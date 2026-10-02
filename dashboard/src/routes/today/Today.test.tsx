@@ -361,6 +361,25 @@ describe('Today - past tours needing an outcome (Sam item 18)', () => {
     expect(within(link).getByText('Undated')).toBeInTheDocument();
   });
 
+  it('a no-show row reads "No show" and opens the plain tour page (no ?outcome=1), back to Today', async () => {
+    // Today lists the Past tab's no-shows (spec 9.4): the row's next step
+    // (Reschedule, the no-show check-in) lives on the tour page itself.
+    const user = userEvent.setup();
+    state = { status: 'ready', source: 'server', items: [] };
+    past = { status: 'ready', rows: [pastRow('t3', { status: 'no_show' })], total: 1 };
+    renderToday();
+    const link = screen.getByRole('link', {
+      name: 'Tour for Tasha Nguyen at 88 Sycamore St on Sep 24, 2026, 2:30 PM, No show',
+    });
+    expect(link).toHaveAttribute('href', '/tours/t3');
+    expect(within(link).getByText('No show')).toBeInTheDocument();
+    await user.click(link);
+    expect(await screen.findByText(/TOUR PAGE/)).toBeInTheDocument();
+    // No query string at all: Record outcome is not this row's next step.
+    expect(screen.getByTestId('search').textContent).toBe('');
+    expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
+  });
+
   it('links "See all N on the Past tab" when it shows only some of them', () => {
     state = { status: 'ready', source: 'server', items: [] };
     past = { status: 'ready', rows: ['a', 'b', 'c', 'd', 'e'].map((id) => pastRow(id)), total: 12 };
@@ -418,7 +437,7 @@ describe('Today - past tours needing an outcome (Sam item 18)', () => {
     expect(screen.getByTestId('state')).toHaveTextContent('{"back":"/"}');
   });
 
-  it('links the Past tab count when the Past tab holds more than Today lists (its no-shows)', () => {
+  it("links the Past tab count when the Past tab holds more than Today lists (a deleted tenant's tour)", () => {
     state = { status: 'ready', source: 'server', items: [] };
     past = { status: 'ready', rows: [pastRow('a'), pastRow('b')], total: 3 };
     renderToday();

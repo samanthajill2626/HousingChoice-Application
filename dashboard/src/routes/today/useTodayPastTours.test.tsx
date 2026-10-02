@@ -1,10 +1,11 @@
 // useTodayPastTours - the Today page's past-tours section (Sam's item 18).
 // The fetch and the selection are the Past tab's own (usePastTours), so these
-// tests drive the api barrel's getTours and pin what Today adds: no-shows off,
-// a cap of five with the full count, the Past order, point-read names, a
-// soft-deleted tenant skipped (the walk continues past it), a failed lookup
-// kept under its id, a first-load failure isolated to the section, and a
-// tour.updated event reloading the rows.
+// tests drive the api barrel's getTours and pin what Today adds: every Past
+// row, no-shows included (a no-show now closes on its own two weeks after its
+// last mark), a cap of five with the full count, the Past order, point-read
+// names, a soft-deleted tenant skipped (the walk continues past it), a failed
+// lookup kept under its id, a first-load failure isolated to the section, and
+// a tour.updated event reloading the rows.
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Contact, Tour, UnitItem } from '../../api/index.js';
@@ -74,7 +75,7 @@ afterEach(() => {
 });
 
 describe('useTodayPastTours', () => {
-  it('lists the Past rows minus no-shows, most recent first, with names and addresses', async () => {
+  it('lists the Past rows - no-shows included - most recent first, with names and addresses', async () => {
     serveTours([
       tour('old', 5),
       tour('ns', 2, { status: 'no_show' }),
@@ -82,12 +83,15 @@ describe('useTodayPastTours', () => {
     ]);
     const { result } = renderHook(() => useTodayPastTours());
     await waitFor(() => expect(result.current.status).toBe('ready'));
-    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['new', 'old']);
-    // The "See all N" count is the Past tab's: it lists the no-show too.
+    // The no-show sits in its date order: Today lists the Past tab's rows as
+    // they are (spec 9.4).
+    expect(result.current.rows.map((r) => r.tour.tourId)).toEqual(['new', 'ns', 'old']);
+    // The "See all N" count is the Past tab's, which is all three here.
     expect(result.current.total).toBe(3);
     expect(result.current.rows[0]).toMatchObject({ tenant: 'Name c-new Tenant', property: 'u-new Main St' });
-    // Only the listed rows are looked up - never the no-show's tenant.
-    expect(getContact).not.toHaveBeenCalledWith('c-ns', expect.anything());
+    // The no-show is a listed row, so its tenant and property are looked up too.
+    expect(result.current.rows[1]).toMatchObject({ tenant: 'Name c-ns Tenant', property: 'u-ns Main St' });
+    expect(getContact).toHaveBeenCalledWith('c-ns', expect.anything());
   });
 
   it('shows at most five rows and reports the Past tab count for "See all N"', async () => {

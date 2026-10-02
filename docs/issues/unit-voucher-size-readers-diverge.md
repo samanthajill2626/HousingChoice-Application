@@ -5,7 +5,7 @@ type: debt
 severity: med
 status: open
 area: dashboard
-created: 2026-10-02
+created: 2026-10-01
 refs: dashboard/src/routes/listing/listingFormat.ts, dashboard/src/routes/listings/unitListFacets.ts, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:219-227, dashboard/src/routes/broadcasts/AudienceFilters.tsx, app/src/lib/unitFields.ts:294-306, dashboard/src/routes/listing/ListingDetail.tsx:752-754, dashboard/src/routes/listing/ListingEditForm.tsx:30-32, dashboard/src/routes/listing/ListingEditForm.tsx:68
 ---
 

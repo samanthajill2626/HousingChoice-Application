@@ -1,6 +1,6 @@
 # Properties page: available now vs. coming soon - implementation plan
 
-> **Amended 2026-10-02 after code review round 1** (records:
+> **Amended 2026-10-01 after code review round 1** (records:
 > `docs/superpowers/reviews/2026-10-01-properties-available-view/review-adjudications-r1.md`).
 > The tasks below are kept as PLANNED. What changed in the build: code names
 > are unit-based (`propertyFacets` -> `unitListFacets`, `Property*` types and

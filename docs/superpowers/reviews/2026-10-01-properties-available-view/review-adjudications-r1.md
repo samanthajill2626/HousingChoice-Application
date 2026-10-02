@@ -4,7 +4,7 @@ Branch `feat/properties-available-view` at ddeb6b58. Reviewers (both `model: opu
 adversarial plan-blind (`code-review-adversarial-r1.md`, A1-A13) and spec-conformance
 (`code-review-conformance-r1.md`, C1-C6; 48/53 design items delivered, the rest
 wording, process, or the two deliberate deviations). Adjudicated by the planner,
-2026-10-02. ACCEPT = fixed in the fix wave; DEFER = filed; REJECT = reason given.
+2026-10-01. ACCEPT = fixed in the fix wave; DEFER = filed; REJECT = reason given.
 
 Claims checked in the code before ruling: the perf resolver and `bindResolved`
 exact-link check (`e2e/performance/routes.ts:1030-1038,1090-1103`); the terminal

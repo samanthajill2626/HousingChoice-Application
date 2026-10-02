@@ -89,8 +89,9 @@ walked). Dashboard-only: no API, repo, seed, or data change.
 - Voucher sizes: new `voucherSizesOf(unit)` in `listingFormat.ts` - a finite
   number yields `[n]`; an array yields its finite-number members; anything else
   yields `[]`. Buckets via ONE shared rule, `voucherBucketOfSize`, extracted from
-  `tenantFacets.voucherBucketOf` (truncate, clamp to 0..4, 4 -> `4plus`; a
-  non-finite size has no bucket). A unit with no bucket is "Not recorded".
+  `tenantFacets.voucherBucketOf` (truncate, clamp to 0..4, 4 -> `4plus`; NaN has
+  no bucket). `voucherSizesOf` drops non-finite sizes first, so such a property
+  reads as "Not recorded", as does any unit with no bucket.
 
 ### 3.2 Address (URL) contract
 
@@ -105,8 +106,20 @@ On `/listings` and `/listings/deleted`:
 
 - Parsing: an unknown `status` reads as the view default; unknown `voucher`
   values drop individually; empty `ha`/`q` values are ignored.
-- Writing: every filter change REPLACES the history entry (Back leaves the page,
-  the Tenants-list rule). A status equal to the view default is omitted; empty
+- State model (amended after code review round 1): the filters are LOCAL,
+  urgently-updated component state and the URL is their PERSISTENCE.
+  react-router 7's BrowserRouter applies URL changes inside a transition, so
+  controls that read the URL lagged their own events (a second tap before the
+  first committed dropped the first). The URL is adopted into local state on
+  mount and on every navigation that is not one of the page's own REPLACE
+  writes (Back/Forward, a tab switch, a nav link, a summary count).
+- Writing: a chip or dropdown change REPLACES the history entry at once (Back
+  leaves the page, the Tenants-list rule). The search box writes on BLUR (and
+  rides along with any other filter write), never per keystroke: WebKit
+  throttles replaceState (100 calls per 10 s) and throws past that. A summary
+  count is a drill-down NAVIGATION: its link PUSHES (Back undoes it), and a plain
+  click also applies its selection locally, since the router turns a same-URL
+  link into a REPLACE. A status equal to the view default is omitted; empty
   facets and an empty search are omitted; unrelated params are untouched.
 - Tabs: the ACTIVE view's own tab link keeps the current query; the other tab
   links to the bare path, so switching views starts clean.
@@ -123,8 +136,11 @@ On `/listings` and `/listings/deleted`:
 - Housing authority chips: stored spellings (C6); a "Not recorded" chip appears
   only when some loaded unit in the view has no authority; Clear while any is
   selected.
-- Search: unchanged box; value from `q`.
+- Search: unchanged box; its text is local state (filtering as you type), seeded
+  from `q` and saved to `q` on blur (3.2).
 - Filtering: AND across status, voucher, authority, search; OR within a facet.
+- Clear hands keyboard focus to its group's first chip (it unmounts itself).
+- Chips wrap a long unbroken stored spelling rather than widen the page.
 
 ### 3.4 Summary table (Active tab only, once at least one unit has loaded)
 
@@ -135,12 +151,21 @@ On `/listings` and `/listings/deleted`:
   authorities" / "... with no housing authority recorded".
 - Phone width: the table must not overflow sideways at 360px; authority names
   wrap.
+- Under a voucher filter that leaves out Not recorded, a line under the table
+  says how many available or coming-soon properties have no voucher size
+  recorded and are not counted (amended after review round 1: a size filter
+  must not shrink the counts silently).
+- Count links are underlined (not color alone); zeros use the muted text tone;
+  the All row is bold with a heavier rule, not a tinted fill (contrast).
 
 ### 3.5 Copy
 
 - Active subtitle: "Available properties by default - change the status filter
   to see the rest." Deleted subtitle unchanged.
-- No-match message unchanged.
+- When nothing but the default status is in play and no row shows: "No
+  available properties right now." with a "Show all statuses" button (amended
+  after review round 1). Any other empty result keeps the existing no-match
+  message.
 
 ## 4. Out of scope
 
@@ -152,7 +177,7 @@ On `/listings` and `/listings/deleted`:
 
 ## 5. Tests
 
-- Unit (dashboard): a pure `propertyFacets` module (URL parse/write, prune,
+- Unit (dashboard): a pure `unitListFacets` module (URL parse/write, prune,
   filtering, summary, count-click selection) and `voucherSizesOf`; the shared
   bucket rule keeps the Tenants suites green; `ListingsList` component tests
   for the default, the summary, count clicks, the voucher filter (number and
@@ -169,10 +194,24 @@ On `/listings` and `/listings/deleted`:
 - The page-performance profiler's `/listings` terminal waits for the
   "Properties" rows list; the perf seed cycles every status, so Active still
   renders rows. Update its source-ledger line citations for the moved lines.
+  (Review round 1 added: the terminal also accepts the default view's empty
+  line, and the property-detail resolver binds an AVAILABLE unit - the only
+  rows the default list renders. `/listings` timings are not comparable with
+  pre-merge baselines, since the default view now renders far fewer rows.)
 - The e2e scenario step that opens `/listings` looks for an AVAILABLE property:
   unaffected by the default.
 - The component stays MOUNTED across `/listings` and `/listings/deleted`
-  (sibling routes, same element position): every piece of filter state must
-  derive from the URL, never from component state.
+  (sibling routes, same element position). Amended after review round 1: the
+  filter state is local but RE-ADOPTED from the URL on every non-REPLACE
+  navigation, and the tab switch is a PUSH to a bare path - so nothing carries
+  from one tab to the other, and the prune is the second defense.
 - `docs/issues/properties-authority-filter-invisible-lock.md` closes with this
   branch; `retire-humanize-authority.md` gets a progress note (step 2 done).
+
+## 7. Code names (amended after review round 1)
+
+Code says `unit`, per documentation/GLOSSARY.md, and `propertyId` already names
+the parent building group in code. So the new module is `unitListFacets`
+(`UnitListSelection`, `UnitListView`, `parseUnitListSelection`,
+`applyUnitListSelection`, `applyUnitListFilters`) and the summary component is
+`AuthoritySummary`; staff-facing copy still says "property".

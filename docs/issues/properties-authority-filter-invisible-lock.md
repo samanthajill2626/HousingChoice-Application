@@ -7,19 +7,21 @@ status: resolved
 resolved: 2026-10-01
 area: dashboard
 created: 2026-08-10
-refs: dashboard/src/routes/listings/ListingsList.tsx, dashboard/src/routes/listings/propertyFacets.ts, dashboard/src/routes/listings/ListingsList.test.tsx
+refs: dashboard/src/routes/listings/ListingsList.tsx, dashboard/src/routes/listings/unitListFacets.ts, dashboard/src/routes/listings/ListingsList.test.tsx
 ---
 
 **Resolution (2026-10-01).** Fixed on `feat/properties-available-view` (tracker #1), which
-moved the whole properties-list filter state into the URL and copied the tenant list's prune.
-Two independent defenses now hold: (1) the Active/Deleted tab links carry no query (only the
-current tab's own link keeps it), so switching views starts from a clean selection; (2)
-`propertyFacets.pruneSelection` drops any authority key no chip shows - including a stale or
-hand-typed `?ha=` - before anything filters, and the authority group renders whenever the view
-has units (a Not recorded chip joins it when some unit lists no authority), so every surviving
-selection is a lit chip with a Clear. Pinned by `ListingsList.test.tsx` ("an authority picked
-on Active never filters the Deleted tab", "a stale authority key in a link does not empty the
-list"); disabling the prune fails the second one. The original report follows.
+gave the properties list URL-persisted filters (local state, re-adopted from the URL on every
+navigation that is not the page's own replace-write) and copied the tenant list's prune. Two
+independent defenses now hold: (1) the Active/Deleted tab links carry no query (only the
+current tab's own link keeps it), so switching views is a push to a bare path that re-adopts a
+clean selection; (2) `unitListFacets.pruneSelection` drops any authority key no chip shows -
+including a stale or hand-typed `?ha=` - before anything filters, and the authority group
+renders whenever the view has units (a Not recorded chip joins it when some unit lists no
+authority), so every surviving selection is a lit chip with a Clear. Pinned by
+`ListingsList.test.tsx` ("an authority picked on Active never filters the Deleted tab", "a
+stale authority key in a link does not empty the list"); disabling the prune fails the second
+one. The original report follows.
 
 **Problem.** On the properties list, `selectedHAs` is component `useState` (never in the URL),
 and BOTH the authority chip group and its per-facet Clear button are gated on

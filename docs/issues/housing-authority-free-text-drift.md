@@ -9,6 +9,14 @@ created: 2026-08-06
 refs: app/src/services/extraction/schema.ts, app/src/lib/import/airtableSource.ts, dashboard/src/routes/listings/ListingsList.tsx, dashboard/src/routes/listing/listingFormat.ts, app/src/repos/contactsRepo.ts, app/src/repos/unitsRepo.ts
 ---
 
+**Update (2026-10-01).** `humanizeAuthority` - described below as live code at
+`ListingsList.tsx:36-42`, with its free-text corruption listed among the consequences - was
+DELETED by `feat/properties-available-view` (tracker #1). The properties list's authority chips
+and its new by-authority summary now show stored spellings, like the tenant list, so the
+corruption consequence no longer applies; demo and e2e worlds show raw seed slugs there until
+the seed values are normalized (see [[retire-humanize-authority]], whose remaining steps go
+with tracker #2). The rest of this issue stands as written.
+
 **Problem.** One real-world entity - the housing authority administering a voucher or covering a
 property - is stored under two field names, in two different vocabularies, with no validation on
 either.

@@ -1,5 +1,17 @@
 # Properties page: available now vs. coming soon - implementation plan
 
+> **Amended 2026-10-02 after code review round 1** (records:
+> `docs/superpowers/reviews/2026-10-01-properties-available-view/review-adjudications-r1.md`).
+> The tasks below are kept as PLANNED. What changed in the build: code names
+> are unit-based (`propertyFacets` -> `unitListFacets`, `Property*` types and
+> functions -> `UnitList*`, `PropertySummary` -> `AuthoritySummary`); Task 3's
+> state model became local urgent state with the URL as persistence (chips and
+> dropdown write at once, search writes on blur, a summary count pushes and
+> applies locally); and the default view's empty state, the summary's
+> not-counted line, the perf resolver/terminal fixes, and a frozen-router test
+> (`ListingsList.urgentState.test.tsx`) were added. See design note 3.2, 3.3, 3.4,
+> 3.5, 6 and 7.
+
 Design: `docs/superpowers/specs/2026-10-01-properties-available-view-design.md`.
 Worktree `W:\tmp\properties-available-view`, branch
 `feat/properties-available-view` (from main @ae04122d). Small-fix lane: the

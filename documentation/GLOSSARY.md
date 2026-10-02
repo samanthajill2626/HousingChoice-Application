@@ -309,6 +309,14 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   accept-and-ignore tombstones on the unit PATCH until
   `docs/issues/retire-humanize-authority.md` closes.
 
+- **"Coming soon"** (tracker #1, 2026-10-01) - the staff-facing name, on the
+  Properties page's by-housing-authority summary ONLY, for properties in the
+  existing `setup` status: the column reads "Coming soon (Setup)". It is NOT a
+  status of its own (decided 2026-09-30) - the status dropdown, row badges and
+  property page keep "Setup", which also covers brand-new properties still being
+  set up. Its partner column is "Available" (`available`). Code: the
+  `COMING_SOON_STATUS` constant in `dashboard/src/routes/listings/unitListFacets.ts`.
+
 ---
 
 ## For the future AI layer

@@ -9,6 +9,7 @@
 //   PATCH /api/tours/:tourId  { scheduledAt?, status?, outcome?, moveForward? }
 //                                                                    → { tour } | 404
 //   POST  /api/tours/:tourId/relay  { members? }                     → 201 { tour, conversation }
+//   POST  /api/tours/:tourId/reopen  (empty body)                    -> { tour } | 404 | 409
 //
 // POST: scheduledAt is OPTIONAL. Absent → the tour is created 'requested' (the
 // timeless coordination anchor; no scheduledAt attribute stored, no reminders).
@@ -52,6 +53,7 @@ import {
   isStaffTourOutcome,
   isTourStatus,
   isTourType,
+  reopenTargetFor,
   STAFF_TOUR_OUTCOMES,
   TOUR_STATUSES,
   TOUR_TYPES,
@@ -121,7 +123,7 @@ import {
   type PendingRosterActionsRepo,
 } from '../repos/pendingRosterActionsRepo.js';
 import { clampOutOfQuietHours, isQuietTime } from '../lib/quietHours.js';
-import { armRelayCloseNagIfOpen } from '../services/relayCloseNag.js';
+import { armRelayCloseNagIfOpen, clearRelayCloseNagOnReopen } from '../services/relayCloseNag.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { recordTourEvent as recordTourEventShared } from '../lib/tourEvents.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
@@ -1039,7 +1041,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
     // --- Status transition guard ---
     // Rules:
-    //   - 'closed' is terminal: no status change is allowed from 'closed'.
+    //   - 'closed' is terminal for PATCH: no status change is allowed from
+    //     'closed'; POST /:tourId/reopen is the only way out.
     //   - 'requested' is a CREATE-ONLY initial state: nothing transitions into
     //     it, and the ways out are booking (-> scheduled, which requires a
     //     time), canceling, or recording that it already happened (-> toured).
@@ -1049,7 +1052,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       const targetStatus = newStatus as TourStatus;
 
       if (currentStatus === 'closed') {
-        // closed is fully terminal — no transitions allowed.
+        // closed is terminal for PATCH; POST /:tourId/reopen is the only way out.
         res.status(409).json({ error: 'illegal_status_transition', detail: `a closed tour cannot be changed (current: closed, requested: ${targetStatus})` });
         return;
       }
@@ -1465,6 +1468,52 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
     log.info({ tourId, fields: Object.keys(patch).length }, 'tour patched via api');
     res.json({ tour });
+  });
+
+  // POST /api/tours/:tourId/reopen - reopen a CLOSED tour (Sam #18,
+  // 2026-10-01; spec section 7): back to the state it closed from
+  // (reopenTargetFor), outcome cleared, a fresh two weeks on the auto-close
+  // clock (lastMarkedAt). SILENT: arms no reminder (not even into a past
+  // 'scheduled'), sends nothing, touches no placement or roster. A converted
+  // tour never reopens - the placement owns it. The ONLY way out of 'closed';
+  // PATCH still refuses every change to a closed tour.
+  router.post('/:tourId/reopen', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    const body: unknown = req.body ?? {};
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+    const fields = Object.keys(body);
+    if (fields.length > 0) {
+      res.status(400).json({ error: `unknown field(s): ${fields.join(', ')}` });
+      return;
+    }
+    const current = await tours.get(tourId, { consistentRead: true });
+    if (!current) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    const decision = reopenTargetFor(current);
+    if (!decision.ok) {
+      res.status(409).json({ error: decision.error });
+      return;
+    }
+    const reopened = await tours.reopenIf(current, decision.target, getNow());
+    if (reopened === undefined) {
+      res.status(409).json({ error: 'tour_changed' });
+      return;
+    }
+    await recordTourEvent(
+      { tenantId: current.tenantId, unitId: current.unitId, tourId },
+      'tour_reopened',
+      'tour_reopened',
+      'Tour reopened',
+    );
+    await clearRelayCloseNagOnReopen({ conversationsRepo: conversations, logger: log }, current.groupThreadId, tourId);
+    events.emit('tour.updated', { tourId, status: reopened.status });
+    log.info({ tourId, to: reopened.status }, 'tour reopened via api');
+    res.json({ tour: reopened });
   });
 
   // POST /api/tours/:tourId/relay — provision a masked relay group thread for a

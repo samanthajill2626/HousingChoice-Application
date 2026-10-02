@@ -5,7 +5,8 @@
 - Branch `feat/tour-auto-close`, worktree `W:\tmp\tour-auto-close`, cut from
   main @ae04122d. Mission records:
   `docs/superpowers/reviews/2026-10-01-tour-auto-close/`.
-- Status: PLAN v3 (against the APPROVED spec; adversarial plan review round 2).
+- Status: PLAN v4 - APPROVED (planner, 2026-10-01, under Cameron's overnight
+  authority) after two adversarial plan rounds; round 2 changed no decision.
 
 ## 0. Ground rules for this plan
 
@@ -60,7 +61,7 @@
 | dev tick 400s | `'now must be a valid ISO 8601 datetime'`, `'tourIds must be a non-empty array of at most 50 tour ids'` |
 | reopen dialog | title `'Reopen tour'`, buttons `'Cancel'` / `'Yes, reopen'` |
 | Reopen placement | primary CTA when the ladder has nothing else; kebab item ONLY when `convertible === true` puts "Start placement" in the primary slot; never both |
-| Record outcome 409 | an `ApiError` 409 shows `'This tour changed since the page loaded - reload and try again.'` |
+| dialog 409 copy | in EVERY writing tour dialog (Book / Reschedule, Mark already toured, Record outcome, Cancel, Reopen) an `ApiError` 409 shows `'This tour changed since the page loaded - reload and try again.'` (`TOUR_CHANGED_COPY`) |
 | reopen copy (toured) | `'This tour goes back to Toured so you can record a different outcome. Nothing is sent.'` |
 | reopen copy (no_show) | `'This tour goes back to No show so you can reschedule it. Nothing is sent.'` |
 | reopen copy (scheduled) | `'This tour goes back to Not marked so you can mark it toured or a no-show, or reschedule it. Nothing is sent.'` |
@@ -84,7 +85,7 @@ Today section, add a manual no-show exit, let staff record `no_outcome`.
 | S5 sweep | 5.1 nag clear helper, 5.2 job, 5.3 worker, 5.4 dev tick | `jobs/tourAutoClose.ts`, `worker.ts`, `dev.ts` |
 | S6 reopen | 6.1 route | `app/src/routes/tours.ts` |
 | S7 chip | 7.1 listing chip | `app/src/lib/listingSendTour.ts` |
-| S8 dashboard | 8.1 api, 8.2 pure module, 8.3 kebab, 8.4 dialog, 8.4b outcome-dialog 409, 8.5 tour page, 8.6 tours page, 8.7 Today, 8.8 labels | `dashboard/src/...` |
+| S8 dashboard | 8.1 api, 8.2 pure module, 8.3 kebab, 8.4 dialog, 8.4b 409 copy in every writing tour dialog, 8.5 tour page, 8.6 tours page, 8.7 Today, 8.8 labels | `dashboard/src/...` |
 | S9 e2e | 9.1 Today spec rewrite, 9.2 new spec | `e2e/tests/dashboard-next/` |
 | S10 docs | 10.1 glossary, 10.2 issues, 10.3 runbook | docs |
 | S11 gates | main sync + the five gates | - |
@@ -159,9 +160,13 @@ export function isStaffTourOutcome(x: unknown): x is StaffTourOutcome {
 IN THE SAME COMMIT (formerly Task 4.1 - so no commit ever lets staff write
 `no_outcome`):
 
-- RED (`app/test/toursApi.test.ts`, near the exit-gate tests): a toured tour,
-  PATCH `{ outcome: 'no_outcome', moveForward: false }` -> 400 with `error`
-  containing `'move_forward, not_a_fit'`; the stored tour has no outcome.
+- (PIN in this combined commit) `app/test/toursApi.test.ts`, near the
+  exit-gate tests: a toured tour, PATCH `{ outcome: 'no_outcome', moveForward:
+  false }` -> 400 with `error` containing `'move_forward, not_a_fit'`; the
+  stored tour has no outcome. It passes on unchanged code (today's 400 text
+  is identical) and would go red ONLY if the model half landed without the
+  validator half - which is exactly what it guards. To watch it fail, apply
+  the `toursModel.ts` change first and run it before switching the validator.
 - GREEN: in the PATCH validation (`app/src/routes/tours.ts:1047-1049`) use
   `isStaffTourOutcome` and `STAFF_TOUR_OUTCOMES.join(', ')` in the message;
   update the imports (drop `isTourOutcome` / `TOUR_OUTCOMES` if no longer
@@ -1297,8 +1302,10 @@ and close it with `world.toursRepo.autoCloseIf(await world.toursRepo.get(id),
     complete second `POST /reopen` on the same tour (which wins and returns
     200); the parked first call then forwards to the real `reopenIf`, loses
     its condition, and the first request answers 409 `tour_changed`. Assert
-    both codes and that the tour shows exactly ONE `tour_reopened` activity
-    event. (The repo's own parking pattern: `toursApi.test.ts:2043-2052`.)
+    both codes and that exactly ONE `tour_reopened` audit row exists on
+    `tours#<tourId>` (one reopen also writes a tenant and a landlord
+    milestone and a `units#` row - count the `tours#` row). (The repo's own
+    parking pattern: `toursApi.test.ts:2043-2052`.)
 13. after a reopen, `GET /api/tours/:id` shows the reopened state and a
     second reopen is 409 `tour_not_closed`.
 
@@ -1518,7 +1525,14 @@ GREEN: export ONE constant from `TourModals.tsx`,
 and in each dialog's catch (`TourModals.tsx` around `:86-88` - the shared
 date dialog, which covers Book and Reschedule - `:220-222`, `:303-305`,
 `:377-379`) bind the error and branch on `err instanceof ApiError &&
-err.status === 409`. The Reopen dialog uses the same constant. Commit.
+err.status === 409`. The Reopen dialog uses the same constant.
+EXISTING TEST THIS TURNS RED: `TourDetail.test.tsx` around `:555-568`
+rejects the Mark-already-toured confirm with an `ApiError` 409 and expects
+the generic "Couldn't mark the tour as toured" text. Change that test's
+rejection to a non-409 error (it is about the generic path) and add a 409
+case expecting `TOUR_CHANGED_COPY` - do NOT narrow the 409 branch to make the
+old test pass. Update the `TourModals.tsx` header comment (`:1-21`) - its
+dialog list / count gains the Reopen dialog and the shared 409 copy. Commit.
 
 ### Task 8.5 - tour page wiring (`TourDetail.tsx`)
 
@@ -1663,10 +1677,11 @@ property labels AND `to: '/tours/<id>'`.
 GREEN: add the entries to `TOUR_EVENT_LABELS` and `MILESTONE_TYPE`
 (`tourActivityFormat.ts`) and to `TOUR_LABELS` (`listingFormat.ts`). The seed
 "mirror" comments become false otherwise: reword
-`app/src/lib/seed/history.ts` (~`:79-96`) and `app/test/seedTourTrails.test.ts`
-(~`:53-69`) - the seeded tour kinds are a SUBSET of `TOUR_EVENT_LABELS`;
-`tour_auto_closed` and `tour_reopened` are never seeded (no seed change).
-Commit.
+`app/src/lib/seed/history.ts` (~`:79-96`), `app/test/seedTourTrails.test.ts`
+(~`:53-69`, and the test TITLE around `:134`) and
+`app/test/seedHistory.test.ts` (~`:858-861`) - the seeded tour kinds are a
+SUBSET of `TOUR_EVENT_LABELS`; `tour_auto_closed` and `tour_reopened` are
+never seeded (no seed change). Commit.
 
 ---
 
@@ -1751,8 +1766,9 @@ Run the spec alone GREEN, then commit.
 
 Add an entry: **Tour auto-close / "No outcome recorded" / Reopen** (Sam's item
 18, 2026-10-01) - a tour still undecided two weeks after its clock start
-(latest of its time, creation, and `lastMarkedAt` - the last time a person
-marked, rescheduled or reopened it) is closed by the worker with outcome
+(latest of its time, its creation, and its mark: `lastMarkedAt` - the last
+time a person marked, rescheduled or reopened it - or, for a tour nobody has
+marked yet, its last change `updatedAt`) is closed by the worker with outcome
 `no_outcome` ("No outcome recorded"), silently; staff never record that
 outcome. Reopen (`POST /api/tours/:tourId/reopen`) returns a closed,
 unconverted tour to the state it closed from (`autoClosedFrom`, or toured for
@@ -1787,8 +1803,9 @@ Add a short entry under the deploy notes section of `RUNBOOK.md`: "Tour
 auto-close (first production run)" - no operator step; BEFORE the deploy, the
 preview recipe of spec section 13 (Past tab rows dated more than 14 days
 ago, minus "Needs placement" rows and rows a person changed in the last 14
-days, plus "Undated" rows last changed more than 14 days ago; the 90-day /
-one-page blind spot); WHAT HAPPENS about 15 minutes after the new worker
+days, plus "Undated" rows last changed more than 14 days ago - no screen
+shows that last-change date, so that part errs safe; the 90-day / one-page
+blind spot); WHAT HAPPENS about 15 minutes after the new worker
 starts (every tour already two weeks past its clock start with no outcome
 closes silently; timeline pins dated that day on tenant and landlord
 timelines; never-sent reminder history rows deleted; relay close-nags about
@@ -1817,8 +1834,9 @@ recorded" badge; Reopen on the tour page). Commit.
 3. Live self-QA on an `npm run e2e:session` lane with the Playwright MCP: the
    auto-closed tour on the Closed tab and tour page; Reopen into each target;
    the no-show on Today; screenshots under `.playwright-mcp/`.
-4. The handback (`.superpowers/sdd/handback.md` and the mission records'
-   `handback.md`) carries, besides the orchestrator manual's standard
+4. The handback (`.superpowers/sdd/handback.md`, and the mission records'
+   `docs/superpowers/reviews/2026-10-01-tour-auto-close/handback.md` -
+   COMMITTED, like every record) carries, besides the orchestrator manual's standard
    sections: (a) spec decision 6's PRE-DEPLOY PREVIEW - the section 13 recipe
    and its blind spot, verbatim enough that Cameron can run it on the
    production Past tab; (b) what the first production run does (section 13

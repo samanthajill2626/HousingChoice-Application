@@ -144,3 +144,27 @@ Decisions changed (required dep contract, a handback deliverable, task
 ordering) -> plan round 2 on v3. PB landed more accepted unique findings
 (PB7, PB8, PB9, PB10) and is continued with SendMessage; it gets PA's report
 path.
+
+## Plan round 2 (plan v3 @4f45fa2e)
+
+Reviewer PB continued. Report: `plan-r2-b.md`. No adjudication contested;
+PB1-PB9 fixes verified correct against the code; case 12's parked
+interleaving walked step by step and confirmed (one 200, one 409
+`tour_changed`).
+
+| # | finding | ruling | decision changed? |
+|---|---|---|---|
+| P2-1 | Task 8.4b turns `TourDetail.test.tsx:555-568` red (it rejects Mark-already-toured with a 409 and expects the generic copy) without naming it | ACCEPT. Named: switch that test to a non-409 rejection, add a 409 case; never narrow the 409 branch | NO (precision) |
+| P2-2 | Case 12's "exactly ONE tour_reopened activity event" is ambiguous (one reopen writes two milestones and two audit rows) | ACCEPT. Count the `tours#<tourId>` audit row | NO |
+| P2-3 | Task 1.1's merged `no_outcome` -> 400 case passes on unchanged code | ACCEPT. Labeled (PIN) with how to watch it fail (model half first) | NO |
+| P2-4 | S11.4 does not say to COMMIT the records `handback.md` | ACCEPT | NO |
+| P2-5 | Docs lag the approved spec: GLOSSARY omits the `updatedAt` fallback; RUNBOOK omits "errs safe"; the constants table / work map scope the 409 copy to Record outcome only | ACCEPT. All three updated | NO |
+| P2-6 | PB10 partial: `seedTourTrails.test.ts:134` title, `seedHistory.test.ts:858-861`, and the `TourModals.tsx:1-21` header | ACCEPT. Named in Tasks 8.8 / 8.4b | NO |
+
+### Round 2 result - TERMINAL
+
+No accepted finding changed what gets built, added or removed a surface, or
+moved an invariant. Precision edits folded in; PLAN v4 is APPROVED by the
+planner under Cameron's overnight authority (2026-10-01). Plan rounds: 2 of
+the 4-round cap. Totals across the design phase: spec 3 rounds (32
+findings), plan 2 rounds (26 findings), 0 BLOCKING, every finding ruled.

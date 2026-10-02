@@ -586,7 +586,8 @@ router module is not even imported there.
   (`fixtures/groupText.ts` throws rather than pass silently).
   `POST /__dev/logtail/clear` scopes a spec to its own window.
 - The `*/tick` seams - `tour-reminders`, `roster-actions`, `placement-nudges`,
-  `extraction`, and `group-guardrails` (plus `group-send-staleness/check`).
+  `extraction`, `group-guardrails` and `tour-auto-close` (plus
+  `group-send-staleness/check`).
 
 **THE TICKS ARE NOT A CONVENIENCE.** The lane runs jobs in-process in the APP
 *and* spawns a real worker with its own pollers. Only the app's log lines reach

@@ -231,9 +231,12 @@ export interface ScheduledUpdatedEvent {
 /**
  * A tour was mutated (tour-detail-page 1a) - the tour page refetches the
  * header + Activity card live. Emitted best-effort after a successful
- * PATCH /api/tours/:tourId, POST /api/tours/:tourId/relay, and the from-tour
- * conversion (placements.ts). ID + status only: the page re-reads the tour
- * itself, so the event never carries names/phones/labels (PII, doc section 9).
+ * PATCH /api/tours/:tourId, POST /api/tours/:tourId/relay, POST
+ * /api/tours/:tourId/reopen, the from-tour conversion (placements.ts), and
+ * each tour the auto-close sweep closes (jobs/tourAutoClose.ts - from the
+ * worker poll, bridged to the app, and from the dev tick). ID + status only:
+ * the page re-reads the tour itself, so the event never carries
+ * names/phones/labels (PII, doc section 9).
  */
 export interface TourUpdatedEvent {
   tourId: string;

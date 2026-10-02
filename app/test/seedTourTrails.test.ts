@@ -51,11 +51,14 @@ const msOf = (ts: unknown): number => Date.parse(isoOf(ts));
 const typesOf = (rows: AuditRow[]): string[] => rows.map((r) => r.event_type);
 
 // ---------------------------------------------------------------------------
-// The pinned 8-type vocabulary. This literal list MIRRORS the dashboard's
-// tourActivityFormat.ts TOUR_EVENT_LABELS keys (the dashboard module is not
-// importable from app tests). If the dashboard label map changes, this pin must
-// change with it - a deliberate drift alarm. Seeded rows may ONLY use these
-// types so no unknown-type fallback ever renders.
+// The pinned 8-type SEEDED vocabulary. This literal list is a SUBSET of the
+// dashboard's tourActivityFormat.ts TOUR_EVENT_LABELS keys (the dashboard
+// module is not importable from app tests); the dashboard also labels the
+// live-only tour_auto_closed and tour_reopened (the auto-close sweep, the
+// reopen route), which no seed writes. If the dashboard drops one of these
+// labels, or the seed starts writing a new kind, this pin must change with it
+// - a deliberate drift alarm. Seeded rows may ONLY use these types so no
+// unknown-type fallback ever renders.
 // ---------------------------------------------------------------------------
 const TOUR_EVENT_LABEL_KEYS = [
   'tour_scheduled',
@@ -131,7 +134,7 @@ describe('seed tour trails: presence per status', () => {
 // 2. Every generated row's type is a key of the dashboard label map.
 // ---------------------------------------------------------------------------
 describe('seed tour trails: type vocabulary', () => {
-  it('every generated tours# row type is one of the 8 dashboard TOUR_EVENT_LABELS keys', () => {
+  it('every generated tours# row type is one of the 8 seeded kinds (all dashboard TOUR_EVENT_LABELS keys)', () => {
     const tourRows = HISTORY.audit_events.filter((r) => r.entityKey.startsWith('tours#'));
     expect(tourRows.length, 'assembled map must produce tour rows').toBeGreaterThan(0);
     for (const r of tourRows) {
@@ -460,7 +463,7 @@ describe('seed tour trails: live-path coverage (historyItems reads the tours sli
     }
   });
 
-  it('every live tour trail type is one of the pinned 8 dashboard label keys', () => {
+  it('every live tour trail type is one of the pinned 8 seeded kinds (all dashboard-labeled)', () => {
     const rows = liveHistory.audit_events.filter((r) => r.entityKey.startsWith('tours#'));
     expect(rows.length, 'live map must produce tour rows').toBeGreaterThan(0);
     for (const r of rows) {

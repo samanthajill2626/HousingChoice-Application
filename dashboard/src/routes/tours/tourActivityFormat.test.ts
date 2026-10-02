@@ -20,6 +20,13 @@ describe('describeTourActivity', () => {
     expect(describeTourActivity(ev({ type: 'tour_outcome' })).label).toBe('Outcome recorded');
   });
 
+  it('labels the auto-close and reopen kinds (spec 9.5), with no deep link', () => {
+    const closed = describeTourActivity(ev({ type: 'tour_auto_closed', tourId: 'tour-1' }));
+    expect(closed).toEqual({ label: 'Closed automatically: no outcome recorded after two weeks' });
+    const reopened = describeTourActivity(ev({ type: 'tour_reopened', tourId: 'tour-1' }));
+    expect(reopened).toEqual({ label: 'Tour reopened' });
+  });
+
   it('links a converted row to the placement', () => {
     const d = describeTourActivity(ev({ type: 'tour_converted', placementId: 'plc-9' }));
     expect(d.label).toBe('Converted to placement');
@@ -67,6 +74,19 @@ describe('tourActivityToMilestone', () => {
       type: 'placement_opened',
       label: 'Converted to placement',
     });
+  });
+
+  it('maps the auto-close and reopen kinds to their own same-named milestone types', () => {
+    expect(tourActivityToMilestone(ev({ type: 'tour_auto_closed' }))).toMatchObject({
+      type: 'tour_auto_closed',
+      label: 'Closed automatically: no outcome recorded after two weeks',
+    });
+    expect(tourActivityToMilestone(ev({ type: 'tour_reopened' }))).toMatchObject({
+      type: 'tour_reopened',
+      label: 'Tour reopened',
+    });
+    // We are ON the tour page: no self-link.
+    expect(tourActivityToMilestone(ev({ type: 'tour_reopened' })).refType).toBeUndefined();
   });
 
   it('keeps the converted/group-opened deep links via refType/refId', () => {

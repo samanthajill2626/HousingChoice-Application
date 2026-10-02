@@ -123,7 +123,7 @@ import {
 import { clampOutOfQuietHours, isQuietTime } from '../lib/quietHours.js';
 import { armRelayCloseNagIfOpen } from '../services/relayCloseNag.js';
 import { normalizeToE164 } from '../lib/phone.js';
-import { recordPersonMilestone } from '../lib/personEvents.js';
+import { recordTourEvent as recordTourEventShared } from '../lib/tourEvents.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 
 /**
@@ -248,42 +248,15 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
   const router = Router();
 
-  // Best-effort write of a tour lifecycle event to THREE surfaces: BOTH
-  // parties' contact timelines (the tenant's and the unit landlord's - one
-  // activity event each, via lib/personEvents), the property's Activity card
-  // (a `units#<unitId>` audit row), and the tour's OWN history (a
-  // `tours#<tourId>` audit row - tour-detail-page 1a, feeds
-  // GET /api/tours/:tourId/activity). Each write is independently guarded -
-  // NONE may fail the route (state is already persisted). PII-safe log:
-  // ids/type only.
-  async function recordTourEvent(
+  // Tour lifecycle events go through the ONE shared writer (lib/tourEvents.ts)
+  // so the auto-close sweep and reopen record exactly what this route does.
+  const recordTourEvent = (
     tour: { tenantId: string; unitId: string; tourId: string },
     activityType: ActivityEventType,
     auditType: string,
     label: string,
-  ): Promise<void> {
-    await recordPersonMilestone(
-      { activityEvents, units, log },
-      {
-        tenantId: tour.tenantId,
-        unitId: tour.unitId,
-        type: activityType,
-        label,
-        refType: 'tour',
-        refId: tour.tourId,
-      },
-    );
-    try {
-      await audit.append(`units#${tour.unitId}`, auditType, { tourId: tour.tourId });
-    } catch (err) {
-      log.error({ err, tourId: tour.tourId }, `${auditType} unit audit failed (best-effort)`);
-    }
-    try {
-      await audit.append(`tours#${tour.tourId}`, auditType, { tourId: tour.tourId });
-    } catch (err) {
-      log.error({ err, tourId: tour.tourId }, `${auditType} tour audit failed (best-effort)`);
-    }
-  }
+  ): Promise<void> =>
+    recordTourEventShared({ activityEvents, units, audit, log }, tour, activityType, auditType, label);
 
   // POST /api/tours — create a tour. With scheduledAt → 'scheduled' + armed
   // ladder; without → 'requested' (timeless), nothing armed until booking.

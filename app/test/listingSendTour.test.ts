@@ -2,8 +2,9 @@
 //
 // deriveTourSignal collapses ALL tours for ONE (unit, tenant) pairing into the
 // most-progressed qualifying chip signal. Precedence:
-//   toured  (status 'toured', OR 'closed' with convertedPlacementId) > scheduled > requested
-// Disqualifying: 'canceled' / 'no_show' / unconverted 'closed' -> no signal.
+//   toured  (status 'toured', OR 'closed' with convertedPlacementId, OR 'closed'
+//            auto-closed from 'toured') > scheduled > requested
+// Disqualifying: 'canceled' / 'no_show' / any other 'closed' -> no signal.
 // Ties WITHIN the winning state: the most recently created qualifying tour wins.
 //
 // NOTE: the TourStatus union (lib/toursModel.ts) has NO 'confirmed' status - it
@@ -119,5 +120,50 @@ describe('deriveTourSignal - tie-break within the winning state', () => {
       tour({ tourId: 't-conv-new', status: 'closed', convertedPlacementId: 'p-2', createdAt: '2026-07-08T00:00:00.000Z' }),
     ]);
     expect(signal).toEqual({ tourId: 't-conv-new', state: 'toured' });
+  });
+});
+
+// Tour auto-close (Sam #18; spec 10.3): a tour the sweep closed FROM 'toured'
+// still happened - only the decision is missing - so it keeps the chip.
+describe('deriveTourSignal - auto-closed tours', () => {
+  it("a tour auto-closed from 'toured' is the 'toured' floor", () => {
+    const signal = deriveTourSignal([
+      tour({ tourId: 't-auto', status: 'closed', outcome: 'no_outcome', autoClosedFrom: 'toured' }),
+    ]);
+    expect(signal).toEqual({ tourId: 't-auto', state: 'toured' });
+  });
+
+  it("a tour auto-closed from 'scheduled' or 'no_show' shows no chip, like any unconverted closed tour", () => {
+    expect(
+      deriveTourSignal([
+        tour({ tourId: 't-auto-sched', status: 'closed', outcome: 'no_outcome', autoClosedFrom: 'scheduled' }),
+      ]),
+    ).toBeUndefined();
+    expect(
+      deriveTourSignal([
+        tour({ tourId: 't-auto-noshow', status: 'closed', outcome: 'no_outcome', autoClosedFrom: 'no_show' }),
+      ]),
+    ).toBeUndefined();
+  });
+
+  it("an auto-closed-from-toured tour beats a newer live 'scheduled' tour for the same pairing", () => {
+    const signal = deriveTourSignal([
+      tour({ tourId: 't-sched', status: 'scheduled', createdAt: '2026-07-09T00:00:00.000Z' }),
+      tour({
+        tourId: 't-auto',
+        status: 'closed',
+        outcome: 'no_outcome',
+        autoClosedFrom: 'toured',
+        createdAt: '2026-07-01T00:00:00.000Z',
+      }),
+    ]);
+    expect(signal).toEqual({ tourId: 't-auto', state: 'toured' });
+  });
+
+  it("(PIN) a person-closed not-a-fit tour still shows no chip - only the auto-close from 'toured' counts", () => {
+    const signal = deriveTourSignal([
+      tour({ tourId: 't-naf', status: 'closed', outcome: 'not_a_fit', moveForward: false, convertible: false }),
+    ]);
+    expect(signal).toBeUndefined();
   });
 });

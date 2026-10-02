@@ -9,13 +9,18 @@
 // PRECEDENCE (most progressed wins):
 //   toured  - any tour with status 'toured', OR a 'closed' tour that carries a
 //             convertedPlacementId (a converted tour necessarily happened, so
-//             "Toured" is the honest floor). Beats scheduled/requested outright.
+//             "Toured" is the honest floor), OR a 'closed' tour the auto-close
+//             sweep closed FROM 'toured' (autoClosedFrom, Sam #18: the visit
+//             happened - only the decision is missing - the same honest
+//             floor). Beats scheduled/requested outright.
 //   scheduled - any 'scheduled' tour (booking IS the confirmation; the removed
 //             'confirmed' status folded into 'scheduled' back in 2026-07-08, so
 //             there is no separate 'confirmed' bucket to map).
 //   requested - any 'requested' (timeless) tour.
-// Disqualifying: 'canceled', 'no_show', and an UNCONVERTED 'closed' yield no
-// signal (undefined) - the chip is simply absent on that row.
+// Disqualifying: 'canceled', 'no_show', and any other 'closed' - neither
+// converted nor auto-closed from 'toured' (a person's not-a-fit, a tour
+// auto-closed from 'scheduled' or 'no_show') - yield no signal (undefined) -
+// the chip is simply absent on that row.
 //
 // TIES within the winning state: the most recently created qualifying tour wins
 // (compare createdAt, ISO 8601 - lexical order is chronological); its tourId is
@@ -45,12 +50,16 @@ function isNonEmptyString(x: unknown): x is string {
 
 /**
  * Classify one tour into a qualifying chip state, or undefined when it does not
- * qualify ('canceled' / 'no_show' / unconverted 'closed').
+ * qualify ('canceled' / 'no_show' / a 'closed' tour that is neither converted
+ * nor auto-closed from 'toured').
  */
 function qualifyingState(tour: TourItem): TourSignalState | undefined {
   const status = tour.status;
   if (status === 'toured') return 'toured';
   if (status === 'closed' && isNonEmptyString(tour['convertedPlacementId'])) return 'toured';
+  // Auto-closed from toured (Sam #18): the visit happened - only the decision
+  // is missing - so "Toured" is the honest floor, as for a converted tour.
+  if (status === 'closed' && tour['autoClosedFrom'] === 'toured') return 'toured';
   if (status === 'scheduled') return 'scheduled';
   if (status === 'requested') return 'requested';
   return undefined;

@@ -5,12 +5,14 @@
 // ("Yes, reopen" - never "Reopen tour", the header control's name), the
 // confirm-then-close order, the error copy (a 409 says reload, anything else
 // says try again; the dialog stays open either way) and the Cancel button.
+// Plus a compile-time pin: the Record outcome dialog and patchTour carry only
+// a person's outcomes, never the sweep's no_outcome.
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
-import { ApiError } from '../../api/index.js';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { ApiError, type patchTour } from '../../api/index.js';
 import buttonStyles from '../../ui/Button.module.css';
-import { ReopenTourModal, TOUR_CHANGED_COPY } from './TourModals.js';
+import { ReopenTourModal, TOUR_CHANGED_COPY, type RecordOutcomeModal } from './TourModals.js';
 import type { ReopenTarget } from './tourReopen.js';
 
 /** The shared 409 copy every writing tour dialog uses (spec 9.2 / D14). */
@@ -119,5 +121,18 @@ describe('ReopenTourModal', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+});
+
+// `no_outcome` is written ONLY by the server's auto-close sweep (spec 9.1); a
+// person can never record it. Compile-time pins - `npm run typecheck` covers
+// test files, so widening either type below (to TourOutcome, or by widening
+// StaffTourOutcome itself) fails the typecheck gate, not just this file.
+describe('Record outcome - a person records only move_forward / not_a_fit', () => {
+  it('the dialog decides, and patchTour sends, a staff outcome only', () => {
+    type Decided = Parameters<React.ComponentProps<typeof RecordOutcomeModal>['onConfirm']>[0]['outcome'];
+    type Sent = NonNullable<Parameters<typeof patchTour>[1]['outcome']>;
+    expectTypeOf<Decided>().toEqualTypeOf<'move_forward' | 'not_a_fit'>();
+    expectTypeOf<Sent>().toEqualTypeOf<'move_forward' | 'not_a_fit'>();
   });
 });

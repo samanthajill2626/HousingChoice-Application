@@ -13,6 +13,7 @@ import {
   normalizeAuthorityKey,
   parseSelection,
   voucherBucketOf,
+  voucherBucketOfSize,
   VOUCHER_BUCKETS,
   type TenantSelection,
 } from './tenantFacets.js';
@@ -57,6 +58,30 @@ describe('voucherBucketOf', () => {
   });
   it('null when absent', () => {
     expect(voucherBucketOf(t({}))).toBeNull();
+  });
+});
+
+describe('voucherBucketOfSize', () => {
+  // The ONE size-to-bucket rule. The Tenants facet (voucherBucketOf) and the
+  // Properties list's voucher filter both read through it, so a 4+ BR tenant and
+  // a 4+ BR property can never land in different buckets.
+  it('buckets whole sizes, truncating fractions', () => {
+    expect(voucherBucketOfSize(0)).toBe('0');
+    expect(voucherBucketOfSize(2)).toBe('2');
+    expect(voucherBucketOfSize(2.7)).toBe('2');
+    expect(voucherBucketOfSize(3)).toBe('3');
+  });
+  it('caps 4 and above (and Infinity) at 4plus; a negative reads as Studio', () => {
+    expect(voucherBucketOfSize(4)).toBe('4plus');
+    expect(voucherBucketOfSize(9)).toBe('4plus');
+    expect(voucherBucketOfSize(Number.POSITIVE_INFINITY)).toBe('4plus');
+    expect(voucherBucketOfSize(-1)).toBe('0');
+  });
+  it('null for anything that is not a number, and for NaN', () => {
+    expect(voucherBucketOfSize(Number.NaN)).toBeNull();
+    expect(voucherBucketOfSize('2')).toBeNull();
+    expect(voucherBucketOfSize(undefined)).toBeNull();
+    expect(voucherBucketOfSize(null)).toBeNull();
   });
 });
 

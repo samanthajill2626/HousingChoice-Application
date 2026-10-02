@@ -68,6 +68,24 @@ export function authoritiesOf(unit: {
   return typeof legacy === 'string' && legacy.length > 0 ? [legacy] : [];
 }
 
+/**
+ * The voucher (bedroom) sizes a unit accepts, read from `voucher_size_accepted`
+ * in EITHER shape: ONE number today, or a LIST of numbers once tracker #12 makes
+ * the field a multi-select (the `full` demo seed already stores `[2, 3]`). Only
+ * finite numbers count; anything else - absent, NaN, a string, a list of junk -
+ * reads as nothing recorded. No fallback to `beds`: a 3-bed unit may accept a
+ * 2-BR voucher, so bedrooms are not a voucher size (Cameron, 2026-10-01).
+ *
+ * Typed with an `unknown` field for the same reason as `authoritiesOf`: the
+ * wire document is flexible, so a stored value can be any shape.
+ */
+export function voucherSizesOf(unit: { voucher_size_accepted?: unknown }): number[] {
+  const raw = unit.voucher_size_accepted;
+  const isSize = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  if (Array.isArray(raw)) return raw.filter(isSize);
+  return isSize(raw) ? [raw] : [];
+}
+
 /** The header facts subline: "2 BR - 1 BA - $1,400-1,600/mo - West End
  *  - Porter Properties". Only present parts are joined. `landlordName` is the
  *  resolved landlord/company, appended last when known. The AREA slot carries

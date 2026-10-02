@@ -84,16 +84,24 @@ export interface TenantFacetModel {
 }
 
 /**
- * The voucher bucket a tenant falls in, or null when no size is recorded.
+ * The voucher bucket ONE size falls in, or null when it is not a number.
  * Presence is `typeof === 'number'` - NEVER truthiness, which silently drops
  * Studio (0). Sizes at or above 4 land in `4plus`; a nonsense negative reads as
- * Studio, mirroring `voucherSizeLabel`'s `<= 0` guard.
+ * Studio, mirroring `voucherSizeLabel`'s `<= 0` guard; NaN has no bucket.
+ *
+ * The ONE size-to-bucket rule: the Tenants facet below and the Properties
+ * list's voucher filter (routes/listings/propertyFacets.ts) both read through
+ * it, so a tenant and a property of the same size share a bucket.
  */
-export function voucherBucketOf(c: Contact): VoucherBucketKey | null {
-  const size = c.voucherSize;
+export function voucherBucketOfSize(size: unknown): VoucherBucketKey | null {
   if (typeof size !== 'number') return null;
   const capped = Math.min(Math.max(Math.trunc(size), 0), 4);
   return SIZE_TO_BUCKET[capped] ?? null;
+}
+
+/** The voucher bucket a tenant falls in, or null when no size is recorded. */
+export function voucherBucketOf(c: Contact): VoucherBucketKey | null {
+  return voucherBucketOfSize(c.voucherSize);
 }
 
 /**

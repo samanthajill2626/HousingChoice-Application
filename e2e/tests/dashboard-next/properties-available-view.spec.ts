@@ -86,6 +86,10 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
     // under them and every number below is exact.
     const authA = `Summary Authority ${stamp}`;
     const authB = `Summary Partner ${stamp}`;
+    // One long UNBROKEN stored spelling (a raw slug) on the coming-soon
+    // property: chips and the summary show stored text as-is, so step 7's
+    // 360px check proves such a name wraps instead of widening the page.
+    const longSlug = `long_unbroken_authority_name_${stamp}_for_the_phone_width_check`;
     const twoBr = `${stamp} Summary Avail Two St`;
     const both = `${stamp} Summary Avail Both Ave`;
     const soon = `${stamp} Summary Soon Ct`;
@@ -98,13 +102,22 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
       voucherSize: 3,
       available: true,
     });
-    await createProperty(req, landlordId, { line1: soon, authorities: [authA], voucherSize: 2, available: false });
+    await createProperty(req, landlordId, {
+      line1: soon,
+      authorities: [authA, longSlug],
+      voucherSize: 2,
+      available: false,
+    });
 
-    // 1. The Active tab opens on Available, with a bare URL.
+    // 1. The Active tab opens on Available, with a bare URL: the available
+    //    properties are listed and the Setup one is not.
     await page.goto(`${NEXT}/listings`);
     const status = page.getByLabel('Status', { exact: true });
+    const list = page.getByRole('list', { name: 'Properties', exact: true });
     await expect(status).toHaveValue('available');
     await expect(page).toHaveURL(/\/listings$/);
+    await expect(list.getByRole('listitem').filter({ hasText: twoBr })).toHaveCount(1);
+    await expect(list.getByRole('listitem').filter({ hasText: soon })).toHaveCount(0);
 
     // 2. The summary: A has two available and one coming soon; B (accepted by
     //    the two-authority property only) has one available and a plain zero.
@@ -116,7 +129,6 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
     await expect(rowB.getByRole('link')).toHaveCount(1);
 
     // 3. A count drills in: Coming soon for A -> status Setup, only that property.
-    const list = page.getByRole('list', { name: 'Properties', exact: true });
     await rowA.getByRole('link', { name: `Show 1 coming soon property for ${authA}` }).click();
     await expect(status).toHaveValue('setup');
     await expect(list.getByRole('listitem')).toHaveCount(1);

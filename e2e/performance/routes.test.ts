@@ -697,12 +697,12 @@ describe('representative resolvers', () => {
 
   it('returns explicit skips for missing fixtures and exact-link misses without row substitution', async () => {
     const unitApi = new FakeApi();
-    unitApi.pages.set('/api/units?', [{ units: [{ unitId: 'unit-private-a', landlordId: 'contact-private' }], nextCursor: null }]);
+    unitApi.pages.set('/api/units?', [{ units: [{ unitId: 'unit-private-a', landlordId: 'contact-private', status: 'available' }], nextCursor: null }]);
     await expect(resolveUnitDetail(unitApi, new FakeDom(new Set(['/listings/unit-different'])))).resolves.toEqual({
       kind: 'skip', reason: 'fixture_not_navigable',
     });
     const notReadyApi = new FakeApi();
-    notReadyApi.pages.set('/api/units?', [{ units: [{ unitId: 'unit-private-a' }], nextCursor: null }]);
+    notReadyApi.pages.set('/api/units?', [{ units: [{ unitId: 'unit-private-a', status: 'available' }], nextCursor: null }]);
     await expect(resolveUnitDetail(notReadyApi, new FakeDom(new Set(['/listings/unit-private-a']), undefined, false))).resolves.toEqual({
       kind: 'skip', reason: 'source_not_ready',
     });
@@ -710,6 +710,28 @@ describe('representative resolvers', () => {
     const placementApi = new FakeApi();
     placementApi.pages.set('/api/placements?', [{ placements: [], nextCursor: null }]);
     await expect(resolvePlacementDetail(placementApi, new FakeDom(new Set()))).resolves.toEqual({
+      kind: 'skip', reason: 'fixture_absent',
+    });
+  });
+
+  it('binds the first AVAILABLE unit - the only rows the default Properties list renders', async () => {
+    const unitApi = new FakeApi();
+    unitApi.pages.set('/api/units?', [{
+      units: [
+        { unitId: 'unit-private-setup', landlordId: 'contact-private', status: 'setup' },
+        { unitId: 'unit-private-gone', landlordId: 'contact-private', status: 'available', deleted_at: 'x' },
+        { unitId: 'unit-private-live', landlordId: 'contact-private', status: 'available' },
+      ],
+      nextCursor: null,
+    }]);
+    await expect(resolveUnitDetail(unitApi, new FakeDom(new Set(['/listings/unit-private-live'])))).resolves.toEqual({
+      kind: 'resolved', coldPath: '/listings/unit-private-live',
+      warmTarget: { path: '/listings/unit-private-live', query: { kind: 'absent' } },
+      branch: { kind: 'unit_detail', hasLandlord: true },
+    });
+    const noneAvailable = new FakeApi();
+    noneAvailable.pages.set('/api/units?', [{ units: [{ unitId: 'unit-private-setup', status: 'setup' }], nextCursor: null }]);
+    await expect(resolveUnitDetail(noneAvailable, new FakeDom(new Set(['/listings/unit-private-setup'])))).resolves.toEqual({
       kind: 'skip', reason: 'fixture_absent',
     });
   });

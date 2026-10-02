@@ -443,7 +443,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   // once the card lands in 1b). Serves the tour's OWN audit trail (entityKey
   // `tours#<tourId>`: tour_scheduled / tour_rescheduled / tour_took_place /
   // tour_no_show / tour_canceled / tour_outcome / tour_group_opened /
-  // tour_converted) NEWEST-FIRST via auditRepo.listByEntity, projected onto
+  // tour_converted / tour_auto_closed / tour_reopened) NEWEST-FIRST via
+  // auditRepo.listByEntity, projected onto
   // TourActivityEvent (fixed-key whitelist, never the raw payload). Paging is
   // the PLACEMENT-HISTORY pattern (E-D1): bounded ?limit= (1..MAX, default
   // DEFAULT) + optional ?before= exclusive `ts` upper bound (a row's `id`) for

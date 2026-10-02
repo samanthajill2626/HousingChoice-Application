@@ -2504,6 +2504,8 @@ export type TimelineMilestoneType =
   | 'tour_group_opened'
   | 'placement_group_opened'
   | 'tour_converted'
+  | 'tour_auto_closed'
+  | 'tour_reopened'
   | 'stage_changed'
   | 'contact_status_changed'
   | 'opt_out_changed'
@@ -2898,7 +2900,8 @@ export interface SimilarUnit {
  *  today: unit_created, unit_updated, unit_contact_added, unit_contact_removed,
  *  listing_status_changed, unit_deleted, unit_restored,
  *  broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
- *  tour_no_show, tour_canceled, tour_outcome.
+ *  tour_no_show, tour_canceled, tour_outcome, tour_auto_closed,
+ *  tour_reopened.
  *  Unknown types must still render (humanized), never blank. */
 export interface UnitActivityEvent {
   /** The audit ts sort key — unique within the unit (a stable React key). */

@@ -593,6 +593,96 @@ describe('PATCH status precondition - a concurrent change is refused, never merg
 });
 
 // ============================================================================
+// lastMarkedAt (tour auto-close spec 5.2 / 8.4, ruling F4): the floor of the
+// two-week auto-close clock. The PATCH stamps the router's injected clock, in
+// the same write, when a person CHANGES the tour's status or sets its time; an
+// outcome-only exit gate or a same-status restatement leaves it where it was.
+// ============================================================================
+
+describe('PATCH stamps lastMarkedAt on a status change or a new time, never on a restatement', () => {
+  const MARK_1 = '2026-07-10T12:00:00.000Z';
+  const MARK_2 = '2026-07-11T12:00:00.000Z';
+
+  it('a status change stamps the injected now, stored and returned', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => MARK_1 });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBeUndefined(); // create is not a mark
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.tour.lastMarkedAt).toBe(MARK_1);
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+  });
+
+  it('a reschedule (a new time on a scheduled tour) stamps the injected now', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => MARK_1 });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-07-20T14:00:00.000Z' })
+      .expect(200);
+
+    expect(world.toursMap.get(tourId)?.status).toBe('scheduled');
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+  });
+
+  it('booking a requested tour (scheduledAt only) stamps the injected now', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => MARK_1 });
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ tenantId: 'contact-tenant-1', unitId: 'unit-abc', tourType: 'self_guided' });
+    expect(created.body.tour.status).toBe('requested');
+    const tourId = created.body.tour.tourId as string;
+
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-07-20T14:00:00.000Z' })
+      .expect(200);
+
+    expect(world.toursMap.get(tourId)?.status).toBe('scheduled');
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+  });
+
+  it('an outcome-only exit gate leaves lastMarkedAt where the toured mark put it', async () => {
+    let now = MARK_1;
+    const { app, world } = makeWebhookHarness({ toursNow: () => now });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+
+    now = MARK_2;
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true })
+      .expect(200);
+
+    expect(world.toursMap.get(tourId)?.outcome).toBe('move_forward');
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+  });
+
+  it('a same-status restatement is not a mark: lastMarkedAt stays put (ruling F4)', async () => {
+    let now = MARK_1;
+    const { app, world } = makeWebhookHarness({ toursNow: () => now });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+
+    now = MARK_2;
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    expect(res.status).toBe(200);
+    expect(world.toursMap.get(tourId)?.status).toBe('toured');
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+  });
+});
+
+// ============================================================================
 // tour_took_place milestone — recorded on the transition INTO 'toured'
 // (Post-Tour & Application Task 2; resolves docs/issues/tour-took-place-milestone)
 // ============================================================================

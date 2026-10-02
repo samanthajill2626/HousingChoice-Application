@@ -1150,6 +1150,17 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       // Exit gate: convertible is true iff moveForward is true.
       patch['convertible'] = newMoveForward === true;
     }
+    // The auto-close clock's floor (spec 5.3): a person marking, rescheduling
+    // or reviving this tour gives it a fresh two weeks. Only a CHANGE counts
+    // (spec 5.2, ruling F4): a status that differs from the one read above, or
+    // any new time - so the booking / revival auto-advance stamps, while a
+    // same-status restatement and an outcome-only exit gate do not.
+    if (
+      (patch['status'] !== undefined && patch['status'] !== currentStatus) ||
+      patch['scheduledAt'] !== undefined
+    ) {
+      patch['lastMarkedAt'] = getNow();
+    }
 
     // Reminder side effects are keyed on the EFFECTIVE post-patch status -
     // arming must never happen on a tour that is not live (e.g. PATCH

@@ -6,11 +6,14 @@
 //     lazy-load, and the group + 1:1 empty states (open-group / create-on-demand)
 //   - the right-column cards (routing chip + fallback warning, People, Guidance,
 //     Outcome) + the mobile initial pane = Details
+//   - Reopen (spec 9.2): ONE "Reopen tour" control per state across the header
+//     CTA and the kebab, the confirm's hand-off to Record outcome (the guarded
+//     close), and the Outcome card of an auto-closed (no_outcome) tour
 //   - not-found
 //
 // Pattern mirrors PlacementDetail.test / the old TourDetail.test: mock the api
 // barrel, import after mocking, assert accessibility-first.
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
@@ -39,6 +42,10 @@ const getTourRoster = vi.fn();
 // first and provisions only after the confirm (contact-rosters spec 6.3).
 const previewTourRosterOpen = vi.fn();
 const patchTour = vi.fn();
+// POST /api/tours/:id/reopen (spec 9.2). Overridden HERE because the barrel
+// mock spreads the real module - an un-overridden reopenTour would run the real
+// fetch.
+const reopenTour = vi.fn();
 const createTourRelay = vi.fn();
 const createPlacementFromTour = vi.fn();
 const ensureContactConversation = vi.fn();
@@ -65,6 +72,7 @@ vi.mock('../../api/index.js', async () => {
     getTourRoster: (...a: unknown[]) => getTourRoster(...a),
     previewTourRosterOpen: (...a: unknown[]) => previewTourRosterOpen(...a),
     patchTour: (...a: unknown[]) => patchTour(...a),
+    reopenTour: (...a: unknown[]) => reopenTour(...a),
     createTourRelay: (...a: unknown[]) => createTourRelay(...a),
     createPlacementFromTour: (...a: unknown[]) => createPlacementFromTour(...a),
     ensureContactConversation: (...a: unknown[]) => ensureContactConversation(...a),
@@ -83,6 +91,7 @@ vi.mock('react-router-dom', async () => {
 
 import { TourDetail } from './TourDetail.js';
 import { TOUR_CHANGED_COPY } from './TourModals.js';
+import { REOPEN_BODY, type ReopenTarget } from './tourReopen.js';
 
 /** The default resolved roster: the same two people the page used to hard-code
  *  (tenant + the unit's landlord), now served by GET /api/tours/:id/roster. */
@@ -918,6 +927,226 @@ describe('TourDetail - a 409 in a writing tour dialog says reload, not retry', (
       expect(within(dialog).queryByText(TOUR_CHANGED_COPY)).not.toBeInTheDocument();
     });
   }
+});
+
+// Reopen (spec 9.2): a closed, unconverted tour goes back to the state it
+// closed from. ONE "Reopen tour" control per state, counted across BOTH roles:
+// the header CTA is a `button`, a kebab item is a `menuitem`, so a `button`
+// query never sees the kebab's item. It is the CTA unless "Start placement"
+// holds the primary slot (a convertible tour) - then the kebab carries it.
+// Exact names throughout: a /reopen/i regex would match "Yes, reopen" too.
+describe('TourDetail - Reopen (spec 9.2)', () => {
+  /** A tour the auto-close sweep closed from `from`. Midday-UTC instants:
+   *  shortDate formats in LOCAL time and vitest sets no TZ, so a midday instant
+   *  is the same calendar day in any US zone. */
+  function autoClosed(from: ReopenTarget): Partial<Tour> {
+    return {
+      status: 'closed',
+      scheduledAt: '2026-06-10T12:00:00Z',
+      outcome: 'no_outcome',
+      autoClosedAt: '2026-06-24T12:00:00Z',
+      autoClosedFrom: from,
+    };
+  }
+
+  async function openReopenDialog(): Promise<HTMLElement> {
+    await userEvent.click(screen.getByRole('button', { name: 'Reopen tour' }));
+    return screen.getByRole('dialog', { name: 'Reopen tour' });
+  }
+
+  const CTA_STATES: { name: string; tour: Partial<Tour>; target: ReopenTarget }[] = [
+    { name: 'auto-closed from scheduled', tour: autoClosed('scheduled'), target: 'scheduled' },
+    { name: 'auto-closed from toured', tour: autoClosed('toured'), target: 'toured' },
+    { name: 'auto-closed from no_show', tour: autoClosed('no_show'), target: 'no_show' },
+    {
+      name: 'closed as not a fit',
+      tour: { status: 'closed', outcome: 'not_a_fit', moveForward: false },
+      target: 'toured',
+    },
+  ];
+
+  for (const c of CTA_STATES) {
+    it(`${c.name}: exactly one Reopen tour control - the header CTA - and no kebab`, async () => {
+      getTour.mockResolvedValue(makeTour(c.tour));
+      renderDetail();
+      await waitLoaded();
+      expect(screen.getAllByRole('button', { name: 'Reopen tour' })).toHaveLength(1);
+      // A closed, non-convertible tour has no other branch action, so the kebab
+      // does not render at all - no menuitem can exist beside the CTA.
+      expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument();
+      expect(screen.queryAllByRole('menuitem', { name: 'Reopen tour' })).toHaveLength(0);
+      // The CTA opens the confirm, which says where THIS tour goes.
+      const dialog = await openReopenDialog();
+      expect(within(dialog).getByText(REOPEN_BODY[c.target])).toBeInTheDocument();
+    });
+  }
+
+  it('closed + convertible (not converted): Start placement holds the CTA, Reopen is the ONE kebab item', async () => {
+    getTour.mockResolvedValue(
+      makeTour({ status: 'closed', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
+    reopenTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getAllByRole('button', { name: 'Start placement' }).length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryAllByRole('button', { name: 'Reopen tour' })).toHaveLength(0);
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    expect(screen.getAllByRole('menuitem', { name: 'Reopen tour' })).toHaveLength(1);
+    expect(screen.queryAllByRole('button', { name: 'Reopen tour' })).toHaveLength(0);
+    // The item opens the same confirm; a person's decision reopens into Toured.
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Reopen tour' }));
+    const dialog = screen.getByRole('dialog', { name: 'Reopen tour' });
+    expect(within(dialog).getByText(REOPEN_BODY.toured)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Yes, reopen' }));
+    expect(await screen.findByRole('dialog', { name: 'Record outcome' })).toBeInTheDocument();
+    expect(reopenTour).toHaveBeenCalledWith('tour-abc');
+  });
+
+  const NO_REOPEN: { name: string; tour: Partial<Tour>; kebab: boolean }[] = [
+    {
+      name: 'converted',
+      tour: {
+        status: 'closed',
+        outcome: 'move_forward',
+        moveForward: true,
+        convertible: true,
+        convertedPlacementId: 'placement-1',
+      },
+      kebab: false,
+    },
+    {
+      name: 'a pending conversion claim',
+      tour: {
+        status: 'closed',
+        outcome: 'move_forward',
+        moveForward: true,
+        convertible: true,
+        convertedPlacementId: 'pending:x',
+      },
+      kebab: false,
+    },
+    { name: 'closed with no outcome and no autoClosedFrom', tour: { status: 'closed' }, kebab: false },
+    // Canceled is not closed: Reschedule (its kebab) is what revives it.
+    { name: 'canceled', tour: { status: 'canceled' }, kebab: true },
+  ];
+
+  for (const c of NO_REOPEN) {
+    it(`${c.name}: no Reopen tour anywhere`, async () => {
+      getTour.mockResolvedValue(makeTour(c.tour));
+      renderDetail();
+      await waitLoaded();
+      expect(screen.queryAllByRole('button', { name: 'Reopen tour' })).toHaveLength(0);
+      if (c.kebab) {
+        await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+        expect(screen.getAllByRole('menuitem').length).toBeGreaterThan(0);
+      } else {
+        expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument();
+      }
+      expect(screen.queryAllByRole('menuitem', { name: 'Reopen tour' })).toHaveLength(0);
+    });
+  }
+
+  it('the converted tour keeps View placement as its CTA', async () => {
+    getTour.mockResolvedValue(makeTour(NO_REOPEN[0]!.tour));
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getByRole('link', { name: 'View placement' })).toHaveAttribute(
+      'href',
+      '/placements/placement-1',
+    );
+  });
+
+  it('confirm into toured: reopenTour once, then Record outcome opens AND stays open (the guarded close)', async () => {
+    getTour.mockResolvedValue(makeTour(autoClosed('toured')));
+    reopenTour.mockResolvedValue(makeTour({ status: 'toured', scheduledAt: '2026-06-10T12:00:00Z' }));
+    renderDetail();
+    await waitLoaded();
+    const dialog = await openReopenDialog();
+    expect(within(dialog).getByText(REOPEN_BODY.toured)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Yes, reopen' }));
+    expect(await screen.findByRole('dialog', { name: 'Record outcome' })).toBeInTheDocument();
+    expect(reopenTour).toHaveBeenCalledTimes(1);
+    expect(reopenTour).toHaveBeenCalledWith('tour-abc');
+    // The Reopen dialog calls its onClose AFTER onConfirm handed the slot to
+    // Record outcome. That close is guarded (it clears only its own slot), so a
+    // tick later Record outcome is still up - a flat setModal(null) shuts it.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getByRole('dialog', { name: 'Record outcome' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Reopen tour' })).not.toBeInTheDocument();
+    expect(screen.getByText('Toured')).toBeInTheDocument();
+  });
+
+  it('confirm into no_show: the dialog closes and the badge reads No show', async () => {
+    getTour.mockResolvedValue(makeTour(autoClosed('no_show')));
+    reopenTour.mockResolvedValue(makeTour({ status: 'no_show', scheduledAt: '2026-06-10T12:00:00Z' }));
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getByText('Closed')).toBeInTheDocument();
+    const dialog = await openReopenDialog();
+    expect(within(dialog).getByText(REOPEN_BODY.no_show)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Yes, reopen' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(reopenTour).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('No show')).toBeInTheDocument();
+    expect(screen.queryByText('Closed')).not.toBeInTheDocument();
+    // An open no-show is not reopenable: the control is gone with the state.
+    expect(screen.queryAllByRole('button', { name: 'Reopen tour' })).toHaveLength(0);
+  });
+
+  it('a failed reopen keeps the dialog open with the reload copy; the tour stays closed', async () => {
+    getTour.mockResolvedValue(makeTour(autoClosed('scheduled')));
+    reopenTour.mockRejectedValue(new ApiError(409, 'tour_not_closed', 'tour_not_closed'));
+    renderDetail();
+    await waitLoaded();
+    const dialog = await openReopenDialog();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Yes, reopen' }));
+    await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent(TOUR_CHANGED_COPY));
+    expect(screen.getByRole('dialog', { name: 'Reopen tour' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Record outcome' })).not.toBeInTheDocument();
+    expect(screen.getByText('Closed')).toBeInTheDocument();
+  });
+
+  it('Cancel closes the dialog and reopens nothing', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'closed', outcome: 'not_a_fit', moveForward: false }));
+    renderDetail();
+    await waitLoaded();
+    const dialog = await openReopenDialog();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog', { name: 'Reopen tour' })).not.toBeInTheDocument();
+    expect(reopenTour).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Reopen tour' })).toBeInTheDocument();
+  });
+
+  it('Outcome card for no_outcome: the label, then "Closed automatically on <date>" in place of Moving forward', async () => {
+    getTour.mockResolvedValue(makeTour(autoClosed('toured')));
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getByText('No outcome recorded')).toBeInTheDocument();
+    // ONE element: an exact getByText reads one element's own text, so a KV
+    // (separate key and value spans) would not match.
+    expect(screen.getByText('Closed automatically on Jun 24')).toBeInTheDocument();
+    expect(screen.queryByText('Moving forward')).not.toBeInTheDocument();
+  });
+
+  it('a no_outcome tour without autoClosedAt shows the label and no date line - never Moving forward', async () => {
+    getTour.mockResolvedValue(makeTour({ ...autoClosed('toured'), autoClosedAt: undefined }));
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getByText('No outcome recorded')).toBeInTheDocument();
+    expect(screen.queryByText(/Closed automatically/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Moving forward')).not.toBeInTheDocument();
+  });
+
+  it('every other outcome renders as before: Not a fit, Moving forward No, no date line', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'closed', outcome: 'not_a_fit', moveForward: false }));
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getByText('Not a fit')).toBeInTheDocument();
+    expect(screen.getByText('Moving forward').parentElement).toHaveTextContent(/^Moving forward\s*No$/);
+    expect(screen.queryByText(/Closed automatically/)).not.toBeInTheDocument();
+  });
 });
 
 describe('TourDetail - close the relay group after a terminal outcome (relay number lifecycle)', () => {

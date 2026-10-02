@@ -155,6 +155,7 @@ import {
   type TourItem,
   type ToursRepo,
 } from '../../src/repos/toursRepo.js';
+import { isAutoCloseStatus } from '../../src/lib/toursModel.js';
 import {
   type ReminderKind,
   type TourReminderItem,
@@ -3618,6 +3619,35 @@ export function createFakeWorld(): FakeWorld {
       delete t.rosterVersion;
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
+    },
+    async autoCloseIf(tour, rotation) {
+      // The real repo's condition, field for field, as one synchronous
+      // check-and-set (no await between them): the up-front candidate-status
+      // refusal, then exists AND same status AND no outcome AND no conversion
+      // claim AND not convertible AND the same scheduledAt and lastMarkedAt
+      // (both absent counts as the same, like attribute_not_exists).
+      if (!isAutoCloseStatus(tour.status)) return undefined;
+      const t = toursMap.get(tour.tourId);
+      if (
+        !t ||
+        t.status !== tour.status ||
+        t.outcome !== undefined ||
+        t.convertedPlacementId !== undefined ||
+        t.convertible === true ||
+        t.scheduledAt !== tour.scheduledAt ||
+        t.lastMarkedAt !== tour.lastMarkedAt
+      ) {
+        return undefined;
+      }
+      const now = new Date().toISOString();
+      t.status = 'closed';
+      t.outcome = 'no_outcome';
+      t.autoClosedFrom = tour.status as TourItem['autoClosedFrom'];
+      t.autoClosedAt = now;
+      t.currentLadderId = rotation;
+      t.updatedAt = now;
+      toursMap.set(t.tourId, t);
+      return { ...t };
     },
   };
 

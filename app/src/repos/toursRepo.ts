@@ -35,7 +35,7 @@ import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import { RosterPlanConflictError, type RosterEntry } from '../lib/rosterResolution.js';
-import type { AutoCloseStatus, TourOutcome, TourType } from '../lib/toursModel.js';
+import { isAutoCloseStatus, type AutoCloseStatus, type TourOutcome, type TourType } from '../lib/toursModel.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -284,6 +284,18 @@ export interface ToursRepo {
    * and idempotent: a tour with no plan is a no-op.
    */
   clearRoster(tourId: string): Promise<void>;
+  /**
+   * The auto-close sweep's ONE write (jobs/tourAutoClose.ts, spec 6.3): closes
+   * `tour` with outcome `no_outcome` ONLY while every field the due decision
+   * read is unchanged - status, no outcome, no conversion claim, not
+   * convertible, the same scheduledAt and lastMarkedAt (FIELD equality: two
+   * writes in one millisecond carry the same updatedAt, so updatedAt equality
+   * cannot detect a change). Rotates the reminder-ladder pointer to `rotation`
+   * in the same write. Stamps autoClosedAt / updatedAt with the WALL clock.
+   * Returns the post-write item, or undefined when the condition failed (or
+   * the tour is missing) - never throws for that.
+   */
+  autoCloseIf(tour: TourItem, rotation: string): Promise<TourItem | undefined>;
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +664,75 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
         }),
       );
       log.info({ tourId }, 'tour roster plan cleared');
+    },
+
+    async autoCloseIf(tour, rotation) {
+      // Defense in depth (spec 6.3): only a candidate status may ever be
+      // closed as no_outcome, whatever the caller's due filter did.
+      if (!isAutoCloseStatus(tour.status)) return undefined;
+      const now = new Date().toISOString();
+      const names: Record<string, string> = {
+        '#st': 'status',
+        '#oc': 'outcome',
+        '#acf': 'autoClosedFrom',
+        '#aca': 'autoClosedAt',
+        '#cl': 'currentLadderId',
+        '#ua': 'updatedAt',
+        '#cp': 'convertedPlacementId',
+        '#cv': 'convertible',
+        '#sa': 'scheduledAt',
+        '#lm': 'lastMarkedAt',
+      };
+      const values: Record<string, unknown> = {
+        ':closed': 'closed',
+        ':noOutcome': 'no_outcome',
+        ':from': tour.status,
+        ':now': now,
+        ':rot': rotation,
+        ':true': true,
+      };
+      const conditions = [
+        'attribute_exists(tourId)',
+        '#st = :from',
+        'attribute_not_exists(#oc)',
+        'attribute_not_exists(#cp)',
+        '(attribute_not_exists(#cv) OR #cv <> :true)',
+      ];
+      if (typeof tour.scheduledAt === 'string') {
+        values[':sa'] = tour.scheduledAt;
+        conditions.push('#sa = :sa');
+      } else {
+        conditions.push('attribute_not_exists(#sa)');
+      }
+      if (typeof tour.lastMarkedAt === 'string') {
+        values[':lm'] = tour.lastMarkedAt;
+        conditions.push('#lm = :lm');
+      } else {
+        conditions.push('attribute_not_exists(#lm)');
+      }
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { tourId: tour.tourId },
+            UpdateExpression:
+              'SET #st = :closed, #oc = :noOutcome, #acf = :from, #aca = :now, #cl = :rot, #ua = :now',
+            ConditionExpression: conditions.join(' AND '),
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        // debug, not info: the job owns the ONE info line per closed tour.
+        log.debug({ tourId: tour.tourId, from: tour.status }, 'tour auto-close write landed');
+        return Attributes as TourItem;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.debug({ tourId: tour.tourId }, 'tour auto-close lost its condition - skipped');
+          return undefined;
+        }
+        throw err;
+      }
     },
   };
 }

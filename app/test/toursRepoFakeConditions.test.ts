@@ -11,7 +11,7 @@
 // Pure in-memory: createFakeWorld() does no I/O. Stored rows are read straight
 // from the backing map (world.toursMap), the fake's equivalent of rawTour.
 import { describe, expect, it } from 'vitest';
-import { ConditionalCheckFailedException } from '../src/repos/toursRepo.js';
+import { ConditionalCheckFailedException, type ToursRepo } from '../src/repos/toursRepo.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 
 function setup() {
@@ -72,4 +72,168 @@ describe('harness fake toursRepo - conditional writes match the real repo', () =
     ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
     expect(rawTour('tour-ghost-expected')).toBeUndefined();
   });
+
+  // autoCloseIf - the sweep's ONE write (spec 6.3).
+
+  it('autoCloseIf closes a scheduled tour as no_outcome, rotates the pointer and stamps the wall clock', async () => {
+    const { tours, rawTour } = setup();
+    const tour = await tours.create({
+      tenantId: 'contact-close-1',
+      unitId: 'unit-close-1',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      tourType: 'self_guided',
+      currentLadderId: 'ladder-live',
+    });
+    const read = (await tours.get(tour.tourId))!;
+    const before = Date.now();
+
+    const closed = await tours.autoCloseIf(read, 'rot-1');
+
+    expect(closed).toMatchObject({
+      tourId: tour.tourId,
+      tenantId: 'contact-close-1',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      createdAt: read.createdAt,
+      status: 'closed',
+      outcome: 'no_outcome',
+      autoClosedFrom: 'scheduled',
+      currentLadderId: 'rot-1',
+    });
+    expect(closed!.autoClosedAt).toBe(closed!.updatedAt);
+    expect(Date.parse(closed!.autoClosedAt as string)).toBeGreaterThanOrEqual(before);
+    expect(closed).not.toHaveProperty('moveForward');
+    expect(closed).not.toHaveProperty('convertible');
+    expect(closed).not.toHaveProperty('lastMarkedAt');
+    expect(rawTour(tour.tourId)).toEqual(closed);
+  });
+
+  it('autoCloseIf closes a candidate carrying convertible: false and leaves moveForward / convertible as they are', async () => {
+    const { tours, rawTour } = setup();
+    const tour = await tours.create({
+      tenantId: 'contact-close-cv',
+      unitId: 'unit-close-cv',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      tourType: 'self_guided',
+      status: 'toured',
+      moveForward: false,
+      convertible: false,
+      lastMarkedAt: '2026-09-02T09:00:00.000Z',
+    });
+    const read = (await tours.get(tour.tourId))!;
+
+    const closed = await tours.autoCloseIf(read, 'rot-cv');
+
+    expect(closed).toMatchObject({
+      status: 'closed',
+      outcome: 'no_outcome',
+      autoClosedFrom: 'toured',
+      moveForward: false,
+      convertible: false,
+      lastMarkedAt: '2026-09-02T09:00:00.000Z',
+    });
+    expect(rawTour(tour.tourId)).toEqual(closed);
+  });
+
+  it('autoCloseIf closes an undated toured tour and adds no scheduledAt', async () => {
+    const { tours, rawTour } = setup();
+    const tour = await tours.create({
+      tenantId: 'contact-close-2',
+      unitId: 'unit-close-2',
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { status: 'toured' });
+    const read = (await tours.get(tour.tourId))!;
+
+    const closed = await tours.autoCloseIf(read, 'rot-2');
+
+    expect(closed).toMatchObject({ status: 'closed', outcome: 'no_outcome', autoClosedFrom: 'toured' });
+    const stored = rawTour(tour.tourId);
+    expect(stored).toEqual(closed);
+    expect(stored).not.toHaveProperty('scheduledAt');
+  });
+
+  // The integration file's race table, row for row.
+  const autoCloseRaces: {
+    name: string;
+    undated?: boolean;
+    lastMarkedAt?: string;
+    change: (repo: ToursRepo, tourId: string) => Promise<unknown>;
+  }[] = [
+    { name: 'the status changed', change: (r, id) => r.patch(id, { status: 'toured' }) },
+    { name: 'an outcome was recorded', change: (r, id) => r.patch(id, { outcome: 'not_a_fit' }) },
+    { name: 'a conversion was claimed', change: (r, id) => r.claimConversion(id, 'pending:x') },
+    { name: 'it became convertible', change: (r, id) => r.patch(id, { convertible: true }) },
+    {
+      name: 'it was rescheduled',
+      change: (r, id) => r.patch(id, { scheduledAt: '2026-09-05T15:00:00.000Z' }),
+    },
+    {
+      name: 'an undated tour got a date',
+      undated: true,
+      change: (r, id) => r.patch(id, { scheduledAt: '2026-09-05T15:00:00.000Z' }),
+    },
+    {
+      name: 'a person marked it for the first time',
+      change: (r, id) => r.patch(id, { lastMarkedAt: '2026-09-20T00:00:00.000Z' }),
+    },
+    {
+      name: 'a person marked it again',
+      lastMarkedAt: '2026-09-10T00:00:00.000Z',
+      change: (r, id) => r.patch(id, { lastMarkedAt: '2026-09-20T00:00:00.000Z' }),
+    },
+  ];
+
+  it.each(autoCloseRaces)(
+    'autoCloseIf loses - undefined, nothing written - when $name between its read and its write',
+    async ({ undated, lastMarkedAt, change }) => {
+      const { tours, rawTour } = setup();
+      const tour = await tours.create({
+        tenantId: 'contact-close-race',
+        unitId: 'unit-close-race',
+        tourType: 'self_guided',
+        status: undated === true ? 'toured' : 'scheduled',
+        ...(undated !== true && { scheduledAt: '2026-09-01T15:00:00.000Z' }),
+        ...(lastMarkedAt !== undefined && { lastMarkedAt }),
+      });
+      const read = (await tours.get(tour.tourId))!;
+      await change(tours, tour.tourId);
+      const changed = rawTour(tour.tourId);
+
+      await expect(tours.autoCloseIf(read, 'rot-race')).resolves.toBeUndefined();
+      expect(rawTour(tour.tourId)).toEqual(changed);
+    },
+  );
+
+  it('autoCloseIf returns undefined for a missing tour and creates NOTHING', async () => {
+    const { tours, rawTour } = setup();
+    const tour = await tours.create({
+      tenantId: 'contact-close-ghost',
+      unitId: 'unit-close-ghost',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    const read = (await tours.get(tour.tourId))!;
+
+    await expect(tours.autoCloseIf({ ...read, tourId: 'tour-ghost-close' }, 'rot-ghost')).resolves.toBeUndefined();
+    expect(rawTour('tour-ghost-close')).toBeUndefined();
+  });
+
+  it.each(['canceled', 'requested', 'closed'])(
+    'autoCloseIf refuses a %s tour up front and writes nothing (the store alone would let it through)',
+    async (status) => {
+      const { tours, rawTour } = setup();
+      const tour = await tours.create({
+        tenantId: 'contact-close-refuse',
+        unitId: 'unit-close-refuse',
+        tourType: 'self_guided',
+        status,
+        ...(status !== 'requested' && { scheduledAt: '2026-09-01T15:00:00.000Z' }),
+      });
+      const read = (await tours.get(tour.tourId))!;
+      const before = rawTour(tour.tourId);
+
+      await expect(tours.autoCloseIf(read, 'rot-refuse')).resolves.toBeUndefined();
+      expect(rawTour(tour.tourId)).toEqual(before);
+    },
+  );
 });

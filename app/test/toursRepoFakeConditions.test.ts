@@ -236,4 +236,126 @@ describe('harness fake toursRepo - conditional writes match the real repo', () =
       expect(rawTour(tour.tourId)).toEqual(before);
     },
   );
+
+  // reopenIf - POST /api/tours/:id/reopen's write (spec 7.3).
+
+  /** The integration file's seedClosed: `auto` is the item autoCloseIf
+   *  RETURNED (the post-close row). */
+  const seedClosed = async (repo: ToursRepo, kind: 'auto' | 'person' | 'bare') => {
+    if (kind === 'auto') {
+      const tour = await repo.create({
+        tenantId: 'contact-reopen-auto',
+        unitId: 'unit-reopen',
+        scheduledAt: '2026-09-01T15:00:00.000Z',
+        tourType: 'self_guided',
+        moveForward: false,
+        convertible: false,
+        currentLadderId: 'ladder-live',
+      });
+      return (await repo.autoCloseIf((await repo.get(tour.tourId))!, 'rot-reopen'))!;
+    }
+    if (kind === 'person') {
+      const tour = await repo.create({
+        tenantId: 'contact-reopen-person',
+        unitId: 'unit-reopen',
+        scheduledAt: '2026-09-01T15:00:00.000Z',
+        tourType: 'self_guided',
+        status: 'toured',
+      });
+      await repo.patch(tour.tourId, { outcome: 'not_a_fit', moveForward: false, convertible: false, status: 'closed' });
+      return (await repo.get(tour.tourId))!;
+    }
+    const tour = await repo.create({
+      tenantId: 'contact-reopen-bare',
+      unitId: 'unit-reopen',
+      tourType: 'self_guided',
+      status: 'closed',
+      autoClosedFrom: 'toured',
+    });
+    return (await repo.get(tour.tourId))!;
+  };
+
+  it('reopenIf returns an auto-closed tour to its status, stamps lastMarkedAt and removes the close and the decision', async () => {
+    const { tours, rawTour } = setup();
+    const closed = await seedClosed(tours, 'auto');
+    expect(closed).toMatchObject({
+      status: 'closed',
+      outcome: 'no_outcome',
+      autoClosedFrom: 'scheduled',
+      moveForward: false,
+      convertible: false,
+    });
+    const before = Date.now();
+
+    const reopened = await tours.reopenIf(closed, 'scheduled', '2026-10-20T12:00:00.000Z');
+
+    expect(reopened).toMatchObject({
+      tourId: closed.tourId,
+      status: 'scheduled',
+      lastMarkedAt: '2026-10-20T12:00:00.000Z',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      currentLadderId: 'rot-reopen',
+    });
+    for (const gone of ['outcome', 'moveForward', 'convertible', 'autoClosedAt', 'autoClosedFrom']) {
+      expect(reopened).not.toHaveProperty(gone);
+    }
+    expect(reopened!.updatedAt).not.toBe('2026-10-20T12:00:00.000Z');
+    expect(Date.parse(reopened!.updatedAt)).toBeGreaterThanOrEqual(before);
+    expect(rawTour(closed.tourId)).toEqual(reopened);
+  });
+
+  it('reopenIf returns a person-decided tour to toured and removes outcome / moveForward / convertible', async () => {
+    const { tours, rawTour } = setup();
+    const closed = await seedClosed(tours, 'person');
+
+    const reopened = await tours.reopenIf(closed, 'toured', '2026-10-20T12:00:00.000Z');
+
+    expect(reopened).toMatchObject({ status: 'toured', lastMarkedAt: '2026-10-20T12:00:00.000Z' });
+    for (const gone of ['outcome', 'moveForward', 'convertible', 'autoClosedAt', 'autoClosedFrom']) {
+      expect(reopened).not.toHaveProperty(gone);
+    }
+    expect(rawTour(closed.tourId)).toEqual(reopened);
+  });
+
+  // The integration file's race table, row for row.
+  const reopenRaces: {
+    name: string;
+    seed: 'auto' | 'person' | 'bare';
+    change: (repo: ToursRepo, tourId: string) => Promise<unknown>;
+  }[] = [
+    {
+      name: 'a first reopen already ran',
+      seed: 'auto',
+      change: async (r, id) => r.reopenIf((await r.get(id))!, 'scheduled', '2026-10-21T12:00:00.000Z'),
+    },
+    { name: 'it left closed (outcome kept)', seed: 'auto', change: (r, id) => r.patch(id, { status: 'toured' }) },
+    { name: 'a conversion was claimed', seed: 'person', change: (r, id) => r.claimConversion(id, 'pending:x') },
+    { name: 'the outcome changed', seed: 'person', change: (r, id) => r.patch(id, { outcome: 'move_forward' }) },
+    { name: 'an outcome appeared', seed: 'bare', change: (r, id) => r.patch(id, { outcome: 'not_a_fit' }) },
+    { name: 'autoClosedFrom changed', seed: 'auto', change: (r, id) => r.patch(id, { autoClosedFrom: 'toured' }) },
+    { name: 'autoClosedFrom appeared', seed: 'person', change: (r, id) => r.patch(id, { autoClosedFrom: 'no_show' }) },
+  ];
+
+  it.each(reopenRaces)(
+    'reopenIf loses - undefined, nothing written - when $name after its read',
+    async ({ seed, change }) => {
+      const { tours, rawTour } = setup();
+      const read = await seedClosed(tours, seed);
+      await change(tours, read.tourId);
+      const changed = rawTour(read.tourId);
+
+      await expect(tours.reopenIf(read, 'toured', '2026-10-20T12:00:00.000Z')).resolves.toBeUndefined();
+      expect(rawTour(read.tourId)).toEqual(changed);
+    },
+  );
+
+  it('reopenIf returns undefined for a missing tour and creates NOTHING', async () => {
+    const { tours, rawTour } = setup();
+    const read = await seedClosed(tours, 'person');
+
+    await expect(
+      tours.reopenIf({ ...read, tourId: 'tour-ghost-reopen' }, 'toured', '2026-10-20T12:00:00.000Z'),
+    ).resolves.toBeUndefined();
+    expect(rawTour('tour-ghost-reopen')).toBeUndefined();
+  });
 });

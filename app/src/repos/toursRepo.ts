@@ -296,6 +296,16 @@ export interface ToursRepo {
    * the tour is missing) - never throws for that.
    */
   autoCloseIf(tour: TourItem, rotation: string): Promise<TourItem | undefined>;
+  /**
+   * Reopen a closed tour (POST /api/tours/:id/reopen, spec 7.3): status ->
+   * `target`, lastMarkedAt -> `lastMarkedAt` (the route's clock), and REMOVE
+   * outcome / moveForward / convertible / autoClosedAt / autoClosedFrom - ONLY
+   * while it is still closed, unconverted, and carries the outcome and
+   * autoClosedFrom the caller read (field equality). currentLadderId is left
+   * alone (it names no live rows); nothing is armed. Returns the post-write
+   * item, or undefined when the condition failed - never throws for that.
+   */
+  reopenIf(tour: TourItem, target: AutoCloseStatus, lastMarkedAt: string): Promise<TourItem | undefined>;
 }
 
 // ---------------------------------------------------------------------------
@@ -729,6 +739,61 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
           log.debug({ tourId: tour.tourId }, 'tour auto-close lost its condition - skipped');
+          return undefined;
+        }
+        throw err;
+      }
+    },
+
+    async reopenIf(tour, target, lastMarkedAt) {
+      const names: Record<string, string> = {
+        '#st': 'status',
+        '#lm': 'lastMarkedAt',
+        '#ua': 'updatedAt',
+        '#oc': 'outcome',
+        '#mf': 'moveForward',
+        '#cv': 'convertible',
+        '#aca': 'autoClosedAt',
+        '#acf': 'autoClosedFrom',
+        '#cp': 'convertedPlacementId',
+      };
+      const values: Record<string, unknown> = {
+        ':closed': 'closed',
+        ':target': target,
+        ':lm': lastMarkedAt,
+        ':now': new Date().toISOString(),
+      };
+      const conditions = ['attribute_exists(tourId)', '#st = :closed', 'attribute_not_exists(#cp)'];
+      if (typeof tour.outcome === 'string') {
+        values[':oc'] = tour.outcome;
+        conditions.push('#oc = :oc');
+      } else {
+        conditions.push('attribute_not_exists(#oc)');
+      }
+      if (typeof tour.autoClosedFrom === 'string') {
+        values[':acf'] = tour.autoClosedFrom;
+        conditions.push('#acf = :acf');
+      } else {
+        conditions.push('attribute_not_exists(#acf)');
+      }
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { tourId: tour.tourId },
+            UpdateExpression: 'SET #st = :target, #lm = :lm, #ua = :now REMOVE #oc, #mf, #cv, #aca, #acf',
+            ConditionExpression: conditions.join(' AND '),
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        // debug, not info: the route owns the ONE info line per reopen.
+        log.debug({ tourId: tour.tourId, to: target }, 'tour reopen write landed');
+        return Attributes as TourItem;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.debug({ tourId: tour.tourId }, 'tour reopen lost its condition');
           return undefined;
         }
         throw err;

@@ -3649,6 +3649,31 @@ export function createFakeWorld(): FakeWorld {
       toursMap.set(t.tourId, t);
       return { ...t };
     },
+    async reopenIf(tour, target, lastMarkedAt) {
+      // The real repo's condition as one synchronous check-and-set: exists AND
+      // closed AND no conversion claim AND the outcome and autoClosedFrom the
+      // caller read (both absent counts as the same, like attribute_not_exists).
+      const t = toursMap.get(tour.tourId);
+      if (
+        !t ||
+        t.status !== 'closed' ||
+        t.convertedPlacementId !== undefined ||
+        t.outcome !== tour.outcome ||
+        t.autoClosedFrom !== tour.autoClosedFrom
+      ) {
+        return undefined;
+      }
+      t.status = target;
+      t.lastMarkedAt = lastMarkedAt;
+      t.updatedAt = new Date().toISOString();
+      delete t.outcome;
+      delete t.moveForward;
+      delete t.convertible;
+      delete t.autoClosedAt;
+      delete t.autoClosedFrom;
+      toursMap.set(t.tourId, t);
+      return { ...t };
+    },
   };
 
   const tourRemindersMap = new Map<string, TourReminderItem>();

@@ -89,3 +89,23 @@ guarded close, the listing chip, `StaffTourOutcome`, the Today e2e rewrite,
 
 Decisions changed (legacy clock floor, Reopen placement, Record outcome 409
 copy) -> round 3 on draft 3, same reviewer, in parallel with plan round 1.
+
+## Spec round 3 (draft 3 @579a810b)
+
+Reviewer B continued. Report: `spec-r3-b.md`. Headline: nothing at MEDIUM or
+above; every writer of a tour's `updatedAt` is person-triggered or at create
+time (background jobs only read tours), so the legacy floor can neither hold
+a candidate open forever nor close one early.
+
+| # | finding | ruling | decision changed? |
+|---|---|---|---|
+| R3-1 | The `updatedAt` fallback governs every tour no person has marked yet, not only pre-deploy rows (create writes no `lastMarkedAt`), so a group open or roster edit after the date postpones a never-marked tour's close | ACCEPT as a statement in 5.3 (no build change): the effect can only postpone, never strand or close early; stamping `lastMarkedAt` at create was considered and not taken - it adds a write surface for a practically nil difference (writes to a never-marked tour after its date are rare) | NO (text) |
+| R3-2 | D14's reason applies equally to the Reschedule / Book and Cancel dialogs (and Mark already toured): a 409 there also says "please try again" | ACCEPT. D14 widened to every writing tour dialog (one shared constant); the same decision applied consistently, no new mechanism | NO (precision of D14) |
+| R3-3 | Section 13 claims the tour page's history shows when an undated row last changed; it does not (roster edits / outcome-only patches move `updatedAt` with no history row) | ACCEPT. Text corrected; that part of the preview errs safe | NO (text) |
+
+### Round 3 result - TERMINAL
+
+No accepted finding changed what gets built, added or removed a surface, or
+moved an invariant (R3-2 completes D14's own coverage). Precision edits
+folded in; the spec is APPROVED by the planner under Cameron's overnight
+authority (2026-10-01). Spec rounds: 3 of the 4-round cap.

@@ -3,8 +3,9 @@
 - Date: 2026-10-01
 - Branch: `feat/tour-auto-close` (worktree `W:\tmp\tour-auto-close`, cut from main @ae04122d)
 - Source: Sam's improvement #18 (remaining part), HousingChoice Improvements Tracker
-- Status: DRAFT 3 - adversarial review round 3. Per Cameron's instruction of
-  2026-10-01 the planner approves this spec itself after the review rounds;
+- Status: APPROVED (planner, 2026-10-01, per Cameron's overnight authority)
+  after three adversarial rounds; round 3 changed no decision. Per Cameron's
+  instruction of 2026-10-01 the planner approves this spec itself;
   every decision the planner took alone is listed in section 14, and the
   review rulings are in
   `docs/superpowers/reviews/2026-10-01-tour-auto-close/design-review/adjudications.md`.
@@ -222,6 +223,14 @@ must not close on the first run. For such a row `updatedAt` is never earlier
 than its last mark. Once a person marks, reschedules or reopens a tour after
 the deploy, `lastMarkedAt` exists and unrelated writes (a roster edit, a
 group open) no longer move its clock.
+
+The fallback is not limited to pre-deploy rows: create does not write
+`lastMarkedAt`, so ANY tour no person has marked yet (a booked-ahead tour
+never marked toured is the common case) counts from its last change of any
+kind. Writers of a tour's `updatedAt` are all person-triggered or at create
+time - background jobs only read tours (spec review round 3) - so the
+fallback can postpone a close (a group opened or a roster edited after the
+date) but never keep a tour open forever or close one early. Accepted.
 
 A tour is due when `due <= now`. Consequences: a tour booked ahead closes 14
 days after its time; a tour marked toured, a no-show or rescheduled after its
@@ -473,12 +482,14 @@ create's pointer write, tests) is unchanged.
 - Outcome card for `no_outcome`: "Outcome: No outcome recorded" and the line
   "Closed automatically on <short date of autoClosedAt>" in place of "Moving
   forward". Other outcomes unchanged.
-- The Record outcome dialog: an `ApiError` with status 409 (the tour closed
-  or changed while the dialog was open - `illegal_exit_gate`,
-  `tour_changed`) shows "This tour changed since the page loaded - reload and
-  try again." instead of "Couldn't record the outcome - please try again."
-  (a retry cannot succeed). Other errors keep the existing copy; other tour
-  dialogs are unchanged.
+- Every tour dialog that writes - Book / Reschedule (the shared date
+  dialog), Mark already toured, Record outcome, Cancel, and Reopen: an
+  `ApiError` with status 409 (the tour closed or changed while the dialog
+  was open - `illegal_exit_gate`, `illegal_status_transition`,
+  `tour_changed`) shows "This tour changed since the page loaded - reload
+  and try again." instead of its "Couldn't ... - please try again." (a retry
+  cannot succeed). Other errors keep each dialog's existing copy. One shared
+  constant.
 
 ### 9.3 Tours page (`ToursPage.tsx`)
 
@@ -686,8 +697,10 @@ Readers that must agree with the new states:
   28): the Past tab rows dated more than 14 days ago, minus "Needs placement"
   rows and minus any row a person changed in the last 14 days (marked
   toured / no-show, rescheduled - those keep the rest of their two weeks);
-  plus "Undated" rows last changed more than 14 days ago (the Past tab does
-  not show that date; the tour page's history does). BLIND SPOT: the Past tab
+  plus "Undated" rows last changed more than 14 days ago (no screen shows
+  that date - roster edits and outcome-only patches move it without a
+  history row - so this part of the preview errs safe: it may predict closes
+  that will not happen). BLIND SPOT: the Past tab
   covers 90 days and one page of the range read, so older candidates (tours
   from before early July with no outcome) close without appearing there -
   they are on no list today either. Review after the run: the Closed tab,
@@ -732,9 +745,10 @@ Readers that must agree with the new states:
   copy option for Cameron / Sam, not built).
 - D13 No manual exit for no-shows (Sam's Sep 30 decision); the issue closes
   by that decision.
-- D14 The Record outcome dialog maps a 409 to "This tour changed since the
+- D14 Every writing tour dialog maps a 409 to "This tour changed since the
   page loaded - reload and try again." (the auto-close makes that refusal
-  likelier at the two-week boundary); other tour dialogs are unchanged.
+  likelier at the two-week boundary, where Today now sends staff to
+  reschedule no-shows).
 
 ## 15. Issue registry and docs
 

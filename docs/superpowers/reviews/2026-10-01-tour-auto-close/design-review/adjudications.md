@@ -109,3 +109,38 @@ No accepted finding changed what gets built, added or removed a surface, or
 moved an invariant (R3-2 completes D14's own coverage). Precision edits
 folded in; the spec is APPROVED by the planner under Cameron's overnight
 authority (2026-10-01). Spec rounds: 3 of the 4-round cap.
+
+## Plan round 1 (plan v2 @579a810b, spec draft 3)
+
+Two independent reviewers, same brief: PA = `plan-r1-a.md`, PB = `plan-r1-b.md`.
+Both verified the server code blocks against the real repo (expression
+names/values all used, fake conditions field-for-field equal, signatures,
+`as const satisfies`, the parked tests) and found no BLOCKING issue.
+
+| # | finding | ruling | decision changed? |
+|---|---|---|---|
+| PA1 = PB1 | Task 8.5's "exactly one Reopen tour" test counts `button` only; kebab items are `menuitem`s and a closed non-convertible tour renders no kebab, so the test is vacuous where a duplicate could appear and red on correct code in the convertible state | ACCEPT. Count both roles; assert the kebab trigger is ABSENT in the CTA states; in the convertible state no header button and exactly one menuitem; matrix covers auto-closed from each status | NO (test precision) |
+| PA2 = PB4 | Task 6.1 case 12 (concurrent reopens -> one 200 + one 409 `tour_changed`) cannot reproduce on the in-memory harness; the loser reads after the winner and gets `tour_not_closed` | ACCEPT. Park `world.toursRepo.reopenIf` (the repo's own pattern, `toursApi.test.ts:2043-2052`) so a second reopen completes between the first's read and write; the sequential case stays as its own test | NO (test precision) |
+| PA3 = PB3 | `activityEventsRepo` optional in `TourAutoCloseDeps` + untested worker / dev-tick deps -> omitting it typechecks and silently drops every timeline pin | ACCEPT. The field is REQUIRED; Tasks 5.3 / 5.4 list the exact deps the blocks construct (modelled on the roster-action block, `worker.ts:394-434`) | YES (dep contract) |
+| PA4 = PB6 | Decision 6's handback preview is assigned to no task | ACCEPT. S11 gains a handback step carrying the section-13 recipe and blind spot; Task 10.3's RUNBOOK entry covers before AND after the first run | YES (deliverable added) |
+| PA5 = PB5 | Task 1.1 makes PATCH accept `no_outcome` until Task 4.1 (eight commits) - "nothing in between is unguarded" is false; the sweep (S5) also lands before reopen (S6) and the labels (S8) | ACCEPT. Task 4.1's validator switch folds into Task 1.1's commit; the order paragraph stops claiming guarded intermediate states for S5-S8 (branch-internal, nothing deploys mid-branch) | YES (ordering) |
+| PA6 = PB2 | `mutationCatalog.test.ts:364-375` pins the count at 110 (+ an itemized ledger comment); `ToursPage.test.tsx:708-716` pins the old Past intro - neither named | ACCEPT. Named in Tasks 8.1 / 8.6 (count -> 111, ledger extended; the intro pin updated) | NO |
+| PA7 | = PB2 secondary | merged | - |
+| PA8 = PB9a | Two info lines per closed (and per reopened) tour - repo + job / route | ACCEPT. The repo methods log at debug; the job and the route own the one info line | NO |
+| PA9 = PB10 (part) | `seed/history.ts:79-96` and `seedTourTrails.test.ts:53-69` claim to MIRROR `TOUR_EVENT_LABELS`; Task 8.8 makes that false silently | ACCEPT. Reworded in Task 8.8 (seeded kinds are a subset; the two auto-close kinds are never seeded) | NO |
+| PA10 | Task 4.2 claims the dialogs show `ApiError.message` for a 409; only the header alert does | ACCEPT. Text corrected; the dialogs' 409s are D14's shared copy (Task 8.4b) | NO |
+| PB7 | Retyping to `StaffTourOutcome` leaves unused `TourOutcome` imports (`endpoints.ts:77`, `TourDetail.tsx:43`, `TourModals.tsx:23`) - lint errors | ACCEPT. Named in Task 8.1 | NO |
+| PB8 | Some RED steps are green on unchanged code (Task 4.2 case 2, Task 8.7's `Today.test.tsx` row, Task 2.2 cases 3-4) | ACCEPT. Labeled as regression PINS; each task keeps at least one real RED (named) | NO |
+| PB9b | `autoCloseDueAtMs` nulls a MISSING `createdAt`, a rule the spec does not state | ACCEPT as an explicit defensive rule in Task 1.2 (every writer stamps `createdAt`; never close on a date we cannot read) | NO |
+| PB9c | "Mirror `CancelTourModal` exactly" invites copying "Keep tour" and the danger variant | ACCEPT. Task 8.4 mirrors the structure only; labels "Cancel" / "Yes, reopen", non-danger confirm | NO |
+| PB10 | Stale old-rule comments in no task: `ToursPage.tsx:25-29`, `useTours.ts:10-12`, the `relayCloseNag.ts` header, the seed mirror comments, `Today.test.tsx:421` title | ACCEPT. Each named in its task (8.6, 8.7, 5.1, 8.8, 8.7) | NO |
+
+Also folded (from spec round 3, R3-2): Task 8.4b covers every writing tour
+dialog with one shared constant.
+
+### Round 1 result
+
+Decisions changed (required dep contract, a handback deliverable, task
+ordering) -> plan round 2 on v3. PB landed more accepted unique findings
+(PB7, PB8, PB9, PB10) and is continued with SendMessage; it gets PA's report
+path.

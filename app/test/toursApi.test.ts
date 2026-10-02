@@ -442,6 +442,157 @@ describe('PATCH /api/tours/:tourId', () => {
 });
 
 // ============================================================================
+// PATCH status precondition (tour auto-close spec 8): the guards run on a
+// CONSISTENT read, and the main write carries the status that read returned.
+// A concurrent change between the two (another PATCH, a conversion, the
+// auto-close sweep) is refused with 409 tour_changed - never merged on top -
+// and not one side effect runs.
+// ============================================================================
+
+describe('PATCH status precondition - a concurrent change is refused, never merged', () => {
+  // A tour already past its date (the auto-close sweep's candidate). Its create
+  // still calls toursRepo.patch (the ladder pointer for its booked_too_late
+  // skipped rungs), so every wrapper below is installed AFTER the create.
+  const PAST = '2026-01-15T10:00:00.000Z';
+  const TOUR_CHANGED = {
+    error: 'tour_changed',
+    detail: 'This tour changed while you were saving - reload and try again.',
+  };
+  const rowCount = (world: FakeWorld, tourId: string): number =>
+    [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId).length;
+
+  async function createPastTour(app: ReturnType<typeof makeWebhookHarness>['app']): Promise<string> {
+    const created = await authed(app).post('/api/tours').send({ ...BASE_CREATE_BODY, scheduledAt: PAST });
+    expect(created.status).toBe(201);
+    return created.body.tour.tourId as string;
+  }
+
+  it('a PATCH that read a pre-close status cannot land on an auto-closed tour (409 tour_changed)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createPastTour(app);
+    const asRead = (await world.toursRepo.get(tourId))!;
+    const rowsBefore = rowCount(world, tourId);
+    expect(rowsBefore).toBeGreaterThan(0);
+
+    // The sweep lands between the route's read and its write.
+    let raced = false;
+    const realPatch = world.toursRepo.patch;
+    world.toursRepo.patch = async (id, updates, opts) => {
+      if (!raced) {
+        raced = true;
+        await world.toursRepo.autoCloseIf(asRead, 'rot-race');
+      }
+      return realPatch(id, updates, opts);
+    };
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    expect(raced).toBe(true);
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual(TOUR_CHANGED);
+    // The close stands as the sweep wrote it; the refused PATCH merged nothing
+    // (not even its pointer rotation).
+    const stored = world.toursMap.get(tourId)!;
+    expect(stored.status).toBe('closed');
+    expect(stored.outcome).toBe('no_outcome');
+    expect(stored.autoClosedFrom).toBe('scheduled');
+    expect(stored.currentLadderId).toBe('rot-race');
+    // Not one side effect ran: no milestone on any surface, no reminder sweep,
+    // no live-refresh emit.
+    expect(
+      world.activityEvents.filter((e) => e.type === 'tour_took_place' && e.refId === tourId),
+    ).toHaveLength(0);
+    expect(world.auditEvents.filter((e) => e.event_type === 'tour_took_place')).toHaveLength(0);
+    expect(rowCount(world, tourId)).toBe(rowsBefore);
+    expect(world.emitted.filter((e) => e.event === 'tour.updated')).toHaveLength(0);
+  });
+
+  it('(PIN) a PATCH whose tour vanished between its read and its write still answers 404 tour_not_found', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createPastTour(app);
+
+    let removed = false;
+    const realPatch = world.toursRepo.patch;
+    world.toursRepo.patch = async (id, updates, opts) => {
+      if (!removed) {
+        removed = true;
+        world.toursMap.delete(id);
+      }
+      return realPatch(id, updates, opts);
+    };
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    expect(removed).toBe(true);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'tour_not_found' });
+    expect(world.toursMap.has(tourId)).toBe(false);
+  });
+
+  it('every PATCH write carries the status its read returned (reschedule, status change, exit gate)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const writeOpts: unknown[] = [];
+    const realPatch = world.toursRepo.patch;
+    world.toursRepo.patch = async (id, updates, opts) => {
+      writeOpts.push(opts);
+      return realPatch(id, updates, opts);
+    };
+
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-07-20T14:00:00.000Z' })
+      .expect(200);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'not_a_fit', moveForward: false })
+      .expect(200);
+
+    expect(writeOpts).toEqual([
+      { expectedStatus: 'scheduled' },
+      { expectedStatus: 'scheduled' },
+      { expectedStatus: 'toured' },
+    ]);
+  });
+
+  it('reads CONSISTENTLY, and loses a race with another PATCH the same way (409; the other write stands)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const readOpts: unknown[] = [];
+    const realGet = world.toursRepo.get;
+    world.toursRepo.get = async (id, opts) => {
+      readOpts.push(opts);
+      return realGet(id, opts);
+    };
+    // Another person's cancel lands between this PATCH's read and its write.
+    let raced = false;
+    const realPatch = world.toursRepo.patch;
+    world.toursRepo.patch = async (id, updates, opts) => {
+      if (!raced) {
+        raced = true;
+        await realPatch(id, { status: 'canceled' });
+      }
+      return realPatch(id, updates, opts);
+    };
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    expect(raced).toBe(true);
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual(TOUR_CHANGED);
+    expect(world.toursMap.get(tourId)?.status).toBe('canceled');
+    // The read the guards ran on, then the re-read that tells a race from a
+    // missing tour - both strongly consistent.
+    expect(readOpts).toEqual([{ consistentRead: true }, { consistentRead: true }]);
+  });
+});
+
+// ============================================================================
 // tour_took_place milestone — recorded on the transition INTO 'toured'
 // (Post-Tour & Application Task 2; resolves docs/issues/tour-took-place-milestone)
 // ============================================================================
@@ -2063,8 +2214,8 @@ describe('currentLadderId - the tour generation pointer', () => {
     });
     let parked = false;
     const realPatch = world.toursRepo.patch;
-    world.toursRepo.patch = async (id, updates) => {
-      const out = await realPatch(id, updates);
+    world.toursRepo.patch = async (id, updates, opts) => {
+      const out = await realPatch(id, updates, opts);
       if (!parked) {
         parked = true;
         signalEntered();
@@ -2141,8 +2292,8 @@ describe('currentLadderId - the tour generation pointer', () => {
     });
     let parked = false;
     const realPatch = world.toursRepo.patch;
-    world.toursRepo.patch = async (id, updates) => {
-      const out = await realPatch(id, updates);
+    world.toursRepo.patch = async (id, updates, opts) => {
+      const out = await realPatch(id, updates, opts);
       if (!parked) {
         parked = true;
         signalEntered();

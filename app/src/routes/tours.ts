@@ -1026,8 +1026,10 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       return;
     }
 
-    // Fetch the current tour to check transition legality.
-    const current = await tours.get(tourId);
+    // Fetch the current tour to check transition legality. CONSISTENT: the
+    // status this read returns is the main write's precondition below (tour
+    // auto-close spec 8), so a stale read would refuse a valid PATCH.
+    const current = await tours.get(tourId, { consistentRead: true });
     if (!current) {
       res.status(404).json({ error: 'tour_not_found' });
       return;
@@ -1209,10 +1211,25 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
     let tour: TourItem;
     try {
-      tour = await tours.patch(tourId, patch);
+      // The precondition is the status the guards above ran on: a concurrent
+      // change (another PATCH, a conversion, the auto-close sweep) between
+      // that read and this write is refused instead of merged on top
+      // (tour auto-close spec section 8).
+      tour = await tours.patch(tourId, patch, { expectedStatus: currentStatus });
     } catch (err) {
       if (err instanceof ConditionalCheckFailedException) {
-        res.status(404).json({ error: 'tour_not_found' });
+        // Two conditions share this exception: the tour is gone, or its status
+        // moved after our read. A consistent re-read tells them apart; neither
+        // runs a single side effect below.
+        const fresh = await tours.get(tourId, { consistentRead: true });
+        if (fresh === undefined) {
+          res.status(404).json({ error: 'tour_not_found' });
+          return;
+        }
+        res.status(409).json({
+          error: 'tour_changed',
+          detail: 'This tour changed while you were saving - reload and try again.',
+        });
         return;
       }
       throw err;

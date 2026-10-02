@@ -10,17 +10,21 @@
 // a day and kept `hc-prod-orphan-logs` flapping ALARM<->OK for days, which is
 // how an alarm stops being read. Worse, each loop's `.catch` arm is the only
 // place a poll's own crash is reported, so a genuine poll failure was an
-// orphan ERROR - carrying no id to pivot on during triage.
+// orphan ERROR - carrying no id to pivot on during triage. Every poll added
+// since starts here as well - the journal sweep, and the tour auto-close poll
+// on its own 15-minute interval: seven loops today.
 //
-// Same lesson as jobs/queueWiring.ts: behavior five call sites must share
-// belongs in one function they all call, not in five blocks that happen to
-// agree.
+// Same lesson as jobs/queueWiring.ts: behavior every call site must share
+// belongs in one function they all call, not in one block per poll that
+// happens to agree.
 import { newPollRunId, runWithContext, type CorrelationContext } from '../lib/context.js';
 import type { Logger } from '../lib/logger.js';
 
 export interface StartPollDeps {
   logger: Logger;
-  /** Shared WORKER_POLL_INTERVAL_MS cadence. */
+  /** Tick interval (ms): the shared WORKER_POLL_INTERVAL_MS cadence for every
+   *  poll but the tour auto-close, which passes its own
+   *  TOUR_AUTO_CLOSE_INTERVAL_MS (jobs/tourAutoClose.ts). */
   intervalMs: number;
   /**
    * Process provenance merged under the tick's own id (typically the

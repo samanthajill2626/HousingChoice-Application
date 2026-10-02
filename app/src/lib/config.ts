@@ -597,10 +597,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(`PORT must be a valid TCP port, got: ${env.PORT}`);
   }
 
-  // Worker poll cadence (ms) for the FIVE stateless polls that share it (tour
-  // reminders, placement nudges, roster actions, extraction, group guardrails -
-  // worker.ts). Default 30000; fail-fast on a non-positive-integer so a QA typo
-  // never silently disables or hot-loops the polls.
+  // Worker poll cadence (ms) for the SIX stateless polls that share it (tour
+  // reminders, placement nudges, roster actions, extraction, group guardrails,
+  // journal sweep - worker.ts). The tour auto-close poll is the one exception:
+  // it runs on its own code constant (TOUR_AUTO_CLOSE_INTERVAL_MS, 15 minutes).
+  // Default 30000; fail-fast on a non-positive-integer so a QA typo never
+  // silently disables or hot-loops the polls.
   //
   // The default is kept in step with the .env examples deliberately. This value
   // is only a backup - deployed envs set WORKER_POLL_INTERVAL_MS explicitly -

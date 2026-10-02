@@ -13,6 +13,9 @@
 //   scheduled -> no_show                      (tenant no-show)
 //   canceled / no_show -> scheduled           (reschedule - see canReschedule)
 //   toured + outcome set -> closed            (exit gate)
+//   scheduled / toured / no_show -> closed    (auto-close, outcome no_outcome,
+//                                              two weeks after the clock start)
+//   closed -> scheduled / toured / no_show    (reopen - see reopenTargetFor)
 //
 // NOTE (2026-07-08): the 'confirmed' status was removed - scheduled covers it
 // (booking IS the confirmation; the [AUTO] booking text already says so).
@@ -28,10 +31,12 @@
 // would text the group about a visit that already took place). It may carry an
 // optional past scheduledAt recording when it actually happened.
 //
-// `closed` is the terminal for a finished-and-decided tour. The `outcome`
-// field (TourOutcome) records the exit decision; `moveForward=true` marks
-// the tour as convertible. Conversion to a placement is NOT handled here —
-// this is pure enums/guards.
+// `closed` is terminal for PATCH; only POST /reopen leaves it (see
+// reopenTargetFor). It ends a finished-and-decided tour - decided by a person,
+// or with outcome `no_outcome` by the auto-close sweep. The `outcome` field
+// (TourOutcome) records the exit decision; `moveForward=true` marks the tour
+// as convertible. Conversion to a placement is NOT handled here - this is
+// pure enums/guards.
 
 // --- Tour statuses -----------------------------------------------------------
 export const TOUR_STATUSES = [
@@ -129,7 +134,8 @@ export function isTourType(x: unknown): x is TourType {
 //   - `no_show`    - second-chance appointment after a no-show
 //
 // A `toured` tour carries a real outcome and MUST be closed via the exit gate;
-// it cannot be recycled as a new appointment. A `closed` tour is terminal.
+// it cannot be recycled as a new appointment. A `closed` tour is terminal for
+// PATCH; only POST /reopen leaves it (see reopenTargetFor).
 const RESCHEDULABLE: ReadonlySet<TourStatus> = new Set<TourStatus>([
   'requested',
   'scheduled',
@@ -222,4 +228,32 @@ export function autoCloseDueAtMs(tour: AutoCloseClockInput): number | null {
 export function isAutoCloseDue(tour: AutoCloseClockInput, nowMs: number): boolean {
   const due = autoCloseDueAtMs(tour);
   return due !== null && due <= nowMs;
+}
+
+// --- Reopen (Sam #18, 2026-10-01) --------------------------------------------
+// A closed tour may be reopened to record a different outcome or reschedule
+// it. It returns to the state it closed from: the sweep stores that state in
+// `autoClosedFrom`; a person-decided tour (not a fit / move forward) was
+// toured. A converted tour (finished or mid-claim) never reopens - the
+// placement owns it. A closed tour carrying neither fact (written directly
+// through the API) is refused rather than guessed.
+export type ReopenRefusal = 'tour_not_closed' | 'tour_converted' | 'tour_reopen_unsupported';
+
+export interface ReopenTargetInput {
+  status: unknown;
+  outcome?: unknown;
+  convertedPlacementId?: unknown;
+  autoClosedFrom?: unknown;
+}
+
+export type ReopenTargetResult =
+  | { ok: true; target: AutoCloseStatus }
+  | { ok: false; error: ReopenRefusal };
+
+export function reopenTargetFor(tour: ReopenTargetInput): ReopenTargetResult {
+  if (tour.status !== 'closed') return { ok: false, error: 'tour_not_closed' };
+  if (typeof tour.convertedPlacementId === 'string') return { ok: false, error: 'tour_converted' };
+  if (isAutoCloseStatus(tour.autoClosedFrom)) return { ok: true, target: tour.autoClosedFrom };
+  if (tour.outcome === 'not_a_fit' || tour.outcome === 'move_forward') return { ok: true, target: 'toured' };
+  return { ok: false, error: 'tour_reopen_unsupported' };
 }

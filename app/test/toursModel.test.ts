@@ -11,6 +11,7 @@ import {
   isStaffTourOutcome,
   isTourOutcome,
   isTourStatus,
+  reopenTargetFor,
   STAFF_TOUR_OUTCOMES,
   TOUR_OUTCOME_LABELS,
   TOUR_OUTCOMES,
@@ -298,5 +299,72 @@ describe('toursModel - auto-close clock', () => {
     for (const tour of NON_CANDIDATES) {
       expect(isAutoCloseDue(tour, Number.MAX_SAFE_INTEGER)).toBe(false);
     }
+  });
+});
+
+describe('toursModel - reopenTargetFor', () => {
+  it('refuses every status other than closed, whatever else the tour carries', () => {
+    for (const status of TOUR_STATUSES.filter((s) => s !== 'closed')) {
+      expect(reopenTargetFor({ status })).toEqual({ ok: false, error: 'tour_not_closed' });
+      expect(
+        reopenTargetFor({
+          status,
+          outcome: 'no_outcome',
+          autoClosedFrom: 'toured',
+          convertedPlacementId: 'placement-1',
+        }),
+      ).toEqual({ ok: false, error: 'tour_not_closed' });
+    }
+  });
+
+  it('refuses a converted tour - finished or a pending: claim - even when auto-closed', () => {
+    for (const convertedPlacementId of ['placement-1', 'pending:x']) {
+      expect(reopenTargetFor({ status: 'closed', outcome: 'move_forward', convertedPlacementId })).toEqual({
+        ok: false,
+        error: 'tour_converted',
+      });
+      expect(
+        reopenTargetFor({
+          status: 'closed',
+          outcome: 'no_outcome',
+          autoClosedFrom: 'scheduled',
+          convertedPlacementId,
+        }),
+      ).toEqual({ ok: false, error: 'tour_converted' });
+    }
+  });
+
+  it('returns an auto-closed tour to the status it closed from', () => {
+    for (const from of ['scheduled', 'toured', 'no_show'] as const) {
+      expect(reopenTargetFor({ status: 'closed', outcome: 'no_outcome', autoClosedFrom: from })).toEqual({
+        ok: true,
+        target: from,
+      });
+    }
+  });
+
+  it('autoClosedFrom wins over a person outcome when both are present', () => {
+    expect(
+      reopenTargetFor({ status: 'closed', outcome: 'not_a_fit', autoClosedFrom: 'no_show' }),
+    ).toEqual({ ok: true, target: 'no_show' });
+  });
+
+  it('returns a person-decided tour (not a fit / move forward) to toured', () => {
+    for (const outcome of ['not_a_fit', 'move_forward']) {
+      expect(reopenTargetFor({ status: 'closed', outcome })).toEqual({ ok: true, target: 'toured' });
+    }
+  });
+
+  it('refuses a closed tour that carries neither fact (API-only rows) rather than guess', () => {
+    expect(reopenTargetFor({ status: 'closed' })).toEqual({ ok: false, error: 'tour_reopen_unsupported' });
+    // no_outcome alone is not a person decision: there is no state to return to.
+    expect(reopenTargetFor({ status: 'closed', outcome: 'no_outcome' })).toEqual({
+      ok: false,
+      error: 'tour_reopen_unsupported',
+    });
+    // autoClosedFrom outside the candidate statuses is not trusted.
+    expect(
+      reopenTargetFor({ status: 'closed', outcome: 'no_outcome', autoClosedFrom: 'canceled' }),
+    ).toEqual({ ok: false, error: 'tour_reopen_unsupported' });
   });
 });

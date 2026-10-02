@@ -6,8 +6,18 @@ severity: med
 status: open
 area: dashboard
 created: 2026-08-10
-refs: dashboard/src/routes/listings/ListingsList.tsx, app/src/lib/seed/matrix.ts, app/src/lib/seed/cast.ts, app/src/lib/seed/lean.ts, app/src/lib/seed/live.ts, app/src/lib/import/apply.ts
+refs: app/src/lib/seed/matrix.ts, app/src/lib/seed/cast.ts, app/src/lib/seed/lean.ts, app/src/lib/seed/live.ts, app/src/lib/import/apply.ts, app/src/lib/unitFields.ts, app/src/routes/units.ts
 ---
+
+**Progress (2026-10-01): step 2 is DONE, ahead of step 1, by Cameron's decision.**
+`feat/properties-available-view` (tracker #1) deleted `humanizeAuthority`; the properties list's
+authority chips and its new by-authority summary both show the STORED spelling, the same as the
+tenant list. The trade-off the original ordering avoided is now accepted: demo and e2e worlds
+show raw seed slugs (`atlanta_housing`, `ga_dca`) on the properties list too, exactly as the
+tenant list already did. What remains - step 1 (seed values to canonical names), step 3 (lean
+stragglers) and step 4 (the PATCH tombstones) - belongs with tracker #2 (one clean name per
+housing authority), which builds the master name list these seeds should speak. The original
+report follows; its line numbers predate the deletion.
 
 **Problem.** `humanizeAuthority` (`ListingsList.tsx:36-42`) exists only to convert dev-seed
 slugs (`atlanta_housing`, `ga_dca`) back into the human-readable names they should have been.

@@ -35,21 +35,21 @@ import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import { RosterPlanConflictError, type RosterEntry } from '../lib/rosterResolution.js';
-import type { TourType } from '../lib/toursModel.js';
+import type { AutoCloseStatus, TourOutcome, TourType } from '../lib/toursModel.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/** The three ways a tour can be conducted. Canonical home is lib/toursModel.ts;
- *  re-exported here so existing importers keep resolving from this repo. */
-export type { TourType };
+/** The three ways a tour can be conducted (TourType) and the tour outcome
+ *  (TourOutcome: exit gate + auto-close). Canonical home of both is
+ *  lib/toursModel.ts; re-exported here so existing importers keep resolving
+ *  from this repo, and so the outcome union can never drift from the model's
+ *  TOUR_OUTCOMES (it was a hand-copied union until auto-close). */
+export type { TourOutcome, TourType };
 
 /** Tour status — mirrors TOUR_STATUSES in lib/toursModel.ts. */
 export type TourStatus = string;
-
-/** Exit-gate outcome (mirrors lib/toursModel.ts TOUR_OUTCOMES). */
-export type TourOutcome = 'move_forward' | 'not_a_fit';
 
 /**
  * One scheduled (or completed) tour: a tenant visiting a unit.
@@ -100,6 +100,17 @@ export interface TourItem {
   moveForward?: boolean;
   /** Navigator note: convertible to a placement? Absent until exit gate. */
   convertible?: boolean;
+  /** Auto-close (spec 5.2): wall-clock ISO instant the sweep closed this tour.
+   *  Present only while the tour is closed with outcome `no_outcome`; reopen
+   *  removes it. */
+  autoClosedAt?: string;
+  /** Auto-close: the status the sweep closed the tour FROM (`scheduled`,
+   *  `toured` or `no_show`) - reopen returns it there. Removed by reopen. */
+  autoClosedFrom?: AutoCloseStatus;
+  /** The latest instant a PERSON changed this tour's status or time (PATCH),
+   *  or reopened it. The auto-close clock never starts before it. Never
+   *  removed. */
+  lastMarkedAt?: string;
   /**
    * GENERATION POINTER (supersession, 2026-09-01): the id of the reminder
    * ladder that is CURRENT for this tour. Reminder rows carry a matching

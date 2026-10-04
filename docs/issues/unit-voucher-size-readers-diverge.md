@@ -33,7 +33,17 @@ Separately, for #12's multi-select: **the property page** shows "Voucher size ac
 when the stored value is a NUMBER (`ListingDetail.tsx:752-754`), and **the edit form** reads a
 stored list as an empty field (`ListingEditForm.tsx:30-32,68`), so saving a typed size there
 replaces the list with one number. These two show and edit the RECORDED field, so they should
-keep reading it directly - but they must take the list shape.
+keep reading it directly - but they must take the list shape. Two more for #12, from the review
+of the bedrooms fallback (2026-10-04):
+
+- **A recorded size cannot be cleared.** The edit form skips an emptied number
+  (`ListingEditForm.tsx:101`, "clearing a number isn't supported") and the unit PATCH rejects
+  null for a number field (`app/src/lib/unitFields.ts:165-167`). A wrong recorded size can be
+  corrected to another number, but never removed to fall back to the bedrooms again. The
+  multi-select needs an explicit empty state that removes the field.
+- **The property page shows nothing for a beds-only property**, while the Properties list
+  files it under its bedroom chip. Decide whether the page shows the effective size (for
+  example "3 (from bedrooms)") beside or instead of the recorded row.
 
 **Failure scenario.** A property with `beds: 3` and `voucher_size_accepted: 2` (the case the
 field exists for): the Properties list files it under 2-BR, but its "Send to tenants" composer

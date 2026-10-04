@@ -323,11 +323,14 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   list with tracker #12), otherwise its bedroom count (`beds`); "Not recorded"
   only when both are missing. Read ONLY through `acceptedVoucherSizes(unit)`
   (`dashboard/src/routes/listing/listingFormat.ts`) - never re-derived at a call
-  site; server code gets a hand-mirrored twin in `app/src/lib/unitFields.ts`
-  when it first needs one. Distinct from a tenant's `voucherSize` (the voucher
-  the tenant holds) and from the stored field itself, which the property page
-  and the New/Edit forms show and edit as entered. Matching's pre-fill and the
-  public flyer still read `beds` (`docs/issues/unit-voucher-size-readers-diverge.md`).
+  site. Server code has no copy yet: the public flyer's projection
+  (`toUnitFlyer`, `app/src/lib/unitFields.ts`) still derives its own size from
+  `beds` alone, and Matching's pre-fill does the same in the dashboard
+  (`docs/issues/unit-voucher-size-readers-diverge.md`); the server's twin of the
+  function belongs in `unitFields.ts`, hand-mirrored like `authoritiesOf`.
+  Distinct from a tenant's `voucherSize` (the voucher the tenant holds) and from
+  the stored field itself, which the property page and the New/Edit forms show
+  and edit as entered.
 
 ---
 

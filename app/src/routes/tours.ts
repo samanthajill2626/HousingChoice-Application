@@ -1226,9 +1226,11 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     let tour: TourItem;
     try {
       // The precondition is the status the guards above ran on: a concurrent
-      // change (another PATCH, a conversion, the auto-close sweep) between
-      // that read and this write is refused instead of merged on top
-      // (tour auto-close spec section 8).
+      // STATUS change between that read and this write (another PATCH that
+      // changed status, a conversion finalize, the auto-close sweep) is
+      // refused instead of merged on top (tour auto-close spec section 8).
+      // Only status is conditioned: a same-status concurrent PATCH (an exit
+      // gate, a reschedule) or a conversion claim still merges as before.
       tour = await tours.patch(tourId, patch, { expectedStatus: currentStatus });
     } catch (err) {
       if (err instanceof ConditionalCheckFailedException) {

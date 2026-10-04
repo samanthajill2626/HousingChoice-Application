@@ -87,3 +87,39 @@ mutation-checked (the matching test fails with the protection removed).
 ```
 git -C "W:\AI Projects\Housing Choice\HC Application" merge --no-ff feat/properties-available-view
 ```
+
+## Post-merge fix (2026-10-04) - voucher size falls back to bedrooms
+
+The branch had been fast-forwarded into main at 71e532fb. Cameron then reported that any
+voucher-size chip emptied an authority's Available list. Diagnosed before any edit
+(`fix-voucher-beds-fallback.md`): the filter read only `voucher_size_accepted`, which the
+import never writes. Cameron reversed D3 - a property's voucher size is its recorded size,
+else its bedroom count, else Not recorded - and asked for ONE reusable function on a
+property. `acceptedVoucherSizes(unit)` (`dashboard/src/routes/listing/listingFormat.ts`)
+replaces `voucherSizesOf`; the Properties filter and summary read it. Reviewed by the
+continued adversarial reviewer (4 LOW: 2 fixed, 2 deferred to #12 in
+`unit-voucher-size-readers-diverge`; `review-adjudications-fix-beds.md`). Main had not moved.
+
+Gates on de116692 (bare, quiet tree before and after):
+
+```
+TYPECHECK_EXIT=0
+TEST_EXIT=0    app 8109 passed 1 skipped; dashboard 3679; e2e 503; fake-twilio 275;
+               fake-twilio-web 111; zero [dynamoAdmin] lines
+SMOKE_EXIT=0
+E2E_EXIT=0     306 passed (19.4m)
+LINT_EXIT=0    7 branch files (main...HEAD)
+```
+
+The earlier full run on 8c8c4270 ended 304 passed / 2 failed - `deleted-contact-resurfacing`
+(an inbox response that was assembled but never completed) and `quiet-hours` (1) (the Vite
+proxy logged `connect EADDRINUSE 127.0.0.1:9801`, Windows ephemeral-port exhaustion). Neither
+touches this branch's diff, both files passed alone (5/5), and the full run on de116692 is
+green. Live check (lane 7, full world, de116692): cobb_housing's Available list under 3-BR
+keeps its 3-bedroom property, which has no recorded voucher size.
+
+Merge (PowerShell, from anywhere):
+
+```
+git -C "W:\AI Projects\Housing Choice\HC Application" merge --ff-only feat/properties-available-view
+```

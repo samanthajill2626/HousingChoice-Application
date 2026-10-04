@@ -3631,9 +3631,10 @@ export function createFakeWorld(): FakeWorld {
       // check-and-set (no await between them): the up-front candidate-status
       // refusal, then exists AND same status AND no outcome AND no conversion
       // claim AND not convertible AND the same scheduledAt and lastMarkedAt
-      // (both absent counts as the same, like attribute_not_exists) AND - only
-      // when the read carries no lastMarkedAt - the same updatedAt, the clock
-      // of a never-marked tour (ruling A-1).
+      // (both absent counts as the same, like attribute_not_exists; a
+      // non-string read requires the attribute absent, as in the store) AND -
+      // only when the read carries no lastMarkedAt - the same updatedAt, the
+      // clock of a never-marked tour (ruling A-1).
       if (!isAutoCloseStatus(tour.status)) return undefined;
       const t = toursMap.get(tour.tourId);
       if (
@@ -3642,7 +3643,7 @@ export function createFakeWorld(): FakeWorld {
         t.outcome !== undefined ||
         t.convertedPlacementId !== undefined ||
         t.convertible === true ||
-        t.scheduledAt !== tour.scheduledAt ||
+        !storedAsRead(t.scheduledAt, tour.scheduledAt) ||
         !storedAsRead(t.lastMarkedAt, tour.lastMarkedAt) ||
         (typeof tour.lastMarkedAt !== 'string' && !storedAsRead(t.updatedAt, tour.updatedAt))
       ) {
@@ -3661,14 +3662,15 @@ export function createFakeWorld(): FakeWorld {
     async reopenIf(tour, target, lastMarkedAt) {
       // The real repo's condition as one synchronous check-and-set: exists AND
       // closed AND no conversion claim AND the outcome and autoClosedFrom the
-      // caller read (both absent counts as the same, like attribute_not_exists).
+      // caller read (both absent counts as the same, like attribute_not_exists;
+      // a non-string read requires the attribute absent, as in the store).
       const t = toursMap.get(tour.tourId);
       if (
         !t ||
         t.status !== 'closed' ||
         t.convertedPlacementId !== undefined ||
-        t.outcome !== tour.outcome ||
-        t.autoClosedFrom !== tour.autoClosedFrom
+        !storedAsRead(t.outcome, tour.outcome) ||
+        !storedAsRead(t.autoClosedFrom, tour.autoClosedFrom)
       ) {
         return undefined;
       }

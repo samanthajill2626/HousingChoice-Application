@@ -309,6 +309,26 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   accept-and-ignore tombstones on the unit PATCH until
   `docs/issues/retire-humanize-authority.md` closes.
 
+- **Tour auto-close / "No outcome recorded" / Reopen** (tour auto-close,
+  2026-10-01, Sam's item 18) - a tour still undecided two weeks after its
+  clock start is closed by the worker, silently (nothing is sent), with
+  outcome `no_outcome`, shown to staff as "No outcome recorded". The clock
+  start is the LATEST of the tour's time, its creation and its mark:
+  `lastMarkedAt` (the last time a person marked, rescheduled or reopened it)
+  or, for a tour nobody has marked yet, its last change of any kind
+  (`updatedAt`). Only scheduled (date passed), toured-without-outcome and
+  no-show tours close; requested, canceled, "Needs placement" and converted
+  tours never do. Staff never record `no_outcome` - the Record outcome dialog
+  keeps its two choices. The tour page's Outcome card reads "Closed
+  automatically on <date>" (`autoClosedAt`) in place of "Moving forward", and
+  the Closed tab badges the row "No outcome recorded". "Reopen tour" (tour
+  page only; `POST /api/tours/:tourId/reopen`) returns a closed tour that did
+  not become a placement to the state it closed from - `autoClosedFrom` for an
+  auto-closed tour, toured for a decided one ("Not a fit") - clears the
+  outcome, sends nothing and restarts the two weeks. Code/data:
+  `autoClosedAt`, `autoClosedFrom`, `lastMarkedAt`, `jobs/tourAutoClose.ts`
+  (the worker's 15-minute poll), `POST /api/tours/:tourId/reopen`.
+
 ---
 
 ## For the future AI layer

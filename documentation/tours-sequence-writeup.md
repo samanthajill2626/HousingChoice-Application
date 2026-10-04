@@ -167,6 +167,10 @@ this sequence:
 - **No — not a fit.** Outcome `not_a_fit`; the tour closes. The tenant stays
   `searching`; hand back to **Sending Unit** to share a new property and restart
   the loop.
+- **No decision - it closes on its own.** A tour still without an outcome two
+  weeks after its date or its last mark (never marked, a no-show, or toured and
+  undecided) closes automatically as "No outcome recorded"; nothing is sent,
+  and staff can reopen it from its tour page (tour auto-close, 2026-10-01).
 
 ## How this evolves the source documents
 

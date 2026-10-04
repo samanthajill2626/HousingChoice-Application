@@ -286,14 +286,20 @@ export interface ToursRepo {
   clearRoster(tourId: string): Promise<void>;
   /**
    * The auto-close sweep's ONE write (jobs/tourAutoClose.ts, spec 6.3): closes
-   * `tour` with outcome `no_outcome` ONLY while every field the due decision
-   * read is unchanged - status, no outcome, no conversion claim, not
-   * convertible, the same scheduledAt and lastMarkedAt (FIELD equality: two
-   * writes in one millisecond carry the same updatedAt, so updatedAt equality
-   * cannot detect a change). Rotates the reminder-ladder pointer to `rotation`
-   * in the same write. Stamps autoClosedAt / updatedAt with the WALL clock.
-   * Returns the post-write item, or undefined when the condition failed (or
-   * the tour is missing) - never throws for that.
+   * `tour` with outcome `no_outcome` ONLY while the stored tour still has the
+   * status read, no outcome, no conversion claim, is not convertible, and has
+   * the same scheduledAt and the same lastMarkedAt as read (each ABSENT when
+   * the read had none) - and, ONLY for a never-marked tour (the read carries
+   * no lastMarkedAt), the same updatedAt, because that tour's clock counts
+   * from it (ruling A-1, code-review/adjudications-r1.md). Once a mark exists
+   * the clock ignores updatedAt, so it is not conditioned: a roster edit or a
+   * group open does not block a due close. Residual: updatedAt is a
+   * millisecond stamp, so a racing write stamped in the SAME millisecond as
+   * the write the read saw leaves it unchanged and the close still lands - a
+   * false negative of the guard. Rotates the reminder-ladder pointer to
+   * `rotation` in the same write. Stamps autoClosedAt / updatedAt with the
+   * WALL clock. Returns the post-write item, or undefined when the condition
+   * failed (or the tour is missing) - never throws for that.
    */
   autoCloseIf(tour: TourItem, rotation: string): Promise<TourItem | undefined>;
   /**
@@ -719,6 +725,19 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
         conditions.push('#lm = :lm');
       } else {
         conditions.push('attribute_not_exists(#lm)');
+        // Never marked: updatedAt IS the clock's mark (toursModel
+        // autoCloseDueAtMs), so a write that moved it since our read - a
+        // roster edit, a group open - restarted the clock and wins (ruling A-1,
+        // code-review/adjudications-r1.md). Not conditioned once a mark exists:
+        // the clock ignores updatedAt then, and such writes must not block a
+        // due close. A row without updatedAt is written by nothing, but the
+        // branch stays total.
+        if (typeof tour.updatedAt === 'string') {
+          values[':ua'] = tour.updatedAt;
+          conditions.push('#ua = :ua');
+        } else {
+          conditions.push('attribute_not_exists(#ua)');
+        }
       }
       try {
         const { Attributes } = await doc.send(

@@ -7,10 +7,18 @@
 // and no send service, so nothing here can text anyone. It never marks a
 // no-show, never touches tenant status or placements.
 //
-// One conditional write per tour (toursRepo.autoCloseIf): a staff change that
-// lands between our read and our write wins, and we skip the tour this run.
-// Only the WINNER of that write runs the side effects - reminder sweep,
-// activity, relay close-nag, events - each best-effort.
+// One conditional write per tour (toursRepo.autoCloseIf). It lands only while
+// the tour still has the status we read, no outcome, no conversion claim, is
+// not convertible, and has the same scheduledAt and the same lastMarkedAt -
+// and, for a never-marked tour (no lastMarkedAt), the same updatedAt, which is
+// its clock (ruling A-1). A change to any of those between our read and our
+// write wins: we skip the tour this run and re-evaluate it next run. On a
+// MARKED tour any other write (a roster edit, a group open) does not block the
+// close - the clock ignores it. Residual: a racing write stamped in the same
+// millisecond as the write we read leaves updatedAt unchanged, so the guard
+// misses it (a false negative). Only the WINNER of that write runs the side
+// effects - reminder sweep, activity, relay close-nag, events - each
+// best-effort.
 //
 // The injected `now` decides only WHICH tours are due; every stamp is wall
 // clock (repo convention). Runs on the worker's own 15-minute poll and on the

@@ -625,8 +625,9 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     expect(await rawTour('tour-ghost-expected')).toBeUndefined();
   });
 
-  // autoCloseIf - the sweep's ONE write (spec 6.3): FIELD equality on every
-  // input of the due decision, never updatedAt equality.
+  // autoCloseIf - the sweep's ONE write (spec 6.3): equality on every input of
+  // the due decision - updatedAt only for a never-marked tour, whose clock it
+  // is (ruling A-1).
 
   it('autoCloseIf closes a scheduled tour as no_outcome, rotates the pointer and stamps the wall clock', async () => {
     const tour = await tours.create({
@@ -755,6 +756,60 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
       expect(await rawTour(tour.tourId)).toEqual(changed);
     },
   );
+
+  /** Resolve once the wall clock has passed `iso`. The repo stamps updatedAt
+   *  in whole milliseconds, so a write in the SAME millisecond as the read's
+   *  stamp would leave updatedAt unchanged and prove nothing. */
+  const afterMillisecond = async (iso: string): Promise<void> => {
+    const ms = Date.parse(iso);
+    while (Date.now() <= ms) await new Promise((resolve) => setTimeout(resolve, 1));
+  };
+
+  // A never-marked tour's clock counts from its updatedAt (spec 5.3), so the
+  // close also conditions on it (ruling A-1, code-review/adjudications-r1.md);
+  // once a mark exists the clock ignores updatedAt and so does the close.
+  it("autoCloseIf loses - undefined, nothing written - when an unrelated write moved a never-marked tour's updatedAt", async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-close-ua',
+      unitId: 'unit-close-ua',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    const read = (await tours.get(tour.tourId))!;
+    expect(read).not.toHaveProperty('lastMarkedAt');
+    await afterMillisecond(read.updatedAt);
+    // A roster reset: no status, outcome, date or mark changes - only updatedAt.
+    await tours.clearRoster(tour.tourId);
+    const changed = await rawTour(tour.tourId);
+    expect(changed!['updatedAt']).not.toBe(read.updatedAt);
+
+    await expect(tours.autoCloseIf(read, 'rot-ua')).resolves.toBeUndefined();
+    expect(await rawTour(tour.tourId)).toEqual(changed);
+  });
+
+  it('(PIN) autoCloseIf still closes a MARKED tour after the same unrelated write - the clock ignores updatedAt once a mark exists', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-close-ua-marked',
+      unitId: 'unit-close-ua-marked',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      tourType: 'self_guided',
+      lastMarkedAt: '2026-09-02T09:00:00.000Z',
+    });
+    const read = (await tours.get(tour.tourId))!;
+    await afterMillisecond(read.updatedAt);
+    await tours.clearRoster(tour.tourId);
+    expect((await rawTour(tour.tourId))!['updatedAt']).not.toBe(read.updatedAt);
+
+    const closed = await tours.autoCloseIf(read, 'rot-ua-marked');
+
+    expect(closed).toMatchObject({
+      status: 'closed',
+      outcome: 'no_outcome',
+      autoClosedFrom: 'scheduled',
+      lastMarkedAt: '2026-09-02T09:00:00.000Z',
+    });
+    expect(await rawTour(tour.tourId)).toEqual(closed);
+  });
 
   it('autoCloseIf returns undefined for a missing tour and creates NOTHING', async () => {
     const tour = await tours.create({

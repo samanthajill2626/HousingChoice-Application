@@ -3461,6 +3461,12 @@ export function createFakeWorld(): FakeWorld {
   // existence. scheduledAt is optional (absent → status 'requested').
   const toursMap = new Map<string, TourItem>();
   let tourCounter = 0;
+  /** A read-dependent condition term exactly as the store evaluates it
+   *  (toursRepo.autoCloseIf / reopenIf): a STRING read must still be the
+   *  stored value (`#x = :x`); any other read requires the attribute ABSENT
+   *  (`attribute_not_exists(#x)`), so even an identical non-string loses. */
+  const storedAsRead = (stored: unknown, read: unknown): boolean =>
+    typeof read === 'string' ? stored === read : stored === undefined;
   const toursRepo: ToursRepo = {
     async create(input) {
       const now = new Date().toISOString();
@@ -3625,7 +3631,9 @@ export function createFakeWorld(): FakeWorld {
       // check-and-set (no await between them): the up-front candidate-status
       // refusal, then exists AND same status AND no outcome AND no conversion
       // claim AND not convertible AND the same scheduledAt and lastMarkedAt
-      // (both absent counts as the same, like attribute_not_exists).
+      // (both absent counts as the same, like attribute_not_exists) AND - only
+      // when the read carries no lastMarkedAt - the same updatedAt, the clock
+      // of a never-marked tour (ruling A-1).
       if (!isAutoCloseStatus(tour.status)) return undefined;
       const t = toursMap.get(tour.tourId);
       if (
@@ -3635,7 +3643,8 @@ export function createFakeWorld(): FakeWorld {
         t.convertedPlacementId !== undefined ||
         t.convertible === true ||
         t.scheduledAt !== tour.scheduledAt ||
-        t.lastMarkedAt !== tour.lastMarkedAt
+        !storedAsRead(t.lastMarkedAt, tour.lastMarkedAt) ||
+        (typeof tour.lastMarkedAt !== 'string' && !storedAsRead(t.updatedAt, tour.updatedAt))
       ) {
         return undefined;
       }

@@ -258,6 +258,31 @@ describe('runTourAutoClose', () => {
     expect(world.conversations.get(groupId)!.close_nag_next_at).toBeUndefined();
   });
 
+  it("an unrelated write that moves a never-marked tour's updatedAt between the list read and the close wins: lost, no side effect", async () => {
+    const { world, deps } = fixture();
+    const tourId = await seedTour(world, { createdAt: CREATED, scheduledAt: AT, currentLadderId: 'ladder-1' });
+    const groupId = await openGroupFor(world, tourId, '+15550100094');
+    const realAutoCloseIf = world.toursRepo.autoCloseIf;
+    world.toursRepo.autoCloseIf = async (tour, rotation) => {
+      // A person resets the roster plan after the sweep listed the tour. No
+      // status, outcome, date or mark changes, but the write moves updatedAt -
+      // the clock of a tour nobody has marked (spec 5.3, ruling A-1).
+      await world.toursRepo.clearRoster(tour.tourId);
+      return realAutoCloseIf(tour, rotation);
+    };
+
+    expect(await runTourAutoClose(NOW, deps)).toEqual({ scanned: 1, due: 1, closed: 0, lost: 1, failed: 0 });
+    const t = world.toursMap.get(tourId)!;
+    expect(t.updatedAt).not.toBe(CREATED);
+    expect(t.status).toBe('scheduled');
+    expect(t.outcome).toBeUndefined();
+    expect(t.currentLadderId).toBe('ladder-1');
+    expect(world.activityEvents).toEqual([]);
+    expect(world.auditEvents).toEqual([]);
+    expect(world.emitted).toEqual([]);
+    expect(world.conversations.get(groupId)!.close_nag_next_at).toBeUndefined();
+  });
+
   it('a close write that THROWS counts as failed, logs the tourId, and the run moves on to the next due tour', async () => {
     const { world, capture, deps } = fixture();
     const first = await seedTour(world, { createdAt: CREATED, scheduledAt: AT });

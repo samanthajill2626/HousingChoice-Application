@@ -298,10 +298,24 @@ New repo method `toursRepo.autoCloseIf(tour, rotation)`:
   handed is not a candidate status - defense in depth for the `tourIds` path,
   which reads tours of any status.
 
-Residual (accepted): for a row with no `lastMarkedAt`, an unrelated write
-(roster edit, group open) racing the close is not detected - the condition
-does not compare `updatedAt` (millisecond stamps make that guard unsound).
-Such a write would only have postponed the close.
+Never-marked tours: when the tour as read carries no `lastMarkedAt`, the
+condition ALSO requires `updatedAt` equal to the value read
+(`attribute_not_exists(updatedAt)` if the read had none). For such a tour
+`updatedAt` is the clock's mark (5.3), so an unrelated write (roster edit,
+group open) that lands between the read and the write has restarted the
+clock: the close loses, and the sweep re-evaluates the tour next run. The
+term is limited to never-marked tours because once `lastMarkedAt` exists the
+clock ignores `updatedAt`, and conditioning on it there would let a roster
+edit or a group open block a due close it does not postpone. Residual: two
+writes in one millisecond carry the same stamp, so a racing write stamped in
+the same millisecond as the write the read saw goes undetected and the close
+lands - a false negative of the guard. The term can only turn a close into a
+skip, never a skip into a close. (Changed 2026-10-04, ruling A-1 in
+code-review/adjudications-r1.md: this paragraph used to accept that race as a
+residual, on the grounds that millisecond stamps make `updatedAt` equality
+unsound; the code review reproduced it on DynamoDB Local. This amends the
+CONDITION bullet above, whose "never `updatedAt` equality" now holds for
+marked tours only.)
 
 `rotation` is a fresh UUID: the pointer then names a ladder no row carries,
 which is how "no live ladder" is expressed (same as the PATCH terminal

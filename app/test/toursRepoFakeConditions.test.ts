@@ -12,7 +12,7 @@
 // from the backing map (world.toursMap), the fake's equivalent of rawTour.
 import { describe, expect, it } from 'vitest';
 import { ConditionalCheckFailedException, type ToursRepo } from '../src/repos/toursRepo.js';
-import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
+import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
 function setup() {
   const world = createFakeWorld();
@@ -152,51 +152,98 @@ describe('harness fake toursRepo - conditional writes match the real repo', () =
     expect(stored).not.toHaveProperty('scheduledAt');
   });
 
-  // The integration file's race table, row for row.
+  // The integration file's race table, row for row, on the same two reads.
+  // The fake does no I/O, so the create, the read and a repo change usually
+  // share one millisecond and a never-marked row then isolates its own term
+  // too - but not always (the clock can tick between them), so here as in the
+  // store it is the MARKED read, and for the first mark the raw-write row, that
+  // proves each term (review r2, R2-1).
+  const BOTH_READS = ['never marked', 'marked'] as const;
   const autoCloseRaces: {
     name: string;
+    term: string;
+    reads: readonly (typeof BOTH_READS)[number][];
     undated?: boolean;
-    lastMarkedAt?: string;
-    change: (repo: ToursRepo, tourId: string) => Promise<unknown>;
+    change: (repo: ToursRepo, tourId: string, world: FakeWorld) => Promise<unknown>;
   }[] = [
-    { name: 'the status changed', change: (r, id) => r.patch(id, { status: 'toured' }) },
-    { name: 'an outcome was recorded', change: (r, id) => r.patch(id, { outcome: 'not_a_fit' }) },
-    { name: 'a conversion was claimed', change: (r, id) => r.claimConversion(id, 'pending:x') },
-    { name: 'it became convertible', change: (r, id) => r.patch(id, { convertible: true }) },
+    {
+      name: 'the status changed',
+      term: '#st = :from',
+      reads: BOTH_READS,
+      change: (r, id) => r.patch(id, { status: 'toured' }),
+    },
+    {
+      name: 'an outcome was recorded',
+      term: 'attribute_not_exists(#oc)',
+      reads: BOTH_READS,
+      change: (r, id) => r.patch(id, { outcome: 'not_a_fit' }),
+    },
+    {
+      name: 'a conversion was claimed',
+      term: 'attribute_not_exists(#cp)',
+      reads: BOTH_READS,
+      change: (r, id) => r.claimConversion(id, 'pending:x'),
+    },
+    {
+      name: 'it became convertible',
+      term: '#cv <> :true',
+      reads: BOTH_READS,
+      change: (r, id) => r.patch(id, { convertible: true }),
+    },
     {
       name: 'it was rescheduled',
+      term: '#sa = :sa',
+      reads: BOTH_READS,
       change: (r, id) => r.patch(id, { scheduledAt: '2026-09-05T15:00:00.000Z' }),
     },
     {
       name: 'an undated tour got a date',
+      term: 'attribute_not_exists(#sa)',
+      reads: BOTH_READS,
       undated: true,
       change: (r, id) => r.patch(id, { scheduledAt: '2026-09-05T15:00:00.000Z' }),
     },
+    // Never marked by construction; the patch stamps updatedAt as well.
     {
       name: 'a person marked it for the first time',
+      term: 'attribute_not_exists(#lm)',
+      reads: ['never marked'],
       change: (r, id) => r.patch(id, { lastMarkedAt: '2026-09-20T00:00:00.000Z' }),
     },
     {
+      name: 'a raw write marked it, updatedAt kept',
+      term: 'attribute_not_exists(#lm)',
+      reads: ['never marked'],
+      // Straight into the stored row: no repo method sets a mark without
+      // stamping updatedAt.
+      change: async (_r, id, world) => {
+        world.toursMap.get(id)!.lastMarkedAt = '2026-09-20T00:00:00.000Z';
+      },
+    },
+    // Marked by construction.
+    {
       name: 'a person marked it again',
-      lastMarkedAt: '2026-09-10T00:00:00.000Z',
+      term: '#lm = :lm',
+      reads: ['marked'],
       change: (r, id) => r.patch(id, { lastMarkedAt: '2026-09-20T00:00:00.000Z' }),
     },
   ];
+  const autoCloseRaceCases = autoCloseRaces.flatMap(({ reads, ...row }) => reads.map((read) => ({ ...row, read })));
 
-  it.each(autoCloseRaces)(
-    'autoCloseIf loses - undefined, nothing written - when $name between its read and its write',
-    async ({ undated, lastMarkedAt, change }) => {
-      const { tours, rawTour } = setup();
+  it.each(autoCloseRaceCases)(
+    'autoCloseIf loses - undefined, nothing written - when $name between its read and its write ($read read, breaks $term)',
+    async ({ undated, read: readKind, change }) => {
+      const { world, tours, rawTour } = setup();
       const tour = await tours.create({
         tenantId: 'contact-close-race',
         unitId: 'unit-close-race',
         tourType: 'self_guided',
         status: undated === true ? 'toured' : 'scheduled',
         ...(undated !== true && { scheduledAt: '2026-09-01T15:00:00.000Z' }),
-        ...(lastMarkedAt !== undefined && { lastMarkedAt }),
+        ...(readKind === 'marked' && { lastMarkedAt: '2026-09-10T00:00:00.000Z' }),
       });
       const read = (await tours.get(tour.tourId))!;
-      await change(tours, tour.tourId);
+      await change(tours, tour.tourId, world);
       const changed = rawTour(tour.tourId);
 
       await expect(tours.autoCloseIf(read, 'rot-race')).resolves.toBeUndefined();

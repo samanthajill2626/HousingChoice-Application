@@ -8,7 +8,7 @@
 // Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -704,48 +704,116 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     expect(stored).not.toHaveProperty('scheduledAt');
   });
 
+  /** Set a first mark the way no repo method can: updatedAt untouched. */
+  const rawFirstMark = async (tourId: string): Promise<void> => {
+    const before = await rawTour(tourId);
+    await doc.send(
+      new UpdateCommand({
+        TableName: tableName('tours', testEnv),
+        Key: { tourId },
+        UpdateExpression: 'SET #lm = :lm',
+        ConditionExpression: 'attribute_exists(tourId)',
+        ExpressionAttributeNames: { '#lm': 'lastMarkedAt' },
+        ExpressionAttributeValues: { ':lm': '2026-09-20T00:00:00.000Z' },
+      }),
+    );
+    // The mark is the ONLY difference from the read, so attribute_not_exists
+    // on it is the only term that can fail.
+    expect(await rawTour(tourId)).toEqual({ ...before, lastMarkedAt: '2026-09-20T00:00:00.000Z' });
+  };
+
   // Each change lands BETWEEN the sweep's read and its write; the change wins.
-  // One row per condition term (and per branch of the two optional fields).
+  // One row per condition term (and per branch of the two optional fields);
+  // `term` is the one its change breaks, and a row proves it only where no
+  // other term can fail. Every repo write also moves updatedAt, which a
+  // never-marked read conditions on too (ruling A-1) - and on DynamoDB Local
+  // the change lands, in practice always, in a later millisecond than the
+  // create - so on a NEVER-MARKED read a repo-write row also loses on
+  // `#ua = :ua` (review r2, R2-1). A MARKED read has no updatedAt term: there
+  // the row's own term is the only one that can fail, so that read proves
+  // every term but the first mark's. `attribute_not_exists(#lm)` exists on a
+  // never-marked read alone; its proving row writes the mark raw and leaves
+  // updatedAt as it was. Each term stripped in turn, and the rows it turns
+  // red: code-review/fix-wave-2-report.md.
+  const BOTH_READS = ['never marked', 'marked'] as const;
   const autoCloseRaces: {
     name: string;
+    term: string;
+    reads: readonly (typeof BOTH_READS)[number][];
     undated?: boolean;
-    lastMarkedAt?: string;
     change: (repo: typeof tours, tourId: string) => Promise<unknown>;
   }[] = [
-    { name: 'the status changed', change: (r, id) => r.patch(id, { status: 'toured' }) },
-    { name: 'an outcome was recorded', change: (r, id) => r.patch(id, { outcome: 'not_a_fit' }) },
-    { name: 'a conversion was claimed', change: (r, id) => r.claimConversion(id, 'pending:x') },
-    { name: 'it became convertible', change: (r, id) => r.patch(id, { convertible: true }) },
+    {
+      name: 'the status changed',
+      term: '#st = :from',
+      reads: BOTH_READS,
+      change: (r, id) => r.patch(id, { status: 'toured' }),
+    },
+    {
+      name: 'an outcome was recorded',
+      term: 'attribute_not_exists(#oc)',
+      reads: BOTH_READS,
+      change: (r, id) => r.patch(id, { outcome: 'not_a_fit' }),
+    },
+    {
+      name: 'a conversion was claimed',
+      term: 'attribute_not_exists(#cp)',
+      reads: BOTH_READS,
+      change: (r, id) => r.claimConversion(id, 'pending:x'),
+    },
+    {
+      name: 'it became convertible',
+      term: '#cv <> :true',
+      reads: BOTH_READS,
+      change: (r, id) => r.patch(id, { convertible: true }),
+    },
     {
       name: 'it was rescheduled',
+      term: '#sa = :sa',
+      reads: BOTH_READS,
       change: (r, id) => r.patch(id, { scheduledAt: '2026-09-05T15:00:00.000Z' }),
     },
     {
       name: 'an undated tour got a date',
+      term: 'attribute_not_exists(#sa)',
+      reads: BOTH_READS,
       undated: true,
       change: (r, id) => r.patch(id, { scheduledAt: '2026-09-05T15:00:00.000Z' }),
     },
+    // Never marked by construction, and the patch moves updatedAt as well, so
+    // this row cannot prove its term on the store - the raw row below does.
     {
       name: 'a person marked it for the first time',
+      term: 'attribute_not_exists(#lm)',
+      reads: ['never marked'],
       change: (r, id) => r.patch(id, { lastMarkedAt: '2026-09-20T00:00:00.000Z' }),
     },
     {
+      name: 'a raw write marked it, updatedAt kept',
+      term: 'attribute_not_exists(#lm)',
+      reads: ['never marked'],
+      change: (_r, id) => rawFirstMark(id),
+    },
+    // Marked by construction.
+    {
       name: 'a person marked it again',
-      lastMarkedAt: '2026-09-10T00:00:00.000Z',
+      term: '#lm = :lm',
+      reads: ['marked'],
       change: (r, id) => r.patch(id, { lastMarkedAt: '2026-09-20T00:00:00.000Z' }),
     },
   ];
+  const autoCloseRaceCases = autoCloseRaces.flatMap(({ reads, ...row }) => reads.map((read) => ({ ...row, read })));
 
-  it.each(autoCloseRaces)(
-    'autoCloseIf loses - undefined, nothing written - when $name between its read and its write',
-    async ({ undated, lastMarkedAt, change }) => {
+  it.each(autoCloseRaceCases)(
+    'autoCloseIf loses - undefined, nothing written - when $name between its read and its write ($read read, breaks $term)',
+    async ({ undated, read: readKind, change }) => {
       const tour = await tours.create({
         tenantId: 'contact-close-race',
         unitId: 'unit-close-race',
         tourType: 'self_guided',
         status: undated === true ? 'toured' : 'scheduled',
         ...(undated !== true && { scheduledAt: '2026-09-01T15:00:00.000Z' }),
-        ...(lastMarkedAt !== undefined && { lastMarkedAt }),
+        ...(readKind === 'marked' && { lastMarkedAt: '2026-09-10T00:00:00.000Z' }),
       });
       const read = (await tours.get(tour.tourId))!;
       await change(tours, tour.tourId);

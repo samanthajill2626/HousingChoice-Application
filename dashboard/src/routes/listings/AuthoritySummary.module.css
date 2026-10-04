@@ -1,0 +1,109 @@
+/* AuthoritySummary - the Properties page's by-housing-authority summary (Active
+ * tab only; tracker #1). A compact card-styled table: authority name, then the
+ * Available and Coming soon counts. All values from tokens.css. */
+
+.summary {
+  max-width: 640px;
+  margin-bottom: var(--sp-4);
+}
+
+/* `separate` borders so the table itself can carry the rounded card border;
+ * the caption renders OUTSIDE that border box, above the card, like the
+ * uppercase labels over the filter controls. */
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  font-size: var(--fs-sm);
+}
+
+.caption {
+  caption-side: top;
+  margin-bottom: var(--sp-1);
+  text-align: left;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-text-muted);
+}
+
+.table th,
+.table td {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--c-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.table tbody tr:last-child th,
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table thead th {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-muted);
+}
+
+/* The authority name wraps anywhere rather than widening the card past a
+ * phone's content pane (a stored name can be one long unbroken token). */
+.authority {
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+  overflow-wrap: anywhere;
+}
+
+/* Count columns: right-aligned tabular figures. Only the CELLS refuse to wrap -
+ * the "Coming soon (Setup)" header may break onto two lines on a phone. */
+.table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.table td.num {
+  white-space: nowrap;
+}
+
+/* The All row reads as a total by weight and a heavier rule under it - NOT a
+ * tinted fill: the brand link color on --c-surface-2 falls under 4.5:1, and a
+ * filled last row would square off the table's rounded corners. */
+.allRow th,
+.allRow td {
+  font-weight: var(--fw-semibold);
+  border-bottom-color: var(--c-border-strong);
+}
+
+/* Underlined, not color alone, so a linked count reads as a link to everyone. */
+.count {
+  color: var(--c-brand);
+  font-weight: var(--fw-semibold);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.count:hover {
+  color: var(--c-brand-hover);
+}
+
+.count:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* A zero is plain text in the muted (AA) tone; the subtler tone failed contrast. */
+.zero {
+  color: var(--c-text-muted);
+}
+
+.note {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}

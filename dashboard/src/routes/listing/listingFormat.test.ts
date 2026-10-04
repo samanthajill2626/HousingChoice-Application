@@ -10,6 +10,7 @@ import {
   isMediaUrl,
   shortAddress,
   statusLabel,
+  voucherSizesOf,
 } from './listingFormat.js';
 
 describe('formatMoney', () => {
@@ -73,6 +74,27 @@ describe('authoritiesOf', () => {
     expect(authoritiesOf({ accepted_authorities: ['DCA', 7, null] })).toEqual(['DCA']);
     expect(authoritiesOf({ accepted_authorities: 'not-a-list', jurisdiction: 'j' })).toEqual(['j']);
     expect(authoritiesOf({ jurisdiction: '' })).toEqual([]);
+  });
+});
+
+describe('voucherSizesOf', () => {
+  // `voucher_size_accepted` is ONE number today and becomes a multi-select list
+  // with tracker #12 (the `full` demo seed already stores [2, 3]); every reader
+  // must take both shapes.
+  it('wraps a single number', () => {
+    expect(voucherSizesOf({ voucher_size_accepted: 2 })).toEqual([2]);
+    expect(voucherSizesOf({ voucher_size_accepted: 0 })).toEqual([0]);
+  });
+  it('keeps every finite number of a list, in order', () => {
+    expect(voucherSizesOf({ voucher_size_accepted: [2, 3] })).toEqual([2, 3]);
+    expect(voucherSizesOf({ voucher_size_accepted: [2, 'x', null, Number.NaN, 3] })).toEqual([2, 3]);
+    expect(voucherSizesOf({ voucher_size_accepted: [] })).toEqual([]);
+  });
+  it('anything else reads as nothing recorded', () => {
+    expect(voucherSizesOf({})).toEqual([]);
+    expect(voucherSizesOf({ voucher_size_accepted: Number.NaN })).toEqual([]);
+    expect(voucherSizesOf({ voucher_size_accepted: '2' })).toEqual([]);
+    expect(voucherSizesOf({ voucher_size_accepted: null })).toEqual([]);
   });
 });
 

@@ -396,8 +396,18 @@ const TODAY_TERMINAL = terminal(
 function contactListTerminal(heading: string): TerminalContract {
   return terminal([locator('list', heading)], [locator('text', `No ${heading.toLowerCase()} yet`)], [L.alert]);
 }
+// The Active list opens on Available (tracker #1), so a world with properties
+// but none Available renders neither the rows list nor "No properties yet" -
+// it renders the default view's own empty line. Without that alternative the
+// sample would read `unknown` and fail as a misattributed ready_timeout.
 function unitListTerminal(deleted: boolean): TerminalContract {
-  return terminal([locator('list', 'Properties')], [locator('text', deleted ? 'No deleted properties' : 'No properties yet')], [L.alert]);
+  return terminal(
+    [locator('list', 'Properties')],
+    deleted
+      ? [locator('text', 'No deleted properties')]
+      : [locator('text', 'No properties yet'), locator('text', 'No available properties right now.')],
+    [L.alert],
+  );
 }
 const TOUR_ACTIVE_TERMINAL = terminal(
   [locator('list', undefined, 'role_only', 'Upcoming tours'), locator('list', undefined, 'role_only', 'Needs booking')],
@@ -763,8 +773,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/contacts/landlords': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/contacts/unknown': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/contacts/deleted': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
-    '/listings': 'dashboard/src/routes/listings/ListingsList.tsx:144,248-257',
-    '/listings/deleted': 'dashboard/src/routes/listings/ListingsList.tsx:144,248-257',
+    '/listings': 'dashboard/src/routes/listings/ListingsList.tsx:302,408-426',
+    '/listings/deleted': 'dashboard/src/routes/listings/ListingsList.tsx:302,408-417',
     '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:720-818',
     '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:720-818',
     '/placements': 'dashboard/src/routes/placements/PlacementsPage.tsx:128-176',
@@ -1087,11 +1097,16 @@ export async function resolveContactDetail(api: ResolverApi, dom: ResolverDom): 
   return { kind: 'skip', reason: 'fixture_absent' };
 }
 
+// The warm sample clicks this unit's row on `/listings`, which opens on
+// Available only (tracker #1) - so bind an AVAILABLE unit, or the exact-link
+// check finds no row and every sample skips as fixture_not_navigable.
 export async function resolveUnitDetail(api: ResolverApi, dom: ResolverDom): Promise<ResolverResult> {
   let cursor: string | undefined;
   do {
     const page = object(await api.get('/api/units', { ...(cursor !== undefined && { cursor }) }));
-    const match = rowsFrom(page, 'units').find((row) => row.deleted_at === undefined && stringField(row, 'unitId') !== undefined);
+    const match = rowsFrom(page, 'units').find(
+      (row) => row.deleted_at === undefined && row.status === 'available' && stringField(row, 'unitId') !== undefined,
+    );
     if (match !== undefined) {
       return bindResolved(dom, `/listings/${stringField(match, 'unitId')!}`, {
         kind: 'unit_detail', hasLandlord: stringField(match, 'landlordId') !== undefined,

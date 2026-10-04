@@ -697,12 +697,12 @@ describe('representative resolvers', () => {
 
   it('returns explicit skips for missing fixtures and exact-link misses without row substitution', async () => {
     const unitApi = new FakeApi();
-    unitApi.pages.set('/api/units?', [{ units: [{ unitId: 'unit-private-a', landlordId: 'contact-private' }], nextCursor: null }]);
+    unitApi.pages.set('/api/units?', [{ units: [{ unitId: 'unit-private-a', landlordId: 'contact-private', status: 'available' }], nextCursor: null }]);
     await expect(resolveUnitDetail(unitApi, new FakeDom(new Set(['/listings/unit-different'])))).resolves.toEqual({
       kind: 'skip', reason: 'fixture_not_navigable',
     });
     const notReadyApi = new FakeApi();
-    notReadyApi.pages.set('/api/units?', [{ units: [{ unitId: 'unit-private-a' }], nextCursor: null }]);
+    notReadyApi.pages.set('/api/units?', [{ units: [{ unitId: 'unit-private-a', status: 'available' }], nextCursor: null }]);
     await expect(resolveUnitDetail(notReadyApi, new FakeDom(new Set(['/listings/unit-private-a']), undefined, false))).resolves.toEqual({
       kind: 'skip', reason: 'source_not_ready',
     });
@@ -710,6 +710,28 @@ describe('representative resolvers', () => {
     const placementApi = new FakeApi();
     placementApi.pages.set('/api/placements?', [{ placements: [], nextCursor: null }]);
     await expect(resolvePlacementDetail(placementApi, new FakeDom(new Set()))).resolves.toEqual({
+      kind: 'skip', reason: 'fixture_absent',
+    });
+  });
+
+  it('binds the first AVAILABLE unit - the only rows the default Properties list renders', async () => {
+    const unitApi = new FakeApi();
+    unitApi.pages.set('/api/units?', [{
+      units: [
+        { unitId: 'unit-private-setup', landlordId: 'contact-private', status: 'setup' },
+        { unitId: 'unit-private-gone', landlordId: 'contact-private', status: 'available', deleted_at: 'x' },
+        { unitId: 'unit-private-live', landlordId: 'contact-private', status: 'available' },
+      ],
+      nextCursor: null,
+    }]);
+    await expect(resolveUnitDetail(unitApi, new FakeDom(new Set(['/listings/unit-private-live'])))).resolves.toEqual({
+      kind: 'resolved', coldPath: '/listings/unit-private-live',
+      warmTarget: { path: '/listings/unit-private-live', query: { kind: 'absent' } },
+      branch: { kind: 'unit_detail', hasLandlord: true },
+    });
+    const noneAvailable = new FakeApi();
+    noneAvailable.pages.set('/api/units?', [{ units: [{ unitId: 'unit-private-setup', status: 'setup' }], nextCursor: null }]);
+    await expect(resolveUnitDetail(noneAvailable, new FakeDom(new Set(['/listings/unit-private-setup'])))).resolves.toEqual({
       kind: 'skip', reason: 'fixture_absent',
     });
   });
@@ -799,5 +821,32 @@ describe('representative resolvers', () => {
       api,
       new FakeDom(new Set(['/tours/tour-private']), now),
     )).resolves.toEqual({ kind: 'skip', reason: 'unresolved_branch' });
+  });
+});
+
+describe('Properties list terminal copy', () => {
+  // The terminal contract matches the page by EXACT text. Nothing else ties the
+  // two together, so a copy edit on the page would turn every sample into a
+  // misattributed ready_timeout (code review r2, C2-6). Read the page source and
+  // require every populated/empty string the contract waits for.
+  it('names only strings the Properties page actually renders', () => {
+    const pageSource = readFileSync(
+      fileURLToPath(new URL('../../dashboard/src/routes/listings/ListingsList.tsx', import.meta.url)),
+      'utf8',
+    );
+    for (const surfaceId of ['/listings', '/listings/deleted']) {
+      const route = ROUTES.find((candidate) => candidate.surfaceId === surfaceId)!;
+      const contracts = [...route.terminal.populated, ...route.terminal.empty];
+      expect(contracts.length).toBeGreaterThan(1);
+      for (const contract of contracts) {
+        // Role-aware, so a common word cannot pass on unrelated text: a `text`
+        // contract needs its exact sentence, a named `list` its exact aria-label.
+        const name = contract.name;
+        expect(typeof name, `${surfaceId}: a ${contract.role} contract without a name`).toBe('string');
+        const needle = contract.role === 'list' ? `aria-label="${name}"` : `${name}`;
+        expect(['text', 'list'], `${surfaceId}: unexpected role ${contract.role}`).toContain(contract.role);
+        expect(pageSource, `${surfaceId} waits for ${contract.role} "${name}"`).toContain(needle);
+      }
+    }
   });
 });

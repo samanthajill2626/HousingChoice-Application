@@ -81,6 +81,10 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
+  /* A flex item's min-width defaults to its content, so one long chip would
+   * widen the column past a phone's pane; let it shrink and wrap instead. */
+  min-width: 0;
+  max-width: 100%;
 }
 
 .controlLabel {
@@ -116,6 +120,7 @@
 }
 
 .chip {
+  max-width: 100%;
   padding: var(--sp-1) var(--sp-3);
   border-radius: var(--radius-pill);
   border: 1px solid var(--c-border);
@@ -124,6 +129,10 @@
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
   cursor: pointer;
+  /* Authority chips show the STORED spelling, and a stored slug can be one long
+   * unbroken token (atlanta_housing_authority_...): wrap it anywhere rather
+   * than scroll a 360px pane sideways (the summary table does the same). */
+  overflow-wrap: anywhere;
 }
 
 .chip:hover {
@@ -144,11 +153,13 @@
   outline-offset: 1px;
 }
 
+/* Text buttons (Clear, Show all statuses). The darker brand tone: the base brand
+ * blue is about 4.4:1 on the page background, under AA for this size. */
 .clear {
   padding: var(--sp-1) var(--sp-2);
   border: none;
   background: transparent;
-  color: var(--c-brand);
+  color: var(--c-brand-hover);
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
   cursor: pointer;
@@ -319,6 +330,12 @@
   margin: var(--sp-4) 0;
   font-size: var(--fs-sm);
   color: var(--c-text-muted);
+}
+
+/* The default view's empty state: its sentence, then a "Show all statuses"
+ * button styled like Clear. */
+.noMatchesText {
+  margin: 0 0 var(--sp-1);
 }
 
 .empty {

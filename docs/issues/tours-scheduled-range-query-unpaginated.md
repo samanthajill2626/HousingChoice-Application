@@ -42,3 +42,15 @@ reuses the Past tab's loader (`usePastTours`), so a truncated range read would
 also drop the most recent rows from the landing page. Still low at the
 current volume (review finding L9,
 `docs/superpowers/reviews/2026-09-30-today-past-tours/`).
+
+**Update 2026-10-04.** The tour auto-close sweep (feat/tour-auto-close,
+`app/src/jobs/tourAutoClose.ts`) is not a third caller: it reads its
+candidates by STATUS - `listByStatus` for `scheduled`, `toured` and `no_show`,
+each paged to exhaustion - never by range (spec
+`docs/superpowers/specs/2026-10-01-tour-auto-close-reopen-design.md`, section
+6.2), so a truncated range page cannot hide a tour from it, and it also reaches
+the undated tours the `byScheduledAt` GSI leaves out. The range read still has
+exactly the two callers above. Line numbers above are as of main @ae04122d; on
+feat/tour-auto-close `listByScheduledRange` is
+`app/src/repos/toursRepo.ts:393-410`, `listByStatus` is `:412-432` and the
+tours route's caller is `app/src/routes/tours.ts:387`. Status unchanged.

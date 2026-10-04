@@ -40,3 +40,24 @@ snapshot's values, map 409 to "Changed since the list loaded", and drop the
 GET. A product decision first: the spec's Q14 accepted the client guard and
 its residual (a tour marked no-show and revived at the same time between the
 load and the click passes the guard, which is what the operator meant).
+
+**Update (2026-10-04, feat/tour-auto-close).** The server-side window is
+closed. The tour auto-close (spec
+`docs/superpowers/specs/2026-10-01-tour-auto-close-reopen-design.md`, section
+8) made PATCH read the tour CONSISTENTLY (`app/src/routes/tours.ts:1034`) and
+write with a status precondition: `toursRepo.patch(tourId, patch, {
+expectedStatus })` adds `status = <the status that read returned>` to its
+`ConditionExpression` (`routes/tours.ts:1232`, `app/src/repos/toursRepo.ts:463-468`).
+A change that lands between the PATCH's own read and its write - another
+PATCH, a conversion, the auto-close sweep - now gets 409 `{ error:
+'tour_changed', detail: 'This tour changed while you were saving - reload and
+try again.' }` before any side effect (`routes/tours.ts:1233-1247`) instead of
+being merged on top. The CLIENT's stale-list window remains: the precondition
+is the status the server read, not the one a list loaded minutes earlier
+showed, and it does not compare `scheduledAt`, so on its own the server still
+accepts `{ status: 'toured' }` on a tour a colleague canceled, marked no-show
+or rebooked after the Past tab loaded (`canceled -> toured` and `no_show ->
+toured` stay legal). The bulk runner's re-read (`markToured` in
+`dashboard/src/routes/tours/ToursPage.tsx`) still guards that window, narrowed
+to one eventually consistent round trip; the suggested fix above (the client
+sends the status and time it saw) is what would close it. Status stays open.

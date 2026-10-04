@@ -251,8 +251,8 @@ describe('toursModel - auto-close clock', () => {
     );
   });
 
-  it('9. an undated toured / no_show tour counts from its creation, or a later mark', () => {
-    for (const status of ['toured', 'no_show']) {
+  it('9. an undated scheduled / toured / no_show tour counts from its creation, or a later mark', () => {
+    for (const status of ['scheduled', 'toured', 'no_show']) {
       const undated = { status, createdAt: '2026-09-01T00:00:00.000Z' };
       for (const tour of [undated, { ...undated, scheduledAt: '' }]) {
         expect(autoCloseDueAtMs(tour)).toBe(Date.parse('2026-09-15T00:00:00.000Z'));

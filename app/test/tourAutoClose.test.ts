@@ -323,6 +323,33 @@ describe('runTourAutoClose', () => {
     expect(world.conversations.get(naggedGroup)!.close_nag_next_at).toBe('2026-12-01T00:00:00.000Z');
   });
 
+  // Spec 11 (Job): the nag is armed ONLY on an open relay group (review r1
+  // SC-2). Both cases pass on unchanged code by design - they pin the rule.
+  it('(PIN) a due tour linked to a CLOSED relay group closes, and the group gains no close-nag', async () => {
+    const { world, deps } = fixture();
+    const tourId = await seedTour(world, { createdAt: CREATED, scheduledAt: AT });
+    const groupId = await openGroupFor(world, tourId, '+15550100096');
+    await world.conversationsRepo.setRelayStatus(groupId, 'closed', 'open');
+
+    expect(await runTourAutoClose(NOW, deps)).toEqual({ scanned: 1, due: 1, closed: 1, lost: 0, failed: 0 });
+    expect(statusOf(world, tourId)).toBe('closed');
+    expect(world.conversations.get(groupId)!.status).toBe('closed');
+    expect(world.conversations.get(groupId)!.close_nag_next_at).toBeUndefined();
+  });
+
+  it('(PIN) a due tour whose groupThreadId names an open NON-relay thread closes, and the thread gains no close-nag', async () => {
+    const { world, deps } = fixture();
+    const tourId = await seedTour(world, { createdAt: CREATED, scheduledAt: AT });
+    const thread = await world.conversationsRepo.createOrGetByParticipantPhone('+15550100097', 'tenant_1to1');
+    // A direct map write, like openGroupFor: the tour's updatedAt (its clock) is untouched.
+    world.toursMap.get(tourId)!.groupThreadId = thread.conversationId;
+
+    expect(await runTourAutoClose(NOW, deps)).toEqual({ scanned: 1, due: 1, closed: 1, lost: 0, failed: 0 });
+    expect(statusOf(world, tourId)).toBe('closed');
+    expect(world.conversations.get(thread.conversationId)).toMatchObject({ type: 'tenant_1to1', status: 'open' });
+    expect(world.conversations.get(thread.conversationId)!.close_nag_next_at).toBeUndefined();
+  });
+
   it('a failing close-nag arm is logged WITH the tourId, and the run still closes the tour and moves on', async () => {
     const { world, capture, deps } = fixture();
     const first = await seedTour(world, { createdAt: CREATED, scheduledAt: AT });

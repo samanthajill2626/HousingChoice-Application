@@ -9,7 +9,8 @@
 //      counting under both, and a zero is plain text, not a link;
 //   3. a count is a drill-down: it sets the status and that authority, and the
 //      list shows exactly the properties counted - and a reload keeps it;
-//   4. the voucher-size filter narrows the list AND the summary;
+//   4. the voucher-size filter narrows the list AND the summary, a property
+//      with no recorded voucher size counting by its bedrooms;
 //   5. Back from a property page returns to the same filtered view, typed
 //      search included;
 //   6. the Deleted tab starts clean, on every status;
@@ -48,18 +49,19 @@ async function createLandlord(request: APIRequestContext, stamp: string): Promis
 }
 
 /** A property via the real route (it starts in Setup = "Coming soon"), then
- *  published to Available when asked. */
+ *  published to Available when asked. `voucherSize` is optional: a property
+ *  without one is how imported properties look (the import never writes it). */
 async function createProperty(
   request: APIRequestContext,
   landlordId: string,
-  opts: { line1: string; authorities: string[]; voucherSize: number; available: boolean },
+  opts: { line1: string; authorities: string[]; beds: number; voucherSize?: number; available: boolean },
 ): Promise<string> {
   const res = await request.post(`${NEXT}/api/units`, {
     data: {
       landlordId,
       accepted_authorities: opts.authorities,
-      voucher_size_accepted: opts.voucherSize,
-      beds: opts.voucherSize,
+      ...(opts.voucherSize !== undefined && { voucher_size_accepted: opts.voucherSize }),
+      beds: opts.beds,
       rent_min: 1500,
       address: { line1: opts.line1, city: 'Atlanta', state: 'GA', zip: '30314' },
     },
@@ -79,7 +81,7 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
   test('opens on Available; the summary drills into the list; voucher, reload, Back and tabs hold', async ({
     page,
   }) => {
-    test.slow(); // builds its own world: a landlord and three properties.
+    test.slow(); // builds its own world: a landlord and four properties.
     await devLogin(page);
     const req = page.request;
     const stamp = `${Date.now()}`.slice(-6);
@@ -94,21 +96,27 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
     const twoBr = `${stamp} Summary Avail Two St`;
     const both = `${stamp} Summary Avail Both Ave`;
     const soon = `${stamp} Summary Soon Ct`;
+    // Bedrooms but NO recorded voucher size - every imported property looks like
+    // this. Its voucher size falls back to its bedrooms (Cameron, 2026-10-04).
+    const bedsOnly = `${stamp} Summary Beds Only Way`;
 
     const landlordId = await createLandlord(req, stamp);
-    await createProperty(req, landlordId, { line1: twoBr, authorities: [authA], voucherSize: 2, available: true });
+    await createProperty(req, landlordId, { line1: twoBr, authorities: [authA], beds: 2, voucherSize: 2, available: true });
     await createProperty(req, landlordId, {
       line1: both,
       authorities: [authA, authB],
+      beds: 3,
       voucherSize: 3,
       available: true,
     });
     await createProperty(req, landlordId, {
       line1: soon,
       authorities: [authA, longSlug],
+      beds: 2,
       voucherSize: 2,
       available: false,
     });
+    await createProperty(req, landlordId, { line1: bedsOnly, authorities: [authB], beds: 2, available: true });
 
     // 1. The Active tab opens on Available, with a bare URL: the available
     //    properties are listed and the Setup one is not.
@@ -120,13 +128,14 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
     await expect(list.getByRole('listitem').filter({ hasText: twoBr })).toHaveCount(1);
     await expect(list.getByRole('listitem').filter({ hasText: soon })).toHaveCount(0);
 
-    // 2. The summary: A has two available and one coming soon; B (accepted by
-    //    the two-authority property only) has one available and a plain zero.
+    // 2. The summary: A has two available and one coming soon; B (the
+    //    two-authority property plus the beds-only one) has two available and a
+    //    plain zero.
     const summary = page.getByRole('table', { name: 'By housing authority', exact: true });
     const rowA = summary.getByRole('row').filter({ has: page.getByRole('rowheader', { name: authA, exact: true }) });
     const rowB = summary.getByRole('row').filter({ has: page.getByRole('rowheader', { name: authB, exact: true }) });
     await expect(rowA.getByRole('cell')).toHaveText(['2', '1']);
-    await expect(rowB.getByRole('cell')).toHaveText(['1', '0']);
+    await expect(rowB.getByRole('cell')).toHaveText(['2', '0']);
     await expect(rowB.getByRole('link')).toHaveCount(1);
 
     // 3. A count drills in: Coming soon for A -> status Setup, only that property.
@@ -175,13 +184,25 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
       page.getByRole('group', { name: 'Voucher size', exact: true }).getByRole('button', { name: '3-BR', exact: true }),
     ).toHaveAttribute('aria-pressed', 'true');
 
-    // 6. The Deleted tab starts clean, on every status, with no summary.
+    // 6. The reported case (Cameron, 2026-10-04): B's Available list shows both
+    //    of its properties, and 2-BR keeps the one with 2 bedrooms and NO recorded
+    //    voucher size - its bedrooms stand in - while the one whose RECORDED size is
+    //    3 drops out.
+    await page.goto(`${NEXT}/listings`);
+    await rowB.getByRole('link', { name: `Show 2 available properties for ${authB}` }).click();
+    await expect(list.getByRole('listitem')).toHaveCount(2);
+    await page.getByRole('group', { name: 'Voucher size', exact: true }).getByRole('button', { name: '2-BR', exact: true }).click();
+    await expect(list.getByRole('listitem')).toHaveCount(1);
+    await expect(list.getByRole('listitem')).toContainText(bedsOnly);
+    await expect(rowB.getByRole('cell')).toHaveText(['1', '0']);
+
+    // 7. The Deleted tab starts clean, on every status, with no summary.
     await page.getByRole('navigation', { name: 'Properties view', exact: true }).getByRole('link', { name: 'Deleted' }).click();
     await expect(page).toHaveURL(/\/listings\/deleted$/);
     await expect(page.getByRole('heading', { level: 1, name: 'Deleted properties' })).toBeVisible();
     await expect(page.getByRole('table', { name: 'By housing authority', exact: true })).toHaveCount(0);
 
-    // 7. Phone width: the summary, chips and rows never scroll sideways.
+    // 8. Phone width: the summary, chips and rows never scroll sideways.
     await page.setViewportSize(NARROW_360);
     try {
       await page.goto(`${NEXT}/listings`);

@@ -355,7 +355,9 @@ finished), `convertible: true`, or status requested/canceled/closed.
 - Sweep vs sweep (worker + dev tick, or two workers): the condition makes the
   close exactly-once; only the winner runs 6.4.
 - Sweep read, then a staff change, then the sweep write: the condition fails
-  (status, outcome, date, mark or conversion changed); the sweep skips.
+  (status, outcome, date, mark or conversion changed, and, for a never-marked
+  tour, an unrelated write that moved `updatedAt` (ruling A-1)); the sweep
+  skips.
 - Staff PATCH read, then the close, then the PATCH write: refused by the
   PATCH's new status precondition (section 8) with 409 `tour_changed`; the
   tour stays closed and reopenable.
@@ -595,8 +597,9 @@ any unconverted closed tour.
 - Repo (DynamoDB Local, `app/test/toursRepo.integration.test.ts`): `patch`
   with `expectedStatus` wins / loses; `autoCloseIf` wins on an untouched
   candidate and loses on each of: status changed, outcome set, conversion
-  claimed, `convertible: true`, `scheduledAt` changed, `lastMarkedAt` changed;
-  it refuses a non-candidate status without writing;
+  claimed, `convertible: true`, `scheduledAt` changed, `lastMarkedAt` changed,
+  and, for a never-marked tour, an unrelated write that moved `updatedAt`
+  (ruling A-1); it refuses a non-candidate status without writing;
   `reopenIf` wins, removes the five attributes, sets `lastMarkedAt`, and loses
   on a converted / changed tour. A matching unit test drives the harness fake
   through the same cases.

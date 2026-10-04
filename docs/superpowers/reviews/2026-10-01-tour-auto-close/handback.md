@@ -22,7 +22,11 @@ docs-only records commit on top, on `feat/tour-auto-close`
 (`W:\tmp\tour-auto-close`), 0 behind main @71e532fb, 66 ahead (67 with the
 records commit), UNMERGED (human gate). NO infra / post-merge ops. One e2e
 file outside the feature failed once in the final full run and passed alone
-(section 2); main-tip baseline: [BASELINE PENDING].
+(section 2); the full main-tip baseline in the scratch worktree ran "306
+passed (17.3m)", exit 0 - the failure is adjudicated environmental (a stale
+foreign browser session was polling the branch's lane throughout; details in
+section 2). Cameron may want one more `npm run e2e` on the branch with that tab
+closed before merging; nothing in the feature's surface is implicated.
 
 ## 1. Work map - shipped / deviated / skipped
 
@@ -52,16 +56,18 @@ no GSI / table / env var / infra change, no manual no-show exit, no rename).
 | 1 `npm run typecheck` | 0 | all 5 workspaces (`final-gate1-typecheck.log`) |
 | 2 `npm test` | 0 | Test Files 405/405 (app) + 215/215 (dashboard) + 22/22 + 34/34 + 13/13; 83 s; 0 `[dynamoAdmin]` lines (`final-gate2-test.log`) |
 | 3 `npm run smoke` | 0 | "smoke-dist: OK - 1552 import specifier(s) across 270 emitted file(s) resolve under plain Node." |
-| 4 `npm run e2e` | 1 | "308 passed (21.9m)", "1 failed": `tests/dashboard-next/deleted-contact-resurfacing.spec.ts:67` (run #63) - `expect(getByRole('heading', { name: 'Inbox' })).toBeVisible()` timed out after 15 s at spec `:49` via `:88` (expectTashaHidden, step 2). The feature's own four e2e tests (#189-#192: today-past-tours, tour-auto-close x3) passed. 0 `ERR_ADDRESS_IN_USE` / `ERR_NO_BUFFER_SPACE`, 0 `[dynamoAdmin]`. ISOLATION, same file alone on the branch: "1 passed (18.3s)", exit 0 (`final-gate4-isolate.log`). The feature changes nothing on that spec's path (no inbox / contact / conversation file; the only `today/` change is the past-tours section). MAIN-TIP BASELINE (full suite at 71e532fb in the scratch worktree): [BASELINE PENDING] |
+| 4 `npm run e2e` | 1 | "308 passed (21.9m)", "1 failed": `tests/dashboard-next/deleted-contact-resurfacing.spec.ts:67` (run #63) - `expect(getByRole('heading', { name: 'Inbox' })).toBeVisible()` timed out after 15 s at spec `:49` via `:88` (expectTashaHidden, step 2). The feature's own four e2e tests (#189-#192: today-past-tours, tour-auto-close x3) passed. 0 `ERR_ADDRESS_IN_USE` / `ERR_NO_BUFFER_SPACE`, 0 `[dynamoAdmin]`. ISOLATION, same file alone on the branch: "1 passed (18.3s)", exit 0 (`final-gate4-isolate.log`). The feature changes nothing on that spec's path (no inbox / contact / conversation file; the only `today/` change is the past-tours section). MAIN-TIP BASELINE (full suite at 71e532fb in `W:\tmp\tour-auto-close-base`, lane 15, 16:57-17:14): exit 0, "306 passed (17.3m)" (main has 306 tests; the branch 309 = main + the three new tour-auto-close tests), the deleted-contact spec green among them (`base-e2e.log`). ADJUDICATION: environmental. The file is untouched by the feature and green alone on the branch; the branch's run on lane 7 was being polled about 2400 times by a stale foreign browser session (user-0002, `GET /api/inbox/unread-count`, the tab C7 first noticed) - load on exactly the inbox surface that timed out - which the baseline's lane 15 did not have. |
 | 5 eslint (55 touched files vs the main tip, normalized, `-f json`) | 0 NEW | HEAD 2 errors, both pre-existing and on untouched lines: `dashboard/src/routes/tours/TourDetail.tsx:326:85` react-hooks/purity, `dashboard/src/routes/tours/useTours.ts:128:5` react-hooks/set-state-in-effect; base 3 - the branch REMOVED `app/src/routes/tours.ts` unused `TourOutcome` (D-a). `final-gate5-compare.txt` |
 
 Pre-sync battery on 339acd9d (before review), for the record: typecheck 0;
 `npm test` 0 (405 + 213 + 22 + 34 + 13); smoke 0; e2e exit 1 - 306 passed / 2
 failed in 22.0 min (`a2p-compliance.spec.ts:132`, `contact-detail.spec.ts:161`,
 both a 60 s `devLogin` timeout at runs #2 and #59; the two files alone: "31
-passed (37.9s)" exit 0); eslint 0 NEW. Three full-suite runs today, three
-different unrelated files timing out once each, every one green alone - the
-pattern this PC has shown since 2026-09-30.
+passed (37.9s)" exit 0); eslint 0 NEW. Four full-suite runs today: the two
+branch runs each lost one or two different unrelated files to a page-load
+timeout (every one green alone), the main-tip baseline on a lane without the
+foreign tab was clean - the pattern this PC has shown since 2026-09-30, with a
+plausible local cause this time.
 
 Files touched vs main: 97 (+15153 / -306 lines, records included); code, tests,
 e2e and scripts: 57 files (+5433 / -300).
@@ -214,9 +220,13 @@ the next app + worker deploy; deploy timing is Cameron's.
   through every run today; harmless, not mine to close.
 - RUNBOOK still says "five" shared polls and "60-second" in older paragraphs
   (pre-existing wording).
-- The e2e harness: three full runs today each lost ONE or TWO unrelated specs to
-  a 15-60 s page-load timeout, every one green alone and none in the files this
-  feature touches. Not this feature's; worth its own look if it keeps up.
+- The e2e harness: the two branch runs today each lost ONE or TWO unrelated
+  specs to a 15-60 s page-load timeout, every one green alone and none in the
+  files this feature touches; the main baseline on another lane was clean. A
+  stale browser session (user-0002) polled lane 7's inbox unread count about
+  2400 times during the branch run - close that tab (it is on
+  127.0.0.1:9711) before the next lane-7 run, and consider whether the harness
+  should refuse a lane with foreign connections.
 
 ## 11. Self-QA
 

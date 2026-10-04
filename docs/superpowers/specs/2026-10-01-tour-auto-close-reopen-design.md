@@ -228,9 +228,15 @@ The fallback is not limited to pre-deploy rows: create does not write
 `lastMarkedAt`, so ANY tour no person has marked yet (a booked-ahead tour
 never marked toured is the common case) counts from its last change of any
 kind. Writers of a tour's `updatedAt` are all person-triggered or at create
-time - background jobs only read tours (spec review round 3) - so the
-fallback can postpone a close (a group opened or a roster edited after the
-date) but never keep a tour open forever or close one early. Accepted.
+time (spec review round 3), apart from this sweep's own close. One of them
+runs in the background: the worker's roster-action poll
+(`jobs/rosterActions.ts`) and its hermetic dev tick apply a group open a
+person confirmed during quiet hours - setting `groupThreadId`, clearing the
+`roster` plan and bumping `updatedAt`, once per confirmed action, never
+status, outcome or the date. (Text corrected 2026-10-04, ruling F1: it used
+to say background jobs only read tours.) So the fallback can postpone a close
+(a group opened or a roster edited after the date) but never keep a tour open
+forever or close one early. Accepted.
 
 A tour is due when `due <= now`. Consequences: a tour booked ahead closes 14
 days after its time; a tour marked toured, a no-show or rescheduled after its
@@ -640,10 +646,13 @@ Invariants changed / added:
 Writers of tour status / outcome / the new attributes after this change:
 tour create (POST; status only), PATCH (status precondition, `lastMarkedAt`),
 conversion finalize (`placements.ts:771`, unchanged; its tours are never
-candidates - `convertible: true`), the sweep (new), reopen (new), roster /
-relay routes (status untouched), seeds and dev reseed (unchanged). Nothing
-else may write `no_outcome`, `autoClosedAt`, `autoClosedFrom` or
-`lastMarkedAt`.
+candidates - `convertible: true`), the conversion claim and release
+(`placements.ts:716`, `:750`, `:778`; `convertedPlacementId` and
+`conversionClaimedAt` only, status untouched), the sweep (new), reopen (new),
+roster / relay routes and the worker's roster-action poll with its dev tick
+(a person-confirmed deferred group open; status untouched), seeds and dev
+reseed (unchanged). Nothing else may write `no_outcome`, `autoClosedAt`,
+`autoClosedFrom` or `lastMarkedAt`. (List completed 2026-10-04, ruling F1.)
 
 Readers that must agree with the new states:
 
@@ -668,13 +677,21 @@ Readers that must agree with the new states:
 - Conversion route: an auto-closed tour is not convertible - unchanged.
 - Contact timeline Upcoming walk (`contactTimeline.ts:1080-1194`): reminder
   rows only - unchanged.
-- Seeds: lean has no tours (e2e uses lean). The full-profile matrix writes
-  past `createdAt` / `scheduledAt` (`app/src/lib/seed/matrix.ts:911-916`,
-  `:957-963`), so in the local demo world its two no-shows auto-close about 9
-  and 11 days after a full reseed if a worker runs - acceptable for a demo
-  world; the cast's old convertible tour (`app/src/lib/seed/cast.ts:799-817`)
-  is excluded (`convertible: true`); `live.ts` uses the seed clock. No seed
-  change.
+- Seeds: lean has no tours (e2e uses lean). In the full-profile demo world,
+  if a worker runs and nobody marks them, seven seeded tours auto-close: the
+  matrix's `no_show` pair about 9 and 11 days after a full reseed (past
+  `createdAt` / `scheduledAt`, `app/src/lib/seed/matrix.ts:911-916`,
+  `:957-963`, marked half an hour after their time, `:1071`), its two
+  scheduled tours about 17 and 19 days after (dated 3 and 5 days out,
+  `:907-910`, `:953-956`), and `live.ts`'s three scheduled tours (today, +1
+  and +2 days on the seed clock, `app/src/lib/seed/live.ts:357-396`) about
+  14, 15 and 16 days after - two of those carry the live relay group's
+  `groupThreadId`, so the first of them to close arms its close-nag.
+  Acceptable for a demo world. The matrix's other tours carry an outcome or a
+  non-candidate status; the cast's two tours are never candidates (one
+  requested, `app/src/lib/seed/cast.ts:548-561`; the old convertible one,
+  `:799-817`, `convertible: true`). No seed change. (Text corrected
+  2026-10-04, ruling F5: it used to name only the matrix's no-show tours.)
 - Activity vocabularies: 9.5 / 10.1 (`history.ts`' seed vocabulary is NOT
   extended - no auto-closed tours are seeded).
 

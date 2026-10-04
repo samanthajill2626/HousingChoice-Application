@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app/tours
 created: 2026-10-04
-refs: app/src/lib/toursModel.ts:253, dashboard/src/routes/tours/tourReopen.ts:12, app/src/routes/tours.ts:1051, app/src/routes/tours.ts:1124, app/src/routes/tours.ts:1134, app/src/services/relayCloseNag.ts:84, app/src/routes/tours.ts:1459, app/src/routes/tours.ts:1517, app/src/routes/today.ts:1001, app/src/repos/toursRepo.ts:785, app/src/routes/tours.ts:1504
+refs: app/src/lib/toursModel.ts:253, dashboard/src/routes/tours/tourReopen.ts:12, app/src/routes/tours.ts:1051, app/src/routes/tours.ts:1124, app/src/routes/tours.ts:1134, app/src/services/relayCloseNag.ts:84, app/src/routes/tours.ts:1459, app/src/routes/tours.ts:1517, app/src/routes/relayGroups.ts:687, app/src/routes/relayGroups.ts:772, app/src/routes/today.ts:1001, app/src/repos/toursRepo.ts:785, app/src/routes/tours.ts:1504
 ---
 
 **Reopen treats a recorded decision as proof of a visit (AD-5, low).** Filed
@@ -32,16 +32,19 @@ unless the outcome was recorded on the transition into `closed`, or clear
 `toured`.
 
 **A PATCH revival keeps the close-nag its cancel armed (AD-7, pre-existing).**
-Only reopen clears a group's pending relay close-nag
+Reopen is the only TOUR event that clears a group's pending relay close-nag
 (`clearRelayCloseNagOnReopen`, `app/src/services/relayCloseNag.ts:84-113`, its
 one caller `app/src/routes/tours.ts:1517`), because a live tour's group must
-not prompt "close it?". A cancel arms the same nag on the tour's open relay
+not prompt "close it?". (On the group itself, closing it clears the nag,
+`app/src/routes/relayGroups.ts:687`, and the "Keep open" defer pushes it out
+28 days, `:772`.) A cancel arms the same nag on the tour's open relay
 group (`routes/tours.ts:1459-1464`), and a canceled tour revived by PATCH
 (`{ status: 'scheduled' }`, or a new time that auto-advances it,
 `routes/tours.ts:1143-1149`) never clears it, so 28 days after the cancel the
 revived tour's group still surfaces on Today's relay groups to close (the due
 filter does not look at the owner, `app/src/routes/today.ts:1001-1004`). The
-asymmetry predates auto-close: the feature added the first clear, not the arm.
+asymmetry predates auto-close: the feature added the first tour-event clear,
+not the arm.
 Suggested fix: clear on revival with the same owner rule (only a standalone
 group or the tour's own), when a PATCH moves a tour from `canceled` back to
 `scheduled`.

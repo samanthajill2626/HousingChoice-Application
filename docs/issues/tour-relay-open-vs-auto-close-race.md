@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app/tours
 created: 2026-10-04
-refs: app/src/services/rosterProvision.ts:150, app/src/services/rosterProvision.ts:335, app/src/repos/toursRepo.ts:496, app/src/routes/tours.ts:1544, app/src/routes/tours.ts:883, app/src/jobs/rosterActions.ts:144, app/src/repos/toursRepo.ts:679, app/src/routes/placements.ts:716, app/src/repos/toursRepo.ts:540
+refs: app/src/services/rosterProvision.ts:150, app/src/services/rosterProvision.ts:335, app/src/repos/toursRepo.ts:502, app/src/routes/tours.ts:1552, app/src/routes/tours.ts:883, app/src/jobs/rosterActions.ts:144, app/src/repos/toursRepo.ts:685, app/src/routes/placements.ts:716, app/src/repos/toursRepo.ts:546
 ---
 
 **Problem.** Deferred by the tour auto-close design (spec
@@ -21,13 +21,13 @@ READ, and the write that claims the group slot does not check it again:
   object (:303), then claims the slot with `claimGroupThread(tourId,
   'provisioning:<tourId>')` (:335), whose condition is only
   `attribute_exists(tourId) AND attribute_not_exists(#gt)`
-  (`app/src/repos/toursRepo.ts:496`) - one thread per tour, no status term.
+  (`app/src/repos/toursRepo.ts:502`) - one thread per tour, no status term.
 
 Three paths reach `openTourGroup`, each on its own read of the tour:
 
 1. `POST /api/tours/:tourId/relay`, the immediate open
-   (`app/src/routes/tours.ts:1544`): an eventually consistent `tours.get`
-   (:1550), the guard (:1559), the open (:1644).
+   (`app/src/routes/tours.ts:1552`): an eventually consistent `tours.get`
+   (:1558), the guard (:1567), the open (:1652).
 2. apply-now, `POST /api/tours/:tourId/roster/pending/:actionId/apply-now`
    (`routes/tours.ts:883`): `applyTourRosterAction`
    (`app/src/jobs/rosterActions.ts:589`) -> `loadTourOwner` (:144; the read
@@ -39,7 +39,7 @@ Three paths reach `openTourGroup`, each on its own read of the tour:
    `applyTourRosterAction`, for a quiet-hours open a person confirmed, applied
    at quiet-end.
 
-The sweep's close (`toursRepo.autoCloseIf`, `toursRepo.ts:679`) does not look
+The sweep's close (`toursRepo.autoCloseIf`, `toursRepo.ts:685`) does not look
 at `groupThreadId` either. So when the sweep closes a tour (two weeks past its
 clock start, no outcome) inside the window between an open's read and its
 pointer write, both writes win: the group is provisioned (a pool number
@@ -73,7 +73,7 @@ tour; no dashboard path does). The conversion (`POST
 /api/placements/from-tour`, `app/src/routes/placements.ts:644`) gates on an
 eventually consistent read of `convertible === true` (:656, :661), then claims
 with `claimConversion` (:716), whose condition is only `attribute_exists(tourId)
-AND attribute_not_exists(#cp)` (`app/src/repos/toursRepo.ts:540`) - no status
+AND attribute_not_exists(#cp)` (`app/src/repos/toursRepo.ts:546`) - no status
 and no `convertible` term. A reopen (`reopenIf`: status back to toured,
 `outcome` / `moveForward` / `convertible` removed) that lands between that read
 and that claim is silently overridden: the claim wins, the placement is

@@ -6,21 +6,21 @@ severity: low
 status: open
 area: app/tours
 created: 2026-09-26
-refs: app/src/repos/toursRepo.ts:347, app/src/repos/toursRepo.ts:366, app/src/routes/today.ts:550, app/src/routes/tours.ts:413, dashboard/src/routes/tours/useTours.ts
+refs: app/src/repos/toursRepo.ts:399, app/src/repos/toursRepo.ts:418, app/src/routes/today.ts:550, app/src/routes/tours.ts:387, dashboard/src/routes/tours/useTours.ts
 ---
 
-**Problem.** `listByScheduledRange(from, to)` (`app/src/repos/toursRepo.ts:347-364`)
+**Problem.** `listByScheduledRange(from, to)` (`app/src/repos/toursRepo.ts:399-416`)
 issues a single `Query` on the `byScheduledAt` GSI and returns `Items` without
 following `LastEvaluatedKey`. DynamoDB caps a Query page at 1 MB, so a window
 whose tours exceed that returns a silently truncated list. The Query is
 ASCENDING on `scheduledAt`, so the rows dropped are the NEWEST in the window.
-`listByStatus` directly below it (lines 366-385) already paginates, and the
-shared single-partition helper `queryGsi` (lines 274-291) was moved onto
+`listByStatus` directly below it (lines 418-437) already paginates, and the
+shared single-partition helper `queryGsi` (lines 326-342) was moved onto
 `queryAll` for the same reason; the range read is the one GSI reader left on a
 single page.
 
 Callers (the only two): `app/src/routes/today.ts:550` (the Today board's
-tours-today window) and `app/src/routes/tours.ts:413` (`GET /api/tours?from&to`),
+tours-today window) and `app/src/routes/tours.ts:387` (`GET /api/tours?from&to`),
 which serves the Tours page's Active window (start of today to +30 days) and,
 since the Past tab (spec `docs/superpowers/specs/2026-09-26-staff-notes-past-tours-design.md`
 section 4.2), a 90-day look-back sorted most-recent-first - so for Past a
@@ -50,7 +50,6 @@ each paged to exhaustion - never by range (spec
 `docs/superpowers/specs/2026-10-01-tour-auto-close-reopen-design.md`, section
 6.2), so a truncated range page cannot hide a tour from it, and it also reaches
 the undated tours the `byScheduledAt` GSI leaves out. The range read still has
-exactly the two callers above. Line numbers above are as of main @ae04122d; on
-feat/tour-auto-close `listByScheduledRange` is
-`app/src/repos/toursRepo.ts:393-410`, `listByStatus` is `:412-432` and the
-tours route's caller is `app/src/routes/tours.ts:387`. Status unchanged.
+exactly the two callers above. Every line number in this file was re-derived
+on feat/tour-auto-close (2026-10-04); until then they cited main @ae04122d.
+Status unchanged.

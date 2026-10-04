@@ -105,7 +105,9 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
     await createProperty(req, landlordId, {
       line1: both,
       authorities: [authA, authB],
-      beds: 3,
+      // 2 bedrooms but a RECORDED 3: only "a recorded size wins" files it under
+      // 3-BR (step 4) and drops it from 2-BR (step 6) - bedrooms would do the reverse.
+      beds: 2,
       voucherSize: 3,
       available: true,
     });
@@ -186,8 +188,8 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
 
     // 6. The reported case (Cameron, 2026-10-04): B's Available list shows both
     //    of its properties, and 2-BR keeps the one with 2 bedrooms and NO recorded
-    //    voucher size - its bedrooms stand in - while the one whose RECORDED size is
-    //    3 drops out.
+    //    voucher size - its bedrooms stand in - while the one with 2 bedrooms but a
+    //    RECORDED 3 drops out (the recorded size wins).
     await page.goto(`${NEXT}/listings`);
     await rowB.getByRole('link', { name: `Show 2 available properties for ${authB}` }).click();
     await expect(list.getByRole('listitem')).toHaveCount(2);

@@ -88,11 +88,14 @@ export function authoritiesOf(unit: {
  * NOT for the property page's "Voucher size accepted" row or the New/Edit forms:
  * those show and edit what was RECORDED, which is a different question.
  *
- * Server side: no shared package exists between app and dashboard. When server
- * code first needs a property's voucher size (the Matching audience, WP1
- * matching, the flyer), give it this function's twin in app/src/lib/unitFields.ts
- * as the source of truth and turn this one into its hand mirror, exactly as
- * `authoritiesOf` does - with the same test cases in both suites.
+ * Server side: no shared package exists between app and dashboard, and server
+ * code has no copy of this rule yet - the public flyer's projection
+ * (`toUnitFlyer`, app/src/lib/unitFields.ts) still derives its own size from
+ * `beds` alone, as Matching's pre-fill does here
+ * (docs/issues/unit-voucher-size-readers-diverge.md). Server code that needs the
+ * rule (the flyer, the Matching audience, WP1 matching) gets this function's twin
+ * in app/src/lib/unitFields.ts as the source of truth, with this one becoming its
+ * hand mirror, exactly as `authoritiesOf` does - same test cases in both suites.
  *
  * Typed with `unknown` fields for the same reason as `authoritiesOf`: the wire
  * document is flexible, so a stored value can be any shape.

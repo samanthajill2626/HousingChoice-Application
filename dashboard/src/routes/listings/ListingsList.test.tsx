@@ -732,14 +732,14 @@ describe('ListingsList', () => {
     it('says how many properties a size filter leaves out for recording no size', async () => {
       activeState = { status: 'ready', units: SUMMARY_UNITS };
       renderAt();
-      expect(screen.queryByText(/no voucher size recorded/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/not counted/i)).not.toBeInTheDocument();
       await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
       // s2 (coming soon, no size) is the one unrecorded property left out.
       expect(
         screen.getByText('1 property has no voucher size or bedroom count recorded and is not counted.'),
       ).toBeInTheDocument();
       await userEvent.click(within(voucherGroup()).getByRole('button', { name: 'Not recorded' }));
-      expect(screen.queryByText(/no voucher size recorded/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/not counted/i)).not.toBeInTheDocument();
     });
 
     it('puts the summary above the filter controls', () => {

@@ -259,6 +259,16 @@ describe('buildAuthoritySummary', () => {
     // the occupied unit is outside the summary altogether.
     expect(buildAuthoritySummary(units, new Set(['2']), authority).unrecordedExcluded).toBe(2);
   });
+  it('a beds-only property counts by its bedrooms, and is never "not counted" as unrecorded', () => {
+    const bedsWorld = [
+      u({ status: 'available', accepted_authorities: ['DCA'], beds: 2 }), // counts as 2-BR
+      u({ status: 'available', accepted_authorities: ['DCA'], beds: 3 }), // left out by 2-BR, but HAS a size
+      u({ status: 'setup', accepted_authorities: ['DCA'] }), // neither: the only unrecorded one
+    ];
+    const summary = buildAuthoritySummary(bedsWorld, new Set(['2']), authorityOptions(bedsWorld));
+    expect(summary.all).toEqual({ available: 1, comingSoon: 0 });
+    expect(summary.unrecordedExcluded).toBe(1);
+  });
   it('excludes nothing unrecorded with no voucher filter, or with Not recorded selected', () => {
     expect(buildAuthoritySummary(units, new Set<string>(), authority).unrecordedExcluded).toBe(0);
     const withNone = buildAuthoritySummary(units, new Set(['2', NONE_KEY]), authority);

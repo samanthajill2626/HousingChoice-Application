@@ -112,7 +112,8 @@ export function AuthoritySummary({ summary, linkFor }: AuthoritySummaryProps): R
       </table>
       <p className={styles.note}>A property that accepts several housing authorities counts under each.</p>
       {/* A size filter must not shrink the counts silently: say how many
-       *  properties it left out only because nobody recorded their size. */}
+       *  properties it left out only because nobody recorded either their
+       *  voucher size or their bedrooms (acceptedVoucherSizes has no answer). */}
       {excluded > 0 ? (
         <p className={styles.note}>
           {excluded === 1

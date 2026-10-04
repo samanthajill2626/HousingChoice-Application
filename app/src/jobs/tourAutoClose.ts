@@ -128,7 +128,13 @@ async function afterClose(tour: TourItem, rotation: string, deps: TourAutoCloseD
     'tour_auto_closed',
     TOUR_AUTO_CLOSED_LABEL,
   );
-  await armRelayCloseNagIfOpen({ conversationsRepo: deps.conversationsRepo, logger: log }, tour.groupThreadId, 'tour');
+  // A child logger, so the shared helper's lines (it logs the conversationId
+  // only) carry the tourId too (spec 6.4).
+  await armRelayCloseNagIfOpen(
+    { conversationsRepo: deps.conversationsRepo, logger: log.child({ tourId: tour.tourId }) },
+    tour.groupThreadId,
+    'tour',
+  );
   deps.events.emit('tour.updated', { tourId: tour.tourId, status: 'closed' });
   deps.events.emit('scheduled.updated', { contactId: tour.tenantId });
 }

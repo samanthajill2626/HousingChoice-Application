@@ -323,6 +323,31 @@ describe('runTourAutoClose', () => {
     expect(world.conversations.get(naggedGroup)!.close_nag_next_at).toBe('2026-12-01T00:00:00.000Z');
   });
 
+  it('a failing close-nag arm is logged WITH the tourId, and the run still closes the tour and moves on', async () => {
+    const { world, capture, deps } = fixture();
+    const first = await seedTour(world, { createdAt: CREATED, scheduledAt: AT });
+    const second = await seedTour(world, { createdAt: CREATED_LATER, scheduledAt: AT });
+    const groupId = await openGroupFor(world, first, '+15550100095');
+    const realGetById = world.conversationsRepo.getById;
+    world.conversationsRepo.getById = async (conversationId) => {
+      if (conversationId === groupId) throw new Error('dynamo unavailable');
+      return realGetById(conversationId);
+    };
+
+    expect(await runTourAutoClose(NOW, deps)).toEqual({ scanned: 2, due: 2, closed: 2, lost: 0, failed: 0 });
+    expect(statusOf(world, first)).toBe('closed');
+    expect(statusOf(world, second)).toBe('closed');
+    // Spec 6.4: a failed step is logged with the tourId. The shared helper logs
+    // only the conversationId; the job hands it a child logger carrying tourId.
+    const armErrors = capture.atLevel(ERROR).filter((l) => l['msg'] === 'relay close-nag arm failed (best-effort)');
+    expect(armErrors.map((l) => [l['tourId'], l['conversationId']])).toEqual([[first, groupId]]);
+    // The steps after the arm still ran for the first tour.
+    expect(world.emitted.filter((e) => e.event === 'tour.updated').map((e) => e.payload)).toEqual([
+      { tourId: first, status: 'closed' },
+      { tourId: second, status: 'closed' },
+    ]);
+  });
+
   it("deletes the old ladder's never-sent reminder rows (a skipped one included) and keeps a SENT row", async () => {
     const { world, deps } = fixture();
     const tourId = await seedTour(world, { createdAt: CREATED, scheduledAt: AT, currentLadderId: 'ladder-1' });

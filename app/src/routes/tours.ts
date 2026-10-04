@@ -1510,7 +1510,13 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       'tour_reopened',
       'Tour reopened',
     );
-    await clearRelayCloseNagOnReopen({ conversationsRepo: conversations, logger: log }, current.groupThreadId, tourId);
+    // A child logger, so the shared helper's lines (it logs the
+    // conversationId only) carry the tourId too.
+    await clearRelayCloseNagOnReopen(
+      { conversationsRepo: conversations, logger: log.child({ tourId }) },
+      current.groupThreadId,
+      tourId,
+    );
     events.emit('tour.updated', { tourId, status: reopened.status });
     log.info({ tourId, to: reopened.status }, 'tour reopened via api');
     res.json({ tour: reopened });

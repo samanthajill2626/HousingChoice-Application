@@ -400,15 +400,41 @@ describe('ListingsList', () => {
       expect(location()).toBe('/listings?status=all');
     });
 
-    it('never treats bedrooms as a voucher size', async () => {
+    // Cameron's report (2026-10-04): an authority's Available list showed its
+    // properties with their bedrooms, and any voucher size then emptied it, because
+    // the filter read only the (mostly blank) recorded voucher size.
+    it('uses the bedroom count when no voucher size is recorded; a recorded size wins', async () => {
       activeState = {
         status: 'ready',
-        units: [{ unitId: 'b1', landlordId: 'l1', status: 'available', beds: 2, address: { line1: '9 Beds Only St' } }],
+        units: [
+          { unitId: 'b1', landlordId: 'l1', status: 'available', beds: 3, accepted_authorities: ['Cobb'], address: { line1: '9 Beds Only St' } },
+          {
+            unitId: 'b2',
+            landlordId: 'l1',
+            status: 'available',
+            beds: 3,
+            voucher_size_accepted: 2,
+            accepted_authorities: ['Cobb'],
+            address: { line1: '10 Takes Two St' },
+          },
+          { unitId: 'b3', landlordId: 'l1', status: 'available', accepted_authorities: ['Cobb'], address: { line1: '11 Nothing Recorded Rd' } },
+        ],
       };
       renderAt();
+      await userEvent.click(screen.getByRole('link', { name: 'Show 3 available properties for Cobb' }));
+      expect(rows()).toHaveLength(3);
+
+      // 3 bedrooms stand in for the blank voucher size; the recorded 2 wins over 3 beds.
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: '3-BR' }));
+      expect(rowText()).toEqual([expect.stringContaining('9 Beds Only St')]);
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: '3-BR' }));
       await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
-      expect(rows()).toHaveLength(0);
-      expect(screen.getByText(/no properties match the selected filters/i)).toBeInTheDocument();
+      expect(rowText()).toEqual([expect.stringContaining('10 Takes Two St')]);
+
+      // Not recorded is left for a property with NEITHER a voucher size nor beds.
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
+      await userEvent.click(within(voucherGroup()).getByRole('button', { name: 'Not recorded' }));
+      expect(rowText()).toEqual([expect.stringContaining('11 Nothing Recorded Rd')]);
     });
   });
 
@@ -709,7 +735,9 @@ describe('ListingsList', () => {
       expect(screen.queryByText(/no voucher size recorded/i)).not.toBeInTheDocument();
       await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
       // s2 (coming soon, no size) is the one unrecorded property left out.
-      expect(screen.getByText('1 property has no voucher size recorded and is not counted.')).toBeInTheDocument();
+      expect(
+        screen.getByText('1 property has no voucher size or bedroom count recorded and is not counted.'),
+      ).toBeInTheDocument();
       await userEvent.click(within(voucherGroup()).getByRole('button', { name: 'Not recorded' }));
       expect(screen.queryByText(/no voucher size recorded/i)).not.toBeInTheDocument();
     });

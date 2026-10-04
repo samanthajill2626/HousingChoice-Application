@@ -19,7 +19,7 @@ import {
   voucherBucketOfSize,
   type VoucherBucketKey,
 } from '../contacts/tenantFacets.js';
-import { authoritiesOf, shortAddress, voucherSizesOf } from '../listing/listingFormat.js';
+import { acceptedVoucherSizes, authoritiesOf, shortAddress } from '../listing/listingFormat.js';
 
 /** Which property list is showing: the Active tab or the Deleted tab. */
 export type UnitListView = 'active' | 'deleted';
@@ -171,18 +171,20 @@ export function pruneSelection(sel: UnitListSelection, authority: AuthorityOptio
   return { ...sel, ha };
 }
 
-/** The voucher buckets a unit accepts (one number or a list; never `beds`). */
+/** The voucher buckets a unit takes - its sizes come ONLY from
+ *  `acceptedVoucherSizes` (the recorded voucher size, else its bedroom count). */
 export function unitVoucherBuckets(unit: UnitItem): Set<VoucherBucketKey> {
   const buckets = new Set<VoucherBucketKey>();
-  for (const size of voucherSizesOf(unit)) {
+  for (const size of acceptedVoucherSizes(unit)) {
     const bucket = voucherBucketOfSize(size);
     if (bucket !== null) buckets.add(bucket);
   }
   return buckets;
 }
 
-/** OR within the voucher facet: a unit matches when ANY size it accepts is
- *  selected; Not recorded matches a unit with no usable size. Empty = all. */
+/** OR within the voucher facet: a unit matches when ANY size it takes is
+ *  selected; Not recorded matches a unit with neither a voucher size nor a
+ *  bedroom count recorded. Empty = all. */
 export function matchesVoucher(unit: UnitItem, keys: ReadonlySet<string>): boolean {
   if (keys.size === 0) return true;
   const buckets = unitVoucherBuckets(unit);
@@ -234,10 +236,10 @@ export interface AuthoritySummaryModel {
   all: SummaryCounts;
   rows: SummaryRow[];
   /** Available or coming-soon units the voucher selection left out BECAUSE
-   *  they record no voucher size at all (0 when no voucher filter is on, or
-   *  when Not recorded is selected). The summary says so out loud: without it
-   *  a size filter would silently shrink the counts on data that was simply
-   *  never filled in (the import never writes the field). */
+   *  they record neither a voucher size nor a bedroom count (0 when no voucher
+   *  filter is on, or when Not recorded is selected). The summary says so out
+   *  loud: a size filter must not silently shrink the counts on data that was
+   *  simply never filled in. */
   unrecordedExcluded: number;
 }
 

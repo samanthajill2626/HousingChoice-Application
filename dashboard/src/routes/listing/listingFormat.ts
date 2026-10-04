@@ -69,21 +69,40 @@ export function authoritiesOf(unit: {
 }
 
 /**
- * The voucher (bedroom) sizes a unit accepts, read from `voucher_size_accepted`
- * in EITHER shape: ONE number today, or a LIST of numbers once tracker #12 makes
- * the field a multi-select (the `full` demo seed already stores `[2, 3]`). Only
- * finite numbers count; anything else - absent, NaN, a string, a list of junk -
- * reads as nothing recorded. No fallback to `beds`: a 3-bed unit may accept a
- * 2-BR voucher, so bedrooms are not a voucher size (Cameron, 2026-10-01).
+ * THE voucher (bedroom) sizes a property takes. Every place that needs a
+ * property's voucher size reads it through this ONE function - never by
+ * re-deriving the rule at a call site (Cameron, 2026-10-04):
  *
- * Typed with an `unknown` field for the same reason as `authoritiesOf`: the
- * wire document is flexible, so a stored value can be any shape.
+ *   1. its RECORDED `voucher_size_accepted`, when that holds at least one size -
+ *      ONE number today, or a LIST once tracker #12 makes the field a
+ *      multi-select (the `full` demo seed already stores `[2, 3]`). A recorded
+ *      size always wins: a 3-bed property may take only a 2-BR voucher;
+ *   2. otherwise its bedroom count (`beds`) - most properties never had the
+ *      field filled in (the import does not write it), and a property usually
+ *      takes the voucher that matches its bedrooms;
+ *   3. otherwise nothing (`[]`): the property shows as "Not recorded".
+ *
+ * Only finite numbers count; anything else - absent, NaN, a string, an empty or
+ * junk list - records nothing at that step.
+ *
+ * NOT for the property page's "Voucher size accepted" row or the New/Edit forms:
+ * those show and edit what was RECORDED, which is a different question.
+ *
+ * Server side: no shared package exists between app and dashboard. When server
+ * code first needs a property's voucher size (the Matching audience, WP1
+ * matching, the flyer), give it this function's twin in app/src/lib/unitFields.ts
+ * as the source of truth and turn this one into its hand mirror, exactly as
+ * `authoritiesOf` does - with the same test cases in both suites.
+ *
+ * Typed with `unknown` fields for the same reason as `authoritiesOf`: the wire
+ * document is flexible, so a stored value can be any shape.
  */
-export function voucherSizesOf(unit: { voucher_size_accepted?: unknown }): number[] {
-  const raw = unit.voucher_size_accepted;
+export function acceptedVoucherSizes(unit: { voucher_size_accepted?: unknown; beds?: unknown }): number[] {
   const isSize = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
-  if (Array.isArray(raw)) return raw.filter(isSize);
-  return isSize(raw) ? [raw] : [];
+  const raw = unit.voucher_size_accepted;
+  const recorded = Array.isArray(raw) ? raw.filter(isSize) : isSize(raw) ? [raw] : [];
+  if (recorded.length > 0) return recorded;
+  return isSize(unit.beds) ? [unit.beds] : [];
 }
 
 /** The header facts subline: "2 BR - 1 BA - $1,400-1,600/mo - West End

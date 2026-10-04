@@ -116,8 +116,8 @@ export function AuthoritySummary({ summary, linkFor }: AuthoritySummaryProps): R
       {excluded > 0 ? (
         <p className={styles.note}>
           {excluded === 1
-            ? '1 property has no voucher size recorded and is not counted.'
-            : `${excluded} properties have no voucher size recorded and are not counted.`}
+            ? '1 property has no voucher size or bedroom count recorded and is not counted.'
+            : `${excluded} properties have no voucher size or bedroom count recorded and are not counted.`}
         </p>
       ) : null}
     </div>

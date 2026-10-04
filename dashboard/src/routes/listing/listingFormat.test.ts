@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { UnitActivityEvent, UnitItem } from '../../api/index.js';
 import {
+  acceptedVoucherSizes,
   authoritiesOf,
   buildListingFacts,
   formatBedsBaths,
@@ -10,7 +11,6 @@ import {
   isMediaUrl,
   shortAddress,
   statusLabel,
-  voucherSizesOf,
 } from './listingFormat.js';
 
 describe('formatMoney', () => {
@@ -77,24 +77,35 @@ describe('authoritiesOf', () => {
   });
 });
 
-describe('voucherSizesOf', () => {
-  // `voucher_size_accepted` is ONE number today and becomes a multi-select list
-  // with tracker #12 (the `full` demo seed already stores [2, 3]); every reader
-  // must take both shapes.
-  it('wraps a single number', () => {
-    expect(voucherSizesOf({ voucher_size_accepted: 2 })).toEqual([2]);
-    expect(voucherSizesOf({ voucher_size_accepted: 0 })).toEqual([0]);
+describe('acceptedVoucherSizes', () => {
+  // THE one reader of "which voucher sizes does this property take" (Cameron,
+  // 2026-10-04): the recorded `voucher_size_accepted` when there is one - ONE
+  // number today, a multi-select LIST with tracker #12 (the `full` demo seed
+  // already stores [2, 3]) - otherwise the bedroom count; nothing only when
+  // BOTH are missing.
+  it('a recorded single size wins, even over a different bedroom count', () => {
+    expect(acceptedVoucherSizes({ voucher_size_accepted: 2 })).toEqual([2]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: 2, beds: 3 })).toEqual([2]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: 0, beds: 1 })).toEqual([0]);
   });
-  it('keeps every finite number of a list, in order', () => {
-    expect(voucherSizesOf({ voucher_size_accepted: [2, 3] })).toEqual([2, 3]);
-    expect(voucherSizesOf({ voucher_size_accepted: [2, 'x', null, Number.NaN, 3] })).toEqual([2, 3]);
-    expect(voucherSizesOf({ voucher_size_accepted: [] })).toEqual([]);
+  it('a recorded list wins, keeping every finite number in order', () => {
+    expect(acceptedVoucherSizes({ voucher_size_accepted: [2, 3], beds: 4 })).toEqual([2, 3]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: [2, 'x', null, Number.NaN, 3] })).toEqual([2, 3]);
   });
-  it('anything else reads as nothing recorded', () => {
-    expect(voucherSizesOf({})).toEqual([]);
-    expect(voucherSizesOf({ voucher_size_accepted: Number.NaN })).toEqual([]);
-    expect(voucherSizesOf({ voucher_size_accepted: '2' })).toEqual([]);
-    expect(voucherSizesOf({ voucher_size_accepted: null })).toEqual([]);
+  it('falls back to the bedroom count when no voucher size is recorded', () => {
+    expect(acceptedVoucherSizes({ beds: 3 })).toEqual([3]);
+    expect(acceptedVoucherSizes({ beds: 0 })).toEqual([0]);
+    // An empty or unusable recorded value records nothing, so beds still decide.
+    expect(acceptedVoucherSizes({ voucher_size_accepted: [], beds: 2 })).toEqual([2]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: ['x', null], beds: 2 })).toEqual([2]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: Number.NaN, beds: 2 })).toEqual([2]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: '2', beds: 1 })).toEqual([1]);
+  });
+  it('is empty (Not recorded) only when BOTH are missing or unusable', () => {
+    expect(acceptedVoucherSizes({})).toEqual([]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: null, beds: null })).toEqual([]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: [], beds: Number.NaN })).toEqual([]);
+    expect(acceptedVoucherSizes({ beds: '3' })).toEqual([]);
   });
 });
 

@@ -179,15 +179,22 @@ describe('unitVoucherBuckets / matchesVoucher', () => {
     expect(matchesVoucher(both, new Set(['4plus']))).toBe(false);
     expect(matchesVoucher(both, new Set([NONE_KEY]))).toBe(false);
   });
-  it('Not recorded matches only a unit with no usable size; an empty selection matches all', () => {
+  it('Not recorded matches only a unit with neither a voucher size nor beds; empty selection matches all', () => {
     expect(matchesVoucher(u({}), new Set([NONE_KEY]))).toBe(true);
     expect(matchesVoucher(u({ voucher_size_accepted: Number.NaN }), new Set([NONE_KEY]))).toBe(true);
     expect(matchesVoucher(u({}), new Set(['2']))).toBe(false);
     expect(matchesVoucher(u({}), new Set<string>())).toBe(true);
   });
-  it('never falls back to beds', () => {
-    expect(matchesVoucher(u({ beds: 2 }), new Set(['2']))).toBe(false);
-    expect(matchesVoucher(u({ beds: 2 }), new Set([NONE_KEY]))).toBe(true);
+  it('falls back to beds when no voucher size is recorded (Cameron, 2026-10-04)', () => {
+    expect([...unitVoucherBuckets(u({ beds: 2 }))]).toEqual(['2']);
+    expect(matchesVoucher(u({ beds: 2 }), new Set(['2']))).toBe(true);
+    expect(matchesVoucher(u({ beds: 2 }), new Set([NONE_KEY]))).toBe(false);
+    expect(matchesVoucher(u({ beds: 5 }), new Set(['4plus']))).toBe(true);
+  });
+  it('a recorded voucher size wins over beds', () => {
+    const takesTwo = u({ beds: 3, voucher_size_accepted: 2 });
+    expect(matchesVoucher(takesTwo, new Set(['2']))).toBe(true);
+    expect(matchesVoucher(takesTwo, new Set(['3']))).toBe(false);
   });
 });
 

@@ -414,7 +414,11 @@ other tour routes), empty body (any field -> 400 `unknown field(s): ...`).
    conversation that is a `relay_group`, `status === 'open'`, carries
    `close_nag_next_at`, and whose `owner` is absent, has a null type, or is
    `{ type: 'tour', id: tourId }`: `conversationsRepo.setCloseNagNextAt(id,
-   null)`. Never throws.
+   null)`. Never throws. (As built 2026-10-04, ruling F3: the owner is
+   resolved through `getOwner(conversation)` like every other owner reader,
+   so a legacy group that carries only `placementId` counts as
+   placement-owned and is NOT cleared; a malformed `owner: { type: 'tour' }`
+   with no id resolves to unowned and IS cleared.)
 3. Emit `tour.updated` `{ tourId, status: target }`.
 
 No message, no reminder, no tenant-status change, no placement change, no
@@ -451,6 +455,10 @@ and closes again 14 days later if nothing is recorded.
    `app/test/toursApi.test.ts`) forward the new third argument.
 4. When the built patch contains `status` or `scheduledAt`, it also sets
    `lastMarkedAt = getNow()` (the router's injected clock), in the same write.
+   (As built 2026-10-04, ruling F4: the stamp fires on an ACTUAL status
+   change, or whenever the patch carries `scheduledAt` - a same-status
+   restatement such as a repeated `{ status: 'toured' }` does not restart the
+   clock; a same-time reschedule does, as a deliberate person action.)
 5. Everything else (closed-terminal 409, exit gate on toured, ladder
    rotation, milestones, close-nag) is unchanged. Leaving `closed` is possible
    only through `POST /reopen`.

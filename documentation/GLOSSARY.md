@@ -317,6 +317,18 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   set up. Its partner column is "Available" (`available`). Code: the
   `COMING_SOON_STATUS` constant in `dashboard/src/routes/listings/unitListFacets.ts`.
 
+- **voucher size of a property** (accepted voucher sizes; Cameron, 2026-10-04) -
+  the voucher (bedroom) sizes a property takes: its RECORDED
+  `voucher_size_accepted` when there is one (one number today, a multi-select
+  list with tracker #12), otherwise its bedroom count (`beds`); "Not recorded"
+  only when both are missing. Read ONLY through `acceptedVoucherSizes(unit)`
+  (`dashboard/src/routes/listing/listingFormat.ts`) - never re-derived at a call
+  site; server code gets a hand-mirrored twin in `app/src/lib/unitFields.ts`
+  when it first needs one. Distinct from a tenant's `voucherSize` (the voucher
+  the tenant holds) and from the stored field itself, which the property page
+  and the New/Edit forms show and edit as entered. Matching's pre-fill and the
+  public flyer still read `beds` (`docs/issues/unit-voucher-size-readers-diverge.md`).
+
 ---
 
 ## For the future AI layer

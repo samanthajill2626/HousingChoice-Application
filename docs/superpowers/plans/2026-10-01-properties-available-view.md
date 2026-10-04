@@ -11,6 +11,11 @@
 > not-counted line, the perf resolver/terminal fixes, and a frozen-router test
 > (`ListingsList.urgentState.test.tsx`) were added. See design note 3.2, 3.3, 3.4,
 > 3.5, 6 and 7.
+>
+> **Amended 2026-10-04 (post-merge fix, Cameron):** a property's voucher size
+> falls back to its bedroom count when none is recorded; one reusable reader,
+> `acceptedVoucherSizes` in `dashboard/src/routes/listing/listingFormat.ts`,
+> replaces `voucherSizesOf`. Record: `fix-voucher-beds-fallback.md`.
 
 Design: `docs/superpowers/specs/2026-10-01-properties-available-view-design.md`.
 Worktree `W:\tmp\properties-available-view`, branch

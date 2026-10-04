@@ -28,8 +28,14 @@ Cameron's answers (2026-10-01):
 - D2. "Coming soon" is the existing `setup` status. Only the summary says
   "Coming soon (Setup)"; the status dropdown, row badges and property page keep
   "Setup" (which also covers brand-new properties still being set up).
-- D3. Voucher size: NO fallback to bedrooms. A property with no recorded
-  voucher size is "Not recorded".
+- D3. (REVERSED by Cameron, 2026-10-04, after he hit the result live - see
+  `docs/superpowers/reviews/2026-10-01-properties-available-view/fix-voucher-beds-fallback.md`.)
+  A property's voucher size is its RECORDED voucher size when there is one,
+  otherwise its BEDROOM count; only when BOTH are missing is it "Not recorded".
+  The rule lives in ONE reusable function on a property, `acceptedVoucherSizes`.
+  (Originally: "NO fallback to bedrooms" - with the import never filling the
+  field, that sent nearly every property to Not recorded and emptied the list
+  under any size.)
 - D4. Both extras are in: filters kept in the page address, and the
   invisible-lock bug fixed.
 - D5. DynamoDB Local is NOT restarted overnight; a gate blocked by it is
@@ -56,9 +62,10 @@ Planner calls Cameron approved ("go", 2026-10-01):
   is plain text, not a link.
 - C5. Voucher-size chips: Studio, 1-BR, 2-BR, 3-BR, 4+ BR, Not recorded - the
   Tenants list's labels (`VOUCHER_BUCKETS`). Multi-select, OR within the facet.
-  A property's voucher size may be ONE number (today) or a LIST of numbers
-  (after #12, and already in the `full` demo seed); it matches any size it
-  lists. Sizes 4 and above count as 4+. No counts on the chips.
+  A property's recorded voucher size may be ONE number (today) or a LIST of
+  numbers (after #12, and already in the `full` demo seed); it matches any size
+  it lists, and with nothing recorded its bedroom count stands in (D3 as
+  amended). Sizes 4 and above count as 4+. No counts on the chips.
 - C6. Names: the summary AND the existing authority chips show the STORED
   spelling. `humanizeAuthority` is deleted (step 2 of
   `retire-humanize-authority`; the Tenants list already displays stored
@@ -86,12 +93,17 @@ walked). Dashboard-only: no API, repo, seed, or data change.
 - Display spelling per key: `displaySpelling` over the raw spellings of ALL
   units loaded for the current view (existing chip rule), so a chip and its
   summary row always read the same.
-- Voucher sizes: new `voucherSizesOf(unit)` in `listingFormat.ts` - a finite
-  number yields `[n]`; an array yields its finite-number members; anything else
-  yields `[]`. Buckets via ONE shared rule, `voucherBucketOfSize`, extracted from
+- Voucher sizes (amended 2026-10-04): `acceptedVoucherSizes(unit)` in
+  `listingFormat.ts` is the ONE reader of the voucher sizes a property takes -
+  its recorded `voucher_size_accepted` (a finite number yields `[n]`, an array
+  its finite-number members) when that records at least one size; otherwise
+  `[beds]` when `beds` is a finite number; otherwise `[]`. Buckets via ONE
+  shared rule, `voucherBucketOfSize`, extracted from
   `tenantFacets.voucherBucketOf` (truncate, clamp to 0..4, 4 -> `4plus`; NaN has
-  no bucket). `voucherSizesOf` drops non-finite sizes first, so such a property
-  reads as "Not recorded", as does any unit with no bucket.
+  no bucket). A unit with no bucket - neither a voucher size nor a bedroom
+  count - reads as "Not recorded". The property page's "Voucher size accepted"
+  row and the New/Edit forms keep reading the stored field itself: they show and
+  edit what was recorded.
 
 ### 3.2 Address (URL) contract
 
@@ -161,9 +173,10 @@ On `/listings` and `/listings/deleted`:
 - Phone width: the table must not overflow sideways at 360px; authority names
   wrap.
 - Under a voucher filter that leaves out Not recorded, a line under the table
-  says how many available or coming-soon properties have no voucher size
-  recorded and are not counted (amended after review round 1: a size filter
-  must not shrink the counts silently).
+  says how many available or coming-soon properties have no voucher size or
+  bedroom count recorded and are not counted (amended after review round 1: a
+  size filter must not shrink the counts silently; copy amended 2026-10-04 with
+  the bedrooms fallback).
 - Count links are underlined (not color alone); zeros use the muted text tone;
   the All row is bold with a heavier rule, not a tinted fill (contrast).
 

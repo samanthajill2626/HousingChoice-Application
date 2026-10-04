@@ -1,6 +1,6 @@
 ---
 id: unit-voucher-size-readers-diverge
-title: A property's voucher size is read two ways - beds on Matching and the flyer, voucher_size_accepted (one number or a list) on the Properties list
+title: Matching's pre-fill and the flyer read a property's voucher size from beds instead of acceptedVoucherSizes
 type: debt
 severity: med
 status: open
@@ -9,33 +9,41 @@ created: 2026-10-01
 refs: dashboard/src/routes/listing/listingFormat.ts, dashboard/src/routes/listings/unitListFacets.ts, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:219-227, dashboard/src/routes/broadcasts/AudienceFilters.tsx, app/src/lib/unitFields.ts:294-306, dashboard/src/routes/listing/ListingDetail.tsx:752-754, dashboard/src/routes/listing/ListingEditForm.tsx:30-32, dashboard/src/routes/listing/ListingEditForm.tsx:68
 ---
 
-**Problem.** "Which voucher sizes does this property take?" now has two answers in the app.
+**Update (2026-10-04).** The rule is now settled and lives in ONE place: a property's voucher
+size is its recorded `voucher_size_accepted` when there is one (one number, or a list after
+#12), otherwise its bedroom count, and "Not recorded" only when both are missing (Cameron,
+reversing the 2026-10-01 no-fallback call after seeing every size chip empty the Properties
+list - the import never writes the field). The reader is `acceptedVoucherSizes(unit)` in
+`dashboard/src/routes/listing/listingFormat.ts`; the Properties list's filter and summary use
+it. This issue now tracks the readers that still derive a property's voucher size on their own.
 
-- **The Properties list's voucher filter** (tracker #1, `feat/properties-available-view`) reads
-  `voucher_size_accepted` through `voucherSizesOf` (`listingFormat.ts`): ONE number today, or a
-  LIST once tracker #12 makes the field a multi-select (the `full` demo seed already stores
-  `[2, 3]`). It NEVER falls back to `beds` - Cameron's decision (2026-10-01), because a 3-bed
-  property may take a 2-BR voucher.
+**Problem.** Two surfaces still answer "which voucher sizes does this property take?" from
+`beds`, ignoring a recorded voucher size:
+
 - **The Matching composer** pre-fills the audience's voucher size from the property's `beds`
-  (`BroadcastComposer.tsx:219-227`) and labels it as matching the property (`AudienceFilters.tsx`).
+  (`BroadcastComposer.tsx:219-227`) and labels it as matching the property
+  (`AudienceFilters.tsx`). Its filter holds ONE size, so a property recording a list needs a
+  rule for which size(s) to pre-fill.
 - **The public flyer** tells tenants it "Fits a N-bedroom voucher" from `beds`
-  (`unitFields.ts:294-306`, `voucher_size: beds`).
-- **The property page** shows "Voucher size accepted" only when the value is a NUMBER
-  (`ListingDetail.tsx:752-754`), so a stored list shows nothing.
-- **The edit form** reads a stored list as an empty field (`ListingEditForm.tsx:30-32,68`), and
-  saving a typed size there replaces the list with one number.
+  (`app/src/lib/unitFields.ts:294-306`, `voucher_size: beds`) - server code, so it needs the
+  server twin of `acceptedVoucherSizes` (in `unitFields.ts`, with the dashboard copy becoming
+  its hand mirror, as `authoritiesOf` does).
+
+Separately, for #12's multi-select: **the property page** shows "Voucher size accepted" only
+when the stored value is a NUMBER (`ListingDetail.tsx:752-754`), and **the edit form** reads a
+stored list as an empty field (`ListingEditForm.tsx:30-32,68`), so saving a typed size there
+replaces the list with one number. These two show and edit the RECORDED field, so they should
+keep reading it directly - but they must take the list shape.
 
 **Failure scenario.** A property with `beds: 3` and `voucher_size_accepted: 2` (the case the
 field exists for): the Properties list files it under 2-BR, but its "Send to tenants" composer
 pre-fills 3-BR voucher holders as "matching" the property, and the flyer tells them it fits a
-3-bedroom voucher.
+3-bedroom voucher. A property with only `beds` agrees everywhere.
 
 **Why filed, not fixed.** Found by the plan-blind reviewer of tracker #1 (code review r1, A3).
-Every surface above is outside #1's scope: #12 owns the voucher-size write path and its display
-(the multi-select), and #6 owns the Matching audience rules. The no-beds rule is settled for the
-Properties filter only.
+The surfaces above belong to #6 (Matching audience rules) and #12 (the voucher-size field and
+its display).
 
-**Suggested fix.** With #12: make `voucherSizesOf` the one reader for "voucher sizes this
-property takes" - the composer pre-fill and its tag, the property page, and the edit form (a
-multi-select that round-trips a list) - and decide what the flyer's "Fits a N-bedroom voucher"
-line should say when the accepted sizes differ from the bedroom count.
+**Suggested fix.** #6: pre-fill and tag from `acceptedVoucherSizes` (decide the list case).
+Flyer: add the server twin and decide what "Fits a N-bedroom voucher" says when the accepted
+sizes differ from the bedrooms. #12: the property page and edit form take the list shape.

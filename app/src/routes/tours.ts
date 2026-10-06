@@ -5,6 +5,7 @@
 //   POST  /api/tours  { tenantId, unitId, scheduledAt?, tourType } → 201 { tour }
 //   GET   /api/tours/:tourId                                         → { tour } | 404
 //   GET   /api/tours/:tourId/activity?limit=&before=       -> { events } | 404
+//   GET   /api/tours/list?when=&from=&to=&status=&type=&sort=&limit=&cursor= -> { tours, contacts, units, nextCursor }
 //   GET   /api/tours?tenantId=&unitId=&from=&to=&status=             → { tours }
 //   PATCH /api/tours/:tourId  { scheduledAt?, status?, outcome?, moveForward? }
 //                                                                    → { tour } | 404
@@ -61,6 +62,16 @@ import {
   type TourType,
 } from '../lib/toursModel.js';
 import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
+import {
+  decodeTourListCursor,
+  encodeTourListCursor,
+  locateTourListCursor,
+  parseTourListQuery,
+  planTourListPhases,
+  tourListFingerprint,
+  type TourListPhase,
+} from '../lib/tourListQuery.js';
+import { listTourPage } from '../services/tourListPage.js';
 import { armTourReminders, readQuietHoursWindow } from '../jobs/tourReminders.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
@@ -201,6 +212,24 @@ function parseActivityLimit(raw: unknown): number | undefined {
   return limit;
 }
 
+/** The All tab's slim row (spec 5.2) - never the roster, the ladder pointer or
+ *  claim timestamps. */
+function toTourListRow(t: TourItem): Record<string, unknown> {
+  const row: Record<string, unknown> = {
+    tourId: t.tourId,
+    tenantId: t.tenantId,
+    unitId: t.unitId,
+    tourType: t.tourType,
+    status: t.status,
+    createdAt: t.createdAt,
+    updatedAt: t.updatedAt,
+  };
+  for (const key of ['scheduledAt', 'outcome', 'convertible', 'convertedPlacementId', 'autoClosedAt'] as const) {
+    if (t[key] !== undefined) row[key] = t[key];
+  }
+  return row;
+}
+
 export interface ToursRouterDeps {
   config?: AppConfig;
   logger?: Logger;
@@ -222,8 +251,10 @@ export interface ToursRouterDeps {
   pendingRosterActionsRepo?: PendingRosterActionsRepo;
   events?: EventBus;
   /**
-   * Injected clock for arm/re-arm dueAt computation — defaults to wall clock.
-   * Tests inject this to assert exact dueAt values; production omits it.
+   * Injected clock - defaults to the wall clock. It times arm/re-arm dueAt
+   * computation, and it pins the All tab's Upcoming / Past instant on a list's
+   * first page (GET /list; later pages reuse the instant their cursor carries).
+   * Tests inject this to assert exact values; production omits it.
    */
   now?: () => string;
 }
@@ -400,6 +431,101 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     }
 
     res.json({ tours: tourList });
+  });
+
+  // GET /api/tours/list - the Tours page's All tab (spec
+  // docs/superpowers/specs/2026-10-06-tour-list-design.md section 5): ONE
+  // server-filtered page plus the names its rows need. Registered BEFORE
+  // '/:tourId' so 'list' never reaches the tour lookup.
+  router.get('/list', async (req, res) => {
+    const parsed = parseTourListQuery(req.query as Record<string, unknown>);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    const { filters, limit, cursor: rawCursor } = parsed.value;
+    const fingerprint = tourListFingerprint(filters);
+    // Canonical ISO: it goes in the cursor, and decodeTourListCursor accepts
+    // only a toISOString() form (an injected clock need not produce one).
+    let pinnedNow = new Date(getNow()).toISOString();
+    let start: { phaseIndex: number; startKey?: Record<string, string> } | undefined;
+    let phases: TourListPhase[];
+    if (rawCursor !== undefined) {
+      const cursor = decodeTourListCursor(rawCursor);
+      if (cursor === undefined) {
+        res.status(400).json({ error: 'invalid cursor' });
+        return;
+      }
+      if (cursor.f !== fingerprint) {
+        res.status(400).json({ error: 'cursor_mismatch' });
+        return;
+      }
+      pinnedNow = cursor.n;
+      phases = planTourListPhases(filters, pinnedNow);
+      start = locateTourListCursor(cursor, phases);
+      if (start === undefined) {
+        res.status(400).json({ error: 'invalid cursor' });
+        return;
+      }
+    } else {
+      phases = planTourListPhases(filters, pinnedNow);
+    }
+
+    let page;
+    try {
+      page = await listTourPage((phase, opts) => tours.queryListPhase(phase, opts), {
+        phases,
+        filters,
+        fingerprint,
+        pinnedNow,
+        limit,
+        ...(start !== undefined && { start }),
+      });
+    } catch (err) {
+      // A start key DynamoDB refuses is the client's cursor; any other
+      // ValidationException is a defect in the query (500 via the app's
+      // error handler).
+      if (rawCursor !== undefined && err instanceof Error && err.name === 'ValidationException') {
+        res.status(400).json({ error: 'invalid cursor' });
+        return;
+      }
+      throw err;
+    }
+
+    const tenantIds = [...new Set(page.items.map((t) => t.tenantId))];
+    const unitIds = [...new Set(page.items.map((t) => t.unitId))];
+    const [contactNames, unitNames] = await Promise.all([
+      contacts.getDisplaysByIds(tenantIds),
+      units.getDisplaysByIds(unitIds),
+    ]);
+    const contactsOut: Record<string, Record<string, string>> = {};
+    for (const [id, c] of contactNames) {
+      const entry: Record<string, string> = {};
+      if (typeof c.firstName === 'string') entry['firstName'] = c.firstName;
+      if (typeof c.lastName === 'string') entry['lastName'] = c.lastName;
+      if (typeof c.phone === 'string') entry['phone'] = c.phone;
+      contactsOut[id] = entry;
+    }
+    const unitsOut: Record<string, Record<string, unknown>> = {};
+    for (const [id, u] of unitNames) unitsOut[id] = u.address !== undefined ? { address: u.address } : {};
+
+    // Counts only - never an id, a name or an address.
+    log.info(
+      {
+        returned: page.items.length,
+        evaluated: page.evaluated,
+        calls: page.calls,
+        phases: page.phasesTouched,
+        when: filters.when,
+      },
+      'tours list page',
+    );
+    res.json({
+      tours: page.items.map(toTourListRow),
+      contacts: contactsOut,
+      units: unitsOut,
+      nextCursor: page.nextCursor === null ? null : encodeTourListCursor(page.nextCursor),
+    });
   });
 
   // GET /api/tours/:tourId — one tour. 404 when not found.

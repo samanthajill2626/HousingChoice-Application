@@ -10,9 +10,9 @@
 - Branch `feat/clean-org-names`, worktree `W:\tmp\clean-org-names`, cut from
   main @d839494a. Mission records:
   `docs/superpowers/reviews/2026-10-06-clean-org-names/`.
-- Status: PLAN (planner) - plan review round 1 adjudicated and applied
-  (`docs/superpowers/reviews/2026-10-06-clean-org-names/plan-review/adjudications.md`);
-  round 2 pending.
+- Status: PLAN (planner) - plan review CLOSED after 3 rounds (round 3
+  precision only), every round adjudicated and applied
+  (`docs/superpowers/reviews/2026-10-06-clean-org-names/plan-review/adjudications.md`).
 
 ## 0. Ground rules for this plan
 
@@ -3619,6 +3619,7 @@ describe('OrgRecordsService.notOnList (spec D10)', () => {
         contact('t-7', { housingAuthority: 'Nowhere Housing' }),
         contact('t-8', { agency: ATLANTA.name }),
         contact('t-9', { agency: '' }), // a cleared agency is not a value
+        contact('t-10', { housingAuthority: '  ' }), // whitespace only (pre-trim data): blank, not a value
         contact('p-1', { type: 'partner', status: 'active', agency: 'Nobody Org' }),
       ],
       units: [
@@ -3928,8 +3929,11 @@ export function createOrgRecordsService(deps: OrgRecordsDeps = {}): OrgRecordsSe
         const deleted = isContactDeleted(c);
         for (const field of ['housingAuthority', 'agency'] as const) {
           const value = c[field];
-          // '' is a cleared agency, not a value (spec D5).
-          if (typeof value !== 'string' || value === '') continue;
+          // '' is a cleared agency, not a value (spec D5) - and so is text that
+          // is only whitespace (pre-2026-07-14 data, before trimJsonBody): D5
+          // treats it as a clear, the cleanup skips it, and no request could
+          // name it (the body trim turns it into '').
+          if (typeof value !== 'string' || value.trim() === '') continue;
           if (isOnListFor(entries, value, KINDS_FOR_FIELD[field])) continue;
           tally(field, value, deleted);
         }
@@ -3937,7 +3941,7 @@ export function createOrgRecordsService(deps: OrgRecordsDeps = {}): OrgRecordsSe
       for await (const u of everyUnit()) {
         const deleted = isUnitDeleted(u);
         const members = new Set(
-          (storedAuthorities(u) ?? []).filter((m): m is string => typeof m === 'string' && m !== ''),
+          (storedAuthorities(u) ?? []).filter((m): m is string => typeof m === 'string' && m.trim() !== ''),
         );
         for (const m of members) {
           if (isOnListFor(entries, m, KINDS_FOR_FIELD.accepted_authorities)) continue;
@@ -30242,9 +30246,11 @@ touched must carry it after the merge - typecheck finds them); list types and
 `endpoints.ts` (and their tests `endpoints.test.ts` / `types.test.ts`); a
 route in `dashboard/src/App.tsx`; api-mock edits in
 `dashboard/src/routes/contact/files.test.tsx` and
-`dashboard/src/routes/listing/ListingDetail.test.tsx`; the harness fake in
-`app/test/helpers/twilioWebhookHarness.ts` (its `getDisplaysByIds` beside
-this branch's Task 6.3 `getById(unitId, opts?)` change); one appended
+`dashboard/src/routes/listing/ListingDetail.test.tsx`; the harness units fake
+in `app/test/helpers/twilioWebhookHarness.ts` and the END of the `UnitsRepo`
+interface and implementation in `app/src/repos/unitsRepo.ts` (its
+`getDisplaysByIds` beside this branch's Task 3.3 `rewriteAcceptedAuthorities` -
+the likely textual conflict; Task 6.3 changes no fake); one appended
 `documentation/GLOSSARY.md` entry; `e2e/README.md` and
 `e2e/performance/routes.ts` (+ `routes.test.ts`) edits for `/tours/past`.
 BOTH branches bump the profiler-route COUNT pins in

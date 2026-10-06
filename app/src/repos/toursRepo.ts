@@ -200,10 +200,13 @@ export interface ToursRepo {
   /** All tours for a unit via the byUnit GSI. */
   listByUnit(unitId: string): Promise<TourItem[]>;
   /**
-   * Tours whose scheduledAt is in [from, to] (inclusive ISO 8601 range) via
-   * the byScheduledAt GSI. Powers "tours today", reminder sweeps, no-show checks.
+   * Every tour whose scheduledAt falls in [from, to] (inclusive), via the
+   * byScheduledAt GSI - EVERY page (queryAll), so a window larger than one
+   * 1 MB Query page is never silently truncated (it used to drop the newest
+   * tours first - docs/issues/tours-scheduled-range-query-unpaginated.md).
+   * `opts.pageLimit` sets the Query's Limit - for tests that force paging.
    */
-  listByScheduledRange(from: string, to: string): Promise<TourItem[]>;
+  listByScheduledRange(from: string, to: string, opts?: { pageLimit?: number }): Promise<TourItem[]>;
   /**
    * All tours with the given status via the byStatus GSI (hash=status,
    * range=createdAt). Returns all pages concatenated (no cursor — dashboard
@@ -396,23 +399,15 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
       return queryGsi('byUnit', 'unitId', unitId);
     },
 
-    async listByScheduledRange(from, to) {
-      const input: QueryCommandInput = {
+    async listByScheduledRange(from, to, opts) {
+      return queryAll<TourItem>(doc, {
         TableName: table,
         IndexName: 'byScheduledAt',
         KeyConditionExpression: '#sp = :sp AND #sat BETWEEN :from AND :to',
-        ExpressionAttributeNames: {
-          '#sp': '_schedPartition',
-          '#sat': 'scheduledAt',
-        },
-        ExpressionAttributeValues: {
-          ':sp': 'tours',
-          ':from': from,
-          ':to': to,
-        },
-      };
-      const { Items } = await doc.send(new QueryCommand(input));
-      return (Items ?? []) as TourItem[];
+        ExpressionAttributeNames: { '#sp': '_schedPartition', '#sat': 'scheduledAt' },
+        ExpressionAttributeValues: { ':sp': 'tours', ':from': from, ':to': to },
+        ...(opts?.pageLimit !== undefined && { Limit: opts.pageLimit }),
+      });
     },
 
     async listByStatus(status) {

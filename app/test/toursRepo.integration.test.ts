@@ -8,7 +8,7 @@
 // Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { GetCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -225,6 +225,75 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     const ids = result.map((t) => t.tourId);
     expect(ids).toContain(atFrom.tourId);
     expect(ids).toContain(atTo.tourId);
+  });
+
+  // -------------------------------------------------------------------------
+  // listByScheduledRange walks EVERY page (tour list S1, spec section 7). It
+  // used to send ONE Query and drop LastEvaluatedKey, so a window larger than
+  // one 1 MB page silently lost its newest tours. `pageLimit: 1` forces one
+  // row per page, which makes a single-page read visible as one Query call.
+  //
+  // The window is MARCH 2027 because this file's one table is shared by every
+  // case: the others write 2026 dates (and one reads all of 2026), and eight
+  // rows keep the walk far under queryAll's 100-page cap.
+  // -------------------------------------------------------------------------
+
+  describe('listByScheduledRange pages to completion (March 2027 window)', () => {
+    const from = '2027-03-01T00:00:00.000Z';
+    const to = '2027-03-10T23:59:59.999Z';
+    const insideIds: string[] = [];
+
+    beforeAll(async () => {
+      // Seven inside the window, one a day (distinct instants - no ties), and
+      // one outside it.
+      for (let day = 2; day <= 8; day += 1) {
+        const tour = await tours.create({
+          tenantId: `contact-paged-${day}`,
+          unitId: `unit-paged-${day}`,
+          scheduledAt: `2027-03-0${day}T10:00:00.000Z`,
+          tourType: 'self_guided',
+          status: 'scheduled',
+        });
+        insideIds.push(tour.tourId);
+      }
+      await tours.create({
+        tenantId: 'contact-paged-outside',
+        unitId: 'unit-paged-outside',
+        scheduledAt: '2027-03-20T10:00:00.000Z',
+        tourType: 'self_guided',
+        status: 'scheduled',
+      });
+    });
+
+    it('pageLimit 1 still returns the whole window, one Query per page', async () => {
+      // The file's spying-doc idiom: record, then forward to the shared doc.
+      // queryAll sends every page through the repo's doc, so this sees them all.
+      let rangeQueries = 0;
+      const spyingDoc = {
+        send: async (command: unknown) => {
+          if (command instanceof QueryCommand && command.input.IndexName === 'byScheduledAt') {
+            rangeQueries += 1;
+          }
+          return (doc as DynamoDBDocumentClient).send(command as never);
+        },
+      } as unknown as DynamoDBDocumentClient;
+      const spyingRepo = createToursRepo({ doc: spyingDoc, env: testEnv, logger });
+
+      const result = await spyingRepo.listByScheduledRange(from, to, { pageLimit: 1 });
+
+      expect(new Set(result.map((t) => t.tourId))).toEqual(new Set(insideIds));
+      expect(result).toHaveLength(insideIds.length);
+      // One row per page: seven rows take at least seven Queries. A read that
+      // ignores the page limit (or stops after one page) sends exactly one.
+      expect(rangeQueries).toBeGreaterThanOrEqual(7);
+    });
+
+    it('(PIN) without opts the same window comes back whole', async () => {
+      const result = await tours.listByScheduledRange(from, to);
+
+      expect(new Set(result.map((t) => t.tourId))).toEqual(new Set(insideIds));
+      expect(result).toHaveLength(insideIds.length);
+    });
   });
 
   it('patch updates fields and bumps updatedAt without touching other fields', async () => {

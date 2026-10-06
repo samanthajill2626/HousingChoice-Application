@@ -88,3 +88,35 @@ Counts: 7 findings, 7 accepted, 0 rejected.
 Decisions changed this round: yes (R3-4 only) - round 4, the last allowed
 under the 4-round cap, follows. If round 4 still changes a decision, the
 design goes to Cameron as a decision with the open findings.
+
+## Round 4 (spec revision 4 @ccf74ebd; reviewer B continued) - TERMINAL
+
+Reviewer report: `spec-r4-reviewer-b.md` (7 findings, all LOW, all labelled
+precision by the reviewer; #5 "decision if triage is to be protected").
+
+| # | Finding | Ruling | Resulting change | Decision changed |
+|---|---|---|---|---|
+| R4-1 | `lastRewrite` cannot re-run a Split's agency half | ACCEPT | `lastRewrite` stores `agencyName` and the target `field` | no |
+| R4-2 | Split only for contact housing authority values | ACCEPT | stated: compound property-list members and compound agency values are settled with Use / Clear or record by record | no |
+| R4-3 | Names 120 chars, spellings 100: long names can never be merged | ACCEPT | spelling cap raised to 120 (the name limit) | no |
+| R4-4 | Compound text refused as a spelling but accepted as a name | ACCEPT | compound text refused as a new name too (add, Add as new, rename), pointing to Split | no |
+| R4-5 | (B) Unstamped triage is still reverted by a re-import | ACCEPT as statement; protection NOT added | D21 states triage of `unknown` is not protected (pre-existing importer behavior; prod re-import unknown); filed as a section-12 follow-up. Protecting triage would stop the importer filling fields for every triaged contact (the round-3 concern) - not changed here | no |
+| R4-6 | D9 cites D20 for the importer type rule | ACCEPT | now D21 | no |
+| R4-7 | Deleted-only users show zero uses yet block delete | ACCEPT | rows show "+N deleted"; the 409 says how many deleted records hold the name | no |
+
+Counts: 7 findings, 7 accepted (R4-5 as a statement), 0 rejected.
+Decisions changed this round: NONE. Round 4 is the terminal round; the
+review is closed at spec revision 5.
+
+## Totals
+
+| Round | Reviewer(s) | Findings | Accepted | Rejected | Decisions changed |
+|---|---|---|---|---|---|
+| 1 | A + B | 38 | 37 | 1 (T20) | yes |
+| 2 | B | 16 | 16 | 0 | yes (3) |
+| 3 | B | 7 | 7 | 0 | yes (1) |
+| 4 | B | 7 | 7 | 0 | no - terminal |
+
+The only rejection: T20 (the tenant's free-text `caseworker` attribute) -
+out of scope; written only by the lean seed and display-only on tour and
+placement pages; added to the non-goals. The reviewer conceded it in round 2.

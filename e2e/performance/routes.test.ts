@@ -380,6 +380,8 @@ describe('route registry completeness', () => {
       '/quick-reply/:callId',
       // A new list view, not yet a profiler surface (issue perf-pages-tours-past-surface).
       '/tours/past',
+      // The All tours view, not yet a profiler surface either (the same issue).
+      '/tours/all',
       '/settings',
       '*',
     ]);

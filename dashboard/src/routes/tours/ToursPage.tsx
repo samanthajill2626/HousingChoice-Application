@@ -1,6 +1,15 @@
-// ToursPage - the /tours list page, in three URL-backed VIEWS switched by the
-// Active | Past | Closed tabs (mirrors the properties list's Active/Deleted tabs;
-// Cameron 2026-07-15 - the URL is the source of truth):
+// ToursPage - the /tours list page, in four URL-backed VIEWS switched by the
+// All | Active | Past | Closed tabs (mirrors the properties list's Active/Deleted
+// tabs; Cameron 2026-07-15 - the URL is the source of truth):
+//
+//   All (/tours/all) - every tour, upcoming and past, filtered and paged by
+//                 the server (GET /api/tours/list - spec
+//                 docs/superpowers/specs/2026-10-06-tour-list-design.md).
+//                 AllToursView owns its reads, so nothing below loads there
+//                 (spec 4.2). While on All, an unmodified primary click on the
+//                 All tab is swallowed - no navigation (P15); its link carries
+//                 the current filters, so a modified click opens the same
+//                 list in a new tab.
 //
 //   Active (/tours) — two sections:
 //     Upcoming  — tours in the next 30 days (from=start-of-today, to=+30d),
@@ -36,6 +45,12 @@
 // Schedule-a-tour dialog the tenant file opens, with both sides free typeaheads;
 // a 201 navigates to the new tour (mirrors the properties "+ New property").
 //
+// ToursPage keeps the header, the intro, the tab strip and that dialog. Its body
+// is AllToursView on All, else ONE TourListsView element holding the Active,
+// Past and Closed reads and bodies: switching among those three keeps it
+// mounted, so the contact and unit walks below do not refetch; leaving for All
+// unmounts it, and coming back mounts it fresh (its walks run again).
+//
 // Each row links to /tours/:tourId (the TourDetail page). Tenant names and unit
 // labels are resolved from the full contacts + units lists (same cross-reference
 // pattern used by PlacementsBoard / TenantFile) — INCLUDING soft-deleted records:
@@ -43,7 +58,7 @@
 // removed from inventory), and a live-only map rendered raw uuids for those rows.
 // Staff-facing vocabulary: "property" for the unit (per GLOSSARY.md).
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   TOUR_OUTCOME_LABELS,
   TOUR_TYPE_LABELS,
@@ -57,6 +72,7 @@ import {
 } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
+import { AllToursView } from './AllToursView.js';
 import { ScheduleTourForm } from './ScheduleTourForm.js';
 import { pastState, useClosedTours, usePastTours, useTours } from './useTours.js';
 import { formatDate, formatTime, whenLabel } from './tourTime.js';
@@ -580,34 +596,50 @@ function PastToursView({ contacts, units }: PastToursViewProps): React.JSX.Eleme
 // Page
 // ---------------------------------------------------------------------------
 
-export type ToursView = 'active' | 'past' | 'closed';
+export type ToursView = 'all' | 'active' | 'past' | 'closed';
 
 export interface ToursPageProps {
-  /** Which URL-backed view: the default active list, the Past tab (spec 4.1),
-   *  or the Closed tab. */
+  /** Which URL-backed view: the All tab (every tour, filtered - spec
+   *  docs/superpowers/specs/2026-10-06-tour-list-design.md 4.1), the default
+   *  active list, the Past tab (spec 4.1), or the Closed tab. */
   view?: ToursView;
 }
 
-/** Active / Past / Closed view tabs. Links to the three routes so the URL is
- *  the source of truth (mirrors the properties list's Active/Deleted tabs). */
+/** All / Active / Past / Closed view tabs, All first. Links to the four routes
+ *  so the URL is the source of truth (mirrors the properties list's
+ *  Active/Deleted tabs). `/tours` stays Active. */
 const VIEW_TABS: { view: ToursView; label: string; to: string }[] = [
+  { view: 'all', label: 'All', to: '/tours/all' },
   { view: 'active', label: 'Active', to: '/tours' },
   { view: 'past', label: 'Past', to: '/tours/past' },
   { view: 'closed', label: 'Closed', to: '/tours/closed' },
 ];
 
 const PAGE_TITLE: Record<ToursView, string> = {
+  all: 'All tours',
   active: 'Tours',
   past: 'Past tours',
   closed: 'Closed tours',
 };
 
 const PAGE_INTRO: Record<ToursView, string> = {
+  all: 'Every tour, upcoming and past. Filter by date, status or type, or search by tenant or property.',
   active: 'Upcoming scheduled tours and unbooked tour requests.',
   past: 'Last 90 days: tours that were never marked toured, toured tours still waiting on an outcome or a placement, and no-shows. Tours with no outcome close on their own two weeks after their date or their last update.',
   closed:
     'Tours that ended - converted into a placement, closed as not a fit, closed automatically with no outcome, or canceled.',
 };
+
+/** P15 (spec 4.1): on the All view, an unmodified primary click on the All tab
+ *  is swallowed - no navigation, so the list, its filters and the history
+ *  entry's state stay as they are. "Unmodified primary" is react-router's own
+ *  test for a click its Link navigates (button 0, no Meta, Alt, Ctrl or Shift;
+ *  the Link runs this handler first and skips a click whose default is
+ *  prevented). Any other click keeps the browser's default: open in a new tab
+ *  or window - and the link carries the current filters (D-5). */
+function stayOnAllTab(e: React.MouseEvent<HTMLAnchorElement>): void {
+  if (e.button === 0 && !e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey) e.preventDefault();
+}
 
 /** Router state the Past tab's links carry so the tour page's back arrow
  *  returns here (spec 4.6). */
@@ -618,22 +650,22 @@ const BACK_TO_PAST = { back: '/tours/past' } as const;
 type MarkResult = { ok: true } | { ok: false; message: MarkFailure };
 type MarkFailure = 'Could not check the tour' | 'Changed since the list loaded' | 'The update failed';
 
-export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Element {
-  const navigate = useNavigate();
+/** The Active, Past and Closed views' body (spec 4.2): their data hooks, the
+ *  loading / error derivation, the name maps and the three bodies, exactly as
+ *  ToursPage held them before the All tab. ToursPage renders ONE element of it
+ *  at one position for all three views, so switching among them keeps it
+ *  mounted and the contact and unit walks do not refetch. On All, AllToursView
+ *  takes its place - it unmounts, and the next named view mounts it fresh. */
+function TourListsView({ view }: { view: Exclude<ToursView, 'all'> }): React.JSX.Element {
   const closed = view === 'closed';
   const past = view === 'past';
   const { status: toursStatus, upcoming, needsBooking } = useTours();
   const { status: contactsStatus, contacts: contactsList } = useContacts('all');
   const { status: unitsStatus, units: unitsList } = useListings();
-  // Soft-deleted contacts/units still back rows (closed tours especially) — fetch
+  // Soft-deleted contacts/units still back rows (closed tours especially) - fetch
   // them too so those rows show real names instead of raw ids.
   const { status: deletedContactsStatus, contacts: deletedContactsList } = useContacts('deleted');
   const { status: deletedUnitsStatus, units: deletedUnitsList } = useListings(true);
-
-  // The "+ New tour" dialog (Active view only) - the SAME Schedule-a-tour form
-  // the tenant file opens, here with BOTH sides as free typeaheads (no locked
-  // tenant, no pre-committed unit). On create, jump to the new tour.
-  const [creating, setCreating] = useState(false);
 
   // Closed tours are fetched only when the Closed view is showing.
   const { status: closedStatus, closed: closedTours } = useClosedTours(closed);
@@ -698,30 +730,7 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
   }, [upcoming]);
 
   return (
-    <div className={styles.page}>
-      <div className={styles.header}>
-        <h1 className={styles.title}>{PAGE_TITLE[view]}</h1>
-        {view === 'active' ? (
-          <Button variant="primary" size="sm" type="button" onClick={() => setCreating(true)}>
-            + New tour
-          </Button>
-        ) : null}
-      </div>
-      <p className={styles.sub}>{PAGE_INTRO[view]}</p>
-
-      <nav className={styles.tabs} aria-label="Tours view">
-        {VIEW_TABS.map((t) => (
-          <Link
-            key={t.view}
-            to={t.to}
-            className={`${styles.tab} ${t.view === view ? styles.tabActive : ''}`}
-            {...(t.view === view && { 'aria-current': 'page' })}
-          >
-            {t.label}
-          </Link>
-        ))}
-      </nav>
-
+    <>
       {loading ? <Spinner center /> : null}
 
       {!loading && error ? (
@@ -812,6 +821,55 @@ export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Elemen
           )}
         </section>
       ) : null}
+    </>
+  );
+}
+
+export function ToursPage({ view = 'active' }: ToursPageProps): React.JSX.Element {
+  const navigate = useNavigate();
+  // The committed query string - the current All tab links to it (D-5).
+  const { search } = useLocation();
+
+  // The "+ New tour" dialog (Active view only) - the SAME Schedule-a-tour form
+  // the tenant file opens, here with BOTH sides as free typeaheads (no locked
+  // tenant, no pre-committed unit). On create, jump to the new tour.
+  const [creating, setCreating] = useState(false);
+
+  return (
+    <div className={styles.page}>
+      <div className={styles.header}>
+        <h1 className={styles.title}>{PAGE_TITLE[view]}</h1>
+        {view === 'active' ? (
+          <Button variant="primary" size="sm" type="button" onClick={() => setCreating(true)}>
+            + New tour
+          </Button>
+        ) : null}
+      </div>
+      <p className={styles.sub}>{PAGE_INTRO[view]}</p>
+
+      <nav className={styles.tabs} aria-label="Tours view">
+        {VIEW_TABS.map((t) => {
+          // The CURRENT All tab carries the committed filters (ruling D-5), so a
+          // Ctrl/Cmd/middle-click opens the same filtered list in a new tab.
+          const allHere = t.view === 'all' && view === 'all';
+          return (
+            <Link
+              key={t.view}
+              to={allHere ? { pathname: t.to, search } : t.to}
+              className={`${styles.tab} ${t.view === view ? styles.tabActive : ''}`}
+              {...(t.view === view && { 'aria-current': 'page' })}
+              {...(allHere && { onClick: stayOnAllTab })}
+            >
+              {t.label}
+            </Link>
+          );
+        })}
+      </nav>
+
+      {/* One element at one position for Active, Past and Closed (spec 4.2):
+          switching among them keeps TourListsView mounted; All swaps in its
+          own view, which loads nothing of theirs. */}
+      {view === 'all' ? <AllToursView /> : <TourListsView view={view} />}
 
       {creating ? (
         <ScheduleTourForm

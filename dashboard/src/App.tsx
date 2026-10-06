@@ -234,12 +234,14 @@ function AuthedApp(): React.JSX.Element {
                 <Route key={to} path={to.slice(1)} element={<Placeholder title={label} />} />
               ))}
 
-            {/* Tours list page at /tours (+ the Past view at /tours/past and the
-                Closed view at /tours/closed). The static paths rank above the
-                dynamic tours/:tourId segment below. */}
+            {/* Tours list page at /tours (+ the Past view at /tours/past, the
+                Closed view at /tours/closed and the All view at /tours/all).
+                The static paths rank above the dynamic tours/:tourId segment
+                below. */}
             <Route path="tours" element={<ToursPage />} />
             <Route path="tours/past" element={<ToursPage view="past" />} />
             <Route path="tours/closed" element={<ToursPage view="closed" />} />
+            <Route path="tours/all" element={<ToursPage view="all" />} />
 
             {/* Tour detail page — /tours/:tourId. The static paths above rank first. */}
             <Route path="tours/:tourId" element={<TourDetail />} />

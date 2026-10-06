@@ -174,3 +174,69 @@ Decision changed: YES (today.ts).
 
 Round 1 changed decisions: YES -> round 2 with reviewer A continued (15
 accepted vs 14; it receives reviewer B's report).
+
+## Round 2 (spec draft 2 @0775dbd4; reviewer A continued, with B's round-1 report)
+
+Report: `spec-r2-a.md` (7 findings, 2 concessions).
+
+### R2-1 [A-r2 1] The restore has no anchor once the user acted on the tour - ACCEPT
+Verified the surfaces cited (mark toured / no-show, reschedule, record outcome,
+cancel all change the field a filtered list keys on). The restore record now
+also keeps the opened row's 0-based POSITION; when the opened row has left the
+list, the view lands on the row now at that position - the next one to work
+on, which is exactly the follow-up loop P14 serves. Test added.
+Decision changed: YES.
+
+### R2-2 [A-r2 2] Restore trigger scope, no cap, D2/D3 wording, no test seam - ACCEPT (redesigned)
+Took the reviewer's suggested shape: the restore record lives in HISTORY STATE,
+not module memory - written into the list entry's own state by the stamped
+REPLACE that opening a row now always makes, and carried by the row link and
+the tour page's back arrow. So it is per history entry (Back/Forward-correct),
+an arrival without a record starts at page 1, and there is no module state to
+reset between tests. The restore is capped at 10 requests. D2 and D3 reworded
+(a fresh unsearched visit loads one page; a search is the one thing that loads a
+whole list on its own; Load more, Keep checking and a capped restore load
+further only on the user's own history).
+Decision changed: YES (mechanism).
+
+### R2-3 [A-r2 3] "No phantom Load more" is false for unfiltered phases - ACCEPT (peek)
+DynamoDB returns a LastEvaluatedKey whenever it stops at Limit. Unfiltered
+Queries now ask for the rows still needed PLUS ONE; the peek row proves more
+exist and is never sent, so an unfiltered final phase never leaves a phantom.
+The guarantee is narrowed to that case; filtered phases and a phase boundary
+whose successor is empty can still cost one empty page, which 4.5 absorbs.
+Decision changed: YES (small).
+
+### R2-4 [A-r2 4] Paging state machine gaps - ACCEPT
+One loader at a time (Load more, Keep checking, the walk, the restore); a search
+typed during a restore takes over its cursor; Keep checking is shown INSTEAD of
+Load more; a 400 on a cursor-bearing request restarts the list at page 1 ("The
+list was refreshed.") instead of offering a Retry that cannot succeed; P15
+suppresses only an unmodified primary click.
+Decision changed: YES (small).
+
+### R2-5 [A-r2 5] Cost statements; the requested partition over-reads - ACCEPT
+Cost wording corrected (the status set chooses phases and partitions; filters
+within a phase narrow only what is sent). The requested partition drops its
+not-exists filter (I1 + P10 make it a no-op; client de-duplication absorbs a
+violation), so with no type filter it is an unfiltered, peek-limited Query; the
+phase-D status filter is omitted when every dated status is pressed.
+Decision changed: YES (small).
+
+### R2-6 [A-r2 6] e2e steps still depend on page depth - ACCEPT
+Every e2e step now searches for the unique tenant name.
+Decision changed: NO (test precision).
+
+### R2-7 [A-r2 7] "Undated" on the All row vs "Not booked" on the tour page - ACCEPT
+Decided: the tour page's facts line keeps "Not booked" for a requested tour and
+reads "Undated" for any other undated tour (`TourDetail.tsx:312`), matching the
+All and Past rows; GLOSSARY records both words.
+Decision changed: YES (small, a tour-page copy change).
+
+### Contested - both rejections stand
+R1-2 (PATCH stamping) and R1-7 (PATCH no-show guard): conceded by the reviewer
+with evidence (`toursRepo.ts:355-364`, `airtableSource.ts:189-196`,
+`tours.ts:146`, `TourDetail.tsx:319`).
+
+Round 2 changed decisions: YES -> round 3 (reviewer A continued). Round 4 is the
+hard cap.

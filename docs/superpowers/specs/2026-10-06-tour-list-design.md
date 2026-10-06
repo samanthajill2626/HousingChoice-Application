@@ -1,8 +1,8 @@
 # Tours page: the All tab - every tour, filtered and paged by the server (Sam #18, final part)
 
-Status: DRAFT 2 (2026-10-06) - after design review round 1 (rulings:
+Status: DRAFT 3 (2026-10-06) - after design review rounds 1 and 2 (rulings:
 `docs/superpowers/reviews/2026-10-06-tour-list/design-review/adjudications.md`).
-For review round 2, then Cameron's spec gate.
+For review round 3, then Cameron's spec gate.
 Branch `feat/tour-list`, worktree `W:\tmp\tour-list`, cut from main @d839494a.
 Records: `docs/superpowers/reviews/2026-10-06-tour-list/`.
 
@@ -29,13 +29,14 @@ out, or a "needs placement" tour older than 90 days, is on none of them.
   Closed. Opening Tours (`/tours`) still lands on Active, with the Active tab
   selected. (All holds every tour; the other three are narrower subsets.)
 - D2. The All list is filtered and paged BY THE SERVER, built now ("we'll
-  probably need it in the future"). The first screen of an UNSEARCHED list never
-  loads every tour.
+  probably need it in the future"). A fresh, unsearched visit loads one page;
+  more loads only when the user asks (Load more / Keep checking) or returns to
+  a list they had already loaded further (P14, capped).
 - D3. Free-text search is FRONTEND-only: it filters the rows the server returned
   for the current filters. Because the list is paged, a search loads the REST of
   the current filtered list so it covers every match, not just the pages already
-  shown (section 6; explained to Cameron 2026-10-06). A search is the one way
-  the All tab loads a whole filtered list.
+  shown (section 6; explained to Cameron 2026-10-06). A search is the one thing
+  that loads a whole filtered list on its own.
 - D4. A filter shows the undated OPEN tours (Cameron: "still open, not canceled,
   closed, or marked toured, and that don't have a date"). As the dashboard can
   produce them, these are exactly the `requested` tours (3.4).
@@ -70,6 +71,9 @@ out, or a "needs placement" tour older than 90 days, is on none of them.
 - P7. The date column reads the tour's date and time for a dated tour, "Not
   booked" for a requested tour (the tour page's word, `TourDetail.tsx:312`), and
   "Undated" for any other undated tour (the Past tab's word, `ToursPage.tsx:206`).
+  The tour page aligns: its facts line keeps "Not booked" for a requested tour
+  and reads "Undated" for any other undated tour (today it says "Not booked" for
+  every undated tour), so the All row, the Past row and the tour page agree.
 - P8. No total count from the server (it cannot count without reading
   everything). The count line (4.5) says "Showing N tours" while more pages
   remain and "N tours" once the list is complete.
@@ -91,14 +95,20 @@ out, or a "needs placement" tour older than 90 days, is on none of them.
   of tours still needing a decision, `useTours.ts:159-212`), which are curated
   work lists. So a canceled tour next week shows under All > Upcoming with its
   Canceled badge, and a tour at 9 am today is Past on All after 9 am.
-- P14. Returning to the All list from a tour - the tour page's back arrow or the
-  browser's Back - reloads the list to the depth already loaded and brings the
-  opened row back into view (4.9). Every other arrival starts at page 1. (The
-  cheaper alternative, accepting the reset, is offered at the spec gate.)
+- P14. Opening a row records, in the list's own browser-history entry, how deep
+  the list was loaded and which row was opened (its id and position). Coming
+  back to that entry - the tour page's back arrow or the browser's Back -
+  reloads the list to that depth (capped) and puts the user back at that row,
+  or, when the row has left the list (the user marked, rescheduled, decided or
+  canceled it), at the row now in its position - the next one to work on
+  (4.9). A fresh arrival (the tab, the nav) starts at page 1. (The cheaper
+  alternative, accepting the reset, is offered at the spec gate.)
 - P15. Re-clicking the All tab while on it does not navigate: it keeps the
   filters and any unsaved search. (#1 keeps filters on a re-click too,
   `ListingsList.tsx:321-324`; here the tab strip lives in the parent, which cannot
-  see the child's local state, so doing nothing is the faithful version.)
+  see the child's local state, so doing nothing is the faithful version.) Only an
+  unmodified primary click is suppressed; Ctrl/Cmd/Shift-click and middle-click
+  keep the browser's open-in-new-tab behavior.
 
 ## 3. Current state (verified at main @d839494a)
 
@@ -233,8 +243,9 @@ after the range read (`today.ts:551`; message "results truncated",
 - Title "All tours". Intro: "Every tour, upcoming and past. Filter by date,
   status or type, or search by tenant or property." No "+ New tour" button
   (it stays on Active).
-- P15: while on All, the All tab's click is prevented (no navigation). The other
-  tabs keep their bare links, so switching views always starts clean.
+- P15: while on All, an unmodified primary click on the All tab is prevented
+  (no navigation); a modified or middle click keeps the browser's default. The
+  other tabs keep their bare links, so switching views always starts clean.
 
 ### 4.2 Page loading split
 
@@ -298,26 +309,33 @@ of 4.8.
 
 ### 4.5 Paging and the count line
 
-- A filter change aborts any in-flight request and loads the first page
-  (`limit=50`).
+- ONE LOADER AT A TIME. Four things advance the list's cursor: Load more, Keep
+  checking, the search walk (6) and the return restore (4.9). Exactly one runs
+  at a time; while one runs, Load more and Keep checking are hidden. A filter
+  change aborts whichever is running and loads the first page (`limit=50`).
+  Typing a search while a restore runs aborts the restore and the walk
+  continues from the cursor it reached.
 - **Load more** appears while the last response carried a `nextCursor` and no
-  search walk is running; it appends the next page.
+  loader is running; it appends the next page.
 - De-duplication by `tourId` on append: the LATER copy's data replaces the
   earlier row in place (a tour rescheduled between two pages can come back).
 - Empty pages: a page that comes back EMPTY with a cursor (a sparse filter met
   the server's read budget, 5.4) is followed automatically, up to 10 in a row.
   While following, the count line reads "Checking more tours...". If the tenth
   is still empty the list stops and shows, below any rows, "No more matches in
-  the tours checked so far." with a **Keep checking** button (the same request
-  as Load more).
+  the tours checked so far." with a **Keep checking** button - shown INSTEAD of
+  Load more (the same request), never beside it.
 - An empty page with `nextCursor: null` simply completes the list.
 - Count line (`role="status"`): "Showing N tours" (more remain), "N tours"
   (complete), "Checking more tours..." (following), and during a search the
   copy of section 6.
 - States: a first-page failure shows "We couldn't load tours. Please try
   again." with a Retry button; a Load more failure keeps the rows and shows the
-  same message beside a Retry. A complete empty list shows "No tours match these
-  filters." (plus Clear filters when filters are set).
+  same message beside a Retry. A 400 on a request that carried a cursor
+  (`cursor_mismatch` / `invalid cursor` - say a tab left open across a deploy)
+  is never retried with that cursor: the list restarts at page 1 and the count
+  line says "The list was refreshed." A complete empty list shows "No tours
+  match these filters." (plus Clear filters when filters are set).
 
 ### 4.6 Search
 
@@ -331,33 +349,46 @@ Date range; `sort` written only when the user picked one (P3). The state model
 is #1's (3.5), in a child component that mounts only on the All view: filters
 live in local state; control changes REPLACE the URL with a stamped write; the
 URL is adopted on mount, on POP and on any unstamped navigation; writes are
-skipped while a navigation is pending; the search text is written on blur and
-on row open, never per keystroke. (P15 replaces #1's current-tab link.)
+skipped while a navigation is pending; the search text is written on blur, and
+opening a row always writes (its history state also carries the restore record,
+4.9) - never per keystroke. (P15 replaces #1's current-tab link.)
 
 ### 4.8 The back arrow
 
-- Each row's link carries router state `{ back }`, built AT CLICK TIME from the
-  view's LOCAL selection - filters and search text, serialized exactly as 4.7
-  writes the URL - never from `location` (a search typed but not yet saved
-  would be dropped, and the back arrow and the browser's Back would disagree).
+- Each row's link carries router state `{ back, restore }`, built AT CLICK TIME:
+  `back` from the view's LOCAL selection - filters and search text, serialized
+  exactly as 4.7 writes the URL - never from `location` (a search typed but not
+  yet saved would be dropped, and the back arrow and the browser's Back would
+  disagree); `restore` per 4.9.
 - `TourDetail` additionally accepts a `state.back` whose pathname is exactly
   `/tours/all`, with any query string, and returns there ("Back to tours"). Its
-  back link to that target also carries `{ returnToList: true }` (4.9). Every
-  other rule in `TourDetail.tsx:113-124` is unchanged.
+  back link to that target also carries the row's `restore` record (4.9)
+  unchanged. Every other rule in `TourDetail.tsx:113-124` is unchanged.
 
 ### 4.9 Returning from a tour (P14)
 
-- A module-level memory, one per browser tab (the Past tab's batch-store
-  idiom, `ToursPage.tsx:290-333`), keeps for the All view: the normalized filter
-  key (everything but the search text), how many rows were loaded, and the
-  `tourId` of the row last opened.
-- On mount, when the navigation is a POP or carries `returnToList`, and the
-  filter key matches the memory, the view loads pages (`limit=100`, fresh reads)
-  until it holds at least that many rows or the list ends, then scrolls the
-  opened row into view and moves focus to its link (when the row is still in
-  the list). Any other mount starts at page 1 and resets the memory.
-- With a search, the walk of section 6 loads the whole filtered list anyway; the
-  opened row is then brought into view the same way.
+- The restore record is `{ depth, openedTourId, openedIndex }`: how many rows
+  the list held, and the opened row's id and 0-based position, at the moment the
+  row was opened.
+- Where it lives - in history state, never module memory (so it is per history
+  entry, Back/Forward-correct, and needs no test reset seam):
+  - Opening a row makes the stamped REPLACE of 4.7 (the search save on row
+    open) ALWAYS happen, and its history state carries the stamp AND
+    `restore`. So the list's own history entry remembers where the user was.
+  - The row link's router state carries `{ back, restore }` (4.8), and the tour
+    page's back arrow hands `restore` back.
+- On mount (or on adoption of a POP) with a `restore` record - from the entry's
+  own state on a browser Back, or from the back arrow's state - the view loads
+  pages (`limit=100`, fresh reads, never a cache) until it holds at least
+  `depth` rows, the list ends, or 10 requests have run (the cap: past it, the
+  view keeps what it has). Then it scrolls to, and focuses the link of:
+  - the row with `openedTourId`, when it is still in the list; else
+  - the row now at `openedIndex` (the next one to work on), clamped to the last
+    row; else (an empty list) nothing.
+- With a search, the walk of section 6 loads the whole filtered list instead,
+  and the same anchor rule applies when it ends.
+- Any arrival without a `restore` record (the All tab, the nav, a typed URL, a
+  POP to an entry whose rows were never opened) starts at page 1.
 
 ### 4.10 Data hook
 
@@ -433,13 +464,19 @@ U_ORDER = [requested, toured, no_show, canceled, closed] - every status except
 | unscheduled | R: byStatus, `status = requested` (order by createdAt) | earliest first |
 
 - Phase D sorts with `ScanIndexForward` and applies a FilterExpression for the
-  status set (`status IN ...`, omitted when it is all six) and the type.
+  status set (`status IN ...`) and the type. The status filter is omitted when
+  the set holds every status that can carry a date (scheduled, toured, no_show,
+  canceled, closed - with or without requested), since it could exclude nothing.
 - Phase U walks byStatus for each U_ORDER status that is in the status set, in
-  U_ORDER, each by createdAt in the sort direction, with FilterExpression
-  `attribute_not_exists(scheduledAt)` (plus the type). The not-exists filter
-  keeps a dated tour from appearing twice. `requested` comes first because every
-  requested tour is undated: that partition wastes no reads, while the others
-  re-evaluate their dated tours to find the few undated ones.
+  U_ORDER, each by createdAt in the sort direction. For toured, no_show,
+  canceled and closed it applies FilterExpression
+  `attribute_not_exists(scheduledAt)` (plus the type): those partitions
+  re-evaluate their dated tours to find the few undated ones, and the filter
+  keeps a dated tour from appearing twice. For `requested` it applies no
+  not-exists filter (I1 and P10 make every requested row undated; the client's
+  de-duplication would absorb a violation anyway), so with no type filter that
+  partition is an unfiltered Query and wastes no reads - which is why it comes
+  first.
 - Phase R applies the type filter only; the status parameter is ignored.
 - Skips: phase D is skipped when the status set holds only `requested` (never
   dated); phase U is skipped when the status set holds no U_ORDER status (the
@@ -451,23 +488,32 @@ Named constants, injectable through the router's deps for tests:
 `QUERY_PAGE_LIMIT` = 200 (items one filtered Query evaluates) and
 `MAX_QUERY_CALLS` = 5 (Queries per HTTP request).
 
-- A Query with NO FilterExpression (phase D with every status and type, phase R
-  with every type) asks for exactly the rows still needed (`Limit = limit -
-  rows`), so an unfiltered page never over-reads. A filtered Query (phase U
-  always) asks for `QUERY_PAGE_LIMIT`.
+- A Query with NO FilterExpression (phase D with no status or type filter after
+  5.3's normalization, phase U's requested partition and phase R with no type
+  filter) asks for the rows still needed PLUS ONE (`Limit = limit - rows + 1`):
+  an unfiltered page never over-reads by more than that one PEEK row, which
+  proves whether more rows follow and is never sent. A filtered Query asks for
+  `QUERY_PAGE_LIMIT`.
 - The server keeps querying - D, then U's statuses in order - until it has
   `limit` rows, every phase is exhausted, or the call budget is spent.
 - Where it stops decides the cursor:
-  - Page full with matched rows still unreturned in the last batch: `k` = the
-    KEY OF THE LAST RETURNED ROW (byScheduledAt: tourId, `_schedPartition`,
-    scheduledAt; byStatus: tourId, status, createdAt) - rows after it were
-    evaluated but never sent.
+  - Page full and at least one more MATCHED row was already read (the peek row,
+    or matched rows left in a filtered batch): `k` = the KEY OF THE LAST
+    RETURNED ROW (byScheduledAt: tourId, `_schedPartition`, scheduledAt;
+    byStatus: tourId, status, createdAt) - rows after it were read but never
+    sent.
   - Last batch fully consumed and it carried a `LastEvaluatedKey`: `k` = that
     key (everything evaluated was sent or filtered out).
   - Last batch fully consumed with NO `LastEvaluatedKey` (its phase or status
     is exhausted): if another phase or U status remains, the cursor names it
-    with NO `k` ("start of"); otherwise `nextCursor: null`. So a page that ends
-    on the final row of the final phase never leaves a phantom Load more.
+    with NO `k` ("start of"); otherwise `nextCursor: null`.
+- Phantom pages: an UNFILTERED final phase never leaves a Load more that finds
+  nothing (the peek row decides). A FILTERED phase can: DynamoDB returns a
+  `LastEvaluatedKey` whenever it stops at its Limit, even when every later item
+  would be filtered out. So can a page that fills exactly at the end of a phase
+  whose successor turns out to be empty. Either costs one empty page, which 4.5
+  absorbs (an empty page with `nextCursor: null` completes the list; one with a
+  cursor is followed).
 
 ### 5.5 The cursor
 
@@ -528,11 +574,14 @@ items evaluated, Query calls, phases touched) - never an id, name or address.
   back arrow - 4.7, 4.9).
 - While the walk runs, Load more is hidden and the count line reads
   "Searching... N matches so far"; once complete, "N matches".
-- Cost, stated precisely: only When narrows what the SERVER reads (it is the
-  key condition); status and type narrow what is SENT and how many requests
-  the walk takes. A search under Any time therefore reads every tour once in
-  phase D, and every toured, no-show, canceled and closed tour once more in
-  phase U to find the undated ones. Tour rows and their names only - never the
+- Cost, stated precisely. What the SERVER reads is set by When (the key
+  condition) and by the status set's choice of phases and partitions (it can
+  skip phase D or U, and phase U reads only the selected statuses). Within a
+  phase, the status and type FILTERS narrow only what is sent (and so how many
+  requests the walk takes), not what is read. So a search under Any time with
+  every status reads every dated tour once in phase D, and every toured,
+  no-show, canceled and closed tour once more in phase U to find the undated
+  ones; narrower statuses read less. Tour rows and their names only - never the
   contact or property lists.
 - The walk is aborted by any filter change and by clearing the search (the rows
   loaded so far and the last completed page's cursor stay, so Load more resumes
@@ -583,10 +632,13 @@ having no date), and a seed pin asserts every seeded tour row has it. Readers:
 
 Labels: All rows read `tourStatusLabel` and `TOUR_OUTCOME_LABELS`, as the
 Active and Closed rows and the tour header do. The Past tab and Today keep
-`pastState` (their work-list wording). The GLOSSARY records a requested tour's
-staff labels: "Requested" (status), "Needs booking" (Active section and All
-filter; the Active list's name "Unbooked tour requests"), "Not booked" (tour
-page and All date column).
+`pastState` (their work-list wording). Undated wording: "Not booked" for a
+requested tour and "Undated" for any other undated tour, on the All rows, the
+Past rows and - changed here (P7) - the tour page's facts line
+(`TourDetail.tsx:312`). The GLOSSARY records a requested tour's staff labels -
+"Requested" (status), "Needs booking" (Active section and All filter; the
+Active list's name "Unbooked tour requests"), "Not booked" (tour page and All
+date column) - and "Undated" for the other undated tours.
 
 ## 9. Tests
 
@@ -603,12 +655,15 @@ page and All date column).
     `limit`: a page that fills mid-batch resumes at the next row; a sparse
     filter returns partial pages and still reaches every match; undated rows
     come after dated ones in both directions; no duplicates; an unfiltered page
-    evaluates only the rows it returns.
+    reads at most one row past the ones it returns, and an unfiltered final
+    page that ends exactly on the last row answers `nextCursor: null`; the
+    status-filter normalization (every dated status pressed = no filter).
   - `unitsRepo.getDisplaysByIds` (chunks, retries, best-effort); the harness
     fakes; the paged range read (`pageLimit: 1`); Today without the cap warning;
     the seed pin and the inverted matrix assertion.
 - dashboard:
-  - The tab order (All first), `/tours` landing on Active, P15's no-op re-click.
+  - The tab order (All first), `/tours` landing on Active, P15's no-op re-click
+    (and a Ctrl/Cmd-click left to the browser).
   - `/tours/all` issuing no contact, unit or Active reads; Active -> Past ->
     Closed running each walk ONCE.
   - Filters -> request parameters; pruning; defaults; Clear filters; Date range
@@ -616,25 +671,33 @@ page and All date column).
     midnight, both-empty sends no bounds, From after To sends nothing and shows
     the message); the sort default per When.
   - Load more; de-duplication (later copy wins); the empty-page follow, its cap
-    copy and Keep checking; errors and Retry.
+    copy and Keep checking shown instead of Load more; errors and Retry; a
+    cursor 400 restarting the list at page 1; one loader at a time (no second
+    request while a walk or restore runs; a search typed during a restore
+    takes over its cursor).
   - Search: narrows at once; walks the rest; starts immediately on an adopted
     search; hides Load more while walking; clearing aborts and keeps rows; the
     request cap copy.
   - URL adoption and stamped writes; `state.back` built from local state with an
-    unsaved search; `TourDetail` accepting `/tours/all?...` and passing
-    `returnToList`; the return restore (depth reloaded, opened row in view and
-    focused); the row accessible name.
+    unsaved search; `TourDetail` accepting `/tours/all?...` and handing `restore`
+    back; the tour page's facts line reading "Undated" for an undated
+    non-requested tour; the row accessible name.
+  - The return restore, through both the back arrow and a browser Back: depth
+    reloaded (and capped at 10 requests); the opened row in view and focused;
+    when the opened row has left the list, the row now at its position; an
+    empty list; an arrival without a record starting at page 1.
 - e2e: a spec that creates its own uniquely named tenant contact and property
   through the API, then its tours (a request, an upcoming, a past no-show, a
   canceled, an undated toured), and checks: the tab order and `/tours` landing on
-  Active; Needs booking; Upcoming; Past + No show; Any time with a search for
-  the unique tenant name (the walk covers the whole list) listing the undated
-  rows after the dated; a row opened from a search and the back arrow
-  returning to the same filtered list with the search. Every assertion scopes
-  to its own rows (the lane holds other specs' tours), selectors stay inside the
-  "Tours view" nav (Playwright names are case-insensitive substrings), and an
-  API-level step walks `GET /api/tours/list?limit=2` to `nextCursor: null`
-  through the real stack.
+  Active; Needs booking; Upcoming; Past + No show; Any time listing the undated
+  rows after the dated; a row opened and the back arrow returning to the same
+  filtered list with the search, the opened row in view. EVERY step also
+  searches for the unique tenant name, so the walk loads the whole filtered
+  list and no step depends on page depth (the lane holds other specs' tours,
+  and Needs booking lists oldest first). Every assertion scopes to its own
+  rows, selectors stay inside the "Tours view" nav (Playwright names are
+  case-insensitive substrings), and an API-level step walks
+  `GET /api/tours/list?limit=2` to `nextCursor: null` through the real stack.
 - perf: the `routes.test.ts` exclusion; the refreshed ledger citations.
 
 ## 10. Not in this change (follow-ups)

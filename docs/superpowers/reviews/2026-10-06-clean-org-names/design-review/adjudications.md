@@ -120,3 +120,11 @@ review is closed at spec revision 5.
 The only rejection: T20 (the tenant's free-text `caseworker` attribute) -
 out of scope; written only by the lean seed and display-only on tour and
 placement pages; added to the non-goals. The reviewer conceded it in round 2.
+
+## Spec gate
+
+APPROVED by Cameron on 2026-10-06 at spec revision 5 (@9633b7e4): "Reviewed
+and Approved". Sam's answers to spec section 13 are pending (Cameron's
+meeting); they change only Appendix A and the `fulton_housing` seed mapping,
+and are folded into the spec and the plan's starting-list task before the
+launch gate.

@@ -84,6 +84,9 @@ Known gap: the Tours page's Past tab (`/tours/past`, added 2026-09-27) is not a
 registered destination yet, so the profiler never measures it. It is excluded on
 purpose in `e2e/performance/routes.test.ts`; registering it is
 `docs/issues/perf-pages-tours-past-surface.md`.
+The All tab (`/tours/all`, added 2026-10-06) is the same gap, excluded and
+tracked the same way: it reads GET /api/tours/list?when&sort&limit for the
+first page, the same plus cursor after it, and never the contact or unit walks.
 
 The three target commands are:
 

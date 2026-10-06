@@ -87,3 +87,22 @@ JSON string value (F3); `app/src/lib/housingAuthority.ts:48` maps raw
 Counts: 6 findings, 6 accepted; 0 rejected; 1 planner addition (P32).
 Decisions changed this round: yes (P30, P32) - round 3 continues reviewer B
 on the round-2 edits.
+
+## Round 3 (plan + spec @2f42d119; reviewer B continued)
+
+Report: `plan-r3-reviewer-b.md` (3 findings, all LOW). Reviewer B contested
+none of P26-P32 (P32's phrase sits inside one prompt line, C3, and the prompt
+still names no list entry) and traced the P26 slot release through
+StrictMode, a real unmount, `reload()` during a read and the rewrite-stopped
+effect against every existing hook test.
+
+| # | Theme (finding) | Ruling | Resulting change | Decision changed |
+|---|---|---|---|---|
+| P33 | A whitespace-only stored value (pre-2026-07-14 data) is listed under "Not on the list" but can never be settled: the body trim turns the request's `value` into `''` (B3.F1) | ACCEPT (the listing half of the suggested fix) | `notOnList` skips a value or list member whose trim is `''`, like `''` itself - D5 already treats whitespace as a clear and the cleanup's `isText` already skips it, so the Settings list and the dry-run preview now agree; the notOnList test gains a `'  '` holder that yields no row. The cleanup does NOT start clearing such values (inert, and outside section 8's automatic mappings) | no |
+| P34 | Task 17.1 places the tour-list harness overlap beside Task 6.3, which changes no fake (B3.F2) | ACCEPT | the note names the real meeting point: the harness units fake and the END of the `UnitsRepo` interface and implementation, where Task 3.3's `rewriteAcceptedAuthorities` meets tour-list's `getDisplaysByIds` | no |
+| P35 | Bare `Clayton` (P30) is also the county seat of Rabun County, whose vouchers are DCA's; as a unique spelling it maps to Jonesboro automatically in the importer, the cleanup and the AI apply (B3.F3, informational) | NOTED | no change: for a metro-Atlanta caseload bare "Clayton" means Clayton County, exactly as the retired importer alias read it, and P32 guards the AI path. Added to what Cameron confirms (or vetoes) at the launch gate with P30 | no |
+
+Counts: 3 findings; 2 accepted, 1 noted for the launch gate; 0 rejected.
+Decisions changed this round: NO - precision only. This is the TERMINAL
+round: plan review CLOSED after 3 rounds (findings 36 + 6 + 3 = 45; every
+round-1 rejection conceded by the reviewer).

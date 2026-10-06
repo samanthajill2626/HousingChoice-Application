@@ -15,7 +15,17 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createToursRepo, type CreateTourInput, type TourItem, type TourType } from '../src/repos/toursRepo.js';
-import { tourListKeyOf, type TourListPhase, type TourListRange } from '../src/lib/tourListQuery.js';
+import {
+  isUnfilteredPhase,
+  locateTourListCursor,
+  planTourListPhases,
+  tourListFingerprint,
+  tourListKeyOf,
+  type TourListFilters,
+  type TourListPhase,
+  type TourListRange,
+} from '../src/lib/tourListQuery.js';
+import { listTourPage, type TourListPageResult } from '../src/services/tourListPage.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -1352,5 +1362,140 @@ describe.skipIf(!reachable)('toursRepo.queryListPhase against DynamoDB Local (ow
       }
     }
     expect(failures).toEqual([]);
+  });
+});
+
+// listTourPage over the REAL repo (Tours page All tab, spec
+// docs/superpowers/specs/2026-10-06-tour-list-design.md 5.4 and 9): the paging
+// engine walks DynamoDB Local with TINY constants (2 items per filtered Query,
+// ONE Query per page, 2 rows per page), so the budget stop, the k-less
+// boundary cursor and the filtered phantom all happen on a ten-row table. If
+// this fails where tourListPage.test.ts passes, the shared phase model
+// (helpers/tourListIndexFake.ts) is wrong: fix it and its mirror first. Its OWN
+// table (a when=any walk reads every tour in its table); no range-key ties;
+// every instant a full toISOString() value.
+describe.skipIf(!reachable)('listTourPage over toursRepo.queryListPhase on DynamoDB Local (own prefix)', () => {
+  const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
+  const client = createDynamoClient({ endpoint });
+  const doc = createDocumentClient({ endpoint });
+  const logger = createLogger({ destination: createLogCapture().stream });
+  const tours = createToursRepo({ doc, env: testEnv, logger });
+
+  const PINNED = '2026-10-06T16:00:00.000Z';
+  const TINY = { queryPageLimit: 2, maxQueryCalls: 1 };
+  const at = (day: number): string => `2028-02-0${day}T10:00:00.000Z`;
+  const created = (day: number): string => `2028-01-${String(day).padStart(2, '0')}T09:00:00.000Z`;
+  function tour(tourId: string, status: string, createdAt: string, scheduledAt?: string): CreateTourInput {
+    return {
+      tourId,
+      tenantId: `contact-${tourId}`,
+      unitId: `unit-${tourId}`,
+      tourType: 'self_guided',
+      status,
+      createdAt,
+      ...(scheduledAt !== undefined && { scheduledAt }),
+    };
+  }
+  // Seven dated rows of several statuses (two of them closed), two requests,
+  // one undated toured - and NO undated closed tour, so the closed partition's
+  // first filtered batch of 2 is all filtered out.
+  const FIXTURE: CreateTourInput[] = [
+    tour('tour-lp-d1', 'scheduled', created(1), at(1)),
+    tour('tour-lp-d2', 'toured', created(2), at(2)),
+    tour('tour-lp-d3', 'no_show', created(3), at(3)),
+    tour('tour-lp-d4', 'canceled', created(4), at(4)),
+    tour('tour-lp-d5', 'closed', created(5), at(5)),
+    tour('tour-lp-d6', 'scheduled', created(6), at(6)),
+    tour('tour-lp-d7', 'closed', created(7), at(7)),
+    tour('tour-lp-r1', 'requested', created(8)),
+    tour('tour-lp-r2', 'requested', created(9)),
+    tour('tour-lp-u3', 'toured', created(10)),
+  ];
+  const DATED = ['tour-lp-d1', 'tour-lp-d2', 'tour-lp-d3', 'tour-lp-d4', 'tour-lp-d5', 'tour-lp-d6', 'tour-lp-d7'];
+
+  beforeAll(async () => {
+    await ensureTable(client, getTableSpec('tours'), tableName('tours', testEnv));
+    for (const input of FIXTURE) await tours.create(input);
+  }, 120_000);
+
+  afterAll(async () => {
+    await deleteTableIfExists(client, tableName('tours', testEnv));
+    doc.destroy();
+    client.destroy();
+  }, 120_000);
+
+  /** One walked page, and whether every Query it made read an UNFILTERED phase D. */
+  interface WalkedPage {
+    page: TourListPageResult;
+    unfilteredD: boolean;
+  }
+
+  /** Follow nextCursor to null (at most 50 pages), decode-free: the cursor goes
+   *  back through locateTourListCursor as the next page's start. */
+  async function walk(filters: TourListFilters): Promise<WalkedPage[]> {
+    const phases = planTourListPhases(filters, PINNED);
+    const fingerprint = tourListFingerprint(filters);
+    const pages: WalkedPage[] = [];
+    let start: { phaseIndex: number; startKey?: Record<string, string> } | undefined;
+    for (let i = 0; i < 50; i++) {
+      const read: TourListPhase[] = [];
+      const page = await listTourPage(
+        (phase, opts) => {
+          read.push(phase);
+          return tours.queryListPhase(phase, opts);
+        },
+        { phases, filters, fingerprint, pinnedNow: PINNED, limit: 2, ...(start !== undefined && { start }) },
+        TINY,
+      );
+      pages.push({ page, unfilteredD: read.length > 0 && read.every((p) => p.kind === 'd' && isUnfilteredPhase(p)) });
+      if (page.nextCursor === null) return pages;
+      start = locateTourListCursor(page.nextCursor, phases);
+      if (start === undefined) throw new Error(`cursor does not fit its plan: ${JSON.stringify(page.nextCursor)}`);
+    }
+    throw new Error('the walk did not end within 50 pages');
+  }
+
+  const walkedIds = (pages: WalkedPage[]): string[] => pages.flatMap((w) => w.page.items.map((t) => t.tourId));
+
+  /** Spec 9 / ruling A-6: an unfiltered page reads at most ONE row past the
+   *  rows it returns (the peek row) - on real DynamoDB. */
+  function expectPeekBound(pages: WalkedPage[], label: string): number {
+    const unfiltered = pages.filter((w) => w.unfilteredD);
+    for (const [n, w] of unfiltered.entries()) {
+      expect(w.page.evaluated, `${label} unfiltered-D page ${n}`).toBeLessThanOrEqual(w.page.items.length + 1);
+    }
+    return unfiltered.length;
+  }
+
+  it('latest first: every id exactly once - dated, then the requests, then the undated toured; the budget stop and the k-less u cursor survive real DynamoDB', async () => {
+    const pages = await walk({ when: 'any', statuses: [], sort: 'latest' });
+    const got = walkedIds(pages);
+    expect(new Set(got).size).toBe(got.length);
+    expect([...got].sort()).toEqual(FIXTURE.map((t) => String(t.tourId)).sort());
+    expect(got).toEqual([...[...DATED].reverse(), 'tour-lp-r2', 'tour-lp-r1', 'tour-lp-u3']);
+
+    expect(pages.some((w) => w.page.items.length === 0 && w.page.nextCursor !== null)).toBe(true);
+    expect(pages.some((w) => w.page.nextCursor?.ph === 'u' && w.page.nextCursor.k === undefined)).toBe(true);
+    expect(pages.every((w) => w.page.nextCursor?.ph !== 'd' || w.page.nextCursor.k !== undefined)).toBe(true);
+    expect(pages.every((w) => w.page.calls === 1)).toBe(true);
+    expect(expectPeekBound(pages, 'latest')).toBeGreaterThanOrEqual(3);
+  });
+
+  it('earliest first: every id exactly once - the dated rows EARLIEST first, then the undated ones in the same phase order', async () => {
+    const pages = await walk({ when: 'any', statuses: [], sort: 'earliest' });
+    const got = walkedIds(pages);
+    expect(new Set(got).size).toBe(got.length);
+    expect(got).toEqual([...DATED, 'tour-lp-r1', 'tour-lp-r2', 'tour-lp-u3']);
+    expect(pages.some((w) => w.page.items.length === 0 && w.page.nextCursor !== null)).toBe(true);
+    expect(pages.some((w) => w.page.nextCursor?.ph === 'u' && w.page.nextCursor.k === undefined)).toBe(true);
+    expect(expectPeekBound(pages, 'earliest')).toBeGreaterThanOrEqual(3);
+  });
+
+  it('a sparse filter (no_show): partial and empty pages, and the walk still reaches the one no-show and ends with nextCursor null', async () => {
+    const pages = await walk({ when: 'any', statuses: ['no_show'], sort: 'latest' });
+    expect(walkedIds(pages)).toEqual(['tour-lp-d3']);
+    expect(pages.at(-1)?.page.nextCursor).toBeNull();
+    expect(pages.some((w) => w.page.items.length === 0 && w.page.nextCursor?.ph === 'd')).toBe(true);
+    expect(pages.length).toBeGreaterThan(2);
   });
 });

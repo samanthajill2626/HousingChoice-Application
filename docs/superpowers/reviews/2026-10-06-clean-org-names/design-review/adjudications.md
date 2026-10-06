@@ -40,3 +40,31 @@ Counts: 38 findings; 37 accepted (in 19 themes), 1 rejected (T20).
 Decisions changed this round: yes (T1-T12, T18, T19) - round 2 is required.
 Round 2 continues reviewer B (more accepted findings: 20 vs 17), handed
 reviewer A's report.
+
+## Round 2 (spec revision 2 @28243656; reviewer B continued, handed reviewer A's report)
+
+Reviewer report: `spec-r2-reviewer-b.md` (16 findings). It conceded the one
+round-1 rejection (T20) and reopened none.
+
+| # | Finding | Ruling | Resulting change | Decision changed |
+|---|---|---|---|---|
+| R2-1 | "Uses", "Not on the list" and the D7 re-check ignore the field's kind | ACCEPT | D3 defines "on the list" per field kind; wrong-kind exact names are listed (resolution "the other kind") and are not uses; D7 and I1 use the per-kind rule | yes (invariant definition) |
+| R2-2 | "Show records" reaches only active tenants' housing authority values | ACCEPT | a row expands into its holding records (contact name, type, deleted marker, or property address, each linked); records whose page lacks the field are settled with value-level actions | yes (new surface) |
+| R2-3 | Accept `value` checked only against the list | ACCEPT | server refuses a value outside the text's D4 resolution or its ambiguity candidates (422 `value_not_from_suggestion`); a re-accept with a different value answers 409 `suggestion_already_resolved` | no (guard on D8) |
+| R2-4 | (B) Importer writes a status for its own type after a manual retype; re-fills the removed authority | ACCEPT | for `type_source: 'manual'` the importer writes none of type, status, housing authority, agency; "mirroring its status rule" wording removed (a NEW field, contacts without it import as today) | no (B rule precision) |
+| R2-5 | Automatic spelling additions: caps, name collision, compound test, people's names, cross-kind sharing | ACCEPT | D4 defines COMPOUND; cross-kind sharing refused; automatic additions SKIP (never fail on) a rule-breaking spelling and report it; Use shows the value with "Remember this spelling" | no (rule precision) |
+| R2-6 | "Not on the list" GET admin-only though visible to all | ACCEPT | viewing is for everyone; actions stay admin | no |
+| R2-7 | D15 omits the Templates hint that mirrors the intake rule | ACCEPT | hint and its test change with D15; added to readers | no |
+| R2-8 | Send-time re-check guards a filter the dashboard's send never uses | ACCEPT | re-check at preview and on a filter-resolved send only; 1.2 corrected | no |
+| R2-9 | Per-run list `version` is not recoverable | ACCEPT | run log records `orgListFingerprint` (hash of the rendered block) | no |
+| R2-10 | No AI list block budget; names uncapped | ACCEPT | block budget 16,000 chars (spellings dropped first, WARN); names <= 120 chars | no |
+| R2-11 | Create-on-first-read races the reseed window | ACCEPT | seeds write the item with an unconditional put | no |
+| R2-12 | Cleanup ignores the rewrite lock | ACCEPT | the cleanup apply takes the D11 lock (action `cleanup`) | no |
+| R2-13 | No "Move to Housing authority" for agency-field authority names | ACCEPT | symmetric admin action added | yes (new action) |
+| R2-14 | Rewrite job writes no per-record audit | ACCEPT | `org_name_rewrite` audit event per record | no |
+| R2-15 | (B) Make caseworker on landlord-based kinds ignores unit ownership | ACCEPT | also refused while the contact is a landlord of record or on a unit roster | no (precondition) |
+| R2-16 | (B) Thread re-typing reaches only the primary phone and emails | ACCEPT | re-typing covers every phone in `phones` and every email | no (precision) |
+
+Counts: 16 findings, 16 accepted, 0 rejected.
+Decisions changed this round: yes (R2-1, R2-2, R2-13) - round 3 is required
+(cap: 4).

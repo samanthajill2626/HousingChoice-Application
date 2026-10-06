@@ -625,6 +625,24 @@ describe('useAllTours', () => {
       expect(result.current.refreshed).toBe(true);
     });
 
+    it('a second one while the restarted page 1 is still the latest is dead, and refreshed is then false (F-s11 O1)', async () => {
+      reply('', page([row('a1')], 'c1'), page([row('n1')], 'd1'));
+      reply('c1', cursor400());
+      reply('d1', mismatch400());
+      const { result } = mount();
+      await settle();
+      act(() => result.current.loadMore());
+      await settle();
+      expect(ids(result.current)).toEqual(['n1']);
+      expect(result.current.refreshed).toBe(true);
+
+      act(() => result.current.loadMore());
+      await settle();
+      expect(result.current.dead).toBe(true);
+      // Never "The list was refreshed." beside "We couldn't load more tours.".
+      expect(result.current.refreshed).toBe(false);
+    });
+
     it('a new listKey - even back to an earlier one (A -> B -> A) - is a new list: refreshed false and a fresh allowance', async () => {
       reply('', page([row('a1')], 'c1'), page([row('a1')], 'c2'));
       reply('c1', cursor400());

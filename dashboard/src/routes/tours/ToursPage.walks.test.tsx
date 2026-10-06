@@ -82,10 +82,14 @@ describe('ToursPage - the contact and unit walks across the views', () => {
     expectWalks(8, 2);
 
     // The All view mounts in place of the named views' component and loads
-    // none of their reads.
+    // none of their reads - only its own first page, once.
+    expect(listTours).not.toHaveBeenCalled();
     await user.click(tab('All'));
     await screen.findByRole('heading', { level: 1, name: 'All tours' });
     expect(screen.queryByRole('region', { name: 'Closed tours' })).not.toBeInTheDocument();
+    await screen.findByText('No tours match these filters.');
+    expect(listTours).toHaveBeenCalledTimes(1);
+    expect(listTours).toHaveBeenCalledWith({ when: 'any', sort: 'latest' }, { limit: 50 }, expect.any(AbortSignal));
     expectWalks(8, 2);
 
     // Leaving All mounts the named views' component fresh: one more round.

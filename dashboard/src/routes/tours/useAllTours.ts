@@ -59,7 +59,8 @@ export interface AllToursData {
   /** A second cursor 400 in this list: only Start over continues. */
   dead: boolean;
   /** This list was restarted after a cursor 400 and its first page is still
-   *  the latest (false once the next page lands, or the list changes). */
+   *  the latest (false once the next page lands, the list changes, or the
+   *  list is dead). */
   refreshed: boolean;
   restoreOutcome: RestoreOutcome;
   /** Load more, Keep checking, and Retry after a failed page. */
@@ -340,7 +341,9 @@ export function useAllTours(input: UseAllToursInput): AllToursData {
     dead: state.dead,
     // Only while the restarted list's first page is the latest: role="status"
     // is atomic, so a lasting notice would be re-announced with every count.
-    refreshed: restarted && state.pages <= 1,
+    // Never on a dead list: "The list was refreshed." must not stand beside
+    // "We couldn't load more tours." (F-s11 O1).
+    refreshed: restarted && state.pages <= 1 && !state.dead,
     restoreOutcome,
     loadMore,
     retry,

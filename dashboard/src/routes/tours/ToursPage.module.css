@@ -1,6 +1,7 @@
-/* Tours list page - three views: Active (the Upcoming / Needs booking
- * sections), Past and Closed. Mirrors the ContactsList / ListingsList module
- * language (tokens.css, never hard-coded). */
+/* Tours list page - four views: All (its filter bar and states live in
+ * AllToursView.module.css; its rows use the row styles below), Active (the
+ * Upcoming / Needs booking sections), Past and Closed. Mirrors the
+ * ContactsList / ListingsList module language (tokens.css, never hard-coded). */
 
 .page {
   /* Full-width: fills the AppFrame content area.
@@ -33,9 +34,9 @@
   color: var(--c-text-muted);
 }
 
-/* Active / Past / Closed view tabs (links to /tours, /tours/past and
- * /tours/closed) - mirrors the properties list's Active/Deleted tabs
- * (ListingsList.module.css). */
+/* All / Active / Past / Closed view tabs (links to /tours/all, /tours,
+ * /tours/past and /tours/closed) - mirrors the properties list's
+ * Active/Deleted tabs (ListingsList.module.css). */
 .tabs {
   display: flex;
   flex-wrap: wrap;

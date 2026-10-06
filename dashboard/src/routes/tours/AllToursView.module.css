@@ -1,0 +1,238 @@
+/* All tours view - the Tours page's All tab body (spec
+ * docs/superpowers/specs/2026-10-06-tour-list-design.md section 4): the filter
+ * bar, the count line, the list states and the action area. The rows reuse
+ * ToursPage.module.css (the other tabs' row look); the filter controls are
+ * the Properties list's (ListingsList.module.css), copied. Tokens only
+ * (tokens.css), never hard-coded. */
+
+/* --- Filters (When, From / To, Status chips, Tour type, Sort) -------------- */
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+}
+
+.control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  /* A flex item's min-width defaults to its content, so one long chip row
+   * would widen the column past a phone's pane; let it shrink and wrap. */
+  min-width: 0;
+  max-width: 100%;
+}
+
+.controlLabel {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-text-muted);
+}
+
+.select {
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+}
+
+.select:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+  border-color: var(--c-border-strong);
+}
+
+/* From / To (Date range only) and the range message under them. */
+.dateInputs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.rangeError {
+  flex: 1 1 100%;
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  /* Align the chip row with the select's input box (clears the uppercase label). */
+  min-height: 36px;
+}
+
+.chip {
+  max-width: 100%;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.chip:hover {
+  border-color: var(--c-border-strong);
+  color: var(--c-text);
+}
+
+.chipOn,
+.chipOn:hover {
+  background: var(--c-nav-bg);
+  border-color: var(--c-nav-bg);
+  color: var(--c-text-inverse);
+}
+
+.chip:focus-visible,
+.clear:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+/* Text buttons (a chip group's Clear, Clear filters). The darker brand tone:
+ * the base brand blue is about 4.4:1 on the page background, under AA for
+ * this size. */
+.clear {
+  padding: var(--sp-1) var(--sp-2);
+  border: none;
+  background: transparent;
+  color: var(--c-brand-hover);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+
+.clear:hover {
+  text-decoration: underline;
+}
+
+/* Clear filters sits at the end of the controls row, level with the inputs. */
+.resetAll {
+  align-self: flex-end;
+}
+
+/* --- Search ---------------------------------------------------------------- */
+
+.search {
+  margin-bottom: var(--sp-4);
+}
+
+.searchLabel {
+  display: block;
+  margin-bottom: var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-text-muted);
+}
+
+.searchInput {
+  width: 100%;
+  max-width: 360px;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+}
+
+.searchInput:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+  border-color: var(--c-border-strong);
+}
+
+/* --- Count line, states, actions ----------------------------------------- */
+
+/* ONE role="status" region, mounted even while it is empty (ruling D-6). */
+.countLine {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.countLine:empty {
+  margin: 0;
+}
+
+/* "The list was refreshed." and the walk-cap sentence inside the count line. */
+.notice {
+  color: var(--c-text);
+  font-weight: var(--fw-medium);
+}
+
+/* A first-page failure: the message and Retry, inside one alert. */
+.failure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+}
+
+/* Below the rows: Load more, Keep checking, Retry or Start over (one at a
+ * time) with its sentence. */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0;
+}
+
+.actionText {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.errorText {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+
+/* At 480px or less the controls stack full width (spec 4.3). A CONTAINER
+ * query on the page's inline-size container (ToursPage.module.css .page), the
+ * house idiom (ruling D-4): the content pane is narrow on phones AND beside
+ * the expanded sidebar. */
+@container (max-width: 480px) {
+  .controls,
+  .dateInputs {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .control {
+    width: 100%;
+  }
+  .select,
+  .searchInput {
+    width: 100%;
+    max-width: none;
+  }
+  .resetAll {
+    align-self: flex-start;
+  }
+}

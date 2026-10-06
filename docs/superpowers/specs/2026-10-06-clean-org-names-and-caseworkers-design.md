@@ -1,13 +1,14 @@
 # Clean housing authority and agency names, and caseworkers - design
 
-Date: 2026-10-06 (revision 7: revision 5 was APPROVED by Cameron; revision 6
+Date: 2026-10-06 (revision 8: revision 5 was APPROVED by Cameron; revision 6
 folded in precision corrections from the plan research
 (`docs/superpowers/reviews/2026-10-06-clean-org-names/plan-research/planner-rulings.md`);
 revision 7 folds in the plan review round 1
 (`docs/superpowers/reviews/2026-10-06-clean-org-names/plan-review/adjudications.md`):
-the starting-list default of section 13 (for Cameron to confirm at the launch
-gate), the name-variant rule in D10, D11's read paths, fixed `fields` and
-lock-loss stop, and section 6's endpoint shapes. Design review: rounds 1-4,
+the name-variant rule in D10, D11's read paths, fixed `fields` and
+lock-loss stop, and section 6's endpoint shapes; revision 8 records Sam's
+answers from the 2026-10-06 meeting (section 13, Appendix A: the old county
+values become spellings of the authority that runs those vouchers). Design review: rounds 1-4,
 closed - adjudications in
 `docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md`).
 Tracker items #2 ("One clean name per housing authority") and #19
@@ -918,47 +919,54 @@ routes still mint `tenant_1to1` for any phone (tracker #13).
 
 ---
 
-## 13. Questions for Sam - no longer blocking
+## 13. Questions for Sam - answered 2026-10-06
 
-Planner default (2026-10-06, to be confirmed by Cameron at the launch gate):
-the answers no longer block the build. Fulton County Housing Authority is on
-the starting list (a real metro voucher administrator; an unused entry does
-no harm), with only its official name as a spelling. The old values `Fulton
-County`, `Clayton County`, `Cobb County` and `McDonough` are NOT spellings of
-anything: tenants holding them surface in "Not on the list", where Sam settles
-each value with one click once she confirms what it meant. Anything else she
-adds later goes in through Settings. The seeds map `fulton_housing` to Fulton
-County Housing Authority.
+Sam answered in the 2026-10-06 founder meeting
+(`W:\AI Projects\Housing Choice\Founder Meeting 2026-10-06\Meeting Transcript.md`):
 
-1. Are there tenants with a Fulton County voucher (Housing Authority of
-   Fulton County)?
-2. "McDonough" on tenants: a DCA voucher in Henry County, or something else?
-3. "Clayton County" = Jonesboro Housing Authority, "Cobb County" = Marietta
-   Housing Authority?
-4. Who is "Hands of Hope"?
-5. Any other entry now (for example McIntosh Trail Community Service Board)?
-6. HUD-VASH as the agency on a veteran's record: confirmed?
+1. **Fulton County:** add Fulton County Housing Authority (she left it off
+   her list by mistake; she works with no one there today). The old value
+   `Fulton County` meant the Fulton County voucher, not Atlanta's.
+2. **McDonough:** McDonough Housing Authority runs public housing only;
+   McDonough and Henry County vouchers are DCA's.
+3. **Clayton County and Cobb County:** Clayton County vouchers (including
+   "Housing Authority of Clayton County") are Jonesboro Housing Authority's;
+   Cobb County vouchers are Marietta Housing Authority's.
+4. **Hands of Hope:** left off - real, but she has no record of working with
+   it (she works with HOPE Atlanta). Settings adds it if that changes.
+5. **Any other entry now:** none beyond Fulton County.
+6. **HUD-VASH:** confirmed as an agency; VA caseworkers are her strongest
+   relationships, and she works with them directly.
+
+So the old values are spellings of the entry that runs those vouchers
+(Appendix A) and the cleanup maps them automatically: `Fulton County` and
+`Fulton, Fulton County` -> Fulton County Housing Authority; `McDonough` and
+`Henry County` -> Georgia Department of Community Affairs; `Clayton County`
+and `Housing Authority of Clayton County` -> Jonesboro Housing Authority;
+`Cobb County` -> Marietta Housing Authority. "McDonough Housing Authority" is
+deliberately NOT a spelling (a public-housing authority with no vouchers). The
+seeds map `fulton_housing` to Fulton County Housing Authority.
 
 ---
 
-## Appendix A - Starting list (section 13's planner default; Cameron confirms at the launch gate)
+## Appendix A - Starting list (final: Sam's answers, section 13)
 
 Housing authorities:
 
 | Name | Spellings |
 |---|---|
 | Atlanta Housing Authority | AHA; Atlanta Housing; Housing Authority of the City of Atlanta; Atlanta (AHA); Atlanta, aha, Atlanta housing |
-| Georgia Department of Community Affairs | DCA; Georgia DCA; GA DCA; Department of Community Affairs; DCA, Department of Community Affairs |
+| Georgia Department of Community Affairs | DCA; Georgia DCA; GA DCA; Department of Community Affairs; DCA, Department of Community Affairs; McDonough; Henry County |
 | Georgia Housing Voucher Program (DBHDD) | GHV; GHVP; DBHDD; Georgia Housing Voucher; Georgia Housing Voucher (GHV) |
 | DeKalb County Housing Authority | HADC; Housing Authority of DeKalb County; Dekalb County Housing; Dekalb Housing |
 | Decatur Housing Authority | Housing Authority of the City of Decatur |
-| Marietta Housing Authority | MHA |
-| Jonesboro Housing Authority | JHA; Jonesboro (JHA); Jonesboro housing; Jonesboro, JHA, Jonesboro housing |
+| Marietta Housing Authority | MHA; Cobb County |
+| Jonesboro Housing Authority | JHA; Jonesboro (JHA); Jonesboro housing; Jonesboro, JHA, Jonesboro housing; Clayton County; Housing Authority of Clayton County |
 | East Point Housing Authority | EPHA; East Point; Eastpoint Housing Authority |
 | College Park Housing Authority | Housing Authority of the City of College Park; College Park |
 | Macon-Bibb County Housing Authority | Macon Housing Authority; MHA |
 | Augusta Housing Authority | AHA |
-| Fulton County Housing Authority | Housing Authority of Fulton County |
+| Fulton County Housing Authority | Housing Authority of Fulton County; Fulton County; Fulton, Fulton County |
 
 Notes carried on the starting entries (research, 2026-10-06): Georgia
 Department of Community Affairs (the 149 counties it covers and the ten it
@@ -985,9 +993,11 @@ Under D4's normalization these spellings are distinct within each entry
 "CaringWorks" because normalization does not join words). The old canonical
 spellings ("Atlanta (AHA)", "Jonesboro (JHA)",
 "Dekalb County Housing", "Georgia Housing Voucher (GHV)", "DCA", "East
-Point", "HUD VASH", "Claratel", "Hope Atlanta", "Step Up") resolve to one
-entry each, so the cleanup maps them automatically; a bare "AHA" or "MHA" is
-ambiguous by design and lands in "Not on the list".
+Point", "HUD VASH", "Claratel", "Hope Atlanta", "Step Up") and the old county
+values Sam settled ("Fulton County", "McDonough", "Henry County", "Clayton
+County", "Cobb County") resolve to one entry each, so the cleanup maps them
+automatically; a bare "AHA" or "MHA" is ambiguous by design and lands in "Not
+on the list".
 
 ## Appendix B - Research sources (2026-10-06)
 

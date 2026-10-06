@@ -38,5 +38,27 @@ findings). Adjudicated by theme; tags are reviewer.finding.
 
 Counts: 36 findings; 33 accepted (some in part), 3 rejected (P3's switch,
 P17, P22's two kept items). P2 goes to Cameron at the launch gate.
+
+**P2 superseded (2026-10-06, after the fixer pass):** Sam answered spec
+section 13 in the founder meeting the same day, so the starting list no
+longer rests on the planner's default and P2 is no longer a launch-gate
+question. Spec revision 8 records the answers: Fulton County Housing Authority
+stays on the list; the old county values become spellings of the entry that
+runs those vouchers (`Fulton County` and `Fulton, Fulton County` -> Fulton
+County Housing Authority; `McDonough` and `Henry County` -> Georgia
+Department of Community Affairs; `Clayton County` and `Housing Authority of
+Clayton County` -> Jonesboro Housing Authority; `Cobb County` -> Marietta
+Housing Authority), so the cleanup maps them automatically instead of leaving
+them for "Not on the list"; "McDonough Housing Authority" (public housing
+only) is deliberately not a spelling; Hands of Hope stays off. Plan edits: S1
+Task 1.5's list, its conformance tests (the old "not spellings" test is now a
+mapping table plus an off-list check for `fulton_housing` and "McDonough
+Housing Authority"; the shared set stays `['AHA', 'MHA']`) and its section-13
+note; the stale rationale in S6 (the resolution table row and
+`unitsApi.test.ts`'s note - the server now STORES the full name, so the edit
+stands), S7 (the rewritten test's comment and the broken-tests note) and S14
+(the Decatur substitution note). Outside S1 no test edit changes: every
+rewritten expectation already used a list name. Decision changed: yes (the list's
+content - a product input from Sam, not a review finding).
 Decisions changed this round: yes (P5) - round 2 continues reviewer B (more
 accepted findings: 21 vs 12), handed reviewer A's report.

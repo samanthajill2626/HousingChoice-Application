@@ -10,14 +10,25 @@
 // search narrows the LOADED rows at once (tenant or property, as displayed);
 // 300 ms after typing stops, the hook walks the rest of the filtered list.
 //
+// URL STATE (spec 4.7) is the Properties list's model (ListingsList.tsx): the
+// filters are LOCAL state and the URL is their persistence. Control changes
+// REPLACE the URL at once with a stamped write (OWN_WRITE); the search text is
+// written on blur, never per keystroke. The URL is ADOPTED on mount, on every
+// POP and on any navigation that is not a stamped write. A write is skipped
+// while a navigation is still pending - the pending navigation wins. A filter
+// change walks the NEW list at once when a search is set (spec 6), and Clear
+// filters empties the search and stops the walk. A restore record in history
+// state (spec 4.9) is bound to the list it was adopted for, so it can only
+// ever drive that list.
+//
 // THE LIST AREA follows the hook's status: loading -> the Spinner, and no
 // count text and no actions (never "Showing 0 tours"); error -> the first-page
 // failure and Retry, inside an alert; idle (an invalid date range) -> only the
 // range message; ready -> the rows, then ONE action area. The count line is
 // ONE role="status" element that stays mounted, empty, while nothing is ready
 // (a live region inserted together with its text is not reliably announced).
-import { useEffect, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Link, useLocation, useNavigationType, useSearchParams } from 'react-router-dom';
 import {
   TOUR_OUTCOME_LABELS,
   TOUR_TYPE_LABELS,
@@ -36,11 +47,15 @@ import {
   TOUR_LIST_STATUS_CHIPS,
   TOUR_LIST_TYPE_OPTIONS,
   TOUR_LIST_WHEN_OPTIONS,
+  applyTourListSelection,
   effectiveTourListSort,
   isDefaultTourListSelection,
+  parseTourListRestore,
   parseTourListSelection,
+  pruneTourListSelection,
   tourListApiKey,
   tourListRangeError,
+  type TourListRestore,
   type TourListSelection,
   type TourListSort,
   type TourListWhen,
@@ -52,6 +67,45 @@ import styles from './AllToursView.module.css';
 
 /** The search walk starts this long after typing stops (spec 6). */
 const SEARCH_DEBOUNCE_MS = 300;
+
+/** The history state stamped on this view's own URL writes. A row open adds
+ *  `restore` (spec 4.9); every OTHER write replaces the whole state with the
+ *  stamp alone, so a filter change or a blur save drops a restore record. */
+const OWN_WRITE = Object.freeze({ tourListFilterWrite: true });
+
+function isOwnWrite(state: unknown): boolean {
+  return (
+    typeof state === 'object' &&
+    state !== null &&
+    (state as Record<string, unknown>)['tourListFilterWrite'] === true
+  );
+}
+
+/** The browser history's stack index, which react-router 7 keeps in
+ *  `window.history.state.idx`. A PUSH or a Back/Forward moves it; a REPLACE -
+ *  every write this view makes - does not. Undefined without a real browser
+ *  history (a MemoryRouter), which disarms the pending-navigation check. */
+function historyIdx(): unknown {
+  if (typeof window === 'undefined') return undefined;
+  const state: unknown = window.history.state;
+  return typeof state === 'object' && state !== null ? (state as Record<string, unknown>)['idx'] : undefined;
+}
+
+/** The query string a selection writes (other params kept). */
+function searchFor(base: URLSearchParams, sel: TourListSelection): string {
+  const params = new URLSearchParams(base);
+  applyTourListSelection(params, sel);
+  return params.toString();
+}
+
+/** A restore record from history state, bound to the list it belongs to. */
+function boundRestore(
+  state: unknown,
+  selection: TourListSelection,
+): { record: TourListRestore; listKey: string } | null {
+  const record = parseTourListRestore(state);
+  return record === null ? null : { record, listKey: tourListApiKey(selection) };
+}
 
 /** Toggle one value in a chip set, returning a new set. */
 function toggled<T>(values: ReadonlySet<T>, value: T): Set<T> {
@@ -181,13 +235,42 @@ function countText(data: AllToursData, searching: boolean, matches: number): str
 }
 
 export function AllToursView(): React.JSX.Element {
-  const [searchParams] = useSearchParams();
-  // The filters are LOCAL state, adopted from the URL on mount.
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  const [searchParams, setSearchParams] = useSearchParams();
+  // Local filter state, adopted from the URL on mount and on every navigation
+  // that is not one of this view's own stamped writes: a POP always, a PUSH
+  // or REPLACE unless it carries OWN_WRITE (see the header).
   const urlSelection = parseTourListSelection(searchParams);
   const [chosen, setChosen] = useState<TourListSelection>(urlSelection);
-  // The search the WALK follows: the adopted search at once, typing 300 ms
-  // after it stops (spec 6).
+  // The search the WALK follows: set at once on adoption and on a filter
+  // change, 300 ms after typing otherwise (spec 6).
   const [walkQ, setWalkQ] = useState(urlSelection.q);
+  // The restore record (spec 4.9) is BOUND to the list it was adopted for: it
+  // can only ever drive that list (plan review P1 - a record that survived a
+  // filter change re-loaded every later list to the old depth).
+  const [restore, setRestore] = useState<{ record: TourListRestore; listKey: string } | null>(() =>
+    boundRestore(location.state, urlSelection),
+  );
+  const [syncedKey, setSyncedKey] = useState(location.key);
+  if (location.key !== syncedKey) {
+    setSyncedKey(location.key);
+    if (navigationType === 'POP' || !isOwnWrite(location.state)) {
+      setChosen(urlSelection);
+      setWalkQ(urlSelection.q);
+      setRestore(boundRestore(location.state, urlSelection));
+    }
+  }
+
+  // The history index of the COMMITTED location. While a PUSH or a
+  // Back/Forward is still in flight, the browser's index has already moved
+  // past it. Recorded in a LAYOUT effect - inside the commit, before any later
+  // event can run (ListingsList.tsx, code review r3 there).
+  const committedIdx = useRef<unknown>(undefined);
+  useLayoutEffect(() => {
+    committedIdx.current = historyIdx();
+  }, [location.key]);
+
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
     () => () => {
@@ -198,23 +281,54 @@ export function AllToursView(): React.JSX.Element {
   const whenRef = useRef<HTMLSelectElement>(null);
 
   const listKey = tourListApiKey(chosen);
-  // The second condition is a belt: a debounce timer can never walk an EMPTY
-  // box.
-  const data = useAllTours({ listKey, walk: walkQ.trim() !== '' && chosen.q.trim() !== '', restoreDepth: null });
+  const restoreDepth = restore !== null && restore.listKey === listKey ? restore.record.depth : null;
+  // The second condition is a belt: a debounce timer that fires after a POP
+  // adoption (it cannot be cleared during render) can never walk an EMPTY box.
+  const data = useAllTours({ listKey, walk: walkQ.trim() !== '' && chosen.q.trim() !== '', restoreDepth });
 
-  /** A filter change: a new selection, so a new list. */
-  function change(next: TourListSelection): void {
-    setChosen(next);
+  /** Persist a selection to the URL - a stamped REPLACE, so Back leaves the
+   *  page rather than walking filter changes. Skipped while a PUSH or a
+   *  Back/Forward is pending: replacing the browser's current entry then would
+   *  cancel the navigation the user already made. Returns whether it wrote. */
+  function persist(next: TourListSelection): boolean {
+    if (historyIdx() !== committedIdx.current) return false;
+    setSearchParams(new URLSearchParams(searchFor(searchParams, next)), { replace: true, state: OWN_WRITE });
+    return true;
   }
 
-  /** Typing narrows the loaded rows at once; the walk follows 300 ms after the
-   *  last keystroke, and stops at once when the box is emptied. */
-  function search(value: string): void {
-    setChosen((prev) => ({ ...prev, q: value }));
+  function clearSearchTimer(): void {
     if (searchTimer.current !== null) clearTimeout(searchTimer.current);
     searchTimer.current = null;
+  }
+
+  /** EVERY control change, Clear filters included: apply it now, walk the new
+   *  list at once when a search is set (or stop the walk when Clear filters
+   *  empties the box), drop the restore record, persist it now. Always writes:
+   *  comparing against the COMMITTED URL could wrongly skip while an earlier
+   *  write is still in flight. */
+  function change(next: TourListSelection): void {
+    clearSearchTimer();
+    setChosen(next);
+    setWalkQ(next.q);
+    setRestore(null);
+    persist(next);
+  }
+
+  /** Typing narrows the loaded rows at once and never touches history; the
+   *  walk follows 300 ms after the last keystroke, and stops at once when the
+   *  box is emptied. */
+  function search(value: string): void {
+    setChosen((prev) => ({ ...prev, q: value }));
+    clearSearchTimer();
     if (value.trim() === '') setWalkQ('');
     else searchTimer.current = setTimeout(() => setWalkQ(value), SEARCH_DEBOUNCE_MS);
+  }
+
+  /** Leaving the search box persists its text, only when that changes the URL
+   *  (so tabbing through the page spends no history calls). That write drops
+   *  the entry's restore record, so the view drops it too. */
+  function persistSearch(): void {
+    if (searchFor(searchParams, chosen) !== searchParams.toString() && persist(chosen)) setRestore(null);
   }
 
   function clearFilters(): void {
@@ -224,11 +338,21 @@ export function AllToursView(): React.JSX.Element {
     change(DEFAULT_TOUR_LIST_SELECTION);
   }
 
+  /** After a dead list: page 1 of a new list, and no restore (spec 4.9). */
+  function startOver(): void {
+    data.startOver();
+    setRestore(null);
+  }
+
   const rangeError = tourListRangeError(chosen);
+  // The effective selection: the chosen one minus what no control shows (spec
+  // 4.3). The chips and Clear filters render from it, as #1 renders its
+  // pruned `selection` (ListingsList.tsx).
+  const selection = pruneTourListSelection(chosen);
   // Needs booking is a request - it has no date, so a dated When hides it.
   const statusChips =
     chosen.when === 'any' ? TOUR_LIST_STATUS_CHIPS : TOUR_LIST_STATUS_CHIPS.filter((c) => c.value !== 'requested');
-  const showClearFilters = !isDefaultTourListSelection(chosen);
+  const showClearFilters = !isDefaultTourListSelection(selection);
 
   const needle = chosen.q.trim().toLowerCase();
   const searching = needle !== '';
@@ -295,7 +419,7 @@ export function AllToursView(): React.JSX.Element {
           labelId="tours-all-status-label"
           label="Status"
           options={statusChips}
-          selected={chosen.statuses}
+          selected={selection.statuses}
           onChange={(statuses) => change({ ...chosen, statuses })}
         />
 
@@ -353,6 +477,7 @@ export function AllToursView(): React.JSX.Element {
           placeholder="Search tenant or property"
           value={chosen.q}
           onChange={(e) => search(e.target.value)}
+          onBlur={persistSearch}
         />
       </div>
 
@@ -425,7 +550,7 @@ export function AllToursView(): React.JSX.Element {
         data.dead ? (
           <div className={styles.actions} role="alert">
             <p className={styles.errorText}>We couldn&apos;t load more tours.</p>
-            <Button variant="secondary" size="sm" type="button" onClick={() => data.startOver()}>
+            <Button variant="secondary" size="sm" type="button" onClick={startOver}>
               Start over
             </Button>
           </div>

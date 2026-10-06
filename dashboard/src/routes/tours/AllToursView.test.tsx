@@ -15,8 +15,17 @@
 // accessible name from its content, and the Spinner is a status too (named
 // "Loading"), so the count line is the status WITHOUT an aria-label.
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate, useNavigationType } from 'react-router-dom';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  BrowserRouter,
+  Link,
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useNavigationType,
+} from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type TourListPage, type TourListParams, type TourListRow } from '../../api/index.js';
 
 const listToursMock = vi.fn();
@@ -219,6 +228,11 @@ function renderAt(entry: Entry = '/tours/all', from?: Entry) {
 // ---------------------------------------------------------------------------
 // Queries
 // ---------------------------------------------------------------------------
+
+const routerText = (): string => screen.getByTestId('router').textContent ?? '';
+const routerKey = (): string => screen.getByTestId('router').getAttribute('data-key') ?? '';
+const routerNav = (): string => screen.getByTestId('router').getAttribute('data-nav') ?? '';
+const routerState = (): unknown => JSON.parse(screen.getByTestId('router').getAttribute('data-state') ?? 'null');
 
 const list = (): HTMLElement => screen.getByRole('list', { name: 'All tours list' });
 const rowLinks = (): HTMLElement[] => within(list()).getAllByRole('link');
@@ -751,5 +765,227 @@ describe('AllToursView - search (spec 6)', () => {
     expect(call(2).params).toStrictEqual({ when: 'past', sort: 'latest' });
     expect(call(2).opts).toStrictEqual({ limit: 50 });
     expect(call(3).opts).toStrictEqual({ cursor: 'p-c1', limit: 100 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 12.2 - the URL state (#1's model) and the debounced walk flag
+// ---------------------------------------------------------------------------
+
+describe('AllToursView - the URL (spec 4.7)', () => {
+  it('adopts the URL on mount: the controls show it, the request carries it, and an adopted search walks at once', async () => {
+    reply('', namedPage([['t1', 'Ray Smith', '1 Oak St']], 'c1'));
+    renderAt('/tours/all?when=past&status=no_show&q=Smith');
+    await settle();
+    expect(select('When').value).toBe('past');
+    expect(chip('No show')).toHaveAttribute('aria-pressed', 'true');
+    expect(searchBox().value).toBe('Smith');
+    expect(call(0).params).toStrictEqual({ when: 'past', status: 'no_show', sort: 'latest' });
+    // No 300 ms wait: the walk follows the first page at once.
+    expect(optsOf()).toStrictEqual([{ limit: 50 }, { cursor: 'c1', limit: 100 }]);
+  });
+
+  it('each control change REPLACEs the URL with only the non-defaults, stamped; typing never writes; leaving the box writes once', async () => {
+    renderAt('/tours/all', '/elsewhere');
+    await settle();
+    const k0 = routerKey();
+    pick(select('When'), 'past');
+    expect(routerText()).toBe('/tours/all?when=past');
+    expect(routerNav()).toBe('REPLACE');
+    expect(routerState()).toStrictEqual({ tourListFilterWrite: true });
+    expect(routerKey()).not.toBe(k0);
+    fireEvent.click(chip('Toured'));
+    expect(routerText()).toBe('/tours/all?when=past&status=toured');
+    pick(select('Tour type'), 'self_guided');
+    pick(select('Sort'), 'earliest');
+    expect(routerText()).toBe('/tours/all?when=past&status=toured&type=self_guided&sort=earliest');
+
+    const k1 = routerKey();
+    typeSearch('S');
+    typeSearch('Sm');
+    typeSearch('Smith');
+    expect(routerKey()).toBe(k1);
+    fireEvent.blur(searchBox());
+    expect(routerText()).toBe('/tours/all?when=past&status=toured&type=self_guided&sort=earliest&q=Smith');
+    expect(routerState()).toStrictEqual({ tourListFilterWrite: true });
+    const k2 = routerKey();
+    expect(k2).not.toBe(k1);
+    // A second blur changes nothing, so it writes nothing.
+    fireEvent.blur(searchBox());
+    expect(routerKey()).toBe(k2);
+
+    // Every write was a REPLACE: Back leaves the list.
+    fireEvent.click(button('Browser back'));
+    expect(routerText()).toBe('/elsewhere');
+  });
+
+  it('a Browser back (POP) onto a stamped entry adopts its URL', async () => {
+    renderAt('/tours/all', {
+      pathname: '/tours/all',
+      search: '?when=past&status=no_show',
+      state: { tourListFilterWrite: true },
+    });
+    await settle();
+    expect(call(0).params).toStrictEqual({ when: 'any', sort: 'latest' });
+    fireEvent.click(button('Browser back'));
+    await settle();
+    expect(routerText()).toBe('/tours/all?when=past&status=no_show');
+    expect(select('When').value).toBe('past');
+    expect(chip('No show')).toHaveAttribute('aria-pressed', 'true');
+    expect(lastCall().params).toStrictEqual({ when: 'past', status: 'no_show', sort: 'latest' });
+  });
+
+  it('the All tab while on All keeps an UNSAVED search (P15 - no navigation)', async () => {
+    renderAt('/tours/all?when=past');
+    await settle();
+    const k0 = routerKey();
+    typeSearch('Smith');
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Tours view' })).getByRole('link', { name: 'All' }));
+    await settle();
+    expect(searchBox().value).toBe('Smith');
+    expect(routerKey()).toBe(k0);
+  });
+
+  it('Clear filters STOPS the walk: the box empties, the default first page loads, and no further walk request is made', async () => {
+    reply('', namedPage([['t1', 'Ray Smith', '1 Oak St']], 'c1'), page([row('d1')], 'd-c1'));
+    renderAt('/tours/all?when=past');
+    await settle();
+    typeSearch('smith');
+    await waitFor(() => expect(calls).toHaveLength(2));
+    const walk = call(1);
+    expect(walk.opts).toStrictEqual({ cursor: 'c1', limit: 100 });
+
+    fireEvent.click(button('Clear filters'));
+    await settle();
+    expect(searchBox().value).toBe('');
+    expect(walk.signal?.aborted).toBe(true);
+    expect(call(2).params).toStrictEqual({ when: 'any', sort: 'latest' });
+    expect(call(2).opts).toStrictEqual({ limit: 50 });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 350));
+    });
+    expect(calls).toHaveLength(3);
+    expect(rowIds()).toEqual(['d1']);
+  });
+
+  it('the empty-state Clear filters does the same', async () => {
+    reply('', namedPage([], null), page([row('d1')], 'd-c1'));
+    renderAt('/tours/all?when=past&q=smith');
+    await settle();
+    const empty = screen.getByText('No tours match these filters.').parentElement!;
+    fireEvent.click(within(empty).getByRole('button', { name: 'Clear filters' }));
+    await settle();
+    expect(searchBox().value).toBe('');
+    expect(call(1).params).toStrictEqual({ when: 'any', sort: 'latest' });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 350));
+    });
+    expect(optsOf()).toStrictEqual([{ limit: 50 }, { limit: 50 }]);
+  });
+
+  it('a keystroke followed by Clear filters within 300 ms never walks afterwards', async () => {
+    reply('', page([row('p1')], 'p-c1'), page([row('d1')], 'd-c1'));
+    renderAt('/tours/all?when=past');
+    await settle();
+    typeSearch('S');
+    fireEvent.click(button('Clear filters'));
+    await settle();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 350));
+    });
+    expect(optsOf()).toStrictEqual([{ limit: 50 }, { limit: 50 }]);
+  });
+
+  it('a filter change made while a search is set walks the NEW list at once, even within 300 ms of the last keystroke', async () => {
+    // Fake timers (the house idiom, ContactDetail.test.tsx): with real timers
+    // the keystroke's own 300 ms timer would fire inside a waitFor and start
+    // the same walk, so this case could not fail.
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    try {
+      reply('', namedPage([['t1', 'Ray Smith', '1 Oak St']], 'c1'), namedPage([['p1', 'Jo Smith', '2 Elm St']], 'p-c1'));
+      renderAt();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(optsOf()).toStrictEqual([{ limit: 50 }]);
+
+      typeSearch('Smith');
+      pick(select('When'), 'past');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(call(1).params).toStrictEqual({ when: 'past', sort: 'latest' });
+      expect(optsOf()).toStrictEqual([{ limit: 50 }, { limit: 50 }, { cursor: 'p-c1', limit: 100 }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('Clear filters and the Status Clear are judged on the PRUNED selection', async () => {
+    renderAt();
+    await settle();
+    pick(select('When'), 'range');
+    pick(screen.getByLabelText('From'), '2026-10-01');
+    pick(screen.getByLabelText('To'), '2026-10-31');
+    expect(button('Clear filters')).toBeInTheDocument();
+    pick(select('When'), 'any');
+    // From / To are still held, but no control shows them: nothing to clear.
+    expectNoButton('Clear filters');
+
+    fireEvent.click(chip('Needs booking'));
+    expect(button('Clear status filter')).toBeInTheDocument();
+    pick(select('When'), 'past');
+    // Needs booking is still held, but hidden: the Status group has nothing
+    // to clear (When is still set, so Clear filters stays).
+    expectNoButton('Clear status filter');
+    expect(button('Clear filters')).toBeInTheDocument();
+
+    // Both were held, not dropped.
+    pick(select('When'), 'range');
+    expect(screen.getByLabelText('From')).toHaveValue('2026-10-01');
+    pick(select('When'), 'any');
+    expect(chip('Needs booking')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  describe('under a browser history', () => {
+    afterEach(() => {
+      window.history.replaceState(null, '', '/');
+    });
+
+    function renderBrowser(): void {
+      window.history.replaceState(null, '', '/tours/all');
+      render(
+        <BrowserRouter>
+          <Routes>
+            <Route path="/tours/all" element={<ToursPage view="all" />} />
+            <Route path="/tours/:tourId" element={<TourProbe />} />
+          </Routes>
+        </BrowserRouter>,
+      );
+    }
+
+    it('a chip tap writes the browser URL', async () => {
+      renderBrowser();
+      await settle();
+      fireEvent.click(chip('Toured'));
+      await settle();
+      expect(window.location.pathname + window.location.search).toBe('/tours/all?status=toured');
+    });
+
+    it('a chip tap during a still-pending navigation leaves that entry untouched (the write is skipped)', async () => {
+      renderBrowser();
+      await settle();
+      // A navigation the browser has started but the router has not
+      // committed: the history entry (and its react-router index) has moved.
+      const idx = (window.history.state as { idx?: number } | null)?.idx ?? 0;
+      window.history.pushState({ usr: null, key: 'pending', idx: idx + 1 }, '', '/tours/past');
+      fireEvent.click(chip('Toured'));
+      await settle();
+      expect(window.location.pathname + window.location.search).toBe('/tours/past');
+    });
   });
 });

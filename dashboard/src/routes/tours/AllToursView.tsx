@@ -21,6 +21,13 @@
 // state (spec 4.9) is bound to the list it was adopted for, so it can only
 // ever drive that list.
 //
+// RETURNING FROM A TOUR (spec 4.8, 4.9): a row link carries { back, restore }
+// (the LOCAL selection as a /tours/all URL, and the rows loaded plus the row's
+// id and VISIBLE index); an unmodified primary click also stores the record in
+// the list's own entry (a stamped REPLACE). Back with a record, the hook loads
+// to its depth and the view focuses and scrolls to the opened row - or the row
+// now at its position - unless the user acted first.
+//
 // THE LIST AREA follows the hook's status: loading -> the Spinner, and no
 // count text and no actions (never "Showing 0 tours"); error -> the first-page
 // failure and Retry, inside an alert; idle (an invalid date range) -> only the
@@ -290,12 +297,16 @@ export function AllToursView(): React.JSX.Element {
   const data = useAllTours({ listKey, walk: walkQ.trim() !== '' && chosen.q.trim() !== '', restoreDepth });
 
   /** Persist a selection to the URL - a stamped REPLACE, so Back leaves the
-   *  page rather than walking filter changes. Skipped while a PUSH or a
+   *  page rather than walking filter changes; a row open also stores its
+   *  restore record in the entry's state (spec 4.9). Skipped while a PUSH or a
    *  Back/Forward is pending: replacing the browser's current entry then would
    *  cancel the navigation the user already made. Returns whether it wrote. */
-  function persist(next: TourListSelection): boolean {
+  function persist(next: TourListSelection, restoreRecord?: TourListRestore): boolean {
     if (historyIdx() !== committedIdx.current) return false;
-    setSearchParams(new URLSearchParams(searchFor(searchParams, next)), { replace: true, state: OWN_WRITE });
+    setSearchParams(new URLSearchParams(searchFor(searchParams, next)), {
+      replace: true,
+      state: restoreRecord === undefined ? OWN_WRITE : { ...OWN_WRITE, restore: restoreRecord },
+    });
     return true;
   }
 
@@ -370,6 +381,60 @@ export function AllToursView(): React.JSX.Element {
     ? views.filter((v) => v.tenant.toLowerCase().includes(needle) || v.property.toLowerCase().includes(needle))
     : views;
   const ready = data.status === 'ready';
+
+  // THE RETURN ANCHOR (spec 4.9). A convenience, never a hijack: any
+  // user-intent event after mount cancels it. Not 'scroll' (the browser
+  // scrolls on its own) and not click / keyup / pointerup (the tail of the
+  // gesture that brought the user back). Refs are read only inside effects.
+  const userActed = useRef(false);
+  useEffect(() => {
+    const mark = (): void => {
+      userActed.current = true;
+    };
+    const kinds = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const;
+    for (const k of kinds) document.addEventListener(k, mark, { capture: true, passive: true });
+    return () => {
+      for (const k of kinds) document.removeEventListener(k, mark, { capture: true });
+    };
+  }, []);
+
+  const listRef = useRef<HTMLUListElement>(null);
+  const anchoredFor = useRef<TourListRestore | null>(null);
+  // The record that applies to THIS list (bound at adoption).
+  const record = restore !== null && restore.listKey === listKey ? restore.record : null;
+  useLayoutEffect(() => {
+    if (record === null || anchoredFor.current === record) return;
+    if (data.restoreOutcome !== 'reached' && data.restoreOutcome !== 'capped') return;
+    anchoredFor.current = record;
+    if (userActed.current) return;
+    // Among the VISIBLE rows: the opened row when it is there; else, when the
+    // list was loaded to the depth (or ended), the row now at its position -
+    // the next one to work on - clamped to the last; else (a capped restore
+    // that stopped short, an empty list) nothing.
+    const ids = visible.map((v) => v.row.tourId);
+    let target: string | undefined = ids.includes(record.openedTourId) ? record.openedTourId : undefined;
+    if (target === undefined && data.restoreOutcome === 'reached' && ids.length > 0) {
+      target = ids[Math.min(record.openedIndex, ids.length - 1)];
+    }
+    if (target === undefined) return;
+    const link = [...(listRef.current?.querySelectorAll<HTMLAnchorElement>('a[data-tour-id]') ?? [])].find(
+      (a) => a.dataset['tourId'] === target,
+    );
+    // The house idiom (StatusMenu.tsx): focus without the browser's own
+    // scroll, then the smallest scroll that shows it.
+    link?.focus({ preventScroll: true });
+    link?.scrollIntoView({ block: 'nearest' });
+  }, [record, data.restoreOutcome, visible]);
+
+  /** An unmodified primary click on a row opens it HERE: the list's own entry
+   *  then remembers where the user was (a stamped REPLACE whose state carries
+   *  the restore record, the search text included). react-router runs a
+   *  Link's onClick even for a modified click, so the check is this
+   *  handler's: any other click opens the tour elsewhere and writes nothing. */
+  function openRow(e: React.MouseEvent<HTMLAnchorElement>, tourId: string, index: number): void {
+    if (e.button !== 0 || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey) return;
+    persist(chosen, { depth: data.rows.length, openedTourId: tourId, openedIndex: index });
+  }
 
   return (
     <section aria-label="All tours">
@@ -515,7 +580,7 @@ export function AllToursView(): React.JSX.Element {
       ) : null}
 
       {ready && visible.length > 0 ? (
-        <ul className={rowStyles.rows} aria-label="All tours list">
+        <ul className={rowStyles.rows} aria-label="All tours list" ref={listRef}>
           {visible.map((v, i) => (
             <li key={v.row.tourId} className={rowStyles.rowItem}>
               {/* The router state hands the tour page its back pointer and the
@@ -524,6 +589,7 @@ export function AllToursView(): React.JSX.Element {
               <Link
                 to={`/tours/${v.row.tourId}`}
                 state={{ back, restore: { depth: data.rows.length, openedTourId: v.row.tourId, openedIndex: i } }}
+                onClick={(e) => openRow(e, v.row.tourId, i)}
                 className={rowStyles.row}
                 aria-label={rowName(v)}
                 data-tour-id={v.row.tourId}

@@ -25,7 +25,7 @@ import {
   useNavigate,
   useNavigationType,
 } from 'react-router-dom';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { ApiError, type TourListPage, type TourListParams, type TourListRow } from '../../api/index.js';
 
 const listToursMock = vi.fn();
@@ -222,6 +222,21 @@ function renderAt(entry: Entry = '/tours/all', from?: Entry) {
       <RouterProbe />
       <BackButton />
     </MemoryRouter>,
+  );
+}
+
+/** Under a REAL browser history (BrowserRouter) - the pending-navigation
+ *  cases (under a MemoryRouter the index guard is disarmed). The caller
+ *  resets the URL in afterEach. */
+function renderBrowser(): void {
+  window.history.replaceState(null, '', '/tours/all');
+  render(
+    <BrowserRouter>
+      <Routes>
+        <Route path="/tours/all" element={<ToursPage view="all" />} />
+        <Route path="/tours/:tourId" element={<TourProbe />} />
+      </Routes>
+    </BrowserRouter>,
   );
 }
 
@@ -956,18 +971,6 @@ describe('AllToursView - the URL (spec 4.7)', () => {
       window.history.replaceState(null, '', '/');
     });
 
-    function renderBrowser(): void {
-      window.history.replaceState(null, '', '/tours/all');
-      render(
-        <BrowserRouter>
-          <Routes>
-            <Route path="/tours/all" element={<ToursPage view="all" />} />
-            <Route path="/tours/:tourId" element={<TourProbe />} />
-          </Routes>
-        </BrowserRouter>,
-      );
-    }
-
     it('a chip tap writes the browser URL', async () => {
       renderBrowser();
       await settle();
@@ -1019,5 +1022,317 @@ describe('AllToursView - the row link state (spec 4.8)', () => {
       back: '/tours/all',
       restore: { depth: 2, openedTourId: 'a2', openedIndex: 1 },
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 12.4 - the row-open write and the return restore
+// ---------------------------------------------------------------------------
+
+/** Rows `<prefix><start>` .. `<prefix><start + n - 1>`. */
+function rowsFrom(prefix: string, start: number, n: number): TourListRow[] {
+  return Array.from({ length: n }, (_, i) => row(`${prefix}${start + i}`));
+}
+
+function linkFor(tourId: string): HTMLElement {
+  const link = list().querySelector<HTMLElement>(`a[data-tour-id="${tourId}"]`);
+  if (link === null) throw new Error(`no row link for ${tourId}`);
+  return link;
+}
+
+/** The tour id of the row link that has focus ('' = none). */
+const focusedRow = (): string => (document.activeElement as HTMLElement | null)?.getAttribute('data-tour-id') ?? '';
+
+describe('AllToursView - the row-open write (spec 4.7, 4.9)', () => {
+  it('an unmodified primary click REPLACEs the list entry with the stamp, the unsaved search and the restore record', async () => {
+    reply('', page([row('a1'), row('a2'), row('a3')], null));
+    renderAt('/tours/all?when=past', '/elsewhere');
+    await settle();
+    typeSearch('First');
+    fireEvent.click(linkFor('a2'));
+    expect(screen.getByTestId('tour-route')).toHaveTextContent('/tours/a2');
+
+    reply('', page([row('a1'), row('a2'), row('a3')], null));
+    fireEvent.click(button('Browser back'));
+    await settle();
+    expect(routerText()).toBe('/tours/all?when=past&q=First');
+    expect(routerState()).toStrictEqual({
+      tourListFilterWrite: true,
+      restore: { depth: 3, openedTourId: 'a2', openedIndex: 1 },
+    });
+    // A REPLACE: one more Back leaves the list.
+    fireEvent.click(button('Browser back'));
+    expect(routerText()).toBe('/elsewhere');
+  });
+
+  it('a Ctrl-click and an Alt-click write nothing (the tour opens elsewhere)', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      reply('', page([row('a1')], null));
+      renderAt('/tours/all?when=past');
+      await settle();
+      const k0 = routerKey();
+      fireEvent.click(linkFor('a1'), { ctrlKey: true });
+      fireEvent.click(linkFor('a1'), { altKey: true });
+      // jsdom reports each unprevented anchor activation as an unimplemented
+      // navigation; wait for both so they land inside this spy, not in a later
+      // test's stderr (ToursPage.test.tsx's P15 case does the same).
+      await waitFor(() => expect(errors).toHaveBeenCalledTimes(2));
+      expect(routerKey()).toBe(k0);
+      expect(routerText()).toBe('/tours/all?when=past');
+      expect(routerState()).toBeNull();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  describe('under a browser history', () => {
+    afterEach(() => {
+      window.history.replaceState(null, '', '/');
+    });
+
+    it('the row-open write lands on the list entry', async () => {
+      reply('', page([row('a1')], null));
+      renderBrowser();
+      await settle();
+      const replace = vi.spyOn(window.history, 'replaceState');
+      try {
+        fireEvent.click(linkFor('a1'));
+        expect(replace).toHaveBeenCalledTimes(1);
+        expect((replace.mock.calls[0]![0] as { usr?: unknown }).usr).toStrictEqual({
+          tourListFilterWrite: true,
+          restore: { depth: 1, openedTourId: 'a1', openedIndex: 0 },
+        });
+      } finally {
+        replace.mockRestore();
+      }
+    });
+
+    it('the row-open write is skipped while a navigation is pending', async () => {
+      reply('', page([row('a1')], null));
+      renderBrowser();
+      await settle();
+      const idx = (window.history.state as { idx?: number } | null)?.idx ?? 0;
+      window.history.pushState({ usr: null, key: 'pending', idx: idx + 1 }, '', '/tours/past');
+      const replace = vi.spyOn(window.history, 'replaceState');
+      try {
+        fireEvent.click(linkFor('a1'));
+        expect(replace).not.toHaveBeenCalled();
+      } finally {
+        replace.mockRestore();
+      }
+    });
+  });
+});
+
+describe('AllToursView - the return restore (spec 4.9)', () => {
+  const RECORD = { depth: 120, openedTourId: 'r100', openedIndex: 100 };
+  let scrolled: MockInstance<HTMLElement['scrollIntoView']>;
+  beforeEach(() => {
+    scrolled = vi.spyOn(HTMLElement.prototype, 'scrollIntoView');
+  });
+  afterEach(() => {
+    scrolled.mockRestore();
+  });
+
+  /** Page 1 is r0-r49 (cursor c1); the restore page from c1 is r50-r149. */
+  function scriptDepth150(): void {
+    reply('', page(rowsOf('r', 50), 'c1'));
+    reply('c1', page(rowsFrom('r', 50, 100), 'c2'));
+  }
+
+  const ARRIVALS: Array<[string, () => void]> = [
+    [
+      'the back arrow',
+      () => {
+        renderAt({ pathname: '/tours/r100', state: { back: '/tours/all?when=past', restore: RECORD } });
+        fireEvent.click(screen.getByRole('link', { name: 'Back to tours' }));
+      },
+    ],
+    [
+      'Browser back (a POP onto the stamped entry)',
+      () => {
+        renderAt('/tours/r100', {
+          pathname: '/tours/all',
+          search: '?when=past',
+          state: { tourListFilterWrite: true, restore: RECORD },
+        });
+        fireEvent.click(button('Browser back'));
+      },
+    ],
+    [
+      'a reload of the stamped entry',
+      () => {
+        renderAt({ pathname: '/tours/all', search: '?when=past', state: { tourListFilterWrite: true, restore: RECORD } });
+      },
+    ],
+  ];
+
+  it.each(ARRIVALS)(
+    'via %s: page 1, then ONE limit-100 restore page, then the opened row has focus and is scrolled into view',
+    async (_how, arrive) => {
+      scriptDepth150();
+      arrive();
+      await settle();
+      expect(call(0).params).toStrictEqual({ when: 'past', sort: 'latest' });
+      expect(optsOf()).toStrictEqual([{ limit: 50 }, { cursor: 'c1', limit: 100 }]);
+      expect(rowLinks()).toHaveLength(150);
+      expect(focusedRow()).toBe('r100');
+      expect(scrolled).toHaveBeenCalledTimes(1);
+      expect(scrolled.mock.contexts[0]).toBe(linkFor('r100'));
+    },
+  );
+
+  it.each([
+    [1, 'a1'],
+    [7, 'a2'],
+  ])('the opened row is gone: openedIndex %i focuses the row now there, clamped to the last (%s)', async (openedIndex, expected) => {
+    reply('', page([row('a0'), row('a1'), row('a2')], null));
+    renderAt({ pathname: '/tours/all', state: { restore: { depth: 3, openedTourId: 'gone', openedIndex } } });
+    await settle();
+    expect(focusedRow()).toBe(expected);
+    expect(scrolled.mock.contexts[0]).toBe(linkFor(expected));
+  });
+
+  it('with a search, positions count the VISIBLE (matching) rows', async () => {
+    reply(
+      '',
+      namedPage(
+        [
+          ['t1', 'Tasha Nguyen', '1 Oak St'],
+          ['t2', 'Ray Smith', '2 Elm St'],
+          ['t3', 'Ann Lee', '9 Smith Rd'],
+          ['t4', 'Jo Smith', '4 Pine St'],
+        ],
+        null,
+      ),
+    );
+    renderAt({ pathname: '/tours/all', search: '?q=smith', state: { restore: { depth: 4, openedTourId: 'gone', openedIndex: 1 } } });
+    await settle();
+    expect(rowIds()).toEqual(['t2', 't3', 't4']);
+    expect(focusedRow()).toBe('t3');
+  });
+
+  it('an EMPTY list focuses nothing', async () => {
+    reply('', page([], null));
+    renderAt({ pathname: '/tours/all', state: { restore: { depth: 3, openedTourId: 'gone', openedIndex: 1 } } });
+    await settle();
+    expect(screen.getByText('No tours match these filters.')).toBeInTheDocument();
+    expect(document.activeElement).toBe(document.body);
+    expect(scrolled).not.toHaveBeenCalled();
+  });
+
+  it('a capped restore stops after page 1 + 10 restore pages of 100 (1,050 rows): no further request, Load more shows, nothing moves', async () => {
+    reply('', page(rowsOf('r', 50), 'c0'));
+    for (let i = 0; i < 10; i++) reply(`c${i}`, page(rowsFrom('r', 50 + i * 100, 100), `c${i + 1}`));
+    renderAt({ pathname: '/tours/all', state: { restore: { depth: 2000, openedTourId: 'r1999', openedIndex: 1999 } } });
+    await settle();
+    expect(calls).toHaveLength(11);
+    expect(calls.slice(1).every((c) => c.opts.limit === 100)).toBe(true);
+    expect(rowLinks()).toHaveLength(1050);
+    expect(button('Load more')).toBeInTheDocument();
+    expect(document.activeElement).toBe(document.body);
+    expect(scrolled).not.toHaveBeenCalled();
+    await settle();
+    expect(calls).toHaveLength(11);
+  });
+
+  it.each([
+    ['keydown', () => fireEvent.keyDown(document, { key: 'Tab' })],
+    ['pointerdown', () => fireEvent.pointerDown(document)],
+    ['wheel', () => fireEvent.wheel(document)],
+    ['touchstart', () => fireEvent.touchStart(document)],
+  ])('a %s before the load ends cancels the anchor: nothing is focused or scrolled', async (_kind, userActs) => {
+    reply('', page(rowsOf('r', 50), 'c1'));
+    renderAt({ pathname: '/tours/all', state: { restore: RECORD } });
+    await settle();
+    expect(lastCall().opts).toStrictEqual({ cursor: 'c1', limit: 100 });
+    userActs();
+    await land(lastCall(), page(rowsFrom('r', 50, 100), 'c2'));
+    expect(rowLinks()).toHaveLength(150);
+    expect(focusedRow()).toBe('');
+    expect(scrolled).not.toHaveBeenCalled();
+  });
+
+  it('a browser scroll event does NOT cancel it', async () => {
+    reply('', page(rowsOf('r', 50), 'c1'));
+    renderAt({ pathname: '/tours/all', state: { restore: RECORD } });
+    await settle();
+    fireEvent.scroll(document);
+    fireEvent.scroll(window);
+    await land(lastCall(), page(rowsFrom('r', 50, 100), 'c2'));
+    expect(focusedRow()).toBe('r100');
+  });
+
+  it('an arrival without a record loads one page and focuses nothing', async () => {
+    reply('', page(rowsOf('r', 50), 'c1'));
+    renderAt('/tours/all?when=past');
+    await settle();
+    expect(optsOf()).toStrictEqual([{ limit: 50 }]);
+    expect(document.activeElement).toBe(document.body);
+    expect(scrolled).not.toHaveBeenCalled();
+  });
+
+  // Each case returns to the restored list's own filters afterwards: the
+  // binding alone keeps a record off ANOTHER list, so only the way back
+  // proves the record was dropped.
+  const DROPS: Array<[string, string, () => void, () => void]> = [
+    ['a When change (and back again)', '', () => pick(select('When'), 'past'), () => pick(select('When'), 'any')],
+    ['a sort change (and back again)', '', () => pick(select('Sort'), 'earliest'), () => pick(select('Sort'), 'latest')],
+    [
+      'Clear filters (and back again)',
+      '?type=pm_team',
+      () => fireEvent.click(button('Clear filters')),
+      () => pick(select('Tour type'), 'pm_team'),
+    ],
+  ];
+
+  it.each(DROPS)(
+    '%s after a restore DROPS the record: each new list makes ONE limit-50 request and no restore request',
+    async (_how, search, first, second) => {
+      reply('', page(rowsOf('r', 50), 'c0'));
+      for (let i = 0; i < 3; i++) reply(`c${i}`, page(rowsFrom('r', 50 + i * 100, 100), `c${i + 1}`));
+      renderAt({ pathname: '/tours/all', search, state: { restore: { depth: 300, openedTourId: 'r10', openedIndex: 10 } } });
+      await settle();
+      expect(calls).toHaveLength(4);
+      const n = calls.length;
+
+      reply('', page(rowsOf('s', 50), 's-c1'));
+      first();
+      await settle();
+      expect(optsOf().slice(n)).toStrictEqual([{ limit: 50 }]);
+      // Back to the restored list's own filters: still no restore.
+      reply('', page(rowsOf('t', 50), 't-c1'));
+      second();
+      await settle();
+      expect(optsOf().slice(n)).toStrictEqual([{ limit: 50 }, { limit: 50 }]);
+    },
+  );
+
+  it('a blur save mid-restore drops the record: the pending restore request is aborted and none follows', async () => {
+    reply('', page(rowsOf('r', 50), 'c0'));
+    renderAt({
+      pathname: '/tours/x',
+      state: { back: '/tours/all?q=Smith', restore: { depth: 300, openedTourId: 'r10', openedIndex: 10 } },
+    });
+    fireEvent.click(screen.getByRole('link', { name: 'Back to tours' }));
+    await settle();
+    // The adopted search walks first.
+    expect(optsOf()).toStrictEqual([{ limit: 50 }, { cursor: 'c0', limit: 100 }]);
+    const walk = call(1);
+
+    typeSearch('');
+    await settle();
+    // The walk stops at once; the restore takes over from the same cursor
+    // (held in flight).
+    expect(walk.signal?.aborted).toBe(true);
+    expect(optsOf()).toStrictEqual([{ limit: 50 }, { cursor: 'c0', limit: 100 }, { cursor: 'c0', limit: 100 }]);
+    const restoring = call(2);
+
+    fireEvent.blur(searchBox());
+    await settle();
+    expect(routerText()).toBe('/tours/all');
+    expect(restoring.signal?.aborted).toBe(true);
+    expect(calls).toHaveLength(3);
   });
 });

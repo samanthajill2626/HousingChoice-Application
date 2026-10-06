@@ -19,9 +19,14 @@
 //     still exists or still sits there (a deleted or rescheduled tour);
 //   - a start key OUTSIDE the key condition (another partition, or a range
 //     key outside the phase's range) is REJECTED with a ValidationException-
-//     named error, as DynamoDB rejects it ("The provided starting key is
-//     outside query boundaries based on provided conditions"). Route test 3
-//     and the route's cursor-400 mapping depend on this.
+//     named error, as DynamoDB rejects it. The message is DynamoDB Local's,
+//     measured 2026-10-06 for every range op, both directions, the exclusive
+//     `lt` bound itself, a wrong partition and a wrong status: "The provided
+//     starting key does not match the range key predicate". (The plan quoted
+//     AWS's wording as "...is outside query boundaries based on provided
+//     conditions".) The text is not a contract - match on the NAME, as the
+//     route's cursor-400 mapping does. Route test 3 and that mapping depend
+//     on the rejection.
 // WHERE IT KNOWINGLY DIFFERS - TIES: rows sharing a range-key value come back
 // here by tourId (ascending forward); DynamoDB orders them opaquely. So a start
 // key whose range-key value another row of the phase also holds THROWS a PLAIN
@@ -94,10 +99,9 @@ export function queryListPhaseFromItems(
   if (opts.startKey !== undefined) {
     const k = opts.startKey;
     if (outsideKeyCondition(phase, k)) {
-      throw Object.assign(
-        new Error('The provided starting key is outside query boundaries based on provided conditions'),
-        { name: 'ValidationException' },
-      );
+      throw Object.assign(new Error('The provided starting key does not match the range key predicate'), {
+        name: 'ValidationException',
+      });
     }
     const kRange = (phase.kind === 'd' ? k['scheduledAt'] : k['createdAt']) ?? '';
     const kId = k['tourId'] ?? '';

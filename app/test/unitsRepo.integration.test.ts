@@ -103,6 +103,37 @@ describe.skipIf(!reachable)('unitsRepo against DynamoDB Local (throwaway prefix)
     });
   });
 
+  it('getDisplaysByIds batch-reads unitId + address; a soft-deleted unit still answers, a missing id is absent', async () => {
+    const kept = await units.create({
+      landlordId: 'contact-ll-disp-1',
+      status: 'available',
+      address: { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30301' },
+      beds: 2,
+    });
+    const removed = await units.create({
+      landlordId: 'contact-ll-disp-2',
+      status: 'available',
+      address: { line1: '9 Elm Ave', city: 'Decatur', state: 'GA' },
+    });
+    await units.softDelete(removed.unitId, '2026-10-06T12:00:00.000Z');
+
+    const found = await units.getDisplaysByIds([kept.unitId, removed.unitId, 'unit-missing']);
+
+    // Exactly the projection - landlordId, status, beds and deleted_at stay home.
+    expect(found.get(kept.unitId)).toEqual({
+      unitId: kept.unitId,
+      address: { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30301' },
+    });
+    // A soft-deleted unit keeps its row, so it is still named (the Closed tab
+    // names removed properties the same way).
+    expect(found.get(removed.unitId)).toEqual({
+      unitId: removed.unitId,
+      address: { line1: '9 Elm Ave', city: 'Decatur', state: 'GA' },
+    });
+    expect(found.has('unit-missing')).toBe(false);
+    expect(found.size).toBe(2);
+  });
+
   it('update SET-merges (leaves unset fields untouched) and bumps updated_at', async () => {
     const unit = await units.create({
       landlordId: 'contact-ll-2',

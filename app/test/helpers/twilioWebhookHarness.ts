@@ -116,6 +116,7 @@ import {
   LandlordReassignmentRequiredError,
   unitContacts,
   type UnitContact,
+  type UnitDisplayItem,
   type UnitItem,
   type UnitsRepo,
 } from '../../src/repos/unitsRepo.js';
@@ -2708,6 +2709,18 @@ export function createFakeWorld(): FakeWorld {
     },
     async getById(unitId) {
       return units.get(unitId);
+    },
+    async getDisplaysByIds(unitIds) {
+      // The real repo's projection: unitId, plus address only when set. A
+      // soft-deleted unit still answers; an unknown id is simply absent.
+      const found = new Map<string, UnitDisplayItem>();
+      for (const unitId of unitIds) {
+        const unit = units.get(unitId);
+        if (unit !== undefined) {
+          found.set(unitId, { unitId, ...(unit.address !== undefined && { address: unit.address }) });
+        }
+      }
+      return found;
     },
     async update(unitId, patch) {
       const unit = units.get(unitId);

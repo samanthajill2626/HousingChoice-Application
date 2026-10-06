@@ -17,6 +17,7 @@
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
+  BatchGetCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -319,6 +320,12 @@ export interface ListUnitsOpts {
   deleted?: boolean;
 }
 
+/** The fields a staff-facing property label needs (the All tab's name map). */
+export interface UnitDisplayItem {
+  unitId: string;
+  address?: UnitItem['address'];
+}
+
 /**
  * Create input: landlordId + status are required (the owning landlord and the
  * lifecycle/GSI status); everything else is optional and flows through as a
@@ -331,6 +338,14 @@ export interface UnitsRepo {
   /** Create a unit (generates unitId); returns the stored item. */
   create(input: CreateUnitInput): Promise<UnitItem>;
   getById(unitId: string): Promise<UnitItem | undefined>;
+  /**
+   * Batch-read the display fields (unitId, address) of many units by primary
+   * key - BEST-EFFORT, like contactsRepo.getDisplaysByIds: 100-key chunks,
+   * UnprocessedKeys retried, keys still unread after the retries (or a chunk
+   * whose request failed) are dropped with a WARN (counts only). A short map
+   * is a missing LABEL, never an error. Soft-deleted units still answer.
+   */
+  getDisplaysByIds(unitIds: string[]): Promise<Map<string, UnitDisplayItem>>;
   /**
    * SET-merge update: only the supplied fields are written; omitted fields are
    * LEFT as stored (never blanked) — the same no-overwrite contract as
@@ -561,6 +576,45 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
     async getById(unitId) {
       const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { unitId } }));
       return Item as UnitItem | undefined;
+    },
+
+    async getDisplaysByIds(unitIds) {
+      const found = new Map<string, UnitDisplayItem>();
+      // BatchGetItem REJECTS duplicate keys; callers may repeat an id.
+      const uniqueIds = [...new Set(unitIds)];
+      let unprocessed = 0;
+      for (let i = 0; i < uniqueIds.length; i += 100) {
+        let keys = uniqueIds.slice(i, i + 100).map((unitId) => ({ unitId }));
+        try {
+          for (let attempt = 0; attempt < 4 && keys.length > 0; attempt += 1) {
+            if (attempt > 0) {
+              await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
+            }
+            const response = await doc.send(
+              new BatchGetCommand({
+                RequestItems: {
+                  [table]: {
+                    Keys: keys,
+                    ProjectionExpression: '#unitId, #address',
+                    ExpressionAttributeNames: { '#unitId': 'unitId', '#address': 'address' },
+                  },
+                },
+              }),
+            );
+            for (const item of (response.Responses?.[table] ?? []) as UnitDisplayItem[]) {
+              found.set(item.unitId, item);
+            }
+            keys = (response.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ unitId: string }>;
+          }
+        } catch (err) {
+          log.warn({ err, chunkKeys: keys.length }, 'units: BatchGet chunk failed - keys dropped');
+        }
+        unprocessed += keys.length;
+      }
+      if (unprocessed > 0) {
+        log.warn({ unprocessed, requested: uniqueIds.length }, 'units: BatchGet left keys unprocessed after retries');
+      }
+      return found;
     },
 
     async update(unitId, patch) {

@@ -2,13 +2,17 @@
 
 - Spec (the contract - read it in full before Task 1.1):
   `docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md`
-  (revision 5, APPROVED by Cameron 2026-10-06). This plan builds BRANCH A
+  (revision 8; revision 5 was APPROVED by Cameron 2026-10-06, revisions 6-7
+  fold in the plan research and plan review round 1, revision 8 records Sam's
+  answers - the final starting list). This plan builds BRANCH A
   only. Branch B (caseworkers, spec D16-D21) gets its own plan after this
   branch merges; nothing in this plan implements D16-D21.
 - Branch `feat/clean-org-names`, worktree `W:\tmp\clean-org-names`, cut from
   main @d839494a. Mission records:
   `docs/superpowers/reviews/2026-10-06-clean-org-names/`.
-- Status: PLAN DRAFT (planner) - pending adversarial plan review.
+- Status: PLAN (planner) - plan review round 1 adjudicated and applied
+  (`docs/superpowers/reviews/2026-10-06-clean-org-names/plan-review/adjudications.md`);
+  round 2 pending.
 
 ## 0. Ground rules for this plan
 
@@ -48,6 +52,20 @@
   (:5174/:8080).
 - No agent runs the cleanup script against dev or prod - lanes only
   (`--env local --lane <L>`).
+- Line numbers in this plan (`:123`, "at 93c3c65b") are the branch base's
+  source (93c3c65b is a docs-only commit on this branch; the source equals
+  main @d839494a). They DRIFT once an earlier task in the same slice inserts
+  lines above them. Every quoted anchor (an `old_string`, "replace ... with")
+  is unique text in its file - match the TEXT, never the number.
+- References this plan does not define live in the mission records: rulings
+  cited as R1-F1, R2, R3-Fn, R4-Fn, R5 are in
+  `docs/superpowers/reviews/2026-10-06-clean-org-names/plan-research/planner-rulings.md`
+  (the findings behind them in `R1-findings.md` ... `R5-findings.md` there);
+  the section writers' contract issues and their rulings are in
+  `docs/superpowers/reviews/2026-10-06-clean-org-names/plan-research/plan-assembly-rulings.md`
+  (every one that binds a slice is written into plan section 3 or the task
+  that needs it). The "R1-R5 reference" documents (code maps) are
+  `.superpowers/sdd/plan-research/R<n>-*-reference.md` in this worktree.
 
 ## 1. Global constraints (verbatim from the spec)
 
@@ -62,14 +80,14 @@
 | on the list (D3) | value is character-for-character the name of an entry of a kind the field accepts |
 | normalization (D4) | lowercase; `&` -> ` and `; `. , ( ) - / ' " _` -> space; collapse whitespace; trim |
 | ambiguity | counted within the field's kinds; shared spellings only within ONE kind |
-| COMPOUND (D4) | not an exact name/spelling AND >= 2 longest-first non-overlapping spans with no single entry matched by every span |
-| limits (D13) | name <= 120 chars; notes <= 500; <= 20 spellings per entry, each <= 120 chars; item <= 300 KB (`org_list_full`) |
+| COMPOUND (D4) | not an exact name/spelling AND >= 2 non-overlapping spans (found left to right, taking at each position the LONGEST phrase that is a name or spelling) with no single entry matched by every span |
+| limits (D13) | name <= 120 chars, never normalizing to '' (e.g. `-`, `()`); notes <= 500; <= 20 spellings per entry, each <= 120 chars; item <= 300 KB (`org_list_full`); `POST /check` text <= 200 chars (400), close names scored only up to 120 normalized chars |
 | write check (D5) | only values that CHANGE; `housingAuthority: ''` REMOVEs; `agency: ''` stored; list members already held (compared after trimming both sides) pass; the legacy `jurisdiction` passes ONLY while the unit has no stored `accepted_authorities` |
 | write error | HTTP 422 `{ error: 'org_not_on_list', field, text, candidates, close, otherKind?, compound? }` |
 | admin-only | spellings edit, rename, merge, delete, kind change, all "Not on the list" actions, Run again (`requireRole('admin')`) |
 | everyone | view all three Settings sections (incl. "Not on the list" + records), add (name + notes), edit notes |
 | rewrite lock | one rewrite at a time; 409 `org_rewrite_running` while `lastRewrite.status === 'running'` and heartbeat < 15 min; cleanup takes the lock as action `cleanup`, never offered "Run again" |
-| rewrite job | base-table reads (all contact types + deleted, all units + deleted); conditional per record; REMOVE housingAuthority on clear; dedupe unit lists; NEVER stamp unit `updated_at`; audit `org_name_rewrite` per record; never touches broadcasts |
+| rewrite job | reads every contact of every type + deleted through the `byTypeStatus` index (as every contact list in the app does) and every unit + deleted (a base-table scan); `fields` fixed when the rewrite starts; conditional per record; REMOVE housingAuthority on clear; dedupe unit lists; NEVER stamp unit `updated_at`; audit `org_name_rewrite` per field written; stops writing at once when a heartbeat finds the lock gone; never touches broadcasts |
 | merge | moves name + ALL spellings to the target; refused 409 `org_spellings_full` if a cap would break |
 | AI | system prompt static; list block in USER content; `orgListFingerprint` per run; block budget 16,000 chars (drop spellings, then agency names, then HA names; WARN); agency in HA field -> drop reason `agency_not_authority` |
 | accept value | optional `value`; allowed only = D4 resolution of the suggestion text or one of its candidates; else 422 `value_not_from_suggestion`; re-accept with a different value -> 409 `suggestion_already_resolved` |
@@ -91,7 +109,7 @@ run the cleanup against dev or prod.
 | S1 rules | pure matching rules + starting list | `app/src/lib/orgNames.ts`, `app/src/lib/orgStartingList.ts` |
 | S2 store | the `org-list` settings item: get (lazy create-only seed), read-and-bump mutate, seed put, size guard | `app/src/repos/orgListRepo.ts` |
 | S3 services | write checks against the stored list; list operations; record iteration, usage, "Not on the list"; rewrite lock + start/run-again | `app/src/services/orgNames.ts`, `app/src/services/orgRecords.ts`, `app/src/services/orgRewrite.ts`; new repo writers on `contactsRepo` / `unitsRepo` |
-| S4 rewrite job | the `org.rewrite` job handler + registration | `app/src/jobs/orgRewrite.ts`, `app/src/worker.ts` (+ in-process wiring) |
+| S4 rewrite job | the `org.rewrite` job handler + registration (the worker and the in-process app both register through `registerAllJobHandlers`; `worker.ts` needs no edit) | `app/src/jobs/orgRewrite.ts`, `app/src/jobs/registerHandlers.ts` |
 | S5 API | `/api/organizations` router + composition-root wiring | `app/src/routes/organizations.ts`, `app/src/routes/api.ts` |
 | S6 writers | D5 on contacts PATCH, units POST/PATCH, broadcasts POST/preview/filter-send | `app/src/routes/contacts.ts`, `units.ts`, `broadcasts.ts` |
 | S7 AI | list block in user content, fingerprint, apply-layer resolution, agency drop reason, accept `value` | `app/src/services/extraction/*`, `app/src/jobs/extraction.ts`, `app/src/routes/suggestions.ts`, `app/src/services/suggestionResolution.ts`, repo |
@@ -112,7 +130,9 @@ after S6-S9 stopped importing them. S12 (seeds) lands before S11/S14 so the
 dashboard work and the e2e world use list names. Between S6 and S12 the unit
 suites that seed slugs are updated in the task that breaks them (each task
 names its test fallout); nothing deploys mid-branch, so the branch is judged
-at S17.
+at S17. Two full-suite checkpoints (`npm run typecheck` + `npm test`, bare)
+sit after S10 and after S13, so fallout a task failed to name surfaces
+before the dashboard work, not only at S17.
 
 ## 3. Interfaces (BINDING for every slice)
 
@@ -159,6 +179,12 @@ export interface OrgRewriteState {
   fromTexts: string[];
   /** The one field a value action targets; absent for rename/merge (all fields of the kind). */
   field?: OrgRecordField;
+  /** The record fields the rewrite runs one pass over each (spec 5.1), FIXED
+   *  when it starts: a value action's `[field]`; a rename/merge, every field
+   *  of the target entry's kind at that moment (`recordFieldsForKind`); the
+   *  cleanup lock, all three. The job and Run again read it - never a
+   *  run-time lookup of the target. */
+  fields: OrgRecordField[];
   toName?: string;
   /** Split only: the agency half. */
   agencyName?: string;
@@ -295,12 +321,16 @@ export interface OrgRecordsService {
   notOnList(entries: readonly OrgEntry[]): Promise<NotOnListRow[]>;
   holders(field: OrgRecordField, value: string): Promise<HolderRecord[]>;
   /** Rewrite every record (all contact types and units, active and deleted)
-   *  per the definition; conditional per record; audits each write with
-   *  `auditType` ('org_name_rewrite' for the job, 'org_name_cleanup' for the
-   *  script); calls `heartbeat` at most every 20 s; returns counts. */
+   *  per the definition - ONE pass over `def.field`; conditional per record;
+   *  audits each field written with `auditType` ('org_name_rewrite' for the
+   *  job, 'org_name_cleanup' for the script); calls `heartbeat` at most every
+   *  20 s (checked after every record visited, written or not) and, when it
+   *  answers false (the lock is no longer the caller's), writes nothing more
+   *  and throws `OrgRewriteLockLostError` with the counts so far; a heartbeat
+   *  that THROWS is logged and the pass continues; returns counts. */
   rewrite(
     def: OrgRewriteState,
-    opts: { auditType: 'org_name_rewrite' | 'org_name_cleanup'; actor?: string; heartbeat?: () => Promise<void> },
+    opts: { auditType: 'org_name_rewrite' | 'org_name_cleanup'; actor?: string; heartbeat?: () => Promise<boolean> },
   ): Promise<Record<string, number>>;
 }
 ```
@@ -321,9 +351,15 @@ export interface OrgRewriteService {
     rememberSpelling?: boolean;
     actor: string;
   }): Promise<{ lastRewrite: OrgRewriteState; skippedSpellings: SkippedSpelling[] }>;
+  /** Re-queues the stored definition under a new id, after re-checking that
+   *  `toName` (and a split's `agencyName`) still name entries of the expected
+   *  kind (else 409 org_rewrite_target_gone). */
   runAgain(actor: string): Promise<{ lastRewrite: OrgRewriteState }>;
-  /** For the job and the cleanup script. */
-  heartbeat(jobId: string): Promise<void>;
+  /** For the job and the cleanup script. true = the lock is still the
+   *  caller's (its heartbeat was written); false = it is not (another id holds
+   *  it, or it is no longer running) - the caller stops writing records and
+   *  does NOT call finish. */
+  heartbeat(jobId: string): Promise<boolean>;
   finish(jobId: string, outcome: { status: 'done' | 'failed'; counts?: Record<string, number>; error?: string }): Promise<void>;
   /** Cleanup script: take the lock as action 'cleanup' (409 when held). */
   acquireForCleanup(actor: string): Promise<OrgRewriteState>;
@@ -373,7 +409,7 @@ factory convention). Wiring:
 | code | status | extras | raised by |
 |---|---|---|---|
 | `org_not_on_list` | 422 | `field, text, candidates, close, otherKind?, compound?` | D5 on every writer |
-| `org_name_empty` / `org_name_too_long` / `org_name_invalid` | 400 | - | add, rename, Add as new (`invalid` = a newline or control character) |
+| `org_name_empty` / `org_name_too_long` / `org_name_invalid` | 400 | - | add, rename, Add as new (`invalid` = a newline or control character, or a name that normalizes to '' such as `-` or `()`) |
 | `org_notes_too_long` | 400 | - | add, notes edit |
 | `org_name_taken` | 409 | `entry: OrgRef` | add, rename, Add as new |
 | `org_name_compound` | 409 | `spans: OrgRef[][]` | add, rename, Add as new |
@@ -382,7 +418,10 @@ factory convention). Wiring:
 | `org_spellings_full` | 409 | - | merge transfer or a spelling edit past 20 |
 | `org_in_use` | 409 | `uses: { active: number, deleted: number }` | delete, kind change |
 | `org_not_found` | 404 | - | any `:orgId` route |
-| `org_rewrite_running` | 409 | `lastRewrite` | rename, merge, resolve, run-again, cleanup apply |
+| `org_rewrite_running` | 409 | `lastRewrite` | rename, merge, resolve, run-again, cleanup apply, delete, kind change |
+| `org_rewrite_not_rerunnable` | 409 | - | run-again for the `cleanup` lock, a `done` rewrite, or none |
+| `org_rewrite_target_gone` | 409 | - | run-again when the stored `toName` (or a split's `agencyName`) no longer names an entry of the expected kind |
+| `org_value_is_name_variant` | 409 | `entry: OrgRef` | "Not on the list" resolve of a value that normalizes equal to an entry NAME of the field's kind, with any action other than "Use <that entry>" (spec D10) |
 | `org_list_full` | 409 | - | any list write past 300 KB |
 | `org_list_busy` | 503 | - | `OrgListBusyError` |
 | `value_not_from_suggestion` | 422 | - | suggestion accept with a bad `value` |
@@ -392,7 +431,8 @@ Names and spellings with a newline or other control character are refused
 (`org_name_invalid`; for spellings, `org_spelling_refused` with problem
 `invalid`) - S1 Task 1.4's checks gain this rule in S3 Task 3.1's first step
 (the S1 functions stay as written; the service checks control characters
-before calling them).
+before calling them). A NAME that normalizes to '' (`-`, `()`) is
+`org_name_invalid` too - that rule is S1's own (`checkNewName`, Task 1.4).
 
 ### 3.6 Endpoints (S5; signed-in staff unless marked ADMIN)
 
@@ -400,13 +440,13 @@ before calling them).
 - `GET /api/organizations/usage` -> `{ usage: OrgUsage }`
 - `GET /api/organizations/not-on-list` -> `{ rows: NotOnListRow[] }`
 - `GET /api/organizations/not-on-list/records?field=&value=` -> `{ records: HolderRecord[] }`
-- `POST /api/organizations/check` `{ kind, text, spellingFor? }` -> `OrgCheckResult`
+- `POST /api/organizations/check` `{ kind, text, spellingFor? }` -> `OrgCheckResult` (a `text` over 200 characters is refused 400 before any check runs)
 - `POST /api/organizations` `{ kind, name, notes? }` -> 201 `{ entry }`
 - `PATCH /api/organizations/:orgId` `{ notes }` -> `{ entry }`; ADMIN `{ spellings, confirmShared? }` -> `{ entry }`; ADMIN `{ name }` -> 202 `{ entry, lastRewrite, skippedSpellings }`; ADMIN `{ kind }` -> `{ entry }`. Exactly one of the four keys per request (400 `one_change_per_request` otherwise).
 - ADMIN `POST /api/organizations/:orgId/merge` `{ intoOrgId }` -> 202 `{ lastRewrite }`
 - ADMIN `DELETE /api/organizations/:orgId` -> 204
-- ADMIN `POST /api/organizations/not-on-list/resolve` `{ field, value, action, name?, agencyName?, rememberSpelling? }` -> 202 `{ lastRewrite, skippedSpellings }`
-- ADMIN `POST /api/organizations/rewrite/run-again` -> 202 `{ lastRewrite }` (409 `org_rewrite_not_rerunnable` for action `cleanup` or when nothing failed or stalled)
+- ADMIN `POST /api/organizations/not-on-list/resolve` `{ field, value, action, name?, agencyName?, rememberSpelling? }` -> 202 `{ lastRewrite, skippedSpellings }` (409 `org_value_is_name_variant` `{ entry }` for a name-variant value with any action but "Use <entry>")
+- ADMIN `POST /api/organizations/rewrite/run-again` -> 202 `{ lastRewrite }` (409 `org_rewrite_not_rerunnable` for action `cleanup` or when nothing failed or stalled; 409 `org_rewrite_target_gone` when its target name left the list or changed kind)
 
 ### 3.7 New repo writers (S3; they break typed fakes - update every fake in the same task)
 
@@ -432,7 +472,11 @@ rewriteAcceptedAuthorities(
 for the job; `'org_name_cleanup'` with `{ field, from, to }` (no actor) for
 the script. `from` and `to` are STRINGS (the property Activity projection
 shows them only as strings): a property list is joined with `', '`, a
-removed value is `''`. The cleanup script plans each record itself
+removed or absent value is `''` (never null). ONE event per FIELD a record
+write changes: Move to Agency, Move to Housing authority and Split write two
+fields and append two events (Move to Agency: `housingAuthority` from the
+value to `''`, then `agency` from what it held - `''` when absent - to the
+agency name); a field the write leaves as it was gets no event. The cleanup script plans each record itself
 (`planContact` / `planUnit`) and writes through the 3.7 writers; it does not
 use `orgRecords.rewrite`. Move to Agency / Split / the cleanup treat a record
 whose `agency` already holds THAT SAME agency name as compatible (the
@@ -448,21 +492,29 @@ up", each with a `from -> to` detail line.
   list write, stored as `lastRewrite.jobId` and carried in the payload - never
   the jobs envelope id (the envelope id exists only after enqueue).
 - The handler reads `lastRewrite`; it does nothing unless `lastRewrite.jobId
-  === payload.jobId` and `status === 'running'`.
+  === payload.jobId` and `status === 'running'`. It runs one pass per member of
+  `lastRewrite.fields` (fixed at start) - it never looks the target up again.
 - The handler catches its own errors, records `failed` with the counts so far,
   and NEVER rethrows (a rethrow would make SQS redeliver up to 5 times).
 - `heartbeat` and `finish` are read-and-bump writes that first check
-  `lastRewrite.jobId` is still the caller's and otherwise do nothing, so a
-  duplicate or stale run can never overwrite a newer rewrite's state.
+  `lastRewrite.jobId` is still the caller's (and `running`) and otherwise
+  write nothing, so a duplicate or stale run can never overwrite a newer
+  rewrite's state. `heartbeat` answers `true` while the lock is the caller's
+  and `false` once it is not; a pass that gets `false` writes no further
+  record (`OrgRewriteLockLostError`), and the job then returns WITHOUT
+  `finish` (outcome `lock_lost`) - the lock it would finish is not its own.
 - Register the handler in `registerAllJobHandlers` and add `org.rewrite` to the
   pinned name list in `app/test/registerHandlers.test.ts`.
 
 ### 3.10 AI (S7)
 
-- `renderOrgListBlock(entries, opts?: { budget?: number }): { text: string; fingerprint: string; dropped: { spellings: number; agencies: number; authorities: number } }`
+- `renderOrgListBlock(entries, opts?: { budget?: number }): { text: string; fingerprint: string; dropped: { spellings: number; agencies: number; authorities: number }; unrenderable: { spellings: number; agencies: number; authorities: number } }`
   (`budget` default 16_000). The text starts with the line
   `ORGANIZATION LIST` and never contains the word `TRANSCRIPT`; every name and
   spelling is rendered on one line. `fingerprint` = sha256 hex of `text`.
+  `dropped` counts ONLY what the budget left out (the job WARNs on these);
+  `unrenderable` counts what can never be rendered (blank, or holding the
+  word TRANSCRIPT) - no WARN.
 - `ExtractionInput` gains `orgListBlock: string`; the run draft and
   `AiRunRecord` gain `orgListFingerprint?: string` (optional: a run that
   exits at a skip gate never reads the list - the `promptFingerprint?`
@@ -484,7 +536,9 @@ gains `getOrgList`, `getOrgUsage`, `getNotOnList`, `getNotOnListRecords`,
 `checkOrgText`, `addOrg`, `patchOrg`, `mergeOrg`, `deleteOrg`,
 `resolveNotOnList`, `runOrgRewriteAgain`, and `acceptSuggestion(..., value?)`.
 Every new code in 3.5 gets copy in the error-copy map and its parity test.
-`useOrgList()` returns `{ entries, version, lastRewrite, loading, error, reload }`.
+`useOrgList()` returns `{ entries, version, lastRewrite, loading, error, reload, noteAdded }`
+(`noteAdded(entry)`: a name "Is this really new?" just added counts as on the
+list at once - no transient "Not on the list" mark - and the list is re-read).
 Labels "Housing authority", "Housing authorities" and "Agency" stay exactly as
 today (unit tests and e2e select by them).
 
@@ -722,6 +776,11 @@ describe('closeNames (prompts only)', () => {
   it('returns at most three', () => {
     expect(closeNames(HA_ONLY, 'atlanta augusta georgia housing').length).toBeLessThanOrEqual(3);
   });
+  it('scores nothing for a text longer than 120 characters (no name is that long)', () => {
+    // Three of its four words begin words of Atlanta's name - a close name at 120 characters or fewer.
+    expect(closeNames(HA_ONLY, `atlanta housing authority ${'x'.repeat(100)}`)).toEqual([]);
+    expect(closeNames(HA_ONLY, `atlanta housing authority ${'x'.repeat(90)}`)[0]).toBe(ATLANTA);
+  });
 });
 ```
 
@@ -847,14 +906,17 @@ function levenshtein(a: string, b: string): number {
  * applied automatically (D4). Scores: initials equality 0.9; the share of
  * typed words (2+ chars) that begin a word of the name or a spelling, counted
  * only when a matched word is not generic; edit similarity when 0.75 or
- * more. Kept at a best score of 0.5 or more, highest first.
+ * more. Kept at a best score of 0.5 or more, highest first. A text longer
+ * than ORG_NAME_MAX (120) characters scores nothing: no name or spelling is
+ * that long (D13), and the edit distance costs |text| x |target| per text, so
+ * an unbounded text must never reach it (spec section 6).
  */
 export function closeNames(
   candidates: readonly OrgEntry[],
   normalized: string,
   limit = 3,
 ): OrgEntry[] {
-  if (normalized === '') return [];
+  if (normalized === '' || normalized.length > ORG_NAME_MAX) return [];
   const typed = normalized.split(' ').filter((w) => w.length >= 2);
   const compact = normalized.replace(/ /g, '');
   const scored = candidates.map((e) => {
@@ -1066,9 +1128,12 @@ describe('checkNewName (D13, D12 rename rule)', () => {
   it('accepts a fresh name', () => {
     expect(checkNewName(LIST, 'Marietta Housing Authority')).toBeNull();
   });
-  it('refuses blank, too long, taken by any name or spelling of either kind, and compound', () => {
+  it('refuses blank, too long, nothing left once normalized, taken by any name or spelling of either kind, and compound', () => {
     expect(checkNewName(LIST, '  ')).toEqual({ code: 'org_name_empty' });
     expect(checkNewName(LIST, 'x'.repeat(121))).toEqual({ code: 'org_name_too_long' });
+    // Spec D13: a name that normalizes to '' could never be matched or settled.
+    expect(checkNewName(LIST, '-')).toEqual({ code: 'org_name_invalid' });
+    expect(checkNewName(LIST, ' ( ) ')).toEqual({ code: 'org_name_invalid' });
     expect(checkNewName(LIST, 'atlanta housing')).toEqual({ code: 'org_name_taken', entry: ATLANTA });
     expect(checkNewName(LIST, 'Step up')).toEqual({ code: 'org_name_taken', entry: STEP_UP });
     expect(checkNewName(LIST, 'DCA VASH')).toEqual({ code: 'org_name_compound', spans: [[DCA], [VASH]] });
@@ -1101,17 +1166,24 @@ describe('checkSpelling (D12)', () => {
 RED. GREEN: append to `app/src/lib/orgNames.ts`:
 
 ```ts
+/**
+ * `org_name_invalid`: checkNewName returns it for a name that normalizes to
+ * '' (for example "-" or "()", D13). The other `org_name_invalid` case - a
+ * newline or other control character - is applied by services/orgNames.ts
+ * BEFORE it calls checkNewName (plan 3.5).
+ */
 export type NameProblem =
   | { code: 'org_name_empty' }
   | { code: 'org_name_too_long' }
   | { code: 'org_name_taken'; entry: OrgEntry }
-  | { code: 'org_name_compound'; spans: OrgEntry[][] };
+  | { code: 'org_name_compound'; spans: OrgEntry[][] }
+  | { code: 'org_name_invalid' };
 
 /**
  * D13 + D12: a new name (add, Add as new, rename). Refused when blank, over
- * 120 chars, equal (normalized) to any OTHER entry's name or spelling of
- * either kind, or compound. `excludeOrgId` is the entry being renamed - its
- * own name and spellings do not count against it.
+ * 120 chars, nothing once normalized, equal (normalized) to any OTHER entry's
+ * name or spelling of either kind, or compound. `excludeOrgId` is the entry
+ * being renamed - its own name and spellings do not count against it.
  */
 export function checkNewName(
   entries: readonly OrgEntry[],
@@ -1121,8 +1193,10 @@ export function checkNewName(
   const trimmed = name.trim();
   if (trimmed === '') return { code: 'org_name_empty' };
   if (trimmed.length > ORG_NAME_MAX) return { code: 'org_name_too_long' };
-  const others = entries.filter((e) => e.orgId !== opts.excludeOrgId);
   const n = normalizeOrgText(trimmed);
+  // D13: punctuation alone - nothing a lookup or a rewrite could ever match.
+  if (n === '') return { code: 'org_name_invalid' };
+  const others = entries.filter((e) => e.orgId !== opts.excludeOrgId);
   const taken = others.find((e) => matchesText(e, n));
   if (taken) return { code: 'org_name_taken', entry: taken };
   const spans = compoundSpans(others, n);
@@ -1267,14 +1341,26 @@ describe('old values resolve as spec Appendix A says', () => {
       ]);
     }
   });
-  it('the old county values are not spellings of anything (settled on Settings)', () => {
-    for (const t of ['fulton_housing', 'Fulton County', 'Clayton County', 'Cobb County', 'McDonough']) {
+  // Sam's answers (2026-10-06 meeting, spec section 13): the old county values
+  // map to the authority that runs those vouchers.
+  const samMappings: Array<[string, string]> = [
+    ['Fulton County', 'Fulton County Housing Authority'],
+    ['Fulton, Fulton County', 'Fulton County Housing Authority'],
+    ['Housing Authority of Fulton County', 'Fulton County Housing Authority'],
+    ['McDonough', 'Georgia Department of Community Affairs'],
+    ['Henry County', 'Georgia Department of Community Affairs'],
+    ['Clayton County', 'Jonesboro Housing Authority'],
+    ['Housing Authority of Clayton County', 'Jonesboro Housing Authority'],
+    ['Cobb County', 'Marietta Housing Authority'],
+  ];
+  it.each(samMappings)('%s -> %s (Sam, 2026-10-06)', (text, name) => {
+    const r = resolveOrgText(entries, text, HA);
+    expect(r.status === 'match' && r.entry.name).toBe(name);
+  });
+  it('the slug and the public-housing authority\'s full name stay off the list', () => {
+    for (const t of ['fulton_housing', 'McDonough Housing Authority']) {
       expect(resolveOrgText(entries, t, HA).status).not.toBe('match');
     }
-  });
-  it('the Fulton County Housing Authority resolves by its official name', () => {
-    const r = resolveOrgText(entries, 'Housing Authority of Fulton County', HA);
-    expect(r.status === 'match' && r.entry.name).toBe('Fulton County Housing Authority');
   });
 });
 
@@ -1284,7 +1370,10 @@ it('every entry carries notes only within the cap', () => {
 ```
 
 RED. GREEN: create `app/src/lib/orgStartingList.ts` with EXACTLY these
-entries (spec Appendix A; the three notes come from the 2026-10-06 research):
+entries (spec Appendix A; the four notes - Georgia Department of Community
+Affairs, Georgia Housing Voucher Program, Fulton County Housing Authority,
+HUD-VASH - come from the 2026-10-06 research and are listed under Appendix
+A's table):
 
 ```ts
 // The STARTING organization list (spec Appendix A). It seeds an EMPTY store
@@ -1309,7 +1398,7 @@ export const STARTING_ORG_LIST: readonly StartingOrg[] = [
   {
     kind: 'housing_authority',
     name: 'Georgia Department of Community Affairs',
-    spellings: ['DCA', 'Georgia DCA', 'GA DCA', 'Department of Community Affairs', 'DCA, Department of Community Affairs'],
+    spellings: ['DCA', 'Georgia DCA', 'GA DCA', 'Department of Community Affairs', 'DCA, Department of Community Affairs', 'McDonough', 'Henry County'],
     notes: 'Runs vouchers in 149 of Georgia\'s 159 counties (not Fulton, DeKalb, Clayton, Cobb, Bibb, Chatham, Glynn, Muscogee, Richmond or Sumter). North Regional Office in Atlanta.',
   },
   {
@@ -1324,11 +1413,18 @@ export const STARTING_ORG_LIST: readonly StartingOrg[] = [
     spellings: ['HADC', 'Housing Authority of DeKalb County', 'Dekalb County Housing', 'Dekalb Housing'],
   },
   { kind: 'housing_authority', name: 'Decatur Housing Authority', spellings: ['Housing Authority of the City of Decatur'] },
-  { kind: 'housing_authority', name: 'Marietta Housing Authority', spellings: ['MHA'] },
+  { kind: 'housing_authority', name: 'Marietta Housing Authority', spellings: ['MHA', 'Cobb County'] },
   {
     kind: 'housing_authority',
     name: 'Jonesboro Housing Authority',
-    spellings: ['JHA', 'Jonesboro (JHA)', 'Jonesboro housing', 'Jonesboro, JHA, Jonesboro housing'],
+    spellings: [
+      'JHA',
+      'Jonesboro (JHA)',
+      'Jonesboro housing',
+      'Jonesboro, JHA, Jonesboro housing',
+      'Clayton County',
+      'Housing Authority of Clayton County',
+    ],
   },
   { kind: 'housing_authority', name: 'East Point Housing Authority', spellings: ['EPHA', 'East Point', 'Eastpoint Housing Authority'] },
   {
@@ -1341,7 +1437,7 @@ export const STARTING_ORG_LIST: readonly StartingOrg[] = [
   {
     kind: 'housing_authority',
     name: 'Fulton County Housing Authority',
-    spellings: ['Housing Authority of Fulton County'],
+    spellings: ['Housing Authority of Fulton County', 'Fulton County', 'Fulton, Fulton County'],
     notes: 'Runs vouchers for Fulton County outside the City of Atlanta (Atlanta Housing Authority covers the city).',
   },
   {
@@ -1374,15 +1470,18 @@ export function buildStartingEntries(now: string, newId: () => string): OrgEntry
 }
 ```
 
-Spec section 13 note (decided by the planner 2026-10-06, Sam's answers no
-longer block the build): "Fulton County Housing Authority" is on the list
-(a real metro voucher administrator), but the old values `Fulton County`,
-`Clayton County`, `Cobb County` and `McDonough` are NOT spellings of
-anything - tenants holding them surface in "Not on the list", where Sam
-settles each with one click once she confirms what it meant. Anything else
-Sam adds later (Hands of Hope, McIntosh Trail Community Service Board) goes in
-through Settings. The conformance test's expected shared-spelling set stays
-`['AHA', 'MHA']`.
+Spec section 13 and Appendix A (revision 8: Sam's answers from the
+2026-10-06 meeting): Fulton County Housing Authority joins the list; the old
+county values are spellings of the authority that runs those vouchers -
+`Fulton County` (and `Fulton, Fulton County`) -> Fulton County Housing
+Authority, `McDonough` and `Henry County` -> Georgia Department of Community
+Affairs, `Clayton County` and `Housing Authority of Clayton County` ->
+Jonesboro Housing Authority, `Cobb County` -> Marietta Housing Authority - so
+the cleanup maps them automatically. "McDonough Housing Authority" (a
+public-housing authority with no vouchers) is deliberately NOT a spelling.
+Hands of Hope stays off the list; anything Sam adds later goes in through
+Settings. The conformance test's expected shared-spelling set stays
+`['AHA', 'MHA']`. The builder builds exactly this list.
 
 GREEN; commit `feat(org-names): the starting list and its conformance tests`.
 
@@ -1485,12 +1584,16 @@ export function orgListItem(
  * A `running` rewrite (plan 3.2) started by `usr_admin`. Its heartbeat is
  * ORG_T0 - pass `heartbeatAt` when a test needs the lock FRESH against its
  * clock (spec D11: a heartbeat 15 minutes old no longer holds the lock).
+ * `fields` defaults to `[field]` for a value action and `[]` otherwise - a
+ * rename or merge case passes its own (e.g. `['housingAuthority',
+ * 'accepted_authorities']`).
  */
 export function runningRewrite(
   partial: Partial<OrgRewriteState> & Pick<OrgRewriteState, 'action' | 'fromTexts'>,
 ): OrgRewriteState {
   return {
     jobId: 'job-1',
+    fields: partial.field !== undefined ? [partial.field] : [],
     status: 'running',
     heartbeatAt: ORG_T0,
     startedAt: ORG_T0,
@@ -1676,6 +1779,11 @@ export interface OrgRewriteState {
   fromTexts: string[];
   /** The one field a value action targets; absent for rename/merge (all fields of the kind). */
   field?: OrgRecordField;
+  /** The record fields the rewrite runs one pass over each (spec 5.1), FIXED
+   *  when it starts: a value action's `[field]`; a rename/merge, every field
+   *  of the target entry's kind at that moment; the cleanup lock, all three.
+   *  The job and Run again read it - never a run-time lookup of the target. */
+  fields: OrgRecordField[];
   toName?: string;
   /** Split only: the agency half. */
   agencyName?: string;
@@ -2366,9 +2474,11 @@ Commit `test(org-names): in-memory org-list fake and world.orgListRepo`.
 
 ## S3 - the services (`app/src/services/orgNames.ts`, `orgRecords.ts`, `orgRewrite.ts`; new writers on `contactsRepo` / `unitsRepo`; tests `app/test/orgNamesService.test.ts`, `app/test/orgRecordWriters.integration.test.ts`, `app/test/orgRecords.test.ts`, `app/test/orgRewriteService.test.ts`)
 
-Read spec D3, D5, D10-D13 and plan 3.4, 3.4b, 3.5, 3.7, 3.8 first, and the
-CONTRACT ISSUES at the top of these sections - most of them land in this
-slice.
+Read spec D3, D5, D10-D13 and plan 3.4, 3.4b, 3.5, 3.7, 3.8 first. The
+section writers' contract issues that land in this slice are already written
+into plan section 3 and the tasks below; their rulings are recorded in
+`docs/superpowers/reviews/2026-10-06-clean-org-names/plan-research/plan-assembly-rulings.md`
+("S2-S5 writer").
 Factories follow plan 3.4b exactly: every dep optional, defaulting to the real
 implementation. Order: the shared refusal/rule helpers (3.1), the two record
 writers (3.2-3.3), record access (3.4-3.5), the list service (3.6-3.7), the
@@ -2377,8 +2487,10 @@ rewrite lock and its actions (3.8-3.10).
 ### Task 3.1 - the shared refusal helpers and the control-character rule
 
 Plan 3.5 says this task's first step gives names and spellings the
-control-character rule; per CONTRACT ISSUE 1 the S1 functions stay as written
-and only the two S1 problem unions widen.
+control-character rule; per plan 3.5 (the paragraph under its error table)
+the S1 functions stay as written and only the S1 `SpellingProblem` union
+widens - `NameProblem` already carries `org_name_invalid` (S1 Task 1.4
+returns it for a name that normalizes to '').
 
 RED: create `app/test/orgNamesService.test.ts`:
 
@@ -2527,35 +2639,10 @@ describe('isOrgRewriteRunning / rewriteRunningError (spec D11)', () => {
 Run: `cd "W:/tmp/clean-org-names/app"; npx vitest run test/orgNamesService.test.ts`
 - RED: `../src/services/orgNames.js` does not exist.
 
-GREEN, step 1 - widen the two S1 problem unions in `app/src/lib/orgNames.ts`
-(types only; `checkNewName` / `checkSpelling` are untouched). Replace (as
-created by Task 1.4)
-
-```ts
-export type NameProblem =
-  | { code: 'org_name_empty' }
-  | { code: 'org_name_too_long' }
-  | { code: 'org_name_taken'; entry: OrgEntry }
-  | { code: 'org_name_compound'; spans: OrgEntry[][] };
-```
-
-with
-
-```ts
-/**
- * `org_name_invalid` (a newline or other control character, spec D13) is
- * never returned by checkNewName: services/orgNames.ts applies that rule
- * BEFORE calling it (plan 3.5).
- */
-export type NameProblem =
-  | { code: 'org_name_empty' }
-  | { code: 'org_name_too_long' }
-  | { code: 'org_name_taken'; entry: OrgEntry }
-  | { code: 'org_name_compound'; spans: OrgEntry[][] }
-  | { code: 'org_name_invalid' };
-```
-
-and replace
+GREEN, step 1 - widen the S1 `SpellingProblem` union in
+`app/src/lib/orgNames.ts` (a type only; `checkNewName` / `checkSpelling` are
+untouched, and `NameProblem` already has `org_name_invalid` from Task 1.4).
+Replace (as created by Task 1.4)
 
 ```ts
 export type SpellingProblem =
@@ -2734,8 +2821,11 @@ Run `npx vitest run test/orgNames.test.ts test/orgNamesService.test.ts` - GREEN
 
 ### Task 3.2 - `contactsRepo.rewriteOrgFields` (plan 3.7) and every typed fake
 
-RED: create `app/test/orgRecordWriters.integration.test.ts`. Every case runs
-against BOTH the real repo (DynamoDB Local) and the harness world fake:
+RED: create `app/test/orgRecordWriters.integration.test.ts` - its CONTACTS
+half only (Task 3.3 adds the units half: `Pick<UnitsRepo,
+'rewriteAcceptedAuthorities'>` names a method that does not exist until then,
+so it would break this task's typecheck). Every case runs against BOTH the
+real repo (DynamoDB Local) and the harness world fake:
 
 ```ts
 // The two machine writers the org rewrite and the cleanup script use (plan
@@ -2758,7 +2848,6 @@ import {
   type ContactItem,
   type ContactsRepo,
 } from '../src/repos/contactsRepo.js';
-import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../src/repos/unitsRepo.js';
 import { quietLogger } from './helpers/orgFixtures.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 
@@ -2785,38 +2874,31 @@ const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
 const client = createDynamoClient({ endpoint });
 const doc = createDocumentClient({ endpoint });
 const contactsTable = tableName('contacts', testEnv);
-const unitsTable = tableName('units', testEnv);
 
 beforeAll(async () => {
   if (!reachable) return;
   await ensureTable(client, getTableSpec('contacts'), contactsTable);
-  await ensureTable(client, getTableSpec('units'), unitsTable);
 }, 120_000);
 
 afterAll(async () => {
   if (reachable) {
     await deleteTableIfExists(client, contactsTable);
-    await deleteTableIfExists(client, unitsTable);
   }
   doc.destroy();
   client.destroy();
 }, 120_000);
 
-/** One implementation under test: the two writers plus raw seed/read access. */
+/** One implementation under test: the writers plus raw seed/read access. */
 interface Writers {
   contacts: Pick<ContactsRepo, 'rewriteOrgFields'>;
-  units: Pick<UnitsRepo, 'rewriteAcceptedAuthorities'>;
   putContact(item: ContactItem): Promise<void>;
   readContact(contactId: string): Promise<ContactItem | undefined>;
-  putUnit(item: UnitItem): Promise<void>;
-  readUnit(unitId: string): Promise<UnitItem | undefined>;
 }
 
 function realWriters(): Writers {
   const logger = quietLogger();
   return {
     contacts: createContactsRepo({ doc, env: testEnv, logger }),
-    units: createUnitsRepo({ doc, env: testEnv, logger }),
     async putContact(item) {
       await doc.send(new PutCommand({ TableName: contactsTable, Item: item }));
     },
@@ -2826,13 +2908,6 @@ function realWriters(): Writers {
       );
       return Item as ContactItem | undefined;
     },
-    async putUnit(item) {
-      await doc.send(new PutCommand({ TableName: unitsTable, Item: item }));
-    },
-    async readUnit(unitId) {
-      const { Item } = await doc.send(new GetCommand({ TableName: unitsTable, Key: { unitId }, ConsistentRead: true }));
-      return Item as UnitItem | undefined;
-    },
   };
 }
 
@@ -2840,19 +2915,11 @@ function fakeWriters(): Writers {
   const world = createFakeWorld();
   return {
     contacts: world.contactsRepo,
-    units: world.unitsRepo,
     async putContact(item) {
       world.contacts.push(structuredClone(item));
     },
     async readContact(contactId) {
       const hit = world.contacts.find((c) => c.contactId === contactId);
-      return hit === undefined ? undefined : structuredClone(hit);
-    },
-    async putUnit(item) {
-      world.units.set(item.unitId, structuredClone(item));
-    },
-    async readUnit(unitId) {
-      const hit = world.units.get(unitId);
       return hit === undefined ? undefined : structuredClone(hit);
     },
   };
@@ -3148,7 +3215,122 @@ Local). Then `cd "W:/tmp/clean-org-names"; npm run typecheck` - GREEN, and
 
 ### Task 3.3 - `unitsRepo.rewriteAcceptedAuthorities` (plan 3.7)
 
-RED: append to `app/test/orgRecordWriters.integration.test.ts`:
+RED: give `app/test/orgRecordWriters.integration.test.ts` its units half
+(moved here from Task 3.2 so that task's typecheck could pass), then append
+the cases.
+
+1. Replace
+
+```ts
+} from '../src/repos/contactsRepo.js';
+import { quietLogger } from './helpers/orgFixtures.js';
+```
+
+with
+
+```ts
+} from '../src/repos/contactsRepo.js';
+import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../src/repos/unitsRepo.js';
+import { quietLogger } from './helpers/orgFixtures.js';
+```
+
+2. Replace
+
+```ts
+const contactsTable = tableName('contacts', testEnv);
+
+beforeAll(async () => {
+  if (!reachable) return;
+  await ensureTable(client, getTableSpec('contacts'), contactsTable);
+}, 120_000);
+
+afterAll(async () => {
+  if (reachable) {
+    await deleteTableIfExists(client, contactsTable);
+  }
+```
+
+with
+
+```ts
+const contactsTable = tableName('contacts', testEnv);
+const unitsTable = tableName('units', testEnv);
+
+beforeAll(async () => {
+  if (!reachable) return;
+  await ensureTable(client, getTableSpec('contacts'), contactsTable);
+  await ensureTable(client, getTableSpec('units'), unitsTable);
+}, 120_000);
+
+afterAll(async () => {
+  if (reachable) {
+    await deleteTableIfExists(client, contactsTable);
+    await deleteTableIfExists(client, unitsTable);
+  }
+```
+
+3. Replace
+
+```ts
+  contacts: Pick<ContactsRepo, 'rewriteOrgFields'>;
+  putContact(item: ContactItem): Promise<void>;
+  readContact(contactId: string): Promise<ContactItem | undefined>;
+}
+```
+
+with
+
+```ts
+  contacts: Pick<ContactsRepo, 'rewriteOrgFields'>;
+  units: Pick<UnitsRepo, 'rewriteAcceptedAuthorities'>;
+  putContact(item: ContactItem): Promise<void>;
+  readContact(contactId: string): Promise<ContactItem | undefined>;
+  putUnit(item: UnitItem): Promise<void>;
+  readUnit(unitId: string): Promise<UnitItem | undefined>;
+}
+```
+
+4. In `realWriters()` replace
+
+```ts
+    contacts: createContactsRepo({ doc, env: testEnv, logger }),
+```
+
+with
+
+```ts
+    contacts: createContactsRepo({ doc, env: testEnv, logger }),
+    units: createUnitsRepo({ doc, env: testEnv, logger }),
+    async putUnit(item) {
+      await doc.send(new PutCommand({ TableName: unitsTable, Item: item }));
+    },
+    async readUnit(unitId) {
+      const { Item } = await doc.send(new GetCommand({ TableName: unitsTable, Key: { unitId }, ConsistentRead: true }));
+      return Item as UnitItem | undefined;
+    },
+```
+
+5. In `fakeWriters()` replace
+
+```ts
+    contacts: world.contactsRepo,
+```
+
+with
+
+```ts
+    contacts: world.contactsRepo,
+    units: world.unitsRepo,
+    async putUnit(item) {
+      world.units.set(item.unitId, structuredClone(item));
+    },
+    async readUnit(unitId) {
+      const hit = world.units.get(unitId);
+      return hit === undefined ? undefined : structuredClone(hit);
+    },
+```
+
+6. Append:
 
 ```ts
 describe('unitsRepo.rewriteAcceptedAuthorities (plan 3.7)', () => {
@@ -3794,14 +3976,20 @@ GREEN. Typecheck. Commit
 
 ### Task 3.5 - `orgRecords.rewrite()`: one conditional pass over one field
 
-Per CONTRACT ISSUES 2 and 3: one call is ONE pass over `def.field` (required;
-the job splits a rename/merge per field), and a rename/merge/use pass skips a
-value already equal to `toName`. Counts carry exactly the plan-3.2 keys
+Plan 3.4 and the S2-S5 rulings in `plan-assembly-rulings.md` (items 2 and 3):
+one call is ONE pass over `def.field` (required; the job runs one pass per
+member of `lastRewrite.fields`), and a rename/merge/use pass skips a value
+already equal to `toName`. Counts carry exactly the plan-3.2 keys
 (`housingAuthority`, `agency`, `accepted_authorities`, `skipped`,
 `conflicts`), so a record write that THROWS (not a lost condition - the SDK
 has already retried throttles) stops the pass with `OrgRewriteAbortedError`
 carrying the counts so far; the job records `failed` and Run again re-runs
-safely.
+safely. A heartbeat that answers `false` (the lock is no longer the
+caller's, spec D11) stops the pass before its next write with
+`OrgRewriteLockLostError` carrying the counts so far. Move to Agency, Move to
+Housing authority and Split audit EACH field they write (plan 3.8). A value
+action whose from-text normalizes to '' (a stored `-` or `()`) matches that
+EXACT stored text instead, so every "Not on the list" row can be settled.
 
 RED: in `app/test/orgRecords.test.ts` replace the import block
 
@@ -3820,7 +4008,11 @@ with
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
-import { createOrgRecordsService, OrgRewriteAbortedError } from '../src/services/orgRecords.js';
+import {
+  createOrgRecordsService,
+  OrgRewriteAbortedError,
+  OrgRewriteLockLostError,
+} from '../src/services/orgRecords.js';
 import {
   ATLANTA,
   AUGUSTA,
@@ -3987,14 +4179,18 @@ describe('OrgRecordsService.rewrite - one conditional pass over one field (spec 
       expect(contactIn(world, id)?.['agency']).toBe(VASH.name);
     }
     expect(contactIn(world, 'c-4')).toMatchObject({ housingAuthority: 'HUD VASH', agency: STEP_UP.name });
-    // The audit describes the matched field: its authority was REMOVEd (to: '').
-    expect(rewrites(world).find((e) => e.entityKey === 'contacts#c-1')?.payload).toEqual({
-      field: 'housingAuthority',
-      from: 'HUD VASH',
-      to: '',
-      action: 'move_to_agency',
-      actor: 'usr_admin',
-    });
+    // One event per field written (plan 3.8): the authority REMOVEd (to: ''),
+    // then the agency set - an absent agency audits as from: ''.
+    const payloads = (id: string) => rewrites(world).filter((e) => e.entityKey === `contacts#${id}`).map((e) => e.payload);
+    expect(payloads('c-1')).toEqual([
+      { field: 'housingAuthority', from: 'HUD VASH', to: '', action: 'move_to_agency', actor: 'usr_admin' },
+      { field: 'agency', from: '', to: VASH.name, action: 'move_to_agency', actor: 'usr_admin' },
+    ]);
+    // c-3 already held that agency: only its authority changed, so one event.
+    expect(payloads('c-3')).toEqual([
+      { field: 'housingAuthority', from: 'HUD VASH', to: '', action: 'move_to_agency', actor: 'usr_admin' },
+    ]);
+    expect(payloads('c-4')).toEqual([]);
   });
 
   it('move to housing authority: an absent authority takes the name and the agency is emptied; another authority is a conflict', async () => {
@@ -4015,6 +4211,15 @@ describe('OrgRecordsService.rewrite - one conditional pass over one field (spec 
     expect(contactIn(world, 'c-1')).toMatchObject({ housingAuthority: DCA.name, agency: '' });
     expect(contactIn(world, 'c-2')).toMatchObject({ housingAuthority: DCA.name, agency: '' });
     expect(contactIn(world, 'c-3')).toMatchObject({ housingAuthority: ATLANTA.name, agency: 'DCA' });
+    // One event per field written: c-1 gained its authority, c-2 already held it.
+    const payloads = (id: string) => rewrites(world).filter((e) => e.entityKey === `contacts#${id}`).map((e) => e.payload);
+    expect(payloads('c-1')).toEqual([
+      { field: 'agency', from: 'DCA', to: '', action: 'move_to_housing_authority', actor: 'usr_admin' },
+      { field: 'housingAuthority', from: '', to: DCA.name, action: 'move_to_housing_authority', actor: 'usr_admin' },
+    ]);
+    expect(payloads('c-2')).toEqual([
+      { field: 'agency', from: 'DCA', to: '', action: 'move_to_housing_authority', actor: 'usr_admin' },
+    ]);
   });
 
   it('split: the authority is always set; the agency only where empty, else a conflict that keeps it', async () => {
@@ -4036,6 +4241,30 @@ describe('OrgRecordsService.rewrite - one conditional pass over one field (spec 
     expect(contactIn(world, 'c-1')).toMatchObject({ housingAuthority: DCA.name, agency: VASH.name });
     expect(contactIn(world, 'c-2')).toMatchObject({ housingAuthority: DCA.name, agency: STEP_UP.name });
     expect(contactIn(world, 'c-3')).toMatchObject({ housingAuthority: DCA.name, agency: VASH.name });
+    // One event per field written: only c-1's agency was set.
+    const payloads = (id: string) => rewrites(world).filter((e) => e.entityKey === `contacts#${id}`).map((e) => e.payload);
+    expect(payloads('c-1')).toEqual([
+      { field: 'housingAuthority', from: 'DCA HUD-VASH', to: DCA.name, action: 'split', actor: 'usr_admin' },
+      { field: 'agency', from: '', to: VASH.name, action: 'split', actor: 'usr_admin' },
+    ]);
+    expect(payloads('c-2').map((p) => p?.['field'])).toEqual(['housingAuthority']);
+    expect(payloads('c-3').map((p) => p?.['field'])).toEqual(['housingAuthority']);
+  });
+
+  it('a value action on a from-text that normalizes to nothing matches that EXACT stored text', async () => {
+    const { world, records } = setup({
+      contacts: [
+        contact('t-1', { housingAuthority: '-' }),
+        contact('t-2', { housingAuthority: '()' }), // also normalizes to '', but another stored value
+        contact('p-1', { type: 'partner', status: 'active', agency: '-' }),
+      ],
+    });
+    const use = runningRewrite({ action: 'use', field: 'housingAuthority', fromTexts: ['-'], toName: ATLANTA.name });
+    expect(await records.rewrite(use, OPTS)).toEqual({ ...ZERO, housingAuthority: 1 });
+    expect(contactIn(world, 't-1')?.['housingAuthority']).toBe(ATLANTA.name);
+    expect(contactIn(world, 't-2')?.['housingAuthority']).toBe('()');
+    await records.rewrite(runningRewrite({ action: 'clear', field: 'agency', fromTexts: ['-'] }), OPTS);
+    expect(contactIn(world, 'p-1')?.['agency']).toBe('');
   });
 
   it('a record edited between the read and the write is skipped and left as the edit made it', async () => {
@@ -4100,6 +4329,26 @@ describe('OrgRecordsService.rewrite - one conditional pass over one field (spec 
     expect(counts).toEqual({ ...ZERO, agency: 6 });
   });
 
+  it('a heartbeat that answers false (the lock is no longer ours) stops the pass before its next write', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-06T12:00:00.000Z'));
+    const { world, records } = setup({
+      contacts: [1, 2, 3, 4, 5, 6].map((i) => contact(`p-${i}`, { type: 'partner', status: 'active', agency: 'Steps' })),
+    });
+    const write = world.contactsRepo.rewriteOrgFields.bind(world.contactsRepo);
+    world.contactsRepo.rewriteOrgFields = async (contactId, expected, next) => {
+      vi.setSystemTime(Date.now() + 7_000); // each write takes 7 s
+      return write(contactId, expected, next);
+    };
+    const def = runningRewrite({ action: 'use', field: 'agency', fromTexts: ['Steps'], toName: STEP_UP.name });
+    const err = await records.rewrite(def, { ...OPTS, heartbeat: async () => false }).catch((e: unknown) => e);
+    // 7 s, 14 s, 21 s (beat: the lock is gone) - then not one more write.
+    expect(err).toBeInstanceOf(OrgRewriteLockLostError);
+    expect((err as OrgRewriteLockLostError).counts).toEqual({ ...ZERO, agency: 3 });
+    expect(world.contacts.filter((c) => c['agency'] === STEP_UP.name)).toHaveLength(3);
+    expect(rewrites(world)).toHaveLength(3);
+  });
+
   it('the cleanup audit type records field, from and to only - no action, no actor', async () => {
     const { world, records } = setup({ contacts: [contact('t-1', { housingAuthority: 'DCA' })] });
     const def = runningRewrite({ action: 'use', field: 'housingAuthority', fromTexts: ['DCA'], toName: DCA.name });
@@ -4112,8 +4361,8 @@ describe('OrgRecordsService.rewrite - one conditional pass over one field (spec 
 ```
 
 Run: `cd "W:/tmp/clean-org-names/app"; npx vitest run test/orgRecords.test.ts`
-- RED: `OrgRewriteAbortedError` is not exported and `records.rewrite` does not
-exist (the Task 3.4 cases stay green).
+- RED: `OrgRewriteAbortedError` / `OrgRewriteLockLostError` are not exported
+and `records.rewrite` does not exist (the Task 3.4 cases stay green).
 
 GREEN: edit `app/src/services/orgRecords.ts`.
 
@@ -4122,18 +4371,24 @@ GREEN: edit `app/src/services/orgRecords.ts`.
 ```ts
 //
 // THE REWRITE PASS. One call is ONE pass over ONE field (`def.field`); the
-// org.rewrite job runs one pass per field of a rename/merge target's kind
-// (recordFieldsForKind). A record's value is rewritten when its NORMALIZED text
-// is a from-text (D11), through contactsRepo.rewriteOrgFields /
+// org.rewrite job runs one pass per member of `lastRewrite.fields` (fixed when
+// the rewrite started - recordFieldsForKind for a rename/merge). A record's
+// value is rewritten when its NORMALIZED text is a from-text (D11) - or, for a
+// value action whose from-text normalizes to '' (a stored "-"), when it is
+// that EXACT text - through contactsRepo.rewriteOrgFields /
 // unitsRepo.rewriteAcceptedAuthorities - each conditional on the record still
 // holding exactly what was read, so a record changed meanwhile (or a stale GSI
 // page) is counted `skipped`, never overwritten. Unit writes never stamp
 // updated_at. A rename/merge/use pass leaves a value already equal to
-// `toName` alone. PRECONDITION for callers: no from-text may normalize equal
-// to the exact NAME of an entry of the field's kind other than `toName` - the
-// pass has no list to test "on the list" against, and such a value would be
-// rewritten too (services/orgRewrite.ts refuses those definitions; the cleanup
-// script must keep to the same rule).
+// `toName` alone. Every field a write changes gets its own audit event (Move
+// and Split write two). The heartbeat runs at most every 20 s, checked after
+// every record visited; when it answers false the lock is no longer the
+// caller's, and the pass writes nothing more (OrgRewriteLockLostError).
+// PRECONDITION for callers: no from-text may normalize equal to the exact
+// NAME of an entry of the field's kind other than `toName` - the pass has no
+// list to test "on the list" against, and such a value would be rewritten too
+// (services/orgRewrite.ts refuses those definitions; the cleanup script must
+// keep to the same rule).
 ```
 
 2. Imports - replace
@@ -4199,13 +4454,14 @@ export interface OrgRecordsService {
   notOnList(entries: readonly OrgEntry[]): Promise<NotOnListRow[]>;
   holders(field: OrgRecordField, value: string): Promise<HolderRecord[]>;
   /** Rewrite every record (all contact types and units, active and deleted)
-   *  per the definition; conditional per record; audits each write with
-   *  `auditType` ('org_name_rewrite' for the job, 'org_name_cleanup' for the
-   *  script); calls `heartbeat` at most every 20 s; returns counts. ONE pass
+   *  per the definition; conditional per record; audits each field written
+   *  with `auditType` ('org_name_rewrite' for the job, 'org_name_cleanup' for
+   *  the script); calls `heartbeat` at most every 20 s and stops with
+   *  OrgRewriteLockLostError when it answers false; returns counts. ONE pass
    *  over `def.field`, which is required (see the header). */
   rewrite(
     def: OrgRewriteState,
-    opts: { auditType: 'org_name_rewrite' | 'org_name_cleanup'; actor?: string; heartbeat?: () => Promise<void> },
+    opts: { auditType: 'org_name_rewrite' | 'org_name_cleanup'; actor?: string; heartbeat?: () => Promise<boolean> },
   ): Promise<Record<string, number>>;
 }
 ```
@@ -4237,6 +4493,19 @@ export class OrgRewriteAbortedError extends Error {
   }
 }
 
+/**
+ * A pass stopped because its heartbeat answered that the lock is no longer the
+ * caller's (spec D11: a newer rewrite took it over, or a duplicate run already
+ * finished it). Nothing was written after that answer; `counts` are the writes
+ * that landed before it. The caller must not finish() - the lock is not its own.
+ */
+export class OrgRewriteLockLostError extends Error {
+  constructor(readonly counts: Record<string, number>) {
+    super('org rewrite stopped: the lock is no longer this run');
+    this.name = 'OrgRewriteLockLostError';
+  }
+}
+
 /** The plan-3.2 count keys, exactly. */
 interface RewriteCounts {
   housingAuthority: number;
@@ -4252,6 +4521,14 @@ interface RewriteCounts {
 const UNIT_ACTIONS: ReadonlySet<OrgRewriteAction> = new Set<OrgRewriteAction>(['rename', 'merge', 'use', 'clear']);
 /** Actions that write the target name into the matched value's own field. */
 const SAME_FIELD_ACTIONS: ReadonlySet<OrgRewriteAction> = new Set<OrgRewriteAction>(['rename', 'merge', 'use']);
+/** The "Not on the list" value actions: their from-text is one stored value. */
+const VALUE_ACTIONS: ReadonlySet<OrgRewriteAction> = new Set<OrgRewriteAction>([
+  'use',
+  'move_to_agency',
+  'move_to_housing_authority',
+  'split',
+  'clear',
+]);
 
 /** The pass's field, or an Error naming what is wrong with the definition. */
 function passField(def: OrgRewriteState): OrgRecordField {
@@ -4277,23 +4554,30 @@ function passField(def: OrgRewriteState): OrgRecordField {
   return def.field;
 }
 
+/** One audit event: a field the write changes, from what to what ('' = absent or removed). */
+interface FieldAudit {
+  field: 'housingAuthority' | 'agency';
+  from: string;
+  to: string;
+}
+
 type ContactPlan =
   | {
       kind: 'write';
       expect: { housingAuthority?: string | null; agency?: string | null };
       next: { housingAuthority?: string | null; agency?: string };
-      /** The audit `to`: what the matched field holds after the write - '' when it is removed or emptied. */
-      to: string;
+      /** One event per field the write changes (plan 3.8): the matched field first. */
+      audits: FieldAudit[];
       conflict: boolean;
     }
   | { kind: 'conflict' };
 
 /**
  * One contact's write for `def` (spec D10/D11): what it must still hold, what
- * to write, and whether it is a Move/Split conflict. `value` is the matched
- * text in `field`; the other field is read from `c` as the pass saw it. An
- * agency that already holds the SAME name is compatible, never a conflict
- * (planner ruling): Move drops the now-redundant authority and counts it.
+ * to write, what to audit, and whether it is a Move/Split conflict. `value` is
+ * the matched text in `field`; the other field is read from `c` as the pass
+ * saw it. An agency that already holds the SAME name is compatible, never a
+ * conflict (plan 3.8): Move drops the now-redundant authority and counts it.
  */
 function planContactRewrite(
   def: OrgRewriteState,
@@ -4306,23 +4590,30 @@ function planContactRewrite(
   const agency = typeof rawAgency === 'string' ? rawAgency : undefined;
   const rawHa = c['housingAuthority'];
   const housingAuthority = typeof rawHa === 'string' ? rawHa : undefined;
+  const matched = (to: string): FieldAudit => ({ field, from: value, to });
   switch (def.action) {
     case 'clear':
       return field === 'housingAuthority'
-        ? { kind: 'write', expect: { housingAuthority: value }, next: { housingAuthority: null }, to: '', conflict: false }
-        : { kind: 'write', expect: { agency: value }, next: { agency: '' }, to: '', conflict: false };
+        ? { kind: 'write', expect: { housingAuthority: value }, next: { housingAuthority: null }, audits: [matched('')], conflict: false }
+        : { kind: 'write', expect: { agency: value }, next: { agency: '' }, audits: [matched('')], conflict: false };
     case 'move_to_agency':
       if (agency === undefined || agency === '') {
         return {
           kind: 'write',
           expect: { housingAuthority: value, agency: agency === undefined ? null : '' },
           next: { housingAuthority: null, agency: toName },
-          to: '',
+          audits: [matched(''), { field: 'agency', from: agency ?? '', to: toName }],
           conflict: false,
         };
       }
       if (agency === toName) {
-        return { kind: 'write', expect: { housingAuthority: value, agency }, next: { housingAuthority: null }, to: '', conflict: false };
+        return {
+          kind: 'write',
+          expect: { housingAuthority: value, agency },
+          next: { housingAuthority: null },
+          audits: [matched('')],
+          conflict: false,
+        };
       }
       return { kind: 'conflict' };
     case 'move_to_housing_authority':
@@ -4331,12 +4622,18 @@ function planContactRewrite(
           kind: 'write',
           expect: { agency: value, housingAuthority: null },
           next: { housingAuthority: toName, agency: '' },
-          to: '',
+          audits: [matched(''), { field: 'housingAuthority', from: '', to: toName }],
           conflict: false,
         };
       }
       if (housingAuthority === toName) {
-        return { kind: 'write', expect: { agency: value, housingAuthority }, next: { agency: '' }, to: '', conflict: false };
+        return {
+          kind: 'write',
+          expect: { agency: value, housingAuthority },
+          next: { agency: '' },
+          audits: [matched('')],
+          conflict: false,
+        };
       }
       return { kind: 'conflict' };
     case 'split': {
@@ -4346,7 +4643,7 @@ function planContactRewrite(
           kind: 'write',
           expect: { housingAuthority: value, agency: agency === undefined ? null : '' },
           next: { housingAuthority: toName, agency: agencyName },
-          to: toName,
+          audits: [matched(toName), { field: 'agency', from: agency ?? '', to: agencyName }],
           conflict: false,
         };
       }
@@ -4355,14 +4652,14 @@ function planContactRewrite(
         kind: 'write',
         expect: { housingAuthority: value, agency },
         next: { housingAuthority: toName },
-        to: toName,
+        audits: [matched(toName)],
         conflict: agency !== agencyName,
       };
     }
     default: // rename, merge, use
       return field === 'housingAuthority'
-        ? { kind: 'write', expect: { housingAuthority: value }, next: { housingAuthority: toName }, to: toName, conflict: false }
-        : { kind: 'write', expect: { agency: value }, next: { agency: toName }, to: toName, conflict: false };
+        ? { kind: 'write', expect: { housingAuthority: value }, next: { housingAuthority: toName }, audits: [matched(toName)], conflict: false }
+        : { kind: 'write', expect: { agency: value }, next: { agency: toName }, audits: [matched(toName)], conflict: false };
   }
 }
 ```
@@ -4405,15 +4702,25 @@ with
     async rewrite(def, opts) {
       const counts: RewriteCounts = { housingAuthority: 0, agency: 0, accepted_authorities: 0, skipped: 0, conflicts: 0 };
       let lastBeat = Date.now();
+      /** At most every 20 s; throws OrgRewriteLockLostError once the lock is not ours (spec D11). */
       const beat = async (): Promise<void> => {
         if (opts.heartbeat === undefined || Date.now() - lastBeat < ORG_REWRITE_HEARTBEAT_MS) return;
         lastBeat = Date.now();
+        let ours: boolean;
         try {
-          await opts.heartbeat();
+          ours = await opts.heartbeat();
         } catch (err) {
-          // A lost heartbeat must not lose the rewrite: if every later beat
-          // fails too, the lock simply goes stale after 15 minutes.
+          // A heartbeat that could not be WRITTEN (a busy list) says nothing
+          // about the lock: keep going - if every later beat fails too, the
+          // lock simply goes stale after 15 minutes.
           log.warn({ err, jobId: def.jobId }, 'org rewrite: heartbeat failed - continuing');
+          return;
+        }
+        if (!ours) {
+          // A newer rewrite took the lock, or a duplicate run finished it:
+          // stop writing records at once.
+          log.warn({ jobId: def.jobId, ...counts }, 'org rewrite: the lock is no longer this run - stopping');
+          throw new OrgRewriteLockLostError({ ...counts });
         }
       };
       // `from` and `to` are STRINGS (planner ruling): the property Activity
@@ -4431,11 +4738,22 @@ with
       };
       try {
         const field = passField(def);
-        const from = new Set(def.fromTexts.map(normalizeOrgText).filter((t) => t !== ''));
+        // From-texts compare NORMALIZED (D4). One that normalizes to '' (a
+        // stored "-" or "()") would match nothing that way, so a value action
+        // matches that EXACT stored text instead - every "Not on the list" row
+        // can be settled. (Rename and merge from-texts are entry names and
+        // spellings; a name never normalizes to '' - D13.)
+        const from = new Set<string>();
+        const exact = new Set<string>();
+        for (const text of def.fromTexts) {
+          const n = normalizeOrgText(text);
+          if (n !== '') from.add(n);
+          else if (VALUE_ACTIONS.has(def.action) && text !== '') exact.add(text);
+        }
         const matches = (value: unknown): value is string =>
           typeof value === 'string' &&
           value !== '' &&
-          from.has(normalizeOrgText(value)) &&
+          (from.has(normalizeOrgText(value)) || exact.has(value)) &&
           // Already the target (a case-only rename, a variant's own entry): nothing to do.
           !(SAME_FIELD_ACTIONS.has(def.action) && value === def.toName);
         if (field === 'accepted_authorities') {
@@ -4476,7 +4794,8 @@ with
                 else {
                   counts[field] += 1;
                   if (plan.conflict) counts.conflicts += 1;
-                  await record(`contacts#${c.contactId}`, field, value, plan.to);
+                  // One event per field the write changed (plan 3.8).
+                  for (const a of plan.audits) await record(`contacts#${c.contactId}`, a.field, a.from, a.to);
                 }
               }
             }
@@ -4484,6 +4803,8 @@ with
           }
         }
       } catch (err) {
+        // Losing the lock is not a failure of the pass: the caller must not finish().
+        if (err instanceof OrgRewriteLockLostError) throw err;
         throw new OrgRewriteAbortedError({ ...counts }, err);
       }
       log.info({ jobId: def.jobId, action: def.action, field: def.field, ...counts }, 'org rewrite pass finished');
@@ -4788,10 +5109,11 @@ GREEN. Typecheck. Commit `feat(org-names): OrgNamesService reads and checks`.
 
 ### Task 3.7 - `OrgNamesService` list writes: add, notes, spellings, kind, delete
 
-Per CONTRACT ISSUES 4-6: `org_in_use` is answered by the router (this
-service has no record access under plan 3.4b); `remove()` and `changeKind()`
-also refuse while a rewrite runs; a kind change that would make a shared
-spelling cross kinds is refused.
+Plan 3.5 (the `org_in_use` and `org_rewrite_running` rows) and the S2-S5
+rulings 4-6 in `plan-assembly-rulings.md`: `org_in_use` is answered by the
+router (this service has no record access under plan 3.4b); `remove()` and
+`changeKind()` also refuse while a rewrite runs; a kind change that would make
+a shared spelling cross kinds is refused.
 
 RED: in `app/test/orgNamesService.test.ts` replace
 
@@ -5027,7 +5349,7 @@ function replaceEntry(item: OrgListItem, entry: OrgEntry): OrgListItem {
   return { ...item, entries: item.entries.map((e) => (e.orgId === entry.orgId ? entry : e)) };
 }
 
-/** Delete and kind change wait for a running rewrite too (CONTRACT ISSUE 5). */
+/** Delete and kind change wait for a running rewrite too (plan 3.5: 409 org_rewrite_running). */
 function refuseWhileRewriteRuns(item: OrgListItem): void {
   const last = item.lastRewrite;
   if (last !== undefined && isOrgRewriteRunning(last, Date.now())) throw rewriteRunningError(last);
@@ -5313,6 +5635,8 @@ describe('OrgRewriteService.rename (spec D11, D12)', () => {
       jobId: 'id-1',
       action: 'rename',
       fromTexts: ['Atlanta Housing Authority'],
+      // Fixed NOW, from the entry's kind (spec 5.1): the job never looks the target up again.
+      fields: ['housingAuthority', 'accepted_authorities'],
       toName: 'Housing Authority of the City of Atlanta',
       status: 'running',
       heartbeatAt: T1,
@@ -5382,7 +5706,7 @@ describe('OrgRewriteService.rename (spec D11, D12)', () => {
 });
 
 describe('OrgRewriteService.heartbeat / finish (spec D11; planner ruling R4-F4)', () => {
-  it('act only for the RUNNING rewrite they name; a late duplicate changes nothing', async () => {
+  it('act only for the RUNNING rewrite they name; heartbeat says whether the lock is still the caller\'s', async () => {
     let clock = T1;
     const { repo, svc } = await rewriteService({
       lastRewrite: runningRewrite({
@@ -5396,9 +5720,9 @@ describe('OrgRewriteService.heartbeat / finish (spec D11; planner ruling R4-F4)'
       now: () => clock,
     });
     clock = '2026-10-06T12:00:20.000Z';
-    await svc.heartbeat('job-other');
+    expect(await svc.heartbeat('job-other')).toBe(false);
     expect((await repo.peek())?.version).toBe(1); // not its lock: nothing written
-    await svc.heartbeat('job-1');
+    expect(await svc.heartbeat('job-1')).toBe(true);
     expect((await repo.peek())?.lastRewrite?.heartbeatAt).toBe('2026-10-06T12:00:20.000Z');
     clock = '2026-10-06T12:01:00.000Z';
     await svc.finish('job-1', { status: 'done', counts: { agency: 2 } });
@@ -5411,7 +5735,8 @@ describe('OrgRewriteService.heartbeat / finish (spec D11; planner ruling R4-F4)'
     });
     const version = (await repo.peek())?.version;
     await svc.finish('job-1', { status: 'failed', error: 'a late duplicate' });
-    await svc.heartbeat('job-1');
+    // A finished rewrite's lock is nobody's: a late duplicate learns it must stop.
+    expect(await svc.heartbeat('job-1')).toBe(false);
     expect((await repo.peek())?.lastRewrite).toEqual(done);
     expect((await repo.peek())?.version).toBe(version);
   });
@@ -5458,7 +5783,13 @@ GREEN: create `app/src/services/orgRewrite.ts`:
 // and the cleanup script keep the lock alive with heartbeat() and release it
 // with finish(); both act ONLY while `lastRewrite` still carries the caller's
 // id and is `running`, so a duplicate delivery or a stale run never
-// overwrites a newer rewrite's state (planner ruling R4-F4).
+// overwrites a newer rewrite's state (planner ruling R4-F4). heartbeat()
+// answers whether the lock is still the caller's: on `false` the caller stops
+// writing records at once and does not finish (spec D11).
+//
+// A rewrite's `fields` are FIXED when it starts (spec 5.1): a value action's
+// one field; a rename or merge, every field of the target entry's kind at that
+// moment (recordFieldsForKind). The job and Run again use them as stored.
 //
 // ORG_REWRITE_JOB is declared HERE and re-exported by jobs/orgRewrite.ts: the
 // job module builds this service, so this module must not import it.
@@ -5480,7 +5811,7 @@ import {
   OrgHttpError,
   rewriteRunningError,
 } from './orgNames.js';
-import type { OrgRecordsService } from './orgRecords.js';
+import { recordFieldsForKind, type OrgRecordsService } from './orgRecords.js';
 
 /** The org.rewrite job name (plan 3.9). */
 export const ORG_REWRITE_JOB = 'org.rewrite';
@@ -5498,8 +5829,11 @@ export const ORG_REWRITE_ENQUEUE_FAILED = 'enqueue_failed';
 /** Plan 3.4 - Tasks 3.9-3.10 add merge, resolveNotOnList, runAgain and acquireForCleanup. */
 export interface OrgRewriteService {
   rename(orgId: string, newName: string, actor: string): Promise<{ entry: OrgEntry; lastRewrite: OrgRewriteState; skippedSpellings: SkippedSpelling[] }>;
-  /** For the job and the cleanup script. */
-  heartbeat(jobId: string): Promise<void>;
+  /** For the job and the cleanup script. true = the lock is still the
+   *  caller's (its heartbeat was written); false = it is not (another id holds
+   *  it, or it is no longer running) - the caller stops writing records and
+   *  does NOT call finish. */
+  heartbeat(jobId: string): Promise<boolean>;
   finish(jobId: string, outcome: { status: 'done' | 'failed'; counts?: Record<string, number>; error?: string }): Promise<void>;
 }
 
@@ -5508,8 +5842,9 @@ export interface OrgRewriteDeps {
   orgListRepo?: OrgListRepo;
   /**
    * Wired by the composition root (plan 3.4b). No method here reads records:
-   * the records pass runs in the org.rewrite job, which needs the list to split
-   * a rename or merge into per-field passes. Accepted, never defaulted.
+   * the records pass runs in the org.rewrite job, one pass per member of the
+   * `fields` this service stores when the rewrite starts. Accepted, never
+   * defaulted.
    */
   orgRecords?: OrgRecordsService;
   enqueue?: typeof enqueue;
@@ -5521,7 +5856,7 @@ export interface OrgRewriteDeps {
 }
 
 /** The definition part of `lastRewrite` (plan 3.2). */
-type RewriteDefinition = Pick<OrgRewriteState, 'action' | 'fromTexts' | 'field' | 'toName' | 'agencyName'>;
+type RewriteDefinition = Pick<OrgRewriteState, 'action' | 'fromTexts' | 'field' | 'fields' | 'toName' | 'agencyName'>;
 
 function runningState(jobId: string, def: RewriteDefinition, actor: string, at: string): OrgRewriteState {
   return {
@@ -5529,6 +5864,7 @@ function runningState(jobId: string, def: RewriteDefinition, actor: string, at: 
     action: def.action,
     fromTexts: [...def.fromTexts],
     ...(def.field !== undefined && { field: def.field }),
+    fields: [...def.fields],
     ...(def.toName !== undefined && { toName: def.toName }),
     ...(def.agencyName !== undefined && { agencyName: def.agencyName }),
     status: 'running',
@@ -5561,14 +5897,16 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
     if (held !== undefined && isOrgRewriteRunning(held, Date.parse(at))) throw rewriteRunningError(held);
   }
 
-  async function heartbeat(jobId: string): Promise<void> {
-    await list.mutate((current) => {
+  /** true = the lock is still the caller's and its heartbeat was written; false = it is not. */
+  async function heartbeat(jobId: string): Promise<boolean> {
+    return list.mutate((current) => {
       const last = current.lastRewrite;
-      // Not this run's lock (a newer rewrite, or this one already finished): write nothing.
+      // Not this run's lock (a newer rewrite, or this one already finished):
+      // write nothing, and tell the caller to stop writing records (spec D11).
       if (last === undefined || last.jobId !== jobId || last.status !== 'running') {
-        return { next: current, result: undefined };
+        return { next: current, result: false };
       }
-      return { next: { ...current, lastRewrite: { ...last, heartbeatAt: now() } }, result: undefined };
+      return { next: { ...current, lastRewrite: { ...last, heartbeatAt: now() } }, result: true };
     });
   }
 
@@ -5667,7 +6005,8 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
         }
         return {
           entries,
-          def: { action: 'rename', fromTexts: [entry.name], toName: name },
+          // `fields` fixed now, from the entry's kind (spec 5.1).
+          def: { action: 'rename', fromTexts: [entry.name], fields: recordFieldsForKind(entry.kind), toName: name },
           result: { entry: renamed, skippedSpellings },
         };
       });
@@ -5696,6 +6035,7 @@ describe('OrgRewriteService.merge (spec D11)', () => {
       jobId: 'id-1',
       action: 'merge',
       fromTexts: ['Augusta Housing Authority'],
+      fields: ['housingAuthority', 'accepted_authorities'],
       toName: ATLANTA.name,
       status: 'running',
       heartbeatAt: T1,
@@ -5840,7 +6180,13 @@ with
         const entries = replaceEntry(others, merged);
         return {
           entries,
-          def: { action: 'merge', fromTexts: [source.name, ...unshared], toName: target.name },
+          def: {
+            action: 'merge',
+            fromTexts: [source.name, ...unshared],
+            // `fields` fixed now, from the target's kind (spec 5.1).
+            fields: recordFieldsForKind(target.kind),
+            toName: target.name,
+          },
           result: {},
         };
       });
@@ -5914,6 +6260,7 @@ describe('OrgRewriteService.resolveNotOnList (spec D10)', () => {
         action: 'use',
         fromTexts: ['Atlanta Hsg Auth'],
         field: 'housingAuthority',
+        fields: ['housingAuthority'],
         toName: ATLANTA.name,
         status: 'running',
         heartbeatAt: T1,
@@ -6015,15 +6362,12 @@ describe('OrgRewriteService.resolveNotOnList (spec D10)', () => {
     expect(cleared).not.toHaveProperty('toName');
   });
 
-  it('refuses (400) a blank or on-list value, a name variant unless used as its own entry, the wrong field and the wrong kind', async () => {
+  it('refuses (400) a blank or on-list value, the wrong field and the wrong kind; a name variant (409) unless used as its own entry', async () => {
     const { repo, svc } = await rewriteService();
     const resolve = (input: Omit<ResolveInput, 'actor'>) => svc.resolveNotOnList({ ...input, actor: 'u' });
     const refused: Array<Omit<ResolveInput, 'actor'>> = [
       { field: 'housingAuthority', value: '  ', action: 'clear' },
       { field: 'housingAuthority', value: ATLANTA.name, action: 'clear' },
-      // CONTRACT ISSUE 3: a pass over a name variant would also hit the exact holders.
-      { field: 'housingAuthority', value: 'atlanta housing authority', action: 'clear' },
-      { field: 'housingAuthority', value: 'atlanta housing authority', action: 'use', name: AUGUSTA.name },
       { field: 'agency', value: 'HUD VASH', action: 'move_to_agency', name: VASH.name },
       { field: 'accepted_authorities', value: 'DCA HUD-VASH', action: 'split', name: DCA.name, agencyName: VASH.name },
       { field: 'housingAuthority', value: 'DCA HUD-VASH', action: 'split', name: DCA.name, agencyName: ATLANTA.name },
@@ -6032,6 +6376,19 @@ describe('OrgRewriteService.resolveNotOnList (spec D10)', () => {
     ];
     for (const input of refused) {
       await expect(resolve(input)).rejects.toMatchObject({ status: 400 });
+    }
+    // A NAME VARIANT (spec D10): a pass over it would also rewrite every exact
+    // holder of the name, so only "Use <that entry>" may settle it - 409 with the entry.
+    const variants: Array<Omit<ResolveInput, 'actor'>> = [
+      { field: 'housingAuthority', value: 'atlanta housing authority', action: 'clear' },
+      { field: 'housingAuthority', value: 'atlanta housing authority', action: 'use', name: AUGUSTA.name },
+      { field: 'accepted_authorities', value: 'ATLANTA HOUSING AUTHORITY', action: 'add', name: 'Atlanta Housing Two' },
+    ];
+    for (const input of variants) {
+      await expect(resolve(input)).rejects.toMatchObject({
+        status: 409,
+        body: { error: 'org_value_is_name_variant', entry: orgRef(ATLANTA) },
+      });
     }
     expect((await repo.peek())?.version).toBe(1);
     // A name variant settled as its OWN entry is safe: the pass leaves the exact holders alone.
@@ -6064,6 +6421,7 @@ describe('OrgRewriteService.runAgain (spec D11)', () => {
       jobId: 'id-1',
       action: 'use',
       field: 'agency',
+      fields: ['agency'],
       fromTexts: ['Steps'],
       toName: STEP_UP.name,
       status: 'running',
@@ -6094,6 +6452,60 @@ describe('OrgRewriteService.runAgain (spec D11)', () => {
     const none = await rewriteService();
     await expect(none.svc.runAgain('a')).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_not_rerunnable' } });
   });
+
+  it('re-checks its target names first: 409 org_rewrite_target_gone once a name left the list or changed kind', async () => {
+    const failed = (def: OrgRewriteState): OrgRewriteState => ({ ...def, status: 'failed', finishedAt: ORG_T0 });
+    const useStepUp = failed(
+      runningRewrite({ jobId: 'job-old', action: 'use', field: 'agency', fromTexts: ['Steps'], toName: STEP_UP.name }),
+    );
+    const gone = { status: 409, body: { error: 'org_rewrite_target_gone' } };
+    // The agency was deleted after the failure (a failed rewrite holds no lock).
+    const deleted = await rewriteService({
+      entries: ORG_FIXTURE.filter((e) => e.orgId !== STEP_UP.orgId),
+      lastRewrite: useStepUp,
+    });
+    await expect(deleted.svc.runAgain('a')).rejects.toMatchObject(gone);
+    expect(deleted.enqueued).toEqual([]);
+    // It became a housing authority: the agency field must not receive it.
+    const rekinded = await rewriteService({
+      entries: ORG_FIXTURE.map((e) => (e.orgId === STEP_UP.orgId ? { ...e, kind: 'housing_authority' as const } : e)),
+      lastRewrite: useStepUp,
+    });
+    await expect(rekinded.svc.runAgain('a')).rejects.toMatchObject(gone);
+    // A split's agency half is re-checked too.
+    const split = await rewriteService({
+      entries: ORG_FIXTURE.filter((e) => e.orgId !== VASH.orgId),
+      lastRewrite: failed(
+        runningRewrite({
+          jobId: 'job-old',
+          action: 'split',
+          field: 'housingAuthority',
+          fromTexts: ['DCA HUD-VASH'],
+          toName: DCA.name,
+          agencyName: VASH.name,
+        }),
+      ),
+    });
+    await expect(split.svc.runAgain('a')).rejects.toMatchObject(gone);
+    // A rename's target is its stored name, of the kind its fields belong to.
+    const renamed = await rewriteService({
+      lastRewrite: failed(
+        runningRewrite({
+          jobId: 'job-old',
+          action: 'rename',
+          fromTexts: ['Old Name'],
+          fields: ['housingAuthority', 'accepted_authorities'],
+          toName: 'Renamed Again Since',
+        }),
+      ),
+    });
+    await expect(renamed.svc.runAgain('a')).rejects.toMatchObject(gone);
+    // A clear names no target and re-runs as stored.
+    const clear = await rewriteService({
+      lastRewrite: failed(runningRewrite({ jobId: 'job-old', action: 'clear', field: 'agency', fromTexts: ['x'] })),
+    });
+    expect((await clear.svc.runAgain('a')).lastRewrite).toMatchObject({ action: 'clear', fields: ['agency'], status: 'running' });
+  });
 });
 
 describe('OrgRewriteService.acquireForCleanup (spec section 8)', () => {
@@ -6105,6 +6517,7 @@ describe('OrgRewriteService.acquireForCleanup (spec section 8)', () => {
       jobId: 'id-1',
       action: 'cleanup',
       fromTexts: [],
+      fields: ['housingAuthority', 'agency', 'accepted_authorities'],
       status: 'running',
       heartbeatAt: T1,
       startedAt: T1,
@@ -6117,7 +6530,7 @@ describe('OrgRewriteService.acquireForCleanup (spec section 8)', () => {
     });
     await expect(svc.acquireForCleanup('again')).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_running' } });
     clock = '2026-10-06T12:05:00.000Z';
-    await svc.heartbeat('id-1');
+    expect(await svc.heartbeat('id-1')).toBe(true);
     await svc.finish('id-1', { status: 'done', counts: { housingAuthority: 4 } });
     expect((await repo.peek())?.lastRewrite).toMatchObject({
       jobId: 'id-1',
@@ -6172,6 +6585,48 @@ import {
 } from '../repos/orgListRepo.js';
 ```
 
+and replace
+
+```ts
+  rewriteRunningError,
+} from './orgNames.js';
+```
+
+with
+
+```ts
+  rewriteRunningError,
+  toOrgRef,
+} from './orgNames.js';
+```
+
+and after the `replaceEntry` function (`function replaceEntry(entries: readonly
+OrgEntry[], entry: OrgEntry): OrgEntry[] { ... }`) insert:
+
+```ts
+
+/**
+ * The kind of entry `toName` must name for a re-run (spec D11 Run again):
+ * Move to Agency writes an agency; Move to Housing authority and Split write a
+ * housing authority (Split's agency half is checked on its own); rename, merge
+ * and use write the kind of the field(s) they rewrite. Clear names no target.
+ */
+function rewriteTargetKind(def: OrgRewriteState): OrgKind | undefined {
+  switch (def.action) {
+    case 'clear':
+    case 'cleanup':
+      return undefined;
+    case 'move_to_agency':
+      return 'agency';
+    case 'move_to_housing_authority':
+    case 'split':
+      return 'housing_authority';
+    default: // rename, merge, use
+      return (def.field ?? def.fields[0]) === 'agency' ? 'agency' : 'housing_authority';
+  }
+}
+```
+
 2. Interface - replace
 
 ```ts
@@ -6204,6 +6659,9 @@ with
     rememberSpelling?: boolean;
     actor: string;
   }): Promise<{ lastRewrite: OrgRewriteState; skippedSpellings: SkippedSpelling[] }>;
+  /** Re-queues the stored definition under a new id, after re-checking that
+   *  `toName` (and a split's `agencyName`) still name entries of the expected
+   *  kind (else 409 org_rewrite_target_gone). */
   runAgain(actor: string): Promise<{ lastRewrite: OrgRewriteState }>;
 ```
 
@@ -6247,16 +6705,14 @@ with
         if (isOnListFor(entries, value, kinds)) {
           throw new OrgHttpError(400, { error: 'the value is on the list for this field; there is nothing to settle' });
         }
-        // CONTRACT ISSUE 3: a value that differs from an entry NAME of the
-        // field's kind only in case or punctuation normalizes equal to that
+        // A NAME VARIANT (spec D10): a value that differs from an entry NAME of
+        // the field's kind only in case or punctuation normalizes equal to that
         // exact name, so a pass over it would also rewrite every exact holder.
         // Only "Use <that entry>" is safe - the pass leaves exact holders alone.
         const n = normalizeOrgText(value);
         const variantOf = entries.find((e) => kinds.includes(e.kind) && normalizeOrgText(e.name) === n);
         if (variantOf !== undefined && !(action === 'use' && input.name === variantOf.name)) {
-          throw new OrgHttpError(400, {
-            error: `the value differs from "${variantOf.name}" only in case or punctuation; settle it with Use ${variantOf.name}`,
-          });
+          throw new OrgHttpError(409, { error: 'org_value_is_name_variant', entry: toOrgRef(variantOf) });
         }
         const named = (name: string | undefined, wanted: OrgKind, key: 'name' | 'agencyName'): OrgEntry => {
           const hit = name === undefined ? undefined : entries.find((e) => e.name === name && e.kind === wanted);
@@ -6268,9 +6724,10 @@ with
           return hit;
         };
         const skippedSpellings: SkippedSpelling[] = [];
-        const settle = (def: Omit<RewriteDefinition, 'fromTexts' | 'field'>) => ({
+        // A value action rewrites the one field the row names (spec 5.1 `fields`).
+        const settle = (def: Omit<RewriteDefinition, 'fromTexts' | 'field' | 'fields'>) => ({
           entries,
-          def: { ...def, fromTexts: [value], field },
+          def: { ...def, fromTexts: [value], field, fields: [field] },
           result: { skippedSpellings },
         });
         switch (action) {
@@ -6349,8 +6806,21 @@ with
         }
         if (isOrgRewriteRunning(last, Date.parse(at))) throw rewriteRunningError(last);
         if (last.status === 'done') throw new OrgHttpError(409, { error: 'org_rewrite_not_rerunnable' });
-        // Failed, or running with a stale heartbeat: the SAME definition under
-        // a NEW id, so a late delivery of the old run finds the lock is not its own.
+        // Spec D11: a failed or stalled rewrite holds no lock, so its target may
+        // have been renamed, merged, deleted or re-kinded since. Re-run only
+        // while every name it writes is still an entry of the kind it expects.
+        const targetGone = (name: string | undefined, kind: OrgKind): boolean =>
+          name === undefined || !current.entries.some((e) => e.name === name && e.kind === kind);
+        const toKind = rewriteTargetKind(last);
+        if (
+          (toKind !== undefined && targetGone(last.toName, toKind)) ||
+          (last.action === 'split' && targetGone(last.agencyName, 'agency'))
+        ) {
+          throw new OrgHttpError(409, { error: 'org_rewrite_target_gone' });
+        }
+        // Failed, or running with a stale heartbeat: the SAME definition (its
+        // `fields` included) under a NEW id, so a late delivery of the old run
+        // finds the lock is not its own.
         const lastRewrite = runningState(jobId, last, actor, at);
         return { next: { ...current, lastRewrite }, result: { lastRewrite } };
       });
@@ -6365,7 +6835,13 @@ with
       const lastRewrite = await list.mutate((current) => {
         const at = now();
         refuseWhileHeld(current, at);
-        const state = runningState(jobId, { action: 'cleanup', fromTexts: [] }, actor, at);
+        // The cleanup touches all three fields (spec section 8); no job ever runs it.
+        const state = runningState(
+          jobId,
+          { action: 'cleanup', fromTexts: [], fields: ['housingAuthority', 'agency', 'accepted_authorities'] },
+          actor,
+          at,
+        );
         return { next: { ...current, lastRewrite: state }, result: state };
       });
       log.info({ jobId, actor }, 'org rewrite lock taken by the cleanup script');
@@ -6397,10 +6873,11 @@ RED: create `app/test/orgRewriteJob.test.ts`:
 ```ts
 // jobs/orgRewrite.ts (spec D11; plan 3.9; planner rulings R4-F3, R4-F4): the
 // handler acts only for the running rewrite its payload names, runs one pass
-// per field, records done or failed with the counts, NEVER rethrows, and two
-// concurrent runs of one definition rewrite each record once. Over the harness
-// world fakes and the real services.
-import { describe, expect, it } from 'vitest';
+// per stored field, records done or failed with the counts, NEVER rethrows,
+// stops writing once its heartbeat finds the lock gone, and two concurrent
+// runs of one definition rewrite each record once. Over the harness world
+// fakes and the real services.
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseOrgRewritePayload, runOrgRewriteJob } from '../src/jobs/orgRewrite.js';
 import type { OrgEntry } from '../src/lib/orgNames.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
@@ -6463,6 +6940,10 @@ describe('parseOrgRewritePayload (plan 3.9)', () => {
 });
 
 describe('runOrgRewriteJob (spec D11; plan 3.9)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('does nothing unless lastRewrite names this id and is running', async () => {
     for (const last of [undefined, { ...USE, jobId: 'job-newer' }, { ...USE, status: 'done' as const }, { ...USE, status: 'failed' as const }]) {
       const { world, deps } = await jobWorld(last);
@@ -6481,11 +6962,17 @@ describe('runOrgRewriteJob (spec D11; plan 3.9)', () => {
     expect(rewritesIn(world).map((e) => e.actorId)).toEqual(['usr_admin', 'usr_admin', 'usr_admin']);
   });
 
-  it('a rename runs one pass per field of the target entry kind and sums the counts', async () => {
+  it('a rename runs one pass per STORED field (fixed when it started) and sums the counts', async () => {
     const NEW = 'Housing Authority of the City of Atlanta';
     const entries = ORG_FIXTURE.map((e) => (e.orgId === ATLANTA.orgId ? { ...e, name: NEW } : e));
     const { world, deps } = await jobWorld(
-      runningRewrite({ jobId: 'job-1', action: 'rename', fromTexts: [ATLANTA.name], toName: NEW }),
+      runningRewrite({
+        jobId: 'job-1',
+        action: 'rename',
+        fromTexts: [ATLANTA.name],
+        fields: ['housingAuthority', 'accepted_authorities'],
+        toName: NEW,
+      }),
       { entries, contacts: [holder('t-1', { housingAuthority: ATLANTA.name })] },
     );
     world.units.set('u-1', { unitId: 'u-1', landlordId: 'l-1', status: 'available', accepted_authorities: [ATLANTA.name] });
@@ -6497,14 +6984,14 @@ describe('runOrgRewriteJob (spec D11; plan 3.9)', () => {
     expect(world.units.get('u-1')?.accepted_authorities).toEqual([NEW]);
   });
 
-  it('a rename whose target left the list records failed and resolves', async () => {
+  it('a rewrite that names no fields records failed and resolves - it never looks the target up', async () => {
     const { world, deps } = await jobWorld(
-      runningRewrite({ jobId: 'job-1', action: 'rename', fromTexts: ['Old Name'], toName: 'Gone' }),
+      runningRewrite({ jobId: 'job-1', action: 'rename', fromTexts: ['Old Name'], fields: [], toName: 'Gone' }),
     );
     expect(await runOrgRewriteJob({ jobId: 'job-1' }, deps)).toEqual({ outcome: 'failed', counts: {} });
     expect((await world.orgListRepo.peek())?.lastRewrite).toMatchObject({
       status: 'failed',
-      error: 'the rewrite target is no longer on the list',
+      error: 'the rewrite names no record fields',
     });
   });
 
@@ -6560,17 +7047,30 @@ describe('runOrgRewriteJob (spec D11; plan 3.9)', () => {
     expect((await world.orgListRepo.peek())?.lastRewrite).toMatchObject({ jobId: 'job-1', status: 'done' });
   });
 
-  it('a stale run never overwrites a newer rewrite that took the lock meanwhile', async () => {
-    const { world, deps } = await jobWorld(USE);
+  it('a run whose lock a newer rewrite took over writes NO record after its next heartbeat and never finishes', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-06T12:00:00.000Z'));
+    const { world, deps } = await jobWorld(USE); // three holders of 'Atlanta Hsg'
     const newer = runningRewrite({ jobId: 'job-2', action: 'clear', field: 'agency', fromTexts: ['x'] });
     const write = world.contactsRepo.rewriteOrgFields.bind(world.contactsRepo);
     world.contactsRepo.rewriteOrgFields = async (contactId, expected, next) => {
-      // While job-1 runs, its lock goes stale and job-2 takes it over.
+      const outcome = await write(contactId, expected, next);
+      // Each write takes 25 s, so the pass heartbeats after every record; after
+      // the FIRST write job-1's lock has gone stale and job-2 has taken it over.
+      vi.setSystemTime(Date.now() + 25_000);
       const item = await world.orgListRepo.get();
       if (item.lastRewrite?.jobId === 'job-1') await world.orgListRepo.putForSeed({ ...item, lastRewrite: newer });
-      return write(contactId, expected, next);
+      return outcome;
     };
-    await runOrgRewriteJob({ jobId: 'job-1' }, deps);
+    expect(await runOrgRewriteJob({ jobId: 'job-1' }, deps)).toEqual({
+      outcome: 'lock_lost',
+      counts: { ...ZERO, housingAuthority: 1 },
+    });
+    // The record written before the takeover stays; none was written after it.
+    expect(world.contacts.filter((c) => c['housingAuthority'] === ATLANTA.name)).toHaveLength(1);
+    expect(world.contacts.filter((c) => c['housingAuthority'] === 'Atlanta Hsg')).toHaveLength(2);
+    expect(rewritesIn(world)).toHaveLength(1);
+    // No finish: the newer rewrite's state stands exactly as it took the lock.
     expect((await world.orgListRepo.peek())?.lastRewrite).toEqual(newer);
   });
 });
@@ -6585,15 +7085,21 @@ GREEN: create `app/src/jobs/orgRewrite.ts`:
 // org.rewrite (spec 2026-10-06 D11; plan 3.9; planner rulings R4-F3, R4-F4):
 // runs the rewrite that `lastRewrite` defines - rename, merge, or a "Not on
 // the list" action - over every contact and unit, active and deleted, through
-// services/orgRecords.ts: one pass per field (a value action names its field;
-// a rename or merge rewrites every field of its target entry's kind).
+// services/orgRecords.ts: one pass per member of `lastRewrite.fields`, which
+// the service FIXED when the rewrite started (a value action's one field; a
+// rename or merge, every field of its target entry's kind then). The job never
+// looks the target up again.
 //
 // The definition and the lock live on the org-list item; the payload carries
 // only the rewrite id the service minted BEFORE its list write (never the jobs
-// envelope id). The handler acts only while `lastRewrite` still names that id
-// and is `running`, so a duplicate SQS delivery, a stale run, or a run whose
-// lock a newer rewrite took over does nothing - and its heartbeats and finish
-// re-check the id too (services/orgRewrite.ts).
+// envelope id). The handler STARTS only while `lastRewrite` still names that
+// id and is `running`, so a duplicate SQS delivery or a stale run does
+// nothing. While it runs, every heartbeat (at most every 20 s, after each
+// record the pass visits) re-checks the id: once the lock is no longer this
+// run's - a newer rewrite took it over, or a duplicate run already finished
+// it - the pass writes no further record and the job returns WITHOUT
+// finish(), because the lock it would finish is not its own. finish()
+// re-checks the id too (services/orgRewrite.ts).
 //
 // It NEVER rethrows: dispatchJob rethrows a handler error and SQS would
 // redeliver it up to 5 times (infra/modules/jobs/main.tf). Every failure is
@@ -6601,12 +7107,16 @@ GREEN: create `app/src/jobs/orgRewrite.ts`:
 // again, which is safe - a record already rewritten no longer holds the
 // from-text. It sends nothing, so it draws no A2P token of its own.
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import type { OrgEntry } from '../lib/orgNames.js';
-import type { OrgListRepo, OrgRecordField, OrgRewriteState } from '../repos/orgListRepo.js';
-import { OrgRewriteAbortedError, recordFieldsForKind, type OrgRecordsService } from '../services/orgRecords.js';
+import type { OrgListRepo } from '../repos/orgListRepo.js';
+import {
+  OrgRewriteAbortedError,
+  OrgRewriteLockLostError,
+  type OrgRecordsService,
+} from '../services/orgRecords.js';
 import { ORG_REWRITE_JOB, type OrgRewritePayload, type OrgRewriteService } from '../services/orgRewrite.js';
 
-// Declared by the service (CONTRACT ISSUE 9); this is the job's public name.
+// Declared by services/orgRewrite.ts, which this module imports (the reverse
+// import would be a cycle); this is the job's public name.
 export { ORG_REWRITE_JOB };
 export type { OrgRewritePayload };
 
@@ -6626,17 +7136,10 @@ export interface RunOrgRewriteDeps {
   logger?: Logger;
 }
 
+/** `lock_lost`: the heartbeat found the lock no longer this run's - stopped, NOT finished. */
 export type OrgRewriteJobResult =
   | { outcome: 'not_current' }
-  | { outcome: 'done' | 'failed'; counts: Record<string, number> };
-
-/** The passes a definition needs: its own field, or every field of the target entry's kind. */
-function passFields(last: OrgRewriteState, entries: readonly OrgEntry[]): OrgRecordField[] {
-  if (last.field !== undefined) return [last.field];
-  const target = entries.find((e) => e.name === last.toName);
-  if (target === undefined) throw new Error('the rewrite target is no longer on the list');
-  return recordFieldsForKind(target.kind);
-}
+  | { outcome: 'done' | 'failed' | 'lock_lost'; counts: Record<string, number> };
 
 function errorText(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).slice(0, 300);
@@ -6659,7 +7162,10 @@ export async function runOrgRewriteJob(
       log.info({ jobId, current: last?.jobId, status: last?.status }, 'org.rewrite: not the running rewrite - nothing to do');
       return { outcome: 'not_current' };
     }
-    for (const field of passFields(last, item.entries)) {
+    // The passes are the fields FIXED when the rewrite started (spec 5.1).
+    const fields = Array.isArray(last.fields) ? last.fields : [];
+    if (fields.length === 0) throw new Error('the rewrite names no record fields');
+    for (const field of fields) {
       add(
         await deps.orgRecords.rewrite(
           { ...last, field },
@@ -6671,6 +7177,13 @@ export async function runOrgRewriteJob(
     log.info({ jobId, action: last.action, ...counts }, 'org.rewrite finished');
     return { outcome: 'done', counts: { ...counts } };
   } catch (err) {
+    if (err instanceof OrgRewriteLockLostError) {
+      // Spec D11: the lock is not this run's any more - no record was written
+      // after the heartbeat said so, and finishing would touch another run's lock.
+      add(err.counts);
+      log.warn({ jobId, ...counts }, 'org.rewrite: lost the lock - stopped without finishing');
+      return { outcome: 'lock_lost', counts: { ...counts } };
+    }
     if (err instanceof OrgRewriteAbortedError) add(err.counts);
     log.error({ err, jobId }, 'org.rewrite failed - recording it failed');
     try {
@@ -6708,14 +7221,14 @@ with
 RED, part 2 - in `app/test/orgRewriteJob.test.ts` replace
 
 ```ts
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseOrgRewritePayload, runOrgRewriteJob } from '../src/jobs/orgRewrite.js';
 ```
 
 with
 
 ```ts
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { _resetForTests, configureJobsLogger, dispatchJob, registeredJobNames } from '../src/jobs/jobs.js';
 import {
   ORG_REWRITE_JOB,
@@ -6777,9 +7290,12 @@ imports
 
 ```ts
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import type { OrgEntry } from '../lib/orgNames.js';
-import type { OrgListRepo, OrgRecordField, OrgRewriteState } from '../repos/orgListRepo.js';
-import { OrgRewriteAbortedError, recordFieldsForKind, type OrgRecordsService } from '../services/orgRecords.js';
+import type { OrgListRepo } from '../repos/orgListRepo.js';
+import {
+  OrgRewriteAbortedError,
+  OrgRewriteLockLostError,
+  type OrgRecordsService,
+} from '../services/orgRecords.js';
 import { ORG_REWRITE_JOB, type OrgRewritePayload, type OrgRewriteService } from '../services/orgRewrite.js';
 ```
 
@@ -6787,15 +7303,14 @@ with
 
 ```ts
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import type { OrgEntry } from '../lib/orgNames.js';
 import type { AuditRepo } from '../repos/auditRepo.js';
 import type { ContactsRepo } from '../repos/contactsRepo.js';
-import { createOrgListRepo, type OrgListRepo, type OrgRecordField, type OrgRewriteState } from '../repos/orgListRepo.js';
+import { createOrgListRepo, type OrgListRepo } from '../repos/orgListRepo.js';
 import type { UnitsRepo } from '../repos/unitsRepo.js';
 import {
   createOrgRecordsService,
   OrgRewriteAbortedError,
-  recordFieldsForKind,
+  OrgRewriteLockLostError,
   type OrgRecordsService,
 } from '../services/orgRecords.js';
 import {
@@ -6990,7 +7505,7 @@ describe('GET /api/organizations - both lists, for everyone', () => {
     expect((await as(h, TEST_SESSION_COOKIE).get()).body.lastRewrite).toEqual(last);
   });
 
-  it('sits behind requireAuth', async () => {
+  it('(PIN) sits behind requireAuth', async () => {
     const h = makeWebhookHarness();
     expect((await request(h.app).get(BASE).set('x-origin-verify', ORIGIN_SECRET)).status).toBe(401);
   });
@@ -7071,11 +7586,19 @@ describe('POST /api/organizations/check - for everyone', () => {
     expect(missing.status).toBe(404);
     expect(missing.body).toEqual({ error: 'org_not_found' });
   });
+
+  it('refuses a text over 200 characters before any check runs (spec section 6)', async () => {
+    const va = as(await harness(), TEST_SESSION_COOKIE);
+    expect((await va.post('/check', { kind: 'agency', text: 'x'.repeat(201) })).status).toBe(400);
+    expect((await va.post('/check', { kind: 'agency', text: 'x'.repeat(200) })).status).toBe(200);
+  });
 });
 ```
 
 Run: `cd "W:/tmp/clean-org-names/app"; npx vitest run test/organizationsApi.test.ts`
-- RED: every request answers 404 (nothing is mounted at `/api/organizations`).
+- RED: every signed-in request answers 404 (nothing is mounted at
+  `/api/organizations`). The (PIN) case passes already: requireAuth answers
+  the unauthenticated request 401 before any route is matched.
 
 GREEN, part 1 - create `app/src/routes/organizations.ts`:
 
@@ -7090,7 +7613,7 @@ GREEN, part 1 - create `app/src/routes/organizations.ts`:
 //   GET    /usage                              -> { usage }
 //   GET    /not-on-list                        -> { rows }
 //   GET    /not-on-list/records?field=&value=  -> { records }
-//   POST   /check  { kind, text, spellingFor? }  -> OrgCheckResult
+//   POST   /check  { kind, text, spellingFor? }  -> OrgCheckResult (text <= 200 chars, else 400)
 //   POST   /       { kind, name, notes? }        -> 201 { entry }
 //   PATCH  /:orgId { notes }                     -> { entry }
 //          ADMIN   { spellings, confirmShared? } -> { entry }
@@ -7128,6 +7651,8 @@ export interface OrganizationsRouterDeps {
 
 const KINDS: readonly OrgKind[] = ['housing_authority', 'agency'];
 const RECORD_FIELDS: readonly OrgRecordField[] = ['housingAuthority', 'agency', 'accepted_authorities'];
+/** POST /check refuses a longer text with 400 (spec section 6). */
+const ORG_CHECK_TEXT_MAX = 200;
 
 function isKind(value: unknown): value is OrgKind {
   return typeof value === 'string' && (KINDS as readonly string[]).includes(value);
@@ -7222,6 +7747,13 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
       }
       if (typeof text !== 'string') {
         res.status(400).json({ error: 'text must be a string' });
+        return;
+      }
+      // Spec section 6: no name or spelling exceeds 120 characters, and every
+      // check scores close names against the whole list - an unbounded text
+      // (express.json takes up to 100 KB) never reaches it.
+      if (text.length > ORG_CHECK_TEXT_MAX) {
+        res.status(400).json({ error: `text must be at most ${ORG_CHECK_TEXT_MAX} characters` });
         return;
       }
       if (spellingFor !== undefined && typeof spellingFor !== 'string') {
@@ -7608,8 +8140,10 @@ with
   /**
    * 409 org_in_use while any record - deleted ones included (D10) - holds the
    * entry's name in a field of its kind. OrgNamesService has no record access
-   * (plan 3.4b), so the delete and kind-change routes ask here first
-   * (CONTRACT ISSUE 4).
+   * (plan 3.4b), so the delete and kind-change routes ask here first (plan
+   * 3.5). The count and the list write are two steps: a record written in
+   * between can end up holding the removed name - it then shows in "Not on
+   * the list" (the accepted race, plan watch items).
    */
   async function refuseWhileUsed(entry: OrgEntry): Promise<void> {
     const u = (await orgRecords.usage([entry]))[entry.orgId];
@@ -7822,7 +8356,7 @@ describe('rewrites through the real in-process queue and the org.rewrite job (sp
     });
   }
 
-  it('an admin rename answers 202, then the job rewrites every holder and records done', async () => {
+  it('(PIN) an admin rename answers 202, then the job rewrites every holder and records done', async () => {
     const h = await harness();
     wireRewriteJob(h);
     h.world.contacts.push(
@@ -7932,6 +8466,19 @@ describe('rewrites through the real in-process queue and the org.rewrite job (sp
     expect((await admin.post('/org-aug/merge', {})).status).toBe(400);
   });
 
+  it('a name variant is settled only with Use <its entry>: 409 org_value_is_name_variant names the entry (spec D10)', async () => {
+    const h = await harness();
+    h.world.contacts.push(tenant('t-1', { housingAuthority: 'atlanta housing authority' }));
+    const res = await as(h, TEST_ADMIN_COOKIE).post('/not-on-list/resolve', {
+      field: 'housingAuthority',
+      value: 'atlanta housing authority',
+      action: 'clear',
+    });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'org_value_is_name_variant', entry: orgRef(ATLANTA) });
+    expect(h.world.contacts[0]?.['housingAuthority']).toBe('atlanta housing authority');
+  });
+
   it('an enqueue failure answers 202 with the rewrite failed; Run again restarts it under a new id', async () => {
     const h = await harness();
     h.world.contacts.push(tenant('t-1', { housingAuthority: DCA.name }));
@@ -7968,8 +8515,10 @@ describe('rewrites through the real in-process queue and the org.rewrite job (sp
 
 Run: `cd "W:/tmp/clean-org-names/app"; npx vitest run test/organizationsApi.test.ts`
 - RED: `POST /:orgId/merge`, `POST /not-on-list/resolve` and
-`POST /rewrite/run-again` are not routes (404); the rename cases fail only on
-their job assertions until the routes below exist.
+`POST /rewrite/run-again` are not routes (404), so every case that calls one
+fails on that 404 - the payload case on its merge, the enqueue-failure case
+on its Run again. The (PIN) rename case passes already: Task 5.2 shipped
+PATCH `{ name }` and S4 registered the job.
 
 GREEN: edit `app/src/routes/organizations.ts`.
 
@@ -8109,7 +8658,7 @@ Resolutions the cases rely on (D4):
 | `Step Up` | housing authority | other kind (an agency) |
 | `Atlanta Housing Authority` | agency | other kind (a housing authority) |
 | `Hope Atlanta`, `hope atlanta` | agency | the name `HOPE Atlanta` (case differs) |
-| `Nowhere Housing Authority`, `Old Place`, `Fulton` | either | unknown (never `Fulton County`: pending spec section 13) |
+| `Nowhere Housing Authority`, `Old Place`, `Fulton` | either | unknown (`Fulton County` is NOT unknown: since Sam's answers it is a spelling of Fulton County Housing Authority - spec section 13 - so no case uses it as an unknown) |
 
 ### Task 6.1 - contacts PATCH checks housingAuthority and agency (D5); POST keeps ignoring them
 
@@ -8653,8 +9202,10 @@ describe('POST /api/units - accepted_authorities (spec D5)', () => {
 
 Existing test this task breaks: `app/test/unitsApi.test.ts:46` and `:56` (the
 create test POSTs and expects `accepted_authorities: ['Fulton County']`;
-`Fulton County` is a spelling only of the PENDING Fulton entry, so it would
-422). Edit with `replace_all: true` - the only two occurrences of this exact
+`Fulton County` is a spelling of Fulton County Housing Authority on the
+starting list (S1 Task 1.5, Sam's answers), so the server now STORES the full
+name and the expectation no longer holds). Edit with
+`replace_all: true` - the only two occurrences of this exact
 text in the file (the `jurisdiction: 'Fulton County'` tombstone bodies at
 `:492` and `:510` must stay as they are). Current:
 
@@ -8821,7 +9372,7 @@ import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarnes
 // harness org-list fake serves the starting list (spec Appendix A) on its
 // first read.
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -8925,15 +9476,69 @@ describe('PATCH /api/units/:id - accepted_authorities (spec D5)', () => {
     expect(res.status).toBe(200);
     expect(world.units.get('u-other')?.accepted_authorities).toEqual(['Nowhere Housing Authority']);
   });
+
+  it('decides what the unit already holds from a CONSISTENT read', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-read', { accepted_authorities: ['Atlanta Housing Authority'] });
+    const getById = vi.spyOn(world.unitsRepo, 'getById');
+    const res = await patchUnit(app, 'u-read', { accepted_authorities: ['Atlanta Housing Authority'] });
+    expect(res.status).toBe(200);
+    expect(getById).toHaveBeenCalledWith('u-read', { consistentRead: true });
+  });
 });
 ```
 
 Run: `cd "W:/tmp/clean-org-names/app"; npx vitest run test/unitsApiOrgNames.test.ts`
 - RED: the PATCH has no check yet, so `GA DCA` is stored raw, the off-list
-member and the R1-F1 `Fulton` are written (200, not 422). The (PIN) cases
-pass.
+member and the R1-F1 `Fulton` are written (200, not 422), and no unit is
+read at all. The (PIN) cases pass.
 
-GREEN - edit `app/src/routes/units.ts`, the PATCH handler (`:1341-1345` at
+GREEN, part 1 - `app/src/repos/unitsRepo.ts`: `getById` gains the optional
+consistent read `contactsRepo.getById` already has (the contacts PATCH uses it
+for the same reason, Task 6.1). Replace (`:333`)
+
+```ts
+  getById(unitId: string): Promise<UnitItem | undefined>;
+```
+
+with
+
+```ts
+  /** `consistentRead` for a caller that decides a write from this read (the
+   *  D5 "already held" check of the units PATCH); default eventually consistent. */
+  getById(unitId: string, opts?: { consistentRead?: boolean }): Promise<UnitItem | undefined>;
+```
+
+and replace (`:561-564`)
+
+```ts
+    async getById(unitId) {
+      const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { unitId } }));
+      return Item as UnitItem | undefined;
+    },
+```
+
+with
+
+```ts
+    async getById(unitId, opts) {
+      const { Item } = await doc.send(
+        new GetCommand({
+          TableName: table,
+          Key: { unitId },
+          ...(opts?.consistentRead === true && { ConsistentRead: true }),
+        }),
+      );
+      return Item as UnitItem | undefined;
+    },
+```
+
+No fake changes: the harness fake's `getById(unitId)` and every `as unknown as
+UnitsRepo` cast still satisfy the interface (a function with fewer
+parameters is assignable), and the in-memory fakes are always consistent. The
+repo's own internal `this.getById(unitId)` calls keep their default.
+
+GREEN, part 2 - edit `app/src/routes/units.ts`, the PATCH handler (`:1341-1345` at
 93c3c65b; after Task 6.2 the numbers moved - match the text). Insert the
 check after the tombstone-only no-op return and before the media pre-read.
 Current:
@@ -8962,9 +9567,11 @@ Replace with:
     // synthesize its list from that value (lib/unitFields.ts authoritiesOf; a
     // stored list, even [], wins - ruling R1-F1). Every other member must
     // resolve to a housing authority on the list; members are trimmed and
-    // de-duplicated, and a unique spelling is stored as the exact name.
+    // de-duplicated, and a unique spelling is stored as the exact name. The
+    // pre-read is CONSISTENT: a stale read could pass an off-list value
+    // through as "already held" (the contacts PATCH precedent).
     if (Array.isArray(validation.fields['accepted_authorities'])) {
-      const storedUnit = await units.getById(unitId);
+      const storedUnit = await units.getById(unitId, { consistentRead: true });
       if (storedUnit === undefined) {
         res.status(404).json({ error: 'unit_not_found' });
         return;
@@ -8997,10 +9604,10 @@ Unchanged and still green: `unitsApi.test.ts:481-515` (a tombstone-only
 PATCH takes the no-op return above the new block, and keeps its 404), every
 other `unitsApi.test.ts` PATCH case (none sends `accepted_authorities`).
 
-Run: `cd "W:/tmp/clean-org-names/app"; npx vitest run test/unitsApiOrgNames.test.ts test/unitsApi.test.ts` - GREEN.
+Run: `cd "W:/tmp/clean-org-names/app"; npx vitest run test/unitsApiOrgNames.test.ts test/unitsApi.test.ts test/unitsRepo.integration.test.ts` - GREEN.
 Then `cd "W:/tmp/clean-org-names"; npm run typecheck` - exit 0.
 
-GREEN; commit (stage `app/src/routes/units.ts`,
+GREEN; commit (stage `app/src/repos/unitsRepo.ts`, `app/src/routes/units.ts`,
 `app/test/unitsApiOrgNames.test.ts`)
 `feat(org-names): units PATCH checks new accepted authorities against the stored unit (D5)`.
 
@@ -9647,7 +10254,7 @@ const LIST = [GAMMA, BETA, ALPHA];
 
 describe('renderOrgListBlock - shape', () => {
   it('starts with the header, lists housing authorities with spellings, then agency names under "not housing authorities"', () => {
-    const { text, dropped } = renderOrgListBlock(LIST);
+    const { text, dropped, unrenderable } = renderOrgListBlock(LIST);
     const lines = text.split('\n');
     expect(ORG_LIST_BLOCK_HEADER).toBe('ORGANIZATION LIST');
     expect(lines[0]).toBe(ORG_LIST_BLOCK_HEADER);
@@ -9662,6 +10269,7 @@ describe('renderOrgListBlock - shape', () => {
     // Agencies are listed by NAME only (apply.ts still resolves their spellings).
     expect(text).not.toContain('Gamma Svc Co');
     expect(dropped).toEqual({ spellings: 0, agencies: 0, authorities: 0 });
+    expect(unrenderable).toEqual({ spellings: 0, agencies: 0, authorities: 0 });
   });
 
   it('orders entries by name, so the stored order changes neither the text nor the fingerprint', () => {
@@ -9694,7 +10302,7 @@ describe('renderOrgListBlock - shape', () => {
     expect(lines).toHaveLength(5);
   });
 
-  it('never contains the word TRANSCRIPT: a name or spelling holding it is left out and counted', () => {
+  it('never contains the word TRANSCRIPT: a name or spelling holding it is left out and counted as unrenderable, not as a budget drop', () => {
     const block = renderOrgListBlock([
       ALPHA,
       org('housing_authority', 'Transcript Housing Authority', ['THA']),
@@ -9706,7 +10314,10 @@ describe('renderOrgListBlock - shape', () => {
     // A left-out name costs nothing else - only the BUDGET cascades.
     expect(lines).toContain('- Alpha Housing Authority | also: AHA | Alpha HA');
     expect(lines).toContain('- Beta Housing Authority | also: BHA');
-    expect(block.dropped).toEqual({ spellings: 2, agencies: 1, authorities: 1 });
+    // THA goes with its unrenderable name; 'beta transcript office' on its own.
+    expect(block.unrenderable).toEqual({ spellings: 2, agencies: 1, authorities: 1 });
+    // More budget would not bring any of them back: no budget drop (spec D8 WARNs only on those).
+    expect(block.dropped).toEqual({ spellings: 0, agencies: 0, authorities: 0 });
   });
 
   it('renders the whole starting list inside the default budget with nothing dropped', () => {
@@ -9715,6 +10326,7 @@ describe('renderOrgListBlock - shape', () => {
     const block = renderOrgListBlock(entries);
     expect(ORG_LIST_BLOCK_BUDGET).toBe(16_000);
     expect(block.dropped).toEqual({ spellings: 0, agencies: 0, authorities: 0 });
+    expect(block.unrenderable).toEqual({ spellings: 0, agencies: 0, authorities: 0 });
     expect(block.text.length).toBeLessThanOrEqual(ORG_LIST_BLOCK_BUDGET);
     for (const entry of entries) expect(block.text).toContain(`- ${entry.name}`);
     expect(block.text).toContain('Housing Authority of the City of Atlanta');
@@ -9738,6 +10350,7 @@ describe('renderOrgListBlock - the budget (spec D8 drop order)', () => {
   it('drops spellings first - only the ones that do not fit', () => {
     const block = renderOrgListBlock(LIST, { budget: full - 1 });
     expect(block.dropped).toEqual({ spellings: 1, agencies: 0, authorities: 0 });
+    expect(block.unrenderable).toEqual({ spellings: 0, agencies: 0, authorities: 0 });
     const lines = block.text.split('\n');
     expect(lines).toContain('- Alpha Housing Authority | also: AHA | Alpha HA');
     expect(lines).toContain('- Beta Housing Authority');
@@ -9791,7 +10404,8 @@ GREEN: create `app/src/services/extraction/orgListBlock.ts`:
 //   - prompt.ts places it BEFORE the TRANSCRIPT header, and the block never
 //     contains that word: every line after the header must be a rendered
 //     transcript line (the run log hashes them). A name or spelling holding
-//     the word, in any case, is left out and counted as dropped;
+//     the word, in any case, is left out and counted as UNRENDERABLE - no
+//     budget would ever bring it back, so it is no budget drop and no WARN;
 //   - every name and spelling renders on ONE line: control characters
 //     (newlines included) become spaces, so a staff-entered name can never
 //     start a line of its own;
@@ -9799,7 +10413,8 @@ GREEN: create `app/src/services/extraction/orgListBlock.ts`:
 //     agency names, then spellings. Over budget, spellings are dropped first,
 //     then agency names, then the housing authority names that do not fit;
 //     once a name of a higher class has not fit, nothing of a lower class is
-//     added. The job logs any drop at WARN with these counts.
+//     added. The job logs these BUDGET drops (`dropped`) at WARN with their
+//     counts (spec D8).
 //
 // Housing authorities carry their spellings (the model maps "AHA" or "Atlanta
 // (AHA)" to a full name); agencies are listed by NAME only, under a "not
@@ -9823,8 +10438,11 @@ export interface OrgListBlock {
   text: string;
   /** sha256 hex of `text` - the run log's orgListFingerprint. */
   fingerprint: string;
-  /** Names and spellings left out of `text` (the budget, or the TRANSCRIPT rule). */
+  /** Names and spellings the BUDGET left out (spec D8: the job WARNs on these). */
   dropped: { spellings: number; agencies: number; authorities: number };
+  /** Names and spellings that can never be rendered (blank, or holding the
+   *  word TRANSCRIPT) - a name's spellings go with it. No WARN. */
+  unrenderable: { spellings: number; agencies: number; authorities: number };
 }
 
 /**
@@ -9858,6 +10476,7 @@ export function renderOrgListBlock(
 ): OrgListBlock {
   const budget = opts.budget ?? ORG_LIST_BLOCK_BUDGET;
   const dropped = { spellings: 0, agencies: 0, authorities: 0 };
+  const unrenderable = { spellings: 0, agencies: 0, authorities: 0 };
   const authorities = entries.filter((e) => e.kind === 'housing_authority').sort(byName);
   const agencies = entries.filter((e) => e.kind === 'agency').sort(byName);
   // The three fixed lines; every added line costs its length plus one newline.
@@ -9874,11 +10493,17 @@ export function renderOrgListBlock(
   let authorityCut = false;
   for (const entry of authorities) {
     const name = oneLine(entry.name);
-    if (renderable(name) && take(1 + 2 + name.length)) {
+    if (!renderable(name)) {
+      // Never renderable: no budget would bring it (or its spellings) back.
+      unrenderable.authorities += 1;
+      unrenderable.spellings += entry.spellings.length;
+      continue;
+    }
+    if (take(1 + 2 + name.length)) {
       kept.push({ entry, name, spellings: [] });
       continue;
     }
-    if (renderable(name)) authorityCut = true;
+    authorityCut = true;
     dropped.authorities += 1;
     // Its spellings cannot be shown without it.
     dropped.spellings += entry.spellings.length;
@@ -9889,11 +10514,15 @@ export function renderOrgListBlock(
   let agencyCut = false;
   for (const entry of agencies) {
     const name = oneLine(entry.name);
-    if (renderable(name) && !authorityCut && take(1 + 2 + name.length)) {
+    if (!renderable(name)) {
+      unrenderable.agencies += 1;
+      continue;
+    }
+    if (!authorityCut && take(1 + 2 + name.length)) {
       agencyNames.push(name);
       continue;
     }
-    if (renderable(name) && !authorityCut) agencyCut = true;
+    if (!authorityCut) agencyCut = true;
     dropped.agencies += 1;
   }
 
@@ -9902,7 +10531,9 @@ export function renderOrgListBlock(
     for (const raw of line.entry.spellings) {
       const spelling = oneLine(raw);
       const cost = (line.spellings.length === 0 ? FIRST_SPELLING.length : NEXT_SPELLING.length) + spelling.length;
-      if (renderable(spelling) && !authorityCut && !agencyCut && take(cost)) {
+      if (!renderable(spelling)) {
+        unrenderable.spellings += 1;
+      } else if (!authorityCut && !agencyCut && take(cost)) {
         line.spellings.push(spelling);
       } else {
         dropped.spellings += 1;
@@ -9921,7 +10552,7 @@ export function renderOrgListBlock(
     AGENCY_HEADING,
     ...agencyNames.map((name) => `- ${name}`),
   ].join('\n');
-  return { text, fingerprint: createHash('sha256').update(text, 'utf8').digest('hex'), dropped };
+  return { text, fingerprint: createHash('sha256').update(text, 'utf8').digest('hex'), dropped, unrenderable };
 }
 ```
 
@@ -10079,7 +10710,7 @@ describe('runDueExtractions - the organization list (spec 2026-10-06 D8)', () =>
     expect(h.runs[0]!.orgListFingerprint).toBe(renderOrgListBlock(ORG_ENTRIES).fingerprint);
   });
 
-  it('never reads the list on a skip path', async () => {
+  it('(PIN) never reads the list on a skip path', async () => {
     const landlord = makeHarness({
       dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: landlordContact(), conversation: convWith('c1'),
     });
@@ -10149,13 +10780,39 @@ describe('runDueExtractions - the organization list (spec 2026-10-06 D8)', () =>
     await runDueExtractions(NOW, h.deps);
     expect(warn.mock.calls.filter((call) => String(call[1]).includes('organization list'))).toHaveLength(0);
   });
+
+  it('does not WARN for an entry that can never be rendered - that is no budget drop (PIN)', async () => {
+    const transcriptNamed: OrgEntry = {
+      orgId: 'org-transcript',
+      kind: 'housing_authority',
+      name: 'Transcript Housing Authority',
+      spellings: [],
+      createdAt: NOW,
+      createdBy: 'test',
+      updatedAt: NOW,
+      updatedBy: 'test',
+    };
+    const entries = [...ORG_ENTRIES, transcriptNamed];
+    expect(renderOrgListBlock(entries).unrenderable.authorities).toBe(1);
+    const warn = vi.fn();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() } as unknown as Logger;
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      orgListRepo: { get: vi.fn(async () => orgListItem(entries)) },
+      logger,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(warn.mock.calls.filter((call) => String(call[1]).includes('organization list'))).toHaveLength(0);
+  });
 });
 ```
 
 Run: `cd "W:/tmp/clean-org-names/app"; npx vitest run test/extractionJob.test.ts test/extractionJobDraftGuard.test.ts`
 - RED: `get` is never called, `orgListFingerprint` is undefined, a throwing
   `get` does not fail the run and the WARN never fires - the job ignores
-  `deps.orgListRepo`. (The harness edits are inert until GREEN; the PIN passes.)
+  `deps.orgListRepo`. (The harness edits are inert until GREEN; the three
+  (PIN) cases pass: a skip path never reads the list, and no WARN fires
+  while nothing reads it.)
 
 GREEN:
 
@@ -10230,6 +10887,9 @@ import { renderOrgListBlock } from '../services/extraction/orgListBlock.js';
     return failed('repo', err);
   }
   const orgBlock = renderOrgListBlock(orgEntries);
+  // BUDGET drops only (spec D8). An entry that can never be rendered (blank,
+  // or holding the word TRANSCRIPT) is counted in `unrenderable` - more budget
+  // would not bring it back, so it is no budget problem and no WARN.
   const { spellings, agencies, authorities } = orgBlock.dropped;
   if (spellings + agencies + authorities > 0) {
     logger.warn(
@@ -10916,8 +11576,9 @@ await applyExtraction(deps, {
 
 ```ts
   it('writes a housingAuthority that is a list name directly', async () => {
-    // Was 'Fulton County' - pending spec 2026-10-06 section 13 and not on the
-    // starting list, so it is now suggested (the D8 block below).
+    // Was 'Fulton County' - now a spelling of Fulton County Housing Authority
+    // (spec 2026-10-06 section 13), so it is written as that name (the spelling
+    // case is the next test). This one keeps the exact-name case.
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: { housingAuthority: { op: 'write', value: 'Jonesboro Housing Authority' } },
@@ -11471,7 +12132,8 @@ coercedValue: value,
 GREEN: re-run the command; then `cd "W:/tmp/clean-org-names"; npm run typecheck`.
 
 Existing tests this breaks: `extractionApply.test.ts:338-345` ('Fulton County'
-is no longer written) and `:347-359` ('Dekalb Housing' now writes
+is now written as 'Fulton County Housing Authority', not verbatim) and
+`:347-359` ('Dekalb Housing' now writes
 'DeKalb County Housing Authority') - rewritten in RED step 2;
 `extractionRunTypes.test.ts:16-31` (twelve -> thirteen) - RED step 5.
 Typecheck sites of the now-required ctx field: the `run()` helper, the 6
@@ -12465,14 +13127,14 @@ describe('the accept value (spec 2026-10-06 D8)', () => {
     expect(storedAuthority(world)).toBe('Augusta Housing Authority');
   });
 
-  it('accepts the name the text resolves to', async () => {
+  it('accepts the name the text resolves to (PIN)', async () => {
     const { app, world, target, identity } = await setup('Atlanta (AHA)');
     const res = await post(app, target, 'accept', { ...identity, value: 'Atlanta Housing Authority' });
     expect(res.status).toBe(200);
     expect(storedAuthority(world)).toBe('Atlanta Housing Authority');
   });
 
-  it('accepts a name staff just added from the text', async () => {
+  it('accepts a name staff just added from the text (PIN)', async () => {
     const { app, world, target, identity } = await setup('Metro HA', { list: storedList([authority('Metro HA')]) });
     const res = await post(app, target, 'accept', { ...identity, value: 'Metro HA' });
     expect(res.status).toBe(200);
@@ -12610,10 +13272,15 @@ describe('the claim-race twin compares the value key too (spec 2026-10-06 D8)', 
 ```
 
 Run: `cd "W:/tmp/clean-org-names/app"; npx vitest run test/suggestionAcceptOrgList.test.ts`
-- RED: the route and the service ignore `value` - the 'AHA' accepts with a
-  value answer 422 `org_not_on_list`, a value on `pets` or a blank value is
-  accepted with 200, no completed row carries a `valueKey`, and a re-accept
-  with a different value replays instead of 409. The PINs pass.
+- RED: the route and the service ignore `value`, so every 'AHA' accept is
+  checked on its TEXT and answers 422 `org_not_on_list` - the candidate case,
+  the not-from-the-suggestion case (a 422 with the wrong body), the
+  journal-row case and the re-accept case all fail on that first 422; a value
+  on `pets` or a blank value is accepted with 200; the two claim-race cases
+  fail on the missing `resolutionValueKey` export. The (PIN) cases pass: an
+  accept whose TEXT already resolves (`Atlanta (AHA)`, or `Metro HA` once it
+  is on the list) succeeds without reading the value, and the dismiss and the
+  value-less replay never read it.
 
 GREEN:
 
@@ -13952,7 +14619,9 @@ Existing tests this task breaks:
   change it to `import { housingAuthorityFor } from '../src/lib/housingAuthority.js';` (the module
   still exists until S10, whose task deletes that test block together with the module and
   `HOUSING_AUTHORITY_VOCAB`). NOTE for S10: after this task nothing in `app/src/lib/import/`
-  imports `lib/housingAuthority.ts`.
+  imports `lib/housingAuthority.ts`. S10 Task 10.1 (item 4b) deletes this
+  task's `'the importer no longer uses the hand-kept alias map'` block - its
+  permanent guard supersedes it - and deletes the re-pointed line 16 (item 4).
 
 GREEN: `npx vitest run test/importOrgNames.test.ts test/importApply.integration.test.ts test/importGroupAttribution.test.ts test/importGroupGuards.test.ts test/extractionSchema.test.ts`.
 Commit `feat(import): only resolved housing authority names on a property; the alias map leaves the importer (D9)`.
@@ -14360,7 +15029,7 @@ GREEN; commit (stage `app/src/jobs/missedCallAutoText.ts`,
 
 ---
 
-## S10 - retire the app's hand-kept lists (`app/src/lib/housingAuthority.ts`, `app/src/services/extraction/schema.ts`, `app/src/lib/import/apply.ts`, test `app/test/orgListsRetired.test.ts`)
+## S10 - retire the app's hand-kept lists (`app/src/lib/housingAuthority.ts`, `app/src/services/extraction/schema.ts`, `app/src/lib/import/apply.ts`, tests `app/test/orgListsRetired.test.ts`, `app/test/extractionSchema.test.ts`, `app/test/importOrgNames.test.ts`)
 
 Runs AFTER S7 (the AI apply layer and prompt read the stored list) and S8
 (the importer resolves through it): they removed the live-code uses; this
@@ -14373,6 +15042,11 @@ and `apply.ts:23,119-132,251` (S7); `app/src/lib/import/apply.ts:41,297,484-490,
 (S8); `app/test/extractionSchema.test.ts:6,16,82-112,437-440`;
 `app/test/importApply.integration.test.ts:21,188-206`;
 `dashboard/src/routes/contact/ContactEditForm.test.tsx:532-536` (a comment).
+S8 adds two references on purpose, both cleared here: Task 8.2 re-points
+`extractionSchema.test.ts:16` at `../src/lib/housingAuthority.js` (the module
+lives until this slice), and appends a source-check block to
+`app/test/importOrgNames.test.ts` that names the retired identifiers in
+string literals - the permanent guard below supersedes it.
 
 Not this slice: `dashboard/src/routes/contact/orgVocabulary.ts` (S11 deletes
 it with the tenant form), `RUNBOOK.md` (S15), `documentation/GLOSSARY.md` and
@@ -14452,9 +15126,10 @@ describe('the hand-kept organization lists are retired (one stored list)', () =>
 
 Run: `cd "W:/tmp/clean-org-names/app"; npx vitest run test/orgListsRetired.test.ts`
 - RED: all three cases fail - the module exists, the schema still exports
-the constant, and the scan lists at least `src/lib/housingAuthority.ts` and
-`src/services/extraction/schema.ts`. The scan's offender list is this task's
-worklist; keep it open.
+the constant, and the scan lists at least `src/lib/housingAuthority.ts`,
+`src/services/extraction/schema.ts`, `test/extractionSchema.test.ts` and
+`test/importOrgNames.test.ts` (S8's leftovers, items 4 and 4b). The scan's
+offender list is this task's worklist; keep it open.
 
 GREEN - clear every offender with the rules below, re-running the guard until
 it is green. Each numbered item is a no-op when S7/S8 already removed it.
@@ -14529,12 +15204,38 @@ export { housingAuthorityFor, KNOWN_AUTHORITIES };
 4. `app/test/extractionSchema.test.ts`:
    - `:4-8` - drop the `HOUSING_AUTHORITY_VOCAB,` line from the
      `../src/services/extraction/schema.js` import (keep the other names).
-   - `:16` - delete the line `import { housingAuthorityFor } from '../src/lib/import/apply.js';`.
+   - `:16` - delete the line as S8 Task 8.2 leaves it,
+     `import { housingAuthorityFor } from '../src/lib/housingAuthority.js';`
+     (should it still read the pre-S8
+     `import { housingAuthorityFor } from '../src/lib/import/apply.js';`,
+     delete that line instead - either way it is S8's deliberate leftover,
+     not a STOP under item 6).
    - `:82-112` - delete the whole `describe('HOUSING_AUTHORITY_VOCAB', () => { ... });`
      block (its two cases pin the retired constant and its agreement with the
      retired alias map) and the blank line after it.
    - `:437-440` - if S7 left `it('system prompt lists every housing-authority vocabulary value', ...)`
      in place, delete it whole.
+
+4b. `app/test/importOrgNames.test.ts` - delete S8 Task 8.2's source-check
+   block and the blank line before it: the permanent guard above scans
+   `app/src/lib/import/apply.ts` too, so it supersedes this one-file check -
+   whose test title and string literals would otherwise be flagged by the
+   guard forever. Current:
+
+```ts
+
+describe('the importer no longer uses the hand-kept alias map', () => {
+  it('apply.ts does not import lib/housingAuthority.ts (S10 retires it)', () => {
+    const source = readFileSync(join(process.cwd(), 'src', 'lib', 'import', 'apply.ts'), 'utf8');
+    expect(source).not.toContain('housingAuthority.js');
+    expect(source).not.toContain('housingAuthorityFor');
+    expect(source).not.toContain('KNOWN_AUTHORITIES');
+  });
+});
+```
+
+   Replace with nothing. Keep the file's `readFileSync` / `join` imports -
+   Task 8.3's CLI source check still uses them.
 
 5. `app/test/importApply.integration.test.ts` (S8 owns the rest of this
    test; delete only what pins the retired helper):
@@ -14548,7 +15249,8 @@ export { housingAuthorityFor, KNOWN_AUTHORITIES };
      the rest of the test (from `// And it lands on the contact`) as S8 left
      it.
 
-6. Any OTHER offender the guard lists:
+6. Any OTHER offender the guard lists (anything items 1-5 and 4b do not
+   name):
    - a COMMENT (in `app/src/services/extraction/apply.ts`, `prompt.ts`, a
      test, or anywhere else) - rewrite it to name the stored list instead:
      the `org-list` settings item (`repos/orgListRepo.ts`) and the matching
@@ -14581,7 +15283,7 @@ export { housingAuthorityFor, KNOWN_AUTHORITIES };
 ```
 
 Run, in order:
-- `cd "W:/tmp/clean-org-names/app"; npx vitest run test/orgListsRetired.test.ts test/extractionSchema.test.ts test/extractionApply.test.ts test/importApply.integration.test.ts`
+- `cd "W:/tmp/clean-org-names/app"; npx vitest run test/orgListsRetired.test.ts test/extractionSchema.test.ts test/extractionApply.test.ts test/importApply.integration.test.ts test/importOrgNames.test.ts`
   - GREEN (the importer suite needs DynamoDB Local - `npm run db:start`
   first).
 - `cd "W:/tmp/clean-org-names/dashboard"; npx vitest run src/routes/contact/ContactEditForm.test.tsx` - GREEN (comment only).
@@ -14599,9 +15301,24 @@ GREEN; commit (the `git rm` above already staged the deletion; stage
 `app/test/orgListsRetired.test.ts`, `app/src/services/extraction/schema.ts`,
 `dashboard/src/routes/contact/ContactEditForm.test.tsx`, and every other file
 this task edited - `app/src/lib/import/apply.ts`,
-`app/test/extractionSchema.test.ts`, `app/test/importApply.integration.test.ts`
-and any file item 6 touched)
+`app/test/extractionSchema.test.ts`, `app/test/importOrgNames.test.ts`,
+`app/test/importApply.integration.test.ts` and any file item 6 touched)
 `refactor(org-names): retire the app's hand-kept authority lists`.
+
+### Checkpoint after S10 - the full typecheck and `npm test` (every workspace)
+
+Every task so far ran only its named files; fallout a task failed to name
+surfaces here instead of at S17. Run both BARE (never piped, never
+`;`-chained to each other), one at a time, DynamoDB Local up:
+
+1. `cd "W:/tmp/clean-org-names"; npm run typecheck`
+2. `cd "W:/tmp/clean-org-names"; npm test`
+
+Both exit 0, or every red FILE is fixed (in the slice that owns it, with its
+own commit) before S12 starts. A red DynamoDB-Local suite follows AGENTS.md's
+re-run-and-compare rule (re-run the failing FILE alone, compare with the
+merge base); any `[dynamoAdmin]` line is a real container fault - capture
+it. Record the two exit codes for the handback.
 
 ---
 
@@ -14951,8 +15668,9 @@ an app unit test):
 - No e2e spec reads a cast, matrix or live authority value (Tasks 12.3-12.4), and none asserts the
   flyer's "Accepts:" line.
 
-NOTE for the S16 writer: `documentation/sequence-diagram-to-test.md:165` shows
-`accepted_authorities:['atlanta_housing']` as an example request body.
+NOTE for S16: `documentation/sequence-diagram-to-test.md:165` shows
+`accepted_authorities:['atlanta_housing']` as an example request body - S16
+Task 16.5 changes it.
 
 GREEN: `npx vitest run test/seedOrgNames.test.ts test/seedData.test.ts test/seedProfile.integration.test.ts`.
 Commit `feat(seed): the lean world uses org-list names (spec section 7)`.
@@ -15421,6 +16139,19 @@ Then `cd "W:/tmp/clean-org-names"; npm run typecheck`.
 GREEN: `npx vitest run test/devOrgFixture.test.ts test/devTourAutoCloseTick.test.ts`.
 Commit `feat(dev): POST /__dev/org-fixture plants raw organization values for e2e (plan 3.12)`.
 
+### Checkpoint after S13 - the full typecheck and `npm test` again
+
+The seeds (S12) changed the lean world every suite reads, and S11 builds on
+all of it. The same two commands as the checkpoint after S10, BARE, one at a
+time, DynamoDB Local up:
+
+1. `cd "W:/tmp/clean-org-names"; npm run typecheck`
+2. `cd "W:/tmp/clean-org-names"; npm test`
+
+Both exit 0, or every red FILE is fixed (in the slice that owns it, with its
+own commit) before S11 starts - same re-run-and-compare rule for a
+DynamoDB-Local suite. Record the two exit codes for the handback.
+
 ---
 
 ---
@@ -15547,6 +16278,7 @@ it('organization writes send the exact body to the exact route', async () => {
     jobId: 'j1',
     action: 'merge',
     fromTexts: ['A'],
+    fields: ['housingAuthority', 'accepted_authorities'],
     toName: 'B',
     status: 'running',
     heartbeatAt: '2026-10-06T00:00:00.000Z',
@@ -15613,7 +16345,20 @@ Replace with:
   entry(ENDPOINTS, 'runOrgRewriteAgain', 'request:POST', '/api/organizations/rewrite/run-again'),
 ```
 
-`e2e/performance/mutationCatalog.test.ts`, current (`:373-376`):
+`e2e/performance/mutationCatalog.test.ts` - the count's header comment and
+the assertion, current (`:367` and `:373-376`; the lines between stay):
+
+```ts
+    // 111 = the 102 pre-manual-trigger mutations + runExtraction
+```
+
+Replace with:
+
+```ts
+    // 118 = the 102 pre-manual-trigger mutations + runExtraction
+```
+
+and current (`:373-376`):
 
 ```ts
     // + uploadVoicemailGreeting and removeVoicemailGreeting (voicemail-greeting:
@@ -15700,6 +16445,8 @@ export interface OrgRewriteState {
   action: OrgRewriteAction;
   fromTexts: string[];
   field?: OrgRecordField;
+  /** The record fields it rewrites, fixed when it started (spec 5.1). */
+  fields: OrgRecordField[];
   toName?: string;
   /** Split only: the agency half. */
   agencyName?: string;
@@ -15761,9 +16508,9 @@ export type HolderRecord =
   | { kind: 'unit'; unitId: string; address: string | null; deleted: boolean };
 
 /**
- * Why a text cannot be a NEW name (spec D13; plan 3.4 `nameProblem`). A
- * SUPERSET of the S1 union: `org_name_invalid` (a newline or other control
- * character, plan 3.5) is listed so the dialog can word it either way.
+ * Why a text cannot be a NEW name (spec D13; plan 3.4 `nameProblem`): the S1
+ * union. `org_name_invalid` covers a newline or other control character
+ * (plan 3.5) and a name with nothing left once normalized (`-`, `()`).
  */
 export type OrgNameProblem =
   | 'org_name_empty'
@@ -15987,7 +16734,9 @@ export async function deleteOrg(orgId: string): Promise<void> {
 }
 
 /** POST /api/organizations/not-on-list/resolve (admin, 202) - settle one stored
- *  value (spec D10): the rewrite it started + any spelling D12 skipped. */
+ *  value (spec D10): the rewrite it started + any spelling D12 skipped. 409
+ *  org_value_is_name_variant (body.entry: only "Use <entry>" settles it) /
+ *  org_rewrite_running. */
 export function resolveNotOnList(body: NotOnListResolveBody): Promise<OrgRewriteStarted> {
   return request<OrgRewriteStarted>('/api/organizations/not-on-list/resolve', {
     method: 'POST',
@@ -15997,7 +16746,7 @@ export function resolveNotOnList(body: NotOnListResolveBody): Promise<OrgRewrite
 
 /** POST /api/organizations/rewrite/run-again (admin, 202) - re-run a failed or
  *  stalled rewrite, never the cleanup script's. Unwrapped. 409
- *  org_rewrite_not_rerunnable / org_rewrite_running. */
+ *  org_rewrite_not_rerunnable / org_rewrite_running / org_rewrite_target_gone. */
 export async function runOrgRewriteAgain(): Promise<OrgRewriteState> {
   const res = await request<{ lastRewrite: OrgRewriteState }>('/api/organizations/rewrite/run-again', {
     method: 'POST',
@@ -16314,6 +17063,8 @@ const ORG_SERVER_CODES = [
   'org_not_found',
   'org_rewrite_running',
   'org_rewrite_not_rerunnable',
+  'org_rewrite_target_gone',
+  'org_value_is_name_variant',
   'org_list_full',
   'org_list_busy',
   'one_change_per_request',
@@ -16423,6 +17174,16 @@ describe('orgErrorCopy (body-aware)', () => {
     expect(orgErrorCopy(err)).toBe('AHA is now shared with Augusta Housing Authority - it will no longer be applied automatically.');
   });
 
+  it('a name variant can only be settled with Use <its entry> (spec D10)', () => {
+    const err = new ApiError(409, 'org_value_is_name_variant', 'org_value_is_name_variant', {
+      error: 'org_value_is_name_variant',
+      entry: ATL,
+    });
+    expect(orgErrorCopy(err)).toBe(
+      'That value is Atlanta Housing Authority written differently - settle it with Use Atlanta Housing Authority.',
+    );
+  });
+
   it('a non-API failure is the generic sentence', () => {
     expect(orgErrorCopy(new Error('boom'))).toBe(ORG_GENERIC_ERROR);
   });
@@ -16455,6 +17216,7 @@ describe('rewrite status', () => {
     jobId: 'j1',
     action: 'rename',
     fromTexts: ['Atlanta HA'],
+    fields: ['housingAuthority', 'accepted_authorities'],
     toName: 'Atlanta Housing Authority',
     status: 'running',
     heartbeatAt: '2026-07-01T11:59:00.000Z',
@@ -16638,7 +17400,7 @@ const ORG_ERROR_COPY: Readonly<Record<string, string>> = {
   org_not_on_list: 'That name is not on the list - pick one from the list or add it.',
   org_name_empty: 'Type a name first.',
   org_name_too_long: 'Names can be at most 120 characters.',
-  org_name_invalid: 'Names cannot contain line breaks or other control characters.',
+  org_name_invalid: 'A name needs at least one letter or digit, and no line breaks or other control characters.',
   org_notes_too_long: 'Notes can be at most 500 characters.',
   org_name_taken: 'That name is already on the list.',
   org_name_compound: 'That names more than one organization, so it cannot be one entry. Use Split instead.',
@@ -16649,6 +17411,9 @@ const ORG_ERROR_COPY: Readonly<Record<string, string>> = {
   org_not_found: 'That entry is no longer on the list - reload to see the current list.',
   org_rewrite_running: 'Another update is still running - try again when it finishes.',
   org_rewrite_not_rerunnable: 'There is no failed or stalled update to run again.',
+  org_rewrite_target_gone:
+    'The name this update writes is gone from the list or changed kind, so it cannot run again - start a new one from the list.',
+  org_value_is_name_variant: 'That value is a listed name written differently - settle it with Use and that name.',
   org_list_full: 'The list is full - delete unused entries before adding more.',
   org_list_busy: 'The list is busy right now - try again in a moment.',
   one_change_per_request: 'Make one change at a time.',
@@ -16761,6 +17526,13 @@ export function orgErrorCopy(err: unknown): string {
         ? sharedSpellingCopy(spelling, entries)
         : orgErrorMessage(err.code);
     }
+    case 'org_value_is_name_variant': {
+      // Spec D10: only "Use <that entry>" may settle it (the row offers nothing else).
+      const [entry] = refsOf([b['entry']]);
+      return entry !== undefined
+        ? `That value is ${entry.name} written differently - settle it with Use ${entry.name}.`
+        : orgErrorMessage(err.code);
+    }
     default:
       return orgErrorMessage(err.code);
   }
@@ -16774,7 +17546,7 @@ export function nameProblemCopy(problem: string, check?: OrgCheckResult): string
     case 'org_name_too_long':
       return 'Names can be at most 120 characters.';
     case 'org_name_invalid':
-      return 'Names cannot contain line breaks or other control characters.';
+      return 'A name needs at least one letter or digit, and no line breaks or other control characters.';
     case 'org_name_compound':
       return 'It names more than one organization, so it cannot be one entry.';
     case 'org_name_taken': {
@@ -16973,8 +17745,9 @@ RED - create `dashboard/src/routes/orgs/useOrgList.test.tsx`:
 
 ```tsx
 // useOrgList tests - the picker's list (plan 3.11): loading, the entries,
-// version and latest rewrite, a failed read reported (never an empty list), and
-// reload keeping the current data while it runs.
+// version and latest rewrite, a failed read reported (never an empty list),
+// reload keeping the current data while it runs, and noteAdded counting a
+// just-added name at once.
 import { act, render, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
@@ -17050,6 +17823,32 @@ describe('useOrgList', () => {
     await waitFor(() => expect(latest!.version).toBe(2));
     expect(getOrgList).toHaveBeenCalledTimes(2);
   });
+
+  it('noteAdded counts a just-added entry at once, and until a read returns it (spec D6)', async () => {
+    getOrgList.mockResolvedValueOnce({ version: 1, entries: [ENTRY] });
+    render(<Probe />);
+    await waitFor(() => expect(latest!.entries).toHaveLength(1));
+    const added = { ...ENTRY, kind: 'housing_authority' as const, orgId: 'o2', name: 'Metro Housing Authority', spellings: [] };
+    let land: (value: unknown) => void = () => {};
+    getOrgList.mockReturnValueOnce(
+      new Promise((resolve) => {
+        land = resolve;
+      }),
+    );
+    act(() => latest!.noteAdded(added));
+    // Before the re-read lands the new name already counts: its chip never
+    // flashes "Not on the list".
+    expect(latest!.entries.map((e) => e.name)).toEqual(['Atlanta Housing Authority', 'Metro Housing Authority']);
+    expect(getOrgList).toHaveBeenCalledTimes(2);
+    // A read that does not return it yet keeps it counted...
+    await act(async () => land({ version: 2, entries: [ENTRY] }));
+    expect(latest!.entries.map((e) => e.name)).toEqual(['Atlanta Housing Authority', 'Metro Housing Authority']);
+    // ...and once a read returns it, the server's copy is the only one.
+    getOrgList.mockResolvedValueOnce({ version: 3, entries: [ENTRY, added] });
+    act(() => latest!.reload());
+    await waitFor(() => expect(latest!.version).toBe(3));
+    expect(latest!.entries).toEqual([ENTRY, added]);
+  });
 });
 ```
 
@@ -17064,7 +17863,9 @@ GREEN - create `dashboard/src/routes/orgs/useOrgList.ts`:
 // /api/organizations once). The status flavor of the useSettings idiom: a
 // picker must KNOW the list failed to load, because it cannot offer names then
 // (spec R2 ruling 6). A reload keeps the current data until the answer lands.
-import { useCallback, useEffect, useRef, useState } from 'react';
+// noteAdded(): a name "Is this really new?" just added is counted at once, so
+// its chip never flashes "Not on the list" while the re-read is in flight.
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getOrgList, type OrgEntry, type OrgRewriteState } from '../../api/index.js';
 
 export interface OrgListState {
@@ -17078,6 +17879,10 @@ export interface OrgListState {
   error: boolean;
   /** Re-read the list (after an add, or while a rewrite runs). */
   reload: () => void;
+  /** "Yes, add it" just added `entry` (spec D6): it counts as on the list AT
+   *  ONCE - its chip never flashes "Not on the list" - and stays counted until
+   *  a read returns it; the list is re-read. */
+  noteAdded: (entry: OrgEntry) => void;
 }
 
 interface Loaded {
@@ -17092,6 +17897,8 @@ export function useOrgList(): OrgListState {
   const [data, setData] = useState<Loaded>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  /** Entries this mount just added, counted until a read returns them. */
+  const [added, setAdded] = useState<OrgEntry[]>([]);
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
@@ -17102,6 +17909,8 @@ export function useOrgList(): OrgListState {
       const res = await getOrgList(controller.signal);
       if (controller.signal.aborted) return;
       setData({ entries: res.entries, version: res.version, lastRewrite: res.lastRewrite });
+      // The server's copy of a just-added entry takes over from ours.
+      setAdded((prev) => prev.filter((a) => !res.entries.some((e) => e.orgId === a.orgId)));
       setError(false);
       setLoading(false);
     } catch (err) {
@@ -17112,6 +17921,10 @@ export function useOrgList(): OrgListState {
   }, []);
 
   useEffect(() => {
+    // load() sets state only AFTER an await (never synchronously) - a
+    // fetch-on-mount, not the cascading-render case the rule targets (the
+    // useContactTimeline.ts precedent).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
     return () => abortRef.current?.abort();
   }, [load]);
@@ -17120,7 +17933,20 @@ export function useOrgList(): OrgListState {
     void load();
   }, [load]);
 
-  return { ...data, loading, error, reload };
+  const noteAdded = useCallback(
+    (entry: OrgEntry) => {
+      setAdded((prev) => (prev.some((e) => e.orgId === entry.orgId) ? prev : [...prev, entry]));
+      void load();
+    },
+    [load],
+  );
+
+  const entries = useMemo(
+    () => [...data.entries, ...added.filter((a) => !data.entries.some((e) => e.orgId === a.orgId))],
+    [data.entries, added],
+  );
+
+  return { ...data, entries, loading, error, reload, noteAdded };
 }
 ```
 
@@ -17434,12 +18260,14 @@ carries the `NewOrgDialog` classes Task 11.6 uses):
   color: var(--c-evt-amber-text);
 }
 
+/* 24 x 24 px: the minimum touch target at phone width (WCAG 2.2 target size). */
 .chipRemove {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   border: none;
   border-radius: var(--radius-pill);
   background: transparent;
@@ -17612,6 +18440,17 @@ carries the `NewOrgDialog` classes Task 11.6 uses):
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2);
+}
+
+/* The shared Button never wraps (Button.module.css: white-space: nowrap), but a
+   "Use <name>" label can carry a 120-character name: here the label wraps
+   inside the dialog instead of pushing it sideways at phone width (360 px). */
+.choiceButtons > button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  line-height: 1.3;
 }
 
 .nameList {
@@ -18561,8 +19400,10 @@ is now `:532-677`; the file's final `});` is `:678`).
 Tests this task breaks (all updated below): every datalist and
 whitespace-collapse test in `ContactEditForm.test.tsx` (`:70-77` and the
 whole block from `:532`); nothing else imports `orgVocabulary.ts`
-(`git grep -n orgVocabulary -- dashboard` lists only `ContactEditForm.tsx`
-and the comment in `files.test.tsx:125`).
+(`git grep -n orgVocabulary -- dashboard` lists only `ContactEditForm.tsx:73`
+and `:177`; the one other mention of the module is its helper
+`collapseOrgInput`, named in the comment at `files.test.tsx:125` - item (k)
+below).
 
 RED - `dashboard/src/routes/contact/ContactEditForm.test.tsx`.
 
@@ -18777,7 +19618,10 @@ and the file's final `});`. In its place insert:
     await waitFor(() =>
       expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument(),
     );
-    expect(screen.getByRole('button', { name: 'Remove Metro Housing Authority' })).toBeInTheDocument();
+    const chip = screen.getByRole('button', { name: 'Remove Metro Housing Authority' }).closest('li');
+    // The name just added counts as on the list at once - even though this
+    // test's re-read still answers the old list (useOrgList noteAdded).
+    expect(chip).not.toHaveTextContent('Not on the list');
     // Adding to the list never saves the contact; Save does.
     expect(updateContact).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
@@ -18859,8 +19703,14 @@ and the file's final `});`. In its place insert:
 ```
 
 Run: `cd "W:/tmp/clean-org-names/dashboard"; npx vitest run src/routes/contact/ContactEditForm.test.tsx` -
-RED: no combobox named "Housing authority" (the form still renders a
-datalist input), and none of the picker behavior exists.
+RED, though NOT for a missing combobox: today's datalist inputs already ARE
+comboboxes named "Housing authority" and "Agency" (an `<input list>` has
+the implicit combobox role under its `<label>`). The new cases fail on the
+picker behavior: typing commits free text on Save (the "typing alone"
+case sends a PATCH), no option carries a list NAME (the datalist offers the
+retired spellings, so `/^DeKalb County Housing Authority/` and the add
+option are never found), and there is no hint, no chip with a Remove
+button, no "Not on the list" mark and no load-failure message.
 
 GREEN - `dashboard/src/routes/contact/ContactEditForm.tsx`.
 
@@ -19176,7 +20026,8 @@ Replace with:
             setAdding(null);
           }}
           onAdded={(entry) => {
-            orgList.reload();
+            // Counted as on the list at once: no "Not on the list" flash on its chip.
+            orgList.noteAdded(entry);
             applyOrg(entry);
             setAdding(null);
           }}
@@ -19446,6 +20297,10 @@ Replace with:
     await user.click(within(isNew).getByRole('button', { name: 'Yes, add it' }));
     expect(addOrg).toHaveBeenCalledWith({ kind: 'housing_authority', name: 'Metro Housing Board' });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Remove Metro Housing Board' })).toBeInTheDocument());
+    // The name just added counts as on the list at once (useOrgList noteAdded).
+    expect(screen.getByRole('button', { name: 'Remove Metro Housing Board' }).closest('li')).not.toHaveTextContent(
+      'Not on the list',
+    );
     await user.click(screen.getByRole('button', { name: /^Create$/ }));
     await waitFor(() => expect(createUnit).toHaveBeenCalled());
     expect((createUnit.mock.calls[0]?.[0] as Record<string, unknown>)['accepted_authorities']).toEqual([
@@ -19721,6 +20576,8 @@ Replace with:
     await user.click(within(isNew).getByRole('button', { name: 'Yes, add it' }));
     expect(addOrg).toHaveBeenCalledWith({ kind: 'housing_authority', name: 'Metro Housing Board' });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Remove Metro Housing Board' })).toBeInTheDocument());
+    // Only the stored ga_dca is marked; the name just added counts at once (useOrgList noteAdded).
+    expect(screen.getAllByText('Not on the list')).toHaveLength(1);
     expect(updateUnit).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
     expect(updateUnit).toHaveBeenCalledWith('u1', { accepted_authorities: ['ga_dca', 'Metro Housing Board'] });
@@ -19916,7 +20773,8 @@ Replace with:
             setAddingAuthority(null);
           }}
           onAdded={(entry) => {
-            orgList.reload();
+            // Counted as on the list at once: no "Not on the list" flash on its chip.
+            orgList.noteAdded(entry);
             addAuthority(entry.name);
             setAddingAuthority(null);
           }}
@@ -21289,7 +22147,7 @@ describe('AiRunsSection - the organization list', () => {
     expect(header).toHaveTextContent('Prompt fingerprint: abcdef123456');
   });
 
-  it('a run that never read the list (a skip) shows no organization list line', () => {
+  it('(PIN) a run that never read the list (a skip) shows no organization list line', () => {
     renderSection();
     expect(screen.queryByText(/Organization list fingerprint/)).not.toBeInTheDocument();
   });
@@ -21299,6 +22157,7 @@ describe('AiRunsSection - the organization list', () => {
 Run: `cd "W:/tmp/clean-org-names/dashboard"; npx vitest run src/api/types.test.ts src/routes/settings/aiRuns/AiRunsSection.test.tsx` -
 RED: the label map does not exist (types.test import fails); the Reason cell
 shows the model's reason alone and the header has no organization list line.
+The (PIN) case passes already: no header shows that line before GREEN.
 
 GREEN (a) - `dashboard/src/api/types.ts`. Current (`:323`):
 
@@ -21508,18 +22367,24 @@ Commit `feat(dashboard): property Activity names the organization-list rewrites`
 
 R5 ruling: while `lastRewrite.status === 'running'` (with a fresh heartbeat -
 a stalled one is "Run again" material, D11) the section re-reads every 2 s
-(the `useBroadcastResults` precedent: an interval keyed on liveness only).
-A rewrite changes the use counts and the "Not on the list" rows as it goes,
-so all three reads repeat, and the counts and rows are read once more when it
-stops (the read that saw `done` may have raced its last record writes).
+(the `useBroadcastResults` precedent: an interval keyed on liveness only) -
+but ONLY `GET /api/organizations` (one GetItem; its `lastRewrite` is the
+status line). The use counts and the "Not on the list" rows are each a FULL
+pass over every contact and unit (D11's read paths), so they are read on
+mount, after an action (`reload()`), and ONCE more when the rewrite stops
+(done, failed or stalled - the read that saw it stop may have raced its last
+record writes) - never every 2 s. A details read in flight is never aborted
+to start another (an aborted scan still costs the server its whole pass): a
+request made while one runs waits and runs once, after it lands.
 
 RED - create `dashboard/src/routes/settings/useOrgAdmin.test.tsx`:
 
 ```tsx
 // useOrgAdmin tests - the Settings tab's data (spec 2026-10-06 D10, D11; R5
 // ruling): the lists, the use counts and the "Not on the list" rows load on
-// mount; all three repeat every pollMs while a rewrite runs with a fresh
-// heartbeat, and the counts and rows once more when it stops.
+// mount; only the lists repeat every pollMs while a rewrite runs with a fresh
+// heartbeat, the counts and rows are read once more when it stops, and a
+// details read in flight is never aborted.
 import { act, render, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type OrgRewriteState } from '../../api/index.js';
@@ -21544,6 +22409,7 @@ const RUNNING: OrgRewriteState = {
   jobId: 'j1',
   action: 'rename',
   fromTexts: ['Atlanta HA'],
+  fields: ['housingAuthority', 'accepted_authorities'],
   toName: 'Atlanta Housing Authority',
   status: 'running',
   heartbeatAt: '2026-07-01T11:59:50.000Z',
@@ -21594,7 +22460,7 @@ describe('useOrgAdmin', () => {
     expect(latest!.usage).toBeNull();
   });
 
-  it('re-reads everything while a rewrite runs, stops when it is done, then reads the counts once more', async () => {
+  it('while a rewrite runs polls ONLY the lists, and reads the counts and rows once more when it stops', async () => {
     getOrgList
       .mockResolvedValueOnce({ version: 1, entries: [], lastRewrite: RUNNING })
       .mockResolvedValueOnce({ version: 1, entries: [], lastRewrite: RUNNING })
@@ -21605,11 +22471,36 @@ describe('useOrgAdmin', () => {
     await pause(100); // any in-flight tick settles; polling has stopped
     const listReads = getOrgList.mock.calls.length;
     expect(listReads).toBeGreaterThanOrEqual(3); // mount + two polls
-    // Every list read was paired with a counts/rows read, plus the final one.
-    expect(getNotOnList).toHaveBeenCalledTimes(listReads + 1);
-    expect(getOrgUsage).toHaveBeenCalledTimes(listReads + 1);
+    // The two full-scan reads: once on mount, once when the rewrite stopped -
+    // never once per poll.
+    await waitFor(() => expect(getNotOnList).toHaveBeenCalledTimes(2));
+    expect(getOrgUsage).toHaveBeenCalledTimes(2);
     await pause(100);
     expect(getOrgList).toHaveBeenCalledTimes(listReads);
+    expect(getNotOnList).toHaveBeenCalledTimes(2);
+  });
+
+  it('never aborts a details read in flight - reloads meanwhile run ONE more read after it lands', async () => {
+    let land: (rows: unknown) => void = () => {};
+    getNotOnList.mockReturnValueOnce(
+      new Promise((resolve) => {
+        land = resolve;
+      }),
+    );
+    render(<Probe />);
+    await waitFor(() => expect(getNotOnList).toHaveBeenCalledTimes(1));
+    const firstSignal = getNotOnList.mock.calls[0]?.[0] as AbortSignal;
+    act(() => latest!.reload());
+    act(() => latest!.reload());
+    // Still one scan in flight: neither aborted nor doubled.
+    expect(getNotOnList).toHaveBeenCalledTimes(1);
+    expect(firstSignal.aborted).toBe(false);
+    await act(async () => land([ROW]));
+    // The two reloads made while it ran became ONE more read.
+    await waitFor(() => expect(getNotOnList).toHaveBeenCalledTimes(2));
+    await pause(50);
+    expect(getNotOnList).toHaveBeenCalledTimes(2);
+    expect(latest!.notOnList).toEqual([ROW]);
   });
 
   it('does not poll a stalled rewrite (a heartbeat 15 minutes old or more)', async () => {
@@ -21646,12 +22537,15 @@ GREEN - create `dashboard/src/routes/settings/useOrgAdmin.ts`:
 // useOrgAdmin - everything Settings > Housing authorities & agencies shows
 // (spec 2026-10-06 D10, D11): the lists and the latest rewrite (useOrgList),
 // the use counts and the "Not on the list" rows, all read on mount. While the
-// latest rewrite RUNS with a fresh heartbeat, all three are re-read every
-// `pollMs` (2 s - the useBroadcastResults precedent, R5 ruling): the rewrite
-// changes the counts and the rows as it goes. When it stops, the counts and
-// rows are read once more - the read that saw it finish may have raced its
-// last record writes. A stalled rewrite (heartbeat 15 min old) is not polled;
-// the section offers "Run again" for it instead.
+// latest rewrite RUNS with a fresh heartbeat, ONLY the lists are re-read every
+// `pollMs` (2 s - the useBroadcastResults precedent, R5 ruling): one GetItem,
+// whose lastRewrite is the status line. The counts and the rows are each a
+// FULL pass over every contact and unit, so they are read on mount, after an
+// action (reload) and ONCE when the rewrite stops - the read that saw it stop
+// may have raced its last record writes. A details read in flight is never
+// aborted to start another (the server would finish the scan anyway): a
+// request made meanwhile runs once, after it lands. A stalled rewrite
+// (heartbeat 15 min old) is not polled; the section offers "Run again" for it.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getNotOnList, getOrgUsage, type NotOnListRow, type OrgUsage } from '../../api/index.js';
 import { isRewriteLive } from '../orgs/orgCopy.js';
@@ -21681,34 +22575,48 @@ export function useOrgAdmin(options: { pollMs?: number } = {}): OrgAdminState {
   const [usageError, setUsageError] = useState(false);
   const [notOnList, setNotOnList] = useState<NotOnListRow[] | null>(null);
   const [notOnListError, setNotOnListError] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  /** The details read in flight - aborted only on unmount, never to start another. */
+  const inFlightRef = useRef<AbortController | null>(null);
+  /** A details read was asked for while one ran: run ONE more after it lands. */
+  const againRef = useRef(false);
 
   const loadDetails = useCallback(async () => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    const [counts, rows] = await Promise.allSettled([
-      getOrgUsage(controller.signal),
-      getNotOnList(controller.signal),
-    ]);
-    if (controller.signal.aborted) return;
-    if (counts.status === 'fulfilled') {
-      setUsage(counts.value);
-      setUsageError(false);
-    } else {
-      setUsageError(true);
+    if (inFlightRef.current !== null) {
+      againRef.current = true;
+      return;
     }
-    if (rows.status === 'fulfilled') {
-      setNotOnList(rows.value);
-      setNotOnListError(false);
-    } else {
-      setNotOnListError(true);
-    }
+    do {
+      againRef.current = false;
+      const controller = new AbortController();
+      inFlightRef.current = controller;
+      const [counts, rows] = await Promise.allSettled([
+        getOrgUsage(controller.signal),
+        getNotOnList(controller.signal),
+      ]);
+      inFlightRef.current = null;
+      if (controller.signal.aborted) return; // unmounted
+      if (counts.status === 'fulfilled') {
+        setUsage(counts.value);
+        setUsageError(false);
+      } else {
+        setUsageError(true);
+      }
+      if (rows.status === 'fulfilled') {
+        setNotOnList(rows.value);
+        setNotOnListError(false);
+      } else {
+        setNotOnListError(true);
+      }
+    } while (againRef.current);
   }, []);
 
   useEffect(() => {
+    // loadDetails() sets state only AFTER an await (never synchronously) - a
+    // fetch-on-mount, not the cascading-render case the rule targets (the
+    // useContactTimeline.ts precedent).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadDetails();
-    return () => abortRef.current?.abort();
+    return () => inFlightRef.current?.abort();
   }, [loadDetails]);
 
   const reloadList = list.reload;
@@ -21718,17 +22626,25 @@ export function useOrgAdmin(options: { pollMs?: number } = {}): OrgAdminState {
   }, [reloadList, loadDetails]);
 
   // Keyed on liveness only: a steady cadence while it runs, torn down the
-  // moment the rewrite finishes, fails or goes stale (and on unmount).
+  // moment the rewrite finishes, fails or goes stale (and on unmount). It
+  // re-reads ONLY the lists - the counts and rows wait for the rewrite to stop.
   const rewriteLive = isRewriteLive(list.lastRewrite);
   useEffect(() => {
     if (!rewriteLive) return undefined;
-    const id = setInterval(reload, pollMs);
+    const id = setInterval(reloadList, pollMs);
     return () => clearInterval(id);
-  }, [rewriteLive, reload, pollMs]);
+  }, [rewriteLive, reloadList, pollMs]);
 
+  // The rewrite just stopped (done, failed or stalled): read the counts and
+  // the rows ONCE.
   const wasLiveRef = useRef(false);
   useEffect(() => {
-    if (wasLiveRef.current && !rewriteLive) void loadDetails();
+    if (wasLiveRef.current && !rewriteLive) {
+      // loadDetails() sets state only AFTER an await (never synchronously) - a
+      // refetch, not the cascading-render case the rule targets.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void loadDetails();
+    }
     wasLiveRef.current = rewriteLive;
   }, [rewriteLive, loadDetails]);
 
@@ -21838,6 +22754,7 @@ const FAILED: OrgRewriteState = {
   jobId: 'j1',
   action: 'merge',
   fromTexts: ['Atlanta HA'],
+  fields: ['housingAuthority', 'accepted_authorities'],
   toName: 'Atlanta Housing Authority',
   status: 'failed',
   heartbeatAt: '2026-07-01T11:00:00.000Z',
@@ -22277,7 +23194,13 @@ GREEN (a) - create `dashboard/src/routes/settings/OrgListSection.module.css`
   font-size: var(--fs-sm);
 }
 
+/* 24 x 24 px at least: the minimum touch target at phone width (as OrgPicker's chips). */
 .spellingRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
   border: none;
   background: transparent;
   color: var(--c-text-muted);
@@ -22655,7 +23578,9 @@ Spec D10-D13 + S14 S7/S8: row buttons (admin only - absent for a VA)
 `Change kind of <name>`, `Delete <name>`. Rename is ONE dialog
 (`Rename <name>`: `New name`, the counts sentence, `Rename`); a 202 starts the
 rewrite and any spelling D12 skipped is named on the page. Rename and Merge
-start a rewrite, so they are disabled while one runs (D11: one at a time).
+start a rewrite, so they are disabled while one runs (D11: one at a time);
+Change kind and Delete are disabled then too (the server refuses both with
+409 `org_rewrite_running` while one runs - plan 3.5).
 A shared spelling needs "Save anyway" (409 `org_spelling_shared` ->
 `confirmShared: true`, D12). Delete and kind change wait until no record -
 deleted ones included - uses the entry (D10); the server's 409 `org_in_use`
@@ -22831,12 +23756,14 @@ describe('OrgListSection - admin entry actions', () => {
     expect(deleteOrg).toHaveBeenCalledWith('o-dek');
   });
 
-  it('while an update runs, Rename and Merge wait for it', async () => {
+  it('while an update runs, Rename, Merge, Change kind and Delete wait for it', async () => {
     getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA, DEKALB, STEP_UP], lastRewrite: RUNNING });
     renderSection();
     const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
-    expect(within(row).getByRole('button', { name: 'Rename Atlanta Housing Authority' })).toBeDisabled();
-    expect(within(row).getByRole('button', { name: 'Merge Atlanta Housing Authority' })).toBeDisabled();
+    // The server refuses all four with 409 org_rewrite_running while one runs (D11; plan 3.5).
+    for (const name of ['Rename', 'Merge', 'Change kind of', 'Delete']) {
+      expect(within(row).getByRole('button', { name: `${name} Atlanta Housing Authority` }), name).toBeDisabled();
+    }
     expect(within(row).getByRole('button', { name: 'Edit spellings for Atlanta Housing Authority' })).toBeEnabled();
   });
 });
@@ -23374,7 +24301,9 @@ Replace with:
   }
 
   // Admin-only row actions (spec D10): absent for a VA. Rename and Merge start
-  // a rewrite, so they wait while one runs (D11: one at a time).
+  // a rewrite, so they wait while one runs (D11: one at a time); Change kind
+  // and Delete wait too - the server refuses both with 409 org_rewrite_running
+  // while one runs (plan 3.5), so an enabled button could only fail.
   const busyTitle = admin.rewriteLive ? 'Another update is still running' : undefined;
   const adminActions = (entry: OrgEntry): React.ReactNode => (
     <>
@@ -23414,6 +24343,8 @@ Replace with:
         size="sm"
         type="button"
         aria-label={`Change kind of ${entry.name}`}
+        disabled={admin.rewriteLive}
+        title={busyTitle}
         onClick={() => setDialog({ action: 'kind', entry })}
       >
         Change kind
@@ -23423,6 +24354,8 @@ Replace with:
         size="sm"
         type="button"
         aria-label={`Delete ${entry.name}`}
+        disabled={admin.rewriteLive}
+        title={busyTitle}
         onClick={() => setDialog({ action: 'delete', entry })}
       >
         Delete
@@ -23521,13 +24454,16 @@ deleted`) and the D4 resolution; `Show records` expands per-record links
 compound value's halves of the field's kind, close names), `Split into <HA> +
 <agency>` (a compound housing authority value on contacts naming one of each
 kind), `Move to Agency as <name>` / `Move to Housing authority as <name>`,
-`Use another name`, `Add as new` (unknown values) and `Clear`. Each opens
-`Settle <value>`, which shows the value; its confirm repeats the action
-(`Use <name>`, `Move to ... as <name>`, `Split`, `Add as new`, `Clear`).
+`Use another name`, `Add as new` (unknown values) and `Clear`. A NAME-VARIANT
+row - its value normalizes equal to the matched entry's NAME - offers ONLY
+`Use <that name>` (spec D10: any other action would also rewrite the exact
+name's holders; the server refuses it with 409 `org_value_is_name_variant`).
+Each opens `Settle <value>`, which shows the value; its confirm repeats the
+action (`Use <name>`, `Move to ... as <name>`, `Split`, `Add as new`, `Clear`).
 "Remember this spelling" (Use, and Add as new with a corrected name) is on by
 default; it turns off - saying why - when the value is the name itself in
 other letters (known without asking) or when `POST /check` with
-`spellingFor` = the target entry's orgId (CONTRACT ISSUE 2) answers a
+`spellingFor` = the target entry's orgId (plan 3.4 `OrgCheckResult`) answers a
 `spellingProblem`. Settling waits while a rewrite runs.
 
 RED (a) - create `dashboard/src/routes/settings/NotOnListSection.test.tsx`:
@@ -23612,6 +24548,13 @@ const ROWS: NotOnListRow[] = [
     resolution: { status: 'compound', compound: [[ref(SHRIKE)], [ref(SHRIKE_AID)]] },
   },
   {
+    field: 'agency',
+    value: 'Shrike Housing',
+    count: 1,
+    deletedCount: 0,
+    resolution: { status: 'other_kind', otherKind: [ref(SHRIKE)] },
+  },
+  {
     field: 'accepted_authorities',
     value: 'Rook Junk',
     count: 1,
@@ -23625,6 +24568,8 @@ const RUNNING: OrgRewriteState = {
   jobId: 'j1',
   action: 'use',
   fromTexts: ['x'],
+  field: 'housingAuthority',
+  fields: ['housingAuthority'],
   status: 'running',
   heartbeatAt: '2026-07-01T11:59:59.000Z',
   startedAt: '2026-07-01T11:59:59.000Z',
@@ -23723,13 +24668,17 @@ describe('NotOnListSection - admin settling', () => {
     renderSection();
     const names = (value: string): (string | null)[] =>
       within(valueRow(value)).getAllByRole('button').map((b) => b.textContent);
-    expect(names('merlin housing authority')).toEqual([
+    // A NAME VARIANT (spec D10): only Use <that entry> - any other action would
+    // also rewrite every record holding the exact name (the server refuses it).
+    expect(names('merlin housing authority')).toEqual(['Show records', 'Use Merlin Housing Authority']);
+    expect(names('Kite Aid')).toEqual(['Show records', 'Move to Agency as Kite Aid', 'Use another name', 'Clear']);
+    // An agency value that names a housing authority moves the other way.
+    expect(names('Shrike Housing')).toEqual([
       'Show records',
-      'Use Merlin Housing Authority',
+      'Move to Housing authority as Shrike Housing Authority',
       'Use another name',
       'Clear',
     ]);
-    expect(names('Kite Aid')).toEqual(['Show records', 'Move to Agency as Kite Aid', 'Use another name', 'Clear']);
     expect(names('Shrike Housing Authority Shrike Aid')).toEqual([
       'Show records',
       'Use Shrike Housing Authority',
@@ -23822,6 +24771,29 @@ describe('NotOnListSection - admin settling', () => {
       value: 'Rook Junk',
       action: 'clear',
     });
+  });
+
+  it('Move to Housing authority settles an agency value that names a housing authority', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(
+      within(valueRow('Shrike Housing')).getByRole('button', {
+        name: 'Move to Housing authority as Shrike Housing Authority',
+      }),
+    );
+    const dialog = screen.getByRole('dialog', { name: 'Settle Shrike Housing' });
+    expect(dialog).toHaveTextContent('Agency: Shrike Housing');
+    expect(dialog).toHaveTextContent('The value leaves Agency and goes into Housing authority as Shrike Housing Authority');
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Move to Housing authority as Shrike Housing Authority' }),
+    );
+    expect(resolveNotOnList).toHaveBeenCalledWith({
+      field: 'agency',
+      value: 'Shrike Housing',
+      action: 'move_to_housing_authority',
+      name: 'Shrike Housing Authority',
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
   it('Split prefills both halves (editable) and sends them', async () => {
@@ -24033,11 +25005,22 @@ type Settle =
  * value on contacts naming one entry of each kind (D10: Split applies only
  * there); Move for the other kind's name (contacts only - a property list
  * takes housing authorities only); "Use another name"; "Add as new" for an
- * unknown value; Clear.
+ * unknown value; Clear. A NAME VARIANT - a value that normalizes equal to the
+ * matched entry's NAME, e.g. "atlanta housing authority" - offers ONLY "Use
+ * <that entry>" (spec D10): a rewrite matches normalized text, so any other
+ * action would also rewrite every record holding the exact name, and the
+ * server refuses it (409 org_value_is_name_variant).
  */
 function settleChoices(row: NotOnListRow): { label: string; settle: Settle }[] {
   const res = row.resolution;
   const kind = kindForField(row.field);
+  if (
+    res.status === 'match' &&
+    res.match !== undefined &&
+    normalizeOrgText(row.value) === normalizeOrgText(res.match.name)
+  ) {
+    return [{ label: `Use ${res.match.name}`, settle: { action: 'use', row, name: res.match.name } }];
+  }
   const choices: { label: string; settle: Settle }[] = [];
   const offered = new Set<string>();
   const use = (name: string): void => {
@@ -25031,15 +26014,17 @@ in the commit body, and keep the test's assertions (only names change).
   spelling edit of a starting entry).
 - A rewrite is lane-global and one runs at a time (D11): every action that
   starts one is followed by `waitForRewrite` before the next.
-- The 15 other specs that create units with `accepted_authorities: ['atlanta_housing']`
+- The 17 other specs that create units with `accepted_authorities: ['atlanta_housing']`
   (landlord-activity, listing-activity, listing-photos, property-roster,
   public-pages, send-outcome-reconcile, share-sent-outcome, share-skip-fix,
   tour-comms-pane, tours-page, upcoming-in-stream, relay-intro-variants,
   roster-quiet-hours, tour-roster, broadcasts:78, a2p-compliance:347,
   matching-entry-points:71) are NOT changed: D5 resolves the slug through the
   spelling `Atlanta Housing` to `Atlanta Housing Authority`, and none reads the
-  value back. Proof: `cd "W:/tmp/clean-org-names"; git grep -n "Accepts" -- e2e/tests e2e/scenarios`
-  prints nothing.
+  value back (none asserts the flyer's "Accepts:" line). Proof:
+  `cd "W:/tmp/clean-org-names"; git grep -n "Accepts:" -- e2e/tests e2e/scenarios`
+  prints nothing (the colon matters: a bare "Accepts" also finds the unrelated
+  `teamAcceptsRent` step).
 
 ### Task 14.1 - the org picker driver in steps.ts, and the scenario steps on list names
 
@@ -25099,11 +26084,14 @@ export const ORG_PICKER = {
  * its chip - proof the pick committed before the caller saves (typed text is
  * NEVER committed, spec D6/D7). The listbox is PORTALED to document.body (the
  * ContactSearchField pattern), so the option is looked up on the PAGE, never
- * inside `scope`. `replacing` first removes a single picker's current chip.
+ * inside `scope`. `scope` is the dialog holding the picker, or the page itself
+ * when the picker sits on the page (the blast composer) - never a CSS locator
+ * such as `body` (e2e/support/selectors.md). `replacing` first removes a single
+ * picker's current chip.
  */
 export async function pickOrgName(
   page: Page,
-  scope: Locator,
+  scope: Page | Locator,
   label: 'Housing authority' | 'Housing authorities' | 'Agency',
   name: string,
   opts: { query?: string; replacing?: string } = {},
@@ -25228,9 +26216,13 @@ not unique in the file: use the Edit tool with `replace_all: true`):
 - `housingAuthority: 'dekalb_housing',` -> `housingAuthority: 'DeKalb County Housing Authority',`
   (4: lines 99, 106, 168, 175);
 - `housingAuthority: 'fulton_housing',` -> `housingAuthority: 'Decatur Housing Authority',`
-  (2: lines 129, 136) - `fulton_housing` matches no list entry under any
-  outcome of spec section 13, and the scenario needs a name that is surely on
-  the list.
+  (2: lines 129, 136) - `fulton_housing` is a retired slug that resolves to
+  nothing (Fulton County Housing Authority IS on the starting list, but its
+  spellings are "Housing Authority of Fulton County", "Fulton County" and
+  "Fulton, Fulton County" - S1 Task 1.5; S12 maps the seeds' copy of the slug
+  to the full name). This scenario only needs a list name distinct from its
+  siblings' Atlanta and DeKalb, and Decatur keeps it independent of the Fulton
+  entry.
 
 And the matching SMS (unique). Current (`tenant-onboarding.spec.ts:123`):
 
@@ -25442,9 +26434,9 @@ export async function waitForRewrite(
 (The holder object, not a `let`, carries the poll's result: TypeScript does not
 track a `let` assigned inside a callback and would narrow it to `undefined`.)
 
-Step 3 - `e2e/tests/dashboard-next/contact-detail.spec.ts`, five edits. Line
-107 (`// Cleanup ...`) carries a non-ASCII character; it is deliberately left
-untouched.
+Step 3 - `e2e/tests/dashboard-next/contact-detail.spec.ts`, six edits (`:2`,
+`:87-90`, `:92-94`, `:104`, `:109`, `:115`). Line 107 (`// Cleanup ...`)
+carries a non-ASCII character; it is deliberately left untouched.
 
 Current (`:2`):
 
@@ -25890,7 +26882,8 @@ File: `e2e/tests/dashboard-next/org-lists.spec.ts` (new).
 Step 1 - conform rows N1-N4, S1-S8, L1-L6 and A1-A2 of the selector contract
 to S11's source (see above); every name lives in the `UI` block below.
 
-Step 2 - (PIN, see CONTRACT ISSUE 5) create the file with exactly:
+Step 2 - (PIN: plan section 0 lets an e2e task that covers behavior its
+slice already proved with unit tests be PIN-only) create the file with exactly:
 
 ```ts
 // e2e/tests/dashboard-next/org-lists.spec.ts
@@ -26227,7 +27220,7 @@ test.describe('Org pickers (spec D6, D7)', () => {
 
     // A pick commits the filter, and the reach counts exactly the two tenants.
     const committed = page.waitForRequest((r) => isDraftCreate(r) && draftAuthority(r) === plover);
-    await pickOrgName(page, page.locator('body'), 'Housing authority', plover, { query: 'Plover' });
+    await pickOrgName(page, page, 'Housing authority', plover, { query: 'Plover' });
     await committed;
     await expect(page.getByText('Reaches 2 tenants', { exact: true })).toBeVisible();
     expect(sent.filter((a) => a !== undefined).every((a) => a === plover)).toBe(true);
@@ -26815,8 +27808,8 @@ Files: `e2e/support/selectors.md`, `e2e/README.md`. Word every new row with the
 names the spec files actually use after Tasks 14.1-14.7 (the selector contract
 as conformed to S11).
 
-Step 1 - `selectors.md`, seven edits (each quoted string is unique in the
-file; lines 6-10, 44-45 and 158-160 are non-ASCII and are not touched).
+Step 1 - `selectors.md`, six edits, (a)-(f) (each quoted string is unique in
+the file; lines 6-10, 44-45 and 158-160 are non-ASCII and are not touched).
 
 (a) Line 72 (the AI run log decision ledger) - skip if S11 already added this
 exception (`grep -n "agency_not_authority" e2e/support/selectors.md`). Current
@@ -26916,6 +27909,20 @@ Replace with:
   (`fixtures/orgFixture.ts` `setOffListValue`).
 ```
 
+Step 2b - `e2e/README.md` Layout: the fixtures list gains the new fixture
+(always - S13 does not touch this line). Current (`README.md:601`, unique,
+ASCII):
+
+```md
+- `fixtures/` - `reseed`, `fakeTwilio` (inbound injection incl. CARRIER GROUP texts, the Conversations inspectors, and `getOutboundTo` proof-of-send reads), `groupText` (log tail + guardrail ticks), `fakeEmail`, `fakeVoice`, `relayConnect`, `voiceSetup`, `extraction`.
+```
+
+Replace with:
+
+```md
+- `fixtures/` - `reseed`, `fakeTwilio` (inbound injection incl. CARRIER GROUP texts, the Conversations inspectors, and `getOutboundTo` proof-of-send reads), `groupText` (log tail + guardrail ticks), `fakeEmail`, `fakeVoice`, `relayConnect`, `voiceSetup`, `extraction`, `orgFixture` (the organization list over the API: add a run-unique name, read usage and "Not on the list", plant an off-list value through `/__dev/org-fixture`, and `waitForRewrite`).
+```
+
 Step 3 - check (no tests; docs only):
 `cd "W:/tmp/clean-org-names"; git diff -U0 -- e2e/support/selectors.md e2e/README.md | grep '^+' | grep -nP '[^\x00-\x7F]'`
 -> prints nothing (the added lines are ASCII).
@@ -26971,18 +27978,23 @@ What section 8 adds:
   (create-only) when absent.
 - **The lock (D11):** `--apply` calls `acquireForCleanup('clean-org-names')` BEFORE reading a
   record (a 409 `org_rewrite_running` becomes `CleanupRefusedError`: exit 1, nothing read or
-  written), heartbeats at most every 20 s, and releases with `finish(jobId, ...)`: `done`; or
-  `failed` on an abort (in the PARTIAL path, before the rethrow, never masking the original
-  error) and when records could not be planned. After a hard kill the lock stops blocking 15
-  minutes after its last heartbeat.
+  written), heartbeats on ELAPSED time - at most every 20 s, checked before every record,
+  written or not (plan 3.4: `heartbeat` answers whether the lock is still its own) - and
+  releases with `finish(jobId, ...)`: `done`; or `failed` on an abort (in the PARTIAL path,
+  before the rethrow, never masking the original error) and when records could not be
+  planned. A heartbeat that answers `false` (another rewrite took the lock over) stops the
+  run at once (`CleanupLockLostError`: the PARTIAL report, exit 1, and NO finish - the lock is
+  not its own). After a hard kill the lock stops blocking 15 minutes after its last heartbeat.
 - **Reads:** consistent Scans of the contacts and units BASE tables - every type, deleted
-  included; contact pointer rows (`phoneref#` / `emailref#`) skipped.
+  included (the repos' rule: a NON-EMPTY `deleted_at` string); contact pointer rows
+  (`phoneref#` / `emailref#`) skipped.
 - **Planning (pure, Task 15.1) and writes:** one conditional write per changed record through
   the section-3.7 writers (never stamps a unit's `updated_at`), then one `org_name_cleanup`
-  audit event `{ field, from, to }` per changed field - no actor (CONTRACT ISSUE 2: strings).
-  Reading of "agency is absent or ''": an agency that already holds that agency's exact name is
-  compatible too (D10's "records whose agency holds something ELSE are conflicts") - the
-  housing authority is removed and the agency left as is; pinned by a test (CONTRACT ISSUE 3).
+  audit event `{ field, from, to }` per changed field - no actor; `from` and `to` are STRINGS,
+  `''` for an absent or removed value, never null (plan 3.8). Reading of "agency is absent or
+  ''": an agency that already holds that agency's exact name is compatible too (D10's "records
+  whose agency holds something ELSE are conflicts") - the housing authority is removed and the
+  agency left as is; pinned by a test (plan 3.8).
 - **Output:** per-field leftover values with active/deleted counts and why (organization
   values only, never a person's name), and the counts of every automatic change.
 
@@ -27026,9 +28038,10 @@ describe('planContact (spec section 8: automatic mappings only)', () => {
         expect: { housingAuthority: 'Hope Atlanta', agency: agency ?? null },
         next: { housingAuthority: null, agency: 'HOPE Atlanta' },
       });
+      // Strings only (plan 3.8): '' for the removed housing authority and the empty agency.
       expect(plan.audits).toEqual([
-        { field: 'housingAuthority', from: 'Hope Atlanta', to: null },
-        { field: 'agency', from: agency ?? null, to: 'HOPE Atlanta' },
+        { field: 'housingAuthority', from: 'Hope Atlanta', to: '' },
+        { field: 'agency', from: '', to: 'HOPE Atlanta' },
       ]);
       expect(plan.changes).toEqual({ movedToAgency: 1 });
     }
@@ -27040,7 +28053,7 @@ describe('planContact (spec section 8: automatic mappings only)', () => {
       ENTRIES,
     );
     expect(plan.write?.next).toEqual({ housingAuthority: null });
-    expect(plan.audits).toEqual([{ field: 'housingAuthority', from: 'HUD VASH', to: null }]);
+    expect(plan.audits).toEqual([{ field: 'housingAuthority', from: 'HUD VASH', to: '' }]);
     expect(plan.changes).toEqual({ movedToAgency: 1 });
   });
 
@@ -27124,14 +28137,17 @@ describe('planUnit', () => {
   });
 
   it('backfills a jurisdiction-only unit from its resolved value, or the raw value', () => {
+    // The audit is about the LIST, which was absent: from '' (plan 3.8) - so
+    // even a raw backfill never reads "X -> X" on the property's Activity tab.
     expect(planUnit({ jurisdiction: 'East Point' }, ENTRIES)).toEqual({
       write: { expected: null, next: ['East Point Housing Authority'] },
-      audits: [{ field: 'accepted_authorities', from: 'East Point', to: 'East Point Housing Authority' }],
+      audits: [{ field: 'accepted_authorities', from: '', to: 'East Point Housing Authority' }],
       changes: { jurisdictionBackfilled: 1 },
       leftovers: [],
     });
     const raw = planUnit({ jurisdiction: 'Smyrna Housing Office' }, ENTRIES);
     expect(raw.write).toEqual({ expected: null, next: ['Smyrna Housing Office'] });
+    expect(raw.audits).toEqual([{ field: 'accepted_authorities', from: '', to: 'Smyrna Housing Office' }]);
     expect(raw.leftovers).toEqual([{ field: 'accepted_authorities', value: 'Smyrna Housing Office', resolution: 'unknown' }]);
   });
 
@@ -27180,7 +28196,8 @@ GREEN: create `app/scripts/clean-org-names.ts`:
 // write is CONDITIONAL on the record still holding what the run read, never
 // stamps a unit's `updated_at` (the importer's human-ownership signal), and
 // appends an `org_name_cleanup` audit event { field, from, to } per changed
-// field - no actor (a script, not a person). It never touches broadcasts.
+// field - no actor (a script, not a person); `from` and `to` are strings, ''
+// for an absent or removed value. It never touches broadcasts.
 //
 // THE LIST: the stage's stored `org-list` item, read WITHOUT creating it; the
 // starting list (spec Appendix A) when none is stored yet - a dry run before
@@ -27188,9 +28205,11 @@ GREEN: create `app/scripts/clean-org-names.ts`:
 // included. `--apply` first takes the organization-list rewrite lock (spec
 // D11: `lastRewrite` action `cleanup`; taking it creates the item, create-only,
 // when absent) and refuses while another rewrite runs; it heartbeats the lock
-// and releases it `done`, or `failed` when it aborts or completes with
-// failures. After a hard kill the lock stops blocking 15 minutes after its
-// last heartbeat.
+// on elapsed time (at most every 20 s, checked before every record) and
+// releases it `done`, or `failed` when it aborts or completes with failures.
+// A heartbeat that finds the lock no longer its own stops the run at once,
+// without releasing a lock that is not its own. After a hard kill the lock
+// stops blocking 15 minutes after its last heartbeat.
 //
 // TARGET: `--env local|dev|prod` through scripts/lib/stageClient.ts (dev/prod:
 // account guard first, client bound to the housingchoice profile). An agent
@@ -27240,13 +28259,17 @@ export interface CleanupChanges {
   jurisdictionBackfilled: number;
 }
 
-/** One changed field of one record: its `org_name_cleanup` audit payload. */
+/**
+ * One changed field of one record: its `org_name_cleanup` audit payload.
+ * STRINGS only (plan 3.8 - the property Activity projection shows them only as
+ * strings): a property list is joined with ", "; '' is absent or removed.
+ */
 export interface FieldAudit {
   field: CleanupField;
-  /** The value before (a property list joined with ", "); null = absent. */
-  from: string | null;
-  /** The value after; null = removed. */
-  to: string | null;
+  /** The value before; '' = absent (a backfilled property had no list). */
+  from: string;
+  /** The value after; '' = removed. */
+  to: string;
 }
 
 export interface ContactWrite {
@@ -27344,8 +28367,9 @@ export function planContact(
       ...(agencyChanged && nextAgency !== undefined && { agency: nextAgency }),
     },
   };
-  if (haChanged) plan.audits.push({ field: 'housingAuthority', from: ha ?? null, to: nextHa ?? null });
-  if (agencyChanged) plan.audits.push({ field: 'agency', from: agency ?? null, to: nextAgency ?? null });
+  // Strings only (plan 3.8): '' for an absent or removed value.
+  if (haChanged) plan.audits.push({ field: 'housingAuthority', from: ha ?? '', to: nextHa ?? '' });
+  if (agencyChanged) plan.audits.push({ field: 'agency', from: agency ?? '', to: nextAgency ?? '' });
   return plan;
 }
 
@@ -27373,7 +28397,9 @@ export function planUnit(
       else plan.leftovers.push({ field: 'accepted_authorities', value: legacy, resolution: r.status });
     }
     plan.write = { expected: null, next: [value] };
-    plan.audits.push({ field: 'accepted_authorities', from: legacy, to: value });
+    // The audit is about the LIST, which was absent: from '' (plan 3.8). The
+    // legacy `jurisdiction` itself is left as it is.
+    plan.audits.push({ field: 'accepted_authorities', from: '', to: value });
     bump(plan.changes, 'jurisdictionBackfilled');
     return plan;
   }
@@ -27443,6 +28469,7 @@ import { createOrgListRepo, type OrgListItem, type OrgRewriteState } from '../sr
 import {
   buildCleanupDeps,
   cleanOrgNames,
+  CleanupLockLostError,
   CleanupRefusedError,
   planContact,
   planUnit,
@@ -27513,12 +28540,12 @@ const LEFTOVERS: CleanupLeftover[] = [
   { field: 'accepted_authorities', value: 'Step Up', count: 1, deletedCount: 0, resolution: 'other_kind' },
 ];
 
-/** One org_name_cleanup event per changed field: [entityKey, payload]. */
+/** One org_name_cleanup event per changed field: [entityKey, payload] - strings only, '' = absent or removed. */
 const EVENTS: Array<[string, Record<string, unknown>]> = [
   ['contacts#c-spelling', { field: 'housingAuthority', from: 'Atlanta (AHA)', to: 'Atlanta Housing Authority' }],
-  ['contacts#c-agency-as-ha', { field: 'housingAuthority', from: 'Hope Atlanta', to: null }],
-  ['contacts#c-agency-as-ha', { field: 'agency', from: null, to: 'HOPE Atlanta' }],
-  ['contacts#c-agency-empty', { field: 'housingAuthority', from: 'Claratel', to: null }],
+  ['contacts#c-agency-as-ha', { field: 'housingAuthority', from: 'Hope Atlanta', to: '' }],
+  ['contacts#c-agency-as-ha', { field: 'agency', from: '', to: 'HOPE Atlanta' }],
+  ['contacts#c-agency-empty', { field: 'housingAuthority', from: 'Claratel', to: '' }],
   ['contacts#c-agency-empty', { field: 'agency', from: '', to: 'Claratel Behavioral Health' }],
   ['contacts#c-agency-spelling', { field: 'agency', from: 'Caring Works', to: 'CaringWorks' }],
   [
@@ -27533,8 +28560,8 @@ const EVENTS: Array<[string, Record<string, unknown>]> = [
     'units#u-human-owned',
     { field: 'accepted_authorities', from: 'DCA, MHA', to: 'Georgia Department of Community Affairs, MHA' },
   ],
-  ['units#u-legacy', { field: 'accepted_authorities', from: 'East Point', to: 'East Point Housing Authority' }],
-  ['units#u-legacy-deleted', { field: 'accepted_authorities', from: 'Smyrna Housing Office', to: 'Smyrna Housing Office' }],
+  ['units#u-legacy', { field: 'accepted_authorities', from: '', to: 'East Point Housing Authority' }],
+  ['units#u-legacy-deleted', { field: 'accepted_authorities', from: '', to: 'Smyrna Housing Office' }],
 ];
 
 const eventKey = ([entityKey, payload]: [unknown, unknown]): string =>
@@ -27700,6 +28727,7 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
       jobId: 'job-rename',
       action: 'rename',
       fromTexts: ['Old Name'],
+      fields: ['housingAuthority', 'accepted_authorities'],
       toName: 'New Name',
       status: 'running',
       heartbeatAt: at,
@@ -27721,6 +28749,7 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
       jobId: 'job-killed',
       action: 'cleanup',
       fromTexts: [],
+      fields: ['housingAuthority', 'agency', 'accepted_authorities'],
       status: 'running',
       heartbeatAt: stale,
       startedAt: stale,
@@ -27807,7 +28836,7 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
     expect((await w.cleanupEvents()).some((e) => e['entityKey'] === 'contacts#c-spelling')).toBe(false);
   }, 120_000);
 
-  it('heartbeats the lock while it runs (at most every 20 s), under its own job id', async () => {
+  it('heartbeats the lock on elapsed time, before records it does not write too, under its own job id', async () => {
     const w = await seedWorld();
     const real = buildCleanupDeps(doc, w.env, silent);
     const beats: string[] = [];
@@ -27823,22 +28852,61 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
           acquireForCleanup: (actor) => real.lock.acquireForCleanup(actor),
           heartbeat: async (jobId) => {
             beats.push(jobId);
-            await real.lock.heartbeat(jobId);
+            return real.lock.heartbeat(jobId);
           },
           finish: (jobId, outcome) => real.lock.finish(jobId, outcome),
         },
       },
     });
     expect(result.recordsWritten).toBe(8);
-    expect(beats.length).toBeGreaterThan(0);
+    // Every row read is 30 s later on this clock, so EVERY row beats first -
+    // the eight it writes and the seven it does not (the pointer row included):
+    // nine contacts, one pointer row, five units.
+    expect(beats).toHaveLength(9 + 1 + 5);
     expect(new Set(beats)).toEqual(new Set([(await w.orgList.peek())?.lastRewrite?.jobId]));
+  }, 120_000);
+
+  it('stops writing at once when a heartbeat finds the lock gone, and never finishes a lock that is not its own', async () => {
+    const w = await seedWorld();
+    const real = buildCleanupDeps(doc, w.env, silent);
+    const before = { contacts: await w.scanTable('contacts'), units: await w.scanTable('units') };
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const finished: string[] = [];
+    let clock = 0;
+    await expect(
+      cleanOrgNames({
+        doc,
+        env: w.env,
+        apply: true,
+        logger: log,
+        now: () => (clock += 30_000),
+        deps: {
+          lock: {
+            acquireForCleanup: (actor) => real.lock.acquireForCleanup(actor),
+            // Another rewrite took the lock over: the heartbeat says it is not ours.
+            heartbeat: async () => false,
+            finish: async (jobId, outcome) => {
+              finished.push(jobId);
+              await real.lock.finish(jobId, outcome);
+            },
+          },
+        },
+      }),
+    ).rejects.toBeInstanceOf(CleanupLockLostError);
+    // The first row's heartbeat stopped it: nothing written at all.
+    expect(await w.scanTable('contacts')).toEqual(before.contacts);
+    expect(await w.scanTable('units')).toEqual(before.units);
+    expect(capture.atLevel(50).some((l) => String(l['msg']).includes('PARTIAL result'))).toBe(true);
+    expect(finished).toEqual([]);
+    expect((await w.orgList.peek())?.lastRewrite).toMatchObject({ action: 'cleanup', status: 'running' });
   }, 120_000);
 });
 ```
 
 Run: `cd "W:/tmp/clean-org-names/app"; npx vitest run test/cleanOrgNames.test.ts` (DynamoDB
-Local up) - RED (`cleanOrgNames`, `buildCleanupDeps`, `CleanupRefusedError` and
-`reportCleanupRun` are not exported).
+Local up) - RED (`cleanOrgNames`, `buildCleanupDeps`, `CleanupRefusedError`,
+`CleanupLockLostError` and `reportCleanupRun` are not exported).
 
 GREEN: in `app/scripts/clean-org-names.ts` replace the import line
 `import { isOnListFor, KINDS_FOR_FIELD, resolveOrgText, type OrgEntry } from '../src/lib/orgNames.js';`
@@ -27855,11 +28923,13 @@ import { createAuditRepo, type AuditRepo } from '../src/repos/auditRepo.js';
 import {
   createContactsRepo,
   EMAIL_REF_PREFIX,
+  isDeleted as isContactDeleted,
   PHONE_REF_PREFIX,
+  type ContactItem,
   type ContactsRepo,
 } from '../src/repos/contactsRepo.js';
 import { createOrgListRepo, type OrgListRepo, type OrgRewriteState } from '../src/repos/orgListRepo.js';
-import { createUnitsRepo, type UnitsRepo } from '../src/repos/unitsRepo.js';
+import { createUnitsRepo, isDeleted as isUnitDeleted, type UnitItem, type UnitsRepo } from '../src/repos/unitsRepo.js';
 import { OrgHttpError } from '../src/services/orgNames.js';
 import { createOrgRecordsService } from '../src/services/orgRecords.js';
 import { createOrgRewriteService, type OrgRewriteService } from '../src/services/orgRewrite.js';
@@ -27883,6 +28953,22 @@ export const HEARTBEAT_EVERY_MS = 20_000;
  * read or written. Exit 1, no PARTIAL banner.
  */
 export class CleanupRefusedError extends Error {}
+
+/**
+ * The apply's heartbeat found the organization-list rewrite lock no longer
+ * its own (spec D11: another rewrite took it over after this run went 15
+ * minutes without a heartbeat). The run stopped writing at once and does NOT
+ * release a lock that is not its own. Exit 1, with the PARTIAL report.
+ */
+export class CleanupLockLostError extends Error {
+  constructor(jobId: string) {
+    super(
+      `${SCRIPT_NAME}: lost the organization-list rewrite lock (job ${jobId}) to another rewrite; ` +
+        'stopped writing at once. Re-run the apply once that rewrite has finished (idempotent).',
+    );
+    this.name = 'CleanupLockLostError';
+  }
+}
 
 export interface CleanupLeftover {
   field: CleanupField;
@@ -28082,18 +29168,31 @@ export async function cleanOrgNames(opts: CleanupOpts): Promise<CleanupResult> {
       { ...flatCounts(result), apply },
       `${SCRIPT_NAME} - PARTIAL result: the run ABORTED and these counters cover only what completed before the failure. Every write is conditional, so re-running after the fix is safe.`,
     );
-    if (lock !== undefined) await releaseAfterAbort(deps, lock.jobId, result, err, log);
+    // A lost lock is another rewrite's now: never finish it (spec D11).
+    if (lock !== undefined && !(err instanceof CleanupLockLostError)) {
+      await releaseAfterAbort(deps, lock.jobId, result, err, log);
+    }
     throw err;
   }
 
   if (lock !== undefined) {
     const failed = result.failed > 0;
-    await deps.lock.finish(
-      lock.jobId,
-      failed
-        ? { status: 'failed', counts: flatCounts(result), error: `${result.failed} record(s) could not be planned` }
-        : { status: 'done', counts: flatCounts(result) },
-    );
+    try {
+      await deps.lock.finish(
+        lock.jobId,
+        failed
+          ? { status: 'failed', counts: flatCounts(result), error: `${result.failed} record(s) could not be planned` }
+          : { status: 'done', counts: flatCounts(result) },
+      );
+    } catch (err) {
+      // The run itself COMPLETED; only the release failed. Say so here - the
+      // CLI names the error itself, and there is no PARTIAL report to point at.
+      log.error(
+        { err, jobId: lock.jobId, ...flatCounts(result) },
+        `${SCRIPT_NAME} - the run COMPLETED (these counters are what it wrote) but the rewrite lock could not be released; it stops blocking other rewrites 15 minutes after its last heartbeat`,
+      );
+      throw err;
+    }
     log.info({ jobId: lock.jobId, status: failed ? 'failed' : 'done' }, `${SCRIPT_NAME} - released the rewrite lock`);
   }
   return result;
@@ -28145,14 +29244,29 @@ async function run(
   );
 
   let lastBeat = now();
+  /**
+   * The lock's heartbeat on ELAPSED time: checked before EVERY row, written or
+   * not, so a long stretch with nothing to write still keeps the lock alive.
+   * A heartbeat that cannot be written (a busy list) is logged and the run
+   * goes on - the lock goes stale only after 15 minutes without one. One that
+   * answers false means another rewrite holds the lock now: stop at once.
+   */
   const beat = async (): Promise<void> => {
     if (lock === undefined || now() - lastBeat < HEARTBEAT_EVERY_MS) return;
     lastBeat = now();
-    await deps.lock.heartbeat(lock.jobId);
+    let ours: boolean;
+    try {
+      ours = await deps.lock.heartbeat(lock.jobId);
+    } catch (err) {
+      log.warn({ err, jobId: lock.jobId }, `${SCRIPT_NAME} - heartbeat failed; continuing`);
+      return;
+    }
+    if (!ours) throw new CleanupLockLostError(lock.jobId);
   };
   const tally = new Map<string, CleanupLeftover>();
 
   for await (const row of scanAll(doc, tableName('contacts', env), opts.scanLimit)) {
+    await beat();
     const contactId = String(row['contactId'] ?? '');
     if (contactId.startsWith(PHONE_REF_PREFIX) || contactId.startsWith(EMAIL_REF_PREFIX)) {
       result.pointerRows += 1;
@@ -28167,7 +29281,9 @@ async function run(
       log.error({ err, contactId }, `${SCRIPT_NAME} - contact could not be PLANNED; stepped over and counted failed`);
       continue;
     }
-    tallyLeftovers(tally, plan, row['deleted_at'] !== undefined);
+    // The repos' own "deleted" rule (a NON-EMPTY deleted_at string), so these
+    // counts match what Settings > "Not on the list" shows; it reads only that attribute.
+    tallyLeftovers(tally, plan, isContactDeleted(row as Pick<ContactItem, 'deleted_at'>));
     if (plan.write === undefined) {
       // Nothing to write - but a conflict is still a decision the run counts.
       addChanges(result.changes, plan.changes);
@@ -28192,10 +29308,10 @@ async function run(
       }
       log.info({ contactId, fields }, `${SCRIPT_NAME} - contact cleaned`);
     }
-    await beat();
   }
 
   for await (const row of scanAll(doc, tableName('units', env), opts.scanLimit)) {
+    await beat();
     const unitId = String(row['unitId'] ?? '');
     result.unitsScanned += 1;
     let plan: RecordPlan<UnitWrite>;
@@ -28206,7 +29322,7 @@ async function run(
       log.error({ err, unitId }, `${SCRIPT_NAME} - unit could not be PLANNED; stepped over and counted failed`);
       continue;
     }
-    tallyLeftovers(tally, plan, row['deleted_at'] !== undefined);
+    tallyLeftovers(tally, plan, isUnitDeleted(row as Pick<UnitItem, 'deleted_at'>));
     if (plan.write === undefined) {
       // Nothing to write - but an agency kept as a list's only member is still counted.
       addChanges(result.changes, plan.changes);
@@ -28230,7 +29346,6 @@ async function run(
       }
       log.info({ unitId }, `${SCRIPT_NAME} - unit cleaned`);
     }
-    await beat();
   }
 
   result.leftovers = [...tally.values()].sort(compareLeftovers);
@@ -28256,7 +29371,9 @@ Notes for the builder: `acquireForCleanup` is S3's read-and-bump through `orgLis
 whose read creates the starting list create-only when the item is absent - the apply test
 pins `listSource: 'stored'` on a world with no item. The lock's `startedBy` is the actor passed,
 `clean-org-names`. A write that THROWS (anything but the writers' `'skipped'`) or a failing audit
-append aborts the run - the template's posture; the PARTIAL path releases the lock.
+append aborts the run - the template's posture; the PARTIAL path releases the lock. A LOST lock
+(a heartbeat answering false) takes the PARTIAL path too, but never releases: the lock is
+another rewrite's.
 
 GREEN: `npx vitest run test/cleanOrgNames.test.ts`. Then `cd "W:/tmp/clean-org-names"; npm run typecheck`.
 Commit `feat(org-names): clean-org-names run - dry run, apply under the rewrite lock, PARTIAL and failure reporting (spec section 8)`.
@@ -28341,6 +29458,10 @@ describe('the CLI', () => {
     expect(source.indexOf('resolveStageClient(')).toBeLessThan(source.indexOf('await cleanOrgNames('));
     expect(source).toContain('err instanceof CleanupRefusedError');
     expect(source).toContain('stage.doc.destroy()');
+    // The CLI names the failure itself; it never claims a PARTIAL report that
+    // only a mid-run abort logs.
+    expect(source).toContain('FAILED: ${err instanceof Error ? err.message : String(err)}');
+    expect(source).not.toContain('see the PARTIAL report above');
   });
 });
 ```
@@ -28444,7 +29565,10 @@ if (invokedDirectly) {
         process.exitCode = 1;
         return;
       }
-      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED (see the PARTIAL report above)`);
+      // Name the REAL failure: the run logged a PARTIAL report itself only when
+      // it aborted mid-run (a lost lock included); a lock that could not be
+      // taken or released has none to point at.
+      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;
     } finally {
       stage.doc.destroy();
@@ -28467,15 +29591,15 @@ What `app/scripts/clean-org-names.ts` does: it reads every contact (every type, 
 
 Target handling is the automation scripts' (above): `--env local|dev|prod` resolves the tables AND the credentials itself (`app/scripts/lib/stageClient.ts`); `dev`/`prod` run the account guard on the `housingchoice` profile BEFORE any table is read, pin the regional endpoint and refuse to start while an `AWS_ENDPOINT_URL*` variable is set. Unknown or repeated arguments, and `--lane` with `dev`/`prod`, are usage errors (exit 2, nothing run).
 
-**The lock.** `--apply` first takes the organization-list rewrite lock (`lastRewrite` on the `org-list` item, action `cleanup`) - the lock the Settings page's renames, merges and "Not on the list" actions take - so none of them can interleave with it. It refuses to start while one of those runs (`REFUSED - another organization-name rewrite is running`, exit 1, nothing read or written: wait for it to finish; the Settings page shows it), and while the apply holds the lock those Settings actions answer that a rewrite is running. It heartbeats the lock while it works and releases it at the end: `done`, or `failed` when it aborts or completes with failures. After a HARD KILL (a closed terminal, a lost machine) nothing releases the lock: it stops blocking 15 minutes after its last heartbeat - wait those 15 minutes, then re-run the apply. A dry run takes no lock.
+**The lock.** `--apply` first takes the organization-list rewrite lock (`lastRewrite` on the `org-list` item, action `cleanup`) - the lock the Settings page's renames, merges and "Not on the list" actions take - so none of them can interleave with it. It refuses to start while one of those runs (`REFUSED - another organization-name rewrite is running`, exit 1, nothing read or written: wait for it to finish; the Settings page shows it), and while the apply holds the lock those Settings actions answer that a rewrite is running. It heartbeats the lock at most every 20 seconds while it works - whether or not it is writing - and releases it at the end: `done`, or `failed` when it aborts or completes with failures. If another rewrite ever takes the lock over (possible only after 15 minutes without a heartbeat), the apply's next heartbeat sees it and the apply stops writing at once: `lost the organization-list rewrite lock`, a PARTIAL report, exit 1, and the lock is left to its new owner - re-run the apply once that rewrite has finished. After a HARD KILL (a closed terminal, a lost machine) nothing releases the lock: it stops blocking 15 minutes after its last heartbeat - wait those 15 minutes, then re-run the apply. A dry run takes no lock.
 
-1. **Dry run BEFORE the deploy, from a `main` checkout with this branch merged:** `npx tsx app/scripts/clean-org-names.ts --env dev`, then `--env prod`. Dry run is the DEFAULT and writes NOTHING - not even the `org-list` item: before the deploy none is stored, so it resolves against the starting list (a log line says which list it used). It prints the automatic changes it would make, one count per kind (`housingAuthorityRewritten`, `movedToAgency`, `agencyConflicts`, `agencyRewritten`, `unitMembersRewritten`, `unitAgencyMembersDropped`, `unitAgencyMembersKept`, `unitDuplicatesRemoved`, `jurisdictionBackfilled`), then every value it would LEAVE, per field, with its record count (`+N deleted` for deleted records) and why - the preview of the Settings page's "Not on the list" section. It prints organization values and record counts only, never a person's name.
+1. **Dry run BEFORE the deploy, from a `main` checkout with this branch merged:** `npx tsx app/scripts/clean-org-names.ts --env dev`, then `--env prod`. Dry run is the DEFAULT and writes NOTHING - not even the `org-list` item: before the deploy none is stored, so it resolves against the starting list (a log line says which list it used). It prints the automatic changes it would make under `Automatic changes this run WOULD make (dry run):`, one count per kind with a plain label (`housing authority spelling -> its list name`, `agency named as housing authority -> moved to Agency`, `agency named as housing authority, Agency already set (left)`, `agency spelling -> its list name`, `property authority spelling -> its list name`, `agency dropped from a property list`, `agency kept on a property (its only entry)`, `duplicate dropped from a property list`, `property list filled from its legacy jurisdiction`), then every value it would LEAVE, per field, with its record count (`+N deleted` for deleted records) and why - the preview of the Settings page's "Not on the list" section. The JSON `done` log line carries the same counts under their key names (`housingAuthorityRewritten`, `movedToAgency`, `agencyConflicts`, `agencyRewritten`, `unitMembersRewritten`, `unitAgencyMembersDropped`, `unitAgencyMembersKept`, `unitDuplicatesRemoved`, `jurisdictionBackfilled`). It prints organization values and record counts only, never a person's name.
 2. **Review the leftover list with Sam.** For each value decide: a spelling of a listed name (after the deploy, "Use <name>" with "Remember this spelling" on), a genuinely new organization ("Add as new"), or junk ("Clear"). A spelling Sam confirms can also be added to its entry on Settings (admin) right after the deploy and BEFORE step 4, so the apply maps it automatically - but do not let that delay the apply. A name missing from the starting list is added on Settings after the deploy the same way: `orgStartingList.ts` seeds an environment only once, and editing it after that environment's first read changes nothing there.
 3. **Deploy** the branch (app + worker), dev first.
 4. **Apply immediately after that environment's deploy:** `npx tsx app/scripts/clean-org-names.ts --env dev --apply` (then `--env prod --apply` after prod's deploy). Until it runs, a blast filtered on a list name misses the tenants still holding an old spelling of it. The done line carries the same counters, now what it WROTE, plus `recordsWritten` and `skippedOnCondition`; the printed summary lists what is left. `skippedOnCondition > 0` means records changed while it ran: re-run the apply (idempotent - a re-run of a completed apply plans nothing). `failed > 0` (`COMPLETED WITH FAILURES`, exit 1): those records (named by id on ERROR lines) hold a malformed value and could not be planned - look at them, then re-run. A write failure ABORTS the run: it logs a **PARTIAL** report (the counters as of the abort), releases the lock as `failed` and exits 1 - fix the cause and re-run. (An abort between a record's write and its audit append leaves that one record without its event; the record itself is clean.)
 5. **Sam settles the leftovers** on Settings > Housing authorities & agencies > "Not on the list" (admin actions; each one is a rewrite - see "Run again" below).
 
-Cost: one consistent Scan of the contacts table and one of the units table, plus, on an apply, one conditional write and its audit events per changed record - seconds at today's volume. Exit codes: 0 the run completed clean; 1 it completed with failures, aborted (PARTIAL), was refused by the lock, or the target could not be resolved (nothing read); 2 usage.
+Cost: one consistent Scan of the contacts table and one of the units table, plus, on an apply, one conditional write and its audit events per changed record - seconds at today's volume. Exit codes: 0 the run completed clean; 1 it completed with failures, aborted (PARTIAL - a lost lock included), was refused by the lock, could not release the lock after completing (its ERROR line says so), or the target could not be resolved (nothing read); 2 usage. On a failure the last line names it: `clean-org-names - FAILED: <the error>`.
 
 **No agent runs it against dev or prod; an agent rehearses on a lane: `--env local --lane <L>`.** Never a bare `--env local` - that is the live local stack.
 
@@ -28529,7 +29653,7 @@ Commit `feat(org-names): clean-org-names CLI and RUNBOOK - dry run before the de
 
 ---
 
-## S16 - docs: glossary and issues (`documentation/GLOSSARY.md`, `docs/issues/`)
+## S16 - docs: glossary, issues and the e2e guide (`documentation/GLOSSARY.md`, `docs/issues/`, `documentation/sequence-diagram-to-test.md`)
 
 Docs only - no tests. Every added line is ASCII. `<BUILD-DATE>` below means
 today's date from `date +%F` (YYYY-MM-DD); replace every occurrence before
@@ -28541,7 +29665,7 @@ ASCII check for an edited file:
 prints nothing. For a new file:
 `tr -d '\11\12\15\40-\176' < "<file>" | wc -c` prints `0`.
 
-### Task 16.1 - GLOSSARY: housing authority and agency rewritten; three new entries
+### Task 16.1 - GLOSSARY: housing authority and agency rewritten; three new entries; accepted authorities updated
 
 File: `documentation/GLOSSARY.md` (spec section 3). The block below is ASCII
 (the file's non-ASCII lines - 5-6, 12, 40-90, 105-111, 128, 167, 363 - are not
@@ -28648,9 +29772,63 @@ Replace with:
   list", and an unrelated save never fails because of it.
 ```
 
+Then, in the same file, the **accepted authorities** entry that follows the
+replaced block (`GLOSSARY.md:296-310` at the base commit; the replacement
+above moved it down - match the text; ASCII) - it still says the members are
+plain strings and that legacy units get "no backfill" (AGENTS.md: fix
+glossary drift in the change that creates it). Current:
+
+```md
+- **accepted authorities** (tenant-list-visibility, 2026-08-10) - the authorities
+  whose vouchers a property takes: `unit.accepted_authorities`, a string LIST with
+  at least one entry, chosen by the landlord. It REPLACED both `unit.jurisdiction`
+  (a single string that could not hold the plural) and `unit.accepted_programs`
+  (old-vocabulary program labels - `HCV`, `Section 8`, `VASH` - retired with the
+  field, never folded in). Staff and landlords see ONE "Housing authorities"
+  input/row; tenants see it as the flyer's "Accepts:" line. Jurisdiction ("is the
+  unit in authority X's area?") and acceptance ("does this landlord take X's
+  vouchers?") are two distinct QUESTIONS but explicitly ONE field (Cameron,
+  2026-08-10): the two-question framing is how staff reason about FILLING the list,
+  not two things to store, so there is deliberately no jurisdiction field beside it.
+  Legacy documents are read through `authoritiesOf(unit)`, which synthesizes
+  `[jurisdiction]` when the list is absent - no backfill; the two retired keys are
+  accept-and-ignore tombstones on the unit PATCH until
+  `docs/issues/retire-humanize-authority.md` closes.
+```
+
+Replace with:
+
+```md
+- **accepted authorities** (tenant-list-visibility, 2026-08-10; updated by
+  clean-org-names, 2026-10-06) - the authorities whose vouchers a property takes:
+  `unit.accepted_authorities`, a string LIST with at least one entry, chosen by
+  the landlord. Its members are NAMES from the housing authority list
+  (**organization list**, above): the unit POST and PATCH check every new member
+  against it (a unique **alternate spelling** is stored as its entry's name;
+  members the unit already holds pass unchanged), and staff pick them with the
+  "Housing authorities" multi-picker, where a held member that is not on the
+  list shows as a "Not on the list" chip. It REPLACED both `unit.jurisdiction`
+  (a single string that could not hold the plural) and `unit.accepted_programs`
+  (old-vocabulary program labels - `HCV`, `Section 8`, `VASH` - retired with the
+  field, never folded in). Staff and landlords see ONE "Housing authorities"
+  input/row; tenants see it as the flyer's "Accepts:" line. Jurisdiction ("is the
+  unit in authority X's area?") and acceptance ("does this landlord take X's
+  vouchers?") are two distinct QUESTIONS but explicitly ONE field (Cameron,
+  2026-08-10): the two-question framing is how staff reason about FILLING the list,
+  not two things to store, so there is deliberately no jurisdiction field beside it.
+  Legacy documents are read through `authoritiesOf(unit)`, which synthesizes
+  `[jurisdiction]` when the list is absent. The one-time cleanup
+  (`app/scripts/clean-org-names.ts`) BACKFILLS the stored list from that legacy
+  value - its list name when it resolves to one entry, else the raw value, which
+  then shows as **not on the list** (above) - so once it has run in an environment no
+  stored unit depends on the synthesis. The two retired keys are accept-and-ignore
+  tombstones on the unit PATCH until `docs/issues/retire-humanize-authority.md`
+  closes.
+```
+
 Check: the ASCII check above on `documentation/GLOSSARY.md`.
 
-Commit `docs(glossary): housing authority and agency are list names; organization list, alternate spelling, not on the list`.
+Commit `docs(glossary): housing authority, agency and accepted authorities are list names; organization list, alternate spelling, not on the list`.
 
 ### Task 16.2 - close housing-authority-free-text-drift
 
@@ -28929,6 +30107,34 @@ Check: `cd "W:/tmp/clean-org-names"; for f in docs/issues/property-authorities-f
 Commit `docs(issues): file four clean-org-names follow-ups` (stage the four
 files by explicit path).
 
+### Task 16.5 - the sequence-diagram guide's example unit body uses a list name
+
+File: `documentation/sequence-diagram-to-test.md` (S12's note: its example
+request body still shows a retired seed slug; the file carries pre-existing
+non-ASCII lines - only the changed line must be ASCII, and it is).
+
+Current (`:165`, unique in the file):
+
+```md
+  accepted_authorities:['atlanta_housing'], address:{line1,city,state,zip} }` starts a unit in `setup` (status is NOT a
+```
+
+Replace with:
+
+```md
+  accepted_authorities:['Atlanta Housing Authority'], address:{line1,city,state,zip} }` starts a unit in `setup` (status is NOT a
+```
+
+(`atlanta_housing` would still resolve - it is a spelling of Atlanta Housing
+Authority - but the unit POST stores the NAME, and a guide that teaches
+slugs reintroduces them.)
+
+Check: `cd "W:/tmp/clean-org-names"; git diff -U0 -- documentation/sequence-diagram-to-test.md | grep '^+' | grep -nP '[^\x00-\x7F]'`
+prints nothing, and `git grep -n "atlanta_housing" -- documentation/sequence-diagram-to-test.md`
+prints nothing.
+
+Commit `docs(e2e-guide): the example unit body uses an organization-list name`.
+
 ---
 
 ## S17 - final (main sync, the five gates, live self-QA, handback)
@@ -28936,22 +30142,35 @@ files by explicit path).
 ### Task 17.1 - sync `main` once
 
 Read `git worktree list --porcelain` and `git -C "W:/tmp/clean-org-names"
-status` first. Then, from the worktree:
+status` first. Then, from the worktree (`main` is the LOCAL branch of this
+shared repo - there is nothing to fetch):
 
 ```
-cd "W:/tmp/clean-org-names"; git fetch; git merge main
+cd "W:/tmp/clean-org-names"; git merge --no-commit main
 ```
 
-Resolve conflicts preserving BOTH sides' intent (never take one side
-wholesale on a source file). If `main` touched any file this branch changes
-(the likely ones: `app/src/routes/contacts.ts`, `broadcasts.ts`, `units.ts`,
-the seeds, `dashboard/src/routes/settings/*`, e2e specs), re-run that file's
-unit tests before continuing. If `main` is ahead by a change to tours or
-the tour list (another mission was in flight on 2026-10-06), confirm no seed
-or e2e expectation from it collides with S12/S14. After the merge: `git
-status` (a separate read), then commit the merge (Git's default message plus
-the trailer). This is the ONLY main sync on the branch; later drift is
-reported in the handback, not chased.
+`--no-commit` stops before the merge commit, so the trailer can be added
+(in a non-interactive shell a plain `git merge` commits a clean merge itself).
+`Already up to date.` means `main` has not moved: nothing to commit, go to
+Task 17.2. Otherwise resolve conflicts preserving BOTH sides' intent (never
+take one side wholesale on a source file). If `main` touched any file this
+branch changes (the likely ones: `app/src/routes/contacts.ts`,
+`broadcasts.ts`, `units.ts`, the seeds, `dashboard/src/routes/settings/*`, e2e
+specs), re-run that file's unit tests before continuing. If `main` is ahead
+by a change to tours or the tour list (another mission was in flight on
+2026-10-06), confirm no seed or e2e expectation from it collides with
+S12/S14. Then `git status` (a separate read; `.git/MERGE_HEAD` is expected to
+exist here), stage the resolved files by explicit path, and commit:
+
+```
+cd "W:/tmp/clean-org-names"; git commit -m "Merge branch 'main' into feat/clean-org-names" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+(or the authoring model's name in the trailer). If the merge changed
+`package-lock.json` (`git -C "W:/tmp/clean-org-names" diff --name-only HEAD~1 HEAD -- package-lock.json`
+prints it), run `cd "W:/tmp/clean-org-names"; npm ci` before any gate - a
+dependency-changing merge needs the install. This is the ONLY main sync on
+the branch; later drift is reported in the handback, not chased.
 
 ### Task 17.2 - the five gates, bare, from the worktree
 
@@ -28965,14 +30184,36 @@ child writing):
    alone, run the suite at the merge base, compare failing FILES; any
    `[dynamoAdmin]` line is a real container fault - capture it)
 3. `cd "W:/tmp/clean-org-names"; npm run smoke`
-4. `cd "W:/tmp/clean-org-names"; timeout 1500 npm run e2e`
+4. `cd "W:/tmp/clean-org-names"; timeout 2700 npm run e2e` - from the BASH
+   tool (Git Bash), where `timeout` is GNU coreutils; in PowerShell `timeout`
+   is the Windows wait command and npm never runs. 2,700 s (45 minutes) covers
+   the 20-40 minutes a loaded full run takes (Task 14.9) plus this branch's
+   new specs. If it TIMES OUT (exit 124), or the run is aborted for any
+   reason, before ANYTHING else: (a) tree-kill the stack it started - read
+   `launcherPid` from `e2e/.artifacts/lane.json` and run
+   `taskkill /T /F /PID <launcherPid>` (killing the background task alone
+   leaves the reparented node tree running); (b)
+   `cd "W:/tmp/clean-org-names"; npm run e2e:stop`; (c) confirm no listener
+   survives on the lane's four ports (`ports` in `lane.json`), e.g. in
+   PowerShell `Get-NetTCPConnection -State Listen -LocalPort <app>,<dashboard>,<fake>,<publicBase> -ErrorAction SilentlyContinue`
+   prints nothing. AGENTS.md: `reuseExistingServer` adopts an orphaned
+   same-commit stack, so a survivor would contaminate the re-run. Never kill
+   shared MCP browser processes and never restart the DynamoDB Local
+   container. Then re-run gate 4 once and record both runs in the handback.
 5. `cd "W:/tmp/clean-org-names"; npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')`
    - attribute any error by BASELINE comparison at the merge base (AGENTS.md
      gate 5); anything present now and absent there is this branch's and is
-     blocking.
+     blocking. KNOWN pre-existing error in a file this branch touches:
+     `dashboard/src/routes/broadcasts/useComposerDraft.ts:116`
+     (`react-hooks/refs`, present at the base commit - recorded in
+     `plan-research/plan-assembly-rulings.md`, S11 writer item 3): gate 5 may
+     exit 1 on it alone. Name it - and every other pre-existing error the
+     baseline shows - in the handback, so the next reader does not
+     re-diagnose it as this branch's.
 
-Expected: all five exit 0 (gate 5: no new errors in touched files). Record
-the five exit codes and the e2e pass count in the handback.
+Expected: gates 1-4 exit 0; gate 5 shows no NEW error in a touched file (a
+non-zero exit only for the named pre-existing errors). Record the five exit
+codes, the e2e pass count and the pre-existing lint errors in the handback.
 
 ### Task 17.3 - live self-QA (hermetic lane only)
 
@@ -29004,13 +30245,16 @@ was walked, PASS/FAIL per step, screenshot names) and commit it.
 
 Write `docs/superpowers/reviews/2026-10-06-clean-org-names/handback.md` and
 commit it: per-slice table (done / deviations with why), the five gate exit
-codes and counts, self-QA result, reviewer findings and adjudications from
-the orchestrator's own review wave, every issue filed, `main` drift since the
-sync, and the owed operator actions: (1) dry run of the cleanup against prod
-from a `main` checkout BEFORE the deploy, (2) review leftovers with Sam, (3)
-deploy, (4) apply right after the deploy, (5) Sam settles leftovers on
-Settings. No Terraform, no secrets, no env vars. Never merge, deploy or clean
-up.
+codes and counts (with the pre-existing lint errors gate 5 showed, by file
+and rule), self-QA result, reviewer findings and adjudications from the
+orchestrator's own review wave, every issue filed, `main` drift since the
+sync, and the owed operator actions - DEV FIRST, then prod (spec section 8;
+the RUNBOOK section of Task 15.3): (1) dry run of the cleanup from a `main`
+checkout BEFORE the deploy - `--env dev`, then `--env prod`; (2) review the
+leftovers with Sam; (3) deploy - dev first, then prod; (4) apply right after
+each environment's deploy - `--env dev --apply` after dev's, then
+`--env prod --apply` after prod's; (5) Sam settles the leftovers on Settings.
+No Terraform, no secrets, no env vars. Never merge, deploy or clean up.
 
 ## 12. Watch items (read before Task 1.1)
 
@@ -29024,8 +30268,10 @@ up.
 - The harness `units.list` fake ignores the cursor and caps at 50 - keep
   page-all-units tests under 50 units.
 - New repo methods break the typed fakes (harness, `contactCapture.test.ts`,
-  `sendMessage.test.ts`, `scheduledSendSuppression.test.ts`) - update them in
-  the same task.
+  `sendMessage.test.ts`, `scheduledSendSuppression.test.ts`,
+  `audienceResolution.test.ts`) - update them in the same task. (An OPTIONAL
+  new parameter, like `unitsRepo.getById`'s `{ consistentRead }` in Task 6.3,
+  breaks none of them.)
 - The tenant form must NEVER send an unchanged `housingAuthority` (doing so
   supersedes a pending AI suggestion).
 - "Is this really new?" renders OUTSIDE the `<form>`; every button in it has
@@ -29036,13 +30282,27 @@ up.
 - `ApiError.message` is the raw code - render copy from `err.body` / the copy
   map, never the message.
 - The rewrite id is minted by the service before the list write; the job
-  handler never rethrows; heartbeat/finish re-check the id.
+  handler never rethrows; heartbeat/finish re-check the id. `heartbeat`
+  answers whether the lock is still the caller's: on `false` a pass writes no
+  further record and the job (or the cleanup script) stops WITHOUT finish.
+  A rewrite's `fields` are fixed when it starts - the job never looks the
+  target up again.
+- Contacts are listed through the `byTypeStatus` index, as every contact list
+  in the app is (the contacts table also holds pointer rows; the repo refuses
+  to remove that index's keys). Index lag is sub-second: a record written in
+  the second before a rewrite or a delete check can be missed, and it then
+  appears in "Not on the list", where Use settles it (spec D11).
+- Two residual races are ACCEPTED, not fixed: (1) during a rewrite, an API
+  caller that re-sends a record's old off-list value as "unchanged" on the
+  contacts PATCH writes it back (the PATCH judges "unchanged" against its
+  consistent pre-read, and its write is conditional only on staff notes; the
+  dashboard never sends an unchanged value); (2) delete and kind change count
+  uses with a full scan, then write the list - a record written in between
+  holds a name that is gone or re-kinded. Both surface in "Not on the list",
+  where an admin settles them.
 - Machine writes to units never stamp `updated_at`.
 - `housingAuthority` is a GSI key: REMOVE it, never SET `''`.
 - The lean seed world changes in S12 - e2e expectations follow in S14.
 - Two e2e-workspace unit tests run inside `npm test` and pin dashboard
   surfaces (mutation catalog count, profiler route registry) - S11 updates
   them.
-- PENDING-SAM AMENDMENT items (S1 Task 1.5, S12): the builder never guesses
-  them; if the planner has not applied the amendment, build exactly what the
-  plan says.

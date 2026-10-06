@@ -488,9 +488,9 @@ describe('listTourPage - the All tab paging loop', () => {
     expect(bareUCursors).toBeGreaterThan(5);
   });
 
-  it('13: the route defaults - QUERY_PAGE_LIMIT 200 and MAX_QUERY_CALLS 5 when nothing is injected', async () => {
+  it('13: the route defaults - QUERY_PAGE_LIMIT 200 and MAX_QUERY_CALLS 6 when nothing is injected', async () => {
     expect(QUERY_PAGE_LIMIT).toBe(200);
-    expect(MAX_QUERY_CALLS).toBe(5);
+    expect(MAX_QUERY_CALLS).toBe(6);
     const rows = Array.from({ length: 6 }, (_, i) => tour(`tour-q${i + 1}`, 'toured', at(-(i + 1))));
     const { query, calls } = recorder(rows);
     const list = listOf({ when: 'any', statuses: ['canceled'], sort: 'latest' });
@@ -501,5 +501,35 @@ describe('listTourPage - the All tab paging loop', () => {
       { kind: 'd', limit: 200, forward: false },
       { kind: 'u', index: 3, limit: 200, forward: false },
     ]);
+  });
+
+  it('14: the default budget covers one Query per possible phase - a sparse when=any list of every status completes in ONE request', async () => {
+    // Six phases (D + five U statuses) under the default filters. A budget
+    // below six would spend itself before the last phase on EVERY first page
+    // that does not fill, so a small deployment's default view would always
+    // carry a cursor - and a phantom Load more - even over an empty table.
+    const list = listOf({ when: 'any', statuses: [], sort: 'latest' });
+    expect(list.phases).toHaveLength(6);
+    const empty = recorder([]);
+    const overEmpty = await listTourPage(empty.query, { ...list, limit: 50 });
+    expect(overEmpty.items).toEqual([]);
+    expect(overEmpty.nextCursor).toBeNull();
+    expect(overEmpty.calls).toBe(6);
+    expect(empty.calls.map((c) => c.kind)).toEqual(['d', 'u', 'u', 'u', 'u', 'u']);
+    // The same with a few rows in every phase: one request, no cursor.
+    const rows = [
+      tour('tour-s1', 'scheduled', at(2)),
+      tour('tour-c1', 'closed', at(-3)),
+      tour('tour-r1', 'requested'),
+      tour('tour-t1', 'toured'),
+      tour('tour-n1', 'no_show'),
+      tour('tour-x1', 'canceled'),
+      tour('tour-z1', 'closed'),
+    ];
+    const sparse = recorder(rows);
+    const overSparse = await listTourPage(sparse.query, { ...list, limit: 50 });
+    expect(ids(overSparse.items)).toEqual(['tour-s1', 'tour-c1', 'tour-r1', 'tour-t1', 'tour-n1', 'tour-x1', 'tour-z1']);
+    expect(overSparse.nextCursor).toBeNull();
+    expect(overSparse.calls).toBe(6);
   });
 });

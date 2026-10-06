@@ -18,8 +18,12 @@ import type { TourItem } from '../repos/toursRepo.js';
 
 /** Items one FILTERED Query evaluates (spec 5.4). */
 export const QUERY_PAGE_LIMIT = 200;
-/** Queries per HTTP request (spec 5.4). */
-export const MAX_QUERY_CALLS = 5;
+/** Queries per HTTP request (spec 5.4): one per possible phase (D + the five
+ *  U statuses), so a sparse unfiltered list completes in ONE request. A
+ *  smaller budget would spend itself before the last phase on every first
+ *  page that does not fill - a phantom Load more over every small table. The
+ *  budget bites only when a FILTERED phase needs more than one Query. */
+export const MAX_QUERY_CALLS = 6;
 
 export type QueryListPhase = (
   phase: TourListPhase,

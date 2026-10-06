@@ -23,7 +23,7 @@
 //      tab lists it as Not marked, and it has a fresh two weeks: a tick 1 day
 //      ahead leaves it open, one 15 days ahead closes it again.
 //   3. A toured tour closed as "Not a fit" reopens straight into the Record
-//      outcome dialog; canceled, the tour reads Toured with "Record outcome".
+//      outcome dialog; canceled, the tour reads "Toured - needs outcome" with "Record outcome".
 //
 // Every tour a test creates is decided in afterEach (toured + not a fit)
 // unless it ended closed, so no later spec meets it on the Past tab or Today.
@@ -304,7 +304,7 @@ test.describe('Tour auto-close and reopen', () => {
     await expect(dialog).toHaveCount(0);
     await outcomeDialog.getByRole('button', { name: 'Cancel' }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
-    await expect(tourHeader(page).getByText('Toured', { exact: true })).toBeVisible();
+    await expect(tourHeader(page).getByText('Toured - needs outcome', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Record outcome' })).toBeVisible();
 
     const reopened = await getTour(page, tourId);

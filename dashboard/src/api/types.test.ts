@@ -7,7 +7,40 @@ import {
   suggestionResolutionErrorMessage,
   suppressionLead,
   suppressionNote,
+  tourStatusLabel,
 } from './types.js';
+
+describe('tourStatusLabel', () => {
+  it('a toured tour with no outcome reads "Toured - needs outcome"', () => {
+    expect(tourStatusLabel({ status: 'toured' })).toBe('Toured - needs outcome');
+  });
+
+  it('a move-forward tour with no placement yet reads "Toured - needs placement"', () => {
+    expect(tourStatusLabel({ status: 'toured', outcome: 'move_forward', convertible: true })).toBe(
+      'Toured - needs placement',
+    );
+  });
+
+  it('a toured tour whose placement started reads plain "Toured"', () => {
+    expect(
+      tourStatusLabel({ status: 'toured', outcome: 'move_forward', convertible: true, convertedPlacementId: 'p-1' }),
+    ).toBe('Toured');
+  });
+
+  it.each([
+    ['requested', 'Requested'],
+    ['scheduled', 'Scheduled'],
+    ['no_show', 'No show'],
+    ['canceled', 'Canceled'],
+    ['closed', 'Closed'],
+  ] as const)('any other status %s reads its plain label %s', (status, label) => {
+    expect(tourStatusLabel({ status })).toBe(label);
+  });
+
+  it('a closed tour stays "Closed" whatever its outcome', () => {
+    expect(tourStatusLabel({ status: 'closed', outcome: 'no_outcome' })).toBe('Closed');
+  });
+});
 
 describe('MESSAGE_TRANSPORTS', () => {
   it('mirrors the complete authenticated message transport contract', () => {

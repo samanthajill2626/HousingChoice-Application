@@ -2282,7 +2282,7 @@ export class Scenario {
         .getByRole('button', { name: 'Cancel', exact: true })
         .click();
       await expect(gate).toHaveCount(0);
-      await expect(this.tourStatusBadge('Toured')).toBeVisible({ timeout: 10_000 });
+      await expect(this.tourStatusBadge('Toured - needs outcome')).toBeVisible({ timeout: 10_000 });
     });
   }
 
@@ -2319,7 +2319,7 @@ export class Scenario {
         .getByRole('button', { name: 'Cancel', exact: true })
         .click();
       await expect(gate).toHaveCount(0);
-      await expect(this.tourStatusBadge('Toured')).toBeVisible({ timeout: 10_000 });
+      await expect(this.tourStatusBadge('Toured - needs outcome')).toBeVisible({ timeout: 10_000 });
       if (happenedAtLocal !== undefined) {
         tour.scheduledAt = new Date(happenedAtLocal).toISOString();
       }

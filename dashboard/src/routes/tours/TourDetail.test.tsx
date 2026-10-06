@@ -1075,7 +1075,7 @@ describe('TourDetail - Reopen (spec 9.2)', () => {
     });
     expect(screen.getByRole('dialog', { name: 'Record outcome' })).toBeInTheDocument();
     expect(screen.queryByRole('dialog', { name: 'Reopen tour' })).not.toBeInTheDocument();
-    expect(screen.getByText('Toured')).toBeInTheDocument();
+    expect(screen.getByText('Toured - needs outcome')).toBeInTheDocument();
   });
 
   it('confirm into no_show: the dialog closes and the badge reads No show', async () => {

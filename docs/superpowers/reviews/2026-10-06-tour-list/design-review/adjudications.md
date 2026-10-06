@@ -323,3 +323,24 @@ reviewers (17 merged items); round 2 - 7; round 3 - 5; round 4 - 3. Rejected:
 2 alternative fixes (R1-2 PATCH stamping, R1-7 PATCH no-show guard), both
 conceded by the reviewer. Filed: `tour-no-show-without-date`,
 `undated-tour-wording`.
+
+## Spec gate (Cameron, 2026-10-06) - DRAFT 5 @7a290a92 -> DRAFT 6
+
+Approved "other than" these, all applied in DRAFT 6:
+
+- D4 corrected: his ask was a way to list just the undated OPEN tours, not a
+  dedicated filter. Those are exactly the requested tours, already listable
+  (the Active tab's Needs booking section; the All tab's Requested chip under
+  Any time). The separate "Needs booking" When option is REMOVED - and with it
+  the server's `when=unscheduled` mode, phase R and the `ph: 'r'` cursor form;
+  `when=any&status=requested` reads only phase U's requested partition. P12's
+  naming question becomes moot (no new label; "Needs booking" stays the Active
+  section's name).
+- D9: keep the return restore (P14) - "scrolling down and finding the next one
+  each time is kind of annoying".
+- D8: align the undated wording everywhere in this change (the planner's R3-4
+  narrowing is reversed at his call): one shared helper `undatedTourLabel` -
+  "Not booked" for a request, "Undated" otherwise - read by the All and Past
+  rows, the tour page (`TourDetail.tsx:312`, reused at `:783`), the tenant
+  file, the landlord file and the property page. Resolves
+  `docs/issues/undated-tour-wording.md` (set resolved when the code lands).

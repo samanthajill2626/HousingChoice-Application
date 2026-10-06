@@ -1,8 +1,8 @@
 # Tours page: the All tab - every tour, filtered and paged by the server (Sam #18, final part)
 
-Status: DRAFT 5 (2026-10-06) - design review closed after round 4 (rulings:
-`docs/superpowers/reviews/2026-10-06-tour-list/design-review/adjudications.md`).
-For Cameron's spec gate.
+Status: DRAFT 6 (2026-10-06) - design review closed after round 4 (rulings:
+`docs/superpowers/reviews/2026-10-06-tour-list/design-review/adjudications.md`);
+Cameron's spec-gate changes applied (D4 clarified, D8, D9) - otherwise approved.
 Branch `feat/tour-list`, worktree `W:\tmp\tour-list`, cut from main @d839494a.
 Records: `docs/superpowers/reviews/2026-10-06-tour-list/`.
 
@@ -37,47 +37,63 @@ out, or a "needs placement" tour older than 90 days, is on none of them.
   the current filtered list so it covers every match, not just the pages already
   shown (section 6; explained to Cameron 2026-10-06). A search is the one thing
   that loads a whole filtered list on its own.
-- D4. A filter shows the undated OPEN tours (Cameron: "still open, not canceled,
-  closed, or marked toured, and that don't have a date"). As the dashboard can
-  produce them, these are exactly the `requested` tours (3.4).
+- D4. There must be a way to list JUST the undated OPEN tours (Cameron: "still
+  open, not canceled, closed, or marked toured, and that don't have a date").
+  As the dashboard can produce them, these are exactly the `requested` tours
+  (3.4), and two ways already cover it: the Active tab's Needs booking section,
+  and, on the All tab, the **Requested** status chip with When on Any time. NO
+  separate filter is added (Cameron at the spec gate, 2026-10-06, correcting an
+  earlier draft that read his ask as a dedicated filter).
 - D5. The date-range read is paged to completion
   (`docs/issues/tours-scheduled-range-query-unpaginated.md`), so every existing
   date-window list (Active, Past, Today) is guaranteed complete.
-- D6. Active, Past, Closed, Today and the auto-close keep their behavior.
+- D6. Active, Past, Closed, Today and the auto-close keep their behavior (the one
+  wording change of D8 aside).
 - D7. No housing authority filter here (tracker #2 owns clean names).
+- D8. The undated wording is aligned EVERYWHERE in this change (Cameron at the
+  spec gate, 2026-10-06): "Not booked" for a requested tour, "Undated" for any
+  other tour without a date (P7).
+- D9. Keep the return-to-where-you-were restore (P14) - "scrolling down and
+  finding the next one each time is kind of annoying" (Cameron at the spec
+  gate, 2026-10-06).
 
-### 2.2 Planner calls (flagged for the spec gate)
+### 2.2 Planner calls (accepted at the spec gate, 2026-10-06)
 
-- P1. Filters: **When** (Any time / Upcoming / Past / Needs booking / Date
-  range), **Status** chips (multi-select), **Tour type** (single select),
+- P1. Filters: **When** (Any time / Upcoming / Past / Date range), **Status**
+  chips (multi-select), **Tour type** (single select),
   **Search** (tenant name or property address), **Sort** (Latest first /
   Earliest first). Not included: an outcome filter (closed rows already show the
   outcome), counts on the chips, sorting by name, separate tenant/property
   pickers (the search covers both).
 - P2. The tab opens on: Any time, every status, every type, no search, latest
   first.
-- P3. Until the user picks a sort, the order follows When: Upcoming and Needs
-  booking list earliest first; Any time, Past and Date range list latest
-  first. A sort the user picked sticks across When changes.
+- P3. Until the user picks a sort, the order follows When: Upcoming lists
+  earliest first; Any time, Past and Date range list latest first. A sort the
+  user picked sticks across When changes. (So the undated open tours of D4 -
+  Requested under Any time - open newest request first; Earliest first matches
+  the Active tab's oldest-first Needs booking.)
 - P4. Upcoming / Past split at an instant the SERVER pins on the first page of a
   list and carries in the cursor (5.5), so every page of one list uses the same
   boundary.
 - P5. Pages of 50 rows; a search walk and a return-restore (P14) ask for 100,
   the server's maximum (the house convention, `dashboard/src/api/paging.ts:33-40`).
-- P6. Undated tours: Needs booking = `requested`. Any time lists the undated
-  tours AFTER every dated tour, in either sort direction: requested first, then
-  toured, no-show, canceled, closed. Upcoming, Past and Date range list dated
-  tours only.
-- P7. The date column reads the tour's date and time for a dated tour, "Not
-  booked" for a requested tour (the tour page's word, `TourDetail.tsx:312`), and
-  "Undated" for any other undated tour (the Past tab's word, `ToursPage.tsx:206`),
-  so the All and Past rows agree. The tour page and the tenant, landlord and
-  property tour lists keep saying "Not booked" for EVERY undated tour
-  (`TourDetail.tsx:312, 783`, `TenantFile.tsx:334-337`, `LandlordFile.tsx:214-217`,
-  `ListingDetail.tsx:1082-1084`) - the Past tab has differed from them the same
-  way since Sep 27. Aligning those four is filed
-  (`docs/issues/undated-tour-wording.md`) and offered at the spec gate; this
-  change leaves them alone.
+- P6. Undated tours: Any time lists the undated tours AFTER every dated tour,
+  in either sort direction: requested first, then toured, no-show, canceled,
+  closed. Upcoming, Past and Date range list dated tours only. Requested alone
+  under Any time is D4's list (5.3: phase D is skipped and only the requested
+  partition is read).
+- P7. ONE wording rule for a tour's missing date, in ONE shared helper
+  (`undatedTourLabel(tour)` beside `tourStatusLabel` in
+  `dashboard/src/api/types.ts`): "Not booked" for a requested tour, "Undated"
+  for any other tour without a date (D8). Its readers: the All rows' date column
+  (dated rows show date and time via `whenLabel`), the Past rows
+  (`ToursPage.tsx:206` - every Past row is non-requested, so its output does not
+  change), the tour page's facts line and Schedule card (both from
+  `TourDetail.tsx:312`; `:783` reuses it), the tenant file
+  (`TenantFile.tsx:334-337`), the landlord file (`LandlordFile.tsx:214-217`) and
+  the property page (`ListingDetail.tsx:1082-1084`). Today those last four say
+  "Not booked" for EVERY undated tour. This resolves
+  `docs/issues/undated-tour-wording.md`.
 - P8. No total count from the server (it cannot count without reading
   everything). The count line (4.5) says "Showing N tours" while more pages
   remain and "N tours" once the list is complete.
@@ -88,10 +104,10 @@ out, or a "needs placement" tour older than 90 days, is on none of them.
 - P11. perf:pages: `/tours/all` joins `/tours/past` in the route-pin exclusion,
   the existing gap issue widens to cover both, and the ledger citations the
   4.2 split moves are refreshed (4.11).
-- P12. The undated-open filter is named **Needs booking** - the Active tab's
-  existing name for the same tours - rather than a new phrase ("not scheduled
-  yet" was Cameron's description of the set). The GLOSSARY records every staff
-  label a requested tour carries (3.7).
+- P12. No new label (D4): the All tab lists the undated open tours through the
+  Requested chip, whose word matches the rows' status badge; "Needs booking"
+  stays the Active tab's section name. The GLOSSARY records every staff label a
+  requested tour carries (3.7) and the D8 wording.
 - P13. All's Upcoming and Past are pure date splits at the pinned instant,
   across every status (the Status chips narrow them). They deliberately differ
   from Active's Upcoming section (scheduled tours from the start of today -
@@ -106,8 +122,7 @@ out, or a "needs placement" tour older than 90 days, is on none of them.
   or, when the row has left the list (the user marked, rescheduled, decided or
   canceled it), at the row now in its position - the next one to work on
   (4.9) - unless the user has already started typing, clicking or scrolling. A
-  fresh arrival (the tab, the nav) starts at page 1. (The cheaper alternative,
-  accepting the reset, is offered at the spec gate.)
+  fresh arrival (the tab, the nav) starts at page 1. Kept at the spec gate (D9).
 - P15. Re-clicking the All tab while on it does not navigate: it keeps the
   filters and any unsaved search. (#1 keeps filters on a re-click too,
   `ListingsList.tsx:321-324`; here the tab strip lives in the parent, which cannot
@@ -270,7 +285,7 @@ TODAY's reads and rendering for Active, Past and Closed. Requirements:
 
 Labels, roles and order:
 
-- **When** - a select: Any time, Upcoming, Past, Needs booking, Date range.
+- **When** - a select: Any time, Upcoming, Past, Date range.
 - **From** / **To** - date inputs, shown only under Date range. Each is a local
   calendar day; either or both may be empty (both empty = every dated tour,
   P6). Conversion: From -> the start of that local day; To -> the END of that
@@ -283,8 +298,8 @@ Labels, roles and order:
 - **Status** - a chip group of aria-pressed buttons (the #1 ChipGroup idiom):
   Requested, Scheduled, Toured, No show, Canceled, Closed; none pressed = every
   status; a Clear button once any is pressed. Under Upcoming, Past and Date
-  range the Requested chip is NOT shown (a requested tour has no date). Under
-  Needs booking the whole group is hidden.
+  range the Requested chip is NOT shown (a requested tour has no date).
+  Requested alone, under Any time, lists exactly the undated open tours (D4).
 - **Tour type** - a select: All types, Self-guided, Landlord-led, PM team.
 - **Search** - a text box, "Search tenant or property".
 - **Sort** - a select: Latest first, Earliest first (default per P3).
@@ -293,17 +308,18 @@ Labels, roles and order:
 
 THE INVARIANT (from #1 and the Tenants list): a selection the user can neither
 see nor clear must never filter. So the effective selection is PRUNED before it
-is sent: a `requested` chip under a dated When, any status under Needs booking,
-`from`/`to` under any When but Date range, and any unknown URL value drop out
-individually; a pruned-to-empty status set means every status.
+is sent: a `requested` chip under a dated When, `from`/`to` under any When but
+Date range, and any unknown URL value drop out individually; a pruned-to-empty
+status set means every status.
 
 At phone width the controls wrap; at 480px or less they stack full width.
 
 ### 4.4 Rows
 
 Each row matches the other tabs (`ToursPage.tsx:128-168`): tenant name,
-property address, the date column (P7: date and time via `whenLabel`, "Not
-booked", or "Undated"), the status label (`tourStatusLabel`), the outcome badge
+property address, the date column (date and time via `whenLabel`, else
+`undatedTourLabel` - "Not booked" or "Undated", P7), the status label
+(`tourStatusLabel`), the outcome badge
 on a closed tour, the type badge. Accessible name: "Tour for <tenant> at
 <property>, <date column>, <status label>" plus ", <outcome>" on a closed row
 with one (the Past tab ruling: the state rides in the name,
@@ -454,8 +470,7 @@ refreshed in the same change - their test checks only the citation format
 
 Query parameters (all optional):
 
-- `when`: `any` (default) | `upcoming` | `past` | `unscheduled` (the UI's
-  "Needs booking") | `range`.
+- `when`: `any` (default) | `upcoming` | `past` | `range`.
 - `from`, `to`: ISO 8601 instants, accepted ONLY with `when=range` (400
   otherwise). Each is canonicalized with `new Date(x).toISOString()` before it
   is used anywhere (key condition, comparison, fingerprint) - the existing
@@ -500,7 +515,6 @@ U_ORDER = [requested, toured, no_show, canceled, closed] - every status except
 | upcoming | D: byScheduledAt, `scheduledAt >= N` | earliest first |
 | past | D: byScheduledAt, `scheduledAt < N` | latest first |
 | range | D: byScheduledAt, `BETWEEN from AND to`, `>= from`, `<= to`, or the whole partition | latest first |
-| unscheduled | R: byStatus, `status = requested` (order by createdAt) | earliest first |
 
 - Phase D sorts with `ScanIndexForward` and applies a FilterExpression for the
   status set (`status IN ...`) and the type. The status filter is omitted when
@@ -516,10 +530,11 @@ U_ORDER = [requested, toured, no_show, canceled, closed] - every status except
   de-duplication would absorb a violation anyway), so with no type filter that
   partition is an unfiltered Query and wastes no reads - which is why it comes
   first.
-- Phase R applies the type filter only; the status parameter is ignored.
 - Skips: phase D is skipped when the status set holds only `requested` (never
   dated); phase U is skipped when the status set holds no U_ORDER status (the
-  set is exactly `scheduled`).
+  set is exactly `scheduled`). So D4's list - `when=any&status=requested` -
+  reads only phase U's requested partition, in createdAt order (newest first by
+  default, P3).
 
 ### 5.4 Filling a page
 
@@ -528,8 +543,8 @@ Named constants, injectable through the router's deps for tests:
 `MAX_QUERY_CALLS` = 5 (Queries per HTTP request).
 
 - A Query with NO FilterExpression (phase D with no status or type filter after
-  5.3's normalization, phase U's requested partition and phase R with no type
-  filter) asks for the rows still needed PLUS ONE (`Limit = limit - rows + 1`):
+  5.3's normalization, and phase U's requested partition with no type filter)
+  asks for the rows still needed PLUS ONE (`Limit = limit - rows + 1`):
   an unfiltered page never over-reads by more than that one PEEK row, which
   proves whether more rows follow and is never sent. A filtered Query asks for
   `QUERY_PAGE_LIMIT`.
@@ -573,8 +588,6 @@ base64url(JSON) of `{ v: 1, f, n, ph, i?, k? }`:
     request's set) and an optional `k` (byStatus key; `k.status` must equal
     `U_ORDER[i]`; absent = start of that status) - only for any, and never when
     phase U is skipped.
-  - `ph: 'r'` with `k` (byStatus key; `k.status` must be 'requested') - only for
-    unscheduled.
   - `k`, when present, has EXACTLY the attribute names of its index plus
     `tourId`, all strings.
 - A DynamoDB ValidationException on a request that CARRIED a cursor is answered
@@ -655,7 +668,8 @@ items evaluated, Query calls, phases touched) - never an id, name or address.
 
 ## 8. Invariants and every surface
 
-The All tab adds READERS of two invariants; it changes no writer of tour data.
+The All tab adds READERS of two invariants; it changes no writer of tour data
+(D8 changes display wording only).
 
 I1. `requested` <=> no `scheduledAt`; `scheduled` always has one; every other
 status may lack one (3.4). Writers: the repo's create (`toursRepo.ts:345-375`;
@@ -663,9 +677,9 @@ a caller-supplied status wins, so a seed can break it), POST `/api/tours`
 (`tours.ts:265-361`), PATCH (`tours.ts:986+`), reopen (`tours.ts:1482+`),
 auto-close (`app/src/jobs/tourAutoClose.ts`), conversion (`placements.ts:771`),
 roster writes (`app/src/services/rosterProvision.ts:398`), seeds (cast, matrix,
-live, performance), the dev reseed. Readers relying on it: phase R and phase U
-(5.3), the Requested-chip pruning (4.3), the Active tab's Needs booking
-(`useTours.ts:72`).
+live, performance), the dev reseed. Readers relying on it: phase U and the
+phase-D skip (5.3), D4's Requested-chip list and the chip's pruning (4.3), the
+Active tab's Needs booking (`useTours.ts:72`), and `undatedTourLabel` (P7).
 
 I2. A tour with a `scheduledAt` carries `_schedPartition` = 'tours' (else no
 date read finds it). Writers: the repo's create (stamps every tour); PATCH, the
@@ -677,15 +691,15 @@ having no date), and a seed pin asserts every seeded tour row has it. Readers:
 
 Labels: All rows read `tourStatusLabel` and `TOUR_OUTCOME_LABELS`, as the
 Active and Closed rows and the tour header do. The Past tab and Today keep
-`pastState` (their work-list wording). Undated wording (P7): the All and Past
-rows say "Not booked" for a requested tour and "Undated" for any other undated
-tour; the tour page and the tenant, landlord and property tour lists say "Not
-booked" for every undated tour (unchanged here; filed). The GLOSSARY records a
-requested tour's staff labels - "Requested" (status), "Needs booking" (Active
-section and All filter; the Active list's name "Unbooked tour requests"), "Not
-booked" (tour page, the three tour lists, All date column) - and "Undated",
-naming the surfaces that use it (the Past and All rows) and the ones that do
-not.
+`pastState` (their work-list wording). Undated wording (P7, D8): every surface
+that shows a tour's missing date reads it through the one helper
+`undatedTourLabel` - the All and Past rows, the tour page, and the tenant,
+landlord and property tour lists - so "Not booked" (a request) and "Undated"
+(any other undated tour) mean the same thing everywhere. The GLOSSARY records a
+requested tour's staff labels - "Requested" (status badge and the All tab's
+chip), "Needs booking" (the Active section; its list's name "Unbooked tour
+requests"), "Not booked" (its missing date, everywhere) - and "Undated" for any
+other tour without a date.
 
 ## 9. Tests
 
@@ -734,6 +748,14 @@ not.
   - URL adoption and stamped writes; `state.back` built from local state with an
     unsaved search; `TourDetail` accepting `/tours/all?...` and handing `restore`
     back; the row accessible name.
+  - `undatedTourLabel` ("Not booked" for requested, "Undated" otherwise) and,
+    for an undated TOURED tour, "Undated" on each surface that reads it: the
+    tour page's facts line and Schedule card, the tenant file, the landlord
+    file, the property page (their existing tests cover requested tours only -
+    `files.test.tsx:266-278, 458-470`, `ListingDetail.test.tsx:432-433`), the
+    Past row (output unchanged) and the All row.
+  - Any time + the Requested chip alone requesting `status=requested` and
+    listing only requests (D4).
   - The return restore, through the back arrow, a browser Back and a reload:
     depth reloaded (and capped at 10 requests); the opened row in view and
     focused; when the opened row has left the list, the VISIBLE row now at its
@@ -749,12 +771,13 @@ not.
 - e2e: a spec that creates its own uniquely named tenant contact and property
   through the API, then its tours (a request, an upcoming, a past no-show, a
   canceled, an undated toured), and checks: the tab order and `/tours` landing on
-  Active; Needs booking; Upcoming; Past + No show; Any time listing the undated
-  rows after the dated; a row opened and the back arrow returning to the same
-  filtered list with the search, the opened row in view. EVERY step also
-  searches for the unique tenant name, so the walk loads the whole filtered
-  list and no step depends on page depth (the lane holds other specs' tours,
-  and Needs booking lists oldest first). Every assertion scopes to its own
+  Active; Any time + Requested listing only the request (D4); Upcoming; Past +
+  No show; Any time listing the undated rows after the dated, the undated
+  toured one reading "Undated" (and "Undated" on its tour page); a row opened
+  and the back arrow returning to the same filtered list with the search, the
+  opened row in view. EVERY step also searches for the unique tenant name, so
+  the walk loads the whole filtered list and no step depends on page depth (the
+  lane holds other specs' tours). Every assertion scopes to its own
   rows, selectors stay inside the "Tours view" nav (Playwright names are
   case-insensitive substrings), and an API-level step walks
   `GET /api/tours/list?limit=2` to `nextCursor: null` through the real stack.
@@ -772,10 +795,8 @@ not.
   and on a return restore only).
 - `docs/issues/tour-no-show-without-date.md` (3.4): the API accepts a no-show
   on a tour that never had a date.
-- `docs/issues/undated-tour-wording.md` (P7): the tour page and the tenant,
-  landlord and property tour lists say "Not booked" for every undated tour,
-  while the Past and All rows say "Undated" for an undated tour that is not a
-  request.
+
+(`docs/issues/undated-tour-wording.md` is resolved by this change - D8, P7.)
 
 ## 11. Rollout
 

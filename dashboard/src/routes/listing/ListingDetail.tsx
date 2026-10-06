@@ -35,9 +35,9 @@ import {
   LISTING_STATUSES,
   LISTING_STATUS_LABELS,
   STAGE_LABELS,
-  TOUR_STATUS_LABELS,
   TOUR_TYPE_LABELS,
   setListingStatus,
+  tourStatusLabel,
   type ListingStatus,
 } from '../../api/index.js';
 import { BLANK, Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterRow, responseClass } from '../contact/Card.js';
@@ -1085,7 +1085,7 @@ export function ListingDetail(): React.JSX.Element {
                           </span>
                         </span>
                       }
-                      right={TOUR_STATUS_LABELS[t.status] ?? t.status}
+                      right={tourStatusLabel(t)}
                     />
                   ))}
                 />

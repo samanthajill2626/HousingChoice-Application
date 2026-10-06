@@ -46,6 +46,7 @@ import {
   sendNowErrorMessage,
   TOUR_OUTCOME_LABELS,
   TOUR_TYPE_LABELS,
+  tourStatusLabel,
   type Contact,
   type RosterPreview,
   type StaffTourOutcome,
@@ -685,7 +686,7 @@ function TourDetailLoaded({
         <div className={shell.identity}>
           <div className={shell.nameRow}>
             <span className={shell.name}>Tour - {address}</span>
-            <StatusBadge kind="tour" status={tour.status} />
+            <StatusBadge kind="tour" status={tour.status} label={tourStatusLabel(tour)} />
           </div>
           <div className={styles.facts}>{factsLine}</div>
           {createdText !== null ? <div className={styles.created}>created {createdText}</div> : null}

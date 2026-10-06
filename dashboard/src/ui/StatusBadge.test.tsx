@@ -42,6 +42,12 @@ describe('StatusBadge', () => {
     render(<StatusBadge kind="tour" status="some_future_status" />);
     expect(screen.getByText('Some future status')).toBeInTheDocument();
   });
+
+  it('a label override replaces the status label', () => {
+    render(<StatusBadge kind="tour" status="toured" label="Toured - needs outcome" />);
+    expect(screen.getByText('Toured - needs outcome')).toBeInTheDocument();
+    expect(screen.queryByText('Toured')).not.toBeInTheDocument();
+  });
 });
 
 describe('contactStatusTone', () => {

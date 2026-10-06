@@ -896,6 +896,21 @@ export const TOUR_STATUS_LABELS: Readonly<Record<TourStatus, string>> = {
   closed: 'Closed',
 };
 
+/** The status label a person reads for ONE tour (Cameron 2026-10-05, Sam #18).
+ *  A toured tour is not finished until it is decided, so its label names what
+ *  is left: "Toured - needs outcome" until an outcome is recorded, and "Toured -
+ *  needs placement" for a move-forward tour whose placement has not started.
+ *  Every other tour reads its TOUR_STATUS_LABELS entry. */
+export function tourStatusLabel(
+  tour: Pick<Tour, 'status' | 'outcome' | 'convertible' | 'convertedPlacementId'>,
+): string {
+  if (tour.status === 'toured') {
+    if (tour.outcome === undefined) return 'Toured - needs outcome';
+    if (tour.convertible === true && tour.convertedPlacementId === undefined) return 'Toured - needs placement';
+  }
+  return TOUR_STATUS_LABELS[tour.status] ?? tour.status;
+}
+
 /** Tour outcome (mirrors app/src/lib/toursModel.ts TourOutcome). A person
  *  records `move_forward` / `not_a_fit` at the exit gate; `no_outcome` is
  *  written ONLY by the server's auto-close sweep, when nobody recorded a

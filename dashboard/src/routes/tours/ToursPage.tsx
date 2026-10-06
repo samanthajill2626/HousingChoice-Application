@@ -46,10 +46,10 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   TOUR_OUTCOME_LABELS,
-  TOUR_STATUS_LABELS,
   TOUR_TYPE_LABELS,
   getTour,
   patchTour,
+  tourStatusLabel,
   type Tour,
   type Contact,
   type UnitItem,
@@ -134,7 +134,7 @@ function TourRow({ tour, contacts, units, timeDisplay }: TourRowProps): React.JS
       : timeDisplay === 'date'
         ? formatDate(tour.scheduledAt)
         : undefined;
-  const statusLabel = TOUR_STATUS_LABELS[tour.status] ?? tour.status;
+  const statusLabel = tourStatusLabel(tour);
   const typeLabel = TOUR_TYPE_LABELS[tour.tourType as keyof typeof TOUR_TYPE_LABELS] ?? tour.tourType;
 
   return (

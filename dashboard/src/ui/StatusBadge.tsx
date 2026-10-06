@@ -83,6 +83,9 @@ export interface StatusBadgeProps {
   kind: 'tenant' | 'listing' | 'tour';
   /** The stored status value (snake_case wire string). */
   status: string;
+  /** Overrides the status's own label (the tone still follows `status`) - e.g.
+   *  a tour's per-tour label from tourStatusLabel. */
+  label?: string;
 }
 
 /** Resolve the display label for a status (kind-aware), falling back to a
@@ -100,8 +103,8 @@ function toneFor(kind: 'tenant' | 'listing' | 'tour', status: string): BadgeTone
   return LISTING_TONE[status as ListingStatus] ?? 'neutral';
 }
 
-export function StatusBadge({ kind, status }: StatusBadgeProps): React.JSX.Element {
-  const label = labelFor(kind, status);
+export function StatusBadge({ kind, status, label: labelOverride }: StatusBadgeProps): React.JSX.Element {
+  const label = labelOverride ?? labelFor(kind, status);
   const tone = toneFor(kind, status);
   return <span className={`${styles.badge} ${TONE_CLASS[tone]}`}>{label}</span>;
 }

@@ -8,7 +8,7 @@
 // gleaning slice). Each list row links to its detail route.
 import {
   STAGE_LABELS,
-  TOUR_STATUS_LABELS,
+  tourStatusLabel,
   type PlacementItem,
   type Contact,
   type ContactPhone,
@@ -336,7 +336,7 @@ export function TenantFile({
                   ? new Date(t.scheduledAt).toLocaleDateString()
                   : 'Not booked'
               }`}
-              right={<span className={responseClass.muted}>{TOUR_STATUS_LABELS[t.status] ?? t.status}</span>}
+              right={<span className={responseClass.muted}>{tourStatusLabel(t)}</span>}
             />
           ))
         )}

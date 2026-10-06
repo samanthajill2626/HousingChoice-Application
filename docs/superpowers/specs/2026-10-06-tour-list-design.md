@@ -575,7 +575,11 @@ Named constants, injectable into the paging engine for tests (the route uses
 the defaults - amended from the plan research: the router has no test path for
 them, and the engine is where the budget logic lives):
 `QUERY_PAGE_LIMIT` = 200 (items one filtered Query evaluates) and
-`MAX_QUERY_CALLS` = 5 (Queries per HTTP request).
+`MAX_QUERY_CALLS` = 6 (Queries per HTTP request - one per possible phase, D
+plus the five U statuses, so a sparse unfiltered list completes in ONE request;
+amended at build time from 5, which spent itself before the last phase on every
+first page that did not fill and left a phantom Load more over every small
+table - build ruling A-7).
 
 - A Query with NO FilterExpression (phase D with no status or type filter after
   5.3's normalization, and phase U's requested partition with no type filter)

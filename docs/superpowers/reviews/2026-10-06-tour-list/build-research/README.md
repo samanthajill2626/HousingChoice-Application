@@ -46,6 +46,20 @@ Format: ruling - rationale - where it lands.
 - A-6 (app G5) Task 6.2 also asserts `evaluated <= returned + 1` on every
   unfiltered-D page of its walks (spec 9's "at most one row past the page"
   on real DynamoDB). - S6.
+- A-7 (slice C's open point, orchestrator, after S7) `MAX_QUERY_CALLS` is 6,
+  not 5. The default list (`when=any`, every status) has SIX phases (D plus
+  the five U statuses); a budget of five spent itself before the closed
+  phase on every first page that did not fill, so every small deployment's
+  default view - even an empty table - answered a cursor and showed a
+  phantom Load more (an empty page with a cursor is followed automatically,
+  but a non-empty one is not). The budget's purpose is to bound FILTERED
+  phases that need several Queries; one Query per possible phase keeps that
+  bound (6 x 200 evaluated items at most) and lets a sparse unfiltered list
+  complete in one request. Spec 5.4 and the plan's constants table are
+  amended in place; engine test 14 pins it (an empty table and a seven-row
+  table both answer `nextCursor: null` in one request of six calls). A
+  spec-vs-behavior discrepancy where both readings honor D2's intent -
+  decided here, recorded for the handback.
 
 ### Dashboard
 

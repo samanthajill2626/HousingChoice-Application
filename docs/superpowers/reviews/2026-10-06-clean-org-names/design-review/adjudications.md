@@ -68,3 +68,23 @@ round-1 rejection (T20) and reopened none.
 Counts: 16 findings, 16 accepted, 0 rejected.
 Decisions changed this round: yes (R2-1, R2-2, R2-13) - round 3 is required
 (cap: 4).
+
+## Round 3 (spec revision 3 @bfec445a; reviewer B continued)
+
+Reviewer report: `spec-r3-reviewer-b.md` (7 findings). No adjudication
+contested.
+
+| # | Finding | Ruling | Resulting change | Decision changed |
+|---|---|---|---|---|
+| R3-1 | COMPOUND test, read literally, makes every value holding a shared spelling compound (incl. "Atlanta (AHA)") | ACCEPT | exact equality decided first and never compound; compound = two or more non-overlapping longest-first spans with no single entry matched by every span; worked examples; plan tests every Appendix A row | no (corrects R2-5's definition to its intent) |
+| R3-2 | D12's "skip a spelling another entry carries" breaks merge's "shared stays shared" | ACCEPT | merge transfers ALL spellings (the target replaces the merged carrier); D12's skip rules exempt the merge transfer; a merge that would break a cap is refused 409 `org_spellings_full` | no (precision) |
+| R3-3 | Cleanup takes the lock, but "Run again" assumes a re-enqueueable job | ACCEPT | no "Run again" for action `cleanup`; the script releases the lock on abort/failure; a hard-killed lock goes stale after 15 minutes; RUNBOOK names the wait | no (precision) |
+| R3-4 | Compound values have no settling action keeping both halves | ACCEPT | new admin action **Split into <housing authority> + <agency>** (agency set where absent or `''`, conflicts counted) | yes (new action) |
+| R3-5 | (B) `type_source` stamped on every staff type change, triage included | ACCEPT | stamped only when staff OVERRIDE an existing tenant/landlord/partner type, and by Make caseworker; triage from `unknown` does not stamp | no (precision) |
+| R3-6 | No way to create off-list values in e2e; shared seeds would leak between specs | ACCEPT | dev-only `POST /__dev/org-fixture` writes run-unique off-list values onto spec-created records; nothing off-list seeded into the lean world | no (test seam) |
+| R3-7 | List-block budget has no rule when names exceed it | ACCEPT | over budget: drop spellings, then agency names, then housing authority names that do not fit (WARN with counts) | no (precision) |
+
+Counts: 7 findings, 7 accepted, 0 rejected.
+Decisions changed this round: yes (R3-4 only) - round 4, the last allowed
+under the 4-round cap, follows. If round 4 still changes a decision, the
+design goes to Cameron as a decision with the open findings.

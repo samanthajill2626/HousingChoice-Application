@@ -4,6 +4,7 @@
 // fingerprint the filters, and encode / decode / locate the opaque cursor.
 // No AWS and no Express here: toursRepo.queryListPhase runs ONE phase batch
 // and services/tourListPage.ts runs the paging loop.
+import { createHash } from 'node:crypto';
 import {
   TOUR_STATUSES,
   TOUR_TYPES,
@@ -197,4 +198,95 @@ export function planTourListPhases(f: TourListFilters, pinnedNow: string): TourL
  *  asks for exactly the rows it still needs plus one peek row (spec 5.4). */
 export function isUnfilteredPhase(p: TourListPhase): boolean {
   return p.kind === 'd' ? p.statusFilter === undefined && p.type === undefined : !p.notExists && p.type === undefined;
+}
+
+const HEX16 = /^[0-9a-f]{16}$/;
+const D_KEY_ATTRS = ['_schedPartition', 'scheduledAt', 'tourId'] as const;
+const U_KEY_ATTRS = ['createdAt', 'status', 'tourId'] as const;
+
+/** The opaque cursor (spec 5.5). `k` is absent ONLY on a `u` cursor, meaning
+ *  "start of U_ORDER[i]". */
+export interface TourListCursor {
+  v: 1;
+  /** tourListFingerprint of the filters that produced it. */
+  f: string;
+  /** The pinned instant (canonical ISO): Upcoming / Past split here on every
+   *  page of one list. */
+  n: string;
+  ph: 'd' | 'u';
+  i?: number;
+  k?: Record<string, string>;
+}
+
+export function tourListFingerprint(f: TourListFilters): string {
+  const canonical = JSON.stringify([f.when, f.from ?? '', f.to ?? '', f.statuses.join(','), f.type ?? '', f.sort]);
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+}
+
+export function encodeTourListCursor(c: TourListCursor): string {
+  return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url');
+}
+
+function isKey(k: unknown, attrs: readonly string[]): k is Record<string, string> {
+  if (typeof k !== 'object' || k === null || Array.isArray(k)) return false;
+  const entries = Object.entries(k);
+  if (entries.length !== attrs.length) return false;
+  return entries.every(([name, value]) => attrs.includes(name) && typeof value === 'string' && value.length > 0);
+}
+
+/** SHAPE validation only; locateTourListCursor checks it against the plan. */
+export function decodeTourListCursor(raw: string): TourListCursor | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+  const c = parsed as Record<string, unknown>;
+  const allowed = new Set(['v', 'f', 'n', 'ph', 'i', 'k']);
+  if (Object.keys(c).some((key) => !allowed.has(key))) return undefined;
+  if (c['v'] !== 1) return undefined;
+  const f = c['f'];
+  const n = c['n'];
+  if (typeof f !== 'string' || !HEX16.test(f)) return undefined;
+  if (typeof n !== 'string' || canonicalInstant(n) !== n) return undefined;
+  if (c['ph'] === 'd') {
+    const k = c['k'];
+    if (c['i'] !== undefined || !isKey(k, D_KEY_ATTRS)) return undefined;
+    return { v: 1, f, n, ph: 'd', k };
+  }
+  if (c['ph'] === 'u') {
+    const i = c['i'];
+    const k = c['k'];
+    if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= U_ORDER.length) return undefined;
+    if (k !== undefined && !isKey(k, U_KEY_ATTRS)) return undefined;
+    return { v: 1, f, n, ph: 'u', i, ...(k !== undefined && { k }) };
+  }
+  return undefined;
+}
+
+/** Where a decoded cursor resumes in THIS plan, or undefined when it does not
+ *  fit it (a skipped phase, a status outside the set, a wrong-partition key). */
+export function locateTourListCursor(
+  c: TourListCursor,
+  phases: TourListPhase[],
+): { phaseIndex: number; startKey?: Record<string, string> } | undefined {
+  const phaseIndex = phases.findIndex((p) => p.kind === c.ph && (p.kind === 'd' || p.index === c.i));
+  const phase = phases[phaseIndex];
+  if (phaseIndex < 0 || phase === undefined) return undefined;
+  if (phase.kind === 'd') {
+    if (c.k === undefined || c.k['_schedPartition'] !== 'tours') return undefined;
+  } else if (c.k !== undefined && c.k['status'] !== phase.status) {
+    return undefined;
+  }
+  return { phaseIndex, ...(c.k !== undefined && { startKey: c.k }) };
+}
+
+/** The ExclusiveStartKey that resumes right AFTER `item` in `phase`'s index. */
+export function tourListKeyOf(item: Record<string, unknown>, phase: TourListPhase): Record<string, string> {
+  const attrs = phase.kind === 'd' ? D_KEY_ATTRS : U_KEY_ATTRS;
+  const key: Record<string, string> = {};
+  for (const name of attrs) key[name] = String(item[name]);
+  return key;
 }

@@ -1,12 +1,19 @@
 // Unit tests for lib/tourListQuery.ts - the PURE half of the Tours page's All
 // tab read, GET /api/tours/list (spec
 // docs/superpowers/specs/2026-10-06-tour-list-design.md section 5): request
-// parsing and normalization, and the phase plan. Pure - no I/O, no DynamoDB.
+// parsing and normalization, the phase plan, the filter fingerprint and the
+// opaque cursor. Pure - no I/O, no DynamoDB.
 import { describe, expect, it } from 'vitest';
 import {
+  decodeTourListCursor,
+  encodeTourListCursor,
   isUnfilteredPhase,
+  locateTourListCursor,
   parseTourListQuery,
   planTourListPhases,
+  tourListFingerprint,
+  tourListKeyOf,
+  type TourListCursor,
   type TourListFilters,
   type TourListPhase,
   type TourListRequest,
@@ -237,5 +244,164 @@ describe('planTourListPhases', () => {
     }
     expect(isUnfilteredPhase({ kind: 'd', range: { op: 'all' }, statusFilter: ['toured'] })).toBe(false);
     expect(isUnfilteredPhase({ kind: 'd', range: { op: 'lt', value: N } })).toBe(true);
+  });
+});
+
+describe('tourListFingerprint', () => {
+  const base: TourListFilters = {
+    when: 'range',
+    from: '2026-10-01T04:00:00.000Z',
+    to: '2026-11-01T03:59:59.999Z',
+    statuses: ['toured', 'closed'],
+    type: 'pm_team',
+    sort: 'latest',
+  };
+
+  it('1: 16 lowercase hex chars, equal for equal filters, different when any one filter changes', () => {
+    const fp = tourListFingerprint(base);
+    expect(fp).toMatch(/^[0-9a-f]{16}$/);
+    expect(tourListFingerprint({ ...base, statuses: ['toured', 'closed'] })).toBe(fp);
+
+    const { from: _from, ...noFrom } = base;
+    const { to: _to, ...noTo } = base;
+    const { type: _type, ...noType } = base;
+    const variants: TourListFilters[] = [
+      { ...base, when: 'past' },
+      { ...base, from: '2026-10-02T04:00:00.000Z' },
+      noFrom,
+      { ...base, to: '2026-11-02T03:59:59.999Z' },
+      noTo,
+      { ...base, statuses: ['toured'] },
+      { ...base, statuses: [] },
+      { ...base, type: 'self_guided' },
+      noType,
+      { ...base, sort: 'earliest' },
+    ];
+    const prints = variants.map((v) => tourListFingerprint(v));
+    for (const p of prints) expect(p).not.toBe(fp);
+    expect(new Set([fp, ...prints]).size).toBe(variants.length + 1);
+  });
+
+  it('1: status absent and all six statuses fingerprint the same (both normalize to every status)', () => {
+    const absent = parseTourListQuery({});
+    const allSix = parseTourListQuery({ status: 'closed,requested,toured,scheduled,canceled,no_show' });
+    if (!absent.ok || !allSix.ok) throw new Error('expected both to parse');
+    expect(tourListFingerprint(allSix.value.filters)).toBe(tourListFingerprint(absent.value.filters));
+  });
+});
+
+describe('tour list cursor', () => {
+  const N = '2026-10-06T16:00:00.000Z';
+  const F = '0123456789abcdef';
+  const D_KEY = { tourId: 'tour-d1', _schedPartition: 'tours', scheduledAt: '2028-01-01T10:00:00.000Z' };
+  const U_KEY = { tourId: 'tour-u1', status: 'no_show', createdAt: '2027-12-01T10:00:00.000Z' };
+  /** base64url(JSON) of ANY value - for the shapes encodeTourListCursor refuses to type. */
+  const raw = (value: unknown): string => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+  const every = planTourListPhases({ when: 'any', statuses: [], sort: 'latest' }, N);
+
+  it('2: encode / decode round-trips a d cursor and a u cursor with and without k', () => {
+    const cursors: TourListCursor[] = [
+      { v: 1, f: F, n: N, ph: 'd', k: D_KEY },
+      { v: 1, f: F, n: N, ph: 'u', i: 3, k: { ...U_KEY, status: 'canceled' } },
+      { v: 1, f: F, n: N, ph: 'u', i: 3 },
+    ];
+    for (const c of cursors) {
+      const encoded = encodeTourListCursor(c);
+      expect(encoded).toMatch(/^[A-Za-z0-9_-]+$/);
+      expect(decodeTourListCursor(encoded)).toStrictEqual(c);
+    }
+  });
+
+  it('3: decode refuses every malformed shape', () => {
+    const d = { v: 1, f: F, n: N, ph: 'd', k: D_KEY };
+    const u = { v: 1, f: F, n: N, ph: 'u', i: 2, k: U_KEY };
+    const bad: Array<[string, string]> = [
+      ['not base64url JSON', '%%%not-a-cursor%%%'],
+      ['base64url of plain text', Buffer.from('not json', 'utf8').toString('base64url')],
+      ['a JSON string', raw('cursor')],
+      ['a JSON array', raw([d])],
+      ['v: 2', raw({ ...d, v: 2 })],
+      ['f not 16 hex (short)', raw({ ...d, f: '0123abcd' })],
+      ['f not 16 hex (uppercase)', raw({ ...d, f: '0123456789ABCDEF' })],
+      ['n a date, not a canonical instant', raw({ ...d, n: '2026-10-06' })],
+      ['n a non-canonical instant', raw({ ...d, n: '2026-10-06T16:00:00Z' })],
+      ['ph: r', raw({ ...d, ph: 'r' })],
+      ['ph: d with an i', raw({ ...d, i: 0 })],
+      ['ph: d without k', raw({ v: 1, f: F, n: N, ph: 'd' })],
+      ['ph: u without i', raw({ v: 1, f: F, n: N, ph: 'u', k: U_KEY })],
+      ['i negative', raw({ ...u, i: -1 })],
+      ['i fractional', raw({ ...u, i: 1.5 })],
+      ['i > 4', raw({ ...u, i: 5 })],
+      ['i a string', raw({ ...u, i: '2' })],
+      ['k with an extra key', raw({ ...d, k: { ...D_KEY, unitId: 'unit-1' } })],
+      ['k with a missing key', raw({ ...d, k: { tourId: 'tour-d1', _schedPartition: 'tours' } })],
+      ['k with an empty string', raw({ ...d, k: { ...D_KEY, scheduledAt: '' } })],
+      ['k with a non-string value', raw({ ...d, k: { ...D_KEY, scheduledAt: 20280101 } })],
+      ['k an array', raw({ ...d, k: ['tour-d1', 'tours', '2028-01-01T10:00:00.000Z'] })],
+      ['a d key on a u cursor', raw({ ...u, k: D_KEY })],
+      ['a u key on a d cursor', raw({ ...d, k: U_KEY })],
+      ['an unknown top-level key', raw({ ...d, extra: true })],
+    ];
+    for (const [why, cursor] of bad) expect(decodeTourListCursor(cursor), why).toBeUndefined();
+  });
+
+  it('4: locate - a d cursor resumes phase D only with a tours-partition key', () => {
+    expect(locateTourListCursor({ v: 1, f: F, n: N, ph: 'd', k: D_KEY }, every)).toStrictEqual({
+      phaseIndex: 0,
+      startKey: D_KEY,
+    });
+    expect(
+      locateTourListCursor({ v: 1, f: F, n: N, ph: 'd', k: { ...D_KEY, _schedPartition: 'other' } }, every),
+    ).toBeUndefined();
+    const requestedOnly = planTourListPhases({ when: 'any', statuses: ['requested'], sort: 'latest' }, N);
+    expect(locateTourListCursor({ v: 1, f: F, n: N, ph: 'd', k: D_KEY }, requestedOnly)).toBeUndefined();
+  });
+
+  it('4: locate - a u cursor resumes its status phase only when that status is in the plan', () => {
+    // every: [D, requested, toured, no_show, canceled, closed] - no_show (i 2) is phase 3.
+    expect(locateTourListCursor({ v: 1, f: F, n: N, ph: 'u', i: 2, k: U_KEY }, every)).toStrictEqual({
+      phaseIndex: 3,
+      startKey: U_KEY,
+    });
+    expect(locateTourListCursor({ v: 1, f: F, n: N, ph: 'u', i: 2 }, every)).toStrictEqual({ phaseIndex: 3 });
+    expect(
+      locateTourListCursor({ v: 1, f: F, n: N, ph: 'u', i: 2, k: { ...U_KEY, status: 'toured' } }, every),
+    ).toBeUndefined();
+
+    // [D(toured, no_show), toured, no_show] - requested is not in the plan.
+    const reduced = planTourListPhases({ when: 'any', statuses: ['toured', 'no_show'], sort: 'latest' }, N);
+    expect(locateTourListCursor({ v: 1, f: F, n: N, ph: 'u', i: 0 }, reduced)).toBeUndefined();
+    expect(locateTourListCursor({ v: 1, f: F, n: N, ph: 'u', i: 2 }, reduced)).toStrictEqual({ phaseIndex: 2 });
+
+    const past = planTourListPhases({ when: 'past', statuses: [], sort: 'latest' }, N);
+    expect(locateTourListCursor({ v: 1, f: F, n: N, ph: 'u', i: 1 }, past)).toBeUndefined();
+    expect(locateTourListCursor({ v: 1, f: F, n: N, ph: 'u', i: 2, k: U_KEY }, past)).toBeUndefined();
+  });
+
+  it("5: tourListKeyOf returns exactly the phase index's three key attributes", () => {
+    const item = {
+      tourId: 'tour-9',
+      tenantId: 'contact-1',
+      unitId: 'unit-1',
+      tourType: 'self_guided',
+      status: 'no_show',
+      scheduledAt: '2028-01-03T10:00:00.000Z',
+      _schedPartition: 'tours',
+      createdAt: '2027-12-03T10:00:00.000Z',
+      updatedAt: '2028-01-03T11:00:00.000Z',
+      outcome: 'not_a_fit',
+    };
+    const [d, , , noShow] = every;
+    if (d === undefined || noShow === undefined) throw new Error('expected the every-status plan');
+    expect(tourListKeyOf(item, d)).toStrictEqual({
+      tourId: 'tour-9',
+      _schedPartition: 'tours',
+      scheduledAt: '2028-01-03T10:00:00.000Z',
+    });
+    expect(tourListKeyOf(item, noShow)).toStrictEqual({
+      tourId: 'tour-9',
+      status: 'no_show',
+      createdAt: '2027-12-03T10:00:00.000Z',
+    });
   });
 });

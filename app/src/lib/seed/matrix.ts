@@ -940,7 +940,7 @@ function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenant
       if (status === 'requested') {
         const createdAt = iso(nowMs - (2 + rep) * DAY_MS); // 3-4 days ago
         groups.push({
-          tour: { tourId, tenantId, unitId, status, tourType, createdAt, updatedAt: createdAt },
+          tour: { tourId, tenantId, unitId, _schedPartition: 'tours', status, tourType, createdAt, updatedAt: createdAt },
           reminders,
         });
         continue;

@@ -990,6 +990,55 @@ export interface ToursPage {
   tours: Tour[];
 }
 
+/** The All tab's server filters - GET /api/tours/list (spec section 5.1).
+ *  `status` is a comma list of tour statuses (the client never sends an
+ *  array); `from` / `to` are ISO instants, sent only with `when: 'range'`. */
+export interface TourListParams {
+  when: 'any' | 'upcoming' | 'past' | 'range';
+  from?: string;
+  to?: string;
+  status?: string;
+  type?: TourType;
+  sort: 'latest' | 'earliest';
+}
+
+/** One row of GET /api/tours/list - the slim projection the All tab renders
+ *  (spec 5.2). It satisfies tourStatusLabel and undatedTourLabel. */
+export interface TourListRow {
+  tourId: string;
+  tenantId: string;
+  unitId: string;
+  scheduledAt?: string;
+  tourType: TourType;
+  status: TourStatus;
+  outcome?: TourOutcome;
+  convertible?: boolean;
+  convertedPlacementId?: string;
+  autoClosedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The display fields of a row's tenant, as the page's name map carries them. */
+export interface TourListContactName {
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+}
+
+/** The address of a row's property, as the page's name map carries it. */
+export interface TourListUnitAddress {
+  address?: UnitItem['address'];
+}
+
+/** One page of GET /api/tours/list. `nextCursor` null = the list is complete. */
+export interface TourListPage {
+  tours: TourListRow[];
+  contacts: Record<string, TourListContactName>;
+  units: Record<string, TourListUnitAddress>;
+  nextCursor: string | null;
+}
+
 /**
  * One row of a tour's OWN lifecycle history (GET /api/tours/:tourId/activity ->
  * { events }). Mirrors the app-side TourActivityEvent projection verbatim: a

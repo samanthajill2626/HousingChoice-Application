@@ -22,6 +22,7 @@ import {
   dismissTourRosterAction,
   dismissSuggestion,
   getTours,
+  listTours,
   getPlacement,
   getContactVocabulary,
   getPlacementHistory,
@@ -536,6 +537,58 @@ it('getTours forwards from/to together (window query) and unwraps { tours }', as
   expect(request).toHaveBeenCalledWith('/api/tours', {
     query: { from: '2026-07-01T00:00:00Z', to: '2026-07-02T00:00:00Z' },
   });
+});
+
+it('listTours GETs /api/tours/list with the filters and the page size, and resolves the page unchanged', async () => {
+  const page = {
+    tours: [
+      {
+        tourId: 't1',
+        tenantId: 'c1',
+        unitId: 'u1',
+        scheduledAt: '2026-06-02T14:00:00.000Z',
+        tourType: 'self_guided',
+        status: 'no_show',
+        createdAt: '2026-06-01T10:00:00.000Z',
+        updatedAt: '2026-06-02T15:00:00.000Z',
+      },
+    ],
+    contacts: { c1: { firstName: 'Alice', lastName: 'Smith' } },
+    units: { u1: { address: '123 Peachtree St' } },
+    nextCursor: 'cursor-2',
+  };
+  vi.mocked(request).mockResolvedValueOnce(page);
+  const res = await listTours({ when: 'past', status: 'no_show,canceled', sort: 'latest' }, { limit: 50 });
+  // Every key rides in the query object; the client drops the undefined ones
+  // on the wire (client.ts buildUrl), so the URL carries only what is set.
+  expect(request).toHaveBeenCalledWith('/api/tours/list', {
+    query: {
+      when: 'past',
+      from: undefined,
+      to: undefined,
+      status: 'no_show,canceled',
+      type: undefined,
+      sort: 'latest',
+      limit: 50,
+      cursor: undefined,
+    },
+  });
+  // A GET (no method) and, with no signal given, no signal key.
+  const sent = vi.mocked(request).mock.calls[0]![1] as Record<string, unknown>;
+  expect(Object.keys(sent)).toEqual(['query']);
+  expect(res).toBe(page);
+});
+
+it('listTours forwards the cursor, the limit and an AbortSignal', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ tours: [], contacts: {}, units: {}, nextCursor: null });
+  const controller = new AbortController();
+  await listTours({ when: 'any', sort: 'latest' }, { cursor: 'abc', limit: 100 }, controller.signal);
+  const sent = vi.mocked(request).mock.calls[0]![1] as {
+    query: Record<string, unknown>;
+    signal?: AbortSignal;
+  };
+  expect(sent.query).toMatchObject({ when: 'any', sort: 'latest', cursor: 'abc', limit: 100 });
+  expect(sent.signal).toBe(controller.signal);
 });
 
 // --- Pure helpers (no transport) --------------------------------------------

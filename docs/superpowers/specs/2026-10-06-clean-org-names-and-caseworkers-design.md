@@ -1,7 +1,7 @@
 # Clean housing authority and agency names, and caseworkers - design
 
-Date: 2026-10-06 (revision 4, after adversarial design review rounds 1-3 -
-adjudications in
+Date: 2026-10-06 (revision 5, after adversarial design review rounds 1-4;
+round 4 was precision-only, so the review is closed - adjudications in
 `docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md`).
 Tracker items #2 ("One clean name per housing authority") and #19
 ("Caseworkers"), built together under one approved estimate (10-15 hours of
@@ -376,7 +376,7 @@ unknown values are not written and are listed in the import report with
 counts. Unit side: the existing ownership rule is unchanged (import-owned
 units are rewritten each run, human-owned units fill absent attributes); the
 values it writes are resolved names, and agency names are never written to a
-unit. (B adds a `type` rule to the importer, D20.)
+unit. (B adds a `type` rule to the importer, D21.)
 
 ### Settings page
 
@@ -384,8 +384,10 @@ D10. **Settings > "Housing authorities & agencies".** A new Settings tab,
 visible to every signed-in user, with three sections:
 - **Housing authorities** and **Agencies**: each row shows the name, its
   spellings, its notes, and how many records use it (D3) - tenants and other
-  contacts, properties, (B) caseworkers - counting active records (deleted
-  records are counted only for the delete and kind-change checks).
+  contacts, properties, (B) caseworkers - counting active records, with the
+  count of deleted records that still hold it shown beside them ("+2
+  deleted"); the delete and kind-change checks count both, and their 409
+  says how many deleted records hold the name.
 - **Not on the list**: every distinct stored value, across all contact types
   and properties (deleted included), that is not on the list for its field
   (D3) - one row per value and field, with its record count, the field, and
@@ -423,6 +425,9 @@ visible to every signed-in user, with three sections:
     conflicts; their housing authority is still set).
   - **Add as new** - create the entry (from the value or a corrected name),
     then Use it.
+  Split applies only to housing authority values on contacts. A compound
+  member of a property's list, or a compound agency value, is settled with
+  Use (keeping one half) or Clear, or record by record on its page.
   - **Clear** - remove the value from those records.
 - Delete is allowed only when no record (deleted records included) uses the
   entry; kind change likewise.
@@ -487,7 +492,11 @@ starting list; admin edits on the Settings page; renamed and merged names
 
 D13. **Notes, names and size limits.** Names are at most 120 characters.
 Notes are free text up to 500 characters, editable by everyone. An entry
-carries at most 20 spellings of at most 100 characters each. A write that
+carries at most 20 spellings of at most 120 characters each (the name limit,
+so a merged or renamed name always fits as a spelling). A COMPOUND text (D4)
+is refused as a new name too - in "Is this really new?", Add as new and
+rename - with a message naming the entries it contains and pointing to
+Split. A write that
 would make the item larger than 300 KB is refused with 409 `org_list_full`
 (about 300 entries with full notes fit; the starting list has about 20). The
 AI list block has its own budget (D8).
@@ -575,7 +584,11 @@ type (edit form, Caseworker choice) - and by Make caseworker; triage of an
 `type_source` is `'manual'`, writes none of
 `type`, `status`, `housingAuthority` or `agency` (its own type and status
 were computed for a type staff overrode, and Make caseworker removed the
-authority on purpose); contacts without the field are imported as today. The
+authority on purpose); contacts without the field are imported as today.
+Triage of an `unknown` contact is NOT protected: a later re-import still
+applies the importer's type, status and fill-only fields to it, as it does
+today (pre-existing behavior; whether another import will run against prod
+is unknown; filed as a follow-up issue, section 12). The
 contact header shows voucher size and housing authority only for tenants.
 
 ---
@@ -593,7 +606,7 @@ contact header shows voucher size and housing authority only for tenants.
       orgId: string,               // stable id (uuid), never shown
       kind: 'housing_authority' | 'agency',
       name: string,                // the stored full name (unique across kinds)
-      spellings: string[],         // <= 20, each <= 100 chars
+      spellings: string[],         // <= 20, each <= 120 chars
       notes?: string,              // <= 500 chars
       createdAt: string, createdBy: string,
       updatedAt: string, updatedBy: string,
@@ -604,6 +617,8 @@ contact header shows voucher size and housing authority only for tenants.
     action: 'rename' | 'merge' | 'use' | 'move_to_agency'
           | 'move_to_housing_authority' | 'split' | 'clear' | 'cleanup',
     fromTexts: string[], toName?: string,
+    agencyName?: string,           // split: the agency half
+    field?: string,                // the one field a value action targets
     fields: string[],              // which record fields it rewrites
     status: 'running' | 'done' | 'failed',
     heartbeatAt: string,
@@ -838,6 +853,9 @@ routes still mint `tenant_1to1` for any phone (tracker #13).
   acceptance stays a choice).
 - AI fills a tenant's Agency from the conversation.
 - AI adds confirmed-new names itself (Work Package 2).
+- A re-import reverts in-app triage of imported `unknown` contacts (the
+  importer SETs type and status on every run for contacts without
+  `type_source`; pre-existing).
 - Close or update `housing-authority-free-text-drift` (resolved by this work)
   and `retire-humanize-authority` (seed slugs retired here; PATCH tombstones
   remain).

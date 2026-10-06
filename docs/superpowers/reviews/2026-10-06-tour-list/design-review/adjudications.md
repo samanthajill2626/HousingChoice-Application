@@ -344,3 +344,15 @@ Approved "other than" these, all applied in DRAFT 6:
   rows, the tour page (`TourDetail.tsx:312`, reused at `:783`), the tenant
   file, the landlord file and the property page. Resolves
   `docs/issues/undated-tour-wording.md` (set resolved when the code lands).
+
+## Spec gate, follow-up (Cameron, 2026-10-06) - DRAFT 6 @d7de0e90, amended in place
+
+- D10: the All tab's chip for status `requested` reads "Needs booking" (the URL
+  and the API keep the value `requested`).
+- D8 amended, on Cameron's proposal with the planner's agreement: a requested
+  tour's missing date reads "Needs booking" (not "Not booked") on every surface
+  through `undatedTourLabel`; "Undated" stays for any other undated tour. "Not
+  booked" retires from the product; the existing tests and e2e steps that
+  assert it move (listed in P7). The status badge keeps "Requested" (the status
+  name, `TOUR_STATUS_LABELS`) - renaming the status itself was not asked and
+  would touch every tour header and list.

@@ -36,6 +36,7 @@ import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import { RosterPlanConflictError, type RosterEntry } from '../lib/rosterResolution.js';
 import { isAutoCloseStatus, type AutoCloseStatus, type TourOutcome, type TourType } from '../lib/toursModel.js';
+import type { TourListPhase } from '../lib/tourListQuery.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -315,6 +316,20 @@ export interface ToursRepo {
    * item, or undefined when the condition failed - never throws for that.
    */
   reopenIf(tour: TourItem, target: AutoCloseStatus, lastMarkedAt: string): Promise<TourItem | undefined>;
+  /**
+   * ONE Query of one All-tab phase (spec 2026-10-06-tour-list-design.md 5.3):
+   * D = the dated tours on byScheduledAt (key range per `phase.range`), U = one
+   * status's tours on byStatus (`notExists` filters out the dated ones). The
+   * phase's status / type filters become a FilterExpression. `limit` is the
+   * Query's Limit (EVALUATED items, before the filter); `startKey` resumes
+   * after that key; `forward` is ScanIndexForward. `scannedCount` is the
+   * items the Query evaluated (ScannedCount) - a count for the route's log
+   * line. Never walks - the caller (services/tourListPage.ts) owns paging.
+   */
+  queryListPhase(
+    phase: TourListPhase,
+    opts: { limit: number; startKey?: Record<string, string>; forward: boolean },
+  ): Promise<{ items: TourItem[]; lastEvaluatedKey?: Record<string, string>; scannedCount: number }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -812,6 +827,73 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
         }
         throw err;
       }
+    },
+
+    async queryListPhase(phase, opts) {
+      const names: Record<string, string> = {};
+      const values: Record<string, unknown> = {};
+      const filters: string[] = [];
+      let indexName: string;
+      let keyCondition: string;
+      if (phase.kind === 'd') {
+        indexName = 'byScheduledAt';
+        names['#sp'] = '_schedPartition';
+        values[':sp'] = 'tours';
+        keyCondition = '#sp = :sp';
+        const r = phase.range;
+        if (r.op !== 'all') {
+          names['#sat'] = 'scheduledAt';
+          if (r.op === 'between') {
+            values[':from'] = r.from;
+            values[':to'] = r.to;
+            keyCondition += ' AND #sat BETWEEN :from AND :to';
+          } else {
+            values[':bound'] = r.value;
+            const operator = r.op === 'gte' ? '>=' : r.op === 'lt' ? '<' : '<=';
+            keyCondition += ` AND #sat ${operator} :bound`;
+          }
+        }
+        if (phase.statusFilter !== undefined) {
+          names['#st'] = 'status';
+          const placeholders = phase.statusFilter.map((s, i) => {
+            values[`:s${i}`] = s;
+            return `:s${i}`;
+          });
+          filters.push(`#st IN (${placeholders.join(', ')})`);
+        }
+      } else {
+        indexName = 'byStatus';
+        names['#st'] = 'status';
+        values[':st'] = phase.status;
+        keyCondition = '#st = :st';
+        if (phase.notExists) {
+          names['#sat'] = 'scheduledAt';
+          filters.push('attribute_not_exists(#sat)');
+        }
+      }
+      if (phase.type !== undefined) {
+        names['#tt'] = 'tourType';
+        values[':tt'] = phase.type;
+        filters.push('#tt = :tt');
+      }
+      const { Items, LastEvaluatedKey, ScannedCount } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: indexName,
+          KeyConditionExpression: keyCondition,
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+          ScanIndexForward: opts.forward,
+          Limit: opts.limit,
+          ...(filters.length > 0 && { FilterExpression: filters.join(' AND ') }),
+          ...(opts.startKey !== undefined && { ExclusiveStartKey: opts.startKey }),
+        }),
+      );
+      return {
+        items: (Items ?? []) as TourItem[],
+        scannedCount: ScannedCount ?? 0,
+        ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey as Record<string, string> }),
+      };
     },
   };
 }

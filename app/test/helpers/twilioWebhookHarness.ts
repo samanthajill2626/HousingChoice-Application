@@ -218,6 +218,7 @@ import {
 } from './authSession.js';
 import { createLogCapture, type LogCapture } from './logCapture.js';
 import { createSuggestionResolutionFake } from './suggestionResolutionFake.js';
+import { queryListPhaseFromItems } from './tourListIndexFake.js';
 import { queryUnreadPageFromItems } from './unreadIndexFake.js';
 import type { SuggestionResolutionHooks } from '../../src/services/suggestionResolution.js';
 
@@ -3529,6 +3530,11 @@ export function createFakeWorld(): FakeWorld {
         .filter((t) => t.status === status)
         .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
         .map((t) => ({ ...t }));
+    },
+    async queryListPhase(phase, opts) {
+      // The ONE All-tab phase model, pinned to DynamoDB Local by
+      // tourListIndexFakeMirror.integration.test.ts.
+      return queryListPhaseFromItems([...toursMap.values()], phase, opts);
     },
     async patch(tourId, updates, opts) {
       const t = toursMap.get(tourId);

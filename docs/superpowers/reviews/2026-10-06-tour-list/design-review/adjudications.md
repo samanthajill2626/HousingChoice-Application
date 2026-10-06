@@ -289,3 +289,37 @@ Decision changed: NO (precision).
 
 Round 3 changed one decision (R3-4, a scope reduction) -> round 4, the hard
 cap: if it changes a decision, the open findings go to Cameron as a decision.
+
+## Round 4 (spec draft 4 @5634409c; reviewer A continued) - TERMINAL
+
+Report: `spec-r4-a.md` (3 findings). R3-4's revert not contested.
+
+### R4-1 [A-r4 1] A filter or sort change during a search leaves the search page-1-only - ACCEPT
+One rule now starts the walk: whenever the search is non-empty and the list is
+incomplete - after typing, on adoption, and when a NEW list starts while
+searching (filter or sort change, the cursor-400 restart). An incomplete list
+with no walk running reads "N matches so far - not the whole list", never
+"N matches". Test added (change When during a search).
+Decision changed: NO (completes D3's stated guarantee; no surface added).
+
+### R4-2 [A-r4 2] The anchor guard's events; react-router's exact click rule - ACCEPT
+The guard listens for `pointerdown`, `keydown`, `wheel`, `touchstart` on the
+document from mount (not `scroll`, `click`, `keyup`, `pointerup`); the
+restore's own scroll and focus never trip it. "Unmodified primary" is exactly
+react-router's predicate (button 0, no Meta/Alt/Ctrl/Shift, `_self` target,
+`chunk-4ZMWKKQ3.mjs:7330-7337`).
+Decision changed: NO (precision).
+
+### R4-3 [A-r4 3] Two cursor consumers outside the loader rule; Retry after a second 400 - ACCEPT
+The first-page load and the empty-page follow are loaders too (Load more and
+Keep checking hidden while any loader runs); a search typed during the first
+page walks on after it lands; the second cursor 400 offers "Start over", never
+a Retry that resends the rejected cursor.
+Decision changed: NO (precision).
+
+Round 4 changed NO decision: the design review CLOSES here (terminal round,
+precision edits folded into DRAFT 5). Totals: round 1 - 29 findings from two
+reviewers (17 merged items); round 2 - 7; round 3 - 5; round 4 - 3. Rejected:
+2 alternative fixes (R1-2 PATCH stamping, R1-7 PATCH no-show guard), both
+conceded by the reviewer. Filed: `tour-no-show-without-date`,
+`undated-tour-wording`.

@@ -1,8 +1,8 @@
 # Tours page: the All tab - every tour, filtered and paged by the server (Sam #18, final part)
 
-Status: DRAFT 4 (2026-10-06) - after design review rounds 1-3 (rulings:
+Status: DRAFT 5 (2026-10-06) - design review closed after round 4 (rulings:
 `docs/superpowers/reviews/2026-10-06-tour-list/design-review/adjudications.md`).
-For review round 4 (the last), then Cameron's spec gate.
+For Cameron's spec gate.
 Branch `feat/tour-list`, worktree `W:\tmp\tour-list`, cut from main @d839494a.
 Records: `docs/superpowers/reviews/2026-10-06-tour-list/`.
 
@@ -314,15 +314,16 @@ of 4.8.
 
 ### 4.5 Paging and the count line
 
-- ONE LOADER AT A TIME. Four things advance the list's cursor: Load more, Keep
-  checking, the search walk (6) and the return restore (4.9). Exactly one runs
-  at a time; while one runs, Load more and Keep checking are hidden. A filter
-  change aborts whichever is running and loads the first page (`limit=50`).
-  Typing a search while a restore runs aborts the restore and the walk
-  continues from the cursor it reached; typing one while Load more, Keep
-  checking or the empty-page follow has a request in flight lets that request
-  finish (its rows are valid for the same filters), then the walk continues
-  from its cursor.
+- ONE LOADER AT A TIME. Every request that starts or advances the list's
+  cursor chain is a loader: the first-page load, Load more, Keep checking, the
+  empty-page follow, the search walk (6) and the return restore (4.9). Exactly
+  one runs at a time; while ANY runs, Load more and Keep checking are hidden. A
+  filter or sort change aborts whichever is running and loads the first page
+  (`limit=50`). Typing a search while a restore runs aborts the restore and the
+  walk continues from the cursor it reached; typing one while the first-page
+  load, Load more, Keep checking or the empty-page follow has a request in
+  flight lets that request finish (its rows are valid for the same filters),
+  then the walk continues from its cursor.
 - **Load more** appears while the last response carried a `nextCursor` and no
   loader is running; it appends the next page.
 - De-duplication by `tourId` on append: the LATER copy's data replaces the
@@ -343,11 +344,12 @@ of 4.8.
   (`cursor_mismatch` / `invalid cursor` - say a tab left open across a deploy)
   is never retried with that cursor: the list restarts at page 1 and the count
   line says "The list was refreshed." At most ONE automatic restart per list (a
-  filter change starts a new list): a second cursor 400 shows the Load more
-  failure message, stops any walk or restore, and offers no automatic retry,
-  so a persistent rejection cannot become a restart loop. A complete empty
-  list shows "No tours match these filters." (plus Clear filters when filters
-  are set).
+  filter change starts a new list): a second cursor 400 stops any walk or
+  restore and shows "We couldn't load more tours." with a **Start over** button
+  (page 1, a new list) - never a Retry that would resend the rejected cursor -
+  so a persistent rejection cannot become a restart loop. A complete empty list
+  shows "No tours match these filters." (plus Clear filters when filters are
+  set).
 
 ### 4.6 Search
 
@@ -391,11 +393,14 @@ replaces #1's current-tab link.)
   entry, Back/Forward-correct, and needs no test reset seam):
   - An UNMODIFIED primary click on a row makes the stamped REPLACE of 4.7, and
     its history state carries the stamp AND `restore`, so the list's own entry
-    remembers where the user was. A Ctrl/Cmd/Shift/middle click opens the tour
-    elsewhere and writes nothing (react-router runs a Link's own onClick even
-    for a modified click, so the handler checks). While a navigation is
-    pending the write is skipped (4.7) - that entry then has no record, and
-    only the back arrow's copy remains.
+    remembers where the user was. "Unmodified primary" is exactly
+    react-router's own rule for a click it navigates (button 0, no Meta, Alt,
+    Ctrl or Shift, no target other than `_self`;
+    `node_modules/react-router/dist/development/chunk-4ZMWKKQ3.mjs:7330-7337`):
+    any other click opens the tour elsewhere and writes nothing (react-router
+    runs a Link's own onClick even for a modified click, so the handler
+    checks). While a navigation is pending the write is skipped (4.7) - that
+    entry then has no record, and only the back arrow's copy remains.
   - Every other write replaces the whole state (4.7), so a filter change or a
     blur save drops the record.
   - The row link's router state carries `{ back, restore }` (4.8), and the tour
@@ -411,9 +416,14 @@ replaces #1's current-tab link.)
     `openedIndex` (the next one to work on), clamped to the last visible row;
   - else (an empty list, or a capped restore that stopped short of `depth`)
     nothing - Load more continues from there.
-- The anchor is a convenience, never a hijack: if the user types, clicks or
-  scrolls anywhere on the page before the load ends, the anchor is dropped and
-  neither scroll nor focus moves.
+- The anchor is a convenience, never a hijack: if the user acts before the load
+  ends, the anchor is dropped and neither scroll nor focus moves. "Acts" means a
+  user-intent event - `pointerdown`, `keydown`, `wheel` or `touchstart` -
+  listened for on the document from the view's mount. Not `scroll` (the browser
+  scrolls on its own: clamping, scroll anchoring, focus), and not `click`,
+  `keyup` or `pointerup` (they can be the tail of the gesture that navigated
+  back, such as a mouse back button or Alt+Left). The restore's own scroll and
+  focus come after the load ends and never trip it.
 - With a search, the walk of section 6 loads the whole filtered list instead,
   and the same anchor rule applies when it ends.
 - Any arrival without a `restore` record (the All tab, the nav, a typed URL, a
@@ -598,11 +608,17 @@ items evaluated, Query calls, phases touched) - never an id, name or address.
   rare, a throttled read.
 - It narrows the rows already loaded at once. If the list is not complete, the
   hook then loads the REST of the current filtered list (100-row pages) and
-  matches appear as pages arrive. Triggers: 300 ms after typing stops, AND
-  immediately whenever a non-empty search is adopted (mount, browser Back, the
-  back arrow - 4.7, 4.9).
+  matches appear as pages arrive. ONE RULE for when the walk starts: whenever
+  the search is non-empty and the list is not complete - 300 ms after typing
+  stops; immediately when a non-empty search is adopted (mount, browser Back,
+  the back arrow - 4.7, 4.9); and immediately when a NEW list starts while the
+  search is non-empty (a filter or sort change, the cursor-400 restart). The
+  request cap and the copy below apply in every case.
 - While the walk runs, Load more is hidden and the count line reads
-  "Searching... N matches so far"; once complete, "N matches".
+  "Searching... N matches so far"; once the list is complete, "N matches". A
+  search over an INCOMPLETE list with no walk running (the walk hit its cap,
+  or stopped on a second cursor 400) never reads as complete: "N matches so
+  far - not the whole list".
 - Cost, stated precisely. What the SERVER reads is set by When (the key
   condition) and by the status set's choice of phases and partitions (it can
   skip phase D or U, and phase U reads only the selected statuses). Within a
@@ -707,8 +723,14 @@ not.
     request while a walk or restore runs; a search typed during a restore
     takes over its cursor).
   - Search: narrows at once; walks the rest; starts immediately on an adopted
-    search; hides Load more while walking; clearing aborts and keeps rows; the
-    request cap copy.
+    search AND on a filter or sort change made while searching; hides Load more
+    while walking; clearing aborts and keeps rows; the request cap copy; an
+    incomplete list never reading "N matches".
+  - Loaders: Load more hidden during the first-page load and the empty-page
+    follow; a search typed while the first page loads walks on after it lands;
+    the second cursor 400 offering Start over, not Retry; the anchor guard
+    tripped by `keydown`/`pointerdown`/`wheel`/`touchstart` and NOT by a
+    browser-made `scroll`; an Alt-click on a row writing no record.
   - URL adoption and stamped writes; `state.back` built from local state with an
     unsaved search; `TourDetail` accepting `/tours/all?...` and handing `restore`
     back; the row accessible name.

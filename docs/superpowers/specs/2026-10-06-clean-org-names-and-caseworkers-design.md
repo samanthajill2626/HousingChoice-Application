@@ -1,9 +1,14 @@
 # Clean housing authority and agency names, and caseworkers - design
 
-Date: 2026-10-06 (revision 6: revision 5 was APPROVED by Cameron; revision 6
-folds in precision corrections from the plan research - see
-`docs/superpowers/reviews/2026-10-06-clean-org-names/plan-research/planner-rulings.md`
-- with no design change. Design review: rounds 1-4, closed - adjudications in
+Date: 2026-10-06 (revision 7: revision 5 was APPROVED by Cameron; revision 6
+folded in precision corrections from the plan research
+(`docs/superpowers/reviews/2026-10-06-clean-org-names/plan-research/planner-rulings.md`);
+revision 7 folds in the plan review round 1
+(`docs/superpowers/reviews/2026-10-06-clean-org-names/plan-review/adjudications.md`):
+the starting-list default of section 13 (for Cameron to confirm at the launch
+gate), the name-variant rule in D10, D11's read paths, fixed `fields` and
+lock-loss stop, and section 6's endpoint shapes. Design review: rounds 1-4,
+closed - adjudications in
 `docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md`).
 Tracker items #2 ("One clean name per housing authority") and #19
 ("Caseworkers"), built together under one approved estimate (10-15 hours of
@@ -223,8 +228,8 @@ environment that finds no `org-list` item writes the starting list
 (Appendix A) with a create-only condition and returns it. From then on the
 stored item is the only source; later edits to the starting list in code do
 NOT reach an environment that already has the item. No environment holds
-the item before branch A deploys there, and Appendix A is final before the
-branch A plan is written (section 13), so dev and prod start from the same
+the item before branch A deploys there, and Appendix A is fixed in the code
+before branch A merges (section 13), so dev and prod start from the same
 list. Seeds (lean and full) write the item with an UNCONDITIONAL put, so a
 reader that created the item during the dev reseed's clear-then-seed window
 is overwritten and test worlds stay deterministic.
@@ -264,8 +269,9 @@ D4. **Matching rules (one server-side module).**
   (normalized) is a match or an ambiguity as above, and is NEVER compound.
 - Otherwise a value is COMPOUND when its normalized text holds two or more
   NON-overlapping whole-word spans that each equal a name or spelling (spans
-  taken longest first, so a span inside a longer matching span does not
-  count) and no single entry is matched by every span. Examples: "dca hud
+  found left to right, taking at each position the LONGEST phrase that is a
+  name or spelling, so a span inside a longer matching span does not count)
+  and no single entry is matched by every span. Examples: "dca hud
   vash" (Georgia Department of Community Affairs + HUD-VASH) is compound;
   "aha" and "atlanta aha" are exact spellings, never compound; "atlanta
   housing authority aha" is not compound (Atlanta Housing Authority matches
@@ -413,7 +419,12 @@ visible to every signed-in user, with three sections:
   marker, or each property's address, linked to its page. Tenants and
   properties can be fixed one at a time on their own pages; for records whose
   page does not show the field (non-tenant contacts in branch A, deleted
-  records), the value-level actions below are the way to settle them.
+  records), the value-level actions below are the way to settle them. A
+  NAME-VARIANT row (a value that normalizes equal to an entry NAME of the
+  field's kind, e.g. "atlanta housing authority") offers ONLY "Use <that
+  entry>": a rewrite matches normalized text, so any other action would also
+  rewrite every record holding the exact name (refused 409
+  `org_value_is_name_variant`).
 - Everyone: view all three sections (including "Not on the list" and its
   records); add an entry (name and notes, through "Is this really new?");
   edit an entry's notes.
@@ -463,8 +474,15 @@ D11. **The rewrite job (rename, merge, and the "Not on the list" actions).**
   EXCEPT action `cleanup`, which no job can run: for it the page says to
   re-run the cleanup script, and a stale `cleanup` lock simply stops blocking
   new rewrites after 15 minutes.
-- The job reads base tables, not the GSI: every contact of every type, active
-  and deleted, and every unit, active and deleted. It rewrites each value or
+- The job reads every contact of every type, active and deleted - through the
+  `byTypeStatus` index, as every contact list in the app does (the contacts
+  table also holds pointer rows; the repo refuses to remove that index's keys,
+  so a contact missing them is invisible app-wide) - and every unit, active and
+  deleted (a base-table scan). Index lag is sub-second: a record written in
+  the moment before a rewrite or a delete check can be missed, and then shows
+  in "Not on the list" once the index catches up, where Use settles it. The
+  rewrite's `fields` are fixed when it starts (rename/merge: the fields of the
+  target's kind then). It rewrites each value or
   list member whose normalized text is in the from-texts, conditional on the
   record still holding the text it read; unit lists are de-duplicated after
   the rewrite; the housing authority is REMOVEd on Clear. Machine writes never
@@ -487,7 +505,10 @@ D11. **The rewrite job (rename, merge, and the "Not on the list" actions).**
   (records rewritten per field, skipped because a record changed meanwhile).
   It acts only while `lastRewrite` still carries its id and `running`; every
   heartbeat and finish re-checks the id first, so a duplicate or stale run
-  never overwrites a newer rewrite's state. It catches its own errors,
+  never overwrites a newer rewrite's state, and a run whose heartbeat finds
+  the lock gone stops writing records at once. "Run again" first re-checks
+  that the rewrite's target names still exist with the expected kind (else
+  409 `org_rewrite_target_gone`). It catches its own errors,
   records `failed` with the counts so far, and never rethrows (a rethrow would
   make the queue redeliver it). Re-running a definition is safe: records
   already rewritten no longer hold the from-text. While a rewrite runs, a
@@ -515,7 +536,8 @@ starting list; admin edits on the Settings page; renamed and merged names
 
 D13. **Notes, names and size limits.** Names are at most 120 characters.
 Names and spellings may not contain a newline or other control character
-(they are rendered one per line into the AI list block).
+(they are rendered one per line into the AI list block), and a name may not
+normalize to the empty string (for example "-" or "()").
 Notes are free text up to 500 characters, editable by everyone. An entry
 carries at most 20 spellings of at most 120 characters each (the name limit,
 so a merged or renamed name always fits as a spelling). A COMPOUND text (D4)
@@ -679,12 +701,16 @@ the cleanup backfills `accepted_authorities` for units that have only
 All under `/api/organizations`, signed-in staff unless marked admin.
 
 - `GET /api/organizations` - both lists (5.1 entries) plus `lastRewrite`.
-  `?usage=1` adds per-entry use counts (D3, D10).
+- `GET /api/organizations/usage` - per-entry use counts (D3, D10).
 - `GET /api/organizations/not-on-list` - the D10 section: distinct values,
-  field, count, resolution, and (per row, on request) the holding records.
-  Computed on demand from base-table reads. Visible to everyone.
-- `POST /api/organizations/check` `{ kind, text }` - the D4 resolution:
-  `{ match?, candidates[], close[], otherKind? }`. No write.
+  field, count, resolution; `GET /api/organizations/not-on-list/records?field=&value=`
+  - the holding records of one row. Computed on demand (D11's read paths).
+  Visible to everyone.
+- `POST /api/organizations/check` `{ kind, text, spellingFor? }` - the D4
+  resolution: `{ match?, candidates[], close[], otherKind?, compound?,
+  nameProblem?, spellingProblem? }`. No write. Text over 200 characters is
+  refused with 400; close names are scored only for texts up to 120
+  characters.
 - `POST /api/organizations` `{ kind, name, notes? }` - add. Refused 409
   `org_name_taken` when the name equals any entry's name or spelling (either
   kind), returning that entry.
@@ -732,8 +758,8 @@ Existing endpoints that write the fields in 5.2 apply D5 and answer 422
   Atlanta Housing Authority, `ga_dca` -> Georgia Department of Community
   Affairs, `dekalb_housing` -> DeKalb County Housing Authority,
   `gwinnett_housing` -> Georgia Department of Community Affairs,
-  `cobb_housing` -> Marietta Housing Authority, `fulton_housing` -> section 13
-  item 1). Seeds write the `org-list` item. The lean world changes; e2e
+  `cobb_housing` -> Marietta Housing Authority, `fulton_housing` -> Fulton
+  County Housing Authority). Seeds write the `org-list` item. The lean world changes; e2e
   expectations follow.
 - **e2e specs** that type free-text names or mint run-unique names pick list
   names or add their run-unique names through `POST /api/organizations` first.
@@ -892,23 +918,30 @@ routes still mint `tenant_1to1` for any phone (tracker #13).
 
 ---
 
-## 13. Open items pending Sam (Cameron's meeting, 2026-10-06)
+## 13. Questions for Sam - no longer blocking
 
-The answers change only Appendix A and the seed mapping of `fulton_housing`,
-not the design. Appendix A must be final before the branch A plan is written.
+Planner default (2026-10-06, to be confirmed by Cameron at the launch gate):
+the answers no longer block the build. Fulton County Housing Authority is on
+the starting list (a real metro voucher administrator; an unused entry does
+no harm), with only its official name as a spelling. The old values `Fulton
+County`, `Clayton County`, `Cobb County` and `McDonough` are NOT spellings of
+anything: tenants holding them surface in "Not on the list", where Sam settles
+each value with one click once she confirms what it meant. Anything else she
+adds later goes in through Settings. The seeds map `fulton_housing` to Fulton
+County Housing Authority.
 
-1. Fulton County Housing Authority: are there tenants with one? (Decides
-   whether it is in Appendix A, and what `fulton_housing` maps to.)
+1. Are there tenants with a Fulton County voucher (Housing Authority of
+   Fulton County)?
 2. "McDonough" on tenants: a DCA voucher in Henry County, or something else?
 3. "Clayton County" = Jonesboro Housing Authority, "Cobb County" = Marietta
-   Housing Authority? (If yes, each becomes a spelling of that entry.)
+   Housing Authority?
 4. Who is "Hands of Hope"?
 5. Any other entry now (for example McIntosh Trail Community Service Board)?
 6. HUD-VASH as the agency on a veteran's record: confirmed?
 
 ---
 
-## Appendix A - Starting list (final once section 13 is answered)
+## Appendix A - Starting list (section 13's planner default; Cameron confirms at the launch gate)
 
 Housing authorities:
 
@@ -925,9 +958,15 @@ Housing authorities:
 | College Park Housing Authority | Housing Authority of the City of College Park; College Park |
 | Macon-Bibb County Housing Authority | Macon Housing Authority; MHA |
 | Augusta Housing Authority | AHA |
+| Fulton County Housing Authority | Housing Authority of Fulton County |
 
-Pending section 13: Fulton County Housing Authority (spellings: Housing
-Authority of Fulton County; Fulton County; Fulton, Fulton County).
+Notes carried on the starting entries (research, 2026-10-06): Georgia
+Department of Community Affairs (the 149 counties it covers and the ten it
+does not; North Regional Office in Atlanta), Georgia Housing Voucher Program
+(DBHDD's statewide program; its contractor pays landlords; the provider
+agency requests inspections), HUD-VASH (national program; voucher from a
+housing authority, case manager from the local VA medical center), Fulton
+County Housing Authority (Fulton County outside the City of Atlanta).
 
 Agencies:
 

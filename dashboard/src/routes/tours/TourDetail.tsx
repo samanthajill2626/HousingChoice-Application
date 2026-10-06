@@ -47,6 +47,7 @@ import {
   TOUR_OUTCOME_LABELS,
   TOUR_TYPE_LABELS,
   tourStatusLabel,
+  undatedTourLabel,
   type Contact,
   type RosterPreview,
   type StaffTourOutcome,
@@ -309,7 +310,7 @@ function TourDetailLoaded({
 
   const address = unit ? formatAddress(unit.address) || tour.unitId : tour.unitId;
   const typeLabel = TOUR_TYPE_LABELS[tour.tourType] ?? tour.tourType;
-  const whenText = tour.scheduledAt !== undefined ? formatScheduledAt(tour.scheduledAt) : 'Not booked';
+  const whenText = tour.scheduledAt !== undefined ? formatScheduledAt(tour.scheduledAt) : undatedTourLabel(tour);
   const factsLine = `${whenText} - ${typeLabel} - ${tenantName} -> ${address}`;
   const createdText = typeof tour.createdAt === 'string' ? shortDate(tour.createdAt) : null;
 

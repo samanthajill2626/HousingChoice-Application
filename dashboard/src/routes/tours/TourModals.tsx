@@ -200,7 +200,7 @@ export function RescheduleTourModal({ onClose, onConfirm }: DateModalProps): Rea
  *
  * The date is OPTIONAL (Cameron, 2026-08-19): supplying it records when the
  * tour actually happened so the Schedule card and the date-range views show a
- * real date instead of "Not booked"; leaving it blank records only that it
+ * real date instead of "Undated"; leaving it blank records only that it
  * happened. It is seeded with the current whole hour and is clearable, and the
  * odd-time check is INVERTED against the booking dialogs - a past time is
  * expected here, a FUTURE one is what asks for confirmation.

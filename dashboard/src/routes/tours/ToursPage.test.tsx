@@ -677,6 +677,33 @@ describe('ToursPage', () => {
     }
   });
 
+  /** A request canceled before it was ever booked: canceled, and NO date. */
+  const TOUR_CANCELED_UNDATED: Tour = {
+    tourId: 'k3',
+    tenantId: 'c2',
+    unitId: 'u1',
+    tourType: 'pm_team',
+    status: 'canceled',
+    createdAt: '2026-06-10T10:00:00Z',
+    updatedAt: '2026-06-12T10:00:00Z',
+  };
+
+  it('Closed rows: an undated tour (a request canceled before booking) reads "Undated" in the date column, never a blank', () => {
+    readyAll([], []);
+    closedState = { status: 'ready', closed: [TOUR_CLOSED_NEW, TOUR_CANCELED_UNDATED] };
+    renderPage('/tours/closed');
+    const items = within(screen.getByRole('region', { name: 'Closed tours' })).getAllByRole('listitem');
+    expect(items).toHaveLength(2);
+    // A dated row keeps its date.
+    expect(within(items[0]!).getByText(/Jul 14, 2026/)).toBeInTheDocument();
+    expect(within(items[0]!).queryByText('Undated')).not.toBeInTheDocument();
+    // The undated row's lead meta column says so, before the status badge. It
+    // is not a request any more, so it never reads "Needs booking".
+    expect(within(items[1]!).getByText('Undated')).toBeInTheDocument();
+    expect(items[1]!).toHaveTextContent(/Undated\s*Canceled\s*PM team/);
+    expect(within(items[1]!).queryByText('Needs booking')).not.toBeInTheDocument();
+  });
+
   it('the Closed intro names every way a tour ends (spec 9.3)', () => {
     readyAll([], []);
     renderPage('/tours/closed');

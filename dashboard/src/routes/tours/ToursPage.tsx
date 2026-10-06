@@ -50,6 +50,7 @@ import {
   getTour,
   patchTour,
   tourStatusLabel,
+  undatedTourLabel,
   type Tour,
   type Contact,
   type UnitItem,
@@ -120,8 +121,9 @@ interface TourRowProps {
   contacts: Map<string, Contact>;
   units: Map<string, UnitItem>;
   /** The lead meta column: the tour's time (Upcoming - the date is the group
-   *  header), its date (Closed - possibly months old), or nothing (Needs
-   *  booking - timeless). */
+   *  header), its date (Closed - possibly months old; an undated one reads
+   *  `undatedTourLabel`, never a blank), or nothing (Needs booking -
+   *  timeless). */
   timeDisplay: 'time' | 'date' | 'none';
 }
 
@@ -132,7 +134,9 @@ function TourRow({ tour, contacts, units, timeDisplay }: TourRowProps): React.JS
     timeDisplay === 'time'
       ? formatTime(tour.scheduledAt)
       : timeDisplay === 'date'
-        ? formatDate(tour.scheduledAt)
+        ? tour.scheduledAt !== undefined
+          ? formatDate(tour.scheduledAt)
+          : undatedTourLabel(tour)
         : undefined;
   const statusLabel = tourStatusLabel(tour);
   const typeLabel = TOUR_TYPE_LABELS[tour.tourType as keyof typeof TOUR_TYPE_LABELS] ?? tour.tourType;
@@ -203,7 +207,7 @@ function PastTourRow({
   // blank) reads "Undated" in the date column and ", undated" in every name,
   // never a dangling "on ". It is never "Not marked", so it never joins a batch.
   const dated = typeof tour.scheduledAt === 'string' && tour.scheduledAt.length > 0;
-  const when = dated ? whenLabel(tour.scheduledAt) : 'Undated';
+  const when = dated ? whenLabel(tour.scheduledAt) : undatedTourLabel(tour);
   const who = dated ? `${tenant} at ${property} on ${when}` : `${tenant} at ${property}, undated`;
   const state = pastState(tour);
   const notMarked = tour.status === 'scheduled';

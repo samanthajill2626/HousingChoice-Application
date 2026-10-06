@@ -911,6 +911,16 @@ export function tourStatusLabel(
   return TOUR_STATUS_LABELS[tour.status] ?? tour.status;
 }
 
+/** How a tour with NO date reads, everywhere a date would show (Cameron
+ *  2026-10-06, spec P7 / D8): a request is work to do - "Needs booking" (the
+ *  Active tab's section and the All tab's chip use the same words); any other
+ *  tour without a date - toured with the date left blank, a request canceled
+ *  before booking, or one of those closed - is "Undated". ONE rule: every
+ *  surface that shows a missing tour date calls this, never its own string. */
+export function undatedTourLabel(tour: Pick<Tour, 'status'>): string {
+  return tour.status === 'requested' ? 'Needs booking' : 'Undated';
+}
+
 /** Tour outcome (mirrors app/src/lib/toursModel.ts TourOutcome). A person
  *  records `move_forward` / `not_a_fit` at the exit gate; `no_outcome` is
  *  written ONLY by the server's auto-close sweep, when nobody recorded a

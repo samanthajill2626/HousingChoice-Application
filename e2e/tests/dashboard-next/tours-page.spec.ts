@@ -235,11 +235,11 @@ test.describe('Tours page', () => {
     const tourId = tourIdMatch![1]!;
 
     // ── Tour detail: status is "Requested" (the 'requested' label) ──
-    // The rebuilt page shows the status as a header StatusBadge pill plus a "Not
-    // booked" facts line (no more <dd> aria-labels). Scope to the page header.
+    // The rebuilt page shows the status as a header StatusBadge pill plus a
+    // "Needs booking" facts line (no more <dd> aria-labels). Scope to the page header.
     const detailHeader = page.locator('header').filter({ hasText: 'Tour -' });
     await expect(detailHeader.getByText('Requested', { exact: true })).toBeVisible();
-    await expect(detailHeader.getByText('Not booked')).toBeVisible();
+    await expect(detailHeader.getByText('Needs booking')).toBeVisible();
 
     // ── /tours page — "Needs booking" section lists the tour ──
     await page.goto(`${NEXT}/tours`);
@@ -476,7 +476,7 @@ test.describe('Tours page', () => {
       .getByRole('option', { name: /Joseph E\. Boone/ })
       .click();
 
-    // Timeless create -> lands on the new tour (requested, not booked).
+    // Timeless create -> lands on the new tour (requested, needs booking).
     await dialog.getByRole('button', { name: 'Schedule', exact: true }).click();
     await expect(dialog).toHaveCount(0, { timeout: 10_000 });
     await expect(page).toHaveURL(/\/tours\/[A-Za-z0-9_-]+$/, { timeout: 10_000 });

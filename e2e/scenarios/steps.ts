@@ -1144,7 +1144,7 @@ export class Scenario {
    * first-class entity: documentation/tours-sequence.mermaid). The handoff signal
    * is now a REAL tour record: a timeless ('requested') tour exists for this
    * tenant + the fitting unit (GET /api/tours?tenantId=), Team SEES the row on
-   * the tenant's Tours card ('Not booked' + 'Requested'), and the tenant stays
+   * the tenant's Tours card ('Needs booking' + 'Requested'), and the tenant stays
    * `searching` (touring never changes tenant status — no placement yet).
    */
   expectHandoffToTours(fittingUnit: Unit): Promise<void> {
@@ -1165,15 +1165,15 @@ export class Scenario {
       expect(sent.some((sRow) => sRow.unitId === fittingUnit.unitId)).toBe(true);
       await this.assertStatus('searching');
       await this.page.goto(`${NEXT}/contacts/${id}`);
-      // Team SEES the tour on the Tours card: the row reads "<address> · Not
-      // booked" with the status LABEL 'Requested' on the right (never raw enums).
+      // Team SEES the tour on the Tours card: the row reads "<unit> - Needs booking"
+      // with the status LABEL 'Requested' on the right (never raw enums).
       const toursCard = this.page
         .locator('section')
         .filter({ has: this.page.getByRole('heading', { name: 'Tours' }) });
       await expect(
         toursCard.getByRole('link').filter({ hasText: fittingUnit.addressLine1 }),
       ).toBeVisible({ timeout: 10_000 });
-      await expect(toursCard.getByText('Not booked')).toBeVisible();
+      await expect(toursCard.getByText('Needs booking')).toBeVisible();
       await expect(toursCard.getByText('Requested')).toBeVisible();
       const details = this.page
         .locator('section')
@@ -1850,10 +1850,10 @@ export class Scenario {
           tenantFirstName: this.activeTenant.firstName,
         }),
       };
-      // Requested + not booked - the rebuilt page shows the tour StatusBadge in
-      // the header band (no more <dd> aria-labels) plus a "Not booked" facts line.
+      // Requested + Needs booking - the rebuilt page shows the tour StatusBadge in
+      // the header band (no more <dd> aria-labels) plus a "Needs booking" facts line.
       await expect(this.tourStatusBadge('Requested')).toBeVisible();
-      await expect(this.tourHeader().getByText('Not booked')).toBeVisible();
+      await expect(this.tourHeader().getByText('Needs booking')).toBeVisible();
       return tourId;
     });
   }

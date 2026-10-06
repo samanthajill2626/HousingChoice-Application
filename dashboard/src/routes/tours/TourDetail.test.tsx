@@ -304,8 +304,22 @@ describe('TourDetail - primary CTA ladder', () => {
     await waitLoaded();
     expect(screen.getByRole('button', { name: 'Schedule tour' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
-    // Not booked shows in the facts + Schedule card.
-    expect(screen.getByText(/Not booked - Self-guided/)).toBeInTheDocument();
+    // Needs booking shows in the facts + Schedule card.
+    expect(screen.getByText(/Needs booking - Self-guided/)).toBeInTheDocument();
+    expect(screen.getByText('Needs booking')).toBeInTheDocument();
+  });
+
+  it('an undated TOURED tour reads "Undated" in the facts line and the Schedule card - never "Needs booking"', async () => {
+    // Marked "already toured" with the date left blank: no scheduledAt, and it
+    // is not a request, so there is nothing left to book.
+    getTour.mockResolvedValue(makeTour({ status: 'toured', scheduledAt: undefined }));
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getByText(/^Undated - Self-guided - /)).toBeInTheDocument();
+    // The Schedule card's When (the facts line is a longer text, so exact
+    // matching finds only the card value).
+    expect(screen.getByText('Undated')).toBeInTheDocument();
+    expect(screen.queryByText(/Needs booking/)).not.toBeInTheDocument();
   });
 
   it('scheduled -> Mark toured', async () => {

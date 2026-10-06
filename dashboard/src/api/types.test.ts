@@ -8,6 +8,7 @@ import {
   suppressionLead,
   suppressionNote,
   tourStatusLabel,
+  undatedTourLabel,
 } from './types.js';
 
 describe('tourStatusLabel', () => {
@@ -40,6 +41,21 @@ describe('tourStatusLabel', () => {
   it('a closed tour stays "Closed" whatever its outcome', () => {
     expect(tourStatusLabel({ status: 'closed', outcome: 'no_outcome' })).toBe('Closed');
   });
+});
+
+// The ONE wording rule for a tour's missing date (spec P7 / D8): a request is
+// work to do, any other tour without a date is simply undated.
+describe('undatedTourLabel', () => {
+  it('a requested tour reads "Needs booking"', () => {
+    expect(undatedTourLabel({ status: 'requested' })).toBe('Needs booking');
+  });
+
+  it.each(['scheduled', 'toured', 'no_show', 'canceled', 'closed'] as const)(
+    'a %s tour without a date reads "Undated"',
+    (status) => {
+      expect(undatedTourLabel({ status })).toBe('Undated');
+    },
+  );
 });
 
 describe('MESSAGE_TRANSPORTS', () => {

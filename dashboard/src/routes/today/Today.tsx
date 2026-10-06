@@ -17,6 +17,7 @@ import { Link } from 'react-router-dom';
 import {
   closeConversation,
   deferCloseNag,
+  undatedTourLabel,
   type RelayCloseNag,
   type TodayGroup,
   type TodayItem,
@@ -212,7 +213,7 @@ function PastTourRow({ row }: { row: TodayPastTourRow }): React.JSX.Element {
           <span className={styles.why}>{property}</span>
         </span>
         <span className={styles.meta}>
-          <span className={styles.when}>{when.length > 0 ? when : 'Undated'}</span>
+          <span className={styles.when}>{when.length > 0 ? when : undatedTourLabel(tour)}</span>
           <span className={styles.tag}>{state}</span>
         </span>
       </Link>

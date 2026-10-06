@@ -1,7 +1,7 @@
 # Clean housing authority and agency names, and caseworkers - design
 
-Date: 2026-10-06 (revision 3, after adversarial design review rounds 1 and
-2 - adjudications in
+Date: 2026-10-06 (revision 4, after adversarial design review rounds 1-3 -
+adjudications in
 `docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md`).
 Tracker items #2 ("One clean name per housing authority") and #19
 ("Caseworkers"), built together under one approved estimate (10-15 hours of
@@ -258,10 +258,20 @@ D4. **Matching rules (one server-side module).**
   any entry's name (normalized). Spellings are unique within one entry
   (de-duplicated on write) and may be shared between entries of the SAME
   kind (AHA, MHA); a spelling may never be shared across kinds.
-- A value is COMPOUND when its normalized text contains, as whole words,
-  the normalized names or spellings of two or more different entries (for
-  example "dca hud vash" contains "dca" and "hud vash"). Compound values are
-  never stored as spellings and never resolve to one entry.
+- Exact equality is decided first: a text equal to a name or spelling
+  (normalized) is a match or an ambiguity as above, and is NEVER compound.
+- Otherwise a value is COMPOUND when its normalized text holds two or more
+  NON-overlapping whole-word spans that each equal a name or spelling (spans
+  taken longest first, so a span inside a longer matching span does not
+  count) and no single entry is matched by every span. Examples: "dca hud
+  vash" (Georgia Department of Community Affairs + HUD-VASH) is compound;
+  "aha" and "atlanta aha" are exact spellings, never compound; "atlanta
+  housing authority aha" is not compound (Atlanta Housing Authority matches
+  both spans) and, not being exact, is simply not on the list. One shared
+  spelling is ambiguity, never compound.
+- Compound values are never stored as spellings and never resolve to one
+  entry; the Settings page offers Split for them (D10). The plan's tests
+  cover every Appendix A row and these examples.
 
 D5. **One server-side check for every writer.** When a writer SETS a value
 that differs from what the record holds now, it resolves the text with D4
@@ -322,8 +332,9 @@ D8. **AI: list-aware, suggestion-only for anything new.**
   of the rendered list block (`orgListFingerprint`) in the AI run log beside
   the prompt fingerprint, so runs that saw the same list group together. The
   block has a budget of 16,000 characters: housing authority names first,
-  then agency names, then spellings; spellings are dropped first when it is
-  exceeded (logged at WARN).
+  then agency names, then spellings. Over budget, spellings are dropped
+  first, then agency names, then the housing authority names that do not fit
+  (each drop logged at WARN with counts).
 - The model is told: return the full name from the list; when an
   abbreviation belongs to more than one name, pick the one the conversation
   supports or return the text as said; agency names are never housing
@@ -404,6 +415,12 @@ visible to every signed-in user, with three sections:
     housing authority entry: move to `housingAuthority` where it is absent,
     set `agency` to `''`; records whose housing authority holds something else
     are counted as conflicts and left.
+  - **Split into <housing authority> + <agency>** - for compound housing
+    authority values (D4); both names prefilled from the value's spans and
+    editable: set `housingAuthority` to the housing authority name, and set
+    `agency` to the agency name where `agency` is absent or `''` (records
+    whose `agency` holds something else keep it and are counted as
+    conflicts; their housing authority is still set).
   - **Add as new** - create the entry (from the value or a corrected name),
     then Use it.
   - **Clear** - remove the value from those records.
@@ -420,7 +437,10 @@ D11. **The rewrite job (rename, merge, and the "Not on the list" actions).**
   definition (from-texts, to-name, fields, action); then the job is enqueued
   (`jobs.enqueue`). An enqueue failure sets `lastRewrite` to `failed`. A
   `failed` rewrite, or a `running` one whose heartbeat is older than 15
-  minutes, shows "Run again" (admin), which re-enqueues the same definition.
+  minutes, shows "Run again" (admin), which re-enqueues the same definition -
+  EXCEPT action `cleanup`, which no job can run: for it the page says to
+  re-run the cleanup script, and a stale `cleanup` lock simply stops blocking
+  new rewrites after 15 minutes.
 - The job reads base tables, not the GSI: every contact of every type, active
   and deleted, and every unit, active and deleted. It rewrites each value or
   list member whose normalized text is in the from-texts, conditional on the
@@ -431,10 +451,15 @@ D11. **The rewrite job (rename, merge, and the "Not on the list" actions).**
   action, by}. The job never touches broadcasts.
 - From-texts: rename = the old name; merge = the merged entry's name and its
   spellings that no other entry shares; Use <name>, Move to Agency, Move to
-  Housing authority and Clear = the value (in the one field the row names).
-- Merge moves the merged entry's name and spellings onto the target as
-  spellings (spellings shared with other entries stay shared), then removes
-  the merged entry. A renamed entry keeps its old name as a spelling.
+  Housing authority, Split and Clear = the value (in the one field the row
+  names).
+- Merge moves the merged entry's name and ALL its spellings onto the target
+  as spellings, then removes the merged entry. A spelling the merged entry
+  shared with a third entry stays shared (the target replaces the merged
+  carrier, so no share is created or lost); D12's skip rules for automatic
+  additions do not apply to this transfer. A merge whose transfer would break
+  a D13 cap is refused (409 `org_spellings_full`) so no spelling is silently
+  dropped. A renamed entry keeps its old name as a spelling.
 - The job heartbeats `lastRewrite` and finishes with `done` and counts
   (records rewritten per field, skipped because a record changed meanwhile).
   Re-running a definition is safe: records already rewritten no longer hold
@@ -450,11 +475,12 @@ starting list; admin edits on the Settings page; renamed and merged names
   breaks a D13 cap; adding a spelling another entry of the same kind already
   carries is allowed only with an explicit confirm ("now shared with <name> -
   it will no longer be applied automatically").
-- AUTOMATIC additions (rename keeping the old name, merge moving names and
-  spellings, Use with "Remember this spelling") apply the same rules but SKIP
-  - never fail on - a spelling that breaks one; the action still runs, and the
-  result names each skipped spelling and why. They never create a same-kind
-  share silently: a spelling another entry already carries is skipped too.
+- AUTOMATIC additions (rename keeping the old name, Use with "Remember this
+  spelling") apply the same rules but SKIP - never fail on - a spelling that
+  breaks one; the action still runs, and the result names each skipped
+  spelling and why. They never create a same-kind share silently: a spelling
+  another entry already carries is skipped too. (Merge's transfer follows
+  D11 instead.)
 - A rename's new name must not equal another entry's name or spelling (it may
   equal one of the entry's own spellings, which is then dropped from its
   spellings).
@@ -542,8 +568,11 @@ choice, Make caseworker), the contact's open one-to-one threads - for EVERY
 phone in its `phones` list and every email address, not only the primary
 phone - whose type matches the OLD type are re-typed to the new type; a
 thread typed for some other identity is left alone (today's triage-conflict
-rule). Staff type changes stamp a NEW field `type_source: 'manual'`. The
-importer, for a contact whose `type_source` is `'manual'`, writes none of
+rule). A NEW field `type_source: 'manual'` is stamped when staff OVERRIDE a
+type - change a contact typed tenant, landlord or partner to a different
+type (edit form, Caseworker choice) - and by Make caseworker; triage of an
+`unknown` contact does not stamp it. The importer, for a contact whose
+`type_source` is `'manual'`, writes none of
 `type`, `status`, `housingAuthority` or `agency` (its own type and status
 were computed for a type staff overrode, and Make caseworker removed the
 authority on purpose); contacts without the field are imported as today. The
@@ -573,7 +602,7 @@ contact header shows voucher size and housing authority only for tenants.
   lastRewrite?: {                  // the latest rewrite (D11)
     jobId: string,
     action: 'rename' | 'merge' | 'use' | 'move_to_agency'
-          | 'move_to_housing_authority' | 'clear' | 'cleanup',
+          | 'move_to_housing_authority' | 'split' | 'clear' | 'cleanup',
     fromTexts: string[], toName?: string,
     fields: string[],              // which record fields it rewrites
     status: 'running' | 'done' | 'failed',
@@ -624,9 +653,9 @@ All under `/api/organizations`, signed-in staff unless marked admin.
 - `DELETE /api/organizations/:orgId` (admin) - refused 409 `org_in_use` while
   anything uses the entry.
 - `POST /api/organizations/not-on-list/resolve` (admin) `{ field, value,
-  action: 'use' | 'move_to_agency' | 'move_to_housing_authority' | 'add' |
-  'clear', name?, rememberSpelling? }` - starts the rewrite (D10, D11); the
-  response names any spelling D12 skipped.
+  action: 'use' | 'move_to_agency' | 'move_to_housing_authority' | 'split' |
+  'add' | 'clear', name?, agencyName? (split), rememberSpelling? }` - starts
+  the rewrite (D10, D11); the response names any spelling D12 skipped.
 - `POST /api/organizations/rewrite/run-again` (admin) - D11.
 - Suggestions: `POST` accept gains optional `value` (D8); 422
   `value_not_from_suggestion`, 409 `suggestion_already_resolved`.
@@ -664,6 +693,12 @@ Existing endpoints that write the fields in 5.2 apply D5 and answer 422
   expectations follow.
 - **e2e specs** that type free-text names or mint run-unique names pick list
   names or add their run-unique names through `POST /api/organizations` first.
+  The "Not on the list" section and its actions are tested through a NEW
+  dev-only seam, `POST /__dev/org-fixture` (mounted only where the other
+  `/__dev` fixtures are), which writes a run-unique off-list value onto
+  records the spec itself created, bypassing D5; nothing off-list is seeded
+  into the shared lean world, so one spec's settle action cannot leak into
+  another.
 
 ---
 
@@ -706,7 +741,11 @@ Existing endpoints that write the fields in 5.2 apply D5 and answer 422
 - **Lock:** the apply takes the D11 rewrite lock (`lastRewrite` set to
   `running` with action `cleanup`, heartbeated, finished `done` or `failed`)
   and refuses to start while another rewrite runs, so no rename or merge can
-  interleave with it. A dry run takes no lock.
+  interleave with it. Its abort and failure paths release the lock (set
+  `failed`) before exiting; after a hard kill the stale lock stops blocking
+  rewrites 15 minutes after its last heartbeat (RUNBOOK names the wait). The
+  Settings page never offers "Run again" for it (D11). A dry run takes no
+  lock.
 - **Order (RUNBOOK):** dry run against prod from a `main` checkout BEFORE the
   deploy; review the leftover values with Sam; deploy; apply immediately after
   the deploy (until the apply runs, a blast filtered on a new list name misses
@@ -741,7 +780,8 @@ Writers (each applies D5, or is a stated exception):
 - the public intake routes (do not write these fields today; tracker #14
   will);
 - seeds (lean, cast, matrix, live, performance) including seeded broadcasts,
-  and the dev reseed;
+  and the dev reseed; the dev-only `POST /__dev/org-fixture` seam (a stated
+  exception: it writes off-list values on purpose, local stacks only);
 - the rewrite job (D11) and the cleanup script (section 8);
 - (B) Make caseworker (D19) and the Caseworker choice (D16).
 

@@ -67,6 +67,10 @@
   flex: 1;
   min-width: 0;
   overflow: auto;
+  /* Contain absolutely positioned descendants (visually hidden form labels in
+   * the cards) so they scroll and clip with this pane instead of escaping it
+   * and stretching the page - the same defect Timeline's .stream had. */
+  position: relative;
   background: var(--c-bg);
   /* Bleed the scroller into the AppFrame content's RIGHT padding (var(--sp-5)) so
    * its native scrollbar sits out in that edge gutter instead of flush against the

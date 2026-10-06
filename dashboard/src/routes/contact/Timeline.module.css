@@ -116,6 +116,14 @@
    * In rem (scales with root font) so it isn't a brittle pixel constant. */
   min-height: 8rem;
   overflow: auto;
+  /* The containing block for every absolutely positioned descendant - in
+   * practice the visually hidden .srOnly groups on inbound Relay bubbles. Left
+   * unpositioned, their containing block was .streamWrap, OUTSIDE this
+   * scroller: they escaped its clip, kept their UNSCROLLED offset, and stretched
+   * the AppFrame <main> into a page-level scrollbar over about one stream-height
+   * of blank space. Guarded by
+   * e2e/tests/dashboard-next/stream-hidden-label-overflow.spec.ts. */
+  position: relative;
   /* Thread history paging: the manual scrollTop correction in Timeline.tsx's
    * layout effect (`el.scrollTop += el.scrollHeight - anchor`) must be the ONLY
    * correction applied when an older page is prepended. CSS scroll anchoring is

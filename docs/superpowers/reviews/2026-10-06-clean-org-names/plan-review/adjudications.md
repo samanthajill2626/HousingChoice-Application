@@ -38,6 +38,8 @@ findings). Adjudicated by theme; tags are reviewer.finding.
 
 Counts: 36 findings; 33 accepted (some in part), 3 rejected (P3's switch,
 P17, P22's two kept items). P2 goes to Cameron at the launch gate.
+Decisions changed this round: yes (P5) - round 2 continues reviewer B (more
+accepted findings: 21 vs 12), handed reviewer A's report.
 
 **P2 superseded (2026-10-06, after the fixer pass):** Sam answered spec
 section 13 in the founder meeting the same day, so the starting list no
@@ -60,5 +62,28 @@ stands), S7 (the rewritten test's comment and the broken-tests note) and S14
 (the Decatur substitution note). Outside S1 no test edit changes: every
 rewritten expectation already used a list name. Decision changed: yes (the list's
 content - a product input from Sam, not a review finding).
-Decisions changed this round: yes (P5) - round 2 continues reviewer B (more
-accepted findings: 21 vs 12), handed reviewer A's report.
+
+## Round 2 (plan @fb6cf81e + 5069e8dc; reviewer B continued)
+
+Report: `plan-r2-reviewer-b.md` (6 findings: 1 HIGH, 5 LOW). Reviewer B
+conceded all three round-1 rejections (P3, P17, P22) and verified the other
+round-1 fixes and Sam's answers as applied. Load-bearing claims were checked
+in the code before ruling: `dashboard/src/main.tsx:15` renders in
+`<StrictMode>` on React 19 and `scripts/e2e-session.mjs:462` serves the Vite
+dev server (F1); `app/src/app.ts:142` mounts `trimJsonBody`, which trims every
+JSON string value (F3); `app/src/lib/housingAuthority.ts:48` maps raw
+`clayton` (F5).
+
+| # | Theme (finding) | Ruling | Resulting change | Decision changed |
+|---|---|---|---|---|
+| P26 | `useOrgAdmin`'s in-flight guard (the P13 fix) never loads the counts or the rows under StrictMode: the cleanup aborts read A but leaves the slot held, the second mount's read queues behind A, and A's aborted return drops the queue (B.F1, HIGH) | ACCEPT | a read releases the slot only while it still holds it (`inFlightRef.current === controller`); the mount effect's cleanup aborts AND releases (and drops a queued request); new hook test renders under `<StrictMode>` and is RED against the old body | no (restores P13's stated behavior) |
+| P27 | A spelling that normalizes to '' (`-`) is accepted, so "Use" with "Remember this spelling" stores junk that renders into the AI block (B.F2) | ACCEPT | `checkSpelling` returns `empty` when the normalized text is '' (automatic additions skip it with a reason); the copy for `empty` reads "it has no letters or digits"; spec D13 extends the name rule to spellings | no (D13's rule applied to its sibling) |
+| P28 | The global body trim defeats the exact-text checks: a padded exact name cannot be settled (400 "nothing to settle"), a padded `-` never matches (B.F3) | ACCEPT | `resolveNotOnList` exempts "Use <that entry>" from the on-list 400 (the pass rewrites only holders whose stored text differs from the name; every other action stays 400); the pass's exact-text set compares TRIMMED stored text; tests: the padded-name use (service), a padded ` - ` holder (records), and a (PIN) that a use whose from-text is the name rewrites only padded holders | no |
+| P29 | Gate 4's abort `taskkill /T /F /PID` runs in Git Bash, which rewrites slash switches (B.F4) | ACCEPT | PowerShell, or `MSYS_NO_PATHCONV=1 taskkill ...` from the Bash tool | no |
+| P30 | Every key of the retired alias map carries over except raw `clayton` (B.F5) | ACCEPT | `Clayton` added to Jonesboro Housing Authority's spellings (Sam: Clayton County vouchers are Jonesboro's; the old importer read `clayton` as Clayton County); S1 mapping table, section-13 note, spec section 13 and Appendix A. "McDonough Housing Authority" stays off (spec section 13: a real public-housing authority with no vouchers) | yes (list content; told to Cameron at the launch gate) |
+| P31 | Task 17.1 does not name the tour-list overlap (B.F6) | ACCEPT (half done @5069e8dc before the report landed) | Task 17.1 now names all ten files plus the harness fake, and warns that both branches bump the profiler-route COUNT pins in `e2e/performance/routes.test.ts` - recompute them from the merged registry | no |
+| P32 | (planner, from Sam's answers) Several spellings are now PLACE names (Cobb County, Henry County, McDonough, Clayton), and the apply layer writes a unique-spelling match directly - so a tenant's home or search area could be recorded as their housing authority | ADD | the extraction system prompt gains one rule: "Where the client lives or wants to live is not a housing authority: a county or city name counts only when the client says it runs the voucher"; a schema test asserts the phrase; spec D8's prompt bullet says so. (Today's prompt already lists Fulton County, Clayton County and McDonough as known spellings; this guards the wider set.) | yes (a new prompt rule) |
+
+Counts: 6 findings, 6 accepted; 0 rejected; 1 planner addition (P32).
+Decisions changed this round: yes (P30, P32) - round 3 continues reviewer B
+on the round-2 edits.

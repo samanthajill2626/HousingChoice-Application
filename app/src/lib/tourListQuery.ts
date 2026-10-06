@@ -135,3 +135,66 @@ export function parseTourListQuery(query: Record<string, unknown>): TourListPars
   };
   return { ok: true, value: { filters, limit, ...(cursorRaw !== undefined && { cursor: cursorRaw }) } };
 }
+
+/** Phase D's key range on byScheduledAt (range key `scheduledAt`). */
+export type TourListRange =
+  | { op: 'all' }
+  | { op: 'gte'; value: string }
+  | { op: 'lt'; value: string }
+  | { op: 'lte'; value: string }
+  | { op: 'between'; from: string; to: string };
+
+/** One phase a page may read. D: the dated tours on byScheduledAt. U: the
+ *  undated tours of ONE status on byStatus (`index` = its U_ORDER position;
+ *  `notExists` = filter `attribute_not_exists(scheduledAt)`). */
+export type TourListPhase =
+  | { kind: 'd'; range: TourListRange; statusFilter?: TourStatus[]; type?: TourType }
+  | { kind: 'u'; index: number; status: TourStatus; notExists: boolean; type?: TourType };
+
+function rangeFor(f: TourListFilters, pinnedNow: string): TourListRange {
+  switch (f.when) {
+    case 'upcoming':
+      return { op: 'gte', value: pinnedNow };
+    case 'past':
+      return { op: 'lt', value: pinnedNow };
+    case 'range':
+      if (f.from !== undefined && f.to !== undefined) return { op: 'between', from: f.from, to: f.to };
+      if (f.from !== undefined) return { op: 'gte', value: f.from };
+      if (f.to !== undefined) return { op: 'lte', value: f.to };
+      return { op: 'all' };
+    default:
+      return { op: 'all' };
+  }
+}
+
+/** The ordered phases one list reads (spec 5.3). Phase D is skipped when no
+ *  picked status can carry a date; its status filter is omitted when every
+ *  dated status is picked (it could exclude nothing). Phase U exists only for
+ *  `when: 'any'`, one entry per picked U_ORDER status. */
+export function planTourListPhases(f: TourListFilters, pinnedNow: string): TourListPhase[] {
+  const every = f.statuses.length === 0;
+  const has = (s: TourStatus): boolean => every || f.statuses.includes(s);
+  const typePart = f.type !== undefined ? { type: f.type } : {};
+  const phases: TourListPhase[] = [];
+  const dated = DATED_STATUSES.filter(has);
+  if (dated.length > 0) {
+    phases.push({
+      kind: 'd',
+      range: rangeFor(f, pinnedNow),
+      ...(dated.length < DATED_STATUSES.length && { statusFilter: [...dated] }),
+      ...typePart,
+    });
+  }
+  if (f.when === 'any') {
+    U_ORDER.forEach((status, index) => {
+      if (has(status)) phases.push({ kind: 'u', index, status, notExists: status !== 'requested', ...typePart });
+    });
+  }
+  return phases;
+}
+
+/** A phase is UNFILTERED when its Query carries no FilterExpression - it then
+ *  asks for exactly the rows it still needs plus one peek row (spec 5.4). */
+export function isUnfilteredPhase(p: TourListPhase): boolean {
+  return p.kind === 'd' ? p.statusFilter === undefined && p.type === undefined : !p.notExists && p.type === undefined;
+}

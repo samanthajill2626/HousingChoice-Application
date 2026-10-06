@@ -1,9 +1,16 @@
 // Unit tests for lib/tourListQuery.ts - the PURE half of the Tours page's All
 // tab read, GET /api/tours/list (spec
 // docs/superpowers/specs/2026-10-06-tour-list-design.md section 5): request
-// parsing and normalization. Pure - no I/O, no DynamoDB.
+// parsing and normalization, and the phase plan. Pure - no I/O, no DynamoDB.
 import { describe, expect, it } from 'vitest';
-import { parseTourListQuery, type TourListRequest } from '../src/lib/tourListQuery.js';
+import {
+  isUnfilteredPhase,
+  parseTourListQuery,
+  planTourListPhases,
+  type TourListFilters,
+  type TourListPhase,
+  type TourListRequest,
+} from '../src/lib/tourListQuery.js';
 
 /** Parse and unwrap a request that must be valid. */
 function parsed(query: Record<string, unknown>): TourListRequest {
@@ -119,5 +126,116 @@ describe('parseTourListQuery', () => {
     expect(parsed({ cursor: 'eyJ2IjoxfQ' }).cursor).toBe('eyJ2IjoxfQ');
     expect(parseTourListQuery({ cursor: '' })).toEqual({ ok: false, error: 'invalid cursor' });
     expect(parseTourListQuery({ cursor: ['a', 'b'] })).toEqual({ ok: false, error: 'invalid cursor' });
+  });
+});
+
+describe('planTourListPhases', () => {
+  const N = '2026-10-06T16:00:00.000Z';
+  const filters = (over: Partial<TourListFilters>): TourListFilters => ({
+    when: 'any',
+    statuses: [],
+    sort: 'latest',
+    ...over,
+  });
+  const EVERY_ANY: TourListPhase[] = [
+    { kind: 'd', range: { op: 'all' } },
+    { kind: 'u', index: 0, status: 'requested', notExists: false },
+    { kind: 'u', index: 1, status: 'toured', notExists: true },
+    { kind: 'u', index: 2, status: 'no_show', notExists: true },
+    { kind: 'u', index: 3, status: 'canceled', notExists: true },
+    { kind: 'u', index: 4, status: 'closed', notExists: true },
+  ];
+
+  it('1: when=any, every status -> D over the whole partition (no filters), then one U phase per U_ORDER status', () => {
+    expect(planTourListPhases(filters({}), N)).toStrictEqual(EVERY_ANY);
+  });
+
+  it('2: only requested -> exactly the requested U phase (D skipped - requested is never dated)', () => {
+    expect(planTourListPhases(filters({ statuses: ['requested'] }), N)).toStrictEqual([
+      { kind: 'u', index: 0, status: 'requested', notExists: false },
+    ]);
+  });
+
+  it('3: only scheduled -> exactly D with a scheduled status filter (U skipped)', () => {
+    expect(planTourListPhases(filters({ statuses: ['scheduled'] }), N)).toStrictEqual([
+      { kind: 'd', range: { op: 'all' }, statusFilter: ['scheduled'] },
+    ]);
+  });
+
+  it('4: a partial dated set -> D filtered to the dated picks, then U for the picked U_ORDER statuses', () => {
+    expect(
+      planTourListPhases(filters({ statuses: ['requested', 'scheduled', 'toured', 'no_show', 'canceled'] }), N),
+    ).toStrictEqual([
+      { kind: 'd', range: { op: 'all' }, statusFilter: ['scheduled', 'toured', 'no_show', 'canceled'] },
+      { kind: 'u', index: 0, status: 'requested', notExists: false },
+      { kind: 'u', index: 1, status: 'toured', notExists: true },
+      { kind: 'u', index: 2, status: 'no_show', notExists: true },
+      { kind: 'u', index: 3, status: 'canceled', notExists: true },
+    ]);
+  });
+
+  it('5: every dated status without requested -> D carries NO status filter; U has no requested phase', () => {
+    expect(
+      planTourListPhases(filters({ statuses: ['scheduled', 'toured', 'no_show', 'canceled', 'closed'] }), N),
+    ).toStrictEqual([
+      { kind: 'd', range: { op: 'all' } },
+      { kind: 'u', index: 1, status: 'toured', notExists: true },
+      { kind: 'u', index: 2, status: 'no_show', notExists: true },
+      { kind: 'u', index: 3, status: 'canceled', notExists: true },
+      { kind: 'u', index: 4, status: 'closed', notExists: true },
+    ]);
+  });
+
+  it('6: upcoming / past split at the pinned instant and never read phase U, whatever the statuses', () => {
+    expect(planTourListPhases(filters({ when: 'upcoming', sort: 'earliest' }), N)).toStrictEqual([
+      { kind: 'd', range: { op: 'gte', value: N } },
+    ]);
+    expect(planTourListPhases(filters({ when: 'past' }), N)).toStrictEqual([{ kind: 'd', range: { op: 'lt', value: N } }]);
+    expect(planTourListPhases(filters({ when: 'past', statuses: ['requested', 'toured', 'closed'] }), N)).toStrictEqual([
+      { kind: 'd', range: { op: 'lt', value: N }, statusFilter: ['toured', 'closed'] },
+    ]);
+    expect(planTourListPhases(filters({ when: 'upcoming', statuses: ['scheduled', 'requested'] }), N)).toStrictEqual([
+      { kind: 'd', range: { op: 'gte', value: N }, statusFilter: ['scheduled'] },
+    ]);
+  });
+
+  it('7: range -> between / gte from / lte to / all, and never phase U', () => {
+    const from = '2026-10-01T04:00:00.000Z';
+    const to = '2026-11-01T03:59:59.999Z';
+    expect(planTourListPhases(filters({ when: 'range', from, to }), N)).toStrictEqual([
+      { kind: 'd', range: { op: 'between', from, to } },
+    ]);
+    expect(planTourListPhases(filters({ when: 'range', from }), N)).toStrictEqual([
+      { kind: 'd', range: { op: 'gte', value: from } },
+    ]);
+    expect(planTourListPhases(filters({ when: 'range', to }), N)).toStrictEqual([
+      { kind: 'd', range: { op: 'lte', value: to } },
+    ]);
+    expect(planTourListPhases(filters({ when: 'range' }), N)).toStrictEqual([{ kind: 'd', range: { op: 'all' } }]);
+  });
+
+  it('8: upcoming with only requested -> no phase at all (nothing can match)', () => {
+    expect(planTourListPhases(filters({ when: 'upcoming', sort: 'earliest', statuses: ['requested'] }), N)).toStrictEqual(
+      [],
+    );
+  });
+
+  it('9: a type rides on every phase', () => {
+    expect(planTourListPhases(filters({ type: 'self_guided' }), N)).toStrictEqual(
+      EVERY_ANY.map((p) => ({ ...p, type: 'self_guided' })),
+    );
+  });
+
+  it('10: isUnfilteredPhase - only a filter-free D and the type-free requested U phase', () => {
+    const [d, requested, ...notExists] = planTourListPhases(filters({}), N);
+    expect(d && isUnfilteredPhase(d)).toBe(true);
+    expect(requested && isUnfilteredPhase(requested)).toBe(true);
+    expect(notExists).toHaveLength(4);
+    for (const p of notExists) expect(isUnfilteredPhase(p), `${p.kind} ${JSON.stringify(p)}`).toBe(false);
+    for (const p of planTourListPhases(filters({ type: 'pm_team' }), N)) {
+      expect(isUnfilteredPhase(p), `typed ${JSON.stringify(p)}`).toBe(false);
+    }
+    expect(isUnfilteredPhase({ kind: 'd', range: { op: 'all' }, statusFilter: ['toured'] })).toBe(false);
+    expect(isUnfilteredPhase({ kind: 'd', range: { op: 'lt', value: N } })).toBe(true);
   });
 });

@@ -989,3 +989,35 @@ describe('AllToursView - the URL (spec 4.7)', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 12.3 - the back state
+// ---------------------------------------------------------------------------
+
+describe('AllToursView - the row link state (spec 4.8)', () => {
+  it('carries { back, restore }: back from the LOCAL selection (an unsaved search included), restore with the rows loaded and the VISIBLE index', async () => {
+    reply('', namedPage([['t1', 'Tasha Nguyen', '1 Oak St'], ['t2', 'Ray Smith', '2 Elm St'], ['t3', 'Ann Lee', '9 Smith Rd']], 'c1'));
+    renderAt('/tours/all?when=past');
+    await settle();
+    // Typed, never blurred: the URL does not have it, the back pointer does.
+    typeSearch('smith');
+    expect(routerText()).toBe('/tours/all?when=past');
+    fireEvent.click(within(list()).getByRole('link', { name: /^Tour for Ann Lee / }));
+    expect(screen.getByTestId('tour-route')).toHaveTextContent('/tours/t3');
+    expect(routerState()).toStrictEqual({
+      back: '/tours/all?when=past&q=smith',
+      restore: { depth: 3, openedTourId: 't3', openedIndex: 1 },
+    });
+  });
+
+  it('the default selection points back to /tours/all with no query string', async () => {
+    reply('', page([row('a1'), row('a2')], null));
+    renderAt();
+    await settle();
+    fireEvent.click(within(list()).getByRole('link', { name: /^Tour for First a2 / }));
+    expect(routerState()).toStrictEqual({
+      back: '/tours/all',
+      restore: { depth: 2, openedTourId: 'a2', openedIndex: 1 },
+    });
+  });
+});

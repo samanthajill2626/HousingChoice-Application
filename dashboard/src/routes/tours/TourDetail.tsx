@@ -81,6 +81,7 @@ import {
   RescheduleTourModal,
 } from './TourModals.js';
 import { reopenTargetOf, type ReopenTarget } from './tourReopen.js';
+import { parseTourListRestore } from './tourListSelection.js';
 import { describeTourActivity, tourActivityToMilestone } from './tourActivityFormat.js';
 import { RelayCloseAskDialog } from '../conversation/RelayCloseAskDialog.js';
 import shell from '../../ui/twoPaneShell.module.css';
@@ -116,12 +117,19 @@ const CANCELABLE: ReadonlySet<TourStatus> = new Set<TourStatus>(['requested', 's
  *  router state is client-supplied. */
 const BACK_TARGETS: ReadonlySet<string> = new Set(['/tours', '/tours/past', '/tours/closed', '/']);
 
+/** The All tab hands back its filters: /tours/all with any query string
+ *  (tour-list spec 4.8). */
+const ALL_TOURS_PATH = '/tours/all';
+
 /** Where the back arrow goes: the page that opened this one when its link
- *  said so (the Past tab's rows, Today's past-tours rows), else the Active
- *  list. */
+ *  said so (the Past tab's rows, Today's past-tours rows, the All tab's rows),
+ *  else the Active list. */
 function backHref(state: unknown): string {
   const back = typeof state === 'object' && state !== null ? (state as { back?: unknown }).back : undefined;
-  return typeof back === 'string' && BACK_TARGETS.has(back) ? back : '/tours';
+  if (typeof back !== 'string') return '/tours';
+  if (BACK_TARGETS.has(back)) return back;
+  if (back === ALL_TOURS_PATH || back.startsWith(`${ALL_TOURS_PATH}?`)) return back;
+  return '/tours';
 }
 
 /** The back arrow's accessible name: it says where it goes. */
@@ -270,6 +278,11 @@ function TourDetailLoaded({
   // The back arrow returns to the tab that opened this page (spec 4.6).
   const location = useLocation();
   const backTo = backHref(location.state);
+  // Back to the All tab, it hands the row's restore record back unchanged, so
+  // the list returns to the row that was opened (tour-list spec 4.8 / 4.9).
+  const restoreRecord = parseTourListRestore(location.state);
+  const backState =
+    backTo.startsWith(ALL_TOURS_PATH) && restoreRecord !== null ? { restore: restoreRecord } : undefined;
   // Deep link from the Tours page's Past tab (spec 4.6): /tours/:id?outcome=1
   // opens the Record-outcome dialog ONCE, on a toured tour with no outcome.
   // The dialog is opened in the STATE INITIALIZER (this component mounts after
@@ -681,7 +694,7 @@ function TourDetailLoaded({
   return (
     <div className={shell.page}>
       <header className={shell.header}>
-        <Link to={backTo} className={styles.backBtn} aria-label={backLabel(backTo)}>
+        <Link to={backTo} state={backState} className={styles.backBtn} aria-label={backLabel(backTo)}>
           {'\u2190'}
         </Link>
         <div className={shell.identity}>

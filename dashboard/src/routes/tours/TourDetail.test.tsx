@@ -2189,6 +2189,13 @@ describe('TourDetail - ?outcome=1 deep link and the back arrow (spec 4.6)', () =
     return <output data-testid="search">{l.search}</output>;
   }
 
+  /** The All tab's route: its URL and router state (else `/tours/all` would
+   *  match `/tours/:tourId` and render TourDetail again). */
+  function AllToursProbe(): React.JSX.Element {
+    const l = useLocation();
+    return <p data-testid="all-tours">{`${l.pathname}${l.search} ${JSON.stringify(l.state ?? null)}`}</p>;
+  }
+
   function renderAt(path: string, state?: unknown) {
     return render(
       <MemoryRouter initialEntries={[{ pathname: '/tours/tour-abc', search: path, state }]}>
@@ -2202,6 +2209,7 @@ describe('TourDetail - ?outcome=1 deep link and the back arrow (spec 4.6)', () =
               </>
             }
           />
+          <Route path="/tours/all" element={<AllToursProbe />} />
         </Routes>
       </MemoryRouter>,
     );
@@ -2294,4 +2302,37 @@ describe('TourDetail - ?outcome=1 deep link and the back arrow (spec 4.6)', () =
     await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(''));
     expect(screen.getByRole('link', { name: 'Back to Today' })).toHaveAttribute('href', '/');
   });
+
+  // The All tab (tour-list spec 4.8 / 4.9): its rows hand over their filters
+  // as a /tours/all URL and the restore record; the back arrow returns there
+  // and hands the record back.
+  it('the back arrow honors state.back = /tours/all with a query string and, followed, carries state.restore', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    const restore = { depth: 120, openedTourId: 'tour-abc', openedIndex: 3 };
+    renderAt('', { back: '/tours/all?when=past&q=Smith', restore });
+    await waitLoaded();
+    const back = screen.getByRole('link', { name: 'Back to tours' });
+    expect(back).toHaveAttribute('href', '/tours/all?when=past&q=Smith');
+    fireEvent.click(back);
+    expect(await screen.findByTestId('all-tours')).toHaveTextContent(
+      `/tours/all?when=past&q=Smith ${JSON.stringify({ restore })}`,
+    );
+  });
+
+  it('the back arrow honors a bare state.back = /tours/all', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderAt('', { back: '/tours/all' });
+    await waitLoaded();
+    expect(screen.getByRole('link', { name: 'Back to tours' })).toHaveAttribute('href', '/tours/all');
+  });
+
+  it.each(['/tours/allx', '/tours/all/../x', '/tours/all/x'])(
+    'the back arrow falls back to /tours for state.back = %s',
+    async (back) => {
+      getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+      renderAt('', { back });
+      await waitLoaded();
+      expect(screen.getByRole('link', { name: 'Back to tours' })).toHaveAttribute('href', '/tours');
+    },
+  );
 });

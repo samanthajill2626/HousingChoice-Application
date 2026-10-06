@@ -68,6 +68,9 @@ import styles from './AllToursView.module.css';
 /** The search walk starts this long after typing stops (spec 6). */
 const SEARCH_DEBOUNCE_MS = 300;
 
+/** This view's route; TourDetail's back arrow accepts it with any query. */
+const ALL_TOURS_PATH = '/tours/all';
+
 /** The history state stamped on this view's own URL writes. A row open adds
  *  `restore` (spec 4.9); every OTHER write replaces the whole state with the
  *  stamp alone, so a filter change or a blur save drops a restore record. */
@@ -354,6 +357,12 @@ export function AllToursView(): React.JSX.Element {
     chosen.when === 'any' ? TOUR_LIST_STATUS_CHIPS : TOUR_LIST_STATUS_CHIPS.filter((c) => c.value !== 'requested');
   const showClearFilters = !isDefaultTourListSelection(selection);
 
+  // Where a row's back arrow returns (spec 4.8): the LOCAL selection - an
+  // unsaved search included - serialized exactly as the URL writes it, never
+  // read from `location`.
+  const backSearch = searchFor(new URLSearchParams(), chosen);
+  const back = backSearch === '' ? ALL_TOURS_PATH : `${ALL_TOURS_PATH}?${backSearch}`;
+
   const needle = chosen.q.trim().toLowerCase();
   const searching = needle !== '';
   const views = data.rows.map((r) => rowView(r, data.contacts, data.units));
@@ -507,10 +516,14 @@ export function AllToursView(): React.JSX.Element {
 
       {ready && visible.length > 0 ? (
         <ul className={rowStyles.rows} aria-label="All tours list">
-          {visible.map((v) => (
+          {visible.map((v, i) => (
             <li key={v.row.tourId} className={rowStyles.rowItem}>
+              {/* The router state hands the tour page its back pointer and the
+                  restore record: the rows LOADED, and this row's id and
+                  position among the VISIBLE rows (spec 4.8, 4.9). */}
               <Link
                 to={`/tours/${v.row.tourId}`}
+                state={{ back, restore: { depth: data.rows.length, openedTourId: v.row.tourId, openedIndex: i } }}
                 className={rowStyles.row}
                 aria-label={rowName(v)}
                 data-tour-id={v.row.tourId}

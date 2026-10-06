@@ -1,7 +1,7 @@
 # Clean housing authority and agency names, and caseworkers - design
 
-Date: 2026-10-06 (revision 2, after adversarial design review round 1 -
-adjudications in
+Date: 2026-10-06 (revision 3, after adversarial design review rounds 1 and
+2 - adjudications in
 `docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md`).
 Tracker items #2 ("One clean name per housing authority") and #19
 ("Caseworkers"), built together under one approved estimate (10-15 hours of
@@ -82,8 +82,10 @@ plan, written after A merges, against A's real code.
   the suggestion's identity).
 - Saved blast drafts store their filter in `audience_filter.housing_authority`
   (`app/src/repos/broadcastsRepo.ts`), written only by `POST
-  /api/broadcasts`; a draft can be resumed, and its preview and send
-  re-resolve the stored filter.
+  /api/broadcasts`; a draft can be resumed, and its preview re-resolves the
+  stored filter. The dashboard's send posts the curated recipient list
+  (`recipientContactIds`) and does not re-resolve the filter; only a send
+  without that list (an API caller) re-resolves it.
 - Seeds use slugs (`atlanta_housing`, `ga_dca`, `dekalb_housing`,
   `fulton_housing`, `gwinnett_housing`, `cobb_housing`), including the
   broadcast filters in `app/src/lib/seed/matrix.ts`; about 20 e2e specs and
@@ -221,15 +223,20 @@ stored item is the only source; later edits to the starting list in code do
 NOT reach an environment that already has the item. No environment holds
 the item before branch A deploys there, and Appendix A is final before the
 branch A plan is written (section 13), so dev and prod start from the same
-list. Seeds (lean and full) write the item explicitly so test worlds are
-deterministic, and the dev reseed's wipe of `settings` is followed by that
-seed write.
+list. Seeds (lean and full) write the item with an UNCONDITIONAL put, so a
+reader that created the item during the dev reseed's clear-then-seed window
+is overwritten and test worlds stay deterministic.
 
-D3. **Records store the full name, not an ID; "uses" means exact text.**
-`contact.housingAuthority`, `contact.agency`, `unit.accepted_authorities[]`
-and (B) `contact.organization` hold the entry's name text. An entry is USED
-by a record exactly when the record's stored value (or a member of the unit's
-list) is character-for-character the entry's name. Every existing reader (the
+D3. **Records store the full name, not an ID; "uses" means exact text in a
+field of the right kind.** `contact.housingAuthority`, `contact.agency`,
+`unit.accepted_authorities[]` and (B) `contact.organization` hold the entry's
+name text. A stored value is ON THE LIST for its field exactly when it is
+character-for-character the name of an entry of a kind that field accepts
+(housing authority fields: housing authority entries; `agency`: agency
+entries; (B) `organization`: either). An entry is USED by a record exactly
+when such a field of the record holds the entry's name. An agency's exact
+name in a housing authority field (or the reverse) is therefore NOT on the
+list and not a use. Every existing reader (the
 GSI, blasts, facets, the Properties summary, the flyer, similar units, the AI
 context) keeps working unchanged. Consequence: renaming or merging an entry
 rewrites the records that hold it (D11).
@@ -249,9 +256,12 @@ D4. **Matching rules (one server-side module).**
   are never applied automatically.
 - Names are unique across BOTH kinds (normalized). A spelling may not equal
   any entry's name (normalized). Spellings are unique within one entry
-  (de-duplicated on write) and may be shared between entries of the same
-  kind (AHA, MHA). Compound values ("DCA HUD-VASH") are never stored as
-  spellings.
+  (de-duplicated on write) and may be shared between entries of the SAME
+  kind (AHA, MHA); a spelling may never be shared across kinds.
+- A value is COMPOUND when its normalized text contains, as whole words,
+  the normalized names or spellings of two or more different entries (for
+  example "dca hud vash" contains "dca" and "hud vash"). Compound values are
+  never stored as spellings and never resolve to one entry.
 
 D5. **One server-side check for every writer.** When a writer SETS a value
 that differs from what the record holds now, it resolves the text with D4
@@ -293,11 +303,14 @@ D7. **Blast composer: the picker without the add step.** Composer filters
 can only name list entries. A tenant whose stored value is not on the list is
 not reachable by a housing authority filter until that value is settled on
 the Settings page (D10), which lists every such value with its count. A
-stored draft filter is re-checked at preview and at send: a value that is not
-exactly a current list name is refused with 422 `org_not_on_list` and the
-composer asks for a new pick (sent blasts keep their historical filter;
-nothing rewrites broadcasts). Prefilling from the property and multi-authority
-rules stay with tracker #6.
+stored draft filter is re-checked at preview and on a send that re-resolves
+the filter (a send without `recipientContactIds`): a value that is not on the
+list for the housing authority field (D3) is refused with 422
+`org_not_on_list` and the composer asks for a new pick. The dashboard's
+curated send (`recipientContactIds`) does not re-resolve the filter and is
+not re-checked. Sent blasts keep their historical filter; nothing rewrites
+broadcasts. Prefilling from the property and multi-authority rules stay with
+tracker #6.
 
 D8. **AI: list-aware, suggestion-only for anything new.**
 - The extraction SYSTEM prompt stays a static template, so its memoized
@@ -305,8 +318,12 @@ D8. **AI: list-aware, suggestion-only for anything new.**
   list block). The list rides in the USER content as a block - the housing
   authority names with their spellings, then the agency names under "not
   housing authorities" - passed to the adapter through the extraction input;
-  the extraction job reads the store once per run. Each run records the
-  list's `version` in the AI run log beside the prompt fingerprint.
+  the extraction job reads the store once per run. Each run records a hash
+  of the rendered list block (`orgListFingerprint`) in the AI run log beside
+  the prompt fingerprint, so runs that saw the same list group together. The
+  block has a budget of 16,000 characters: housing authority names first,
+  then agency names, then spellings; spellings are dropped first when it is
+  exceeded (logged at WARN).
 - The model is told: return the full name from the list; when an
   abbreviation belongs to more than one name, pick the one the conversation
   supports or return the text as said; agency names are never housing
@@ -330,6 +347,13 @@ D8. **AI: list-aware, suggestion-only for anything new.**
     (`superseded_by_human_edit`, as today);
   - the text is an agency name (a suggestion created before the deploy):
     the dialog says so and offers Dismiss.
+  The SERVER enforces the same rule: a `value` is accepted only when it is
+  the D4 resolution of the suggestion's text or one of the text's ambiguity
+  candidates, computed against the current list (a name staff just added
+  from the text resolves); anything else is refused with 422
+  `value_not_from_suggestion`. A second accept of an already-resolved
+  suggestion with a different `value` answers 409
+  `suggestion_already_resolved`, as an action mismatch does today.
 - The AI never adds to the list and never fills Agency (non-goals).
 
 D9. **Importer: same check, no overwrites.** The importer resolves each
@@ -352,22 +376,37 @@ visible to every signed-in user, with three sections:
   contacts, properties, (B) caseworkers - counting active records (deleted
   records are counted only for the delete and kind-change checks).
 - **Not on the list**: every distinct stored value, across all contact types
-  and properties (deleted included), that is not exactly a listed name - one
-  row per value and field, with its record count, the field, and its D4
-  resolution (one name, several candidates, the other kind, or nothing). No
-  names of people. "Show records" opens the Tenants or Properties page
-  filtered to that value.
-- Everyone: view; add an entry (name and notes, through "Is this really
-  new?"); edit an entry's notes.
+  and properties (deleted included), that is not on the list for its field
+  (D3) - one row per value and field, with its record count, the field, and
+  its D4 resolution (one name, several candidates, the other kind, compound,
+  or nothing). An agency's exact name in a housing authority field appears
+  here with resolution "the other kind". "Show records" expands the row into
+  the records holding the value: each contact's name, type and a "deleted"
+  marker, or each property's address, linked to its page. Tenants and
+  properties can be fixed one at a time on their own pages; for records whose
+  page does not show the field (non-tenant contacts in branch A, deleted
+  records), the value-level actions below are the way to settle them.
+- Everyone: view all three sections (including "Not on the list" and its
+  records); add an entry (name and notes, through "Is this really new?");
+  edit an entry's notes.
 - Admins only (`requireRole('admin')` on the server): edit spellings, rename,
   merge into another entry of the same kind, delete, change kind, and the
-  "Not on the list" actions: **Use <name>** (rewrite every record holding the
-  value to that name; the value becomes a spelling of it unless it is shared
-  or compound), **Move to Agency as <name>** (housing authority values that
-  match an agency: move to `agency` where `agency` is absent or `''`; records
-  whose `agency` holds something else are counted as conflicts and left),
-  **Add as new** (create the entry, from the value or a corrected name, then
-  Use it), and **Clear** (remove the value from those records).
+  "Not on the list" actions, each a rewrite (D11):
+  - **Use <name>** - rewrite every record holding the value (in that field) to
+    that name. The dialog shows the value and a "Remember this spelling"
+    checkbox (on by default; D12's automatic rules can turn it off and say
+    why).
+  - **Move to Agency as <name>** - for housing authority values that match an
+    agency entry: move to `agency` where `agency` is absent or `''`, REMOVE
+    the housing authority; records whose `agency` holds something else are
+    counted as conflicts and left.
+  - **Move to Housing authority as <name>** - for agency values that match a
+    housing authority entry: move to `housingAuthority` where it is absent,
+    set `agency` to `''`; records whose housing authority holds something else
+    are counted as conflicts and left.
+  - **Add as new** - create the entry (from the value or a corrected name),
+    then Use it.
+  - **Clear** - remove the value from those records.
 - Delete is allowed only when no record (deleted records included) uses the
   entry; kind change likewise.
 - Editing spellings or notes touches no records.
@@ -375,7 +414,7 @@ visible to every signed-in user, with three sections:
 D11. **The rewrite job (rename, merge, and the "Not on the list" actions).**
 - One rewrite at a time: a new one is refused (409 `org_rewrite_running`)
   while `lastRewrite.status` is `running` and its heartbeat is under 15
-  minutes old.
+  minutes old. The cleanup script's apply takes the same lock (section 8).
 - Order: ONE conditional write of the list item changes the list (rename,
   merge, new spelling) and sets `lastRewrite` to `running` with the rewrite's
   definition (from-texts, to-name, fields, action); then the job is enqueued
@@ -387,10 +426,12 @@ D11. **The rewrite job (rename, merge, and the "Not on the list" actions).**
   list member whose normalized text is in the from-texts, conditional on the
   record still holding the text it read; unit lists are de-duplicated after
   the rewrite; the housing authority is REMOVEd on Clear. Machine writes never
-  stamp `updated_at` on units (the importer's human-ownership signal). The job
-  never touches broadcasts.
+  stamp `updated_at` on units (the importer's human-ownership signal). Each
+  record write appends an audit event `org_name_rewrite` {field, from, to,
+  action, by}. The job never touches broadcasts.
 - From-texts: rename = the old name; merge = the merged entry's name and its
-  spellings that no other entry shares; Use <name> = the value.
+  spellings that no other entry shares; Use <name>, Move to Agency, Move to
+  Housing authority and Clear = the value (in the one field the row names).
 - Merge moves the merged entry's name and spellings onto the target as
   spellings (spellings shared with other entries stay shared), then removes
   the merged entry. A renamed entry keeps its old name as a spelling.
@@ -402,19 +443,28 @@ D11. **The rewrite job (rename, merge, and the "Not on the list" actions).**
 
 D12. **Spellings are curated, never learned from form clicks.** Sources: the
 starting list; admin edits on the Settings page; renamed and merged names
-(D11); values settled with "Use <name>" (D10). An admin spelling edit is
-refused when the spelling equals any entry's name; adding a spelling another
-entry of the same kind already carries is allowed only with an explicit
-confirm ("now shared with <name> - it will no longer be applied
-automatically"). A rename's new name must not equal another entry's name or
-spelling (it may equal one of the entry's own spellings, which is then
-dropped from its spellings).
+(D11); values settled with "Use <name>" when "Remember this spelling" is on
+(D10).
+- An admin spelling edit is refused when the spelling equals any entry's
+  name, would be shared with an entry of the OTHER kind, is compound (D4), or
+  breaks a D13 cap; adding a spelling another entry of the same kind already
+  carries is allowed only with an explicit confirm ("now shared with <name> -
+  it will no longer be applied automatically").
+- AUTOMATIC additions (rename keeping the old name, merge moving names and
+  spellings, Use with "Remember this spelling") apply the same rules but SKIP
+  - never fail on - a spelling that breaks one; the action still runs, and the
+  result names each skipped spelling and why. They never create a same-kind
+  share silently: a spelling another entry already carries is skipped too.
+- A rename's new name must not equal another entry's name or spelling (it may
+  equal one of the entry's own spellings, which is then dropped from its
+  spellings).
 
-D13. **Notes per entry and size limits.** Notes are free text up to 500
-characters, editable by everyone. An entry carries at most 20 spellings of at
-most 100 characters each. A write that would make the item larger than 300 KB
-is refused with 409 `org_list_full` (about 300 entries with full notes fit;
-the starting list has about 20).
+D13. **Notes, names and size limits.** Names are at most 120 characters.
+Notes are free text up to 500 characters, editable by everyone. An entry
+carries at most 20 spellings of at most 100 characters each. A write that
+would make the item larger than 300 KB is refused with 409 `org_list_full`
+(about 300 entries with full notes fit; the starting list has about 20). The
+AI list block has its own budget (D8).
 
 ### Cleanup and side effects
 
@@ -430,7 +480,9 @@ no decisions file.
 D15. **Agency counts as an intake fact.** The missed-call intake auto-text
 (`app/src/jobs/missedCallAutoText.ts`) treats a contact with an `agency` as
 known, so moving an agency out of the housing authority field does not
-re-arm the intake text. A contact whose only fact was a junk value that staff
+re-arm the intake text. The operator hint that mirrors this rule (Settings >
+Templates, `dashboard/src/routes/settings/TemplatesSection.tsx`, and its
+test) changes with it. A contact whose only fact was a junk value that staff
 Clear is genuinely blank and may receive it (stated, accepted).
 
 ### Branch B
@@ -462,7 +514,9 @@ caseworkers" list of contacts that are not yet caseworkers:
 Each row offers "Make caseworker" and "Not a caseworker" (dismissal is stored
 on the contact, `caseworker_review: 'dismissed'`, and hides the row for good).
 Make caseworker: refused (409) while the contact has an open placement or an
-upcoming or unresolved tour as the tenant; otherwise sets type `partner`,
+upcoming or unresolved tour as the tenant, is any unit's landlord of record
+(`landlordId`), or sits on any unit's contact roster; otherwise sets type
+`partner`,
 role "Caseworker", `type_source: manual`, `organization` from the contact's
 agency or housing authority when either is exactly a list name (else left
 empty for staff to pick), REMOVEs `housingAuthority`, clears `agency`, and
@@ -484,13 +538,16 @@ labelled by their role.
 
 D21. **Type changes keep threads and imports consistent.** When staff change
 a contact's type between tenant, landlord and partner (edit form, Caseworker
-choice, Make caseworker), the contact's open one-to-one threads whose type
-matches the OLD type are re-typed to the new type; a thread typed for some
-other identity is left alone (today's triage-conflict rule). Staff type
-changes stamp `type_source: manual`, and the importer no longer changes the
-type of a contact whose `type_source` is `manual` (mirroring its status
-rule). The contact header shows voucher size and housing authority only for
-tenants.
+choice, Make caseworker), the contact's open one-to-one threads - for EVERY
+phone in its `phones` list and every email address, not only the primary
+phone - whose type matches the OLD type are re-typed to the new type; a
+thread typed for some other identity is left alone (today's triage-conflict
+rule). Staff type changes stamp a NEW field `type_source: 'manual'`. The
+importer, for a contact whose `type_source` is `'manual'`, writes none of
+`type`, `status`, `housingAuthority` or `agency` (its own type and status
+were computed for a type staff overrode, and Make caseworker removed the
+authority on purpose); contacts without the field are imported as today. The
+contact header shows voucher size and housing authority only for tenants.
 
 ---
 
@@ -515,7 +572,8 @@ tenants.
   ],
   lastRewrite?: {                  // the latest rewrite (D11)
     jobId: string,
-    action: 'rename' | 'merge' | 'use' | 'move_to_agency' | 'clear',
+    action: 'rename' | 'merge' | 'use' | 'move_to_agency'
+          | 'move_to_housing_authority' | 'clear' | 'cleanup',
     fromTexts: string[], toName?: string,
     fields: string[],              // which record fields it rewrites
     status: 'running' | 'done' | 'failed',
@@ -536,7 +594,7 @@ tenants.
 | `contact.organization` (B, partners) | either | new |
 | `contact.caseworker_review` (B) | - | new: `'dismissed'` |
 | `contact.type_source` (B) | - | new: `'manual'` on staff type changes |
-| broadcast `audience_filter.housing_authority` | housing authority | POST checked by D5; preview and send re-check (D7) |
+| broadcast `audience_filter.housing_authority` | housing authority | POST checked by D5; preview and a filter-resolved send re-check (D7) |
 
 The legacy `unit.jurisdiction` / `accepted_programs` tombstones stay accepted
 and ignored on the unit PATCH (`docs/issues/retire-humanize-authority.md`);
@@ -551,8 +609,9 @@ All under `/api/organizations`, signed-in staff unless marked admin.
 
 - `GET /api/organizations` - both lists (5.1 entries) plus `lastRewrite`.
   `?usage=1` adds per-entry use counts (D3, D10).
-- `GET /api/organizations/not-on-list` (admin) - the D10 section: distinct
-  values, field, count, resolution. Computed on demand from base-table reads.
+- `GET /api/organizations/not-on-list` - the D10 section: distinct values,
+  field, count, resolution, and (per row, on request) the holding records.
+  Computed on demand from base-table reads. Visible to everyone.
 - `POST /api/organizations/check` `{ kind, text }` - the D4 resolution:
   `{ match?, candidates[], close[], otherKind? }`. No write.
 - `POST /api/organizations` `{ kind, name, notes? }` - add. Refused 409
@@ -565,10 +624,12 @@ All under `/api/organizations`, signed-in staff unless marked admin.
 - `DELETE /api/organizations/:orgId` (admin) - refused 409 `org_in_use` while
   anything uses the entry.
 - `POST /api/organizations/not-on-list/resolve` (admin) `{ field, value,
-  action: 'use' | 'move_to_agency' | 'add' | 'clear', name? }` - starts the
-  rewrite (D10, D11).
+  action: 'use' | 'move_to_agency' | 'move_to_housing_authority' | 'add' |
+  'clear', name?, rememberSpelling? }` - starts the rewrite (D10, D11); the
+  response names any spelling D12 skipped.
 - `POST /api/organizations/rewrite/run-again` (admin) - D11.
-- Suggestions: `POST` accept gains optional `value` (D8).
+- Suggestions: `POST` accept gains optional `value` (D8); 422
+  `value_not_from_suggestion`, 409 `suggestion_already_resolved`.
 
 Existing endpoints that write the fields in 5.2 apply D5 and answer 422
 `org_not_on_list`. Rewrite-starting endpoints answer 409
@@ -642,6 +703,10 @@ Existing endpoints that write the fields in 5.2 apply D5 and answer 422
 - **Reporting** follows `enable-conversation-automation.ts`: a done line with
   counters; a PARTIAL report and exit 1 on an abort; `COMPLETED WITH
   FAILURES` and exit 1 on per-record failures; re-running is safe.
+- **Lock:** the apply takes the D11 rewrite lock (`lastRewrite` set to
+  `running` with action `cleanup`, heartbeated, finished `done` or `failed`)
+  and refuses to start while another rewrite runs, so no rename or merge can
+  interleave with it. A dry run takes no lock.
 - **Order (RUNBOOK):** dry run against prod from a `main` checkout BEFORE the
   deploy; review the leftover values with Sam; deploy; apply immediately after
   the deploy (until the apply runs, a blast filtered on a new list name misses
@@ -654,11 +719,12 @@ Existing endpoints that write the fields in 5.2 apply D5 and answer 422
 ## 9. Invariants, writers and readers (the plan must enumerate each)
 
 **Invariant I1:** every housing authority, agency, accepted-authority member,
-(B) organization and broadcast filter value WRITTEN after the deploy is a
-name on the list of the right kind. Values written before the deploy are
-either mapped by the cleanup or listed in the Settings page's "Not on the
-list" section until staff settle them; a broadcast's stored filter is
-re-checked at preview and send.
+(B) organization and broadcast filter value WRITTEN after the deploy is on
+the list for its field (D3: an entry name of a kind the field accepts).
+Values written before the deploy are either mapped by the cleanup or listed
+in the Settings page's "Not on the list" section until staff settle them; a
+broadcast's stored filter is re-checked at preview and on a filter-resolved
+send (D7).
 
 Writers (each applies D5, or is a stated exception):
 
@@ -683,8 +749,9 @@ Readers (must keep working with full names and with not-on-the-list values):
 `audienceResolution.ts` and broadcast preview/send; Tenants page facets;
 Properties page summary and facets; the flyer projection; `similarUnits.ts`;
 the AI job's current-profile context and the new list block; the AI run log
-and System Status (prompt fingerprint plus list version, the new drop
-reason); the missed-call auto-text check (D15); the contact header and tenant
+and System Status (prompt fingerprint plus `orgListFingerprint`, the new drop
+reason and its label); the missed-call auto-text check and its Settings >
+Templates hint (D15); the contact header and tenant
 file; tour and placement pages that show tenant facts; (B) the Caseworkers
 tab, partner page, "Sent to" list, and the extraction kind canonicalizer.
 

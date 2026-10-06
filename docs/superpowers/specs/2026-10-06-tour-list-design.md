@@ -80,7 +80,8 @@ out, or a "needs placement" tour older than 90 days, is on none of them.
   list and carries in the cursor (5.5), so every page of one list uses the same
   boundary.
 - P5. Pages of 50 rows; a search walk and a return-restore (P14) ask for 100,
-  the server's maximum (the house convention, `dashboard/src/api/paging.ts:33-40`).
+  the server's maximum (the house convention, `dashboard/src/api/paging.ts:33-40`),
+  after the list's usual 50-row first page.
 - P6. Undated tours: Any time lists the undated tours AFTER every dated tour,
   in either sort direction: requested first, then toured, no-show, canceled,
   closed. Upcoming, Past and Date range list dated tours only. The Needs booking
@@ -448,10 +449,15 @@ replaces #1's current-tab link.)
     page's back arrow hands `restore` back.
 - On mount (or on adoption of a POP) with a `restore` record - the entry's own
   state on a browser Back or a reload, or the back arrow's state - the view
-  loads pages (`limit=100`, fresh reads, never a cache) until it holds at least
-  `depth` rows, the list ends, or 10 requests have run (the cap: past it, the
-  view keeps what it has). Then it scrolls to, and focuses the link of, among
-  the VISIBLE rows:
+  loads its first page as every list does (`limit=50`), then restore pages
+  (`limit=100`, fresh reads, never a cache) until it holds at least `depth`
+  rows, the list ends, or 10 restore pages have run (the cap: past it, the
+  view keeps what it has - no further automatic request, not even the
+  empty-page follow; Load more continues). The record drives only the list it
+  was made for: a filter, sort or search-save change, Clear filters or Start
+  over drops it, and the automatic cursor-400 restart (4.5) ends the restore
+  (the refreshed list starts at page 1). (Amended by plan review r1.) Then it
+  scrolls to, and focuses the link of, among the VISIBLE rows:
   - the row with `openedTourId`, when it is visible; else
   - when the list was loaded to `depth` (or ended), the row now at
     `openedIndex` (the next one to work on), clamped to the last visible row;
@@ -789,7 +795,8 @@ for any other tour without a date.
     `requested`; Any time + that chip alone requesting `status=requested` and
     listing only requests (D4).
   - The return restore, through the back arrow, a browser Back and a reload:
-    depth reloaded (and capped at 10 requests); the opened row in view and
+    depth reloaded (and capped at 10 restore pages after the first page, with
+    no follow after the cap); the opened row in view and
     focused; when the opened row has left the list, the VISIBLE row now at its
     position; under a search, positions counted over the visible matches; a
     capped restore that never reached the anchor moving nothing; user input
@@ -800,18 +807,22 @@ for any other tour without a date.
   - The cursor-400 restart happening once per list (a second 400 shows the
     error and stops); a search typed during Load more letting that request
     finish, then walking on from its cursor.
-- e2e: a spec that creates its own uniquely named tenant contact and property
-  through the API, then its tours (a request, an upcoming, a past no-show, a
-  canceled, an undated toured), and checks: the tab order and `/tours` landing on
+- e2e: a spec that reseeds the lean world once per file (it seeds no tours;
+  Playwright runs one worker, files in sequence - the house pattern of
+  `tours-past.spec.ts:77-80`) and creates, in each test that needs them, its
+  own tours for the lean seed's tenant through the API (a request, an
+  upcoming, a past no-show, a canceled, an undated toured) - amended by plan
+  review r1 from "its own uniquely named tenant contact and property" - and
+  checks: the tab order and `/tours` landing on
   Active; Any time + the Needs booking chip listing only the request, its date
   reading "Needs booking" (D4, D8); Upcoming; Past + No show; Any time listing
   the undated rows after the dated, the undated toured one reading "Undated"
   (and "Undated" on its tour page); a row opened
   and the back arrow returning to the same filtered list with the search, the
-  opened row in view. EVERY step also searches for the unique tenant name, so
-  the walk loads the whole filtered list and no step depends on page depth (the
-  lane holds other specs' tours). Every assertion scopes to its own
-  rows, tab selectors stay inside the "Tours view" nav (Playwright names are
+  opened row in view. EVERY step also searches for the tenant's name, so
+  the walk loads the whole filtered list and no step depends on page depth
+  (earlier tests in the file leave their tours behind). Every assertion scopes
+  to its own rows, tab selectors stay inside the "Tours view" nav (Playwright names are
   case-insensitive substrings), and "Needs booking" is matched by role and
   scope - it is now the All chip (a button in the Status group), the date text
   of request rows and the Active tab's section heading at once. An API-level

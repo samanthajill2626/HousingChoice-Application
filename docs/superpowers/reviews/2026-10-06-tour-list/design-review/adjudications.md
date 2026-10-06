@@ -394,3 +394,136 @@ One more planner precision recorded in spec 4.5: an automatic follow request
 in flight when a search starts is aborted and re-requested from the same
 cursor as a walk page (one automatic effect), rather than "allowed to finish"
 - equivalent for the user, no row lost or repeated.
+
+## Plan round 1 (plan v1 @7beb7422; reviewers A and B, opus, independent)
+
+Reports: `plan-r1-a.md` (15 findings), `plan-r1-b.md` (13 findings) - 28
+findings, merged into 18 items below. All ACCEPTED; none rejected or deferred.
+Both reviewers verified the app and dashboard code compiles and lints as
+written, so every finding is about behavior or plan coherence. Plan v2 folds
+them in; the spec is amended where a rule changed (4.9, P5, 9).
+
+### P1 [A1, B-F1] The view's restore record is never dropped - ACCEPT (decision changed)
+
+Verified in plan v1: the local `restore` was set only by the initializer and
+POP/unstamped adoption, so after a return every filter change re-ran the
+restore to the old depth on the NEW list. Fix: the record is BOUND to the list
+it was adopted for (`{ record, listKey }`; `restoreDepth` is null for any other
+list) and cleared by `change()`, a writing blur save and Start over. Task 12.4
+gains the spec's "a filter change dropping the record" case (exactly one
+`limit: 50` request, no `limit: 100`) plus reload and empty-list cases (P7).
+
+### P2 [A2, B-F2, B-F12] Clear filters leaves the walk flag and its timer set - ACCEPT (decision changed)
+
+`change()` - every control change, both Clear filters buttons included - now
+clears the debounce timer and sets `walkQ` AT ONCE, so Clear filters stops the
+walk and a filter change made while searching walks the new list immediately
+(B-F12). Belt: the hook's walk flag also requires a non-empty box. Task 12.2
+cases 7-8.
+
+### P3 [A3, B-F3] Task 10.1 asserts a `listTours` call the S10 stub cannot make - ACCEPT
+
+The assertion moves to Task 12.1 (case 10) once the real view lands.
+
+### P4 [A4] RED cases contradict the GREEN code - ACCEPT
+
+Engine case 9 states its budget (`maxQueryCalls: 10`) and pins the default
+budget's `{ ph: 'u', i: 3 }` too, so nobody "fixes" it by not counting empty
+calls. `loadMore` gains the `autoMode !== null` guard (a stray call during a
+walk or restore is a no-op, as hook case 7 says). The restore-count
+contradiction is P5.
+
+### P5 [A4-3, A5, B-F4] The restore's first page, cap and follow disagree with spec 4.9 - ACCEPT (decision changed)
+
+One rule, stated identically in S11 case 9, Task 12.4 cases 2/4 and spec 4.9
+(amended): the first page is the usual `limit: 50`; then up to 10 restore pages
+of 100; a capped restore keeps what it has - no follow after it; the automatic
+cursor-400 restart ends the restore (spec 4.5: the refreshed list starts at
+page 1); Retry after a failed first page does not. Found while revising: a
+failed first page must keep `restoreOutcome` 'pending' - v1 reported
+'reached' on the empty failed list, which would have spent the once-per-record
+anchor on nothing.
+
+### P6 [A6] Task 10.1 turns `npm test` red until Task 13.2 - ACCEPT
+
+The `'/tours/all'` route-pin exclusion moves into Task 10.1, the commit that
+adds the route; Task 13.2 keeps the known-gap note and the ledger.
+
+### P7 [A7, B-F6] Spec 9 cases missing from the plan - ACCEPT
+
+Added: restore through a reload and on an empty list (Task 12.4), a search
+typed while the first page loads (S11 case 13), and the DynamoDB Local walk in
+BOTH sort directions (Task 6.2).
+
+### P8 [A8, B-F10] The log line drops "items evaluated" - ACCEPT (decision changed)
+
+`queryListPhase` returns `scannedCount` (DynamoDB's ScannedCount; the shared
+fake returns the rows it evaluated, pinned by the mirror test), the engine
+sums `evaluated`, and the route logs it; route test 10 requires the four spec
+5.7 counts.
+
+### P9 [A9, B-F11, B-F13-2] The restart allowance and the refreshed notice are keyed by the filter string - ACCEPT (decision changed)
+
+A list is now `listKey#gen` (gen bumps on every `listKey` change, even back to
+an earlier key, and on Start over - which therefore needs no ref resets). The
+notice renders inside the ONE count-line status region (spec 4.5: "the count
+line says") and lasts until the list changes; the dead state shows its message
+and Start over in place of Load more (Task 12.1). The hook was re-linted
+(`npx eslint --stdin`, exit 0, no warnings) and type-checked against the 9.1
+types (`tsc` strict + noUncheckedIndexedAccess, exit 0) after the change; the
+conditional `listGen` setState in render is the pattern react-hooks' own rule
+message recommends.
+
+### P10 [A10] Clear filters judged on the unpruned selection - ACCEPT
+
+Both Clears read the PRUNED selection, as #1 does (`ListingsList.tsx:228-231`);
+Task 12.2 case 9.
+
+### P11 [A11, B-F9] Two definitions of the API-params type - ACCEPT
+
+Task 9.2 uses `export type TourListApiParams = TourListParams`.
+
+### P12 [A12, B-F5] e2e fixture placement, citations and cleanup - ACCEPT
+
+Each test creates its own tours in its body; row assertions are about the
+test's own ids; citations corrected (`decide` :70-76, `decideQuietly` :84-90,
+the reseed hook `tours-past.spec.ts:77-80`); a local `closeOut` leaves a
+canceled tour alone (`decide` as written PATCHes any status to toured). The
+fixture deviation (lean seed tenant + per-file reseed instead of a uniquely
+named tenant) is recorded as a planner call and spec 9 is amended - sound
+under `workers: 1` and a lean world with no tours. The API walk tolerates an
+empty boundary-phantom page.
+
+### P13 [A13] `pinnedNow` is not canonicalized - ACCEPT
+
+`new Date(getNow()).toISOString()`; route test 3 adds a non-canonical clock.
+
+### P14 [A14] The shared fake resumes by tourId lookup - ACCEPT
+
+It now resumes by key position (`(rangeKey, tourId)` against the start key in
+the read's order), matching DynamoDB for a deleted or moved row; the mirror
+test adds a moved-row case.
+
+### P15 [A15, B-F13-1] "six readers" - ACCEPT
+
+Task 14.2 says eight and names the two extras.
+
+### P16 [B-F7] An unused `exhaustive-deps` suppression - ACCEPT
+
+Removed with its builder note; v2 has no suppression (P9's re-lint confirms).
+
+### P17 [B-F8] P15's click return value cannot fail - ACCEPT
+
+Dropped; the location assertion is the RED, the Ctrl-click check stays.
+
+### P18 [B-F13-3] Self-QA cannot exercise "the row left the list" - ACCEPT
+
+S15 self-QA presses the Scheduled chip first, and adds "a filter change after
+a return loads one page".
+
+### Round verdict
+
+Decisions changed (P1, P2, P5, P8, P9): what the view and hook build, the
+restore rule (spec 4.9 amended), and the repo/engine surface (`scannedCount`).
+Round 2 is required: reviewer A (more accepted findings) continues with
+`plan-r1-b.md`.

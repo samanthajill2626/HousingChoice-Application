@@ -1,0 +1,42 @@
+# Plan design review - adjudications
+
+Plan: `docs/superpowers/plans/2026-10-06-clean-org-names.md` (branch A).
+Spec: revision 6. Planner: the feature-mission planner session.
+
+## Round 1 (plan @efea53ac; reviewers A and B in parallel)
+
+Reports: `plan-r1-reviewer-a.md` (13 findings), `plan-r1-reviewer-b.md` (23
+findings). Adjudicated by theme; tags are reviewer.finding.
+
+| # | Theme (findings) | Ruling | Resulting change | Decision changed |
+|---|---|---|---|---|
+| P1 | S10 guard flags S8's own source-check test; S10 quotes pre-S8 text (B.F1, A.10) | ACCEPT | Task 10.1 deletes S8's source-check block (the guard supersedes it), quotes `extractionSchema.test.ts:16` as S8 leaves it, lists `importOrgNames.test.ts` among its edits | no (seam fix) |
+| P2 | The starting list settles spec section 13 on the planner's authority (B.F2, A.2) | ACCEPT as a LAUNCH-GATE QUESTION | spec Appendix A + section 13 updated to the planner default (Fulton County Housing Authority added with one spelling; `Fulton County`, `Clayton County`, `Cobb County`, `McDonough` are not spellings and go to "Not on the list"), marked "confirmed by Cameron at the launch gate"; stale PENDING-SAM watch item and the stale S6/S14 rationale removed | product decision for Cameron |
+| P3 | Contacts read through the `byTypeStatus` GSI, not base tables (B.F3, A.1) | REJECT the switch; ACCEPT a spec amendment | Every contact list in the app reads that index; the repo refuses to remove its keys (`RequiredIndexKeyRemovalError`), so a row missing them is invisible app-wide (a guarded bug class), and a new scan method would break five typed fakes again. GSI lag is sub-second and self-healing: a record a rewrite or delete check misses shows in "Not on the list" once the index catches up, where Use settles it. Spec D11 / section 6 now say so. | no |
+| P4 | A rewrite pass that loses its lock keeps writing; the takeover test is vacuous (B.F4, A.3) | ACCEPT | interface 3.4 `heartbeat(jobId): Promise<boolean>` (true = still the caller's lock); the pass checks ownership at each heartbeat and aborts the remaining writes when lost; the takeover test asserts no record is written after the takeover; the cleanup script's heartbeat runs on elapsed time, not only after writes (B.F12) | no (delivers the stated D11 guarantee) |
+| P5 | Name-variant rows offer actions the server always refuses with an uncoded 400 (B.F5, A.5) | ACCEPT | spec D10: a row whose value normalizes equal to an entry NAME of the field's kind can only be settled with "Use <that entry>"; server refusal coded 409 `org_value_is_name_variant` `{ entry }`; the dashboard offers only that action on such rows; 11.17's pinned test changed | yes (narrows D10's actions on one row type) |
+| P6 | Task 3.2's typecheck needs a method only Task 3.3 adds (B.F6) | ACCEPT | the `units` half of the suite moves to Task 3.3 | no |
+| P7 | New hooks will trip `react-hooks/set-state-in-effect` (B.F7) | ACCEPT | the codebase's justified disable on the three effects | no |
+| P8 | Run again re-queues without re-checking names; `lastRewrite.fields` dropped (B.F8, A.7, B.F23) | ACCEPT | `lastRewrite.fields: OrgRecordField[]` restored (set at start; rename/merge from the target's kind then); `runAgain` re-checks `toName` / `agencyName` exist with the expected kind, else 409 `org_rewrite_target_gone` | no (restores spec 5.1) |
+| P9 | Stale pre-reads and non-conditional writes (B.F9) | ACCEPT in part | units PATCH pre-read becomes consistent (`unitsRepo.getById` gains an optional `{ consistentRead }`, fakes unaffected); the contacts write race (API callers only) and the delete/kind-change scan race are documented in the watch items | no |
+| P10 | Values that normalize to '' cannot be settled; Add as new can create such a name (B.F10) | ACCEPT | `checkNewName` refuses a name that normalizes to '' (`org_name_invalid`); value actions match EXACT stored text when the normalized from-text is '' | no |
+| P11 | Move and Split audit only the matched field (B.F11) | ACCEPT | one audit event per field written | no |
+| P12 | S15 details: null audits, heartbeat placement, CLI message, own deleted test, no-op audit (B.F12, A.4) | ACCEPT | `''` not null; elapsed-time heartbeat; CLI message names the real failure; the repos' `isDeleted` rule; jurisdiction backfill audits `from: ''` | no |
+| P13 | Settings polls two full scans every 2 s and aborts reads (B.F13) | ACCEPT | poll only `GET /api/organizations` while running; refresh usage and Not-on-the-list once when the rewrite ends; skip a details read while one is in flight | no |
+| P14 | Untested Move to Housing authority; Change kind / Delete enabled while running (B.F14) | ACCEPT | an agency-row test; both disabled while a rewrite runs | no |
+| P15 | Phone-width overflow; transient false "Not on the list" mark (B.F15) | ACCEPT | dialog name buttons wrap; chip remove target 24 px; a just-added name counts as on the list until the reload lands | no |
+| P16 | Over-budget WARN mislabels unrenderable drops (B.F16) | ACCEPT | separate counts; WARN only for budget drops | no |
+| P17 | Pre-deploy claimed journals replay unchecked text; dismissals keyed on old spellings (B.F17) | REJECT | a journal is replayed within seconds of its claim, so the deploy window is negligible; dismissal keys are informational and unchanged by this branch | no |
+| P18 | Already-green RED cases unmarked; wrong RED reasons (B.F18) | ACCEPT | marked (PIN) / reasons corrected in 5.1, 5.3, 7.2, 7.8, 11.7, 11.12 | no |
+| P19 | S17 details (B.F19, A.13) | ACCEPT | `git merge --no-commit main` then a commit with the trailer; no fetch; `npm ci` when the lockfile changed; e2e timeout 2700 s, tree-kill + `npm run e2e:stop` + lane-port check on a timeout; gate 5 names pre-existing errors (`useComposerDraft.ts:116`); "dev first" in the owed actions; full `npm test` checkpoints after S10 and after S13 | no |
+| P20 | Docs drift (B.F20, A.11) | ACCEPT | GLOSSARY "accepted authorities" entry; RUNBOOK step 1 key names; README fixtures list; `documentation/sequence-diagram-to-test.md` per the S12 note | no |
+| P21 | Dangling and stale references (B.F21, A.9) | ACCEPT | CONTRACT ISSUES pointers replaced with plan section 3 / the records file; spec revision 6; S4 work-map row; typed-fakes list; `"Accepts:"` grep; edit counts; a note that line numbers drift and anchors are unique text | no |
+| P22 | CSS locators and a fixed wait in the new spec (B.F22) | ACCEPT in part | `pickOrgName` scope uses the page, not `locator('body')`; the Activity `section` locator mirrors existing helpers (kept, noted); the 1.5 s negative window is kept (it cannot cause a false failure) | no |
+| P23 | API shapes differ from spec section 6 (B.F23, A.8) | ACCEPT | spec section 6 amended to the plan's separate `/usage` and `/not-on-list/records` endpoints | no |
+| P24 | Compound spans: left-to-right vs "longest first" (A.6) | ACCEPT | spec D4 wording: "left to right, the longest phrase at each position" (what S1 implements and documents) | no |
+| P25 | Unbounded text into the edit-distance scorer (A.12) | ACCEPT | `closeNames` scores only texts whose normalized length is at most 120 (else no close names); `POST /check` refuses text over 200 chars with 400 | no |
+
+Counts: 36 findings; 33 accepted (some in part), 3 rejected (P3's switch,
+P17, P22's two kept items). P2 goes to Cameron at the launch gate.
+Decisions changed this round: yes (P5) - round 2 continues reviewer B (more
+accepted findings: 21 vs 12), handed reviewer A's report.

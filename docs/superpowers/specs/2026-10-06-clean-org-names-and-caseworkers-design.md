@@ -1,7 +1,9 @@
 # Clean housing authority and agency names, and caseworkers - design
 
-Date: 2026-10-06 (revision 5, after adversarial design review rounds 1-4;
-round 4 was precision-only, so the review is closed - adjudications in
+Date: 2026-10-06 (revision 6: revision 5 was APPROVED by Cameron; revision 6
+folds in precision corrections from the plan research - see
+`docs/superpowers/reviews/2026-10-06-clean-org-names/plan-research/planner-rulings.md`
+- with no design change. Design review: rounds 1-4, closed - adjudications in
 `docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md`).
 Tracker items #2 ("One clean name per housing authority") and #19
 ("Caseworkers"), built together under one approved estimate (10-15 hours of
@@ -284,9 +286,10 @@ other kind that the text matches). Rules for partial and empty writes:
   allowed: `housingAuthority: ''` REMOVEs the attribute (it is a GSI key and
   is never SET to `''`), `agency: ''` keeps today's stored `''`.
 - `accepted_authorities` is checked per member: members the unit already
-  holds (exact text), or equal to the unit's legacy `jurisdiction`, pass
-  unchanged; only new members must resolve. Members are trimmed and
-  de-duplicated.
+  holds (compared after trimming both sides) pass unchanged, and so does the
+  unit's legacy `jurisdiction` ONLY while the unit has no stored
+  `accepted_authorities` (the list a form shows was synthesized from it);
+  every other member must resolve. Members are trimmed and de-duplicated.
 - Scripts and jobs follow the same rules and REMOVE (never SET `''`) the
   housing authority.
 The full list of writers is in section 9; the plan must cover each one.
@@ -313,12 +316,15 @@ D7. **Blast composer: the picker without the add step.** Composer filters
 can only name list entries. A tenant whose stored value is not on the list is
 not reachable by a housing authority filter until that value is settled on
 the Settings page (D10), which lists every such value with its count. A
-stored draft filter is re-checked at preview and on a send that re-resolves
-the filter (a send without `recipientContactIds`): a value that is not on the
-list for the housing authority field (D3) is refused with 422
-`org_not_on_list` and the composer asks for a new pick. The dashboard's
-curated send (`recipientContactIds`) does not re-resolve the filter and is
-not re-checked. Sent blasts keep their historical filter; nothing rewrites
+stored filter is re-checked at preview of a DRAFT and inside the send branch
+that re-resolves the filter (not a seeds-only send): a value that is not on
+the list for the housing authority field (D3) is refused with 422
+`org_not_on_list` (field `audience_filter`; a stored value that resolves to
+one entry but is not its exact name lists that entry as the candidate), and
+the composer asks for a new pick. The dashboard's composer does not resume
+saved drafts; the 422s it can meet come from creating its draft and from
+Preview. The curated send (`recipientContactIds`) does not re-resolve the
+filter and is not re-checked. Sent blasts keep their historical filter; nothing rewrites
 broadcasts. Prefilling from the property and multi-authority rules stay with
 tracker #6.
 
@@ -340,9 +346,10 @@ D8. **AI: list-aware, suggestion-only for anything new.**
   supports or return the text as said; agency names are never housing
   authorities.
 - The apply layer resolves the returned text with D4: a match is handled
-  exactly as a known authority is today (write an empty field, suggest a
-  change); ambiguous or unknown text becomes a staff suggestion (as unknown
-  names do today); an agency name is dropped from `housingAuthority`,
+  exactly as a known authority is today (the model's op still decides write
+  or suggest; the value written or suggested is the entry's exact name);
+  ambiguous or unknown text becomes a staff suggestion (as unknown names do
+  today); an agency name is dropped from `housingAuthority`,
   recorded with the new drop reason `agency_not_authority` (dashboard label
   "Agency, not a housing authority"), never written.
 - Accepting a housing authority suggestion: the accept request gains an
@@ -364,7 +371,11 @@ D8. **AI: list-aware, suggestion-only for anything new.**
   from the text resolves); anything else is refused with 422
   `value_not_from_suggestion`. A second accept of an already-resolved
   suggestion with a different `value` answers 409
-  `suggestion_already_resolved`, as an action mismatch does today.
+  `suggestion_already_resolved`, as an action mismatch does today: the
+  completed journal row keeps `valueKey` (a sha256 of the accepted value,
+  absent when none was sent) and a re-accept compares it.
+- The per-run `orgListFingerprint` shows in the AI run detail header beside
+  the prompt fingerprint; System Status is unchanged.
 - The AI never adds to the list and never fills Agency (non-goals).
 
 D9. **Importer: same check, no overwrites.** The importer resolves each
@@ -375,8 +386,12 @@ authority column is written to `agency` when `agency` is absent; ambiguous or
 unknown values are not written and are listed in the import report with
 counts. Unit side: the existing ownership rule is unchanged (import-owned
 units are rewritten each run, human-owned units fill absent attributes); the
-values it writes are resolved names, and agency names are never written to a
-unit. (B adds a `type` rule to the importer, D21.)
+values it writes are resolved names, agency names are never written to a
+unit, and unknown or ambiguous unit values are not written and are counted
+in the report. The list reaches the importer as an input: the CLI reads the
+environment's stored item WITHOUT creating it (the starting list when
+absent), and the not-written counts are computed in dry runs too. (B adds a
+`type` rule to the importer, D21.)
 
 ### Settings page
 
@@ -437,10 +452,12 @@ D11. **The rewrite job (rename, merge, and the "Not on the list" actions).**
 - One rewrite at a time: a new one is refused (409 `org_rewrite_running`)
   while `lastRewrite.status` is `running` and its heartbeat is under 15
   minutes old. The cleanup script's apply takes the same lock (section 8).
-- Order: ONE conditional write of the list item changes the list (rename,
-  merge, new spelling) and sets `lastRewrite` to `running` with the rewrite's
-  definition (from-texts, to-name, fields, action); then the job is enqueued
-  (`jobs.enqueue`). An enqueue failure sets `lastRewrite` to `failed`. A
+- Order: the service mints the rewrite id (a random UUID); ONE conditional
+  write of the list item changes the list (rename, merge, new spelling) and
+  sets `lastRewrite` to `running` with that id and the rewrite's definition
+  (from-texts, to-name, fields, action); then the job is enqueued
+  (`jobs.enqueue`) with the id in its payload (never the jobs envelope id).
+  An enqueue failure sets `lastRewrite` to `failed`. A
   `failed` rewrite, or a `running` one whose heartbeat is older than 15
   minutes, shows "Run again" (admin), which re-enqueues the same definition -
   EXCEPT action `cleanup`, which no job can run: for it the page says to
@@ -453,7 +470,8 @@ D11. **The rewrite job (rename, merge, and the "Not on the list" actions).**
   the rewrite; the housing authority is REMOVEd on Clear. Machine writes never
   stamp `updated_at` on units (the importer's human-ownership signal). Each
   record write appends an audit event `org_name_rewrite` {field, from, to,
-  action, by}. The job never touches broadcasts.
+  action, actor} (`actor` is the codebase's audit key). The job never touches
+  broadcasts.
 - From-texts: rename = the old name; merge = the merged entry's name and its
   spellings that no other entry shares; Use <name>, Move to Agency, Move to
   Housing authority, Split and Clear = the value (in the one field the row
@@ -467,9 +485,14 @@ D11. **The rewrite job (rename, merge, and the "Not on the list" actions).**
   dropped. A renamed entry keeps its old name as a spelling.
 - The job heartbeats `lastRewrite` and finishes with `done` and counts
   (records rewritten per field, skipped because a record changed meanwhile).
-  Re-running a definition is safe: records already rewritten no longer hold
-  the from-text. While a rewrite runs, a blast filtered on the new name
-  misses records not yet rewritten (seconds to minutes).
+  It acts only while `lastRewrite` still carries its id and `running`; every
+  heartbeat and finish re-checks the id first, so a duplicate or stale run
+  never overwrites a newer rewrite's state. It catches its own errors,
+  records `failed` with the counts so far, and never rethrows (a rethrow would
+  make the queue redeliver it). Re-running a definition is safe: records
+  already rewritten no longer hold the from-text. While a rewrite runs, a
+  blast filtered on the new name misses records not yet rewritten (seconds to
+  minutes).
 
 D12. **Spellings are curated, never learned from form clicks.** Sources: the
 starting list; admin edits on the Settings page; renamed and merged names
@@ -491,6 +514,8 @@ starting list; admin edits on the Settings page; renamed and merged names
   spellings).
 
 D13. **Notes, names and size limits.** Names are at most 120 characters.
+Names and spellings may not contain a newline or other control character
+(they are rendered one per line into the AI list block).
 Notes are free text up to 500 characters, editable by everyone. An entry
 carries at most 20 spellings of at most 120 characters each (the name limit,
 so a merged or renamed name always fits as a spelling). A COMPOUND text (D4)
@@ -517,7 +542,9 @@ D15. **Agency counts as an intake fact.** The missed-call intake auto-text
 known, so moving an agency out of the housing authority field does not
 re-arm the intake text. The operator hint that mirrors this rule (Settings >
 Templates, `dashboard/src/routes/settings/TemplatesSection.tsx`, and its
-test) changes with it. A contact whose only fact was a junk value that staff
+test) changes with it, and so does the rule's description in
+`docs/issues/missed-call-autotext-partial-intake.md`. A contact whose only
+fact was a junk value that staff
 Clear is genuinely blank and may receive it (stated, accepted).
 
 ### Branch B
@@ -688,8 +715,10 @@ Existing endpoints that write the fields in 5.2 apply D5 and answer 422
   `orgVocabulary.ts` is replaced by the stored list.
 - **Property New/Edit forms:** Housing authorities multi-picker (D6), housing
   authorities only; legacy members shown as "Not on the list" chips.
-- **Blast composer:** housing authority filter picker without add (D7); a
-  resumed draft with an off-list filter asks for a new pick.
+- **Blast composer:** housing authority filter picker without add (D7); it
+  changes the filter only on a pick or a clear (never per keystroke, since
+  every filter change re-creates the draft); a 422 at draft create or at
+  Preview asks for a new pick.
 - **Contact suggestions (AI):** D8.
 - **Importer:** D9.
 - **Settings:** D10-D13.
@@ -804,9 +833,10 @@ Readers (must keep working with full names and with not-on-the-list values):
 `audienceResolution.ts` and broadcast preview/send; Tenants page facets;
 Properties page summary and facets; the flyer projection; `similarUnits.ts`;
 the AI job's current-profile context and the new list block; the AI run log
-and System Status (prompt fingerprint plus `orgListFingerprint`, the new drop
-reason and its label); the missed-call auto-text check and its Settings >
-Templates hint (D15); the contact header and tenant
+(the run detail header shows `orgListFingerprint`; the new drop reason and
+its label; System Status is unchanged); the missed-call auto-text check and
+its Settings > Templates hint (D15); the property Activity tab (labels for
+`org_name_rewrite` / `org_name_cleanup`); the contact header and tenant
 file; tour and placement pages that show tenant facts; (B) the Caseworkers
 tab, partner page, "Sent to" list, and the extraction kind canonicalizer.
 

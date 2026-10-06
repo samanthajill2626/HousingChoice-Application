@@ -155,6 +155,7 @@ import {
   type TourItem,
   type ToursRepo,
 } from '../../src/repos/toursRepo.js';
+import { isAutoCloseStatus } from '../../src/lib/toursModel.js';
 import {
   type ReminderKind,
   type TourReminderItem,
@@ -3460,6 +3461,12 @@ export function createFakeWorld(): FakeWorld {
   // existence. scheduledAt is optional (absent → status 'requested').
   const toursMap = new Map<string, TourItem>();
   let tourCounter = 0;
+  /** A read-dependent condition term exactly as the store evaluates it
+   *  (toursRepo.autoCloseIf / reopenIf): a STRING read must still be the
+   *  stored value (`#x = :x`); any other read requires the attribute ABSENT
+   *  (`attribute_not_exists(#x)`), so even an identical non-string loses. */
+  const storedAsRead = (stored: unknown, read: unknown): boolean =>
+    typeof read === 'string' ? stored === read : stored === undefined;
   const toursRepo: ToursRepo = {
     async create(input) {
       const now = new Date().toISOString();
@@ -3510,10 +3517,19 @@ export function createFakeWorld(): FakeWorld {
         .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
         .map((t) => ({ ...t }));
     },
-    async patch(tourId, updates) {
+    async patch(tourId, updates, opts) {
       const t = toursMap.get(tourId);
       if (!t) {
         throw new TourConditionalCheckFailedException({ message: `patch: no tour ${tourId}`, $metadata: {} });
+      }
+      // The expected-status precondition (tour auto-close, spec 8.3) - checked
+      // BEFORE the loop below mutates the stored row in place, and in the same
+      // tick, like the real ConditionExpression.
+      if (opts?.expectedStatus !== undefined && t.status !== opts.expectedStatus) {
+        throw new TourConditionalCheckFailedException({
+          message: `patch: tour ${tourId} status is not ${opts.expectedStatus}`,
+          $metadata: {},
+        });
       }
       for (const [key, value] of Object.entries(updates)) {
         if (value === undefined) continue;
@@ -3609,6 +3625,65 @@ export function createFakeWorld(): FakeWorld {
       delete t.rosterVersion;
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
+    },
+    async autoCloseIf(tour, rotation) {
+      // The real repo's condition, field for field, as one synchronous
+      // check-and-set (no await between them): the up-front candidate-status
+      // refusal, then exists AND same status AND no outcome AND no conversion
+      // claim AND not convertible AND the same scheduledAt and lastMarkedAt
+      // (both absent counts as the same, like attribute_not_exists; a
+      // non-string read requires the attribute absent, as in the store) AND -
+      // only when the read carries no lastMarkedAt - the same updatedAt, the
+      // clock of a never-marked tour (ruling A-1).
+      if (!isAutoCloseStatus(tour.status)) return undefined;
+      const t = toursMap.get(tour.tourId);
+      if (
+        !t ||
+        t.status !== tour.status ||
+        t.outcome !== undefined ||
+        t.convertedPlacementId !== undefined ||
+        t.convertible === true ||
+        !storedAsRead(t.scheduledAt, tour.scheduledAt) ||
+        !storedAsRead(t.lastMarkedAt, tour.lastMarkedAt) ||
+        (typeof tour.lastMarkedAt !== 'string' && !storedAsRead(t.updatedAt, tour.updatedAt))
+      ) {
+        return undefined;
+      }
+      const now = new Date().toISOString();
+      t.status = 'closed';
+      t.outcome = 'no_outcome';
+      t.autoClosedFrom = tour.status as TourItem['autoClosedFrom'];
+      t.autoClosedAt = now;
+      t.currentLadderId = rotation;
+      t.updatedAt = now;
+      toursMap.set(t.tourId, t);
+      return { ...t };
+    },
+    async reopenIf(tour, target, lastMarkedAt) {
+      // The real repo's condition as one synchronous check-and-set: exists AND
+      // closed AND no conversion claim AND the outcome and autoClosedFrom the
+      // caller read (both absent counts as the same, like attribute_not_exists;
+      // a non-string read requires the attribute absent, as in the store).
+      const t = toursMap.get(tour.tourId);
+      if (
+        !t ||
+        t.status !== 'closed' ||
+        t.convertedPlacementId !== undefined ||
+        !storedAsRead(t.outcome, tour.outcome) ||
+        !storedAsRead(t.autoClosedFrom, tour.autoClosedFrom)
+      ) {
+        return undefined;
+      }
+      t.status = target;
+      t.lastMarkedAt = lastMarkedAt;
+      t.updatedAt = new Date().toISOString();
+      delete t.outcome;
+      delete t.moveForward;
+      delete t.convertible;
+      delete t.autoClosedAt;
+      delete t.autoClosedFrom;
+      toursMap.set(t.tourId, t);
+      return { ...t };
     },
   };
 

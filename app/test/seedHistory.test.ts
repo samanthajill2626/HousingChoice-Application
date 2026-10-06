@@ -855,10 +855,12 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
         new Set(['tour_scheduled', 'tour_group_opened']),
       );
 
-      // Every row type is one of the 8 dashboard TOUR_EVENT_LABELS keys, so the
-      // dashboard's describeTourActivity resolves a REAL label (never the
-      // humanize() fallback). Pinned literal mirror (the dashboard module is not
-      // importable from app tests) - a drift alarm.
+      // Every row type is one of the 8 SEEDED kinds - a subset of the
+      // dashboard's TOUR_EVENT_LABELS keys (which also label the live-only
+      // tour_auto_closed / tour_reopened, never seeded) - so the dashboard's
+      // describeTourActivity resolves a REAL label (never the humanize()
+      // fallback). Pinned literal (the dashboard module is not importable from
+      // app tests) - a drift alarm.
       const TOUR_LABEL_KEYS = new Set<string>([
         'tour_scheduled',
         'tour_rescheduled',

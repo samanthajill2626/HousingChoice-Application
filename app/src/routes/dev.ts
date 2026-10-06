@@ -78,6 +78,7 @@ import {
   type RunGroupGuardrailsDeps,
 } from '../jobs/groupGuardrails.js';
 import { runJournalSweep, type JournalSweepDeps } from '../jobs/journalSweep.js';
+import { runTourAutoClose, type TourAutoCloseDeps } from '../jobs/tourAutoClose.js';
 import {
   createGroupSendStaleness,
   type GroupSendStalenessService,
@@ -130,6 +131,9 @@ export interface DevRouterDeps {
   /** Deps for POST /__dev/journal-sweep/tick (log-hygiene spec 9.3) - injected
    *  in tests; defaults to the worker's construction (worker.ts). */
   journalSweepDeps?: JournalSweepDeps;
+  /** Deps for POST /__dev/tour-auto-close/tick - injected in tests; defaults to
+   *  the worker's construction (worker.ts). */
+  tourAutoCloseDeps?: TourAutoCloseDeps;
   /** Service for POST /__dev/group-send-staleness/check (T6.4) - injected in tests. */
   groupStaleness?: GroupSendStalenessService;
   performanceReseed?: typeof resetPerformanceData;
@@ -423,6 +427,60 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     await runDueTourReminders(nowIso, tourReminderDeps());
     log.info({ now: nowIso }, 'dev tour-reminder tick ran');
     res.status(200).json({ ok: true, now: nowIso });
+  });
+
+  // POST /__dev/tour-auto-close/tick { now?, tourIds? } - the deterministic
+  // e2e seam for the worker's 15-minute auto-close poll (Sam #18). `now` is
+  // normalized like the tour-reminders tick. `tourIds` (dev-only) scopes the
+  // sweep to those tours so a spec can never close another spec's tours; the
+  // real poll never passes it. Same job, same rule, same writes otherwise.
+  // Same triple-gate/hermetic-LOCAL-only construction as the ticks around it;
+  // json() is scoped to this route only.
+  let autoCloseTickDeps = deps.tourAutoCloseDeps;
+  const tourAutoCloseDeps = (): TourAutoCloseDeps => {
+    // Built lazily on the first tick - EXACTLY the eight fields worker.ts
+    // builds, so the tick is silent by construction too (no adapter, send
+    // service or token bucket). The dev router runs in the APP process, so
+    // `events` is the app's own bus, as in the roster-actions tick's deps.
+    autoCloseTickDeps ??= {
+      toursRepo: createToursRepo({ logger: log }),
+      tourRemindersRepo: createTourRemindersRepo({ logger: log }),
+      conversationsRepo: createConversationsRepo({ logger: log }),
+      unitsRepo: createUnitsRepo({ logger: log }),
+      auditRepo: createAuditRepo({ logger: log }),
+      activityEventsRepo: createActivityEventsRepo({ logger: log }),
+      events: appEvents,
+      logger: log,
+    };
+    return autoCloseTickDeps;
+  };
+  router.post('/__dev/tour-auto-close/tick', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { now?: unknown; tourIds?: unknown };
+    let nowIso = new Date().toISOString();
+    if (body.now !== undefined) {
+      if (typeof body.now !== 'string' || !Number.isFinite(Date.parse(body.now))) {
+        res.status(400).json({ error: 'now must be a valid ISO 8601 datetime' });
+        return;
+      }
+      nowIso = new Date(body.now).toISOString();
+    }
+    let tourIds: string[] | undefined;
+    if (body.tourIds !== undefined) {
+      const ids = body.tourIds;
+      if (
+        !Array.isArray(ids) ||
+        ids.length === 0 ||
+        ids.length > 50 ||
+        !ids.every((id): id is string => typeof id === 'string' && id.length > 0)
+      ) {
+        res.status(400).json({ error: 'tourIds must be a non-empty array of at most 50 tour ids' });
+        return;
+      }
+      tourIds = ids;
+    }
+    const summary = await runTourAutoClose(nowIso, tourAutoCloseDeps(), tourIds !== undefined ? { tourIds } : {});
+    log.info({ now: nowIso, ...summary }, 'dev tour auto-close tick ran');
+    res.status(200).json({ ok: true, now: nowIso, ...summary });
   });
 
   // POST /__dev/placement-nudges/tick { now? } — the deterministic e2e seam for

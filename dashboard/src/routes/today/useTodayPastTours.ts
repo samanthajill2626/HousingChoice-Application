@@ -1,8 +1,10 @@
 // useTodayPastTours - the Today page's "Past tours needing an outcome" section
 // (Sam's item 18, Cameron 2026-09-30). It REUSES the Tours page's Past tab: the
 // same loader (usePastTours - the same two reads over the same window) and the
-// Past tab's selected rows, minus no-shows (selectTodayPastTours). Nothing here
-// decides which tour is "past"; change the Past tab's rule and Today follows.
+// Past tab's selected rows as they are, no-shows included - a no-show now
+// closes on its own two weeks after its last mark (spec 9.4), so it no longer
+// sits here for the whole window. Nothing here decides which tour is "past";
+// change the Past tab's rule and Today follows.
 //
 // What it adds for the home page:
 // - Names for the rows it shows. The Past tab loads EVERY contact and property
@@ -13,11 +15,12 @@
 //   the cap. A failed lookup is NOT a deletion: the row stays, labeled by id
 //   (the Past tab's fallback).
 // - Live refresh: a tour.updated event (a status or outcome PATCH, a
-//   conversion) reloads the rows, debounced; addresses already looked up are
-//   reused (tenants are re-read, for their delete state), and a failed reload
-//   keeps the rows and says so (reloadFailed).
+//   conversion, the auto-close sweep, a reopen) reloads the rows, debounced;
+//   addresses already looked up are reused (tenants are re-read, for their
+//   delete state), and a failed reload keeps the rows and says so
+//   (reloadFailed).
 // - Failure isolation: a failed load is this section's error, never the page's.
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   getContact,
   getUnit,
@@ -27,7 +30,7 @@ import {
   type UnitItem,
 } from '../../api/index.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
-import { TODAY_PAST_TOURS_CAP, selectTodayPastTours, usePastTours } from '../tours/useTours.js';
+import { TODAY_PAST_TOURS_CAP, usePastTours } from '../tours/useTours.js';
 
 export interface TodayPastTourRow {
   tour: Tour;
@@ -46,8 +49,8 @@ export interface TodayPastToursState {
   rows: TodayPastTourRow[];
   /** How many rows the Past tab lists - the "See all N on the Past tab" count,
    *  so the link names what the click lands on. It includes what Today leaves
-   *  out (no-shows, a deleted tenant's tours), so it can exceed rows.length
-   *  even when Today lists everything it qualifies. */
+   *  out (a deleted tenant's tours), so it can exceed rows.length even when
+   *  Today lists everything it qualifies. */
   total: number;
   /** The last live reload failed; the rows on screen may be stale (the Past
    *  tab's reloadFailed, passed through). Never true unless status is ready. */
@@ -142,9 +145,9 @@ async function labelRows(tours: Tour[], signal: AbortSignal, cache: LabelCache):
 
 export function useTodayPastTours(): TodayPastToursState {
   const { status: pastStatus, past, reload, reloadFailed } = usePastTours(true);
-  // `past` is a new array on every load, so this (and the labeling effect)
-  // re-runs per load and never on an unrelated render.
-  const eligible = useMemo(() => selectTodayPastTours(past), [past]);
+  // Today lists the Past rows themselves (no-shows included, spec 9.4). `past`
+  // is a new array on every load, so the labeling effect re-runs per load and
+  // never on an unrelated render.
   const pastCount = past.length;
   const [labeled, setLabeled] = useState<{ rows: TodayPastTourRow[]; total: number } | null>(null);
   const cacheRef = useRef<LabelCache>({ units: new Map() });
@@ -155,12 +158,12 @@ export function useTodayPastTours(): TodayPastToursState {
     // The state write is in the async callback, never synchronous in the
     // effect (react-hooks/set-state-in-effect). A reload keeps the previous
     // rows on screen until this lands.
-    void labelRows(eligible, controller.signal, cacheRef.current).then((rows) => {
+    void labelRows(past, controller.signal, cacheRef.current).then((rows) => {
       if (controller.signal.aborted) return;
       setLabeled({ rows, total: pastCount });
     });
     return () => controller.abort();
-  }, [pastStatus, eligible, pastCount]);
+  }, [pastStatus, past, pastCount]);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(

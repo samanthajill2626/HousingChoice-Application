@@ -6,8 +6,9 @@
 // Activity). A segmented "Details | Conversation" toggle appears at <=860px,
 // leading with DETAILS (per the 2026-07-08 decision; the contact page leads with
 // comms). Everything the page needs comes from useTour + useTourChannels +
-// useTourActivity; mutations go through PATCH /api/tours/:id, POST /:id/relay, and
-// POST /api/placements/from-tour, applying the returned tour in place.
+// useTourActivity; mutations go through PATCH /api/tours/:id, POST /:id/relay,
+// POST /:id/reopen, and POST /api/placements/from-tour, applying the returned tour
+// in place.
 //
 // Tours are SEPARATE from placements, but the exit gate is the handoff: a
 // move-forward outcome CONVERTS IMMEDIATELY (records the decision, POSTs
@@ -24,6 +25,13 @@
 // toured": the visit happened without us booking it, and scheduling it just to
 // record the outcome would arm - and send - a reminder ladder for a visit
 // already in the past. Audience: staff see "property" for the unit (GLOSSARY).
+//
+// A closed, unconverted tour offers "Reopen tour" (spec 9.2): the primary CTA,
+// or - while "Start placement" holds that slot - the kebab's item, never both.
+// It goes back to the state it closed from (an auto-closed tour's
+// autoClosedFrom; a person's decision goes back to Toured, where the modal slot
+// passes straight to Record outcome). Nothing is sent. An auto-closed tour's
+// Outcome card reads "No outcome recorded" and "Closed automatically on <date>".
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
@@ -34,13 +42,14 @@ import {
   getNoShowCheckinDraft,
   patchTour,
   previewTourRosterOpen,
+  reopenTour,
   sendNowErrorMessage,
   TOUR_OUTCOME_LABELS,
   TOUR_TYPE_LABELS,
   type Contact,
   type RosterPreview,
+  type StaffTourOutcome,
   type Tour,
-  type TourOutcome,
   type TourStatus,
   type UnitItem,
 } from '../../api/index.js';
@@ -66,8 +75,10 @@ import {
   CancelTourModal,
   MarkAlreadyTouredModal,
   RecordOutcomeModal,
+  ReopenTourModal,
   RescheduleTourModal,
 } from './TourModals.js';
+import { reopenTargetOf, type ReopenTarget } from './tourReopen.js';
 import { describeTourActivity, tourActivityToMilestone } from './tourActivityFormat.js';
 import { RelayCloseAskDialog } from '../conversation/RelayCloseAskDialog.js';
 import shell from '../../ui/twoPaneShell.module.css';
@@ -271,7 +282,7 @@ function TourDetailLoaded({
   const [searchParams, setSearchParams] = useSearchParams();
   const wantsOutcome = searchParams.get('outcome') === '1';
   const [modal, setModal] = useState<
-    'book' | 'reschedule' | 'outcome' | 'cancel' | 'already-toured' | null
+    'book' | 'reschedule' | 'outcome' | 'cancel' | 'already-toured' | 'reopen' | null
   >(() => (wantsOutcome && tour.status === 'toured' && tour.outcome === undefined ? 'outcome' : null));
   useEffect(() => {
     if (!wantsOutcome) return;
@@ -279,6 +290,10 @@ function TourDetailLoaded({
     next.delete('outcome');
     setSearchParams(next, { replace: true, state: location.state });
   }, [wantsOutcome, searchParams, setSearchParams, location.state]);
+  // The Reopen dialog's target, SNAPSHOTTED when it opens: the dialog renders
+  // from this, so it neither changes its copy nor unmounts mid-confirm when the
+  // tour updates underneath it (setTour, a tour.updated refetch).
+  const [reopenFor, setReopenFor] = useState<ReopenTarget | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   // "Send no-show check-in" seed handed to TourConversation (nonce bumps per click).
@@ -332,6 +347,10 @@ function TourDetailLoaded({
   const pendingOpen = roster.roster?.pending.find((p) => p.kind === 'open_group');
   const pendingOpenNote = pendingOpen !== undefined ? pendingActionNote(pendingOpen) : undefined;
   const isConverted = typeof tour.convertedPlacementId === 'string';
+  // Reopen (spec 9.2): the state this tour would go back to - null unless it is
+  // closed and unconverted with a known origin, exactly where POST /reopen
+  // accepts (tourReopen.ts mirrors the server's reopenTargetFor).
+  const reopenTarget = reopenTargetOf(tour);
 
   // --- Mutations ------------------------------------------------------------
   // A direct (no-input) status PATCH: apply the returned tour; errors surface in
@@ -529,7 +548,7 @@ function TourDetailLoaded({
     setModal('outcome');
   };
   const confirmOutcome = async (decision: {
-    outcome: TourOutcome;
+    outcome: StaffTourOutcome;
     moveForward: boolean;
   }): Promise<void> => {
     // not-a-fit ALSO closes the tour (diagram) in the same PATCH; move-forward
@@ -565,6 +584,23 @@ function TourDetailLoaded({
     // Canceling the tour leaves the relay group open - offer to close it.
     void maybeAskCloseGroup();
   };
+  // Opens the Reopen confirm for the target as it stands NOW (the snapshot the
+  // dialog keeps until it closes).
+  const openReopen = (): void => {
+    if (reopenTarget === null) return;
+    setReopenFor(reopenTarget);
+    setModal('reopen');
+  };
+  // Reopen (spec 9.2): back to the state the tour closed from. Into toured,
+  // recording the different outcome is what the operator came to do, so the
+  // modal slot passes straight to Record outcome - the dialog's close below is
+  // GUARDED for exactly that reason (same as "already toured").
+  const confirmReopen = async (): Promise<void> => {
+    setActionError(null);
+    const reopened = await reopenTour(tourId);
+    setTour(reopened);
+    if (reopened.status === 'toured') setModal('outcome');
+  };
 
   // --- Primary CTA (one status-aware happy-path button) ---------------------
   let primaryCta: React.JSX.Element | null = null;
@@ -596,6 +632,15 @@ function TourDetailLoaded({
     primaryCta = (
       <Button size="sm" onClick={() => setModal('outcome')}>
         Record outcome
+      </Button>
+    );
+  } else if (reopenTarget !== null) {
+    // A closed, unconverted tour with nothing above it: Reopen is the primary
+    // CTA. A convertible one keeps "Start placement" (the rung above) and carries
+    // Reopen in the kebab instead - one placement per state (spec 9.2).
+    primaryCta = (
+      <Button size="sm" onClick={openReopen}>
+        Reopen tour
       </Button>
     );
   }
@@ -663,6 +708,10 @@ function TourDetailLoaded({
             {...(openGroupBlockedReason !== undefined && {
               openGroupDisabledReason: openGroupBlockedReason,
             })}
+            // Only while "Start placement" holds the primary slot; anywhere else
+            // Reopen IS the primary CTA - never both (spec 9.2).
+            canReopen={reopenTarget !== null && tour.convertible === true}
+            onReopen={openReopen}
             busy={busy}
           />
         </div>
@@ -793,7 +842,18 @@ function TourDetailLoaded({
               ) : (
                 <>
                   <KV k="Outcome" v={TOUR_OUTCOME_LABELS[tour.outcome] ?? tour.outcome} />
-                  <KV k="Moving forward" v={tour.moveForward ? 'Yes' : 'No'} />
+                  {tour.outcome === 'no_outcome' ? (
+                    // The auto-close sweep's outcome: nobody decided, so there is
+                    // no "Moving forward" - say when it closed instead. ONE
+                    // element (a KV would split it across two spans).
+                    typeof tour.autoClosedAt === 'string' ? (
+                      <p className={styles.subtle}>
+                        Closed automatically on {shortDate(tour.autoClosedAt)}
+                      </p>
+                    ) : null
+                  ) : (
+                    <KV k="Moving forward" v={tour.moveForward ? 'Yes' : 'No'} />
+                  )}
                   {isConverted ? (
                     <Row to={`/placements/${tour.convertedPlacementId}`} label="View the placement" />
                   ) : tour.convertible === true ? (
@@ -832,6 +892,15 @@ function TourDetailLoaded({
       ) : null}
       {modal === 'cancel' ? (
         <CancelTourModal onClose={() => setModal(null)} onConfirm={confirmCancel} />
+      ) : null}
+      {modal === 'reopen' && reopenFor !== null ? (
+        // onConfirm may hand the slot to Record outcome before this dialog's
+        // onClose runs; a flat setModal(null) would shut that dialog at once.
+        <ReopenTourModal
+          target={reopenFor}
+          onClose={() => setModal((m) => (m === 'reopen' ? null : m))}
+          onConfirm={confirmReopen}
+        />
       ) : null}
       {closeAsk !== null ? (
         <RelayCloseAskDialog

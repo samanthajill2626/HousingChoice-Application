@@ -8,7 +8,7 @@
 // Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -565,5 +565,472 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     // and true on the opt-in, absent again for an options object that does not
     // ask for it.
     expect(seen).toEqual([undefined, true, undefined]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Tour auto-close and reopen (Sam #18, 2026-10-01): the conditional writes.
+  //
+  // Every case below also runs against the harness fake in
+  // toursRepoFakeConditions.test.ts - a fake looser than the store would make
+  // every route test built on it lie. Stored rows are read through rawTour.
+  // -------------------------------------------------------------------------
+
+  it('patch with expectedStatus writes while the stored status matches, and refuses once it does not', async () => {
+    const { ConditionalCheckFailedException: Err } = await import('../src/repos/toursRepo.js');
+    const tour = await tours.create({
+      tenantId: 'contact-expect-1',
+      unitId: 'unit-expect-1',
+      scheduledAt: '2026-09-10T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+
+    // `status` is both SET and conditioned on here (two placeholders, one
+    // attribute) - the PATCH route's own shape.
+    const patched = await tours.patch(tour.tourId, { status: 'toured' }, { expectedStatus: 'scheduled' });
+    expect(patched.status).toBe('toured');
+    const before = await rawTour(tour.tourId);
+    expect(before).toMatchObject({ status: 'toured' });
+
+    // A caller still holding the 'scheduled' read loses - and writes nothing.
+    await expect(
+      tours.patch(tour.tourId, { status: 'no_show' }, { expectedStatus: 'scheduled' }),
+    ).rejects.toBeInstanceOf(Err);
+    // The precondition holds even when the patch does not touch status.
+    await expect(
+      tours.patch(tour.tourId, { scheduledAt: '2026-09-11T15:00:00.000Z' }, { expectedStatus: 'scheduled' }),
+    ).rejects.toBeInstanceOf(Err);
+    expect(await rawTour(tour.tourId)).toEqual(before);
+  });
+
+  it('(PIN) patch without opts keeps the unconditional contract', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-expect-2',
+      unitId: 'unit-expect-2',
+      scheduledAt: '2026-09-10T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    await tours.patch(tour.tourId, { status: 'toured' }, { expectedStatus: 'scheduled' });
+
+    const patched = await tours.patch(tour.tourId, { status: 'no_show' });
+
+    expect(patched.status).toBe('no_show');
+    expect(await rawTour(tour.tourId)).toMatchObject({ status: 'no_show' });
+  });
+
+  it('(PIN) patch with expectedStatus on a missing tour throws ConditionalCheckFailedException and creates nothing', async () => {
+    const { ConditionalCheckFailedException: Err } = await import('../src/repos/toursRepo.js');
+    await expect(
+      tours.patch('tour-ghost-expected', { status: 'toured' }, { expectedStatus: 'scheduled' }),
+    ).rejects.toBeInstanceOf(Err);
+    expect(await rawTour('tour-ghost-expected')).toBeUndefined();
+  });
+
+  // autoCloseIf - the sweep's ONE write (spec 6.3): equality on every input of
+  // the due decision - updatedAt only for a never-marked tour, whose clock it
+  // is (ruling A-1).
+
+  it('autoCloseIf closes a scheduled tour as no_outcome, rotates the pointer and stamps the wall clock', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-close-1',
+      unitId: 'unit-close-1',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      tourType: 'self_guided',
+      currentLadderId: 'ladder-live',
+    });
+    const read = (await tours.get(tour.tourId))!;
+    const before = Date.now();
+
+    const closed = await tours.autoCloseIf(read, 'rot-1');
+
+    expect(closed).toMatchObject({
+      tourId: tour.tourId,
+      tenantId: 'contact-close-1',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      createdAt: read.createdAt,
+      status: 'closed',
+      outcome: 'no_outcome',
+      autoClosedFrom: 'scheduled',
+      currentLadderId: 'rot-1',
+    });
+    // Both stamps are the wall clock of the write itself.
+    expect(closed!.autoClosedAt).toBe(closed!.updatedAt);
+    expect(Date.parse(closed!.autoClosedAt as string)).toBeGreaterThanOrEqual(before);
+    expect(closed).not.toHaveProperty('moveForward');
+    expect(closed).not.toHaveProperty('convertible');
+    expect(closed).not.toHaveProperty('lastMarkedAt');
+    expect(await rawTour(tour.tourId)).toEqual(closed);
+  });
+
+  it('autoCloseIf closes a candidate carrying convertible: false and leaves moveForward / convertible as they are', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-close-cv',
+      unitId: 'unit-close-cv',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      tourType: 'self_guided',
+      status: 'toured',
+      moveForward: false,
+      convertible: false,
+      lastMarkedAt: '2026-09-02T09:00:00.000Z',
+    });
+    const read = (await tours.get(tour.tourId))!;
+
+    const closed = await tours.autoCloseIf(read, 'rot-cv');
+
+    expect(closed).toMatchObject({
+      status: 'closed',
+      outcome: 'no_outcome',
+      autoClosedFrom: 'toured',
+      moveForward: false,
+      convertible: false,
+      lastMarkedAt: '2026-09-02T09:00:00.000Z',
+    });
+    expect(await rawTour(tour.tourId)).toEqual(closed);
+  });
+
+  it('autoCloseIf closes an undated toured tour and adds no scheduledAt', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-close-2',
+      unitId: 'unit-close-2',
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { status: 'toured' });
+    const read = (await tours.get(tour.tourId))!;
+
+    const closed = await tours.autoCloseIf(read, 'rot-2');
+
+    expect(closed).toMatchObject({ status: 'closed', outcome: 'no_outcome', autoClosedFrom: 'toured' });
+    const stored = await rawTour(tour.tourId);
+    expect(stored).toEqual(closed);
+    expect(stored).not.toHaveProperty('scheduledAt');
+  });
+
+  /** Set a first mark the way no repo method can: updatedAt untouched. */
+  const rawFirstMark = async (tourId: string): Promise<void> => {
+    const before = await rawTour(tourId);
+    await doc.send(
+      new UpdateCommand({
+        TableName: tableName('tours', testEnv),
+        Key: { tourId },
+        UpdateExpression: 'SET #lm = :lm',
+        ConditionExpression: 'attribute_exists(tourId)',
+        ExpressionAttributeNames: { '#lm': 'lastMarkedAt' },
+        ExpressionAttributeValues: { ':lm': '2026-09-20T00:00:00.000Z' },
+      }),
+    );
+    // The mark is the ONLY difference from the read, so attribute_not_exists
+    // on it is the only term that can fail.
+    expect(await rawTour(tourId)).toEqual({ ...before, lastMarkedAt: '2026-09-20T00:00:00.000Z' });
+  };
+
+  // Each change lands BETWEEN the sweep's read and its write; the change wins.
+  // One row per condition term (and per branch of the two optional fields);
+  // `term` is the one its change breaks, and a row proves it only where no
+  // other term can fail. Every repo write also moves updatedAt, which a
+  // never-marked read conditions on too (ruling A-1) - and on DynamoDB Local
+  // the change lands, in practice always, in a later millisecond than the
+  // create - so on a NEVER-MARKED read a repo-write row also loses on
+  // `#ua = :ua` (review r2, R2-1). A MARKED read has no updatedAt term: there
+  // the row's own term is the only one that can fail, so that read proves
+  // every term but the first mark's. `attribute_not_exists(#lm)` exists on a
+  // never-marked read alone; its proving row writes the mark raw and leaves
+  // updatedAt as it was. Each term stripped in turn, and the rows it turns
+  // red: code-review/fix-wave-2-report.md.
+  const BOTH_READS = ['never marked', 'marked'] as const;
+  const autoCloseRaces: {
+    name: string;
+    term: string;
+    reads: readonly (typeof BOTH_READS)[number][];
+    undated?: boolean;
+    change: (repo: typeof tours, tourId: string) => Promise<unknown>;
+  }[] = [
+    {
+      name: 'the status changed',
+      term: '#st = :from',
+      reads: BOTH_READS,
+      change: (r, id) => r.patch(id, { status: 'toured' }),
+    },
+    {
+      name: 'an outcome was recorded',
+      term: 'attribute_not_exists(#oc)',
+      reads: BOTH_READS,
+      change: (r, id) => r.patch(id, { outcome: 'not_a_fit' }),
+    },
+    {
+      name: 'a conversion was claimed',
+      term: 'attribute_not_exists(#cp)',
+      reads: BOTH_READS,
+      change: (r, id) => r.claimConversion(id, 'pending:x'),
+    },
+    {
+      name: 'it became convertible',
+      term: '#cv <> :true',
+      reads: BOTH_READS,
+      change: (r, id) => r.patch(id, { convertible: true }),
+    },
+    {
+      name: 'it was rescheduled',
+      term: '#sa = :sa',
+      reads: BOTH_READS,
+      change: (r, id) => r.patch(id, { scheduledAt: '2026-09-05T15:00:00.000Z' }),
+    },
+    {
+      name: 'an undated tour got a date',
+      term: 'attribute_not_exists(#sa)',
+      reads: BOTH_READS,
+      undated: true,
+      change: (r, id) => r.patch(id, { scheduledAt: '2026-09-05T15:00:00.000Z' }),
+    },
+    // Never marked by construction, and the patch moves updatedAt as well, so
+    // this row cannot prove its term on the store - the raw row below does.
+    {
+      name: 'a person marked it for the first time',
+      term: 'attribute_not_exists(#lm)',
+      reads: ['never marked'],
+      change: (r, id) => r.patch(id, { lastMarkedAt: '2026-09-20T00:00:00.000Z' }),
+    },
+    {
+      name: 'a raw write marked it, updatedAt kept',
+      term: 'attribute_not_exists(#lm)',
+      reads: ['never marked'],
+      change: (_r, id) => rawFirstMark(id),
+    },
+    // Marked by construction.
+    {
+      name: 'a person marked it again',
+      term: '#lm = :lm',
+      reads: ['marked'],
+      change: (r, id) => r.patch(id, { lastMarkedAt: '2026-09-20T00:00:00.000Z' }),
+    },
+  ];
+  const autoCloseRaceCases = autoCloseRaces.flatMap(({ reads, ...row }) => reads.map((read) => ({ ...row, read })));
+
+  it.each(autoCloseRaceCases)(
+    'autoCloseIf loses - undefined, nothing written - when $name between its read and its write ($read read, breaks $term)',
+    async ({ undated, read: readKind, change }) => {
+      const tour = await tours.create({
+        tenantId: 'contact-close-race',
+        unitId: 'unit-close-race',
+        tourType: 'self_guided',
+        status: undated === true ? 'toured' : 'scheduled',
+        ...(undated !== true && { scheduledAt: '2026-09-01T15:00:00.000Z' }),
+        ...(readKind === 'marked' && { lastMarkedAt: '2026-09-10T00:00:00.000Z' }),
+      });
+      const read = (await tours.get(tour.tourId))!;
+      await change(tours, tour.tourId);
+      const changed = await rawTour(tour.tourId);
+
+      // A lost condition is an answer, never a throw.
+      await expect(tours.autoCloseIf(read, 'rot-race')).resolves.toBeUndefined();
+      expect(await rawTour(tour.tourId)).toEqual(changed);
+    },
+  );
+
+  /** Resolve once the wall clock has passed `iso`. The repo stamps updatedAt
+   *  in whole milliseconds, so a write in the SAME millisecond as the read's
+   *  stamp would leave updatedAt unchanged and prove nothing. */
+  const afterMillisecond = async (iso: string): Promise<void> => {
+    const ms = Date.parse(iso);
+    while (Date.now() <= ms) await new Promise((resolve) => setTimeout(resolve, 1));
+  };
+
+  // A never-marked tour's clock counts from its updatedAt (spec 5.3), so the
+  // close also conditions on it (ruling A-1, code-review/adjudications-r1.md);
+  // once a mark exists the clock ignores updatedAt and so does the close.
+  it("autoCloseIf loses - undefined, nothing written - when an unrelated write moved a never-marked tour's updatedAt", async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-close-ua',
+      unitId: 'unit-close-ua',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    const read = (await tours.get(tour.tourId))!;
+    expect(read).not.toHaveProperty('lastMarkedAt');
+    await afterMillisecond(read.updatedAt);
+    // A roster reset: no status, outcome, date or mark changes - only updatedAt.
+    await tours.clearRoster(tour.tourId);
+    const changed = await rawTour(tour.tourId);
+    expect(changed!['updatedAt']).not.toBe(read.updatedAt);
+
+    await expect(tours.autoCloseIf(read, 'rot-ua')).resolves.toBeUndefined();
+    expect(await rawTour(tour.tourId)).toEqual(changed);
+  });
+
+  it('(PIN) autoCloseIf still closes a MARKED tour after the same unrelated write - the clock ignores updatedAt once a mark exists', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-close-ua-marked',
+      unitId: 'unit-close-ua-marked',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      tourType: 'self_guided',
+      lastMarkedAt: '2026-09-02T09:00:00.000Z',
+    });
+    const read = (await tours.get(tour.tourId))!;
+    await afterMillisecond(read.updatedAt);
+    await tours.clearRoster(tour.tourId);
+    expect((await rawTour(tour.tourId))!['updatedAt']).not.toBe(read.updatedAt);
+
+    const closed = await tours.autoCloseIf(read, 'rot-ua-marked');
+
+    expect(closed).toMatchObject({
+      status: 'closed',
+      outcome: 'no_outcome',
+      autoClosedFrom: 'scheduled',
+      lastMarkedAt: '2026-09-02T09:00:00.000Z',
+    });
+    expect(await rawTour(tour.tourId)).toEqual(closed);
+  });
+
+  it('autoCloseIf returns undefined for a missing tour and creates NOTHING', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-close-ghost',
+      unitId: 'unit-close-ghost',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    const read = (await tours.get(tour.tourId))!;
+
+    await expect(tours.autoCloseIf({ ...read, tourId: 'tour-ghost-close' }, 'rot-ghost')).resolves.toBeUndefined();
+    expect(await rawTour('tour-ghost-close')).toBeUndefined();
+  });
+
+  it.each(['canceled', 'requested', 'closed'])(
+    'autoCloseIf refuses a %s tour up front and writes nothing (the store alone would let it through)',
+    async (status) => {
+      const tour = await tours.create({
+        tenantId: 'contact-close-refuse',
+        unitId: 'unit-close-refuse',
+        tourType: 'self_guided',
+        status,
+        ...(status !== 'requested' && { scheduledAt: '2026-09-01T15:00:00.000Z' }),
+      });
+      const read = (await tours.get(tour.tourId))!;
+      const before = await rawTour(tour.tourId);
+
+      await expect(tours.autoCloseIf(read, 'rot-refuse')).resolves.toBeUndefined();
+      expect(await rawTour(tour.tourId)).toEqual(before);
+    },
+  );
+
+  // reopenIf - POST /api/tours/:id/reopen's write (spec 7.3).
+
+  /** A closed tour of each shape reopen meets, AS THE CALLER READ IT. `auto`
+   *  is the item autoCloseIf RETURNED (the post-close row - the pre-close read
+   *  carries no outcome / autoClosedFrom, and reopenIf rightly refuses it). */
+  const seedClosed = async (repo: typeof tours, kind: 'auto' | 'person' | 'bare') => {
+    if (kind === 'auto') {
+      const tour = await repo.create({
+        tenantId: 'contact-reopen-auto',
+        unitId: 'unit-reopen',
+        scheduledAt: '2026-09-01T15:00:00.000Z',
+        tourType: 'self_guided',
+        moveForward: false,
+        convertible: false,
+        currentLadderId: 'ladder-live',
+      });
+      return (await repo.autoCloseIf((await repo.get(tour.tourId))!, 'rot-reopen'))!;
+    }
+    if (kind === 'person') {
+      const tour = await repo.create({
+        tenantId: 'contact-reopen-person',
+        unitId: 'unit-reopen',
+        scheduledAt: '2026-09-01T15:00:00.000Z',
+        tourType: 'self_guided',
+        status: 'toured',
+      });
+      await repo.patch(tour.tourId, { outcome: 'not_a_fit', moveForward: false, convertible: false, status: 'closed' });
+      return (await repo.get(tour.tourId))!;
+    }
+    // API-only shape: closed with an autoClosedFrom and no outcome.
+    const tour = await repo.create({
+      tenantId: 'contact-reopen-bare',
+      unitId: 'unit-reopen',
+      tourType: 'self_guided',
+      status: 'closed',
+      autoClosedFrom: 'toured',
+    });
+    return (await repo.get(tour.tourId))!;
+  };
+
+  it('reopenIf returns an auto-closed tour to its status, stamps lastMarkedAt and removes the close and the decision', async () => {
+    const closed = await seedClosed(tours, 'auto');
+    expect(closed).toMatchObject({
+      status: 'closed',
+      outcome: 'no_outcome',
+      autoClosedFrom: 'scheduled',
+      moveForward: false,
+      convertible: false,
+    });
+    const before = Date.now();
+
+    const reopened = await tours.reopenIf(closed, 'scheduled', '2026-10-20T12:00:00.000Z');
+
+    expect(reopened).toMatchObject({
+      tourId: closed.tourId,
+      status: 'scheduled',
+      lastMarkedAt: '2026-10-20T12:00:00.000Z',
+      scheduledAt: '2026-09-01T15:00:00.000Z',
+      // Left as is: it names no live rows, and nothing is armed.
+      currentLadderId: 'rot-reopen',
+    });
+    for (const gone of ['outcome', 'moveForward', 'convertible', 'autoClosedAt', 'autoClosedFrom']) {
+      expect(reopened).not.toHaveProperty(gone);
+    }
+    // updatedAt is the wall clock of the write, never the caller's mark.
+    expect(reopened!.updatedAt).not.toBe('2026-10-20T12:00:00.000Z');
+    expect(Date.parse(reopened!.updatedAt)).toBeGreaterThanOrEqual(before);
+    expect(await rawTour(closed.tourId)).toEqual(reopened);
+  });
+
+  it('reopenIf returns a person-decided tour to toured and removes outcome / moveForward / convertible', async () => {
+    const closed = await seedClosed(tours, 'person');
+
+    const reopened = await tours.reopenIf(closed, 'toured', '2026-10-20T12:00:00.000Z');
+
+    expect(reopened).toMatchObject({ status: 'toured', lastMarkedAt: '2026-10-20T12:00:00.000Z' });
+    for (const gone of ['outcome', 'moveForward', 'convertible', 'autoClosedAt', 'autoClosedFrom']) {
+      expect(reopened).not.toHaveProperty(gone);
+    }
+    expect(await rawTour(closed.tourId)).toEqual(reopened);
+  });
+
+  // Each change lands AFTER the caller's read; the change wins. One row per
+  // condition term (and per branch of the two read-dependent ones).
+  const reopenRaces: {
+    name: string;
+    seed: 'auto' | 'person' | 'bare';
+    change: (repo: typeof tours, tourId: string) => Promise<unknown>;
+  }[] = [
+    {
+      name: 'a first reopen already ran',
+      seed: 'auto',
+      change: async (r, id) => r.reopenIf((await r.get(id))!, 'scheduled', '2026-10-21T12:00:00.000Z'),
+    },
+    { name: 'it left closed (outcome kept)', seed: 'auto', change: (r, id) => r.patch(id, { status: 'toured' }) },
+    { name: 'a conversion was claimed', seed: 'person', change: (r, id) => r.claimConversion(id, 'pending:x') },
+    { name: 'the outcome changed', seed: 'person', change: (r, id) => r.patch(id, { outcome: 'move_forward' }) },
+    { name: 'an outcome appeared', seed: 'bare', change: (r, id) => r.patch(id, { outcome: 'not_a_fit' }) },
+    { name: 'autoClosedFrom changed', seed: 'auto', change: (r, id) => r.patch(id, { autoClosedFrom: 'toured' }) },
+    { name: 'autoClosedFrom appeared', seed: 'person', change: (r, id) => r.patch(id, { autoClosedFrom: 'no_show' }) },
+  ];
+
+  it.each(reopenRaces)(
+    'reopenIf loses - undefined, nothing written - when $name after its read',
+    async ({ seed, change }) => {
+      const read = await seedClosed(tours, seed);
+      await change(tours, read.tourId);
+      const changed = await rawTour(read.tourId);
+
+      // A lost condition is an answer, never a throw.
+      await expect(tours.reopenIf(read, 'toured', '2026-10-20T12:00:00.000Z')).resolves.toBeUndefined();
+      expect(await rawTour(read.tourId)).toEqual(changed);
+    },
+  );
+
+  it('reopenIf returns undefined for a missing tour and creates NOTHING', async () => {
+    const read = await seedClosed(tours, 'person');
+
+    await expect(
+      tours.reopenIf({ ...read, tourId: 'tour-ghost-reopen' }, 'toured', '2026-10-20T12:00:00.000Z'),
+    ).resolves.toBeUndefined();
+    expect(await rawTour('tour-ghost-reopen')).toBeUndefined();
   });
 });

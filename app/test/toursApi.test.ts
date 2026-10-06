@@ -400,6 +400,28 @@ describe('PATCH /api/tours/:tourId', () => {
     expect(badOutcome.status).toBe(400);
   });
 
+  // no_outcome is a real TourOutcome (the auto-close sweep writes it) but it is
+  // SYSTEM-ONLY: the PATCH exit gate validates against the STAFF allowlist, so a
+  // person can never record it. Green on the pre-feature code (whose 400 text
+  // is identical); it goes red only if the model widens without the validator.
+  it('PATCH { outcome: no_outcome } is a 400 listing only the staff outcomes; nothing is stored', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'no_outcome', moveForward: false });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'outcome must be one of: move_forward, not_a_fit' });
+    const stored = world.toursMap.get(tourId);
+    expect(stored?.status).toBe('toured');
+    expect(stored?.outcome).toBeUndefined();
+    expect(stored?.moveForward).toBeUndefined();
+  });
+
   it("PATCH { status: 'confirmed' } is a plain 400 invalid-status error (the status was removed 2026-07-08)", async () => {
     const { app, world } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
@@ -416,6 +438,247 @@ describe('PATCH /api/tours/:tourId', () => {
 
     // The tour is untouched (still scheduled).
     expect(world.toursMap.get(tourId)?.status).toBe('scheduled');
+  });
+});
+
+// ============================================================================
+// PATCH status precondition (tour auto-close spec 8): the guards run on a
+// CONSISTENT read, and the main write carries the status that read returned.
+// A concurrent change between the two (another PATCH, a conversion, the
+// auto-close sweep) is refused with 409 tour_changed - never merged on top -
+// and not one side effect runs.
+// ============================================================================
+
+describe('PATCH status precondition - a concurrent change is refused, never merged', () => {
+  // A tour already past its date (the auto-close sweep's candidate). Its create
+  // still calls toursRepo.patch (the ladder pointer for its booked_too_late
+  // skipped rungs), so every wrapper below is installed AFTER the create.
+  const PAST = '2026-01-15T10:00:00.000Z';
+  const TOUR_CHANGED = {
+    error: 'tour_changed',
+    detail: 'This tour changed while you were saving - reload and try again.',
+  };
+  const rowCount = (world: FakeWorld, tourId: string): number =>
+    [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId).length;
+
+  async function createPastTour(app: ReturnType<typeof makeWebhookHarness>['app']): Promise<string> {
+    const created = await authed(app).post('/api/tours').send({ ...BASE_CREATE_BODY, scheduledAt: PAST });
+    expect(created.status).toBe(201);
+    return created.body.tour.tourId as string;
+  }
+
+  it('a PATCH that read a pre-close status cannot land on an auto-closed tour (409 tour_changed)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createPastTour(app);
+    const asRead = (await world.toursRepo.get(tourId))!;
+    const rowsBefore = rowCount(world, tourId);
+    expect(rowsBefore).toBeGreaterThan(0);
+
+    // The sweep lands between the route's read and its write.
+    let raced = false;
+    const realPatch = world.toursRepo.patch;
+    world.toursRepo.patch = async (id, updates, opts) => {
+      if (!raced) {
+        raced = true;
+        await world.toursRepo.autoCloseIf(asRead, 'rot-race');
+      }
+      return realPatch(id, updates, opts);
+    };
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    expect(raced).toBe(true);
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual(TOUR_CHANGED);
+    // The close stands as the sweep wrote it; the refused PATCH merged nothing
+    // (not even its pointer rotation).
+    const stored = world.toursMap.get(tourId)!;
+    expect(stored.status).toBe('closed');
+    expect(stored.outcome).toBe('no_outcome');
+    expect(stored.autoClosedFrom).toBe('scheduled');
+    expect(stored.currentLadderId).toBe('rot-race');
+    // Not one side effect ran: no milestone on any surface, no reminder sweep,
+    // no live-refresh emit.
+    expect(
+      world.activityEvents.filter((e) => e.type === 'tour_took_place' && e.refId === tourId),
+    ).toHaveLength(0);
+    expect(world.auditEvents.filter((e) => e.event_type === 'tour_took_place')).toHaveLength(0);
+    expect(rowCount(world, tourId)).toBe(rowsBefore);
+    expect(world.emitted.filter((e) => e.event === 'tour.updated')).toHaveLength(0);
+  });
+
+  it('(PIN) a PATCH whose tour vanished between its read and its write still answers 404 tour_not_found', async () => {
+    const { app, world } = makeWebhookHarness();
+    const tourId = await createPastTour(app);
+
+    let removed = false;
+    const realPatch = world.toursRepo.patch;
+    world.toursRepo.patch = async (id, updates, opts) => {
+      if (!removed) {
+        removed = true;
+        world.toursMap.delete(id);
+      }
+      return realPatch(id, updates, opts);
+    };
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    expect(removed).toBe(true);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'tour_not_found' });
+    expect(world.toursMap.has(tourId)).toBe(false);
+  });
+
+  it('every PATCH write carries the status its read returned (reschedule, status change, exit gate)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const writeOpts: unknown[] = [];
+    const realPatch = world.toursRepo.patch;
+    world.toursRepo.patch = async (id, updates, opts) => {
+      writeOpts.push(opts);
+      return realPatch(id, updates, opts);
+    };
+
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-07-20T14:00:00.000Z' })
+      .expect(200);
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'not_a_fit', moveForward: false })
+      .expect(200);
+
+    expect(writeOpts).toEqual([
+      { expectedStatus: 'scheduled' },
+      { expectedStatus: 'scheduled' },
+      { expectedStatus: 'toured' },
+    ]);
+  });
+
+  it('reads CONSISTENTLY, and loses a race with another PATCH the same way (409; the other write stands)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const readOpts: unknown[] = [];
+    const realGet = world.toursRepo.get;
+    world.toursRepo.get = async (id, opts) => {
+      readOpts.push(opts);
+      return realGet(id, opts);
+    };
+    // Another person's cancel lands between this PATCH's read and its write.
+    let raced = false;
+    const realPatch = world.toursRepo.patch;
+    world.toursRepo.patch = async (id, updates, opts) => {
+      if (!raced) {
+        raced = true;
+        await realPatch(id, { status: 'canceled' });
+      }
+      return realPatch(id, updates, opts);
+    };
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    expect(raced).toBe(true);
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual(TOUR_CHANGED);
+    expect(world.toursMap.get(tourId)?.status).toBe('canceled');
+    // The read the guards ran on, then the re-read that tells a race from a
+    // missing tour - both strongly consistent.
+    expect(readOpts).toEqual([{ consistentRead: true }, { consistentRead: true }]);
+  });
+});
+
+// ============================================================================
+// lastMarkedAt (tour auto-close spec 5.2 / 8.4, ruling F4): the floor of the
+// two-week auto-close clock. The PATCH stamps the router's injected clock, in
+// the same write, when a person CHANGES the tour's status or sets its time; an
+// outcome-only exit gate or a same-status restatement leaves it where it was.
+// ============================================================================
+
+describe('PATCH stamps lastMarkedAt on a status change or a new time, never on a restatement', () => {
+  const MARK_1 = '2026-07-10T12:00:00.000Z';
+  const MARK_2 = '2026-07-11T12:00:00.000Z';
+
+  it('a status change stamps the injected now, stored and returned', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => MARK_1 });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBeUndefined(); // create is not a mark
+
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.tour.lastMarkedAt).toBe(MARK_1);
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+  });
+
+  it('a reschedule (a new time on a scheduled tour) stamps the injected now', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => MARK_1 });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-07-20T14:00:00.000Z' })
+      .expect(200);
+
+    expect(world.toursMap.get(tourId)?.status).toBe('scheduled');
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+  });
+
+  it('booking a requested tour (scheduledAt only) stamps the injected now', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => MARK_1 });
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ tenantId: 'contact-tenant-1', unitId: 'unit-abc', tourType: 'self_guided' });
+    expect(created.body.tour.status).toBe('requested');
+    const tourId = created.body.tour.tourId as string;
+
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ scheduledAt: '2026-07-20T14:00:00.000Z' })
+      .expect(200);
+
+    expect(world.toursMap.get(tourId)?.status).toBe('scheduled');
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+  });
+
+  it('an outcome-only exit gate leaves lastMarkedAt where the toured mark put it', async () => {
+    let now = MARK_1;
+    const { app, world } = makeWebhookHarness({ toursNow: () => now });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+
+    now = MARK_2;
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true })
+      .expect(200);
+
+    expect(world.toursMap.get(tourId)?.outcome).toBe('move_forward');
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+  });
+
+  it('a same-status restatement is not a mark: lastMarkedAt stays put (ruling F4)', async () => {
+    let now = MARK_1;
+    const { app, world } = makeWebhookHarness({ toursNow: () => now });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
+
+    now = MARK_2;
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+
+    expect(res.status).toBe(200);
+    expect(world.toursMap.get(tourId)?.status).toBe('toured');
+    expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARK_1);
   });
 });
 
@@ -2041,8 +2304,8 @@ describe('currentLadderId - the tour generation pointer', () => {
     });
     let parked = false;
     const realPatch = world.toursRepo.patch;
-    world.toursRepo.patch = async (id, updates) => {
-      const out = await realPatch(id, updates);
+    world.toursRepo.patch = async (id, updates, opts) => {
+      const out = await realPatch(id, updates, opts);
       if (!parked) {
         parked = true;
         signalEntered();
@@ -2119,8 +2382,8 @@ describe('currentLadderId - the tour generation pointer', () => {
     });
     let parked = false;
     const realPatch = world.toursRepo.patch;
-    world.toursRepo.patch = async (id, updates) => {
-      const out = await realPatch(id, updates);
+    world.toursRepo.patch = async (id, updates, opts) => {
+      const out = await realPatch(id, updates, opts);
       if (!parked) {
         parked = true;
         signalEntered();

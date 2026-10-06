@@ -469,8 +469,8 @@ describe('ToursPage', () => {
     updatedAt: '2026-06-02T19:00:00Z',
   };
 
-  /** A CANCELED tour — the Closed view lists these too (revivable, but not
-   *  live; the badge tells it apart from a terminal closed tour). */
+  /** A CANCELED tour - the Closed view lists these too (revivable, but not
+   *  live; the status badge tells it apart from a closed tour). */
   const TOUR_CANCELED: Tour = {
     tourId: 'k1',
     tenantId: 'c1',
@@ -618,6 +618,75 @@ describe('ToursPage', () => {
     expect(screen.queryByRole('region', { name: 'Closed tours' })).not.toBeInTheDocument();
   });
 
+  // --- Closed rows carry the outcome (spec 9.3) ---
+
+  /** A tour the auto-close sweep closed: no outcome recorded. */
+  const TOUR_AUTO_CLOSED: Tour = {
+    tourId: 'x3',
+    tenantId: 'c2',
+    unitId: 'u1',
+    scheduledAt: '2026-06-05T12:00:00Z',
+    tourType: 'self_guided',
+    status: 'closed',
+    outcome: 'no_outcome',
+    autoClosedAt: '2026-06-19T12:00:00Z',
+    autoClosedFrom: 'scheduled',
+    createdAt: '2026-06-01T10:00:00Z',
+    updatedAt: '2026-06-19T12:00:00Z',
+  };
+
+  /** A canceled tour that recorded a decision first (an API-only path: PATCH
+   *  does not refuse toured -> canceled). Still canceled, so no outcome badge. */
+  const TOUR_CANCELED_DECIDED: Tour = {
+    ...TOUR_CANCELED,
+    tourId: 'k2',
+    outcome: 'move_forward',
+    moveForward: true,
+  };
+
+  it('Closed rows: a closed tour carries its outcome as one more badge, after the status', () => {
+    readyAll([], []);
+    closedState = { status: 'ready', closed: [TOUR_AUTO_CLOSED, TOUR_CLOSED_OLD] };
+    renderPage('/tours/closed');
+    const items = within(screen.getByRole('region', { name: 'Closed tours' })).getAllByRole('listitem');
+    expect(items).toHaveLength(2);
+    // By TEXT inside the row, never by the link's name: the row link's
+    // aria-label REPLACES its content as the accessible name, so a badge is
+    // never part of it.
+    expect(within(items[0]!).getByText('No outcome recorded')).toBeInTheDocument();
+    expect(within(items[1]!).getByText('Not a fit')).toBeInTheDocument();
+    // "No outcome recorded" and "Not a fit" read apart; each sits after the
+    // status badge and before the type.
+    expect(within(items[0]!).queryByText('Not a fit')).not.toBeInTheDocument();
+    expect(within(items[1]!).queryByText('No outcome recorded')).not.toBeInTheDocument();
+    expect(items[0]!).toHaveTextContent(/Closed\s*No outcome recorded\s*Self-guided/);
+    expect(items[1]!).toHaveTextContent(/Closed\s*Not a fit\s*Self-guided/);
+  });
+
+  it('Closed rows: a canceled tour carries no outcome badge, even one that recorded a decision', () => {
+    readyAll([], []);
+    closedState = { status: 'ready', closed: [TOUR_CANCELED, TOUR_CANCELED_DECIDED] };
+    renderPage('/tours/closed');
+    const items = within(screen.getByRole('region', { name: 'Closed tours' })).getAllByRole('listitem');
+    expect(items).toHaveLength(2);
+    for (const item of items) {
+      expect(within(item).getByText('Canceled')).toBeInTheDocument();
+      for (const label of ['No outcome recorded', 'Not a fit', 'Move forward']) {
+        expect(within(item).queryByText(label)).not.toBeInTheDocument();
+      }
+    }
+  });
+
+  it('the Closed intro names every way a tour ends (spec 9.3)', () => {
+    readyAll([], []);
+    renderPage('/tours/closed');
+    expect(
+      screen.getByText(
+        'Tours that ended - converted into a placement, closed as not a fit, closed automatically with no outcome, or canceled.',
+      ),
+    ).toBeInTheDocument();
+  });
+
   // --- "+ New tour" (Active-view header action) ---
 
   it('"+ New tour" opens the Schedule-a-tour dialog with BOTH sides as free typeaheads', async () => {
@@ -709,9 +778,10 @@ describe('ToursPage - Past view', () => {
     readyPast([]);
     renderPage('/tours/past');
     expect(screen.getByRole('heading', { level: 1, name: 'Past tours' })).toBeInTheDocument();
+    // The intro also says these rows leave on their own (spec 9.3, auto-close).
     expect(
       screen.getByText(
-        'Last 90 days: tours that were never marked toured, toured tours still waiting on an outcome or a placement, and no-shows.',
+        'Last 90 days: tours that were never marked toured, toured tours still waiting on an outcome or a placement, and no-shows. Tours with no outcome close on their own two weeks after their date or their last update.',
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Past' })).toHaveAttribute('aria-current', 'page');

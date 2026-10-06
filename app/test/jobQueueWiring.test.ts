@@ -126,6 +126,27 @@ describe('configureJobQueues (shared job-queue wiring)', () => {
     expect(capture.lines).toHaveLength(0);
   });
 
+  // GUARD (tour auto-close, code review r2): the worker's auto-close poll block
+  // is the feature's ONLY production trigger, yet deleting it - or binding it
+  // to the shared poll interval - kept every gate green (the e2e drives the
+  // dev tick only). Source-level for the same reason as the guard below.
+  it('worker.ts starts the tour auto-close poll on its own interval, with no messaging adapter', () => {
+    // Code only: a commented-out call is no call, so drop block comments and
+    // whole-line comments first.
+    const code = readFileSync(fileURLToPath(new URL('../src/worker.ts', import.meta.url)), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    const call = "startPollLoop('tour auto-close'";
+    expect(code, 'worker.ts must start the tour auto-close poll').toContain(call);
+    // The top-level block holding the call (it opens and closes at column 0).
+    const at = code.indexOf(call);
+    const block = code.slice(code.lastIndexOf('\n{\n', at), code.indexOf('\n}\n', at));
+    expect(block).toContain('runTourAutoClose(');
+    expect(block).toContain('intervalMs: TOUR_AUTO_CLOSE_INTERVAL_MS');
+    // Silent by construction: nothing on this path can text anyone.
+    expect(block).not.toMatch(/createMessagingAdapter|createSendMessageService|tokenBucket|a2pBucket/);
+  });
+
   // GUARD (the actual 2026-08-16 regression): one entrypoint was wired and the
   // other was not. Any future entrypoint that dispatches jobs must call the shared
   // wiring - a source-level assertion because these modules self-execute on import

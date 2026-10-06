@@ -150,7 +150,9 @@ export interface UnitActivityDescription {
   to?: string;
 }
 
-/** Human labels for the tour-lifecycle audit kinds surfaced on a property. */
+/** Human labels for the tour-lifecycle audit kinds surfaced on a property.
+ *  Listing a kind here is also what keeps its /tours/<id> link (an unknown
+ *  type humanizes with no link). */
 const TOUR_LABELS: Record<string, string> = {
   tour_scheduled: 'Tour scheduled',
   tour_rescheduled: 'Tour rescheduled',
@@ -158,6 +160,9 @@ const TOUR_LABELS: Record<string, string> = {
   tour_no_show: 'Tour no-show',
   tour_canceled: 'Tour canceled',
   tour_outcome: 'Tour outcome',
+  // Spec 9.5: the auto-close sweep and the reopen route.
+  tour_auto_closed: 'Tour closed automatically: no outcome recorded after two weeks',
+  tour_reopened: 'Tour reopened',
 };
 
 /** Staff copy per activity event (GLOSSARY: "property", never "listing"/"unit").

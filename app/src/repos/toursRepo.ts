@@ -35,21 +35,21 @@ import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import { RosterPlanConflictError, type RosterEntry } from '../lib/rosterResolution.js';
-import type { TourType } from '../lib/toursModel.js';
+import { isAutoCloseStatus, type AutoCloseStatus, type TourOutcome, type TourType } from '../lib/toursModel.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/** The three ways a tour can be conducted. Canonical home is lib/toursModel.ts;
- *  re-exported here so existing importers keep resolving from this repo. */
-export type { TourType };
+/** The three ways a tour can be conducted (TourType) and the tour outcome
+ *  (TourOutcome: exit gate + auto-close). Canonical home of both is
+ *  lib/toursModel.ts; re-exported here so existing importers keep resolving
+ *  from this repo, and so the outcome union can never drift from the model's
+ *  TOUR_OUTCOMES (it was a hand-copied union until auto-close). */
+export type { TourOutcome, TourType };
 
 /** Tour status — mirrors TOUR_STATUSES in lib/toursModel.ts. */
 export type TourStatus = string;
-
-/** Exit-gate outcome (mirrors lib/toursModel.ts TOUR_OUTCOMES). */
-export type TourOutcome = 'move_forward' | 'not_a_fit';
 
 /**
  * One scheduled (or completed) tour: a tenant visiting a unit.
@@ -100,6 +100,17 @@ export interface TourItem {
   moveForward?: boolean;
   /** Navigator note: convertible to a placement? Absent until exit gate. */
   convertible?: boolean;
+  /** Auto-close (spec 5.2): wall-clock ISO instant the sweep closed this tour.
+   *  Present only while the tour is closed with outcome `no_outcome`; reopen
+   *  removes it. */
+  autoClosedAt?: string;
+  /** Auto-close: the status the sweep closed the tour FROM (`scheduled`,
+   *  `toured` or `no_show`) - reopen returns it there. Removed by reopen. */
+  autoClosedFrom?: AutoCloseStatus;
+  /** The latest instant a PERSON changed this tour's status or time (PATCH),
+   *  or reopened it. The auto-close clock never starts before it. Never
+   *  removed. */
+  lastMarkedAt?: string;
   /**
    * GENERATION POINTER (supersession, 2026-09-01): the id of the reminder
    * ladder that is CURRENT for this tour. Reminder rows carry a matching
@@ -158,6 +169,17 @@ export type PatchTourInput = Partial<
   Omit<TourItem, 'tourId' | '_schedPartition' | 'createdAt' | 'updatedAt'>
 >;
 
+/** Options for `patch`. Omitted, the patch is unconditional (beyond existence). */
+export interface PatchTourOptions {
+  /**
+   * Write ONLY while the stored status still equals this - the status the
+   * caller read and ran its guards on. A mismatch throws
+   * ConditionalCheckFailedException, exactly like a missing tour; a caller
+   * that must tell the two apart re-reads (PATCH /api/tours/:id does).
+   */
+  expectedStatus?: string;
+}
+
 export interface ToursRepo {
   /** Create a tour (generates tourId); returns the stored item. */
   create(input: CreateTourInput): Promise<TourItem>;
@@ -191,10 +213,12 @@ export interface ToursRepo {
   /**
    * SET-merge patch: only supplied fields are written; omitted fields are LEFT as
    * stored (no-overwrite contract). updatedAt is always bumped. Throws
-   * ConditionalCheckFailedException when the tourId does not exist.
-   * Returns the post-patch item (ALL_NEW).
+   * ConditionalCheckFailedException when the tourId does not exist - and, with
+   * `opts.expectedStatus`, when the stored status no longer equals it (tour
+   * auto-close: a staff PATCH must not overwrite a close that landed after its
+   * read). Returns the post-patch item (ALL_NEW).
    */
-  patch(tourId: string, updates: PatchTourInput): Promise<TourItem>;
+  patch(tourId: string, updates: PatchTourInput, opts?: PatchTourOptions): Promise<TourItem>;
   /**
    * Atomically CLAIM the tour's group-thread slot (relay provisioning): sets
    * groupThreadId to `value` ONLY when none exists yet. Throws
@@ -260,6 +284,34 @@ export interface ToursRepo {
    * and idempotent: a tour with no plan is a no-op.
    */
   clearRoster(tourId: string): Promise<void>;
+  /**
+   * The auto-close sweep's ONE write (jobs/tourAutoClose.ts, spec 6.3): closes
+   * `tour` with outcome `no_outcome` ONLY while the stored tour still has the
+   * status read, no outcome, no conversion claim, is not convertible, and has
+   * the same scheduledAt and the same lastMarkedAt as read (each ABSENT when
+   * the read had none) - and, ONLY for a never-marked tour (the read carries
+   * no lastMarkedAt), the same updatedAt, because that tour's clock counts
+   * from it (ruling A-1, code-review/adjudications-r1.md). Once a mark exists
+   * the clock ignores updatedAt, so it is not conditioned: a roster edit or a
+   * group open does not block a due close. Residual: updatedAt is a
+   * millisecond stamp, so a racing write stamped in the SAME millisecond as
+   * the write the read saw leaves it unchanged and the close still lands - a
+   * false negative of the guard. Rotates the reminder-ladder pointer to
+   * `rotation` in the same write. Stamps autoClosedAt / updatedAt with the
+   * WALL clock. Returns the post-write item, or undefined when the condition
+   * failed (or the tour is missing) - never throws for that.
+   */
+  autoCloseIf(tour: TourItem, rotation: string): Promise<TourItem | undefined>;
+  /**
+   * Reopen a closed tour (POST /api/tours/:id/reopen, spec 7.3): status ->
+   * `target`, lastMarkedAt -> `lastMarkedAt` (the route's clock), and REMOVE
+   * outcome / moveForward / convertible / autoClosedAt / autoClosedFrom - ONLY
+   * while it is still closed, unconverted, and carries the outcome and
+   * autoClosedFrom the caller read (field equality). currentLadderId is left
+   * alone (it names no live rows); nothing is armed. Returns the post-write
+   * item, or undefined when the condition failed - never throws for that.
+   */
+  reopenIf(tour: TourItem, target: AutoCloseStatus, lastMarkedAt: string): Promise<TourItem | undefined>;
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +436,7 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
       return all;
     },
 
-    async patch(tourId, updates) {
+    async patch(tourId, updates, opts) {
       // SET each supplied non-null field; REMOVE each explicit-null field
       // (the only way to truly clear an attribute). Omitted (undefined) fields
       // are LEFT untouched. Names are expression-aliased so reserved words are
@@ -411,6 +463,16 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
       values[':updatedAt'] = new Date().toISOString();
       sets.push('#updatedAt = :updatedAt');
 
+      // Existence always; the caller's status precondition when it gave one. A
+      // second placeholder for `status` is legal beside a `#k<i>` that SETs it
+      // (only overlapping UPDATE paths are refused).
+      const conditions = ['attribute_exists(tourId)'];
+      if (opts?.expectedStatus !== undefined) {
+        names['#expectedStatus'] = 'status';
+        values[':expectedStatus'] = opts.expectedStatus;
+        conditions.push('#expectedStatus = :expectedStatus');
+      }
+
       const clauses = [`SET ${sets.join(', ')}`];
       if (removes.length > 0) clauses.push(`REMOVE ${removes.join(', ')}`);
 
@@ -419,7 +481,7 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
           TableName: table,
           Key: { tourId },
           UpdateExpression: clauses.join(' '),
-          ConditionExpression: 'attribute_exists(tourId)',
+          ConditionExpression: conditions.join(' AND '),
           ExpressionAttributeNames: names,
           ExpressionAttributeValues: values,
           ReturnValues: 'ALL_NEW',
@@ -618,6 +680,143 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
         }),
       );
       log.info({ tourId }, 'tour roster plan cleared');
+    },
+
+    async autoCloseIf(tour, rotation) {
+      // Defense in depth (spec 6.3): only a candidate status may ever be
+      // closed as no_outcome, whatever the caller's due filter did.
+      if (!isAutoCloseStatus(tour.status)) return undefined;
+      const now = new Date().toISOString();
+      const names: Record<string, string> = {
+        '#st': 'status',
+        '#oc': 'outcome',
+        '#acf': 'autoClosedFrom',
+        '#aca': 'autoClosedAt',
+        '#cl': 'currentLadderId',
+        '#ua': 'updatedAt',
+        '#cp': 'convertedPlacementId',
+        '#cv': 'convertible',
+        '#sa': 'scheduledAt',
+        '#lm': 'lastMarkedAt',
+      };
+      const values: Record<string, unknown> = {
+        ':closed': 'closed',
+        ':noOutcome': 'no_outcome',
+        ':from': tour.status,
+        ':now': now,
+        ':rot': rotation,
+        ':true': true,
+      };
+      const conditions = [
+        'attribute_exists(tourId)',
+        '#st = :from',
+        'attribute_not_exists(#oc)',
+        'attribute_not_exists(#cp)',
+        '(attribute_not_exists(#cv) OR #cv <> :true)',
+      ];
+      if (typeof tour.scheduledAt === 'string') {
+        values[':sa'] = tour.scheduledAt;
+        conditions.push('#sa = :sa');
+      } else {
+        conditions.push('attribute_not_exists(#sa)');
+      }
+      if (typeof tour.lastMarkedAt === 'string') {
+        values[':lm'] = tour.lastMarkedAt;
+        conditions.push('#lm = :lm');
+      } else {
+        conditions.push('attribute_not_exists(#lm)');
+        // Never marked: updatedAt IS the clock's mark (toursModel
+        // autoCloseDueAtMs), so a write that moved it since our read - a
+        // roster edit, a group open - restarted the clock and wins (ruling A-1,
+        // code-review/adjudications-r1.md). Not conditioned once a mark exists:
+        // the clock ignores updatedAt then, and such writes must not block a
+        // due close. A row without updatedAt is written by nothing, but the
+        // branch stays total.
+        if (typeof tour.updatedAt === 'string') {
+          values[':ua'] = tour.updatedAt;
+          conditions.push('#ua = :ua');
+        } else {
+          conditions.push('attribute_not_exists(#ua)');
+        }
+      }
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { tourId: tour.tourId },
+            UpdateExpression:
+              'SET #st = :closed, #oc = :noOutcome, #acf = :from, #aca = :now, #cl = :rot, #ua = :now',
+            ConditionExpression: conditions.join(' AND '),
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        // debug, not info: the job owns the ONE info line per closed tour.
+        log.debug({ tourId: tour.tourId, from: tour.status }, 'tour auto-close write landed');
+        return Attributes as TourItem;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.debug({ tourId: tour.tourId }, 'tour auto-close lost its condition - skipped');
+          return undefined;
+        }
+        throw err;
+      }
+    },
+
+    async reopenIf(tour, target, lastMarkedAt) {
+      const names: Record<string, string> = {
+        '#st': 'status',
+        '#lm': 'lastMarkedAt',
+        '#ua': 'updatedAt',
+        '#oc': 'outcome',
+        '#mf': 'moveForward',
+        '#cv': 'convertible',
+        '#aca': 'autoClosedAt',
+        '#acf': 'autoClosedFrom',
+        '#cp': 'convertedPlacementId',
+      };
+      const values: Record<string, unknown> = {
+        ':closed': 'closed',
+        ':target': target,
+        ':lm': lastMarkedAt,
+        ':now': new Date().toISOString(),
+      };
+      const conditions = ['attribute_exists(tourId)', '#st = :closed', 'attribute_not_exists(#cp)'];
+      if (typeof tour.outcome === 'string') {
+        values[':oc'] = tour.outcome;
+        conditions.push('#oc = :oc');
+      } else {
+        conditions.push('attribute_not_exists(#oc)');
+      }
+      if (typeof tour.autoClosedFrom === 'string') {
+        values[':acf'] = tour.autoClosedFrom;
+        conditions.push('#acf = :acf');
+      } else {
+        conditions.push('attribute_not_exists(#acf)');
+      }
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { tourId: tour.tourId },
+            UpdateExpression: 'SET #st = :target, #lm = :lm, #ua = :now REMOVE #oc, #mf, #cv, #aca, #acf',
+            ConditionExpression: conditions.join(' AND '),
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        // debug, not info: the route owns the ONE info line per reopen.
+        log.debug({ tourId: tour.tourId, to: target }, 'tour reopen write landed');
+        return Attributes as TourItem;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.debug({ tourId: tour.tourId }, 'tour reopen lost its condition');
+          return undefined;
+        }
+        throw err;
+      }
     },
   };
 }

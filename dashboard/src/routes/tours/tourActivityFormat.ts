@@ -8,9 +8,10 @@
 import type { TimelineMilestone, TimelineMilestoneType, TourActivityEvent } from '../../api/index.js';
 import { humanize } from '../contact/format.js';
 
-/** Human titles for the tour lifecycle audit kinds (the recordTourEvent set +
- *  the group-opened / converted milestones). An unknown type humanizes -> a
- *  staff member never sees a raw snake_case token. */
+/** Human titles for the tour lifecycle audit kinds (the recordTourEvent set -
+ *  the PATCH route, the auto-close sweep and the reopen route all write through
+ *  it - + the group-opened / converted milestones). An unknown type humanizes
+ *  -> a staff member never sees a raw snake_case token. */
 const TOUR_EVENT_LABELS: Record<string, string> = {
   tour_scheduled: 'Tour scheduled',
   tour_rescheduled: 'Tour rescheduled',
@@ -20,6 +21,10 @@ const TOUR_EVENT_LABELS: Record<string, string> = {
   tour_outcome: 'Outcome recorded',
   tour_group_opened: 'Relay group opened',
   tour_converted: 'Converted to placement',
+  // Spec 9.5. The tour page drops the person timeline's leading "Tour" - we
+  // are already on the tour.
+  tour_auto_closed: 'Closed automatically: no outcome recorded after two weeks',
+  tour_reopened: 'Tour reopened',
 };
 
 /** What one Activity row renders: the event line + an optional deep-link target. */
@@ -69,6 +74,8 @@ const MILESTONE_TYPE: Record<string, TimelineMilestoneType> = {
   tour_outcome: 'tour_outcome',
   tour_group_opened: 'added_to_group_text',
   tour_converted: 'placement_opened',
+  tour_auto_closed: 'tour_auto_closed',
+  tour_reopened: 'tour_reopened',
 };
 
 /**

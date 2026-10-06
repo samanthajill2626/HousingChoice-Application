@@ -40,6 +40,8 @@ export type ActivityEventType =
   | 'tour_group_opened'
   | 'placement_group_opened'
   | 'tour_converted'
+  | 'tour_auto_closed'
+  | 'tour_reopened'
   | 'stage_changed'
   | 'contact_status_changed'
   | 'opt_out_changed'

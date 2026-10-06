@@ -13,6 +13,7 @@
 // gate: validates, mints jobRunId, rehydrates correlation context) ->
 // registered handler. The worker polls the same queue regardless of producer.
 import type { SqsJobConsumer } from './adapters/sqsJobConsumer.js';
+import type { TourAutoCloseDeps } from './jobs/tourAutoClose.js';
 import { startOtel } from './lib/otel.js';
 
 await startOtel();
@@ -285,7 +286,9 @@ runWithContext(bootContext, () => {
 // Every poll loop below starts through jobs/pollLoop.ts, which wraps the whole
 // tick (including the rejection handler) in a fresh pollRunId context - see
 // that module for why the previous bare setIntervals made every poll log line
-// an orphan. Bound once here so the six call sites stay one line each.
+// an orphan. Bound once here, to the shared WORKER_POLL_INTERVAL_MS cadence, so
+// the six shared-cadence call sites stay one line each. The tour auto-close
+// poll (the last block) has its own interval and calls startPollLoop directly.
 function startPoll(pollName: string, run: (nowIso: string) => Promise<unknown>): void {
   startPollLoop(pollName, run, {
     logger,
@@ -494,8 +497,8 @@ if (config.aiExtractionEnabled) {
   startPoll('extraction', (now) => runDueExtractions(now, extractionDeps));
 }
 
-// Native group texting: the guardrail duties (T6.3). Same shared poll as every
-// other block, but the duties are CADENCED behind a conditional claim on a
+// Native group texting: the guardrail duties (T6.3). Same shared poll as the
+// blocks above, but the duties are CADENCED behind a conditional claim on a
 // settings record, so this poll is nearly always a no-op read - the cross-check
 // and staleness sweeps act every five minutes and the two liveness WARNs act
 // daily, no matter how many processes are polling.
@@ -518,6 +521,52 @@ if (config.aiExtractionEnabled) {
   const { runJournalSweep } = await import('./jobs/journalSweep.js');
 
   startPoll('journal sweep', (now) => runJournalSweep(now, { logger }));
+}
+
+// Tour auto-close poll (Sam #18, 2026-10-01; jobs/tourAutoClose.ts): closes a
+// tour that still has no outcome two weeks after its date or its last mark,
+// with outcome `no_outcome`. Its OWN 15-minute cadence
+// (TOUR_AUTO_CLOSE_INTERVAL_MS - a code constant, not an env var): a two-week
+// rule gains nothing from the shared 30s tick, so this block calls
+// startPollLoop directly instead of the local startPoll wrapper, which binds
+// the shared interval (same logger, same bootContext). Built like the
+// roster-action block: lazy imports, every repo with `{ logger }`, and the
+// bridged `events` bus. SILENT BY CONSTRUCTION: these deps hold no messaging
+// adapter, send service or token bucket, so nothing on this path can text
+// anyone. The app drives the same job through POST /__dev/tour-auto-close/tick.
+{
+  const { createToursRepo } = await import('./repos/toursRepo.js');
+  const { createTourRemindersRepo } = await import('./repos/tourRemindersRepo.js');
+  const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
+  const { createUnitsRepo } = await import('./repos/unitsRepo.js');
+  const { createAuditRepo } = await import('./repos/auditRepo.js');
+  const { createActivityEventsRepo } = await import('./repos/activityEventsRepo.js');
+  const { appEvents } = await import('./lib/events.js');
+  const { runTourAutoClose, TOUR_AUTO_CLOSE_INTERVAL_MS } = await import('./jobs/tourAutoClose.js');
+
+  // Annotated, so an extra field here (an adapter, say) is a type error too.
+  const tourAutoCloseDeps: TourAutoCloseDeps = {
+    toursRepo: createToursRepo({ logger }),
+    // The winner's sweep of the old ladder's never-sent reminder rows.
+    tourRemindersRepo: createTourRemindersRepo({ logger }),
+    // The 28-day relay close-nag arm (set-if-absent, open group only).
+    conversationsRepo: createConversationsRepo({ logger }),
+    // The unit's landlord gets the second "Tour closed automatically" pin.
+    unitsRepo: createUnitsRepo({ logger }),
+    auditRepo: createAuditRepo({ logger }),
+    activityEventsRepo: createActivityEventsRepo({ logger }),
+    // The bridge (lib/eventBridge.ts) forwards tour.updated / scheduled.updated
+    // to app SSE clients when EVENT_BRIDGE_URL is set; an unbridged emit is a
+    // no-op.
+    events: appEvents,
+    logger,
+  };
+
+  startPollLoop('tour auto-close', (now) => runTourAutoClose(now, tourAutoCloseDeps), {
+    logger,
+    intervalMs: TOUR_AUTO_CLOSE_INTERVAL_MS,
+    baseContext: bootContext,
+  });
 }
 
 // Keep the process alive until a shutdown signal arrives (also covers the

@@ -5,11 +5,13 @@
 // "Relay groups to close" section (relay-number-lifecycle D5) leads the ready
 // content: each still-open relay group whose 28-day close-nag is due, with Close /
 // Keep-open actions. A "Past tours needing an outcome" section (Sam's item 18)
-// sits after "Follow-ups due": the Tours page's Past rows minus no-shows, up to
-// five, with a link to the Past tab (useTodayPastTours). Empty groups are
-// skipped; loading shows a Spinner, error an inline message, all-empty (no
-// items, no nags, no past tours) a friendly "all caught up" state. Matches the
-// locked mockup structure in the new design language (tokens + CSS Modules).
+// sits after "Follow-ups due": the Tours page's Past rows as they are -
+// no-shows included, since a no-show now closes on its own two weeks after its
+// last mark (spec 9.4) - up to five, with a link to the Past tab
+// (useTodayPastTours). Empty groups are skipped; loading shows a Spinner, error
+// an inline message, all-empty (no items, no nags, no past tours) a friendly
+// "all caught up" state. Matches the locked mockup structure in the new design
+// language (tokens + CSS Modules).
 import { Fragment, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
@@ -188,8 +190,9 @@ function RelayCloseNagRow({
 /** One past tour (Sam's item 18): tenant - property - when - the Past tab's
  *  state chip. A "Needs outcome" row opens the tour page with the Record
  *  outcome dialog up (the Past tab's ?outcome=1 deep link); the others open the
- *  tour page, where Mark toured / Start placement live. Its accessible name
- *  mirrors a Past row's: identity, date, then the state. */
+ *  plain tour page, where their next step lives (Mark toured, Start placement,
+ *  or a no-show's Reschedule / no-show check-in). Its accessible name mirrors a
+ *  Past row's: identity, date, then the state. */
 function PastTourRow({ row }: { row: TodayPastTourRow }): React.JSX.Element {
   const { tour, tenant, property } = row;
   const when = whenLabel(tour.scheduledAt);
@@ -220,8 +223,8 @@ function PastTourRow({ row }: { row: TodayPastTourRow }): React.JSX.Element {
 /** The past-tours section. Hidden until its rows (names included) are ready
  *  and whenever there are none; a failed load says so here and leaves the
  *  rest of Today alone. The Past tab link carries the Past tab's own row count
- *  whenever that tab holds more than this section lists (it also lists
- *  no-shows). */
+ *  whenever that tab holds more than this section lists (rows past the cap, a
+ *  deleted tenant's tours). */
 function PastToursSection({ past }: { past: TodayPastToursState }): React.JSX.Element | null {
   if (past.status === 'idle') return null;
   if (past.status === 'error') {

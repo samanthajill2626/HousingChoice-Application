@@ -1,6 +1,6 @@
 // The Today page's "Past tours needing an outcome" section (Sam's item 18,
-// Cameron 2026-09-30): the Tours page's Past rows minus no-shows, most recent
-// first, up to five, with a link to the Past tab.
+// Cameron 2026-09-30): the Tours page's Past rows, no-shows included, most
+// recent first, up to five, with a link to the Past tab.
 //
 // Against the real backend on the hermetic lane. The lean world seeds NO tours,
 // so this spec creates PAST-DATED tours through POST /api/tours (the route
@@ -8,16 +8,18 @@
 // skipped reminder row and sends nothing), then advances some through the API
 // - the same setup as tours-past.spec.ts.
 //
-//   Today lists the Not marked and the Needs outcome tour, most recent first,
-//   and NOT the no-show; Today is not "all caught up"; the link names the Past
-//   tab's own count ("See all 3" - it lists the no-show too). The Needs
-//   outcome row opens its tour with the Record outcome dialog up, and the back
-//   arrow ("Back to Today") returns to Today. Recording that outcome through
-//   the API drops the row LIVE (the tour.updated event), with no reload. With
-//   six qualifying tours Today shows five, and "See all 7 on the Past tab"
-//   lands on seven Past rows. No horizontal overflow at 360px. Every tour this
-//   spec creates is decided afterwards - in afterEach too, so a failure midway
-//   cannot leave a later spec a Today section it did not expect.
+//   Today lists the Not marked, the Needs outcome and the No show tour, most
+//   recent first - a no-show now closes on its own two weeks after its last
+//   mark, so Today lists it meanwhile (tour auto-close, spec 9.4); Today is not
+//   "all caught up"; with every Past row shown the link simply reads "Open the
+//   Past tab". The Needs outcome row opens its tour with the Record outcome
+//   dialog up, and the back arrow ("Back to Today") returns to Today. Recording
+//   that outcome through the API drops the row LIVE (the tour.updated event),
+//   with no reload. With seven qualifying tours Today shows five, and "See all
+//   7 on the Past tab" lands on seven Past rows. No horizontal overflow at
+//   360px. Every tour this spec creates is decided afterwards - in afterEach
+//   too, so a failure midway cannot leave a later spec a Today section it did
+//   not expect.
 import { test, expect, type Page } from '@playwright/test';
 import { expectTodayReady } from '../../support/today.js';
 import { NARROW_360, WIDE_RESTORE, expectNoHorizontalOverflow } from '../../support/viewport.js';
@@ -92,14 +94,14 @@ test.describe('Today - past tours needing an outcome', () => {
     for (const id of created.splice(0)) await decideQuietly(page, id);
   });
 
-  test('lists past tours minus no-shows, deep-links Record outcome, back to Today, live drop, cap of five', async ({
+  test('lists past tours with no-shows, deep-links Record outcome, back to Today, live drop, cap of five', async ({
     page,
   }) => {
     test.slow(); // API setup, three Today visits, a tour page, a live update, 360px.
     await devLogin(page); // page.request carries the session cookie for /api writes
 
     // Yesterday (stays scheduled = "Not marked"), two days ago (-> toured, no
-    // outcome = "Needs outcome"), three days ago (-> no_show, NOT on Today).
+    // outcome = "Needs outcome"), three days ago (-> no_show = "No show").
     const notMarkedId = await createTour(page, UNIT_A, pastAt(1, 10));
     const needsOutcomeId = await createTour(page, UNIT_B, pastAt(2, 10));
     const noShowId = await createTour(page, UNIT_A, pastAt(3, 10));
@@ -112,28 +114,28 @@ test.describe('Today - past tours needing an outcome', () => {
     await expect(list).toBeVisible();
     await expect(page.getByRole('heading', { name: HEADING })).toBeVisible();
     await expect(page.getByText(/all caught up/i)).toHaveCount(0);
-    await expect(list.getByRole('listitem')).toHaveCount(2);
-    // Most recent first; the Needs outcome row deep-links the dialog.
+    await expect(list.getByRole('listitem')).toHaveCount(3);
+    // Most recent first; the Needs outcome row deep-links the dialog, the
+    // no-show row opens its plain tour page (no ?outcome=1).
     const hrefs = await list.getByRole('link').evaluateAll((els) => els.map((e) => e.getAttribute('href')));
-    expect(hrefs).toEqual([`/tours/${notMarkedId}`, `/tours/${needsOutcomeId}?outcome=1`]);
+    expect(hrefs).toEqual([`/tours/${notMarkedId}`, `/tours/${needsOutcomeId}?outcome=1`, `/tours/${noShowId}`]);
     await expect(list.getByRole('link', { name: /^Tour for Tasha Nguyen at .* on .*, Not marked$/ })).toBeVisible();
     await expect(list.getByRole('link', { name: /^Tour for Tasha Nguyen at .* on .*, Needs outcome$/ })).toBeVisible();
-    // The no-show is on the Past tab only - nowhere on Today.
-    await expect(page.locator(`a[href^="/tours/${noShowId}"]`)).toHaveCount(0);
-    // The link names what the Past tab holds: these two plus the no-show.
-    await expect(page.getByRole('link', { name: 'See all 3 on the Past tab' })).toHaveAttribute('href', '/tours/past');
+    await expect(list.getByRole('link', { name: /^Tour for Tasha Nguyen at .* on .*, No show$/ })).toBeVisible();
+    // Every Past row is on Today, so the link simply opens the Past tab.
+    await expect(page.getByRole('link', { name: 'Open the Past tab' })).toHaveAttribute('href', '/tours/past');
 
     // Narrow: the section's rows must not push Today sideways.
     await page.setViewportSize(NARROW_360);
-    await expect(list.getByRole('listitem')).toHaveCount(2);
+    await expect(list.getByRole('listitem')).toHaveCount(3);
     await expectNoHorizontalOverflow(page, 'Today with past tours at 360px');
     // Mid-width: an 880px window leaves a ~592px pane beside the expanded
     // sidebar - the band where a one-line past-tour row squeezed the property
     // out (review P2). The row stacks there, so no text inside any card is
-    // clipped. Two cards, counted first, so the check is never vacuous.
+    // clipped. Three cards, counted first, so the check is never vacuous.
     await page.setViewportSize(MID_880);
     const cards = list.getByRole('link');
-    await expect(cards).toHaveCount(2);
+    await expect(cards).toHaveCount(3);
     // The check's premise, asserted (review P-a): the pane is inside the
     // stacking band. A changed sidebar default fails HERE, loudly, instead of
     // quietly testing the one-line layout.
@@ -160,23 +162,29 @@ test.describe('Today - past tours needing an outcome', () => {
     await page.getByRole('link', { name: 'Back to Today' }).click();
     await expect(page).toHaveURL(`${NEXT}/`);
     await expectTodayReady(page);
-    await expect(list.getByRole('listitem')).toHaveCount(2);
+    await expect(list.getByRole('listitem')).toHaveCount(3);
 
-    // Live: recording the outcome elsewhere drops the row without a reload.
+    // Live: recording the outcome elsewhere drops the row without a reload
+    // (the Not marked and the No show rows remain).
     await patchTour(page, needsOutcomeId, { outcome: 'not_a_fit', moveForward: false });
-    await expect(list.getByRole('listitem')).toHaveCount(1);
+    await expect(list.getByRole('listitem')).toHaveCount(2);
     await expect(page.locator(`a[href^="/tours/${needsOutcomeId}"]`)).toHaveCount(0);
 
-    // The cap: five more Not marked tours (4-8 days ago) make six that qualify.
+    // The cap: five more Not marked tours (4-8 days ago) make seven that qualify.
     const older: string[] = [];
     for (let d = 4; d <= 8; d++) older.push(await createTour(page, d % 2 === 0 ? UNIT_A : UNIT_B, pastAt(d, 10)));
     await page.goto(`${NEXT}/`);
     await expectTodayReady(page);
     await expect(list.getByRole('listitem')).toHaveCount(5);
     const capped = await list.getByRole('link').evaluateAll((els) => els.map((e) => e.getAttribute('href')));
-    // Most recent first: yesterday's, then 4, 5, 6 and 7 days ago (8 is cut).
-    expect(capped).toEqual([`/tours/${notMarkedId}`, ...older.slice(0, 4).map((id) => `/tours/${id}`)]);
-    // Six qualify for Today; the Past tab also lists the no-show: seven.
+    // Most recent first: yesterday's, the no-show (3 days ago), then 4, 5 and 6
+    // days ago (7 and 8 are cut).
+    expect(capped).toEqual([
+      `/tours/${notMarkedId}`,
+      `/tours/${noShowId}`,
+      ...older.slice(0, 3).map((id) => `/tours/${id}`),
+    ]);
+    // Seven qualify for Today and the Past tab alike; Today shows five.
     const seeAll = page.getByRole('link', { name: 'See all 7 on the Past tab' });
     await expect(seeAll).toBeVisible();
     await seeAll.click();

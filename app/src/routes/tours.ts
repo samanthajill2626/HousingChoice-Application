@@ -9,6 +9,7 @@
 //   PATCH /api/tours/:tourId  { scheduledAt?, status?, outcome?, moveForward? }
 //                                                                    → { tour } | 404
 //   POST  /api/tours/:tourId/relay  { members? }                     → 201 { tour, conversation }
+//   POST  /api/tours/:tourId/reopen  (empty body)                    -> { tour } | 404 | 409
 //
 // POST: scheduledAt is OPTIONAL. Absent → the tour is created 'requested' (the
 // timeless coordination anchor; no scheduledAt attribute stored, no reminders).
@@ -49,13 +50,13 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { parseIntroBody } from '../lib/relayIntroBody.js';
 import {
   canReschedule,
-  isTourOutcome,
+  isStaffTourOutcome,
   isTourStatus,
   isTourType,
+  reopenTargetFor,
+  STAFF_TOUR_OUTCOMES,
   TOUR_STATUSES,
-  TOUR_OUTCOMES,
   TOUR_TYPES,
-  type TourOutcome,
   type TourStatus,
   type TourType,
 } from '../lib/toursModel.js';
@@ -122,9 +123,9 @@ import {
   type PendingRosterActionsRepo,
 } from '../repos/pendingRosterActionsRepo.js';
 import { clampOutOfQuietHours, isQuietTime } from '../lib/quietHours.js';
-import { armRelayCloseNagIfOpen } from '../services/relayCloseNag.js';
+import { armRelayCloseNagIfOpen, clearRelayCloseNagOnReopen } from '../services/relayCloseNag.js';
 import { normalizeToE164 } from '../lib/phone.js';
-import { recordPersonMilestone } from '../lib/personEvents.js';
+import { recordTourEvent as recordTourEventShared } from '../lib/tourEvents.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 
 /**
@@ -249,42 +250,15 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
   const router = Router();
 
-  // Best-effort write of a tour lifecycle event to THREE surfaces: BOTH
-  // parties' contact timelines (the tenant's and the unit landlord's - one
-  // activity event each, via lib/personEvents), the property's Activity card
-  // (a `units#<unitId>` audit row), and the tour's OWN history (a
-  // `tours#<tourId>` audit row - tour-detail-page 1a, feeds
-  // GET /api/tours/:tourId/activity). Each write is independently guarded -
-  // NONE may fail the route (state is already persisted). PII-safe log:
-  // ids/type only.
-  async function recordTourEvent(
+  // Tour lifecycle events go through the ONE shared writer (lib/tourEvents.ts)
+  // so the auto-close sweep and reopen record exactly what this route does.
+  const recordTourEvent = (
     tour: { tenantId: string; unitId: string; tourId: string },
     activityType: ActivityEventType,
     auditType: string,
     label: string,
-  ): Promise<void> {
-    await recordPersonMilestone(
-      { activityEvents, units, log },
-      {
-        tenantId: tour.tenantId,
-        unitId: tour.unitId,
-        type: activityType,
-        label,
-        refType: 'tour',
-        refId: tour.tourId,
-      },
-    );
-    try {
-      await audit.append(`units#${tour.unitId}`, auditType, { tourId: tour.tourId });
-    } catch (err) {
-      log.error({ err, tourId: tour.tourId }, `${auditType} unit audit failed (best-effort)`);
-    }
-    try {
-      await audit.append(`tours#${tour.tourId}`, auditType, { tourId: tour.tourId });
-    } catch (err) {
-      log.error({ err, tourId: tour.tourId }, `${auditType} tour audit failed (best-effort)`);
-    }
-  }
+  ): Promise<void> =>
+    recordTourEventShared({ activityEvents, units, audit, log }, tour, activityType, auditType, label);
 
   // POST /api/tours — create a tour. With scheduledAt → 'scheduled' + armed
   // ladder; without → 'requested' (timeless), nothing armed until booking.
@@ -444,7 +418,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   // once the card lands in 1b). Serves the tour's OWN audit trail (entityKey
   // `tours#<tourId>`: tour_scheduled / tour_rescheduled / tour_took_place /
   // tour_no_show / tour_canceled / tour_outcome / tour_group_opened /
-  // tour_converted) NEWEST-FIRST via auditRepo.listByEntity, projected onto
+  // tour_converted / tour_auto_closed / tour_reopened) NEWEST-FIRST via
+  // auditRepo.listByEntity, projected onto
   // TourActivityEvent (fixed-key whitelist, never the raw payload). Paging is
   // the PLACEMENT-HISTORY pattern (E-D1): bounded ?limit= (1..MAX, default
   // DEFAULT) + optional ?before= exclusive `ts` upper bound (a row's `id`) for
@@ -1044,8 +1019,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       res.status(400).json({ error: `status must be one of: ${TOUR_STATUSES.join(', ')}` });
       return;
     }
-    if (newOutcome !== undefined && !isTourOutcome(newOutcome)) {
-      res.status(400).json({ error: `outcome must be one of: ${TOUR_OUTCOMES.join(', ')}` });
+    if (newOutcome !== undefined && !isStaffTourOutcome(newOutcome)) {
+      res.status(400).json({ error: `outcome must be one of: ${STAFF_TOUR_OUTCOMES.join(', ')}` });
       return;
     }
     if (newMoveForward !== undefined && typeof newMoveForward !== 'boolean') {
@@ -1053,8 +1028,10 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       return;
     }
 
-    // Fetch the current tour to check transition legality.
-    const current = await tours.get(tourId);
+    // Fetch the current tour to check transition legality. CONSISTENT: the
+    // status this read returns is the main write's precondition below (tour
+    // auto-close spec 8), so a stale read would refuse a valid PATCH.
+    const current = await tours.get(tourId, { consistentRead: true });
     if (!current) {
       res.status(404).json({ error: 'tour_not_found' });
       return;
@@ -1064,7 +1041,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
     // --- Status transition guard ---
     // Rules:
-    //   - 'closed' is terminal: no status change is allowed from 'closed'.
+    //   - 'closed' is terminal for PATCH: no status change is allowed from
+    //     'closed'; POST /:tourId/reopen is the only way out.
     //   - 'requested' is a CREATE-ONLY initial state: nothing transitions into
     //     it, and the ways out are booking (-> scheduled, which requires a
     //     time), canceling, or recording that it already happened (-> toured).
@@ -1074,7 +1052,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       const targetStatus = newStatus as TourStatus;
 
       if (currentStatus === 'closed') {
-        // closed is fully terminal — no transitions allowed.
+        // closed is terminal for PATCH; POST /:tourId/reopen is the only way out.
         res.status(409).json({ error: 'illegal_status_transition', detail: `a closed tour cannot be changed (current: closed, requested: ${targetStatus})` });
         return;
       }
@@ -1175,6 +1153,17 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       // Exit gate: convertible is true iff moveForward is true.
       patch['convertible'] = newMoveForward === true;
     }
+    // The auto-close clock's floor (spec 5.3): a person marking, rescheduling
+    // or reviving this tour gives it a fresh two weeks. Only a CHANGE counts
+    // (spec 5.2, ruling F4): a status that differs from the one read above, or
+    // any new time - so the booking / revival auto-advance stamps, while a
+    // same-status restatement and an outcome-only exit gate do not.
+    if (
+      (patch['status'] !== undefined && patch['status'] !== currentStatus) ||
+      patch['scheduledAt'] !== undefined
+    ) {
+      patch['lastMarkedAt'] = getNow();
+    }
 
     // Reminder side effects are keyed on the EFFECTIVE post-patch status -
     // arming must never happen on a tour that is not live (e.g. PATCH
@@ -1236,10 +1225,27 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
     let tour: TourItem;
     try {
-      tour = await tours.patch(tourId, patch);
+      // The precondition is the status the guards above ran on: a concurrent
+      // STATUS change between that read and this write (another PATCH that
+      // changed status, a conversion finalize, the auto-close sweep) is
+      // refused instead of merged on top (tour auto-close spec section 8).
+      // Only status is conditioned: a same-status concurrent PATCH (an exit
+      // gate, a reschedule) or a conversion claim still merges as before.
+      tour = await tours.patch(tourId, patch, { expectedStatus: currentStatus });
     } catch (err) {
       if (err instanceof ConditionalCheckFailedException) {
-        res.status(404).json({ error: 'tour_not_found' });
+        // Two conditions share this exception: the tour is gone, or its status
+        // moved after our read. A consistent re-read tells them apart; neither
+        // runs a single side effect below.
+        const fresh = await tours.get(tourId, { consistentRead: true });
+        if (fresh === undefined) {
+          res.status(404).json({ error: 'tour_not_found' });
+          return;
+        }
+        res.status(409).json({
+          error: 'tour_changed',
+          detail: 'This tour changed while you were saving - reload and try again.',
+        });
         return;
       }
       throw err;
@@ -1464,6 +1470,58 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
     log.info({ tourId, fields: Object.keys(patch).length }, 'tour patched via api');
     res.json({ tour });
+  });
+
+  // POST /api/tours/:tourId/reopen - reopen a CLOSED tour (Sam #18,
+  // 2026-10-01; spec section 7): back to the state it closed from
+  // (reopenTargetFor), outcome cleared, a fresh two weeks on the auto-close
+  // clock (lastMarkedAt). SILENT: arms no reminder (not even into a past
+  // 'scheduled'), sends nothing, touches no placement or roster. A converted
+  // tour never reopens - the placement owns it. The ONLY way out of 'closed';
+  // PATCH still refuses every change to a closed tour.
+  router.post('/:tourId/reopen', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    const body: unknown = req.body ?? {};
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+    const fields = Object.keys(body);
+    if (fields.length > 0) {
+      res.status(400).json({ error: `unknown field(s): ${fields.join(', ')}` });
+      return;
+    }
+    const current = await tours.get(tourId, { consistentRead: true });
+    if (!current) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    const decision = reopenTargetFor(current);
+    if (!decision.ok) {
+      res.status(409).json({ error: decision.error });
+      return;
+    }
+    const reopened = await tours.reopenIf(current, decision.target, getNow());
+    if (reopened === undefined) {
+      res.status(409).json({ error: 'tour_changed' });
+      return;
+    }
+    await recordTourEvent(
+      { tenantId: current.tenantId, unitId: current.unitId, tourId },
+      'tour_reopened',
+      'tour_reopened',
+      'Tour reopened',
+    );
+    // A child logger, so the shared helper's lines (it logs the
+    // conversationId only) carry the tourId too.
+    await clearRelayCloseNagOnReopen(
+      { conversationsRepo: conversations, logger: log.child({ tourId }) },
+      current.groupThreadId,
+      tourId,
+    );
+    events.emit('tour.updated', { tourId, status: reopened.status });
+    log.info({ tourId, to: reopened.status }, 'tour reopened via api');
+    res.json({ tour: reopened });
   });
 
   // POST /api/tours/:tourId/relay — provision a masked relay group thread for a

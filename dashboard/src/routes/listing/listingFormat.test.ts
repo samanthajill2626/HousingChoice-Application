@@ -254,6 +254,17 @@ describe('describeUnitActivity', () => {
     expect(describeUnitActivity(evt({ type: 'tour_canceled' }))).toEqual({ label: 'Tour canceled' });
   });
 
+  it('describes the auto-close and reopen rows (spec 9.5) with their tour deep-links', () => {
+    expect(describeUnitActivity(evt({ type: 'tour_auto_closed', tourId: 't3' }))).toEqual({
+      label: 'Tour closed automatically: no outcome recorded after two weeks',
+      to: '/tours/t3',
+    });
+    expect(describeUnitActivity(evt({ type: 'tour_reopened', tourId: 't3' }))).toEqual({
+      label: 'Tour reopened',
+      to: '/tours/t3',
+    });
+  });
+
   it('humanizes an unknown event type (open set — never a blank row)', () => {
     expect(describeUnitActivity(evt({ type: 'unit_frobnicated' }))).toEqual({ label: 'Unit frobnicated' });
   });

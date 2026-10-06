@@ -78,11 +78,14 @@ export const LIFECYCLE_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
 
 /**
  * The tour lifecycle audit event_types this module OWNS on `tours#<tourId>` in
- * the full profile. MIRRORS the live writer's recordTourEvent set + the
- * group-opened / converted milestones (routes/tours.ts, routes/placements.ts)
- * AND the dashboard's tourActivityFormat.ts TOUR_EVENT_LABELS keys - seeded
- * rows use ONLY these so no unknown-type fallback ever renders. Used for the
- * entity-scoped supersede of pre-existing tours# rows in historyItems.
+ * the full profile - the kinds it SEEDS. A SUBSET of the live vocabulary (the
+ * shared recordTourEvent writer, lib/tourEvents.ts, + the group-opened /
+ * converted milestones - routes/tours.ts, routes/placements.ts) AND of the
+ * dashboard's tourActivityFormat.ts TOUR_EVENT_LABELS keys - seeded rows use
+ * ONLY these, so no unknown-type fallback ever renders. tour_auto_closed and
+ * tour_reopened are LIVE-ONLY (the auto-close sweep, the reopen route): never
+ * seeded, so never owned here. Used for the entity-scoped supersede of
+ * pre-existing tours# rows in historyItems.
  */
 export const TOUR_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   'tour_scheduled',
@@ -694,10 +697,12 @@ const TOUR_GROUP_OPENED_LABEL = 'Relay group opened';
 const TOUR_CONVERTED_LABEL = 'Converted to placement';
 
 /**
- * A tour's person-timeline milestones, in the LIVE writers' full vocabulary:
- * tour_scheduled / tour_took_place / tour_no_show / tour_canceled / tour_outcome
- * (routes/tours.ts recordTourEvent) + tour_group_opened (the relay route) +
- * tour_converted (the conversion route). refType `tour` (the tour itself) so each
+ * A tour's person-timeline milestones, in a SUBSET of the LIVE writers'
+ * vocabulary: tour_scheduled / tour_took_place / tour_no_show / tour_canceled /
+ * tour_outcome (the shared recordTourEvent writer, lib/tourEvents.ts) +
+ * tour_group_opened (the relay route) + tour_converted (the conversion route).
+ * The live-only tour_auto_closed / tour_reopened (the auto-close sweep, the
+ * reopen route) are never seeded. refType `tour` (the tour itself) so each
  * milestone deep-links to /tours/<id>, not the property.
  *
  * Per-status sequence + appendices + instants are a deliberate MIRROR of
@@ -841,12 +846,14 @@ export function tourMilestones(
 // Tour audit-trail generator (`tours#<tourId>` rows) - the tour detail page's
 // own lifecycle history (GET /api/tours/:id/activity), interleaved into all
 // three conversation panes + the Activity card. FAITHFUL MIRROR of the live
-// writer's event vocabulary + per-status sequences (spec section 3, derived
-// from recordTourEvent + group-opened/converted call sites). NO actor - these
-// are archive writes describing actions the API never ran (same posture as the
-// seeded reminder rows that carry sentAt directly). The instants agree with
-// tourMilestones (booking = createdAt, took_place = scheduledAt) so the tenant
-// timeline and the tour trail tell one same-clock story.
+// writers' per-status sequences, over the SEEDED subset of their event
+// vocabulary (spec section 3, derived from recordTourEvent + group-opened/
+// converted call sites; the live-only tour_auto_closed / tour_reopened are
+// never seeded). NO actor - these are archive writes describing actions the
+// API never ran (same posture as the seeded reminder rows that carry sentAt
+// directly). The instants agree with tourMilestones (booking = createdAt,
+// took_place = scheduledAt) so the tenant timeline and the tour trail tell one
+// same-clock story.
 // ---------------------------------------------------------------------------
 
 /** A small fixed spacing used to place appendix rows strictly after the visit. */

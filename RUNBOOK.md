@@ -402,6 +402,21 @@ Cost: one consistent Scan of the broadcasts table, then per slot a handful of ke
 
 **No agent runs it against dev or prod; an agent rehearses on a lane: `--env local --lane <L>`.** Never a bare `--env local` - that is the live local stack.
 
+### Tour auto-close (2026-10-01): NOTHING is owed - no migration, no env var, no Terraform, no operator step
+
+**Feature branch `feat/tour-auto-close` (Sam's item 18). Deploy the app image (app + worker) and you are done.** Recorded here because the FIRST run closes every tour that is already overdue, all at once and silently, and the natural questions are "what will it close?" and "where do I see what it closed?". Spec: `docs/superpowers/specs/2026-10-01-tour-auto-close-reopen-design.md`, section 13.
+
+- **Nothing to apply.** The three new tour attributes (`autoClosedAt`, `autoClosedFrom`, `lastMarkedAt`) are optional and written from the deploy onward: no backfill, no migration, no GSI change or `db-update-gsis` (the sweep reads the existing `byStatus` index), no Terraform, no secret or SSM entry. The 15-minute cadence is a code constant (`TOUR_AUTO_CLOSE_INTERVAL_MS`), not an env var.
+- **BEFORE the deploy - preview what the first run will close** (the Past tab has been live in production since 2026-09-28): take the Past tab rows dated more than 14 days ago, minus the "Needs placement" rows, minus any row a person changed in the last 14 days (marked toured or no-show, rescheduled - those keep the rest of their two weeks); add the "Undated" rows last changed more than 14 days ago. No screen shows that last-change date (a roster edit or an outcome-only update moves it without a history row), so the "Undated" part errs safe: it may predict closes that will not happen. **Blind spot:** the Past tab covers 90 days and one page of its range read, so older tours with no outcome (from before early July) close without ever appearing there - they are on no list today either.
+- **WHAT HAPPENS about 15 minutes after the new worker starts** (the poll's first tick is one interval after boot): every tour already two weeks past its clock start with no outcome closes, silently - no text, no email, to anyone. The clock start is the latest of the tour's time, its creation and its last change: no row carries `lastMarkedAt` before this deploy, so `updatedAt` stands in, and a tour touched in any way in the last 14 days stays open for now. Requested, canceled, "Needs placement" and converted tours are never closed. For each close:
+  - a "Tour closed automatically: no outcome recorded after two weeks" pin dated the run day on the tenant's AND the landlord's timelines, plus a row in the property activity and the tour activity - a landlord with many old tours sees a burst;
+  - the tour's never-sent reminder rows (skipped / canceled history) are deleted, as on any manual close;
+  - a relay close-nag is armed on the tour's open relay group (set-if-absent), so those groups surface on Today about four weeks later;
+  - the tour chip on the "Sent to tenants" / "Properties sent" lists keeps "Toured" only where the tour had been marked toured; a tour closed from scheduled loses its "Scheduled" chip.
+
+  The worker logs one INFO line per close, `tour closed automatically (no outcome after two weeks)` with `tourId` and `from`, then one `tour auto-close run` line with `scanned` / `due` / `closed` / `lost` / `failed`; a run that closes nothing logs nothing. **On dev the first run can come before the deploy:** `npm run dev` without `--local` runs a worker on this machine against the real `hc-dev-` tables (see "Dev modes" above), so a 15-minute local session on any checkout that has this feature runs it there.
+- **AFTER - review on the Closed tab** (Tours -> Closed, newest activity first, so the run's closes are at the top): each auto-closed tour carries the "No outcome recorded" badge, and its tour page reads "Closed automatically on <date>". One that should not have closed is reopened from its tour page ("Reopen tour", then "Yes, reopen"): it goes back to the state it closed from, nothing is sent, and it gets a fresh two weeks.
+
 ### Tour reminder supersession (2026-09-01): NOTHING is owed - no backfill, no Terraform, no sweep
 
 **Feature branch `feat/tour-reminder-supersession`. Deploy the app image and you are done.** Recorded here because the branch changes what a retired reminder rung LOOKS like, and the natural question on reading that is "what has to be migrated?" - the answer is nothing.
@@ -1120,6 +1135,11 @@ One interval drives **five** due-row polls in `worker.ts`: tour reminders, place
 nudges, roster actions, conversation-fact extraction, and group guardrails. Lowered
 from 60000 to **30000** on 2026-08-16 so a scheduled run starts nearer its due time.
 
+The **tour auto-close** poll (2026-10-01) is NOT on this interval: it runs every 15
+minutes on its own code constant (`TOUR_AUTO_CLOSE_INTERVAL_MS` in
+`app/src/jobs/tourAutoClose.ts`, no env var), so `WORKER_POLL_INTERVAL_MS` does not
+move it.
+
 **Owed on the next deploy:** the var was previously absent from every `.env`, so both
 dev and prod were running the in-code default. `.env.dev.example` and
 `.env.prod.example` now carry `WORKER_POLL_INTERVAL_MS=30000` - sync the real `.env`
@@ -1206,6 +1226,18 @@ both polls), then look for `… poll error` lines in the worker logs.
   poll is not running or is erroring - check the worker service, then `roster action poll error`
   lines; a row claimed but half-applied is visible as `applied` with no thread/member change and its
   correlationId names the failing apply in the worker log.
+- **Tour auto-close** (`tours` table, `jobs/tourAutoClose.ts`; poll name `tour auto-close`): NOT on
+  the shared cadence - every 15 minutes (`TOUR_AUTO_CLOSE_INTERVAL_MS`, a code constant; the first
+  tick is 15 minutes after the worker boots). It reads the scheduled, toured and no-show tours by
+  status and closes each one two weeks past its clock start with no outcome as `no_outcome` ("No
+  outcome recorded"), one conditional write per tour - a person's change in between wins and the
+  tour is re-checked next run. Silent by construction (its deps hold no messaging adapter). The
+  first production run and how to review it: "Tour auto-close (2026-10-01)" under Daily
+  operations. Dev seam (hermetic-LOCAL-only): `POST /__dev/tour-auto-close/tick { now?, tourIds? }`
+  (`tourIds`: 1-50 ids, scoping the run to those tours). If overdue tours stop closing in a
+  deployed env: check the worker service, then look for `tour auto-close poll error` lines (ERROR,
+  `poll: 'tour auto-close'`, from `jobs/pollLoop.ts`); one tour's failed write logs
+  `tour auto-close write failed` with its `tourId` and the run goes on.
 
 ### AI extraction (conversation fact extraction)
 

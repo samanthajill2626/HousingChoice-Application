@@ -1,4 +1,4 @@
-// TourModals - the five small input dialogs the tour header + Schedule card open:
+// TourModals - the six small dialogs the tour header + Schedule card open:
 //   - BookTourModal / RescheduleTourModal: a datetime-local, normalized to a full
 //     ISO instant (the navigator's timezone) before the parent PATCHes it. Book
 //     runs on a timeless 'requested' tour (sets scheduledAt + status scheduled);
@@ -14,17 +14,36 @@
 //   - RecordOutcomeModal: the exit gate - a move-forward / not-a-fit radio choice.
 //     The parent PATCHes { outcome, moveForward } (and closes the tour on not-a-fit).
 //   - CancelTourModal: a confirm dialog - the parent PATCHes { status: canceled }.
+//   - ReopenTourModal: a confirm dialog for a closed tour - its body says where
+//     the tour goes (REOPEN_BODY, tourReopen.ts); the parent POSTs /reopen.
 //
 // Each dialog owns ONLY its input + validation + busy/error UX; the parent owns
-// the mutation (patchTour -> setTour) via the async onConfirm it passes. onConfirm
-// resolves on success (the dialog closes) and throws on failure (inline error,
-// dialog stays open). ScheduleTourForm is create-only and deliberately NOT reused.
+// the mutation (patchTour / reopenTour -> setTour) via the async onConfirm it
+// passes. onConfirm resolves on success (the dialog closes) and throws on
+// failure (inline error, dialog stays open). That error is SHARED for a 409 in
+// every dialog: TOUR_CHANGED_COPY ("reload and try again" - the tour closed or
+// changed while the dialog was open, so a retry cannot succeed; spec 9.2 /
+// D14). Any other failure keeps the dialog's own "Couldn't ... - please try
+// again." ScheduleTourForm is create-only and deliberately NOT reused.
 import { useState } from 'react';
-import { type TourOutcome } from '../../api/index.js';
+import { ApiError, type StaffTourOutcome } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
+import { REOPEN_BODY, type ReopenTarget } from './tourReopen.js';
 import { currentHourLocal, pastTourTimeWarning, tourTimeWarning } from './tourTime.js';
 import styles from './TourDetail.module.css';
+
+/** What a writing tour dialog shows for a 409 (spec 9.2 / D14): the tour
+ *  closed or changed while the dialog was open, so "please try again" cannot
+ *  succeed - only a reload shows its real state. One constant, every dialog. */
+export const TOUR_CHANGED_COPY = 'This tour changed since the page loaded - reload and try again.';
+
+/** A writing dialog's inline error for a failed onConfirm: any ApiError 409
+ *  (illegal_status_transition, illegal_exit_gate, tour_changed, a reopen
+ *  refusal) reads TOUR_CHANGED_COPY; anything else the dialog's own copy. */
+function failureCopy(err: unknown, retryCopy: string): string {
+  return err instanceof ApiError && err.status === 409 ? TOUR_CHANGED_COPY : retryCopy;
+}
 
 /** Normalize a zoneless datetime-local value to a full ISO instant. */
 function toIso(local: string): string {
@@ -83,8 +102,8 @@ function DateTimeModal({
     try {
       await onConfirm(toIso(value));
       onClose();
-    } catch {
-      setError(errorText);
+    } catch (err) {
+      setError(failureCopy(err, errorText));
       setBusy(false);
     }
   };
@@ -217,8 +236,8 @@ export function MarkAlreadyTouredModal({
       // tour stays off the byScheduledAt index exactly as it is today.
       await onConfirm(value === '' ? undefined : toIso(value));
       onClose();
-    } catch {
-      setError("Couldn't mark the tour as toured - please try again.");
+    } catch (err) {
+      setError(failureCopy(err, "Couldn't mark the tour as toured - please try again."));
       setBusy(false);
     }
   };
@@ -282,8 +301,9 @@ export function RecordOutcomeModal({
   onConfirm,
 }: {
   onClose: () => void;
-  /** PATCH the exit-gate decision; resolves on success, throws to stay open. */
-  onConfirm: (decision: { outcome: TourOutcome; moveForward: boolean }) => Promise<void>;
+  /** PATCH the exit-gate decision; resolves on success, throws to stay open.
+   *  A person's outcome only - `no_outcome` is the auto-close sweep's. */
+  onConfirm: (decision: { outcome: StaffTourOutcome; moveForward: boolean }) => Promise<void>;
 }): React.JSX.Element {
   const [moveForward, setMoveForward] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
@@ -300,8 +320,8 @@ export function RecordOutcomeModal({
         moveForward,
       });
       onClose();
-    } catch {
-      setError("Couldn't record the outcome - please try again.");
+    } catch (err) {
+      setError(failureCopy(err, "Couldn't record the outcome - please try again."));
       setBusy(false);
     }
   };
@@ -374,8 +394,8 @@ export function CancelTourModal({
     try {
       await onConfirm();
       onClose();
-    } catch {
-      setError("Couldn't cancel the tour - please try again.");
+    } catch (err) {
+      setError(failureCopy(err, "Couldn't cancel the tour - please try again."));
       setBusy(false);
     }
   };
@@ -399,6 +419,67 @@ export function CancelTourModal({
         This tour will be marked <strong>canceled</strong>. Any armed reminders stop. You can
         reschedule it later to revive it.
       </p>
+      {error !== null ? (
+        <p role="alert" className={styles.modalError}>
+          {error}
+        </p>
+      ) : null}
+    </Modal>
+  );
+}
+
+/**
+ * ReopenTourModal - confirm a reopen (spec 9.2): the body says where the tour
+ * goes and that nothing is sent. CancelTourModal's structure, not its labels:
+ * the confirm is "Yes, reopen" in the normal variant (reopening destroys
+ * nothing), and it must never be named "Reopen tour" - the page behind the
+ * shared Modal is not inert, and Playwright names match by substring, so the
+ * header CTA and this confirm would collide.
+ */
+export function ReopenTourModal({
+  target,
+  onClose,
+  onConfirm,
+}: {
+  /** The state the tour reopens into - the parent's snapshot, so the body
+   *  never changes mid-confirm when the tour updates underneath the dialog. */
+  target: ReopenTarget;
+  onClose: () => void;
+  /** POST the reopen and apply the tour; resolves on success, throws to stay open. */
+  onConfirm: () => Promise<void>;
+}): React.JSX.Element {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const doReopen = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm();
+      onClose();
+    } catch (err) {
+      setError(failureCopy(err, "Couldn't reopen the tour - please try again."));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Reopen tour"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" size="sm" type="button" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button size="sm" type="button" onClick={() => void doReopen()} disabled={busy}>
+            {busy ? 'Reopening...' : 'Yes, reopen'}
+          </Button>
+        </>
+      }
+    >
+      <p>{REOPEN_BODY[target]}</p>
       {error !== null ? (
         <p role="alert" className={styles.modalError}>
           {error}

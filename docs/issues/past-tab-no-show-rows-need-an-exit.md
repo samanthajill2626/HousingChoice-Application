@@ -3,7 +3,8 @@ id: past-tab-no-show-rows-need-an-exit
 title: No-show rows on the Tours Past tab have no way off the list until they age out at 90 days
 type: decision
 severity: med
-status: open
+status: resolved
+resolved: 2026-10-04
 area: dashboard/tours
 created: 2026-09-26
 refs: dashboard/src/routes/tours/ToursPage.tsx, dashboard/src/routes/tours/TourDetail.tsx:261, app/src/lib/toursModel.ts:110
@@ -40,3 +41,16 @@ item 18 ("Tours: past and upcoming") in the HousingChoice Improvements Tracker,
 90 days, because there is no way to mark one as done. Should a no-show get a
 way off the list, such as Cancel tour (moves it to Closed)?" Open until Sam
 answers; option 1 above is the recommendation.
+
+**Resolution (2026-10-04, feat/tour-auto-close).** Closed BY DECISION, not by a
+manual exit: Sam answered on Sep 30 that the two-week auto-close covers it, so
+no Cancel or "done" action was added to a no-show (none of the options above
+was built; spec decision D13). What shipped with the tour auto-close (Sam's
+item 18, spec `docs/superpowers/specs/2026-10-01-tour-auto-close-reopen-design.md`):
+a no-show closes on its own 14 days after its last mark (or its date, if
+later) - outcome "No outcome recorded", nothing sent - so it leaves
+the Past tab and Today and moves to the Closed tab, and its tour page can
+reopen it (back to No show) if the follow-up is not over. Meanwhile Today lists
+no-shows like the Past tab's other rows (the filter that hid them is gone,
+spec 9.4). So no-show rows now work themselves off the list: each stays about
+two weeks after its last mark, not 90 days.

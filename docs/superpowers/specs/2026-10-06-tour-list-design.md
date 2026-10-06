@@ -1,8 +1,8 @@
 # Tours page: the All tab - every tour, filtered and paged by the server (Sam #18, final part)
 
-Status: DRAFT 3 (2026-10-06) - after design review rounds 1 and 2 (rulings:
+Status: DRAFT 4 (2026-10-06) - after design review rounds 1-3 (rulings:
 `docs/superpowers/reviews/2026-10-06-tour-list/design-review/adjudications.md`).
-For review round 3, then Cameron's spec gate.
+For review round 4 (the last), then Cameron's spec gate.
 Branch `feat/tour-list`, worktree `W:\tmp\tour-list`, cut from main @d839494a.
 Records: `docs/superpowers/reviews/2026-10-06-tour-list/`.
 
@@ -70,10 +70,14 @@ out, or a "needs placement" tour older than 90 days, is on none of them.
   tours only.
 - P7. The date column reads the tour's date and time for a dated tour, "Not
   booked" for a requested tour (the tour page's word, `TourDetail.tsx:312`), and
-  "Undated" for any other undated tour (the Past tab's word, `ToursPage.tsx:206`).
-  The tour page aligns: its facts line keeps "Not booked" for a requested tour
-  and reads "Undated" for any other undated tour (today it says "Not booked" for
-  every undated tour), so the All row, the Past row and the tour page agree.
+  "Undated" for any other undated tour (the Past tab's word, `ToursPage.tsx:206`),
+  so the All and Past rows agree. The tour page and the tenant, landlord and
+  property tour lists keep saying "Not booked" for EVERY undated tour
+  (`TourDetail.tsx:312, 783`, `TenantFile.tsx:334-337`, `LandlordFile.tsx:214-217`,
+  `ListingDetail.tsx:1082-1084`) - the Past tab has differed from them the same
+  way since Sep 27. Aligning those four is filed
+  (`docs/issues/undated-tour-wording.md`) and offered at the spec gate; this
+  change leaves them alone.
 - P8. No total count from the server (it cannot count without reading
   everything). The count line (4.5) says "Showing N tours" while more pages
   remain and "N tours" once the list is complete.
@@ -101,8 +105,9 @@ out, or a "needs placement" tour older than 90 days, is on none of them.
   reloads the list to that depth (capped) and puts the user back at that row,
   or, when the row has left the list (the user marked, rescheduled, decided or
   canceled it), at the row now in its position - the next one to work on
-  (4.9). A fresh arrival (the tab, the nav) starts at page 1. (The cheaper
-  alternative, accepting the reset, is offered at the spec gate.)
+  (4.9) - unless the user has already started typing, clicking or scrolling. A
+  fresh arrival (the tab, the nav) starts at page 1. (The cheaper alternative,
+  accepting the reset, is offered at the spec gate.)
 - P15. Re-clicking the All tab while on it does not navigate: it keeps the
   filters and any unsaved search. (#1 keeps filters on a re-click too,
   `ListingsList.tsx:321-324`; here the tab strip lives in the parent, which cannot
@@ -314,7 +319,10 @@ of 4.8.
   at a time; while one runs, Load more and Keep checking are hidden. A filter
   change aborts whichever is running and loads the first page (`limit=50`).
   Typing a search while a restore runs aborts the restore and the walk
-  continues from the cursor it reached.
+  continues from the cursor it reached; typing one while Load more, Keep
+  checking or the empty-page follow has a request in flight lets that request
+  finish (its rows are valid for the same filters), then the walk continues
+  from its cursor.
 - **Load more** appears while the last response carried a `nextCursor` and no
   loader is running; it appends the next page.
 - De-duplication by `tourId` on append: the LATER copy's data replaces the
@@ -334,8 +342,12 @@ of 4.8.
   same message beside a Retry. A 400 on a request that carried a cursor
   (`cursor_mismatch` / `invalid cursor` - say a tab left open across a deploy)
   is never retried with that cursor: the list restarts at page 1 and the count
-  line says "The list was refreshed." A complete empty list shows "No tours
-  match these filters." (plus Clear filters when filters are set).
+  line says "The list was refreshed." At most ONE automatic restart per list (a
+  filter change starts a new list): a second cursor 400 shows the Load more
+  failure message, stops any walk or restore, and offers no automatic retry,
+  so a persistent rejection cannot become a restart loop. A complete empty
+  list shows "No tours match these filters." (plus Clear filters when filters
+  are set).
 
 ### 4.6 Search
 
@@ -349,9 +361,13 @@ Date range; `sort` written only when the user picked one (P3). The state model
 is #1's (3.5), in a child component that mounts only on the All view: filters
 live in local state; control changes REPLACE the URL with a stamped write; the
 URL is adopted on mount, on POP and on any unstamped navigation; writes are
-skipped while a navigation is pending; the search text is written on blur, and
-opening a row always writes (its history state also carries the restore record,
-4.9) - never per keystroke. (P15 replaces #1's current-tab link.)
+skipped while a navigation is pending (a row open included - the skip always
+wins); the search text is written on blur, and opening a row with an unmodified
+primary click writes too (its history state also carries the restore record,
+4.9) - never per keystroke. Every write REPLACES the whole history state with
+the stamp (as #1's `state: OWN_WRITE` does, `ListingsList.tsx:257-260`), so a
+filter change or a blur save drops any restore record the entry held. (P15
+replaces #1's current-tab link.)
 
 ### 4.8 The back arrow
 
@@ -368,23 +384,36 @@ opening a row always writes (its history state also carries the restore record,
 ### 4.9 Returning from a tour (P14)
 
 - The restore record is `{ depth, openedTourId, openedIndex }`: how many rows
-  the list held, and the opened row's id and 0-based position, at the moment the
+  the list had LOADED, and the opened row's id and 0-based position among the
+  VISIBLE rows (the search's matches when a search is active), at the moment the
   row was opened.
 - Where it lives - in history state, never module memory (so it is per history
   entry, Back/Forward-correct, and needs no test reset seam):
-  - Opening a row makes the stamped REPLACE of 4.7 (the search save on row
-    open) ALWAYS happen, and its history state carries the stamp AND
-    `restore`. So the list's own history entry remembers where the user was.
+  - An UNMODIFIED primary click on a row makes the stamped REPLACE of 4.7, and
+    its history state carries the stamp AND `restore`, so the list's own entry
+    remembers where the user was. A Ctrl/Cmd/Shift/middle click opens the tour
+    elsewhere and writes nothing (react-router runs a Link's own onClick even
+    for a modified click, so the handler checks). While a navigation is
+    pending the write is skipped (4.7) - that entry then has no record, and
+    only the back arrow's copy remains.
+  - Every other write replaces the whole state (4.7), so a filter change or a
+    blur save drops the record.
   - The row link's router state carries `{ back, restore }` (4.8), and the tour
     page's back arrow hands `restore` back.
-- On mount (or on adoption of a POP) with a `restore` record - from the entry's
-  own state on a browser Back, or from the back arrow's state - the view loads
-  pages (`limit=100`, fresh reads, never a cache) until it holds at least
+- On mount (or on adoption of a POP) with a `restore` record - the entry's own
+  state on a browser Back or a reload, or the back arrow's state - the view
+  loads pages (`limit=100`, fresh reads, never a cache) until it holds at least
   `depth` rows, the list ends, or 10 requests have run (the cap: past it, the
-  view keeps what it has). Then it scrolls to, and focuses the link of:
-  - the row with `openedTourId`, when it is still in the list; else
-  - the row now at `openedIndex` (the next one to work on), clamped to the last
-    row; else (an empty list) nothing.
+  view keeps what it has). Then it scrolls to, and focuses the link of, among
+  the VISIBLE rows:
+  - the row with `openedTourId`, when it is visible; else
+  - when the list was loaded to `depth` (or ended), the row now at
+    `openedIndex` (the next one to work on), clamped to the last visible row;
+  - else (an empty list, or a capped restore that stopped short of `depth`)
+    nothing - Load more continues from there.
+- The anchor is a convenience, never a hijack: if the user types, clicks or
+  scrolls anywhere on the page before the load ends, the anchor is dropped and
+  neither scroll nor focus moves.
 - With a search, the walk of section 6 loads the whole filtered list instead,
   and the same anchor rule applies when it ends.
 - Any arrival without a `restore` record (the All tab, the nav, a typed URL, a
@@ -632,13 +661,15 @@ having no date), and a seed pin asserts every seeded tour row has it. Readers:
 
 Labels: All rows read `tourStatusLabel` and `TOUR_OUTCOME_LABELS`, as the
 Active and Closed rows and the tour header do. The Past tab and Today keep
-`pastState` (their work-list wording). Undated wording: "Not booked" for a
-requested tour and "Undated" for any other undated tour, on the All rows, the
-Past rows and - changed here (P7) - the tour page's facts line
-(`TourDetail.tsx:312`). The GLOSSARY records a requested tour's staff labels -
-"Requested" (status), "Needs booking" (Active section and All filter; the
-Active list's name "Unbooked tour requests"), "Not booked" (tour page and All
-date column) - and "Undated" for the other undated tours.
+`pastState` (their work-list wording). Undated wording (P7): the All and Past
+rows say "Not booked" for a requested tour and "Undated" for any other undated
+tour; the tour page and the tenant, landlord and property tour lists say "Not
+booked" for every undated tour (unchanged here; filed). The GLOSSARY records a
+requested tour's staff labels - "Requested" (status), "Needs booking" (Active
+section and All filter; the Active list's name "Unbooked tour requests"), "Not
+booked" (tour page, the three tour lists, All date column) - and "Undated",
+naming the surfaces that use it (the Past and All rows) and the ones that do
+not.
 
 ## 9. Tests
 
@@ -680,12 +711,19 @@ date column) - and "Undated" for the other undated tours.
     request cap copy.
   - URL adoption and stamped writes; `state.back` built from local state with an
     unsaved search; `TourDetail` accepting `/tours/all?...` and handing `restore`
-    back; the tour page's facts line reading "Undated" for an undated
-    non-requested tour; the row accessible name.
-  - The return restore, through both the back arrow and a browser Back: depth
-    reloaded (and capped at 10 requests); the opened row in view and focused;
-    when the opened row has left the list, the row now at its position; an
-    empty list; an arrival without a record starting at page 1.
+    back; the row accessible name.
+  - The return restore, through the back arrow, a browser Back and a reload:
+    depth reloaded (and capped at 10 requests); the opened row in view and
+    focused; when the opened row has left the list, the VISIBLE row now at its
+    position; under a search, positions counted over the visible matches; a
+    capped restore that never reached the anchor moving nothing; user input
+    (typing in the search box during a slow walk, a click, a scroll) cancelling
+    the anchor; an empty list; an arrival without a record starting at page 1;
+    a Ctrl/Cmd-click on a row writing no record; no record written while a
+    navigation is pending; a filter change dropping the record.
+  - The cursor-400 restart happening once per list (a second 400 shows the
+    error and stops); a search typed during Load more letting that request
+    finish, then walking on from its cursor.
 - e2e: a spec that creates its own uniquely named tenant contact and property
   through the API, then its tours (a request, an upcoming, a past no-show, a
   canceled, an undated toured), and checks: the tab order and `/tours` landing on
@@ -712,6 +750,10 @@ date column) - and "Undated" for the other undated tours.
   and on a return restore only).
 - `docs/issues/tour-no-show-without-date.md` (3.4): the API accepts a no-show
   on a tour that never had a date.
+- `docs/issues/undated-tour-wording.md` (P7): the tour page and the tenant,
+  landlord and property tour lists say "Not booked" for every undated tour,
+  while the Past and All rows say "Undated" for an undated tour that is not a
+  request.
 
 ## 11. Rollout
 

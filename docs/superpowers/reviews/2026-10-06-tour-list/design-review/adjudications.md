@@ -240,3 +240,52 @@ with evidence (`toursRepo.ts:355-364`, `airtableSource.ts:189-196`,
 
 Round 2 changed decisions: YES -> round 3 (reviewer A continued). Round 4 is the
 hard cap.
+
+## Round 3 (spec draft 3 @7a8ac2f3; reviewer A continued)
+
+Report: `spec-r3-a.md` (5 findings). The reviewer confirmed the history-state
+record survives react-router 7.18's declarative BrowserRouter
+(`main.tsx:15-19`; synchronous `replaceState`/`pushState` into
+`history.state.usr`), that the extra REPLACE per row open is far inside
+WebKit's budget, and that the own-write stamp and adoption rules do not
+collide with it.
+
+### R3-1 [A-r3 1] The anchor can steal focus from a user who is already typing or scrolling - ACCEPT
+The anchor is dropped if the user types, clicks or scrolls anywhere on the page
+before the load ends; a test types into the search box during a slow walk.
+Decision changed: NO (a guard on an existing action).
+
+### R3-2 [A-r3 2] The always-on row-open write - ACCEPT
+The pending-navigation skip wins (that entry then has no record; the back
+arrow's copy remains); only an unmodified primary click writes a record;
+every write replaces the whole history state, so a filter change or a blur save
+drops the record (stated in 4.7 and 4.9); a reload of an entry with a record
+restores too.
+Decision changed: NO (precision).
+
+### R3-3 [A-r3 3] Anchor terms under a search and at the cap - ACCEPT
+`openedIndex` and "still in the list" count VISIBLE rows (the matches under a
+search); a capped restore that stopped short of `depth` anchors only on the
+opened row itself, never on a position.
+Decision changed: NO (precision).
+
+### R3-4 [A-r3 4] The "Undated" rule misses three tour lists - ACCEPT (scope narrowed)
+Verified: `TenantFile.tsx:337`, `LandlordFile.tsx:217`, `ListingDetail.tsx:1084`
+print "Not booked" for every undated tour, as does `TourDetail.tsx:312` (and
+`:783`). Rather than spread a copy change across four surfaces outside the All
+tab, draft 4 REVERTS round 2's tour-page change: the All rows follow the Past
+tab ("Not booked" for a request, "Undated" otherwise), the four other surfaces
+are unchanged, the GLOSSARY names which surfaces use which word, and the
+alignment is filed (`docs/issues/undated-tour-wording.md`) and offered to
+Cameron at the spec gate as a one-line-per-surface addition.
+Decision changed: YES (a surface removed from the build).
+
+### R3-5 [A-r3 5] The cursor-400 restart can loop; a search typed during Load more - ACCEPT
+At most one automatic restart per list (a second cursor 400 shows the error and
+stops any walk or restore); a search typed while Load more, Keep checking or
+the empty-page follow has a request in flight lets it finish, then walks on
+from its cursor.
+Decision changed: NO (precision).
+
+Round 3 changed one decision (R3-4, a scope reduction) -> round 4, the hard
+cap: if it changes a decision, the open findings go to Cameron as a decision.

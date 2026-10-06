@@ -8,7 +8,9 @@ revision 7 folds in the plan review round 1
 the name-variant rule in D10, D11's read paths, fixed `fields` and
 lock-loss stop, and section 6's endpoint shapes; revision 8 records Sam's
 answers from the 2026-10-06 meeting (section 13, Appendix A: the old county
-values become spellings of the authority that runs those vouchers). Design review: rounds 1-4,
+values become spellings of the authority that runs those vouchers) and plan
+review round 2 (D13's no-empty rule covers spellings; D8's place-name rule;
+`Clayton` on Jonesboro). Design review: rounds 1-4,
 closed - adjudications in
 `docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md`).
 Tracker items #2 ("One clean name per housing authority") and #19
@@ -351,7 +353,9 @@ D8. **AI: list-aware, suggestion-only for anything new.**
 - The model is told: return the full name from the list; when an
   abbreviation belongs to more than one name, pick the one the conversation
   supports or return the text as said; agency names are never housing
-  authorities.
+  authorities; where the client lives or wants to live is not a housing
+  authority - a county or city name counts only when the client says it
+  runs the voucher (some spellings are place names, section 13).
 - The apply layer resolves the returned text with D4: a match is handled
   exactly as a known authority is today (the model's op still decides write
   or suggest; the value written or suggested is the entry's exact name);
@@ -537,8 +541,9 @@ starting list; admin edits on the Settings page; renamed and merged names
 
 D13. **Notes, names and size limits.** Names are at most 120 characters.
 Names and spellings may not contain a newline or other control character
-(they are rendered one per line into the AI list block), and a name may not
-normalize to the empty string (for example "-" or "()").
+(they are rendered one per line into the AI list block), and neither a name
+nor a spelling may normalize to the empty string (for example "-" or "()" -
+such a spelling would match nothing).
 Notes are free text up to 500 characters, editable by everyone. An entry
 carries at most 20 spellings of at most 120 characters each (the name limit,
 so a merged or renamed name always fits as a spelling). A COMPOUND text (D4)
@@ -941,9 +946,10 @@ Sam answered in the 2026-10-06 founder meeting
 So the old values are spellings of the entry that runs those vouchers
 (Appendix A) and the cleanup maps them automatically: `Fulton County` and
 `Fulton, Fulton County` -> Fulton County Housing Authority; `McDonough` and
-`Henry County` -> Georgia Department of Community Affairs; `Clayton County`
-and `Housing Authority of Clayton County` -> Jonesboro Housing Authority;
-`Cobb County` -> Marietta Housing Authority. "McDonough Housing Authority" is
+`Henry County` -> Georgia Department of Community Affairs; `Clayton County`,
+`Housing Authority of Clayton County` and the retired importer alias
+`Clayton` -> Jonesboro Housing Authority; `Cobb County` -> Marietta Housing
+Authority. "McDonough Housing Authority" is
 deliberately NOT a spelling (a public-housing authority with no vouchers). The
 seeds map `fulton_housing` to Fulton County Housing Authority.
 
@@ -961,7 +967,7 @@ Housing authorities:
 | DeKalb County Housing Authority | HADC; Housing Authority of DeKalb County; Dekalb County Housing; Dekalb Housing |
 | Decatur Housing Authority | Housing Authority of the City of Decatur |
 | Marietta Housing Authority | MHA; Cobb County |
-| Jonesboro Housing Authority | JHA; Jonesboro (JHA); Jonesboro housing; Jonesboro, JHA, Jonesboro housing; Clayton County; Housing Authority of Clayton County |
+| Jonesboro Housing Authority | JHA; Jonesboro (JHA); Jonesboro housing; Jonesboro, JHA, Jonesboro housing; Clayton County; Housing Authority of Clayton County; Clayton |
 | East Point Housing Authority | EPHA; East Point; Eastpoint Housing Authority |
 | College Park Housing Authority | Housing Authority of the City of College Park; College Park |
 | Macon-Bibb County Housing Authority | Macon Housing Authority; MHA |

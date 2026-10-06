@@ -1149,6 +1149,7 @@ describe('checkSpelling (D12)', () => {
   });
   it('names every problem', () => {
     expect(checkSpelling(LIST, DCA, ' ')).toEqual({ problem: 'empty' });
+    expect(checkSpelling(LIST, DCA, ' - ')).toEqual({ problem: 'empty' }); // nothing left once normalized
     expect(checkSpelling(LIST, DCA, 'y'.repeat(121))).toEqual({ problem: 'too_long' });
     expect(checkSpelling(LIST, DCA, 'georgia dca')).toEqual({ problem: 'duplicate' });
     expect(checkSpelling(LIST, DCA, 'Step Up')).toEqual({ problem: 'equals_name', entries: [STEP_UP] });
@@ -1229,6 +1230,8 @@ export function checkSpelling(
   if (trimmed === '') return { problem: 'empty' };
   if (trimmed.length > ORG_SPELLING_MAX) return { problem: 'too_long' };
   const n = normalizeOrgText(trimmed);
+  // D13: a spelling with no letters or digits ("-", "()") matches nothing.
+  if (n === '') return { problem: 'empty' };
   if (matchesText(target, n)) return { problem: 'duplicate' };
   if (target.spellings.length >= ORG_SPELLINGS_PER_ENTRY_MAX) return { problem: 'too_many' };
   const others = entries.filter((e) => e.orgId !== target.orgId);
@@ -1351,6 +1354,8 @@ describe('old values resolve as spec Appendix A says', () => {
     ['Henry County', 'Georgia Department of Community Affairs'],
     ['Clayton County', 'Jonesboro Housing Authority'],
     ['Housing Authority of Clayton County', 'Jonesboro Housing Authority'],
+    // The retired alias map's raw `clayton` (lib/housingAuthority.ts) carries over.
+    ['Clayton', 'Jonesboro Housing Authority'],
     ['Cobb County', 'Marietta Housing Authority'],
   ];
   it.each(samMappings)('%s -> %s (Sam, 2026-10-06)', (text, name) => {
@@ -1424,6 +1429,7 @@ export const STARTING_ORG_LIST: readonly StartingOrg[] = [
       'Jonesboro, JHA, Jonesboro housing',
       'Clayton County',
       'Housing Authority of Clayton County',
+      'Clayton',
     ],
   },
   { kind: 'housing_authority', name: 'East Point Housing Authority', spellings: ['EPHA', 'East Point', 'Eastpoint Housing Authority'] },
@@ -1475,9 +1481,10 @@ Spec section 13 and Appendix A (revision 8: Sam's answers from the
 county values are spellings of the authority that runs those vouchers -
 `Fulton County` (and `Fulton, Fulton County`) -> Fulton County Housing
 Authority, `McDonough` and `Henry County` -> Georgia Department of Community
-Affairs, `Clayton County` and `Housing Authority of Clayton County` ->
-Jonesboro Housing Authority, `Cobb County` -> Marietta Housing Authority - so
-the cleanup maps them automatically. "McDonough Housing Authority" (a
+Affairs, `Clayton County`, `Housing Authority of Clayton County` and the
+retired alias map's raw `Clayton` -> Jonesboro Housing Authority, `Cobb
+County` -> Marietta Housing Authority - so the cleanup maps them
+automatically. "McDonough Housing Authority" (a
 public-housing authority with no vouchers) is deliberately NOT a spelling.
 Hands of Hope stays off the list; anything Sam adds later goes in through
 Settings. The conformance test's expected shared-spelling set stays
@@ -4125,6 +4132,19 @@ describe('OrgRecordsService.rewrite - one conditional pass over one field (spec 
     expect(rewrites(world).map((e) => e.entityKey)).toEqual(['contacts#t-1']);
   });
 
+  it('(PIN) use whose from-text IS the name (a padded stored name arrives trimmed) rewrites only the padded holders', async () => {
+    const { world, records } = setup({
+      contacts: [
+        contact('t-1', { housingAuthority: `${ATLANTA.name} ` }),
+        contact('t-2', { housingAuthority: ATLANTA.name }),
+      ],
+    });
+    const def = runningRewrite({ action: 'use', field: 'housingAuthority', fromTexts: [ATLANTA.name], toName: ATLANTA.name });
+    expect(await records.rewrite(def, OPTS)).toEqual({ ...ZERO, housingAuthority: 1 });
+    expect(contactIn(world, 't-1')?.['housingAuthority']).toBe(ATLANTA.name);
+    expect(rewrites(world).map((e) => e.entityKey)).toEqual(['contacts#t-1']);
+  });
+
   it('use on the agency field; clear REMOVEs a housing authority, stores an empty agency, drops a list member', async () => {
     const { world, records } = setup({
       contacts: [
@@ -4251,17 +4271,19 @@ describe('OrgRecordsService.rewrite - one conditional pass over one field (spec 
     expect(payloads('c-3').map((p) => p?.['field'])).toEqual(['housingAuthority']);
   });
 
-  it('a value action on a from-text that normalizes to nothing matches that EXACT stored text', async () => {
+  it('a value action on a from-text that normalizes to nothing matches that stored text, trimmed', async () => {
     const { world, records } = setup({
       contacts: [
         contact('t-1', { housingAuthority: '-' }),
         contact('t-2', { housingAuthority: '()' }), // also normalizes to '', but another stored value
+        contact('t-3', { housingAuthority: ' - ' }), // padded legacy text; the request's '-' arrives trimmed
         contact('p-1', { type: 'partner', status: 'active', agency: '-' }),
       ],
     });
     const use = runningRewrite({ action: 'use', field: 'housingAuthority', fromTexts: ['-'], toName: ATLANTA.name });
-    expect(await records.rewrite(use, OPTS)).toEqual({ ...ZERO, housingAuthority: 1 });
+    expect(await records.rewrite(use, OPTS)).toEqual({ ...ZERO, housingAuthority: 2 });
     expect(contactIn(world, 't-1')?.['housingAuthority']).toBe(ATLANTA.name);
+    expect(contactIn(world, 't-3')?.['housingAuthority']).toBe(ATLANTA.name);
     expect(contactIn(world, 't-2')?.['housingAuthority']).toBe('()');
     await records.rewrite(runningRewrite({ action: 'clear', field: 'agency', fromTexts: ['-'] }), OPTS);
     expect(contactIn(world, 'p-1')?.['agency']).toBe('');
@@ -4740,20 +4762,22 @@ with
         const field = passField(def);
         // From-texts compare NORMALIZED (D4). One that normalizes to '' (a
         // stored "-" or "()") would match nothing that way, so a value action
-        // matches that EXACT stored text instead - every "Not on the list" row
-        // can be settled. (Rename and merge from-texts are entry names and
-        // spellings; a name never normalizes to '' - D13.)
+        // matches that stored text instead - TRIMMED on both sides, because a
+        // request's text arrives trimmed (trimJsonBody) while a stored " - "
+        // may not be - so every "Not on the list" row can be settled. (Rename
+        // and merge from-texts are entry names and spellings; a name never
+        // normalizes to '' - D13.)
         const from = new Set<string>();
         const exact = new Set<string>();
         for (const text of def.fromTexts) {
           const n = normalizeOrgText(text);
           if (n !== '') from.add(n);
-          else if (VALUE_ACTIONS.has(def.action) && text !== '') exact.add(text);
+          else if (VALUE_ACTIONS.has(def.action) && text.trim() !== '') exact.add(text.trim());
         }
         const matches = (value: unknown): value is string =>
           typeof value === 'string' &&
           value !== '' &&
-          (from.has(normalizeOrgText(value)) || exact.has(value)) &&
+          (from.has(normalizeOrgText(value)) || exact.has(value.trim())) &&
           // Already the target (a case-only rename, a variant's own entry): nothing to do.
           !(SAME_FIELD_ACTIONS.has(def.action) && value === def.toName);
         if (field === 'accepted_authorities') {
@@ -6394,6 +6418,18 @@ describe('OrgRewriteService.resolveNotOnList (spec D10)', () => {
     // A name variant settled as its OWN entry is safe: the pass leaves the exact holders alone.
     const own = await resolve({ field: 'housingAuthority', value: 'atlanta housing authority', action: 'use', name: ATLANTA.name });
     expect(own.lastRewrite.toName).toBe(ATLANTA.name);
+    // A stored name padded with whitespace arrives TRIMMED (trimJsonBody) - as
+    // the exact name. Use <that entry> is allowed (the clear above stays 400).
+    const fresh = await rewriteService();
+    const padded = await fresh.svc.resolveNotOnList({
+      field: 'housingAuthority',
+      value: ATLANTA.name,
+      action: 'use',
+      name: ATLANTA.name,
+      actor: 'u',
+    });
+    expect(padded.lastRewrite.fromTexts).toEqual([ATLANTA.name]);
+    expect(padded.lastRewrite.toName).toBe(ATLANTA.name);
   });
 
   it('is refused while another rewrite runs', async () => {
@@ -6702,7 +6738,11 @@ with
       const addedId = action === 'add' ? newId() : undefined;
       return start(actor, (current) => {
         let entries: OrgEntry[] = [...current.entries];
-        if (isOnListFor(entries, value, kinds)) {
+        // `value` arrives TRIMMED (trimJsonBody, app.ts), so a stored name padded
+        // with whitespace reaches here as the exact name. "Use <that entry>"
+        // settles it - the pass rewrites only holders whose stored text differs
+        // from the name - so that one request is not "nothing to settle".
+        if (isOnListFor(entries, value, kinds) && !(action === 'use' && input.name === value)) {
           throw new OrgHttpError(400, { error: 'the value is on the list for this field; there is nothing to settle' });
         }
         // A NAME VARIANT (spec D10): a value that differs from an entry NAME of
@@ -11359,6 +11399,9 @@ import { buildStartingEntries, STARTING_ORG_LIST } from '../src/lib/orgStartingL
     expect(sys).toContain('abbreviation belongs to more than one name');
     expect(sys).toContain('the one the conversation supports, or return the text as said.');
     expect(sys).toContain('Agency names are never housing authorities');
+    // Spec 2026-10-06 section 13: some spellings are place names (Cobb County,
+    // McDonough, Clayton) - a tenant's home or search area is not an authority.
+    expect(sys).toContain('Where the client lives or wants to live is not a housing authority');
     // Run 4bf0cf42: an unlisted authority is still a real answer - the model
     // records what it heard and a human confirms it (apply.ts suggests it).
     expect(sys).toContain('record what they said');
@@ -11456,6 +11499,8 @@ export function buildExtractionSystemPrompt(): string {
     '  - When an abbreviation belongs to more than one name on the list, return',
     '    the one the conversation supports, or return the text as said.',
     '  - Agency names are never housing authorities - never return one here.',
+    '  - Where the client lives or wants to live is not a housing authority:',
+    '    a county or city name counts only when the client says it runs the voucher.',
     '  - A name that is not on the list is still a real answer -',
     '    record what they said (op "write"). Never answer op "none" merely',
     '    because an authority is missing from the list; a human confirms it.',
@@ -17569,7 +17614,7 @@ export function spellingProblemCopy(problem: string, related: readonly OrgRef[] 
   const who = names(related);
   switch (problem) {
     case 'empty':
-      return 'it is blank';
+      return 'it has no letters or digits';
     case 'too_long':
       return 'it is longer than 120 characters';
     case 'too_many':
@@ -22386,6 +22431,7 @@ RED - create `dashboard/src/routes/settings/useOrgAdmin.test.tsx`:
 // heartbeat, the counts and rows are read once more when it stops, and a
 // details read in flight is never aborted.
 import { act, render, waitFor } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type OrgRewriteState } from '../../api/index.js';
 
@@ -22450,6 +22496,21 @@ describe('useOrgAdmin', () => {
     expect(latest!.rewriteLive).toBe(false);
     expect(getOrgUsage).toHaveBeenCalledWith(expect.any(AbortSignal));
     expect(getNotOnList).toHaveBeenCalledWith(expect.any(AbortSignal));
+  });
+
+  it('loads under StrictMode too (mount, cleanup, mount - every dev session and every e2e lane)', async () => {
+    // main.tsx renders the app in <StrictMode> and the e2e lanes serve the
+    // Vite dev server, so the first mount's read is aborted by a simulated
+    // unmount at once. The second mount's read must start, not queue behind it.
+    render(
+      <StrictMode>
+        <Probe />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(latest!.notOnList).toEqual([ROW]));
+    expect(latest!.usage).toEqual(COUNTS);
+    const signals = getNotOnList.mock.calls.map((c) => c[0] as AbortSignal);
+    expect(signals.at(-1)?.aborted).toBe(false);
   });
 
   it('a failed counts read is reported and the rows still load', async () => {
@@ -22575,7 +22636,8 @@ export function useOrgAdmin(options: { pollMs?: number } = {}): OrgAdminState {
   const [usageError, setUsageError] = useState(false);
   const [notOnList, setNotOnList] = useState<NotOnListRow[] | null>(null);
   const [notOnListError, setNotOnListError] = useState(false);
-  /** The details read in flight - aborted only on unmount, never to start another. */
+  /** The details read in flight - aborted (and released) only by the mount
+   *  effect's cleanup, never to start another. */
   const inFlightRef = useRef<AbortController | null>(null);
   /** A details read was asked for while one ran: run ONE more after it lands. */
   const againRef = useRef(false);
@@ -22593,7 +22655,11 @@ export function useOrgAdmin(options: { pollMs?: number } = {}): OrgAdminState {
         getOrgUsage(controller.signal),
         getNotOnList(controller.signal),
       ]);
-      inFlightRef.current = null;
+      // Release the slot only while it is still this read's: the cleanup
+      // releases it itself (an unmount, or StrictMode's mount-cleanup-mount in
+      // development and in every e2e lane), and the next mount's read may
+      // already hold it.
+      if (inFlightRef.current === controller) inFlightRef.current = null;
       if (controller.signal.aborted) return; // unmounted
       if (counts.status === 'fulfilled') {
         setUsage(counts.value);
@@ -22616,7 +22682,14 @@ export function useOrgAdmin(options: { pollMs?: number } = {}): OrgAdminState {
     // useContactTimeline.ts precedent).
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadDetails();
-    return () => inFlightRef.current?.abort();
+    return () => {
+      // Abort AND release: under StrictMode the effect runs again at once, and
+      // that read must START, not queue behind the aborted one (a queued
+      // request never survives an aborted read).
+      inFlightRef.current?.abort();
+      inFlightRef.current = null;
+      againRef.current = false;
+    };
   }, [loadDetails]);
 
   const reloadList = list.reload;
@@ -30166,10 +30239,19 @@ never touch it) plans ADDITIVE edits to files this branch also changes: one
 interface and implementation (so every typed `UnitsRepo` fake this branch
 touched must carry it after the merge - typecheck finds them); list types and
 `listTours` after the existing tour ones in `dashboard/src/api/types.ts` /
-`endpoints.ts`; a route in `dashboard/src/App.tsx`; one appended
+`endpoints.ts` (and their tests `endpoints.test.ts` / `types.test.ts`); a
+route in `dashboard/src/App.tsx`; api-mock edits in
+`dashboard/src/routes/contact/files.test.tsx` and
+`dashboard/src/routes/listing/ListingDetail.test.tsx`; the harness fake in
+`app/test/helpers/twilioWebhookHarness.ts` (its `getDisplaysByIds` beside
+this branch's Task 6.3 `getById(unitId, opts?)` change); one appended
 `documentation/GLOSSARY.md` entry; `e2e/README.md` and
-`e2e/performance/routes.ts` (+ its test) edits for `/tours/past`. When
-`main` brings these in, keep both sides of each, then re-run the seed pins
+`e2e/performance/routes.ts` (+ `routes.test.ts`) edits for `/tours/past`.
+BOTH branches bump the profiler-route COUNT pins in
+`e2e/performance/routes.test.ts`: a textual merge of two count edits can
+apply cleanly and still be wrong - recompute each pinned count from the
+merged route registry, never take either side's number. When `main` brings
+these in, keep both sides of each, then re-run the seed pins
 that exist (`seedTourPartition.test.ts`,
 `seedMatrixCoherence.test.ts`, `seedRosterShape.test.ts`) and
 `npm run typecheck` before Task 17.2. Then `git status` (a separate read; `.git/MERGE_HEAD` is expected to
@@ -30203,8 +30285,10 @@ child writing):
    the 20-40 minutes a loaded full run takes (Task 14.9) plus this branch's
    new specs. If it TIMES OUT (exit 124), or the run is aborted for any
    reason, before ANYTHING else: (a) tree-kill the stack it started - read
-   `launcherPid` from `e2e/.artifacts/lane.json` and run
-   `taskkill /T /F /PID <launcherPid>` (killing the background task alone
+   `launcherPid` from `e2e/.artifacts/lane.json` and run, in PowerShell,
+   `taskkill /T /F /PID <launcherPid>` - from the Bash tool it must be
+   `MSYS_NO_PATHCONV=1 taskkill /T /F /PID <launcherPid>`, because Git Bash
+   rewrites slash switches as paths (killing the background task alone
    leaves the reparented node tree running); (b)
    `cd "W:/tmp/clean-org-names"; npm run e2e:stop`; (c) confirm no listener
    survives on the lane's four ports (`ports` in `lane.json`), e.g. in

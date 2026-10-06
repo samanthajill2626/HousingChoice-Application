@@ -385,7 +385,9 @@ of 4.8.
   same message beside a Retry. A 400 on a request that carried a cursor
   (`cursor_mismatch` / `invalid cursor` - say a tab left open across a deploy)
   is never retried with that cursor: the list restarts at page 1 and the count
-  line says "The list was refreshed." At most ONE automatic restart per list (a
+  line says "The list was refreshed." (until the next page lands - the count
+  line is an atomic live region, so a lasting notice would be repeated with
+  every later count; plan review r2). At most ONE automatic restart per list (a
   filter change starts a new list): a second cursor 400 stops any walk or
   restore and shows "We couldn't load more tours." with a **Start over** button
   (page 1, a new list) - never a Retry that would resend the rejected cursor -

@@ -527,3 +527,80 @@ Decisions changed (P1, P2, P5, P8, P9): what the view and hook build, the
 restore rule (spec 4.9 amended), and the repo/engine surface (`scannedCount`).
 Round 2 is required: reviewer A (more accepted findings) continues with
 `plan-r1-b.md`.
+
+## Plan round 2 (plan v2 @9650d386; reviewer A continued, with B's round-1 report) - TERMINAL
+
+Report: `plan-r2-a.md` - 6 findings (1 MEDIUM, 5 LOW). All ACCEPTED; none
+changes a decision (test-model fidelity, test precision, one removed no-op
+special case, stale references, a specified loading render, a notice
+duration the spec never fixed), so this is the TERMINAL round and the plan
+review closes. Plan v3; spec 4.5 gains one precision parenthetical.
+
+### P2-1 [MEDIUM] Since P14, route test 3 cannot catch a page 2 that ignores the pinned instant - ACCEPT (both parts)
+
+Traced and confirmed: v2's key-position fake resumes from a start key OUTSIDE
+the phase's range, so a route that rebuilt page 2's `gte` bound from the new
+clock still returned T2. DynamoDB rejects such a key ("The provided starting
+key is outside query boundaries based on provided conditions" - documented
+behavior, which spec 5.5 already relies on). Fix: the fake REJECTS a start key
+outside the key condition (partition or range) with a ValidationException-
+named error; the mirror test adds an out-of-bounds `gte` resume (if DynamoDB
+Local does not reject, the fake follows DynamoDB Local and the slice report
+says so); route test 3 advances the clock past the SECOND tour, which catches
+the regression under either fake semantics; route test 9 adds an end-to-end
+crafted-cursor case through the fake. The revised fake, engine and repo code
+were type-checked against the real `@aws-sdk/lib-dynamodb` types (`tsc`
+strict + noUncheckedIndexedAccess, exit 0; a planted error proved the check
+covered the files).
+
+### P2-2 [LOW] Two new RED cases cannot fail - ACCEPT
+
+Task 12.2 case 8 uses the house fake-timer idiom
+(`ContactDetail.test.tsx:1459-1489`) and never advances to 300 ms. Task 12.4
+case 7 tests the blur-save drop MID-restore (arrive with `?q=`, clear the box so
+the restore takes over, blur -> the pending restore page is aborted, nothing
+follows). Case 7's timer clause in 12.2 is annotated as behavior-only (the
+empty-box belt satisfies it; the timer clear is defensive and unobservable).
+
+### P2-3 [LOW] P5's "failed first page stays 'pending'" cannot deliver the anchor - ACCEPT (drop it)
+
+Confirmed: the only way out of a failed first page is the Retry control, and
+its pointerdown/keydown trips the user-intent guard, so the anchor never lands
+in either design. Spec 4.9 is kept literal - a Retry click is a user act - so
+the special case and its rationale are removed rather than exempting Retry
+from the guard. A failed page during a return is a failure like any other;
+after Retry the restore keeps loading to its depth or cap without moving the
+anchor.
+
+### P2-4 [LOW] Stale references - ACCEPT
+
+The constraints table's restore cap now states the amended rule; the e2e
+wire-check citation is `tours-past.spec.ts:259-262` (verified).
+
+### P2-5 [LOW] The view's loading state is unspecified - ACCEPT
+
+While a list's first page loads: `<Spinner center />` in the list area (the
+house pattern, `ToursPage.tsx:721`, `ListingsList.tsx:398`), no count line,
+no action area - never a "Showing 0 tours". Task 12.1 case 11.
+
+### P2-6 [LOW] Contest of P9: the notice is re-announced with every later count - ACCEPT (reviewer's version)
+
+`role="status"` is atomic, so a notice that lasts for the whole list repeats
+with every Load more, walk or follow update. The hook now reports `refreshed`
+only while the restarted list's first page is the latest (a `pages` count in
+the list state); the list-level `restarted` flag still ends the restore. Spec
+4.5 gains "(until the next page lands)". Hook re-linted and re-type-checked
+after the change (exit 0 / exit 0).
+
+### Planner precision folded in with this round
+
+Re-reading tracker #2's plan (at its plan stage) showed more shared files than
+plan v2 named: `app/src/lib/seed/*`, `unitsRepo.ts` (new writers) and its typed
+fakes, and the dashboard `api/types.ts` + `endpoints.ts`. The ground rules,
+S15's main-sync step and the watch items now name them, and this branch keeps
+its edits there additive.
+
+### Plan review totals
+
+Round 1: 28 findings -> 18 items, all accepted (5 changed decisions). Round 2:
+6 findings, all accepted, none changed a decision (terminal). No rejections.

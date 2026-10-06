@@ -94,15 +94,23 @@ out, or a "needs placement" tour older than 90 days, is on none of them.
   (`ToursPage.tsx:206` - every Past row is non-requested, so its output does not
   change), the tour page's facts line and Schedule card (both from
   `TourDetail.tsx:312`; `:783` reuses it), the tenant file
-  (`TenantFile.tsx:334-337`), the landlord file (`LandlordFile.tsx:214-217`) and
-  the property page (`ListingDetail.tsx:1082-1084`). Today those last four say
-  "Not booked" for EVERY undated tour; after this change no surface says "Not
-  booked". This resolves `docs/issues/undated-tour-wording.md`. The tests and
-  e2e steps that assert "Not booked" today move to "Needs booking":
-  `TourDetail.test.tsx:307-308`, `ListingDetail.test.tsx:432-433`,
-  `files.test.tsx:266-278, 458-470`, `e2e/tests/dashboard-next/tours-page.spec.ts:242`,
-  `e2e/scenarios/steps.ts:1147, 1176, 1854-1856` (and the comments at
-  `TourModals.tsx:203`, `e2e/tests/scenarios/tours.spec.ts:417`).
+  (`TenantFile.tsx:334-337`), the landlord file (`LandlordFile.tsx:214-217`),
+  the property page (`ListingDetail.tsx:1082-1084`), Today's past-tours row
+  (`Today.tsx:215` - a literal "Undated" today; Today lists Past-tab rows,
+  never a request, so its output does not change) and the Closed tab's date
+  column (`ToursPage.tsx:131-136` - an undated closed or canceled tour shows an
+  EMPTY date there today; it reads "Undated"). The tour page and the three
+  lists say "Not booked" for EVERY undated tour today; after this change no
+  surface says "Not booked". This resolves `docs/issues/undated-tour-wording.md`.
+  The tests and e2e steps that assert "Not booked" for a REQUEST today move to
+  "Needs booking": `TourDetail.test.tsx:307-308`, `ListingDetail.test.tsx:432-433`,
+  `files.test.tsx:266-278, 458-470`, `e2e/tests/dashboard-next/tours-page.spec.ts:242`
+  (and its comment at `:238-239`, which splits the phrase across two lines),
+  `e2e/scenarios/steps.ts:1147, 1168-1169, 1176, 1854-1856`, the comment at
+  `e2e/tests/scenarios/tours.spec.ts:417`, and the living doc
+  `documentation/sequence-diagram-to-test.md:262-263`. The comment at
+  `TourModals.tsx:203` describes an undated TOURED tour and moves to "Undated".
+  (Amended 2026-10-06 from the plan research.)
 - P8. No total count from the server (it cannot count without reading
   everything). The count line (4.5) says "Showing N tours" while more pages
   remain and "N tours" once the list is complete.
@@ -238,10 +246,11 @@ past 100 `replaceState` calls in 10 seconds.
 
 The repo's create stamps `_schedPartition` on EVERY tour, dated or not
 (`toursRepo.ts:355-364`), and tours are never imported. Seeds write raw items
-(`app/src/lib/seed/index.ts:127-157`), and three full-profile rows lack it: the
-cast requested tour (`cast.ts:547-561`), the cast toured tour, which HAS a date
-(`cast.ts:799-812`), and the matrix requested tours (`matrix.ts:940-946`) - a
-test even requires the absence (`app/test/seedMatrixCoherence.test.ts:410-417`).
+(`app/src/lib/seed/index.ts:127-157`), and FOUR full-profile rows lack it: the
+cast requested tour (`cast.ts:548-561`), the cast toured tour, which HAS a date
+(`cast.ts:799-817`), and the two matrix requested tours (`matrix.ts:930-946`
+emits `tour-mx-requested-01` and `-02`) - a test even requires the absence
+(`app/test/seedMatrixCoherence.test.ts:410-417`).
 The live, matrix-dated and performance seeds stamp it. PATCH, the writer that
 ADDS a date (booking; "already toured" with a date), never writes
 `_schedPartition` (`toursRepo.ts:168-170, 439+`) - so a seeded request that is
@@ -351,9 +360,11 @@ of 4.8.
   filter or sort change aborts whichever is running and loads the first page
   (`limit=50`). Typing a search while a restore runs aborts the restore and the
   walk continues from the cursor it reached; typing one while the first-page
-  load, Load more, Keep checking or the empty-page follow has a request in
-  flight lets that request finish (its rows are valid for the same filters),
-  then the walk continues from its cursor.
+  load or a Load more / Keep checking request is in flight lets that request
+  finish (its rows are valid for the same filters), then the walk continues
+  from its cursor; an automatic empty-page-follow request in flight is aborted
+  and re-requested from the SAME cursor as a walk page - no row lost or
+  repeated (amended from the plan: one automatic loader, one effect).
 - **Load more** appears while the last response carried a `nextCursor` and no
   loader is running; it appends the next page.
 - De-duplication by `tourId` on append: the LATER copy's data replaces the
@@ -552,7 +563,9 @@ U_ORDER = [requested, toured, no_show, canceled, closed] - every status except
 
 ### 5.4 Filling a page
 
-Named constants, injectable through the router's deps for tests:
+Named constants, injectable into the paging engine for tests (the route uses
+the defaults - amended from the plan research: the router has no test path for
+them, and the engine is where the budget logic lives):
 `QUERY_PAGE_LIMIT` = 200 (items one filtered Query evaluates) and
 `MAX_QUERY_CALLS` = 5 (Queries per HTTP request).
 
@@ -676,8 +689,11 @@ items evaluated, Query calls, phases touched) - never an id, name or address.
   only by tests). Its two callers (`tours.ts:387`, `today.ts:550`) are unchanged.
 - A DynamoDB Local integration test writes several tours in one window, reads
   it with `pageLimit: 1`, and proves the window comes back whole.
-- Today's `warnIfCapped('tours_today', ...)` call (3.8) is removed: the read can
-  no longer be truncated, so the warning could only be false.
+- Today's `warnIfCapped('tours_today', ...)` call (3.8) is removed: it fires
+  on a COUNT of 100 or more over a read that pages to completion, so it could
+  only be false; the remaining cap (100 pages of 1 MB, unreachable in
+  production) lives in `queryAll`, which warns on its own (amended from the
+  plan research).
 - `docs/issues/tours-scheduled-range-query-unpaginated.md` is resolved.
 
 ## 8. Invariants and every surface

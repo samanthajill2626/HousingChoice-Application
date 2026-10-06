@@ -356,3 +356,41 @@ Approved "other than" these, all applied in DRAFT 6:
   assert it move (listed in P7). The status badge keeps "Requested" (the status
   name, `TOUR_STATUS_LABELS`) - renaming the status itself was not asked and
   would touch every tour header and list.
+
+## Plan research (2026-10-06) - findings against the approved spec
+
+Three read-only researchers (app, dashboard, e2e/docs; opus) captured the code
+the plan builds on (`.superpowers/sdd/plan-research/*-reference.md`, gitignored)
+and filed findings (`../plan-research/*-findings.md`). Rulings - all
+precision, none changes a decision Cameron made:
+
+- app F1 (the route tests run on a fake that does not model DynamoDB paging) -
+  ACCEPT: one shared fake model (`test/helpers/tourListIndexFake.ts`) to the
+  house rules, used by the harness fake AND the engine tests, pinned to the
+  real repo by a mirror integration test; the engine also runs over DynamoDB
+  Local (plan Tasks 5.2, 6.2).
+- app F2 (no test path injects the budget constants through the router) -
+  ACCEPT, spec 5.4 amended: the constants are injected into the engine; the
+  route uses the defaults.
+- app F3 (the live seed's tour rows are invisible to a pure pin) - ACCEPT:
+  `seedLive.test.ts` pins them (plan Task 2.1).
+- app F4 (four unstamped rows, not three) - ACCEPT, spec 3.6 amended.
+- app F5 (`queryAll` keeps a 100-page cap) - ACCEPT, spec 7 reworded; the
+  `pageLimit: 1` test stays under 100 rows in its own window.
+- dashboard F1 (two more missing-date surfaces: Today's past-tours row and the
+  Closed tab's empty date column) - ACCEPT inside D8 ("everywhere"): both read
+  `undatedTourLabel`; spec P7 amended.
+- e2e F1 (`TourModals.tsx:203` describes an undated TOURED tour) - ACCEPT:
+  it moves to "Undated"; spec P7 amended.
+- e2e F2 (split-line "Not booked" comments and a living doc) - ACCEPT: added to
+  P7 and the plan (S8, S14).
+- e2e F3 (two more places state the perf gap as /tours/past only) - ACCEPT:
+  plan Task 13.2 updates `routes.ts:616-627` and `e2e/README.md:83-86`; the
+  issue slug stays.
+- e2e F4 (a stale ledger citation outside the refresh list) - ACCEPT: the
+  plan's ledger refresh covers it and the other drifted citations.
+
+One more planner precision recorded in spec 4.5: an automatic follow request
+in flight when a search starts is aborted and re-requested from the same
+cursor as a walk page (one automatic effect), rather than "allowed to finish"
+- equivalent for the user, no row lost or repeated.

@@ -30159,7 +30159,20 @@ branch changes (the likely ones: `app/src/routes/contacts.ts`,
 specs), re-run that file's unit tests before continuing. If `main` is ahead
 by a change to tours or the tour list (another mission was in flight on
 2026-10-06), confirm no seed or e2e expectation from it collides with
-S12/S14. Then `git status` (a separate read; `.git/MERGE_HEAD` is expected to
+S12/S14. The tour list (`feat/tour-list`, worktree `W:\tmp\tour-list` -
+never touch it) plans ADDITIVE edits to files this branch also changes: one
+`_schedPartition` stamp per tour seed row in `app/src/lib/seed/cast.ts` /
+`matrix.ts`; a new `UnitsRepo` reader `getDisplaysByIds` at the end of the
+interface and implementation (so every typed `UnitsRepo` fake this branch
+touched must carry it after the merge - typecheck finds them); list types and
+`listTours` after the existing tour ones in `dashboard/src/api/types.ts` /
+`endpoints.ts`; a route in `dashboard/src/App.tsx`; one appended
+`documentation/GLOSSARY.md` entry; `e2e/README.md` and
+`e2e/performance/routes.ts` (+ its test) edits for `/tours/past`. When
+`main` brings these in, keep both sides of each, then re-run the seed pins
+that exist (`seedTourPartition.test.ts`,
+`seedMatrixCoherence.test.ts`, `seedRosterShape.test.ts`) and
+`npm run typecheck` before Task 17.2. Then `git status` (a separate read; `.git/MERGE_HEAD` is expected to
 exist here), stage the resolved files by explicit path, and commit:
 
 ```
@@ -30303,6 +30316,11 @@ No Terraform, no secrets, no env vars. Never merge, deploy or clean up.
 - Machine writes to units never stamp `updated_at`.
 - `housingAuthority` is a GSI key: REMOVE it, never SET `''`.
 - The lean seed world changes in S12 - e2e expectations follow in S14.
+- A parallel branch, `feat/tour-list` (`W:\tmp\tour-list`), was building on
+  2026-10-06 and touches some of the same files (seeds, `unitsRepo.ts`,
+  dashboard api types, GLOSSARY, e2e README/perf registry). Never touch that
+  worktree; its plan keeps its edits additive, and Task 17.1 names what to
+  keep when `main` brings them in.
 - Two e2e-workspace unit tests run inside `npm test` and pin dashboard
   surfaces (mutation catalog count, profiler route registry) - S11 updates
   them.

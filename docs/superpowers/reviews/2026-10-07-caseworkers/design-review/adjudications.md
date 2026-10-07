@@ -43,3 +43,31 @@ Counts: 28 findings (13 distinct after de-duplication across reviewers and
 the shared root causes); all accepted in substance; 3 partial rejections
 (send-time re-type, admin-only tenant rows, extending the tour/placement
 guards - the last deferred to section 12).
+
+## Round 2 (2026-10-07) - revision 10 -> revision 11
+
+Reviewer A continued (it landed the most accepted round-1 findings and held
+reviewer B's report): `R2-reviewer-a.md`, 11 findings (2 HIGH, 5 MEDIUM, 4
+LOW) plus concessions. Decisions CHANGED again, so a round 3 follows (cap 4).
+
+The root of findings 1, 5, 6 and 10 is one design choice of revision 10:
+running the conversion INSIDE the contacts PATCH. Ruling: reverse it. The
+conversion becomes one action - a confirm dialog with an Organization picker
+and one route - reached from the Possible list, the Unknown card's Mark as
+Caseworker and a Make caseworker action on contact pages; the PATCH refuses
+409 `caseworker_use_conversion` a write that would make a caseworker.
+
+| Finding | Ruling | What changed in revision 11 |
+|---|---|---|
+| 1 conversion overwrites a staff-picked organization | ACCEPT | Request (the dialog's picker) wins, else stored, else derived; the edit form no longer offers Caseworker on a non-caseworker, so there is no same-save pick to lose. |
+| 2 repair does not work | ACCEPT (a, b, d); (c) stated | Threads: re-type every OWN thread not already `partner_1to1` (old-type limit dropped). Removed values recorded atomically in the commit write (`caseworker_conversion`). The PATCH no longer converts, so (d) is moot. (c) repair stays route-only, logged and named in RUNBOOK - a page button for a rare partial failure is not worth a surface. |
+| 3 participant matching cannot see a shared phone | ACCEPT | Own = no other live holder of the phone/address by an all-holders byPhone/byEmail Query (pointer rows resolved), plus participant check; the plan adds the read; the dialog counts left-alone threads. |
+| 4 blanket supersede vs `accepted` and the guarded type drain | ACCEPT | Type suggestion through the existing revision-guarded drain; every OTHER suggestion superseded after it. |
+| 5 PATCH request semantics undefined | ACCEPT (by removal) | The PATCH never runs the conversion; the route owns its whole write; the write condition is named (`classification_revision`, 409 `contact_changed`). |
+| 6 contest: admin-only rejection's reasons fail on two paths | ACCEPT the contest | Every entry point opens the same confirm dialog; the removed values survive in the commit write. The rejection of admin-only stands on that mechanism; who-can remains Cameron's ruling. |
+| 7 relationship signal silently widened | ACCEPT | Restored to tenants only (an editing slip in revision 10), with the reason stated; Marcus Bell's e2e link no longer reaches the list. |
+| 8 "other provenance stamps" is the empty set | ACCEPT | Stated: other tenant facts stay as data with their stamps; only `housingAuthority` and its stamp are removed. |
+| 9 agency-first inverted for off-list; D13 limits skipped | ACCEPT | The agency wins whenever present (resolved or carried); carried text must pass D13's limits or stays only in `caseworker_conversion`. |
+| 10 PATCH vs route inputs; "already a caseworker" undefined | ACCEPT | One entry point; "a caseworker" defined once: partner + `isCaseworkerRole`. |
+| 11 units scan inside an interactive save | ACCEPT | Stated as accepted on the explicit action; folded into the section 12 cost item. |
+| 12 concessions; name the tour harm | ACCEPT | Section 12 item names it: a reopened tour has no reminder thread. |

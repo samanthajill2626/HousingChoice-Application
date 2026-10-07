@@ -27,7 +27,14 @@ review round 1 (`docs/superpowers/reviews/2026-10-07-caseworkers/design-review/a
 one caseworker conversion behind every path into the role, the generic type
 change keeping today's thread rule, threads matched by participant, all
 pending suggestions superseded, off-list employer text carried into
-`organization`, the AI's own caseworker line instead of the bare words. Design review: rounds 1-4,
+`organization`, the AI's own caseworker line instead of the bare words.
+Revision 11 (2026-10-07) folds in round 2: the conversion becomes one
+action with one dialog and one route (the contacts PATCH refuses to make a
+caseworker), the removed values are kept in the commit write
+(`caseworker_conversion`), a staff-picked organization wins, a thread is
+re-typed only when no other contact holds its phone or address, the type
+suggestion keeps its guarded drain, and the relationship signal is
+tenant-only again. Design review: rounds 1-4,
 closed - adjudications in
 `docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md`).
 Tracker items #2 ("One clean name per housing authority") and #19
@@ -618,27 +625,30 @@ shared helper:
 - the extraction kind canonicalizer (`canonicalSuggestedContactKind`) treats
   `type: partner` with role EXACTLY `Caseworker` as `partner` - byte-exact,
   as the Property Manager preset is - so accepting an AI "partner" suggestion
-  through the Caseworker choice records `accepted`; any other partner role
+  through the Caseworker choice or the conversion records `accepted`; any other partner role
   stays unsupported;
 - the Caseworkers tab (D18) uses `isCaseworkerRole(role)`: the role
   normalizes (D4) to "caseworker" or "case worker";
 - the Possible caseworkers list (D19) uses the looser "mentions" match.
 
-On an EXISTING contact every way into the caseworker role is ONE conversion
-(revision 10), decided by the server, not the form: a contacts PATCH whose
-result would be `type: partner` with role exactly `Caseworker`, on a contact
-that is not already that, runs the caseworker conversion (D19) - its
-refusals, answered 409 with D19's codes (the edit form shows the staff
-sentence), and all its writes. So the edit form's Caseworker choice, the
-Unknown triage card's "Mark as Caseworker" and Make caseworker leave the
-same record, and saving "Partner" first and "Caseworker" second meets the
-same refusals and writes at the second save. The Unknown card has four
-actions today (Mark as Tenant, Landlord, Property Manager, Partner); "Mark as
-Caseworker" goes after Partner - the one-click way to accept the AI's
-`partner` suggestion as a caseworker (planner default; Cameron confirms).
-The KindPicker's "Other" role input no longer offers a caseworker role on a
-tenant or landlord base: the placeholder drops "Case worker" AND the role
-suggestions (the role-vocabulary datalist) leave out every role that
+An EXISTING contact becomes a caseworker only through ONE action, the
+caseworker conversion (D19; revision 11): a "Make caseworker" action that
+opens one confirm dialog and calls one route. It is reached from the
+Possible caseworkers list (D19), from the Unknown triage card's "Mark as
+Caseworker" (after Partner - the card has four actions today: Mark as
+Tenant, Landlord, Property Manager, Partner; the one-click way to accept the
+AI's `partner` suggestion as a caseworker, planner default; Cameron
+confirms), and from a "Make caseworker" action on the tenant, landlord and
+partner pages of a contact that is not yet a caseworker. "A caseworker"
+means, everywhere in this design, a `partner` whose role satisfies
+`isCaseworkerRole`. The edit form offers the Caseworker choice only on a new
+contact or one that is already a caseworker; the contacts PATCH refuses
+(409 `caseworker_use_conversion`) a write whose result would be a caseworker
+on a contact that is not one, so no save - Partner first and Caseworker
+second included - converts a contact without the conversion's refusals and
+writes. The KindPicker's "Other" role input no longer offers a caseworker
+role on a tenant or landlord base: the placeholder drops "Case worker" AND
+the role suggestions (the role-vocabulary datalist) leave out every role that
 satisfies `isCaseworkerRole` there - those are exactly the records D19
 exists to clean up. The generic type change (Tenant, Landlord, Property
 Manager or Partner chosen in the edit form or on the Unknown card) keeps
@@ -698,34 +708,44 @@ and not dismissed:
   (revision 10): a tenant's notes routinely mention the tenant's OWN
   caseworker, and the AI is taught that such a mention is not the contact
   (`services/extraction/prompt.ts`); staff notes are not read;
-- contacts linked as another contact's caseworker relationship (a
+- tenants linked as another contact's caseworker relationship (a
   relationship row that carries a `contactId`), read from the same three
   partitions (rows held by unknown or team_member contacts are not seen -
-  accepted);
+  accepted); tenants only, as revision 9 had it - a landlord linked this way
+  is usually a landlord of record the conversion would refuse;
 - partners with NO role - today EVERY partner, since no path has given a
   partner a role (the importer's caseworkers, the AI chip's, and other
   outside contacts alike; the lean world's Renee Carter is one, and e2e
   expectations include her); "Not a caseworker" dismisses the rest.
 A partner with a non-caseworker role (for example "Case Manager" set through
 the API) is in neither the tab nor this list (no path writes a partner role
-today; accepted). Each row offers "Make caseworker" and "Not a caseworker",
-open to every signed-in user as the edit form's type change is (planner
-default; Cameron confirms), through `POST
-/api/contacts/:contactId/caseworker-review`. Make caseworker on a tenant- or
-landlord-typed row asks first: a confirm names what the conversion removes
-(the housing authority and agency values, the pending AI suggestions) and
-what stays as history. Dismissal is stored on the contact
-(`caseworker_review: 'dismissed'`) and hides the row for good.
+today; accepted). Each row offers "Make caseworker" (the conversion's
+dialog, below) and "Not a caseworker", open to every signed-in user as the
+edit form's type change is (planner default; Cameron confirms). Dismissal is
+stored on the contact (`caseworker_review: 'dismissed'`) and hides the row
+for good.
 
-The route's domain: a deleted or missing contact answers 404; a
-`team_member` answers 400; `make` on a contact that is already a caseworker
-re-runs the conversion's follow-on writes (steps 2-4 below) and answers 200,
-so pressing it again repairs a partial failure; `dismiss` on a caseworker
-answers 400; `make` on an `unknown` contact is allowed (it is what Mark as
-Caseworker does).
+**The caseworker conversion** (revision 11) is ONE server function behind
+ONE route, `POST /api/contacts/:contactId/caseworker-review` `{ action:
+'make', organization? }`, called by every entry point D16 names. The
+contacts PATCH never runs it (D16's 409), so no other request fields ride
+along and the PATCH's own post-write pipeline does not run for a
+conversion: the conversion owns its whole write. The domain: a deleted or
+missing contact answers 404; a `team_member` answers 400; an `unknown`,
+tenant, landlord or partner that is not a caseworker converts; `make` on a
+caseworker re-runs steps 2-4 only and answers 200 (the repair path below);
+`dismiss` on a caseworker answers 400.
 
-**The caseworker conversion** is ONE server function; the contacts PATCH
-(D16) and the caseworker-review route both call it (revision 10).
+**The dialog**, the same on every entry point, says what the conversion
+removes (the housing authority and agency values, the pending AI
+suggestions), what stays (past tours, closed placements, listing sends, the
+other tenant facts as data) and how many of the contact's threads it will
+re-type and how many it leaves because another contact shares the phone or
+address; it carries an Organization picker (D6's both-lists picker),
+prefilled with the contact's stored organization, else the derived one
+(below), which staff may change or clear. The route takes the dialog's
+`organization` (D5-checked, either kind); without one in the request it
+keeps a stored organization, else derives one.
 
 Refusals, each 409 with its own code and a staff sentence naming what to
 resolve first, checked whatever the contact's stored type:
@@ -734,48 +754,65 @@ resolve first, checked whatever the contact's stored type:
   canceled and closed are resolved) - `caseworker_open_tour`;
 - any unit's landlord of record (`landlordId`) -
   `caseworker_landlord_of_record`;
-- a seat on any unit's contact roster (a unit scan - no index) -
-  `caseworker_on_roster`.
+- a seat on any unit's contact roster - `caseworker_on_roster`. This is a
+  scan of every unit (no index) inside an interactive action; accepted at
+  today's unit count, filed with the possible-caseworkers scan (section 12).
 The checks are reads before the write and nothing re-checks later: a tour or
 placement created or reopened for the contact afterwards (tours and
 placements check no contact type today) brings the state back - accepted,
 filed (section 12); so is the race between the reads and the write.
 
 Writes, in order:
-1. The contact, in one conditional write through the classification fence
-   (`contactsRepo.update`, so `classification_revision` bumps) - the commit
-   point: type `partner`, role `Caseworker`, status `active` (the partner
-   default), `type_source: manual` (from any type, unknown included: the
-   conversion removes fields the importer would otherwise restore, D21);
-   REMOVEs `housingAuthority` and `housingAuthority_source` (and the other
-   provenance stamps the PATCH clears on a type change); clears `agency`;
-   sets `organization` (below).
-2. Every pending suggestion on the contact is superseded - all fields, not
-   only the housing authority (a partner is never extracted again, so none
-   would ever resolve) - with the AI verdict stamps the PATCH writes when it
-   supersedes. The open issue `stale-suggestions-survive-contact-retype`
-   stays open for the generic type change.
+1. The contact, in one write through the classification fence
+   (`contactsRepo.update`, conditional on the `classification_revision` the
+   route read, so a concurrent classification write makes the route answer
+   409 `contact_changed` and staff retry) - the commit point: type `partner`,
+   role `Caseworker`, status `active` (the partner default), `type_source:
+   manual` (from any type, unknown included: the conversion removes fields
+   the importer would otherwise restore, D21); `organization` (above);
+   REMOVEs `housingAuthority` and `housingAuthority_source`; clears `agency`;
+   and records, in the SAME write, a server-owned `caseworker_conversion`
+   attribute `{ at, by, fromType, fromRole?, housingAuthority?, agency? }`
+   holding the removed values and the old type - so the removed values
+   survive any later failure and a mistaken conversion can be put back by
+   hand. The other tenant facts (voucher size, pets, address and the rest)
+   stay as data with their `<field>_source` stamps; the partner page does
+   not show them.
+2. Suggestions: the pending TYPE suggestion is resolved by the PATCH's
+   existing revision-guarded type drain (`canonicalSuggestedContactKind` on
+   the converted contact, so an AI `partner` suggestion records `accepted`,
+   D16); then every other pending suggestion on the contact is superseded
+   (a partner is never extracted again, so none would ever resolve) with
+   the AI verdict stamps the PATCH writes when it supersedes. The open issue
+   `stale-suggestions-survive-contact-retype` stays open for the generic
+   type change.
 3. The contact's threads are re-typed (D21's conversion rule).
-4. The side effects the PATCH produces for a write today: the
-   `contact_updated` audit, whose payload for a conversion ALSO carries the
-   removed `housingAuthority` and `agency` values, so a mistaken conversion
-   can be put back by hand; the `contact_status_changed` milestone when the
-   status changed; the `suggestion.updated` and `conversation.updated`
-   events; the role-vocabulary write.
-As in today's PATCH, a failure after step 1 leaves the contact converted;
-Make caseworker again repairs it (idempotent, above).
+4. The PATCH's side effects for a classification write, each once: the
+   `contact_updated` audit (its payload names the conversion and carries
+   `caseworker_conversion`), the `contact_status_changed` milestone when the
+   status changed, the `suggestion.updated` and `conversation.updated`
+   events, and the role-vocabulary write.
+A failure after step 1 leaves the contact converted with its removed values
+safe in `caseworker_conversion`; `make` on that caseworker re-runs steps 2-4
+(the thread rule then reads the old type from `caseworker_conversion`). The
+repair is by the route (no page button: a converted contact is no longer on
+the Possible list); the failure is logged at error level and RUNBOOK names
+the repair.
 
-The organization: the conversion resolves the agency text, then the housing
-authority text, against BOTH lists (D4, `KINDS_FOR_FIELD.organization`), so
-an agency name sitting in the housing authority field counts. The first that
-resolves to an entry gives `organization` that entry's name - agency first
-when both resolve, because the employer is the helper organization (planner
-default; Cameron confirms). When neither resolves, the text is not lost:
-`organization` takes the agency text as written, else the housing authority
-text, as a not-on-the-list value (D17's stated exception, the importer's
-precedent); it then appears in Settings' "Not on the list" as an
-organization row, where staff settle it with Use, Add as new or Clear. With
-neither value, `organization` stays absent for staff to pick.
+The organization, when the request carries none and none is stored: the
+agency wins whenever the contact has one, because the employer is the
+helper organization (planner default; Cameron confirms). The agency text
+resolves against BOTH lists (D4, `KINDS_FOR_FIELD.organization`) - a match
+gives that entry's name, otherwise the agency text is carried as written;
+only with no agency does the housing authority text get the same treatment
+(an agency name sitting in the housing authority field counts). Carried text
+is a not-on-the-list value (D17's stated exception, the importer's
+precedent): it appears in Settings' "Not on the list" as an organization
+row, where staff settle it with Use, Add as new or Clear. Carried text must
+pass D13's limits (at most 120 characters, no control or invisible
+characters, not empty after normalization); text that fails is not carried
+(it stays in `caseworker_conversion`) and `organization` stays absent for
+staff to pick.
 
 Past tours, closed placements and listing sends stay as history in the data;
 the partner page does not show tenant history. The partner page gains the
@@ -827,16 +864,19 @@ D21. **Type changes keep threads and imports consistent.** Two thread rules
   reminders, placement nudges and the timeline still find it.
 - The caseworker conversion (D19) re-types the contact's open one-to-one
   threads - for EVERY phone in its `phones` list and every email address
-  (`conversationsForContact`) - whose type is the contact's old type or
-  `unknown_1to1`, to `partner_1to1`, whether or not the stored type changed
-  (an imported partner's threads are all `unknown_1to1`, and partner ->
-  caseworker is not a type change). A thread counts as the contact's only
-  when its participant `contactId` is the contact, or it has none and the
-  phone's (or address's) owning contact by lookup is the contact; a thread
-  shared with another contact (a household phone) is left alone whatever its
-  type. The re-type is conditional on the type the read returned. The
-  conversion's refusals (no open tour or placement) are what make re-typing
-  a tenant thread safe here.
+  (`conversationsForContact`) - that are not already `partner_1to1` and are
+  the contact's OWN, to `partner_1to1`, whether or not the stored type
+  changed (an imported partner's threads are all `unknown_1to1`, and
+  partner -> caseworker is not a type change). A thread is the contact's own
+  only when NO other live contact holds its phone or address - a Query of
+  the byPhone / byEmail index over ALL its items, pointer rows resolved
+  (`findByPhone` returns one arbitrary holder of a duplicate phone, so it
+  cannot decide this; the plan adds the all-holders read) - and its
+  participant `contactId`, when set, is the contact. A thread shared with
+  another contact (a household phone) is left alone whatever its type, and
+  the dialog counts it. Each re-type is conditional on the type the read
+  returned. The conversion's refusals (no open tour or placement of its
+  own) are what make re-typing the contact's own tenant thread safe here.
 A NEW field `type_source: 'manual'` is stamped when staff OVERRIDE a type -
 the edit form changing a contact typed tenant, landlord or partner to a
 different type - and by the caseworker conversion from any type; triage of
@@ -902,6 +942,7 @@ because an imported authority is a triage hint).
 | `unit.accepted_authorities[]` | housing authority | new members checked by D5; trimmed, de-duplicated |
 | `contact.organization` (B, edited on partners) | either | new; checked by D5 against both kinds (one stated exception: the caseworker conversion may carry existing text, D19); `''` REMOVEs (the `role` convention) |
 | `contact.caseworker_review` (B) | - | new: `'dismissed'`; server-owned (written by the caseworker-review route, a client value refused) |
+| `contact.caseworker_conversion` (B) | - | new: `{ at, by, fromType, fromRole?, housingAuthority?, agency? }`, written by the caseworker conversion in its commit write (D19); server-owned (a client value refused) |
 | `contact.type_source` (B) | - | new: `'manual'` on staff type overrides and the caseworker conversion (D19); server-owned (a client value refused, as `consent_captured_by` is) |
 | broadcast `audience_filter.housing_authority` | housing authority | POST checked by D5; preview and a filter-resolved send re-check (D7) |
 
@@ -956,11 +997,14 @@ Branch B (revisions 9 and 10):
   contact with its name, type, current role and the signal that put it
   there. Visible to everyone.
 - `POST /api/contacts/:contactId/caseworker-review` `{ action: 'make' |
-  'dismiss' }` (everyone - planner default, D19) - `make` runs the
-  caseworker conversion (refused 409 `caseworker_open_placement`,
-  `caseworker_open_tour`, `caseworker_landlord_of_record` or
-  `caseworker_on_roster`, each with a staff sentence; 200 and idempotent on
-  a contact already a caseworker); `dismiss` writes `caseworker_review:
+  'dismiss', organization? }` (everyone - planner default, D19) - `make` is
+  the ONLY way to run the caseworker conversion; `organization` (from the
+  dialog, D5-checked, either kind) wins over a stored or derived one; 409
+  `contact_changed` when the classification revision moved; refused 409
+  `caseworker_open_placement`, `caseworker_open_tour`,
+  `caseworker_landlord_of_record` or `caseworker_on_roster`, each with a
+  staff sentence; on a contact already a caseworker it re-runs steps 2-4
+  and answers 200; `dismiss` writes `caseworker_review:
   'dismissed'` (400 on a caseworker). 404 for a deleted or missing contact,
   400 for a team_member.
 - `POST /api/organizations/check` gains optional `kinds` (both lists) for
@@ -973,11 +1017,11 @@ Branch B (revisions 9 and 10):
   one record may count in two columns; Delete's refusal counts distinct
   records).
 - `GET /api/units/:unitId/recipients` rows gain `type` and `role` (D20).
-- contacts PATCH accepts `organization` (D5, either kind); a write whose
-  result would be partner + `Caseworker` on a contact not already that runs
-  the caseworker conversion and can answer its four 409 codes (D16, D19);
-  any other `type` change keeps today's thread rule (D21); `caseworker_review` and `type_source` are refused when a
-  client sends them.
+- contacts PATCH accepts `organization` (D5, either kind); it refuses 409
+  `caseworker_use_conversion` a write whose result would be a caseworker
+  (partner + an `isCaseworkerRole` role) on a contact that is not one (D16);
+  any other `type` change keeps today's thread rule (D21); `caseworker_review`, `caseworker_conversion` and `type_source`
+  are refused when a client sends them.
 
 ---
 
@@ -1105,9 +1149,10 @@ Writers (each applies D5, or is a stated exception):
   exception: it writes off-list values on purpose, local stacks only; (B) it
   accepts `organization` too);
 - the rewrite job (D11) and the cleanup script (section 8);
-- (B) the caseworker conversion (D19): ONE server function, called by the
-  contacts PATCH (the Caseworker choice and Mark as Caseworker, D16) and by
-  the caseworker-review route (Make caseworker); it writes through the
+- (B) the caseworker conversion (D19): ONE server function behind ONE route
+  (the caseworker-review route), reached from the Possible list, the Unknown
+  card's Mark as Caseworker and the contact pages' Make caseworker; the
+  contacts PATCH refuses to make a caseworker (D16). It writes through the
   classification fence and may carry existing not-on-the-list text into
   `organization` (a stated exception, D17).
 
@@ -1137,15 +1182,18 @@ the public intake routes still mint `tenant_1to1` for any phone (tracker
 
 ## 10. Branch B summary of changes
 
-- The caseworker conversion (D19): one server function behind the contacts
-  PATCH and the caseworker-review route - four refusals (409 codes), the
-  contact write, every pending suggestion superseded, the thread re-type,
-  the audit carrying the removed values, the organization resolved from
-  agency then housing authority over both lists (or carried as
-  not-on-the-list text).
-- KindPicker "Caseworker" choice (a plain save on a new contact; the
-  conversion on an existing one), the Unknown card's "Mark as Caseworker"
-  after Partner, the byte-exact kind canonicalizer and the shared
+- The caseworker conversion (D19): one server function behind one route and
+  one confirm dialog (with an Organization picker) - four refusals (409
+  codes), the contact write recording `caseworker_conversion`, the type
+  suggestion through the guarded drain and every other pending suggestion
+  superseded, the re-type of the contact's own threads, the audit, the
+  organization from the request, else stored, else derived (agency first;
+  carried as not-on-the-list text within D13's limits). The contacts PATCH
+  refuses to make a caseworker (409 `caseworker_use_conversion`).
+- KindPicker "Caseworker" choice (a new contact, or one already a
+  caseworker), the Unknown card's "Mark as Caseworker" after Partner and a
+  "Make caseworker" action on tenant, landlord and partner pages (both open
+  the conversion's dialog), the byte-exact kind canonicalizer and the shared
   `isCaseworkerRole` helper; the "Other" role input stops offering caseworker
   roles on a tenant or landlord base, placeholder and suggestions (D16).
   Partner edit form Organization picker over both lists with the
@@ -1154,7 +1202,7 @@ the public intake routes still mint `tenant_1to1` for any phone (tracker
   shows tenant facts for `tenant` and `unknown` only (D21).
 - Contacts > Caseworkers sub-link and tab with organization chips (D18); the
   Possible caseworkers list from its server endpoint, with Make caseworker
-  (a confirm on tenant and landlord rows) and Not a caseworker through the
+  (the conversion's dialog) and Not a caseworker through the
   caseworker-review route (D19).
 - Direct shares (D20): `broadcasts.ts` seed resolution and the explicit send
   list accept `partner`; both fan-out sites mint the contact's conversation
@@ -1163,8 +1211,9 @@ the public intake routes still mint `tenant_1to1` for any phone (tracker
   surface D20 lists; the property's "Sent to" list labels partner rows
   (recipient rows carry type and role).
 - Threads (D21): the generic type change keeps today's `unknown_1to1`-only
-  flip; the conversion re-types the contact's own old-type and
-  `unknown_1to1` threads by participant; the server-owned `type_source` and
+  flip; the conversion re-types the contact's own threads (no other live
+  holder of the phone or address - a new all-holders byPhone / byEmail read)
+  to `partner_1to1`; the server-owned `type_source` and
   the importer's rule.
 - Settings: an Organization usage column, Delete counting distinct records
   with organization holders, rename/merge of either kind rewriting
@@ -1207,14 +1256,17 @@ the public intake routes still mint `tenant_1to1` for any phone (tracker
   guards only the caseworker conversion). File for a decision.
 - (B) Tours and placements check no contact type on create or reopen, so a
   caseworker can be given an open tour or placement after the conversion
-  refused one (pre-existing; accepted for B).
+  refused one; a tour reopened after a conversion has NO reminder thread
+  (the conversion re-typed it to `partner_1to1`, and reminders look for
+  `tenant_1to1` or `unknown_1to1`). Pre-existing guard gap; accepted for B.
 - (B) A share or reply on an imported contact's `unknown_1to1` thread
   surfaces on Today as an unknown contact even when the contact is typed
   tenant or partner (Today keys on the thread type; the importer never
   re-types threads). Verify against the code and file (pre-existing).
-- (B) The possible-caseworkers read scans three contact partitions with no
-  index (the `tours-tabs-load-every-contact-for-names` cost class); revisit
-  if the contact count grows.
+- (B) The possible-caseworkers read scans three contact partitions, and the
+  conversion's roster refusal scans every unit inside an interactive action,
+  both with no index (the `tours-tabs-load-every-contact-for-names` cost
+  class); revisit if the contact or unit count grows.
 
 ---
 

@@ -136,3 +136,106 @@ ONE findings list to the orchestrator (fresh foreground child): SC-F1, SC-F2,
 E-1, ADV-F2 (memo), ADV-F4, and the two issue appends. Then the SAME two
 reviewers re-review the fix diff (re-review charge), and the planner reruns
 the full gate battery on the final commit.
+
+## Round 2 (fix wave e666fae3..7267b3be; the SAME two reviewers, re-review charge)
+
+Reports: `adversarial-r2.md` (1 MEDIUM, 4 LOW; F1 and F5 conceded) and
+`spec-conformance-r2.md` (5 LOW; 159 items now 141 CONFORMS, 18
+DEVIATES-RULED, 0 PARTIAL, 0 DEVIATES-UNRULED, 0 MISSING). Both reviewers
+confirmed every round-1 fix correct. Both found the same new keyboard-focus
+defect independently.
+
+### Corrections to the round-1 record (ADV-F1)
+
+The F1 rejection stands - both reviewers concede it - but two of its premises
+were wrong and are corrected here: (1) the reminder sweeps do NOT read
+byScheduledAt (the reminder poll reads `byDueAt` and fetches tours by id;
+auto-close reads byStatus), so a dated tour without `_schedPartition` breaks
+Today's tours and the Active, Past and All tabs - not reminders; (2) the type
+did not enforce the stamp where it actually broke - the matrix and cast seed
+rows were untyped (`Record<string, unknown>`), which is exactly why S2 pinned
+them. A sharper reason for the rejection (conformance reviewer): the proposed
+complement could never reach a `scheduled` tour, which has no U phase. The
+stale index comments that misled the record are R2-5 below.
+
+### R2-1 (MEDIUM, adversarial) = R2-F1 (LOW, conformance) - every action button drops keyboard focus to the body - ACCEPT (decision changed)
+
+Verified (`AllToursView.tsx` action area and the first-page Retry): each
+control renders only while no loader runs, so pressing it unmounts it and
+focus falls to the page body; the view already hands focus over for its other
+self-removing buttons, and no test checks focus after these presses. Spec 4.5
+said Load more and Keep checking are HIDDEN while any loader runs - the defect
+is in that rule, so 4.5 is amended: hidden while an AUTOMATIC loader runs
+(the first page, the empty-page follow, the search walk, the return restore);
+while the user's OWN request runs (Load more, Keep checking, Retry after a
+failed page) the pressed control stays in place, busy, and keeps focus - via
+`aria-disabled`, not the `disabled` attribute, which the focus fixup rule can
+blur - and when the page lands focus moves to the first newly added row, or
+stays on the control when no row was added. Start over and the first-page
+Retry rebuild the list: when its first page lands, focus goes to the first
+row (or to the count line, made programmatically focusable, when the list is
+empty). One view test per control, asserting `document.activeElement`.
+
+### R2-2 (LOW, adversarial) - the de-duplication keeps the later-READ copy, not the newer one - ACCEPT
+
+Two copies of one tour in one page come from two indexes, and index reads can
+lag: a booked tour can come back current from the date index and stale (still
+`requested`) from the status index, and since a653d944 the stale copy wins.
+`mergeRows` replaces a row only when the incoming copy's `updatedAt` is the
+same or newer (ISO strings; a tie goes to the later read). The cross-page
+reschedule case is unchanged (the later copy is newer). Spec 4.5's "later copy
+replaces in place" becomes "the newer copy (by `updatedAt`) replaces in
+place". One hook test for the stale-second-copy case.
+
+### R2-3 (LOW, unconfirmed) - date inputs act on every half-typed year - DEFER
+
+Plausible in Chromium (typing a year passes through 0002, 0020, 0202: each a
+valid value, so each starts and aborts a list request, and a half-typed To
+year flashes the range alert), but unconfirmed, and every fix trades
+something (a debounce, or an "incomplete year" state that must not change the
+list key). Filed as a low bug with a confirm-first step.
+
+### R2-4 (adversarial) + R2-F3 (conformance) - `pageLimit` survives in the spec and the resolved issue - ACCEPT
+
+Spec sections 7 and 9 are amended in place to `queryLimit`; the resolved
+issue `tours-scheduled-range-query-unpaginated` gains one line naming the
+rename. The plan is a dated build record and is left as written.
+
+### R2-5 (LOW) - stale comments say reminders and a no-show sweep read the date index - ACCEPT
+
+Comment-only, `toursRepo.ts` header and `tables.ts`' byScheduledAt notes:
+name the readers that exist (verify by grep first: Today's tours, the Tours
+tabs' range reads, the All tab's phase D).
+
+### R2-F2 (LOW) - the cache remedy recorded in tours-all-server-side-search undoes D9 - ACCEPT
+
+A cached list still holds the row just handled, so a return would focus it
+with its old status instead of "the next one to work on", and spec 4.9 says
+"fresh reads, never a cache". The issue text marks that option as needing a
+spec change plus per-tour invalidation, and prefers server-side search.
+
+### R2-F4 (LOW) - the GLOSSARY overstates where "Not booked" appeared - ACCEPT
+
+It appeared on the tour page and the tenant, landlord and property files'
+tour lists; the Past tab and Today already said "Undated" and the Closed tab
+showed a blank. And `undatedTourLabel` is the rule's one implementation, not
+its "only reader".
+
+### R2-F5 (nit) - stale line citations into AllToursView in three issue files - ACCEPT
+
+Cite by symbol name, written after this wave's code change.
+
+### ADV-F5, contested by the conformance reviewer - REJECT becomes DEFER
+
+The premise was wrong: feat/clean-org-names edits `contactsRepo.ts` far from
+`batchGetByIds`. The duplicated BatchGet walk is real debt that will drift:
+filed low (debt), with a `TODO(<slug>):` marker at `unitsRepo.getDisplaysByIds`
+pointing to its twin. The route-path and click-predicate parts stay rejected
+(conceded).
+
+### Round verdict
+
+A decision changed (spec 4.5's hidden-while-loading rule; the merge rule's
+newest-wins), so this is not the terminal round: fix wave 2, then the same
+two reviewers re-review it, then the planner reruns the full battery on the
+final commit.

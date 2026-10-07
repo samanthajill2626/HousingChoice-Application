@@ -19,12 +19,23 @@ import {
   rewriteStatusText,
   usageText,
 } from '../orgs/orgCopy.js';
-import { NotesDialog } from './OrgEntryDialogs.js';
+import {
+  DeleteDialog,
+  KindDialog,
+  MergeDialog,
+  NotesDialog,
+  RenameDialog,
+  SpellingsDialog,
+  skippedSpellingsNotice,
+} from './OrgEntryDialogs.js';
 import { useOrgAdmin } from './useOrgAdmin.js';
 import styles from './OrgListSection.module.css';
 
-/** The entry dialog that is open, if any. */
-type EntryDialog = { action: 'notes'; entry: OrgEntry };
+/** The entry dialog that is open, if any (everything but notes is admin-only). */
+type EntryDialog = {
+  action: 'notes' | 'spellings' | 'rename' | 'merge' | 'kind' | 'delete';
+  entry: OrgEntry;
+};
 
 const KINDS: readonly OrgKind[] = ['housing_authority', 'agency'];
 
@@ -151,8 +162,11 @@ export function OrgListSection(): React.JSX.Element {
 
   const lastRewrite = list.lastRewrite;
   const closeDialog = (): void => setDialog(null);
+  // An action that succeeds clears the notice an earlier one left: it would no
+  // longer describe the page (worklist RE2-3).
   const closeAndReload = (): void => {
     setDialog(null);
+    setNotice(null);
     admin.reload();
   };
 
@@ -169,6 +183,69 @@ export function OrgListSection(): React.JSX.Element {
       setRunAgainBusy(false);
     }
   }
+
+  // Admin-only row actions (spec D10): absent for a VA. Rename and Merge start
+  // a rewrite, so they wait while one runs (D11: one at a time); Change kind
+  // and Delete wait too - the server refuses both with 409 org_rewrite_running
+  // while one runs (plan 3.5), so an enabled button could only fail.
+  const busyTitle = admin.rewriteLive ? 'Another update is still running' : undefined;
+  const adminActions = (entry: OrgEntry): React.ReactNode => (
+    <>
+      <Button
+        variant="ghost"
+        size="sm"
+        type="button"
+        aria-label={`Edit spellings for ${entry.name}`}
+        onClick={() => setDialog({ action: 'spellings', entry })}
+      >
+        Spellings
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        type="button"
+        aria-label={`Rename ${entry.name}`}
+        disabled={admin.rewriteLive}
+        title={busyTitle}
+        onClick={() => setDialog({ action: 'rename', entry })}
+      >
+        Rename
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        type="button"
+        aria-label={`Merge ${entry.name}`}
+        disabled={admin.rewriteLive}
+        title={busyTitle}
+        onClick={() => setDialog({ action: 'merge', entry })}
+      >
+        Merge
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        type="button"
+        aria-label={`Change kind of ${entry.name}`}
+        disabled={admin.rewriteLive}
+        title={busyTitle}
+        onClick={() => setDialog({ action: 'kind', entry })}
+      >
+        Change kind
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        type="button"
+        aria-label={`Delete ${entry.name}`}
+        disabled={admin.rewriteLive}
+        title={busyTitle}
+        onClick={() => setDialog({ action: 'delete', entry })}
+      >
+        Delete
+      </Button>
+    </>
+  );
 
   return (
     <div className={styles.page}>
@@ -206,6 +283,7 @@ export function OrgListSection(): React.JSX.Element {
           usage={admin.usage}
           onAdd={() => setAdding(kind)}
           onEditNotes={(entry) => setDialog({ action: 'notes', entry })}
+          {...(isAdmin && { rowActions: adminActions })}
         />
       ))}
       {adding !== null ? (
@@ -222,6 +300,49 @@ export function OrgListSection(): React.JSX.Element {
       ) : null}
       {dialog?.action === 'notes' ? (
         <NotesDialog entry={dialog.entry} onSaved={closeAndReload} onClose={closeDialog} />
+      ) : null}
+      {dialog?.action === 'spellings' ? (
+        <SpellingsDialog entry={dialog.entry} onSaved={closeAndReload} onClose={closeDialog} />
+      ) : null}
+      {dialog?.action === 'rename' ? (
+        <RenameDialog
+          entry={dialog.entry}
+          usage={admin.usage?.[dialog.entry.orgId]}
+          onRenamed={(result) => {
+            closeAndReload();
+            setNotice(
+              result.skippedSpellings !== undefined && result.skippedSpellings.length > 0
+                ? skippedSpellingsNotice(result.skippedSpellings)
+                : null,
+            );
+          }}
+          onClose={closeDialog}
+        />
+      ) : null}
+      {dialog?.action === 'merge' ? (
+        <MergeDialog
+          entry={dialog.entry}
+          entries={list.entries}
+          usage={admin.usage?.[dialog.entry.orgId]}
+          onMerged={closeAndReload}
+          onClose={closeDialog}
+        />
+      ) : null}
+      {dialog?.action === 'kind' ? (
+        <KindDialog
+          entry={dialog.entry}
+          usage={admin.usage?.[dialog.entry.orgId]}
+          onChanged={closeAndReload}
+          onClose={closeDialog}
+        />
+      ) : null}
+      {dialog?.action === 'delete' ? (
+        <DeleteDialog
+          entry={dialog.entry}
+          usage={admin.usage?.[dialog.entry.orgId]}
+          onDeleted={closeAndReload}
+          onClose={closeDialog}
+        />
       ) : null}
     </div>
   );

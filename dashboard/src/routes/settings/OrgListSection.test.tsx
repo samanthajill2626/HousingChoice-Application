@@ -477,3 +477,62 @@ describe('OrgListSection - a notice never outlives a later clean action', () => 
     expect(screen.queryByText(SKIPPED_NOTICE)).not.toBeInTheDocument();
   });
 });
+
+describe('OrgListSection - "Not on the list"', () => {
+  it('everyone sees the values that are not on the list', async () => {
+    getNotOnList.mockResolvedValue([
+      {
+        field: 'housingAuthority',
+        value: 'atlanta_housing',
+        count: 1,
+        deletedCount: 0,
+        resolution: { status: 'unknown', close: [] },
+      },
+    ]);
+    renderSection();
+    const notOnList = await screen.findByRole('region', { name: 'Not on the list' });
+    expect(await within(notOnList).findByRole('rowheader', { name: 'atlanta_housing' })).toBeInTheDocument();
+    expect(within(notOnList).queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument();
+  });
+
+  it('an admin settle re-reads the page and names a spelling it could not keep', async () => {
+    viewerIsAdmin = true;
+    const user = userEvent.setup();
+    getNotOnList.mockResolvedValue([
+      {
+        field: 'housingAuthority',
+        value: 'Atl HA',
+        count: 1,
+        deletedCount: 0,
+        resolution: {
+          status: 'unknown',
+          close: [{ orgId: 'o-atl', kind: 'housing_authority', name: 'Atlanta Housing Authority' }],
+        },
+      },
+    ]);
+    checkOrgText.mockResolvedValue({ candidates: [], close: [], spellingProblem: null });
+    resolveNotOnList.mockResolvedValue({
+      lastRewrite: { ...RUNNING, action: 'use' },
+      skippedSpellings: [{ spelling: 'Atl HA', problem: 'shared_same_kind' }],
+    });
+    renderSection();
+    const notOnList = await screen.findByRole('region', { name: 'Not on the list' });
+    const header = await within(notOnList).findByRole('rowheader', { name: 'Atl HA' });
+    await user.click(within(header.closest('tr')!).getByRole('button', { name: 'Use Atlanta Housing Authority' }));
+    const dialog = screen.getByRole('dialog', { name: 'Settle Atl HA' });
+    await user.click(within(dialog).getByRole('button', { name: 'Use Atlanta Housing Authority' }));
+    expect(resolveNotOnList).toHaveBeenCalledWith({
+      field: 'housingAuthority',
+      value: 'Atl HA',
+      action: 'use',
+      name: 'Atlanta Housing Authority',
+      rememberSpelling: true,
+    });
+    expect(
+      await screen.findByText(
+        'Not kept as a spelling: Atl HA (another entry already has it, and a shared spelling is never applied automatically).',
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(getNotOnList).toHaveBeenCalledTimes(2));
+  });
+});

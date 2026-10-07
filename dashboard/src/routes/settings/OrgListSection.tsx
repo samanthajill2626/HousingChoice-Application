@@ -28,6 +28,7 @@ import {
   SpellingsDialog,
   skippedSpellingsNotice,
 } from './OrgEntryDialogs.js';
+import { NotOnListSection } from './NotOnListSection.js';
 import { useOrgAdmin } from './useOrgAdmin.js';
 import styles from './OrgListSection.module.css';
 
@@ -286,6 +287,18 @@ export function OrgListSection(): React.JSX.Element {
           {...(isAdmin && { rowActions: adminActions })}
         />
       ))}
+      <NotOnListSection
+        rows={admin.notOnList}
+        error={admin.notOnListError}
+        entries={list.entries}
+        isAdmin={isAdmin}
+        rewriteLive={admin.rewriteLive}
+        onRetry={admin.reload}
+        onSettled={(result) => {
+          admin.reload();
+          setNotice(result.skippedSpellings.length > 0 ? skippedSpellingsNotice(result.skippedSpellings) : null);
+        }}
+      />
       {adding !== null ? (
         <NewOrgDialog
           kind={adding}

@@ -11,6 +11,7 @@ import { SEED_AUTHORITY, SEED_ORG_LIST_AT, seedOrgListItem } from '../src/lib/se
 import { castItems } from '../src/lib/seed/cast.js';
 import { buildLiveStaticItems } from '../src/lib/seed/live.js';
 import { matrixItems } from '../src/lib/seed/matrix.js';
+import { generatePerformanceSeed, resolvePerformanceSeedConfig } from '../src/lib/seed/performance.js';
 import { ORG_LIST_SETTING_ID } from '../src/repos/orgListRepo.js';
 
 /** The seeded list: every seeded value must be an exact name on it. */
@@ -142,5 +143,14 @@ describe('the matrix holds list names only, broadcast filters included', () => {
       (b) => (b['audience_filter'] as { housing_authority?: unknown } | undefined)?.housing_authority,
     );
     expect(filters).toEqual([SEED_AUTHORITY.atlanta, SEED_AUTHORITY.dca]);
+  });
+});
+
+describe('the performance seed holds list names only', () => {
+  it('every value is an exact list name ("Georgia DCA" is a spelling, not a name)', () => {
+    const { tables } = generatePerformanceSeed(resolvePerformanceSeedConfig({}, '2026-08-11T16:00:00.000Z'));
+    expect(orgValues(tables).length).toBeGreaterThan(0);
+    expect(offList(tables)).toEqual([]);
+    expect(JSON.stringify(tables)).not.toContain('Georgia DCA');
   });
 });

@@ -193,6 +193,19 @@ describe('useAllTours', () => {
       expect(result.current.followCapped).toBe(false);
       expect(calls).toHaveLength(1);
     });
+
+    it('a first page that lists a tour twice keeps ONE row: the later copy, in the first copy position', async () => {
+      // Planner review SC-F2: a tour in two phases of ONE request (spec 5.3 -
+      // a dated `requested` tour) comes back twice in the same page; the
+      // first page de-duplicates exactly as an appended page does.
+      const later = row('t2', { status: 'toured', updatedAt: '2026-06-02T00:00:00.000Z' });
+      reply('', page([row('t1'), row('t2'), row('t3'), later], null));
+      const { result } = mount();
+      await settle();
+      expect(ids(result.current)).toEqual(['t1', 't2', 't3']);
+      expect(result.current.rows[1]).toEqual(later);
+      expect(result.current.complete).toBe(true);
+    });
   });
 
   // 2

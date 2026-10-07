@@ -94,11 +94,29 @@ interface ListState {
   dead: boolean;
 }
 
+/** `rows` then `incoming`, ONE row per tour: a tour already listed is
+ *  REPLACED IN PLACE by the later copy. A tour rescheduled between two pages
+ *  can come back, and a tour in two phases of one request comes back twice
+ *  in the SAME page (spec 5.3), so the first page goes through this too. */
+function mergeRows(rows: readonly TourListRow[], incoming: readonly TourListRow[]): TourListRow[] {
+  const index = new Map(rows.map((r, i) => [r.tourId, i] as const));
+  const out = [...rows];
+  for (const r of incoming) {
+    const at = index.get(r.tourId);
+    if (at !== undefined) out[at] = r;
+    else {
+      index.set(r.tourId, out.length);
+      out.push(r);
+    }
+  }
+  return out;
+}
+
 function freshState(forKey: string, page: TourListPage | null): ListState {
   return {
     forKey,
     status: page === null ? 'error' : 'ready',
-    rows: page?.tours ?? [],
+    rows: page === null ? [] : mergeRows([], page.tours),
     contacts: page?.contacts ?? {},
     units: page?.units ?? {},
     cursor: page?.nextCursor ?? null,
@@ -115,22 +133,12 @@ function freshState(forKey: string, page: TourListPage | null): ListState {
   };
 }
 
-/** Append a page: a row already listed is REPLACED IN PLACE by the later copy
- *  (a tour rescheduled between two pages can come back); names merge. */
+/** Append a page (mergeRows: a row already listed is REPLACED IN PLACE by the
+ *  later copy); names merge. */
 function withPage(s: ListState, page: TourListPage): ListState {
-  const index = new Map(s.rows.map((r, i) => [r.tourId, i] as const));
-  const rows = [...s.rows];
-  for (const r of page.tours) {
-    const at = index.get(r.tourId);
-    if (at !== undefined) rows[at] = r;
-    else {
-      index.set(r.tourId, rows.length);
-      rows.push(r);
-    }
-  }
   return {
     ...s,
-    rows,
+    rows: mergeRows(s.rows, page.tours),
     contacts: { ...s.contacts, ...page.contacts },
     units: { ...s.units, ...page.units },
     cursor: page.nextCursor,

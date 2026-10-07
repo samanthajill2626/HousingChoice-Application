@@ -71,13 +71,45 @@ function canonicalInstant(raw: string): string | undefined {
 /** An ISO 8601 date-time WITH an explicit zone (spec 5.1: `from` / `to` are
  *  instants). Date.parse alone also takes zone-less and date-only forms, read
  *  in the server's own zone or as UTC midnight, so the same request would mean
- *  a different instant per host (code review r1 SC-2). */
-const ISO_ZONED_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/;
+ *  a different instant per host (code review r1 SC-2). Groups: year, month,
+ *  day, hour, minute, the optional second and fraction (any length), then the
+ *  offset's sign, hours and minutes (none of the three for `Z`). */
+const ISO_ZONED_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+
+/** Days in `month` (1-12) of `year`, by the proleptic Gregorian calendar Date
+ *  itself uses. */
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0 ? 29 : 28;
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
 
 /** A request bound -> its canonical instant, or undefined when it is not an
- *  ISO 8601 date-time with a zone that Date.parse accepts. */
+ *  ISO 8601 date-time with a zone naming a real calendar time. The instant is
+ *  BUILT from the checked fields, the fraction truncated to milliseconds -
+ *  never Date.parse, which rolls an impossible day or hour forward
+ *  (2026-02-30 is March 2, T24:00 the next day; code review r2 R2-1). */
 function boundInstant(raw: string): string | undefined {
-  return ISO_ZONED_DATE_TIME.test(raw) ? canonicalInstant(raw) : undefined;
+  const m = ISO_ZONED_DATE_TIME.exec(raw);
+  if (m === null) return undefined;
+  const [, y, mo, d, h, mi, s, fraction, sign, oh, om] = m;
+  const year = Number(y);
+  const month = Number(mo);
+  const day = Number(d);
+  const hour = Number(h);
+  const minute = Number(mi);
+  const second = Number(s ?? '0');
+  const offsetHours = Number(oh ?? '0');
+  const offsetMinutes = Number(om ?? '0');
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) return undefined;
+  if (hour > 23 || minute > 59 || second > 59 || offsetHours > 23 || offsetMinutes > 59) return undefined;
+  const ms = Number((fraction ?? '').slice(0, 3).padEnd(3, '0'));
+  // The wall-clock fields read as UTC, then moved by the offset.
+  // setUTCFullYear, not Date.UTC: Date.UTC reads a year 0-99 as 1900-1999.
+  const wall = new Date(0);
+  wall.setUTCFullYear(year, month - 1, day);
+  wall.setUTCHours(hour, minute, second, ms);
+  const offsetMs = (sign === '-' ? -1 : 1) * (offsetHours * 60 + offsetMinutes) * 60_000;
+  return new Date(wall.getTime() - offsetMs).toISOString();
 }
 
 const fail = (error: string): TourListParse => ({ ok: false, error });

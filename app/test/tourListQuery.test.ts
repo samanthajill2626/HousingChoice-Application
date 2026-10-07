@@ -144,6 +144,19 @@ describe('parseTourListQuery', () => {
     expect(parsed({ when: 'range', from: '2026-10-06T00:00:00Z' }).filters.from).toBe('2026-10-06T00:00:00.000Z');
     expect(parsed({ when: 'range', to: '2026-10-06T23:59:59.999-04:00' }).filters.to).toBe('2026-10-07T03:59:59.999Z');
     expect(parsed({ when: 'range', to: '2026-10-06T12:30Z' }).filters.to).toBe('2026-10-06T12:30:00.000Z');
+
+    // Any fraction length, truncated to milliseconds; and an impossible
+    // calendar time is a 400, never rolled into the next day or month (R2-1).
+    expect(parsed({ when: 'range', from: '2026-10-06T00:00:00.123456Z' }).filters.from).toBe('2026-10-06T00:00:00.123Z');
+    expect(parsed({ when: 'range', from: '2026-10-06T00:00:00.123456+00:00' }).filters.from).toBe('2026-10-06T00:00:00.123Z');
+    for (const bad of ['2026-02-30T00:00:00Z', '2026-04-31T00:00:00-04:00', '2026-10-06T24:00:00Z']) {
+      expect(parseTourListQuery({ when: 'range', from: bad }), `from ${bad}`).toEqual({ ok: false, error: ISO_ERROR });
+      expect(parseTourListQuery({ when: 'range', to: bad }), `to ${bad}`).toEqual({ ok: false, error: ISO_ERROR });
+    }
+    // The day check is the year's own (a leap day), and a year below 100 is
+    // that year, never 1900 + it.
+    expect(parsed({ when: 'range', from: '2028-02-29T00:00:00Z' }).filters.from).toBe('2028-02-29T00:00:00.000Z');
+    expect(parsed({ when: 'range', from: '0050-06-15T00:00:00Z' }).filters.from).toBe('0050-06-15T00:00:00.000Z');
   });
 });
 

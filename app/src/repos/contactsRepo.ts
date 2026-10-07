@@ -812,10 +812,12 @@ export interface ContactsRepo {
    * checks housingAuthority and/or agency - a string means exactly that text,
    * null means the attribute is ABSENT, omitted means not checked.
    * `next.housingAuthority` null REMOVEs it (a byHousingAuthority key is never
-   * SET to '' - EmptyIndexKeyError, the update() rule); `next.agency` is SET,
-   * '' included. Writes nothing else: no classification fence, no provenance,
-   * no stamp. Answers 'skipped' when the condition is lost (the record changed,
-   * or there is no such contact) - never throws for that.
+   * SET to '' - EmptyIndexKeyError, the update() rule) together with its
+   * `housingAuthority_source` provenance stamp, which describes the removed
+   * value (code review R1-ADV-BE-2); a value replacement keeps the stamp.
+   * `next.agency` is SET, '' included. Writes nothing else: no classification
+   * fence, no stamp. Answers 'skipped' when the condition is lost (the record
+   * changed, or there is no such contact) - never throws for that.
    */
   rewriteOrgFields(
     contactId: string,
@@ -1692,6 +1694,11 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         names['#ha'] = 'housingAuthority';
         if (next.housingAuthority === null) {
           removes.push('#ha');
+          // The AI provenance stamp describes the VALUE, and the dashboard
+          // renders "Auto" from the stamp alone: it goes with the value (code
+          // review R1-ADV-BE-2). A REMOVE of an absent attribute is a no-op.
+          names['#ha_source'] = 'housingAuthority_source';
+          removes.push('#ha_source');
         } else {
           values[':next_housingAuthority'] = next.housingAuthority;
           sets.push('#ha = :next_housingAuthority');

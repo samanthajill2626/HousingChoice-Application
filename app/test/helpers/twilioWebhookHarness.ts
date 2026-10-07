@@ -2490,7 +2490,8 @@ export function createFakeWorld(): FakeWorld {
     // Organization-name rewrite (plan 3.7): mirror the real conditional
     // UpdateItem - '' refused for the GSI key, both guards checked BEFORE
     // anything is applied, 'skipped' when either is lost or the contact is
-    // missing, nothing else touched (no classification fence).
+    // missing, a housingAuthority REMOVE takes housingAuthority_source with it
+    // (code review R1-ADV-BE-2), nothing else touched (no classification fence).
     async rewriteOrgFields(contactId, expected, next) {
       if (next.housingAuthority === '') throw new EmptyIndexKeyError('housingAuthority');
       if (next.housingAuthority === undefined && next.agency === undefined) {
@@ -2504,8 +2505,12 @@ export function createFakeWorld(): FakeWorld {
         const have = contact[attr];
         if (want === null ? have !== undefined : have !== want) return 'skipped';
       }
-      if (next.housingAuthority === null) delete contact['housingAuthority'];
-      else if (next.housingAuthority !== undefined) contact['housingAuthority'] = next.housingAuthority;
+      if (next.housingAuthority === null) {
+        delete contact['housingAuthority'];
+        delete contact['housingAuthority_source'];
+      } else if (next.housingAuthority !== undefined) {
+        contact['housingAuthority'] = next.housingAuthority;
+      }
       if (next.agency !== undefined) contact['agency'] = next.agency;
       return 'written';
     },

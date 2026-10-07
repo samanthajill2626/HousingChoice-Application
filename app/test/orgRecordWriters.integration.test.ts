@@ -184,6 +184,72 @@ describe('contactsRepo.rewriteOrgFields (plan 3.7)', () => {
     expect(await w.contacts.rewriteOrgFields(b, { housingAuthority: 'HUD VASH', agency: '' }, move)).toBe('written');
   });
 
+  // Code review R1-ADV-BE-2: the AI provenance stamp describes the VALUE, and
+  // the dashboard renders an "Auto" badge from the stamp alone - so a machine
+  // REMOVE of the value (Clear, Move to Agency, the cleanup's move) takes the
+  // stamp with it. A value replacement keeps it.
+  const AI_STAMP = { source: 'ai', at: '2026-09-01T09:00:00.000Z', conversationId: 'conv-1' };
+
+  parity('a REMOVE of housingAuthority REMOVEs its housingAuthority_source stamp too, and nothing else', async (w, id) => {
+    const cleared = `${id}-clear`;
+    const moved = `${id}-move`;
+    await w.putContact({
+      contactId: cleared,
+      type: 'tenant',
+      status: 'searching',
+      housingAuthority: 'Bad',
+      housingAuthority_source: AI_STAMP,
+      classification_revision: 3,
+    });
+    await w.putContact({
+      contactId: moved,
+      type: 'partner',
+      status: 'active',
+      housingAuthority: 'HUD VASH',
+      housingAuthority_source: AI_STAMP,
+    });
+    expect(await w.contacts.rewriteOrgFields(cleared, { housingAuthority: 'Bad' }, { housingAuthority: null })).toBe('written');
+    expect(await w.readContact(cleared)).toEqual({
+      contactId: cleared,
+      type: 'tenant',
+      status: 'searching',
+      classification_revision: 3,
+    });
+    expect(
+      await w.contacts.rewriteOrgFields(
+        moved,
+        { housingAuthority: 'HUD VASH', agency: null },
+        { housingAuthority: null, agency: 'HUD-VASH Program' },
+      ),
+    ).toBe('written');
+    expect(await w.readContact(moved)).toEqual({
+      contactId: moved,
+      type: 'partner',
+      status: 'active',
+      agency: 'HUD-VASH Program',
+    });
+  });
+
+  parity('(PIN) a value replacement keeps the housingAuthority_source stamp', async (w, id) => {
+    await w.putContact({
+      contactId: id,
+      type: 'tenant',
+      status: 'searching',
+      housingAuthority: 'AHA',
+      housingAuthority_source: AI_STAMP,
+    });
+    expect(
+      await w.contacts.rewriteOrgFields(id, { housingAuthority: 'AHA' }, { housingAuthority: 'Atlanta Housing Authority' }),
+    ).toBe('written');
+    expect(await w.readContact(id)).toEqual({
+      contactId: id,
+      type: 'tenant',
+      status: 'searching',
+      housingAuthority: 'Atlanta Housing Authority',
+      housingAuthority_source: AI_STAMP,
+    });
+  });
+
   parity('stores a cleared agency as an empty string (spec D5)', async (w, id) => {
     await w.putContact({ contactId: id, type: 'partner', status: 'active', agency: 'Steps' });
     expect(await w.contacts.rewriteOrgFields(id, { agency: 'Steps' }, { agency: '' })).toBe('written');

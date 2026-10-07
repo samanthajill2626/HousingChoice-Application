@@ -1498,4 +1498,43 @@ describe.skipIf(!reachable)('listTourPage over toursRepo.queryListPhase on Dynam
     expect(pages.some((w) => w.page.items.length === 0 && w.page.nextCursor?.ph === 'd')).toBe(true);
     expect(pages.length).toBeGreaterThan(2);
   });
+
+  // Spec 9 (code review r1 SC-6): an UNFILTERED final page that ends exactly on
+  // the last row answers nextCursor null - the peek row finds nothing, so no
+  // phantom Load more - on real DynamoDB, not only the fake.
+  it('past, unfiltered: a page whose limit equals the dated row count ends exactly on the last row - ONE page, nextCursor null', async () => {
+    const filters: TourListFilters = { when: 'past', statuses: [], sort: 'latest' };
+    // Pinned after every dated row, so past reads all seven.
+    const pinnedNow = '2028-03-01T00:00:00.000Z';
+    const phases = planTourListPhases(filters, pinnedNow);
+    expect(phases).toHaveLength(1);
+    expect(phases.every(isUnfilteredPhase)).toBe(true);
+    const page = await listTourPage(
+      (phase, opts) => tours.queryListPhase(phase, opts),
+      { phases, filters, fingerprint: tourListFingerprint(filters), pinnedNow, limit: DATED.length },
+      TINY,
+    );
+    expect(page.items.map((t) => t.tourId)).toEqual([...DATED].reverse());
+    expect(page.nextCursor).toBeNull();
+    expect(page.calls).toBe(1);
+    expect(page.evaluated).toBeLessThanOrEqual(page.items.length + 1);
+  });
+
+  // Spec 9 (SC-6): every dated status pressed normalizes to NO status filter on
+  // phase D, so its pages are unfiltered and read at most the one peek row past
+  // the rows they return.
+  it('every dated status pressed: phase D carries no status filter, and each of its pages reads at most one row past the rows it returns', async () => {
+    const filters: TourListFilters = {
+      when: 'any',
+      statuses: ['scheduled', 'toured', 'no_show', 'canceled', 'closed'],
+      sort: 'latest',
+    };
+    const [d] = planTourListPhases(filters, PINNED);
+    expect(d?.kind).toBe('d');
+    expect(d).not.toHaveProperty('statusFilter');
+    const pages = await walk(filters);
+    expect(walkedIds(pages)).toEqual([...[...DATED].reverse(), 'tour-lp-u3']);
+    expect(pages.at(-1)?.page.nextCursor).toBeNull();
+    expect(expectPeekBound(pages, 'every dated status')).toBeGreaterThanOrEqual(3);
+  });
 });

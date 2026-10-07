@@ -6079,4 +6079,26 @@ describe('GET /api/tours/list', () => {
     expect(query).not.toHaveBeenCalled();
     query.mockRestore();
   });
+
+  it('14: when=range with offset-form bounds - exactly the rows in the window, both ends inclusive, latest first; and each one-sided form (SC-5)', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
+    // The window, as an Atlanta (EDT, -04:00) caller writes October: from
+    // 2026-10-01T04:00:00.000Z to 2026-11-01T03:59:59.999Z.
+    await world.toursRepo.create(tourInput('tl14-before', 'toured', '2026-10-01T03:59:59.999Z'));
+    await world.toursRepo.create(tourInput('tl14-in1', 'toured', '2026-10-01T04:00:00.000Z'));
+    await world.toursRepo.create(tourInput('tl14-in2', 'no_show', '2026-10-15T16:00:00.000Z'));
+    await world.toursRepo.create(tourInput('tl14-in3', 'scheduled', '2026-11-01T03:59:59.999Z'));
+    await world.toursRepo.create(tourInput('tl14-after', 'scheduled', '2026-11-01T04:00:00.000Z'));
+    await world.toursRepo.create(tourInput('tl14-r1', 'requested'));
+    const FROM = 'from=2026-10-01T00:00:00-04:00';
+    const TO = 'to=2026-10-31T23:59:59.999-04:00';
+
+    const both = await walkList(app, `when=range&${FROM}&${TO}`);
+    expect(both).toHaveLength(1);
+    expect(both[0]?.nextCursor).toBeNull();
+    expect(tourIds(both)).toEqual(['tl14-in3', 'tl14-in2', 'tl14-in1']);
+
+    expect(tourIds(await walkList(app, `when=range&${FROM}`))).toEqual(['tl14-after', 'tl14-in3', 'tl14-in2', 'tl14-in1']);
+    expect(tourIds(await walkList(app, `when=range&${TO}`))).toEqual(['tl14-in3', 'tl14-in2', 'tl14-in1', 'tl14-before']);
+  });
 });

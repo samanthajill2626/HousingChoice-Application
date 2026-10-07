@@ -83,7 +83,9 @@ export interface OrgRewriteService {
   }): Promise<{ lastRewrite: OrgRewriteState; skippedSpellings: SkippedSpelling[] }>;
   /** Re-queues the stored definition under a new id, after re-checking that
    *  `toName` (and a split's `agencyName`) still name entries of the expected
-   *  kind (else 409 org_rewrite_target_gone). */
+   *  kind, and that no from-text has since become (or become a name variant
+   *  of) the NAME of an entry its `fields` accept, other than `toName` - else
+   *  409 org_rewrite_target_gone. */
   runAgain(actor: string): Promise<{ lastRewrite: OrgRewriteState }>;
   /** For the job and the cleanup script. true = the lock is still the
    *  caller's (its heartbeat was written); false = it is not (another id holds
@@ -450,9 +452,11 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
         }
         if (isOrgRewriteRunning(last, Date.parse(at))) throw rewriteRunningError(last);
         if (last.status === 'done') throw new OrgHttpError(409, { error: 'org_rewrite_not_rerunnable' });
-        // Spec D11: a failed or stalled rewrite holds no lock, so its target may
-        // have been renamed, merged, deleted or re-kinded since. Re-run only
-        // while every name it writes is still an entry of the kind it expects.
+        // Spec D11: a failed or stalled rewrite holds no lock, so the list may
+        // have changed since. Re-run only while (1) every name it writes is
+        // still an entry of the kind it expects - its target may have been
+        // renamed, merged, deleted or re-kinded - and (2) every from-text is
+        // still OFF the list for its fields (build ruling B-2).
         const targetGone = (name: string | undefined, kind: OrgKind): boolean =>
           name === undefined || !current.entries.some((e) => e.name === name && e.kind === kind);
         const toKind = rewriteTargetKind(last);
@@ -462,6 +466,17 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
         ) {
           throw new OrgHttpError(409, { error: 'org_rewrite_target_gone' });
         }
+        // (2): a from-text that has since become - or become a name variant of
+        // - the NAME of an entry a stored field accepts would rewrite every
+        // record holding that now-listed name; a fresh action on the value is
+        // refused (D10). The one exception is the rewrite's own target: "Use
+        // <that entry>" settles a name variant and leaves exact holders alone.
+        const acceptedKinds = new Set(last.fields.flatMap((f) => KINDS_FOR_FIELD[f]));
+        const fromTexts = new Set(last.fromTexts.map(normalizeOrgText));
+        const fromTextListed = current.entries.some(
+          (e) => acceptedKinds.has(e.kind) && e.name !== last.toName && fromTexts.has(normalizeOrgText(e.name)),
+        );
+        if (fromTextListed) throw new OrgHttpError(409, { error: 'org_rewrite_target_gone' });
         // Failed, or running with a stale heartbeat: the SAME definition (its
         // `fields` included) under a NEW id, so a late delivery of the old run
         // finds the lock is not its own.

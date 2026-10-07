@@ -562,6 +562,74 @@ describe('OrgRewriteService.runAgain (spec D11)', () => {
     });
     expect((await clear.svc.runAgain('a')).lastRewrite).toMatchObject({ action: 'clear', fields: ['agency'], status: 'running' });
   });
+
+  // Build ruling B-2: a failed rewrite holds no lock, so a from-text may have
+  // become a listed name since. Re-running would rewrite every record holding
+  // that now-listed name, where a fresh action on the value is refused (D10).
+  const failedRewrite = (def: OrgRewriteState): OrgRewriteState => ({ ...def, status: 'failed', finishedAt: ORG_T0 });
+  const failedClear = (value: string): OrgRewriteState =>
+    failedRewrite(runningRewrite({ jobId: 'job-old', action: 'clear', field: 'agency', fromTexts: [value] }));
+  // Not on the starting list; added after the Clear failed.
+  const HOPE_HOUSE = orgEntry({ orgId: 'org-hope', kind: 'agency', name: 'Hope House' });
+
+  it('refuses (409 org_rewrite_target_gone) once a from-text was added since as an agency name', async () => {
+    const failed = failedClear('Hope House');
+    const { repo, svc, enqueued } = await rewriteService({ entries: [...ORG_FIXTURE, HOPE_HOUSE], lastRewrite: failed });
+    await expect(svc.runAgain('usr_admin')).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_target_gone' } });
+    expect(enqueued).toEqual([]);
+    expect((await repo.peek())?.lastRewrite).toEqual(failed);
+    expect((await repo.peek())?.version).toBe(1);
+  });
+
+  it('refuses (409 org_rewrite_target_gone) once a from-text became a NAME VARIANT of an added agency', async () => {
+    // "hope-house" differs from the added name only in case and punctuation.
+    const failed = failedClear('hope-house');
+    const { repo, svc, enqueued } = await rewriteService({ entries: [...ORG_FIXTURE, HOPE_HOUSE], lastRewrite: failed });
+    await expect(svc.runAgain('usr_admin')).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_target_gone' } });
+    expect(enqueued).toEqual([]);
+    expect((await repo.peek())?.lastRewrite).toEqual(failed);
+    expect((await repo.peek())?.version).toBe(1);
+  });
+
+  it('(PIN) re-runs a Use whose from-text is a variant of its OWN target, and a from-text that names only the other kind', async () => {
+    // "Use <that entry>" settles a name variant (spec D10): the pass leaves the exact holders alone.
+    const own = await rewriteService({
+      lastRewrite: failedRewrite(
+        runningRewrite({
+          jobId: 'job-old',
+          action: 'use',
+          field: 'housingAuthority',
+          fromTexts: ['atlanta housing authority'],
+          toName: ATLANTA.name,
+        }),
+      ),
+    });
+    expect((await own.svc.runAgain('usr_admin2')).lastRewrite).toEqual({
+      jobId: 'id-1',
+      action: 'use',
+      fromTexts: ['atlanta housing authority'],
+      field: 'housingAuthority',
+      fields: ['housingAuthority'],
+      toName: ATLANTA.name,
+      status: 'running',
+      heartbeatAt: T1,
+      startedAt: T1,
+      startedBy: 'usr_admin2',
+    });
+    expect(own.enqueued).toEqual([{ jobName: 'org.rewrite', payload: { jobId: 'id-1' } }]);
+    // A HOUSING AUTHORITY named "Hope House" does not put the agency value on the list (D3).
+    const otherKind = await rewriteService({
+      entries: [...ORG_FIXTURE, { ...HOPE_HOUSE, kind: 'housing_authority' as const }],
+      lastRewrite: failedClear('Hope House'),
+    });
+    expect((await otherKind.svc.runAgain('a')).lastRewrite).toMatchObject({
+      jobId: 'id-1',
+      action: 'clear',
+      fromTexts: ['Hope House'],
+      status: 'running',
+    });
+    expect(otherKind.enqueued).toEqual([{ jobName: 'org.rewrite', payload: { jobId: 'id-1' } }]);
+  });
 });
 
 describe('OrgRewriteService.acquireForCleanup (spec section 8)', () => {

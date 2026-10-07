@@ -269,6 +269,9 @@ function makeSendFakes(
     stampGroupParticipation: async () => {
       throw new Error('stampGroupParticipation: not used in this suite');
     },
+    rewriteOrgFields: async () => {
+      throw new Error('rewriteOrgFields: not used in this suite');
+    },
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {

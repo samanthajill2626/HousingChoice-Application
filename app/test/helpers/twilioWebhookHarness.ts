@@ -2487,6 +2487,28 @@ export function createFakeWorld(): FakeWorld {
       if (!target) return;
       target.lastSeenAt = at;
     },
+    // Organization-name rewrite (plan 3.7): mirror the real conditional
+    // UpdateItem - '' refused for the GSI key, both guards checked BEFORE
+    // anything is applied, 'skipped' when either is lost or the contact is
+    // missing, nothing else touched (no classification fence).
+    async rewriteOrgFields(contactId, expected, next) {
+      if (next.housingAuthority === '') throw new EmptyIndexKeyError('housingAuthority');
+      if (next.housingAuthority === undefined && next.agency === undefined) {
+        throw new Error('rewriteOrgFields: nothing to write');
+      }
+      const contact = contacts.find((c) => c.contactId === contactId);
+      if (!contact) return 'skipped';
+      for (const attr of ['housingAuthority', 'agency'] as const) {
+        const want = expected[attr];
+        if (want === undefined) continue;
+        const have = contact[attr];
+        if (want === null ? have !== undefined : have !== want) return 'skipped';
+      }
+      if (next.housingAuthority === null) delete contact['housingAuthority'];
+      else if (next.housingAuthority !== undefined) contact['housingAuthority'] = next.housingAuthority;
+      if (next.agency !== undefined) contact['agency'] = next.agency;
+      return 'written';
+    },
   };
 
   const auditRepo: AuditRepo = {

@@ -5,13 +5,43 @@
 import { useState } from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AudienceFilter } from '../../api/index.js';
 import { AudienceFilters } from './AudienceFilters.js';
+
+// The picker's list (spec 2026-10-06 D7) - the hook is mocked so each test
+// picks its own list state.
+const useOrgList = vi.fn();
+vi.mock('../orgs/useOrgList.js', () => ({ useOrgList: () => useOrgList() }));
+
+const ATLANTA = {
+  orgId: 'o-atl',
+  kind: 'housing_authority',
+  name: 'Atlanta Housing Authority',
+  spellings: ['AHA'],
+  createdAt: '2026-10-06T00:00:00.000Z',
+  createdBy: 'system',
+  updatedAt: '2026-10-06T00:00:00.000Z',
+  updatedBy: 'system',
+};
+const LOADED = {
+  entries: [ATLANTA],
+  version: 1,
+  lastRewrite: undefined,
+  loading: false,
+  error: false,
+  reload: vi.fn(),
+};
+
+beforeEach(() => {
+  useOrgList.mockReset();
+  useOrgList.mockReturnValue(LOADED);
+});
 
 /** Controlled harness — mirrors the composer owning the filter state so chip
  *  toggles round-trip through onChange. */
 function Harness({
+  authorityError,
   propertyBeds,
   reachCount,
   reachPending = false,
@@ -23,6 +53,7 @@ function Harness({
   reachPending?: boolean;
   truncated?: boolean;
   onChangeSpy?: (f: AudienceFilter) => void;
+  authorityError?: string;
 }): React.JSX.Element {
   const [filter, setFilter] = useState<AudienceFilter>({ contact_type: 'tenant' });
   return (
@@ -36,6 +67,7 @@ function Harness({
       {...(reachCount !== undefined && { reachCount })}
       reachPending={reachPending}
       truncated={truncated}
+      {...(authorityError !== undefined && { authorityError })}
     />
   );
 }
@@ -71,12 +103,45 @@ describe('AudienceFilters — voucher size pre-fill + override', () => {
     expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant' });
   });
 
-  it('edits the housing authority', async () => {
+  it('sets the housing authority only by picking a list name (names and spellings match)', async () => {
     const u = userEvent.setup();
     const onChangeSpy = vi.fn();
     render(<Harness onChangeSpy={onChangeSpy} />);
-    await u.type(screen.getByLabelText('Housing authority'), 'A');
-    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', housing_authority: 'A' });
+    await u.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'AHA');
+    // Typing never commits (each filter change recreates the draft).
+    expect(onChangeSpy).not.toHaveBeenCalled();
+    await u.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
+    expect(onChangeSpy).toHaveBeenLastCalledWith({
+      contact_type: 'tenant',
+      housing_authority: 'Atlanta Housing Authority',
+    });
+    await u.click(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' }));
+    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant' });
+  });
+
+  it('never offers to add a name (spec D7)', async () => {
+    const u = userEvent.setup();
+    render(<Harness />);
+    await u.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'Nowhere Board');
+    expect(screen.queryByRole('option')).not.toBeInTheDocument();
+  });
+
+  it('a list that fails to load says so and the filter cannot be set; voucher size still works', async () => {
+    const u = userEvent.setup();
+    const onChangeSpy = vi.fn();
+    useOrgList.mockReturnValue({ ...LOADED, entries: [], version: null, error: true });
+    render(<Harness onChangeSpy={onChangeSpy} />);
+    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load housing authorities");
+    expect(screen.getByRole('combobox', { name: 'Housing authority' })).toBeDisabled();
+    await u.click(screen.getByRole('button', { name: '2-BR' }));
+    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', bedroomSize: 2 });
+  });
+
+  it("shows the composer's message under the picker", () => {
+    render(<Harness authorityError="That housing authority is no longer on the list - pick it again" />);
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'That housing authority is no longer on the list - pick it again',
+    );
   });
 });
 

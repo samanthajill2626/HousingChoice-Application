@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   getAllContacts: vi.fn(),
   createBroadcast: vi.fn(),
   deleteBroadcast: vi.fn(),
+  getOrgList: vi.fn(),
 }));
 vi.mock('../../api/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../api/index.js')>()),
@@ -55,6 +56,7 @@ beforeEach(() => {
     flyerUrl: 'https://example.test/p/unit-0001?cta=text',
   });
   api.deleteBroadcast.mockResolvedValue({ deleted: true });
+  api.getOrgList.mockResolvedValue({ version: 1, entries: [] });
 });
 afterEach(() => vi.resetAllMocks());
 

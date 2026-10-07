@@ -1,6 +1,6 @@
 // AudienceFilters — the extensible audience-filter framework (the composer's
 // centerpiece). v1 ships two criteria: a prominent VoucherSize chip control
-// (bedroomSize 0..4) and a HousingAuthority text input; the disabled "+ Add
+// (bedroomSize 0..4) and a HousingAuthority picker; the disabled "+ Add
 // filter" seam is the placeholder for future criteria (neighborhood,
 // accessibility…). The always-on hard fences (opted-out - unreachable) are noted
 // as informational text (the server enforces them — never sent by the client).
@@ -11,6 +11,9 @@
 // 2-BR home may suit other sizes).
 import { useId } from 'react';
 import type { AudienceFilter } from '../../api/index.js';
+import { OrgPicker } from '../orgs/OrgPicker.js';
+import { HOUSING_AUTHORITY_KINDS, orgListLoadError } from '../orgs/orgCopy.js';
+import { useOrgList } from '../orgs/useOrgList.js';
 import {
   VOUCHER_SIZE_CHOICES,
   bedroomPhrase,
@@ -31,6 +34,9 @@ export interface AudienceFiltersProps {
   reachPending: boolean;
   /** True when the reach estimate hit the page/recipient cap (incomplete). */
   truncated: boolean;
+  /** A message for the housing authority filter, shown under its picker - the
+   *  composer's "no longer on the list" after a 422 (spec 2026-10-06 D7). */
+  authorityError?: string | null;
 }
 
 export function AudienceFilters({
@@ -40,9 +46,11 @@ export function AudienceFilters({
   reachCount,
   reachPending,
   truncated,
+  authorityError = null,
 }: AudienceFiltersProps): React.JSX.Element {
   const uid = useId();
-  const authorityId = `${uid}-authority`;
+  // The housing authority list behind the picker (spec 2026-10-06 D7).
+  const orgList = useOrgList();
 
   function pickSize(value: number): void {
     // Toggle: re-clicking the active chip clears the size narrower.
@@ -52,10 +60,11 @@ export function AudienceFilters({
     onChange(next);
   }
 
-  function setAuthority(raw: string): void {
+  /** A pick (an exact list name) or a removed chip (''): the only commits. */
+  function setAuthority(name: string): void {
     const next: AudienceFilter = { contact_type: 'tenant' };
     if (filter.bedroomSize !== undefined) next.bedroomSize = filter.bedroomSize;
-    if (raw.trim().length > 0) next.housing_authority = raw;
+    if (name !== '') next.housing_authority = name;
     onChange(next);
   }
 
@@ -101,19 +110,22 @@ export function AudienceFilters({
         ) : null}
       </div>
 
-      {/* Housing authority. */}
+      {/* Housing authority (spec 2026-10-06 D7): a picker over the stored
+          list - names and spellings, NO add option. Only a pick or a removed
+          chip changes the filter, so typing never recreates the draft. A list
+          that failed to load leaves this filter unsettable; the others work. */}
       <div className={styles.criterion}>
-        <label className={styles.criterionLabel} htmlFor={authorityId}>
-          Housing authority
-        </label>
-        <input
-          id={authorityId}
-          type="text"
-          className={styles.input}
+        <OrgPicker
+          label="Housing authority"
+          kinds={HOUSING_AUTHORITY_KINDS}
+          entries={orgList.entries}
+          loading={orgList.loading}
+          disabled={orgList.error}
           value={filter.housing_authority ?? ''}
+          onChange={setAuthority}
+          error={authorityError ?? (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)}
           placeholder="Any housing authority"
-          autoComplete="off"
-          onChange={(e) => setAuthority(e.target.value)}
+          labelClassName={styles.criterionLabel}
         />
       </div>
 

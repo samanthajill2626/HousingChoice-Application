@@ -17,6 +17,8 @@ const getContact = vi.fn();
 const createBroadcast = vi.fn();
 const deleteBroadcast = vi.fn();
 const previewBroadcast = vi.fn();
+// AudienceFilters' housing authority picker reads the list (spec 2026-10-06 D7).
+const getOrgList = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -29,6 +31,7 @@ vi.mock('../../api/index.js', async () => {
     createBroadcast: (...a: unknown[]) => createBroadcast(...a),
     deleteBroadcast: (...a: unknown[]) => deleteBroadcast(...a),
     previewBroadcast: (...a: unknown[]) => previewBroadcast(...a),
+    getOrgList: (...a: unknown[]) => getOrgList(...a),
     useEventStream: (_h: EventStreamHandlers) => {},
   };
 });
@@ -85,6 +88,7 @@ beforeEach(() => {
     .mockResolvedValue({ broadcastId: 'draft_1', status: 'draft', estimatedCount: 5, truncated: false });
   deleteBroadcast.mockReset().mockResolvedValue({ deleted: true });
   previewBroadcast.mockReset();
+  getOrgList.mockReset().mockResolvedValue({ version: 1, entries: [] });
 });
 afterEach(() => vi.restoreAllMocks());
 

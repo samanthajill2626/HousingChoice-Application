@@ -301,6 +301,58 @@ describe('OrgNamesService - list writes (plan 3.4, 3.5)', () => {
     expect((await repo.peek())?.version).toBe(1);
   });
 
+  // Review R1-ADV-BE-1 / R1-ADV-FE-3: a rewrite pass matches its from-texts
+  // NORMALIZED and has no list to test "on the list" against, so a name added
+  // while it runs that is one of them would be rewritten away - together with
+  // every record that holds it. add() waits for exactly that rewrite.
+  it('add() refuses 409 org_rewrite_running when a running rewrite has the new name among its from-texts, and writes nothing', async () => {
+    const clearing = runningRewrite({ action: 'clear', field: 'housingAuthority', fromTexts: ['Metro HA'], heartbeatAt: T1 });
+    const { repo, svc } = await namesService({ lastRewrite: clearing });
+    await expect(svc.add({ kind: 'housing_authority', name: 'Metro HA', actor: 'usr_va' })).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_rewrite_running', lastRewrite: clearing },
+    });
+    // Compared as the pass compares (D4): case and punctuation do not matter.
+    await expect(svc.add({ kind: 'housing_authority', name: 'metro-ha', actor: 'usr_va' })).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_rewrite_running' },
+    });
+    expect((await repo.peek())?.version).toBe(1);
+  });
+
+  it('(PIN) add() of any other name goes ahead while that rewrite runs - adds are not rewrites (D10)', async () => {
+    const clearing = runningRewrite({ action: 'clear', field: 'housingAuthority', fromTexts: ['Metro HA'], heartbeatAt: T1 });
+    const { repo, svc } = await namesService({ lastRewrite: clearing });
+    const entry = await svc.add({ kind: 'housing_authority', name: 'Fulton County Housing Authority', actor: 'usr_va' });
+    expect(entry.name).toBe('Fulton County Housing Authority');
+    const stored = await repo.peek();
+    expect(stored?.version).toBe(2);
+    expect(stored?.lastRewrite).toEqual(clearing);
+  });
+
+  it('(PIN) add() of that same name goes ahead once the rewrite no longer holds the lock - finished, or stale', async () => {
+    for (const last of [
+      runningRewrite({
+        action: 'clear',
+        field: 'housingAuthority',
+        fromTexts: ['Metro HA'],
+        status: 'done',
+        heartbeatAt: T1,
+        finishedAt: T1,
+      }),
+      // No heartbeat for 16 minutes: the lock is free (D11).
+      runningRewrite({
+        action: 'clear',
+        field: 'housingAuthority',
+        fromTexts: ['Metro HA'],
+        heartbeatAt: '2026-10-06T11:44:00.000Z',
+      }),
+    ]) {
+      const { svc } = await namesService({ lastRewrite: last });
+      expect((await svc.add({ kind: 'housing_authority', name: 'Metro HA', actor: 'usr_va' })).name).toBe('Metro HA');
+    }
+  });
+
   it('updateNotes() sets or (blank) removes the notes; over 500 characters and unknown ids are refused', async () => {
     const { svc } = await namesService();
     const noted = await svc.updateNotes('org-dca', ' Runs vouchers statewide. ', 'usr_va');

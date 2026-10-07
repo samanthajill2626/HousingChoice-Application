@@ -35,8 +35,9 @@
 // PRECONDITION for callers: no from-text may normalize equal to the exact
 // NAME of an entry of the field's kind other than `toName` - the pass has no
 // list to test "on the list" against, and such a value would be rewritten too
-// (services/orgRewrite.ts refuses those definitions; the cleanup script must
-// keep to the same rule).
+// (services/orgRewrite.ts refuses those definitions, and OrgNamesService.add
+// refuses a new name that is a running rewrite's from-text; the cleanup script
+// must keep to the same rule).
 import { formatAddress } from '../lib/address.js';
 import { contactDisplayName } from '../lib/contactName.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';

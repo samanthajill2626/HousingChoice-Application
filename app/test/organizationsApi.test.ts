@@ -198,6 +198,23 @@ describe('POST /api/organizations - add, for everyone (spec D6, D10)', () => {
     expect((await va.post('', { kind: 'agency' })).status).toBe(400);
   });
 
+  it('409 org_rewrite_running while a running rewrite has the name among its from-texts (review R1-ADV-BE-1)', async () => {
+    const h = makeWebhookHarness();
+    const clearing = runningRewrite({
+      action: 'clear',
+      field: 'housingAuthority',
+      fromTexts: ['Metro HA'],
+      heartbeatAt: new Date().toISOString(),
+    });
+    await h.world.orgListRepo.putForSeed(orgListItem(undefined, { lastRewrite: clearing }));
+    const va = as(h, TEST_SESSION_COOKIE);
+    const refused = await va.post('', { kind: 'housing_authority', name: 'Metro HA' });
+    expect(refused.status).toBe(409);
+    expect(refused.body).toEqual({ error: 'org_rewrite_running', lastRewrite: clearing });
+    // Any other name is added as usual while that rewrite runs.
+    expect((await va.post('', { kind: 'housing_authority', name: 'Fulton County Housing Authority' })).status).toBe(201);
+  });
+
   it('maps a busy or full list store to 503 org_list_busy and 409 org_list_full', async () => {
     const h = await harness();
     vi.spyOn(h.world.orgListRepo, 'mutate')

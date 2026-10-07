@@ -167,6 +167,21 @@ function refuseWhileRewriteRuns(item: OrgListItem): void {
   if (last !== undefined && isOrgRewriteRunning(last, Date.now())) throw rewriteRunningError(last);
 }
 
+/**
+ * Add waits ONLY for a running rewrite whose from-texts include the new name,
+ * compared normalized as the pass compares (D4): the pass has no list to test
+ * "on the list" against, so it would rewrite away the brand-new exact name and
+ * every record holding it (code review R1-ADV-BE-1). Any other add goes ahead -
+ * adds are not rewrites, and D10 lets everyone add. The cleanup's lock carries
+ * no from-texts.
+ */
+function refuseWhileRewritingName(item: OrgListItem, name: string): void {
+  const last = item.lastRewrite;
+  if (last === undefined || !isOrgRewriteRunning(last, Date.now())) return;
+  const n = normalizeOrgText(name);
+  if (last.fromTexts.some((t) => normalizeOrgText(t) === n)) throw rewriteRunningError(last);
+}
+
 export interface OrgCheckResult {
   match?: OrgRef;
   candidates: OrgRef[];
@@ -254,6 +269,8 @@ export function createOrgNamesService(deps: { orgListRepo?: OrgListRepo; logger?
       const entry = await list.mutate((current) => {
         const problem = checkNewOrgName(current.entries, trimmedName);
         if (problem !== null) throw nameProblemError(problem);
+        // Inside the mutate: the lock check and the write see ONE item.
+        refuseWhileRewritingName(current, trimmedName);
         const at = new Date().toISOString();
         const created: OrgEntry = {
           orgId,

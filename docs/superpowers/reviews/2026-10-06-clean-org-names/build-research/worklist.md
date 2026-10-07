@@ -274,3 +274,43 @@ react-hooks/refs; `BroadcastComposer.tsx` react-hooks/set-state-in-effect x4;
 - e2e: the S14 file list is complete; the 17 specs left on
   `['atlanta_housing']` resolve through the starting-list spelling `Atlanta
   Housing` and never read the value back (RF).
+
+## Build-time rulings (orchestrator, during Phase 2)
+
+### B-1 (U3 finding 1) - updateSpellings hid the entry's own spellings from the compound test - FIX now (unit U3f)
+
+`app/src/services/orgNames.ts` `updateSpellings` checked each NEW spelling
+against a probe of the entry with NO spellings, so the D4 compound test could
+not see the entry's own spellings: "AHA DCA" was accepted as a DCA spelling
+(D12 refuses compound spellings; POST /check calls it compound), and "Atlanta
+Housing Authority AHA" was wrongly refused as compound for Atlanta (D4 calls
+it not compound). Fix: check each new spelling against the entry as it will
+be - the probe carries the request's OTHER trimmed, de-duplicated spellings.
+
+### B-2 (U3 finding 2) - Run again could rewrite records that now hold a listed name - FIX now (unit U3f)
+
+`runAgain` re-checked only the target names (spec D11's literal text). A
+failed value action whose from-text has since become a listed name (e.g. a
+failed Clear of "Mercy Care", then "Mercy Care" added as an agency) re-ran
+and would rewrite every record holding that now-valid name - a fresh action
+on the same value is refused. Fix: Run again also refuses 409
+`org_rewrite_target_gone` when any stored from-text normalizes equal to the
+NAME of an entry whose kind one of the stored `fields` accepts, other than
+the rewrite's own target (`toName`). Spec intent: D11 "re-running a
+definition is safe" assumes the from-text is still off the list. S11 Task
+11.3: the copy for `org_rewrite_target_gone` becomes "The list changed since
+this update started, so it cannot run again - start a new one from the
+list." (one code, both cases).
+
+### Accepted minors (no change; named for the review and the handback)
+
+- U1: `checkScalarWrite` treats a value as unchanged only when the TRIMMED
+  new text equals the stored value as stored. Requests are trimmed app-wide
+  (trimJsonBody) and the dashboard never re-sends an unchanged value, so a
+  padded legacy stored value is "changed" only for an API caller re-sending
+  it - it is then checked like any new value.
+- U2: `planContactRewrite` (`app/src/services/orgRecords.ts`) counts a
+  whitespace-only stored agency / housing authority as holding another value,
+  so Move/Split count such a record as a conflict (spec D10 says absent or
+  ''). Legacy pre-trim data only; the record keeps its value and stays in
+  "Not on the list", settleable on its page.

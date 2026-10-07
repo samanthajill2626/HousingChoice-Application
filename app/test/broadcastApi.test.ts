@@ -2068,4 +2068,105 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(res.status).toBe(200);
     });
   });
+
+  // --- Organization names on the housing authority filter (spec 2026-10-06:
+  // D5 at draft create; D7 at preview and at the filter-resolving send) -----
+  describe('organization names on the housing authority filter (spec D5, D7)', () => {
+    /** A stored audience filter holding `housing_authority` exactly as written. */
+    const filterFor = (housing_authority: string): BroadcastItem['audience_filter'] => ({
+      contact_type: 'tenant',
+      housing_authority,
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    });
+
+    function postDraft(app: import('express').Express, housingAuthority: string) {
+      return request(app)
+        .post('/api/broadcasts')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({
+          unitId: 'unit-1',
+          body_template: 'hi',
+          audience_filter: { contact_type: 'tenant', housing_authority: housingAuthority },
+        });
+    }
+
+    /** The names of a 422's candidate / otherKind refs, sorted (order is not the contract). */
+    function names(refs: Array<{ name: string }>): string[] {
+      return refs.map((r) => r.name).sort();
+    }
+
+    it('POST stores an exact list name, and the 201 echoes the stored filter', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postDraft(app, 'Atlanta Housing Authority');
+      expect(res.status).toBe(201);
+      expect(res.body.audience_filter).toEqual(filterFor('Atlanta Housing Authority'));
+      expect(world.broadcasts.get(res.body.broadcastId)?.audience_filter).toEqual(
+        filterFor('Atlanta Housing Authority'),
+      );
+    });
+
+    it('POST stores a unique spelling as the exact name, and the estimate counts holders of the NAME', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-org-name-1', housingAuthority: 'Atlanta Housing Authority' } as Partial<ContactItem>);
+      seedTenant(world, { contactId: 'c-org-name-2', housingAuthority: 'Atlanta Housing Authority' } as Partial<ContactItem>);
+      seedTenant(world, { contactId: 'c-org-slug', housingAuthority: 'atlanta_housing' } as Partial<ContactItem>);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postDraft(app, 'atlanta_housing');
+      expect(res.status).toBe(201);
+      expect(res.body.audience_filter.housing_authority).toBe('Atlanta Housing Authority');
+      // The estimate resolved the NAME (two holders), not the slug (one holder).
+      expect(res.body.estimatedCount).toBe(2);
+      expect(world.broadcasts.get(res.body.broadcastId)?.audience_filter.housing_authority).toBe(
+        'Atlanta Housing Authority',
+      );
+    });
+
+    it('POST refuses an ambiguous spelling: 422 (field audience_filter), no row, no audit', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postDraft(app, 'AHA');
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({
+        error: 'org_not_on_list',
+        field: 'audience_filter',
+        text: 'AHA',
+        close: [],
+      });
+      expect(names(res.body.candidates)).toEqual(['Atlanta Housing Authority', 'Augusta Housing Authority']);
+      expect(world.broadcasts.size).toBe(0);
+      expect(world.auditEvents.filter((e) => e.event_type === 'broadcast_created')).toHaveLength(0);
+    });
+
+    it('POST refuses an agency name, naming it in otherKind', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postDraft(app, 'Step Up');
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({ error: 'org_not_on_list', field: 'audience_filter', candidates: [] });
+      expect(names(res.body.otherKind)).toEqual(['Step Up']);
+      expect(world.broadcasts.size).toBe(0);
+    });
+
+    it('(PIN) every 400 and the unit 404 still come before the 422', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const create = (body: Record<string, unknown>) =>
+        request(app)
+          .post('/api/broadcasts')
+          .set('x-origin-verify', ORIGIN_SECRET)
+          .set('cookie', TEST_SESSION_COOKIE)
+          .send(body);
+      const filter = { contact_type: 'tenant', housing_authority: 'AHA' };
+      const noTemplate = await create({ audience_filter: filter });
+      expect(noTemplate.status).toBe(400);
+      const badSeeds = await create({ body_template: 'hi', audience_filter: filter, seedContactIds: 'c-1' });
+      expect(badSeeds.status).toBe(400);
+      const badUnit = await create({ unitId: 'unit-nope', body_template: 'hi', audience_filter: filter });
+      expect(badUnit.status).toBe(404);
+      expect(badUnit.body).toEqual({ error: 'unit_not_found' });
+    });
+  });
 });

@@ -15,6 +15,11 @@
 // ALWAYS excluded. The send fans out through the SHARED A2P throttle (the
 // broadcast.send job + worker a2pBucket).
 //
+// Organization names (spec 2026-10-06 D5): POST answers 422 org_not_on_list
+// (field `audience_filter`) when audience_filter.housing_authority is not a
+// housing authority on the stored org list; a unique spelling is stored as the
+// entry's exact name, and the 201 echoes the stored audience_filter.
+//
 // PII (doc §9): the preview RESPONSE carries phones (authed/internal — the
 // operator needs to see who's in the audience), but LOG LINES never do — IDs/
 // counts only. Bodies/templates are never logged.
@@ -63,6 +68,7 @@ import {
   type ClassifiedRecipient,
 } from '../services/shareRecipientState.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
+import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
 
 /** The lifecycle statuses ?status= may filter on (byStatus GSI partition). */
 const BROADCAST_STATUSES: ReadonlySet<string> = new Set<BroadcastStatus>([
@@ -95,6 +101,12 @@ export interface BroadcastsRouterDeps {
   sendAttemptsRepo?: SendAttemptsRepo;
   auditRepo?: AuditRepo;
   audienceResolutionService?: AudienceResolutionService;
+  /**
+   * Organization names (spec 2026-10-06): the housing authority filter is
+   * checked against the stored org list. Built ONCE in createApiRouter and
+   * threaded down.
+   */
+  orgNamesService?: OrgNamesService;
   events?: EventBus;
 }
 
@@ -395,6 +407,7 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const resolveAudience =
     deps.audienceResolutionService ?? createAudienceResolutionService({ logger: deps.logger });
+  const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
   // NOTE: broadcast.updated SSE events are emitted from the broadcast.send job
   // (on completion) and the delivery-callback rollup — NOT this router — so the
   // `events` dep is accepted for API symmetry but not used here.
@@ -500,6 +513,23 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     const audienceMode: BroadcastAudienceMode =
       seedContactIds !== undefined && !rawFilterProvided ? 'seeds_only' : 'filter';
 
+    // ORGANIZATION NAMES (spec 2026-10-06 D5): a housing authority filter must
+    // name a housing authority on the stored org list. Checked AFTER every 400
+    // shape check and the unit 404 above, and BEFORE the estimate, so the
+    // estimate and the stored row both use the entry's exact name (a unique
+    // spelling is stored as the name). Anything else is a 422 (field
+    // `audience_filter`) with no row and no audit. A seeds_only draft parsed
+    // `{}` and never carries a housing authority.
+    if (filter.housing_authority !== undefined) {
+      const check = await orgNames.checkScalar('audience_filter', filter.housing_authority, undefined);
+      if (!check.ok) {
+        log.info({ actor }, 'broadcast draft refused: housing authority filter not on the list');
+        res.status(422).json(check.error);
+        return;
+      }
+      if (check.value !== null) filter.housing_authority = check.value;
+    }
+
     // Estimate the audience now (save-for-later shows the operator the reach).
     const seeds =
       seedContactIds !== undefined
@@ -545,6 +575,9 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       broadcastId: created.broadcastId,
       status: 'draft',
       estimatedCount: estimatedAudience,
+      // Spec 2026-10-06 D5 (ruling R2 decision 5): echo the STORED filter, so a
+      // caller that sent a spelling sees the list name it was stored as.
+      audience_filter: created.audience_filter,
       // FIX 3+4: surface whether the estimate was truncated (page cap hit) so
       // the operator knows the draft's reach is incomplete before sending.
       truncated,

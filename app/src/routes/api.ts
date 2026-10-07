@@ -1096,6 +1096,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.audienceResolutionService !== undefined && {
         audienceResolutionService: deps.audienceResolutionService,
       }),
+      // Organization names (spec 2026-10-06 D5, D7): the ONE service built above.
+      orgNamesService: orgNames,
       auditRepo: audit,
       events,
     }),

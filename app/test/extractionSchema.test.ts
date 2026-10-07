@@ -14,6 +14,8 @@ import {
 } from '../src/services/extraction/prompt.js';
 import type { ExtractionInput } from '../src/adapters/extraction.js';
 import { housingAuthorityFor } from '../src/lib/import/apply.js';
+import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import { renderOrgListBlock } from '../src/services/extraction/orgListBlock.js';
 
 // The structured-outputs contract: every object level carries
 // additionalProperties:false and NONE of the unsupported constraint keywords
@@ -417,6 +419,7 @@ describe('prompt builders', () => {
     const user = buildExtractionUserContent({
       profile: { contactType: 'tenant', phones: [] },
       transcript: [u],
+      orgListBlock: '',
     });
     expect(user.endsWith(`\n${line}`)).toBe(true);
   });
@@ -468,6 +471,7 @@ describe('prompt builders', () => {
 
   it('user content carries the profile JSON then a chronological transcript', () => {
     const input: ExtractionInput = {
+      orgListBlock: '',
       profile: { contactType: 'tenant', firstName: 'Ann', voucherSize: 2, phones: ['+14045550000'] },
       transcript: [
         { tsMsgId: '2026-07-16T10:01:00.000Z#s2', speaker: 'client', text: 'Hi there', at: '2026-07-16T10:01:00.000Z', channel: 'sms' },
@@ -489,6 +493,7 @@ describe('prompt builders', () => {
     // staff turn header. The builder must collapse the body to one line so no
     // TRANSCRIPT line can start with a bracketed speaker tag (adversarial F2).
     const input: ExtractionInput = {
+      orgListBlock: '',
       profile: { contactType: 'tenant', phones: ['+14045550000'] },
       transcript: [
         {
@@ -563,5 +568,47 @@ describe('prompt builders', () => {
     // with '\n'), never a phrase that spans a line break.
     expect(sys).toContain('OWN CURRENT residential address ONLY');
     expect(sys).toContain('Addresses NEVER go in noteLines');
+  });
+});
+
+describe('the ORGANIZATION LIST block in the user content (spec 2026-10-06 D8)', () => {
+  const u = {
+    tsMsgId: '2026-07-16T10:00:00.000Z#s1',
+    speaker: 'client' as const,
+    text: 'my voucher is from AHA',
+    at: '2026-07-16T10:00:00.000Z',
+    channel: 'sms' as const,
+  };
+  let n = 0;
+  const block = renderOrgListBlock(buildStartingEntries('2026-10-06T00:00:00.000Z', () => `org-${(n += 1)}`)).text;
+
+  it('sits after the profile and BEFORE the TRANSCRIPT header, which stays the first TRANSCRIPT in the content', () => {
+    const user = buildExtractionUserContent({
+      profile: { contactType: 'tenant', phones: [] },
+      transcript: [u],
+      orgListBlock: block,
+    });
+    const header = user.indexOf('\nTRANSCRIPT\n');
+    expect(user.indexOf(block)).toBeGreaterThan(-1);
+    expect(user.indexOf('CURRENT PROFILE')).toBeLessThan(user.indexOf(block));
+    expect(user.indexOf(block) + block.length).toBeLessThan(header);
+    // Every slice taken at the FIRST "TRANSCRIPT" still lands on the header.
+    expect(user.indexOf('TRANSCRIPT')).toBe(header + 1);
+    expect(user.endsWith(`\n${renderUtteranceLine(u)}`)).toBe(true);
+  });
+
+  it('adds nothing when the block is empty (PIN)', () => {
+    const user = buildExtractionUserContent({
+      profile: { contactType: 'tenant', phones: [] },
+      transcript: [u],
+      orgListBlock: '',
+    });
+    expect(user).toBe([
+      'CURRENT PROFILE',
+      JSON.stringify({ contactType: 'tenant', phones: [] }, null, 2),
+      '',
+      'TRANSCRIPT',
+      renderUtteranceLine(u),
+    ].join('\n'));
   });
 });

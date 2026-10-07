@@ -583,7 +583,7 @@ async function processRow(
   const profile = toProfile(contact);
   const profileFields = draftPiece(logger, draft, () => profileFieldNames(profile));
   if (profileFields !== undefined) draft.profileFieldsPopulated = profileFields;
-  const call = await driver.extract({ transcript, profile });
+  const call = await driver.extract({ transcript, profile, orgListBlock: orgBlock.text });
   draft.driver = call.meta.driver;
   if (call.meta.model !== undefined) draft.model = call.meta.model;
   if (call.meta.promptFingerprint !== undefined) draft.promptFingerprint = call.meta.promptFingerprint;

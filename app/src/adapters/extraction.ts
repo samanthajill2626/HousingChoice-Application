@@ -113,6 +113,13 @@ export interface ExtractionProfileSnapshot {
 export interface ExtractionInput {
   transcript: TranscriptUtterance[];
   profile: ExtractionProfileSnapshot;
+  /**
+   * The rendered ORGANIZATION LIST block (spec 2026-10-06 D8;
+   * services/extraction/orgListBlock.ts), placed in the user content BEFORE
+   * the TRANSCRIPT header. The job renders it once per run from the stored
+   * list; '' renders no block. Drivers never log it.
+   */
+  orgListBlock: string;
 }
 
 /** Everything about the CALL, independent of whether it succeeded. */

@@ -1879,3 +1879,13 @@ describe('runDueExtractions - the organization list (spec 2026-10-06 D8)', () =>
     expect(warn.mock.calls.filter((call) => String(call[1]).includes('organization list'))).toHaveLength(0);
   });
 });
+
+describe('runDueExtractions - the block reaches the model (spec 2026-10-06 D8)', () => {
+  it('hands the rendered organization list block to the driver', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen[0]!.orgListBlock).toBe(renderOrgListBlock(ORG_ENTRIES).text);
+  });
+});

@@ -1,9 +1,10 @@
 // System + user prompt builders for conversation fact extraction.
 //
 // The system prompt is the model contract; keep it verbatim and ASCII-only.
-// The user content lays out the CURRENT PROFILE (what we already know) then a
-// chronological TRANSCRIPT, so the model can reconcile new facts against known
-// ones per the reconciliation rules below.
+// The user content lays out the CURRENT PROFILE (what we already know), then
+// the ORGANIZATION LIST block (spec 2026-10-06 D8), then a chronological
+// TRANSCRIPT, so the model can reconcile new facts against known ones per the
+// reconciliation rules below.
 import { createHash } from 'node:crypto';
 import type { ExtractionInput, TranscriptUtterance } from '../../adapters/extraction.js';
 import { EXTRACTION_SCHEMA, HOUSING_AUTHORITY_VOCAB } from './schema.js';
@@ -175,5 +176,9 @@ export function buildExtractionUserContent(input: ExtractionInput): string {
   // preserved - which is what makes the per-message hash in runWindow.ts match.
   const ordered = [...input.transcript].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
   const lines = ordered.map(renderUtteranceLine);
-  return ['CURRENT PROFILE', profileJson, '', 'TRANSCRIPT', ...lines].join('\n');
+  // Spec 2026-10-06 D8: the organization list sits BEFORE the TRANSCRIPT
+  // header - every line after that header must be a rendered transcript line
+  // (the run log hashes them), and the block never contains the word.
+  const listBlock = input.orgListBlock.length > 0 ? [input.orgListBlock, ''] : [];
+  return ['CURRENT PROFILE', profileJson, '', ...listBlock, 'TRANSCRIPT', ...lines].join('\n');
 }

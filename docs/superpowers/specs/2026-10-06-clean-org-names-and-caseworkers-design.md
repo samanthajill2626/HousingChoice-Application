@@ -10,7 +10,10 @@ lock-loss stop, and section 6's endpoint shapes; revision 8 records Sam's
 answers from the 2026-10-06 meeting (section 13, Appendix A: the old county
 values become spellings of the authority that runs those vouchers) and plan
 review round 2 (D13's no-empty rule covers spellings; D8's place-name rule;
-`Clayton` on DCA by Cameron's launch-gate ruling). Design review: rounds 1-4,
+`Clayton` on DCA by Cameron's launch-gate ruling); the final independent
+review (2026-10-07) added two precision lines - D4 folds typographic
+punctuation and strips invisible characters; section 8's apply refuses an
+environment with no stored list. Design review: rounds 1-4,
 closed - adjudications in
 `docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md`).
 Tracker items #2 ("One clean name per housing authority") and #19
@@ -252,8 +255,14 @@ context) keeps working unchanged. Consequence: renaming or merging an entry
 rewrites the records that hold it (D11).
 
 D4. **Matching rules (one server-side module).**
-- Normalize for comparison only: lowercase; `&` to `and`; the characters
-  `. , ( ) - / ' " _` to spaces; collapse whitespace; trim.
+- Normalize for comparison only: first strip invisible format characters
+  (soft hyphen, zero-width and bidi marks, U+FEFF) and fold typographic
+  punctuation to ASCII (curly single quotes and primes to `'`, curly double
+  quotes to `"`, hyphens, dashes and the minus sign to `-` - an iPhone's
+  smart punctuation must match a desktop's); then lowercase; `&` to `and`;
+  the characters `. , ( ) - / ' " _` to spaces; collapse whitespace; trim.
+  (Final review 2026-10-07.) A NEW name or spelling may carry typographic
+  punctuation but never an invisible format character (D13).
 - A text whose normalized form equals an entry's normalized NAME matches that
   entry.
 - A text whose normalized form equals an entry's normalized SPELLING matches
@@ -540,8 +549,10 @@ starting list; admin edits on the Settings page; renamed and merged names
   spellings).
 
 D13. **Notes, names and size limits.** Names are at most 120 characters.
-Names and spellings may not contain a newline or other control character
-(they are rendered one per line into the AI list block), and neither a name
+Names and spellings may not contain a newline, another control character or
+an invisible format character such as a soft hyphen or zero-width space
+(they are rendered one per line into the AI list block, and an invisible
+character would make two visually identical names), and neither a name
 nor a spelling may normalize to the empty string (for example "-" or "()" -
 such a spelling would match nothing).
 Notes are free text up to 500 characters, editable by everyone. An entry
@@ -789,8 +800,12 @@ Existing endpoints that write the fields in 5.2 apply D5 and answer 422
   Unknown or repeated arguments exit 2.
 - **The list it uses:** the environment's stored `org-list` item, or the
   starting list (Appendix A) when the item does not exist yet (a dry run
-  before the deploy). A dry run never writes; an apply creates the item
-  (create-only) when absent.
+  before the deploy). A dry run never writes. An apply REFUSES to run while
+  the environment has no stored item (exit 1, nothing read or written): the
+  deployed app creates the item on its first read, so its absence means the
+  environment is not yet on the new code, and an apply there would rewrite
+  data under an app that still speaks the old spellings (final review
+  2026-10-07; the RUNBOOK's step 4 opens the Settings tab once first).
 - **What it reads:** every contact of every type and every unit, active and
   deleted (base tables).
 - **What it does (apply), each write conditional on the record still holding

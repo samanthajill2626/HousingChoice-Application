@@ -30,3 +30,13 @@ file rather than fix. Filed during the clean-org-names build (`feat/clean-org-na
 message, then enqueue a continuation carrying the rewrite id, the field and the cursor - the
 relay and broadcast fan-out precedent - and keep heartbeating `lastRewrite` across the
 continuations.
+
+**Refinement (final independent review, 2026-10-07, adversarial-backend LOW-5).** A
+redelivery while the first run still heartbeats does more than split the counts: the two
+runs share one `lastRewrite`, so (a) a duplicate whose own pass fails records the healthy
+run `failed` too, and (b) the first run to finish releases the lock (`done`) while the other
+keeps writing for up to one heartbeat interval (20 s), during which a rename or merge may
+start. Both are bounded by the conditional per-record writes (no record is rewritten twice
+or wrongly), so the severity stays low; the chunked design above removes the duplicate-run
+case as well when the continuation carries a run token the handler checks before each chunk.
+Report: `docs/superpowers/reviews/2026-10-06-clean-org-names/final-review/adversarial-backend.md`.

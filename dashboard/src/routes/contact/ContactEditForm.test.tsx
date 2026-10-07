@@ -864,6 +864,20 @@ describe('ContactEditForm - text typed in a picker but never picked', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('the stored chip removed after typing a new name: the name stays and Save saves it in its place (R2-FE-2)', async () => {
+    const user = userEvent.setup();
+    const stored: Contact = { ...TENANT, housingAuthority: 'DeKalb County Housing Authority' };
+    updateContact.mockResolvedValue({ ...stored, housingAuthority: 'Georgia Department of Community Affairs' });
+    render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'Georgia Department of Community Affairs');
+    await screen.findByRole('option', { name: /^Georgia Department of Community Affairs/ });
+    await user.click(screen.getByRole('button', { name: 'Remove DeKalb County Housing Authority' }));
+    expect(housingAuthority()).toHaveValue('Georgia Department of Community Affairs');
+    await user.click(save());
+    // Never { housingAuthority: '' }: the typed name replaces the removed one.
+    expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: 'Georgia Department of Community Affairs' });
+  });
+
   it('(PIN) a typed name equal to the stored one is still never sent', async () => {
     const user = userEvent.setup();
     const stored: Contact = { ...TENANT, housingAuthority: 'DeKalb County Housing Authority' };

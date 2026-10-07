@@ -410,6 +410,22 @@ describe('ListingEditForm - text typed in the picker but never picked', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('a member removed after typing a name: the name stays and Save adds it (R2-FE-2)', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    const listed: UnitItem = { ...UNIT, accepted_authorities: ['Atlanta Housing Authority', 'ga_dca'] };
+    render(<ListingEditForm unit={listed} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(authorities(), 'DCA');
+    await screen.findByRole('option', { name: /^Georgia Department of Community Affairs/ });
+    await user.click(screen.getByRole('button', { name: 'Remove ga_dca' }));
+    expect(authorities()).toHaveValue('DCA');
+    await user.click(save());
+    // The stale member goes AND the typed authority is added.
+    expect(updateUnit).toHaveBeenCalledWith('u1', {
+      accepted_authorities: ['Atlanta Housing Authority', 'Georgia Department of Community Affairs'],
+    });
+  });
+
   it('(PIN) a typed name the list already holds changes nothing', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

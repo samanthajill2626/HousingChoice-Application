@@ -301,7 +301,7 @@ describe('OrgPicker - text typed but never picked (code review R1-ADV-FE-1)', ()
     );
   }
 
-  it('reports the typed text to the host, and an empty text after a pick, a clear and an emptied input', async () => {
+  it('reports the typed text to the host, and an empty text after a pick and an emptied input', async () => {
     const user = userEvent.setup();
     const onPendingTextChange = vi.fn();
     render(<Typed onPendingTextChange={onPendingTextChange} />);
@@ -309,16 +309,27 @@ describe('OrgPicker - text typed but never picked (code review R1-ADV-FE-1)', ()
     expect(onPendingTextChange).toHaveBeenLastCalledWith('Atl');
     await user.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
     expect(onPendingTextChange).toHaveBeenLastCalledWith('');
-    await user.type(combobox(), 'DeK');
-    expect(onPendingTextChange).toHaveBeenLastCalledWith('DeK');
-    // A clear (the chip's remove button) takes the typed text with it.
-    await user.click(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' }));
-    expect(onPendingTextChange).toHaveBeenLastCalledWith('');
-    expect(combobox()).toHaveValue('');
     await user.type(combobox(), 'x');
     expect(onPendingTextChange).toHaveBeenLastCalledWith('x');
     await user.clear(combobox());
     expect(onPendingTextChange).toHaveBeenLastCalledWith('');
+  });
+
+  it('removing a chip keeps the typed text: it stays in the field, still reported, its list back (R2-FE-2)', async () => {
+    // The natural "replace the stale value" order - type the new name, then
+    // remove the old chip, then Save - must not lose the new name at the remove.
+    const user = userEvent.setup();
+    const onPendingTextChange = vi.fn();
+    render(<Typed onPendingTextChange={onPendingTextChange} />);
+    await user.type(combobox(), 'Atl');
+    await user.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
+    await user.type(combobox(), 'DeK');
+    await user.click(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' }));
+    expect(screen.queryByRole('button', { name: 'Remove Atlanta Housing Authority' })).not.toBeInTheDocument();
+    expect(combobox()).toHaveValue('DeK');
+    expect(onPendingTextChange).toHaveBeenLastCalledWith('DeK');
+    expect(combobox()).toHaveFocus();
+    expect(optionNames()).toEqual(['DeKalb County Housing Authority']);
   });
 
   it('a field left holding typed text shows a note under it that describes it', async () => {

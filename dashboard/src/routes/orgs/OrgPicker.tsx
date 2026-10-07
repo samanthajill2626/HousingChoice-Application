@@ -17,9 +17,10 @@
 // `onChange` fires only on a pick or a clear (a chip's remove button), never
 // per keystroke - the blast composer recreates its draft on every filter change.
 // TYPED TEXT IS NEVER DROPPED SILENTLY (code review R1-ADV-FE-1): the picker
-// reports the text it holds through `onPendingTextChange` ('' after a pick, a
-// clear - which takes the typed text with it - or an emptied input), and a field
-// left holding text that is not a pick says "Not saved - ..." under it. A FORM's
+// reports the text it holds through `onPendingTextChange` ('' after a pick or
+// an emptied input; a clear - a chip's remove button - KEEPS the typed text,
+// R2-FE-2), and a field left holding text that is not a pick says "Not saved
+// - ..." under it. A FORM's
 // Save commits that text when it names exactly one entry (orgCopy
 // settleTypedOrgText) and otherwise refuses to save; it clears the committed
 // text or focuses the refused field through the `ref` handle. The composer
@@ -76,8 +77,8 @@ interface OrgPickerBaseProps {
   className?: string;
   labelClassName?: string;
   /** The typed text that is not a pick yet, on every change - and '' after a
-   *  pick, a clear or an emptied input. A form's Save reads it (R1-ADV-FE-1);
-   *  the blast composer leaves it out. */
+   *  pick or an emptied input (a chip removed keeps it, R2-FE-2). A form's
+   *  Save reads it (R1-ADV-FE-1); the blast composer leaves it out. */
   onPendingTextChange?: (text: string) => void;
   /** The Save guard's handle (React 19 passes `ref` as a plain prop). */
   ref?: React.Ref<OrgPickerHandle>;
@@ -292,8 +293,9 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
   function remove(value: string): void {
     if (props.multiple === true) props.onChange(props.value.filter((v) => v !== value));
     else props.onChange('');
-    // A clear commits like a pick does: any half-typed text goes with it.
-    setText('');
+    // The typed text STAYS (code review R2-FE-2): "type the new name, remove
+    // the old chip, Save" must not lose the new name at the remove. It is
+    // still what the host was told, and back in the field its list returns.
     setActiveIndex(-1);
     inputRef.current?.focus();
   }

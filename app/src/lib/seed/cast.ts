@@ -14,6 +14,7 @@ import { conversationIdForGroup } from '../import/ids.js';
 import { CAST_RECORDING_KEY, CAST_PHOTO_KEY } from './media.js';
 import type { SeedConversationRow } from './types.js';
 import { withSeedTransport, type SeedCarrierTransport } from './messageTransport.js';
+import { SEED_AUTHORITY } from './orgList.js';
 
 const CAST_INBOUND_SMS_IDS = [
   'msg-cast-unk-001', 'msg-cast-intake-001', 'msg-cast-intake-003', 'msg-cast-intake-005',
@@ -217,7 +218,7 @@ const midIntakeTenant = {
     email: 'destiny.holloway@example.com',
     firstName: 'Destiny',
     lastName: 'Holloway',
-    housingAuthority: 'dekalb_housing',
+    housingAuthority: SEED_AUTHORITY.dekalb,
     voucherSize: 3,
     voucher_program: 'HCV',
     porting: false,
@@ -325,7 +326,7 @@ const parkedNoRtaTenant = {
     phone: PHONES.parkedNoRta,
     firstName: 'Jamal',
     lastName: 'Okonkwo',
-    housingAuthority: 'fulton_housing',
+    housingAuthority: SEED_AUTHORITY.fulton,
     voucherSize: 2,
     voucher_program: 'HCV',
     porting: true,
@@ -448,7 +449,7 @@ const searchingTenant = {
     ],
     firstName: 'Monique',
     lastName: 'Everett',
-    housingAuthority: 'atlanta_housing',
+    housingAuthority: SEED_AUTHORITY.atlanta,
     voucherSize: 2,
     voucher_program: 'HCV',
     rta_expiration_date: '2026-09-30',
@@ -475,7 +476,7 @@ const searchingTenant = {
     landlordId: 'contact-landlord-0001', // seeded Marcus Bell
     status: 'available',
     status_source: 'manual',
-    accepted_authorities: ['atlanta_housing'],
+    accepted_authorities: [SEED_AUTHORITY.atlanta],
     address: '350 Boulevard SE, Atlanta, GA 30312',
     beds: 2,
     rent_min: 1500,
@@ -682,7 +683,7 @@ const searchingTenant = {
     landlordId: 'contact-landlord-0001',
     status: 'available',
     status_source: 'manual',
-    accepted_authorities: ['atlanta_housing'],
+    accepted_authorities: [SEED_AUTHORITY.atlanta],
     address: '820 Angier Ave NE, Atlanta, GA 30308',
     beds: 2,
     rent_min: 1450,
@@ -724,7 +725,7 @@ const touredYesTenant = {
     phone: PHONES.touredYes,
     firstName: 'Brianna',
     lastName: 'Whitfield',
-    housingAuthority: 'ga_dca',
+    housingAuthority: SEED_AUTHORITY.dca,
     voucherSize: 3,
     voucher_program: 'HCV',
     porting: false,
@@ -738,7 +739,7 @@ const touredYesTenant = {
     landlordId: 'contact-landlord-0001',
     status: 'available',
     status_source: 'manual',
-    accepted_authorities: ['ga_dca'],
+    accepted_authorities: [SEED_AUTHORITY.dca],
     address: '44 Clifton Rd NE, Atlanta, GA 30329',
     beds: 3,
     rent_min: 1800,
@@ -1202,7 +1203,7 @@ const midIntakeUnitLandlord = {
     rta_within_48h: true,
     pass_inspection_first_try: true,
     income_includes_voucher: true,
-    authorities_served: ['atlanta_housing'],
+    authorities_served: [SEED_AUTHORITY.atlanta],
     // Auto-consent: her inbound reply (msg-cast-milu-002 at CD) confers inbound_text.
     consent_method: 'inbound_text',
     consent_at: CD,
@@ -1214,7 +1215,7 @@ const midIntakeUnitLandlord = {
     // status=setup: listing is incomplete — missing voucher_size_accepted
     status: 'setup',
     status_source: 'manual',
-    accepted_authorities: ['atlanta_housing'],
+    accepted_authorities: [SEED_AUTHORITY.atlanta],
     address: '2240 Donald Lee Hollowell Pkwy NW, Atlanta, GA 30318',
     beds: 2,
     rent_min: 1600,
@@ -1325,7 +1326,7 @@ const pmManagedProperty = {
     lead_status: 'registered',
     contract_status: 'signed',
     registered_landlord: true,
-    authorities_served: ['atlanta_housing'],
+    authorities_served: [SEED_AUTHORITY.atlanta],
     created_at: CC,
   },
   manager: {
@@ -1339,7 +1340,7 @@ const pmManagedProperty = {
     lead_status: 'registered',
     contract_status: 'signed',
     registered_landlord: true,
-    authorities_served: ['atlanta_housing'],
+    authorities_served: [SEED_AUTHORITY.atlanta],
     created_at: CC,
   },
   unit: {
@@ -1349,7 +1350,7 @@ const pmManagedProperty = {
     landlordId: C_PM_OWNER,
     status: 'available',
     status_source: 'manual',
-    accepted_authorities: ['atlanta_housing'],
+    accepted_authorities: [SEED_AUTHORITY.atlanta],
     address: '1145 Ralph David Abernathy Blvd SW, Atlanta, GA 30310',
     beds: 3,
     baths: 2,

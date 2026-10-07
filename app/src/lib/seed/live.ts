@@ -44,6 +44,7 @@ import { conversationIdForGroup } from '../import/ids.js';
 import { historyItems } from './history.js';
 import type { TourItem } from '../../repos/toursRepo.js';
 import type { SeedConversationRow } from './types.js';
+import { SEED_AUTHORITY } from './orgList.js';
 
 // ---------------------------------------------------------------------------
 // ID constants — live namespace
@@ -99,7 +100,7 @@ export const LIVE_GROUP_TEXT_ID = conversationIdForGroup([
  * Build all static items for the live seed, using `now` as the reference point.
  * All dates are derived from `now` — no hardcoded calendar dates.
  */
-function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>[]> {
+export function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>[]> {
   const iso = now.toISOString();
 
   // --- Scheduling instants ---------------------------------------------------
@@ -148,7 +149,7 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         lastName: 'Osei',
         phone: LIVE_IDS.tenantAPhone,
         voucherSize: 2,
-        housingAuthority: 'atlanta_housing',
+        housingAuthority: SEED_AUTHORITY.atlanta,
         voucher_program: 'HCV',
         rta_expiration_date: tomorrowYmd, // urgently expiring — matches scenario
         voucher_expiration_date: voucherAt, // source of the voucher_expiration deadline
@@ -165,7 +166,7 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         lastName: 'Abara',
         phone: LIVE_IDS.tenantBPhone,
         voucherSize: 3,
-        housingAuthority: 'ga_dca',
+        housingAuthority: SEED_AUTHORITY.dca,
         voucher_program: 'HCV',
         porting: false,
         created_at: iso,
@@ -180,7 +181,7 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         phone: LIVE_IDS.landlordAPhone,
         lead_status: 'registered',
         contract_status: 'signed',
-        authorities_served: ['atlanta_housing', 'ga_dca'],
+        authorities_served: [SEED_AUTHORITY.atlanta, SEED_AUTHORITY.dca],
         created_at: iso,
       },
     ],
@@ -198,7 +199,7 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
           state: 'GA',
           zip: '30303',
         },
-        accepted_authorities: ['atlanta_housing'],
+        accepted_authorities: [SEED_AUTHORITY.atlanta],
         beds: 2,
         baths: 1,
         rent_min: 1600,
@@ -220,7 +221,7 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
           state: 'GA',
           zip: '30306',
         },
-        accepted_authorities: ['atlanta_housing'],
+        accepted_authorities: [SEED_AUTHORITY.atlanta],
         beds: 2,
         baths: 1,
         rent_min: 1750,
@@ -242,7 +243,7 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
           state: 'GA',
           zip: '30303',
         },
-        accepted_authorities: ['atlanta_housing'],
+        accepted_authorities: [SEED_AUTHORITY.atlanta],
         beds: 3,
         baths: 2,
         rent_min: 1900,

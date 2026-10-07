@@ -15,15 +15,16 @@
 //
 // live.ts is DELIBERATELY EXCLUDED, for two independently verified reasons
 // (mirroring the same exclusion in seedRosterShape.test.ts):
-//   1. it exports NO reachable item array - the builder is the module-private
-//      `buildLiveStaticItems` (live.ts:98) and the only export is the writer
-//      `seedLive()`, so reaching it would mean a refactor-export for the sole
-//      benefit of a guard; and
+//   1. when this guard was written the builder `buildLiveStaticItems` was
+//      module-private, so reaching it meant a refactor-export for the sole
+//      benefit of a guard. It is EXPORTED now (clean-org-names, for
+//      seedOrgNames.test.ts), so this reason no longer blocks adding it - the
+//      exclusion rests on reason 2; and
 //   2. it seeds NO nonzero unread - all four of its conversation rows write a
 //      literal `unread_count: 0` (live.ts:264, :282, :310, :331) and `seedLive`
 //      writes nothing else into the conversations table, so there is no row
 //      here for the invariant to be wrong about.
-// If live.ts ever seeds a nonzero unread, export the builder and add it below.
+// If live.ts ever seeds a nonzero unread, add `buildLiveStaticItems(now)` below.
 import { describe, it, expect } from 'vitest';
 import { SEED } from '../src/lib/seed/lean.js';
 import { castItems } from '../src/lib/seed/cast.js';

@@ -28,6 +28,8 @@ one caseworker conversion behind every path into the role, the generic type
 change keeping today's thread rule, threads matched by participant, all
 pending suggestions superseded, off-list employer text carried into
 `organization`, the AI's own caseworker line instead of the bare words.
+Revision 13 (2026-10-07) folds in round 4's three precision lines; the
+branch B design review is CLOSED (round 4 terminal).
 Revision 12 (2026-10-07) folds in round 3 (terminal: two contract gaps -
 the dialog's preview read and the organization wire - and wording).
 Revision 11 (2026-10-07) folds in round 2: the conversion becomes one
@@ -752,7 +754,10 @@ and how many it leaves because another contact shares the phone or address,
 and the organization it would write with its source (stored, a list match,
 carried not-on-the-list text, or none). The dialog also says what stays
 (past tours, closed placements, listing sends, the other tenant facts as
-data). The preview is advisory: `make` recomputes everything at write time.
+data). The preview is advisory: `make` recomputes everything at write time,
+so a field edited between the preview and Confirm (an agency, say) can make
+`make` derive an organization the dialog never showed - accepted (rare; the
+partner page shows the result and staff can change it).
 The dialog carries an Organization picker (D6's both-lists picker) showing
 the preview's organization - carried text shown as a not-on-the-list value -
 which staff may change or clear. The wire: `make` WITHOUT `organization`
@@ -782,7 +787,11 @@ Writes, in order:
    the `housingAuthority`, `agency` and `organization` values the route
    read, so a concurrent classification or organization edit makes the route
    answer 409 `contact_changed` and staff retry - a value staff just set is
-   never removed unrecorded) - the commit point: type `partner`,
+   never removed unrecorded. `contactsRepo.update`'s `expect` guards one
+   string attribute today; the plan extends it to this four-part guard
+   (the revision number, and each org field as a value, `''` or absent) and
+   maps a failed condition to 404 when a re-read finds the contact gone,
+   else 409) - the commit point: type `partner`,
    role `Caseworker`, status `active` (the partner default), `type_source:
    manual` (from any type, unknown included: the conversion removes fields
    the importer would otherwise restore, D21); `organization` (above);
@@ -813,7 +822,9 @@ safe in `caseworker_conversion`; `make` on that caseworker re-runs steps 2-4
 (D21's thread rule needs no old type: it re-types every own thread not yet
 `partner_1to1`). A later conversion of the same contact (re-typed away and
 converted again) replaces `caseworker_conversion`; the earlier one survives
-in that conversion's audit. A contact created as a Caseworker has no record
+in that conversion's audit (best-effort: the audit is written after the
+commit, so a failed audit followed by a second conversion loses the first
+record - accepted). A contact created as a Caseworker has no record
 (nothing was removed). The
 repair is by the route (no page button: a converted contact is no longer on
 the Possible list); the failure is logged at error level and RUNBOOK names

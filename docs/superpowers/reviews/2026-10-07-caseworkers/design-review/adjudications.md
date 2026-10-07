@@ -92,3 +92,21 @@ Decision check: finding 1 ADDS a read surface (a decision change by the
 rule), finding 2 fixes a route contract. Both fill gaps in the round-2
 design rather than move it. Round 4 (the cap) is a narrow check of these
 two additions only.
+
+## Round 4 (2026-10-07) - revision 12 -> revision 13 - TERMINAL
+
+Reviewer A continued, narrow check of revision 12's additions:
+`R4-reviewer-a.md`, 3 LOW findings, verdict "terminal". The organization
+wire and the type-keyed page action confirmed correct.
+
+| Finding | Ruling | Change |
+|---|---|---|
+| 1 preview-to-confirm race re-derives an unseen organization | ACCEPT | Stated as accepted in D19. |
+| 2 `contactsRepo.update` expect guards one attribute | ACCEPT | D19 step 1 names the repo extension (four-part guard, 404 vs 409 after a re-read) for the plan. |
+| 3 earlier conversion record rests on a best-effort audit | ACCEPT | Marked best-effort and accepted. |
+
+No decision changed. Branch B design review CLOSED at round 4 of 4.
+Totals across rounds: R1 28 findings (13 distinct), R2 12, R3 6, R4 3; all
+accepted in substance; 3 partial rejections in R1 (one contested and
+conceded in R2: its reasoning was replaced by the every-path confirm).
+Open: Cameron's eight rulings (spec "(Cameron confirms)" markers).

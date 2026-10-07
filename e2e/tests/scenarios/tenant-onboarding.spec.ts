@@ -68,14 +68,14 @@ test('inbound · by text → RTA in hand → handoff', async ({ page, request })
     firstName: 'Jordan',
     lastName: 'Rivera',
     voucherSize: 2,
-    housingAuthority: 'atlanta_housing',
+    housingAuthority: 'Atlanta Housing Authority',
   });
   await flow.expectTypedTenant();
   await flow.expectTenantDetails({
     firstName: 'Jordan',
     lastName: 'Rivera',
     voucherSize: 2,
-    housingAuthority: 'atlanta_housing',
+    housingAuthority: 'Atlanta Housing Authority',
   });
 
   await intakeAndRtaTail(flow, { inHand: true });
@@ -96,14 +96,14 @@ test('inbound · by text → no RTA → parked', async ({ page, request }) => {
     firstName: 'Sam',
     lastName: 'Lee',
     voucherSize: 1,
-    housingAuthority: 'dekalb_housing',
+    housingAuthority: 'DeKalb County Housing Authority',
   });
   await flow.expectTypedTenant();
   await flow.expectTenantDetails({
     firstName: 'Sam',
     lastName: 'Lee',
     voucherSize: 1,
-    housingAuthority: 'dekalb_housing',
+    housingAuthority: 'DeKalb County Housing Authority',
   });
 
   await intakeAndRtaTail(flow, { inHand: false });
@@ -120,20 +120,20 @@ test('inbound · by phone call → RTA in hand → handoff', async ({ page, requ
   await flow.login();
   // A missed call fires the auto-text but does NOT auto-capture a contact; the tenant
   // then TEXTS their details (the diagram's next step), creating the unknown to triage.
-  await flow.tenantAnswers('Robin Cole, 3 bed, Fulton Housing');
+  await flow.tenantAnswers('Robin Cole, 3 bed, Decatur Housing');
   await flow.expectRelayedToTeam(tenant, /Robin Cole/i);
   await flow.teamTriagesUnknownToTenant(tenant, {
     firstName: 'Robin',
     lastName: 'Cole',
     voucherSize: 3,
-    housingAuthority: 'fulton_housing',
+    housingAuthority: 'Decatur Housing Authority',
   });
   await flow.expectTypedTenant();
   await flow.expectTenantDetails({
     firstName: 'Robin',
     lastName: 'Cole',
     voucherSize: 3,
-    housingAuthority: 'fulton_housing',
+    housingAuthority: 'Decatur Housing Authority',
   });
 
   await intakeAndRtaTail(flow, { inHand: true });
@@ -146,14 +146,14 @@ test('housing fair · Team enters details → RTA in hand → handoff', async ({
     firstName: 'Casey',
     lastName: 'Nguyen',
     voucherSize: 2,
-    housingAuthority: 'atlanta_housing',
+    housingAuthority: 'Atlanta Housing Authority',
   });
   await flow.expectTypedTenant();
   await flow.expectTenantDetails({
     firstName: 'Casey',
     lastName: 'Nguyen',
     voucherSize: 2,
-    housingAuthority: 'atlanta_housing',
+    housingAuthority: 'Atlanta Housing Authority',
   });
   await intakeAndRtaTail(flow, { inHand: true });
 });
@@ -165,14 +165,14 @@ test('housing fair · Team enters details → no RTA → parked', async ({ page,
     firstName: 'Drew',
     lastName: 'Park',
     voucherSize: 1,
-    housingAuthority: 'dekalb_housing',
+    housingAuthority: 'DeKalb County Housing Authority',
   });
   await flow.expectTypedTenant();
   await flow.expectTenantDetails({
     firstName: 'Drew',
     lastName: 'Park',
     voucherSize: 1,
-    housingAuthority: 'dekalb_housing',
+    housingAuthority: 'DeKalb County Housing Authority',
   });
   await intakeAndRtaTail(flow, { inHand: false });
 });

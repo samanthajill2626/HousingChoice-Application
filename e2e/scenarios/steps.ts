@@ -113,6 +113,53 @@ function formatMoneyLabel(amount: number): string {
   return `$${Math.round(amount).toLocaleString('en-US')}`;
 }
 
+// ==== Organization pickers (clean-org-names spec D6/D7) =====================
+
+/**
+ * The organization picker's accessible names - the S14 selector contract
+ * (rows P2-P5). Every spec drives the Housing authority, Agency and Housing
+ * authorities pickers through these and `pickOrgName`, so a control S11 names
+ * differently is fixed HERE, once.
+ */
+export const ORG_PICKER = {
+  /** An entry option: its accessible name STARTS with the entry name (it may
+   *  go on to name the alternate spelling that matched). */
+  option: (name: string): RegExp => new RegExp(`^${escapeRegExp(name)}(\\s|$)`),
+  /** The trailing add option: forms only, only when nothing matches - never
+   *  in the blast composer (spec D7). */
+  addOption: /^Add .+ as a new (housing authority|agency)$/,
+  /** Every chip - a picked name or a stored value - is removed by this button. */
+  removeChip: (value: string): string => `Remove ${value}`,
+  /** The marker on a chip whose stored value is not a list name (spec D6). */
+  notOnList: 'Not on the list',
+};
+
+/**
+ * Pick ONE organization-list entry: type `query` (default: the name itself)
+ * into the combobox labelled `label`, click the entry's option, and wait for
+ * its chip - proof the pick committed before the caller saves (typed text is
+ * NEVER committed, spec D6/D7). The listbox is PORTALED to document.body (the
+ * ContactSearchField pattern), so the option is looked up on the PAGE, never
+ * inside `scope`. `scope` is the dialog holding the picker, or the page itself
+ * when the picker sits on the page (the blast composer) - never a CSS locator
+ * such as `body` (e2e/support/selectors.md). `replacing` first removes a single
+ * picker's current chip.
+ */
+export async function pickOrgName(
+  page: Page,
+  scope: Page | Locator,
+  label: 'Housing authority' | 'Housing authorities' | 'Agency',
+  name: string,
+  opts: { query?: string; replacing?: string } = {},
+): Promise<void> {
+  if (opts.replacing !== undefined) {
+    await scope.getByRole('button', { name: ORG_PICKER.removeChip(opts.replacing), exact: true }).click();
+  }
+  await scope.getByRole('combobox', { name: label, exact: true }).fill(opts.query ?? name);
+  await page.getByRole('option', { name: ORG_PICKER.option(name) }).click();
+  await expect(scope.getByRole('button', { name: ORG_PICKER.removeChip(name), exact: true })).toBeVisible();
+}
+
 // ==== Tour scheduling + reminder-ladder vocabulary (tours-sequence) ==========
 
 /** Escape a literal string for embedding in a RegExp. */
@@ -824,7 +871,7 @@ export class Scenario {
         expect(contact['housingAuthority']).toBe(fields.housingAuthority);
 
       // UI: Team can SEE these in the Details panel — voucher renders as "<n> BR",
-      // housing authority renders raw (e.g. "atlanta_housing"). Scope to the Details
+      // housing authority as its stored list name ("Atlanta Housing Authority"). Scope to the Details
       // section so the header-subtitle copy of the authority doesn't double-match.
       await this.page.goto(`${NEXT}/contacts/${id}`);
       const details = this.page
@@ -956,7 +1003,9 @@ export class Scenario {
     beds: number;
     /** The authorities whose vouchers this property accepts - the unit's ONE
      *  authority field (spec section 8), which replaced the legacy single
-     *  string. Default `['atlanta_housing']`, matching the lean seed world. */
+     *  string. Organization-list NAMES (clean-org-names spec D5 checks the
+     *  write). Default `['Atlanta Housing Authority']`, matching the lean seed
+     *  world. */
     accepted_authorities?: string[];
     landlordId?: string;
   }): Promise<Unit> {
@@ -971,7 +1020,7 @@ export class Scenario {
       const created = await this.page.request.post(`${NEXT}/api/units`, {
         data: {
           landlordId: opts.landlordId ?? SEEDED_LANDLORD,
-          accepted_authorities: opts.accepted_authorities ?? ['atlanta_housing'],
+          accepted_authorities: opts.accepted_authorities ?? ['Atlanta Housing Authority'],
           beds: opts.beds,
           rent_min: 1500,
           rent_max: 1600,
@@ -1583,8 +1632,9 @@ export class Scenario {
       baths?: number;
       voucherSizeAccepted?: number;
       listingLink?: string;
-      /** Fills the form's ONE comma-separated "Housing authorities" input
-       *  (spec section 8; the old single "Housing authority" input is gone). */
+      /** Organization-list NAMES, each picked in the form's "Housing
+       *  authorities" multi-picker (clean-org-names spec D6). Default
+       *  `['Atlanta Housing Authority']`. */
       accepted_authorities?: string[];
       /** The onboarding call's EXPECTED RENT — a per-property fact (moved off
        *  the contact 2026-07-10): fills Rent min AND max. Default 1400/1500. */
@@ -1603,13 +1653,12 @@ export class Scenario {
       await expect(dialog).toBeVisible();
 
       // Fill the intake fields.
-      // The form's single comma-separated authorities input. NOTE: the old
-      // `getByLabel('Housing authority')` kept matching the renamed plural label
-      // (getByLabel substring-matches), so this line is updated deliberately
-      // rather than because a test went red.
-      await dialog
-        .getByLabel('Housing authorities')
-        .fill((opts.accepted_authorities ?? ['atlanta_housing']).join(', '));
+      // Housing authorities: a multi-picker over the organization list (spec
+      // D6) - each name is picked, never typed and saved (typed text is never
+      // committed).
+      for (const name of opts.accepted_authorities ?? ['Atlanta Housing Authority']) {
+        await pickOrgName(this.page, dialog, 'Housing authorities', name);
+      }
       await dialog.getByLabel('Beds').fill(String(opts.beds));
       await dialog.getByLabel('Baths').fill(String(opts.baths ?? 2));
       await dialog.getByLabel('Rent min').fill(String(opts.expectedRent ?? 1400));
@@ -4051,8 +4100,10 @@ export class Scenario {
     if (fields.lastName !== undefined) await dialog.getByLabel('Last name').fill(fields.lastName);
     if (fields.voucherSize !== undefined)
       await dialog.getByLabel('Voucher size (bedrooms)').fill(String(fields.voucherSize));
+    // A list NAME, picked (spec D6). Every caller opens this on a tenant with no
+    // authority yet (triage, a fresh create, a rename), so no chip is replaced.
     if (fields.housingAuthority !== undefined)
-      await dialog.getByLabel('Housing authority').fill(fields.housingAuthority);
+      await pickOrgName(this.page, dialog, 'Housing authority', fields.housingAuthority);
     await dialog.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(dialog).toHaveCount(0, { timeout: 10_000 });
   }

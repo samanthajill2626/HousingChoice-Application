@@ -355,8 +355,12 @@ of 4.8.
 ### 4.5 Paging and the count line
 
 - ONE LOADER AT A TIME. Every request that starts or advances the list's
-  cursor chain is a loader: the first-page load, Load more, Keep checking, the
-  empty-page follow, the search walk (6) and the return restore (4.9). Exactly
+  cursor chain is a loader: the first-page load (on arrival, a filter change,
+  the automatic restart after a cursor 400, Start over or the first-page
+  Retry), Load more, Keep checking, Retry after a failed page (a Load more
+  from the same cursor), the empty-page follow, the search walk (6) and the
+  return restore (4.9). (Wording amended by the planner review, round 3: the
+  list named neither Retry nor Start over.) Exactly
   one runs at a time. While an AUTOMATIC loader runs (the first-page load, the
   empty-page follow, the search walk, the return restore), Load more and Keep
   checking are hidden. While the user's OWN request runs (Load more, Keep
@@ -377,15 +381,20 @@ of 4.8.
 - **Load more** appears while the last response carried a `nextCursor` and no
   loader is running, and stays, busy, while its own request runs (above); it
   appends the next page.
-- Keyboard focus after the action controls (planner review, round 2, R2-1;
-  round 3, R3-1). When the user's own request settles, focus moves to the link
+- Keyboard focus after the action controls - Load more, Keep checking, Retry
+  after a failed page, Start over and the first-page Retry (planner review,
+  round 2, R2-1; round 3, R3-1). The first three are the user's own request:
+  when it settles, focus moves to the link
   of the first NEWLY ADDED visible row; when no visible row was added, to the
   action control then shown (the pressed one, still in place, or the Retry or
   Start over that replaced it when the request failed); else to the link of
   the LAST visible row (the row the user was just at - after an empty page
   that completed the list, or one handed to the automatic follow); and only
   when no row is visible, to the count line, which is programmatically
-  focusable (`tabindex="-1"`, mounted throughout). That move never scrolls the
+  focusable (`tabindex="-1"`, mounted throughout). Added rows that the search
+  hides are not visible rows: when it hides every added row, focus takes the
+  same chain - the action control then shown, else the last visible row,
+  else the count line. That move never scrolls the
   page (`preventScroll`, no `scrollIntoView`): its target takes the pressed
   control's place, which was in view, and a mouse user's scroll position is
   theirs. (Amended by the planner review, round 3, R3-1, from "else to the
@@ -397,17 +406,25 @@ of 4.8.
   scroll - a new list starts at its top), else (an empty list) it stays on
   the count line; when that page FAILS, it stays on the count line (mounted in
   the error state too), and the failure's Retry is the next Tab stop. Focus
-  moves only after a user-pressed control - never after the first page, an
-  automatic page or the return restore (whose anchor owns focus, 4.9) - and
-  never onto another list (a filter change meanwhile) or away from where the
-  user has put focus since. While a Retry after a failed page runs, the failure
+  moves only after a user-pressed control - never after the INITIAL load
+  (arrival, a filter change) or an automatic page, nor after the return
+  restore (whose anchor owns focus, 4.9); a rebuild the user pressed (Start
+  over, the first-page Retry) is the exception, as above - and never onto
+  another list (a filter change meanwhile) or away from where the user has
+  put focus since. (Wording amended by the planner review, round 3: the
+  controls named; added rows the search hides; and "never after the first
+  page", which the rebuild clause contradicted.) While a Retry after a failed
+  page runs, the failure
   sentence beside it is withdrawn, so a second failure is announced again.
-- De-duplication by `tourId` on append: the NEWER copy (by `updatedAt`; a tie
-  goes to the later read) replaces the earlier row in place (a tour
-  rescheduled between two pages can come back). (Amended by the planner
+- De-duplication by `tourId` on every page, the first included: the NEWER
+  copy (by `updatedAt`; a tie goes to the later read) replaces the earlier row
+  in place (a tour rescheduled between two pages can come back, and 5.3 leans
+  on it for a dated `requested` tour, which one request could return twice).
+  (Amended by the planner
   review, round 2, R2-2, from "the LATER copy": the two copies of one tour come
   from two indexes that replicate independently, so the later-read copy can be
-  the stale one.)
+  the stale one. Wording amended by round 3, from "on append": the first page
+  goes through it too since round 1, SC-F2.)
 - Empty pages: a page that comes back EMPTY with a cursor (a sparse filter met
   the server's read budget, 5.4) is followed automatically, up to 10 in a row.
   While following, the count line reads "Checking more tours...". If the tenth

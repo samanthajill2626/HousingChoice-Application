@@ -15,6 +15,14 @@
 // in an environment that already has its item (D2). peek() is the
 // NON-creating read for the importer CLI and the cleanup script; putForSeed()
 // is the seeds' unconditional overwrite.
+//
+// WRITES are read-and-bump (D1; the aiRunsRepo.putRun precedent): read as
+// get() does, apply the change, Put the whole item conditioned on the version
+// that was read and carrying version + 1; on a lost condition, re-read and
+// re-apply - at most ORG_LIST_MAX_ATTEMPTS times, then OrgListBusyError. The
+// change may run more than once, so it must be pure. A write that would make
+// the item larger than ORG_LIST_MAX_BYTES is refused (OrgListFullError) before
+// anything is sent (D13).
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
@@ -70,11 +78,49 @@ export const ORG_LIST_SETTING_ID = 'org-list';
 export const ORG_LIST_MAX_BYTES = 300 * 1024;
 export const ORG_REWRITE_STALE_MS = 15 * 60 * 1000;
 
+/** Read-and-bump attempts before OrgListBusyError (plan 3.3). */
+export const ORG_LIST_MAX_ATTEMPTS = 5;
+
+/** The write would make the item larger than ORG_LIST_MAX_BYTES (D13 -> 409 org_list_full). */
+export class OrgListFullError extends Error {
+  constructor(message = `the organization list would exceed ${ORG_LIST_MAX_BYTES} bytes`) {
+    super(message);
+    this.name = 'OrgListFullError';
+  }
+}
+
+/** The version race was lost ORG_LIST_MAX_ATTEMPTS times in a row (-> 503 org_list_busy). */
+export class OrgListBusyError extends Error {
+  constructor(message = `the organization list changed during ${ORG_LIST_MAX_ATTEMPTS} write attempts; retry`) {
+    super(message);
+    this.name = 'OrgListBusyError';
+  }
+}
+
+/**
+ * The size the D13 cap measures: UTF-8 bytes of the item's JSON (the
+ * adapters/cloudwatch.ts entryCost precedent). DynamoDB counts attribute names
+ * and values; JSON is a close, slightly generous stand-in, and the cap sits
+ * 100 KB under DynamoDB's own 400 KB item limit. Exported so the test fake
+ * measures the same way.
+ */
+export function orgListItemBytes(item: OrgListItem): number {
+  return Buffer.byteLength(JSON.stringify(item), 'utf8');
+}
+
 export interface OrgListRepo {
   /** One consistent GetItem. Absent item: create the starting list with a
    *  create-only put (attribute_not_exists), then return the stored item
    *  (re-read on a lost create). Never caches. */
   get(): Promise<OrgListItem>;
+  /** Read-and-bump: read (as get()), run `change`, write the result
+   *  conditionally on `version = :expected` with version + 1; retry the whole
+   *  cycle on a lost condition, at most 5 attempts (then OrgListBusyError).
+   *  Refuses (OrgListFullError) when the serialized item exceeds the cap.
+   *  `change` may throw a domain error, which propagates unchanged. A change
+   *  that returns the SAME object it was given writes nothing (no version
+   *  bump) - heartbeat()/finish() use that to do nothing for a stale run. */
+  mutate<T>(change: (current: OrgListItem) => { next: OrgListItem; result: T }): Promise<T>;
   /** Seeds and tests only: unconditional put of a whole item. */
   putForSeed(item: OrgListItem): Promise<void>;
   /** NON-creating consistent read (the importer CLI and the cleanup script):
@@ -147,6 +193,33 @@ export function createOrgListRepo(
 
   return {
     get,
+    async mutate(change) {
+      for (let attempt = 1; attempt <= ORG_LIST_MAX_ATTEMPTS; attempt += 1) {
+        const current = await get();
+        const { next, result } = change(current);
+        if (next === current) return result;
+        const stored: OrgListItem = { ...next, settingId: ORG_LIST_SETTING_ID, version: current.version + 1 };
+        if (orgListItemBytes(stored) > ORG_LIST_MAX_BYTES) throw new OrgListFullError();
+        try {
+          await doc.send(
+            new PutCommand({
+              TableName: table,
+              Item: stored,
+              // "absent OR equal": the conversationsRepo roster-version shape,
+              // so an item written without a version can still be bumped.
+              ConditionExpression: 'attribute_not_exists(#version) OR #version = :expected',
+              ExpressionAttributeNames: { '#version': 'version' },
+              ExpressionAttributeValues: { ':expected': current.version },
+            }),
+          );
+          return result;
+        } catch (err) {
+          if (!(err instanceof ConditionalCheckFailedException)) throw err;
+          log.info({ attempt }, 'org list write lost a version race - retrying');
+        }
+      }
+      throw new OrgListBusyError();
+    },
     async peek() {
       return read();
     },

@@ -31,6 +31,8 @@ one caseworker conversion behind every path into the role, the generic type
 change keeping today's thread rule, threads matched by participant, all
 pending suggestions superseded, off-list employer text carried into
 `organization`, the AI's own caseworker line instead of the bare words.
+Revision 15 (2026-10-07) narrows D22's timeline wording to the plan's rule
+(plan review round 1, B7).
 Revision 14 (2026-10-07) adds D22, the binding precision from the branch B
 plan research.
 Revision 13 (2026-10-07) folds in round 4's three precision lines; the
@@ -978,8 +980,10 @@ Where a line here is more precise than D16-D21, this line governs.
 - Share wording (D20, completed): neutral - the property kebab and card action
   "Send this property", the Matching empty state, "check at least one
   recipient", "Flagged recipients you picked", "No recipients reached" on the
-  property Activity and BOTH landlord-timeline label sites; every share label
-  keeps the "Sent to " prefix. Tenant-worded on purpose (the control reaches
+  property Activity and at the landlord timeline's recount site; the
+  timeline's stored-count site reads "Sent to N recipient(s)" at every N,
+  0 included, so the relabel predicate (a "Sent to " prefix) still finds
+  every share row; every share label keeps the "Sent to " prefix. Tenant-worded on purpose (the control reaches
   only tenants): "Add more tenants by filters", "Add a tenant", "No
   candidates - add a tenant below.", the filter summary "Tenants - ...",
   TenantFile's "Send a property to this tenant". A resolved non-tenant

@@ -1428,8 +1428,10 @@ describe('applyExtraction - housingAuthority against the organization list (spec
 // "DCA", "Fulton County", ...) and anything else as the model said it; now a
 // list match is suggested under the entry's full NAME - a different key. So
 // the suggest path also checks the model's own text and every spelling of the
-// matched entry, and a value dismissed before the deploy is still never
-// re-suggested (ruling 2026-07-21). Writes never consult dismissals.
+// matched entry that names it alone (ruling B-3: a spelling shared within the
+// kind, such as AHA, does not count), and a value dismissed before the deploy
+// is still never re-suggested (ruling 2026-07-21). Writes never consult
+// dismissals.
 describe('applyExtraction - a list match honors dismissals of its other spellings (worklist RG-2)', () => {
   const tombstone = (text: string): string =>
     `housingAuthority#${normalizeSuggestionValue('housingAuthority', text)}`;
@@ -1495,5 +1497,37 @@ describe('applyExtraction - a list match honors dismissals of its other spelling
     });
     expect(outcome.wrote).toEqual(['housingAuthority']);
     expect(records.updates[0]!.patch['housingAuthority']).toBe('Atlanta Housing Authority');
+  });
+
+  // Worklist ruling B-3: only the spellings that resolve to the matched entry
+  // ALONE extend its dismissal keys. AHA is a spelling of both Atlanta and
+  // Augusta, so a dismissed "AHA" (an ambiguous suggestion, suggested as said)
+  // rejected that text - not Augusta's full name.
+  it('a dismissal of a SHARED spelling does not suppress one entry\'s full name (worklist B-3)', async () => {
+    const { deps, records } = makeDeps({
+      dismissedValues: [`housingAuthority#${normalizeSuggestionValue('housingAuthority', 'AHA')}`],
+    });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: 'Augusta Housing Authority' } },
+    });
+    expect(outcome.suggested).toEqual(['housingAuthority']);
+    expect(records.suggestions).toHaveLength(1);
+    expect(records.suggestions[0]).toMatchObject({
+      target: 'housingAuthority', suggestedValue: 'Augusta Housing Authority',
+    });
+  });
+
+  it('(PIN) a dismissal of a spelling unique to the entry still suppresses its full name (worklist B-3)', async () => {
+    // 'Atlanta (AHA)' holds the shared token AHA, but the WHOLE spelling
+    // resolves to Atlanta alone, so it stays one of Atlanta's dismissal keys.
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone('Atlanta (AHA)')] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: 'Atlanta Housing Authority' } },
+    });
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions[0]).toMatchObject({
+      target: 'housingAuthority', outcome: 'dropped', dropReason: 'dismissed_before',
+    });
   });
 });

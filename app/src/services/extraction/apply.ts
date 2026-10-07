@@ -254,8 +254,16 @@ export async function applyExtraction(
     // spellings (on the starting list, each old alias spelling of a housing
     // authority is one of them). The suggest path treats a dismissal of any of
     // them as a dismissal of the name, so a value dismissed before the deploy
-    // is still never re-suggested. Writes never consult dismissals; every
-    // other field passes none.
+    // is still never re-suggested. Ruling B-3: only the spellings that resolve
+    // to THIS entry alone count. A spelling shared within the kind (AHA names
+    // Atlanta and Augusta, MHA Marietta and Macon-Bibb) names no single entry:
+    // a dismissal of an ambiguous "AHA" suggestion rejected that text, not
+    // every full name it could mean, so it must not suppress a later,
+    // unambiguous "Augusta Housing Authority" - a different value. Each old
+    // alias spelling resolves to one entry, so RG-2's pre-deploy dismissals
+    // still hold. The model's own text always counts: it resolved to exactly
+    // this entry. Writes never consult dismissals; every other field passes
+    // none.
     let alsoDismissedAs: readonly string[] = [];
     if (field === 'housingAuthority') {
       const resolved = resolveOrgText(ctx.orgEntries, String(coerced.value), KINDS_FOR_FIELD.housingAuthority);
@@ -271,8 +279,13 @@ export async function applyExtraction(
         continue;
       }
       if (resolved.status === 'match') {
-        value = resolved.entry.name;
-        alsoDismissedAs = [String(coerced.value), ...resolved.entry.spellings];
+        const matched = resolved.entry;
+        value = matched.name;
+        const ownSpellings = matched.spellings.filter((s) => {
+          const r = resolveOrgText(ctx.orgEntries, s, KINDS_FOR_FIELD.housingAuthority);
+          return r.status === 'match' && r.entry.orgId === matched.orgId;
+        });
+        alsoDismissedAs = [String(coerced.value), ...ownSpellings];
       } else {
         notOnList = true;
         if (fieldOp.op === 'write') {
@@ -821,8 +834,8 @@ async function putSuggestionSafe(
     // The suggestion's own key is checked first; then each distinct key of
     // `alsoDismissedAs` - other texts that name the SAME value (worklist RG-2:
     // a housing authority suggested under its list name is also suppressed by
-    // a dismissal of its spellings or of the model's own text). `s` itself is
-    // stored as is.
+    // a dismissal of a spelling that names it alone - ruling B-3 - or of the
+    // model's own text). `s` itself is stored as is.
     const norm = normalizeSuggestionValue(s.target, s.suggestedValue);
     const keys = [norm];
     for (const alt of alsoDismissedAs) {

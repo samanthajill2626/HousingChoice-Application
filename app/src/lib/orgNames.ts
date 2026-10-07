@@ -59,3 +59,158 @@ export function isOnListFor(
 ): boolean {
   return entries.some((e) => kinds.includes(e.kind) && e.name === value);
 }
+
+export type OrgResolution =
+  | { status: 'match'; entry: OrgEntry; via: 'name' | 'spelling' }
+  | { status: 'ambiguous'; candidates: OrgEntry[] }
+  | { status: 'other_kind'; entries: OrgEntry[] }
+  | { status: 'compound'; spans: OrgEntry[][] }
+  | { status: 'unknown'; close: OrgEntry[] };
+
+function matchesText(e: OrgEntry, normalized: string): boolean {
+  return (
+    normalizeOrgText(e.name) === normalized ||
+    e.spellings.some((s) => normalizeOrgText(s) === normalized)
+  );
+}
+
+/** D4: resolve free text against the entries of the accepted kinds. */
+export function resolveOrgText(
+  entries: readonly OrgEntry[],
+  text: string,
+  kinds: readonly OrgKind[],
+): OrgResolution {
+  const n = normalizeOrgText(text);
+  if (n === '') return { status: 'unknown', close: [] };
+  const inKind = entries.filter((e) => kinds.includes(e.kind));
+  const byName = inKind.find((e) => normalizeOrgText(e.name) === n);
+  if (byName) return { status: 'match', entry: byName, via: 'name' };
+  const bySpelling = inKind.filter((e) => e.spellings.some((s) => normalizeOrgText(s) === n));
+  if (bySpelling.length === 1) return { status: 'match', entry: bySpelling[0]!, via: 'spelling' };
+  if (bySpelling.length > 1) return { status: 'ambiguous', candidates: bySpelling };
+  const otherKind = entries.filter((e) => !kinds.includes(e.kind) && matchesText(e, n));
+  if (otherKind.length > 0) return { status: 'other_kind', entries: otherKind };
+  const spans = compoundSpans(entries, n);
+  if (spans !== null) return { status: 'compound', spans };
+  return { status: 'unknown', close: closeNames(inKind, n) };
+}
+
+function phraseIndex(entries: readonly OrgEntry[]): Map<string, OrgEntry[]> {
+  const index = new Map<string, OrgEntry[]>();
+  for (const e of entries) {
+    for (const text of [e.name, ...e.spellings]) {
+      const key = normalizeOrgText(text);
+      if (key === '') continue;
+      const list = index.get(key) ?? [];
+      if (!list.includes(e)) list.push(e);
+      index.set(key, list);
+    }
+  }
+  return index;
+}
+
+/**
+ * D4 COMPOUND. `normalized` (already normalized) is not itself a name or
+ * spelling, and scanning it left to right - taking at each position the
+ * LONGEST phrase that is a name or spelling - gives two or more
+ * non-overlapping spans with no single entry matched by every span. Returns
+ * each span's entries, else null.
+ */
+export function compoundSpans(
+  entries: readonly OrgEntry[],
+  normalized: string,
+): OrgEntry[][] | null {
+  const index = phraseIndex(entries);
+  if (normalized === '' || index.has(normalized)) return null;
+  const words = normalized.split(' ');
+  const maxLen = Math.max(1, ...[...index.keys()].map((k) => k.split(' ').length));
+  const spans: OrgEntry[][] = [];
+  let i = 0;
+  while (i < words.length) {
+    let advanced = false;
+    for (let len = Math.min(maxLen, words.length - i); len >= 1; len -= 1) {
+      const hit = index.get(words.slice(i, i + len).join(' '));
+      if (hit) {
+        spans.push(hit);
+        i += len;
+        advanced = true;
+        break;
+      }
+    }
+    if (!advanced) i += 1;
+  }
+  if (spans.length < 2) return null;
+  const common = spans.reduce<OrgEntry[]>(
+    (acc, span) => acc.filter((e) => span.includes(e)),
+    spans[0]!,
+  );
+  return common.length === 0 ? spans : null;
+}
+
+const GENERIC_WORDS = new Set([
+  'of', 'the', 'and', 'housing', 'authority', 'county', 'city', 'department',
+  'program', 'inc', 'georgia', 'ga',
+]);
+
+function initialsOf(name: string): string {
+  return normalizeOrgText(name)
+    .split(' ')
+    .filter((w) => w !== 'of' && w !== 'the' && w !== 'and')
+    .map((w) => w[0] ?? '')
+    .join('');
+}
+
+function levenshtein(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i += 1) {
+    let diagonal = row[0]!;
+    row[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const above = row[j]!;
+      row[j] = Math.min(above + 1, row[j - 1]! + 1, diagonal + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diagonal = above;
+    }
+  }
+  return row[b.length]!;
+}
+
+/**
+ * Up to `limit` entries that look like `normalized` - for prompts ONLY, never
+ * applied automatically (D4). Scores: initials equality 0.9; the share of
+ * typed words (2+ chars) that begin a word of the name or a spelling, counted
+ * only when a matched word is not generic; edit similarity when 0.75 or
+ * more. Kept at a best score of 0.5 or more, highest first. A text longer
+ * than ORG_NAME_MAX (120) characters scores nothing: no name or spelling is
+ * that long (D13), and the edit distance costs |text| x |target| per text, so
+ * an unbounded text must never reach it (spec section 6).
+ */
+export function closeNames(
+  candidates: readonly OrgEntry[],
+  normalized: string,
+  limit = 3,
+): OrgEntry[] {
+  if (normalized === '' || normalized.length > ORG_NAME_MAX) return [];
+  const typed = normalized.split(' ').filter((w) => w.length >= 2);
+  const compact = normalized.replace(/ /g, '');
+  const scored = candidates.map((e) => {
+    let best = 0;
+    for (const text of [e.name, ...e.spellings]) {
+      const target = normalizeOrgText(text);
+      const targetWords = target.split(' ');
+      const matched = typed.filter((w) => targetWords.some((t) => t.startsWith(w)));
+      if (typed.length > 0 && matched.some((w) => !GENERIC_WORDS.has(w))) {
+        best = Math.max(best, matched.length / typed.length);
+      }
+      const longest = Math.max(normalized.length, target.length, 1);
+      const similarity = 1 - levenshtein(normalized, target) / longest;
+      if (similarity >= 0.75) best = Math.max(best, similarity);
+    }
+    if (compact.length >= 2 && initialsOf(e.name) === compact) best = Math.max(best, 0.9);
+    return { e, best };
+  });
+  return scored
+    .filter((s) => s.best >= 0.5)
+    .sort((a, b) => b.best - a.best || a.e.name.localeCompare(b.e.name))
+    .slice(0, limit)
+    .map((s) => s.e);
+}

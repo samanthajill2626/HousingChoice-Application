@@ -229,3 +229,21 @@ describe('the importer no longer uses the hand-kept alias map', () => {
     expect(source).not.toContain('KNOWN_AUTHORITIES');
   });
 });
+
+describe('the import:apply CLI reads the org list WITHOUT creating it (spec D9, ruling R4-F5)', () => {
+  it('peeks the stage item, falls back to the starting list, and passes the entries to runApply', () => {
+    // A thin top-level-await CLI, so the wire assertion is on the source (the
+    // importGroupAttribution.test.ts A8 precedent).
+    const source = readFileSync(join(process.cwd(), 'scripts', 'import-apply.ts'), 'utf8');
+    const peekAt = source.indexOf('createOrgListRepo({ doc, env: stageEnv }).peek()');
+    const applyAt = source.indexOf('await runApply(');
+    expect(peekAt).toBeGreaterThan(-1);
+    expect(peekAt).toBeLessThan(applyAt);
+    expect(source).toContain('buildStartingEntries(');
+    // Never the get-or-create read: a dry run must not write the item.
+    expect(source).not.toMatch(/createOrgListRepo\([^)]*\)\s*\.get\(/);
+    expect(source.slice(applyAt, source.indexOf('});', applyAt))).toContain('orgEntries');
+    // What was not written is printed - a dry run's report included.
+    expect(source).toContain('report.orgNotWritten');
+  });
+});

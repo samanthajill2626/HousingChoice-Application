@@ -20,7 +20,14 @@
 // gate's identity vars and phase 2's Twilio credentials come from the same
 // gitignored files the rest of the tooling uses. Shell values win over the
 // file. See the stage-config block below.
+//
+// ORGANIZATION NAMES (spec 2026-10-06 D9): housing authority and agency
+// values resolve against the stage's stored org list, read WITHOUT creating
+// it (the starting list when none is stored yet). Contacts get them
+// fill-only; a value the list cannot place is not written and is listed
+// under "organization names NOT written" (a dry run lists them too).
 
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,7 +44,7 @@ import { parseDotenv } from '../../scripts/lib/secretsCore.mjs';
 // gate below reads config. `getDocumentClient` is NOT retained - main's --env
 // stage resolution builds the client with the account guard instead.
 import { loadConfig } from '../src/lib/config.js';
-import { groupReviewRowsByConversationId, runApply } from '../src/lib/import/apply.js';
+import { groupReviewRowsByConversationId, runApply, type OrgValueNotWritten } from '../src/lib/import/apply.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
 import { createGroupRailService } from '../src/services/groupRail.js';
@@ -60,6 +67,8 @@ import {
   parseWorkbook,
 } from '../src/lib/import/workbook.js';
 import { createPoolNumbersRepo } from '../src/repos/poolNumbersRepo.js';
+import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import { createOrgListRepo } from '../src/repos/orgListRepo.js';
 
 function arg(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
@@ -348,6 +357,21 @@ if (!dryRun && !yes) {
   process.exit(1);
 }
 
+// THE ORGANIZATION LIST (spec D9, ruling R4-F5). The importer resolves housing
+// authority and agency values against the stage's stored `org-list` item,
+// read WITHOUT creating it: a dry run writes nothing, and a dry run before the
+// deploy must not pin the starting list into the environment. With no item
+// stored yet it resolves against the starting list (spec Appendix A) in
+// memory - the cleanup script's rule.
+const storedOrgList = await createOrgListRepo({ doc, env: stageEnv }).peek();
+const orgEntries =
+  storedOrgList?.entries ?? buildStartingEntries(new Date().toISOString(), () => randomUUID());
+console.log(
+  storedOrgList !== null
+    ? `org list        : the stored item, version ${storedOrgList.version} (${storedOrgList.entries.length} entries)`
+    : `org list        : none stored yet - the starting list (${orgEntries.length} entries)`,
+);
+
 const importedAt = new Date().toISOString();
 
 let lastLabel = '';
@@ -358,6 +382,7 @@ const report = await runApply({
   importedAt,
   dryRun,
   env: stageEnv,
+  orgEntries,
   onProgress: (label, done, total) => {
     if (label !== lastLabel) {
       if (lastLabel) process.stdout.write('\n');
@@ -374,6 +399,9 @@ console.log('\n=== import:apply complete ===');
 console.log(`  contacts written        : ${report.contacts.written}`);
 console.log(`    dropped by review     : ${report.contacts.skippedDropped}`);
 console.log(`    status preserved      : ${report.contacts.statusPreserved} (a human/automation had already decided)`);
+console.log(
+  `    agency in HA column   : ${report.contacts.agencyFromHousingAuthority} (goes to Agency, only where none is set)`,
+);
 console.log(`  conversations written   : ${report.conversations.written}`);
 console.log(`    relay groups          : ${report.conversations.groups}`);
 console.log(`    flagged connect-day-1 : ${report.conversations.connectedDayOne}`);
@@ -410,6 +438,23 @@ console.log(
       ? 'not determined on a dry run (no rows were read)'
       : `${report.units.humanOwned} (edited in the dashboard - only absent fields were filled)`),
 );
+
+// D9: organization values the import did NOT write (a dry run lists the same
+// values a real run would leave). Settle each on Settings > Housing
+// authorities & agencies - an admin adds the name, or the value as a spelling
+// of a listed one - and a re-run then writes it.
+const NOT_WRITTEN_WHY: Record<OrgValueNotWritten['resolution'], string> = {
+  ambiguous: 'a spelling more than one listed name shares',
+  other_kind: 'an agency, not a housing authority',
+  compound: 'names more than one organization',
+  unknown: 'not on the list',
+};
+if (report.orgNotWritten.length > 0) {
+  console.log(`\n--- organization names NOT written (${report.orgNotWritten.length} distinct) ---`);
+  for (const v of report.orgNotWritten) {
+    console.log(`  ${v.field} ${JSON.stringify(v.value)} (x${v.count}): ${NOT_WRITTEN_WHY[v.resolution]}`);
+  }
+}
 
 if (report.warnings.length > 0) {
   console.log(`\n--- warnings (${report.warnings.length}) ---`);

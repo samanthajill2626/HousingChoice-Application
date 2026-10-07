@@ -878,6 +878,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // Triage re-extraction hook: a flip to tenant schedules an immediate
       // 'triage' run (gated by the same kill switch as the other schedule sites).
       aiExtractionEnabled: config.aiExtractionEnabled,
+      // Organization names (spec 2026-10-06 D5): the ONE service built above.
+      orgNamesService: orgNames,
       events,
     }),
   );

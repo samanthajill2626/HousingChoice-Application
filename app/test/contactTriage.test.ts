@@ -461,9 +461,11 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ housingAuthority: 'dekalb_housing' });
     expect(res.status).toBe(200);
-    expect(res.body.contact.housingAuthority).toBe('dekalb_housing');
+    // Spec D5: 'dekalb_housing' is the unique spelling "Dekalb Housing" of a
+    // listed entry, so the entry's exact NAME is stored.
+    expect(res.body.contact.housingAuthority).toBe('DeKalb County Housing Authority');
     expect(world.contacts.find((c) => c.contactId === 'contact-t2')?.['housingAuthority']).toBe(
-      'dekalb_housing',
+      'DeKalb County Housing Authority',
     );
   });
 

@@ -100,7 +100,8 @@ describe('contact agency field (PATCH allowlist)', () => {
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .expect(200);
-    expect(got.body.contact.agency).toBe('Hope Atlanta');
+    // Spec D5: the list name differs only in case, so the exact name is stored.
+    expect(got.body.contact.agency).toBe('HOPE Atlanta');
   });
 
   it('tracks agency in changedFields (the audit event records it)', async () => {

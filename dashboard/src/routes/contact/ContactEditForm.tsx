@@ -593,7 +593,9 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
             <OrgPicker
               ref={housingAuthorityPicker}
               label="Housing authority"
-              hint="The organization that runs the voucher"
+              // A sentence of its own: the field's description joins it with
+              // the note under the field (code review R3-FE-8).
+              hint="The organization that runs the voucher."
               kinds={HOUSING_AUTHORITY_KINDS}
               entries={orgList.entries}
               loading={orgList.loading}

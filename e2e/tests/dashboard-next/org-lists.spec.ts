@@ -52,7 +52,7 @@ const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
  * picker's own names live in ORG_PICKER, e2e/scenarios/steps.ts).
  */
 const UI = {
-  helpText: 'The organization that runs the voucher',
+  helpText: 'The organization that runs the voucher.',
   newDialog: 'Is this really new?',
   yesAddIt: 'Yes, add it',
   use: (name: string): string => `Use ${name}`,

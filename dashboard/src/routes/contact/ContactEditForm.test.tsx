@@ -575,7 +575,9 @@ describe('ContactEditForm', () => {
     const user = userEvent.setup();
     render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
     const picker = screen.getByRole('combobox', { name: 'Housing authority' });
-    expect(picker).toHaveAccessibleDescription('The organization that runs the voucher');
+    // A sentence of its own: a screen reader hears it apart from the note
+    // that may follow it (code review R3-FE-8).
+    expect(picker).toHaveAccessibleDescription('The organization that runs the voucher.');
     await user.type(picker, 'aha');
     expect(await screen.findByRole('option', { name: 'Atlanta Housing Authority (AHA)' })).toBeInTheDocument();
     await user.clear(picker);
@@ -872,8 +874,9 @@ describe('ContactEditForm - text typed in a picker but never picked', () => {
     await user.type(housingAuthority(), 'DCA');
     await screen.findByRole('option', { name: /^Georgia Department of Community Affairs/ });
     await user.tab();
+    // Two sentences, not one run-on (code review R3-FE-8).
     expect(housingAuthority()).toHaveAccessibleDescription(
-      'The organization that runs the voucher Save will use Georgia Department of Community Affairs.',
+      'The organization that runs the voucher. Save will use Georgia Department of Community Affairs.',
     );
     // Text Save would refuse: not saved, and how to fix it.
     await user.type(agency(), 'Hope');

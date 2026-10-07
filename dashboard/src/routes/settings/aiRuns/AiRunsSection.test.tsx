@@ -199,3 +199,48 @@ describe('AiRunsSection', () => {
     expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
   });
 });
+
+// Spec 2026-10-06 D8 / plan 3.10.
+describe('AiRunsSection - the organization list', () => {
+  it('labels an agency dropped from housingAuthority, with the model reason beside it', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, decisions: {
+      housingAuthority: {
+        proposedOp: 'write',
+        proposedValue: 'Step Up',
+        outcome: 'dropped',
+        verdict: 'not_presented',
+        dropReason: 'agency_not_authority',
+        reason: 'the tenant said Step Up helps her',
+      },
+    } } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const row = screen.getByRole('row', { name: /^housingAuthority/ });
+    expect(within(row).getAllByRole('cell').at(-1)).toHaveTextContent(
+      /^Agency, not a housing authority - the tenant said Step Up helps her$/,
+    );
+    expect(screen.getByRole('table', { name: 'Decisions' })).not.toHaveTextContent('agency_not_authority');
+  });
+
+  it('shows the label alone when the model gave no reason', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, decisions: {
+      housingAuthority: { proposedOp: 'write', proposedValue: 'Step Up', outcome: 'dropped', verdict: 'not_presented', dropReason: 'agency_not_authority' },
+    } } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const row = screen.getByRole('row', { name: /^housingAuthority/ });
+    expect(within(row).getAllByRole('cell').at(-1)).toHaveTextContent(/^Agency, not a housing authority$/);
+  });
+
+  it('shows the organization list fingerprint beside the prompt fingerprint', () => {
+    const orgListFingerprint = 'f'.repeat(64);
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, orgListFingerprint } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    const header = screen.getByRole('heading', { name: /run run-1/i }).parentElement as HTMLElement;
+    expect(header).toHaveTextContent(`Organization list fingerprint: ${orgListFingerprint}`);
+    expect(header).toHaveTextContent('Prompt fingerprint: abcdef123456');
+  });
+
+  it('(PIN) a run that never read the list (a skip) shows no organization list line', () => {
+    renderSection();
+    expect(screen.queryByText(/Organization list fingerprint/)).not.toBeInTheDocument();
+  });
+});

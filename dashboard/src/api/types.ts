@@ -289,6 +289,35 @@ export interface AiRunDecision {
   verdictBy?: string;
 }
 
+/**
+ * Staff labels for a decision's `dropReason` (the AI run log's Reason cell).
+ * HAND MIRROR of DROP_REASONS in app/src/services/extraction/runTypes.ts -
+ * types.test.ts lists every server code, so a code without a label fails
+ * there. Every label before `agency_not_authority` is the humanized text the
+ * run log has always shown.
+ */
+export const AI_RUN_DROP_REASON_LABELS: Readonly<Record<string, string>> = {
+  wrong_contact_type: 'wrong contact type',
+  invalid_value: 'invalid value',
+  equal_to_current: 'equal to current',
+  status_not_onboarding_tenant: 'status not onboarding tenant',
+  type_already_classified: 'type already classified',
+  type_classification_changed: 'type classification changed',
+  phone_not_canonicalizable: 'phone not canonicalizable',
+  phone_already_owned: 'phone already owned',
+  phone_owned_by_other: 'phone owned by other',
+  dismissed_before: 'dismissed before',
+  repo_error: 'repo error',
+  empty_value_at_parse: 'empty value at parse',
+  // Spec 2026-10-06 D8: an agency name the model returned for housingAuthority.
+  agency_not_authority: 'Agency, not a housing authority',
+};
+
+/** A drop reason's label; a code this build does not know is humanized. */
+export function aiRunDropReasonLabel(code: string): string {
+  return AI_RUN_DROP_REASON_LABELS[code] ?? code.replaceAll('_', ' ');
+}
+
 /** One window message as the DETAIL endpoint returns it. */
 export interface AiRunWindowMessage {
   tsMsgId: string;
@@ -321,6 +350,10 @@ export interface AiRunRecordView {
   driver: AiRunDriver;
   model?: string;
   promptFingerprint?: string;
+  /** sha256 hex of the organization-list block the run's prompt carried
+   *  (spec 2026-10-06 D8; plan 3.10). Absent when the run exited at a skip
+   *  gate before reading the list. */
+  orgListFingerprint?: string;
   usage?: { inputTokens: number; outputTokens: number };
   window?: {
     detail: 'light' | 'full'; cursor: string; newestTsMsgId?: string; hasInferredRoleContent?: boolean;

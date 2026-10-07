@@ -3,11 +3,20 @@ id: org-settings-notice-stale-after-add
 title: "Settings > Housing authorities & agencies: a 'Not kept as a spelling' notice from an earlier rename survives a later Add"
 type: bug
 severity: low
-status: open
+status: resolved
 area: dashboard/settings
 created: 2026-10-07
+updated: 2026-10-07
+resolved: 2026-10-07
 refs: dashboard/src/routes/settings/OrgListSection.tsx:307-310, dashboard/src/routes/settings/OrgListSection.tsx:168-172
 ---
+
+**Resolution (2026-10-07).** Fixed by 6435dd26 on `feat/clean-org-names` (code review R1-CONF-2,
+fix wave FW-B item B9): the Settings `onAdded` handler of "Is this really new?" now calls
+`setNotice(null)` before it reloads, as `closeAndReload` does. Pinned by "an Add clears the notice
+an earlier rename left (code review R1-CONF-2)" in
+`dashboard/src/routes/settings/OrgListSection.test.tsx` (the RE2-3 describe block), which failed
+on the code before the fix.
 
 **Problem.** Settings > Housing authorities & agencies keeps one page notice for a result
 staff should see (the `notice` state in `OrgListSection`,

@@ -259,8 +259,8 @@ masked relay group. These realities were paid for in build+debug time:
 - **Timeless `requested` tours:** POST without `scheduledAt` → status `requested`, nothing
   armed, invisible to the sparse `byScheduledAt` GSI; the FIRST `scheduledAt` (Book control
   → `PATCH {scheduledAt, status:'scheduled'}`, or a bare `scheduledAt` patch which
-  auto-advances) is the booking and arms the ladder. Rows render 'Not booked'/'Not yet
-  booked' — assert the label 'Requested', never the raw enum.
+  auto-advances) is the booking and arms the ladder. Rows render 'Needs booking' where
+  the date would be - assert the status label 'Requested', never the raw enum.
 - **Strict-mode collisions to expect:** 'Group thread' vs 'View group thread' (use
   `exact: true`); the plain form-dismiss 'Cancel' vs 'Cancel tour'; exit-gate labels use
   **em dashes** ('Yes — move forward'); `/want to move forward/` matches BOTH the Team ask

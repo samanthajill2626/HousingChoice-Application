@@ -123,14 +123,14 @@ export const APP_ROUTE_EXCLUSIONS = Object.freeze([
 ] as const);
 
 export const CONTRACT_SOURCES = Object.freeze({
-  registry: 'dashboard/src/App.tsx:117-249; dashboard/src/app/nav.ts:55-100',
+  registry: 'dashboard/src/App.tsx:129-275; dashboard/src/app/nav.ts:55-100',
   shell: 'dashboard/src/app/AuthContext.tsx:27-48; dashboard/src/app/UnreadContext.tsx:110-292',
   contacts: 'dashboard/src/routes/contacts/useContacts.ts:14-99',
   units: 'dashboard/src/routes/listings/useListings.ts:10-60',
   today: 'dashboard/src/routes/today/useToday.ts:41-74',
-  tours: 'dashboard/src/routes/tours/useTours.ts:47-133',
+  tours: 'dashboard/src/routes/tours/useTours.ts:48-153',
   placements: 'dashboard/src/routes/placements/usePlacements.ts:50-128,214-225',
-  details: 'dashboard/src/routes/contact/ContactDetail.tsx:111-140; dashboard/src/routes/listing/useListing.ts:110-185',
+  details: 'dashboard/src/routes/contact/ContactDetail.tsx:111-140; dashboard/src/routes/listing/useListing.ts:116-193',
   threads: 'dashboard/src/routes/tours/useTourChannels.ts:166-323; dashboard/src/routes/placements/usePlacementChannels.ts:167-333',
   writes: 'dashboard/src/routes/contact/useMarkContactRead.ts:15-47; dashboard/src/routes/inbox/useInbox.ts:206-242',
 } as const);
@@ -625,6 +625,13 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   // model the two ?from&to reads share one shape and the two ?status reads
   // share another, so the contract must count them, not just list the keys
   // (docs/issues/perf-pages-tours-past-surface.md).
+  // The same KNOWN GAP covers /tours/all (the Tours page's All tab, added
+  // 2026-10-06): no row, excluded on purpose in the same route pin, the same
+  // issue. Its GETs are GET /api/tours/list?when&sort&limit for the first
+  // page, the same plus cursor after it (limit 100 for a search walk or a
+  // return restore; status, type, from and to only when filtered) - never the
+  // contact or unit walks. Its terminal would be the "All tours list" list,
+  // the text "No tours match these filters." or the alert.
   row({ surfaceId: '/placements', label: 'Placements', source: NAV_TODAY('/placements', 'Placements', TODAY_GETS), terminal: PLACEMENT_TERMINAL, gets: PLACEMENT_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: 'inbox-all', label: 'Inbox: All', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox' }), behaviorFamily: 'inbox', source: NAV_TODAY('/inbox', 'Inbox', TODAY_GETS), destinationSelected: inboxDestinationSelected('All'), terminal: inboxTerminal('No conversations yet'), gets: inboxGets('inbox_page_all'), surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: 'inbox-unread', label: 'Inbox: Unread', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=unread' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Unread', inboxGets('inbox_page_unread')), destinationSelected: inboxDestinationSelected('Unread'), terminal: inboxTerminal("You're all caught up"), gets: inboxGets('inbox_page_unread'), surfaceScaleBearing: true, loadScaleBearing: true }),
@@ -722,7 +729,7 @@ assertRouteRegistry(ROUTES);
 
 export const CONTRACT_SOURCE_LEDGER = Object.freeze({
   endpoints: Object.freeze({
-    '/': { base: 'dashboard/src/routes/today/useToday.ts:41-74; dashboard/src/routes/today/useTodayPastTours.ts:71-163; dashboard/src/routes/tours/useTours.ts:296-343' },
+    '/': { base: 'dashboard/src/routes/today/useToday.ts:41-74; dashboard/src/routes/today/useTodayPastTours.ts:71-163; dashboard/src/routes/tours/useTours.ts:293-340' },
     '/contacts': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/contacts/tenants': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/contacts/landlords': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
@@ -730,8 +737,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/contacts/deleted': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/listings': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
     '/listings/deleted': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
-    '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:47-133; dashboard/src/routes/tours/ToursPage.tsx:643-647' },
-    '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:47-133; dashboard/src/routes/tours/ToursPage.tsx:643-647' },
+    '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:48-153; dashboard/src/routes/tours/ToursPage.tsx:662-671' },
+    '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:48-153; dashboard/src/routes/tours/ToursPage.tsx:662-671' },
     '/placements': { base: 'dashboard/src/routes/placements/usePlacements.ts:50-128,214-225' },
     'inbox-all': { base: 'dashboard/src/routes/inbox/useInbox.ts:48-75,157-176' },
     'inbox-unread': { base: 'dashboard/src/routes/inbox/useInbox.ts:48-75,157-176' },
@@ -747,8 +754,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/settings/system': { base: 'dashboard/src/routes/settings/useSettings.ts:18-62; dashboard/src/routes/settings/useSystemStatus.ts:86-141' },
     '/settings/ai-runs': { base: 'dashboard/src/routes/settings/aiRuns/useAiRuns.ts:32-105' },
     '/settings/numbers': { base: 'dashboard/src/routes/settings/NumbersSection.tsx:89-164,207-244' },
-    '/contacts/:contactId': { base: 'dashboard/src/routes/contact/useContactFile.ts:115-136; dashboard/src/api/endpoints.ts:1229-1240; dashboard/src/routes/contact/useContactTimeline.ts:130-185,320-337' },
-    '/listings/:unitId': { base: 'dashboard/src/routes/listing/useListing.ts:110-185; dashboard/src/routes/listing/ListingDetail.tsx:184-185' },
+    '/contacts/:contactId': { base: 'dashboard/src/routes/contact/useContactFile.ts:115-136; dashboard/src/api/endpoints.ts:1415-1427; dashboard/src/routes/contact/useContactTimeline.ts:130-185,320-337' },
+    '/listings/:unitId': { base: 'dashboard/src/routes/listing/useListing.ts:116-193; dashboard/src/routes/listing/ListingDetail.tsx:192-193' },
     '/tours/:tourId': { base: 'dashboard/src/routes/tours/useTourChannels.ts:102-323; dashboard/src/routes/shared/useRoster.ts:75-137' },
     '/placements/:placementId': { base: 'dashboard/src/routes/placements/usePlacementChannels.ts:103-333; dashboard/src/routes/shared/useRoster.ts:75-137' },
     '/conversations/:conversationId': { base: 'dashboard/src/routes/conversation/ConversationDetail.tsx:173-214' },
@@ -760,7 +767,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
       reason: 'The sibling route changes the unmatched-email filter while the same EmailTriage tree keeps the contacts hook mounted, so only the filtered unmatched-email request is passive navigation work.',
     }),
     '/tours/closed': Object.freeze({
-      source: 'dashboard/src/routes/tours/ToursPage.tsx:643-660; dashboard/src/routes/tours/useTours.ts:122-151',
+      source: 'dashboard/src/routes/tours/ToursPage.tsx:662-694,872; dashboard/src/routes/tours/useTours.ts:121-153',
       reason: 'The sibling route enables useClosedTours while the active-tour and cross-reference hooks remain mounted, so only the status-filtered closed-tour request is passive navigation work.',
     }),
   } as const),
@@ -768,15 +775,15 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     contact_detail_tenant: 'dashboard/src/routes/contact/useContactFile.ts:101-165',
     contact_detail_landlord_with_units: 'dashboard/src/routes/contact/useContactFile.ts:101-165',
     contact_detail_other: 'dashboard/src/routes/contact/useContactFile.ts:101-165',
-    unit_detail_with_landlord: 'dashboard/src/routes/listing/useListing.ts:110-185',
-    unit_detail_without_landlord: 'dashboard/src/routes/listing/useListing.ts:110-185',
+    unit_detail_with_landlord: 'dashboard/src/routes/listing/useListing.ts:116-193',
+    unit_detail_without_landlord: 'dashboard/src/routes/listing/useListing.ts:116-193',
     tour_group_thread: 'dashboard/src/routes/tours/useTourChannels.ts:108-154,188-212,266-323',
     tour_person_thread: 'dashboard/src/routes/tours/useTourChannels.ts:108-154,188-212,266-323',
     placement_group_thread: 'dashboard/src/routes/placements/usePlacementChannels.ts:109-155,189-213,274-333',
     placement_person_thread: 'dashboard/src/routes/placements/usePlacementChannels.ts:109-155,189-213,274-333',
   } as const),
   terminals: Object.freeze({
-    '/': 'dashboard/src/routes/today/Today.tsx:35-47,225-260,277-290',
+    '/': 'dashboard/src/routes/today/Today.tsx:36-48,226-261,278-291',
     '/contacts': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/contacts/tenants': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/contacts/landlords': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
@@ -784,8 +791,8 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/contacts/deleted': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/listings': 'dashboard/src/routes/listings/ListingsList.tsx:302,408-426',
     '/listings/deleted': 'dashboard/src/routes/listings/ListingsList.tsx:302,408-417',
-    '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:720-818',
-    '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:720-818',
+    '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:734-823',
+    '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:734-823',
     '/placements': 'dashboard/src/routes/placements/PlacementsPage.tsx:128-176',
     'inbox-all': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
     'inbox-unread': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
@@ -801,25 +808,25 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/settings/system': 'dashboard/src/routes/settings/QuietHoursSection.tsx:135-155; dashboard/src/routes/settings/FlagPills.tsx:41-69; dashboard/src/routes/settings/AlarmGrid.tsx:43-95; dashboard/src/routes/settings/RecentErrors.tsx:69-129',
     '/settings/ai-runs': 'dashboard/src/routes/settings/aiRuns/AiRunList.tsx:43-47',
     '/settings/numbers': 'dashboard/src/routes/settings/NumbersSection.tsx:150-164,207-244',
-    '/contacts/:contactId': 'dashboard/src/routes/contact/ContactDetail.tsx:151-164; dashboard/src/routes/contact/TenantFile.tsx:152; dashboard/src/routes/contact/Card.tsx:18-25',
-    '/listings/:unitId': 'dashboard/src/routes/listing/ListingDetail.tsx:1180-1187',
-    '/tours/:tourId': 'dashboard/src/routes/tours/TourDetail.tsx:630',
+    '/contacts/:contactId': 'dashboard/src/routes/contact/ContactDetail.tsx:151-164; dashboard/src/routes/contact/TenantFile.tsx:176; dashboard/src/routes/contact/Card.tsx:18-25',
+    '/listings/:unitId': 'dashboard/src/routes/listing/ListingDetail.tsx:1192-1199',
+    '/tours/:tourId': 'dashboard/src/routes/tours/TourDetail.tsx:697',
     '/placements/:placementId': 'dashboard/src/routes/placements/PlacementDetail.tsx:515',
     '/conversations/:conversationId': 'dashboard/src/routes/conversation/ConversationDetail.tsx:397-402',
     '/broadcasts/:broadcastId': 'dashboard/src/routes/broadcasts/BroadcastResults.tsx:159-162',
   } as const),
   resolvers: Object.freeze({
-    static: 'dashboard/src/App.tsx:117-249; dashboard/src/app/nav.ts:55-100',
+    static: 'dashboard/src/App.tsx:129-275; dashboard/src/app/nav.ts:55-100',
     contact: 'dashboard/src/routes/contacts/useContacts.ts:14-99',
     unit: 'dashboard/src/routes/listings/useListings.ts:10-60',
-    tour: 'dashboard/src/routes/tours/useTours.ts:46-81',
+    tour: 'dashboard/src/routes/tours/useTours.ts:48-107',
     placement: 'dashboard/src/routes/placements/usePlacements.ts:50-64,214-225',
     conversation: 'dashboard/src/routes/inbox/useInbox.ts:48-120',
     broadcast: 'dashboard/src/routes/broadcasts/useBroadcastsList.ts:29-52,85-108',
   } as const),
   blockedWrites: Object.freeze({
-    contact_detail: 'dashboard/src/routes/contact/useMarkContactRead.ts:15-47; dashboard/src/api/endpoints.ts:1494-1504',
-    conversation_detail: 'dashboard/src/routes/conversation/ConversationDetail.tsx:210-214; dashboard/src/api/endpoints.ts:823-831',
+    contact_detail: 'dashboard/src/routes/contact/useMarkContactRead.ts:15-47; dashboard/src/api/endpoints.ts:1757-1774',
+    conversation_detail: 'dashboard/src/routes/conversation/ConversationDetail.tsx:210-214; dashboard/src/api/endpoints.ts:930-938',
     group_thread: 'dashboard/src/routes/tours/useTourChannels.ts:266-323; dashboard/src/routes/placements/usePlacementChannels.ts:274-333',
     person_thread: 'dashboard/src/routes/tours/useTourChannels.ts:266-323; dashboard/src/routes/placements/usePlacementChannels.ts:274-333',
     contact_inbox_probe: 'dashboard/src/routes/inbox/InboxRow.tsx:73; dashboard/src/routes/inbox/useInbox.ts:206-242',
@@ -1126,7 +1133,7 @@ export async function resolveUnitDetail(api: ResolverApi, dom: ResolverDom): Pro
   return { kind: 'skip', reason: 'fixture_absent' };
 }
 
-// Parity with dashboard/src/routes/tours/useTours.ts:46-51. The resolver owns the live clock.
+// Parity with dashboard/src/routes/tours/useTours.ts:48-54. The resolver owns the live clock.
 export function computeTourWindow(now: Date): { from: string; to: string } {
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
   const end = new Date(start.getTime() + 30 * 24 * 60 * 60 * 1000);

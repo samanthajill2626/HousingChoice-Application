@@ -234,6 +234,19 @@ describe('useListing', () => {
     expect(sorted.map((t) => t.tourId)).toEqual(['b', 'c', 'a']);
   });
 
+  it('sortToursForPanel: only a REQUEST leads - an undated toured or canceled tour is dateless history, after every dated tour', () => {
+    // Ruling D-1: an undated non-request reads "Undated", not "Needs booking",
+    // so it must not sit among the requests at the top of the card.
+    const sorted = sortToursForPanel([
+      { tourId: 'undated-toured', tenantId: 't', unitId: 'u', status: 'toured' },
+      { tourId: 'old', tenantId: 't', unitId: 'u', status: 'toured', scheduledAt: '2026-07-01T15:00:00.000Z' },
+      { tourId: 'undated-canceled', tenantId: 't', unitId: 'u', status: 'canceled' },
+      { tourId: 'request', tenantId: 't', unitId: 'u', status: 'requested' },
+      { tourId: 'new', tenantId: 't', unitId: 'u', status: 'scheduled', scheduledAt: '2026-07-20T15:00:00.000Z' },
+    ] as Parameters<typeof sortToursForPanel>[0]);
+    expect(sorted.map((t) => t.tourId)).toEqual(['request', 'new', 'old', 'undated-toured', 'undated-canceled']);
+  });
+
   it('errors when the unit itself fails to load', async () => {
     getUnit.mockRejectedValue(new ApiError(500, 'boom', 'x'));
     getAllUnits.mockResolvedValue(UNITS);

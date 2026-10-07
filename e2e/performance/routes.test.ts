@@ -385,6 +385,8 @@ describe('route registry completeness', () => {
       // A new Settings tab, not yet a profiler surface
       // (issue perf-pages-settings-organizations-surface).
       '/settings/organizations',
+      // The All tours view, not yet a profiler surface either (the same issue).
+      '/tours/all',
       '/settings',
       '*',
     ]);

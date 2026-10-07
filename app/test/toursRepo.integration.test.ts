@@ -8,13 +8,24 @@
 // Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { GetCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
-import { createToursRepo } from '../src/repos/toursRepo.js';
+import { createToursRepo, type CreateTourInput, type TourItem, type TourType } from '../src/repos/toursRepo.js';
+import {
+  isUnfilteredPhase,
+  locateTourListCursor,
+  planTourListPhases,
+  tourListFingerprint,
+  tourListKeyOf,
+  type TourListFilters,
+  type TourListPhase,
+  type TourListRange,
+} from '../src/lib/tourListQuery.js';
+import { listTourPage, type TourListPageResult } from '../src/services/tourListPage.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -225,6 +236,75 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     const ids = result.map((t) => t.tourId);
     expect(ids).toContain(atFrom.tourId);
     expect(ids).toContain(atTo.tourId);
+  });
+
+  // -------------------------------------------------------------------------
+  // listByScheduledRange walks EVERY page (tour list S1, spec section 7). It
+  // used to send ONE Query and drop LastEvaluatedKey, so a window larger than
+  // one 1 MB page silently lost its newest tours. `queryLimit: 1` forces one
+  // row per page, which makes a single-page read visible as one Query call.
+  //
+  // The window is MARCH 2027 because this file's one table is shared by every
+  // case: the others write 2026 dates (and one reads all of 2026), and eight
+  // rows keep the walk far under queryAll's 100-page cap.
+  // -------------------------------------------------------------------------
+
+  describe('listByScheduledRange pages to completion (March 2027 window)', () => {
+    const from = '2027-03-01T00:00:00.000Z';
+    const to = '2027-03-10T23:59:59.999Z';
+    const insideIds: string[] = [];
+
+    beforeAll(async () => {
+      // Seven inside the window, one a day (distinct instants - no ties), and
+      // one outside it.
+      for (let day = 2; day <= 8; day += 1) {
+        const tour = await tours.create({
+          tenantId: `contact-paged-${day}`,
+          unitId: `unit-paged-${day}`,
+          scheduledAt: `2027-03-0${day}T10:00:00.000Z`,
+          tourType: 'self_guided',
+          status: 'scheduled',
+        });
+        insideIds.push(tour.tourId);
+      }
+      await tours.create({
+        tenantId: 'contact-paged-outside',
+        unitId: 'unit-paged-outside',
+        scheduledAt: '2027-03-20T10:00:00.000Z',
+        tourType: 'self_guided',
+        status: 'scheduled',
+      });
+    });
+
+    it('queryLimit 1 still returns the whole window, one Query per page', async () => {
+      // The file's spying-doc idiom: record, then forward to the shared doc.
+      // queryAll sends every page through the repo's doc, so this sees them all.
+      let rangeQueries = 0;
+      const spyingDoc = {
+        send: async (command: unknown) => {
+          if (command instanceof QueryCommand && command.input.IndexName === 'byScheduledAt') {
+            rangeQueries += 1;
+          }
+          return (doc as DynamoDBDocumentClient).send(command as never);
+        },
+      } as unknown as DynamoDBDocumentClient;
+      const spyingRepo = createToursRepo({ doc: spyingDoc, env: testEnv, logger });
+
+      const result = await spyingRepo.listByScheduledRange(from, to, { queryLimit: 1 });
+
+      expect(new Set(result.map((t) => t.tourId))).toEqual(new Set(insideIds));
+      expect(result).toHaveLength(insideIds.length);
+      // One row per page: seven rows take at least seven Queries. A read that
+      // ignores the query limit (or stops after one page) sends exactly one.
+      expect(rangeQueries).toBeGreaterThanOrEqual(7);
+    });
+
+    it('(PIN) without opts the same window comes back whole', async () => {
+      const result = await tours.listByScheduledRange(from, to);
+
+      expect(new Set(result.map((t) => t.tourId))).toEqual(new Set(insideIds));
+      expect(result).toHaveLength(insideIds.length);
+    });
   });
 
   it('patch updates fields and bumps updatedAt without touching other fields', async () => {
@@ -1032,5 +1112,429 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
       tours.reopenIf({ ...read, tourId: 'tour-ghost-reopen' }, 'toured', '2026-10-20T12:00:00.000Z'),
     ).resolves.toBeUndefined();
     expect(await rawTour('tour-ghost-reopen')).toBeUndefined();
+  });
+});
+
+// queryListPhase - ONE Query of one All-tab phase (Tours page All tab, spec
+// docs/superpowers/specs/2026-10-06-tour-list-design.md 5.3-5.4). Its OWN
+// table: a when=any-shaped read sees every tour in a table, and the describe
+// above writes many. No two fixture rows share a range-key value (scheduledAt
+// on byScheduledAt, createdAt on byStatus) - DynamoDB orders ties opaquely.
+// Every instant is a full toISOString() value: the repo stores scheduledAt
+// raw, and a short form would sort differently from the canonical bounds.
+describe.skipIf(!reachable)('toursRepo.queryListPhase against DynamoDB Local (own prefix)', () => {
+  const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
+  const client = createDynamoClient({ endpoint });
+  const doc = createDocumentClient({ endpoint });
+  const logger = createLogger({ destination: createLogCapture().stream });
+  const tours = createToursRepo({ doc, env: testEnv, logger });
+
+  const at = (day: number): string => `2028-01-0${day}T10:00:00.000Z`;
+  function tour(tourId: string, status: string, tourType: TourType, createdAt: string, scheduledAt?: string) {
+    const input: CreateTourInput = {
+      tourId,
+      tenantId: `contact-${tourId}`,
+      unitId: `unit-${tourId}`,
+      tourType,
+      status,
+      createdAt,
+      ...(scheduledAt !== undefined && { scheduledAt }),
+    };
+    return input;
+  }
+  // Six dated rows (ascending scheduledAt), two requests, one undated toured.
+  const FIXTURE: CreateTourInput[] = [
+    tour('tour-ql-d1', 'scheduled', 'self_guided', '2027-12-01T09:00:00.000Z', at(1)),
+    tour('tour-ql-d2', 'toured', 'landlord_led', '2027-12-02T09:00:00.000Z', at(2)),
+    tour('tour-ql-d3', 'no_show', 'pm_team', '2027-12-03T09:00:00.000Z', at(3)),
+    tour('tour-ql-d4', 'canceled', 'self_guided', '2027-12-04T09:00:00.000Z', at(4)),
+    tour('tour-ql-d5', 'closed', 'landlord_led', '2027-12-05T09:00:00.000Z', at(5)),
+    tour('tour-ql-d6', 'scheduled', 'self_guided', '2027-12-06T09:00:00.000Z', at(6)),
+    tour('tour-ql-r1', 'requested', 'pm_team', '2027-12-07T09:00:00.000Z'),
+    tour('tour-ql-r2', 'requested', 'self_guided', '2027-12-08T09:00:00.000Z'),
+    tour('tour-ql-u3', 'toured', 'landlord_led', '2027-12-09T09:00:00.000Z'),
+  ];
+  const DATED = ['tour-ql-d1', 'tour-ql-d2', 'tour-ql-d3', 'tour-ql-d4', 'tour-ql-d5', 'tour-ql-d6'];
+  const ALL: TourListPhase = { kind: 'd', range: { op: 'all' } };
+  const REQUESTED: TourListPhase = { kind: 'u', index: 0, status: 'requested', notExists: false };
+  const UNDATED_TOURED: TourListPhase = { kind: 'u', index: 1, status: 'toured', notExists: true };
+
+  const seededRows = new Map<string, TourItem>();
+  function seeded(tourId: string): TourItem {
+    const item = seededRows.get(tourId);
+    if (item === undefined) throw new Error(`no seeded row ${tourId}`);
+    return item;
+  }
+  const ids = (items: TourItem[]): string[] => items.map((t) => t.tourId);
+
+  beforeAll(async () => {
+    await ensureTable(client, getTableSpec('tours'), tableName('tours', testEnv));
+    for (const input of FIXTURE) {
+      const item = await tours.create(input);
+      seededRows.set(item.tourId, item);
+    }
+  }, 120_000);
+
+  afterAll(async () => {
+    await deleteTableIfExists(client, tableName('tours', testEnv));
+    doc.destroy();
+    client.destroy();
+  }, 120_000);
+
+  it('1: D over the whole partition - the dated rows, whole, in scheduledAt order both ways; no key', async () => {
+    const up = await tours.queryListPhase(ALL, { limit: 100, forward: true });
+    expect(up.items).toEqual(DATED.map(seeded));
+    expect(up.scannedCount).toBe(6);
+    expect(up.lastEvaluatedKey).toBeUndefined();
+
+    const down = await tours.queryListPhase(ALL, { limit: 100, forward: false });
+    expect(ids(down.items)).toEqual([...DATED].reverse());
+    expect(down.scannedCount).toBe(6);
+    expect(down.lastEvaluatedKey).toBeUndefined();
+  });
+
+  it('2: each range op selects its key range', async () => {
+    const cases: Array<[string, TourListRange, string[]]> = [
+      ['gte', { op: 'gte', value: at(4) }, ['tour-ql-d4', 'tour-ql-d5', 'tour-ql-d6']],
+      ['lt', { op: 'lt', value: at(4) }, ['tour-ql-d1', 'tour-ql-d2', 'tour-ql-d3']],
+      ['lte', { op: 'lte', value: at(4) }, ['tour-ql-d1', 'tour-ql-d2', 'tour-ql-d3', 'tour-ql-d4']],
+      ['between', { op: 'between', from: at(2), to: at(4) }, ['tour-ql-d2', 'tour-ql-d3', 'tour-ql-d4']],
+    ];
+    for (const [label, range, expected] of cases) {
+      const page = await tours.queryListPhase({ kind: 'd', range }, { limit: 100, forward: true });
+      expect(ids(page.items), label).toEqual(expected);
+      expect(page.scannedCount, label).toBe(expected.length);
+      expect(page.lastEvaluatedKey, label).toBeUndefined();
+    }
+    const pastDown = await tours.queryListPhase(
+      { kind: 'd', range: { op: 'lt', value: at(4) } },
+      { limit: 100, forward: false },
+    );
+    expect(ids(pastDown.items)).toEqual(['tour-ql-d3', 'tour-ql-d2', 'tour-ql-d1']);
+    expect(pastDown.scannedCount).toBe(3);
+  });
+
+  it('3: a status filter and a type filter narrow the rows, and combine, while every row in range is evaluated', async () => {
+    const cases: Array<[string, TourListPhase, string[], number]> = [
+      [
+        'status',
+        { kind: 'd', range: { op: 'all' }, statusFilter: ['no_show', 'canceled'] },
+        ['tour-ql-d3', 'tour-ql-d4'],
+        6,
+      ],
+      ['type', { kind: 'd', range: { op: 'all' }, type: 'self_guided' }, ['tour-ql-d1', 'tour-ql-d4', 'tour-ql-d6'], 6],
+      [
+        'status + type',
+        { kind: 'd', range: { op: 'all' }, statusFilter: ['no_show', 'canceled'], type: 'self_guided' },
+        ['tour-ql-d4'],
+        6,
+      ],
+      [
+        'range + status + type',
+        { kind: 'd', range: { op: 'gte', value: at(4) }, statusFilter: ['scheduled'], type: 'self_guided' },
+        ['tour-ql-d6'],
+        3,
+      ],
+    ];
+    for (const [label, phase, expected, scanned] of cases) {
+      const page = await tours.queryListPhase(phase, { limit: 100, forward: true });
+      expect(ids(page.items), label).toEqual(expected);
+      expect(page.scannedCount, label).toBe(scanned);
+      expect(page.lastEvaluatedKey, label).toBeUndefined();
+    }
+  });
+
+  it('4: U reads one status partition by createdAt; notExists keeps only its undated rows', async () => {
+    const up = await tours.queryListPhase(REQUESTED, { limit: 100, forward: true });
+    expect(ids(up.items)).toEqual(['tour-ql-r1', 'tour-ql-r2']);
+    expect(up.scannedCount).toBe(2);
+    expect(up.lastEvaluatedKey).toBeUndefined();
+    const down = await tours.queryListPhase(REQUESTED, { limit: 100, forward: false });
+    expect(ids(down.items)).toEqual(['tour-ql-r2', 'tour-ql-r1']);
+    expect(down.scannedCount).toBe(2);
+
+    // The dated toured row is EVALUATED, then filtered out.
+    const undated = await tours.queryListPhase(UNDATED_TOURED, { limit: 100, forward: true });
+    expect(ids(undated.items)).toEqual(['tour-ql-u3']);
+    expect(undated.scannedCount).toBe(2);
+    expect(undated.lastEvaluatedKey).toBeUndefined();
+    const whole = await tours.queryListPhase({ ...UNDATED_TOURED, notExists: false }, { limit: 100, forward: true });
+    expect(ids(whole.items)).toEqual(['tour-ql-d2', 'tour-ql-u3']);
+    expect(whole.scannedCount).toBe(2);
+  });
+
+  it('5: Limit counts EVALUATED rows, before the filter - an empty filtered page still carries a key', async () => {
+    const closed: TourListPhase = { kind: 'd', range: { op: 'all' }, statusFilter: ['closed'] };
+    const page = await tours.queryListPhase(closed, { limit: 2, forward: true });
+    expect(page.items).toEqual([]);
+    expect(page.scannedCount).toBe(2);
+    expect(page.lastEvaluatedKey).toStrictEqual(tourListKeyOf(seeded('tour-ql-d2'), closed));
+  });
+
+  it('6: a Query that stops AT its Limit returns a key even when nothing follows; resuming finds nothing', async () => {
+    const two: TourListPhase = { kind: 'd', range: { op: 'between', from: at(2), to: at(3) } };
+    const page = await tours.queryListPhase(two, { limit: 2, forward: true });
+    expect(ids(page.items)).toEqual(['tour-ql-d2', 'tour-ql-d3']);
+    expect(page.scannedCount).toBe(2);
+    expect(page.lastEvaluatedKey).toStrictEqual(tourListKeyOf(seeded('tour-ql-d3'), two));
+
+    const next = await tours.queryListPhase(two, { limit: 2, forward: true, startKey: page.lastEvaluatedKey });
+    expect(next.items).toEqual([]);
+    expect(next.scannedCount).toBe(0);
+    expect(next.lastEvaluatedKey).toBeUndefined();
+  });
+
+  it('7: no key when the key range runs out before the Limit', async () => {
+    for (const limit of [7, 100]) {
+      const page = await tours.queryListPhase(ALL, { limit, forward: true });
+      expect(ids(page.items), `limit ${limit}`).toEqual(DATED);
+      expect(page.scannedCount, `limit ${limit}`).toBe(6);
+      expect(page.lastEvaluatedKey, `limit ${limit}`).toBeUndefined();
+    }
+    // ...while a Limit equal to the row count stops AT it (case 6's fact).
+    const exact = await tours.queryListPhase(ALL, { limit: 6, forward: true });
+    expect(exact.scannedCount).toBe(6);
+    expect(exact.lastEvaluatedKey).toStrictEqual(tourListKeyOf(seeded('tour-ql-d6'), ALL));
+  });
+
+  it('8: a start key built from an ITEM resumes right after that item, in either direction', async () => {
+    const first = await tours.queryListPhase(ALL, { limit: 3, forward: true });
+    expect(ids(first.items)).toEqual(['tour-ql-d1', 'tour-ql-d2', 'tour-ql-d3']);
+    const third = first.items[2];
+    if (third === undefined) throw new Error('expected a third row');
+
+    const next = await tours.queryListPhase(ALL, { limit: 2, forward: true, startKey: tourListKeyOf(third, ALL) });
+    expect(ids(next.items)).toEqual(['tour-ql-d4', 'tour-ql-d5']);
+    expect(next.scannedCount).toBe(2);
+    const back = await tours.queryListPhase(ALL, { limit: 100, forward: false, startKey: tourListKeyOf(third, ALL) });
+    expect(ids(back.items)).toEqual(['tour-ql-d2', 'tour-ql-d1']);
+    expect(back.scannedCount).toBe(2);
+
+    const afterR1 = await tours.queryListPhase(REQUESTED, {
+      limit: 100,
+      forward: true,
+      startKey: tourListKeyOf(seeded('tour-ql-r1'), REQUESTED),
+    });
+    expect(ids(afterR1.items)).toEqual(['tour-ql-r2']);
+    expect(afterR1.scannedCount).toBe(1);
+  });
+
+  it('9: every phase SHAPE is a valid Query - no unused or missing expression names or values', async () => {
+    const ranges: TourListRange[] = [
+      { op: 'all' },
+      { op: 'gte', value: at(2) },
+      { op: 'lt', value: at(5) },
+      { op: 'lte', value: at(5) },
+      { op: 'between', from: at(2), to: at(5) },
+    ];
+    const statusFilters: Array<Extract<TourListPhase, { kind: 'd' }>['statusFilter']> = [
+      undefined,
+      ['toured', 'closed'],
+    ];
+    const types: Array<TourListPhase['type']> = [undefined, 'landlord_led'];
+    const shapes: TourListPhase[] = [];
+    for (const range of ranges) {
+      for (const statusFilter of statusFilters) {
+        for (const type of types) {
+          shapes.push({
+            kind: 'd',
+            range,
+            ...(statusFilter !== undefined && { statusFilter }),
+            ...(type !== undefined && { type }),
+          });
+        }
+      }
+    }
+    for (const base of [REQUESTED, UNDATED_TOURED]) {
+      for (const type of types) shapes.push({ ...base, ...(type !== undefined && { type }) });
+    }
+    expect(shapes).toHaveLength(24);
+
+    const failures: string[] = [];
+    for (const phase of shapes) {
+      for (const forward of [true, false]) {
+        try {
+          await tours.queryListPhase(phase, { limit: 100, forward });
+        } catch (err) {
+          const e = err as Error;
+          failures.push(`${JSON.stringify(phase)} forward=${forward}: ${e.name}: ${e.message}`);
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+});
+
+// listTourPage over the REAL repo (Tours page All tab, spec
+// docs/superpowers/specs/2026-10-06-tour-list-design.md 5.4 and 9): the paging
+// engine walks DynamoDB Local with TINY constants (2 items per filtered Query,
+// ONE Query per page, 2 rows per page), so the budget stop, the k-less
+// boundary cursor and the filtered phantom all happen on a ten-row table. If
+// this fails where tourListPage.test.ts passes, the shared phase model
+// (helpers/tourListIndexFake.ts) is wrong: fix it and its mirror first. Its OWN
+// table (a when=any walk reads every tour in its table); no range-key ties;
+// every instant a full toISOString() value.
+describe.skipIf(!reachable)('listTourPage over toursRepo.queryListPhase on DynamoDB Local (own prefix)', () => {
+  const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
+  const client = createDynamoClient({ endpoint });
+  const doc = createDocumentClient({ endpoint });
+  const logger = createLogger({ destination: createLogCapture().stream });
+  const tours = createToursRepo({ doc, env: testEnv, logger });
+
+  const PINNED = '2026-10-06T16:00:00.000Z';
+  const TINY = { queryPageLimit: 2, maxQueryCalls: 1 };
+  const at = (day: number): string => `2028-02-0${day}T10:00:00.000Z`;
+  const created = (day: number): string => `2028-01-${String(day).padStart(2, '0')}T09:00:00.000Z`;
+  function tour(tourId: string, status: string, createdAt: string, scheduledAt?: string): CreateTourInput {
+    return {
+      tourId,
+      tenantId: `contact-${tourId}`,
+      unitId: `unit-${tourId}`,
+      tourType: 'self_guided',
+      status,
+      createdAt,
+      ...(scheduledAt !== undefined && { scheduledAt }),
+    };
+  }
+  // Seven dated rows of several statuses (two of them closed), two requests,
+  // one undated toured - and NO undated closed tour, so the closed partition's
+  // first filtered batch of 2 is all filtered out.
+  const FIXTURE: CreateTourInput[] = [
+    tour('tour-lp-d1', 'scheduled', created(1), at(1)),
+    tour('tour-lp-d2', 'toured', created(2), at(2)),
+    tour('tour-lp-d3', 'no_show', created(3), at(3)),
+    tour('tour-lp-d4', 'canceled', created(4), at(4)),
+    tour('tour-lp-d5', 'closed', created(5), at(5)),
+    tour('tour-lp-d6', 'scheduled', created(6), at(6)),
+    tour('tour-lp-d7', 'closed', created(7), at(7)),
+    tour('tour-lp-r1', 'requested', created(8)),
+    tour('tour-lp-r2', 'requested', created(9)),
+    tour('tour-lp-u3', 'toured', created(10)),
+  ];
+  const DATED = ['tour-lp-d1', 'tour-lp-d2', 'tour-lp-d3', 'tour-lp-d4', 'tour-lp-d5', 'tour-lp-d6', 'tour-lp-d7'];
+
+  beforeAll(async () => {
+    await ensureTable(client, getTableSpec('tours'), tableName('tours', testEnv));
+    for (const input of FIXTURE) await tours.create(input);
+  }, 120_000);
+
+  afterAll(async () => {
+    await deleteTableIfExists(client, tableName('tours', testEnv));
+    doc.destroy();
+    client.destroy();
+  }, 120_000);
+
+  /** One walked page, and whether every Query it made read an UNFILTERED phase D. */
+  interface WalkedPage {
+    page: TourListPageResult;
+    unfilteredD: boolean;
+  }
+
+  /** Follow nextCursor to null (at most 50 pages), decode-free: the cursor goes
+   *  back through locateTourListCursor as the next page's start. */
+  async function walk(filters: TourListFilters): Promise<WalkedPage[]> {
+    const phases = planTourListPhases(filters, PINNED);
+    const fingerprint = tourListFingerprint(filters);
+    const pages: WalkedPage[] = [];
+    let start: { phaseIndex: number; startKey?: Record<string, string> } | undefined;
+    for (let i = 0; i < 50; i++) {
+      const read: TourListPhase[] = [];
+      const page = await listTourPage(
+        (phase, opts) => {
+          read.push(phase);
+          return tours.queryListPhase(phase, opts);
+        },
+        { phases, filters, fingerprint, pinnedNow: PINNED, limit: 2, ...(start !== undefined && { start }) },
+        TINY,
+      );
+      pages.push({ page, unfilteredD: read.length > 0 && read.every((p) => p.kind === 'd' && isUnfilteredPhase(p)) });
+      if (page.nextCursor === null) return pages;
+      start = locateTourListCursor(page.nextCursor, phases);
+      if (start === undefined) throw new Error(`cursor does not fit its plan: ${JSON.stringify(page.nextCursor)}`);
+    }
+    throw new Error('the walk did not end within 50 pages');
+  }
+
+  const walkedIds = (pages: WalkedPage[]): string[] => pages.flatMap((w) => w.page.items.map((t) => t.tourId));
+
+  /** Spec 9 / ruling A-6: an unfiltered page reads at most ONE row past the
+   *  rows it returns (the peek row) - on real DynamoDB. */
+  function expectPeekBound(pages: WalkedPage[], label: string): number {
+    const unfiltered = pages.filter((w) => w.unfilteredD);
+    for (const [n, w] of unfiltered.entries()) {
+      expect(w.page.evaluated, `${label} unfiltered-D page ${n}`).toBeLessThanOrEqual(w.page.items.length + 1);
+    }
+    return unfiltered.length;
+  }
+
+  it('latest first: every id exactly once - dated, then the requests, then the undated toured; the budget stop and the k-less u cursor survive real DynamoDB', async () => {
+    const pages = await walk({ when: 'any', statuses: [], sort: 'latest' });
+    const got = walkedIds(pages);
+    expect(new Set(got).size).toBe(got.length);
+    expect([...got].sort()).toEqual(FIXTURE.map((t) => String(t.tourId)).sort());
+    expect(got).toEqual([...[...DATED].reverse(), 'tour-lp-r2', 'tour-lp-r1', 'tour-lp-u3']);
+
+    expect(pages.some((w) => w.page.items.length === 0 && w.page.nextCursor !== null)).toBe(true);
+    expect(pages.some((w) => w.page.nextCursor?.ph === 'u' && w.page.nextCursor.k === undefined)).toBe(true);
+    expect(pages.every((w) => w.page.nextCursor?.ph !== 'd' || w.page.nextCursor.k !== undefined)).toBe(true);
+    expect(pages.every((w) => w.page.calls === 1)).toBe(true);
+    expect(expectPeekBound(pages, 'latest')).toBeGreaterThanOrEqual(3);
+  });
+
+  it('earliest first: every id exactly once - the dated rows EARLIEST first, then the undated ones in the same phase order', async () => {
+    const pages = await walk({ when: 'any', statuses: [], sort: 'earliest' });
+    const got = walkedIds(pages);
+    expect(new Set(got).size).toBe(got.length);
+    expect(got).toEqual([...DATED, 'tour-lp-r1', 'tour-lp-r2', 'tour-lp-u3']);
+    expect(pages.some((w) => w.page.items.length === 0 && w.page.nextCursor !== null)).toBe(true);
+    expect(pages.some((w) => w.page.nextCursor?.ph === 'u' && w.page.nextCursor.k === undefined)).toBe(true);
+    expect(expectPeekBound(pages, 'earliest')).toBeGreaterThanOrEqual(3);
+  });
+
+  it('a sparse filter (no_show): partial and empty pages, and the walk still reaches the one no-show and ends with nextCursor null', async () => {
+    const pages = await walk({ when: 'any', statuses: ['no_show'], sort: 'latest' });
+    expect(walkedIds(pages)).toEqual(['tour-lp-d3']);
+    expect(pages.at(-1)?.page.nextCursor).toBeNull();
+    expect(pages.some((w) => w.page.items.length === 0 && w.page.nextCursor?.ph === 'd')).toBe(true);
+    expect(pages.length).toBeGreaterThan(2);
+  });
+
+  // Spec 9 (code review r1 SC-6): an UNFILTERED final page that ends exactly on
+  // the last row answers nextCursor null - the peek row finds nothing, so no
+  // phantom Load more - on real DynamoDB, not only the fake.
+  it('past, unfiltered: a page whose limit equals the dated row count ends exactly on the last row - ONE page, nextCursor null', async () => {
+    const filters: TourListFilters = { when: 'past', statuses: [], sort: 'latest' };
+    // Pinned after every dated row, so past reads all seven.
+    const pinnedNow = '2028-03-01T00:00:00.000Z';
+    const phases = planTourListPhases(filters, pinnedNow);
+    expect(phases).toHaveLength(1);
+    expect(phases.every(isUnfilteredPhase)).toBe(true);
+    const page = await listTourPage(
+      (phase, opts) => tours.queryListPhase(phase, opts),
+      { phases, filters, fingerprint: tourListFingerprint(filters), pinnedNow, limit: DATED.length },
+      TINY,
+    );
+    expect(page.items.map((t) => t.tourId)).toEqual([...DATED].reverse());
+    expect(page.nextCursor).toBeNull();
+    expect(page.calls).toBe(1);
+    expect(page.evaluated).toBeLessThanOrEqual(page.items.length + 1);
+  });
+
+  // Spec 9 (SC-6): every dated status pressed normalizes to NO status filter on
+  // phase D, so its pages are unfiltered and read at most the one peek row past
+  // the rows they return.
+  it('every dated status pressed: phase D carries no status filter, and each of its pages reads at most one row past the rows it returns', async () => {
+    const filters: TourListFilters = {
+      when: 'any',
+      statuses: ['scheduled', 'toured', 'no_show', 'canceled', 'closed'],
+      sort: 'latest',
+    };
+    const [d] = planTourListPhases(filters, PINNED);
+    expect(d?.kind).toBe('d');
+    expect(d).not.toHaveProperty('statusFilter');
+    const pages = await walk(filters);
+    expect(walkedIds(pages)).toEqual([...[...DATED].reverse(), 'tour-lp-u3']);
+    expect(pages.at(-1)?.page.nextCursor).toBeNull();
+    expect(expectPeekBound(pages, 'every dated status')).toBeGreaterThanOrEqual(3);
   });
 });

@@ -8,7 +8,7 @@
 //
 // Mirrors unitsApi.test.ts: in-memory fakes via makeWebhookHarness, no DynamoDB.
 import request from 'supertest';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
@@ -37,6 +37,14 @@ import {
 import { VoiceCapabilityError } from '../src/adapters/messaging.js';
 import { rosterActionIdFor } from '../src/repos/pendingRosterActionsRepo.js';
 import { RosterPlanConflictError } from '../src/lib/rosterResolution.js';
+import {
+  encodeTourListCursor,
+  parseTourListQuery,
+  tourListFingerprint,
+  type TourListCursor,
+} from '../src/lib/tourListQuery.js';
+import type { CreateTourInput, TourItem } from '../src/repos/toursRepo.js';
+import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -5560,5 +5568,548 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
       expect(res.status).toBe(404);
       expect(res.body.error).toBe('tour_not_found');
     }
+  });
+});
+
+// ============================================================================
+// GET /api/tours/list - the Tours page's All tab (spec
+// docs/superpowers/specs/2026-10-06-tour-list-design.md section 5)
+// ============================================================================
+//
+// One server-filtered page plus the names its rows need. The harness's
+// queryListPhase is the shared phase model (helpers/tourListIndexFake.ts,
+// pinned to DynamoDB Local), so these walks page exactly as the real index
+// does. Fixtures: every instant a full toISOString() value, and NO two tours
+// share a scheduledAt or a createdAt - the model THROWS (a 500 here) on a
+// resume inside a range-key tie.
+
+describe('GET /api/tours/list', () => {
+  const NOW = '2026-10-06T16:00:00.000Z';
+  const HOUR = 3_600_000;
+  /** `h` hours after (negative: before) NOW, canonical. */
+  const at = (h: number): string => new Date(Date.parse(NOW) + h * HOUR).toISOString();
+  let createdSeq = 0;
+  /** A createdAt no other tour in this describe holds (canonical). */
+  const nextCreatedAt = (): string => new Date(Date.UTC(2026, 5, 1) + ++createdSeq * 60_000).toISOString();
+
+  function tourInput(tourId: string, status: string, scheduledAt?: string, more: Partial<TourItem> = {}): CreateTourInput {
+    return {
+      tenantId: `tenant-${tourId}`,
+      unitId: `unit-${tourId}`,
+      tourType: 'self_guided',
+      ...more,
+      tourId,
+      status,
+      createdAt: nextCreatedAt(),
+      ...(scheduledAt !== undefined && { scheduledAt }),
+    };
+  }
+
+  interface ListBody {
+    tours: Array<Record<string, unknown>>;
+    contacts: Record<string, Record<string, unknown>>;
+    units: Record<string, Record<string, unknown>>;
+    nextCursor: string | null;
+  }
+
+  type App = ReturnType<typeof makeWebhookHarness>['app'];
+
+  const listPath = (query: string, cursor?: string): string => {
+    const parts = [query, cursor !== undefined ? `cursor=${encodeURIComponent(cursor)}` : ''].filter((p) => p !== '');
+    return `/api/tours/list${parts.length > 0 ? `?${parts.join('&')}` : ''}`;
+  };
+
+  /** Follow nextCursor to null; every page must answer 200. */
+  async function walkList(app: App, query: string): Promise<ListBody[]> {
+    const pages: ListBody[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 50; i++) {
+      const res = await authed(app).get(listPath(query, cursor));
+      expect(res.status, `${listPath(query, cursor)}: ${JSON.stringify(res.body)}`).toBe(200);
+      const body = res.body as ListBody;
+      pages.push(body);
+      if (body.nextCursor === null) return pages;
+      cursor = body.nextCursor;
+    }
+    throw new Error(`the walk of '${query}' did not end within 50 pages`);
+  }
+
+  const tourIds = (pages: ListBody[]): string[] => pages.flatMap((p) => p.tours.map((t) => String(t['tourId'])));
+
+  /** The filters the route derives from a query, for crafting cursors. */
+  function fingerprintOf(query: Record<string, unknown>): string {
+    const parsed = parseTourListQuery(query);
+    if (!parsed.ok) throw new Error(parsed.error);
+    return tourListFingerprint(parsed.value.filters);
+  }
+
+  const decodeN = (cursor: string): unknown => (JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as TourListCursor).n;
+
+  /** The route's WARN when DynamoDB refuses the CLIENT's start key (AD-1). */
+  const REFUSED = 'tours list: cursor start key refused';
+  const validationException = (message: string): Error => Object.assign(new Error(message), { name: 'ValidationException' });
+
+  it('1: every invalid parameter is a 400 whose message names it', async () => {
+    const { app } = makeWebhookHarness();
+    const cases: Array<[string, string]> = [
+      ['when=soon', 'when must be one of: any, upcoming, past, range'],
+      ['sort=newest', 'sort must be one of: latest, earliest'],
+      ['status=requested,bogus', 'status must be a comma list of: requested, scheduled, toured, no_show, canceled, closed'],
+      ['type=walkthrough', 'type must be one of: self_guided, landlord_led, pm_team'],
+      ['when=past&from=2026-10-01T00:00:00.000Z', 'from and to are accepted only with when=range'],
+      ['to=2026-10-01T00:00:00.000Z', 'from and to are accepted only with when=range'],
+      ['when=range&from=yesterday', 'from and to must be valid ISO 8601 datetimes'],
+      ['when=range&from=10/06/2026', 'from and to must be valid ISO 8601 datetimes'],
+      // Not a real day: a 400, never rolled into March (R2-1).
+      ['when=range&from=2026-02-30T00:00:00Z', 'from and to must be valid ISO 8601 datetimes'],
+      // Past year 9999 once canonical ('+010000-...'): a 400, never an
+      // inverted range (R3-1).
+      ['when=range&to=9999-12-31T23:59:59-04:00', 'from and to must be valid ISO 8601 datetimes'],
+      ['when=range&from=2026-10-02T00:00:00.000Z&to=2026-10-01T00:00:00.000Z', 'from must be on or before to'],
+      ['limit=0', 'limit must be an integer 1..100'],
+      ['limit=101', 'limit must be an integer 1..100'],
+      ['limit=2.5', 'limit must be an integer 1..100'],
+      ['cursor=', 'invalid cursor'],
+    ];
+    for (const [query, error] of cases) {
+      const res = await authed(app).get(`/api/tours/list?${query}`);
+      expect(res.status, query).toBe(400);
+      expect(res.body, query).toStrictEqual({ error });
+    }
+  });
+
+  it('2: the default list - dated tours latest first, then the undated ones in U_ORDER, each row the slim projection', async () => {
+    const { app, world } = makeWebhookHarness();
+    await world.toursRepo.create(
+      tourInput('tl2-d1', 'scheduled', at(48), {
+        roster: [{ contactId: 'contact-roster-1' }],
+        rosterVersion: 2,
+        currentLadderId: 'ladder-tl2-d1',
+        conversionClaimedAt: at(-3),
+        lastMarkedAt: at(-4),
+      }),
+    );
+    await world.toursRepo.create(
+      tourInput('tl2-d2', 'toured', at(-24), { outcome: 'move_forward', convertible: true, convertedPlacementId: 'pending:tl2' }),
+    );
+    await world.toursRepo.create(
+      tourInput('tl2-d3', 'closed', at(-48), { outcome: 'no_outcome', autoClosedAt: at(-2), autoClosedFrom: 'scheduled' }),
+    );
+    await world.toursRepo.create(tourInput('tl2-r1', 'requested'));
+    await world.toursRepo.create(tourInput('tl2-r2', 'requested'));
+    await world.toursRepo.create(tourInput('tl2-u1', 'toured'));
+    await world.toursRepo.create(tourInput('tl2-n1', 'no_show'));
+    await world.toursRepo.create(tourInput('tl2-x1', 'canceled'));
+    await world.toursRepo.create(tourInput('tl2-c1', 'closed', undefined, { outcome: 'not_a_fit' }));
+
+    const pages = await walkList(app, '');
+    expect(tourIds(pages)).toEqual([
+      'tl2-d1',
+      'tl2-d2',
+      'tl2-d3',
+      'tl2-r2',
+      'tl2-r1',
+      'tl2-u1',
+      'tl2-n1',
+      'tl2-x1',
+      'tl2-c1',
+    ]);
+
+    const ROW_FIELDS = new Set([
+      'tourId',
+      'tenantId',
+      'unitId',
+      'scheduledAt',
+      'tourType',
+      'status',
+      'outcome',
+      'convertible',
+      'convertedPlacementId',
+      'autoClosedAt',
+      'createdAt',
+      'updatedAt',
+    ]);
+    const rows = pages.flatMap((p) => p.tours);
+    for (const row of rows) {
+      for (const key of ['tourId', 'tenantId', 'unitId', 'tourType', 'status', 'createdAt', 'updatedAt']) {
+        expect(row, `${String(row['tourId'])} has ${key}`).toHaveProperty(key);
+      }
+      expect(Object.keys(row).filter((key) => !ROW_FIELDS.has(key)), String(row['tourId'])).toEqual([]);
+    }
+    const byId = new Map(rows.map((row) => [String(row['tourId']), row]));
+    const d1 = byId.get('tl2-d1');
+    for (const hidden of ['roster', 'rosterVersion', 'currentLadderId', '_schedPartition', 'conversionClaimedAt', 'lastMarkedAt']) {
+      expect(d1, hidden).not.toHaveProperty(hidden);
+    }
+    expect(d1).toMatchObject({ scheduledAt: at(48), status: 'scheduled', tourType: 'self_guided' });
+    expect(byId.get('tl2-d2')).toMatchObject({ outcome: 'move_forward', convertible: true, convertedPlacementId: 'pending:tl2' });
+    expect(byId.get('tl2-d3')).toMatchObject({ outcome: 'no_outcome', autoClosedAt: at(-2) });
+    expect(byId.get('tl2-d3')).not.toHaveProperty('autoClosedFrom');
+    expect(byId.get('tl2-r1')).not.toHaveProperty('scheduledAt');
+  });
+
+  it('3: upcoming / past split at the injected clock; the cursor pins the instant, even for a non-canonical clock', async () => {
+    let clock = NOW;
+    const { app, world } = makeWebhookHarness({ toursNow: () => clock });
+    await world.toursRepo.create(tourInput('tl3-p1', 'toured', at(-2)));
+    await world.toursRepo.create(tourInput('tl3-t1', 'scheduled', at(1)));
+    await world.toursRepo.create(tourInput('tl3-t2', 'scheduled', at(2)));
+    await world.toursRepo.create(tourInput('tl3-t3', 'scheduled', at(3)));
+
+    const first = await authed(app).get('/api/tours/list?when=upcoming&limit=1');
+    expect(first.status).toBe(200);
+    expect((first.body as ListBody).tours.map((t) => t['tourId'])).toEqual(['tl3-t1']);
+    const cursor = (first.body as ListBody).nextCursor;
+    if (cursor === null) throw new Error('expected a cursor');
+    expect(decodeN(cursor)).toBe(NOW);
+
+    // Past the SECOND tour: a route that rebuilt page 2's range from the new
+    // clock would reject the start key (as DynamoDB does) or skip tl3-t2.
+    clock = at(2.5);
+    const second = await authed(app).get(`/api/tours/list?when=upcoming&limit=1&cursor=${encodeURIComponent(cursor)}`);
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    expect((second.body as ListBody).tours.map((t) => t['tourId'])).toEqual(['tl3-t2']);
+
+    const past = await walkList(app, 'when=past');
+    expect(tourIds(past)).toEqual(['tl3-t2', 'tl3-t1', 'tl3-p1']);
+
+    // A non-canonical clock: the route canonicalizes the instant before it goes
+    // in the cursor (decodeTourListCursor accepts only a toISOString() form).
+    const raw = makeWebhookHarness({ toursNow: () => '2026-10-06T16:00:00Z' });
+    await raw.world.toursRepo.create(tourInput('tl3-q1', 'scheduled', at(1)));
+    await raw.world.toursRepo.create(tourInput('tl3-q2', 'scheduled', at(2)));
+    const rawFirst = await authed(raw.app).get('/api/tours/list?when=upcoming&limit=1');
+    const rawCursor = (rawFirst.body as ListBody).nextCursor;
+    if (rawCursor === null) throw new Error('expected a cursor');
+    expect(decodeN(rawCursor)).toBe(NOW);
+    const rawSecond = await authed(raw.app).get(`/api/tours/list?when=upcoming&limit=1&cursor=${encodeURIComponent(rawCursor)}`);
+    expect(rawSecond.status, JSON.stringify(rawSecond.body)).toBe(200);
+    expect((rawSecond.body as ListBody).tours.map((t) => t['tourId'])).toEqual(['tl3-q2']);
+  });
+
+  it('4: status and type filters - requested skips phase D, scheduled reads no undated row, a type filters every phase', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await world.toursRepo.create(tourInput('tl4-s1', 'scheduled', at(10)));
+    await world.toursRepo.create(tourInput('tl4-s2', 'scheduled', at(20), { tourType: 'pm_team' }));
+    await world.toursRepo.create(tourInput('tl4-t1', 'toured', at(-10), { tourType: 'pm_team' }));
+    await world.toursRepo.create(tourInput('tl4-r1', 'requested', undefined, { tourType: 'pm_team' }));
+    await world.toursRepo.create(tourInput('tl4-r2', 'requested'));
+    await world.toursRepo.create(tourInput('tl4-u1', 'toured', undefined, { tourType: 'pm_team' }));
+    await world.toursRepo.create(tourInput('tl4-c1', 'closed'));
+
+    const requested = await walkList(app, 'status=requested');
+    expect(tourIds(requested)).toEqual(['tl4-r2', 'tl4-r1']);
+    expect(requested).toHaveLength(1);
+    // Phase D skipped: ONE Query of ONE phase.
+    const line = capture.atLevel(30).filter((l) => l['msg'] === 'tours list page').at(-1);
+    expect(line).toMatchObject({ calls: 1, phases: 1, returned: 2 });
+
+    expect(tourIds(await walkList(app, 'status=scheduled'))).toEqual(['tl4-s2', 'tl4-s1']);
+
+    const pm = await walkList(app, 'type=pm_team');
+    expect(tourIds(pm)).toEqual(['tl4-s2', 'tl4-t1', 'tl4-r1', 'tl4-u1']);
+    expect(pm.flatMap((p) => p.tours).every((t) => t['tourType'] === 'pm_team')).toBe(true);
+  });
+
+  it('5: paging - five tours, limit=2, walked to nextCursor null: every id exactly once, in the default order', async () => {
+    const { app, world } = makeWebhookHarness();
+    await world.toursRepo.create(tourInput('tl5-d1', 'scheduled', at(5)));
+    await world.toursRepo.create(tourInput('tl5-d2', 'toured', at(-5)));
+    await world.toursRepo.create(tourInput('tl5-d3', 'no_show', at(-15)));
+    await world.toursRepo.create(tourInput('tl5-r1', 'requested'));
+    await world.toursRepo.create(tourInput('tl5-u1', 'toured'));
+
+    const pages = await walkList(app, 'limit=2');
+    const got = tourIds(pages);
+    expect(got).toEqual(['tl5-d1', 'tl5-d2', 'tl5-d3', 'tl5-r1', 'tl5-u1']);
+    expect(new Set(got).size).toBe(got.length);
+    expect(pages.length).toBeGreaterThan(2);
+    expect(pages.every((p) => p.tours.length <= 2)).toBe(true);
+  });
+
+  it('6: cursor errors - garbage, a replay under other filters, a u cursor on a D-only list, a wrong-partition d key', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
+    await world.toursRepo.create(tourInput('tl6-p1', 'toured', at(-1)));
+    await world.toursRepo.create(tourInput('tl6-p2', 'toured', at(-2)));
+    await world.toursRepo.create(tourInput('tl6-p3', 'toured', at(-3)));
+
+    const garbage = await authed(app).get('/api/tours/list?cursor=not-a-cursor');
+    expect(garbage.status).toBe(400);
+    expect(garbage.body).toStrictEqual({ error: 'invalid cursor' });
+
+    const pastPage = await authed(app).get('/api/tours/list?when=past&limit=1');
+    const pastCursor = (pastPage.body as ListBody).nextCursor;
+    if (pastCursor === null) throw new Error('expected a cursor');
+    const replay = await authed(app).get(`/api/tours/list?when=upcoming&cursor=${encodeURIComponent(pastCursor)}`);
+    expect(replay.status).toBe(400);
+    expect(replay.body).toStrictEqual({ error: 'cursor_mismatch' });
+
+    const f = fingerprintOf({ when: 'past' });
+    const uOnPast = encodeTourListCursor({ v: 1, f, n: NOW, ph: 'u', i: 0 });
+    const uRes = await authed(app).get(`/api/tours/list?when=past&cursor=${encodeURIComponent(uOnPast)}`);
+    expect(uRes.status).toBe(400);
+    expect(uRes.body).toStrictEqual({ error: 'invalid cursor' });
+
+    const wrongPartition = encodeTourListCursor({
+      v: 1,
+      f,
+      n: NOW,
+      ph: 'd',
+      k: { tourId: 'tl6-p1', _schedPartition: 'x', scheduledAt: at(-1) },
+    });
+    const dRes = await authed(app).get(`/api/tours/list?when=past&cursor=${encodeURIComponent(wrongPartition)}`);
+    expect(dRes.status).toBe(400);
+    expect(dRes.body).toStrictEqual({ error: 'invalid cursor' });
+  });
+
+  it("7: names - contacts and units for THIS page's rows only, string name fields only, a missing record simply absent", async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
+    await world.toursRepo.create(tourInput('tl7-a', 'toured', at(-1), { tenantId: 'tenant-a', unitId: 'unit-a' }));
+    await world.toursRepo.create(tourInput('tl7-b', 'toured', at(-2), { tenantId: 'tenant-b', unitId: 'unit-b' }));
+    await world.toursRepo.create(tourInput('tl7-c', 'toured', at(-3), { tenantId: 'tenant-c', unitId: 'unit-missing' }));
+    world.contacts.push({
+      contactId: 'tenant-a',
+      type: 'tenant',
+      firstName: 'Ada',
+      lastName: 'Lovelace',
+      phone: '+15550100001',
+      email: 'ada@example.com',
+      status: 'searching',
+    });
+    // A legacy non-string lastName is dropped, never forwarded.
+    world.contacts.push({ contactId: 'tenant-c', type: 'tenant', firstName: 'Cy', lastName: 42 });
+    const unitBase = { landlordId: 'll-1', status: 'available', created_at: at(-100), updated_at: at(-100) };
+    const address = { line1: '1 Main St', city: 'Atlanta', state: 'GA', zip: '30303' };
+    world.units.set('unit-a', { ...unitBase, unitId: 'unit-a', address, rent_min: 1200 });
+    // A legacy plain-string address passes through as-is.
+    world.units.set('unit-b', { ...unitBase, unitId: 'unit-b', address: '12 Oak Ave' } as unknown as UnitItem);
+
+    const pages = await walkList(app, 'when=past&limit=1');
+    expect(tourIds(pages)).toEqual(['tl7-a', 'tl7-b', 'tl7-c']);
+    const [first, second, third] = pages;
+    expect(first?.contacts).toStrictEqual({ 'tenant-a': { firstName: 'Ada', lastName: 'Lovelace', phone: '+15550100001' } });
+    expect(first?.units).toStrictEqual({ 'unit-a': { address } });
+    expect(second?.contacts).toStrictEqual({});
+    expect(second?.units).toStrictEqual({ 'unit-b': { address: '12 Oak Ave' } });
+    expect(third?.contacts).toStrictEqual({ 'tenant-c': { firstName: 'Cy' } });
+    expect(third?.units).toStrictEqual({});
+  });
+
+  it("8: GET /api/tours/list never reaches the tour lookup ('list' is not a tourId)", async () => {
+    const { app, world } = makeWebhookHarness();
+    const get = vi.spyOn(world.toursRepo, 'get');
+    const res = await authed(app).get('/api/tours/list');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ tours: [], contacts: {}, units: {} });
+    expect(res.body.error).toBeUndefined();
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it('9: a ValidationException is 400 invalid cursor WITH a cursor and a 500 without; the model rejects an out-of-range start key end to end', async () => {
+    const { app, world, capture } = makeWebhookHarness({ toursNow: () => NOW });
+    await world.toursRepo.create(tourInput('tl9-p1', 'toured', at(-1)));
+    await world.toursRepo.create(tourInput('tl9-p2', 'toured', at(-2)));
+    await world.toursRepo.create(tourInput('tl9-u1', 'scheduled', at(1)));
+    await world.toursRepo.create(tourInput('tl9-u2', 'scheduled', at(2)));
+
+    const firstPage = await authed(app).get('/api/tours/list?when=past&limit=1');
+    const cursor = (firstPage.body as ListBody).nextCursor;
+    if (cursor === null) throw new Error('expected a cursor');
+    // The cursor is valid: it pages before anything is injected.
+    const ok = await authed(app).get(`/api/tours/list?when=past&limit=1&cursor=${encodeURIComponent(cursor)}`);
+    expect(ok.status).toBe(200);
+
+    const spy = vi
+      .spyOn(world.toursRepo, 'queryListPhase')
+      .mockRejectedValue(Object.assign(new Error('bad key'), { name: 'ValidationException' }));
+    const withCursor = await authed(app).get(`/api/tours/list?when=past&limit=1&cursor=${encodeURIComponent(cursor)}`);
+    expect(withCursor.status).toBe(400);
+    expect(withCursor.body).toStrictEqual({ error: 'invalid cursor' });
+    // The 400 path says so in ONE warn line: the refusal under the house `err`
+    // key (the serializer's type and message) and the phase kind, never an id
+    // (AD-1; code review r2 note).
+    const refusals = (): Array<Record<string, unknown>> => capture.atLevel(40).filter((l) => l['msg'] === REFUSED);
+    expect(refusals()).toHaveLength(1);
+    expect(refusals()[0]).toMatchObject({ err: { type: 'ValidationException', message: 'bad key' }, phase: 'd' });
+    expect(refusals()[0]).not.toHaveProperty('name');
+    expect(JSON.stringify(refusals()[0])).not.toContain('tl9-');
+
+    const without = await authed(app).get('/api/tours/list?when=past&limit=1');
+    expect(without.status).toBe(500);
+    expect(without.body).toStrictEqual({ error: 'internal server error' });
+    // The app-level handler's label is the router's LEAF template: by the time
+    // the error unwinds to it, Express has restored req.baseUrl to ''.
+    expect(capture.atLevel(50).map((l) => l['msg'])).toEqual(['unhandled error while handling request: GET /list']);
+    spy.mockRestore();
+
+    // End to end through the shared model (no injected throw): an upcoming d
+    // cursor whose key lies BELOW its own pinned instant.
+    const below = encodeTourListCursor({
+      v: 1,
+      f: fingerprintOf({ when: 'upcoming' }),
+      n: NOW,
+      ph: 'd',
+      k: { tourId: 'tl9-p1', _schedPartition: 'tours', scheduledAt: at(-1) },
+    });
+    const rejected = await authed(app).get(`/api/tours/list?when=upcoming&cursor=${encodeURIComponent(below)}`);
+    expect(rejected.status).toBe(400);
+    expect(rejected.body).toStrictEqual({ error: 'invalid cursor' });
+    expect(refusals()).toHaveLength(2);
+    expect(refusals()[1]).toMatchObject({
+      err: { type: 'ValidationException', message: 'The provided starting key does not match the range key predicate' },
+      phase: 'd',
+    });
+    expect(JSON.stringify(refusals()[1])).not.toContain('tl9-');
+  });
+
+  it("10: the one info line 'tours list page' carries counts only - no tour, tenant or unit id", async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    await world.toursRepo.create(tourInput('tl10-d1', 'scheduled', at(1), { tenantId: 'tenant-log-1', unitId: 'unit-log-1' }));
+    await world.toursRepo.create(tourInput('tl10-r1', 'requested', undefined, { tenantId: 'tenant-log-2', unitId: 'unit-log-2' }));
+    world.contacts.push({ contactId: 'tenant-log-1', type: 'tenant', firstName: 'Lucienne', lastName: 'Logline', phone: '+15550100077' });
+    const fixtureStrings = [
+      'tl10-d1',
+      'tl10-r1',
+      'tenant-log-1',
+      'tenant-log-2',
+      'unit-log-1',
+      'unit-log-2',
+      'Lucienne',
+      'Logline',
+      '+15550100077',
+    ];
+
+    const first = await authed(app).get('/api/tours/list?limit=1');
+    expect(first.status).toBe(200);
+    const cursor = (first.body as ListBody).nextCursor;
+    if (cursor === null) throw new Error('expected a cursor');
+    const second = await authed(app).get(`/api/tours/list?limit=1&cursor=${encodeURIComponent(cursor)}`);
+    expect(second.status).toBe(200);
+
+    const lines = capture.atLevel(30).filter((l) => l['msg'] === 'tours list page');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({ returned: 1, evaluated: 1, calls: 1, phases: 1, when: 'any' });
+    const ALLOWED = new Set([
+      'level',
+      'time',
+      'pid',
+      'hostname',
+      'msg',
+      'requestId',
+      'userId',
+      'correlationId',
+      'traceparent',
+      'returned',
+      'evaluated',
+      'calls',
+      'phases',
+      'when',
+    ]);
+    for (const line of lines) {
+      for (const key of ['returned', 'evaluated', 'calls', 'phases']) expect(typeof line[key], key).toBe('number');
+      expect(Object.keys(line).filter((key) => !ALLOWED.has(key))).toEqual([]);
+      const text = JSON.stringify(line);
+      for (const s of fixtureStrings) expect(text.includes(s), s).toBe(false);
+    }
+  });
+
+  // AD-1: only a cursor page's FIRST Query carries the client's key. A
+  // ValidationException from any other Query is a defect in the query, so it
+  // is a 500 with the app's error line - never a silent 400 'invalid cursor'.
+  it('11: a ValidationException from a LATER Query of a cursor page is a 500 with one error line, not a 400 (AD-1)', async () => {
+    const { app, world, capture } = makeWebhookHarness({ toursNow: () => NOW });
+    await world.toursRepo.create(tourInput('tl11-d1', 'toured', at(-1)));
+    await world.toursRepo.create(tourInput('tl11-d2', 'toured', at(-2)));
+    await world.toursRepo.create(tourInput('tl11-r1', 'requested'));
+
+    // Page 1 at limit=1 stops inside phase D: a d cursor with the client's key.
+    const first = await authed(app).get('/api/tours/list?limit=1');
+    expect(first.status).toBe(200);
+    const cursor = (first.body as ListBody).nextCursor;
+    if (cursor === null) throw new Error('expected a cursor');
+
+    // Page 2 at limit=2: Query 1 (phase D, from the client's key) runs for
+    // real and exhausts D; Query 2 (requested, no key) throws.
+    const real = world.toursRepo.queryListPhase.bind(world.toursRepo);
+    const seen: Array<{ kind: string; startKey: boolean }> = [];
+    const spy = vi.spyOn(world.toursRepo, 'queryListPhase').mockImplementation(async (phase, opts) => {
+      seen.push({ kind: phase.kind, startKey: opts.startKey !== undefined });
+      if (seen.length === 2) throw validationException('Invalid FilterExpression: an expression attribute name is not defined');
+      return real(phase, opts);
+    });
+    const res = await authed(app).get(`/api/tours/list?limit=2&cursor=${encodeURIComponent(cursor)}`);
+    spy.mockRestore();
+
+    expect(seen).toStrictEqual([
+      { kind: 'd', startKey: true },
+      { kind: 'u', startKey: false },
+    ]);
+    expect(res.status).toBe(500);
+    expect(res.body).toStrictEqual({ error: 'internal server error' });
+    expect(capture.atLevel(50).map((l) => l['msg'])).toEqual(['unhandled error while handling request: GET /list']);
+    expect(capture.atLevel(40).filter((l) => l['msg'] === REFUSED)).toEqual([]);
+  });
+
+  it('12: a k-less u cursor (the start of a status) carries no client key, so a ValidationException on its first Query is a 500 (AD-1)', async () => {
+    const { app, world, capture } = makeWebhookHarness({ toursNow: () => NOW });
+    await world.toursRepo.create(tourInput('tl12-r1', 'requested'));
+    const kless = encodeTourListCursor({ v: 1, f: fingerprintOf({}), n: NOW, ph: 'u', i: 0 });
+
+    // The cursor is valid: it pages before anything is injected.
+    const ok = await authed(app).get(`/api/tours/list?cursor=${encodeURIComponent(kless)}`);
+    expect(ok.status).toBe(200);
+    expect((ok.body as ListBody).tours.map((t) => t['tourId'])).toEqual(['tl12-r1']);
+
+    const spy = vi
+      .spyOn(world.toursRepo, 'queryListPhase')
+      .mockRejectedValueOnce(validationException('Invalid KeyConditionExpression'));
+    const res = await authed(app).get(`/api/tours/list?cursor=${encodeURIComponent(kless)}`);
+    spy.mockRestore();
+
+    expect(res.status).toBe(500);
+    expect(res.body).toStrictEqual({ error: 'internal server error' });
+    expect(capture.atLevel(50).map((l) => l['msg'])).toEqual(['unhandled error while handling request: GET /list']);
+    expect(capture.atLevel(40).filter((l) => l['msg'] === REFUSED)).toEqual([]);
+  });
+
+  it('13: a cursor key value over 1,024 bytes or not well-formed is a 400 invalid cursor before any Query (AD-4)', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
+    await world.toursRepo.create(tourInput('tl13-p1', 'toured', at(-1)));
+    const query = vi.spyOn(world.toursRepo, 'queryListPhase');
+    const f = fingerprintOf({ when: 'past' });
+    // In range and in the tours partition - only the key VALUE is wrong. No
+    // row holds this scheduledAt, so the fake model would resume from it.
+    const scheduledAt = at(-1.5);
+    const tourIds = ['x'.repeat(1100), `tl13-${String.fromCharCode(0xd800)}`];
+    for (const tourId of tourIds) {
+      const crafted = encodeTourListCursor({ v: 1, f, n: NOW, ph: 'd', k: { tourId, _schedPartition: 'tours', scheduledAt } });
+      const res = await authed(app).get(`/api/tours/list?when=past&cursor=${encodeURIComponent(crafted)}`);
+      expect(res.status, `tourId of length ${tourId.length}`).toBe(400);
+      expect(res.body).toStrictEqual({ error: 'invalid cursor' });
+    }
+    expect(query).not.toHaveBeenCalled();
+    query.mockRestore();
+  });
+
+  it('14: when=range with offset-form bounds - exactly the rows in the window, both ends inclusive, latest first; and each one-sided form (SC-5)', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
+    // The window, as an Atlanta (EDT, -04:00) caller writes October: from
+    // 2026-10-01T04:00:00.000Z to 2026-11-01T03:59:59.999Z.
+    await world.toursRepo.create(tourInput('tl14-before', 'toured', '2026-10-01T03:59:59.999Z'));
+    await world.toursRepo.create(tourInput('tl14-in1', 'toured', '2026-10-01T04:00:00.000Z'));
+    await world.toursRepo.create(tourInput('tl14-in2', 'no_show', '2026-10-15T16:00:00.000Z'));
+    await world.toursRepo.create(tourInput('tl14-in3', 'scheduled', '2026-11-01T03:59:59.999Z'));
+    await world.toursRepo.create(tourInput('tl14-after', 'scheduled', '2026-11-01T04:00:00.000Z'));
+    await world.toursRepo.create(tourInput('tl14-r1', 'requested'));
+    const FROM = 'from=2026-10-01T00:00:00-04:00';
+    const TO = 'to=2026-10-31T23:59:59.999-04:00';
+
+    const both = await walkList(app, `when=range&${FROM}&${TO}`);
+    expect(both).toHaveLength(1);
+    expect(both[0]?.nextCursor).toBeNull();
+    expect(tourIds(both)).toEqual(['tl14-in3', 'tl14-in2', 'tl14-in1']);
+
+    expect(tourIds(await walkList(app, `when=range&${FROM}`))).toEqual(['tl14-after', 'tl14-in3', 'tl14-in2', 'tl14-in1']);
+    expect(tourIds(await walkList(app, `when=range&${TO}`))).toEqual(['tl14-in3', 'tl14-in2', 'tl14-in1', 'tl14-before']);
   });
 });

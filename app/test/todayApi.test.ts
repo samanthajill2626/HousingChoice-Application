@@ -591,6 +591,30 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(ids).not.toContain('tour-canceled');
   });
 
+  it('100 tours today trip NO tours_today cap WARN - the range read pages to completion', async () => {
+    // The warning assumed a single-page read, where 100 rows could mean a
+    // truncated answer. listByScheduledRange now walks every page (queryAll
+    // warns on its own page cap), so a count of 100 is a busy day, not a cut.
+    seedTenant('t-busy', 'Busy', 'Day');
+    const base = Date.parse(`${todayYmd()}T10:00:00.000Z`);
+    for (let i = 0; i < 100; i += 1) {
+      await seedTour({
+        tourId: `tour-busy-${String(i).padStart(3, '0')}`,
+        tenantId: 't-busy',
+        // Distinct minutes, 10:00 to 11:39 - inside the UTC-day fallback window.
+        scheduledAt: new Date(base + i * 60_000).toISOString(),
+      });
+    }
+
+    const tours = (await getItems()).filter((i) => i.group === 'tours_today');
+    // Not vacuous: all 100 were read and shown.
+    expect(tours).toHaveLength(100);
+    const warned = harness.capture
+      .atLevel(40)
+      .filter((l) => String(l['msg'] ?? '').includes('hit the cap') && l['group'] === 'tours_today');
+    expect(warned).toEqual([]);
+  });
+
   it('a lost placement with a due follow-up deadline does NOT appear in follow_ups (active one does)', async () => {
     seedTenant('t-lostfu', 'Lost', 'Followup');
     seedTenant('t-livefu', 'Live', 'Followup');

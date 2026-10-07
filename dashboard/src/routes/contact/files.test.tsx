@@ -263,7 +263,7 @@ describe('TenantFile', () => {
     );
   });
 
-  it('renders a timeless (requested) tour row as "Not booked" — never "Invalid Date"', () => {
+  it('renders a timeless (requested) tour row as "Needs booking" - never "Invalid Date"', () => {
     const requestedTour: Tour = {
       tourId: 'tour-req',
       tenantId: 'T1',
@@ -275,10 +275,26 @@ describe('TenantFile', () => {
     const allLinks = screen.getAllByRole('link');
     const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-req');
     expect(tourDetailLink).toBeDefined();
-    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*-.*Not booked/);
+    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*-.*Needs booking/);
     expect(screen.queryByText(/Invalid Date/i)).not.toBeInTheDocument();
     // The rendered status label, not the raw enum.
     expect(screen.getByText('Requested')).toBeInTheDocument();
+  });
+
+  it('renders an undated TOURED tour row as "Undated" - it is not a request, so never "Needs booking"', () => {
+    const undatedToured: Tour = {
+      tourId: 'tour-undated',
+      tenantId: 'T1',
+      unitId: 'u1',
+      tourType: 'self_guided',
+      status: 'toured',
+    };
+    renderIt({ tours: [undatedToured] });
+    const allLinks = screen.getAllByRole('link');
+    const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-undated');
+    expect(tourDetailLink).toBeDefined();
+    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*-.*Undated/);
+    expect(tourDetailLink).not.toHaveTextContent(/Needs booking/);
   });
 
   it('shows "No relay groups yet." when the relay slice is ready but empty', () => {
@@ -455,7 +471,7 @@ describe('LandlordFile', () => {
     expect(screen.getByRole('heading', { name: 'Placements on their units' })).toBeInTheDocument();
   });
 
-  it('renders a timeless (requested) tour row as "Not booked" — never "Invalid Date"', () => {
+  it('renders a timeless (requested) tour row as "Needs booking" - never "Invalid Date"', () => {
     const requestedTour: Tour = {
       tourId: 'tour-L2',
       tenantId: 'T1',
@@ -467,9 +483,25 @@ describe('LandlordFile', () => {
     const allLinks = screen.getAllByRole('link');
     const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-L2');
     expect(tourDetailLink).toBeDefined();
-    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*-.*Not booked/);
+    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*-.*Needs booking/);
     expect(screen.queryByText(/Invalid Date/i)).not.toBeInTheDocument();
     expect(screen.getByText('Requested')).toBeInTheDocument();
+  });
+
+  it('renders an undated TOURED tour row as "Undated" - it is not a request, so never "Needs booking"', () => {
+    const undatedToured: Tour = {
+      tourId: 'tour-L3',
+      tenantId: 'T1',
+      unitId: 'u1',
+      tourType: 'self_guided',
+      status: 'toured',
+    };
+    renderIt({ tours: [undatedToured] });
+    const allLinks = screen.getAllByRole('link');
+    const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-L3');
+    expect(tourDetailLink).toBeDefined();
+    expect(tourDetailLink).toHaveTextContent(/1450 Joseph Blvd.*-.*Undated/);
+    expect(tourDetailLink).not.toHaveTextContent(/Needs booking/);
   });
 
   it('renders Relay-groups rows - a closed group links to its conversation view', () => {

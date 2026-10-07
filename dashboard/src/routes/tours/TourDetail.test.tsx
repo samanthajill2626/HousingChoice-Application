@@ -304,8 +304,22 @@ describe('TourDetail - primary CTA ladder', () => {
     await waitLoaded();
     expect(screen.getByRole('button', { name: 'Schedule tour' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Mark toured' })).not.toBeInTheDocument();
-    // Not booked shows in the facts + Schedule card.
-    expect(screen.getByText(/Not booked - Self-guided/)).toBeInTheDocument();
+    // Needs booking shows in the facts + Schedule card.
+    expect(screen.getByText(/Needs booking - Self-guided/)).toBeInTheDocument();
+    expect(screen.getByText('Needs booking')).toBeInTheDocument();
+  });
+
+  it('an undated TOURED tour reads "Undated" in the facts line and the Schedule card - never "Needs booking"', async () => {
+    // Marked "already toured" with the date left blank: no scheduledAt, and it
+    // is not a request, so there is nothing left to book.
+    getTour.mockResolvedValue(makeTour({ status: 'toured', scheduledAt: undefined }));
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getByText(/^Undated - Self-guided - /)).toBeInTheDocument();
+    // The Schedule card's When (the facts line is a longer text, so exact
+    // matching finds only the card value).
+    expect(screen.getByText('Undated')).toBeInTheDocument();
+    expect(screen.queryByText(/Needs booking/)).not.toBeInTheDocument();
   });
 
   it('scheduled -> Mark toured', async () => {
@@ -2175,6 +2189,13 @@ describe('TourDetail - ?outcome=1 deep link and the back arrow (spec 4.6)', () =
     return <output data-testid="search">{l.search}</output>;
   }
 
+  /** The All tab's route: its URL and router state (else `/tours/all` would
+   *  match `/tours/:tourId` and render TourDetail again). */
+  function AllToursProbe(): React.JSX.Element {
+    const l = useLocation();
+    return <p data-testid="all-tours">{`${l.pathname}${l.search} ${JSON.stringify(l.state ?? null)}`}</p>;
+  }
+
   function renderAt(path: string, state?: unknown) {
     return render(
       <MemoryRouter initialEntries={[{ pathname: '/tours/tour-abc', search: path, state }]}>
@@ -2188,6 +2209,7 @@ describe('TourDetail - ?outcome=1 deep link and the back arrow (spec 4.6)', () =
               </>
             }
           />
+          <Route path="/tours/all" element={<AllToursProbe />} />
         </Routes>
       </MemoryRouter>,
     );
@@ -2280,4 +2302,37 @@ describe('TourDetail - ?outcome=1 deep link and the back arrow (spec 4.6)', () =
     await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(''));
     expect(screen.getByRole('link', { name: 'Back to Today' })).toHaveAttribute('href', '/');
   });
+
+  // The All tab (tour-list spec 4.8 / 4.9): its rows hand over their filters
+  // as a /tours/all URL and the restore record; the back arrow returns there
+  // and hands the record back.
+  it('the back arrow honors state.back = /tours/all with a query string and, followed, carries state.restore', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    const restore = { depth: 120, openedTourId: 'tour-abc', openedIndex: 3 };
+    renderAt('', { back: '/tours/all?when=past&q=Smith', restore });
+    await waitLoaded();
+    const back = screen.getByRole('link', { name: 'Back to tours' });
+    expect(back).toHaveAttribute('href', '/tours/all?when=past&q=Smith');
+    fireEvent.click(back);
+    expect(await screen.findByTestId('all-tours')).toHaveTextContent(
+      `/tours/all?when=past&q=Smith ${JSON.stringify({ restore })}`,
+    );
+  });
+
+  it('the back arrow honors a bare state.back = /tours/all', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    renderAt('', { back: '/tours/all' });
+    await waitLoaded();
+    expect(screen.getByRole('link', { name: 'Back to tours' })).toHaveAttribute('href', '/tours/all');
+  });
+
+  it.each(['/tours/allx', '/tours/all/../x', '/tours/all/x'])(
+    'the back arrow falls back to /tours for state.back = %s',
+    async (back) => {
+      getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+      renderAt('', { back });
+      await waitLoaded();
+      expect(screen.getByRole('link', { name: 'Back to tours' })).toHaveAttribute('href', '/tours');
+    },
+  );
 });

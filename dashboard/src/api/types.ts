@@ -944,6 +944,16 @@ export function tourStatusLabel(
   return TOUR_STATUS_LABELS[tour.status] ?? tour.status;
 }
 
+/** How a tour with NO date reads, everywhere a date would show (Cameron
+ *  2026-10-06, spec P7 / D8): a request is work to do - "Needs booking" (the
+ *  Active tab's section and the All tab's chip use the same words); any other
+ *  tour without a date - toured with the date left blank, a request canceled
+ *  before booking, or one of those closed - is "Undated". ONE rule: every
+ *  surface that shows a missing tour date calls this, never its own string. */
+export function undatedTourLabel(tour: Pick<Tour, 'status'>): string {
+  return tour.status === 'requested' ? 'Needs booking' : 'Undated';
+}
+
 /** Tour outcome (mirrors app/src/lib/toursModel.ts TourOutcome). A person
  *  records `move_forward` / `not_a_fit` at the exit gate; `no_outcome` is
  *  written ONLY by the server's auto-close sweep, when nobody recorded a
@@ -1011,6 +1021,55 @@ export interface Tour {
 /** GET /api/tours response. */
 export interface ToursPage {
   tours: Tour[];
+}
+
+/** The All tab's server filters - GET /api/tours/list (spec section 5.1).
+ *  `status` is a comma list of tour statuses (the client never sends an
+ *  array); `from` / `to` are ISO instants, sent only with `when: 'range'`. */
+export interface TourListParams {
+  when: 'any' | 'upcoming' | 'past' | 'range';
+  from?: string;
+  to?: string;
+  status?: string;
+  type?: TourType;
+  sort: 'latest' | 'earliest';
+}
+
+/** One row of GET /api/tours/list - the slim projection the All tab renders
+ *  (spec 5.2). It satisfies tourStatusLabel and undatedTourLabel. */
+export interface TourListRow {
+  tourId: string;
+  tenantId: string;
+  unitId: string;
+  scheduledAt?: string;
+  tourType: TourType;
+  status: TourStatus;
+  outcome?: TourOutcome;
+  convertible?: boolean;
+  convertedPlacementId?: string;
+  autoClosedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The display fields of a row's tenant, as the page's name map carries them. */
+export interface TourListContactName {
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+}
+
+/** The address of a row's property, as the page's name map carries it. */
+export interface TourListUnitAddress {
+  address?: UnitItem['address'];
+}
+
+/** One page of GET /api/tours/list. `nextCursor` null = the list is complete. */
+export interface TourListPage {
+  tours: TourListRow[];
+  contacts: Record<string, TourListContactName>;
+  units: Record<string, TourListUnitAddress>;
+  nextCursor: string | null;
 }
 
 /**

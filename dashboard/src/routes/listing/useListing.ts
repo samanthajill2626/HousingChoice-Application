@@ -83,13 +83,18 @@ const LOADING: Omit<ListingState, 'setUnit'> = {
 };
 
 /** Panel order for the tours card: unbooked requests first (the active asks),
- *  then booked tours newest-first — so what needs attention leads and history
- *  reads downward. */
+ *  then booked tours newest-first - so what needs attention leads and history
+ *  reads downward. Any other undated tour (toured with the date left blank, a
+ *  request canceled before booking, or one of those closed) reads "Undated",
+ *  not "Needs booking" (`undatedTourLabel`): it is history with no date, so it
+ *  reads last, never among the requests (ruling D-1, 2026-10-06). */
 export function sortToursForPanel(tours: Tour[]): Tour[] {
+  // 0 = an unbooked request, 1 = dated (newest first), 2 = any other undated tour.
+  const group = (t: Tour): number => (t.scheduledAt !== undefined ? 1 : t.status === 'requested' ? 0 : 2);
   return [...tours].sort((a, b) => {
-    if (a.scheduledAt === undefined && b.scheduledAt === undefined) return 0;
-    if (a.scheduledAt === undefined) return -1;
-    if (b.scheduledAt === undefined) return 1;
+    const byGroup = group(a) - group(b);
+    if (byGroup !== 0) return byGroup;
+    if (a.scheduledAt === undefined || b.scheduledAt === undefined) return 0;
     return a.scheduledAt < b.scheduledAt ? 1 : a.scheduledAt > b.scheduledAt ? -1 : 0;
   });
 }

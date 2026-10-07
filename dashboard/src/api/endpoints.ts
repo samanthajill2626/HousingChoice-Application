@@ -74,6 +74,8 @@ import type {
   TransitionSource,
   Tour,
   TourActivityEvent,
+  TourListPage,
+  TourListParams,
   StaffTourOutcome,
   TourStatus,
   TourType,
@@ -2678,6 +2680,31 @@ export async function getTours(
     ...(signal !== undefined && { signal }),
   });
   return res.tours;
+}
+
+/** GET /api/tours/list - the Tours page's All tab: ONE server-filtered page
+ *  (spec docs/superpowers/specs/2026-10-06-tour-list-design.md section 5).
+ *  `limit` is 1..100 (the server 400s anything else). Pass the previous
+ *  page's `nextCursor` WITH THE SAME params for the next page; a cursor used
+ *  with other params is refused (400 cursor_mismatch). */
+export function listTours(
+  params: TourListParams,
+  opts: { cursor?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<TourListPage> {
+  return request<TourListPage>('/api/tours/list', {
+    query: {
+      when: params.when,
+      from: params.from,
+      to: params.to,
+      status: params.status,
+      type: params.type,
+      sort: params.sort,
+      limit: opts.limit,
+      cursor: opts.cursor,
+    },
+    ...(signal !== undefined && { signal }),
+  });
 }
 
 /** PATCH /api/tours/:tourId - partial update: reschedule, change status, or

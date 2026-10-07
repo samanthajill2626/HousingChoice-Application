@@ -433,12 +433,27 @@ describe('ListingDetail', () => {
     renderAt();
 
     expect(screen.getByRole('heading', { name: /Tours on this property/ })).toBeInTheDocument();
-    // Unbooked request: tenant name + "Not booked", status label on the right.
-    const requested = screen.getByRole('link', { name: /Fixture Tenant.*Not booked.*Requested/s });
+    // Unbooked request: tenant name + "Needs booking", status label on the right.
+    const requested = screen.getByRole('link', { name: /Fixture Tenant.*Needs booking.*Requested/s });
     expect(requested).toHaveAttribute('href', '/tours/tour-1');
     // Booked + toured: carries the date and the Toured status.
     const toured = screen.getByRole('link', { name: /Fixture Tenant.*Toured/s });
     expect(toured).toHaveAttribute('href', '/tours/tour-2');
+  });
+
+  it('an undated TOURED tour row on the Tours card reads "Undated" - it is not a request, so never "Needs booking"', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      tours: {
+        status: 'ready',
+        rows: [{ tourId: 'tour-3', tenantId: 't1', unitId: 'u1', status: 'toured' }],
+      },
+    });
+    renderAt();
+
+    const undated = screen.getByRole('link', { name: /Fixture Tenant.*Undated.*Toured/s });
+    expect(undated).toHaveAttribute('href', '/tours/tour-3');
+    expect(undated).not.toHaveTextContent(/Needs booking/);
   });
 
   it('shows the tours empty state when the property has no tours', () => {

@@ -9,6 +9,7 @@
 import {
   STAGE_LABELS,
   tourStatusLabel,
+  undatedTourLabel,
   type PlacementItem,
   type Contact,
   type ContactPhone,
@@ -214,7 +215,7 @@ export function LandlordFile({
                   label={`${addr} - ${
                     t.scheduledAt !== undefined
                       ? new Date(t.scheduledAt).toLocaleDateString()
-                      : 'Not booked'
+                      : undatedTourLabel(t)
                   }`}
                   right={<span className={responseClass.muted}>{tourStatusLabel(t)}</span>}
                 />

@@ -412,7 +412,10 @@ describe('matrix coherence: tour coverage + requested invariant', () => {
     expect(requested.length).toBeGreaterThanOrEqual(2);
     for (const t of requested) {
       expect(t['scheduledAt'], `requested ${t['tourId']} must have no scheduledAt`).toBeUndefined();
-      expect(t['_schedPartition'], `requested ${t['tourId']} must not be on the scheduled GSI`).toBeUndefined();
+      expect(
+        t['_schedPartition'],
+        `requested ${t['tourId']} carries the partition like a repo-created tour; it stays off byScheduledAt by having no scheduledAt`,
+      ).toBe('tours');
       expect(remindersOf(t['tourId'] as string).length, `requested ${t['tourId']} reminder count`).toBe(0);
     }
   });

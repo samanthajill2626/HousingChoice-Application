@@ -38,6 +38,7 @@ import {
   TOUR_TYPE_LABELS,
   setListingStatus,
   tourStatusLabel,
+  undatedTourLabel,
   type ListingStatus,
 } from '../../api/index.js';
 import { BLANK, Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterRow, responseClass } from '../contact/Card.js';
@@ -1081,7 +1082,7 @@ export function ListingDetail(): React.JSX.Element {
                           <span className={styles.subLabel}>
                             {t.scheduledAt !== undefined
                               ? new Date(t.scheduledAt).toLocaleDateString()
-                              : 'Not booked'}
+                              : undatedTourLabel(t)}
                           </span>
                         </span>
                       }

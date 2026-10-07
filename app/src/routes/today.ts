@@ -548,7 +548,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     {
       const TOURS_TODAY_STATUSES: ReadonlySet<string> = new Set(['scheduled']);
       const todayTours = await tours.listByScheduledRange(toursWindow.from, toursWindow.to);
-      warnIfCapped('tours_today', todayTours.length, GROUP_FETCH_LIMIT);
+      // No cap WARN: the read pages to completion and queryAll (lib/dynamoPaging.ts) warns on its own page cap, so 100 rows is not truncation.
       for (const t of todayTours) {
         if (!TOURS_TODAY_STATUSES.has(t.status)) continue; // skip non-active statuses
         if (await isDeletedContact(t.tenantId)) continue; // deleted tenant → off the boards

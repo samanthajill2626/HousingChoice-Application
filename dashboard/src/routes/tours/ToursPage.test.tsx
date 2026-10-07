@@ -12,7 +12,12 @@
 //   - Past view (/tours/past, spec 4.1, 4.3-4.5): rows with date-time labels,
 //     the row actions, and the sequential re-read-then-PATCH bulk runner
 //     (usePastTours is mocked; pastState stays real via importActual)
-import { render, screen, waitFor, within } from '@testing-library/react';
+//   - All view (/tours/all, spec 4.1-4.2): All is the first tab, the view has
+//     its own title and intro and no "+ New tour", none of the named views'
+//     hooks runs there (AllToursView is a probe here - it has its own tests),
+//     and P15: the current All tab swallows an unmodified primary click
+//   - The walks contract with the REAL hooks lives in ToursPage.walks.test.tsx
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -48,6 +53,9 @@ function pastHookAnswer(enabled: boolean): PastToursState {
     : { status: 'idle', past: [], reload: reloadPast, reloadFailed: false };
 }
 const usePastToursSpy = vi.fn(pastHookAnswer);
+// The data hooks are spies too, so the All view can prove it calls none of
+// them (spec 4.2: on /tours/all nothing else loads).
+const useToursSpy = vi.fn((): ToursPageState => toursState);
 
 // Spread form: the page also imports PURE helpers from this module (pastState
 // renders the Past chip), which must stay real.
@@ -55,18 +63,29 @@ vi.mock('./useTours.js', async () => {
   const actual = await vi.importActual<typeof import('./useTours.js')>('./useTours.js');
   return {
     ...actual,
-    useTours: () => toursState,
+    useTours: () => useToursSpy(),
     useClosedTours: (enabled: boolean) => useClosedToursSpy(enabled),
     usePastTours: (enabled: boolean) => usePastToursSpy(enabled),
   };
 });
 // The page cross-references BOTH live and soft-deleted entities (a closed tour
 // often outlives its contact/unit) — the mocks answer per filter arg.
+const useContactsSpy = vi.fn(
+  (filter: string): ContactsState => (filter === 'deleted' ? deletedContactsState : contactsState),
+);
+const useListingsSpy = vi.fn(
+  (deleted?: boolean): ListingsState => (deleted === true ? deletedUnitsState : unitsState),
+);
 vi.mock('../contacts/useContacts.js', () => ({
-  useContacts: (filter: string) => (filter === 'deleted' ? deletedContactsState : contactsState),
+  useContacts: (filter: string) => useContactsSpy(filter),
 }));
 vi.mock('../listings/useListings.js', () => ({
-  useListings: (deleted?: boolean) => (deleted === true ? deletedUnitsState : unitsState),
+  useListings: (deleted?: boolean) => useListingsSpy(deleted),
+}));
+// The All view's body has its own tests; here it is a probe, so these cases
+// see only what ToursPage itself renders around it.
+vi.mock('./AllToursView.js', () => ({
+  AllToursView: () => <section aria-label="All tours probe" />,
 }));
 
 // The "+ New tour" dialog (ScheduleTourForm) fetches its own typeahead
@@ -246,7 +265,22 @@ function LocationProbe(): React.JSX.Element {
   );
 }
 
-/** Render with ALL THREE view routes wired (the Active/Past/Closed tabs are
+/** Where the router is NOW, on every route: the path and query as text, and
+ *  the history entry's key (every navigation makes a new key - even a REPLACE
+ *  to the same URL - so an unchanged key means nothing navigated). A plain
+ *  span OUTSIDE <Routes>: an <output> would add a second status role beside
+ *  the Spinner's. */
+function RouterSpot(): React.JSX.Element {
+  const l = useLocation();
+  return (
+    <span data-testid="router-spot" data-key={l.key}>
+      {l.pathname}
+      {l.search}
+    </span>
+  );
+}
+
+/** Render with ALL FOUR view routes wired (the All/Active/Past/Closed tabs are
  *  real links, so navigation between the views works in-test), plus a probe on
  *  the tour route that shows where a row link landed and its router state. */
 function renderPage(initialPath = '/tours'): void {
@@ -254,10 +288,12 @@ function renderPage(initialPath = '/tours'): void {
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route path="/tours" element={<ToursPage />} />
+        <Route path="/tours/all" element={<ToursPage view="all" />} />
         <Route path="/tours/past" element={<ToursPage view="past" />} />
         <Route path="/tours/closed" element={<ToursPage view="closed" />} />
         <Route path="/tours/:tourId" element={<LocationProbe />} />
       </Routes>
+      <RouterSpot />
     </MemoryRouter>,
   );
 }
@@ -285,6 +321,9 @@ beforeEach(() => {
   deletedUnitsState = { status: 'ready', units: [] };
   closedState = { status: 'ready', closed: [] };
   useClosedToursSpy.mockClear();
+  useToursSpy.mockClear();
+  useContactsSpy.mockClear();
+  useListingsSpy.mockClear();
   pastRows = { status: 'ready', past: [], reloadFailed: false };
   // mockReset, not mockClear: a test installs a reloadPast implementation,
   // which must never leak into the next test.
@@ -504,11 +543,16 @@ describe('ToursPage', () => {
     expect(useClosedToursSpy.mock.calls.every(([enabled]) => enabled === false)).toBe(true);
   });
 
-  it('the view tabs read Active, Past, Closed - in that order (spec 4.1)', () => {
+  it('the view tabs read All, Active, Past, Closed - in that order (spec 4.1)', () => {
     readyAll([], []);
     renderPage();
     const tabs = screen.getByRole('navigation', { name: 'Tours view' });
-    expect(within(tabs).getAllByRole('link').map((l) => l.textContent)).toEqual(['Active', 'Past', 'Closed']);
+    expect(within(tabs).getAllByRole('link').map((l) => l.textContent)).toEqual([
+      'All',
+      'Active',
+      'Past',
+      'Closed',
+    ]);
   });
 
   it('clicking the Closed tab switches views: title, rows with tenant, property, DATE, and badges', async () => {
@@ -675,6 +719,33 @@ describe('ToursPage', () => {
         expect(within(item).queryByText(label)).not.toBeInTheDocument();
       }
     }
+  });
+
+  /** A request canceled before it was ever booked: canceled, and NO date. */
+  const TOUR_CANCELED_UNDATED: Tour = {
+    tourId: 'k3',
+    tenantId: 'c2',
+    unitId: 'u1',
+    tourType: 'pm_team',
+    status: 'canceled',
+    createdAt: '2026-06-10T10:00:00Z',
+    updatedAt: '2026-06-12T10:00:00Z',
+  };
+
+  it('Closed rows: an undated tour (a request canceled before booking) reads "Undated" in the date column, never a blank', () => {
+    readyAll([], []);
+    closedState = { status: 'ready', closed: [TOUR_CLOSED_NEW, TOUR_CANCELED_UNDATED] };
+    renderPage('/tours/closed');
+    const items = within(screen.getByRole('region', { name: 'Closed tours' })).getAllByRole('listitem');
+    expect(items).toHaveLength(2);
+    // A dated row keeps its date.
+    expect(within(items[0]!).getByText(/Jul 14, 2026/)).toBeInTheDocument();
+    expect(within(items[0]!).queryByText('Undated')).not.toBeInTheDocument();
+    // The undated row's lead meta column says so, before the status badge. It
+    // is not a request any more, so it never reads "Needs booking".
+    expect(within(items[1]!).getByText('Undated')).toBeInTheDocument();
+    expect(items[1]!).toHaveTextContent(/Undated\s*Canceled\s*PM team/);
+    expect(within(items[1]!).queryByText('Needs booking')).not.toBeInTheDocument();
   });
 
   it('the Closed intro names every way a tour ends (spec 9.3)', () => {
@@ -1277,5 +1348,100 @@ describe('ToursPage - Past view', () => {
     expect(refreshAlerts).toHaveLength(1);
     const toolbarBox = screen.getByRole('checkbox', { name: 'Select all not marked' });
     expect(refreshAlerts[0]!.compareDocumentPosition(toolbarBox) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// All view (/tours/all) - spec 4.1, 4.2
+// ---------------------------------------------------------------------------
+
+describe('ToursPage - All tab', () => {
+  const ALL_INTRO =
+    'Every tour, upcoming and past. Filter by date, status or type, or search by tenant or property.';
+
+  it('/tours still opens Active: the Active tab is current and the All tab links to /tours/all', () => {
+    readyAll([], []);
+    renderPage('/tours');
+    expect(screen.getByRole('heading', { level: 1, name: 'Tours' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Upcoming tours' })).toBeInTheDocument();
+    const tabs = screen.getByRole('navigation', { name: 'Tours view' });
+    expect(within(tabs).getByRole('link', { name: 'Active' })).toHaveAttribute('aria-current', 'page');
+    const allTab = within(tabs).getByRole('link', { name: 'All' });
+    expect(allTab).toHaveAttribute('href', '/tours/all');
+    expect(allTab).not.toHaveAttribute('aria-current');
+  });
+
+  it('/tours/all: its own title and intro, the All tab current, the All view mounted - and none of the named views loads', () => {
+    readyAll([TOUR_TODAY], [TOUR_REQUESTED_OLD]);
+    renderPage('/tours/all');
+    expect(screen.getByRole('heading', { level: 1, name: 'All tours' })).toBeInTheDocument();
+    expect(screen.getByText(ALL_INTRO)).toBeInTheDocument();
+    const tabs = screen.getByRole('navigation', { name: 'Tours view' });
+    expect(within(tabs).getByRole('link', { name: 'All' })).toHaveAttribute('aria-current', 'page');
+    expect(within(tabs).getByRole('link', { name: 'Active' })).not.toHaveAttribute('aria-current');
+    expect(screen.getByRole('region', { name: 'All tours probe' })).toBeInTheDocument();
+    // "+ New tour" stays on Active.
+    expect(screen.queryByRole('button', { name: '+ New tour' })).not.toBeInTheDocument();
+    // Nothing of the named views renders or loads here: no sections, no
+    // spinner, and not one of their data hooks is even called.
+    expect(screen.queryByRole('region', { name: 'Upcoming tours' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(useToursSpy).not.toHaveBeenCalled();
+    expect(useContactsSpy).not.toHaveBeenCalled();
+    expect(useListingsSpy).not.toHaveBeenCalled();
+    expect(useClosedToursSpy).not.toHaveBeenCalled();
+    expect(usePastToursSpy).not.toHaveBeenCalled();
+  });
+
+  it('P15: on All, an unmodified primary click on the All tab does not navigate; the tab carries the current filters; a modified click is left to the browser', async () => {
+    renderPage('/tours/all?when=past');
+    const allTab = within(screen.getByRole('navigation', { name: 'Tours view' })).getByRole('link', {
+      name: 'All',
+    });
+    // The CURRENT All tab links to the same filtered list (ruling D-5), so a
+    // Ctrl/Cmd/middle-click opens it elsewhere WITH the filters.
+    expect(allTab).toHaveAttribute('href', '/tours/all?when=past');
+
+    const spot = screen.getByTestId('router-spot');
+    const entryKey = spot.getAttribute('data-key');
+    fireEvent.click(allTab);
+    // No navigation at all: the same URL AND the same history entry. (A
+    // navigation - even a same-URL REPLACE - would make a new entry key and
+    // drop the entry's state.)
+    expect(spot.textContent).toBe('/tours/all?when=past');
+    expect(spot.getAttribute('data-key')).toBe(entryKey);
+
+    // A modified or non-primary click is NOT prevented: the browser keeps
+    // open-in-new-tab. jsdom then runs the anchor's activation - only ever
+    // for an unprevented click - and, in a queued task, reports "Not
+    // implemented: navigation" to console.error. Wait for exactly those four
+    // reports while the spy is installed (else they leak into the next
+    // test's output); they are the only thing these clicks may log.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(fireEvent.click(allTab, { ctrlKey: true })).toBe(true);
+    expect(fireEvent.click(allTab, { metaKey: true })).toBe(true);
+    expect(fireEvent.click(allTab, { shiftKey: true })).toBe(true);
+    expect(fireEvent.click(allTab, { button: 1 })).toBe(true);
+    await waitFor(() => expect(consoleError).toHaveBeenCalledTimes(4));
+    for (const [first] of consoleError.mock.calls) expect(String(first)).toContain('Not implemented: navigation');
+    // The router did not move for any of them either.
+    expect(spot.textContent).toBe('/tours/all?when=past');
+    expect(spot.getAttribute('data-key')).toBe(entryKey);
+  });
+
+  it('the other tabs keep their bare links on All, so switching views starts clean', async () => {
+    const user = userEvent.setup();
+    readyAll([TOUR_TODAY], []);
+    renderPage('/tours/all?when=past&q=smith');
+    const tabs = screen.getByRole('navigation', { name: 'Tours view' });
+    expect(within(tabs).getByRole('link', { name: 'Active' })).toHaveAttribute('href', '/tours');
+    expect(within(tabs).getByRole('link', { name: 'Past' })).toHaveAttribute('href', '/tours/past');
+    expect(within(tabs).getByRole('link', { name: 'Closed' })).toHaveAttribute('href', '/tours/closed');
+    await user.click(within(tabs).getByRole('link', { name: 'Active' }));
+    expect(screen.getByTestId('router-spot').textContent).toBe('/tours');
+    expect(screen.getByRole('heading', { level: 1, name: 'Tours' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Upcoming tours' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'All tours probe' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '+ New tour' })).toBeInTheDocument();
   });
 });

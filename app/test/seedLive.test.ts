@@ -504,6 +504,10 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
         // All three live tours are 'scheduled' - none is terminal - so each one
         // points at the ladder it just armed.
         expect(Item!['currentLadderId'], `tour ${tourId} pointer`).toEqual(expect.any(String));
+        // On the date index's partition, like every seeded tour (the pure
+        // builders are pinned in seedTourPartition.test.ts; this one is not
+        // exported, so its rows are pinned here as they read back).
+        expect(Item!['_schedPartition'], `tour ${tourId} byScheduledAt partition`).toBe('tours');
         pointers.push(Item!['currentLadderId'] as string);
       }
       expect(new Set(pointers).size).toBe(3);

@@ -116,6 +116,7 @@ import {
   LandlordReassignmentRequiredError,
   unitContacts,
   type UnitContact,
+  type UnitDisplayItem,
   type UnitItem,
   type UnitsRepo,
 } from '../../src/repos/unitsRepo.js';
@@ -219,6 +220,7 @@ import {
 import { createLogCapture, type LogCapture } from './logCapture.js';
 import { createOrgListFake } from './orgListFake.js';
 import { createSuggestionResolutionFake } from './suggestionResolutionFake.js';
+import { queryListPhaseFromItems } from './tourListIndexFake.js';
 import { queryUnreadPageFromItems } from './unreadIndexFake.js';
 import type { SuggestionResolutionHooks } from '../../src/services/suggestionResolution.js';
 
@@ -2749,6 +2751,18 @@ export function createFakeWorld(): FakeWorld {
     async getById(unitId) {
       return units.get(unitId);
     },
+    async getDisplaysByIds(unitIds) {
+      // The real repo's projection: unitId, plus address only when set. A
+      // soft-deleted unit still answers; an unknown id is simply absent.
+      const found = new Map<string, UnitDisplayItem>();
+      for (const unitId of unitIds) {
+        const unit = units.get(unitId);
+        if (unit !== undefined) {
+          found.set(unitId, { unitId, ...(unit.address !== undefined && { address: unit.address }) });
+        }
+      }
+      return found;
+    },
     async update(unitId, patch) {
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`update: no unit ${unitId}`);
@@ -3575,6 +3589,11 @@ export function createFakeWorld(): FakeWorld {
         .filter((t) => t.status === status)
         .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
         .map((t) => ({ ...t }));
+    },
+    async queryListPhase(phase, opts) {
+      // The ONE All-tab phase model, pinned to DynamoDB Local by
+      // tourListIndexFakeMirror.integration.test.ts.
+      return queryListPhaseFromItems([...toursMap.values()], phase, opts);
     },
     async patch(tourId, updates, opts) {
       const t = toursMap.get(tourId);

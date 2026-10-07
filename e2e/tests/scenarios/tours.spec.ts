@@ -414,7 +414,7 @@ test('page arc: create -> book (CTA modal) -> group tab fans out -> tenant 1:1 -
     owner: 'Host',
   });
 
-  // Interest -> a timeless 'requested' tour; the page shows Requested + Not booked.
+  // Interest -> a timeless 'requested' tour; the page shows Requested + Needs booking.
   await flow.tenantAsksToTour(unit);
   await flow.teamCreatesTourFromInterest(unit, 'Landlord-led');
 

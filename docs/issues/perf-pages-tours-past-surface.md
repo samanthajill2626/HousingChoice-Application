@@ -1,12 +1,13 @@
 ---
 id: perf-pages-tours-past-surface
-title: The Tours page's Past tab (/tours/past) is excluded from the perf:pages route-registry pin instead of being a profiled surface
+title: The Tours page's Past and All tabs (/tours/past, /tours/all) are excluded from the perf:pages route-registry pin instead of being profiled surfaces
 type: improvement
 severity: low
 status: open
 area: e2e/performance
 created: 2026-09-27
-refs: e2e/performance/routes.test.ts, e2e/performance/routes.ts, dashboard/src/App.tsx, dashboard/src/routes/tours/ToursPage.tsx, dashboard/src/routes/tours/useTours.ts
+updated: 2026-10-06
+refs: e2e/performance/routes.test.ts, e2e/performance/routes.ts, e2e/README.md, dashboard/src/App.tsx, dashboard/src/routes/tours/ToursPage.tsx, dashboard/src/routes/tours/useTours.ts, dashboard/src/routes/tours/AllToursView.tsx, dashboard/src/routes/tours/useAllTours.ts
 ---
 
 **Problem.** The Past tab (spec
@@ -51,3 +52,24 @@ read and its status read. In the contract's path + query-key model the two
 `?from&to` reads share one shape and the two `?status` reads share another,
 so a registered row must count occurrences rather than list keys. The KNOWN
 GAP note in `routes.ts` says the same.
+
+**Update 2026-10-06 (feat/tour-list).** This issue now covers TWO
+unregistered Tours views: `/tours/past` above and the All tab, `/tours/all`
+(spec `docs/superpowers/specs/2026-10-06-tour-list-design.md` 4.11 and P11),
+which feat/tour-list left out of the profiler the same way - excluded on
+purpose in the same route pin (`e2e/performance/routes.test.ts:383-384`,
+under its own comment line), named in the same KNOWN GAP comment
+(`e2e/performance/routes.ts:628-634`) and in `e2e/README.md:87-89`. Its reads
+differ from Past's: `/tours/all` reads `GET /api/tours/list?when&sort&limit`
+for the first page (`limit=50`), the same plus `cursor` after it (`limit=100`
+for a search walk or a return restore; `status`, `type`, `from` and `to` only
+when filtered), and NEVER the contact or unit walks - each page carries the
+names its rows need. Registering it needs a row (source `/tours` with a
+`link('/tours/all')` click, modeled on the `/tours/closed` row), a terminal -
+the list "All tours list" | the text "No tours match these filters." | the
+alert (a failed first page renders inside `role="alert"`: the first-page
+failure block of `AllToursView`, its `data.status === 'error'` branch, in
+`dashboard/src/routes/tours/AllToursView.tsx`) - and that GET contract;
+then the same steps as the Suggested fix (`EXPECTED_KEYS`, `EXPECTED_WARM`,
+the 31 pins - 32 for one view, 33 for both - the README count, the
+`excluded` entry, the profiler self-QA).

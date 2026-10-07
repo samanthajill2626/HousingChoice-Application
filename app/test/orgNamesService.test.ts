@@ -17,6 +17,7 @@ import {
   rewriteRunningError,
   spellingProblemError,
   toOrgRef,
+  type OrgNamesService,
 } from '../src/services/orgNames.js';
 import {
   ATLANTA,
@@ -151,6 +152,18 @@ async function namesService(opts: { entries?: readonly OrgEntry[]; lastRewrite?:
     orgListItem(opts.entries ?? ORG_FIXTURE, opts.lastRewrite === undefined ? {} : { lastRewrite: opts.lastRewrite }),
   );
   return { repo, svc: createOrgNamesService({ orgListRepo: repo, logger: quietLogger() }) };
+}
+
+/** A service over the STARTING list (spec Appendix A): the fake creates it on the first read. */
+function startingListService() {
+  const repo = createOrgListFake();
+  return { repo, svc: createOrgNamesService({ orgListRepo: repo, logger: quietLogger() }) };
+}
+
+async function startingEntry(svc: OrgNamesService, name: string): Promise<OrgEntry> {
+  const entry = (await svc.read()).entries.find((e) => e.name === name);
+  if (entry === undefined) throw new Error(`no starting-list entry named ${name}`);
+  return entry;
 }
 
 describe('OrgNamesService - read and the checks (plan 3.4)', () => {
@@ -342,6 +355,58 @@ describe('OrgNamesService - list writes (plan 3.4, 3.5)', () => {
       status: 409,
       body: { error: 'org_spellings_full' },
     });
+  });
+
+  // A NEW spelling is checked against the entry AS IT WILL BE (build ruling
+  // B-1): the D4 compound test must see the entry's own spellings.
+  it('updateSpellings() refuses "AHA DCA" on DCA as compound - AHA (Atlanta, Augusta) + DCA (DCA itself) (D4, D12)', async () => {
+    const { repo, svc } = startingListService();
+    const dca = await startingEntry(svc, 'Georgia Department of Community Affairs');
+    // POST /check already answers compound for it.
+    expect(await svc.check({ kind: 'housing_authority', text: 'AHA DCA', spellingFor: dca.orgId })).toMatchObject({
+      spellingProblem: 'compound',
+    });
+    await expect(
+      svc.updateSpellings(dca.orgId, [...dca.spellings, 'AHA DCA'], { confirmShared: false, actor: 'usr_admin' }),
+    ).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_spelling_refused', spelling: 'AHA DCA', problem: 'compound' },
+    });
+    expect((await repo.peek())?.version).toBe(1);
+  });
+
+  it('updateSpellings() accepts "Atlanta Housing Authority AHA" on Atlanta - Atlanta matches both spans, so it is not compound (D4)', async () => {
+    const { svc } = startingListService();
+    const atlanta = await startingEntry(svc, 'Atlanta Housing Authority');
+    const wanted = [...atlanta.spellings, 'Atlanta Housing Authority AHA'];
+    const out = await svc.updateSpellings(atlanta.orgId, wanted, { confirmShared: false, actor: 'usr_admin' });
+    expect(out.spellings).toEqual(wanted);
+    expect(await svc.checkScalar('housingAuthority', 'Atlanta Housing Authority AHA', undefined)).toEqual({
+      ok: true,
+      value: atlanta.name,
+    });
+  });
+
+  it('(PIN) updateSpellings() re-sending each entry current spellings unchanged succeeds with no confirm', async () => {
+    const { svc } = startingListService();
+    // AHA and MHA are shared since the starting list: kept spellings are never re-checked.
+    for (const entry of (await svc.read()).entries) {
+      const out = await svc.updateSpellings(entry.orgId, [...entry.spellings], { confirmShared: false, actor: 'usr_admin' });
+      expect(out.spellings).toEqual(entry.spellings);
+    }
+  });
+
+  it('(PIN) updateSpellings() at the 20 cap may swap one spelling for a new one - the entry as it will be, not as it is', async () => {
+    const full = orgEntry({
+      orgId: 'org-full',
+      kind: 'agency',
+      name: 'Full Agency',
+      spellings: Array.from({ length: 20 }, (_, i) => `Full Spelling ${i}`),
+    });
+    const { svc } = await namesService({ entries: [...ORG_FIXTURE, full] });
+    const swapped = [...full.spellings.slice(1), 'Full Spelling New'];
+    const out = await svc.updateSpellings('org-full', swapped, { confirmShared: false, actor: 'usr_admin' });
+    expect(out.spellings).toEqual(swapped);
   });
 
   it('changeKind() refuses a spelling shared with the old kind and a running rewrite; otherwise changes the kind', async () => {

@@ -286,30 +286,36 @@ export function createOrgNamesService(deps: { orgListRepo?: OrgListRepo; logger?
     async updateSpellings(orgId, spellings, { confirmShared, actor }) {
       const updated = await list.mutate((current) => {
         const entry = findEntry(current, orgId);
-        // Only NEW spellings are checked (D12): a kept one - AHA on Atlanta,
-        // shared since the starting list - never needs a confirm again.
-        const existing = new Set(entry.spellings.map(normalizeOrgText));
-        // Checked against the entry with NO spellings, so a request that
-        // re-sends its current list is not refused as a duplicate of itself.
-        const probe: OrgEntry = { ...entry, spellings: [] };
-        const probeEntries = current.entries.map((e) => (e.orgId === orgId ? probe : e));
+        // The list as it will be stored: trimmed, blanks dropped, spellings
+        // de-duplicated on write (D4 - compared normalized, the first wins).
         const kept: string[] = [];
         const seen = new Set<string>();
         for (const raw of spellings) {
           const spelling = raw.trim();
           const n = normalizeOrgText(spelling);
-          // Blanks dropped; spellings de-duplicated on write (D4).
           if (spelling === '' || seen.has(n)) continue;
-          if (!existing.has(n)) {
-            const problem = checkOrgSpelling(probeEntries, probe, spelling);
-            if (problem !== null && !(problem.problem === 'shared_same_kind' && confirmShared)) {
-              throw spellingProblemError(spelling, problem);
-            }
-          }
           kept.push(spelling);
           seen.add(n);
         }
+        // The cap first, so a probe below never carries 20 other spellings
+        // (checkSpelling would answer too_many for a list within the cap).
         if (kept.length > ORG_SPELLINGS_PER_ENTRY_MAX) throw new OrgHttpError(409, { error: 'org_spellings_full' });
+        // Only NEW spellings are checked (D12): a kept one - AHA on Atlanta,
+        // shared since the starting list - never needs a confirm again.
+        const existing = new Set(entry.spellings.map(normalizeOrgText));
+        for (const [i, spelling] of kept.entries()) {
+          if (existing.has(normalizeOrgText(spelling))) continue;
+          // Checked against the entry AS IT WILL BE (build ruling B-1): the
+          // probe carries the request's OTHER spellings, so the D4 compound
+          // test sees the entry's own spellings - "AHA DCA" on DCA is
+          // compound, "Atlanta Housing Authority AHA" on Atlanta is not.
+          const probe: OrgEntry = { ...entry, spellings: kept.filter((_, j) => j !== i) };
+          const probeEntries = current.entries.map((e) => (e.orgId === orgId ? probe : e));
+          const problem = checkOrgSpelling(probeEntries, probe, spelling);
+          if (problem !== null && !(problem.problem === 'shared_same_kind' && confirmShared)) {
+            throw spellingProblemError(spelling, problem);
+          }
+        }
         const next: OrgEntry = { ...entry, spellings: kept, updatedAt: new Date().toISOString(), updatedBy: actor };
         return { next: replaceEntry(current, next), result: next };
       });

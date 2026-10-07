@@ -299,6 +299,12 @@ test.describe('Tours page - All tab', () => {
     await expect(page).toHaveURL(new RegExp(`/tours/${noShowId}$`));
     const back = page.getByRole('link', { name: 'Back to tours', exact: true });
     await expect(back).toBeVisible();
+    // A short viewport, so the returned list starts below the fold: the row is
+    // in view only because the view scrolls to it (code review r2 R2-3). 240,
+    // not 360: with the view's scrollIntoView removed the row was still on
+    // screen at 360 and off it at 240 (mutant runs, 2026-10-06). The page
+    // fixture is per test, so the next test gets the default size again.
+    await page.setViewportSize({ width: 1280, height: 240 });
     await back.click();
 
     // ASSERTIONS ONLY from here to the focus check: any click or keypress on

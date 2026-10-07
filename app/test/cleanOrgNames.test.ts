@@ -147,6 +147,22 @@ describe('planUnit', () => {
     expect(plan.leftovers).toEqual([{ field: 'accepted_authorities', value: 'Step Up', resolution: 'other_kind' }]);
   });
 
+  it('a blank member does not count as remaining: an agency beside only blanks is kept, not dropped (code review R2-BE-4)', () => {
+    for (const blank of ['', '  ']) {
+      const plan = planUnit({ accepted_authorities: ['Step Up', blank] }, ENTRIES);
+      expect(plan.write).toBeUndefined();
+      expect(plan.changes).toEqual({ unitAgencyMembersKept: 1 });
+      expect(plan.leftovers).toEqual([{ field: 'accepted_authorities', value: 'Step Up', resolution: 'other_kind' }]);
+    }
+    // (PIN) Beside a real housing authority it is still dropped; the blank stays as it is.
+    const dropped = planUnit({ accepted_authorities: ['Step Up', '', 'Atlanta Housing Authority'] }, ENTRIES);
+    expect(dropped.write).toEqual({
+      expected: ['Step Up', '', 'Atlanta Housing Authority'],
+      next: ['', 'Atlanta Housing Authority'],
+    });
+    expect(dropped.changes).toEqual({ unitAgencyMembersDropped: 1 });
+  });
+
   it('keeps ambiguous and unknown members in place and reports them', () => {
     const plan = planUnit({ accepted_authorities: ['DCA', 'MHA', 'Smyrna Housing Office'] }, ENTRIES);
     expect(plan.write?.next).toEqual(['Georgia Department of Community Affairs', 'MHA', 'Smyrna Housing Office']);

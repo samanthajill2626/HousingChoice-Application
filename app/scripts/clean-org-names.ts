@@ -291,8 +291,9 @@ export function planUnit(
     return { raw, value: raw, agency: r.status === 'other_kind' };
   });
   // An agency never belongs on a property: drop it - unless nothing else would
-  // remain, in which case it stays and is left for the Settings page.
-  const othersRemain = steps.some((s) => !s.agency);
+  // remain, in which case it stays and is left for the Settings page. A blank
+  // member is nothing (code review R2-BE-4): it names no authority.
+  const othersRemain = steps.some((s) => !s.agency && s.raw.trim() !== '');
   const kept: string[] = [];
   for (const s of steps) {
     if (s.agency && othersRemain) {

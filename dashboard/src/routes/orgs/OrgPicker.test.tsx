@@ -372,6 +372,28 @@ describe('OrgPicker - text typed but never picked (code review R1-ADV-FE-1)', ()
     expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
   });
 
+  it("the note's line is there while the field holds typed text - leaving the field only fills it in (R2-FE-8)", async () => {
+    // Focus leaves on MOUSEDOWN: a note line inserted then would move every
+    // control below the field before the mouseup, and a click there is lost.
+    const user = userEvent.setup();
+    render(<Typed />);
+    const field = combobox().closest('div')?.parentElement;
+    if (field == null) throw new Error('no picker root');
+    expect(field.querySelector('p')).toBeNull(); // nothing typed: no line
+    await user.type(combobox(), 'Metro');
+    const line = field.querySelector('p');
+    expect(line).not.toBeNull();
+    expect(line).toHaveTextContent(''); // reserved, empty while typing
+    expect(combobox()).toHaveAccessibleDescription('');
+    await user.tab();
+    expect(field.querySelector('p')).toBe(line); // the same line, filled in
+    expect(line).toHaveTextContent(NOTE);
+    expect(combobox()).toHaveAccessibleDescription(NOTE);
+    // An emptied field gives the line back.
+    await user.clear(combobox());
+    expect(field.querySelector('p')).toBeNull();
+  });
+
   it("the note is the host's truth about the text: its own words, or none at all (R2-FE-6)", async () => {
     const user = userEvent.setup();
     const WILL_USE = 'Save will use DeKalb County Housing Authority.';

@@ -119,11 +119,17 @@
   color: var(--c-text-muted);
 }
 
-/* "Not saved - ..." under a field left holding typed text (code review
-   R1-ADV-FE-1): the amber of the "Not on the list" mark. */
+/* The note under a field left holding typed text (code review R1-ADV-FE-1,
+   R2-FE-6): the amber of the "Not on the list" mark. Its line is RESERVED -
+   rendered empty while the field holds text and has focus - with the height of
+   one line of note, so a blur (which happens on mousedown) only fills it in
+   and never moves the controls below before the mouseup (R2-FE-8). A note
+   long enough to wrap still adds its extra lines. */
 .pendingNote {
   margin: 0;
   font-size: var(--fs-xs);
+  line-height: var(--lh-normal);
+  min-height: calc(var(--fs-xs) * var(--lh-normal));
   color: var(--c-evt-amber-text);
 }
 

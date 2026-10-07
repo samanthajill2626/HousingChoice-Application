@@ -216,9 +216,13 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
 
   const trimmed = query.trim();
   // Typed text the field holds after focus left it: say what the host makes
-  // of it under the field (R1-ADV-FE-1, R2-FE-6).
+  // of it under the field (R1-ADV-FE-1, R2-FE-6). The note's LINE is there
+  // for as long as the field holds text and a blur only fills it in: focus
+  // leaves on mousedown, so a line inserted then would move every control
+  // below before the mouseup, and the click would be lost (R2-FE-8).
   const noteText = pendingNote === undefined ? ORG_TYPED_NOT_SAVED : pendingNote;
-  const showNote = !focused && trimmed !== '' && noteText !== null;
+  const holdsText = trimmed !== '';
+  const showNote = holdsText && !focused && noteText !== null;
   // "When nothing matches" (spec D6) is judged against EVERY entry of the
   // kinds - chosen ones included - so the add step never offers a name a pick
   // can reach. A multi-picker never offers a member it already holds.
@@ -415,9 +419,9 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
           {hint}
         </span>
       ) : null}
-      {showNote ? (
+      {holdsText ? (
         <p id={noteId} className={styles.pendingNote}>
-          {noteText}
+          {showNote ? noteText : null}
         </p>
       ) : null}
       {error ? (

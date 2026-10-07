@@ -64,6 +64,8 @@ const UI = {
   // The three lists: each a segment button ("Agencies 7") and, when shown, a
   // region named by its heading.
   lists: 'Lists',
+  search: 'Search names and spellings',
+  backTo: (list: string): string => `Back to ${list}`,
   haRegion: 'Housing authorities',
   agencyRegion: 'Agencies',
   notOnListRegion: 'Not on the list',
@@ -564,6 +566,38 @@ test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => 
     expect(rename.status()).toBe(403);
   });
 
+  test('at phone width one pane shows at a time: pick a row, the panel alone, Back returns to the list', async ({
+    page,
+  }) => {
+    await devLogin(page); // the seeded VA
+    await page.setViewportSize({ width: 390, height: 844 });
+    // Below the nav breakpoint the Settings tabs are a <select>: go straight in.
+    await page.goto(`${NEXT}/settings/organizations`);
+    const atlanta = entryLink(page, UI.haRegion, 'Atlanta Housing Authority');
+    await expect(atlanta).toBeVisible();
+    await expect(page.getByRole('group', { name: UI.lists })).toBeVisible();
+    await expect(page.getByRole('searchbox', { name: UI.search })).toBeVisible();
+
+    const panel = await openEntry(page, UI.haRegion, 'Atlanta Housing Authority');
+    await expect(page).toHaveURL(/\/settings\/organizations\/[^/?]+$/);
+    // One pane: the panel alone - no list, no segments, no search, no Close.
+    await expect(region(page, UI.haRegion)).toBeHidden();
+    await expect(page.getByRole('group', { name: UI.lists })).toHaveCount(0);
+    await expect(page.getByRole('searchbox', { name: UI.search })).toHaveCount(0);
+    await expect(panel.getByRole('link', { name: 'Close', exact: true })).toHaveCount(0);
+
+    // Back (its name is exactly "Back to <list>"): the list again, focus on
+    // the row it came from.
+    await panel.getByRole('link', { name: UI.backTo(UI.haRegion), exact: true }).click();
+    await expect(page).toHaveURL(/\/settings\/organizations$/);
+    await expect(region(page, 'Atlanta Housing Authority')).toHaveCount(0);
+    await expect(atlanta).toBeVisible();
+    await expect(atlanta).toBeFocused();
+    // No horizontal scroll at phone width.
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+
   test('an admin renames an entry: the rewrite job finishes and every record holds the new name', async ({
     page,
   }) => {
@@ -645,6 +679,14 @@ async function pickSettle(panel: Locator, choice: string): Promise<Locator> {
   const settle = panel.getByRole('group', { name: UI.settleGroup });
   await settle.getByRole('radio', { name: choice, exact: true }).check();
   return settle;
+}
+
+/** Press the confirm, then wait until the page has left the settled value's
+ *  URL (it replaces it with the list's) - so a later reload cannot land on
+ *  the value it just settled (code review r1, e2e race). */
+async function confirmSettle(page: Page, settle: Locator, confirm: string): Promise<void> {
+  await settle.getByRole('button', { name: confirm, exact: true }).click();
+  await page.waitForURL((url) => !url.searchParams.has('value'));
 }
 
 test.describe('"Not on the list" (spec D10, D11)', () => {
@@ -755,14 +797,14 @@ test.describe('"Not on the list" (spec D10, D11)', () => {
     // action still runs.
     let settle = await pickSettle(await openValue(page, useValue), UI.use(merlin));
     await expect(settle.getByRole('checkbox', { name: UI.rememberSpelling })).not.toBeChecked();
-    await settle.getByRole('button', { name: UI.use(merlin), exact: true }).click();
+    await confirmSettle(page, settle, UI.use(merlin));
     await waitForRewrite(req, (r) => r.action === 'use' && r.fromTexts.some((t) => sameOrgText(t, useValue)));
     expect((await getContact(req, useHolder)).housingAuthority).toBe(merlin);
 
     // Move to Agency as <name>: an agency name out of the housing authority field.
     await page.reload();
     settle = await pickSettle(await openValue(page, moveValue), UI.moveToAgency(kiteAid));
-    await settle.getByRole('button', { name: UI.moveToAgency(kiteAid), exact: true }).click();
+    await confirmSettle(page, settle, UI.moveToAgency(kiteAid));
     await waitForRewrite(
       req,
       (r) => r.action === 'move_to_agency' && r.fromTexts.some((t) => sameOrgText(t, moveValue)),
@@ -774,7 +816,7 @@ test.describe('"Not on the list" (spec D10, D11)', () => {
     // Split into <housing authority> + <agency>: both halves prefilled (D10).
     await page.reload();
     settle = await pickSettle(await openValue(page, splitValue), UI.split(shrike, shrikeAid));
-    await settle.getByRole('button', { name: UI.splitConfirm, exact: true }).click();
+    await confirmSettle(page, settle, UI.splitConfirm);
     await waitForRewrite(req, (r) => r.action === 'split' && r.fromTexts.some((t) => sameOrgText(t, splitValue)));
     const split = await getContact(req, splitHolder);
     expect(split.housingAuthority).toBe(shrike);
@@ -783,7 +825,7 @@ test.describe('"Not on the list" (spec D10, D11)', () => {
     // Clear: the housing authority is REMOVEd, never set to '' (D5, D11).
     await page.reload();
     settle = await pickSettle(await openValue(page, clearValue), UI.clear);
-    await settle.getByRole('button', { name: UI.clear, exact: true }).click();
+    await confirmSettle(page, settle, UI.clear);
     await waitForRewrite(req, (r) => r.action === 'clear' && r.fromTexts.some((t) => sameOrgText(t, clearValue)));
     expect((await getContact(req, clearHolder)).housingAuthority).toBeUndefined();
 

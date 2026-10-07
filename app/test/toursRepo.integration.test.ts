@@ -241,7 +241,7 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
   // -------------------------------------------------------------------------
   // listByScheduledRange walks EVERY page (tour list S1, spec section 7). It
   // used to send ONE Query and drop LastEvaluatedKey, so a window larger than
-  // one 1 MB page silently lost its newest tours. `pageLimit: 1` forces one
+  // one 1 MB page silently lost its newest tours. `queryLimit: 1` forces one
   // row per page, which makes a single-page read visible as one Query call.
   //
   // The window is MARCH 2027 because this file's one table is shared by every
@@ -276,7 +276,7 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
       });
     });
 
-    it('pageLimit 1 still returns the whole window, one Query per page', async () => {
+    it('queryLimit 1 still returns the whole window, one Query per page', async () => {
       // The file's spying-doc idiom: record, then forward to the shared doc.
       // queryAll sends every page through the repo's doc, so this sees them all.
       let rangeQueries = 0;
@@ -290,12 +290,12 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
       } as unknown as DynamoDBDocumentClient;
       const spyingRepo = createToursRepo({ doc: spyingDoc, env: testEnv, logger });
 
-      const result = await spyingRepo.listByScheduledRange(from, to, { pageLimit: 1 });
+      const result = await spyingRepo.listByScheduledRange(from, to, { queryLimit: 1 });
 
       expect(new Set(result.map((t) => t.tourId))).toEqual(new Set(insideIds));
       expect(result).toHaveLength(insideIds.length);
       // One row per page: seven rows take at least seven Queries. A read that
-      // ignores the page limit (or stops after one page) sends exactly one.
+      // ignores the query limit (or stops after one page) sends exactly one.
       expect(rangeQueries).toBeGreaterThanOrEqual(7);
     });
 

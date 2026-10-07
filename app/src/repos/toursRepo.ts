@@ -205,9 +205,12 @@ export interface ToursRepo {
    * byScheduledAt GSI - EVERY page (queryAll), so a window larger than one
    * 1 MB Query page is never silently truncated (it used to drop the newest
    * tours first - docs/issues/tours-scheduled-range-query-unpaginated.md).
-   * `opts.pageLimit` sets the Query's Limit - for tests that force paging.
+   * `opts.queryLimit` is EACH Query's Limit (the items one page evaluates),
+   * for tests that force paging. It is NOT a page cap: the walk still reads
+   * every page, so a small value only multiplies the round trips. `queryAll`'s
+   * `maxPages` caps the pages.
    */
-  listByScheduledRange(from: string, to: string, opts?: { pageLimit?: number }): Promise<TourItem[]>;
+  listByScheduledRange(from: string, to: string, opts?: { queryLimit?: number }): Promise<TourItem[]>;
   /**
    * All tours with the given status via the byStatus GSI (hash=status,
    * range=createdAt). Returns all pages concatenated (no cursor — dashboard
@@ -415,14 +418,19 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
     },
 
     async listByScheduledRange(from, to, opts) {
-      return queryAll<TourItem>(doc, {
-        TableName: table,
-        IndexName: 'byScheduledAt',
-        KeyConditionExpression: '#sp = :sp AND #sat BETWEEN :from AND :to',
-        ExpressionAttributeNames: { '#sp': '_schedPartition', '#sat': 'scheduledAt' },
-        ExpressionAttributeValues: { ':sp': 'tours', ':from': from, ':to': to },
-        ...(opts?.pageLimit !== undefined && { Limit: opts.pageLimit }),
-      });
+      return queryAll<TourItem>(
+        doc,
+        {
+          TableName: table,
+          IndexName: 'byScheduledAt',
+          KeyConditionExpression: '#sp = :sp AND #sat BETWEEN :from AND :to',
+          ExpressionAttributeNames: { '#sp': '_schedPartition', '#sat': 'scheduledAt' },
+          ExpressionAttributeValues: { ':sp': 'tours', ':from': from, ':to': to },
+          ...(opts?.queryLimit !== undefined && { Limit: opts.queryLimit }),
+        },
+        // A page-cap WARN goes through the repo's logger, not the module default.
+        { logger: log },
+      );
     },
 
     async listByStatus(status) {

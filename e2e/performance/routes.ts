@@ -640,6 +640,15 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ surfaceId: '/settings/system', label: 'System status', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/system', 'System status'), terminal: SYSTEM_TERMINAL, gets: SYSTEM_GETS, surfaceScaleBearing: false, loadScaleBearing: false, targetStructuralNote: 'alarms_and_errors_differ_by_target' }),
   row({ surfaceId: '/settings/ai-runs', label: 'AI run log', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/ai-runs', 'AI run log'), terminal: AI_RUN_TERMINAL, gets: AI_RUN_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
   row({ surfaceId: '/settings/numbers', label: 'Phone numbers', source: SETTINGS_SOURCE('/settings/numbers', 'Phone numbers'), terminal: NUMBER_TERMINAL, gets: NUMBER_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
+  // TODO(perf-pages-settings-organizations-surface): KNOWN GAP - there is NO
+  // row for /settings/organizations (Settings > Housing authorities &
+  // agencies, spec 2026-10-06 D10), so `npm run perf:pages` never measures it.
+  // It is excluded on purpose (the route pin in routes.test.ts lists it with
+  // the same issue), not forgotten. Registering it needs: a source (the
+  // Settings tab link), a terminal (the three regions settled), and its GETs -
+  // /api/organizations, /api/organizations/usage and
+  // /api/organizations/not-on-list, all three on mount
+  // (docs/issues/perf-pages-settings-organizations-surface.md).
   row({ surfaceId: '/contacts/:contactId', label: 'Contact detail', resolver: 'contact', source: source('/contacts/tenants', locator('heading', 'Tenants'), link(':resolved_cold_target'), CONTACT_LIVE_WALK), terminal: CONTACT_DETAIL_TERMINAL, gets: CONTACT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'contact_detail' }),
   row({ surfaceId: '/listings/:unitId', label: 'Property detail', resolver: 'unit', source: source('/listings', L.properties, link(':resolved_cold_target'), UNIT_LIVE_WALK), terminal: UNIT_DETAIL_TERMINAL, gets: UNIT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
   row({ surfaceId: '/tours/:tourId', label: 'Tour detail', resolver: 'tour', source: source('/tours', L.tours, link(':resolved_cold_target'), TOUR_LIST_ACTIVE_GETS), terminal: TOUR_DETAIL_TERMINAL, gets: TOUR_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),

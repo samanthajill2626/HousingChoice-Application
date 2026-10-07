@@ -85,6 +85,10 @@ registered destination yet, so the profiler never measures it. It is excluded on
 purpose in `e2e/performance/routes.test.ts`; registering it is
 `docs/issues/perf-pages-tours-past-surface.md`.
 
+Known gap: Settings > Housing authorities & agencies (`/settings/organizations`,
+added 2026-10-06) is not a registered destination either, for the same reason;
+registering it is `docs/issues/perf-pages-settings-organizations-surface.md`.
+
 The three target commands are:
 
 ```powershell

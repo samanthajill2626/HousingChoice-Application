@@ -37,6 +37,7 @@ import { SystemStatusSection } from './routes/settings/SystemStatusSection.js';
 import { QuietHoursSection } from './routes/settings/QuietHoursSection.js';
 import { NumbersSection } from './routes/settings/NumbersSection.js';
 import { AiRunsSection } from './routes/settings/aiRuns/AiRunsSection.js';
+import { OrgListSection } from './routes/settings/OrgListSection.js';
 import { AdminRoute } from './routes/settings/AdminRoute.js';
 import { defaultTabPath } from './routes/settings/settingsTabs.js';
 import { allNavTargets } from './app/nav.js';
@@ -225,6 +226,11 @@ function AuthedApp(): React.JSX.Element {
                   section's own role gate keeps the pool inventory admin-only,
                   and GET /api/pool-numbers stays role-guarded on the server. */}
               <Route path="numbers" element={<NumbersSection />} />
+              {/* Housing authorities & agencies (spec 2026-10-06 D10): any
+                  signed-in user (NOT admin-guarded); the section gates its
+                  admin actions with useAuth().isAdmin and the server with
+                  requireRole('admin'). */}
+              <Route path="organizations" element={<OrgListSection />} />
             </Route>
 
             {/* The remaining nav destinations stay placeholders for now. */}

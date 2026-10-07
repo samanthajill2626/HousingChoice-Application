@@ -206,9 +206,9 @@ export interface ToursRepo {
    * 1 MB Query page is never silently truncated (it used to drop the newest
    * tours first - docs/issues/tours-scheduled-range-query-unpaginated.md).
    * `opts.queryLimit` is EACH Query's Limit (the items one page evaluates),
-   * for tests that force paging. It is NOT a page cap: the walk still reads
-   * every page, so a small value only multiplies the round trips. `queryAll`'s
-   * `maxPages` caps the pages.
+   * for tests that force paging - NOT a page cap (`queryAll`'s `maxPages` is).
+   * A small value bounds nothing: it multiplies the round trips and reaches
+   * that cap sooner, where the walk returns a PREFIX flagged only by a WARN.
    */
   listByScheduledRange(from: string, to: string, opts?: { queryLimit?: number }): Promise<TourItem[]>;
   /**

@@ -1026,6 +1026,35 @@ describe('ContactEditForm - a picker whose list is not there', () => {
     );
   });
 
+  it('a refusal follows its text: once the list lands and settles the text, the alert goes (R3-FE-6)', async () => {
+    const user = userEvent.setup();
+    const read = heldListRead();
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'HADC');
+    await user.click(save());
+    expect(await screen.findByRole('alert')).toHaveTextContent(STILL_LOADING);
+    await act(async () => read.resolve({ version: 1, entries: ORG_ENTRIES }));
+    await user.tab();
+    // Save will now use DeKalb: nothing refuses the text any more, so the
+    // field never says both that and "still loading".
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(housingAuthority()).toHaveAccessibleDescription(
+      'The organization that runs the voucher. Save will use DeKalb County Housing Authority.',
+    );
+  });
+
+  it('a refusal follows its text: once the list lands and still refuses the text, the alert says why now (R3-FE-6)', async () => {
+    const user = userEvent.setup();
+    const read = heldListRead();
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'Metro Nowhere');
+    await user.click(save());
+    expect(await screen.findByRole('alert')).toHaveTextContent(STILL_LOADING);
+    await act(async () => read.resolve({ version: 1, entries: ORG_ENTRIES }));
+    expect(screen.getByRole('alert')).toHaveTextContent(BLOCKED);
+    expect(updateContact).not.toHaveBeenCalled();
+  });
+
   it('Save before the list loads says it is still loading, not that the text is unknown - and works once it lands', async () => {
     const user = userEvent.setup();
     const read = heldListRead();

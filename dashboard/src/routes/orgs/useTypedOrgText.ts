@@ -29,7 +29,9 @@ export interface TypedOrgTextField {
   onPendingTextChange: (text: string) => void;
   /** The picker's `pendingNote`: what Save will do with the text it holds. */
   note: string | null;
-  /** Why the last Save refused the text (the picker's `error`), until the text changes. */
+  /** Once a Save refused the text (until the text changes): why Save refuses
+   *  it NOW (the picker's `error`) - re-judged against the list as it is, so
+   *  it goes once the text settles (code review R3-FE-6). */
   refusal: string | null;
   /** The picker's `errorAttempt`: one more per refused Save, so a refusal
    *  repeated word for word is announced again (code review R2-FE-10). */
@@ -49,23 +51,28 @@ export function useTypedOrgText(
   picker: RefObject<OrgPickerHandle | null>,
 ): TypedOrgTextField {
   const [text, setText] = useState('');
-  const [refusal, setRefusal] = useState<string | null>(null);
+  /** A Save refused the text the field holds (cleared when the text changes). */
+  const [refused, setRefused] = useState(false);
   const [refusalAttempt, setRefusalAttempt] = useState(0);
   const verdict = settleTypedOrgText(list, kinds, text);
   return {
     onPendingTextChange: (next) => {
       setText(next);
-      setRefusal(null);
+      setRefused(false);
     },
     note: typedOrgNote(verdict),
-    // A list that failed to load disables the picker: its load error is
-    // what the field says, never a refusal from an earlier Save (R2-FE-1).
-    refusal: list.error ? null : refusal,
+    // The refusal is about the text AND the list, so it is the CURRENT
+    // verdict's (code review R3-FE-6): once the list lands, a "still
+    // loading" refusal goes if the text now settles - or says what refuses
+    // it now - and never sits beside a note saying Save will use it. A list
+    // that failed to load disables the picker: its load error is what the
+    // field says, never a refusal from an earlier Save (R2-FE-1).
+    refusal: list.error || !refused ? null : typedOrgRefusal(verdict),
     refusalAttempt,
     settle: () => {
-      const refused = typedOrgRefusal(verdict);
-      setRefusal(refused);
-      if (refused !== null) setRefusalAttempt((n) => n + 1);
+      const refusal = typedOrgRefusal(verdict);
+      setRefused(refusal !== null);
+      if (refusal !== null) setRefusalAttempt((n) => n + 1);
       if (verdict.status === 'resolved') picker.current?.clearText();
       return verdict;
     },

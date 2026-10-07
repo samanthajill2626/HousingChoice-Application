@@ -682,3 +682,73 @@ describe('BroadcastComposer - a housing authority that left the list', () => {
     expect(screen.queryByText(/org_not_on_list/)).not.toBeInTheDocument();
   });
 });
+
+// Code review R2-FE-3: the composer's audience is a real send. Text typed in
+// the housing authority filter but never picked is NOT a filter (spec D7: the
+// draft changes only on a pick or a clear), so Preview waits until staff pick
+// a name or clear the text - an unfiltered preview never passes for a
+// filtered one.
+describe('BroadcastComposer - text typed in the housing authority filter', () => {
+  const ATLANTA = {
+    orgId: 'o-atl',
+    kind: 'housing_authority',
+    name: 'Atlanta Housing Authority',
+    spellings: ['AHA'],
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  };
+  const HINT = 'Pick the housing authority from the list, or clear the text.';
+  const preview = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
+  const authority = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authority' });
+  const draftAuthorities = (): unknown[] =>
+    createBroadcast.mock.calls.map(
+      ([body]) => (body as { audience_filter?: { housing_authority?: string } } | undefined)?.audience_filter?.housing_authority,
+    );
+
+  beforeEach(() => {
+    getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA] });
+  });
+
+  it('a full name typed but not picked holds Preview back and says why - a pick lets it go', async () => {
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    await u.type(authority(), 'Atlanta Housing Authority');
+    await screen.findByRole('option', { name: /^Atlanta Housing Authority/ });
+    expect(preview()).toBeDisabled();
+    expect(screen.getByText(HINT)).toBeInTheDocument();
+    expect(previewBroadcast).not.toHaveBeenCalled();
+    // Typing never recreated the draft (D7): no draft carried the text.
+    expect(draftAuthorities().every((a) => a === undefined)).toBe(true);
+    await u.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+    expect(draftAuthorities().at(-1)).toBe('Atlanta Housing Authority');
+  });
+
+  it('clearing the text lets Preview go again - with no new draft', async () => {
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    const drafts = createBroadcast.mock.calls.length;
+    await u.type(authority(), 'Atl');
+    expect(preview()).toBeDisabled();
+    await u.clear(authority());
+    expect(preview()).toBeEnabled();
+    expect(createBroadcast).toHaveBeenCalledTimes(drafts);
+  });
+
+  it('(PIN) text typed before "Change" goes with the compose step: Preview works for the next pick', async () => {
+    const u = userEvent.setup();
+    renderComposer();
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    await u.type(await screen.findByRole('combobox', { name: 'Housing authority' }), 'Atl');
+    await u.click(screen.getByRole('button', { name: 'Change property' }));
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(authority()).toHaveValue('');
+    expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+  });
+});

@@ -47,6 +47,7 @@ function Harness({
   reachPending = false,
   truncated = false,
   onChangeSpy,
+  onAuthorityTextChange,
 }: {
   propertyBeds?: number;
   reachCount?: number;
@@ -54,6 +55,7 @@ function Harness({
   truncated?: boolean;
   onChangeSpy?: (f: AudienceFilter) => void;
   authorityError?: string;
+  onAuthorityTextChange?: (text: string) => void;
 }): React.JSX.Element {
   const [filter, setFilter] = useState<AudienceFilter>({ contact_type: 'tenant' });
   return (
@@ -68,6 +70,7 @@ function Harness({
       reachPending={reachPending}
       truncated={truncated}
       {...(authorityError !== undefined && { authorityError })}
+      {...(onAuthorityTextChange !== undefined && { onAuthorityTextChange })}
     />
   );
 }
@@ -144,6 +147,31 @@ describe('AudienceFilters — voucher size pre-fill + override', () => {
     expect(screen.getByRole('combobox', { name: 'Housing authority' })).toBeDisabled();
     await u.click(screen.getByRole('button', { name: '2-BR' }));
     expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', bedroomSize: 2 });
+  });
+
+  it('tells the composer what is typed in the picker - and nothing once a name is picked (R2-FE-3)', async () => {
+    const u = userEvent.setup();
+    const onAuthorityTextChange = vi.fn();
+    render(<Harness onAuthorityTextChange={onAuthorityTextChange} />);
+    await u.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'AHA');
+    expect(onAuthorityTextChange).toHaveBeenLastCalledWith('AHA');
+    await u.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
+    expect(onAuthorityTextChange).toHaveBeenLastCalledWith('');
+  });
+
+  it('a list that fails while text is typed keeps the field clearable - that text holds Preview back', async () => {
+    const u = userEvent.setup();
+    const onAuthorityTextChange = vi.fn();
+    const { rerender } = render(<Harness onAuthorityTextChange={onAuthorityTextChange} />);
+    const box = screen.getByRole('combobox', { name: 'Housing authority' });
+    await u.type(box, 'Atl');
+    useOrgList.mockReturnValue({ ...LOADED, entries: [], version: null, error: true });
+    rerender(<Harness onAuthorityTextChange={onAuthorityTextChange} />);
+    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load housing authorities");
+    expect(box).toBeEnabled();
+    await u.clear(box);
+    expect(onAuthorityTextChange).toHaveBeenLastCalledWith('');
+    expect(box).toBeDisabled();
   });
 
   it("shows the composer's message under the picker", () => {

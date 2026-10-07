@@ -115,6 +115,10 @@ export function orgTypedWillUse(name: string): string {
 /** Under the blast composer's picker: only a pick sets the filter (spec D7). */
 export const ORG_TYPED_NOT_A_FILTER = 'Not used as a filter - pick a name from the list, or clear the text.';
 
+/** Beside the composer's disabled "Preview recipients" while its housing
+ *  authority filter holds typed text (code review R2-FE-3). */
+export const ORG_FILTER_TYPED_HINT = 'Pick the housing authority from the list, or clear the text.';
+
 /** Under a form picker whose typed text stopped a Save (role="alert"). */
 export const ORG_TYPED_BLOCKED = 'Pick a name from the list, add it as new, or clear the text.';
 

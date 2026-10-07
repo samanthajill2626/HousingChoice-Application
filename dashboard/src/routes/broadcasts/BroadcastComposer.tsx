@@ -32,6 +32,7 @@ import {
 } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { contactDisplayName } from '../contact/format.js';
+import { ORG_FILTER_TYPED_HINT } from '../orgs/orgCopy.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { shortAddress } from '../listing/listingFormat.js';
 import { AudienceFilters } from './AudienceFilters.js';
@@ -132,6 +133,13 @@ export function BroadcastComposer(): React.JSX.Element {
     setAuthorityNotice(null);
     setFilter(next);
   }
+  // Code review R2-FE-3: text typed in the housing authority filter but never
+  // picked is NOT a filter (D7 - the draft changes only on a pick or a clear,
+  // never per keystroke), so Preview waits while there is any: a preview (and
+  // the send after it) of every tenant must never pass for a filtered one.
+  // AudienceFilters reports it; the picker reports '' when it unmounts.
+  const [authorityText, setAuthorityText] = useState('');
+  const authorityTyped = authorityText.trim() !== '';
 
   // Tenant candidates for the "add a tenant" search (loaded once).
   const [tenants, setTenants] = useState<Contact[]>([]);
@@ -355,9 +363,14 @@ export function BroadcastComposer(): React.JSX.Element {
 
   // Disable Preview/Send while a recreate is pending OR after one FAILED (stale):
   // the current draft id no longer matches the on-screen audience/message, so we
-  // must not Preview/Send against it. Editing again retries the recreate.
+  // must not Preview/Send against it. Editing again retries the recreate. And
+  // while the housing authority filter holds typed text (R2-FE-3, above).
   const canPreview =
-    bodyTemplate.trim().length > 0 && draft.draftId !== null && !draft.reachPending && !draft.stale;
+    bodyTemplate.trim().length > 0 &&
+    draft.draftId !== null &&
+    !draft.reachPending &&
+    !draft.stale &&
+    !authorityTyped;
 
   // PROPERTY step - a Matching send ALWAYS carries a property, so until one is
   // attached the only thing on screen is the choice itself: a search field plus
@@ -490,6 +503,7 @@ export function BroadcastComposer(): React.JSX.Element {
             <AudienceFilters
               filter={filter}
               onChange={onFilterChange}
+              onAuthorityTextChange={setAuthorityText}
               authorityError={authorityNotice}
               {...(typeof unit?.beds === 'number' && { propertyBeds: unit.beds })}
               {...(draft.reachCount !== undefined && { reachCount: draft.reachCount })}
@@ -542,12 +556,15 @@ export function BroadcastComposer(): React.JSX.Element {
           {previewBusy ? 'Loading…' : 'Preview recipients'}
         </button>
         {draft.reachPending ? <Spinner /> : null}
-        {/* A disabled button must say WHY: the one operator-actionable gate is
-            the empty message; the settling draft/reach is transient (spinner).
-            A stale draft's failure already renders in the error alert above. */}
+        {/* A disabled button must say WHY: the operator-actionable gates are
+            the empty message and text typed in the housing authority filter;
+            the settling draft/reach is transient (spinner). A stale draft's
+            failure already renders in the error alert above. */}
         {!previewBusy && !canPreview ? (
           bodyTemplate.trim().length === 0 ? (
             <span className={styles.previewHint}>Write a message to enable the preview.</span>
+          ) : authorityTyped ? (
+            <span className={styles.previewHint}>{ORG_FILTER_TYPED_HINT}</span>
           ) : draft.reachPending || draft.draftId === null ? (
             <span className={styles.previewHint}>Sizing the audience…</span>
           ) : null

@@ -352,6 +352,26 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   `autoClosedAt`, `autoClosedFrom`, `lastMarkedAt`, `jobs/tourAutoClose.ts`
   (the worker's 15-minute poll), `POST /api/tours/:tourId/reopen`.
 
+- **Requested tour / "Needs booking" / "Undated"** (tour list, 2026-10-06,
+  Sam's item 18) - a `requested` tour is a tour request with no time yet - it
+  never carries a date (booking it makes it `scheduled`). Its STATUS reads
+  "Requested" (the badge on rows and the tour header, `TOUR_STATUS_LABELS`);
+  everything that names the WORK says "Needs booking": the Active tab's
+  section (its list is named "Unbooked tour requests"), the All tab's status
+  chip (value `requested`), and its missing date on every surface. Any OTHER
+  tour without a date - toured with the date left blank, a request canceled
+  before booking, or one of those closed - reads "Undated": dateless history,
+  not work, so the property page's "Tours on this property" card lists it
+  after the dated tours, never among the requests (`sortToursForPanel`). One
+  helper, `undatedTourLabel` (`dashboard/src/api/types.ts`), is the only
+  reader of that wording rule. These two labels retire the single label
+  every undated tour used to show (its record:
+  `docs/issues/undated-tour-wording.md`). Also: the All tab (`/tours/all`,
+  listed first; `/tours` stays Active) is a server-filtered, server-paged
+  list of every tour (`GET /api/tours/list`); its Upcoming / Past are pure
+  date splits across every status, unlike the Active tab's Upcoming section
+  and the Past tab (curated work lists).
+
 ---
 
 ## For the future AI layer

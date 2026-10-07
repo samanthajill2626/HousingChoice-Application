@@ -171,8 +171,18 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
       return;
     }
     clearedRef.current = false;
-    // Same material inputs as the live draft → nothing to do.
-    if (lastKeyRef.current === key) return;
+    // Same material inputs as the live draft: no draft to make. A change
+    // undone before its own draft was made - inside the debounce, or after its
+    // recreate failed - lands here too. Its cleanup already cleared the timer
+    // and discarded any create in flight (genRef), so the screen matches the
+    // live draft again: nothing is pending, nothing is stale, and no error
+    // stands (code review R4-2).
+    if (lastKeyRef.current === key) {
+      setReachPending(false);
+      setStale(false);
+      setError(null);
+      return;
+    }
 
     if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
     setReachPending(true);

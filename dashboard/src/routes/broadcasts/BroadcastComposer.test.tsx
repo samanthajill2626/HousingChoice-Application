@@ -932,3 +932,47 @@ describe('BroadcastComposer - the audience while a preview loads (code review R3
     expect(sendBroadcast).not.toHaveBeenCalled();
   });
 });
+
+// Code review R4-2: a change undone before its new draft is made - inside the
+// debounce, or after its recreate failed - puts the screen back on the live
+// draft. Nothing is pending and nothing is stale then: Preview works at once,
+// with no new draft.
+describe('BroadcastComposer - a change undone before its draft lands (code review R4-2)', () => {
+  const previewButton = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
+  const message = (): HTMLElement => screen.getByRole('textbox', { name: 'Message' });
+
+  /** Outlast the composer's 600 ms create debounce. */
+  async function outlastDebounce(): Promise<void> {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 800));
+    });
+  }
+
+  it('a character typed and deleted inside the debounce: Preview is enabled again, not left "Sizing the audience"', async () => {
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(previewButton()).toBeEnabled(), { timeout: 4000 });
+    await u.type(message(), 'X{Backspace}');
+    await outlastDebounce();
+    expect(createBroadcast).toHaveBeenCalledTimes(1);
+    expect(previewButton()).toBeEnabled();
+    expect(screen.queryByText(/Sizing the audience/)).not.toBeInTheDocument();
+  });
+
+  it('a change whose recreate failed, undone: the error goes and Preview is enabled again', async () => {
+    const u = userEvent.setup();
+    createBroadcast
+      .mockResolvedValueOnce({ broadcastId: 'draft_1', status: 'draft', estimatedCount: 5, truncated: false })
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(previewButton()).toBeEnabled(), { timeout: 4000 });
+    await u.type(message(), 'X');
+    expect(await screen.findByText(/estimate the audience/, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(previewButton()).toBeDisabled();
+    await u.type(message(), '{Backspace}');
+    expect(previewButton()).toBeEnabled();
+    expect(screen.queryByText(/estimate the audience/)).not.toBeInTheDocument();
+    await outlastDebounce();
+    expect(createBroadcast).toHaveBeenCalledTimes(2);
+  });
+});

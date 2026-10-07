@@ -240,3 +240,132 @@ touch the app workspace.
 - `fe3fb93` fix(settings): Team's invite Role picker keeps its own width
 - `d71be9b` test(e2e): org-lists Settings specs drive the list + detail panel
 - this handback
+
+## 8. Fix round 1
+
+Source: [`code-review-r1.md`](code-review-r1.md) and
+[`live-check-r1.md`](live-check-r1.md), on top of 3751888b. Approved calls:
+Close/Back stay a push and only the post-action exits replace; the
+`organization` record field is a merge note only, with no code change.
+
+Commits:
+- `65c865e` fix(settings): org lists fix round 1 - settle lock, stale add, focus, history
+- `1a44e4e` test(e2e): org-lists - wait off the settled URL before reload; phone one-pane test
+- this handback section
+
+Unless a test file is named, the tests below are in `OrgListSection.test.tsx`,
+in the `fix round 1 (code review r1)` group. "Panel" means
+`NotOnListSection.test.tsx`, in the `an in-flight settle (code review r1 F1,
+M5)` group.
+
+| Finding | Status | What changed | Tests |
+|---|---|---|---|
+| F1 in-flight settle | Fixed | See F1 below. | "F1: while a settle is out the group is locked - no new pick, no second request"; "F1: an answer that lands after the admin moved on does not move them"; "F1: a failure that lands after Close reaches the admin as a notice"; panel: "a confirm whose gate is taken sends nothing", "while another value's request is out...", "while its own request is out...", "the gate is released on an answer either way", "a failure that lands after the panel left the screen goes to the page, not a dead panel" |
+| F2 justAdded fallback | Fixed | See F2 below. | "F2: once the re-read lands, an added entry's URL shows only what the list holds"; "F2 / M1: a deleted entry just added is 'Name not found' at its URL, and Back skips that URL" |
+| F3 focus fallbacks | Fixed | See F3 below. | "F3: Close returns focus to the list heading when a search hides the row"; "F3: the browser Back to a list whose row is not shown focuses the list heading"; "F3: a segment click leaves focus on the segment button" |
+| M1 history | Fixed | See M1 below. | "F1 / M1: a settle that lands on the same panel leaves it, replacing the dead URL in history"; "F2 / M1: ..." (Back after Delete skips the dead URL) |
+| M2 Retry at narrow width | Fixed | `OrgPanelMessage` takes an optional `onRetry`. A value panel whose "Not on the list" read failed offers Retry at every width. | "M2: a value link whose read failed offers Retry in the panel" (narrow) |
+| M3 stale entry link | Fixed | See M3 below. | "M3: a link to an agency that is gone stays on Agencies"; "M3: on a phone the Back link names the right list"; `orgSelection.test.ts` (agency href, view kept); the Add test now expects `.../o-finch?view=agencies` |
+| M4 empty value | Fixed | `readOrgLocation` treats `value=` as no selection. A value of spaces is still a value: it can be a stored placeholder. | `orgSelection.test.ts` "treats an empty value as no selection" |
+| M5 clear the pick | Fixed | Cancel next to the confirm clears the pick and leaves focus on the radio it cleared. It is disabled while the request is out. | Panel: "Cancel clears the pick and leaves focus on the choice it cleared" |
+| M6 live regions (optional) | Done | See M6 below. | "M6: the update status line is a polite live region"; the F1 notice test checks the notice sits inside the mounted `role="status"` |
+| M7 Back chevron | Fixed | See M7 below. | Panel: "Back (phone) leads back to the list; its chevron is not part of its name"; e2e phone test uses the exact name |
+| e2e race | Fixed | See the e2e race below. | e2e only (not run here) |
+| e2e one-pane test | Added | See the e2e one-pane test below. | e2e only (not run here) |
+
+What changed, in more detail:
+
+- **F1 (in-flight settle).**
+  - A `SettleGate` owned by `OrgListSection` holds the one in-flight request.
+    The slot is claimed synchronously through a ref, so a second request
+    can't slip in before the re-render.
+  - While a request is out, every value panel's settle fieldset is disabled,
+    with a visible reason: "Settling this value - waiting for the answer." on
+    its own panel, "Another value is still being settled..." on any other
+    value's panel.
+  - `leaveForList` acts only while the page still shows that value. A late
+    answer doesn't navigate or move focus, and leaves no stale focus flag
+    behind.
+  - A failure that lands after the confirm unmounted becomes a page notice:
+    `"<value>" was not settled: <reason>`.
+- **F2 (just-added fallback).** The fallback holds only while `list.version`
+  is still the version the entry was added at, so it ends when the re-read
+  lands. It is also cleared on Delete and Merge.
+- **F3 (focus fallbacks).**
+  - The focus effect falls back to the list heading when the row it left
+    isn't rendered.
+  - A segment click with a selection sets a keep-focus flag, so focus stays
+    on the button.
+- **M1 (history).**
+  - The exit after Delete, Merge or a settle uses `navigate(..., { replace:
+    true })`.
+  - Close/Back stay a push, as approved: the entry's URL is a real place to
+    return to.
+- **M3 (stale entry link).** An agency's link carries `?view=agencies` (used
+  by `entryHref(orgId, kind)` in list rows and after Add). A link to an
+  agency that is gone stays on Agencies, with "Back to Agencies" /
+  `Close -> ?view=agencies`. A housing authority's link stays bare
+  (`/settings/organizations/<orgId>`).
+- **M6 (live regions).**
+  - The update status line is `role="status"`.
+  - The notice sits in an always-mounted `role="status"` slot. When empty, it
+    cancels its flex gap with a negative margin, so the layout is unchanged.
+- **M7 (Back chevron).** The chevron is an `aria-hidden` span; the CSS
+  `::before` glyph is gone. The link's accessible name is exactly
+  "Back to <list>".
+- **e2e race.** `confirmSettle()` presses the confirm, then waits until the
+  URL no longer has `value=` before `waitForRewrite` and `page.reload()`.
+- **e2e one-pane test** ("at phone width one pane shows at a time ..."):
+  - A VA at 390x844: pick Atlanta, and the panel shows alone, with no list,
+    segments, search or Close.
+  - "Back to Housing authorities" (exact name) returns to the list, with focus
+    on the row.
+  - No horizontal scroll.
+
+Every new page-level test was checked against the old behavior: reverting
+each fix (F1 stale guard, F2 version gate and clear, F3 fallback and
+keep-focus, M1 replace) makes its tests fail.
+
+### Fix round 1 gates (at 1a44e4e, origin/main 20ccdb1, no main sync)
+
+- `npm run typecheck`: exit 0 (all workspaces, e2e included).
+- `npm test -w @housingchoice/dashboard`: exit 0. 229 files, 4201 passed,
+  1 skipped (was 4179 passed).
+- Gate 5 `npx eslint $(git diff --name-only --diff-filter=d origin/main...HEAD -- ...)`:
+  exit 0 over the same 12 files.
+- `npm run smoke`: exit 0.
+- Browser check, against the Vite dev server with a mocked API (not
+  committed):
+  - F1: a slow 409 settle, then a re-pick, a second press and a move to
+    another value give ONE POST; the late failure leaves the URL and focus
+    on the other value and shows the page notice.
+  - F2: the live repro (add, Delete, browser Back). Back lands on the list,
+    and the dead URL opened directly shows "Name not found", with no live
+    Delete button.
+  - M7 and the phone Back: the exact-name link matches, and focus returns to
+    the row.
+- **Not run here (no Docker):** `npm run e2e` (including the new phone test
+  and the race fix), the app workspace `npm test`, and a live check.
+
+### Fix round 1 deviations
+
+- **F1, beyond the brief.** While another value's request is out, that
+  value's settle group also waits ("one settle at a time"). This is how "a
+  second POST must be impossible" is enforced across panels, not only within
+  one.
+- **F1, Close/Back.** They are NOT disabled while a request is out: the brief
+  allows leaving, and the stale-answer handling covers it.
+- **M2.** The panel Retry shows at every width, not only narrow. On desktop
+  the list pane's Retry is also on screen; both re-read.
+- **M3.** I changed the URL scheme for agencies (`?view=agencies` on an
+  agency's link). Housing authority links are unchanged.
+
+### Merge note for branch B (addition)
+
+- `orgSelection.ts` `RECORD_FIELDS` lists only `housingAuthority`, `agency`
+  and `accepted_authorities`. Branch B's `organization` field must be added
+  there, or an organization value's URL reads as no selection (code review r1,
+  "For branch B"). No code change on this branch, as agreed.
+- `SettleConfirm` now takes `gate`, `onFailedAway` and `onCancel`, and calls
+  `resolveNotOnList` through the gate. If B's `settleChoices` adds actions,
+  they go through the same confirm unchanged.

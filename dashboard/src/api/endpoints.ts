@@ -1480,15 +1480,20 @@ export async function getSuggestions(
 
 /** POST /api/contacts/:id/suggestions/:target/accept - apply a pending
  *  suggestion. Returns the updated contact + the remaining suggestions. Throws
- *  ApiError(409, 'phone_in_use') on a phone conflict (suggestion kept). */
+ *  ApiError(409, 'phone_in_use') on a phone conflict (suggestion kept).
+ *  `value` (spec 2026-10-06 D8, housingAuthority only) is the list name staff
+ *  chose in "Is this really new?" - the text's own resolution, one of its
+ *  ambiguity candidates, or the name just added from it; anything else is 422
+ *  value_not_from_suggestion. Without it the body is the bare identity. */
 export async function acceptSuggestion(
   contactId: string,
   target: string,
   identity: SuggestionRequestIdentity,
+  value?: string,
 ): Promise<{ contact: Contact; suggestions: SuggestionItem[] }> {
   return request<{ contact: Contact; suggestions: SuggestionItem[] }>(
     `/api/contacts/${encodeURIComponent(contactId)}/suggestions/${encodeURIComponent(target)}/accept`,
-    { method: 'POST', body: identity },
+    { method: 'POST', body: value === undefined ? identity : { ...identity, value } },
   );
 }
 

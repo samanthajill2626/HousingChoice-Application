@@ -670,3 +670,13 @@ it('organization writes send the exact body to the exact route', async () => {
     method: 'POST',
   });
 });
+
+it('a housing authority accept carries the chosen value; without one the body is the bare identity', async () => {
+  const identity = { revision: 'rev-1', createdAt: '2026-08-08T12:00:00.000Z', runId: 'run-1' };
+  vi.mocked(request).mockResolvedValueOnce({ contact: { contactId: 'c1' }, suggestions: [] });
+  await acceptSuggestion('c1', 'housingAuthority', identity, 'Atlanta Housing Authority');
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/c1/suggestions/housingAuthority/accept', {
+    method: 'POST',
+    body: { ...identity, value: 'Atlanta Housing Authority' },
+  });
+});

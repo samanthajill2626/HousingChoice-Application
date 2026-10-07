@@ -68,6 +68,11 @@ const SERVER_CODES = [
   'suggestion_field_edited',
   'suggestion_resolution_lost',
   'suggestion_resolution_retry_exhausted',
+  // Spec 2026-10-06 D8: a housing authority accept `value` that is neither the
+  // text's own resolution nor one of its candidates.
+  'value_not_from_suggestion',
+  // Spec D5 runs while the accept is planned: the value is not on the list.
+  'org_not_on_list',
 ];
 
 const GENERIC = suggestionResolutionErrorMessage('a_code_no_server_has_ever_sent');

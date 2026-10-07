@@ -1591,6 +1591,14 @@ const SUGGESTION_RESOLUTION_ERROR_COPY: Readonly<Record<string, string>> = {
     'We could not confirm whether that saved - reload to see the current value, then try again in a moment.',
   suggestion_resolution_retry_exhausted:
     'That suggestion was too busy to resolve - try again in a moment.',
+  // Spec 2026-10-06 D8: the accept named a housing authority that is neither
+  // what the AI heard nor one of its candidates. Nothing was claimed.
+  value_not_from_suggestion:
+    'That name is not what the AI heard, so nothing changed - set the field by hand instead.',
+  // D5 runs while the accept is planned: the value left the list (deleted, or
+  // moved to the other kind) after this page loaded it.
+  org_not_on_list:
+    'That housing authority is not on the list any more, so nothing changed - pick it from the list instead.',
 };
 
 /** Staff-facing copy for a failed suggestion accept/dismiss, given its code. */

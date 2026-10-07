@@ -49,6 +49,7 @@ function Harness({
   onChangeSpy,
   onAuthorityTextChange,
   initialFilter = { contact_type: 'tenant' },
+  disabled,
 }: {
   propertyBeds?: number;
   reachCount?: number;
@@ -58,6 +59,7 @@ function Harness({
   authorityError?: string;
   onAuthorityTextChange?: (text: string) => void;
   initialFilter?: AudienceFilter;
+  disabled?: boolean;
 }): React.JSX.Element {
   const [filter, setFilter] = useState<AudienceFilter>(initialFilter);
   return (
@@ -67,6 +69,7 @@ function Harness({
         onChangeSpy?.(next);
         setFilter(next);
       }}
+      {...(disabled !== undefined && { disabled })}
       {...(propertyBeds !== undefined && { propertyBeds })}
       {...(reachCount !== undefined && { reachCount })}
       reachPending={reachPending}
@@ -182,6 +185,19 @@ describe('AudienceFilters — voucher size pre-fill + override', () => {
     await u.clear(box);
     expect(onAuthorityTextChange).toHaveBeenLastCalledWith('');
     expect(box).toBeDisabled();
+  });
+
+  it('disabled (a preview is loading): no voucher chip, pick or chip removal can change the audience (R3-FE-1)', () => {
+    render(
+      <Harness
+        disabled
+        initialFilter={{ contact_type: 'tenant', bedroomSize: 2, housing_authority: 'Atlanta Housing Authority' }}
+      />,
+    );
+    const chips = screen.getByRole('group', { name: 'Voucher size' });
+    for (const chip of Array.from(chips.querySelectorAll('button'))) expect(chip).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'Housing authority' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeDisabled();
   });
 
   it("shows the composer's message under the picker", () => {

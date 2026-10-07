@@ -67,6 +67,15 @@ export interface ComposerDraftState {
    *  matches the on-screen audience/message — Preview/Send must stay disabled
    *  (don't act on a stale draft) until a fresh create succeeds. */
   stale: boolean;
+  /** The material key of the inputs on screen now (unit, message, filter,
+   *  seeds) - what a draft made now would be made for. */
+  key: string;
+  /** The material key the current draft was made for: null with no draft,
+   *  an adopted one, or no message. `draftKey === key` is "the current draft
+   *  is the one on screen", from the very render a change lands in - before
+   *  any recreate starts (code review R3-FE-1: a Preview's result belongs to
+   *  the draft it previewed). */
+  draftKey: string | null;
   /** Adopt an externally-known draft id (resuming a draft row) WITHOUT creating
    *  one — subsequent material edits still recreate + clean up as usual. */
   adoptDraftId: (id: string) => void;
@@ -98,6 +107,8 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
   const [flyerUrl, setFlyerUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
+  // lastKeyRef's twin for rendering: the key the current draft was made for.
+  const [draftKey, setDraftKey] = useState<string | null>(null);
 
   // The currently-live draft id, read inside async callbacks without re-binding.
   const currentIdRef = useRef<string | null>(null);
@@ -117,6 +128,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
   const adoptDraftId = useCallback((id: string) => {
     currentIdRef.current = id;
     setDraftId(id);
+    setDraftKey(null); // what it was made for is not known here
   }, []);
 
   const key = materialKey(input);
@@ -149,6 +161,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
       if (!clearedRef.current) {
         clearedRef.current = true;
         lastKeyRef.current = null;
+        setDraftKey(null);
         setReachCount(undefined);
         setTruncated(false);
         setFlyerUrl(null);
@@ -186,6 +199,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
           lastKeyRef.current = key;
           currentIdRef.current = created.broadcastId;
           setDraftId(created.broadcastId);
+          setDraftKey(key);
           setReachCount(created.estimatedCount);
           setTruncated(created.truncated);
           setFlyerUrl(created.flyerUrl ?? null);
@@ -241,6 +255,8 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
     flyerUrl,
     error,
     stale,
+    key,
+    draftKey,
     adoptDraftId,
   };
 }

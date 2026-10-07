@@ -42,6 +42,10 @@ export interface AudienceFiltersProps {
    *  never a filter (D7), so the composer holds Preview back while there is
    *  any (code review R2-FE-3). */
   onAuthorityTextChange?: (text: string) => void;
+  /** True while a Preview is in flight: the audience is frozen - no voucher
+   *  chip, pick, typing or chip removal - because the candidates it returns
+   *  belong to the draft it previewed (code review R3-FE-1). */
+  disabled?: boolean;
 }
 
 export function AudienceFilters({
@@ -53,6 +57,7 @@ export function AudienceFilters({
   truncated,
   authorityError = null,
   onAuthorityTextChange,
+  disabled = false,
 }: AudienceFiltersProps): React.JSX.Element {
   const uid = useId();
   // The housing authority list behind the picker (spec 2026-10-06 D7).
@@ -106,6 +111,7 @@ export function AudienceFilters({
                 type="button"
                 className={`${styles.chip} ${active ? styles.chipActive : ''}`.trim()}
                 aria-pressed={active}
+                disabled={disabled}
                 onClick={() => pickSize(choice.value)}
               >
                 {choice.label}
@@ -135,7 +141,7 @@ export function AudienceFilters({
           kinds={HOUSING_AUTHORITY_KINDS}
           entries={orgList.entries}
           loading={orgListUnknown(orgList)}
-          disabled={orgList.error && typed.trim() === ''}
+          disabled={disabled || (orgList.error && typed.trim() === '')}
           value={filter.housing_authority ?? ''}
           onChange={setAuthority}
           onPendingTextChange={(text) => {

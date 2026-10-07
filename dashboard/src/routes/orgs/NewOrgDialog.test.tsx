@@ -192,6 +192,33 @@ describe('NewOrgDialog ("Is this really new?")', () => {
     expect(checkOrgText).not.toHaveBeenCalled();
   });
 
+  it('a name edited and brought back to the starting text is checked again, never stuck on "Checking the list..."', async () => {
+    // Code review R1-ADV-FE-8: the caller's answer belongs to the starting
+    // text; once an edit's check replaced it, going back must ask again.
+    const user = userEvent.setup();
+    checkOrgText.mockResolvedValue({ candidates: [], close: [] });
+    renderDialog({ text: 'Metro Housing', initialCheck: { candidates: [], close: [] } });
+    expect(yes()).toBeEnabled(); // the caller's answer, no check
+    const box = screen.getByRole('textbox', { name: 'Name' });
+    await user.type(box, 'X');
+    await waitFor(() =>
+      expect(checkOrgText).toHaveBeenLastCalledWith(
+        { kind: 'housing_authority', text: 'Metro HousingX' },
+        expect.any(AbortSignal),
+      ),
+    );
+    await waitFor(() => expect(yes()).toBeEnabled());
+    await user.type(box, '{Backspace}');
+    await waitFor(() =>
+      expect(checkOrgText).toHaveBeenLastCalledWith(
+        { kind: 'housing_authority', text: 'Metro Housing' },
+        expect.any(AbortSignal),
+      ),
+    );
+    await waitFor(() => expect(yes()).toBeEnabled());
+    expect(screen.queryByText('Checking the list...')).not.toBeInTheDocument();
+  });
+
   it('suggestion mode shows the heard text as fixed, with no Name textbox', () => {
     renderDialog({ text: 'AHA', mode: 'suggestion', initialCheck: { candidates: [ATL, AUG], close: [] } });
     expect(screen.queryByRole('textbox', { name: 'Name' })).not.toBeInTheDocument();

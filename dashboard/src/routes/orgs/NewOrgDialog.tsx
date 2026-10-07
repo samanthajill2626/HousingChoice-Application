@@ -96,7 +96,12 @@ export function NewOrgDialog({
 
   useEffect(() => {
     if (trimmed === '' || trimmed.length > ORG_NAME_MAX) return undefined;
-    if (attempt === 0 && initialCheck !== undefined && trimmed === text.trim()) return undefined;
+    // Skip ONLY when the answer held belongs to this very name (the caller's
+    // initialCheck for the starting text, or an earlier check): an edit's
+    // check replaces the caller's answer, so a name edited back to the
+    // starting text is checked again - never left on "Checking the list..."
+    // (code review R1-ADV-FE-8).
+    if (checked?.name === trimmed) return undefined;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       void checkOrgText({ kind, text: trimmed }, controller.signal).then(
@@ -112,7 +117,8 @@ export function NewOrgDialog({
       clearTimeout(timer);
       controller.abort();
     };
-  }, [kind, trimmed, text, initialCheck, attempt]);
+    // `attempt` re-runs a failed check (Try again).
+  }, [kind, trimmed, checked, attempt]);
 
   const check = checked !== null && checked.name === trimmed ? checked.result : null;
   const checkFailed = failedFor === trimmed;

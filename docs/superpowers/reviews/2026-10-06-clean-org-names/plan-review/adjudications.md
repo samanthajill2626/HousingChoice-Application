@@ -106,3 +106,19 @@ Counts: 3 findings; 2 accepted, 1 noted for the launch gate; 0 rejected.
 Decisions changed this round: NO - precision only. This is the TERMINAL
 round: plan review CLOSED after 3 rounds (findings 36 + 6 + 3 = 45; every
 round-1 rejection conceded by the reviewer).
+
+## Launch gate (2026-10-06 night, Cameron)
+
+- **P30 / P35 ruled:** bare `Clayton` moves from Jonesboro Housing Authority
+  to Georgia Department of Community Affairs - Cameron reads a bare
+  "Clayton" as the city of Clayton in Rabun County, which DCA serves, not as
+  Clayton County. `Clayton County` and `Housing Authority of Clayton County`
+  stay Jonesboro's (Sam's answer and the research agree). Plan S1 Task 1.5
+  (list, mapping table, section-13 note) and spec section 13 / Appendix A
+  updated.
+- **P32 confirmed:** the extraction prompt's place-name rule stands.
+- **Mode: Go - AUTO.** Orchestrator on Opus 5.5 (Cameron's ruling; the
+  planner session runs on Fable for the review); every child opus, sonnet
+  only for trivial mechanical sweeps; no Fable anywhere in the build.
+  Planner check-ins every 45 minutes (Cameron's ruling for this mission;
+  the 30-minute standing rule otherwise).

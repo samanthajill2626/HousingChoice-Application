@@ -2,9 +2,9 @@
 
 Worktree: W:\tmp\clean-org-names  Branch: feat/clean-org-names  (cut from main @d839494a)
 Profile: W:\tmp\clean-org-names\.claude\feature-mission.profile.md
-Spec: docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md (revision 8 @2f42d119; revision 5 approved by Cameron at the spec gate 2026-10-06; revisions 6-8 are plan-research and plan-review precision amendments plus Sam's 2026-10-06 answers in section 13 / Appendix A). This mission builds BRANCH A only: D1-D15 and spec sections 5-9, 11. D16-D21 (caseworkers) are branch B - do NOT build them.
-Plan: docs/superpowers/plans/2026-10-06-clean-org-names.md (PLAN @f44cc250, 86 tasks; section 3 interfaces are BINDING)
-Design review: spec R4 (closed; 68 findings, 67 accepted, 1 rejection conceded), plan R3 (closed; 45 findings over 3 rounds: 41 accepted, 3 rejections conceded by the reviewer, 1 informational note settled at the launch gate; round 3 terminal) - adjudications at docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md and docs/superpowers/reviews/2026-10-06-clean-org-names/plan-review/adjudications.md
+Spec: docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md (revision 8 @a198e88c; revision 5 approved by Cameron at the spec gate 2026-10-06; revisions 6-8 are plan-research and plan-review precision amendments plus Sam's 2026-10-06 answers in section 13 / Appendix A). This mission builds BRANCH A only: D1-D15 and spec sections 5-9, 11. D16-D21 (caseworkers) are branch B - do NOT build them.
+Plan: docs/superpowers/plans/2026-10-06-clean-org-names.md (PLAN @a198e88c, 86 tasks; section 3 interfaces are BINDING)
+Design review: spec R4 (closed; 68 findings, 67 accepted, 1 rejection conceded), plan R3 (closed; 45 findings over 3 rounds: 41 accepted, 3 rejections conceded by the reviewer, 1 informational note ruled at the launch gate; round 3 terminal; the launch-gate rulings are recorded at the end of the plan-review adjudications) - adjudications at docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md and docs/superpowers/reviews/2026-10-06-clean-org-names/plan-review/adjudications.md
 Records: docs/superpowers/reviews/2026-10-06-clean-org-names/ (commit each record as produced; run state only in .superpowers/)
 
 Work map (plan section 2; ORDER S1 -> S2 -> S3 -> S4 -> S5 -> S6 -> S7 -> S8 -> S9 -> S10 -> S12 -> S13 -> S11 -> S14 -> S15 -> S16 -> S17):
@@ -33,7 +33,8 @@ Watch items: plan section 12, plus:
 - NO agent runs `clean-org-names.ts` against dev or prod - lane rehearsal only (`--env local --lane <L>`). No deploy, Terraform, secret push or SSM write.
 - Do NOT edit the Improvements Tracker (Google Doc). The handback carries a two-to-three-sentence note each for tracker #2 and #19, in neutral third person (no "you"); #19's note says the caseworker half is branch B, planned after this merges.
 - Boundaries: #6 owns the blast audience rules (this branch only gives the composer the list); #14 (the /join dropdown) comes later and uses the list.
-- Child models: explicit on every dispatch per the profile (opus routine, sonnet mechanical); never let a child inherit Fable.
+- MODELS (Cameron's ruling at the launch gate, 2026-10-06): this mission runs NO Fable anywhere. The orchestrator itself is dispatched on Opus 5.5; every child is dispatched with an EXPLICIT model - opus for implementers, explorers, researchers and reviewers, sonnet only for trivial mechanical sweeps. Never let a child inherit the parent model.
+- Launch-gate rulings already folded in: bare `Clayton` is a DCA spelling (the city in Rabun County), not Jonesboro's; `Clayton County` stays Jonesboro's. The extraction prompt's place-name rule stands.
 
 Gates (bare, from W:\tmp\clean-org-names, real exit codes, never piped; AGENTS.md "Required completion gates"):
 1. npm run typecheck

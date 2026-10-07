@@ -1354,8 +1354,10 @@ describe('old values resolve as spec Appendix A says', () => {
     ['Henry County', 'Georgia Department of Community Affairs'],
     ['Clayton County', 'Jonesboro Housing Authority'],
     ['Housing Authority of Clayton County', 'Jonesboro Housing Authority'],
-    // The retired alias map's raw `clayton` (lib/housingAuthority.ts) carries over.
-    ['Clayton', 'Jonesboro Housing Authority'],
+    // The retired alias map's raw `clayton` (lib/housingAuthority.ts) read as
+    // Clayton County; Cameron's launch-gate ruling (2026-10-06): a bare
+    // "Clayton" is the city in Rabun County, which DCA serves.
+    ['Clayton', 'Georgia Department of Community Affairs'],
     ['Cobb County', 'Marietta Housing Authority'],
   ];
   it.each(samMappings)('%s -> %s (Sam, 2026-10-06)', (text, name) => {
@@ -1403,7 +1405,7 @@ export const STARTING_ORG_LIST: readonly StartingOrg[] = [
   {
     kind: 'housing_authority',
     name: 'Georgia Department of Community Affairs',
-    spellings: ['DCA', 'Georgia DCA', 'GA DCA', 'Department of Community Affairs', 'DCA, Department of Community Affairs', 'McDonough', 'Henry County'],
+    spellings: ['DCA', 'Georgia DCA', 'GA DCA', 'Department of Community Affairs', 'DCA, Department of Community Affairs', 'McDonough', 'Henry County', 'Clayton'],
     notes: 'Runs vouchers in 149 of Georgia\'s 159 counties (not Fulton, DeKalb, Clayton, Cobb, Bibb, Chatham, Glynn, Muscogee, Richmond or Sumter). North Regional Office in Atlanta.',
   },
   {
@@ -1429,7 +1431,6 @@ export const STARTING_ORG_LIST: readonly StartingOrg[] = [
       'Jonesboro, JHA, Jonesboro housing',
       'Clayton County',
       'Housing Authority of Clayton County',
-      'Clayton',
     ],
   },
   { kind: 'housing_authority', name: 'East Point Housing Authority', spellings: ['EPHA', 'East Point', 'Eastpoint Housing Authority'] },
@@ -1481,10 +1482,13 @@ Spec section 13 and Appendix A (revision 8: Sam's answers from the
 county values are spellings of the authority that runs those vouchers -
 `Fulton County` (and `Fulton, Fulton County`) -> Fulton County Housing
 Authority, `McDonough` and `Henry County` -> Georgia Department of Community
-Affairs, `Clayton County`, `Housing Authority of Clayton County` and the
-retired alias map's raw `Clayton` -> Jonesboro Housing Authority, `Cobb
-County` -> Marietta Housing Authority - so the cleanup maps them
-automatically. "McDonough Housing Authority" (a
+Affairs, `Clayton County` and `Housing Authority of Clayton County` ->
+Jonesboro Housing Authority, `Cobb County` -> Marietta Housing Authority -
+so the cleanup maps them automatically. The retired alias map's raw
+`Clayton` -> Georgia Department of Community Affairs, NOT Jonesboro: Cameron's
+launch-gate ruling (2026-10-06) is that a bare "Clayton" is the city of
+Clayton in Rabun County, which DCA serves, while "Clayton County" stays
+Jonesboro's. "McDonough Housing Authority" (a
 public-housing authority with no vouchers) is deliberately NOT a spelling.
 Hands of Hope stays off the list; anything Sam adds later goes in through
 Settings. The conformance test's expected shared-spelling set stays

@@ -2900,6 +2900,25 @@ export function createFakeWorld(): FakeWorld {
         .slice(0, opts.limit ?? 50);
       return { items };
     },
+    // Organization-name rewrite (plan 3.7): whole-list equality like the real
+    // ConditionExpression, and NO updated_at stamp - unlike every other unit
+    // write in this fake, because the real one stamps none either.
+    async rewriteAcceptedAuthorities(unitId, expected, next) {
+      const unit = units.get(unitId);
+      if (!unit) return 'skipped';
+      const stored: unknown = unit.accepted_authorities;
+      if (expected === null) {
+        if (stored !== undefined) return 'skipped';
+      } else if (
+        !Array.isArray(stored) ||
+        stored.length !== expected.length ||
+        stored.some((member, i) => member !== expected[i])
+      ) {
+        return 'skipped';
+      }
+      unit.accepted_authorities = [...next];
+      return 'written';
+    },
     // Property photos (unit-photos S1): mirror the real repo's atomic append +
     // cap guard, entry-conditioned remove, and move-to-front cover.
     async appendMedia(unitId, keys, cap = UNIT_MEDIA_MAX) {

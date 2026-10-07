@@ -18,6 +18,7 @@ import {
   type ContactItem,
   type ContactsRepo,
 } from '../src/repos/contactsRepo.js';
+import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../src/repos/unitsRepo.js';
 import { quietLogger } from './helpers/orgFixtures.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 
@@ -44,15 +45,18 @@ const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
 const client = createDynamoClient({ endpoint });
 const doc = createDocumentClient({ endpoint });
 const contactsTable = tableName('contacts', testEnv);
+const unitsTable = tableName('units', testEnv);
 
 beforeAll(async () => {
   if (!reachable) return;
   await ensureTable(client, getTableSpec('contacts'), contactsTable);
+  await ensureTable(client, getTableSpec('units'), unitsTable);
 }, 120_000);
 
 afterAll(async () => {
   if (reachable) {
     await deleteTableIfExists(client, contactsTable);
+    await deleteTableIfExists(client, unitsTable);
   }
   doc.destroy();
   client.destroy();
@@ -61,14 +65,25 @@ afterAll(async () => {
 /** One implementation under test: the writers plus raw seed/read access. */
 interface Writers {
   contacts: Pick<ContactsRepo, 'rewriteOrgFields'>;
+  units: Pick<UnitsRepo, 'rewriteAcceptedAuthorities'>;
   putContact(item: ContactItem): Promise<void>;
   readContact(contactId: string): Promise<ContactItem | undefined>;
+  putUnit(item: UnitItem): Promise<void>;
+  readUnit(unitId: string): Promise<UnitItem | undefined>;
 }
 
 function realWriters(): Writers {
   const logger = quietLogger();
   return {
     contacts: createContactsRepo({ doc, env: testEnv, logger }),
+    units: createUnitsRepo({ doc, env: testEnv, logger }),
+    async putUnit(item) {
+      await doc.send(new PutCommand({ TableName: unitsTable, Item: item }));
+    },
+    async readUnit(unitId) {
+      const { Item } = await doc.send(new GetCommand({ TableName: unitsTable, Key: { unitId }, ConsistentRead: true }));
+      return Item as UnitItem | undefined;
+    },
     async putContact(item) {
       await doc.send(new PutCommand({ TableName: contactsTable, Item: item }));
     },
@@ -85,6 +100,14 @@ function fakeWriters(): Writers {
   const world = createFakeWorld();
   return {
     contacts: world.contactsRepo,
+    units: world.unitsRepo,
+    async putUnit(item) {
+      world.units.set(item.unitId, structuredClone(item));
+    },
+    async readUnit(unitId) {
+      const hit = world.units.get(unitId);
+      return hit === undefined ? undefined : structuredClone(hit);
+    },
     async putContact(item) {
       world.contacts.push(structuredClone(item));
     },
@@ -171,5 +194,59 @@ describe('contactsRepo.rewriteOrgFields (plan 3.7)', () => {
     expect(
       await w.contacts.rewriteOrgFields(`${id}-missing`, { housingAuthority: 'AHA' }, { housingAuthority: 'X' }),
     ).toBe('skipped');
+  });
+});
+
+describe('unitsRepo.rewriteAcceptedAuthorities (plan 3.7)', () => {
+  parity('rewrites the list while it is exactly the list read, and never stamps updated_at', async (w, id) => {
+    await w.putUnit({
+      unitId: id,
+      landlordId: 'l-1',
+      status: 'available',
+      accepted_authorities: ['DCA', 'Atlanta Housing Authority'],
+      updated_at: '2026-01-01T00:00:00.000Z',
+    });
+    expect(
+      await w.units.rewriteAcceptedAuthorities(
+        id,
+        ['DCA', 'Atlanta Housing Authority'],
+        ['Georgia Department of Community Affairs', 'Atlanta Housing Authority'],
+      ),
+    ).toBe('written');
+    // updated_at is the importer's human-ownership signal: a machine write never moves it.
+    expect(await w.readUnit(id)).toEqual({
+      unitId: id,
+      landlordId: 'l-1',
+      status: 'available',
+      accepted_authorities: ['Georgia Department of Community Affairs', 'Atlanta Housing Authority'],
+      updated_at: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  parity('skips when the stored list differs - another member, or the same members in another order', async (w, id) => {
+    await w.putUnit({ unitId: id, landlordId: 'l-1', status: 'available', accepted_authorities: ['A', 'B'] });
+    expect(await w.units.rewriteAcceptedAuthorities(id, ['B', 'A'], ['X'])).toBe('skipped');
+    expect(await w.units.rewriteAcceptedAuthorities(id, ['A'], ['X'])).toBe('skipped');
+    expect((await w.readUnit(id))?.accepted_authorities).toEqual(['A', 'B']);
+  });
+
+  parity('expected null matches only an ABSENT list', async (w, id) => {
+    await w.putUnit({ unitId: id, landlordId: 'l-1', status: 'available', jurisdiction: 'DCA' });
+    expect(await w.units.rewriteAcceptedAuthorities(id, null, ['Georgia Department of Community Affairs'])).toBe('written');
+    expect(await w.units.rewriteAcceptedAuthorities(id, null, ['Other'])).toBe('skipped');
+    expect(await w.readUnit(id)).toMatchObject({
+      jurisdiction: 'DCA',
+      accepted_authorities: ['Georgia Department of Community Affairs'],
+    });
+  });
+
+  parity('writes an empty list when every member is cleared', async (w, id) => {
+    await w.putUnit({ unitId: id, landlordId: 'l-1', status: 'available', accepted_authorities: ['Bad'] });
+    expect(await w.units.rewriteAcceptedAuthorities(id, ['Bad'], [])).toBe('written');
+    expect((await w.readUnit(id))?.accepted_authorities).toEqual([]);
+  });
+
+  parity('skips an unknown unit', async (w, id) => {
+    expect(await w.units.rewriteAcceptedAuthorities(`${id}-missing`, null, ['X'])).toBe('skipped');
   });
 });

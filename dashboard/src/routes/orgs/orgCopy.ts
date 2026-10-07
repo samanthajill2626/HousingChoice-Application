@@ -449,9 +449,21 @@ export function isRewriteLive(lr: OrgRewriteState | undefined, nowMs: number = D
   return lr !== undefined && lr.status === 'running' && !isRewriteStalled(lr, nowMs);
 }
 
-/** "Run again" (admin): a failed or stalled rewrite - never the cleanup script's (D11). */
+/**
+ * A failed rewrite its job refused to run because the list changed since it
+ * started - the stored error is `org_rewrite_target_gone: <why>` (the job's
+ * claim, app/src/services/orgRewrite.ts). Run again re-checks the same
+ * definition against the same list, so it could only refuse as well (code
+ * review R3-BE-4).
+ */
+function isOutgrownRewrite(lr: OrgRewriteState): boolean {
+  return lr.status === 'failed' && (lr.error ?? '').startsWith('org_rewrite_target_gone');
+}
+
+/** "Run again" (admin): a failed or stalled rewrite - never the cleanup
+ *  script's (D11), and never one the list outgrew (R3-BE-4). */
 export function canRunAgain(lr: OrgRewriteState | undefined, nowMs: number = Date.now()): boolean {
-  if (lr === undefined || lr.action === 'cleanup') return false;
+  if (lr === undefined || lr.action === 'cleanup' || isOutgrownRewrite(lr)) return false;
   return lr.status === 'failed' || isRewriteStalled(lr, nowMs);
 }
 
@@ -514,7 +526,11 @@ export function rewriteStatusText(lr: OrgRewriteState, nowMs: number = Date.now(
       ? `An update stopped responding: ${what}.${cleanupHint}`
       : `Updating records: ${what}.`;
   }
-  if (lr.status === 'failed') return `The last update failed: ${what}.${tail}${cleanupHint}`;
+  if (lr.status === 'failed') {
+    // Not offered Run again (canRunAgain): say why, and what to do instead.
+    const outgrown = isOutgrownRewrite(lr) ? ` ${orgErrorMessage('org_rewrite_target_gone')}` : '';
+    return `The last update failed: ${what}.${tail}${cleanupHint}${outgrown}`;
+  }
   return `Last update finished: ${what}.${tail}`;
 }
 

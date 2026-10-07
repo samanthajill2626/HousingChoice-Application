@@ -229,6 +229,26 @@ describe('rewrite status', () => {
     expect(rewriteStatusText({ ...base, action: 'cleanup', status: 'failed' })).toContain('Re-run the cleanup script');
   });
 
+  it('never offers Run again for an update the list outgrew - it says so instead (code review R3-BE-4)', () => {
+    // The job's claim re-checks a late update and records why it refused
+    // (org_rewrite_target_gone: <why>); Run again applies the same check to
+    // the same list, so it could only answer 409.
+    const gone: OrgRewriteState = {
+      ...base,
+      status: 'failed',
+      error: 'org_rewrite_target_gone: a value it rewrites became a name on the list',
+      counts: { housingAuthority: 0 },
+    };
+    expect(canRunAgain(gone)).toBe(false);
+    expect(rewriteStatusText(gone)).toBe(
+      'The last update failed: renaming Atlanta HA to Atlanta Housing Authority. The list changed since this update started, so it cannot run again - start a new one from the list.',
+    );
+    // Any other failure still runs again, and says nothing more.
+    const other: OrgRewriteState = { ...base, status: 'failed', error: 'Error: DynamoDB timed out' };
+    expect(canRunAgain(other)).toBe(true);
+    expect(rewriteStatusText(other)).toBe('The last update failed: renaming Atlanta HA to Atlanta Housing Authority.');
+  });
+
   it('describes each action and its counts in staff words', () => {
     expect(describeRewrite(base)).toBe('renaming Atlanta HA to Atlanta Housing Authority');
     expect(

@@ -244,6 +244,24 @@ describe('OrgListSection - admin', () => {
     expect(await screen.findByText(/Re-run the cleanup script to finish it\./)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Run again' })).not.toBeInTheDocument();
   });
+
+  it('an update the list outgrew says why and is not offered Run again (code review R3-BE-4)', async () => {
+    // The job's claim refused it - the list changed since it started - and
+    // Run again would answer 409 org_rewrite_target_gone for the same reason.
+    getOrgList.mockResolvedValue({
+      version: 3,
+      entries: [ATLANTA],
+      lastRewrite: { ...FAILED, error: 'org_rewrite_target_gone: a name it writes left the list or changed kind' },
+    });
+    renderSection();
+    expect(
+      await screen.findByText(
+        'The last update failed: merging Atlanta HA into Atlanta Housing Authority. Housing authority fields: 2. The list changed since this update started, so it cannot run again - start a new one from the list.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Run again' })).not.toBeInTheDocument();
+    expect(runOrgRewriteAgain).not.toHaveBeenCalled();
+  });
 });
 
 // Code review R1-ADV-FE-4: the heartbeat is a SERVER stamp, judged by the

@@ -27,7 +27,7 @@ export const REWRITE_WAIT_REASON =
 /** Back to the list: "Back to <list>" when one pane shows at a time, else Close. */
 export function PanelBack({ segment, narrow }: { segment: OrgSegment; narrow: boolean }): React.JSX.Element {
   return (
-    <Link to={listHref(segment)} className={styles.back}>
+    <Link to={listHref(segment)} className={`${styles.back} ${narrow ? '' : styles.close}`.trim()}>
       {narrow ? `Back to ${SEGMENT_LABEL[segment]}` : 'Close'}
     </Link>
   );

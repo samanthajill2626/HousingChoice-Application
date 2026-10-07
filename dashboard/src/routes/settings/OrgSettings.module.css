@@ -97,6 +97,29 @@
   outline-offset: 1px;
 }
 
+/* Phone: the three segments share one full-width row (the count under the
+ * label), and the search takes the next row. */
+@media (max-width: 520px) {
+  .segments {
+    display: flex;
+    flex-wrap: nowrap;
+    width: 100%;
+    border-radius: var(--radius-md);
+  }
+  .segment {
+    flex: 1 1 0;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0;
+    padding: var(--sp-1) var(--sp-2);
+    text-align: center;
+    line-height: 1.25;
+  }
+  .search {
+    flex: 1 1 100%;
+  }
+}
+
 /* --- List and detail ------------------------------------------------------ */
 .split {
   display: grid;
@@ -274,6 +297,15 @@
 
 .back::before {
   content: '\2039\00a0';
+}
+
+/* Desktop: Close sits at the panel's top right, without the Back chevron. */
+.close {
+  align-self: flex-end;
+}
+
+.close::before {
+  content: none;
 }
 
 .back:hover {

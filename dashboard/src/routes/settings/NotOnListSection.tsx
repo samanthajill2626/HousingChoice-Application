@@ -117,16 +117,30 @@ function orList(values: readonly string[]): string {
 }
 
 /**
+ * Which stored values one settle rewrites together - the server's own
+ * equality (app/src/services/orgRecords.ts, the value actions' matching): a
+ * value is matched by its NORMALIZED text, unless that normalizes to '' (a
+ * placeholder such as "-" or "()"), which is matched by its TRIMMED EXACT
+ * text instead (code review R2-FE-4). The two key forms cannot collide: a
+ * normalized text never holds the punctuation every placeholder is made of.
+ */
+function rewriteKey(value: string): string {
+  const normalized = normalizeOrgText(value);
+  return normalized !== '' ? normalized : `exact:${value.trim()}`;
+}
+
+/**
  * The records a settle of `row` reaches, for its confirm: "3 records (+1
  * deleted)". A rewrite matches NORMALIZED text (spec D11), so settling one
  * row also rewrites the holders of every other row of the same field whose
  * value is written the same way ("AHA", "aha", "A.H.A."): those are counted
  * too, and named - "6 records (+1 deleted), written as AHA, aha or A.H.A."
- * (code review R1-ADV-FE-9).
+ * (code review R1-ADV-FE-9). Placeholder values group only by their trimmed
+ * text, as the server matches them (rewriteKey).
  */
 function recordsText(row: NotOnListRow, rows: readonly NotOnListRow[]): string {
-  const key = normalizeOrgText(row.value);
-  const siblings = rows.filter((r) => r.field === row.field && normalizeOrgText(r.value) === key);
+  const key = rewriteKey(row.value);
+  const siblings = rows.filter((r) => r.field === row.field && rewriteKey(r.value) === key);
   const group = siblings.some((r) => r.value === row.value) ? siblings : [row, ...siblings];
   const count = group.reduce((n, r) => n + r.count, 0);
   const deleted = group.reduce((n, r) => n + r.deletedCount, 0);

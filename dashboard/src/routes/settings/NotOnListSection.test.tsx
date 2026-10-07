@@ -417,6 +417,31 @@ describe('NotOnListSection - admin settling', () => {
     expect(dialog).toHaveTextContent('The value is removed from Agency on every record that holds it (4 records).');
   });
 
+  it('a placeholder value counts only the rows the server rewrites with it - its trimmed exact text (R2-FE-4)', async () => {
+    // "-", "--" and "()" all normalize to '', and the server matches such a
+    // value by its TRIMMED EXACT text (app/src/services/orgRecords.ts), so a
+    // settle of "-" reaches "-" and " - " only - never "--" or "()".
+    const user = userEvent.setup();
+    const unknown = { status: 'unknown' as const, close: [] };
+    renderSection({
+      rows: [
+        { field: 'housingAuthority', value: '-', count: 2, deletedCount: 0, resolution: unknown },
+        { field: 'housingAuthority', value: ' - ', count: 1, deletedCount: 1, resolution: unknown },
+        { field: 'housingAuthority', value: '--', count: 3, deletedCount: 0, resolution: unknown },
+        { field: 'housingAuthority', value: '()', count: 1, deletedCount: 0, resolution: unknown },
+      ],
+    });
+    await user.click(within(valueRow('--')).getByRole('button', { name: 'Clear' }));
+    let dialog = screen.getByRole('dialog', { name: 'Settle --' });
+    expect(dialog).toHaveTextContent('The value is removed from Housing authority on every record that holds it (3 records).');
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    // "-" and " - " are one value to the server: both rows are counted and named.
+    const [dash] = screen.getAllByRole('rowheader', { name: '-' });
+    await user.click(within(dash!.closest('tr')!).getByRole('button', { name: 'Clear' }));
+    dialog = screen.getByRole('dialog');
+    expect(dialog.textContent).toContain('(3 records (+1 deleted), written as - or  - ).');
+  });
+
   it('a refused settle says why in staff words', async () => {
     const user = userEvent.setup();
     resolveNotOnList.mockRejectedValue(new ApiError(409, 'org_rewrite_running', 'org_rewrite_running'));

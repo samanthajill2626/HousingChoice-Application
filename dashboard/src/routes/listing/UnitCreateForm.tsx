@@ -23,6 +23,15 @@ import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { contactDisplayName } from '../contact/format.js';
+import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
+import { OrgPicker } from '../orgs/OrgPicker.js';
+import {
+  HOUSING_AUTHORITY_KINDS,
+  notOnListMessage,
+  orgListLoadError,
+  orgNotOnListBody,
+} from '../orgs/orgCopy.js';
+import { useOrgList } from '../orgs/useOrgList.js';
 import styles from './ListingEditForm.module.css';
 
 export interface UnitCreateFormProps {
@@ -51,9 +60,18 @@ export function UnitCreateForm({
   const [landlordPick, setLandlordPick] = useState<ContactSearchValue>({ name: '' });
 
   // Property fields (mirror ListingEditForm; all optional on create).
-  // ONE comma-separated authorities input replaces the retired single
+  // The housing authorities the property takes: a multi-picker over the
+  // stored list (spec 2026-10-06 D6). It replaced the retired single
   // `jurisdiction` field and the `accepted_programs` list (spec section 8).
-  const [authorities, setAuthorities] = useState('');
+  const orgList = useOrgList();
+  const [authorities, setAuthorities] = useState<string[]>([]);
+  const [authoritiesError, setAuthoritiesError] = useState<string | null>(null);
+  // "Is this really new?" - rendered after the </form> (R5 ruling).
+  const [addingAuthority, setAddingAuthority] = useState<string | null>(null);
+  function addAuthority(name: string): void {
+    setAuthorities((prev) => (prev.includes(name) ? prev : [...prev, name]));
+    setAuthoritiesError(null);
+  }
   const [beds, setBeds] = useState('');
   const [baths, setBaths] = useState('');
   const [rentMin, setRentMin] = useState('');
@@ -173,14 +191,11 @@ export function UnitCreateForm({
     if (!addNumber(body, 'application_fee', applicationFee, 'Application fee')) return null;
     if (!addNumber(body, 'voucher_size_accepted', voucherSize, 'Voucher size accepted')) return null;
 
-    // Housing authorities - comma-separated; send the array only when non-empty.
-    // The retired `jurisdiction` / `accepted_programs` keys are never written
-    // again (both are server-side tombstones - app/src/lib/unitFields.ts).
-    const normAuthorities = authorities
-      .split(',')
-      .map((a) => a.trim())
-      .filter(Boolean);
-    if (normAuthorities.length > 0) body['accepted_authorities'] = normAuthorities;
+    // Housing authorities - the picked list names; send the array only when
+    // non-empty. The retired `jurisdiction` / `accepted_programs` keys are
+    // never written again (both are server-side tombstones -
+    // app/src/lib/unitFields.ts).
+    if (authorities.length > 0) body['accepted_authorities'] = authorities;
 
     // Address — send the object only when at least one part is filled. The server
     // keeps only the non-empty parts.
@@ -202,7 +217,15 @@ export function UnitCreateForm({
       const unit = await createUnit(body);
       setBusy(false);
       onCreated(unit);
-    } catch {
+    } catch (err) {
+      // A refused authority (422 org_not_on_list, spec D5): say why under the
+      // picker, from the body - never the raw code.
+      const refused = orgNotOnListBody(err);
+      if (refused !== null) {
+        setAuthoritiesError(notOnListMessage(refused));
+        setBusy(false);
+        return;
+      }
       setError("Couldn't create the property — please try again.");
       setBusy(false);
     }
@@ -300,16 +323,23 @@ export function UnitCreateForm({
         </div>
 
         <div className={styles.row}>
-          <label className={styles.field}>
-            <span className={styles.label}>Housing authorities</span>
-            <input
-              className={styles.input}
-              value={authorities}
-              onChange={(e) => setAuthorities(e.target.value)}
-              placeholder="e.g. Atlanta (AHA), DCA"
-              autoComplete="off"
-            />
-          </label>
+          <OrgPicker
+            multiple
+            label="Housing authorities"
+            kinds={HOUSING_AUTHORITY_KINDS}
+            entries={orgList.entries}
+            loading={orgList.loading}
+            disabled={orgList.error}
+            value={authorities}
+            onChange={(next) => {
+              setAuthorities(next);
+              setAuthoritiesError(null);
+            }}
+            onRequestAdd={setAddingAuthority}
+            error={authoritiesError ?? (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)}
+            className={styles.field}
+            labelClassName={styles.label}
+          />
         </div>
 
         <div className={styles.row}>
@@ -541,6 +571,24 @@ export function UnitCreateForm({
           </p>
         ) : null}
       </form>
+      {addingAuthority !== null ? (
+        <NewOrgDialog
+          kind="housing_authority"
+          text={addingAuthority}
+          mode="field"
+          onUse={(ref) => {
+            addAuthority(ref.name);
+            setAddingAuthority(null);
+          }}
+          onAdded={(entry) => {
+            // Counted as on the list at once: no "Not on the list" flash on its chip.
+            orgList.noteAdded(entry);
+            addAuthority(entry.name);
+            setAddingAuthority(null);
+          }}
+          onClose={() => setAddingAuthority(null)}
+        />
+      ) : null}
     </Modal>
   );
 }

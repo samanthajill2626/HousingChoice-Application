@@ -1,15 +1,19 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { Contact, UnitItem } from '../../api/index.js';
+import type { Contact, OrgEntry, UnitItem } from '../../api/index.js';
 
 // Mock the api barrel: spread the real module, override only the functions the
 // form calls. Each delegates to a vi.fn() so per-test mockResolvedValue works.
 const createUnit = vi.fn();
 const getAllContacts = vi.fn();
 const getContact = vi.fn();
+// The authorities picker's list and "Is this really new?" (spec 2026-10-06 D6).
+const getOrgList = vi.fn();
+const checkOrgText = vi.fn();
+const addOrg = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -17,6 +21,9 @@ vi.mock('../../api/index.js', async () => {
     createUnit: (...a: unknown[]) => createUnit(...a),
     getAllContacts: (...a: unknown[]) => getAllContacts(...a),
     getContact: (...a: unknown[]) => getContact(...a),
+    getOrgList: (...a: unknown[]) => getOrgList(...a),
+    checkOrgText: (...a: unknown[]) => checkOrgText(...a),
+    addOrg: (...a: unknown[]) => addOrg(...a),
   };
 });
 
@@ -48,10 +55,31 @@ function setup(props?: Partial<Parameters<typeof UnitCreateForm>[0]>) {
   return { onClose, onCreated };
 }
 
+function orgEntry(name: string, spellings: string[] = [], kind: OrgEntry['kind'] = 'housing_authority'): OrgEntry {
+  return {
+    orgId: `id-${name}`,
+    kind,
+    name,
+    spellings,
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  };
+}
+
+const ORG_ENTRIES: OrgEntry[] = [
+  orgEntry('Atlanta Housing Authority', ['AHA']),
+  orgEntry('Georgia Department of Community Affairs', ['DCA']),
+  orgEntry('Step Up', [], 'agency'),
+];
+
 beforeEach(() => {
   vi.clearAllMocks();
   getAllContacts.mockResolvedValue(LANDLORDS);
   getContact.mockResolvedValue(LANDLORDS[0]);
+  getOrgList.mockResolvedValue({ version: 1, entries: ORG_ENTRIES });
+  checkOrgText.mockResolvedValue({ candidates: [], close: [] });
 });
 
 /** Fill a labelled number/text input by its accessible name. */
@@ -71,9 +99,9 @@ describe('UnitCreateForm', () => {
     expect(screen.getByLabelText('Voucher size accepted')).toBeInTheDocument();
     expect(screen.getByLabelText('Public listing link')).toBeInTheDocument();
     expect(screen.getByLabelText('Street address')).toBeInTheDocument();
-    // ONE comma-separated authorities input replaces the retired single
-    // "Housing authority" field and the "Accepted vouchers / programs" list
-    // (spec section 8).
+    // The housing authorities picker (spec 2026-10-06 D6) replaces the retired
+    // single 'Housing authority' field and the 'Accepted vouchers / programs'
+    // list (spec section 8).
     expect(screen.getByLabelText('Housing authorities')).toBeInTheDocument();
     expect(screen.queryByLabelText('Housing authority')).toBeNull();
     expect(screen.queryByLabelText(/Accepted vouchers/i)).toBeNull();
@@ -133,24 +161,59 @@ describe('UnitCreateForm', () => {
     expect(onCreated).toHaveBeenCalledWith(created);
   });
 
-  // -- 4b: the comma-separated authorities input becomes accepted_authorities --
-  it('splits the Housing authorities input into accepted_authorities and never sends the retired keys', async () => {
+  // -- 4b: the picked housing authorities become accepted_authorities --
+  it('sends the picked housing authorities as accepted_authorities and never the retired keys', async () => {
     const user = userEvent.setup();
     createUnit.mockResolvedValue(newUnit());
     setup({ landlordId: 'contact-landlord-0001' });
 
     await screen.findByRole('dialog', { name: 'New property' });
-    await fill(user, 'Housing authorities', 'Atlanta (AHA), DCA');
+    const picker = screen.getByRole('combobox', { name: 'Housing authorities' });
+    await user.type(picker, 'AHA');
+    await user.click(await screen.findByRole('option', { name: /^Atlanta Housing Authority/ }));
+    await user.type(picker, 'DCA');
+    await user.click(await screen.findByRole('option', { name: /^Georgia Department of Community Affairs/ }));
     await user.click(screen.getByRole('button', { name: /^Create$/ }));
 
     await waitFor(() => expect(createUnit).toHaveBeenCalled());
     const body = createUnit.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(body).toEqual({
       landlordId: 'contact-landlord-0001',
-      accepted_authorities: ['Atlanta (AHA)', 'DCA'],
+      accepted_authorities: ['Atlanta Housing Authority', 'Georgia Department of Community Affairs'],
     });
     expect(body).not.toHaveProperty('jurisdiction');
     expect(body).not.toHaveProperty('accepted_programs');
+  });
+
+  it('adds a housing authority through "Is this really new?" - agencies are never offered', async () => {
+    const user = userEvent.setup();
+    createUnit.mockResolvedValue(newUnit());
+    addOrg.mockResolvedValue(orgEntry('Metro Housing Board'));
+    setup({ landlordId: 'contact-landlord-0001' });
+
+    await screen.findByRole('dialog', { name: 'New property' });
+    const picker = screen.getByRole('combobox', { name: 'Housing authorities' });
+    await user.type(picker, 'Step Up');
+    // An agency is not offered here (the add option is, as for any unknown text).
+    expect(await screen.findByRole('option', { name: 'Add Step Up as a new housing authority' })).toBeInTheDocument();
+    await user.clear(picker);
+    await user.type(picker, 'Metro Housing Board');
+    await user.click(await screen.findByRole('option', { name: 'Add Metro Housing Board as a new housing authority' }));
+    const isNew = screen.getByRole('dialog', { name: 'Is this really new?' });
+    expect(isNew.closest('form')).toBeNull();
+    await waitFor(() => expect(within(isNew).getByRole('button', { name: 'Yes, add it' })).toBeEnabled());
+    await user.click(within(isNew).getByRole('button', { name: 'Yes, add it' }));
+    expect(addOrg).toHaveBeenCalledWith({ kind: 'housing_authority', name: 'Metro Housing Board' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Remove Metro Housing Board' })).toBeInTheDocument());
+    // The name just added counts as on the list at once (useOrgList noteAdded).
+    expect(screen.getByRole('button', { name: 'Remove Metro Housing Board' }).closest('li')).not.toHaveTextContent(
+      'Not on the list',
+    );
+    await user.click(screen.getByRole('button', { name: /^Create$/ }));
+    await waitFor(() => expect(createUnit).toHaveBeenCalled());
+    expect((createUnit.mock.calls[0]?.[0] as Record<string, unknown>)['accepted_authorities']).toEqual([
+      'Metro Housing Board',
+    ]);
   });
 
   // ── 5: empty optional fields are omitted from the body ──
@@ -217,5 +280,32 @@ describe('UnitCreateForm', () => {
     expect(screen.getByRole('dialog', { name: 'New property' })).toBeInTheDocument();
     expect(onCreated).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /^Create$/ })).toBeEnabled();
+  });
+
+  // -- 8: a refused authority (422 org_not_on_list, spec D5) shows under the picker --
+  it('shows a refused housing authority under the picker, worded from the body', async () => {
+    const user = userEvent.setup();
+    createUnit.mockRejectedValue(
+      new ApiError(422, 'org_not_on_list', 'org_not_on_list', {
+        error: 'org_not_on_list',
+        field: 'accepted_authorities',
+        text: 'Atlanta Housing Authority',
+        candidates: [],
+        close: [],
+      }),
+    );
+    const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
+
+    await screen.findByRole('dialog', { name: 'New property' });
+    await user.type(screen.getByRole('combobox', { name: 'Housing authorities' }), 'AHA');
+    await user.click(await screen.findByRole('option', { name: /^Atlanta Housing Authority/ }));
+    await user.click(screen.getByRole('button', { name: /^Create$/ }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      'Atlanta Housing Authority is not on the list - pick a name from the list or add it.',
+    );
+    expect(alert.textContent ?? '').not.toContain('org_not_on_list');
+    expect(onCreated).not.toHaveBeenCalled();
   });
 });

@@ -607,7 +607,7 @@ claimed the cadence period.
 
 ## Layout
 - `playwright.config.ts` - one `chromium` project, reporters, `webServer` (which runs `scripts/e2e-session.mjs`).
-- `fixtures/` - `reseed`, `fakeTwilio` (inbound injection incl. CARRIER GROUP texts, the Conversations inspectors, and `getOutboundTo` proof-of-send reads), `groupText` (log tail + guardrail ticks), `fakeEmail`, `fakeVoice`, `relayConnect`, `voiceSetup`, `extraction`.
+- `fixtures/` - `reseed`, `fakeTwilio` (inbound injection incl. CARRIER GROUP texts, the Conversations inspectors, and `getOutboundTo` proof-of-send reads), `groupText` (log tail + guardrail ticks), `fakeEmail`, `fakeVoice`, `relayConnect`, `voiceSetup`, `extraction`, `orgFixture` (the organization list over the API: add a run-unique name, read usage and "Not on the list", plant an off-list value through `/__dev/org-fixture`, and `waitForRewrite`).
 - `support/` - `selectors.md` (the selector conventions), `urls.ts` (central lane-URL module), `lane.mjs` (lane resolver), `preflight.ts` (globalSetup), `viewport.ts`.
 - `tests/` - `dashboard-next/`, `flows/`, `scenarios/`, plus two loose specs.
 - `scenarios/` - `steps.ts`, the sequence-diagram vocabulary.

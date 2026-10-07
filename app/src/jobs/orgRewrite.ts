@@ -23,13 +23,23 @@
 // again, which is safe - a record already rewritten no longer holds the
 // from-text. It sends nothing, so it draws no A2P token of its own.
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import type { OrgListRepo } from '../repos/orgListRepo.js';
+import type { AuditRepo } from '../repos/auditRepo.js';
+import type { ContactsRepo } from '../repos/contactsRepo.js';
+import { createOrgListRepo, type OrgListRepo } from '../repos/orgListRepo.js';
+import type { UnitsRepo } from '../repos/unitsRepo.js';
 import {
+  createOrgRecordsService,
   OrgRewriteAbortedError,
   OrgRewriteLockLostError,
   type OrgRecordsService,
 } from '../services/orgRecords.js';
-import { ORG_REWRITE_JOB, type OrgRewritePayload, type OrgRewriteService } from '../services/orgRewrite.js';
+import {
+  createOrgRewriteService,
+  ORG_REWRITE_JOB,
+  type OrgRewritePayload,
+  type OrgRewriteService,
+} from '../services/orgRewrite.js';
+import { defineJobHandler } from './jobs.js';
 
 // Declared by services/orgRewrite.ts, which this module imports (the reverse
 // import would be a cycle); this is the job's public name.
@@ -109,4 +119,49 @@ export async function runOrgRewriteJob(
     }
     return { outcome: 'failed', counts: { ...counts } };
   }
+}
+
+/** Injectable for tests; production passes nothing and every repo is built lazily. */
+export interface OrgRewriteJobDeps {
+  orgListRepo?: OrgListRepo;
+  contactsRepo?: ContactsRepo;
+  unitsRepo?: UnitsRepo;
+  auditRepo?: AuditRepo;
+  logger?: Logger;
+}
+
+function buildRunDeps(deps: OrgRewriteJobDeps): RunOrgRewriteDeps {
+  const orgListRepo = deps.orgListRepo ?? createOrgListRepo({ logger: deps.logger });
+  const orgRecords = createOrgRecordsService({
+    contactsRepo: deps.contactsRepo,
+    unitsRepo: deps.unitsRepo,
+    auditRepo: deps.auditRepo,
+    logger: deps.logger,
+  });
+  return {
+    orgListRepo,
+    orgRecords,
+    orgRewrite: createOrgRewriteService({ orgListRepo, orgRecords, logger: deps.logger }),
+    logger: deps.logger,
+  };
+}
+
+/** Consumer side (registerHandlers.ts). */
+export function registerOrgRewriteJobHandler(deps: OrgRewriteJobDeps = {}): void {
+  const log = deps.logger ?? defaultLogger;
+  // Lazy: the repos touch config and AWS only on the first run (the
+  // mediaMirror / relayWarm registrar precedent).
+  let run: RunOrgRewriteDeps | undefined;
+  defineJobHandler(ORG_REWRITE_JOB, async (rawPayload) => {
+    let payload: OrgRewritePayload;
+    try {
+      payload = parseOrgRewritePayload(rawPayload);
+    } catch (err) {
+      // Undeliverable forever: logged and dropped, never rethrown.
+      log.error({ err }, 'org.rewrite: malformed payload - dropped');
+      return;
+    }
+    run ??= buildRunDeps(deps);
+    await runOrgRewriteJob(payload, run);
+  });
 }

@@ -23,6 +23,7 @@ describe('registerAllJobHandlers', () => {
         'groupRail.ensure',
         'media.mirror',
         'messaging.retrySend',
+        'org.rewrite',
         'relay.fanOut',
         'relay.intro',
         'relay.memberAdded',

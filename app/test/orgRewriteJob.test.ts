@@ -5,7 +5,15 @@
 // runs of one definition rewrite each record once. Over the harness world
 // fakes and the real services.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parseOrgRewritePayload, runOrgRewriteJob } from '../src/jobs/orgRewrite.js';
+import { _resetForTests, configureJobsLogger, dispatchJob, registeredJobNames } from '../src/jobs/jobs.js';
+import {
+  ORG_REWRITE_JOB,
+  parseOrgRewritePayload,
+  registerOrgRewriteJobHandler,
+  runOrgRewriteJob,
+} from '../src/jobs/orgRewrite.js';
+import { createLogger } from '../src/lib/logger.js';
+import { createLogCapture } from './helpers/logCapture.js';
 import type { OrgEntry } from '../src/lib/orgNames.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { OrgRewriteState } from '../src/repos/orgListRepo.js';
@@ -199,5 +207,42 @@ describe('runOrgRewriteJob (spec D11; plan 3.9)', () => {
     expect(rewritesIn(world)).toHaveLength(1);
     // No finish: the newer rewrite's state stands exactly as it took the lock.
     expect((await world.orgListRepo.peek())?.lastRewrite).toEqual(newer);
+  });
+});
+
+describe('registerOrgRewriteJobHandler (plan 3.9)', () => {
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  it('registers org.rewrite; dispatch drops a malformed payload WITHOUT throwing and runs a valid one', async () => {
+    _resetForTests();
+    configureJobsLogger(quietLogger());
+    const { world } = await jobWorld(USE);
+    const capture = createLogCapture();
+    registerOrgRewriteJobHandler({
+      orgListRepo: world.orgListRepo,
+      contactsRepo: world.contactsRepo,
+      unitsRepo: world.unitsRepo,
+      auditRepo: world.auditRepo,
+      logger: createLogger({ destination: capture.stream }),
+    });
+    expect(registeredJobNames()).toContain(ORG_REWRITE_JOB);
+    // An envelope-less but dispatchable event (the mediaMirrorJob.test.ts shape).
+    const dispatch = (payload: unknown) =>
+      dispatchJob({
+        jobId: `envelope-${Math.random()}`,
+        jobName: ORG_REWRITE_JOB,
+        payload,
+        correlationId: 'corr-1',
+        hopCount: 1,
+        enqueuedAt: new Date().toISOString(),
+      } as never);
+    // A rethrow here would make SQS redeliver it five times.
+    await expect(dispatch({ nope: true })).resolves.toBeUndefined();
+    expect(capture.atLevel(50).some((line) => line['msg'] === 'org.rewrite: malformed payload - dropped')).toBe(true);
+    await dispatch({ jobId: 'job-1' });
+    expect(world.contacts.every((c) => c['housingAuthority'] === ATLANTA.name)).toBe(true);
+    expect((await world.orgListRepo.peek())?.lastRewrite?.status).toBe('done');
   });
 });

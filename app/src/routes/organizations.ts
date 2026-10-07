@@ -52,6 +52,12 @@ export interface OrganizationsRouterDeps {
 const KINDS: readonly OrgKind[] = ['housing_authority', 'agency'];
 /** PATCH /:orgId takes exactly ONE of these per request (plan 3.6). */
 const PATCH_KEYS = ['notes', 'spellings', 'name', 'kind'] as const;
+const RESOLVE_ACTIONS = ['use', 'move_to_agency', 'move_to_housing_authority', 'split', 'add', 'clear'] as const;
+type ResolveAction = (typeof RESOLVE_ACTIONS)[number];
+
+function isResolveAction(value: unknown): value is ResolveAction {
+  return typeof value === 'string' && (RESOLVE_ACTIONS as readonly string[]).includes(value);
+}
 const RECORD_FIELDS: readonly OrgRecordField[] = ['housingAuthority', 'agency', 'accepted_authorities'];
 /** POST /check refuses a longer text with 400 (spec section 6). */
 const ORG_CHECK_TEXT_MAX = 200;
@@ -295,6 +301,73 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
       await refuseWhileUsed(await entryOr404(orgId));
       await orgNames.remove(orgId, actorOf(req));
       res.status(204).end();
+    }),
+  );
+
+  router.post(
+    '/:orgId/merge',
+    requireRole('admin'),
+    handle(async (req, res) => {
+      const orgId = String(req.params['orgId'] ?? '');
+      const intoOrgId = bodyOf(req)?.['intoOrgId'];
+      if (typeof intoOrgId !== 'string' || intoOrgId === '') {
+        res.status(400).json({ error: 'intoOrgId is required' });
+        return;
+      }
+      res.status(202).json(await orgRewrite.merge(orgId, intoOrgId, actorOf(req)));
+    }),
+  );
+
+  router.post(
+    '/not-on-list/resolve',
+    requireRole('admin'),
+    handle(async (req, res) => {
+      const body = bodyOf(req) ?? {};
+      const field = body['field'];
+      const value = body['value'];
+      const action = body['action'];
+      const name = body['name'];
+      const agencyName = body['agencyName'];
+      const rememberSpelling = body['rememberSpelling'];
+      if (!isRecordField(field)) {
+        res.status(400).json({ error: 'field must be housingAuthority, agency or accepted_authorities' });
+        return;
+      }
+      if (typeof value !== 'string' || value === '') {
+        res.status(400).json({ error: 'value is required' });
+        return;
+      }
+      if (!isResolveAction(action)) {
+        res.status(400).json({ error: 'action must be use, move_to_agency, move_to_housing_authority, split, add or clear' });
+        return;
+      }
+      if ((name !== undefined && typeof name !== 'string') || (agencyName !== undefined && typeof agencyName !== 'string')) {
+        res.status(400).json({ error: 'name and agencyName must be strings' });
+        return;
+      }
+      if (rememberSpelling !== undefined && typeof rememberSpelling !== 'boolean') {
+        res.status(400).json({ error: 'rememberSpelling must be true or false' });
+        return;
+      }
+      res.status(202).json(
+        await orgRewrite.resolveNotOnList({
+          field,
+          value,
+          action,
+          ...(name !== undefined && { name }),
+          ...(agencyName !== undefined && { agencyName }),
+          ...(rememberSpelling !== undefined && { rememberSpelling }),
+          actor: actorOf(req),
+        }),
+      );
+    }),
+  );
+
+  router.post(
+    '/rewrite/run-again',
+    requireRole('admin'),
+    handle(async (req, res) => {
+      res.status(202).json(await orgRewrite.runAgain(actorOf(req)));
     }),
   );
 

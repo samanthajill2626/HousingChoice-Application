@@ -34,6 +34,15 @@
 // range message; ready -> the rows, then ONE action area. The count line is
 // ONE role="status" element that stays mounted, empty, while nothing is ready
 // (a live region inserted together with its text is not reliably announced).
+//
+// KEYBOARD FOCUS after the action controls (spec 4.5, planner review round 2
+// R2-1). The user's OWN request (Load more, Keep checking, Retry after a
+// failed page) keeps the pressed control in place, busy (aria-disabled, never
+// `disabled`, which can drop focus) and focused; when it settles, focus goes
+// to the first new row, else to the action control then shown, else to the
+// count line. Start over and the first-page Retry rebuild the list: focus
+// goes to the count line at once, then to the new list's first row. Only
+// after a press - never after an automatic page or the return restore.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigationType, useSearchParams } from 'react-router-dom';
 import {
@@ -74,6 +83,27 @@ import styles from './AllToursView.module.css';
 
 /** The search walk starts this long after typing stops (spec 6). */
 const SEARCH_DEBOUNCE_MS = 300;
+
+/** The action controls whose press is the user's own request (the hook's
+ *  loadMore): while it runs, the pressed one stays, busy (spec 4.5). */
+type OwnAction = 'loadMore' | 'keepChecking' | 'retry';
+
+/** Where keyboard focus goes once a user-pressed control's request settles
+ *  (spec 4.5, R2-1): 'more' - Load more, Keep checking, Retry after a failed
+ *  page; 'rebuild' - Start over and the first-page Retry. Written in the
+ *  click handlers, read and cleared only in the focus effect. */
+interface PendingFocus {
+  kind: 'more' | 'rebuild';
+  /** data.rows.length at the press: the rows from this index on are new. */
+  rowsBefore: number;
+  /** The list pressed in; a different list (a filter change meanwhile) is
+   *  never focused into. */
+  listKey: string;
+  /** Where focus was left: the pressed control, or the count line. */
+  from: Element | null;
+  /** The request was seen in flight; until then nothing settles. */
+  started: boolean;
+}
 
 /** This view's route; TourDetail's back arrow accepts it with any query. */
 const ALL_TOURS_PATH = '/tours/all';
@@ -293,6 +323,13 @@ export function AllToursView(): React.JSX.Element {
     [],
   );
   const whenRef = useRef<HTMLSelectElement>(null);
+  // Keyboard focus after the action controls (spec 4.5, R2-1; see the
+  // header). `pressed` names the control whose request is in flight - read
+  // only while the hook's loader is 'more', so it is never cleared.
+  const [pressed, setPressed] = useState<OwnAction | null>(null);
+  const pendingFocus = useRef<PendingFocus | null>(null);
+  const countRef = useRef<HTMLParagraphElement>(null);
+  const actionsRef = useRef<HTMLDivElement>(null);
 
   const listKey = tourListApiKey(chosen);
   const restoreDepth = restore !== null && restore.listKey === listKey ? restore.record.depth : null;
@@ -356,9 +393,36 @@ export function AllToursView(): React.JSX.Element {
     change(DEFAULT_TOUR_LIST_SELECTION);
   }
 
+  /** Load more, Keep checking and Retry after a failed page: the user's own
+   *  request. Ignored while one runs - the pressed control is then busy
+   *  (aria-disabled), and the hook would ignore the call too. */
+  function requestMore(action: OwnAction, e: React.MouseEvent<HTMLButtonElement>): void {
+    if (data.loader === 'more') return;
+    pendingFocus.current = {
+      kind: 'more',
+      rowsBefore: data.rows.length,
+      listKey,
+      from: e.currentTarget,
+      started: false,
+    };
+    setPressed(action);
+    data.loadMore();
+  }
+
+  /** Start over and the first-page Retry rebuild the list, and the pressed
+   *  control leaves with it: focus goes to the count line (mounted
+   *  throughout, ruling D-6) at once, and to the first row once the new
+   *  first page lands. */
+  function rebuild(run: () => void): void {
+    const count = countRef.current;
+    count?.focus({ preventScroll: true });
+    pendingFocus.current = { kind: 'rebuild', rowsBefore: 0, listKey, from: count, started: false };
+    run();
+  }
+
   /** After a dead list: page 1 of a new list, and no restore (spec 4.9). */
   function startOver(): void {
-    data.startOver();
+    rebuild(data.startOver);
     setRestore(null);
   }
 
@@ -395,6 +459,30 @@ export function AllToursView(): React.JSX.Element {
     ? views.filter((v) => v.tenant.toLowerCase().includes(needle) || v.property.toLowerCase().includes(needle))
     : views;
   const ready = data.status === 'ready';
+
+  // THE ACTION AREA's one control, first match wins (spec 4.5): a dead list
+  // offers only Start over (never a Retry that would resend the rejected
+  // cursor); a failed page offers Retry; while the user's own request runs
+  // (loader 'more') the control they pressed stays, busy; a capped follow
+  // offers Keep checking INSTEAD of Load more; Load more and Keep checking
+  // otherwise only while no loader runs - hidden during an automatic one.
+  const busyAction = data.loader === 'more' ? pressed : null;
+  const action: OwnAction | 'startOver' | null = !ready
+    ? null
+    : data.dead
+      ? 'startOver'
+      : data.moreFailed
+        ? 'retry'
+        : busyAction !== null
+          ? busyAction
+          : data.followCapped && data.loader === 'none'
+            ? 'keepChecking'
+            : !data.complete && data.loader === 'none'
+              ? 'loadMore'
+              : null;
+  // Busy: in place and focusable, so focus stays - aria-disabled, never the
+  // `disabled` attribute (the focus fixup rule can blur a disabled element).
+  const busy = action !== null && action === busyAction;
 
   // THE RETURN ANCHOR (spec 4.9). A convenience, never a hijack: any
   // user-intent event after mount cancels it. Not 'scroll' (the browser
@@ -439,6 +527,40 @@ export function AllToursView(): React.JSX.Element {
     link?.focus({ preventScroll: true });
     link?.scrollIntoView({ block: 'nearest' });
   }, [record, data.restoreOutcome, visible]);
+
+  // FOCUS AFTER A PRESSED ACTION CONTROL (spec 4.5, R2-1). Waits until the
+  // pressed control's request is seen in flight, then settles once it is
+  // over: on the first NEW row's link (visible); else, after the user's own
+  // request, the action control now shown (the pressed one when it stayed, or
+  // the Retry or Start over that replaced it on a failure); else the count
+  // line. Hands off when the list changed meanwhile, or when the user has put
+  // focus somewhere else since. No setState here: focus and the ref only.
+  useEffect(() => {
+    const pending = pendingFocus.current;
+    if (pending === null) return;
+    const inFlight = pending.kind === 'more' ? data.loader === 'more' : data.status === 'loading';
+    if (inFlight) {
+      if (!pending.started) pendingFocus.current = { ...pending, started: true };
+      return;
+    }
+    if (!pending.started) return;
+    pendingFocus.current = null;
+    if (pending.listKey !== listKey) return;
+    const count = countRef.current;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active !== pending.from && active !== count) return;
+    const added = new Set(data.rows.slice(pending.rowsBefore).map((r) => r.tourId));
+    const newRow = [...(listRef.current?.querySelectorAll<HTMLAnchorElement>('a[data-tour-id]') ?? [])].find((a) =>
+      added.has(a.dataset['tourId'] ?? ''),
+    );
+    const shown = pending.kind === 'more' ? actionsRef.current?.querySelector<HTMLButtonElement>('button') : null;
+    const target = newRow ?? shown ?? count;
+    if (target === null || target === active) return;
+    // The anchor's idiom: focus without the browser's own scroll, then the
+    // smallest scroll that shows it.
+    target.focus({ preventScroll: true });
+    target.scrollIntoView({ block: 'nearest' });
+  }, [data.loader, data.status, data.rows, listKey]);
 
   /** An unmodified primary click on a row opens it HERE: the list's own entry
    *  then remembers where the user was (a stamped REPLACE whose state carries
@@ -582,8 +704,10 @@ export function AllToursView(): React.JSX.Element {
 
       {/* ONE status region: the count, plus the walk-cap sentence and the
           refreshed notice as their own spans (spec 4.5: the count line says
-          it). Mounted and EMPTY while nothing is ready (ruling D-6). */}
-      <p className={styles.countLine} role="status">
+          it). Mounted and EMPTY while nothing is ready (ruling D-6), and
+          programmatically focusable: focus waits here while a pressed action
+          control is gone (R2-1). */}
+      <p className={styles.countLine} role="status" tabIndex={-1} ref={countRef}>
         {ready ? <span>{countText(data, searching, visible.length)}</span> : null}
         {ready && searching && data.walkCapped && !data.complete ? (
           <span className={styles.notice}>
@@ -608,7 +732,7 @@ export function AllToursView(): React.JSX.Element {
       {data.status === 'error' ? (
         <div className={styles.failure} role="alert">
           <p className={styles.errorText}>We couldn&apos;t load tours. Please try again.</p>
-          <Button variant="secondary" size="sm" type="button" onClick={() => data.retry()}>
+          <Button variant="secondary" size="sm" type="button" onClick={() => rebuild(data.retry)}>
             Retry
           </Button>
         </div>
@@ -656,39 +780,58 @@ export function AllToursView(): React.JSX.Element {
         </div>
       ) : null}
 
-      {/* ONE action area, first match wins (spec 4.5): a dead list offers only
-          Start over (never a Retry that would resend the rejected cursor); a
-          failed page offers Retry; a capped follow offers Keep checking
-          INSTEAD of Load more; Load more only while no loader runs. */}
-      {ready ? (
-        data.dead ? (
-          <div className={styles.actions} role="alert">
-            <p className={styles.errorText}>We couldn&apos;t load more tours.</p>
-            <Button variant="secondary" size="sm" type="button" onClick={startOver}>
-              Start over
-            </Button>
-          </div>
-        ) : data.moreFailed ? (
-          <div className={styles.actions} role="alert">
-            <p className={styles.errorText}>We couldn&apos;t load tours. Please try again.</p>
-            <Button variant="secondary" size="sm" type="button" onClick={() => data.loadMore()}>
-              Retry
-            </Button>
-          </div>
-        ) : data.followCapped && data.loader === 'none' ? (
-          <div className={styles.actions}>
-            <p className={styles.actionText}>No more matches in the tours checked so far.</p>
-            <Button variant="secondary" size="sm" type="button" onClick={() => data.loadMore()}>
-              Keep checking
-            </Button>
-          </div>
-        ) : !data.complete && data.loader === 'none' ? (
-          <div className={styles.actions}>
-            <Button variant="secondary" size="sm" type="button" onClick={() => data.loadMore()}>
-              Load more
-            </Button>
-          </div>
-        ) : null
+      {/* ONE action area (`action` above). Each control is keyed, so a busy
+          control and its settled self are the SAME element and keep focus. */}
+      {action === 'startOver' ? (
+        <div key="startOver" ref={actionsRef} className={styles.actions} role="alert">
+          <p className={styles.errorText}>We couldn&apos;t load more tours.</p>
+          <Button variant="secondary" size="sm" type="button" onClick={startOver}>
+            Start over
+          </Button>
+        </div>
+      ) : action === 'retry' ? (
+        <div key="retry" ref={actionsRef} className={styles.actions} role="alert">
+          {/* Withdrawn while the retry runs: a second failure is inserted
+              into the alert again, so it is announced again. */}
+          {busy ? null : <p className={styles.errorText}>We couldn&apos;t load tours. Please try again.</p>}
+          <Button
+            variant="secondary"
+            size="sm"
+            type="button"
+            aria-busy={busy || undefined}
+            aria-disabled={busy || undefined}
+            onClick={(e) => requestMore('retry', e)}
+          >
+            Retry
+          </Button>
+        </div>
+      ) : action === 'keepChecking' ? (
+        <div key="keepChecking" ref={actionsRef} className={styles.actions}>
+          <p className={styles.actionText}>No more matches in the tours checked so far.</p>
+          <Button
+            variant="secondary"
+            size="sm"
+            type="button"
+            aria-busy={busy || undefined}
+            aria-disabled={busy || undefined}
+            onClick={(e) => requestMore('keepChecking', e)}
+          >
+            Keep checking
+          </Button>
+        </div>
+      ) : action === 'loadMore' ? (
+        <div key="loadMore" ref={actionsRef} className={styles.actions}>
+          <Button
+            variant="secondary"
+            size="sm"
+            type="button"
+            aria-busy={busy || undefined}
+            aria-disabled={busy || undefined}
+            onClick={(e) => requestMore('loadMore', e)}
+          >
+            Load more
+          </Button>
+        </div>
       ) : null}
     </section>
   );

@@ -613,13 +613,15 @@ describe('AllToursView - paging and the count line (spec 4.5)', () => {
     expect(lastCall().opts).toStrictEqual({ cursor: 'f10', limit: 50 });
   });
 
-  it('Load more shows only with a cursor and no loader running, and appends the next page', async () => {
+  it('Load more shows only with a cursor and no automatic loader running - busy while its own page loads - and appends the next page', async () => {
     reply('', page([row('a1'), row('a2')], 'c1'));
     renderAt();
     await settle();
     fireEvent.click(button('Load more'));
     expect(lastCall().opts).toStrictEqual({ cursor: 'c1', limit: 50 });
-    expectNoButton('Load more');
+    // Planner review round 2 (R2-1): it stays in place, busy, while its own
+    // request runs (the focus cases are below).
+    expect(button('Load more')).toHaveAttribute('aria-busy', 'true');
     await land(lastCall(), page([row('a3')], null));
     expect(rowIds()).toEqual(['a1', 'a2', 'a3']);
     expectNoButton('Load more');
@@ -1447,5 +1449,198 @@ describe('AllToursView - the return restore (spec 4.9)', () => {
     expect(routerText()).toBe('/tours/all');
     expect(restoring.signal?.aborted).toBe(true);
     expect(calls).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Planner review round 2 (R2-1) - keyboard focus after the action controls
+// ---------------------------------------------------------------------------
+
+/** A keyboard press: the control has focus, and Enter activates it. */
+function press(el: HTMLElement): void {
+  el.focus();
+  fireEvent.click(el);
+}
+
+/** The user's own request is in flight: the pressed control is still the
+ *  same element, busy (aria-busy + aria-disabled, never `disabled`), and has
+ *  focus; a second activation sends nothing. */
+function expectBusyWithFocus(name: string, pressed: HTMLElement): void {
+  const el = button(name);
+  expect(el).toBe(pressed);
+  expect(document.activeElement).toBe(el);
+  expect(el).toHaveAttribute('aria-busy', 'true');
+  expect(el).toHaveAttribute('aria-disabled', 'true');
+  expect(el).not.toHaveAttribute('disabled');
+  const before = calls.length;
+  fireEvent.click(el);
+  expect(calls).toHaveLength(before);
+}
+
+describe('AllToursView - keyboard focus after the action controls (spec 4.5, planner review round 2 R2-1)', () => {
+  it('Load more stays, busy and focused, while its page loads; then the first NEW row has focus', async () => {
+    reply('', page([row('a1'), row('a2')], 'c1'));
+    renderAt();
+    await settle();
+    const more = button('Load more');
+    press(more);
+    expect(lastCall().opts).toStrictEqual({ cursor: 'c1', limit: 50 });
+    expectBusyWithFocus('Load more', more);
+
+    await land(lastCall(), page([row('a3'), row('a4')], 'c2'));
+    expect(document.activeElement).toBe(linkFor('a3'));
+    expect(button('Load more')).not.toHaveAttribute('aria-busy');
+    expect(button('Load more')).not.toHaveAttribute('aria-disabled');
+  });
+
+  it('a Load more page that adds no row leaves focus on Load more', async () => {
+    reply('', page([row('a1'), row('a2')], 'c1'));
+    renderAt();
+    await settle();
+    const more = button('Load more');
+    press(more);
+    // Only a second copy of a listed tour: merged in place, no row added.
+    await land(lastCall(), page([row('a2')], 'c2'));
+    expect(rowIds()).toEqual(['a1', 'a2']);
+    expect(button('Load more')).toBe(more);
+    expect(document.activeElement).toBe(more);
+  });
+
+  it('Keep checking stays, busy and focused; an empty page hands the list back to the automatic follow, so focus goes to the count line - and an automatic page moves nothing', async () => {
+    reply('', page([], 'f0'));
+    for (let i = 0; i < 10; i++) reply(`f${i}`, page([], `f${i + 1}`));
+    renderAt();
+    await settle();
+    const keep = button('Keep checking');
+    press(keep);
+    expect(lastCall().opts).toStrictEqual({ cursor: 'f10', limit: 50 });
+    expectBusyWithFocus('Keep checking', keep);
+    expect(screen.getByText('No more matches in the tours checked so far.')).toBeInTheDocument();
+
+    await land(lastCall(), page([], 'k1'));
+    // The follow is in flight (automatic): no action control is shown.
+    expect(lastCall().opts).toStrictEqual({ cursor: 'k1', limit: 50 });
+    expectNoButton('Keep checking');
+    expect(document.activeElement).toBe(countLine());
+    expect(countText()).toBe('Checking more tours...');
+
+    await land(lastCall(), page([row('x1')], 'k2'));
+    expect(rowIds()).toEqual(['x1']);
+    expect(document.activeElement).toBe(countLine());
+  });
+
+  it('Retry after a failed page stays, busy and focused; a second failure keeps focus on it and announces the failure again; a landed page moves focus to the first new row', async () => {
+    reply('', page([row('a1')], 'c1'));
+    reply('c1', serverError());
+    renderAt();
+    await settle();
+    press(button('Load more'));
+    await settle();
+    // The failed Load more: its Retry, in the same place, has focus.
+    const retry = button('Retry');
+    expect(document.activeElement).toBe(retry);
+    expect(screen.getByRole('alert')).toHaveTextContent(LOAD_FAILED);
+
+    press(retry);
+    expect(lastCall().opts).toStrictEqual({ cursor: 'c1', limit: 50 });
+    expectBusyWithFocus('Retry', retry);
+    // While it runs the failure sentence is withdrawn, so a second failure
+    // is inserted into the alert again (and announced).
+    expect(screen.queryByText(LOAD_FAILED)).not.toBeInTheDocument();
+
+    await act(async () => {
+      lastCall().reject(serverError());
+    });
+    expect(button('Retry')).toBe(retry);
+    expect(document.activeElement).toBe(retry);
+    expect(retry).not.toHaveAttribute('aria-busy');
+    expect(screen.getByRole('alert')).toHaveTextContent(LOAD_FAILED);
+
+    press(retry);
+    await land(lastCall(), page([row('a2')], null));
+    expect(rowIds()).toEqual(['a1', 'a2']);
+    expect(document.activeElement).toBe(linkFor('a2'));
+  });
+
+  it('Start over after a dead list hands focus to the count line at once; when the new first page lands, its first row has it', async () => {
+    reply('', page([row('a1')], 'c1'), page([row('n1')], 'd1'));
+    reply('c1', cursor400());
+    reply('d1', mismatch400());
+    renderAt();
+    await settle();
+    press(button('Load more'));
+    await settle();
+    press(button('Load more'));
+    await settle();
+    // The dead list: Start over, in Load more's place, has focus.
+    const startOver = button('Start over');
+    expect(document.activeElement).toBe(startOver);
+
+    press(startOver);
+    expect(lastCall().opts).toStrictEqual({ limit: 50 });
+    expectNoButton('Start over');
+    expect(document.activeElement).toBe(countLine());
+
+    await land(lastCall(), page([row('s1'), row('s2')], null));
+    expect(document.activeElement).toBe(linkFor('s1'));
+  });
+
+  it('the first-page Retry hands focus to the count line at once; a second failure keeps it there (Retry is the next Tab stop); an empty list keeps it there too', async () => {
+    reply('', serverError());
+    renderAt();
+    await settle();
+    press(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' }));
+    expect(calls).toHaveLength(2);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(countLine());
+
+    await act(async () => {
+      lastCall().reject(serverError());
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent(LOAD_FAILED);
+    expect(document.activeElement).toBe(countLine());
+    expect(
+      countLine().compareDocumentPosition(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' })) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    press(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' }));
+    await land(lastCall(), page([], null));
+    expect(screen.getByText('No tours match these filters.')).toBeInTheDocument();
+    expect(document.activeElement).toBe(countLine());
+  });
+
+  it('the first-page Retry: when the page lands with rows, the first row has focus', async () => {
+    reply('', serverError());
+    renderAt();
+    await settle();
+    press(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' }));
+    await land(lastCall(), page([row('a1'), row('a2')], 'c1'));
+    expect(document.activeElement).toBe(linkFor('a1'));
+  });
+
+  it('focus the user moved while the page loaded is left where they put it', async () => {
+    reply('', page([row('a1')], 'c1'));
+    renderAt();
+    await settle();
+    press(button('Load more'));
+    searchBox().focus();
+    await land(lastCall(), page([row('a2')], 'c2'));
+    expect(rowIds()).toEqual(['a1', 'a2']);
+    expect(document.activeElement).toBe(searchBox());
+  });
+
+  it('a filter change while Load more runs starts another list, which is never focused into', async () => {
+    reply('', page([row('a1')], 'c1'));
+    renderAt();
+    await settle();
+    press(button('Load more'));
+    const more = lastCall();
+    // A click that moves no focus (Safari's mouse click on a button).
+    fireEvent.click(chip('Toured'));
+    expect(more.signal?.aborted).toBe(true);
+    await land(lastCall(), page([row('t1')], null));
+    expect(rowIds()).toEqual(['t1']);
+    expect(document.activeElement).toBe(document.body);
   });
 });

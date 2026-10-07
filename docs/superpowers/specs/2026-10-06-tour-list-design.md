@@ -357,7 +357,15 @@ of 4.8.
 - ONE LOADER AT A TIME. Every request that starts or advances the list's
   cursor chain is a loader: the first-page load, Load more, Keep checking, the
   empty-page follow, the search walk (6) and the return restore (4.9). Exactly
-  one runs at a time; while ANY runs, Load more and Keep checking are hidden. A
+  one runs at a time. While an AUTOMATIC loader runs (the first-page load, the
+  empty-page follow, the search walk, the return restore), Load more and Keep
+  checking are hidden. While the user's OWN request runs (Load more, Keep
+  checking, or Retry after a failed page), the control they pressed stays in
+  place, busy (`aria-busy` and `aria-disabled` - never the `disabled`
+  attribute, which can blur a focused element), keeps focus and ignores a
+  second activation; no other action control shows. (Amended by the planner
+  review, round 2, R2-1: "while ANY runs ... hidden" unmounted the pressed
+  control and dropped keyboard focus to the page body.) A
   filter or sort change aborts whichever is running and loads the first page
   (`limit=50`). Typing a search while a restore runs aborts the restore and the
   walk continues from the cursor it reached; typing one while the first-page
@@ -367,7 +375,24 @@ of 4.8.
   and re-requested from the SAME cursor as a walk page - no row lost or
   repeated (amended from the plan: one automatic loader, one effect).
 - **Load more** appears while the last response carried a `nextCursor` and no
-  loader is running; it appends the next page.
+  loader is running, and stays, busy, while its own request runs (above); it
+  appends the next page.
+- Keyboard focus after the action controls (planner review, round 2, R2-1).
+  When the user's own request settles, focus moves to the link of the first
+  NEWLY ADDED visible row; when no row was added, to the action control then
+  shown (the pressed one, still in place, or the Retry or Start over that
+  replaced it when the request failed); else to the count line, which is
+  programmatically focusable (`tabindex="-1"`, mounted throughout). Start over
+  and the first-page Retry rebuild the list, so the pressed control leaves with
+  it: the press moves focus to the count line at once; when the new first page
+  lands, focus goes to the first row's link, else (an empty list) it stays on
+  the count line; when that page FAILS, it stays on the count line (mounted in
+  the error state too), and the failure's Retry is the next Tab stop. Focus
+  moves only after a user-pressed control - never after the first page, an
+  automatic page or the return restore (whose anchor owns focus, 4.9) - and
+  never onto another list (a filter change meanwhile) or away from where the
+  user has put focus since. While a Retry after a failed page runs, the failure
+  sentence beside it is withdrawn, so a second failure is announced again.
 - De-duplication by `tourId` on append: the LATER copy's data replaces the
   earlier row in place (a tour rescheduled between two pages can come back).
 - Empty pages: a page that comes back EMPTY with a cursor (a sparse filter met
@@ -792,7 +817,10 @@ for any other tour without a date.
     while walking; clearing aborts and keeps rows; the request cap copy; an
     incomplete list never reading "N matches".
   - Loaders: Load more hidden during the first-page load and the empty-page
-    follow; a search typed while the first page loads walks on after it lands;
+    follow; the pressed control busy and focused while its own request runs,
+    and where focus lands after each action control - one case per control
+    (amended by the planner review, round 2, R2-1); a search typed while the
+    first page loads walks on after it lands;
     the second cursor 400 offering Start over, not Retry; the anchor guard
     tripped by `keydown`/`pointerdown`/`wheel`/`touchstart` and NOT by a
     browser-made `scroll`; an Alt-click on a row writing no record.

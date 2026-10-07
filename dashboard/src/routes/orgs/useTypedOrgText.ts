@@ -6,16 +6,21 @@
 //     the note says "Save will use <name>.", and Save commits that name as a
 //     pick would (and empties the field);
 //   - any other text: the note says "Not saved - ...", and Save refuses,
-//     saying why under the field (role="alert") until the text changes.
+//     saying why under the field (role="alert") until the text changes;
+//   - a Save never waits on a picker staff cannot use (code review R2-FE-1):
+//     while the list failed to load, the picker (disabled) keeps its text
+//     unused - the field keeps its value - and its load error stays in view,
+//     never replaced by a refusal; before the first read lands, Save refuses
+//     with "Still loading the list - try again in a moment."
 // Every form passes its picker's ref in, wires `onPendingTextChange`, `note`
 // and `refusal` to the OrgPicker and calls settle() from Save - no form holds
 // its own copy of the rule. (The form owns the ref: a hook result carrying one
 // would read as a ref to the React Compiler's lint at every render use.) The
 // blast composer never commits typed text (spec D7): it does not use this.
 import { useState, type RefObject } from 'react';
-import type { OrgEntry, OrgKind } from '../../api/index.js';
+import type { OrgKind } from '../../api/index.js';
 import type { OrgPickerHandle } from './OrgPicker.js';
-import { ORG_TYPED_BLOCKED, refusesSave, settleTypedOrgText, typedOrgNote, type TypedOrgText } from './orgCopy.js';
+import { settleTypedOrgText, typedOrgNote, typedOrgRefusal, type OrgListView, type TypedOrgText } from './orgCopy.js';
 
 export interface TypedOrgTextField {
   /** The picker's `onPendingTextChange`. */
@@ -31,24 +36,27 @@ export interface TypedOrgTextField {
   focus: () => void;
 }
 
-/** `picker` is the OrgPicker's `ref`: Save focuses a refused field and empties a committed one. */
+/** `list` is the picker's list (useOrgList); `picker` is the OrgPicker's
+ *  `ref`: Save focuses a refused field and empties a committed one. */
 export function useTypedOrgText(
-  list: { entries: readonly OrgEntry[] },
+  list: OrgListView,
   kinds: readonly OrgKind[],
   picker: RefObject<OrgPickerHandle | null>,
 ): TypedOrgTextField {
   const [text, setText] = useState('');
-  const [refused, setRefused] = useState(false);
-  const verdict = settleTypedOrgText(list.entries, kinds, text);
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const verdict = settleTypedOrgText(list, kinds, text);
   return {
     onPendingTextChange: (next) => {
       setText(next);
-      setRefused(false);
+      setRefusal(null);
     },
     note: typedOrgNote(verdict),
-    refusal: refused ? ORG_TYPED_BLOCKED : null,
+    // A list that failed to load disables the picker: its load error is
+    // what the field says, never a refusal from an earlier Save (R2-FE-1).
+    refusal: list.error ? null : refusal,
     settle: () => {
-      setRefused(refusesSave(verdict));
+      setRefusal(typedOrgRefusal(verdict));
       if (verdict.status === 'resolved') picker.current?.clearText();
       return verdict;
     },

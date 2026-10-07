@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -407,6 +407,49 @@ describe('UnitCreateForm - text typed in the picker but never picked', () => {
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(BLOCKED);
     expect(authorities().getAttribute('aria-describedby')?.split(' ')).toContain(alert.id);
+    expect(authorities()).toHaveFocus();
+    expect(createUnit).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+  });
+});
+
+// --- Code review R2-FE-1: Create never waits on a picker staff cannot use ----
+// A list read that fails disables the picker WITH the typed text inside: the
+// text is left unused and the load error stays in view. Text typed before the
+// read lands cannot be settled yet: Create says the list is still loading.
+describe('UnitCreateForm - a picker whose list is not there', () => {
+  const authorities = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authorities' });
+  const create = (): HTMLElement => screen.getByRole('button', { name: /^Create$/ });
+
+  it('the read fails while text is typed: Create goes on without it, the load error stays', async () => {
+    const user = userEvent.setup();
+    const held = { reject: (_err: unknown): void => {} };
+    getOrgList.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        held.reject = reject;
+      }),
+    );
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByRole('dialog', { name: 'New property' });
+    await user.type(authorities(), 'DCA');
+    await act(async () => held.reject(new ApiError(503, 'org_list_busy', 'org_list_busy')));
+    expect(authorities()).toBeDisabled();
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalled());
+    expect(createUnit.mock.calls[0]?.[0]).toEqual({ landlordId: 'contact-landlord-0001' });
+    expect(screen.getByText("Couldn't load housing authorities")).toBeInTheDocument();
+    expect(screen.queryByText('Pick a name from the list, add it as new, or clear the text.')).not.toBeInTheDocument();
+  });
+
+  it('Create before the list loads says it is still loading - nothing is created', async () => {
+    const user = userEvent.setup();
+    getOrgList.mockReturnValueOnce(new Promise(() => {}));
+    const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByRole('dialog', { name: 'New property' });
+    await user.type(authorities(), 'DCA');
+    await user.click(create());
+    expect(await screen.findByRole('alert')).toHaveTextContent('Still loading the list - try again in a moment.');
     expect(authorities()).toHaveFocus();
     expect(createUnit).not.toHaveBeenCalled();
     expect(onCreated).not.toHaveBeenCalled();

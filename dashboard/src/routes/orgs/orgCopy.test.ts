@@ -16,11 +16,13 @@ import {
   orgErrorMessage,
   orgListLoadError,
   orgNotOnListBody,
+  refusesSave,
   resolutionText,
   rewriteStatusText,
   settleTypedOrgText,
   spellingProblemCopy,
   typedOrgNote,
+  typedOrgRefusal,
   usageBreakdown,
   usageText,
 } from './orgCopy.js';
@@ -276,12 +278,14 @@ describe('settleTypedOrgText - text typed in a form picker but never picked (cod
     updatedBy: 'system',
   });
   // AHA is a spelling two entries share; DCA and "Atlanta Housing" belong to one.
-  const LIST = [
+  const ENTRIES = [
     listed('housing_authority', 'Atlanta Housing Authority', ['AHA', 'Atlanta Housing']),
     listed('housing_authority', 'Augusta Housing Authority', ['AHA']),
     listed('housing_authority', 'Georgia Department of Community Affairs', ['DCA']),
     listed('agency', 'Step Up'),
   ];
+  /** The list as a loaded form holds it (useOrgList). */
+  const LIST = { entries: ENTRIES, loading: false, error: false };
   const HA: OrgKind[] = ['housing_authority'];
 
   it('blank text is nothing typed', () => {
@@ -317,6 +321,33 @@ describe('settleTypedOrgText - text typed in a form picker but never picked (cod
       expect(settleTypedOrgText(LIST, HA, text), text).toEqual({ status: 'blocked' });
     }
   });
+
+  it('a list still loading cannot settle text yet; a list that failed leaves it unused, never refused (R2-FE-1)', () => {
+    const loading = { entries: [], loading: true, error: false };
+    const failed = { entries: ENTRIES, loading: false, error: true };
+    expect(settleTypedOrgText(loading, HA, 'Atlanta Housing Authority')).toEqual({ status: 'loading' });
+    // A failed re-read keeps the old entries, but the picker is disabled: its text is not used.
+    expect(settleTypedOrgText(failed, HA, 'Atlanta Housing Authority')).toEqual({ status: 'unavailable' });
+    expect(settleTypedOrgText(failed, HA, 'AHA')).toEqual({ status: 'unavailable' });
+    // Blank is still nothing typed.
+    expect(settleTypedOrgText(loading, HA, ' ')).toEqual({ status: 'empty' });
+    expect(settleTypedOrgText(failed, HA, '')).toEqual({ status: 'empty' });
+  });
+
+  it('Save refuses blocked text and text typed before the list loaded - with its own words for each', () => {
+    expect(refusesSave({ status: 'blocked' })).toBe(true);
+    expect(refusesSave({ status: 'loading' })).toBe(true);
+    expect(typedOrgRefusal({ status: 'blocked' })).toBe('Pick a name from the list, add it as new, or clear the text.');
+    expect(typedOrgRefusal({ status: 'loading' })).toBe('Still loading the list - try again in a moment.');
+    for (const verdict of [
+      { status: 'empty' as const },
+      { status: 'unavailable' as const },
+      { status: 'resolved' as const, name: 'Step Up' },
+    ]) {
+      expect(refusesSave(verdict), verdict.status).toBe(false);
+      expect(typedOrgRefusal(verdict), verdict.status).toBeNull();
+    }
+  });
 });
 
 describe('typedOrgNote - the note under a form picker says what Save will do (code review R2-FE-6)', () => {
@@ -326,5 +357,10 @@ describe('typedOrgNote - the note under a form picker says what Save will do (co
       'Not saved - pick a name from the list, add it as new, or clear the text.',
     );
     expect(typedOrgNote({ status: 'empty' })).toBeNull();
+  });
+
+  it('a list that failed to load says the text is not saved; one still loading says nothing yet (R2-FE-1)', () => {
+    expect(typedOrgNote({ status: 'unavailable' })).toBe('Not saved - the list did not load.');
+    expect(typedOrgNote({ status: 'loading' })).toBeNull();
   });
 });

@@ -10,6 +10,7 @@ import { SEED } from '../src/lib/seedData.js';
 import { SEED_AUTHORITY, SEED_ORG_LIST_AT, seedOrgListItem } from '../src/lib/seed/orgList.js';
 import { castItems } from '../src/lib/seed/cast.js';
 import { buildLiveStaticItems } from '../src/lib/seed/live.js';
+import { matrixItems } from '../src/lib/seed/matrix.js';
 import { ORG_LIST_SETTING_ID } from '../src/repos/orgListRepo.js';
 
 /** The seeded list: every seeded value must be an exact name on it. */
@@ -124,5 +125,22 @@ describe('the full profile (cast, live) holds list names only', () => {
     expect(orgValues(items).length).toBeGreaterThan(0);
     expect(offList(items)).toEqual([]);
     expect(JSON.stringify(items)).not.toMatch(RETIRED_SLUG);
+  });
+});
+
+describe('the matrix holds list names only, broadcast filters included', () => {
+  const items = matrixItems(new Date('2026-10-06T12:00:00.000Z'));
+
+  it('every value is an exact list name', () => {
+    expect(orgValues(items).length).toBeGreaterThan(0);
+    expect(offList(items)).toEqual([]);
+    expect(JSON.stringify(items)).not.toMatch(RETIRED_SLUG);
+  });
+
+  it('the seeded broadcasts filter on list names (the draft is re-checked at preview - spec D7)', () => {
+    const filters = rowsOf(items, 'broadcasts').map(
+      (b) => (b['audience_filter'] as { housing_authority?: unknown } | undefined)?.housing_authority,
+    );
+    expect(filters).toEqual([SEED_AUTHORITY.atlanta, SEED_AUTHORITY.dca]);
   });
 });

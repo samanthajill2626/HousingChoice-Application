@@ -30,6 +30,7 @@ import { shiftLocalDate } from '../localTime.js';
 import type { ConversationParticipant } from '../../repos/conversationsRepo.js';
 import { SEED } from './lean.js';
 import type { SeedConversationRow } from './types.js';
+import { SEED_AUTHORITY } from './orgList.js';
 
 // ---------------------------------------------------------------------------
 // Fixed past dates (byte-stable)
@@ -73,7 +74,19 @@ const phoneBase = (n: number) => `+1555020${String(n).padStart(4, '0')}`;
 // ---------------------------------------------------------------------------
 // Housing authorities + addresses + beds + tour_process
 // ---------------------------------------------------------------------------
-const AUTHORITIES = ['atlanta_housing', 'ga_dca', 'dekalb_housing', 'fulton_housing', 'gwinnett_housing', 'cobb_housing'] as const;
+// Seeds hold exact organization-list NAMES (clean-org-names spec section 7,
+// lib/seed/orgList.ts). The pool keeps its SIX positions so every
+// counter-derived fact (beds, statuses, addresses) lands exactly where it did;
+// one position now repeats a name (the retired gwinnett slug maps to DCA, whose
+// vouchers cover Gwinnett County).
+const AUTHORITIES = [
+  SEED_AUTHORITY.atlanta,
+  SEED_AUTHORITY.dca,
+  SEED_AUTHORITY.dekalb,
+  SEED_AUTHORITY.fulton,
+  SEED_AUTHORITY.dca,
+  SEED_AUTHORITY.marietta,
+] as const;
 type Authority = typeof AUTHORITIES[number];
 
 const auth = (i: number): Authority => AUTHORITIES[i % AUTHORITIES.length]!;
@@ -673,14 +686,15 @@ function buildUnitsMatrix(placementGroups: PlacementGroup[]): UnitGroup[] {
   }
 
   // ~6 explicitly tourable 'available' units (distinct from any produced above)
-  // spread across authorities, beds 1-4, and all three tour-process types
+  // spread across authorities (the retired slugs' mapping makes two of them
+  // Atlanta and two DCA - spec section 7), beds 1-4, and all three tour-process types
   const tourableSpecs = [
-    { authority: 'atlanta_housing', beds: 1, processType: 'self_guided' },
-    { authority: 'ga_dca', beds: 2, processType: 'landlord_led' },
-    { authority: 'dekalb_housing', beds: 3, processType: 'pm_team' },
-    { authority: 'fulton_housing', beds: 4, processType: 'self_guided' },
-    { authority: 'gwinnett_housing', beds: 2, processType: 'landlord_led' },
-    { authority: 'cobb_housing', beds: 3, processType: 'pm_team' },
+    { authority: SEED_AUTHORITY.atlanta, beds: 1, processType: 'self_guided' },
+    { authority: SEED_AUTHORITY.dca, beds: 2, processType: 'landlord_led' },
+    { authority: SEED_AUTHORITY.dekalb, beds: 3, processType: 'pm_team' },
+    { authority: SEED_AUTHORITY.fulton, beds: 4, processType: 'self_guided' },
+    { authority: SEED_AUTHORITY.dca, beds: 2, processType: 'landlord_led' },
+    { authority: SEED_AUTHORITY.marietta, beds: 3, processType: 'pm_team' },
   ] as const;
 
   const TOURL_PROCESSES_BY_TYPE: Record<string, string> = {
@@ -725,7 +739,7 @@ function buildUnitsMatrix(placementGroups: PlacementGroup[]): UnitGroup[] {
         landlordId: 'contact-landlord-0001',
         status: 'off_market',
         status_source: 'manual',
-        accepted_authorities: ['atlanta_housing'],
+        accepted_authorities: [SEED_AUTHORITY.atlanta],
         address: addr(counter),
         beds: 2,
         rent_min: 1500,
@@ -1210,7 +1224,7 @@ function buildBroadcasts(): Record<string, unknown>[] {
       unitId: 'unit-mx-tourable-01',
       audience_filter: {
         contact_type: 'tenant',
-        housing_authority: 'atlanta_housing',
+        housing_authority: SEED_AUTHORITY.atlanta,
         bedroomSize: 1,
         excludeOptedOut: true,
         excludeUnreachable: true,
@@ -1243,7 +1257,7 @@ function buildBroadcasts(): Record<string, unknown>[] {
       unitId: 'unit-mx-tourable-02',
       audience_filter: {
         contact_type: 'tenant',
-        housing_authority: 'ga_dca',
+        housing_authority: SEED_AUTHORITY.dca,
         bedroomSize: 2,
         excludeOptedOut: true,
         excludeUnreachable: false,

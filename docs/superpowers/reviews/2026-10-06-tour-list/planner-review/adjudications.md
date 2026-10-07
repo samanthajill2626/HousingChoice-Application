@@ -239,3 +239,46 @@ A decision changed (spec 4.5's hidden-while-loading rule; the merge rule's
 newest-wins), so this is not the terminal round: fix wave 2, then the same
 two reviewers re-review it, then the planner reruns the full battery on the
 final commit.
+
+## Round 3 (fix wave 2, fcdcf9a5..2243d9ef; the SAME two reviewers) - TERMINAL
+
+Reports: `adversarial-r3.md` (1 LOW) and `spec-conformance-r3.md` (1 LOW;
+161 items - 145 CONFORMS, 16 DEVIATES-RULED, 0 PARTIAL, 0 DEVIATES-UNRULED,
+0 MISSING). Both found the same one defect independently, introduced by
+f6b1bc88; every other fix was traced correct in every branch (the anchor and
+the focus move can never both hold focus; StrictMode, a filter change, an
+unmount and the cursor-400 restart are all handled; `aria-disabled` lets
+nothing through; the newer-copy rule keeps the cross-page reschedule case).
+All other rulings conceded.
+
+### R3-1 (adversarial) = R3-F1 (conformance), LOW - an empty user-requested page sends focus AND the page to the top - ACCEPT
+
+When a pressed Load more, Keep checking or Retry adds no visible row and
+leaves no action control, the fallback is the count line ABOVE the list, and
+the move calls `scrollIntoView` (`AllToursView.tsx:557-562`): a jump to the
+top - for mouse users too, since focus is already on the body. It fires on
+spec 5.4's accepted empty last page (100 dated tours, no undated ones), on an
+empty page handed to the automatic follow, and pulls back a user who scrolled
+away during a slow request. Fix: on the user's own request path, focus with
+`preventScroll` only (no `scrollIntoView`) and fall back to the LAST visible
+row's link (the count line only when no row is visible); the rebuild path
+(Start over, the first-page Retry) keeps its scroll to the new list's top.
+Spec 4.5's focus bullet amended to match; a test for the empty-last-page case
+and one for the follow hand-over.
+
+### Notes folded in (precision)
+
+- Spec 4.5 wording (conformance notes): "never after the first page" vs the
+  rebuild clause, "on append" for a de-duplication that now covers the first
+  page, added-but-not-visible rows, and the list of controls.
+- GLOSSARY: "property files" -> "property page" (the house word; the slip
+  was the planner's, in the round-2 brief).
+- A test for focus after the automatic restart (the first cursor 400).
+- NOT taken: a spinner inside the busy control (polish; a nested `Spinner`
+  is itself a `role="status"` region).
+
+### Round verdict
+
+A refinement of the same rule, no decision changed: this is the TERMINAL
+round. Fix wave 3 folds it in; the planner reviews that diff directly (no
+round 4) and reruns the full battery on the final commit.

@@ -399,9 +399,11 @@ describe('tour list cursor', () => {
   it('3b: decode refuses a key value over 1,024 UTF-8 bytes or not well-formed - AWS may answer such a key with a 500 (AD-4)', () => {
     const d = { v: 1, f: F, n: N, ph: 'd', k: D_KEY };
     const u = { v: 1, f: F, n: N, ph: 'u', i: 2, k: U_KEY };
-    // Built in code: a lone high surrogate survives the JSON / base64url wire
-    // form, and a two-byte character makes UTF-8 bytes outnumber UTF-16 units.
+    // Built in code: a lone surrogate, high or low, survives the JSON /
+    // base64url wire form, and a two-byte character makes UTF-8 bytes
+    // outnumber UTF-16 units.
     const lone = `a${String.fromCharCode(0xd800)}b`;
+    const loneLow = `a${String.fromCharCode(0xdc00)}b`;
     const twoByte = String.fromCharCode(0xe9);
     const bad: Array<[string, string]> = [
       ['a 1,100-byte d tourId', raw({ ...d, k: { ...D_KEY, tourId: 'x'.repeat(1100) } })],
@@ -409,6 +411,8 @@ describe('tour list cursor', () => {
       ['600 two-byte characters (1,200 bytes)', raw({ ...d, k: { ...D_KEY, tourId: twoByte.repeat(600) } })],
       ['a lone surrogate in a d tourId', raw({ ...d, k: { ...D_KEY, tourId: lone } })],
       ['a lone surrogate in a u createdAt', raw({ ...u, k: { ...U_KEY, createdAt: lone } })],
+      // A high-only class would let this through (R3-3).
+      ['a lone low surrogate in a d tourId', raw({ ...d, k: { ...D_KEY, tourId: loneLow } })],
     ];
     for (const [why, cursor] of bad) expect(decodeTourListCursor(cursor), why).toBeUndefined();
 

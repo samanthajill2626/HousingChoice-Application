@@ -56,6 +56,20 @@ Counts: 3 fixes (F1-F3), 1 filed-issue update (F12), 2 grouped issues filed
 + `app/src/services/orgNames.ts` + `dashboard/src/routes/orgs/orgCopy.ts`
 (+ tests), and one CSS line - so the five gates run again on the fixed tip.
 
+## Gates - the planner's own runs on the FINAL tip 2dca0cf3 (after the fix wave), bare, from the worktree
+
+| Gate | Exit | Result |
+|---|---|---|
+| 1 `npm run typecheck` | 0 | |
+| 2 `npm test` | 0 | app 424 files, dashboard 222, e2e 22, fake-twilio 34, fake-twilio-web 13 - all passed; 0 `[dynamoAdmin]` lines |
+| 3 `npm run smoke` | 0 | 1608 import specifiers across 279 emitted files resolve |
+| 4 `timeout 2700 npm run e2e`, run 1 | 1 | 323 passed, 1 failed (22.0 min): `placements-page.spec.ts:281` mobile failed at SIGN-IN - the Today heading never appeared in 15 s and the screenshot is a blank white viewport; its desktop twin passed 1.2 s before and the next mobile test 1.1 s after; no app-server error in the window; the spec file is untouched by the fix wave and no changed file is on the Today page's path. Diagnosed as a one-off dev-server blank first paint for one fresh browser context; filed `e2e-blank-first-paint-at-sign-in` (low) with the evidence; the spec alone on the same tip: 11 passed (this test 1.2 s) |
+| 4 `timeout 2700 npm run e2e`, run 2 | 0 | 324 passed, 21.7 min, no flakes (the test above: 1.1 s); lane 13 torn down, no listener left |
+| 5 `npx eslint <changed files>` | 1 | 25 errors, all pre-existing at the merge base by file + rule (the fix wave's 8 touched files: 0 errors); 0 NEW |
+
+Verdict: MERGE-READY at 2dca0cf3 (+ the records commit after it). Not merged -
+Cameron merges.
+
 Cameron's open questions from the handback, with the planner's recommendation:
 1. RG-1 (a suggestion accept claimed before the deploy and replayed after it
    writes its old text unchecked): keep as an accepted gap - the replay window

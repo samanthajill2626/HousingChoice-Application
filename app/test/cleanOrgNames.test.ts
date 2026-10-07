@@ -315,8 +315,14 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
     for (const table of created.splice(0)) await deleteTableIfExists(client, table);
   }, 120_000);
 
-  /** A fresh table set under its own prefix, one record per case. */
-  async function seedWorld(opts: { orgList?: OrgListItem } = {}) {
+  /**
+   * A fresh table set under its own prefix, one record per case. By default
+   * the environment is on the new code: the deployed app created its org-list
+   * item on its first read (the repo's create-only get()). `orgList: null` is
+   * one the new code has not run in yet (no item stored); an item is written
+   * as it is.
+   */
+  async function seedWorld(opts: { orgList?: OrgListItem | null } = {}) {
     const env = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
     for (const base of ['contacts', 'units', 'settings', 'audit_events'] as const) {
       await ensureTable(client, getTableSpec(base), tableName(base, env));
@@ -344,7 +350,8 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
     await unit('u-only-agency', { accepted_authorities: ['Step Up'] });
     await unit('u-legacy', { jurisdiction: 'East Point' });
     await unit('u-legacy-deleted', { status: 'off_market', jurisdiction: 'Smyrna Housing Office', deleted_at: NOW });
-    if (opts.orgList !== undefined) await createOrgListRepo({ doc, env }).putForSeed(opts.orgList);
+    if (opts.orgList === undefined) await createOrgListRepo({ doc, env, logger: silent }).get();
+    else if (opts.orgList !== null) await createOrgListRepo({ doc, env }).putForSeed(opts.orgList);
 
     const keyName = { contacts: 'contactId', units: 'unitId' } as const;
     const get = async (base: 'contacts' | 'units', id: string): Promise<Record<string, unknown> | undefined> =>
@@ -361,7 +368,7 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
   }
 
   it('dry run: plans the automatic mappings, lists what it leaves, and writes NOTHING - not even the org-list item', async () => {
-    const w = await seedWorld();
+    const w = await seedWorld({ orgList: null });
     const before = {
       contacts: await w.scanTable('contacts'),
       units: await w.scanTable('units'),
@@ -504,11 +511,44 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
     });
   }, 120_000);
 
-  it('apply: takes the lock, writes each change conditionally with one audit event per field, never stamps updated_at, releases the lock done', async () => {
+  // Review MEDIUM-1: taking the lock CREATES the item (create-only), so an
+  // apply run before the deploy rewrote records while the OLD app was live. No
+  // stored item means the new code has not run here (it creates the item on
+  // its first read): the apply refuses before the lock.
+  it('apply refuses an environment with no stored org list (the new code has not run there): no lock, no record read, nothing written', async () => {
+    const w = await seedWorld({ orgList: null });
+    const before = {
+      contacts: await w.scanTable('contacts'),
+      units: await w.scanTable('units'),
+      settings: await w.scanTable('settings'),
+      audit: await w.scanTable('audit_events'),
+    };
+    const recorder = recordingClient(doc);
+    const outcome = await cleanOrgNames({ doc: recorder.doc, env: w.env, apply: true, logger: silent }).then(
+      () => 'completed',
+      (err: unknown) => err,
+    );
+    expect(outcome).toBeInstanceOf(CleanupRefusedError);
+    expect((outcome as Error).message).toBe(
+      'clean-org-names: REFUSED - this environment has no organization list yet: the deployed app creates it on its first read. ' +
+        'Deploy first, open Settings > Housing authorities & agencies once, then re-run the apply.',
+    );
+    // ONE command - the non-creating peek of the org-list item - and nothing
+    // else: no lock taken, no record read, nothing written.
+    expect(recorder.sent).toEqual(['GetCommand']);
+    // Still no item, so no lastRewrite: the lock was never taken.
+    expect(await w.orgList.peek()).toBeNull();
+    expect(await w.scanTable('contacts')).toEqual(before.contacts);
+    expect(await w.scanTable('units')).toEqual(before.units);
+    expect(await w.scanTable('settings')).toEqual(before.settings);
+    expect(await w.scanTable('audit_events')).toEqual(before.audit);
+  }, 120_000);
+
+  it('apply: on a stored list, takes the lock, writes each change conditionally with one audit event per field, never stamps updated_at, releases the lock done', async () => {
     const w = await seedWorld();
     const result = await cleanOrgNames({ doc, env: w.env, apply: true, logger: silent });
     expect(result).toEqual({
-      listSource: 'stored', // taking the lock created the item (create-only)
+      listSource: 'stored', // the deployed app created it on its first read
       contactsScanned: 9,
       unitsScanned: 5,
       pointerRows: 1,

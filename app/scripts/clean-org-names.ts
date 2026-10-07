@@ -28,9 +28,11 @@
 // THE LIST: the stage's stored `org-list` item, read WITHOUT creating it; the
 // starting list (spec Appendix A) when none is stored yet - a dry run before
 // the deploy. A DRY RUN (the default) writes nothing at all, the item
-// included. `--apply` first takes the organization-list rewrite lock (spec
-// D11: `lastRewrite` action `cleanup`; taking it creates the item, create-only,
-// when absent) and refuses while another rewrite runs; it heartbeats the lock
+// included. `--apply` REFUSES when no item is stored (review MEDIUM-1): the
+// deployed app creates it on its first read, so none means the new code has
+// not run there, and the apply must never rewrite records under the OLD app.
+// It then takes the organization-list rewrite lock (spec D11: `lastRewrite`
+// action `cleanup`) and refuses while another rewrite runs; it heartbeats the lock
 // on elapsed time (at most every 20 s, checked before every record) and
 // releases it `done`, or `failed` when it aborts or completes with failures.
 // A heartbeat that finds the lock no longer its own stops the run at once,
@@ -335,8 +337,10 @@ export const SCRIPT_NAME = 'clean-org-names';
 export const HEARTBEAT_EVERY_MS = 20_000;
 
 /**
- * Another organization-name rewrite holds the lock (spec D11): nothing was
- * read or written. Exit 1, no PARTIAL banner.
+ * The apply refused before it read a record: another organization-name
+ * rewrite holds the lock (spec D11), or the environment has no stored
+ * organization list yet - the new code has not run there (review MEDIUM-1).
+ * No record was read and nothing was written. Exit 1, no PARTIAL banner.
  */
 export class CleanupRefusedError extends Error {}
 
@@ -371,7 +375,7 @@ export interface CleanupLeftover {
 }
 
 export interface CleanupResult {
-  /** The stored org-list item, or the starting list (no item stored yet). */
+  /** The stored org-list item, or the starting list (no item stored yet - a dry run only: an apply refuses). */
   listSource: 'stored' | 'starting';
   contactsScanned: number;
   unitsScanned: number;
@@ -567,12 +571,23 @@ export async function cleanOrgNames(opts: CleanupOpts): Promise<CleanupResult> {
   const apply = opts.apply === true;
   const result = emptyResult();
 
-  // APPLY: the lock FIRST, so a refusal reads and writes nothing (spec D11).
+  // APPLY: both refusals come BEFORE any record is read, so a refusal reads no
+  // record and writes nothing (spec D11). First the list must be STORED (review
+  // MEDIUM-1): the deployed app creates the item on its first read, so no item
+  // means the new code has not run here - and taking the lock would create it,
+  // letting the apply rewrite records while the OLD app (free-text filters, old
+  // spellings) is live. Then the lock.
   let lock: OrgRewriteState | undefined;
   // When the acquire was SENT - never later than the heartbeat it wrote: the
   // lease's first start (code review R3-BE-1).
   let lockedAt = 0;
   if (apply) {
+    if ((await deps.orgList.peek()) === null) {
+      throw new CleanupRefusedError(
+        `${SCRIPT_NAME}: REFUSED - this environment has no organization list yet: the deployed app creates it on its first read. ` +
+          'Deploy first, open Settings > Housing authorities & agencies once, then re-run the apply.',
+      );
+    }
     try {
       lockedAt = (opts.now ?? Date.now)();
       lock = await deps.lock.acquireForCleanup(SCRIPT_NAME);
@@ -663,9 +678,9 @@ async function run(
   const { doc, env } = opts;
   const now = opts.now ?? Date.now;
 
-  // The list, read WITHOUT creating it. An apply created it (create-only) when
-  // it took the lock; a dry run before the deploy finds none and resolves
-  // against the starting list in memory.
+  // The list, read WITHOUT creating it. An apply found it stored before it took
+  // the lock (it refuses otherwise); a dry run before the deploy finds none and
+  // resolves against the starting list in memory.
   const stored = await deps.orgList.peek();
   const entries: readonly OrgEntry[] =
     stored?.entries ?? buildStartingEntries(new Date().toISOString(), () => randomUUID());

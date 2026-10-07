@@ -112,9 +112,15 @@ function inUseText(usage: OrgUsageCounts): string {
   return `${total} ${total === 1 ? 'record still holds' : 'records still hold'} this name (${usageBreakdown(usage)}).`;
 }
 
+function sameSpellings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((s, i) => s === b[i]);
+}
+
 /** "Edit spellings" (admin, spec D12): abbreviations and other spellings that
  *  find the name. A spelling another entry of the same kind already carries
- *  needs an explicit "Save anyway" (409 org_spelling_shared -> confirmShared). */
+ *  needs an explicit "Save anyway" (409 org_spelling_shared -> confirmShared).
+ *  Save keeps a spelling typed into "New spelling" but never added, and sends
+ *  nothing when the list did not change (code review R1-ADV-FE-6). */
 export function SpellingsDialog({ entry, onSaved, onClose }: EntryDialogProps & { onSaved: () => void }): React.JSX.Element {
   const inputId = useId();
   const [spellings, setSpellings] = useState<string[]>(entry.spellings);
@@ -130,22 +136,40 @@ export function SpellingsDialog({ entry, onSaved, onClose }: EntryDialogProps & 
     setError(null);
   }
 
-  function addDraft(): void {
+  /** The list with the typed spelling folded in - THE Add rule: trimmed, and
+   *  never one the list already has. The same list when nothing folds in. */
+  function withDraft(): string[] {
     const spelling = draft.trim();
+    return spelling === '' || spellings.includes(spelling) ? spellings : [...spellings, spelling];
+  }
+
+  function addDraft(): void {
+    const next = withDraft();
     setDraft('');
-    if (spelling === '' || spellings.includes(spelling)) return;
-    edit([...spellings, spelling]);
+    if (next !== spellings) edit(next);
   }
 
   async function save(confirmShared: boolean): Promise<void> {
     if (busy) return;
+    // R1-ADV-FE-6: a spelling typed but never added is part of what Save
+    // saves. A list that grew here was never confirmed, so it is sent without
+    // confirmShared (the server asks again if it must).
+    const next = withDraft();
+    const grew = next !== spellings;
+    setDraft('');
+    if (grew) edit(next);
+    if (sameSpellings(next, entry.spellings)) {
+      onClose(); // nothing changed: no PATCH, which would only restamp the entry
+      return;
+    }
+    const confirm = confirmShared && !grew;
     setBusy(true);
     setError(null);
     try {
-      await patchOrg(entry.orgId, confirmShared ? { spellings, confirmShared: true } : { spellings });
+      await patchOrg(entry.orgId, confirm ? { spellings: next, confirmShared: true } : { spellings: next });
       onSaved();
     } catch (err) {
-      if (!confirmShared && err instanceof ApiError && err.code === 'org_spelling_shared') {
+      if (!confirm && err instanceof ApiError && err.code === 'org_spelling_shared') {
         setShared(orgErrorCopy(err));
       } else {
         setError(orgErrorCopy(err));

@@ -463,6 +463,67 @@ describe('OrgListSection - admin entry actions', () => {
   });
 });
 
+// Code review R1-ADV-FE-6: a spelling typed into "New spelling" but never
+// added was dropped by the footer Save, which still PATCHed the old list and
+// closed as a success.
+describe('OrgListSection - Save in Edit spellings never drops a typed spelling', () => {
+  beforeEach(() => {
+    viewerIsAdmin = true;
+  });
+
+  async function openSpellings(user: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> {
+    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
+    await user.click(within(row).getByRole('button', { name: 'Edit spellings for Atlanta Housing Authority' }));
+    return screen.getByRole('dialog', { name: 'Edit spellings' });
+  }
+
+  it('a spelling typed but never added is saved with the list', async () => {
+    const user = userEvent.setup();
+    patchOrg.mockResolvedValue({ entry: { ...ATLANTA, spellings: ['AHA', 'ATL HA'] } });
+    renderSection();
+    const dialog = await openSpellings(user);
+    await user.type(within(dialog).getByRole('textbox', { name: 'New spelling' }), 'ATL HA');
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect(patchOrg).toHaveBeenCalledWith('o-atl', { spellings: ['AHA', 'ATL HA'] });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('a typed spelling that needs the shared confirm is still the one Save anyway sends', async () => {
+    const user = userEvent.setup();
+    patchOrg
+      .mockRejectedValueOnce(
+        new ApiError(409, 'org_spelling_shared', 'org_spelling_shared', {
+          error: 'org_spelling_shared',
+          spelling: 'ATL',
+          entries: [{ orgId: 'o-dek', kind: 'housing_authority', name: 'DeKalb County Housing Authority' }],
+        }),
+      )
+      .mockResolvedValueOnce({ entry: { ...ATLANTA, spellings: ['AHA', 'ATL'] } });
+    renderSection();
+    const dialog = await openSpellings(user);
+    await user.type(within(dialog).getByRole('textbox', { name: 'New spelling' }), 'ATL');
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect(patchOrg).toHaveBeenNthCalledWith(1, 'o-atl', { spellings: ['AHA', 'ATL'] });
+    // Folded into the list on Save: it shows as a spelling while staff confirm.
+    expect(within(dialog).getByRole('button', { name: 'Remove ATL' })).toBeInTheDocument();
+    await user.click(await within(dialog).findByRole('button', { name: 'Save anyway' }));
+    expect(patchOrg).toHaveBeenNthCalledWith(2, 'o-atl', { spellings: ['AHA', 'ATL'], confirmShared: true });
+  });
+
+  it.each([
+    ['nothing changed', ''],
+    ['a typed spelling the entry already has (the Add rule)', '  AHA '],
+  ])('Save with %s sends nothing and just closes', async (_case, typed) => {
+    const user = userEvent.setup();
+    renderSection();
+    const dialog = await openSpellings(user);
+    if (typed !== '') await user.type(within(dialog).getByRole('textbox', { name: 'New spelling' }), typed);
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(patchOrg).not.toHaveBeenCalled();
+  });
+});
+
 describe('OrgListSection - a notice never outlives a later clean action', () => {
   const SKIPPED_NOTICE =
     'Not kept as a spelling: Atlanta Housing Authority (another entry already has it, and a shared spelling is never applied automatically).';

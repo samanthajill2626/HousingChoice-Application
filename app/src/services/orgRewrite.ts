@@ -286,8 +286,10 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
           return { next: { ...current, lastRewrite }, result: { outcome: 'refused', lastRewrite } };
         }
       }
-      // (c) A fresh heartbeat: the pass STARTS under a fresh lock (while it
-      // runs, its heartbeat and lease keep it - jobs/orgRewrite.ts).
+      // (c) A fresh heartbeat, stamped now: a write that lands much later
+      // stores it already stale (docs/issues/org-rewrite-pass-start-pacing-gap.md).
+      // While the pass runs, its heartbeat and lease keep the lock
+      // (jobs/orgRewrite.ts).
       const lastRewrite: OrgRewriteState = { ...last, heartbeatAt: at };
       return { next: { ...current, lastRewrite }, result: { outcome: 'claimed', lastRewrite } };
     });

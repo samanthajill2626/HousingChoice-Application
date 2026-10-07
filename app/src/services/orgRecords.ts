@@ -29,10 +29,12 @@
 // page) is counted `skipped`, never overwritten. Unit writes never stamp
 // updated_at. A rename/merge/use pass leaves a value already equal to
 // `toName` alone. Every field a write changes gets its own audit event (Move
-// and Split write two). The heartbeat runs at most every 20 s, checked BEFORE
-// every record visited - so the first record after a stalled read is never
-// written unchecked (code review R3-BE-1); when it answers false the lock is
-// no longer the caller's, and the pass writes nothing more
+// and Split write two). The heartbeat runs at most every 20 s, counted from the
+// start of THIS pass, and is checked BEFORE every record visited - so a record
+// after a stall inside the pass is never written unchecked (code review
+// R3-BE-1); a stall before the pass starts is not seen
+// (docs/issues/org-rewrite-pass-start-pacing-gap.md). When it answers false
+// the lock is no longer the caller's, and the pass writes nothing more
 // (OrgRewriteLockLostError).
 // PRECONDITION for callers: no from-text may normalize equal to the exact
 // NAME of an entry of the field's kind other than `toName` - the pass has no

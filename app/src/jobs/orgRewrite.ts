@@ -14,10 +14,13 @@
 // SQS delivery or a stale run does nothing; re-validates a lock whose
 // heartbeat LAPSED (a delivery 15 minutes late) exactly as Run again does,
 // recording the rewrite `failed` when the list changed under it; and refreshes
-// the heartbeat, so the pass STARTS under a fresh lock. While it runs, the
-// heartbeat (at most every 20 s, checked BEFORE each record the pass visits,
-// so the first record after a stalled read is checked first - code review
-// R3-BE-1) re-checks the id: once the lock is no longer this run's - a newer
+// the heartbeat (stamped when the claim is computed, so a claim write that
+// lands very late stores an already-stale heartbeat - a residual filed as
+// docs/issues/org-rewrite-pass-start-pacing-gap.md). While it runs, the
+// heartbeat (checked BEFORE each record the pass visits, at most every 20 s
+// counted from the START of each pass, so a stall INSIDE a pass is caught at
+// the next record - code review R3-BE-1 - but a stall before a pass starts is
+// not, the same issue) re-checks the id: once the lock is no longer this run's - a newer
 // rewrite took it over, a duplicate run already finished it, or it lapsed -
 // the pass writes no further record and the job returns WITHOUT finish(),
 // because the lock it would finish is not its own (a lapsed one is left for

@@ -14,7 +14,15 @@ review round 2 (D13's no-empty rule covers spellings; D8's place-name rule;
 reversing the launch-gate default of DCA); the final independent
 review (2026-10-07) added two precision lines - D4 folds typographic
 punctuation and strips invisible characters; section 8's apply refuses an
-environment with no stored list. Design review: rounds 1-4,
+environment with no stored list. Revision 9 (2026-10-07, after branch A
+merged): the branch B half (D16-D21, sections 5.2, 6, 9, 10, 12) re-checked
+against A's merged code by two readers
+(`docs/superpowers/reviews/2026-10-07-caseworkers/spec-rereview/`) - 55
+statements, 47 valid or already done, 20 sharpened: the one-kind-per-field
+shape of A's Settings and rewrite code, exact-match role presets, the
+possible-caseworkers endpoint, the recipients wire row, the thread re-type
+rule; planner defaults marked "(planner default; Cameron confirms)" are open
+until Cameron rules. Design review: rounds 1-4,
 closed - adjudications in
 `docs/superpowers/reviews/2026-10-06-clean-org-names/design-review/adjudications.md`).
 Tracker items #2 ("One clean name per housing authority") and #19
@@ -326,8 +334,11 @@ Atlanta Housing Authority"), and "Yes, add it" creates the entry (name and
 notes only; spellings are admin-only, D12). When the text matches an entry
 of the other kind ("HUD-VASH is an agency"), the dialog says so and, on the
 tenant form, offers to put it in Agency instead. Property forms add only
-housing authorities. (B) A caseworker's organization can add either kind;
-the dialog asks which. A stored value that is not on the list shows as a
+housing authorities. (B) A caseworker's Organization picker searches BOTH
+lists at once (A's picker already takes a list of kinds); its add option
+opens "Is this really new?" in an organization mode that asks the kind
+before "Yes, add it", and the close-name check covers both lists
+(`POST /api/organizations/check` with `kinds`). A stored value that is not on the list shows as a
 removable chip marked "Not on the list"; saving never fails because of an
 unchanged value (D5).
 
@@ -420,7 +431,8 @@ D10. **Settings > "Housing authorities & agencies".** A new Settings tab,
 visible to every signed-in user, with three sections:
 - **Housing authorities** and **Agencies**: each row shows the name, its
   spellings, its notes, and how many records use it (D3) - tenants and other
-  contacts, properties, (B) caseworkers - counting active records, with the
+  contacts, properties, (B) partners holding it as their organization -
+  counting active records, with the
   count of deleted records that still hold it shown beside them ("+2
   deleted"); the delete and kind-change checks count both, and their 409
   says how many deleted records hold the name.
@@ -590,43 +602,109 @@ Clear is genuinely blank and may receive it (stated, accepted).
 ### Branch B
 
 D16. **Caseworkers stay partners.** The contact type picker gains a
-"Caseworker" choice that saves `type: partner, role: Caseworker`, the way
+"Caseworker" choice that saves `type: partner, role: Caseworker` (one
+constant, `CASEWORKER_ROLE`, beside `PROPERTY_MANAGER_ROLE`), the way
 "Property Manager" saves `type: landlord, role: Property Manager`. No new
-`ContactType`. The extraction kind canonicalizer
-(`canonicalSuggestedContactKind`) treats partner + Caseworker as `partner`, so
-accepting an AI "partner" suggestion through the Caseworker choice records
-`accepted`.
+`ContactType`. Three tiers of role matching, each named and owned by one
+shared helper (revision 9):
+- the extraction kind canonicalizer (`canonicalSuggestedContactKind`) treats
+  `type: partner` with role EXACTLY `Caseworker` as `partner` - byte-exact,
+  as the Property Manager preset is - so accepting an AI "partner" suggestion
+  through the Caseworker choice records `accepted`; any other partner role
+  stays unsupported;
+- the Caseworkers tab (D18) uses `isCaseworkerRole(role)`: the role
+  normalizes (D4) to "caseworker" or "case worker";
+- the Possible caseworkers list (D19) uses the looser "mentions" match.
+The Unknown triage card gains "Mark as Caseworker" beside Mark as Tenant /
+Landlord / Partner - the one-click way to accept the AI's `partner`
+suggestion as a caseworker (planner default; Cameron confirms). The
+KindPicker's "Other" placeholder no longer suggests "Case worker" on a tenant
+or landlord base: those are exactly the records D19 exists to clean up. The
+Caseworker choice on a contact that is a tenant today applies D19's
+refusals (open placement, open tour, landlord of record, roster seat): the
+choice is a conversion, not a relabel (planner default; Cameron confirms).
+The generic edit-form type change keeps today's unguarded behavior
+(pre-existing; filed, section 12).
 
 D17. **Organization field on partners.** `contact.organization`, checked by
-D5 against either list, edited on partner contacts. Shown on the partner page
-and as the Caseworkers tab's filter. Counted and rewritten by D10 and D11.
+D5 against EITHER list (`KINDS_FOR_FIELD.organization` = both kinds; A's
+check already takes a list of kinds, so an "other kind" result can never
+occur for it), edited on partner contacts (the server accepts it on any
+contact, as it does housingAuthority; the UI offers it on partners).
+Clearing REMOVEs the attribute (`''` -> absent, the `role` convention; Make
+caseworker's "left empty" and the rewrite's Clear mean the same absent
+attribute). Shown on the partner page and as the Caseworkers tab's filter.
+In Settings (D10, D11), where A's code assumes one kind per field: usage
+gains a "partners" column counting organization holders (a record holding
+one name in two fields counts once per entry); a rename or merge of EITHER
+kind also rewrites `organization` (a housing authority rewrite covers
+housingAuthority, accepted_authorities and organization; an agency rewrite
+covers agency and organization); Delete's refusal counts organization
+holders; a kind change is NOT blocked by organization holders (the field
+accepts either kind, so they stay valid); an organization "Not on the list"
+row offers Use (a name of either kind), Add as new (staff pick the kind -
+the resolve body gains `kind`) and Clear - never Move or Split (the field
+has no "other kind"); Run again and the job's claim re-validate an
+organization Use target against both kinds. The Organization picker is D6's
+both-lists picker with the organization-mode add dialog. The dev-only
+`POST /__dev/org-fixture` accepts `organization` (stated exception).
 
-D18. **Caseworkers tab.** Contacts gains a Caseworkers tab: partner contacts
-whose role normalizes to "caseworker" or "case worker", with organization
-filter chips built the way the Tenants page builds its housing authority
-chips.
+D18. **Caseworkers tab.** Contacts gains a Caseworkers tab at
+`/contacts/caseworkers` - a sub-link under Contacts beside Tenants,
+Landlords and Unknown, the one addition this design makes to the otherwise
+locked navigation (planner default; Cameron confirms): partner contacts
+whose role satisfies `isCaseworkerRole`, with organization filter chips
+built the way the Tenants page builds its housing authority chips. The route
+joins the page-profiler registry (or is excluded with a filed issue - the
+plan decides). The tab starts empty until the Caseworker choice or Make
+caseworker writes a role: no path has ever given a partner one.
 
 D19. **Possible caseworkers.** The Caseworkers tab shows a "Possible
-caseworkers" list of contacts that are not yet caseworkers:
+caseworkers" list, computed on the server (`GET
+/api/contacts/possible-caseworkers`: one read of the tenant, landlord and
+partner partitions - no index exists for any signal; the tours-tabs cost
+precedent) of contacts that are not yet caseworkers:
 - tenants whose role mentions caseworker or case manager, whose notes carry
-  the AI's "Identified as a caseworker" line or those words, or who are
-  linked as another contact's caseworker relationship;
-- partners with NO role (the importer's and the AI chip's caseworkers);
+  the AI's "Identified as a caseworker" line or those words (match the
+  words - the line is model-written and dated), or who are linked as another
+  contact's caseworker relationship (a relationship row that carries a
+  `contactId`);
+- partners with NO role - today EVERY partner, since no path has given a
+  partner a role (the importer's caseworkers, the AI chip's, and other
+  outside contacts alike; the lean world's Renee Carter is one, and e2e
+  expectations include her); "Not a caseworker" dismisses the rest;
 - tenant- or landlord-based contacts whose custom-kind role says caseworker.
-Each row offers "Make caseworker" and "Not a caseworker" (dismissal is stored
-on the contact, `caseworker_review: 'dismissed'`, and hides the row for good).
-Make caseworker: refused (409) while the contact has an open placement or an
-upcoming or unresolved tour as the tenant, is any unit's landlord of record
-(`landlordId`), or sits on any unit's contact roster; otherwise sets type
-`partner`,
-role "Caseworker", `type_source: manual`, `organization` from the contact's
-agency or housing authority when either is exactly a list name (else left
-empty for staff to pick), REMOVEs `housingAuthority`, clears `agency`, and
-re-types the contact's open one-to-one thread to `partner_1to1` (D21). Past
-tours, closed placements and listing sends stay as history.
+Each row offers "Make caseworker" and "Not a caseworker", open to every
+signed-in user as the edit form's type change is (planner default; Cameron
+confirms), through `POST /api/contacts/:contactId/caseworker-review`.
+Dismissal is stored on the contact (`caseworker_review: 'dismissed'`) and
+hides the row for good. Make caseworker: refused 409 while the contact has
+an open placement (a non-terminal stage) or an open tour as the tenant
+(requested, scheduled, toured or no_show; canceled and closed are resolved),
+is any unit's landlord of record (`landlordId`), or sits on any unit's
+contact roster (a unit scan - no index) - each refusal has its own code
+(`caseworker_open_placement`, `caseworker_open_tour`,
+`caseworker_landlord_of_record`, `caseworker_on_roster`) and a staff
+sentence naming what to resolve first. Otherwise, in one write through the
+classification fence (`contactsRepo.update`, so `classification_revision`
+bumps): type `partner`, role `Caseworker`, status `active` (the partner
+default), `type_source: manual`; `organization` from the contact's agency
+when it is exactly a list name, else from its housing authority when that is
+(agency wins when both are - the employer is the helper organization;
+planner default; Cameron confirms), else left absent for staff to pick;
+REMOVEs `housingAuthority` together with its `housingAuthority_source` stamp
+and supersedes any pending housing-authority suggestion (a partner is never
+extracted again, so it would never resolve); clears `agency`; re-types the
+contact's open one-to-one threads (D21). Past tours, closed placements and
+listing sends stay as history in the data; the partner page does not show
+tenant history. The partner page gains the Staff notes card, so a converted
+caseworker's notes stay visible (planner default - the open issue
+`staff-notes-on-landlord-partner-files` asked to check with Sam; Cameron
+confirms).
 
 D20. **Direct property shares to partners; no blasts.** A partner's page gets
-the "Properties sent" card and its Send action, as tenants have; the
+the "Properties sent" card and its Send action, as tenants have (the rows
+already load for every contact type; only the card is missing); the
 composer opens with the partner as its starting recipient and sends the
 normal share (address and flyer link) into the partner's own conversation.
 Starting (seed) and explicitly listed recipients may be tenants or partners;
@@ -634,29 +712,44 @@ filter-resolved audiences stay tenant-only, and the composer's recipient
 search stays tenant-only. Every existing gate (opt-out per phone number,
 unreachable, deleted, the kill switch, the just-in-time consent check)
 applies unchanged. A share to a partner with no conversation creates a
-`partner_1to1` conversation (both fan-out sites use the contact's type). The
-property's "Sent to tenants" list becomes "Sent to", with partner rows
-labelled by their role.
+`partner_1to1` conversation: both fan-out sites (the send pass and the
+send.reconcile adoption in `broadcastFanOut.ts`) use the exported
+`conversationTypeFor(contact)` from `lib/voiceMasking.ts`. The property's
+"Sent to tenants" list becomes "Sent to", with partner rows labelled by
+their role: the recipients rows gain `type` and `role` (display projection
+and wire row). Recipient wording goes NEUTRAL everywhere it is tenant-only
+today - the composer preview and results ("Send to N recipients"; a
+recipient row's fallback name), the compose reach line, the Matching list
+label and the property Activity's share row ("Sent to N recipients") - one
+rule, no type on preview or results rows; the plan lists every unit and e2e
+pin that changes.
 
 D21. **Type changes keep threads and imports consistent.** When staff change
 a contact's type between tenant, landlord and partner (edit form, Caseworker
 choice, Make caseworker), the contact's open one-to-one threads - for EVERY
-phone in its `phones` list and every email address, not only the primary
-phone - whose type matches the OLD type are re-typed to the new type; a
-thread typed for some other identity is left alone (today's triage-conflict
-rule). A NEW field `type_source: 'manual'` is stamped when staff OVERRIDE a
-type - change a contact typed tenant, landlord or partner to a different
-type (edit form, Caseworker choice) - and by Make caseworker; triage of an
-`unknown` contact does not stamp it. The importer, for a contact whose
-`type_source` is `'manual'`, writes none of
-`type`, `status`, `housingAuthority` or `agency` (its own type and status
-were computed for a type staff overrode, and Make caseworker removed the
-authority on purpose); contacts without the field are imported as today.
+phone in its `phones` list and every email address
+(`conversationsForContact`), not only the primary phone - whose type matches
+the OLD type, OR is still `unknown_1to1` (today's triage flip, kept: every
+imported one-to-one thread is `unknown_1to1` and only this path ever
+re-types a thread), are re-typed to the new type; a thread typed for some
+other identity is left alone (today's triage-conflict rule); the re-type is
+conditional on the type the read returned. A NEW field `type_source:
+'manual'` is stamped when staff OVERRIDE a type - change a contact typed
+tenant, landlord or partner to a different type (edit form, Caseworker
+choice) - and by Make caseworker; triage of an `unknown` contact does not
+stamp it. The field is server-owned: a client-sent `type_source` is refused
+as `consent_captured_by` is. The importer, for a contact whose `type_source`
+is `'manual'`, writes none of `type`, `status`, `housingAuthority` or
+`agency` (its own type and status were computed for a type staff overrode,
+and Make caseworker removed the authority on purpose - since A the authority
+and agency are fill-only, so the guard is load-bearing for type, status and
+the removed authority); contacts without the field are imported as today.
 Triage of an `unknown` contact is NOT protected: a later re-import still
 applies the importer's type, status and fill-only fields to it, as it does
-today (pre-existing behavior; whether another import will run against prod
-is unknown; filed as a follow-up issue, section 12). The
-contact header shows voucher size and housing authority only for tenants.
+today (pre-existing; filed by A as `reimport-reverts-unknown-triage`). The
+contact header shows voucher size and housing authority only when
+`contact.type` is `tenant` (keyed on the type, not the display kind, because
+team_member maps to the tenant kind).
 
 ---
 
@@ -702,9 +795,9 @@ contact header shows voucher size and housing authority only for tenants.
 | `contact.housingAuthority` (any type) | housing authority | checked by D5 when set; `''` REMOVEs |
 | `contact.agency` (any type) | agency | checked by D5 when set; `''` stored as today |
 | `unit.accepted_authorities[]` | housing authority | new members checked by D5; trimmed, de-duplicated |
-| `contact.organization` (B, partners) | either | new |
-| `contact.caseworker_review` (B) | - | new: `'dismissed'` |
-| `contact.type_source` (B) | - | new: `'manual'` on staff type changes |
+| `contact.organization` (B, partners) | either | new; checked by D5 against both kinds; `''` REMOVEs (the `role` convention) |
+| `contact.caseworker_review` (B) | - | new: `'dismissed'`; server-owned (written by the caseworker-review route, a client value refused) |
+| `contact.type_source` (B) | - | new: `'manual'` on staff type overrides and Make caseworker; server-owned (a client value refused, as `consent_captured_by` is) |
 | broadcast `audience_filter.housing_authority` | housing authority | POST checked by D5; preview and a filter-resolved send re-check (D7) |
 
 The legacy `unit.jurisdiction` / `accepted_programs` tombstones stay accepted
@@ -749,6 +842,30 @@ All under `/api/organizations`, signed-in staff unless marked admin.
 Existing endpoints that write the fields in 5.2 apply D5 and answer 422
 `org_not_on_list`. Rewrite-starting endpoints answer 409
 `org_rewrite_running` while one runs (D11).
+
+Branch B (revision 9):
+
+- `GET /api/contacts/possible-caseworkers` - D19's list, computed on the
+  server from the tenant, landlord and partner partitions: one row per
+  contact with its name, type, current role and the signal that put it
+  there. Visible to everyone.
+- `POST /api/contacts/:contactId/caseworker-review` `{ action: 'make' |
+  'dismiss' }` (everyone - planner default, D19) - `make` is Make caseworker
+  (refused 409 `caseworker_open_placement`, `caseworker_open_tour`,
+  `caseworker_landlord_of_record` or `caseworker_on_roster`, each with a
+  staff sentence); `dismiss` writes `caseworker_review: 'dismissed'`.
+- `POST /api/organizations/check` gains optional `kinds` (both lists) for
+  the organization picker; `kind` alone keeps today's single-list behavior.
+- `POST /api/organizations/not-on-list/resolve` gains `kind` for
+  `action: 'add'` on an `organization` row; `move_to_agency`,
+  `move_to_housing_authority` and `split` are refused 400 for that field.
+- `GET /api/organizations/usage` gains a `partners` count per entry
+  (organization holders; a record holding one name in two fields counts
+  once).
+- `GET /api/units/:unitId/recipients` rows gain `type` and `role` (D20).
+- contacts PATCH accepts `organization` (D5, either kind) and applies D21 to
+  a `type` change; `caseworker_review` and `type_source` are refused when a
+  client sends them.
 
 ---
 
@@ -873,9 +990,11 @@ Writers (each applies D5, or is a stated exception):
   will);
 - seeds (lean, cast, matrix, live, performance) including seeded broadcasts,
   and the dev reseed; the dev-only `POST /__dev/org-fixture` seam (a stated
-  exception: it writes off-list values on purpose, local stacks only);
+  exception: it writes off-list values on purpose, local stacks only; (B) it
+  accepts `organization` too);
 - the rewrite job (D11) and the cleanup script (section 8);
-- (B) Make caseworker (D19) and the Caseworker choice (D16).
+- (B) the caseworker-review route (Make caseworker, D19) and the Caseworker
+  choice (D16), both through the contacts PATCH's classification fence.
 
 Readers (must keep working with full names and with not-on-the-list values):
 `audienceResolution.ts` and broadcast preview/send; Tenants page facets;
@@ -886,7 +1005,9 @@ its label; System Status is unchanged); the missed-call auto-text check and
 its Settings > Templates hint (D15); the property Activity tab (labels for
 `org_name_rewrite` / `org_name_cleanup`); the contact header and tenant
 file; tour and placement pages that show tenant facts; (B) the Caseworkers
-tab, partner page, "Sent to" list, and the extraction kind canonicalizer.
+tab and the Possible caseworkers list, the partner page, the Unknown triage
+card, the "Sent to" list, the Settings usage column and organization rows,
+and the extraction kind canonicalizer.
 
 **Invariant I2 (B):** a partner's share never mints a `tenant_1to1` thread
 (both fan-out sites use the contact's type), and a staff type change re-types
@@ -897,19 +1018,30 @@ routes still mint `tenant_1to1` for any phone (tracker #13).
 
 ## 10. Branch B summary of changes
 
-- KindPicker "Caseworker" choice and the kind canonicalizer (D16); partner
-  edit form Organization picker (D17); partner page shows Role and
-  Organization; contact header hides tenant facts for non-tenants (D21).
-- Contacts > Caseworkers tab with organization chips (D18) and the Possible
-  caseworkers list with its two actions (D19).
-- Direct shares (D20): `broadcasts.ts` seed resolution and explicit send list
-  accept `partner`; both fan-out sites mint the right conversation type;
-  PartnerFile gets the Properties sent card and Send; recipient wording in
-  the composer preview and results is not tenant-only; the property's "Sent
-  to" list labels partner rows.
-- Type-change thread consistency and the importer's `type_source` rule (D21).
-- Settings counts, "Not on the list" and the rewrite job include
-  `organization`.
+- KindPicker "Caseworker" choice (with D19's refusals), the Unknown card's
+  "Mark as Caseworker", the byte-exact kind canonicalizer and the shared
+  `isCaseworkerRole` helper; the "Other" placeholder drops "Case worker"
+  (D16). Partner edit form Organization picker over both lists with the
+  organization-mode add dialog and a both-lists `/check` (D17, D6). Partner
+  page shows Role, Organization and the Staff notes card; the contact header
+  hides tenant facts for non-tenants (D21).
+- Contacts > Caseworkers sub-link and tab with organization chips (D18); the
+  Possible caseworkers list from its server endpoint with its two actions
+  through the caseworker-review route (D19).
+- Direct shares (D20): `broadcasts.ts` seed resolution and the explicit send
+  list accept `partner`; both fan-out sites mint the contact's conversation
+  type; PartnerFile gets the Properties sent card and Send; recipient wording
+  goes neutral on the composer preview and results, the compose reach line,
+  the Matching list label and the property Activity row; the property's
+  "Sent to" list labels partner rows (recipient rows carry type and role).
+- Type-change thread consistency (old-type or `unknown_1to1`), the
+  server-owned `type_source` and the importer's rule (D21).
+- Settings: a partners usage column, Delete counting organization holders,
+  rename/merge of either kind rewriting `organization`, organization rows in
+  "Not on the list" with Use / Add as new (with kind) / Clear, Run again
+  across both kinds (D17).
+- Page-profiler and mutation-catalog pins updated for the new route and
+  endpoints; `/__dev/org-fixture` accepts `organization` (plan).
 
 ---
 
@@ -937,6 +1069,12 @@ routes still mint `tenant_1to1` for any phone (tracker #13).
 - Close or update `housing-authority-free-text-drift` (resolved by this work)
   and `retire-humanize-authority` (seed slugs retired here; PATCH tombstones
   remain).
+- (B) The generic edit-form type change has none of Make caseworker's
+  refusals: a tenant with an open placement or tour can be re-typed today
+  (pre-existing; B guards only the Caseworker choice). File for a decision.
+- (B) The possible-caseworkers read scans three contact partitions with no
+  index (the `tours-tabs-load-every-contact-for-names` cost class); revisit
+  if the contact count grows.
 
 ---
 

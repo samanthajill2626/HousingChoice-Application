@@ -58,8 +58,12 @@ export function toOrgRef(e: OrgEntry): OrgRef {
 /**
  * Spec D13: true when `text` holds a newline or another control character -
  * the C0 controls (tab and newline included), DEL, the C1 controls, and the
- * Unicode line and paragraph separators. Char codes rather than a regex keep
- * this file ASCII.
+ * Unicode line and paragraph separators - or an invisible format character
+ * (review LOW-1): exactly the set lib/orgNames.ts normalizeOrgText removes
+ * (the soft hyphen U+00AD, U+200B-U+200F, U+202A-U+202E, U+2060-U+2064,
+ * U+2066-U+206F, the BOM U+FEFF), so a canonical name never carries one.
+ * Typographic punctuation (a curly apostrophe, an en dash) is legitimate
+ * text and passes. Char codes rather than a regex keep this file ASCII.
  */
 export function hasOrgControlChar(text: string): boolean {
   for (let i = 0; i < text.length; i += 1) {
@@ -67,8 +71,21 @@ export function hasOrgControlChar(text: string): boolean {
     if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029) {
       return true;
     }
+    if (isOrgFormatChar(code)) return true;
   }
   return false;
+}
+
+/** The invisible format characters normalizeOrgText removes (review LOW-1). */
+function isOrgFormatChar(code: number): boolean {
+  return (
+    code === 0xad ||
+    (code >= 0x200b && code <= 0x200f) ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2060 && code <= 0x2064) ||
+    (code >= 0x2066 && code <= 0x206f) ||
+    code === 0xfeff
+  );
 }
 
 /** checkNewName (lib) behind the control-character rule. */

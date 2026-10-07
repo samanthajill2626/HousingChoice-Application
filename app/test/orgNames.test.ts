@@ -44,6 +44,17 @@ const VASH = entry({
 const STEP_UP = entry({ kind: 'agency', name: 'Step Up' });
 const LIST = [ATLANTA, AUGUSTA, DCA, VASH, STEP_UP];
 
+const range = (from: number, to: number): number[] => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+/** The invisible format characters normalizeOrgText removes (review LOW-1). */
+const ORG_FORMAT_CODES = [
+  0xad,
+  ...range(0x200b, 0x200f),
+  ...range(0x202a, 0x202e),
+  ...range(0x2060, 0x2064),
+  ...range(0x2066, 0x206f),
+  0xfeff,
+];
+
 describe('normalizeOrgText', () => {
   it('lowercases, folds punctuation and underscores to spaces, collapses whitespace', () => {
     expect(normalizeOrgText('  Atlanta (AHA) ')).toBe('atlanta aha');
@@ -54,6 +65,37 @@ describe('normalizeOrgText', () => {
   });
   it('returns an empty string for blank input', () => {
     expect(normalizeOrgText('   ')).toBe('');
+  });
+  // Review LOW-1: an iPhone's smart punctuation types U+2019 for an
+  // apostrophe, and a pasted name can hide an invisible character - neither
+  // may make a visually identical name compare different.
+  it('folds typographic quotes and dashes to their ASCII forms first', () => {
+    expect(normalizeOrgText('St. Jude\u2019s')).toBe(normalizeOrgText("St. Jude's"));
+    for (const single of ['\u2018', '\u2019', '\u201a', '\u201b', '\u2032']) {
+      expect(normalizeOrgText(`St. Jude${single}s`)).toBe('st jude s');
+    }
+    for (const double of ['\u201c', '\u201d', '\u201e', '\u2033']) {
+      expect(normalizeOrgText(`${double}Home${double}`)).toBe(normalizeOrgText('"Home"'));
+    }
+    expect(normalizeOrgText('Macon\u2013Bibb')).toBe(normalizeOrgText('Macon-Bibb'));
+    for (const dash of ['\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212']) {
+      expect(normalizeOrgText(`Macon${dash}Bibb`)).toBe('macon bibb');
+    }
+  });
+  it('ignores invisible format characters - a zero-width space or a soft hyphen inside a word', () => {
+    expect(normalizeOrgText('Atl\u200banta Housing')).toBe(normalizeOrgText('Atlanta Housing'));
+    expect(normalizeOrgText('Hous\u00ading Authority')).toBe(normalizeOrgText('Housing Authority'));
+    for (const code of ORG_FORMAT_CODES) {
+      expect(normalizeOrgText(`Atl${String.fromCharCode(code)}anta`), code.toString(16)).toBe('atlanta');
+    }
+  });
+  it('so a curly-apostrophe or soft-hyphen twin of a listed name IS that name, never a new one', () => {
+    const jude = entry({ kind: 'agency', name: "St. Jude's Recovery Center" });
+    expect(checkNewName([jude], 'St. Jude\u2019s Recovery Center')).toEqual({ code: 'org_name_taken', entry: jude });
+    expect(resolveOrgText([jude], 'St. Jude\u2019s Recovery Cen\u00adter', ['agency'])).toMatchObject({
+      status: 'match',
+      entry: jude,
+    });
   });
 });
 

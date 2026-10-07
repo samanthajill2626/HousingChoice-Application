@@ -67,13 +67,23 @@ export function kindForField(field: OrgRecordField): OrgKind {
 }
 
 /**
- * HAND MIRROR of app/src/lib/orgNames.ts `normalizeOrgText` (spec D4):
- * lowercase; `&` to "and"; the characters . , ( ) - / ' " _ to spaces;
- * collapse whitespace; trim. The pickers use it to MATCH; the server decides
- * what is stored. Keep the two (and both test suites) in step.
+ * HAND MIRROR of app/src/lib/orgNames.ts `normalizeOrgText` (spec D4). First
+ * the typographic forms (review LOW-1: an iPhone's smart punctuation, a pasted
+ * name): remove the invisible format characters - the soft hyphen, the
+ * zero-width and direction marks, the bidi embeddings and isolates, the word
+ * joiner and invisible operators, the BOM; fold the curly single quotes and
+ * the prime to ', the curly double quotes and the double prime to ", the
+ * Unicode hyphens and dashes and the minus sign to -. Then lowercase; `&` to
+ * "and"; the characters . , ( ) - / ' " _ to spaces; collapse whitespace;
+ * trim. The pickers use it to MATCH; the server decides what is stored. Keep
+ * the two (and both test suites) in step.
  */
 export function normalizeOrgText(raw: string): string {
   return raw
+    .replace(/[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]/g, '')
+    .replace(/[\u2018\u2019\u201a\u201b\u2032]/g, "'")
+    .replace(/[\u201c\u201d\u201e\u2033]/g, '"')
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
     .toLowerCase()
     .replace(/&/g, ' and ')
     .replace(/[.,()\-\/'"_]/g, ' ')

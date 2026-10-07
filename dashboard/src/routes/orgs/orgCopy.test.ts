@@ -85,12 +85,46 @@ describe('orgErrorMessage', () => {
   });
 });
 
+const range = (from: number, to: number): number[] => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+/** The invisible format characters normalizeOrgText removes (review LOW-1). */
+const ORG_FORMAT_CODES = [
+  0xad,
+  ...range(0x200b, 0x200f),
+  ...range(0x202a, 0x202e),
+  ...range(0x2060, 0x2064),
+  ...range(0x2066, 0x206f),
+  0xfeff,
+];
+
 describe('normalizeOrgText (hand mirror of app/src/lib/orgNames.ts)', () => {
   it('folds case, punctuation and underscores exactly like the server', () => {
     expect(normalizeOrgText('  Atlanta (AHA) ')).toBe('atlanta aha');
     expect(normalizeOrgText('atlanta_housing')).toBe('atlanta housing');
     expect(normalizeOrgText('HUD-VASH')).toBe('hud vash');
     expect(normalizeOrgText('Hope & Help, Inc.')).toBe('hope and help inc');
+  });
+  // Review LOW-1 - the same cases as app/test/orgNames.test.ts: an iPhone's
+  // smart punctuation and a pasted invisible character must not make a
+  // visually identical name compare different.
+  it('folds typographic quotes and dashes to their ASCII forms first, like the server', () => {
+    expect(normalizeOrgText('St. Jude\u2019s')).toBe(normalizeOrgText("St. Jude's"));
+    for (const single of ['\u2018', '\u2019', '\u201a', '\u201b', '\u2032']) {
+      expect(normalizeOrgText(`St. Jude${single}s`)).toBe('st jude s');
+    }
+    for (const double of ['\u201c', '\u201d', '\u201e', '\u2033']) {
+      expect(normalizeOrgText(`${double}Home${double}`)).toBe(normalizeOrgText('"Home"'));
+    }
+    expect(normalizeOrgText('Macon\u2013Bibb')).toBe(normalizeOrgText('Macon-Bibb'));
+    for (const dash of ['\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212']) {
+      expect(normalizeOrgText(`Macon${dash}Bibb`)).toBe('macon bibb');
+    }
+  });
+  it('ignores invisible format characters - a zero-width space or a soft hyphen inside a word - like the server', () => {
+    expect(normalizeOrgText('Atl\u200banta Housing')).toBe(normalizeOrgText('Atlanta Housing'));
+    expect(normalizeOrgText('Hous\u00ading Authority')).toBe(normalizeOrgText('Housing Authority'));
+    for (const code of ORG_FORMAT_CODES) {
+      expect(normalizeOrgText(`Atl${String.fromCharCode(code)}anta`), code.toString(16)).toBe('atlanta');
+    }
   });
 });
 

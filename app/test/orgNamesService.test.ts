@@ -36,10 +36,30 @@ import { createOrgListFake } from './helpers/orgListFake.js';
 
 const NL = String.fromCharCode(10);
 
+const range = (from: number, to: number): number[] => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+/** The invisible format characters normalizeOrgText removes (review LOW-1). */
+const ORG_FORMAT_CODES = [
+  0xad,
+  ...range(0x200b, 0x200f),
+  ...range(0x202a, 0x202e),
+  ...range(0x2060, 0x2064),
+  ...range(0x2066, 0x206f),
+  0xfeff,
+];
+
 describe('hasOrgControlChar (spec D13)', () => {
   it('flags a newline, a tab, other C0 and C1 controls, DEL and the line separators', () => {
     for (const code of [0, 7, 9, 10, 13, 27, 0x7f, 0x85, 0x9f, 0x2028, 0x2029]) {
       expect(hasOrgControlChar(`Atlanta${String.fromCharCode(code)}Housing`)).toBe(true);
+    }
+  });
+  // Review LOW-1: the characters normalizeOrgText removes never reach a
+  // canonical name - a name that looks right but hides one.
+  it('flags an invisible format character: a soft hyphen, a zero-width space, every one normalizeOrgText removes', () => {
+    expect(hasOrgControlChar('Atl\u00adanta Housing')).toBe(true);
+    expect(hasOrgControlChar('Atl\u200banta Housing')).toBe(true);
+    for (const code of ORG_FORMAT_CODES) {
+      expect(hasOrgControlChar(`Atlanta${String.fromCharCode(code)}Housing`), code.toString(16)).toBe(true);
     }
   });
   it('accepts names with punctuation, digits and non-ASCII letters', () => {
@@ -47,12 +67,25 @@ describe('hasOrgControlChar (spec D13)', () => {
     expect(hasOrgControlChar('Atlanta (AHA), 2nd office')).toBe(false);
     expect(hasOrgControlChar(`Caf${String.fromCharCode(0xe9)} Housing`)).toBe(false);
   });
+  it('accepts typographic punctuation - a curly apostrophe, curly quotes, an en dash - as legitimate text', () => {
+    expect(hasOrgControlChar('St. Jude\u2019s Recovery Center')).toBe(false);
+    expect(hasOrgControlChar('\u201cHome\u201d First')).toBe(false);
+    expect(hasOrgControlChar('Macon\u2013Bibb County Housing Authority')).toBe(false);
+  });
 });
 
 describe('checkNewOrgName / checkOrgSpelling - the control-character rule runs first (plan 3.5)', () => {
   it('refuses a name or a spelling that holds a newline as invalid', () => {
     expect(checkNewOrgName(ORG_FIXTURE, `Fulton${NL}County`)).toEqual({ code: 'org_name_invalid' });
     expect(checkOrgSpelling(ORG_FIXTURE, DCA, `GA${NL}DCA`)).toEqual({ problem: 'invalid' });
+  });
+  it('refuses a name or a spelling that holds a soft hyphen or a zero-width space as invalid (review LOW-1)', () => {
+    expect(checkNewOrgName(ORG_FIXTURE, 'Fulton County Hous\u00ading Authority')).toEqual({ code: 'org_name_invalid' });
+    expect(checkNewOrgName(ORG_FIXTURE, 'Fulton\u200bCounty Housing Authority')).toEqual({ code: 'org_name_invalid' });
+    expect(checkOrgSpelling(ORG_FIXTURE, DCA, 'GA\u200bDCA')).toEqual({ problem: 'invalid' });
+  });
+  it('accepts a new name with a curly apostrophe: typographic punctuation is legitimate text', () => {
+    expect(checkNewOrgName(ORG_FIXTURE, 'St. Jude\u2019s Recovery Center')).toBeNull();
   });
   it('otherwise answers exactly what the S1 rules answer', () => {
     expect(checkNewOrgName(ORG_FIXTURE, 'Fulton County Housing Authority')).toBeNull();

@@ -36,11 +36,22 @@ export const ORG_SPELLINGS_PER_ENTRY_MAX = 20;
 export const ORG_NOTES_MAX = 500;
 
 /**
- * The comparison form only - never stored. Lowercase; `&` to "and"; the
- * characters . , ( ) - / ' " _ to spaces; collapse whitespace; trim (D4).
+ * The comparison form only - never stored (D4). First the typographic forms
+ * (review LOW-1: an iPhone's smart punctuation, a pasted name): remove the
+ * invisible format characters - the soft hyphen, the zero-width and direction
+ * marks, the bidi embeddings and isolates, the word joiner and invisible
+ * operators, the BOM; fold the curly single quotes and the prime to ', the
+ * curly double quotes and the double prime to ", the Unicode hyphens and
+ * dashes and the minus sign to -. Then lowercase; `&` to "and"; the
+ * characters . , ( ) - / ' " _ to spaces; collapse whitespace; trim.
+ * dashboard/src/routes/orgs/orgCopy.ts mirrors this by hand.
  */
 export function normalizeOrgText(raw: string): string {
   return raw
+    .replace(/[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]/g, '')
+    .replace(/[\u2018\u2019\u201a\u201b\u2032]/g, "'")
+    .replace(/[\u201c\u201d\u201e\u2033]/g, '"')
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
     .toLowerCase()
     .replace(/&/g, ' and ')
     .replace(/[.,()\-\/'"_]/g, ' ')
@@ -311,8 +322,9 @@ export function checkListWrite(
 /**
  * `org_name_invalid`: checkNewName returns it for a name that normalizes to
  * '' (for example "-" or "()", D13). The other `org_name_invalid` case - a
- * newline or other control character - is applied by services/orgNames.ts
- * BEFORE it calls checkNewName (plan 3.5).
+ * newline or other control character, or an invisible format character
+ * (review LOW-1) - is applied by services/orgNames.ts BEFORE it calls
+ * checkNewName (plan 3.5).
  */
 export type NameProblem =
   | { code: 'org_name_empty' }
@@ -346,8 +358,9 @@ export function checkNewName(
   return null;
 }
 
-/** `invalid` (a control character, spec D13) is never returned by
- *  checkSpelling: services/orgNames.ts applies that rule first (plan 3.5). */
+/** `invalid` (a control or invisible format character, spec D13; review
+ *  LOW-1) is never returned by checkSpelling: services/orgNames.ts applies
+ *  that rule first (plan 3.5). */
 export type SpellingProblem =
   | { problem: 'empty' }
   | { problem: 'too_long' }

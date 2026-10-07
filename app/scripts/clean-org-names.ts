@@ -461,7 +461,12 @@ function emptyResult(): CleanupResult {
   };
 }
 
-/** The counters as one flat record: log fields, and the lock's `counts`. */
+/**
+ * The counters as one flat record: every log line's fields (done, COMPLETED
+ * WITH FAILURES, PARTIAL, the failed lock release) and the lock's `counts`. An
+ * ABORTED apply prints no summary, so its gaps must ride here too (code review
+ * R2-BE-2).
+ */
 function flatCounts(result: CleanupResult): Record<string, number> {
   return {
     contactsScanned: result.contactsScanned,
@@ -471,6 +476,8 @@ function flatCounts(result: CleanupResult): Record<string, number> {
     recordsWritten: result.recordsWritten,
     skippedOnCondition: result.skippedOnCondition,
     failed: result.failed,
+    auditFailed: result.auditFailed,
+    recordsWithBlankValues: result.recordsWithBlankValues,
     ...result.changes,
   };
 }
@@ -769,8 +776,6 @@ export function reportCleanupRun(result: CleanupResult, apply: boolean, log: Log
     listSource: result.listSource,
     leftoverValues: result.leftovers.length,
     contactsMissingTypeOrStatus: result.contactsMissingTypeOrStatus,
-    recordsWithBlankValues: result.recordsWithBlankValues,
-    auditFailed: result.auditFailed,
     apply,
   };
   if (result.failed > 0) {
@@ -779,6 +784,15 @@ export function reportCleanupRun(result: CleanupResult, apply: boolean, log: Log
       `${SCRIPT_NAME} - COMPLETED WITH FAILURES${suffix}: ${result.failed} record(s) could not be planned and were stepped over, nothing written for them (see the ERROR lines naming them). Investigate, then re-run (idempotent).`,
     );
     return 1;
+  }
+  if (result.auditFailed > 0) {
+    // Still a completed run (exit 0) - but at WARN, so a level-filtered view
+    // shows the audit gap (code review R2-BE-2).
+    log.warn(
+      fields,
+      `${SCRIPT_NAME} - done${suffix}: ${result.auditFailed} audit event(s) could not be written (each record change landed; see the WARN lines naming them)`,
+    );
+    return 0;
   }
   log.info(fields, `${SCRIPT_NAME} - done${suffix}`);
   return 0;

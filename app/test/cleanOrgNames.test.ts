@@ -619,6 +619,57 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
     120_000,
   );
 
+  // Code review R2-BE-2: an ABORTED apply prints no summary, so its PARTIAL
+  // line and the lock's counts are all the operator sees - and a re-run can
+  // never write an event whose record is already clean.
+  it('an abort carries auditFailed and recordsWithBlankValues on the PARTIAL line and in the lock counts', async () => {
+    const w = await seedWorld();
+    await doc.send(
+      new PutCommand({
+        TableName: tableName('contacts', w.env),
+        Item: { contactId: 'c-blank-agency', type: 'partner', status: 'active', agency: '   ' },
+      }),
+    );
+    const real = buildCleanupDeps(doc, w.env, silent);
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const boom = new Error('ProvisionedThroughputExceededException');
+    let thrown = false;
+    await expect(
+      cleanOrgNames({
+        doc,
+        env: w.env,
+        apply: true,
+        logger: log,
+        deps: {
+          // The first event cannot be written: counted, and the run goes on...
+          audit: {
+            async append(entityKey, eventType, payload) {
+              if (!thrown) {
+                thrown = true;
+                throw new Error('Rate exceeded');
+              }
+              await real.audit.append(entityKey, eventType, payload);
+            },
+          },
+          // ...until the first property write aborts it (contacts are walked first).
+          units: {
+            rewriteAcceptedAuthorities: async () => {
+              throw boom;
+            },
+          },
+        },
+      }),
+    ).rejects.toBe(boom);
+    const partial = capture.atLevel(50).find((l) => String(l['msg']).includes('PARTIAL result'));
+    expect(partial).toMatchObject({ recordsWritten: 4, auditFailed: 1, recordsWithBlankValues: 1 });
+    expect((await w.orgList.peek())?.lastRewrite).toMatchObject({
+      action: 'cleanup',
+      status: 'failed',
+      counts: { recordsWritten: 4, auditFailed: 1, recordsWithBlankValues: 1 },
+    });
+  }, 120_000);
+
   it('a record it cannot plan is stepped over and counted failed: COMPLETED WITH FAILURES, lock finished failed', async () => {
     const w = await seedWorld();
     await doc.send(
@@ -787,6 +838,19 @@ describe('formatSummary - what the CLI prints (organization values only, never a
     const applied = formatSummary({ ...SUMMARY_RESULT, auditFailed: 1 }, true);
     expect(applied[applied.indexOf('       1  housing authority spelling -> its list name') + 9]).toBe(AUDIT_LINE);
     expect(lines.some((l) => l.startsWith('Audit events'))).toBe(false);
+  });
+});
+
+describe('reportCleanupRun - the done line', () => {
+  it('is logged at WARN while audit events are missing - still exit 0 - so a level filter shows the gap (code review R2-BE-2)', () => {
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    expect(reportCleanupRun({ ...SUMMARY_RESULT, recordsWritten: 8, auditFailed: 1 }, true, log)).toBe(0);
+    expect(reportCleanupRun({ ...SUMMARY_RESULT, recordsWritten: 8 }, true, log)).toBe(0);
+    const [gap, clean] = capture.lines;
+    expect(gap).toMatchObject({ level: 40, auditFailed: 1, recordsWithBlankValues: 0 });
+    expect(String(gap?.['msg'])).toMatch(/^clean-org-names - done/);
+    expect(clean).toMatchObject({ level: 30, msg: 'clean-org-names - done', auditFailed: 0 });
   });
 });
 

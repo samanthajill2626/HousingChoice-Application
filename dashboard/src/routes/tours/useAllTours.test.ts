@@ -194,7 +194,7 @@ describe('useAllTours', () => {
       expect(calls).toHaveLength(1);
     });
 
-    it('a first page that lists a tour twice keeps ONE row: the later copy, in the first copy position', async () => {
+    it('a first page that lists a tour twice keeps ONE row: the later, newer copy, in the first copy position', async () => {
       // Planner review SC-F2: a tour in two phases of ONE request (spec 5.3 -
       // a dated `requested` tour) comes back twice in the same page; the
       // first page de-duplicates exactly as an appended page does.
@@ -205,6 +205,20 @@ describe('useAllTours', () => {
       expect(ids(result.current)).toEqual(['t1', 't2', 't3']);
       expect(result.current.rows[1]).toEqual(later);
       expect(result.current.complete).toBe(true);
+    });
+
+    it('a second copy that is OLDER never replaces the newer one: the dated copy is kept, in the first copy position', async () => {
+      // Planner review round 2, R2-2: the two copies come from two indexes
+      // (byScheduledAt, byStatus), which replicate independently, so read
+      // order is not freshness order - a just-booked tour can come back
+      // current from the date index and still `requested` from the status one.
+      const current = row('t2', { status: 'scheduled', updatedAt: '2026-06-02T00:00:00.000Z' });
+      const stale = row('t2', { status: 'requested', scheduledAt: undefined, updatedAt: '2026-06-01T00:00:00.000Z' });
+      reply('', page([row('t1'), current, row('t3'), stale], null));
+      const { result } = mount();
+      await settle();
+      expect(ids(result.current)).toEqual(['t1', 't2', 't3']);
+      expect(result.current.rows[1]).toEqual(current);
     });
   });
 
@@ -288,7 +302,7 @@ describe('useAllTours', () => {
   });
 
   // 5
-  it('a later copy of a listed tour replaces that row in place', async () => {
+  it('a later copy of a listed tour, the same age (a tie goes to the later read), replaces that row in place', async () => {
     const moved = row('t2', { status: 'toured', scheduledAt: '2026-07-12T15:00:00.000Z' });
     reply('', page([row('t1'), row('t2'), row('t3')], 'c1'));
     reply('c1', page([moved, row('t4')], null));

@@ -393,8 +393,12 @@ of 4.8.
   never onto another list (a filter change meanwhile) or away from where the
   user has put focus since. While a Retry after a failed page runs, the failure
   sentence beside it is withdrawn, so a second failure is announced again.
-- De-duplication by `tourId` on append: the LATER copy's data replaces the
-  earlier row in place (a tour rescheduled between two pages can come back).
+- De-duplication by `tourId` on append: the NEWER copy (by `updatedAt`; a tie
+  goes to the later read) replaces the earlier row in place (a tour
+  rescheduled between two pages can come back). (Amended by the planner
+  review, round 2, R2-2, from "the LATER copy": the two copies of one tour come
+  from two indexes that replicate independently, so the later-read copy can be
+  the stale one.)
 - Empty pages: a page that comes back EMPTY with a cursor (a sparse filter met
   the server's read budget, 5.4) is followed automatically, up to 10 in a row.
   While following, the count line reads "Checking more tours...". If the tenth
@@ -807,8 +811,9 @@ for any other tour without a date.
     conversion (a 6 pm tour on the To day is in, the From day starts at local
     midnight, both-empty sends no bounds, From after To sends nothing and shows
     the message); the sort default per When.
-  - Load more; de-duplication (later copy wins); the empty-page follow, its cap
-    copy and Keep checking shown instead of Load more; errors and Retry; a
+  - Load more; de-duplication (the newer copy wins - round 2, R2-2); the
+    empty-page follow, its cap copy and Keep checking shown instead of Load
+    more; errors and Retry; a
     cursor 400 restarting the list at page 1; one loader at a time (no second
     request while a walk or restore runs; a search typed during a restore
     takes over its cursor).

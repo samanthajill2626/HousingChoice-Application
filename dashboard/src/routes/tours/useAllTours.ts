@@ -95,16 +95,21 @@ interface ListState {
 }
 
 /** `rows` then `incoming`, ONE row per tour: a tour already listed is
- *  REPLACED IN PLACE by the later copy. A tour rescheduled between two pages
- *  can come back, and a tour in two phases of one request comes back twice
- *  in the SAME page (spec 5.3), so the first page goes through this too. */
+ *  REPLACED IN PLACE by a copy that is the same age or NEWER by `updatedAt`
+ *  (canonical ISO, so string order is time order; a tie goes to the later
+ *  read). A tour rescheduled between two pages can come back, and a tour in
+ *  two phases of one request comes back twice in the SAME page (spec 5.3), so
+ *  the first page goes through this too. Read order is not freshness order:
+ *  the two copies come from two indexes that replicate independently, so an
+ *  OLDER later copy is ignored (planner review round 2, R2-2). */
 function mergeRows(rows: readonly TourListRow[], incoming: readonly TourListRow[]): TourListRow[] {
   const index = new Map(rows.map((r, i) => [r.tourId, i] as const));
   const out = [...rows];
   for (const r of incoming) {
     const at = index.get(r.tourId);
-    if (at !== undefined) out[at] = r;
-    else {
+    if (at !== undefined) {
+      if (r.updatedAt >= out[at]!.updatedAt) out[at] = r;
+    } else {
       index.set(r.tourId, out.length);
       out.push(r);
     }
@@ -133,8 +138,8 @@ function freshState(forKey: string, page: TourListPage | null): ListState {
   };
 }
 
-/** Append a page (mergeRows: a row already listed is REPLACED IN PLACE by the
- *  later copy); names merge. */
+/** Append a page (mergeRows: a row already listed is REPLACED IN PLACE by a
+ *  copy that is not older); names merge. */
 function withPage(s: ListState, page: TourListPage): ListState {
   return {
     ...s,

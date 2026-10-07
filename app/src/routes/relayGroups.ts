@@ -58,7 +58,7 @@ import {
   createTourRemindersRepo,
   type TourRemindersRepo,
 } from '../repos/tourRemindersRepo.js';
-import { resolveMessage, resolveWithSettings } from '../messages/index.js';
+import { resolveWithSettings } from '../messages/index.js';
 import {
   assessNamesReadFailure,
   composeTourReminderBody,

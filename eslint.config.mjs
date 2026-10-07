@@ -89,4 +89,24 @@ export default tseslint.config(
       ],
     },
   },
+  // Exemption from the ban above for the import sources. These read the
+  // founder's CSV exports (Airtable, Quo) for a manual, operator-run import -
+  // small text files parsed whole, never media, never on a request path. A
+  // stream buys nothing there, so readFileSync is allowed in exactly these
+  // files. Anything else in app/src stays under the ban.
+  {
+    files: ['app/src/lib/import/airtableSource.ts', 'app/src/lib/import/quoSource.ts'],
+    rules: {
+      'no-restricted-syntax': 'off',
+    },
+  },
+  // Test files may use `any`. Casting a fixture or a partial mock to `any` is
+  // the honest shape for a test that only cares about a few fields; typing it
+  // fully adds noise without catching anything. Shipped code keeps the rule.
+  {
+    files: ['**/*.test.{ts,tsx}', '**/*.spec.{ts,tsx}', '**/test/**/*.{ts,tsx}'],
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+    },
+  },
 );

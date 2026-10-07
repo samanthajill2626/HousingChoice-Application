@@ -47,7 +47,6 @@ const TASHA_ID = 'contact-tenant-0001';
 // --- Live relay group constants (app/src/lib/seed/live.ts, full profile) ------
 const CONV_ID = 'conv-live-relay-group';
 const POOL = '+15550160001';
-const DIANA_ID = 'contact-live-tenant-a';
 const DIANA_PHONE = '+15550170001'; // Diana Osei (tenant)
 const GLORIA_PHONE = '+15550170003'; // Gloria Mensah (landlord)
 const INBOX_LABEL = 'With Diana Osei & Gloria Mensah';

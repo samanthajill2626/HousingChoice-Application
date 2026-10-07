@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { UnitItem, UnitsPage } from '../../api/index.js';
+import type { UnitItem } from '../../api/index.js';
 
 const getAllUnits = vi.fn();
 

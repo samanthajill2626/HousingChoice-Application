@@ -286,8 +286,7 @@ describe('InProcessOutboundQueueAdapter (deferred dispatch)', () => {
 
   it('settle() also drains a dispatch enqueued DURING settling (a job that enqueues another immediate job)', async () => {
     const dispatched: string[] = [];
-    let adapter!: InProcessOutboundQueueAdapter;
-    adapter = new InProcessOutboundQueueAdapter({
+    const adapter: InProcessOutboundQueueAdapter = new InProcessOutboundQueueAdapter({
       dispatch: async (e) => {
         const env = e as JobEnvelope;
         dispatched.push(env.jobName);

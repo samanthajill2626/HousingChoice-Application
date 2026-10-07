@@ -20,7 +20,6 @@ import {
   NEW_MESSAGE_CHAR_CAP,
   SEEN_MESSAGE_CHAR_CAP,
   TRUNCATION_MARKER,
-  WINDOW_CHAR_BUDGET,
   runDueExtractions,
   type ExtractionJobDeps,
 } from '../src/jobs/extraction.js';

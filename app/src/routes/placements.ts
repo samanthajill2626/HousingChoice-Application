@@ -46,7 +46,7 @@ import {
   type SoonestDeadline,
 } from '../repos/placementDeadlinesRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
-import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
@@ -159,15 +159,6 @@ function stageLabel(stage: string): string {
     .join(' ');
 }
 
-
-/** Resolved "First Last" from a contact, or undefined (never a guess). */
-function nameFromContact(contact: ContactItem | undefined): string | undefined {
-  if (!contact) return undefined;
-  const first = typeof contact['firstName'] === 'string' ? contact['firstName'] : '';
-  const last = typeof contact['lastName'] === 'string' ? contact['lastName'] : '';
-  const joined = `${first} ${last}`.trim();
-  return joined.length > 0 ? joined : undefined;
-}
 
 const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;

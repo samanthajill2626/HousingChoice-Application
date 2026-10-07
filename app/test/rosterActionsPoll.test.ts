@@ -197,8 +197,6 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
 
   const openActionId = (ownerType: 'tour' | 'placement', ownerId: string): string =>
     rosterActionIdFor({ ownerType, ownerId, action: 'open_group' });
-  const addActionId = (ownerType: 'tour' | 'placement', ownerId: string, contactId: string): string =>
-    rosterActionIdFor({ ownerType, ownerId, action: 'add_member', contactId });
 
   const rowOf = async (actionId: string): Promise<PendingRosterActionItem> => {
     const row = await world.pendingRosterActionsRepo.getById(actionId);

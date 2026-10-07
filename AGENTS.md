@@ -218,10 +218,11 @@ commands from the feature worktree:
 5. `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')`
 
 **Gate 5 is NO NEW LINT ERRORS IN THE FILES YOU TOUCHED - not a clean repo, and
-not a clean file.** Lint here is not yet clean: as of 2026-08-24 `npm run lint`
-reports 117 errors across 65 files, all pre-existing. A repo-wide gate would
-fail every branch on day one, and a whole-FILE gate would fail any one-line
-change to those 65 files on somebody else's debt. Neither makes anyone lint;
+not a clean file.** Lint here is not yet clean: as of 2026-10-07 `npm run lint`
+reports 23 errors across 18 dashboard files, all pre-existing and all
+`react-hooks/*`. A repo-wide gate would fail every branch on day one, and a
+whole-FILE gate would fail any one-line change to those 18 files on somebody
+else's debt. Neither makes anyone lint;
 both teach people to skip the gate. So the rule is the ratchet the ASCII rule
 already uses: on a pre-existing dirty file, only what you TOUCH must be clean.
 
@@ -233,7 +234,7 @@ convincing but meaningless result.
   checked zero files. `main...HEAD` is what lists the branch's own files.
 - **If that list comes back EMPTY (a docs-only branch), SKIP the gate.** Do not
   run `npx eslint` with no path arguments: it lints the ENTIRE REPO and fails on
-  the 117 pre-existing errors below, which looks like your branch broke
+  the 23 pre-existing errors above, which looks like your branch broke
   something and is the fastest way to teach someone that gate 5 is noise.
 
 The extension filter is there so Markdown paths do not produce a wall of

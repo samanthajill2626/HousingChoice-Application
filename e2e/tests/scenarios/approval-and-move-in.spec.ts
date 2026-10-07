@@ -76,11 +76,9 @@ test.afterEach(async ({ page }) => {
   test.setTimeout(0);
   if (mode === 'hold') {
     const ms = Number(process.env.E2E_PAUSE_MS ?? 600_000);
-    // eslint-disable-next-line no-console
     console.log(`\n[E2E_PAUSE] test done — browser open ~${Math.round(ms / 1000)}s (Ctrl+C to quit).\n`);
     await page.waitForTimeout(ms);
   } else {
-    // eslint-disable-next-line no-console
     console.log('\n[E2E_PAUSE] test done — click "Resume" (▶) in the Playwright Inspector window to continue.\n');
     await page.pause();
   }
@@ -246,7 +244,7 @@ test('marked deviation - inspection FAILS at Awaiting inspection -> Lost (landlo
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const { tenant, unit, placementId } = await reachAwaitingAuthorityApproval(flow, {
+  const { unit, placementId } = await reachAwaitingAuthorityApproval(flow, {
     tenant: 'Failed',
     owner: 'Inspect',
   });
@@ -281,7 +279,7 @@ test('marked deviation — landlord REJECTS the determined rent at Awaiting rent
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const { tenant, unit, placementId } = await reachAwaitingAuthorityApproval(flow, {
+  const { unit, placementId } = await reachAwaitingAuthorityApproval(flow, {
     tenant: 'Reject',
     owner: 'Rent',
   });

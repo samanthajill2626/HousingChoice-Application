@@ -4,7 +4,6 @@ import { loadFakeConfig } from './config.js';
 const config = loadFakeConfig(); // throws if NODE_ENV=production (boot guard)
 const app = buildFakeTwilioApp({ config });
 const server = app.listen(config.port, () => {
-  // eslint-disable-next-line no-console
   console.log(`fake-twilio listening on :${config.port} → app ${config.appBaseUrl}`);
 });
 // Outlive any client stall a live test can produce, so this server never
@@ -16,7 +15,6 @@ hardenServerTimeouts(server);
 // the process exits 0 — masquerading as a clean shutdown to any launcher that
 // tracks it. Exit non-zero so the failure is observable instead.
 server.on('error', (err) => {
-  // eslint-disable-next-line no-console
   console.error(`fake-twilio failed to bind :${config.port}: ${String(err)}`);
   process.exit(1);
 });

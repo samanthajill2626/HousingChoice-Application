@@ -267,7 +267,6 @@ test.describe('Broadcasts - live send progress + disjoint buckets + recipient id
   // support/broadcastSelectors.ts with their collision rules.
   test('curated send: land while Sending, chips tick, terminal Delivered=N with all in-flight buckets drained, rows show names + formatted phones + contact links', async ({
     page,
-    request,
   }) => {
     await devLogin(page);
     const stamp = `${Date.now()}`.slice(-6);

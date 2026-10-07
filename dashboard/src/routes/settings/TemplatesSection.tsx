@@ -98,7 +98,6 @@ export function TemplatesSection(): React.JSX.Element {
     if (settings === undefined) return;
     const current = formRef.current;
     if (current === null || Object.keys(diff(current, settings)).length === 0) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setForm(toForm(settings));
     }
   }, [settings]);

@@ -1215,7 +1215,7 @@ describe('run ordering and warmup policy', () => {
         (page as FakeSamplingPage).hrefs.add('/');
         return resolved('/');
       },
-      instrumentationFor: (_route, mode, repeat) => new FakeInstrumentation([], undefined),
+      instrumentationFor: (_route, _mode, _repeat) => new FakeInstrumentation([], undefined),
     });
 
     expect(result.samples.every((sample) => sample.blockedWrites.every((write) => write.phase !== 'out_of_sample'))).toBe(true);

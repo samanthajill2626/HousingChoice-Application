@@ -128,9 +128,6 @@ export function useOrgAdmin(options: { pollMs?: number } = {}): OrgAdminState {
   const wasLiveRef = useRef(false);
   useEffect(() => {
     if (wasLiveRef.current && !rewriteLive) {
-      // loadDetails() sets state only AFTER an await (never synchronously) - a
-      // refetch, not the cascading-render case the rule targets.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       void loadDetails();
     }
     wasLiveRef.current = rewriteLive;

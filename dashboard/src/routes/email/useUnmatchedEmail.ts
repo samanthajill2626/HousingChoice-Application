@@ -64,7 +64,6 @@ export interface UnmatchedEmailState {
   release: (id: string) => Promise<void>;
 }
 
-const PAGE_LIMIT = 30;
 /** Debounce window (ms) for SSE-triggered reconcile-refetches (matches useInbox). */
 const REFETCH_DEBOUNCE_MS = 300;
 

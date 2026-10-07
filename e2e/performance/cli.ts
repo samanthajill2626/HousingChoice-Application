@@ -35,7 +35,7 @@ import type {
   RouteDefinition,
   TerminalContract,
 } from './routes.js';
-import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult, SurfaceEvidence, TargetMetadata } from './types.js';
+import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult, SurfaceEvidence } from './types.js';
 import { terminalAlternativeVisible } from './readiness.js';
 import { aggregateSamples, buildRankings } from './aggregate.js';
 import type { PageStoreSnapshot } from './readiness.js';

@@ -1207,6 +1207,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       extractionRepo: extraction,
       aiRunsRepo: aiRuns,
       suggestionResolutionRepo: suggestionResolutions,
+      // Spec 2026-10-06 D8: a housingAuthority accept is checked against the
+      // organization list - the ONE service built above, never a second one.
+      orgNamesService: orgNames,
       ...(deps.suggestionResolutionHooks !== undefined && {
         suggestionResolutionHooks: deps.suggestionResolutionHooks,
       }),

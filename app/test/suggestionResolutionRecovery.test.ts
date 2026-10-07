@@ -19,6 +19,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AiRunsRepo } from '../src/repos/aiRunsRepo.js';
 import type { ContactsRepo } from '../src/repos/contactsRepo.js';
 import type { ExtractionRepo } from '../src/repos/extractionRepo.js';
+import type { OrgNamesService } from '../src/services/orgNames.js';
 import type {
   ActiveSuggestionResolution,
   SuggestionResolutionRepo,
@@ -79,6 +80,8 @@ function serviceOver(journals: ActiveSuggestionResolution[]) {
     contactsRepo: {} as ContactsRepo,
     extractionRepo: {} as ExtractionRepo,
     aiRunsRepo: {} as AiRunsRepo,
+    // Never reached: recovery replays stored plans and never reads the list.
+    orgNamesService: {} as OrgNamesService,
     resolutionRepo: {
       async listJournals() {
         return journals;

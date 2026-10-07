@@ -24,6 +24,8 @@ import { isDecisionTarget } from './extraction/runTypes.js';
 import { buildContactStatusTransitionPlan } from './statusTransition.js';
 import type { TenantStatus } from '../lib/statusModel.js';
 import { statusAllowlistFor } from '../lib/statusModel.js';
+import { checkScalarWrite, type OrgEntry } from '../lib/orgNames.js';
+import type { OrgNamesService } from './orgNames.js';
 
 const EXTRACTABLE = new Set<string>(EXTRACTABLE_FIELDS);
 const MAX_RESOLUTION_LOOPS = 6;
@@ -110,6 +112,12 @@ export class SuggestionResolutionError extends Error {
     readonly status: number,
     readonly code: string,
     readonly retryable = false,
+    /**
+     * Extra body fields the route sends beside `error` - the spec 2026-10-06
+     * D5 details of a 422 `org_not_on_list` (field, text, candidates, close,
+     * otherKind?, compound?). Never carries an `error` key.
+     */
+    readonly details?: Readonly<Record<string, unknown>>,
   ) {
     super(code);
     this.name = 'SuggestionResolutionError';
@@ -121,6 +129,13 @@ interface ResolutionServiceDeps {
   extractionRepo: ExtractionRepo;
   aiRunsRepo: AiRunsRepo;
   resolutionRepo: SuggestionResolutionRepo;
+  /**
+   * The organization list (spec 2026-10-06 D8), read only while a
+   * housingAuthority accept builds its plan. REQUIRED so every construction
+   * site (routes/suggestions.ts, jobs/journalSweep.ts, tests) supplies it -
+   * the plan 3.4b `orgNamesService` instance.
+   */
+  orgNamesService: Pick<OrgNamesService, 'read'>;
   logger: Logger;
   now?: () => string;
   leaseId?: () => string;
@@ -182,12 +197,32 @@ function guardForPatch(
   return guard;
 }
 
+/**
+ * Spec 2026-10-06 D8 + D5: the name an accepted housingAuthority suggestion
+ * writes, decided against the CURRENT list inside buildPlan - before the
+ * claim, so a refusal never consumes the suggestion. The text must resolve to
+ * one housing authority (an exact name, or a unique spelling stored as its
+ * entry's exact name); anything else is 422 org_not_on_list with the D5
+ * details.
+ */
+function acceptedAuthorityName(text: string, entries: readonly OrgEntry[]): string {
+  const check = checkScalarWrite(entries, 'housingAuthority', text, undefined);
+  if (!check.ok) {
+    const { error: code, ...details } = check.error;
+    throw new SuggestionResolutionError(422, code, false, { ...details });
+  }
+  // checkScalarWrite answers null only for blank text, which coerceAccept refused.
+  if (check.value === null) throw new SuggestionResolutionError(400, 'invalid_suggestion_value');
+  return check.value;
+}
+
 function buildPlan(
   contact: ContactItem,
   suggestion: SuggestionItem,
   action: ResolutionAction,
   actorId: string | undefined,
   at: string,
+  opts: { orgEntries: readonly OrgEntry[] },
 ): ResolutionReplayPlan {
   const target = suggestion.target;
   if (action === 'dismiss') {
@@ -255,6 +290,31 @@ function buildPlan(
           target,
           ...(from.length > 0 && { from }),
           to: formatted,
+        },
+      },
+    };
+  }
+  if (target === 'housingAuthority') {
+    // Spec 2026-10-06 D8: an accepted housing authority is always a NAME from
+    // the list (the generic arm below would write the text as-is).
+    const coerced = coerceAccept('housingAuthority', suggestion.suggestedValue);
+    if (!coerced.ok) throw new SuggestionResolutionError(400, 'invalid_suggestion_value');
+    const name = acceptedAuthorityName(String(coerced.value), opts.orgEntries);
+    const patch = {
+      housingAuthority: name,
+      housingAuthority_source: provenance(suggestion, at, actorId),
+    };
+    return {
+      kind: 'contact',
+      patch,
+      guard: guardForPatch(contact, patch),
+      audit: {
+        eventType: 'ai_suggestion_accepted',
+        payload: {
+          ...(actorId !== undefined && { actor: actorId }),
+          target,
+          from: contact['housingAuthority'],
+          to: name,
         },
       },
     };
@@ -679,8 +739,15 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           }
           const contact = await deps.contactsRepo.getById(input.contactId);
           if (!contact) throw new SuggestionResolutionError(404, 'contact_not_found');
+          // Spec 2026-10-06 D8: a housingAuthority accept is checked against the
+          // CURRENT organization list while the plan is built - before the claim
+          // below, so a refusal never consumes the suggestion. Nothing else
+          // reads the list.
+          const orgEntries = input.action === 'accept' && input.target === 'housingAuthority'
+            ? (await deps.orgNamesService.read()).entries
+            : [];
           const claimedAt = now();
-          const plan = buildPlan(contact, suggestion, input.action, input.actorId, claimedAt);
+          const plan = buildPlan(contact, suggestion, input.action, input.actorId, claimedAt, { orgEntries });
 
           if (plan.kind === 'phone') {
             const owner = await deps.contactsRepo.findByPhone(plan.phone);

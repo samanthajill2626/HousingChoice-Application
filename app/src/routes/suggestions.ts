@@ -26,6 +26,7 @@ import {
   type SuggestionResolutionHooks,
   type SuggestionResolutionService,
 } from '../services/suggestionResolution.js';
+import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
 
 export interface SuggestionsRouterDeps {
   logger?: Logger;
@@ -33,6 +34,11 @@ export interface SuggestionsRouterDeps {
   extractionRepo?: ExtractionRepo;
   aiRunsRepo?: AiRunsRepo;
   suggestionResolutionRepo?: SuggestionResolutionRepo;
+  /**
+   * The organization list a housingAuthority accept is checked against (spec
+   * 2026-10-06 D8; plan 3.4b). createApiRouter passes its ONE `orgNames`.
+   */
+  orgNamesService?: OrgNamesService;
   suggestionResolutionService?: SuggestionResolutionService;
   suggestionResolutionHooks?: SuggestionResolutionHooks;
   resolutionNow?: () => string;
@@ -77,11 +83,13 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
   const resolutions = deps.suggestionResolutionRepo
     ?? createSuggestionResolutionRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
+  const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
   const service = deps.suggestionResolutionService ?? createSuggestionResolutionService({
     contactsRepo: contacts,
     extractionRepo: extraction,
     aiRunsRepo: aiRuns,
     resolutionRepo: resolutions,
+    orgNamesService: orgNames,
     logger: log,
     ...(deps.resolutionNow !== undefined && { now: deps.resolutionNow }),
     ...(deps.resolutionLeaseId !== undefined && { leaseId: deps.resolutionLeaseId }),
@@ -191,6 +199,9 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
       if (helped || refused) events.emit('suggestion.updated', { contactId });
       if (error instanceof SuggestionResolutionError) {
         res.status(error.status).json({
+          // The D5 details of a 422 org_not_on_list (spec 2026-10-06), spread
+          // FIRST so they can never overwrite `error`.
+          ...(error.details !== undefined && error.details),
           error: error.code,
           ...(error.retryable && { retryable: true }),
         });

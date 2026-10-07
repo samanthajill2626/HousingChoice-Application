@@ -2168,5 +2168,104 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(badUnit.status).toBe(404);
       expect(badUnit.body).toEqual({ error: 'unit_not_found' });
     });
+
+    function act(
+      app: import('express').Express,
+      broadcastId: string,
+      verb: 'preview' | 'send',
+      body: Record<string, unknown> = {},
+    ) {
+      return request(app)
+        .post(`/api/broadcasts/${broadcastId}/${verb}`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send(body);
+    }
+
+    it('preview re-checks a DRAFT: a stored spelling is 422 with its entry as the one candidate', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-org-1', housingAuthority: 'atlanta_housing' } as Partial<ContactItem>);
+      seedShare(world, 'bcast-org-slug', 'draft', {}, { audience_filter: filterFor('atlanta_housing') });
+      const { app } = makeWebhookHarness({ world });
+      const res = await act(app, 'bcast-org-slug', 'preview');
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({
+        error: 'org_not_on_list',
+        field: 'audience_filter',
+        text: 'atlanta_housing',
+        close: [],
+      });
+      expect(res.body.candidates).toEqual([
+        expect.objectContaining({ kind: 'housing_authority', name: 'Atlanta Housing Authority' }),
+      ]);
+    });
+
+    it('preview re-checks a DRAFT: a stored agency name is 422 with otherKind', async () => {
+      seedUnit(world);
+      seedShare(world, 'bcast-org-agency', 'draft', {}, { audience_filter: filterFor('Step Up') });
+      const { app } = makeWebhookHarness({ world });
+      const res = await act(app, 'bcast-org-agency', 'preview');
+      expect(res.status).toBe(422);
+      expect(names(res.body.otherKind)).toEqual(['Step Up']);
+    });
+
+    it('the filter-resolving send re-checks the stored filter: 422, still a draft, nothing sent', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-org-1', housingAuthority: 'atlanta_housing' } as Partial<ContactItem>);
+      seedShare(world, 'bcast-org-send', 'draft', {}, { audience_filter: filterFor('atlanta_housing') });
+      const { app } = makeWebhookHarness({ world });
+      const res = await act(app, 'bcast-org-send', 'send');
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({ error: 'org_not_on_list', field: 'audience_filter', text: 'atlanta_housing' });
+      await queueAdapter.settle();
+      expect(world.broadcasts.get('bcast-org-send')?.status).toBe('draft');
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('(PIN) the curated send (recipientContactIds) is not re-checked', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-org-1', housingAuthority: 'atlanta_housing' } as Partial<ContactItem>);
+      seedShare(world, 'bcast-org-curated', 'draft', {}, { audience_filter: filterFor('atlanta_housing') });
+      const { app } = makeWebhookHarness({ world });
+      const res = await act(app, 'bcast-org-curated', 'send', { recipientContactIds: ['c-org-1'] });
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe('sending');
+    });
+
+    it('(PIN) a seeds_only draft never reads its filter: preview and the no-body send both pass', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-org-1' });
+      seedShare(world, 'bcast-org-seeds', 'draft', {}, {
+        audience_filter: filterFor('Nowhere Housing Authority'),
+        audience_mode: 'seeds_only',
+        seed_contact_ids: ['c-org-1'],
+      });
+      const { app } = makeWebhookHarness({ world });
+      const preview = await act(app, 'bcast-org-seeds', 'preview');
+      expect(preview.status).toBe(200);
+      const send = await act(app, 'bcast-org-seeds', 'send');
+      expect(send.status).toBe(200);
+    });
+
+    it('(PIN) a draft whose stored filter is an exact list name previews and sends', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-org-1', housingAuthority: 'Atlanta Housing Authority' } as Partial<ContactItem>);
+      seedShare(world, 'bcast-org-exact', 'draft', {}, { audience_filter: filterFor('Atlanta Housing Authority') });
+      const { app } = makeWebhookHarness({ world });
+      const preview = await act(app, 'bcast-org-exact', 'preview');
+      expect(preview.status).toBe(200);
+      expect(preview.body.count).toBe(1);
+      const send = await act(app, 'bcast-org-exact', 'send');
+      expect(send.status).toBe(200);
+      expect(send.body.count).toBe(1);
+    });
+
+    it('(PIN) a SENT share keeps its historical filter: its preview is not re-checked', async () => {
+      seedUnit(world);
+      seedShare(world, 'bcast-org-sent', 'sent', {}, { audience_filter: filterFor('atlanta_housing') });
+      const { app } = makeWebhookHarness({ world });
+      const res = await act(app, 'bcast-org-sent', 'preview');
+      expect(res.status).toBe(200);
+    });
   });
 });

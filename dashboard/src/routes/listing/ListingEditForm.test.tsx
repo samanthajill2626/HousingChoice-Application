@@ -333,3 +333,75 @@ describe('ListingEditForm', () => {
     expect(alert.textContent ?? '').not.toContain('org_not_on_list');
   });
 });
+
+// --- Code review R1-ADV-FE-1: text typed in the picker but never picked ------
+// Save adds typed text that names exactly one entry (by name, or by a spelling
+// only that entry carries), as a pick would, and refuses anything else - it is
+// never silently dropped.
+describe('ListingEditForm - text typed in the picker but never picked', () => {
+  const BLOCKED = 'Pick a name from the list, add it as new, or clear the text.';
+  // AHA is a spelling two entries share; DCA belongs to one.
+  const TYPED_LIST: OrgEntry[] = [
+    orgEntry('Atlanta Housing Authority', ['AHA']),
+    orgEntry('Augusta Housing Authority', ['AHA']),
+    orgEntry('Georgia Department of Community Affairs', ['DCA']),
+  ];
+  const authorities = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authorities' });
+  const save = (): HTMLElement => screen.getByRole('button', { name: /^Save$/i });
+
+  beforeEach(() => {
+    getOrgList.mockResolvedValue({ version: 1, entries: TYPED_LIST });
+  });
+
+  it('a list name typed in full is added as if it were picked', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(authorities(), 'Atlanta Housing Authority');
+    await screen.findByRole('option', { name: /^Atlanta Housing Authority/ });
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { accepted_authorities: ['ga_dca', 'Atlanta Housing Authority'] });
+  });
+
+  it('a spelling only one entry carries adds that entry', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(authorities(), 'DCA');
+    await screen.findByRole('option', { name: /^Georgia Department of Community Affairs/ });
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', {
+      accepted_authorities: ['ga_dca', 'Georgia Department of Community Affairs'],
+    });
+  });
+
+  it.each([
+    ['a spelling two entries share', 'AHA'],
+    ['unknown text', 'Metro Nowhere'],
+  ])('%s stops Save: nothing is sent, the picker says why and takes focus', async (_case, text) => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ListingEditForm unit={UNIT} onClose={onClose} onSaved={vi.fn()} />);
+    await user.type(authorities(), text);
+    await screen.findAllByRole('option');
+    await user.click(save());
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(BLOCKED);
+    expect(authorities().getAttribute('aria-describedby')?.split(' ')).toContain(alert.id);
+    expect(authorities()).toHaveFocus();
+    expect(updateUnit).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('(PIN) a typed name the list already holds changes nothing', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const listed: UnitItem = { ...UNIT, accepted_authorities: ['Atlanta Housing Authority', 'ga_dca'] };
+    render(<ListingEditForm unit={listed} onClose={onClose} onSaved={vi.fn()} />);
+    await screen.findByText('Not on the list'); // the list has loaded (ga_dca is marked)
+    await user.type(authorities(), 'Atlanta Housing Authority');
+    await user.click(save());
+    expect(updateUnit).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});

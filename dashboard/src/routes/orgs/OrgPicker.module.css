@@ -119,6 +119,14 @@
   color: var(--c-text-muted);
 }
 
+/* "Not saved - ..." under a field left holding typed text (code review
+   R1-ADV-FE-1): the amber of the "Not on the list" mark. */
+.pendingNote {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-evt-amber-text);
+}
+
 .error {
   margin: 0;
   font-size: var(--fs-xs);

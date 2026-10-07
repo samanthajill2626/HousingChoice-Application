@@ -137,10 +137,11 @@ export const ORG_PICKER = {
 /**
  * Pick ONE organization-list entry: type `query` (default: the name itself)
  * into the combobox labelled `label`, click the entry's option, and wait for
- * its chip - proof the pick committed before the caller saves (typed text is
- * NEVER committed, spec D6/D7). The listbox is PORTALED to document.body (the
- * ContactSearchField pattern), so the option is looked up on the PAGE, never
- * inside `scope`. `scope` is the dialog holding the picker, or the page itself
+ * its chip - proof the pick committed before the caller saves (the composer
+ * never commits typed text, spec D7; a form's Save commits it only when it
+ * names exactly one entry and otherwise refuses - code review R1-ADV-FE-1).
+ * The listbox is PORTALED to document.body (the ContactSearchField pattern),
+ * so the option is looked up on the PAGE, never inside `scope`. `scope` is the dialog holding the picker, or the page itself
  * when the picker sits on the page (the blast composer) - never a CSS locator
  * such as `body` (e2e/support/selectors.md). `replacing` first removes a single
  * picker's current chip.
@@ -1654,8 +1655,8 @@ export class Scenario {
 
       // Fill the intake fields.
       // Housing authorities: a multi-picker over the organization list (spec
-      // D6) - each name is picked, never typed and saved (typed text is never
-      // committed).
+      // D6) - each name is picked, never typed and saved (Save commits typed
+      // text only when it names exactly one entry - a pick is deterministic).
       for (const name of opts.accepted_authorities ?? ['Atlanta Housing Authority']) {
         await pickOrgName(this.page, dialog, 'Housing authorities', name);
       }

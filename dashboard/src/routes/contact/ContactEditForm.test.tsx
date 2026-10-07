@@ -586,14 +586,22 @@ describe('ContactEditForm', () => {
     expect(screen.queryByRole('option', { name: /^Step Up/ })).not.toBeInTheDocument();
   });
 
-  it('typing alone changes nothing: Save just closes', async () => {
+  it('typed text is never dropped silently: part of a name stops Save and the picker says why', async () => {
+    // Code review R1-ADV-FE-1: Save used to close as "nothing changed" here.
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<ContactEditForm contact={TENANT} onClose={onClose} onSaved={vi.fn()} />);
-    await user.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'Atl');
+    const picker = screen.getByRole('combobox', { name: 'Housing authority' });
+    await user.type(picker, 'Atl');
+    await screen.findByRole('option', { name: /^Atlanta Housing Authority/ });
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Pick a name from the list, add it as new, or clear the text.');
+    expect(picker.getAttribute('aria-describedby')?.split(' ')).toContain(alert.id);
+    expect(picker).toHaveFocus();
+    expect(picker).toHaveValue('Atl');
     expect(updateContact).not.toHaveBeenCalled();
-    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('marks stored values that are not on the list and never sends them untouched', async () => {
@@ -731,5 +739,87 @@ describe('ContactEditForm', () => {
     await user.type(screen.getByLabelText(/First name/i), 'X');
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
     expect(updateContact).toHaveBeenCalledWith('k1', { firstName: 'TashaX' });
+  });
+});
+
+// --- Code review R1-ADV-FE-1: text typed in a picker but never picked --------
+// The pickers used to be free-text inputs: staff type the name and Save. Save
+// now commits typed text that names exactly one entry (by name, or by a
+// spelling only that entry carries), as a pick would, and refuses anything
+// else - it is never silently dropped.
+describe('ContactEditForm - text typed in a picker but never picked', () => {
+  const BLOCKED = 'Pick a name from the list, add it as new, or clear the text.';
+  // AHA is a spelling two entries share; DCA belongs to one.
+  const TYPED_LIST: OrgEntry[] = [
+    orgEntry('housing_authority', 'Atlanta Housing Authority', ['AHA']),
+    orgEntry('housing_authority', 'Augusta Housing Authority', ['AHA']),
+    orgEntry('housing_authority', 'DeKalb County Housing Authority', ['HADC']),
+    orgEntry('housing_authority', 'Georgia Department of Community Affairs', ['DCA']),
+    orgEntry('agency', 'Step Up'),
+  ];
+  const housingAuthority = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authority' });
+  const save = (): HTMLElement => screen.getByRole('button', { name: /^Save$/i });
+
+  beforeEach(() => {
+    getOrgList.mockResolvedValue({ version: 1, entries: TYPED_LIST });
+  });
+
+  it('a list name typed in full is saved as if it were picked', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT, housingAuthority: 'Atlanta Housing Authority' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'Atlanta Housing Authority');
+    await screen.findByRole('option', { name: /^Atlanta Housing Authority/ });
+    await user.click(save());
+    expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: 'Atlanta Housing Authority' });
+  });
+
+  it("a spelling only one entry carries saves that entry's name", async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT, housingAuthority: 'Georgia Department of Community Affairs' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'DCA');
+    await screen.findByRole('option', { name: /^Georgia Department of Community Affairs/ });
+    await user.click(save());
+    expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: 'Georgia Department of Community Affairs' });
+  });
+
+  it('the Agency picker commits its typed name too', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT, agency: 'Step Up' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByRole('combobox', { name: 'Agency' }), 'step up');
+    await screen.findByRole('option', { name: 'Step Up' });
+    await user.click(save());
+    expect(updateContact).toHaveBeenCalledWith('k1', { agency: 'Step Up' });
+  });
+
+  it('a spelling two entries share stops Save: nothing is sent, the picker says why and takes focus', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ContactEditForm contact={TENANT} onClose={onClose} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'AHA');
+    await screen.findByRole('option', { name: /^Augusta Housing Authority/ });
+    await user.click(save());
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(BLOCKED);
+    expect(housingAuthority().getAttribute('aria-describedby')?.split(' ')).toContain(alert.id);
+    expect(housingAuthority()).toHaveFocus();
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('(PIN) a typed name equal to the stored one is still never sent', async () => {
+    const user = userEvent.setup();
+    const stored: Contact = { ...TENANT, housingAuthority: 'DeKalb County Housing Authority' };
+    updateContact.mockResolvedValue({ ...stored, firstName: 'TashaX' });
+    render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'HADC');
+    await screen.findByRole('option', { name: /^DeKalb County Housing Authority/ });
+    await user.type(screen.getByLabelText(/First name/i), 'X');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalled());
+    // housingAuthority is a provenance field: an unchanged value never rides the PATCH.
+    expect(updateContact.mock.calls[0]?.[1]).toStrictEqual({ firstName: 'TashaX' });
   });
 });

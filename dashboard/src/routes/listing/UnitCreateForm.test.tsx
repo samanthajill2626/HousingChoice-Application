@@ -309,3 +309,75 @@ describe('UnitCreateForm', () => {
     expect(onCreated).not.toHaveBeenCalled();
   });
 });
+
+// --- Code review R1-ADV-FE-1: text typed in the picker but never picked ------
+// Create sends typed text that names exactly one entry (by name, or by a
+// spelling only that entry carries), as a pick would, and refuses anything
+// else - a property is never created without the authority staff typed.
+describe('UnitCreateForm - text typed in the picker but never picked', () => {
+  const BLOCKED = 'Pick a name from the list, add it as new, or clear the text.';
+  // AHA is a spelling two entries share; DCA belongs to one.
+  const TYPED_LIST: OrgEntry[] = [
+    orgEntry('Atlanta Housing Authority', ['AHA']),
+    orgEntry('Augusta Housing Authority', ['AHA']),
+    orgEntry('Georgia Department of Community Affairs', ['DCA']),
+    orgEntry('Step Up', [], 'agency'),
+  ];
+  const authorities = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authorities' });
+  const create = (): HTMLElement => screen.getByRole('button', { name: /^Create$/ });
+
+  beforeEach(() => {
+    getOrgList.mockResolvedValue({ version: 1, entries: TYPED_LIST });
+  });
+
+  it('a list name typed in full is sent as if it were picked', async () => {
+    const user = userEvent.setup();
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByRole('dialog', { name: 'New property' });
+    await user.type(authorities(), 'Atlanta Housing Authority');
+    await screen.findByRole('option', { name: /^Atlanta Housing Authority/ });
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalled());
+    expect(createUnit.mock.calls[0]?.[0]).toEqual({
+      landlordId: 'contact-landlord-0001',
+      accepted_authorities: ['Atlanta Housing Authority'],
+    });
+  });
+
+  it('a spelling only one entry carries sends that entry (DCA, then Beds, then Create)', async () => {
+    const user = userEvent.setup();
+    createUnit.mockResolvedValue(newUnit());
+    const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByRole('dialog', { name: 'New property' });
+    await user.type(authorities(), 'DCA');
+    await screen.findByRole('option', { name: /^Georgia Department of Community Affairs/ });
+    await fill(user, 'Beds', '2');
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalled());
+    expect(createUnit.mock.calls[0]?.[0]).toEqual({
+      landlordId: 'contact-landlord-0001',
+      beds: 2,
+      accepted_authorities: ['Georgia Department of Community Affairs'],
+    });
+    await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  });
+
+  it.each([
+    ['a spelling two entries share', 'AHA'],
+    ['unknown text', 'Metro Nowhere'],
+  ])('%s stops Create: nothing is sent, the picker says why and takes focus', async (_case, text) => {
+    const user = userEvent.setup();
+    const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByRole('dialog', { name: 'New property' });
+    await user.type(authorities(), text);
+    await screen.findAllByRole('option');
+    await user.click(create());
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(BLOCKED);
+    expect(authorities().getAttribute('aria-describedby')?.split(' ')).toContain(alert.id);
+    expect(authorities()).toHaveFocus();
+    expect(createUnit).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+  });
+});

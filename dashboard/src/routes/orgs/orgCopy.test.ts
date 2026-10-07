@@ -2,7 +2,7 @@
 // 2026-10-06 D3-D13): the code -> copy map and its parity list, the body-aware
 // refusal copy, the normalization mirror, and the rewrite-status helpers.
 import { describe, expect, it } from 'vitest';
-import { ApiError, type OrgRewriteState } from '../../api/index.js';
+import { ApiError, type OrgEntry, type OrgKind, type OrgRewriteState } from '../../api/index.js';
 import {
   ORG_GENERIC_ERROR,
   canRunAgain,
@@ -18,6 +18,7 @@ import {
   orgNotOnListBody,
   resolutionText,
   rewriteStatusText,
+  settleTypedOrgText,
   spellingProblemCopy,
   usageBreakdown,
   usageText,
@@ -259,5 +260,60 @@ describe('Settings counts and resolutions', () => {
   it('words a picker load failure per kind', () => {
     expect(orgListLoadError(['housing_authority'])).toBe("Couldn't load housing authorities");
     expect(orgListLoadError(['agency'])).toBe("Couldn't load agencies");
+  });
+});
+
+describe('settleTypedOrgText - text typed in a form picker but never picked (code review R1-ADV-FE-1)', () => {
+  const listed = (kind: OrgKind, name: string, spellings: string[] = []): OrgEntry => ({
+    orgId: `id-${name}`,
+    kind,
+    name,
+    spellings,
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  });
+  // AHA is a spelling two entries share; DCA and "Atlanta Housing" belong to one.
+  const LIST = [
+    listed('housing_authority', 'Atlanta Housing Authority', ['AHA', 'Atlanta Housing']),
+    listed('housing_authority', 'Augusta Housing Authority', ['AHA']),
+    listed('housing_authority', 'Georgia Department of Community Affairs', ['DCA']),
+    listed('agency', 'Step Up'),
+  ];
+  const HA: OrgKind[] = ['housing_authority'];
+
+  it('blank text is nothing typed', () => {
+    expect(settleTypedOrgText(LIST, HA, '')).toEqual({ status: 'empty' });
+    expect(settleTypedOrgText(LIST, HA, '   ')).toEqual({ status: 'empty' });
+  });
+
+  it('a name, written any way the server folds it, commits that exact name', () => {
+    expect(settleTypedOrgText(LIST, HA, 'Atlanta Housing Authority')).toEqual({
+      status: 'resolved',
+      name: 'Atlanta Housing Authority',
+    });
+    expect(settleTypedOrgText(LIST, HA, '  atlanta housing-authority ')).toEqual({
+      status: 'resolved',
+      name: 'Atlanta Housing Authority',
+    });
+  });
+
+  it('a spelling only one entry carries commits that entry', () => {
+    expect(settleTypedOrgText(LIST, HA, 'dca')).toEqual({
+      status: 'resolved',
+      name: 'Georgia Department of Community Affairs',
+    });
+    expect(settleTypedOrgText(LIST, HA, 'Atlanta Housing')).toEqual({
+      status: 'resolved',
+      name: 'Atlanta Housing Authority',
+    });
+    expect(settleTypedOrgText(LIST, ['agency'], 'step up')).toEqual({ status: 'resolved', name: 'Step Up' });
+  });
+
+  it('a shared spelling, part of a name, the other kind and unknown text are refused', () => {
+    for (const text of ['AHA', 'Atl', 'Step Up', 'Metro Housing Board', '()']) {
+      expect(settleTypedOrgText(LIST, HA, text), text).toEqual({ status: 'blocked' });
+    }
   });
 });

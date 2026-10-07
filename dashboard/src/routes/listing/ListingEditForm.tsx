@@ -3,7 +3,7 @@
 // PATCHed; the server SET-merges, so an untouched field is never blanked). On
 // success the parent applies the returned unit in place (no refetch). The field
 // set + types match the backend allowlist (app/src/lib/unitFields.ts).
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   updateUnit,
   TOUR_TYPE_LABELS,
@@ -14,12 +14,14 @@ import {
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
-import { OrgPicker } from '../orgs/OrgPicker.js';
+import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
 import {
   HOUSING_AUTHORITY_KINDS,
+  ORG_TYPED_BLOCKED,
   notOnListMessage,
   orgListLoadError,
   orgNotOnListBody,
+  settleTypedOrgText,
 } from '../orgs/orgCopy.js';
 import { useOrgList } from '../orgs/useOrgList.js';
 import { authoritiesOf } from './listingFormat.js';
@@ -53,6 +55,25 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
   function addAuthority(name: string): void {
     setAuthorities((prev) => (prev.includes(name) ? prev : [...prev, name]));
     setAuthoritiesError(null);
+  }
+  // Text typed in the picker but never picked (code review R1-ADV-FE-1): Save
+  // adds it when it names exactly one entry, as a pick would, and otherwise
+  // refuses to save and says so under the picker - it is never dropped silently.
+  const [typedAuthority, setTypedAuthority] = useState('');
+  const [typedRefused, setTypedRefused] = useState(false);
+  const authoritiesPicker = useRef<OrgPickerHandle>(null);
+  /** The authorities to save with the typed text settled, or null when Save is refused. */
+  function settleTypedAuthority(): string[] | null {
+    const typed = settleTypedOrgText(orgList.entries, HOUSING_AUTHORITY_KINDS, typedAuthority);
+    setTypedRefused(typed.status === 'blocked');
+    if (typed.status === 'blocked') {
+      authoritiesPicker.current?.focus();
+      return null;
+    }
+    if (typed.status === 'empty') return authorities;
+    addAuthority(typed.name);
+    authoritiesPicker.current?.clearText();
+    return authorities.includes(typed.name) ? authorities : [...authorities, typed.name];
   }
   const [beds, setBeds] = useState(numStr(unit.beds));
   const [baths, setBaths] = useState(numStr(unit.baths));
@@ -125,7 +146,8 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     return true;
   }
 
-  function buildPatch(): Record<string, unknown> | null {
+  /** `authoritiesNow`: the picker's list as Save settled it (settleTypedAuthority). */
+  function buildPatch(authoritiesNow: string[]): Record<string, unknown> | null {
     const patch: Record<string, unknown> = {};
     if (utilities !== str(unit.utilities)) patch['utilities'] = utilities;
     if (videoUrl !== str(unit.video_url)) patch['video_url'] = videoUrl;
@@ -174,8 +196,8 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     // unchanged list is never refused, spec 2026-10-06 D5); the retired
     // `jurisdiction` / `accepted_programs` keys are never written again (both
     // are server-side tombstones - app/src/lib/unitFields.ts).
-    if (JSON.stringify(authorities) !== JSON.stringify(authoritiesOf(unit))) {
-      patch['accepted_authorities'] = authorities;
+    if (JSON.stringify(authoritiesNow) !== JSON.stringify(authoritiesOf(unit))) {
+      patch['accepted_authorities'] = authoritiesNow;
     }
 
     // Address: if ANY part changed, send the whole object (the server keeps only
@@ -197,7 +219,9 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     e.preventDefault();
     if (saving) return;
     setError(null);
-    const patch = buildPatch();
+    const authoritiesNow = settleTypedAuthority();
+    if (authoritiesNow === null) return; // refused: the picker says why
+    const patch = buildPatch(authoritiesNow);
     if (patch === null) return; // a validation error was set
     if (Object.keys(patch).length === 0) {
       onClose(); // nothing changed
@@ -243,6 +267,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
         </p>
         <div className={styles.row}>
           <OrgPicker
+            ref={authoritiesPicker}
             multiple
             label="Housing authorities"
             kinds={HOUSING_AUTHORITY_KINDS}
@@ -254,8 +279,16 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
               setAuthorities(next);
               setAuthoritiesError(null);
             }}
+            onPendingTextChange={(text) => {
+              setTypedAuthority(text);
+              setTypedRefused(false);
+            }}
             onRequestAdd={setAddingAuthority}
-            error={authoritiesError ?? (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)}
+            error={
+              typedRefused
+                ? ORG_TYPED_BLOCKED
+                : (authoritiesError ?? (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null))
+            }
             className={styles.field}
             labelClassName={styles.label}
           />

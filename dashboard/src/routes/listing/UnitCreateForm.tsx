@@ -9,7 +9,7 @@
 // the initial status ('setup') — status is NOT a writable field here. Navigation
 // lives in the entry points: on a 201 the form calls onCreated and the caller
 // closes + navigates (parity with ContactCreateForm / PlacementCreateForm).
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   createUnit,
   getContact,
@@ -24,12 +24,14 @@ import { Modal } from '../contact/Modal.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { contactDisplayName } from '../contact/format.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
-import { OrgPicker } from '../orgs/OrgPicker.js';
+import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
 import {
   HOUSING_AUTHORITY_KINDS,
+  ORG_TYPED_BLOCKED,
   notOnListMessage,
   orgListLoadError,
   orgNotOnListBody,
+  settleTypedOrgText,
 } from '../orgs/orgCopy.js';
 import { useOrgList } from '../orgs/useOrgList.js';
 import styles from './ListingEditForm.module.css';
@@ -71,6 +73,26 @@ export function UnitCreateForm({
   function addAuthority(name: string): void {
     setAuthorities((prev) => (prev.includes(name) ? prev : [...prev, name]));
     setAuthoritiesError(null);
+  }
+  // Text typed in the picker but never picked (code review R1-ADV-FE-1): Create
+  // sends it when it names exactly one entry, as a pick would, and otherwise
+  // refuses to create and says so under the picker - a property is never
+  // created without the authority staff typed.
+  const [typedAuthority, setTypedAuthority] = useState('');
+  const [typedRefused, setTypedRefused] = useState(false);
+  const authoritiesPicker = useRef<OrgPickerHandle>(null);
+  /** The authorities to send with the typed text settled, or null when Create is refused. */
+  function settleTypedAuthority(): string[] | null {
+    const typed = settleTypedOrgText(orgList.entries, HOUSING_AUTHORITY_KINDS, typedAuthority);
+    setTypedRefused(typed.status === 'blocked');
+    if (typed.status === 'blocked') {
+      authoritiesPicker.current?.focus();
+      return null;
+    }
+    if (typed.status === 'empty') return authorities;
+    addAuthority(typed.name);
+    authoritiesPicker.current?.clearText();
+    return authorities.includes(typed.name) ? authorities : [...authorities, typed.name];
   }
   const [beds, setBeds] = useState('');
   const [baths, setBaths] = useState('');
@@ -161,8 +183,9 @@ export function UnitCreateForm({
   }
 
   /** Build the create body from the non-empty fields, or null on a validation
-   *  failure (an inline error was set). landlordId is guaranteed by canCreate. */
-  function buildBody(): Record<string, unknown> | null {
+   *  failure (an inline error was set). landlordId is guaranteed by canCreate.
+   *  `authoritiesNow`: the picker's list as Create settled it. */
+  function buildBody(authoritiesNow: string[]): Record<string, unknown> | null {
     const body: Record<string, unknown> = { landlordId: resolvedLandlordId };
 
     const addStr = (key: string, value: string): void => {
@@ -195,7 +218,7 @@ export function UnitCreateForm({
     // non-empty. The retired `jurisdiction` / `accepted_programs` keys are
     // never written again (both are server-side tombstones -
     // app/src/lib/unitFields.ts).
-    if (authorities.length > 0) body['accepted_authorities'] = authorities;
+    if (authoritiesNow.length > 0) body['accepted_authorities'] = authoritiesNow;
 
     // Address — send the object only when at least one part is filled. The server
     // keeps only the non-empty parts.
@@ -210,7 +233,9 @@ export function UnitCreateForm({
     e.preventDefault();
     if (!canCreate) return;
     setError(null);
-    const body = buildBody();
+    const authoritiesNow = settleTypedAuthority();
+    if (authoritiesNow === null) return; // refused: the picker says why
+    const body = buildBody(authoritiesNow);
     if (body === null) return; // a validation error was set
     setBusy(true);
     try {
@@ -324,6 +349,7 @@ export function UnitCreateForm({
 
         <div className={styles.row}>
           <OrgPicker
+            ref={authoritiesPicker}
             multiple
             label="Housing authorities"
             kinds={HOUSING_AUTHORITY_KINDS}
@@ -335,8 +361,16 @@ export function UnitCreateForm({
               setAuthorities(next);
               setAuthoritiesError(null);
             }}
+            onPendingTextChange={(text) => {
+              setTypedAuthority(text);
+              setTypedRefused(false);
+            }}
             onRequestAdd={setAddingAuthority}
-            error={authoritiesError ?? (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)}
+            error={
+              typedRefused
+                ? ORG_TYPED_BLOCKED
+                : (authoritiesError ?? (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null))
+            }
             className={styles.field}
             labelClassName={styles.label}
           />

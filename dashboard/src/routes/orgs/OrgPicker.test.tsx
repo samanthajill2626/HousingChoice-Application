@@ -3,13 +3,13 @@
 // the ONLY commit, a stored off-list value is a removable "Not on the list"
 // chip, Enter acts only on a highlighted option, Escape keeps a surrounding
 // Modal open, the list is portaled, and the optional add step.
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useState } from 'react';
+import { createRef, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { OrgEntry } from '../../api/index.js';
 import { Modal } from '../contact/Modal.js';
-import { OrgPicker } from './OrgPicker.js';
+import { OrgPicker, type OrgPickerHandle } from './OrgPicker.js';
 
 function entry(kind: OrgEntry['kind'], name: string, spellings: string[] = []): OrgEntry {
   return {
@@ -234,5 +234,96 @@ describe('OrgPicker - the add step', () => {
     render(<Single />);
     fireEvent.change(combobox(), { target: { value: 'Nowhere Org' } });
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  });
+});
+
+describe('OrgPicker - text typed but never picked (code review R1-ADV-FE-1)', () => {
+  const NOTE = 'Not saved - pick a name from the list, or clear the text.';
+
+  /** A single picker with a focusable neighbour to move focus to. */
+  function Typed({
+    onPendingTextChange,
+    pickerRef,
+  }: {
+    onPendingTextChange?: (text: string) => void;
+    pickerRef?: React.Ref<OrgPickerHandle>;
+  }): React.JSX.Element {
+    const [value, setValue] = useState('');
+    return (
+      <>
+        <OrgPicker
+          label="Housing authority"
+          kinds={['housing_authority']}
+          entries={ENTRIES}
+          value={value}
+          onChange={setValue}
+          {...(onPendingTextChange !== undefined && { onPendingTextChange })}
+          {...(pickerRef !== undefined && { ref: pickerRef })}
+        />
+        <button type="button">Elsewhere</button>
+      </>
+    );
+  }
+
+  it('reports the typed text to the host, and an empty text after a pick, a clear and an emptied input', async () => {
+    const user = userEvent.setup();
+    const onPendingTextChange = vi.fn();
+    render(<Typed onPendingTextChange={onPendingTextChange} />);
+    await user.type(combobox(), 'Atl');
+    expect(onPendingTextChange).toHaveBeenLastCalledWith('Atl');
+    await user.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
+    expect(onPendingTextChange).toHaveBeenLastCalledWith('');
+    await user.type(combobox(), 'DeK');
+    expect(onPendingTextChange).toHaveBeenLastCalledWith('DeK');
+    // A clear (the chip's remove button) takes the typed text with it.
+    await user.click(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' }));
+    expect(onPendingTextChange).toHaveBeenLastCalledWith('');
+    expect(combobox()).toHaveValue('');
+    await user.type(combobox(), 'x');
+    expect(onPendingTextChange).toHaveBeenLastCalledWith('x');
+    await user.clear(combobox());
+    expect(onPendingTextChange).toHaveBeenLastCalledWith('');
+  });
+
+  it('a field left holding typed text shows a note under it that describes it', async () => {
+    const user = userEvent.setup();
+    render(<Typed />);
+    await user.type(combobox(), 'Metro');
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument(); // never while typing
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Elsewhere' })).toHaveFocus();
+    expect(screen.getByText(NOTE)).toBeInTheDocument();
+    expect(combobox()).toHaveAccessibleDescription(NOTE);
+    // Back in the field the note goes; an emptied field never shows it.
+    await user.click(combobox());
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
+    await user.clear(combobox());
+    await user.tab();
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
+  });
+
+  it('a host form can focus the field and clear the text it committed', async () => {
+    const user = userEvent.setup();
+    const onPendingTextChange = vi.fn();
+    const pickerRef = createRef<OrgPickerHandle>();
+    render(<Typed onPendingTextChange={onPendingTextChange} pickerRef={pickerRef} />);
+    await user.type(combobox(), 'DCA');
+    await user.tab();
+    act(() => pickerRef.current?.focus());
+    expect(combobox()).toHaveFocus();
+    act(() => pickerRef.current?.clearText());
+    expect(combobox()).toHaveValue('');
+    expect(onPendingTextChange).toHaveBeenLastCalledWith('');
+  });
+
+  it('focusing the field again re-opens the list for the text it holds', async () => {
+    const user = userEvent.setup();
+    render(<Typed />);
+    await user.type(combobox(), 'aha');
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Elsewhere' }));
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    await user.click(combobox());
+    expect(optionNames()).toEqual(['Atlanta Housing Authority (AHA)', 'Augusta Housing Authority (AHA)']);
   });
 });

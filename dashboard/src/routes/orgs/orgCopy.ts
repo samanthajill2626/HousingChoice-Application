@@ -13,6 +13,7 @@ import {
   type HolderRecord,
   type NotOnListResolution,
   type OrgCheckResult,
+  type OrgEntry,
   type OrgKind,
   type OrgNotOnListBody,
   type OrgRecordField,
@@ -92,6 +93,42 @@ export function isOnList(
 /** The inline message when a picker's list failed to load (R2 ruling 6). */
 export function orgListLoadError(kinds: readonly OrgKind[]): string {
   return kinds.includes('housing_authority') ? "Couldn't load housing authorities" : "Couldn't load agencies";
+}
+
+// --- Text typed in a picker but never picked (code review R1-ADV-FE-1) -------
+
+/** Under a picker that lost focus while holding typed text that is not a pick. */
+export const ORG_TYPED_NOT_SAVED = 'Not saved - pick a name from the list, or clear the text.';
+
+/** Under a form picker whose typed text stopped a Save (role="alert"). */
+export const ORG_TYPED_BLOCKED = 'Pick a name from the list, add it as new, or clear the text.';
+
+/** What a form's Save does with one picker's typed text. */
+export type TypedOrgText = { status: 'empty' } | { status: 'resolved'; name: string } | { status: 'blocked' };
+
+/**
+ * A form never drops text typed in a picker but never picked (R1-ADV-FE-1). On
+ * Save, text that normalizes equal to exactly one entry NAME of `kinds` - or,
+ * failing that, to a spelling exactly one such entry carries - is committed as
+ * that entry's exact name, as a pick would be ('resolved'). Anything else - a
+ * spelling two entries share ("AHA"), part of a name, the other kind's name,
+ * unknown text - stops the save ('blocked'). Never fuzzy: close names belong
+ * to "Is this really new?". Blank text is nothing typed ('empty'). The blast
+ * composer never uses this: only a pick or a clear changes its filter (D7).
+ */
+export function settleTypedOrgText(
+  entries: readonly OrgEntry[],
+  kinds: readonly OrgKind[],
+  text: string,
+): TypedOrgText {
+  if (text.trim() === '') return { status: 'empty' };
+  const q = normalizeOrgText(text);
+  const ofKinds = entries.filter((e) => kinds.includes(e.kind));
+  const byName = ofKinds.filter((e) => normalizeOrgText(e.name) === q);
+  const matches =
+    byName.length > 0 ? byName : ofKinds.filter((e) => e.spellings.some((s) => normalizeOrgText(s) === q));
+  const [only] = matches;
+  return matches.length === 1 && only !== undefined ? { status: 'resolved', name: only.name } : { status: 'blocked' };
 }
 
 function names(refs: readonly { name: string }[]): string {

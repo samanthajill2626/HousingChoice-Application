@@ -12,6 +12,15 @@
 // COMMIT RULE (spec D7; R2 finding F2): the typed text is LOCAL state.
 // `onChange` fires only on a pick or a clear (a chip's remove button), never
 // per keystroke - the blast composer recreates its draft on every filter change.
+// TYPED TEXT IS NEVER DROPPED SILENTLY (code review R1-ADV-FE-1): the picker
+// reports the text it holds through `onPendingTextChange` ('' after a pick, a
+// clear - which takes the typed text with it - or an emptied input), and a field
+// left holding text that is not a pick says "Not saved - ..." under it. A FORM's
+// Save commits that text when it names exactly one entry (orgCopy
+// settleTypedOrgText) and otherwise refuses to save; it clears the committed
+// text or focuses the refused field through the `ref` handle. The composer
+// keeps the commit rule above and never commits typed text. Focusing the field
+// again re-opens its list for the text it holds.
 // Matching covers names AND spellings (normalized like the server), so typing
 // AHA lists both Atlanta and Augusta Housing Authority - a shared spelling
 // shows every entry carrying it - and staff pick. An option's accessible name
@@ -23,15 +32,23 @@
 // kinds matches, the one option is "Add <text> as a new housing authority" (or
 // agency). The HOST renders "Is this really new?" (NewOrgDialog) outside its
 // <form>; this component never does.
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { OrgEntry, OrgKind } from '../../api/index.js';
-import { KIND_NOUN, isOnList, normalizeOrgText } from './orgCopy.js';
+import { KIND_NOUN, ORG_TYPED_NOT_SAVED, isOnList, normalizeOrgText } from './orgCopy.js';
 import styles from './OrgPicker.module.css';
 
 const MAX_SHOWN = 10;
 /** U+00D7 MULTIPLICATION SIGN, built at runtime so the source stays ASCII. */
 const REMOVE_GLYPH = String.fromCharCode(0xd7);
+
+/** What a host form's Save guard asks of the picker (code review R1-ADV-FE-1). */
+export interface OrgPickerHandle {
+  /** Focus the field - Save refused the text it holds. */
+  focus: () => void;
+  /** Empty the field - Save committed the text it held, as a pick would. */
+  clearText: () => void;
+}
 
 interface OrgPickerBaseProps {
   /** The visible label - also the combobox's accessible name. Keep each
@@ -54,6 +71,12 @@ interface OrgPickerBaseProps {
   /** Root and label classes, so each host keeps its own field layout. */
   className?: string;
   labelClassName?: string;
+  /** The typed text that is not a pick yet, on every change - and '' after a
+   *  pick, a clear or an emptied input. A form's Save reads it (R1-ADV-FE-1);
+   *  the blast composer leaves it out. */
+  onPendingTextChange?: (text: string) => void;
+  /** The Save guard's handle (React 19 passes `ref` as a plain prop). */
+  ref?: React.Ref<OrgPickerHandle>;
 }
 
 export interface OrgPickerSingleProps extends OrgPickerBaseProps {
@@ -125,6 +148,8 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
     placeholder,
     className,
     labelClassName,
+    onPendingTextChange,
+    ref,
   } = props;
   const chosen: readonly string[] =
     props.multiple === true ? props.value : props.value === '' ? [] : [props.value];
@@ -132,6 +157,7 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(-1);
   const [dismissed, setDismissed] = useState(false);
+  const [focused, setFocused] = useState(false);
   const [pos, setPos] = useState<ListPos | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
@@ -143,9 +169,28 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
   const inputId = `${uid}-input`;
   const listboxId = `${uid}-listbox`;
   const hintId = `${uid}-hint`;
+  const noteId = `${uid}-note`;
   const errorId = `${uid}-error`;
 
+  /** Every change to the typed text goes through here, so the host always
+   *  knows what the field holds (R1-ADV-FE-1). */
+  function setText(next: string): void {
+    setQuery(next);
+    onPendingTextChange?.(next);
+  }
+
+  useImperativeHandle(ref, () => ({
+    focus: () => inputRef.current?.focus(),
+    clearText: () => {
+      setText('');
+      setActiveIndex(-1);
+    },
+  }));
+
   const trimmed = query.trim();
+  // Typed text the field holds after focus left it: a Save would not keep it
+  // as typed (R1-ADV-FE-1), so say so under the field.
+  const showNote = !focused && trimmed !== '';
   // "When nothing matches" (spec D6) is judged against EVERY entry of the
   // kinds - chosen ones included - so the add step never offers a name a pick
   // can reach. A multi-picker never offers a member it already holds.
@@ -220,11 +265,13 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
   const activeOptionId =
     isListShown && activeIndex >= 0 && activeIndex < options.length ? `${uid}-option-${activeIndex}` : undefined;
   const describedBy =
-    [hint !== undefined ? hintId : '', error ? errorId : ''].filter((id) => id !== '').join(' ') || undefined;
+    [hint !== undefined ? hintId : '', showNote ? noteId : '', error ? errorId : '']
+      .filter((id) => id !== '')
+      .join(' ') || undefined;
 
   function choose(option: Option): void {
     setActiveIndex(-1);
-    setQuery('');
+    setText('');
     setDismissed(false);
     if (option.type === 'add') {
       onRequestAdd?.(option.text);
@@ -241,6 +288,9 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
   function remove(value: string): void {
     if (props.multiple === true) props.onChange(props.value.filter((v) => v !== value));
     else props.onChange('');
+    // A clear commits like a pick does: any half-typed text goes with it.
+    setText('');
+    setActiveIndex(-1);
     inputRef.current?.focus();
   }
 
@@ -310,10 +360,16 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
           placeholder={placeholder ?? 'Type a name or abbreviation'}
           autoComplete="off"
           onChange={(e) => {
-            setQuery(e.target.value);
+            setText(e.target.value);
             setActiveIndex(-1);
             setDismissed(false);
           }}
+          onFocus={() => {
+            setFocused(true);
+            // Back in the field, its list follows the text it holds again.
+            setDismissed(false);
+          }}
+          onBlur={() => setFocused(false)}
           onKeyDown={handleKeyDown}
         />
       </div>
@@ -321,6 +377,11 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
         <span id={hintId} className={styles.hint}>
           {hint}
         </span>
+      ) : null}
+      {showNote ? (
+        <p id={noteId} className={styles.pendingNote}>
+          {ORG_TYPED_NOT_SAVED}
+        </p>
       ) : null}
       {error ? (
         <p id={errorId} role="alert" className={styles.error}>

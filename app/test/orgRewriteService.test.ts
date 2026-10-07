@@ -6,11 +6,15 @@ import { describe, expect, it } from 'vitest';
 import { JOB_ENVELOPE_VERSION, type JobEnvelope } from '../src/jobs/types.js';
 import type { OrgEntry } from '../src/lib/orgNames.js';
 import type { OrgRewriteState } from '../src/repos/orgListRepo.js';
-import { createOrgRewriteService } from '../src/services/orgRewrite.js';
+import { createOrgRewriteService, type OrgRewriteService } from '../src/services/orgRewrite.js';
 import {
   ATLANTA,
+  AUGUSTA,
   DCA,
   ORG_FIXTURE,
+  ORG_T0,
+  STEP_UP,
+  VASH,
   orgEntry,
   orgListItem,
   orgRef,
@@ -277,6 +281,319 @@ describe('OrgRewriteService.merge (spec D11)', () => {
     await expect(running.svc.merge('org-aug', 'org-atl', 'a')).rejects.toMatchObject({
       status: 409,
       body: { error: 'org_rewrite_running' },
+    });
+  });
+});
+
+describe('OrgRewriteService.resolveNotOnList (spec D10)', () => {
+  type ResolveInput = Parameters<OrgRewriteService['resolveNotOnList']>[0];
+
+  it('Use with "Remember this spelling" settles the value and remembers it - in one write', async () => {
+    const { repo, svc, enqueued } = await rewriteService();
+    const out = await svc.resolveNotOnList({
+      field: 'housingAuthority',
+      value: 'Atlanta Hsg Auth',
+      action: 'use',
+      name: ATLANTA.name,
+      rememberSpelling: true,
+      actor: 'usr_admin',
+    });
+    expect(out).toEqual({
+      lastRewrite: {
+        jobId: 'id-1',
+        action: 'use',
+        fromTexts: ['Atlanta Hsg Auth'],
+        field: 'housingAuthority',
+        fields: ['housingAuthority'],
+        toName: ATLANTA.name,
+        status: 'running',
+        heartbeatAt: T1,
+        startedAt: T1,
+        startedBy: 'usr_admin',
+      },
+      skippedSpellings: [],
+    });
+    const stored = await repo.peek();
+    expect(stored?.version).toBe(2);
+    expect(stored?.entries[0]?.spellings).toEqual(['AHA', 'Atlanta Housing', 'Atlanta (AHA)', 'Atlanta Hsg Auth']);
+    expect(enqueued).toEqual([{ jobName: 'org.rewrite', payload: { jobId: 'id-1' } }]);
+  });
+
+  it('a spelling the D12 rules refuse is skipped with its reason; the Use still runs', async () => {
+    const { repo, svc } = await rewriteService();
+    const out = await svc.resolveNotOnList({
+      field: 'housingAuthority',
+      value: 'DCA HUD-VASH',
+      action: 'use',
+      name: DCA.name,
+      rememberSpelling: true,
+      actor: 'usr_admin',
+    });
+    expect(out.skippedSpellings).toEqual([{ spelling: 'DCA HUD-VASH', problem: 'compound' }]);
+    expect(out.lastRewrite).toMatchObject({ action: 'use', toName: DCA.name, status: 'running' });
+    expect((await repo.peek())?.entries.find((e) => e.orgId === 'org-dca')?.spellings).toEqual(['DCA', 'Georgia DCA']);
+  });
+
+  it('Add as new creates the entry - a corrected name keeps the value as a spelling - then Uses it', async () => {
+    const { repo, svc } = await rewriteService();
+    const out = await svc.resolveNotOnList({
+      field: 'housingAuthority',
+      value: 'Fulton Cnty HA',
+      action: 'add',
+      name: 'Fulton County Housing Authority',
+      rememberSpelling: true,
+      actor: 'usr_admin',
+    });
+    // The new entry's id is minted first (id-1), the rewrite id second (id-2).
+    expect(out.lastRewrite).toMatchObject({
+      jobId: 'id-2',
+      action: 'use',
+      fromTexts: ['Fulton Cnty HA'],
+      field: 'housingAuthority',
+      toName: 'Fulton County Housing Authority',
+    });
+    expect((await repo.peek())?.entries.at(-1)).toEqual({
+      orgId: 'id-1',
+      kind: 'housing_authority',
+      name: 'Fulton County Housing Authority',
+      spellings: ['Fulton Cnty HA'],
+      createdAt: T1,
+      createdBy: 'usr_admin',
+      updatedAt: T1,
+      updatedBy: 'usr_admin',
+    });
+  });
+
+  it('Add as new without a name adds the value itself, of the field kind; a compound value cannot be added', async () => {
+    const plain = await rewriteService();
+    const out = await plain.svc.resolveNotOnList({ field: 'agency', value: 'Mercy Care', action: 'add', actor: 'usr_admin' });
+    expect(out.lastRewrite).toMatchObject({ action: 'use', field: 'agency', toName: 'Mercy Care' });
+    expect((await plain.repo.peek())?.entries.at(-1)).toMatchObject({ kind: 'agency', name: 'Mercy Care', spellings: [] });
+    const compound = await rewriteService();
+    await expect(
+      compound.svc.resolveNotOnList({ field: 'housingAuthority', value: 'DCA HUD-VASH', action: 'add', actor: 'u' }),
+    ).rejects.toMatchObject({ status: 409, body: { error: 'org_name_compound' } });
+  });
+
+  it('Move to Agency, Move to Housing authority, Split and Clear carry their definitions', async () => {
+    const a = await rewriteService();
+    expect(
+      (await a.svc.resolveNotOnList({ field: 'housingAuthority', value: 'HUD VASH', action: 'move_to_agency', name: VASH.name, actor: 'u' }))
+        .lastRewrite,
+    ).toMatchObject({ action: 'move_to_agency', field: 'housingAuthority', fromTexts: ['HUD VASH'], toName: VASH.name });
+    const b = await rewriteService();
+    expect(
+      (await b.svc.resolveNotOnList({ field: 'agency', value: 'DCA', action: 'move_to_housing_authority', name: DCA.name, actor: 'u' }))
+        .lastRewrite,
+    ).toMatchObject({ action: 'move_to_housing_authority', field: 'agency', fromTexts: ['DCA'], toName: DCA.name });
+    const c = await rewriteService();
+    expect(
+      (
+        await c.svc.resolveNotOnList({
+          field: 'housingAuthority',
+          value: 'DCA HUD-VASH',
+          action: 'split',
+          name: DCA.name,
+          agencyName: VASH.name,
+          actor: 'u',
+        })
+      ).lastRewrite,
+    ).toMatchObject({ action: 'split', field: 'housingAuthority', toName: DCA.name, agencyName: VASH.name });
+    const d = await rewriteService();
+    const cleared = (await d.svc.resolveNotOnList({ field: 'accepted_authorities', value: 'Junk', action: 'clear', actor: 'u' }))
+      .lastRewrite;
+    expect(cleared).toMatchObject({ action: 'clear', field: 'accepted_authorities', fromTexts: ['Junk'] });
+    expect(cleared).not.toHaveProperty('toName');
+  });
+
+  it('refuses (400) a blank or on-list value, the wrong field and the wrong kind; a name variant (409) unless used as its own entry', async () => {
+    const { repo, svc } = await rewriteService();
+    const resolve = (input: Omit<ResolveInput, 'actor'>) => svc.resolveNotOnList({ ...input, actor: 'u' });
+    const refused: Array<Omit<ResolveInput, 'actor'>> = [
+      { field: 'housingAuthority', value: '  ', action: 'clear' },
+      { field: 'housingAuthority', value: ATLANTA.name, action: 'clear' },
+      { field: 'agency', value: 'HUD VASH', action: 'move_to_agency', name: VASH.name },
+      { field: 'accepted_authorities', value: 'DCA HUD-VASH', action: 'split', name: DCA.name, agencyName: VASH.name },
+      { field: 'housingAuthority', value: 'DCA HUD-VASH', action: 'split', name: DCA.name, agencyName: ATLANTA.name },
+      { field: 'housingAuthority', value: 'Junk', action: 'use', name: STEP_UP.name },
+      { field: 'housingAuthority', value: 'Junk', action: 'use' },
+    ];
+    for (const input of refused) {
+      await expect(resolve(input)).rejects.toMatchObject({ status: 400 });
+    }
+    // A NAME VARIANT (spec D10): a pass over it would also rewrite every exact
+    // holder of the name, so only "Use <that entry>" may settle it - 409 with the entry.
+    const variants: Array<Omit<ResolveInput, 'actor'>> = [
+      { field: 'housingAuthority', value: 'atlanta housing authority', action: 'clear' },
+      { field: 'housingAuthority', value: 'atlanta housing authority', action: 'use', name: AUGUSTA.name },
+      { field: 'accepted_authorities', value: 'ATLANTA HOUSING AUTHORITY', action: 'add', name: 'Atlanta Housing Two' },
+    ];
+    for (const input of variants) {
+      await expect(resolve(input)).rejects.toMatchObject({
+        status: 409,
+        body: { error: 'org_value_is_name_variant', entry: orgRef(ATLANTA) },
+      });
+    }
+    expect((await repo.peek())?.version).toBe(1);
+    // A name variant settled as its OWN entry is safe: the pass leaves the exact holders alone.
+    const own = await resolve({ field: 'housingAuthority', value: 'atlanta housing authority', action: 'use', name: ATLANTA.name });
+    expect(own.lastRewrite.toName).toBe(ATLANTA.name);
+    // A stored name padded with whitespace arrives TRIMMED (trimJsonBody) - as
+    // the exact name. Use <that entry> is allowed (the clear above stays 400).
+    const fresh = await rewriteService();
+    const padded = await fresh.svc.resolveNotOnList({
+      field: 'housingAuthority',
+      value: ATLANTA.name,
+      action: 'use',
+      name: ATLANTA.name,
+      actor: 'u',
+    });
+    expect(padded.lastRewrite.fromTexts).toEqual([ATLANTA.name]);
+    expect(padded.lastRewrite.toName).toBe(ATLANTA.name);
+  });
+
+  it('is refused while another rewrite runs', async () => {
+    const { svc } = await rewriteService({
+      lastRewrite: runningRewrite({ action: 'clear', field: 'agency', fromTexts: ['x'], heartbeatAt: T1 }),
+    });
+    await expect(
+      svc.resolveNotOnList({ field: 'agency', value: 'Steps', action: 'clear', actor: 'u' }),
+    ).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_running' } });
+  });
+});
+
+describe('OrgRewriteService.runAgain (spec D11)', () => {
+  it('restarts a failed or stalled rewrite under a NEW id with the same definition', async () => {
+    const failed: OrgRewriteState = {
+      ...runningRewrite({ jobId: 'job-old', action: 'use', field: 'agency', fromTexts: ['Steps'], toName: STEP_UP.name }),
+      status: 'failed',
+      counts: { agency: 2 },
+      error: 'enqueue_failed',
+      finishedAt: ORG_T0,
+    };
+    const { svc, enqueued } = await rewriteService({ lastRewrite: failed });
+    const out = await svc.runAgain('usr_admin2');
+    expect(out.lastRewrite).toEqual({
+      jobId: 'id-1',
+      action: 'use',
+      field: 'agency',
+      fields: ['agency'],
+      fromTexts: ['Steps'],
+      toName: STEP_UP.name,
+      status: 'running',
+      heartbeatAt: T1,
+      startedAt: T1,
+      startedBy: 'usr_admin2',
+    });
+    expect(enqueued).toEqual([{ jobName: 'org.rewrite', payload: { jobId: 'id-1' } }]);
+    const stalled = await rewriteService({
+      lastRewrite: runningRewrite({ jobId: 'job-old', action: 'clear', field: 'agency', fromTexts: ['x'], heartbeatAt: '2026-10-06T11:45:00.000Z' }),
+    });
+    expect((await stalled.svc.runAgain('a')).lastRewrite).toMatchObject({ jobId: 'id-1', action: 'clear', status: 'running' });
+  });
+
+  it('is refused for a running rewrite, a done one, the cleanup lock (even stale), or none', async () => {
+    const running = await rewriteService({
+      lastRewrite: runningRewrite({ action: 'clear', field: 'agency', fromTexts: ['x'], heartbeatAt: T1 }),
+    });
+    await expect(running.svc.runAgain('a')).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_running' } });
+    const done = await rewriteService({
+      lastRewrite: { ...runningRewrite({ action: 'clear', field: 'agency', fromTexts: ['x'] }), status: 'done' },
+    });
+    await expect(done.svc.runAgain('a')).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_not_rerunnable' } });
+    const cleanup = await rewriteService({
+      lastRewrite: runningRewrite({ action: 'cleanup', fromTexts: [], heartbeatAt: '2026-10-06T11:00:00.000Z' }),
+    });
+    await expect(cleanup.svc.runAgain('a')).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_not_rerunnable' } });
+    const none = await rewriteService();
+    await expect(none.svc.runAgain('a')).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_not_rerunnable' } });
+  });
+
+  it('re-checks its target names first: 409 org_rewrite_target_gone once a name left the list or changed kind', async () => {
+    const failed = (def: OrgRewriteState): OrgRewriteState => ({ ...def, status: 'failed', finishedAt: ORG_T0 });
+    const useStepUp = failed(
+      runningRewrite({ jobId: 'job-old', action: 'use', field: 'agency', fromTexts: ['Steps'], toName: STEP_UP.name }),
+    );
+    const gone = { status: 409, body: { error: 'org_rewrite_target_gone' } };
+    // The agency was deleted after the failure (a failed rewrite holds no lock).
+    const deleted = await rewriteService({
+      entries: ORG_FIXTURE.filter((e) => e.orgId !== STEP_UP.orgId),
+      lastRewrite: useStepUp,
+    });
+    await expect(deleted.svc.runAgain('a')).rejects.toMatchObject(gone);
+    expect(deleted.enqueued).toEqual([]);
+    // It became a housing authority: the agency field must not receive it.
+    const rekinded = await rewriteService({
+      entries: ORG_FIXTURE.map((e) => (e.orgId === STEP_UP.orgId ? { ...e, kind: 'housing_authority' as const } : e)),
+      lastRewrite: useStepUp,
+    });
+    await expect(rekinded.svc.runAgain('a')).rejects.toMatchObject(gone);
+    // A split's agency half is re-checked too.
+    const split = await rewriteService({
+      entries: ORG_FIXTURE.filter((e) => e.orgId !== VASH.orgId),
+      lastRewrite: failed(
+        runningRewrite({
+          jobId: 'job-old',
+          action: 'split',
+          field: 'housingAuthority',
+          fromTexts: ['DCA HUD-VASH'],
+          toName: DCA.name,
+          agencyName: VASH.name,
+        }),
+      ),
+    });
+    await expect(split.svc.runAgain('a')).rejects.toMatchObject(gone);
+    // A rename's target is its stored name, of the kind its fields belong to.
+    const renamed = await rewriteService({
+      lastRewrite: failed(
+        runningRewrite({
+          jobId: 'job-old',
+          action: 'rename',
+          fromTexts: ['Old Name'],
+          fields: ['housingAuthority', 'accepted_authorities'],
+          toName: 'Renamed Again Since',
+        }),
+      ),
+    });
+    await expect(renamed.svc.runAgain('a')).rejects.toMatchObject(gone);
+    // A clear names no target and re-runs as stored.
+    const clear = await rewriteService({
+      lastRewrite: failed(runningRewrite({ jobId: 'job-old', action: 'clear', field: 'agency', fromTexts: ['x'] })),
+    });
+    expect((await clear.svc.runAgain('a')).lastRewrite).toMatchObject({ action: 'clear', fields: ['agency'], status: 'running' });
+  });
+});
+
+describe('OrgRewriteService.acquireForCleanup (spec section 8)', () => {
+  it('takes the lock as action cleanup, enqueues nothing, blocks other rewrites, and lives through heartbeat and finish', async () => {
+    let clock = T1;
+    const { repo, svc, enqueued } = await rewriteService({ now: () => clock });
+    const lock = await svc.acquireForCleanup('cleanup-script');
+    expect(lock).toEqual({
+      jobId: 'id-1',
+      action: 'cleanup',
+      fromTexts: [],
+      fields: ['housingAuthority', 'agency', 'accepted_authorities'],
+      status: 'running',
+      heartbeatAt: T1,
+      startedAt: T1,
+      startedBy: 'cleanup-script',
+    });
+    expect(enqueued).toEqual([]);
+    await expect(svc.rename('org-dca', 'Georgia Community Affairs', 'a')).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_rewrite_running' },
+    });
+    await expect(svc.acquireForCleanup('again')).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_running' } });
+    clock = '2026-10-06T12:05:00.000Z';
+    expect(await svc.heartbeat('id-1')).toBe(true);
+    await svc.finish('id-1', { status: 'done', counts: { housingAuthority: 4 } });
+    expect((await repo.peek())?.lastRewrite).toMatchObject({
+      jobId: 'id-1',
+      action: 'cleanup',
+      status: 'done',
+      counts: { housingAuthority: 4 },
+      finishedAt: '2026-10-06T12:05:00.000Z',
     });
   });
 });

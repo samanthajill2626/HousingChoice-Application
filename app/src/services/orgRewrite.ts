@@ -30,15 +30,19 @@ import { randomUUID } from 'node:crypto';
 import { enqueue } from '../jobs/jobs.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
+  isOnListFor,
+  KINDS_FOR_FIELD,
   normalizeOrgText,
   ORG_SPELLINGS_PER_ENTRY_MAX,
   type OrgEntry,
+  type OrgKind,
   type SpellingProblem,
 } from '../lib/orgNames.js';
 import {
   createOrgListRepo,
   type OrgListItem,
   type OrgListRepo,
+  type OrgRecordField,
   type OrgRewriteState,
 } from '../repos/orgListRepo.js';
 import {
@@ -48,6 +52,7 @@ import {
   nameProblemError,
   OrgHttpError,
   rewriteRunningError,
+  toOrgRef,
 } from './orgNames.js';
 import { recordFieldsForKind, type OrgRecordsService } from './orgRecords.js';
 
@@ -64,16 +69,30 @@ export interface SkippedSpelling { spelling: string; problem: SpellingProblem['p
 /** `lastRewrite.error` when the job could not be queued. */
 export const ORG_REWRITE_ENQUEUE_FAILED = 'enqueue_failed';
 
-/** Plan 3.4 - Tasks 3.9-3.10 add merge, resolveNotOnList, runAgain and acquireForCleanup. */
 export interface OrgRewriteService {
   rename(orgId: string, newName: string, actor: string): Promise<{ entry: OrgEntry; lastRewrite: OrgRewriteState; skippedSpellings: SkippedSpelling[] }>;
   merge(orgId: string, intoOrgId: string, actor: string): Promise<{ lastRewrite: OrgRewriteState }>;
+  resolveNotOnList(input: {
+    field: OrgRecordField;
+    value: string;
+    action: 'use' | 'move_to_agency' | 'move_to_housing_authority' | 'split' | 'add' | 'clear';
+    name?: string;
+    agencyName?: string;
+    rememberSpelling?: boolean;
+    actor: string;
+  }): Promise<{ lastRewrite: OrgRewriteState; skippedSpellings: SkippedSpelling[] }>;
+  /** Re-queues the stored definition under a new id, after re-checking that
+   *  `toName` (and a split's `agencyName`) still name entries of the expected
+   *  kind (else 409 org_rewrite_target_gone). */
+  runAgain(actor: string): Promise<{ lastRewrite: OrgRewriteState }>;
   /** For the job and the cleanup script. true = the lock is still the
    *  caller's (its heartbeat was written); false = it is not (another id holds
    *  it, or it is no longer running) - the caller stops writing records and
    *  does NOT call finish. */
   heartbeat(jobId: string): Promise<boolean>;
   finish(jobId: string, outcome: { status: 'done' | 'failed'; counts?: Record<string, number>; error?: string }): Promise<void>;
+  /** Cleanup script: take the lock as action 'cleanup' (409 when held). */
+  acquireForCleanup(actor: string): Promise<OrgRewriteState>;
 }
 
 /** Plan 3.4b: every dep optional, defaulting to the real implementation. */
@@ -121,6 +140,27 @@ function findEntry(entries: readonly OrgEntry[], orgId: string): OrgEntry {
 
 function replaceEntry(entries: readonly OrgEntry[], entry: OrgEntry): OrgEntry[] {
   return entries.map((e) => (e.orgId === entry.orgId ? entry : e));
+}
+
+/**
+ * The kind of entry `toName` must name for a re-run (spec D11 Run again):
+ * Move to Agency writes an agency; Move to Housing authority and Split write a
+ * housing authority (Split's agency half is checked on its own); rename, merge
+ * and use write the kind of the field(s) they rewrite. Clear names no target.
+ */
+function rewriteTargetKind(def: OrgRewriteState): OrgKind | undefined {
+  switch (def.action) {
+    case 'clear':
+    case 'cleanup':
+      return undefined;
+    case 'move_to_agency':
+      return 'agency';
+    case 'move_to_housing_authority':
+    case 'split':
+      return 'housing_authority';
+    default: // rename, merge, use
+      return (def.field ?? def.fields[0]) === 'agency' ? 'agency' : 'housing_authority';
+  }
 }
 
 export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteService {
@@ -293,7 +333,163 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
       });
     },
 
+    async resolveNotOnList(input) {
+      const { field, value, action, actor } = input;
+      if (value.trim() === '') throw new OrgHttpError(400, { error: 'value must not be blank' });
+      const kinds = KINDS_FOR_FIELD[field];
+      const kind: OrgKind = field === 'agency' ? 'agency' : 'housing_authority';
+      // Minted outside the (retryable) list change, before start() mints the rewrite id.
+      const addedId = action === 'add' ? newId() : undefined;
+      return start(actor, (current) => {
+        let entries: OrgEntry[] = [...current.entries];
+        // `value` arrives TRIMMED (trimJsonBody, app.ts), so a stored name padded
+        // with whitespace reaches here as the exact name. "Use <that entry>"
+        // settles it - the pass rewrites only holders whose stored text differs
+        // from the name - so that one request is not "nothing to settle".
+        if (isOnListFor(entries, value, kinds) && !(action === 'use' && input.name === value)) {
+          throw new OrgHttpError(400, { error: 'the value is on the list for this field; there is nothing to settle' });
+        }
+        // A NAME VARIANT (spec D10): a value that differs from an entry NAME of
+        // the field's kind only in case or punctuation normalizes equal to that
+        // exact name, so a pass over it would also rewrite every exact holder.
+        // Only "Use <that entry>" is safe - the pass leaves exact holders alone.
+        const n = normalizeOrgText(value);
+        const variantOf = entries.find((e) => kinds.includes(e.kind) && normalizeOrgText(e.name) === n);
+        if (variantOf !== undefined && !(action === 'use' && input.name === variantOf.name)) {
+          throw new OrgHttpError(409, { error: 'org_value_is_name_variant', entry: toOrgRef(variantOf) });
+        }
+        const named = (name: string | undefined, wanted: OrgKind, key: 'name' | 'agencyName'): OrgEntry => {
+          const hit = name === undefined ? undefined : entries.find((e) => e.name === name && e.kind === wanted);
+          if (hit === undefined) {
+            throw new OrgHttpError(400, {
+              error: `${key} must be the exact name of ${wanted === 'agency' ? 'an agency' : 'a housing authority'} on the list`,
+            });
+          }
+          return hit;
+        };
+        const skippedSpellings: SkippedSpelling[] = [];
+        // A value action rewrites the one field the row names (spec 5.1 `fields`).
+        const settle = (def: Omit<RewriteDefinition, 'fromTexts' | 'field' | 'fields'>) => ({
+          entries,
+          def: { ...def, fromTexts: [value], field, fields: [field] },
+          result: { skippedSpellings },
+        });
+        switch (action) {
+          case 'clear':
+            return settle({ action: 'clear' });
+          case 'move_to_agency':
+            if (field !== 'housingAuthority') {
+              throw new OrgHttpError(400, { error: 'move_to_agency settles housingAuthority values only' });
+            }
+            return settle({ action, toName: named(input.name, 'agency', 'name').name });
+          case 'move_to_housing_authority':
+            if (field !== 'agency') {
+              throw new OrgHttpError(400, { error: 'move_to_housing_authority settles agency values only' });
+            }
+            return settle({ action, toName: named(input.name, 'housing_authority', 'name').name });
+          case 'split':
+            if (field !== 'housingAuthority') {
+              throw new OrgHttpError(400, { error: 'split settles housingAuthority values on contacts only' });
+            }
+            return settle({
+              action,
+              toName: named(input.name, 'housing_authority', 'name').name,
+              agencyName: named(input.agencyName, 'agency', 'agencyName').name,
+            });
+          case 'use':
+          case 'add': {
+            let target: OrgEntry;
+            if (action === 'add') {
+              const name = input.name !== undefined && input.name.trim() !== '' ? input.name.trim() : value.trim();
+              const problem = checkNewOrgName(entries, name);
+              if (problem !== null) throw nameProblemError(problem);
+              const at = now();
+              target = {
+                orgId: addedId ?? newId(),
+                kind,
+                name,
+                spellings: [],
+                createdAt: at,
+                createdBy: actor,
+                updatedAt: at,
+                updatedBy: actor,
+              };
+              entries = [...entries, target];
+            } else {
+              target = named(input.name, kind, 'name');
+            }
+            // "Remember this spelling" (D10, D12) is an AUTOMATIC addition: a
+            // problem is a skip, never a failure; a spelling the entry already
+            // finds ('duplicate') is no skip at all.
+            if (input.rememberSpelling === true) {
+              const spelling = value.trim();
+              const problem = checkOrgSpelling(entries, target, spelling);
+              if (problem === null) {
+                target = { ...target, spellings: [...target.spellings, spelling], updatedAt: now(), updatedBy: actor };
+                entries = replaceEntry(entries, target);
+              } else if (problem.problem !== 'duplicate') {
+                skippedSpellings.push({ spelling, problem: problem.problem });
+              }
+            }
+            // "Add as new" = create the entry, then Use it (D10).
+            return settle({ action: 'use', toName: target.name });
+          }
+        }
+      });
+    },
+
+    async runAgain(actor) {
+      const jobId = newId();
+      const started = await list.mutate((current) => {
+        const at = now();
+        const last = current.lastRewrite;
+        // The cleanup's lock can never be re-run by a job - re-run the script
+        // instead; a stale one simply stops blocking after 15 minutes (D11).
+        if (last === undefined || last.action === 'cleanup') {
+          throw new OrgHttpError(409, { error: 'org_rewrite_not_rerunnable' });
+        }
+        if (isOrgRewriteRunning(last, Date.parse(at))) throw rewriteRunningError(last);
+        if (last.status === 'done') throw new OrgHttpError(409, { error: 'org_rewrite_not_rerunnable' });
+        // Spec D11: a failed or stalled rewrite holds no lock, so its target may
+        // have been renamed, merged, deleted or re-kinded since. Re-run only
+        // while every name it writes is still an entry of the kind it expects.
+        const targetGone = (name: string | undefined, kind: OrgKind): boolean =>
+          name === undefined || !current.entries.some((e) => e.name === name && e.kind === kind);
+        const toKind = rewriteTargetKind(last);
+        if (
+          (toKind !== undefined && targetGone(last.toName, toKind)) ||
+          (last.action === 'split' && targetGone(last.agencyName, 'agency'))
+        ) {
+          throw new OrgHttpError(409, { error: 'org_rewrite_target_gone' });
+        }
+        // Failed, or running with a stale heartbeat: the SAME definition (its
+        // `fields` included) under a NEW id, so a late delivery of the old run
+        // finds the lock is not its own.
+        const lastRewrite = runningState(jobId, last, actor, at);
+        return { next: { ...current, lastRewrite }, result: { lastRewrite } };
+      });
+      return enqueueOrFail(started);
+    },
+
     heartbeat,
     finish,
+
+    async acquireForCleanup(actor) {
+      const jobId = newId();
+      const lastRewrite = await list.mutate((current) => {
+        const at = now();
+        refuseWhileHeld(current, at);
+        // The cleanup touches all three fields (spec section 8); no job ever runs it.
+        const state = runningState(
+          jobId,
+          { action: 'cleanup', fromTexts: [], fields: ['housingAuthority', 'agency', 'accepted_authorities'] },
+          actor,
+          at,
+        );
+        return { next: { ...current, lastRewrite: state }, result: state };
+      });
+      log.info({ jobId, actor }, 'org rewrite lock taken by the cleanup script');
+      return lastRewrite;
+    },
   };
 }

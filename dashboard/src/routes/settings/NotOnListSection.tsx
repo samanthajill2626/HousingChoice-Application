@@ -110,9 +110,29 @@ function rowKey(row: NotOnListRow): string {
   return JSON.stringify([row.field, row.value]);
 }
 
-function recordsText(row: NotOnListRow): string {
-  const records = `${row.count} ${row.count === 1 ? 'record' : 'records'}`;
-  return row.deletedCount > 0 ? `${records} (+${row.deletedCount} deleted)` : records;
+/** "a", "a or b", "a, b or c". */
+function orList(values: readonly string[]): string {
+  if (values.length <= 1) return values.join('');
+  return `${values.slice(0, -1).join(', ')} or ${values[values.length - 1] ?? ''}`;
+}
+
+/**
+ * The records a settle of `row` reaches, for its confirm: "3 records (+1
+ * deleted)". A rewrite matches NORMALIZED text (spec D11), so settling one
+ * row also rewrites the holders of every other row of the same field whose
+ * value is written the same way ("AHA", "aha", "A.H.A."): those are counted
+ * too, and named - "6 records (+1 deleted), written as AHA, aha or A.H.A."
+ * (code review R1-ADV-FE-9).
+ */
+function recordsText(row: NotOnListRow, rows: readonly NotOnListRow[]): string {
+  const key = normalizeOrgText(row.value);
+  const siblings = rows.filter((r) => r.field === row.field && normalizeOrgText(r.value) === key);
+  const group = siblings.some((r) => r.value === row.value) ? siblings : [row, ...siblings];
+  const count = group.reduce((n, r) => n + r.count, 0);
+  const deleted = group.reduce((n, r) => n + r.deletedCount, 0);
+  const records = `${count} ${count === 1 ? 'record' : 'records'}`;
+  const reach = deleted > 0 ? `${records} (+${deleted} deleted)` : records;
+  return group.length > 1 ? `${reach}, written as ${orList(group.map((r) => r.value))}` : reach;
 }
 
 /** "Show records": every record holding the value, linked to its own page. */
@@ -178,13 +198,16 @@ function HolderList({ field, value }: { field: OrgRecordField; value: string }):
 interface SettleDialogProps {
   settle: Settle;
   entries: readonly OrgEntry[];
+  /** Every "Not on the list" row: the confirm counts the settled row's
+   *  siblings (recordsText). */
+  rows: readonly NotOnListRow[];
   onDone: (result: OrgRewriteStarted) => void;
   onClose: () => void;
 }
 
 /** "Settle <value>": one rewrite of every record holding the value in the
  *  row's field (spec D10, D11). The confirm repeats the action. */
-function SettleDialog({ settle, entries, onDone, onClose }: SettleDialogProps): React.JSX.Element {
+function SettleDialog({ settle, entries, rows, onDone, onClose }: SettleDialogProps): React.JSX.Element {
   const { row } = settle;
   const kind = kindForField(row.field);
   const nameId = useId();
@@ -243,7 +266,7 @@ function SettleDialog({ settle, entries, onDone, onClose }: SettleDialogProps): 
   const rememberOn = rememberApplies && remember && rememberProblem === null;
 
   const field = FIELD_LABEL[row.field];
-  const records = recordsText(row);
+  const records = recordsText(row, rows);
   let confirmLabel: string;
   let sentence: string;
   let body: NotOnListResolveBody | null;
@@ -564,6 +587,7 @@ export function NotOnListSection({
         <SettleDialog
           settle={settling}
           entries={entries}
+          rows={rows ?? []}
           onDone={(result) => {
             setSettling(null);
             onSettled(result);

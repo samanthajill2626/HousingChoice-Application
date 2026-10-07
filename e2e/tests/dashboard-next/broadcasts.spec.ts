@@ -17,7 +17,7 @@ import { expectTodayReady } from '../../support/today.js';
 //     confirm it's gone).
 //
 // Seeded data (app/src/lib/seedData.ts):
-//   - unit-0001 = 1450 Joseph E. Boone Blvd NW (beds 2, atlanta_housing)
+//   - unit-0001 = 1450 Joseph E. Boone Blvd NW (beds 2, Atlanta Housing Authority)
 //   - contact-tenant-0001 = Tasha Nguyen (voucherSize 2) → matches unit-0001's
 //     2-BR audience. We seed a PRIOR sent broadcast for unit-0001 that includes
 //     Tasha so the next preview flags her "already sent" (the byUnit GSI resolves

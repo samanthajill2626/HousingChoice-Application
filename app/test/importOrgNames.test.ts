@@ -221,15 +221,6 @@ describe('D9 unit side: the "Voucher Type" cell against the housing authority li
   });
 });
 
-describe('the importer no longer uses the hand-kept alias map', () => {
-  it('apply.ts does not import lib/housingAuthority.ts (S10 retires it)', () => {
-    const source = readFileSync(join(process.cwd(), 'src', 'lib', 'import', 'apply.ts'), 'utf8');
-    expect(source).not.toContain('housingAuthority.js');
-    expect(source).not.toContain('housingAuthorityFor');
-    expect(source).not.toContain('KNOWN_AUTHORITIES');
-  });
-});
-
 describe('the import:apply CLI reads the org list WITHOUT creating it (spec D9, ruling R4-F5)', () => {
   it('peeks the stage item, falls back to the starting list, and passes the entries to runApply', () => {
     // A thin top-level-await CLI, so the wire assertion is on the source (the

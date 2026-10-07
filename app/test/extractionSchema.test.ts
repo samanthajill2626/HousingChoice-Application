@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   EXTRACTION_SCHEMA,
-  HOUSING_AUTHORITY_VOCAB,
   parseExtractionText,
 } from '../src/services/extraction/schema.js';
 import {
@@ -13,7 +12,6 @@ import {
   renderUtteranceLine,
 } from '../src/services/extraction/prompt.js';
 import type { ExtractionInput } from '../src/adapters/extraction.js';
-import { housingAuthorityFor } from '../src/lib/housingAuthority.js';
 import { buildStartingEntries, STARTING_ORG_LIST } from '../src/lib/orgStartingList.js';
 import { renderOrgListBlock } from '../src/services/extraction/orgListBlock.js';
 
@@ -78,38 +76,6 @@ describe('EXTRACTION_SCHEMA', () => {
       'partner',
       'none',
     ]);
-  });
-});
-
-describe('HOUSING_AUTHORITY_VOCAB', () => {
-  it('lists the exact controlled vocabulary (14 entries)', () => {
-    expect(HOUSING_AUTHORITY_VOCAB).toEqual([
-      'Jonesboro (JHA)',
-      'Fulton County',
-      'Atlanta (AHA)',
-      'Clayton County',
-      'College Park',
-      'Georgia Housing Voucher (GHV)',
-      'Step Up',
-      'Claratel',
-      'Hope Atlanta',
-      'HUD VASH',
-      'DCA',
-      'McDonough',
-      'East Point',
-      'Dekalb County Housing',
-    ]);
-  });
-
-  it('agrees with the IMPORTER on DeKalb, character for character', () => {
-    // The invariant that actually matters, and the one a hand-written vocabulary
-    // silently breaks: broadcast audience resolution is an exact hash match on
-    // the byHousingAuthority GSI, so an AI-extracted tenant and an imported
-    // tenant only land in the same audience if these two strings are identical.
-    // Asserting the literal would pass while both drifted together; asserting
-    // MEMBERSHIP of the importer's own output is what pins them to each other.
-    expect(HOUSING_AUTHORITY_VOCAB).toContain(housingAuthorityFor('Dekalb Housing'));
-    expect(HOUSING_AUTHORITY_VOCAB).toContain(housingAuthorityFor('Dekalb County Housing'));
   });
 });
 

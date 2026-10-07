@@ -532,8 +532,9 @@ describe('ContactEditForm', () => {
   // --- Authority + agency org inputs (tenant-list-visibility Task 11) --------
   // The suggestion VALUES are spelled out here on purpose: importing the
   // constant would make the assertion vacuous, and a wrong spelling splits the
-  // byHousingAuthority broadcast audience. Source of truth:
-  // app/src/lib/import/apply.ts CANONICAL_AUTHORITY.
+  // byHousingAuthority broadcast audience. Source of truth: ./orgVocabulary.ts,
+  // the dashboard's last hand-kept copy (the app-side alias map it mirrored is
+  // retired; the stored organization list replaces both).
 
   /** The <datalist> an input's `list` attribute points at. */
   function datalistFor(input: HTMLElement): HTMLDataListElement {

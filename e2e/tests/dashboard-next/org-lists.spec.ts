@@ -28,6 +28,7 @@
 // every action that starts one waits for it to finish.
 import { test, expect, type APIRequestContext, type Locator, type Page, type Request } from '@playwright/test';
 import { ORG_PICKER, pickOrgName } from '../../scenarios/steps.js';
+import { extractionTick, sendExtractSms } from '../../fixtures/extraction.js';
 import {
   addOrg,
   getNotOnList,
@@ -635,5 +636,120 @@ test.describe('"Not on the list" (spec D10, D11)', () => {
     for (const value of [useValue, moveValue, splitValue, clearValue]) {
       await expect(notOnListRow(page, value)).toHaveCount(0);
     }
+  });
+});
+
+// ---- AI housing authority suggestions (spec D8) ----
+
+/** The one extraction run of a contact in the admin AI run log
+ *  (ai-run-log.spec.ts's openRunFor, trimmed). Returns the detail region. */
+async function openRunFor(page: Page, contactId: string): Promise<Locator> {
+  await page.goto(`${NEXT}/settings/ai-runs?scope=${encodeURIComponent(`contacts#${contactId}`)}`);
+  await expect(page.getByRole('heading', { name: 'AI run log' })).toBeVisible();
+  const row = page.getByRole('list', { name: 'AI runs' }).getByRole('button');
+  await expect(row).toHaveCount(1);
+  await row.click();
+  const detail = page.getByRole('region', { name: 'AI run detail' });
+  await expect(detail).toBeVisible();
+  return detail;
+}
+
+function decisionRow(page: Page, target: string): Locator {
+  return page.getByRole('table', { name: 'Decisions' }).getByRole('row', { name: new RegExp(`^${target}\\b`, 'i') });
+}
+
+/** A fake-driver marker carrying only a housingAuthority finding. */
+function housingAuthorityMarker(op: 'write' | 'suggest', value: string): Record<string, unknown> {
+  return { fields: { housingAuthority: { op, value, reason: 'the tenant said so' } } };
+}
+
+test.describe('AI housing authority suggestions (spec D8)', () => {
+  test('an ambiguous AHA is accepted as the candidate staff pick in "Is this really new?"', async ({
+    page,
+    request,
+  }) => {
+    await devLoginAs(page, 'founder@example.com'); // admin: the run log is admin-only
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const { contactId, phone } = await createTenant(req, { firstName: `AiAha${stamp}` });
+    await sendExtractSms(request, phone, housingAuthorityMarker('suggest', 'AHA'));
+    expect((await extractionTick(request)).processed).toBeGreaterThan(0);
+
+    await page.goto(`${NEXT}/contacts/${contactId}`);
+    const chip = page.getByRole('group', { name: 'AI suggestion for housing authority' });
+    await expect(chip.getByText('AI heard "AHA"')).toBeVisible();
+    await chip.getByRole('button', { name: 'Accept' }).click();
+
+    // AHA is a shared spelling, so the dialog offers both of its names (D8).
+    const isNew = page.getByRole('dialog', { name: UI.newDialog });
+    await expect(isNew.getByRole('button', { name: UI.use('Augusta Housing Authority'), exact: true })).toBeVisible();
+    await isNew.getByRole('button', { name: UI.use('Atlanta Housing Authority'), exact: true }).click();
+    await expect(isNew).toHaveCount(0);
+    await expect(chip).toHaveCount(0);
+    expect((await getContact(req, contactId)).housingAuthority).toBe('Atlanta Housing Authority');
+
+    // One of the text's own candidates is an ACCEPT, not a human edit (D8).
+    await openRunFor(page, contactId);
+    await expect(decisionRow(page, 'housingAuthority')).toContainText(/accepted/i);
+  });
+
+  test('an unknown name is suggested, never written, and Yes, add it adds it and accepts', async ({
+    page,
+    request,
+  }) => {
+    await devLoginAs(page, 'founder@example.com');
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const wren = `Wren Housing Authority ${stamp}`;
+    const { contactId, phone } = await createTenant(req, { firstName: `AiWren${stamp}` });
+    // op "write": an unknown name is DEMOTED to a staff suggestion (D8).
+    await sendExtractSms(request, phone, housingAuthorityMarker('write', wren));
+    expect((await extractionTick(request)).processed).toBeGreaterThan(0);
+    expect((await getContact(req, contactId)).housingAuthority).toBeUndefined();
+
+    await page.goto(`${NEXT}/contacts/${contactId}`);
+    const chip = page.getByRole('group', { name: 'AI suggestion for housing authority' });
+    await expect(chip.getByText(`AI heard "${wren}"`)).toBeVisible();
+    await chip.getByRole('button', { name: 'Accept' }).click();
+    const isNew = page.getByRole('dialog', { name: UI.newDialog });
+    await isNew.getByRole('button', { name: UI.yesAddIt, exact: true }).click();
+    await expect(isNew).toHaveCount(0);
+    await expect(chip).toHaveCount(0);
+
+    // The name staff just added from the text resolves, so the accept stands.
+    expect((await getContact(req, contactId)).housingAuthority).toBe(wren);
+    expect((await getOrgList(req)).entries.find((e) => e.name === wren)?.kind).toBe('housing_authority');
+    await openRunFor(page, contactId);
+    await expect(decisionRow(page, 'housingAuthority')).toContainText(/accepted/i);
+  });
+
+  test('an agency name returned for the housing authority is dropped with its label', async ({ page, request }) => {
+    await devLoginAs(page, 'founder@example.com');
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const { contactId, phone } = await createTenant(req, { firstName: `AiAgency${stamp}` });
+    await sendExtractSms(request, phone, housingAuthorityMarker('write', 'Step Up'));
+    expect((await extractionTick(request)).processed).toBeGreaterThan(0);
+
+    // Never written and never suggested: agency names are never housing authorities (D8).
+    expect((await getContact(req, contactId)).housingAuthority).toBeUndefined();
+    const pending = await req.get(`${NEXT}/api/contacts/${contactId}/suggestions`);
+    expect(pending.ok(), await pending.text()).toBeTruthy();
+    const { suggestions } = (await pending.json()) as { suggestions: Array<{ target: string }> };
+    expect(suggestions.some((s) => s.target === 'housingAuthority')).toBe(false);
+
+    const detail = await openRunFor(page, contactId);
+    await expect(decisionRow(page, 'housingAuthority')).toContainText(UI.agencyDropLabel);
+
+    // The run records which list it saw, and the detail header shows it (plan 3.10).
+    const listed = await req.get(`${NEXT}/api/ai-runs?scope=${encodeURIComponent(`contacts#${contactId}`)}`);
+    expect(listed.ok(), await listed.text()).toBeTruthy();
+    const runs = ((await listed.json()) as { runs: Array<{ runId: string }> }).runs;
+    expect(runs).toHaveLength(1);
+    const runRes = await req.get(`${NEXT}/api/ai-runs/${runs[0]?.runId ?? ''}`);
+    expect(runRes.ok(), await runRes.text()).toBeTruthy();
+    const { run } = (await runRes.json()) as { run: { orgListFingerprint?: string } };
+    expect(run.orgListFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    await expect(detail).toContainText((run.orgListFingerprint ?? '').slice(0, 12));
   });
 });

@@ -86,6 +86,8 @@
 .tableWrap {
   width: 100%;
   overflow-x: auto;
+  /* Contain the absolutely positioned .srOnly column head so it clips and scrolls with this table, not the page (main 13b64f60). */
+  position: relative;
 }
 
 .table {

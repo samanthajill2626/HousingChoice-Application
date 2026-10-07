@@ -314,3 +314,25 @@ list." (one code, both cases).
   so Move/Split count such a record as a conflict (spec D10 says absent or
   ''). Legacy pre-trim data only; the record keeps its value and stays in
   "Not on the list", settleable on its page.
+
+### B-3 (orchestrator review of the RG-2 commit 4f7be1ef) - exclude SHARED spellings from the extra dismissal keys - FIX (U8 Task 0)
+
+`alsoDismissedAs` passes every spelling of the matched entry, including the
+shared ones (AHA on Atlanta and Augusta, MHA on Marietta and Macon-Bibb). A
+staff dismissal of an AMBIGUOUS "AHA" suggestion (keyed "aha") would then
+suppress a later, unambiguous suggestion of "Augusta Housing Authority" or
+"Atlanta Housing Authority" for that contact - a different value. The ruling
+meant the pre-deploy alias spellings, each of which resolves to ONE entry.
+Fix: pass only the spellings that resolve uniquely to the matched entry
+(`resolveOrgText(ctx.orgEntries, s, KINDS_FOR_FIELD.housingAuthority)` is a
+`match` of that entry); the raw model text stays (in this branch it resolved
+to exactly that entry). Tests: RED - a contact with a dismissal keyed "aha"
+gets a suggestion of "Augusta Housing Authority" (today: dropped
+`dismissed_before`; after: suggested). PIN - a dismissal keyed "atlanta (aha)"
+still suppresses "Atlanta Housing Authority".
+
+### Gate-5 baseline additions (pre-existing at d839494a, reported by U6/U7)
+
+`app/src/jobs/extraction.ts:22` no-unused-vars `defaultLogger`;
+`app/test/extractionJob.test.ts:23` no-unused-vars `WINDOW_CHAR_BUDGET`;
+`app/test/extractionApply.test.ts:5` no-unused-vars `beforeEach`.

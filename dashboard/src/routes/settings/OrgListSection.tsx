@@ -309,7 +309,10 @@ export function OrgListSection(): React.JSX.Element {
           text=""
           mode="settings"
           onAdded={() => {
+            // A clean action: an earlier notice no longer describes the page
+            // (worklist RE2-3; code review R1-CONF-2).
             setAdding(null);
+            setNotice(null);
             admin.reload();
           }}
           onClose={() => setAdding(null)}

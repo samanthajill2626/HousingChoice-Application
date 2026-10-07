@@ -566,6 +566,23 @@ describe('OrgListSection - a notice never outlives a later clean action', () => 
     expect(screen.queryByText(SKIPPED_NOTICE)).not.toBeInTheDocument();
   });
 
+  it('an Add clears the notice an earlier rename left (code review R1-CONF-2)', async () => {
+    const user = userEvent.setup();
+    patchOrg.mockResolvedValueOnce(SKIPPED_RENAME);
+    addOrg.mockResolvedValue(entry('agency', 'Finch Mission', { orgId: 'o-finch' }));
+    renderSection();
+    await renameAtlanta(user, 'Atlanta Metro Housing');
+    expect(await screen.findByText(SKIPPED_NOTICE)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Add agency' }));
+    const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Name' }), 'Finch Mission');
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Yes, add it' })).toBeEnabled());
+    await user.click(within(dialog).getByRole('button', { name: 'Yes, add it' }));
+    expect(addOrg).toHaveBeenCalledWith({ kind: 'agency', name: 'Finch Mission' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.queryByText(SKIPPED_NOTICE)).not.toBeInTheDocument();
+  });
+
   it('a rename that skipped nothing clears the notice an earlier rename left', async () => {
     const user = userEvent.setup();
     patchOrg

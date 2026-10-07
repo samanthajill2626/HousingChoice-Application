@@ -172,6 +172,29 @@ describe('OrgPicker - single', () => {
     expect(screen.getByRole('listbox').parentElement).toBe(document.body);
   });
 
+  it('a new errorAttempt re-mounts the alert, so the same words are announced again (R2-FE-10)', () => {
+    const picker = (errorAttempt: number): React.JSX.Element => (
+      <OrgPicker
+        label="Housing authority"
+        kinds={['housing_authority']}
+        entries={ENTRIES}
+        value=""
+        onChange={vi.fn()}
+        error="Pick a name from the list, add it as new, or clear the text."
+        errorAttempt={errorAttempt}
+      />
+    );
+    const { rerender } = render(picker(1));
+    const first = screen.getByRole('alert');
+    rerender(picker(1));
+    expect(screen.getByRole('alert')).toBe(first); // a plain re-render keeps it
+    rerender(picker(2));
+    const second = screen.getByRole('alert');
+    expect(second).not.toBe(first);
+    expect(second).toHaveTextContent('Pick a name from the list, add it as new, or clear the text.');
+    expect(combobox().getAttribute('aria-describedby')?.split(' ')).toContain(second.id);
+  });
+
   it('a load failure shows inline and the field cannot be used', () => {
     render(
       <OrgPicker

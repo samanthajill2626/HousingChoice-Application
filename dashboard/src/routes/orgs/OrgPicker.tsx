@@ -71,6 +71,10 @@ interface OrgPickerBaseProps {
   hint?: string;
   /** An inline field error (a list that failed to load, a refused save). */
   error?: string | null;
+  /** Change it to announce `error` again although its words did not change:
+   *  the alert is re-mounted, which a screen reader reads out (a refused Save
+   *  repeated - code review R2-FE-10). */
+  errorAttempt?: number;
   disabled?: boolean;
   placeholder?: string;
   /** Root and label classes, so each host keeps its own field layout. */
@@ -156,6 +160,7 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
     onRequestAdd,
     hint,
     error = null,
+    errorAttempt = 0,
     disabled = false,
     placeholder,
     className,
@@ -416,7 +421,7 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
         </p>
       ) : null}
       {error ? (
-        <p id={errorId} role="alert" className={styles.error}>
+        <p key={errorAttempt} id={errorId} role="alert" className={styles.error}>
           {error}
         </p>
       ) : null}

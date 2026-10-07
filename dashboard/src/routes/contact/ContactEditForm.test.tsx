@@ -912,6 +912,22 @@ describe('ContactEditForm - text typed in a picker but never picked', () => {
     expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: 'Georgia Department of Community Affairs' });
   });
 
+  it('every refused Save is announced again - the alert is a new one each time (R2-FE-10)', async () => {
+    // A keyboard user pressing Enter again in the field must hear the refusal
+    // again; an unchanged alert node would stay silent.
+    const user = userEvent.setup();
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'AHA');
+    await screen.findByRole('option', { name: /^Augusta Housing Authority/ });
+    await user.click(save());
+    const first = await screen.findByRole('alert');
+    await user.click(save());
+    const second = screen.getByRole('alert');
+    expect(second).not.toBe(first);
+    expect(second).toHaveTextContent(BLOCKED);
+    expect(updateContact).not.toHaveBeenCalled();
+  });
+
   it('(PIN) a typed name equal to the stored one is still never sent', async () => {
     const user = userEvent.setup();
     const stored: Contact = { ...TENANT, housingAuthority: 'DeKalb County Housing Authority' };

@@ -438,6 +438,20 @@ describe('ListingEditForm - text typed in the picker but never picked', () => {
     });
   });
 
+  it('every refused Save is announced again - the alert is a new one each time (R2-FE-10)', async () => {
+    const user = userEvent.setup();
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(authorities(), 'AHA');
+    await screen.findAllByRole('option');
+    await user.click(save());
+    const first = await screen.findByRole('alert');
+    await user.click(save());
+    const second = screen.getByRole('alert');
+    expect(second).not.toBe(first);
+    expect(second).toHaveTextContent(BLOCKED);
+    expect(updateUnit).not.toHaveBeenCalled();
+  });
+
   it('(PIN) a typed name the list already holds changes nothing', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

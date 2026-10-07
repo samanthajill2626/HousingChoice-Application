@@ -285,6 +285,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
               authoritiesError ??
               (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)
             }
+            errorAttempt={authorityText.refusalAttempt}
             className={styles.field}
             labelClassName={styles.label}
           />

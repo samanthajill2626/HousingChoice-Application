@@ -611,6 +611,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
                 (orgFieldError?.field === 'housingAuthority' ? orgFieldError.message : null) ??
                 (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)
               }
+              errorAttempt={housingAuthorityText.refusalAttempt}
               className={styles.field}
               labelClassName={styles.label}
             />
@@ -634,6 +635,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
                 (orgFieldError?.field === 'agency' ? orgFieldError.message : null) ??
                 (orgList.error ? orgListLoadError(AGENCY_KINDS) : null)
               }
+              errorAttempt={agencyText.refusalAttempt}
               className={styles.field}
               labelClassName={styles.label}
             />

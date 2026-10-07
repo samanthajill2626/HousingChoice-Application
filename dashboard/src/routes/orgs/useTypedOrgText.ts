@@ -12,8 +12,10 @@
 //     unused - the field keeps its value - and its load error stays in view,
 //     never replaced by a refusal; before the first read lands, Save refuses
 //     with "Still loading the list - try again in a moment."
-// Every form passes its picker's ref in, wires `onPendingTextChange`, `note`
-// and `refusal` to the OrgPicker and calls settle() from Save - no form holds
+// Every form passes its picker's ref in, wires `onPendingTextChange`, `note`,
+// `refusal` and `refusalAttempt` to the OrgPicker (`errorAttempt`: a refusal
+// repeated word for word is announced again, code review R2-FE-10) and calls
+// settle() from Save - no form holds
 // its own copy of the rule. (The form owns the ref: a hook result carrying one
 // would read as a ref to the React Compiler's lint at every render use.) The
 // blast composer never commits typed text (spec D7): it does not use this.
@@ -29,6 +31,9 @@ export interface TypedOrgTextField {
   note: string | null;
   /** Why the last Save refused the text (the picker's `error`), until the text changes. */
   refusal: string | null;
+  /** The picker's `errorAttempt`: one more per refused Save, so a refusal
+   *  repeated word for word is announced again (code review R2-FE-10). */
+  refusalAttempt: number;
   /** Save's verdict on the text the field holds: a refusal is shown under
    *  the field; a committed text is emptied from it, as a pick would be. */
   settle: () => TypedOrgText;
@@ -45,6 +50,7 @@ export function useTypedOrgText(
 ): TypedOrgTextField {
   const [text, setText] = useState('');
   const [refusal, setRefusal] = useState<string | null>(null);
+  const [refusalAttempt, setRefusalAttempt] = useState(0);
   const verdict = settleTypedOrgText(list, kinds, text);
   return {
     onPendingTextChange: (next) => {
@@ -55,8 +61,11 @@ export function useTypedOrgText(
     // A list that failed to load disables the picker: its load error is
     // what the field says, never a refusal from an earlier Save (R2-FE-1).
     refusal: list.error ? null : refusal,
+    refusalAttempt,
     settle: () => {
-      setRefusal(typedOrgRefusal(verdict));
+      const refused = typedOrgRefusal(verdict);
+      setRefusal(refused);
+      if (refused !== null) setRefusalAttempt((n) => n + 1);
       if (verdict.status === 'resolved') picker.current?.clearText();
       return verdict;
     },

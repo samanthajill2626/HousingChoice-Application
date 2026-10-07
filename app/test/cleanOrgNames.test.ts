@@ -345,6 +345,7 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
       recordsWritten: 0,
       skippedOnCondition: 0,
       failed: 0,
+      auditFailed: 0,
       changes: CHANGES,
       contactsMissingTypeOrStatus: 0,
       leftovers: LEFTOVERS,
@@ -391,6 +392,7 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
       recordsWritten: 8,
       skippedOnCondition: 0,
       failed: 0,
+      auditFailed: 0,
       changes: CHANGES,
       contactsMissingTypeOrStatus: 0,
       leftovers: LEFTOVERS,
@@ -514,6 +516,68 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
     expect(rerun).toMatchObject({ recordsWritten: 4, failed: 0 });
   }, 120_000);
 
+  // Code review R1-ADV-BE-4: the append runs AFTER the record write landed, so
+  // aborting on it left a permanent gap - a re-run finds the record clean and
+  // never writes the event. Logged WARN with the record key, counted, and the
+  // run goes on (as the org.rewrite pass does).
+  it.each([
+    {
+      what: 'a contact (its other event still lands)',
+      failKey: 'contacts#c-agency-as-ha',
+      base: 'contacts',
+      id: 'c-agency-as-ha',
+      after: { agency: 'HOPE Atlanta' },
+    },
+    {
+      what: 'a unit',
+      failKey: 'units#u-legacy',
+      base: 'units',
+      id: 'u-legacy',
+      after: { accepted_authorities: ['East Point Housing Authority'] },
+    },
+  ] as const)(
+    'an audit append that fails for $what is logged WARN and counted auditFailed; the apply completes',
+    async ({ failKey, base, id, after }) => {
+      const w = await seedWorld();
+      const real = buildCleanupDeps(doc, w.env, silent);
+      const capture = createLogCapture();
+      const log = createLogger({ level: 'info', destination: capture.stream });
+      let thrown = false;
+      const result = await cleanOrgNames({
+        doc,
+        env: w.env,
+        apply: true,
+        logger: log,
+        deps: {
+          audit: {
+            async append(entityKey, eventType, payload) {
+              if (entityKey === failKey && !thrown) {
+                thrown = true;
+                throw new Error('Rate exceeded');
+              }
+              await real.audit.append(entityKey, eventType, payload);
+            },
+          },
+        },
+      });
+      // Completed: every record written, the one gap counted - no PARTIAL, exit 0, the lock done.
+      expect(result).toMatchObject({ recordsWritten: 8, failed: 0, auditFailed: 1 });
+      expect(capture.atLevel(50).some((l) => String(l['msg']).includes('PARTIAL result'))).toBe(false);
+      expect(capture.atLevel(40).filter((l) => l['entityKey'] === failKey)).toHaveLength(1);
+      expect(reportCleanupRun(result, true, silent)).toBe(0);
+      expect((await w.orgList.peek())?.lastRewrite).toMatchObject({ action: 'cleanup', status: 'done' });
+      // The record was rewritten all the same...
+      expect(await w.get(base, id)).toMatchObject(after);
+      // ...and every OTHER event landed: only the first event of that record is missing.
+      const gap = EVENTS.findIndex(([entityKey]) => entityKey === failKey);
+      const events = await w.cleanupEvents();
+      expect(sortEvents(events.map((e) => [e['entityKey'], e['payload']]))).toEqual(
+        sortEvents(EVENTS.filter((_, i) => i !== gap)),
+      );
+    },
+    120_000,
+  );
+
   it('a record it cannot plan is stepped over and counted failed: COMPLETED WITH FAILURES, lock finished failed', async () => {
     const w = await seedWorld();
     await doc.send(
@@ -636,6 +700,7 @@ const SUMMARY_RESULT: CleanupResult = {
   recordsWritten: 0,
   skippedOnCondition: 0,
   failed: 0,
+  auditFailed: 0,
   changes: CHANGES,
   contactsMissingTypeOrStatus: 0,
   leftovers: [
@@ -666,6 +731,13 @@ describe('formatSummary - what the CLI prints (organization values only, never a
     expect(formatSummary({ ...SUMMARY_RESULT, leftovers: [], contactsMissingTypeOrStatus: 2 }, true).at(-1)).toBe(
       'Contacts missing type or status but holding a housing authority or agency: 2 (expected 0 - Settings cannot see or rewrite them)',
     );
+    // An apply's audit gaps (code review R1-ADV-BE-4), under the change
+    // counts. A dry run appends no event, so it prints no such line.
+    const AUDIT_LINE =
+      'Audit events that could not be written: 1 (expected 0 - each record change landed; each gap is named in a WARN line)';
+    const applied = formatSummary({ ...SUMMARY_RESULT, auditFailed: 1 }, true);
+    expect(applied[applied.indexOf('       1  housing authority spelling -> its list name') + 9]).toBe(AUDIT_LINE);
+    expect(lines.some((l) => l.startsWith('Audit events'))).toBe(false);
   });
 });
 

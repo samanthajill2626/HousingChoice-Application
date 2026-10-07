@@ -348,6 +348,14 @@ export interface CleanupResult {
   skippedOnCondition: number;
   /** Records the run could not PLAN (a malformed value); stepped over, nothing written. */
   failed: number;
+  /**
+   * Apply only: `org_name_cleanup` events that could not be appended AFTER
+   * their record write landed. Each is logged WARN with its record key and the
+   * run goes on - aborting would leave a permanent gap, since a re-run finds
+   * the record already clean and writes no event (code review R1-ADV-BE-4).
+   * Expected 0.
+   */
+  auditFailed: number;
   /** Dry run: the changes it would make. Apply: the changes it made. */
   changes: CleanupChanges;
   /**
@@ -430,6 +438,7 @@ function emptyResult(): CleanupResult {
     recordsWritten: 0,
     skippedOnCondition: 0,
     failed: 0,
+    auditFailed: 0,
     changes: { ...NO_CHANGES },
     contactsMissingTypeOrStatus: 0,
     leftovers: [],
@@ -627,6 +636,22 @@ async function run(
     }
     if (!ours) throw new CleanupLockLostError(lock.jobId);
   };
+  /**
+   * One `org_name_cleanup` event. It is appended AFTER the record write
+   * landed, so a failure is logged and counted, never thrown (code review
+   * R1-ADV-BE-4; the org.rewrite pass does the same, services/orgRecords.ts).
+   */
+  const appendAudit = async (entityKey: string, a: FieldAudit): Promise<void> => {
+    try {
+      await deps.audit.append(entityKey, 'org_name_cleanup', { field: a.field, from: a.from, to: a.to });
+    } catch (err) {
+      result.auditFailed += 1;
+      log.warn(
+        { err, entityKey, field: a.field },
+        `${SCRIPT_NAME} - audit event could NOT be written (the record change landed); counted in auditFailed, continuing`,
+      );
+    }
+  };
   const tally = new Map<string, CleanupLeftover>();
 
   for await (const row of scanAll(doc, tableName('contacts', env), opts.scanLimit)) {
@@ -672,9 +697,7 @@ async function run(
     } else {
       result.recordsWritten += 1;
       addChanges(result.changes, plan.changes);
-      for (const a of plan.audits) {
-        await deps.audit.append(`contacts#${contactId}`, 'org_name_cleanup', { field: a.field, from: a.from, to: a.to });
-      }
+      for (const a of plan.audits) await appendAudit(`contacts#${contactId}`, a);
       log.info({ contactId, fields }, `${SCRIPT_NAME} - contact cleaned`);
     }
   }
@@ -710,9 +733,7 @@ async function run(
     } else {
       result.recordsWritten += 1;
       addChanges(result.changes, plan.changes);
-      for (const a of plan.audits) {
-        await deps.audit.append(`units#${unitId}`, 'org_name_cleanup', { field: a.field, from: a.from, to: a.to });
-      }
+      for (const a of plan.audits) await appendAudit(`units#${unitId}`, a);
       log.info({ unitId }, `${SCRIPT_NAME} - unit cleaned`);
     }
   }
@@ -728,6 +749,7 @@ export function reportCleanupRun(result: CleanupResult, apply: boolean, log: Log
     listSource: result.listSource,
     leftoverValues: result.leftovers.length,
     contactsMissingTypeOrStatus: result.contactsMissingTypeOrStatus,
+    auditFailed: result.auditFailed,
     apply,
   };
   if (result.failed > 0) {
@@ -773,6 +795,12 @@ export function formatSummary(result: CleanupResult, apply: boolean): string[] {
   const lines = [apply ? 'Automatic changes made:' : 'Automatic changes this run WOULD make (dry run):'];
   for (const key of Object.keys(CHANGE_LABELS) as Array<keyof CleanupChanges>) {
     lines.push(`  ${String(result.changes[key]).padStart(6)}  ${CHANGE_LABELS[key]}`);
+  }
+  // The apply's audit gaps (code review R1-ADV-BE-4). A dry run appends no event.
+  if (apply) {
+    lines.push(
+      `Audit events that could not be written: ${result.auditFailed} (expected 0 - each record change landed; each gap is named in a WARN line)`,
+    );
   }
   if (result.leftovers.length === 0) {
     lines.push('Nothing is left for Settings > Housing authorities & agencies: every value is a list name.');

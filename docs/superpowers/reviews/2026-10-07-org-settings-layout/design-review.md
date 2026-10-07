@@ -1,7 +1,8 @@
 # Settings > "Housing authorities & agencies" - layout design review
 
 Date: 2026-10-07. Branch: `fix/org-settings-layout` (cut from `main` @ 20ccdb12).
-Kind: ASSESSMENT ONLY - no source changed. Mockups: [`mockups.html`](mockups.html)
+Kind: ASSESSMENT ONLY - no source changed. **Cameron's rulings (2026-10-07) are
+in section 7 and override the recommendation in section 3.** Mockups: [`mockups.html`](mockups.html)
 (open in a browser; desktop and phone side by side for each option).
 
 Code under review:
@@ -387,3 +388,24 @@ So do NOT raise or remove the cap globally. Make it per tab instead:
    shared menu primitive, plus test and e2e selector updates), so it fits the
    small-feature pipeline (spec note, plan, build, review) rather than the
    small-fix lane.
+
+## 7. Cameron's rulings (2026-10-07)
+
+1. **Option B (list and detail panel)**, not the recommended Option A. The
+   build follows the full feature pipeline (spec, plan, isolated build,
+   independent review). The Option A findings P1-P12 remain the defect list
+   the build must close.
+2. **Full width, responsive.** No page-level width cap: the page fills the
+   main column at any screen size and shrinks with it. "Limiting screen sizes
+   and having a bunch of blank space doesn't serve a purpose." This supersedes
+   section 4's per-tab `wide` flag. What section 4 found still applies at the
+   CONTROL level: inside a full-width page, a form field, textarea or prose
+   paragraph keeps its own sensible width (sized to its content), so Templates'
+   text boxes and Team's invite form do not stretch to about 1,600px. The scope
+   (this tab only, all Settings tabs, or every dashboard page) is an open
+   question for the spec.
+3. **Screenshots are not committed.** They stay in `.playwright-mcp/`
+   (gitignored).
+4. **`mockups.html` stays** in this folder until the feature is built, as the
+   reference to compare the built page against. Remove or stamp it after that
+   comparison.

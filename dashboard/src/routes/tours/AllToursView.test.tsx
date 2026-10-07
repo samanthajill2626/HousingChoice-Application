@@ -520,6 +520,41 @@ describe('AllToursView - the filter bar (spec 4.3)', () => {
     expect(rowIds()).toEqual(['a2']);
   });
 
+  it('From after To is announced: both inputs are invalid and described by the under-inputs copy; the list-area copy is the one alert (R2-2)', async () => {
+    const SENTENCE = 'From must be on or before To.';
+    reply('', page([row('a1')], null), page([row('a2')], null));
+    renderAt('/tours/all?when=range&from=2026-10-01&to=2026-10-31');
+    await settle();
+    const from = screen.getByLabelText('From');
+    const to = screen.getByLabelText('To');
+    for (const input of [from, to]) {
+      expect(input).not.toHaveAttribute('aria-invalid', 'true');
+      expect(input).not.toHaveAttribute('aria-describedby');
+    }
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    pick(from, '2026-11-05');
+    await settle();
+    const alert = screen.getByRole('alert');
+    expect(within(alert).getAllByText(SENTENCE)).toHaveLength(1);
+    for (const input of [from, to]) {
+      expect(input).toHaveAttribute('aria-invalid', 'true');
+      expect(input).toHaveAccessibleDescription(SENTENCE);
+      // The description is the copy under the inputs, never the alert.
+      const described = document.getElementById(input.getAttribute('aria-describedby') ?? '');
+      expect(described).toHaveTextContent(SENTENCE);
+      expect(alert).not.toContainElement(described);
+    }
+
+    pick(from, '2026-10-05');
+    await settle();
+    for (const input of [from, to]) {
+      expect(input).not.toHaveAttribute('aria-invalid', 'true');
+      expect(input).not.toHaveAttribute('aria-describedby');
+    }
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('the controls read in the spec order: When, From, To, Status, Tour type, Search, Sort, Clear filters (spec 4.3, SC-3)', async () => {
     renderAt('/tours/all?when=range');
     await settle();

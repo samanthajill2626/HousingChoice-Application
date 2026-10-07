@@ -78,6 +78,10 @@ const SEARCH_DEBOUNCE_MS = 300;
 /** This view's route; TourDetail's back arrow accepts it with any query. */
 const ALL_TOURS_PATH = '/tours/all';
 
+/** The From-after-To copy under the inputs, which both date inputs name as
+ *  their description while the range is invalid (code review r2 R2-2). */
+const RANGE_ERROR_ID = 'tours-all-range-error';
+
 /** The history state stamped on this view's own URL writes. A row open adds
  *  `restore` (spec 4.9); every OTHER write replaces the whole state with the
  *  stamp alone, so a filter change or a blur save drops a restore record. */
@@ -359,6 +363,9 @@ export function AllToursView(): React.JSX.Element {
   }
 
   const rangeError = tourListRangeError(chosen);
+  // Both inputs are invalid while From is after To, and both name the copy
+  // under them as their description (the house form idiom, IntakeForm.tsx).
+  const rangeDescribedBy = rangeError !== null ? RANGE_ERROR_ID : undefined;
   // The effective selection: the chosen one minus what no control shows (spec
   // 4.3). The chips and Clear filters render from it, as #1 renders its
   // pruned `selection` (ListingsList.tsx).
@@ -470,6 +477,8 @@ export function AllToursView(): React.JSX.Element {
                 className={styles.select}
                 value={chosen.from}
                 onChange={(e) => change({ ...chosen, from: e.target.value })}
+                aria-invalid={rangeError !== null}
+                aria-describedby={rangeDescribedBy}
               />
             </div>
             <div className={styles.control}>
@@ -482,10 +491,18 @@ export function AllToursView(): React.JSX.Element {
                 className={styles.select}
                 value={chosen.to}
                 onChange={(e) => change({ ...chosen, to: e.target.value })}
+                aria-invalid={rangeError !== null}
+                aria-describedby={rangeDescribedBy}
               />
             </div>
-            {/* Under the inputs; nothing is sent until it is fixed (spec 4.3). */}
-            {rangeError !== null ? <p className={styles.rangeError}>{rangeError}</p> : null}
+            {/* Under the inputs; nothing is sent until it is fixed (spec 4.3).
+                The inputs' description, never a live region: the list-area
+                copy is the one alert, so the sentence is announced once. */}
+            {rangeError !== null ? (
+              <p id={RANGE_ERROR_ID} className={styles.rangeError}>
+                {rangeError}
+              </p>
+            ) : null}
           </div>
         ) : null}
 
@@ -571,9 +588,10 @@ export function AllToursView(): React.JSX.Element {
 
       {/* From after To: nothing is sent (the hook is idle) and the list area
           keeps the message until it is fixed (spec 4.3) - outside the count
-          line, as well as under the inputs. */}
+          line, as well as under the inputs. The alert: it is inserted with
+          its text, so it is announced while the list vanishes (R2-2). */}
       {data.status === 'idle' && rangeError !== null ? (
-        <div className={rowStyles.empty}>
+        <div className={rowStyles.empty} role="alert">
           <p className={rowStyles.emptyText}>{rangeError}</p>
         </div>
       ) : null}

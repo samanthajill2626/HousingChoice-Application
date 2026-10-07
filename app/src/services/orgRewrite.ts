@@ -18,7 +18,13 @@
 // id and is `running`, so a duplicate delivery or a stale run never
 // overwrites a newer rewrite's state (planner ruling R4-F4). heartbeat()
 // answers whether the lock is still the caller's: on `false` the caller stops
-// writing records at once and does not finish (spec D11).
+// writing records at once and does not finish (spec D11). A lock whose
+// heartbeat LAPSED is no longer the caller's either: while it was stale every
+// guard was off (code review R2-BE-1).
+//
+// The job CLAIMS its rewrite before any pass (claim(): code review R2-BE-1) -
+// one list write that refreshes the heartbeat, after re-validating a LAPSED
+// lock exactly as Run again does (revalidationProblem: one rule for both).
 //
 // A rewrite's `fields` are FIXED when it starts (spec 5.1): a value action's
 // one field; a rename or merge, every field of the target entry's kind at that
@@ -69,6 +75,19 @@ export interface SkippedSpelling { spelling: string; problem: SpellingProblem['p
 /** `lastRewrite.error` when the job could not be queued. */
 export const ORG_REWRITE_ENQUEUE_FAILED = 'enqueue_failed';
 
+/**
+ * What claim() found (code review R2-BE-1). `claimed`: the lock is this run's,
+ * its heartbeat refreshed, and `lastRewrite` is the definition to run.
+ * `not_current`: `lastRewrite` is not this id running (or is the cleanup's
+ * lock, which no job runs) - nothing written. `refused`: the lock had lapsed
+ * and the list changed under the definition since, so the rewrite is now
+ * recorded `failed` (`lastRewrite.error` says why) and no delivery can run it.
+ */
+export type OrgRewriteClaim =
+  | { outcome: 'claimed'; lastRewrite: OrgRewriteState }
+  | { outcome: 'not_current'; lastRewrite: OrgRewriteState | undefined }
+  | { outcome: 'refused'; lastRewrite: OrgRewriteState };
+
 export interface OrgRewriteService {
   rename(orgId: string, newName: string, actor: string): Promise<{ entry: OrgEntry; lastRewrite: OrgRewriteState; skippedSpellings: SkippedSpelling[] }>;
   merge(orgId: string, intoOrgId: string, actor: string): Promise<{ lastRewrite: OrgRewriteState }>;
@@ -87,10 +106,15 @@ export interface OrgRewriteService {
    *  of) the NAME of an entry its `fields` accept, other than `toName` - else
    *  409 org_rewrite_target_gone. */
   runAgain(actor: string): Promise<{ lastRewrite: OrgRewriteState }>;
+  /** For the job, before any pass (code review R2-BE-1): ONE list write that
+   *  claims the rewrite `jobId` names - a LAPSED lock re-validated exactly as
+   *  runAgain re-validates - and refreshes its heartbeat. See OrgRewriteClaim. */
+  claim(jobId: string): Promise<OrgRewriteClaim>;
   /** For the job and the cleanup script. true = the lock is still the
    *  caller's (its heartbeat was written); false = it is not (another id holds
-   *  it, or it is no longer running) - the caller stops writing records and
-   *  does NOT call finish. */
+   *  it, it is no longer running, or its heartbeat already LAPSED - code
+   *  review R2-BE-1) - nothing is written, and the caller stops writing
+   *  records and does NOT call finish. */
   heartbeat(jobId: string): Promise<boolean>;
   finish(jobId: string, outcome: { status: 'done' | 'failed'; counts?: Record<string, number>; error?: string }): Promise<void>;
   /** Cleanup script: take the lock as action 'cleanup' (409 when held). */
@@ -165,6 +189,39 @@ function rewriteTargetKind(def: OrgRewriteState): OrgKind | undefined {
   }
 }
 
+/**
+ * Why the stored definition must NOT run against the list as it is now, or
+ * null when it may - the ONE rule Run again and the job's claim of a lapsed
+ * lock share (spec D11; build ruling B-2; code review R2-BE-1). While its lock
+ * is fresh every guard keeps the list compatible with a definition; once the
+ * rewrite failed or its heartbeat lapsed the list may have changed under it, so
+ * it runs again only while (1) every name it writes is still an entry of the
+ * kind it expects - its target may have been renamed, merged, deleted or
+ * re-kinded - and (2) every from-text is still OFF the list for its fields.
+ */
+function revalidationProblem(entries: readonly OrgEntry[], def: OrgRewriteState): string | null {
+  const targetGone = (name: string | undefined, kind: OrgKind): boolean =>
+    name === undefined || !entries.some((e) => e.name === name && e.kind === kind);
+  const toKind = rewriteTargetKind(def);
+  if (
+    (toKind !== undefined && targetGone(def.toName, toKind)) ||
+    (def.action === 'split' && targetGone(def.agencyName, 'agency'))
+  ) {
+    return 'a name it writes left the list or changed kind';
+  }
+  // (2): a from-text that has since become - or become a name variant of -
+  // the NAME of an entry a stored field accepts would rewrite every record
+  // holding that now-listed name; a fresh action on the value is refused
+  // (D10). The one exception is the rewrite's own target: "Use <that entry>"
+  // settles a name variant and leaves exact holders alone.
+  const acceptedKinds = new Set(def.fields.flatMap((f) => KINDS_FOR_FIELD[f]));
+  const fromTexts = new Set(def.fromTexts.map(normalizeOrgText));
+  const fromTextListed = entries.some(
+    (e) => acceptedKinds.has(e.kind) && e.name !== def.toName && fromTexts.has(normalizeOrgText(e.name)),
+  );
+  return fromTextListed ? 'a value it rewrites became a name on the list' : null;
+}
+
 export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteService {
   const list = deps.orgListRepo ?? createOrgListRepo({ logger: deps.logger });
   const log = deps.logger ?? defaultLogger;
@@ -182,12 +239,45 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
   async function heartbeat(jobId: string): Promise<boolean> {
     return list.mutate((current) => {
       const last = current.lastRewrite;
-      // Not this run's lock (a newer rewrite, or this one already finished):
-      // write nothing, and tell the caller to stop writing records (spec D11).
-      if (last === undefined || last.jobId !== jobId || last.status !== 'running') {
+      const at = now();
+      // Not this run's lock (a newer rewrite, or this one already finished) -
+      // or one that LAPSED: while it was stale every guard was off, so it is no
+      // longer the caller's (code review R2-BE-1; Run again re-validates).
+      // Write nothing, and tell the caller to stop writing records (spec D11).
+      if (last === undefined || last.jobId !== jobId || !isOrgRewriteRunning(last, Date.parse(at))) {
         return { next: current, result: false };
       }
-      return { next: { ...current, lastRewrite: { ...last, heartbeatAt: now() } }, result: true };
+      return { next: { ...current, lastRewrite: { ...last, heartbeatAt: at } }, result: true };
+    });
+  }
+
+  async function claim(jobId: string): Promise<OrgRewriteClaim> {
+    return list.mutate((current): { next: OrgListItem; result: OrgRewriteClaim } => {
+      const last = current.lastRewrite;
+      // (a) Not this run's rewrite, or the cleanup's lock: write nothing.
+      if (last === undefined || last.jobId !== jobId || last.status !== 'running' || last.action === 'cleanup') {
+        return { next: current, result: { outcome: 'not_current', lastRewrite: last } };
+      }
+      const at = now();
+      // (b) A LAPSED lock (a delivery 15 minutes after the last heartbeat):
+      // re-validate as Run again does. A refusal finishes the rewrite failed
+      // in this same write, so no delivery of the message can ever run it.
+      if (!isOrgRewriteRunning(last, Date.parse(at))) {
+        const problem = revalidationProblem(current.entries, last);
+        if (problem !== null) {
+          const lastRewrite: OrgRewriteState = {
+            ...last,
+            status: 'failed',
+            heartbeatAt: at,
+            finishedAt: at,
+            error: `org_rewrite_target_gone: ${problem}`,
+          };
+          return { next: { ...current, lastRewrite }, result: { outcome: 'refused', lastRewrite } };
+        }
+      }
+      // (c) A fresh heartbeat, so no record is written under a lapsed lock.
+      const lastRewrite: OrgRewriteState = { ...last, heartbeatAt: at };
+      return { next: { ...current, lastRewrite }, result: { outcome: 'claimed', lastRewrite } };
     });
   }
 
@@ -453,30 +543,10 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
         if (isOrgRewriteRunning(last, Date.parse(at))) throw rewriteRunningError(last);
         if (last.status === 'done') throw new OrgHttpError(409, { error: 'org_rewrite_not_rerunnable' });
         // Spec D11: a failed or stalled rewrite holds no lock, so the list may
-        // have changed since. Re-run only while (1) every name it writes is
-        // still an entry of the kind it expects - its target may have been
-        // renamed, merged, deleted or re-kinded - and (2) every from-text is
-        // still OFF the list for its fields (build ruling B-2).
-        const targetGone = (name: string | undefined, kind: OrgKind): boolean =>
-          name === undefined || !current.entries.some((e) => e.name === name && e.kind === kind);
-        const toKind = rewriteTargetKind(last);
-        if (
-          (toKind !== undefined && targetGone(last.toName, toKind)) ||
-          (last.action === 'split' && targetGone(last.agencyName, 'agency'))
-        ) {
+        // have changed since - re-run only a definition that still fits it.
+        if (revalidationProblem(current.entries, last) !== null) {
           throw new OrgHttpError(409, { error: 'org_rewrite_target_gone' });
         }
-        // (2): a from-text that has since become - or become a name variant of
-        // - the NAME of an entry a stored field accepts would rewrite every
-        // record holding that now-listed name; a fresh action on the value is
-        // refused (D10). The one exception is the rewrite's own target: "Use
-        // <that entry>" settles a name variant and leaves exact holders alone.
-        const acceptedKinds = new Set(last.fields.flatMap((f) => KINDS_FOR_FIELD[f]));
-        const fromTexts = new Set(last.fromTexts.map(normalizeOrgText));
-        const fromTextListed = current.entries.some(
-          (e) => acceptedKinds.has(e.kind) && e.name !== last.toName && fromTexts.has(normalizeOrgText(e.name)),
-        );
-        if (fromTextListed) throw new OrgHttpError(409, { error: 'org_rewrite_target_gone' });
         // Failed, or running with a stale heartbeat: the SAME definition (its
         // `fields` included) under a NEW id, so a late delivery of the old run
         // finds the lock is not its own.
@@ -486,6 +556,7 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
       return enqueueOrFail(started);
     },
 
+    claim,
     heartbeat,
     finish,
 

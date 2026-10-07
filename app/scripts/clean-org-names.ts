@@ -314,15 +314,17 @@ export class CleanupRefusedError extends Error {}
 
 /**
  * The apply's heartbeat found the organization-list rewrite lock no longer
- * its own (spec D11: another rewrite took it over after this run went 15
- * minutes without a heartbeat). The run stopped writing at once and does NOT
- * release a lock that is not its own. Exit 1, with the PARTIAL report.
+ * its own (spec D11): another rewrite took it over after it went 15 minutes
+ * without a heartbeat, or it simply lapsed - a lapsed lock is no longer the
+ * caller's (code review R2-BE-1). The run stopped writing at once and does NOT
+ * release the lock. Exit 1, with the PARTIAL report.
  */
 export class CleanupLockLostError extends Error {
   constructor(jobId: string) {
     super(
-      `${SCRIPT_NAME}: lost the organization-list rewrite lock (job ${jobId}) to another rewrite; ` +
-        'stopped writing at once. Re-run the apply once that rewrite has finished (idempotent).',
+      `${SCRIPT_NAME}: lost the organization-list rewrite lock (job ${jobId}) - it lapsed (15 minutes without ` +
+        'a heartbeat) or another rewrite took it over; stopped writing at once. ' +
+        'Re-run the apply once no other rewrite is running (idempotent).',
     );
     this.name = 'CleanupLockLostError';
   }

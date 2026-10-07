@@ -190,6 +190,73 @@ describe('OrgRewriteService.heartbeat / finish (spec D11; planner ruling R4-F4)'
     expect((await repo.peek())?.lastRewrite).toEqual(done);
     expect((await repo.peek())?.version).toBe(version);
   });
+
+  it('heartbeat answers false and writes nothing once the lock LAPSED, even under its own id (code review R2-BE-1)', async () => {
+    let clock = '2026-10-06T12:14:59.000Z';
+    const { repo, svc } = await rewriteService({
+      lastRewrite: runningRewrite({ jobId: 'job-1', action: 'use', field: 'agency', fromTexts: ['Steps'], toName: 'Step Up', heartbeatAt: T1 }),
+      now: () => clock,
+    });
+    // Under 15 minutes old: still the caller's, and refreshed.
+    expect(await svc.heartbeat('job-1')).toBe(true);
+    // 15 minutes after THAT beat nobody took it, yet a lapsed lock is no
+    // longer the caller's: every guard was off meanwhile (Run again re-validates).
+    clock = '2026-10-06T12:29:59.000Z';
+    const before = await repo.peek();
+    expect(await svc.heartbeat('job-1')).toBe(false);
+    expect(await repo.peek()).toEqual(before);
+  });
+});
+
+describe('OrgRewriteService.claim (code review R2-BE-1)', () => {
+  const use = runningRewrite({
+    jobId: 'job-1',
+    action: 'use',
+    field: 'agency',
+    fromTexts: ['Steps'],
+    toName: STEP_UP.name,
+    heartbeatAt: T1,
+  });
+
+  it('writes nothing for a rewrite that is not this id running, or for the cleanup lock', async () => {
+    const cleanup = runningRewrite({ jobId: 'job-1', action: 'cleanup', fromTexts: [], heartbeatAt: T1 });
+    for (const last of [undefined, { ...use, jobId: 'job-other' }, { ...use, status: 'done' as const }, { ...use, status: 'failed' as const }, cleanup]) {
+      const { repo, svc } = await rewriteService({ lastRewrite: last });
+      expect(await svc.claim('job-1')).toEqual({ outcome: 'not_current', lastRewrite: last });
+      expect((await repo.peek())?.version).toBe(1);
+    }
+  });
+
+  it('a FRESH lock: one write refreshes its heartbeat and hands back the stored definition', async () => {
+    const at = '2026-10-06T12:05:00.000Z';
+    const { repo, svc } = await rewriteService({ lastRewrite: use, now: () => at });
+    const claimed = { ...use, heartbeatAt: at };
+    expect(await svc.claim('job-1')).toEqual({ outcome: 'claimed', lastRewrite: claimed });
+    expect(await repo.peek()).toMatchObject({ version: 2, lastRewrite: claimed });
+  });
+
+  it('a LAPSED lock is re-validated as Run again does: claimed while the definition fits the list, else recorded failed', async () => {
+    const late = '2026-10-06T12:15:00.000Z'; // exactly 15 minutes: lapsed
+    const fits = await rewriteService({ lastRewrite: use, now: () => late });
+    expect(await fits.svc.claim('job-1')).toEqual({ outcome: 'claimed', lastRewrite: { ...use, heartbeatAt: late } });
+    // Step Up was deleted while the lock had lapsed: the Use would write an off-list name.
+    const gone = await rewriteService({
+      entries: ORG_FIXTURE.filter((e) => e.orgId !== STEP_UP.orgId),
+      lastRewrite: use,
+      now: () => late,
+    });
+    const failed: OrgRewriteState = {
+      ...use,
+      status: 'failed',
+      heartbeatAt: late,
+      finishedAt: late,
+      error: 'org_rewrite_target_gone: a name it writes left the list or changed kind',
+    };
+    expect(await gone.svc.claim('job-1')).toEqual({ outcome: 'refused', lastRewrite: failed });
+    expect(await gone.repo.peek()).toMatchObject({ version: 2, lastRewrite: failed });
+    // Recorded failed: no later delivery can claim it.
+    expect(await gone.svc.claim('job-1')).toEqual({ outcome: 'not_current', lastRewrite: failed });
+  });
 });
 
 describe('OrgRewriteService - an enqueue failure (spec D11)', () => {

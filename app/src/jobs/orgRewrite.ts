@@ -8,14 +8,19 @@
 //
 // The definition and the lock live on the org-list item; the payload carries
 // only the rewrite id the service minted BEFORE its list write (never the jobs
-// envelope id). The handler STARTS only while `lastRewrite` still names that
-// id and is `running`, so a duplicate SQS delivery or a stale run does
-// nothing. While it runs, every heartbeat (at most every 20 s, after each
-// record the pass visits) re-checks the id: once the lock is no longer this
-// run's - a newer rewrite took it over, or a duplicate run already finished
-// it - the pass writes no further record and the job returns WITHOUT
-// finish(), because the lock it would finish is not its own. finish()
-// re-checks the id too (services/orgRewrite.ts).
+// envelope id). The handler STARTS by CLAIMING the rewrite - one list write
+// (OrgRewriteService.claim, code review R2-BE-1) that answers not_current
+// unless `lastRewrite` still names that id and is `running`, so a duplicate
+// SQS delivery or a stale run does nothing; re-validates a lock whose
+// heartbeat LAPSED (a delivery 15 minutes late) exactly as Run again does,
+// recording the rewrite `failed` when the list changed under it; and refreshes
+// the heartbeat, so no record is written under a lapsed lock. While it runs,
+// every heartbeat (at most every 20 s, after each record the pass visits)
+// re-checks the id: once the lock is no longer this run's - a newer rewrite
+// took it over, a duplicate run already finished it, or it lapsed - the pass
+// writes no further record and the job returns WITHOUT finish(), because the
+// lock it would finish is not its own (a lapsed one is left for Run again,
+// which re-validates). finish() re-checks the id too (services/orgRewrite.ts).
 //
 // It NEVER rethrows: dispatchJob rethrows a handler error and SQS would
 // redeliver it up to 5 times (infra/modules/jobs/main.tf). Every failure is
@@ -56,9 +61,8 @@ export function parseOrgRewritePayload(payload: unknown): OrgRewritePayload {
 }
 
 export interface RunOrgRewriteDeps {
-  orgListRepo: Pick<OrgListRepo, 'get'>;
   orgRecords: Pick<OrgRecordsService, 'rewrite'>;
-  orgRewrite: Pick<OrgRewriteService, 'heartbeat' | 'finish'>;
+  orgRewrite: Pick<OrgRewriteService, 'claim' | 'heartbeat' | 'finish'>;
   logger?: Logger;
 }
 
@@ -82,12 +86,22 @@ export async function runOrgRewriteJob(
     for (const [key, n] of Object.entries(part)) counts[key] = (counts[key] ?? 0) + n;
   };
   try {
-    const item = await deps.orgListRepo.get();
-    const last = item.lastRewrite;
-    if (last === undefined || last.jobId !== jobId || last.status !== 'running' || last.action === 'cleanup') {
-      log.info({ jobId, current: last?.jobId, status: last?.status }, 'org.rewrite: not the running rewrite - nothing to do');
+    const claim = await deps.orgRewrite.claim(jobId);
+    if (claim.outcome === 'not_current') {
+      const current = claim.lastRewrite;
+      log.info({ jobId, current: current?.jobId, status: current?.status }, 'org.rewrite: not the running rewrite - nothing to do');
       return { outcome: 'not_current' };
     }
+    if (claim.outcome === 'refused') {
+      // Code review R2-BE-1: delivered after its lock lapsed, and the list
+      // changed under the definition meanwhile - the claim recorded it failed.
+      log.warn(
+        { jobId, action: claim.lastRewrite.action, error: claim.lastRewrite.error },
+        'org.rewrite: delivered after its lock lapsed and the list changed since - recorded failed, nothing rewritten',
+      );
+      return { outcome: 'failed', counts: {} };
+    }
+    const last = claim.lastRewrite;
     // The passes are the fields FIXED when the rewrite started (spec 5.1).
     const fields = Array.isArray(last.fields) ? last.fields : [];
     if (fields.length === 0) throw new Error('the rewrite names no record fields');
@@ -139,7 +153,6 @@ function buildRunDeps(deps: OrgRewriteJobDeps): RunOrgRewriteDeps {
     logger: deps.logger,
   });
   return {
-    orgListRepo,
     orgRecords,
     orgRewrite: createOrgRewriteService({ orgListRepo, orgRecords, logger: deps.logger }),
     logger: deps.logger,

@@ -1176,7 +1176,7 @@ describe('AllToursView - the row-open write (spec 4.7, 4.9)', () => {
     expect(routerText()).toBe('/elsewhere');
   });
 
-  it('a Ctrl-click and an Alt-click write nothing (the tour opens elsewhere)', async () => {
+  it('a Ctrl-, Alt-, Cmd- (meta) or Shift-click writes nothing (the tour opens elsewhere)', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       reply('', page([row('a1')], null));
@@ -1185,10 +1185,12 @@ describe('AllToursView - the row-open write (spec 4.7, 4.9)', () => {
       const k0 = routerKey();
       fireEvent.click(linkFor('a1'), { ctrlKey: true });
       fireEvent.click(linkFor('a1'), { altKey: true });
+      fireEvent.click(linkFor('a1'), { metaKey: true });
+      fireEvent.click(linkFor('a1'), { shiftKey: true });
       // jsdom reports each unprevented anchor activation as an unimplemented
-      // navigation; wait for both so they land inside this spy, not in a later
-      // test's stderr (ToursPage.test.tsx's P15 case does the same).
-      await waitFor(() => expect(errors).toHaveBeenCalledTimes(2));
+      // navigation; wait for all four so they land inside this spy, not in a
+      // later test's stderr (ToursPage.test.tsx's P15 case does the same).
+      await waitFor(() => expect(errors).toHaveBeenCalledTimes(4));
       expect(routerKey()).toBe(k0);
       expect(routerText()).toBe('/tours/all?when=past');
       expect(routerState()).toBeNull();

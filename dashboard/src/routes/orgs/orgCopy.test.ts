@@ -233,6 +233,25 @@ describe('problem copy', () => {
       expect(spellingProblemCopy(problem), problem).not.toContain('_');
     }
   });
+
+  it('names an invisible character wherever a refused name or spelling is explained', () => {
+    // The server answers a soft hyphen, a zero-width space or a bidi mark with the same code
+    // and problem as a line break, and a pasted name looks fine - so every sentence for that
+    // code has to say invisible characters are refused too.
+    const nameSentence =
+      'A name needs at least one letter or digit, and no line breaks, control characters or invisible characters (a pasted name can carry one - retype it).';
+    expect(orgErrorMessage('org_name_invalid')).toBe(nameSentence);
+    expect(nameProblemCopy('org_name_invalid')).toBe(nameSentence);
+    expect(spellingProblemCopy('invalid')).toBe('it contains a line break, a control character or an invisible character');
+    const refused = new ApiError(409, 'org_spelling_refused', 'org_spelling_refused', {
+      error: 'org_spelling_refused',
+      spelling: 'Atl HA',
+      problem: 'invalid',
+    });
+    expect(orgErrorCopy(refused)).toBe(
+      'Atl HA cannot be a spelling: it contains a line break, a control character or an invisible character.',
+    );
+  });
 });
 
 describe('rewrite status', () => {

@@ -3459,8 +3459,9 @@ export type HolderRecord =
 
 /**
  * Why a text cannot be a NEW name (spec D13; plan 3.4 `nameProblem`): the S1
- * union. `org_name_invalid` covers a newline or other control character
- * (plan 3.5) and a name with nothing left once normalized (`-`, `()`).
+ * union. `org_name_invalid` covers a newline, another control character or an
+ * invisible format character (plan 3.5) and a name with nothing left once
+ * normalized (`-`, `()`).
  */
 export type OrgNameProblem =
   | 'org_name_empty'

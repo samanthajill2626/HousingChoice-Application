@@ -271,7 +271,11 @@ const ORG_ERROR_COPY: Readonly<Record<string, string>> = {
   org_not_on_list: 'That name is not on the list - pick one from the list or add it.',
   org_name_empty: 'Type a name first.',
   org_name_too_long: 'Names can be at most 120 characters.',
-  org_name_invalid: 'A name needs at least one letter or digit, and no line breaks or other control characters.',
+  // One code also covers a name holding an invisible format character (a soft hyphen, a
+  // zero-width space, a bidi mark), so the sentence has to name those or a pasted name
+  // reads as unexplainable. Keep it equal to nameProblemCopy's org_name_invalid.
+  org_name_invalid:
+    'A name needs at least one letter or digit, and no line breaks, control characters or invisible characters (a pasted name can carry one - retype it).',
   org_notes_too_long: 'Notes can be at most 500 characters.',
   org_name_taken: 'That name is already on the list.',
   org_name_compound: 'That names more than one organization, so it cannot be one entry. Use Split instead.',
@@ -419,7 +423,7 @@ export function nameProblemCopy(problem: string, check?: OrgCheckResult): string
     case 'org_name_too_long':
       return 'Names can be at most 120 characters.';
     case 'org_name_invalid':
-      return 'A name needs at least one letter or digit, and no line breaks or other control characters.';
+      return 'A name needs at least one letter or digit, and no line breaks, control characters or invisible characters (a pasted name can carry one - retype it).';
     case 'org_name_compound':
       return 'It names more than one organization, so it cannot be one entry.';
     case 'org_name_taken': {
@@ -460,7 +464,7 @@ export function spellingProblemCopy(problem: string, related: readonly OrgRef[] 
         ? `it is also a spelling of ${who}, and a shared spelling is never applied automatically`
         : 'another entry already has it, and a shared spelling is never applied automatically';
     case 'invalid':
-      return 'it contains a line break or other control character';
+      return 'it contains a line break, a control character or an invisible character';
     default:
       return 'it cannot be used';
   }

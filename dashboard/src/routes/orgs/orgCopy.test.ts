@@ -20,6 +20,7 @@ import {
   rewriteStatusText,
   settleTypedOrgText,
   spellingProblemCopy,
+  typedOrgNote,
   usageBreakdown,
   usageText,
 } from './orgCopy.js';
@@ -315,5 +316,15 @@ describe('settleTypedOrgText - text typed in a form picker but never picked (cod
     for (const text of ['AHA', 'Atl', 'Step Up', 'Metro Housing Board', '()']) {
       expect(settleTypedOrgText(LIST, HA, text), text).toEqual({ status: 'blocked' });
     }
+  });
+});
+
+describe('typedOrgNote - the note under a form picker says what Save will do (code review R2-FE-6)', () => {
+  it('names the entry Save will use, or says the text is not saved and how to fix it', () => {
+    expect(typedOrgNote({ status: 'resolved', name: 'Step Up' })).toBe('Save will use Step Up.');
+    expect(typedOrgNote({ status: 'blocked' })).toBe(
+      'Not saved - pick a name from the list, add it as new, or clear the text.',
+    );
+    expect(typedOrgNote({ status: 'empty' })).toBeNull();
   });
 });

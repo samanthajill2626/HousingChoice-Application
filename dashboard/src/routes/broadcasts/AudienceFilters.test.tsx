@@ -119,6 +119,15 @@ describe('AudienceFilters — voucher size pre-fill + override', () => {
     expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant' });
   });
 
+  it('a field left holding typed text says it is no filter - even a full list name (R2-FE-6)', async () => {
+    const u = userEvent.setup();
+    render(<Harness />);
+    const box = screen.getByRole('combobox', { name: 'Housing authority' });
+    await u.type(box, 'Atlanta Housing Authority');
+    await u.tab();
+    expect(box).toHaveAccessibleDescription('Not used as a filter - pick a name from the list, or clear the text.');
+  });
+
   it('never offers to add a name (spec D7)', async () => {
     const u = userEvent.setup();
     render(<Harness />);

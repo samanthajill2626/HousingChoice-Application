@@ -382,6 +382,19 @@ describe('UnitCreateForm - text typed in the picker but never picked', () => {
   });
 
   it.each([
+    ['DCA', 'Save will use Georgia Department of Community Affairs.'],
+    ['Metro Nowhere', 'Not saved - pick a name from the list, add it as new, or clear the text.'],
+  ])('the note under the field says what Create will do with %s (R2-FE-6)', async (text, note) => {
+    const user = userEvent.setup();
+    setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByRole('dialog', { name: 'New property' });
+    await user.type(authorities(), text);
+    await screen.findAllByRole('option');
+    await user.tab();
+    expect(authorities()).toHaveAccessibleDescription(note);
+  });
+
+  it.each([
     ['a spelling two entries share', 'AHA'],
     ['unknown text', 'Metro Nowhere'],
   ])('%s stops Create: nothing is sent, the picker says why and takes focus', async (_case, text) => {

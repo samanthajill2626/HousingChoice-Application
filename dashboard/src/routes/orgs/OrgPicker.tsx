@@ -17,15 +17,15 @@
 // `onChange` fires only on a pick or a clear (a chip's remove button), never
 // per keystroke - the blast composer recreates its draft on every filter change.
 // TYPED TEXT IS NEVER DROPPED SILENTLY (code review R1-ADV-FE-1): the picker
-// reports the text it holds through `onPendingTextChange` ('' after a pick or
-// an emptied input; a clear - a chip's remove button - KEEPS the typed text,
-// R2-FE-2), and a field left holding text that is not a pick says "Not saved
-// - ..." under it. A FORM's
-// Save commits that text when it names exactly one entry (orgCopy
-// settleTypedOrgText) and otherwise refuses to save; it clears the committed
-// text or focuses the refused field through the `ref` handle. The composer
-// keeps the commit rule above and never commits typed text. Focusing the field
-// again re-opens its list for the text it holds.
+// reports the text it holds through `onPendingTextChange` ('' after a pick, an
+// emptied input or an unmount; a clear - a chip's remove button - KEEPS the
+// typed text, R2-FE-2), and a field left holding text that is not a pick shows
+// the HOST's note about it under the field (`pendingNote`, R2-FE-6). A FORM's
+// Save commits that text when it names exactly one entry and otherwise refuses
+// to save (useTypedOrgText, which also writes the note); it clears the
+// committed text or focuses the refused field through the `ref` handle. The
+// composer keeps the commit rule above and never commits typed text. Focusing
+// the field again re-opens its list for the text it holds.
 // Matching covers names AND spellings (normalized like the server), so typing
 // AHA lists both Atlanta and Augusta Housing Authority - a shared spelling
 // shows every entry carrying it - and staff pick. An option's accessible name
@@ -77,9 +77,16 @@ interface OrgPickerBaseProps {
   className?: string;
   labelClassName?: string;
   /** The typed text that is not a pick yet, on every change - and '' after a
-   *  pick or an emptied input (a chip removed keeps it, R2-FE-2). A form's
-   *  Save reads it (R1-ADV-FE-1); the blast composer leaves it out. */
+   *  pick, an emptied input or an unmount (a chip removed keeps it, R2-FE-2).
+   *  A form's Save reads it (R1-ADV-FE-1). */
   onPendingTextChange?: (text: string) => void;
+  /** The note under a field focus left holding typed text that is not a
+   *  pick: the host's truth about that text (code review R2-FE-6) - a form's
+   *  says what its Save will do (useTypedOrgText), the composer's that it is
+   *  no filter. Absent: "Not saved - pick a name from the list, or clear the
+   *  text." (a host that never uses typed text: the Settle dialogs). null:
+   *  no note. */
+  pendingNote?: string | null;
   /** The Save guard's handle (React 19 passes `ref` as a plain prop). */
   ref?: React.Ref<OrgPickerHandle>;
 }
@@ -154,6 +161,7 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
     className,
     labelClassName,
     onPendingTextChange,
+    pendingNote,
     ref,
   } = props;
   const chosen: readonly string[] =
@@ -192,10 +200,20 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
     },
   }));
 
+  // The text goes with the picker: an unmount reports '' (the tenant pickers
+  // unmount when the type leaves tenant - a Save must not act on text that is
+  // no longer on screen). Through a ref, so the latest callback is told.
+  const pendingRef = useRef(onPendingTextChange);
+  useEffect(() => {
+    pendingRef.current = onPendingTextChange;
+  });
+  useEffect(() => () => pendingRef.current?.(''), []);
+
   const trimmed = query.trim();
-  // Typed text the field holds after focus left it: a Save would not keep it
-  // as typed (R1-ADV-FE-1), so say so under the field.
-  const showNote = !focused && trimmed !== '';
+  // Typed text the field holds after focus left it: say what the host makes
+  // of it under the field (R1-ADV-FE-1, R2-FE-6).
+  const noteText = pendingNote === undefined ? ORG_TYPED_NOT_SAVED : pendingNote;
+  const showNote = !focused && trimmed !== '' && noteText !== null;
   // "When nothing matches" (spec D6) is judged against EVERY entry of the
   // kinds - chosen ones included - so the add step never offers a name a pick
   // can reach. A multi-picker never offers a member it already holds.
@@ -394,7 +412,7 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
       ) : null}
       {showNote ? (
         <p id={noteId} className={styles.pendingNote}>
-          {ORG_TYPED_NOT_SAVED}
+          {noteText}
         </p>
       ) : null}
       {error ? (

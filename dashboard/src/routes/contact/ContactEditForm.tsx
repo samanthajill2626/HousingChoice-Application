@@ -77,13 +77,13 @@ import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
 import {
   AGENCY_KINDS,
   HOUSING_AUTHORITY_KINDS,
-  ORG_TYPED_BLOCKED,
   notOnListMessage,
   orgListLoadError,
   orgNotOnListBody,
-  settleTypedOrgText,
+  refusesSave,
 } from '../orgs/orgCopy.js';
 import { useOrgList } from '../orgs/useOrgList.js';
+import { useTypedOrgText } from '../orgs/useTypedOrgText.js';
 import {
   CONTACT_TYPE_LABEL,
   normalizeRelationships,
@@ -143,15 +143,15 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     field: 'housingAuthority' | 'agency';
     message: string;
   } | null>(null);
-  // Text typed in a picker but never picked (code review R1-ADV-FE-1): Save
-  // commits it when it names exactly one entry, as a pick would, and otherwise
-  // refuses to save and says so under that picker - it is never dropped
-  // silently. `typedRefused` marks the pickers the last Save refused.
-  const [typedHousingAuthority, setTypedHousingAuthority] = useState('');
-  const [typedAgency, setTypedAgency] = useState('');
-  const [typedRefused, setTypedRefused] = useState({ housingAuthority: false, agency: false });
+  // Text typed in a picker but never picked (code review R1-ADV-FE-1, R2-FE-6):
+  // never dropped silently. One rule (useTypedOrgText) writes the note under
+  // each picker and decides Save: text naming exactly one entry is committed
+  // as a pick would be; any other text refuses the save, saying why under
+  // that picker.
   const housingAuthorityPicker = useRef<OrgPickerHandle>(null);
   const agencyPicker = useRef<OrgPickerHandle>(null);
+  const housingAuthorityText = useTypedOrgText(orgList, HOUSING_AUTHORITY_KINDS, housingAuthorityPicker);
+  const agencyText = useTypedOrgText(orgList, AGENCY_KINDS, agencyPicker);
 
   // Type + role together - a KindPicker value, kept collapsed behind "Change type"
   // (changingType) since retyping is rare. isTenant/isLandlord derive from the
@@ -235,12 +235,8 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     if (next.type !== null && !validStatusesForType(next.type).includes(status)) {
       setStatus(defaultStatusForType(next.type, str(contact.status)));
     }
-    // The tenant pickers unmount, and the text typed in them goes with them.
-    if (next.type !== 'tenant') {
-      setTypedHousingAuthority('');
-      setTypedAgency('');
-      setTypedRefused({ housingAuthority: false, agency: false });
-    }
+    // A type that is not tenant unmounts the tenant pickers, and the text typed
+    // in them goes with them (an unmounted OrgPicker reports '').
   }
 
   function handleShowRelationships(): void {
@@ -388,33 +384,32 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
 
   /**
    * Code review R1-ADV-FE-1: text typed in a tenant picker but never picked is
-   * never dropped silently. Text naming exactly one entry (settleTypedOrgText)
-   * is committed as a pick would be; any other text refuses the save, says why
-   * under its picker and focuses it. Returns the two org field values to save,
-   * or null when the save is refused. (An Enter in a picker with nothing
-   * highlighted submits the form, so it lands here too.)
+   * never dropped silently. Both pickers' text is settled by the one rule
+   * (useTypedOrgText): text naming exactly one entry is committed as a pick
+   * would be - even when the other picker refuses; any other text refuses the
+   * save, says why under its picker and the first refused picker takes focus.
+   * Returns the two org field values to save, or null when the save is
+   * refused. (An Enter in a picker with nothing highlighted submits the form,
+   * so it lands here too.)
    */
   function settleTypedText(): { housingAuthority: string; agency: string } | null {
     const org = { housingAuthority, agency };
     if (!isTenant) return org;
-    const ha = settleTypedOrgText(orgList.entries, HOUSING_AUTHORITY_KINDS, typedHousingAuthority);
-    const ag = settleTypedOrgText(orgList.entries, AGENCY_KINDS, typedAgency);
+    const ha = housingAuthorityText.settle();
+    const ag = agencyText.settle();
     if (ha.status === 'resolved') {
       org.housingAuthority = ha.name;
       setHousingAuthority(ha.name);
-      housingAuthorityPicker.current?.clearText();
     }
     if (ag.status === 'resolved') {
       org.agency = ag.name;
       setAgency(ag.name);
-      agencyPicker.current?.clearText();
     }
     // A commit clears a refused-save message the way a pick does.
     if (ha.status === 'resolved' || ag.status === 'resolved') setOrgFieldError(null);
-    setTypedRefused({ housingAuthority: ha.status === 'blocked', agency: ag.status === 'blocked' });
-    if (ha.status === 'blocked') housingAuthorityPicker.current?.focus();
-    else if (ag.status === 'blocked') agencyPicker.current?.focus();
-    return ha.status === 'blocked' || ag.status === 'blocked' ? null : org;
+    if (refusesSave(ha)) housingAuthorityText.focus();
+    else if (refusesSave(ag)) agencyText.focus();
+    return refusesSave(ha) || refusesSave(ag) ? null : org;
   }
 
   async function onSubmit(e: React.FormEvent): Promise<void> {
@@ -608,19 +603,13 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
                 setHousingAuthority(next);
                 setOrgFieldError(null);
               }}
-              onPendingTextChange={(text) => {
-                setTypedHousingAuthority(text);
-                setTypedRefused((r) => (r.housingAuthority ? { ...r, housingAuthority: false } : r));
-              }}
+              onPendingTextChange={housingAuthorityText.onPendingTextChange}
+              pendingNote={housingAuthorityText.note}
               onRequestAdd={(text) => setAdding({ kind: 'housing_authority', text })}
               error={
-                typedRefused.housingAuthority
-                  ? ORG_TYPED_BLOCKED
-                  : orgFieldError?.field === 'housingAuthority'
-                    ? orgFieldError.message
-                    : orgList.error
-                      ? orgListLoadError(HOUSING_AUTHORITY_KINDS)
-                      : null
+                housingAuthorityText.refusal ??
+                (orgFieldError?.field === 'housingAuthority' ? orgFieldError.message : null) ??
+                (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)
               }
               className={styles.field}
               labelClassName={styles.label}
@@ -637,19 +626,13 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
                 setAgency(next);
                 setOrgFieldError(null);
               }}
-              onPendingTextChange={(text) => {
-                setTypedAgency(text);
-                setTypedRefused((r) => (r.agency ? { ...r, agency: false } : r));
-              }}
+              onPendingTextChange={agencyText.onPendingTextChange}
+              pendingNote={agencyText.note}
               onRequestAdd={(text) => setAdding({ kind: 'agency', text })}
               error={
-                typedRefused.agency
-                  ? ORG_TYPED_BLOCKED
-                  : orgFieldError?.field === 'agency'
-                    ? orgFieldError.message
-                    : orgList.error
-                      ? orgListLoadError(AGENCY_KINDS)
-                      : null
+                agencyText.refusal ??
+                (orgFieldError?.field === 'agency' ? orgFieldError.message : null) ??
+                (orgList.error ? orgListLoadError(AGENCY_KINDS) : null)
               }
               className={styles.field}
               labelClassName={styles.label}

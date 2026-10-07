@@ -410,6 +410,18 @@ describe('ListingEditForm - text typed in the picker but never picked', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['DCA', 'Save will use Georgia Department of Community Affairs.'],
+    ['AHA', 'Not saved - pick a name from the list, add it as new, or clear the text.'],
+  ])('the note under the field says what Save will do with %s (R2-FE-6)', async (text, note) => {
+    const user = userEvent.setup();
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(authorities(), text);
+    await screen.findAllByRole('option');
+    await user.tab();
+    expect(authorities()).toHaveAccessibleDescription(note);
+  });
+
   it('a member removed after typing a name: the name stays and Save adds it (R2-FE-2)', async () => {
     const user = userEvent.setup();
     updateUnit.mockResolvedValue({ ...UNIT });

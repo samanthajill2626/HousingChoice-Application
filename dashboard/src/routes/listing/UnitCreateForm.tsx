@@ -27,13 +27,13 @@ import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
 import {
   HOUSING_AUTHORITY_KINDS,
-  ORG_TYPED_BLOCKED,
   notOnListMessage,
   orgListLoadError,
   orgNotOnListBody,
-  settleTypedOrgText,
+  refusesSave,
 } from '../orgs/orgCopy.js';
 import { useOrgList } from '../orgs/useOrgList.js';
+import { useTypedOrgText } from '../orgs/useTypedOrgText.js';
 import styles from './ListingEditForm.module.css';
 
 export interface UnitCreateFormProps {
@@ -74,24 +74,22 @@ export function UnitCreateForm({
     setAuthorities((prev) => (prev.includes(name) ? prev : [...prev, name]));
     setAuthoritiesError(null);
   }
-  // Text typed in the picker but never picked (code review R1-ADV-FE-1): Create
-  // sends it when it names exactly one entry, as a pick would, and otherwise
-  // refuses to create and says so under the picker - a property is never
-  // created without the authority staff typed.
-  const [typedAuthority, setTypedAuthority] = useState('');
-  const [typedRefused, setTypedRefused] = useState(false);
+  // Text typed in the picker but never picked (code review R1-ADV-FE-1,
+  // R2-FE-6): one rule (useTypedOrgText) writes the note under the picker and
+  // decides Create - text naming exactly one entry is sent as a pick would
+  // be; any other text refuses to create, saying why under the picker. A
+  // property is never created without the authority staff typed.
   const authoritiesPicker = useRef<OrgPickerHandle>(null);
+  const authorityText = useTypedOrgText(orgList, HOUSING_AUTHORITY_KINDS, authoritiesPicker);
   /** The authorities to send with the typed text settled, or null when Create is refused. */
   function settleTypedAuthority(): string[] | null {
-    const typed = settleTypedOrgText(orgList.entries, HOUSING_AUTHORITY_KINDS, typedAuthority);
-    setTypedRefused(typed.status === 'blocked');
-    if (typed.status === 'blocked') {
-      authoritiesPicker.current?.focus();
+    const typed = authorityText.settle();
+    if (refusesSave(typed)) {
+      authorityText.focus();
       return null;
     }
-    if (typed.status === 'empty') return authorities;
+    if (typed.status !== 'resolved') return authorities;
     addAuthority(typed.name);
-    authoritiesPicker.current?.clearText();
     return authorities.includes(typed.name) ? authorities : [...authorities, typed.name];
   }
   const [beds, setBeds] = useState('');
@@ -361,15 +359,13 @@ export function UnitCreateForm({
               setAuthorities(next);
               setAuthoritiesError(null);
             }}
-            onPendingTextChange={(text) => {
-              setTypedAuthority(text);
-              setTypedRefused(false);
-            }}
+            onPendingTextChange={authorityText.onPendingTextChange}
+            pendingNote={authorityText.note}
             onRequestAdd={setAddingAuthority}
             error={
-              typedRefused
-                ? ORG_TYPED_BLOCKED
-                : (authoritiesError ?? (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null))
+              authorityText.refusal ??
+              authoritiesError ??
+              (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)
             }
             className={styles.field}
             labelClassName={styles.label}

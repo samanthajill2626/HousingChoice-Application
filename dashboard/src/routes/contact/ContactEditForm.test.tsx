@@ -864,6 +864,40 @@ describe('ContactEditForm - text typed in a picker but never picked', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('the note under each picker says what Save will do with its text (R2-FE-6)', async () => {
+    const user = userEvent.setup();
+    const agency = (): HTMLElement => screen.getByRole('combobox', { name: 'Agency' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    // Text naming one entry: Save will use it - never "Not saved".
+    await user.type(housingAuthority(), 'DCA');
+    await screen.findByRole('option', { name: /^Georgia Department of Community Affairs/ });
+    await user.tab();
+    expect(housingAuthority()).toHaveAccessibleDescription(
+      'The organization that runs the voucher Save will use Georgia Department of Community Affairs.',
+    );
+    // Text Save would refuse: not saved, and how to fix it.
+    await user.type(agency(), 'Hope');
+    await user.tab();
+    expect(agency()).toHaveAccessibleDescription(
+      'Not saved - pick a name from the list, add it as new, or clear the text.',
+    );
+  });
+
+  it('(PIN) text typed in a tenant picker goes when the type changes away and back', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ContactEditForm contact={{ ...TENANT, status: 'needs_review' }} onClose={onClose} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'Atlanta Housing Authority');
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Landlord' }));
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    expect(housingAuthority()).toHaveValue('');
+    await user.click(save());
+    // Nothing on screen asks for a change: nothing is saved.
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('the stored chip removed after typing a new name: the name stays and Save saves it in its place (R2-FE-2)', async () => {
     const user = userEvent.setup();
     const stored: Contact = { ...TENANT, housingAuthority: 'DeKalb County Housing Authority' };

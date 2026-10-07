@@ -17,13 +17,13 @@ import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
 import {
   HOUSING_AUTHORITY_KINDS,
-  ORG_TYPED_BLOCKED,
   notOnListMessage,
   orgListLoadError,
   orgNotOnListBody,
-  settleTypedOrgText,
+  refusesSave,
 } from '../orgs/orgCopy.js';
 import { useOrgList } from '../orgs/useOrgList.js';
+import { useTypedOrgText } from '../orgs/useTypedOrgText.js';
 import { authoritiesOf } from './listingFormat.js';
 import styles from './ListingEditForm.module.css';
 
@@ -56,23 +56,21 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     setAuthorities((prev) => (prev.includes(name) ? prev : [...prev, name]));
     setAuthoritiesError(null);
   }
-  // Text typed in the picker but never picked (code review R1-ADV-FE-1): Save
-  // adds it when it names exactly one entry, as a pick would, and otherwise
-  // refuses to save and says so under the picker - it is never dropped silently.
-  const [typedAuthority, setTypedAuthority] = useState('');
-  const [typedRefused, setTypedRefused] = useState(false);
+  // Text typed in the picker but never picked (code review R1-ADV-FE-1,
+  // R2-FE-6): never dropped silently. One rule (useTypedOrgText) writes the
+  // note under the picker and decides Save: text naming exactly one entry is
+  // added as a pick would be; any other text refuses the save, saying why.
   const authoritiesPicker = useRef<OrgPickerHandle>(null);
+  const authorityText = useTypedOrgText(orgList, HOUSING_AUTHORITY_KINDS, authoritiesPicker);
   /** The authorities to save with the typed text settled, or null when Save is refused. */
   function settleTypedAuthority(): string[] | null {
-    const typed = settleTypedOrgText(orgList.entries, HOUSING_AUTHORITY_KINDS, typedAuthority);
-    setTypedRefused(typed.status === 'blocked');
-    if (typed.status === 'blocked') {
-      authoritiesPicker.current?.focus();
+    const typed = authorityText.settle();
+    if (refusesSave(typed)) {
+      authorityText.focus();
       return null;
     }
-    if (typed.status === 'empty') return authorities;
+    if (typed.status !== 'resolved') return authorities;
     addAuthority(typed.name);
-    authoritiesPicker.current?.clearText();
     return authorities.includes(typed.name) ? authorities : [...authorities, typed.name];
   }
   const [beds, setBeds] = useState(numStr(unit.beds));
@@ -279,15 +277,13 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
               setAuthorities(next);
               setAuthoritiesError(null);
             }}
-            onPendingTextChange={(text) => {
-              setTypedAuthority(text);
-              setTypedRefused(false);
-            }}
+            onPendingTextChange={authorityText.onPendingTextChange}
+            pendingNote={authorityText.note}
             onRequestAdd={setAddingAuthority}
             error={
-              typedRefused
-                ? ORG_TYPED_BLOCKED
-                : (authoritiesError ?? (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null))
+              authorityText.refusal ??
+              authoritiesError ??
+              (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)
             }
             className={styles.field}
             labelClassName={styles.label}

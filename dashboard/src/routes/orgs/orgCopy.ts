@@ -96,9 +96,24 @@ export function orgListLoadError(kinds: readonly OrgKind[]): string {
 }
 
 // --- Text typed in a picker but never picked (code review R1-ADV-FE-1) -------
+// The note under a picker left holding such text tells the truth for its host
+// (code review R2-FE-6): a form says what its Save will do with the text (the
+// same verdict Save acts on - useTypedOrgText), the blast composer that typed
+// text is never a filter, and a host that never uses typed text the default.
 
-/** Under a picker that lost focus while holding typed text that is not a pick. */
+/** Under a picker whose host never uses typed text (the Settle dialogs). */
 export const ORG_TYPED_NOT_SAVED = 'Not saved - pick a name from the list, or clear the text.';
+
+/** Under a FORM picker holding text its Save would refuse. */
+export const ORG_TYPED_NOT_SAVED_FORM = 'Not saved - pick a name from the list, add it as new, or clear the text.';
+
+/** Under a FORM picker holding text its Save will commit as that entry's name. */
+export function orgTypedWillUse(name: string): string {
+  return `Save will use ${name}.`;
+}
+
+/** Under the blast composer's picker: only a pick sets the filter (spec D7). */
+export const ORG_TYPED_NOT_A_FILTER = 'Not used as a filter - pick a name from the list, or clear the text.';
 
 /** Under a form picker whose typed text stopped a Save (role="alert"). */
 export const ORG_TYPED_BLOCKED = 'Pick a name from the list, add it as new, or clear the text.';
@@ -113,8 +128,10 @@ export type TypedOrgText = { status: 'empty' } | { status: 'resolved'; name: str
  * that entry's exact name, as a pick would be ('resolved'). Anything else - a
  * spelling two entries share ("AHA"), part of a name, the other kind's name,
  * unknown text - stops the save ('blocked'). Never fuzzy: close names belong
- * to "Is this really new?". Blank text is nothing typed ('empty'). The blast
- * composer never uses this: only a pick or a clear changes its filter (D7).
+ * to "Is this really new?". Blank text is nothing typed ('empty'). THE one
+ * rule: a form's Save and the note under its picker both read it, through
+ * useTypedOrgText (code review R2-FE-6). The blast composer never uses this:
+ * only a pick or a clear changes its filter (D7).
  */
 export function settleTypedOrgText(
   entries: readonly OrgEntry[],
@@ -129,6 +146,28 @@ export function settleTypedOrgText(
     byName.length > 0 ? byName : ofKinds.filter((e) => e.spellings.some((s) => normalizeOrgText(s) === q));
   const [only] = matches;
   return matches.length === 1 && only !== undefined ? { status: 'resolved', name: only.name } : { status: 'blocked' };
+}
+
+/** Save refuses the text this verdict is about. */
+export function refusesSave(verdict: TypedOrgText): boolean {
+  return verdict.status === 'blocked';
+}
+
+/**
+ * The note under a FORM picker left holding typed text: what its Save will
+ * do with that text, from the verdict Save itself acts on (code review
+ * R2-FE-6) - so the note never says "Not saved" for text Save then commits.
+ * null: nothing to say.
+ */
+export function typedOrgNote(verdict: TypedOrgText): string | null {
+  switch (verdict.status) {
+    case 'resolved':
+      return orgTypedWillUse(verdict.name);
+    case 'blocked':
+      return ORG_TYPED_NOT_SAVED_FORM;
+    default:
+      return null;
+  }
 }
 
 function names(refs: readonly { name: string }[]): string {

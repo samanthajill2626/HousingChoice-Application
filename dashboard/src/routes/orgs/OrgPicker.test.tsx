@@ -349,6 +349,44 @@ describe('OrgPicker - text typed but never picked (code review R1-ADV-FE-1)', ()
     expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
   });
 
+  it("the note is the host's truth about the text: its own words, or none at all (R2-FE-6)", async () => {
+    const user = userEvent.setup();
+    const WILL_USE = 'Save will use DeKalb County Housing Authority.';
+    const picker = (pendingNote: string | null): React.JSX.Element => (
+      <>
+        <OrgPicker
+          label="Housing authority"
+          kinds={['housing_authority']}
+          entries={ENTRIES}
+          value=""
+          onChange={vi.fn()}
+          pendingNote={pendingNote}
+        />
+        <button type="button">Elsewhere</button>
+      </>
+    );
+    const { rerender } = render(picker(WILL_USE));
+    await user.type(combobox(), 'HADC');
+    await user.tab();
+    expect(combobox()).toHaveAccessibleDescription(WILL_USE);
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
+    rerender(picker(null));
+    expect(screen.queryByText(WILL_USE)).not.toBeInTheDocument();
+    expect(combobox()).toHaveAccessibleDescription('');
+  });
+
+  it('an unmounted picker tells its host the text is gone', async () => {
+    // A host must not act on text that left the screen with its picker (the
+    // tenant pickers unmount when the type leaves tenant).
+    const user = userEvent.setup();
+    const onPendingTextChange = vi.fn();
+    const { unmount } = render(<Typed onPendingTextChange={onPendingTextChange} />);
+    await user.type(combobox(), 'Metro');
+    expect(onPendingTextChange).toHaveBeenLastCalledWith('Metro');
+    unmount();
+    expect(onPendingTextChange).toHaveBeenLastCalledWith('');
+  });
+
   it('a host form can focus the field and clear the text it committed', async () => {
     const user = userEvent.setup();
     const onPendingTextChange = vi.fn();

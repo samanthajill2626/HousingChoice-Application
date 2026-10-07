@@ -12,7 +12,7 @@
 import { useId } from 'react';
 import type { AudienceFilter } from '../../api/index.js';
 import { OrgPicker } from '../orgs/OrgPicker.js';
-import { HOUSING_AUTHORITY_KINDS, orgListLoadError } from '../orgs/orgCopy.js';
+import { HOUSING_AUTHORITY_KINDS, ORG_TYPED_NOT_A_FILTER, orgListLoadError } from '../orgs/orgCopy.js';
 import { useOrgList } from '../orgs/useOrgList.js';
 import {
   VOUCHER_SIZE_CHOICES,
@@ -112,7 +112,8 @@ export function AudienceFilters({
 
       {/* Housing authority (spec 2026-10-06 D7): a picker over the stored
           list - names and spellings, NO add option. Only a pick or a removed
-          chip changes the filter, so typing never recreates the draft. A list
+          chip changes the filter, so typing never recreates the draft - and
+          the note under a field left holding text says so (R2-FE-6). A list
           that failed to load leaves this filter unsettable; the others work. */}
       <div className={styles.criterion}>
         <OrgPicker
@@ -123,6 +124,7 @@ export function AudienceFilters({
           disabled={orgList.error}
           value={filter.housing_authority ?? ''}
           onChange={setAuthority}
+          pendingNote={ORG_TYPED_NOT_A_FILTER}
           error={authorityError ?? (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)}
           placeholder="Any housing authority"
           labelClassName={styles.criterionLabel}

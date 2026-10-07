@@ -6,7 +6,7 @@
 //   - a re-run does NOT revert work done in the app after the import
 //   - `drop` in the workbook excludes a person and their traffic
 //   - a STOP sender imports suppressed
-//   - an applied unit records its authorities as a canonical list
+//   - an applied unit records its authorities as exact org-list names (spec D9)
 //
 // Self-skipping like the other integration suites: without DynamoDB Local at
 // DYNAMODB_ENDPOINT the suite is skipped so `npm test` stays green offline.
@@ -273,13 +273,12 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect((await contactOf(PHONES.conflictResolved)).housingAuthority).toBe('Atlanta Housing Authority');
   });
 
-  it('writes an applied unit a canonical accepted_authorities list, never jurisdiction', async () => {
-    // Spec section 8: the unit-side field is the accepted-authorities LIST, and
-    // the founder's raw "Voucher Type" cell goes through the SAME canonicalizer
-    // the contact side uses - so the properties facet and the tenants facet group
-    // one authority under one spelling instead of two. The retired `jurisdiction`
-    // string is never written again.
-    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+  it('writes an applied unit an accepted_authorities list of LIST names, never jurisdiction', async () => {
+    // The unit-side field is the accepted-authorities LIST, and the founder's
+    // raw "Voucher Type" cell resolves against the SAME org list the contact
+    // side uses (spec D9) - so the properties facet and the tenants facet name
+    // one authority one way. The retired `jurisdiction` string is never written.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv, orgEntries: ORG_ENTRIES });
 
     // The unit key is derived exactly as upsertUnit derives it, from the reviewed
     // row - not hardcoded, so a change to either helper surfaces here.
@@ -291,7 +290,7 @@ describe.skipIf(!reachable)('import:apply', () => {
       new GetCommand({ TableName: table('units'), Key: { unitId } }),
     );
     expect(stored.Item).toBeDefined();
-    expect(stored.Item!.accepted_authorities).toEqual(['Atlanta (AHA)']);
+    expect(stored.Item!.accepted_authorities).toEqual(['Atlanta Housing Authority']);
     expect(stored.Item!.jurisdiction).toBeUndefined();
   });
 

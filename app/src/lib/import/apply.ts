@@ -42,7 +42,6 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../config.js';
 import { normalizeToE164 } from '../phone.js';
-import { housingAuthorityFor, KNOWN_AUTHORITIES } from '../housingAuthority.js';
 import { KINDS_FOR_FIELD, resolveOrgText, type OrgEntry } from '../orgNames.js';
 import { buildStartingEntries } from '../orgStartingList.js';
 import {
@@ -503,8 +502,14 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
       report.units.skippedDropped += 1;
       continue;
     }
+    // D9: resolved BEFORE the dry-run gate - a dry run never calls upsertUnit,
+    // and its report must still list what a real run will not write.
+    const authority = resolveImportedUnitAuthority(row.housing_authority, orgEntries);
+    if (authority.notWritten !== undefined) {
+      tallyNotWritten(notWritten, 'accepted_authorities', authority.notWritten);
+    }
     if (!dryRun) {
-      await upsertUnit(doc, unitsTable, row, importedAt, contactIdByPhone, plan, report);
+      await upsertUnit(doc, unitsTable, row, importedAt, contactIdByPhone, plan, report, authority.name);
     }
     report.units.written += 1;
   }
@@ -512,14 +517,6 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
   report.orgNotWritten.push(...[...notWritten.values()].sort(compareNotWritten));
   return report;
 }
-
-// The authority vocabulary moved to lib/housingAuthority.ts on 2026-08-16 so the
-// AI extractor could share it (extraction is not downstream of this importer).
-// Re-exported so this module's public surface is unchanged for the callers and
-// tests that already import them from here. Imported at the top of the file as
-// well, because `export ... from` re-exports WITHOUT binding the names locally
-// and three call sites below use them.
-export { housingAuthorityFor, KNOWN_AUTHORITIES };
 
 /** Honorifics that must not become someone's first name (spelt with or without a dot). */
 const HONORIFIC_RE = /^(mr|mrs|ms|miss|dr|rev|pastor|sir|madam)\.?$/i;
@@ -998,6 +995,23 @@ export function resolveImportedAuthority(
   return { notWritten: { value, resolution: r.status } };
 }
 
+/**
+ * D9 unit side: the "Voucher Type" cell against the housing authority list.
+ * Only a resolved NAME is ever written to a unit; an agency (the other
+ * kind), a shared spelling, two organizations in one value or an unknown
+ * name comes back as `notWritten`.
+ */
+export function resolveImportedUnitAuthority(
+  raw: string | undefined,
+  entries: readonly OrgEntry[],
+): { name?: string; notWritten?: { value: string; resolution: NotWrittenResolution } } {
+  const value = cleanOrgCell(raw);
+  if (value === undefined) return {};
+  const r = resolveOrgText(entries, value, KINDS_FOR_FIELD.accepted_authorities);
+  if (r.status === 'match') return { name: r.entry.name };
+  return { notWritten: { value, resolution: r.status } };
+}
+
 function tallyNotWritten(
   tally: Map<string, OrgValueNotWritten>,
   field: OrgValueNotWritten['field'],
@@ -1383,6 +1397,8 @@ async function upsertUnit(
   contactIdByPhone: ReadonlyMap<string, string>,
   plan: PlanResult,
   report: ApplyReport,
+  /** The cell's resolved housing authority NAME (resolveImportedUnitAuthority); undefined = write none. */
+  authorityName: string | undefined,
 ): Promise<void> {
   const address = (row.address ?? '').trim();
   // IDENTITY STAYS ON THE RAW STRING. The unitId is seeded from the normalized
@@ -1453,16 +1469,15 @@ async function upsertUnit(
       );
     }
   }
-  // The unit's accepted authorities (spec section 8): ONE list field, canonically
-  // spelled through the SAME normalizer the contact side uses. The workbook cell
-  // is the founder's authority-named "Voucher Type", so a raw write would spell
-  // one authority two ways ("Atlanta Housing" here, "Atlanta (AHA)" on her
-  // tenants) and split it into two chips in the properties facet. The retired
-  // `jurisdiction` string is not written; legacy rows are synthesized at read
-  // time (authoritiesOf).
-  const authority = housingAuthorityFor(row.housing_authority);
-  if (authority !== undefined) {
-    fact('accepted_authorities', ':acceptedAuthorities', [authority]);
+  // The unit's accepted authorities (spec section 8): ONE list field, holding
+  // only an exact housing authority LIST name (spec D9), resolved by the caller
+  // (resolveImportedUnitAuthority) so the properties facet and the tenants
+  // facet name one authority one way. An agency, ambiguous or unknown "Voucher
+  // Type" cell arrives here as undefined: nothing is written, and the run
+  // reports it. The retired `jurisdiction` string is not written; legacy rows
+  // are synthesized at read time (authoritiesOf).
+  if (authorityName !== undefined) {
+    fact('accepted_authorities', ':acceptedAuthorities', [authorityName]);
   }
   const notes = (row.notes ?? '').trim();
   if (notes) {

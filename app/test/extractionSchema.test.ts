@@ -13,7 +13,7 @@ import {
   renderUtteranceLine,
 } from '../src/services/extraction/prompt.js';
 import type { ExtractionInput } from '../src/adapters/extraction.js';
-import { housingAuthorityFor } from '../src/lib/import/apply.js';
+import { housingAuthorityFor } from '../src/lib/housingAuthority.js';
 import { buildStartingEntries, STARTING_ORG_LIST } from '../src/lib/orgStartingList.js';
 import { renderOrgListBlock } from '../src/services/extraction/orgListBlock.js';
 

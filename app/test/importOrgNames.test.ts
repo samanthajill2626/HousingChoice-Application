@@ -10,6 +10,8 @@
 //     per value - in a dry run too (the dry run is the preview)
 //   - unit side: only a resolved housing authority name is written
 //   - the CLI reads the list without creating it
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { runApply } from '../src/lib/import/apply.js';
@@ -176,5 +178,54 @@ describe('D9 contact side: the Airtable program against the org list', () => {
     const withDefault = stubDoc();
     await runApply({ doc: withDefault.doc, plan, review: cleanReview(), importedAt });
     expect(valuesOf(contactUpdate(withDefault.sent, PHONES.caseworker))[':agency']).toBe('HOPE Atlanta');
+  });
+});
+
+/** The ONE UpdateCommand upsertUnit sent (the fixture has one property). */
+function unitUpdate(sent: RecordedCommand[]): Record<string, unknown> {
+  const found = sent.filter(
+    (c) => c.name === 'UpdateCommand' && (c.input['Key'] as { unitId?: unknown } | undefined)?.unitId !== undefined,
+  );
+  expect(found, 'one unit UpdateCommand').toHaveLength(1);
+  return found[0]!.input;
+}
+
+/** The fixture's one property row (1460 Lavender Dr; its "Voucher Type" is "Atlanta Housing"). */
+const lavender = (review: ReturnType<typeof cleanReview>) =>
+  [...review.units.values()].find((r) => (r.address ?? '').includes('Lavender'))!;
+
+describe('D9 unit side: the "Voucher Type" cell against the housing authority list', () => {
+  it('writes the resolved housing authority NAME', async () => {
+    const { doc, sent } = stubDoc();
+    await runApply({ doc, plan, review: cleanReview(), importedAt, orgEntries: ENTRIES });
+    expect(valuesOf(unitUpdate(sent))[':acceptedAuthorities']).toEqual(['Atlanta Housing Authority']);
+  });
+
+  it.each([
+    ['Hope Atlanta', 'other_kind'],
+    ['MHA', 'ambiguous'],
+    ['Smyrna Housing Office', 'unknown'],
+  ] as const)('never writes %s to a property and counts it as %s - in a dry run too', async (cell, resolution) => {
+    const review = cleanReview();
+    lavender(review).housing_authority = cell;
+    const expected = { field: 'accepted_authorities', value: cell, resolution, count: 1 };
+
+    const { doc, sent } = stubDoc();
+    const report = await runApply({ doc, plan, review, importedAt, orgEntries: ENTRIES });
+    expect(expressionOf(unitUpdate(sent))).not.toContain('accepted_authorities');
+    expect(report.orgNotWritten).toContainEqual(expected);
+
+    const dry = stubDoc();
+    const dryReport = await runApply({ doc: dry.doc, plan, review, importedAt, orgEntries: ENTRIES, dryRun: true });
+    expect(dryReport.orgNotWritten).toContainEqual(expected);
+  });
+});
+
+describe('the importer no longer uses the hand-kept alias map', () => {
+  it('apply.ts does not import lib/housingAuthority.ts (S10 retires it)', () => {
+    const source = readFileSync(join(process.cwd(), 'src', 'lib', 'import', 'apply.ts'), 'utf8');
+    expect(source).not.toContain('housingAuthority.js');
+    expect(source).not.toContain('housingAuthorityFor');
+    expect(source).not.toContain('KNOWN_AUTHORITIES');
   });
 });

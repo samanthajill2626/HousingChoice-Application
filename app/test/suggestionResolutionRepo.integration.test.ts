@@ -17,6 +17,7 @@ import { createExtractionRepo, type SuggestionItem } from '../src/repos/extracti
 import {
   createSuggestionResolutionRepo,
   resolutionItemId,
+  resolutionValueKey,
   tokenFor,
   type ClaimResolutionInput,
   type ResolutionReplayPlan,
@@ -311,6 +312,7 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
       Key: { itemId: resolutionItemId(contactId, 'pets') },
       ConsistentRead: true,
     }));
+    // No accept value was sent, so no valueKey (spec 2026-10-06 D8).
     expect(journal.Item).toEqual({
       itemId: resolutionItemId(contactId, 'pets'),
       state: 'completed',
@@ -333,6 +335,37 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
     // And the replacement is claimable on its FIRST attempt - no deadlock.
     expect((await resolutions.claim(claimInput(replacement, { leaseId: 'lease-replacement' }))).status)
       .toBe('claimed');
+  });
+
+  // Spec 2026-10-06 D8: the claim writes the accept's valueKey onto the active
+  // journal, and complete() keeps it - and only it - on the PII-free row.
+  it('carries an accept valueKey from the claim to the completed row', async () => {
+    const contactId = 'value-key';
+    const suggestion = await putSuggestion(contactId, 'housingAuthority', 'AHA');
+    const valueKey = resolutionValueKey('Augusta Housing Authority');
+    const claimed = await resolutions.claim(claimInput(suggestion, { valueKey }));
+    if (claimed.status !== 'claimed') throw new Error('claim failed');
+    expect(claimed.journal.valueKey).toBe(valueKey);
+    expect(await resolutions.complete({
+      token: tokenFor(claimed.journal), expectedPhase: 'claimed', completedAt: '2026-08-08T12:05:00.000Z',
+    })).toBe('completed');
+
+    const journal = await doc.send(new GetCommand({
+      TableName: extractionTable,
+      Key: { itemId: resolutionItemId(contactId, 'housingAuthority') },
+      ConsistentRead: true,
+    }));
+    expect(journal.Item).toEqual({
+      itemId: resolutionItemId(contactId, 'housingAuthority'),
+      state: 'completed',
+      contactId,
+      target: 'housingAuthority',
+      identityKey: claimed.journal.identityKey,
+      action: 'accept',
+      completedAt: '2026-08-08T12:05:00.000Z',
+      valueKey,
+    });
+    expect(JSON.stringify(journal.Item)).not.toContain('Augusta');
   });
 
   it('commits contact plus deterministic audit plus phase atomically and recovers by phase', async () => {

@@ -286,6 +286,7 @@ export function createSuggestionResolutionFake(deps: {
         identityKey,
         action: input.action,
         ...(input.actorId !== undefined && { actorId: input.actorId }),
+        ...(input.valueKey !== undefined && { valueKey: input.valueKey }),
         snapshot: live,
         plan: input.plan,
         phase: 'claimed',

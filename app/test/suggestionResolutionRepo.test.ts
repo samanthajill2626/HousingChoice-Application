@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { SuggestionItem } from '../src/repos/extractionRepo.js';
 import {
   makeCompletedResolution,
   resolutionItemId,
+  resolutionValueKey,
   suggestionIdentityKey,
   type ActiveSuggestionResolution,
 } from '../src/repos/suggestionResolutionRepo.js';
@@ -71,6 +73,7 @@ describe('completed suggestion resolution rows', () => {
   it('scrubs the snapshot, replay plan, actor, lease, and phase', () => {
     const completed = makeCompletedResolution(active(), '2026-08-08T12:02:00.000Z');
 
+    // No accept value was sent, so no valueKey (spec 2026-10-06 D8).
     expect(completed).toEqual({
       itemId: 'resolve#contact-1#pets',
       state: 'completed',
@@ -89,6 +92,7 @@ describe('completed suggestion resolution rows', () => {
   it('records a released-unsafe disposition without carrying any suggestion detail', () => {
     const completed = makeCompletedResolution(active(), '2026-08-08T12:02:00.000Z', 'released_unsafe');
 
+    // No accept value was sent, so no valueKey (spec 2026-10-06 D8).
     expect(completed).toEqual({
       itemId: 'resolve#contact-1#pets',
       state: 'completed',
@@ -100,6 +104,40 @@ describe('completed suggestion resolution rows', () => {
       disposition: 'released_unsafe',
     });
     expect(JSON.stringify(completed)).not.toContain('two cats');
+    expect(JSON.stringify(completed)).not.toContain('user-1');
+  });
+});
+
+describe('completed rows and the accept value (spec 2026-10-06 D8)', () => {
+  it('resolutionValueKey is the sha256 hex of the exact value', () => {
+    expect(resolutionValueKey('Atlanta Housing Authority')).toBe(
+      createHash('sha256').update('Atlanta Housing Authority', 'utf8').digest('hex'),
+    );
+  });
+
+  it('keeps the accept valueKey - a hash - and nothing else value-shaped', () => {
+    const valueKey = resolutionValueKey('Atlanta Housing Authority');
+    const completed = makeCompletedResolution(
+      {
+        ...active(),
+        itemId: resolutionItemId('contact-1', 'housingAuthority'),
+        target: 'housingAuthority',
+        snapshot: suggestion({ target: 'housingAuthority', suggestedValue: 'AHA', revision: 'revision-7' }),
+        valueKey,
+      },
+      '2026-08-08T12:02:00.000Z',
+    );
+    expect(completed).toEqual({
+      itemId: 'resolve#contact-1#housingAuthority',
+      state: 'completed',
+      contactId: 'contact-1',
+      target: 'housingAuthority',
+      identityKey: 'revision#revision-7',
+      action: 'accept',
+      completedAt: '2026-08-08T12:02:00.000Z',
+      valueKey,
+    });
+    expect(JSON.stringify(completed)).not.toContain('Atlanta');
     expect(JSON.stringify(completed)).not.toContain('user-1');
   });
 });

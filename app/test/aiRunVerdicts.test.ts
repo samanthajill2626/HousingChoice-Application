@@ -970,6 +970,7 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect(res.body.suggestions).toHaveLength(1);
     expect(await world.extractionRepo.getSuggestion('c1', 'phone')).toEqual(replacement);
     const journal = [...world.suggestionResolutions.values()][0];
+    // No accept value was sent, so no valueKey (spec 2026-10-06 D8).
     expect(journal).toEqual({
       itemId: abandoned?.itemId,
       state: 'completed',

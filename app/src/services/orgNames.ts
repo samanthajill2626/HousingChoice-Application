@@ -9,12 +9,16 @@
 // checks do not carry (names and spellings are rendered one per line into the
 // AI list block, so a newline or other control character is refused - D13),
 // the problem -> refusal mappings, and the rewrite-lock test (D11).
-import type { Logger } from '../lib/logger.js';
+import { randomUUID } from 'node:crypto';
+import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
   checkListWrite,
   checkNewName,
   checkScalarWrite,
   checkSpelling,
+  normalizeOrgText,
+  ORG_NOTES_MAX,
+  ORG_SPELLINGS_PER_ENTRY_MAX,
   resolveOrgText,
   type ListCheck,
   type NameProblem,
@@ -147,6 +151,22 @@ export function asOrgHttpError(err: unknown): OrgHttpError | undefined {
   return undefined;
 }
 
+function findEntry(item: OrgListItem, orgId: string): OrgEntry {
+  const entry = item.entries.find((e) => e.orgId === orgId);
+  if (entry === undefined) throw new OrgHttpError(404, { error: 'org_not_found' });
+  return entry;
+}
+
+function replaceEntry(item: OrgListItem, entry: OrgEntry): OrgListItem {
+  return { ...item, entries: item.entries.map((e) => (e.orgId === entry.orgId ? entry : e)) };
+}
+
+/** Delete and kind change wait for a running rewrite too (plan 3.5: 409 org_rewrite_running). */
+function refuseWhileRewriteRuns(item: OrgListItem): void {
+  const last = item.lastRewrite;
+  if (last !== undefined && isOrgRewriteRunning(last, Date.now())) throw rewriteRunningError(last);
+}
+
 export interface OrgCheckResult {
   match?: OrgRef;
   candidates: OrgRef[];
@@ -159,7 +179,6 @@ export interface OrgCheckResult {
   spellingProblem?: SpellingProblem['problem'] | null;
 }
 
-/** Plan 3.4 - the reads and checks. Task 3.7 adds the list writes. */
 export interface OrgNamesService {
   read(): Promise<OrgListItem>;
   /** D5 helpers bound to the stored list (one read per call). */
@@ -172,6 +191,11 @@ export interface OrgNamesService {
   ): Promise<ListCheck>;
   /** POST /check. */
   check(input: { kind: OrgKind; text: string; spellingFor?: string }): Promise<OrgCheckResult>;
+  add(input: { kind: OrgKind; name: string; notes?: string; actor: string }): Promise<OrgEntry>;
+  updateNotes(orgId: string, notes: string, actor: string): Promise<OrgEntry>;
+  updateSpellings(orgId: string, spellings: string[], opts: { confirmShared: boolean; actor: string }): Promise<OrgEntry>;
+  changeKind(orgId: string, kind: OrgKind, actor: string): Promise<OrgEntry>;
+  remove(orgId: string, actor: string): Promise<void>;
 }
 
 /**
@@ -181,6 +205,7 @@ export interface OrgNamesService {
  */
 export function createOrgNamesService(deps: { orgListRepo?: OrgListRepo; logger?: Logger } = {}): OrgNamesService {
   const list = deps.orgListRepo ?? createOrgListRepo({ logger: deps.logger });
+  const log = deps.logger ?? defaultLogger;
 
   return {
     async read() {
@@ -219,6 +244,121 @@ export function createOrgNamesService(deps: { orgListRepo?: OrgListRepo; logger?
         ...(nameProblem !== null && { nameProblem: nameProblem.code }),
         ...(spellingProblem !== undefined && { spellingProblem }),
       };
+    },
+
+    async add({ kind, name, notes, actor }) {
+      const trimmedNotes = notes?.trim() ?? '';
+      if (trimmedNotes.length > ORG_NOTES_MAX) throw new OrgHttpError(400, { error: 'org_notes_too_long' });
+      const trimmedName = name.trim();
+      const orgId = randomUUID();
+      const entry = await list.mutate((current) => {
+        const problem = checkNewOrgName(current.entries, trimmedName);
+        if (problem !== null) throw nameProblemError(problem);
+        const at = new Date().toISOString();
+        const created: OrgEntry = {
+          orgId,
+          kind,
+          name: trimmedName,
+          spellings: [],
+          ...(trimmedNotes !== '' && { notes: trimmedNotes }),
+          createdAt: at,
+          createdBy: actor,
+          updatedAt: at,
+          updatedBy: actor,
+        };
+        return { next: { ...current, entries: [...current.entries, created] }, result: created };
+      });
+      log.info({ orgId, kind, actor }, 'org entry added');
+      return entry;
+    },
+
+    async updateNotes(orgId, notes, actor) {
+      const trimmed = notes.trim();
+      if (trimmed.length > ORG_NOTES_MAX) throw new OrgHttpError(400, { error: 'org_notes_too_long' });
+      return list.mutate((current) => {
+        const updated: OrgEntry = { ...findEntry(current, orgId), updatedAt: new Date().toISOString(), updatedBy: actor };
+        if (trimmed === '') delete updated.notes;
+        else updated.notes = trimmed;
+        return { next: replaceEntry(current, updated), result: updated };
+      });
+    },
+
+    async updateSpellings(orgId, spellings, { confirmShared, actor }) {
+      const updated = await list.mutate((current) => {
+        const entry = findEntry(current, orgId);
+        // Only NEW spellings are checked (D12): a kept one - AHA on Atlanta,
+        // shared since the starting list - never needs a confirm again.
+        const existing = new Set(entry.spellings.map(normalizeOrgText));
+        // Checked against the entry with NO spellings, so a request that
+        // re-sends its current list is not refused as a duplicate of itself.
+        const probe: OrgEntry = { ...entry, spellings: [] };
+        const probeEntries = current.entries.map((e) => (e.orgId === orgId ? probe : e));
+        const kept: string[] = [];
+        const seen = new Set<string>();
+        for (const raw of spellings) {
+          const spelling = raw.trim();
+          const n = normalizeOrgText(spelling);
+          // Blanks dropped; spellings de-duplicated on write (D4).
+          if (spelling === '' || seen.has(n)) continue;
+          if (!existing.has(n)) {
+            const problem = checkOrgSpelling(probeEntries, probe, spelling);
+            if (problem !== null && !(problem.problem === 'shared_same_kind' && confirmShared)) {
+              throw spellingProblemError(spelling, problem);
+            }
+          }
+          kept.push(spelling);
+          seen.add(n);
+        }
+        if (kept.length > ORG_SPELLINGS_PER_ENTRY_MAX) throw new OrgHttpError(409, { error: 'org_spellings_full' });
+        const next: OrgEntry = { ...entry, spellings: kept, updatedAt: new Date().toISOString(), updatedBy: actor };
+        return { next: replaceEntry(current, next), result: next };
+      });
+      log.info({ orgId, spellings: updated.spellings.length, actor }, 'org entry spellings updated');
+      return updated;
+    },
+
+    /**
+     * Records that USE the entry are the caller's check (org_in_use - the
+     * organizations router counts them through OrgRecordsService first; plan
+     * 3.4b gives this service no record access). This refuses the list-side
+     * problems: unknown entry, a running rewrite, a cross-kind share.
+     */
+    async changeKind(orgId, kind, actor) {
+      const updated = await list.mutate((current) => {
+        const entry = findEntry(current, orgId);
+        if (entry.kind === kind) return { next: current, result: entry };
+        refuseWhileRewriteRuns(current);
+        // D4: a spelling is never shared ACROSS kinds - one this entry shares
+        // with another entry of its old kind (AHA, MHA) would be.
+        for (const spelling of entry.spellings) {
+          const n = normalizeOrgText(spelling);
+          const sharers = current.entries.filter(
+            (e) => e.orgId !== orgId && e.spellings.some((s) => normalizeOrgText(s) === n),
+          );
+          if (sharers.length > 0) {
+            throw new OrgHttpError(409, {
+              error: 'org_spelling_refused',
+              spelling,
+              problem: 'cross_kind',
+              entries: sharers.map(toOrgRef),
+            });
+          }
+        }
+        const next: OrgEntry = { ...entry, kind, updatedAt: new Date().toISOString(), updatedBy: actor };
+        return { next: replaceEntry(current, next), result: next };
+      });
+      log.info({ orgId, kind, actor }, 'org entry kind set');
+      return updated;
+    },
+
+    /** As changeKind: the caller answers org_in_use first. */
+    async remove(orgId, actor) {
+      await list.mutate((current) => {
+        findEntry(current, orgId);
+        refuseWhileRewriteRuns(current);
+        return { next: { ...current, entries: current.entries.filter((e) => e.orgId !== orgId) }, result: undefined };
+      });
+      log.info({ orgId, actor }, 'org entry removed');
     },
   };
 }

@@ -2,7 +2,7 @@
 // first block covers what the org services and the router share: the
 // control-character rule, the refusal mappings, the store-failure mapping and
 // the rewrite-lock test. Tasks 3.6-3.7 append the OrgNamesService itself.
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OrgEntry } from '../src/lib/orgNames.js';
 import { OrgListBusyError, OrgListFullError, type OrgRewriteState } from '../src/repos/orgListRepo.js';
 import {
@@ -222,6 +222,166 @@ describe('OrgNamesService - read and the checks (plan 3.4)', () => {
   it('check() with an unknown spellingFor is 404 org_not_found', async () => {
     const { svc } = await namesService();
     await expect(svc.check({ kind: 'agency', text: 'x', spellingFor: 'org-nope' })).rejects.toMatchObject({
+      status: 404,
+      body: { error: 'org_not_found' },
+    });
+  });
+});
+
+describe('OrgNamesService - list writes (plan 3.4, 3.5)', () => {
+  const T1 = '2026-10-06T12:00:00.000Z';
+  const NL = String.fromCharCode(10);
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(T1));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('add() appends a fresh entry with its notes and authorship in ONE list write', async () => {
+    const { repo, svc } = await namesService();
+    const entry = await svc.add({ kind: 'agency', name: ' Mercy Care ', notes: ' Clinic partner ', actor: 'usr_va' });
+    expect(entry).toEqual({
+      orgId: expect.any(String),
+      kind: 'agency',
+      name: 'Mercy Care',
+      spellings: [],
+      notes: 'Clinic partner',
+      createdAt: T1,
+      createdBy: 'usr_va',
+      updatedAt: T1,
+      updatedBy: 'usr_va',
+    });
+    const stored = await repo.peek();
+    expect(stored?.version).toBe(2);
+    expect(stored?.entries.at(-1)).toEqual(entry);
+  });
+
+  it('add() refuses every name problem with its plan-3.5 code, and writes nothing', async () => {
+    const { repo, svc } = await namesService();
+    await expect(svc.add({ kind: 'housing_authority', name: 'aha', actor: 'u' })).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_name_taken', entry: orgRef(ATLANTA) },
+    });
+    await expect(svc.add({ kind: 'housing_authority', name: 'DCA VASH', actor: 'u' })).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_name_compound', spans: [[orgRef(DCA)], [orgRef(VASH)]] },
+    });
+    await expect(svc.add({ kind: 'agency', name: '  ', actor: 'u' })).rejects.toMatchObject({
+      status: 400,
+      body: { error: 'org_name_empty' },
+    });
+    await expect(svc.add({ kind: 'agency', name: 'x'.repeat(121), actor: 'u' })).rejects.toMatchObject({
+      status: 400,
+      body: { error: 'org_name_too_long' },
+    });
+    await expect(svc.add({ kind: 'agency', name: `Mercy${NL}Care`, actor: 'u' })).rejects.toMatchObject({
+      status: 400,
+      body: { error: 'org_name_invalid' },
+    });
+    await expect(svc.add({ kind: 'agency', name: 'Mercy Care', notes: 'n'.repeat(501), actor: 'u' })).rejects.toMatchObject({
+      status: 400,
+      body: { error: 'org_notes_too_long' },
+    });
+    expect((await repo.peek())?.version).toBe(1);
+  });
+
+  it('updateNotes() sets or (blank) removes the notes; over 500 characters and unknown ids are refused', async () => {
+    const { svc } = await namesService();
+    const noted = await svc.updateNotes('org-dca', ' Runs vouchers statewide. ', 'usr_va');
+    expect(noted).toEqual({ ...DCA, notes: 'Runs vouchers statewide.', updatedAt: T1, updatedBy: 'usr_va' });
+    expect(await svc.updateNotes('org-dca', '', 'usr_va')).not.toHaveProperty('notes');
+    await expect(svc.updateNotes('org-dca', 'n'.repeat(501), 'u')).rejects.toMatchObject({
+      status: 400,
+      body: { error: 'org_notes_too_long' },
+    });
+    await expect(svc.updateNotes('org-nope', 'x', 'u')).rejects.toMatchObject({
+      status: 404,
+      body: { error: 'org_not_found' },
+    });
+  });
+
+  it('updateSpellings() replaces the list, drops blanks and duplicates, and checks only NEW spellings', async () => {
+    const { svc } = await namesService();
+    // AHA (shared with Augusta since the starting list) is KEPT without a confirm.
+    const entry = await svc.updateSpellings(
+      'org-atl',
+      ['AHA', 'Atlanta Housing', ' atlanta housing ', 'Housing Authority of the City of Atlanta', ''],
+      { confirmShared: false, actor: 'usr_admin' },
+    );
+    expect(entry.spellings).toEqual(['AHA', 'Atlanta Housing', 'Housing Authority of the City of Atlanta']);
+    expect(entry.updatedBy).toBe('usr_admin');
+  });
+
+  it('updateSpellings() refuses each D12 problem; a same-kind share lands only with confirmShared', async () => {
+    const refusals: Array<[string, Record<string, unknown>]> = [
+      ['VASH', { error: 'org_spelling_refused', spelling: 'VASH', problem: 'cross_kind', entries: [orgRef(VASH)] }],
+      ['Step Up', { error: 'org_spelling_refused', spelling: 'Step Up', problem: 'equals_name', entries: [orgRef(STEP_UP)] }],
+      [DCA.name, { error: 'org_spelling_refused', spelling: DCA.name, problem: 'duplicate' }],
+      ['Atlanta Housing VASH', { error: 'org_spelling_refused', spelling: 'Atlanta Housing VASH', problem: 'compound' }],
+      [`GA${NL}DCA`, { error: 'org_spelling_refused', spelling: `GA${NL}DCA`, problem: 'invalid' }],
+      ['AHA', { error: 'org_spelling_shared', spelling: 'AHA', entries: [orgRef(ATLANTA), orgRef(AUGUSTA)] }],
+    ];
+    const { repo, svc } = await namesService();
+    for (const [spelling, body] of refusals) {
+      await expect(
+        svc.updateSpellings('org-dca', ['DCA', spelling], { confirmShared: false, actor: 'a' }),
+      ).rejects.toMatchObject({ status: 409, body });
+    }
+    expect((await repo.peek())?.version).toBe(1);
+    const shared = await svc.updateSpellings('org-dca', ['DCA', 'AHA'], { confirmShared: true, actor: 'a' });
+    expect(shared.spellings).toEqual(['DCA', 'AHA']);
+  });
+
+  it('updateSpellings() past 20 spellings is org_spellings_full', async () => {
+    const { svc } = await namesService();
+    const many = Array.from({ length: 21 }, (_, i) => `Agency Spelling ${i}`);
+    await expect(svc.updateSpellings('org-stepup', many, { confirmShared: false, actor: 'a' })).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_spellings_full' },
+    });
+  });
+
+  it('changeKind() refuses a spelling shared with the old kind and a running rewrite; otherwise changes the kind', async () => {
+    const shared = await namesService();
+    await expect(shared.svc.changeKind('org-aug', 'agency', 'usr_admin')).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_spelling_refused', spelling: 'AHA', problem: 'cross_kind', entries: [orgRef(ATLANTA)] },
+    });
+    const running = await namesService({
+      lastRewrite: runningRewrite({ action: 'clear', field: 'agency', fromTexts: ['x'], heartbeatAt: T1 }),
+    });
+    await expect(running.svc.changeKind('org-stepup', 'housing_authority', 'usr_admin')).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_rewrite_running' },
+    });
+    const free = await namesService();
+    expect(await free.svc.changeKind('org-stepup', 'housing_authority', 'usr_admin')).toEqual({
+      ...STEP_UP,
+      kind: 'housing_authority',
+      updatedAt: T1,
+      updatedBy: 'usr_admin',
+    });
+    // The same kind answers the entry and writes nothing.
+    const before = (await free.repo.peek())?.version;
+    expect((await free.svc.changeKind('org-dca', 'housing_authority', 'usr_admin')).kind).toBe('housing_authority');
+    expect((await free.repo.peek())?.version).toBe(before);
+  });
+
+  it('remove() refuses while a rewrite runs; removes an unused entry; 404s an unknown one', async () => {
+    const running = await namesService({
+      lastRewrite: runningRewrite({ action: 'rename', fromTexts: ['x'], toName: STEP_UP.name, heartbeatAt: T1 }),
+    });
+    await expect(running.svc.remove('org-stepup', 'usr_admin')).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_rewrite_running' },
+    });
+    const free = await namesService();
+    await free.svc.remove('org-stepup', 'usr_admin');
+    expect((await free.repo.peek())?.entries.map((e) => e.orgId)).toEqual(['org-atl', 'org-aug', 'org-dca', 'org-vash']);
+    await expect(free.svc.remove('org-stepup', 'usr_admin')).rejects.toMatchObject({
       status: 404,
       body: { error: 'org_not_found' },
     });

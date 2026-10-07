@@ -13,6 +13,7 @@
 import { conversationIdForGroup } from '../import/ids.js';
 import type { SeedConversationRow } from './types.js';
 import { withSeedTransport } from './messageTransport.js';
+import { seedOrgListRow } from './orgList.js';
 
 // Stable timestamps so re-runs write byte-identical items.
 const T0 = '2026-06-01T14:00:00.000Z';
@@ -527,6 +528,12 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       settingId: 'org',
       quietHoursEnabled: false,
     },
+    // The organization list (clean-org-names spec D2): the starting list with
+    // FIXED ids and a fixed timestamp (lib/seed/orgList.ts), so the lean world
+    // stays byte-stable. seedAll's unconditional Put also overwrites an item a
+    // reader created from the starting list while /__dev/reseed had this table
+    // empty. Both profiles start from this lean row.
+    seedOrgListRow(),
   ],
   // auditRepo.append writes event_type + payload (the actor is hoisted to the
   // top-level actorId GSI key from payload.actor). The seed mirrors that shape:

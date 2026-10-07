@@ -817,6 +817,70 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
     expect(finished).toEqual([]);
     expect((await w.orgList.peek())?.lastRewrite).toMatchObject({ action: 'cleanup', status: 'running' });
   }, 120_000);
+
+  // Code review R3-BE-1: a heartbeat that THROWS says nothing about the lock,
+  // so the apply used to write on past its lapse with every guard off. It now
+  // goes on only while its local lease holds: 14 minutes (ORG_REWRITE_STALE_MS
+  // less 60 s) since it took the lock or last refreshed it.
+  it('an apply whose every heartbeat fails stops once its lease ran out, before its lock can lapse, and writes nothing after', async () => {
+    const w = await seedWorld();
+    const real = buildCleanupDeps(doc, w.env, silent);
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    // One row per Scan page, each page read 5 minutes after the one before.
+    let clock = 0;
+    const slowScans = {
+      send: async (command: { constructor: { name: string } }) => {
+        if (command.constructor.name === 'ScanCommand') clock += 5 * 60_000;
+        return await doc.send(command as never);
+      },
+      destroy: () => {},
+    } as unknown as DynamoDBDocumentClient;
+    const writtenAt: number[] = [];
+    let beats = 0;
+    const outcome = await cleanOrgNames({
+      doc: slowScans,
+      env: w.env,
+      apply: true,
+      logger: log,
+      scanLimit: 1,
+      now: () => clock,
+      deps: {
+        lock: {
+          acquireForCleanup: (actor) => real.lock.acquireForCleanup(actor),
+          // The settings table cannot be reached any more: every heartbeat throws.
+          heartbeat: async () => {
+            beats += 1;
+            throw new Error('settings table unavailable');
+          },
+          finish: (jobId, done) => real.lock.finish(jobId, done),
+        },
+        contacts: {
+          rewriteOrgFields: async (contactId, expected, next) => {
+            writtenAt.push(clock);
+            return real.contacts.rewriteOrgFields(contactId, expected, next);
+          },
+        },
+        units: {
+          rewriteAcceptedAuthorities: async (unitId, expected, next) => {
+            writtenAt.push(clock);
+            return real.units.rewriteAcceptedAuthorities(unitId, expected, next);
+          },
+        },
+      },
+    }).then(
+      () => 'completed',
+      (err: unknown) => err,
+    );
+    expect(writtenAt.filter((at) => at >= 14 * 60_000)).toEqual([]);
+    // The beats at 5 and 10 minutes failed inside the lease and the run went
+    // on; the one at 15 failed past it and stopped the run: lost, PARTIAL, and
+    // the lock left as it is (it lapses on its own).
+    expect(outcome).toBeInstanceOf(CleanupLockLostError);
+    expect(beats).toBe(3);
+    expect(capture.atLevel(50).some((l) => String(l['msg']).includes('PARTIAL result'))).toBe(true);
+    expect((await w.orgList.peek())?.lastRewrite).toMatchObject({ action: 'cleanup', status: 'running' });
+  }, 120_000);
 });
 
 // ---------------------------------------------------------------------------

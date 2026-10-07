@@ -29,9 +29,11 @@
 // page) is counted `skipped`, never overwritten. Unit writes never stamp
 // updated_at. A rename/merge/use pass leaves a value already equal to
 // `toName` alone. Every field a write changes gets its own audit event (Move
-// and Split write two). The heartbeat runs at most every 20 s, checked after
-// every record visited; when it answers false the lock is no longer the
-// caller's, and the pass writes nothing more (OrgRewriteLockLostError).
+// and Split write two). The heartbeat runs at most every 20 s, checked BEFORE
+// every record visited - so the first record after a stalled read is never
+// written unchecked (code review R3-BE-1); when it answers false the lock is
+// no longer the caller's, and the pass writes nothing more
+// (OrgRewriteLockLostError).
 // PRECONDITION for callers: no from-text may normalize equal to the exact
 // NAME of an entry of the field's kind other than `toName` - the pass has no
 // list to test "on the list" against, and such a value would be rewritten too
@@ -102,9 +104,9 @@ export interface OrgRecordsService {
   /** Rewrite every record (all contact types and units, active and deleted)
    *  per the definition; conditional per record; audits each field written
    *  with `auditType` ('org_name_rewrite' for the job, 'org_name_cleanup' for
-   *  the script); calls `heartbeat` at most every 20 s and stops with
-   *  OrgRewriteLockLostError when it answers false; returns counts. ONE pass
-   *  over `def.field`, which is required (see the header). */
+   *  the script); calls `heartbeat` before a record, at most every 20 s, and
+   *  stops with OrgRewriteLockLostError when it answers false; returns counts.
+   *  ONE pass over `def.field`, which is required (see the header). */
   rewrite(
     def: OrgRewriteState,
     opts: { auditType: 'org_name_rewrite' | 'org_name_cleanup'; actor?: string; heartbeat?: () => Promise<boolean> },
@@ -184,9 +186,10 @@ export class OrgRewriteAbortedError extends Error {
 /**
  * A pass stopped because its heartbeat answered that the lock is no longer the
  * caller's (spec D11: a newer rewrite took it over, a duplicate run already
- * finished it, or it lapsed - code review R2-BE-1). Nothing was written after
- * that answer; `counts` are the writes that landed before it. The caller must
- * not finish() - the lock is not its own.
+ * finished it, or it lapsed - code review R2-BE-1 - or the caller's local
+ * lease ran out while its heartbeats failed - R3-BE-1). Nothing was written
+ * after that answer; `counts` are the writes that landed before it. The caller
+ * must not finish() - the lock is not its own, or may not be.
  */
 export class OrgRewriteLockLostError extends Error {
   constructor(readonly counts: Record<string, number>) {
@@ -504,15 +507,17 @@ export function createOrgRecordsService(deps: OrgRecordsDeps = {}): OrgRecordsSe
         try {
           ours = await opts.heartbeat();
         } catch (err) {
-          // A heartbeat that could not be WRITTEN (a busy list) says nothing
-          // about the lock: keep going - if every later beat fails too, the
-          // lock simply goes stale after 15 minutes.
+          // A heartbeat that THREW (a busy or unreachable list) says nothing
+          // about the lock: keep going. The caller's local lease answers false
+          // instead once the lock was last refreshed too long ago
+          // (jobs/orgRewrite.ts; code review R3-BE-1).
           log.warn({ err, jobId: def.jobId }, 'org rewrite: heartbeat failed - continuing');
           return;
         }
         if (!ours) {
-          // A newer rewrite took the lock, a duplicate run finished it, or it
-          // lapsed: stop writing records at once.
+          // A newer rewrite took the lock, a duplicate run finished it, it
+          // lapsed, or the caller's lease ran out while its heartbeats failed:
+          // stop writing records at once.
           log.warn({ jobId: def.jobId, ...counts }, 'org rewrite: the lock is no longer this run - stopping');
           throw new OrgRewriteLockLostError({ ...counts });
         }
@@ -554,6 +559,9 @@ export function createOrgRecordsService(deps: OrgRecordsDeps = {}): OrgRecordsSe
           !(SAME_FIELD_ACTIONS.has(def.action) && value === def.toName);
         if (field === 'accepted_authorities') {
           for await (const u of everyUnit()) {
+            // BEFORE the record is matched and written (code review R3-BE-1):
+            // a page read that hung past the lock's lapse is caught here.
+            await beat();
             const stored = storedAuthorities(u);
             const hits: string[] = [];
             const next: unknown[] = [];
@@ -575,10 +583,10 @@ export function createOrgRecordsService(deps: OrgRecordsDeps = {}): OrgRecordsSe
                 await record(`units#${u.unitId}`, field, listText(stored), listText(next));
               }
             }
-            await beat();
           }
         } else {
           for await (const c of everyContact()) {
+            await beat(); // before the record, as above
             const value = c[field];
             if (matches(value)) {
               const plan = planContactRewrite(def, field, value, c);
@@ -595,7 +603,6 @@ export function createOrgRecordsService(deps: OrgRecordsDeps = {}): OrgRecordsSe
                 }
               }
             }
-            await beat();
           }
         }
       } catch (err) {

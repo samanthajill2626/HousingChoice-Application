@@ -476,7 +476,7 @@ describe('OrgRecordsService.rewrite - one conditional pass over one field (spec 
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-10-06T12:00:00.000Z'));
     const { world, records } = setup({
-      contacts: [1, 2, 3, 4, 5, 6].map((i) => contact(`p-${i}`, { type: 'partner', status: 'active', agency: 'Steps' })),
+      contacts: [1, 2, 3, 4, 5, 6, 7].map((i) => contact(`p-${i}`, { type: 'partner', status: 'active', agency: 'Steps' })),
     });
     const write = world.contactsRepo.rewriteOrgFields.bind(world.contactsRepo);
     world.contactsRepo.rewriteOrgFields = async (contactId, expected, next) => {
@@ -492,9 +492,53 @@ describe('OrgRecordsService.rewrite - one conditional pass over one field (spec 
         throw new Error('org list busy');
       },
     });
-    // 7 s, 14 s, 21 s (beat), 28 s, 35 s, 42 s (beat).
+    // 7 s, 14 s, 21 s, then a beat before record 4; 28 s, 35 s, 42 s, then one before record 7.
     expect(beats).toBe(2);
-    expect(counts).toEqual({ ...ZERO, agency: 6 });
+    expect(counts).toEqual({ ...ZERO, agency: 7 });
+  });
+
+  // Code review R3-BE-1: a page read that hangs past the lock's lapse returns
+  // records the pass has not checked the lock for - the beat runs BEFORE each
+  // record is matched and written, never only after.
+  it('beats BEFORE each record: the first record after a stalled page read is never written unchecked', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-06T12:00:00.000Z'));
+    const { world, records } = setup({
+      contacts: [contact('p-1', { type: 'partner', status: 'active', agency: 'Steps' })],
+      units: [unit('u-1', { accepted_authorities: ['Junk HA'] })],
+    });
+    // The FIRST page read of each pass hangs 16 minutes, and the lock lapses meanwhile.
+    const stallMs = 16 * 60_000;
+    const listByType = world.contactsRepo.listByType.bind(world.contactsRepo);
+    let contactsStalled = false;
+    world.contactsRepo.listByType = async (type, opts) => {
+      if (!contactsStalled) {
+        contactsStalled = true;
+        vi.setSystemTime(Date.now() + stallMs);
+      }
+      return listByType(type, opts);
+    };
+    const listUnits = world.unitsRepo.list.bind(world.unitsRepo);
+    let unitsStalled = false;
+    world.unitsRepo.list = async (opts) => {
+      if (!unitsStalled) {
+        unitsStalled = true;
+        vi.setSystemTime(Date.now() + stallMs);
+      }
+      return listUnits(opts);
+    };
+    const lapsed = { ...OPTS, heartbeat: async () => false };
+    const use = runningRewrite({ action: 'use', field: 'agency', fromTexts: ['Steps'], toName: STEP_UP.name });
+    const useErr = await records.rewrite(use, lapsed).catch((e: unknown) => e);
+    expect(contactIn(world, 'p-1')?.['agency']).toBe('Steps');
+    expect(useErr).toBeInstanceOf(OrgRewriteLockLostError);
+    expect((useErr as OrgRewriteLockLostError).counts).toEqual(ZERO);
+    const clear = runningRewrite({ action: 'clear', field: 'accepted_authorities', fromTexts: ['Junk HA'] });
+    const clearErr = await records.rewrite(clear, lapsed).catch((e: unknown) => e);
+    expect(world.units.get('u-1')?.accepted_authorities).toEqual(['Junk HA']);
+    expect(clearErr).toBeInstanceOf(OrgRewriteLockLostError);
+    expect((clearErr as OrgRewriteLockLostError).counts).toEqual(ZERO);
+    expect(rewrites(world)).toEqual([]);
   });
 
   it('a heartbeat that answers false (the lock is no longer ours) stops the pass before its next write', async () => {

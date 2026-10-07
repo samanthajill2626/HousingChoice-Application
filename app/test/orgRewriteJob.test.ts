@@ -203,8 +203,8 @@ describe('runOrgRewriteJob (spec D11; plan 3.9)', () => {
     const write = world.contactsRepo.rewriteOrgFields.bind(world.contactsRepo);
     world.contactsRepo.rewriteOrgFields = async (contactId, expected, next) => {
       const outcome = await write(contactId, expected, next);
-      // Each write takes 25 s, so the pass heartbeats after every record; after
-      // the FIRST write a newer rewrite, job-2, has taken the lock over.
+      // Each write takes 25 s, so the pass heartbeats before every record after
+      // the first; after the FIRST write a newer rewrite, job-2, has taken the lock over.
       vi.setSystemTime(Date.now() + 25_000);
       const item = await world.orgListRepo.get();
       if (item.lastRewrite?.jobId === 'job-1') await world.orgListRepo.putForSeed({ ...item, lastRewrite: newer });
@@ -336,6 +336,126 @@ describe('runOrgRewriteJob - a delivery after its lock lapsed (code review R2-BE
       counts,
       heartbeatAt: '2026-10-06T12:05:00.000Z',
       finishedAt: '2026-10-06T12:05:00.000Z',
+    });
+  });
+});
+
+// Code review R3-BE-1: the claim covers a lock that lapsed BEFORE the pass; a
+// lock can also lapse DURING it. Two ways, both with every guard off once it
+// has: a stall right before a write, and heartbeats that keep throwing. Either
+// way a VA can add the cleared value as a name and save a tenant with it.
+describe('runOrgRewriteJob - a lock that lapses DURING the pass (code review R3-BE-1)', () => {
+  const T_START = '2026-10-06T12:00:00.000Z';
+  const T_LAPSE = '2026-10-06T12:15:00.000Z'; // 15 minutes after the claim's heartbeat
+  const T_LATE = '2026-10-06T12:16:00.000Z';
+  // Settings > Not on the list > housing authority "Metro HA" > Clear, delivered on time.
+  const CLEAR = runningRewrite({
+    jobId: 'job-1',
+    action: 'clear',
+    field: 'housingAuthority',
+    fromTexts: ['Metro HA'],
+    heartbeatAt: T_START,
+  });
+  const contactIn = (world: FakeWorld, id: string) => world.contacts.find((c) => c.contactId === id);
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a stall before a write: the first record after it is checked first - the VA saved with the new name keeps it', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(T_START));
+    const { world, deps } = await jobWorld(CLEAR, {
+      contacts: [holder('l-old', { type: 'landlord', status: 'active', housingAuthority: 'Metro HA' })],
+    });
+    const names = createOrgNamesService({ orgListRepo: world.orgListRepo, logger: quietLogger() });
+    let d5: unknown;
+    const list = world.contactsRepo.listByType.bind(world.contactsRepo);
+    let stalled = false;
+    world.contactsRepo.listByType = async (type, opts) => {
+      if (!stalled) {
+        stalled = true;
+        // The pass's FIRST page read hangs 16 minutes (the client sets no
+        // request timeout). At 12:15 the lock lapses, so the add goes ahead...
+        vi.setSystemTime(new Date(T_LAPSE));
+        await names.add({ kind: 'housing_authority', name: 'Metro HA', actor: 'usr_va' });
+        // ...D5 takes "Metro HA" as an exact list name, and a VA saves a tenant with it...
+        d5 = await names.checkScalar('housingAuthority', 'Metro HA', undefined);
+        world.contacts.push(holder('t-new', { housingAuthority: 'Metro HA' }));
+        // ...and at 12:16 the page comes back, the new tenant on it.
+        vi.setSystemTime(new Date(T_LATE));
+      }
+      return list(type, opts);
+    };
+    const outcome = await runOrgRewriteJob({ jobId: 'job-1' }, deps);
+    expect(contactIn(world, 't-new')?.['housingAuthority']).toBe('Metro HA');
+    expect(d5).toEqual({ ok: true, value: 'Metro HA' });
+    // The heartbeat BEFORE that first record found the lock lapsed: nothing written, no finish.
+    expect(outcome).toEqual({ outcome: 'lock_lost', counts: ZERO });
+    expect(contactIn(world, 'l-old')?.['housingAuthority']).toBe('Metro HA');
+    expect(rewritesIn(world)).toEqual([]);
+    expect((await world.orgListRepo.peek())?.lastRewrite).toEqual(CLEAR);
+  });
+
+  it('every heartbeat throwing: the run stops once its local lease ran out, before the lock can lapse - the VA saved with the new name keeps it', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(T_START));
+    // 60 holders: a first page of 50, then 10 more.
+    const holders = Array.from({ length: 60 }, (_, i) =>
+      holder(`h-${String(i).padStart(2, '0')}`, { housingAuthority: 'Metro HA' }),
+    );
+    const { world, deps } = await jobWorld(CLEAR, { contacts: holders });
+    const names = createOrgNamesService({ orgListRepo: world.orgListRepo, logger: quietLogger() });
+    // At 12:15 - whether or not the pass still runs - the lock (last heartbeat
+    // 12:00) lapses, the add goes ahead, and a VA saves a tenant with the name.
+    let vaActed = false;
+    const vaActs = async (): Promise<void> => {
+      if (vaActed || Date.now() < Date.parse(T_LAPSE)) return;
+      vaActed = true;
+      await names.add({ kind: 'housing_authority', name: 'Metro HA', actor: 'usr_va' });
+      world.contacts.push(holder('t-new', { housingAuthority: 'Metro HA' }));
+    };
+    const writtenAt: number[] = [];
+    const write = world.contactsRepo.rewriteOrgFields.bind(world.contactsRepo);
+    world.contactsRepo.rewriteOrgFields = async (contactId, expected, next) => {
+      vi.setSystemTime(Date.now() + 25_000); // each write takes 25 s
+      await vaActs();
+      writtenAt.push(Date.now());
+      return write(contactId, expected, next);
+    };
+    let beats = 0;
+    const outcome = await runOrgRewriteJob(
+      { jobId: 'job-1' },
+      {
+        ...deps,
+        orgRewrite: {
+          claim: deps.orgRewrite.claim,
+          // The settings table cannot be read: every heartbeat throws.
+          heartbeat: async () => {
+            beats += 1;
+            throw new Error('settings table unavailable');
+          },
+          finish: deps.orgRewrite.finish,
+        },
+      },
+    );
+    if (!vaActed) {
+      vi.setSystemTime(new Date(T_LAPSE));
+      await vaActs();
+    }
+    expect(contactIn(world, 't-new')?.['housingAuthority']).toBe('Metro HA');
+    // Every record from the second on beats first; the beats inside the lease
+    // (14 minutes - ORG_REWRITE_STALE_MS less 60 s - after the claim) threw and
+    // the pass went on; the first one past it stopped the pass: 34 records
+    // written, the last at 12:14:10, before the lock could lapse.
+    expect(outcome).toEqual({ outcome: 'lock_lost', counts: { ...ZERO, housingAuthority: 34 } });
+    expect(beats).toBe(34);
+    expect(Math.max(...writtenAt)).toBeLessThan(Date.parse(T_LAPSE));
+    // Not finished: left lapsed for Run again - which re-validates, and refuses now.
+    expect((await world.orgListRepo.peek())?.lastRewrite).toEqual(CLEAR);
+    await expect(deps.orgRewrite.runAgain('usr_admin')).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_rewrite_target_gone' },
     });
   });
 });

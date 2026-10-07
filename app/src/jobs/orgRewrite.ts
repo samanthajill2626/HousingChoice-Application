@@ -14,13 +14,20 @@
 // SQS delivery or a stale run does nothing; re-validates a lock whose
 // heartbeat LAPSED (a delivery 15 minutes late) exactly as Run again does,
 // recording the rewrite `failed` when the list changed under it; and refreshes
-// the heartbeat, so no record is written under a lapsed lock. While it runs,
-// every heartbeat (at most every 20 s, after each record the pass visits)
-// re-checks the id: once the lock is no longer this run's - a newer rewrite
-// took it over, a duplicate run already finished it, or it lapsed - the pass
-// writes no further record and the job returns WITHOUT finish(), because the
-// lock it would finish is not its own (a lapsed one is left for Run again,
-// which re-validates). finish() re-checks the id too (services/orgRewrite.ts).
+// the heartbeat, so the pass STARTS under a fresh lock. While it runs, the
+// heartbeat (at most every 20 s, checked BEFORE each record the pass visits,
+// so the first record after a stalled read is checked first - code review
+// R3-BE-1) re-checks the id: once the lock is no longer this run's - a newer
+// rewrite took it over, a duplicate run already finished it, or it lapsed -
+// the pass writes no further record and the job returns WITHOUT finish(),
+// because the lock it would finish is not its own (a lapsed one is left for
+// Run again, which re-validates). A heartbeat that THROWS says nothing about
+// the lock, so the pass goes on through one only inside the job's LOCAL lease
+// (ORG_REWRITE_LEASE_MS: 14 minutes since the claim or the last heartbeat that
+// answered true); past it, one that throws stops the pass the same way, before
+// the lock can lapse. No check covers a record write already sent when the
+// lock lapses - the lease's last minute is its margin. finish() re-checks the
+// id too (services/orgRewrite.ts).
 //
 // It NEVER rethrows: dispatchJob rethrows a handler error and SQS would
 // redeliver it up to 5 times (infra/modules/jobs/main.tf). Every failure is
@@ -41,6 +48,7 @@ import {
 import {
   createOrgRewriteService,
   ORG_REWRITE_JOB,
+  ORG_REWRITE_LEASE_MS,
   type OrgRewritePayload,
   type OrgRewriteService,
 } from '../services/orgRewrite.js';
@@ -75,6 +83,36 @@ function errorText(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).slice(0, 300);
 }
 
+/**
+ * The pass's heartbeat under the job's LOCAL lease (code review R3-BE-1). A
+ * heartbeat that throws is rethrown - the pass logs it and goes on - only
+ * while the lease holds: ORG_REWRITE_LEASE_MS since the claim, or since the
+ * last heartbeat that answered true. Past it, one that throws answers false
+ * (the lock lost): the stored lock may lapse before another goes through, and
+ * every guard is off once it has. Each success counts from when it was SENT,
+ * never later than the heartbeat it wrote.
+ */
+function leasedHeartbeat(
+  heartbeat: () => Promise<boolean>,
+  claimSentAt: number,
+  log: Logger,
+  jobId: string,
+): () => Promise<boolean> {
+  let leaseFrom = claimSentAt;
+  return async () => {
+    const sentAt = Date.now();
+    try {
+      const ours = await heartbeat();
+      if (ours) leaseFrom = sentAt;
+      return ours;
+    } catch (err) {
+      if (Date.now() - leaseFrom < ORG_REWRITE_LEASE_MS) throw err;
+      log.warn({ err, jobId }, 'org.rewrite: heartbeat failed past the lease - counting the lock lost');
+      return false;
+    }
+  };
+}
+
 export async function runOrgRewriteJob(
   payload: OrgRewritePayload,
   deps: RunOrgRewriteDeps,
@@ -86,6 +124,8 @@ export async function runOrgRewriteJob(
     for (const [key, n] of Object.entries(part)) counts[key] = (counts[key] ?? 0) + n;
   };
   try {
+    // The claim refreshes the heartbeat: the lease starts when it was sent.
+    const claimSentAt = Date.now();
     const claim = await deps.orgRewrite.claim(jobId);
     if (claim.outcome === 'not_current') {
       const current = claim.lastRewrite;
@@ -105,11 +145,13 @@ export async function runOrgRewriteJob(
     // The passes are the fields FIXED when the rewrite started (spec 5.1).
     const fields = Array.isArray(last.fields) ? last.fields : [];
     if (fields.length === 0) throw new Error('the rewrite names no record fields');
+    // ONE lease across every pass of the rewrite.
+    const heartbeat = leasedHeartbeat(() => deps.orgRewrite.heartbeat(jobId), claimSentAt, log, jobId);
     for (const field of fields) {
       add(
         await deps.orgRecords.rewrite(
           { ...last, field },
-          { auditType: 'org_name_rewrite', actor: last.startedBy, heartbeat: () => deps.orgRewrite.heartbeat(jobId) },
+          { auditType: 'org_name_rewrite', actor: last.startedBy, heartbeat },
         ),
       );
     }
@@ -118,8 +160,9 @@ export async function runOrgRewriteJob(
     return { outcome: 'done', counts: { ...counts } };
   } catch (err) {
     if (err instanceof OrgRewriteLockLostError) {
-      // Spec D11: the lock is not this run's any more - no record was written
-      // after the heartbeat said so, and finishing would touch another run's lock.
+      // Spec D11: the lock is not this run's any more (past the lease: it may
+      // not be) - no record was written after the heartbeat said so, and
+      // finishing would touch another run's lock. A lapsed one is Run again's.
       add(err.counts);
       log.warn({ jobId, ...counts }, 'org.rewrite: lost the lock - stopped without finishing');
       return { outcome: 'lock_lost', counts: { ...counts } };

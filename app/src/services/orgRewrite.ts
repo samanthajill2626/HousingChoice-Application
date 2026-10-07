@@ -46,6 +46,7 @@ import {
 } from '../lib/orgNames.js';
 import {
   createOrgListRepo,
+  ORG_REWRITE_STALE_MS,
   type OrgListItem,
   type OrgListRepo,
   type OrgRecordField,
@@ -74,6 +75,16 @@ export interface SkippedSpelling { spelling: string; problem: SpellingProblem['p
 
 /** `lastRewrite.error` when the job could not be queued. */
 export const ORG_REWRITE_ENQUEUE_FAILED = 'enqueue_failed';
+
+/**
+ * A lock holder's LOCAL lease (code review R3-BE-1): a heartbeat that THROWS
+ * says nothing about the lock, so the org.rewrite job and the cleanup script
+ * go on through one only while their last heartbeat that answered true - or
+ * the claim, or the cleanup's acquire - is younger than this; past it a
+ * heartbeat that throws counts as the lock lost. The stored lock lapses at
+ * ORG_REWRITE_STALE_MS; the 60 s between are for the record write in flight.
+ */
+export const ORG_REWRITE_LEASE_MS = ORG_REWRITE_STALE_MS - 60_000;
 
 /**
  * What claim() found (code review R2-BE-1). `claimed`: the lock is this run's,
@@ -275,7 +286,8 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
           return { next: { ...current, lastRewrite }, result: { outcome: 'refused', lastRewrite } };
         }
       }
-      // (c) A fresh heartbeat, so no record is written under a lapsed lock.
+      // (c) A fresh heartbeat: the pass STARTS under a fresh lock (while it
+      // runs, its heartbeat and lease keep it - jobs/orgRewrite.ts).
       const lastRewrite: OrgRewriteState = { ...last, heartbeatAt: at };
       return { next: { ...current, lastRewrite }, result: { outcome: 'claimed', lastRewrite } };
     });

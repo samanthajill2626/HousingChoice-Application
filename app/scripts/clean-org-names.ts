@@ -34,8 +34,11 @@
 // on elapsed time (at most every 20 s, checked before every record) and
 // releases it `done`, or `failed` when it aborts or completes with failures.
 // A heartbeat that finds the lock no longer its own stops the run at once,
-// without releasing a lock that is not its own. After a hard kill the lock
-// stops blocking 15 minutes after its last heartbeat.
+// without releasing a lock that is not its own - and so does one that FAILS
+// once 14 minutes passed since the lock was taken or last refreshed (a local
+// lease, ORG_REWRITE_LEASE_MS: the lock lapses at 15; code review R3-BE-1).
+// After a hard kill the lock stops blocking 15 minutes after its last
+// heartbeat.
 //
 // TARGET: `--env local|dev|prod` through scripts/lib/stageClient.ts (dev/prod:
 // account guard first, client bound to the housingchoice profile). An agent
@@ -67,7 +70,7 @@ import { createOrgListRepo, type OrgListRepo, type OrgRewriteState } from '../sr
 import { createUnitsRepo, isDeleted as isUnitDeleted, type UnitItem, type UnitsRepo } from '../src/repos/unitsRepo.js';
 import { OrgHttpError } from '../src/services/orgNames.js';
 import { createOrgRecordsService } from '../src/services/orgRecords.js';
-import { createOrgRewriteService, type OrgRewriteService } from '../src/services/orgRewrite.js';
+import { createOrgRewriteService, ORG_REWRITE_LEASE_MS, type OrgRewriteService } from '../src/services/orgRewrite.js';
 import { parseStageArgs, resolveStageClient, type StageClient } from './lib/stageClient.js';
 
 // ---------------------------------------------------------------------------
@@ -335,14 +338,16 @@ export class CleanupRefusedError extends Error {}
  * The apply's heartbeat found the organization-list rewrite lock no longer
  * its own (spec D11): another rewrite took it over after it went 15 minutes
  * without a heartbeat, or it simply lapsed - a lapsed lock is no longer the
- * caller's (code review R2-BE-1). The run stopped writing at once and does NOT
- * release the lock. Exit 1, with the PARTIAL report.
+ * caller's (code review R2-BE-1) - or its heartbeats kept FAILING until its
+ * local lease ran out, 14 minutes after the lock was taken or last refreshed,
+ * when it may lapse at any moment (R3-BE-1). The run stopped writing at once
+ * and does NOT release the lock. Exit 1, with the PARTIAL report.
  */
 export class CleanupLockLostError extends Error {
   constructor(jobId: string) {
     super(
-      `${SCRIPT_NAME}: lost the organization-list rewrite lock (job ${jobId}) - it lapsed (15 minutes without ` +
-        'a heartbeat) or another rewrite took it over; stopped writing at once. ' +
+      `${SCRIPT_NAME}: lost the organization-list rewrite lock (job ${jobId}) - another rewrite took it over, ` +
+        'or it went 14 minutes without a refreshed heartbeat (it lapses at 15); stopped writing at once. ' +
         'Re-run the apply once no other rewrite is running (idempotent).',
     );
     this.name = 'CleanupLockLostError';
@@ -421,7 +426,7 @@ export interface CleanupOpts {
   logger?: Logger;
   /** Test seam: replace any of the deps buildCleanupDeps builds. */
   deps?: Partial<CleanupDeps>;
-  /** Test seam: the clock (ms) that paces the heartbeat. */
+  /** Test seam: the clock (ms) that paces the heartbeat and times its lease. */
   now?: () => number;
 }
 
@@ -558,8 +563,12 @@ export async function cleanOrgNames(opts: CleanupOpts): Promise<CleanupResult> {
 
   // APPLY: the lock FIRST, so a refusal reads and writes nothing (spec D11).
   let lock: OrgRewriteState | undefined;
+  // When the acquire was SENT - never later than the heartbeat it wrote: the
+  // lease's first start (code review R3-BE-1).
+  let lockedAt = 0;
   if (apply) {
     try {
+      lockedAt = (opts.now ?? Date.now)();
       lock = await deps.lock.acquireForCleanup(SCRIPT_NAME);
     } catch (err) {
       if (err instanceof OrgHttpError && err.body.error === 'org_rewrite_running') {
@@ -578,7 +587,7 @@ export async function cleanOrgNames(opts: CleanupOpts): Promise<CleanupResult> {
   }
 
   try {
-    await run(opts, deps, result, log, lock);
+    await run(opts, deps, result, log, lock, lockedAt);
   } catch (err) {
     log.error(
       { ...flatCounts(result), apply },
@@ -643,6 +652,7 @@ async function run(
   result: CleanupResult,
   log: Logger,
   lock: OrgRewriteState | undefined,
+  lockedAt: number,
 ): Promise<void> {
   const { doc, env } = opts;
   const now = opts.now ?? Date.now;
@@ -660,24 +670,35 @@ async function run(
   );
 
   let lastBeat = now();
+  /** When the last heartbeat that answered true was SENT - the acquire's, first. */
+  let leaseFrom = lockedAt;
   /**
    * The lock's heartbeat on ELAPSED time: checked before EVERY row, written or
    * not, so a long stretch with nothing to write still keeps the lock alive.
-   * A heartbeat that cannot be written (a busy list) is logged and the run
-   * goes on - the lock goes stale only after 15 minutes without one. One that
-   * answers false means another rewrite holds the lock now: stop at once.
+   * One that answers false means the lock is no longer this run's: stop at
+   * once. One that THROWS (a busy or unreachable list) says nothing about the
+   * lock, so the run goes on through it only inside its local LEASE
+   * (ORG_REWRITE_LEASE_MS since leaseFrom - code review R3-BE-1); past it, a
+   * heartbeat that throws stops the run the same way, before the lock (15
+   * minutes after its last heartbeat) can lapse.
    */
   const beat = async (): Promise<void> => {
     if (lock === undefined || now() - lastBeat < HEARTBEAT_EVERY_MS) return;
-    lastBeat = now();
+    const sentAt = now();
+    lastBeat = sentAt;
     let ours: boolean;
     try {
       ours = await deps.lock.heartbeat(lock.jobId);
     } catch (err) {
-      log.warn({ err, jobId: lock.jobId }, `${SCRIPT_NAME} - heartbeat failed; continuing`);
-      return;
+      if (now() - leaseFrom < ORG_REWRITE_LEASE_MS) {
+        log.warn({ err, jobId: lock.jobId }, `${SCRIPT_NAME} - heartbeat failed; continuing`);
+        return;
+      }
+      log.warn({ err, jobId: lock.jobId }, `${SCRIPT_NAME} - heartbeat failed past its lease; stopping`);
+      ours = false;
     }
     if (!ours) throw new CleanupLockLostError(lock.jobId);
+    leaseFrom = sentAt;
   };
   /**
    * One `org_name_cleanup` event. It is appended AFTER the record write

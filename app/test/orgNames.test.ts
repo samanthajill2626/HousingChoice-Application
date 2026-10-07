@@ -8,6 +8,8 @@ import {
   closeNames,
   checkScalarWrite,
   checkListWrite,
+  checkNewName,
+  checkSpelling,
   type OrgEntry,
 } from '../src/lib/orgNames.js';
 
@@ -207,5 +209,44 @@ describe('checkListWrite (D5 per member)', () => {
     const r = checkListWrite(LIST, 'accepted_authorities', ['Atlanta Housing Authority', 'Step Up'], [], undefined);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.text).toBe('Step Up');
+  });
+});
+
+describe('checkNewName (D13, D12 rename rule)', () => {
+  it('accepts a fresh name', () => {
+    expect(checkNewName(LIST, 'Marietta Housing Authority')).toBeNull();
+  });
+  it('refuses blank, too long, nothing left once normalized, taken by any name or spelling of either kind, and compound', () => {
+    expect(checkNewName(LIST, '  ')).toEqual({ code: 'org_name_empty' });
+    expect(checkNewName(LIST, 'x'.repeat(121))).toEqual({ code: 'org_name_too_long' });
+    // Spec D13: a name that normalizes to '' could never be matched or settled.
+    expect(checkNewName(LIST, '-')).toEqual({ code: 'org_name_invalid' });
+    expect(checkNewName(LIST, ' ( ) ')).toEqual({ code: 'org_name_invalid' });
+    expect(checkNewName(LIST, 'atlanta housing')).toEqual({ code: 'org_name_taken', entry: ATLANTA });
+    expect(checkNewName(LIST, 'Step up')).toEqual({ code: 'org_name_taken', entry: STEP_UP });
+    expect(checkNewName(LIST, 'DCA VASH')).toEqual({ code: 'org_name_compound', spans: [[DCA], [VASH]] });
+  });
+  it('a rename may take one of the entry\'s own spellings', () => {
+    expect(checkNewName(LIST, 'Atlanta Housing', { excludeOrgId: ATLANTA.orgId })).toBeNull();
+  });
+});
+
+describe('checkSpelling (D12)', () => {
+  it('accepts a fresh spelling', () => {
+    expect(checkSpelling(LIST, DCA, 'GA Dept of Community Affairs')).toBeNull();
+  });
+  it('names every problem', () => {
+    expect(checkSpelling(LIST, DCA, ' ')).toEqual({ problem: 'empty' });
+    expect(checkSpelling(LIST, DCA, ' - ')).toEqual({ problem: 'empty' }); // nothing left once normalized
+    expect(checkSpelling(LIST, DCA, 'y'.repeat(121))).toEqual({ problem: 'too_long' });
+    expect(checkSpelling(LIST, DCA, 'georgia dca')).toEqual({ problem: 'duplicate' });
+    expect(checkSpelling(LIST, DCA, 'Step Up')).toEqual({ problem: 'equals_name', entries: [STEP_UP] });
+    expect(checkSpelling(LIST, DCA, 'VASH')).toEqual({ problem: 'cross_kind', entries: [VASH] });
+    expect(checkSpelling(LIST, DCA, 'Atlanta Housing VASH')).toEqual({ problem: 'compound' });
+    expect(checkSpelling(LIST, DCA, 'AHA')).toEqual({ problem: 'shared_same_kind', entries: [ATLANTA, AUGUSTA] });
+  });
+  it('reports a full entry', () => {
+    const full = entry({ kind: 'agency', name: 'Full', spellings: Array.from({ length: 20 }, (_, i) => `s${i}`) });
+    expect(checkSpelling([...LIST, full], full, 'one more')).toEqual({ problem: 'too_many' });
   });
 });

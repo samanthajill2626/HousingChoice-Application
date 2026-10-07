@@ -307,3 +307,81 @@ export function checkListWrite(
   }
   return { ok: true, value: out };
 }
+
+/**
+ * `org_name_invalid`: checkNewName returns it for a name that normalizes to
+ * '' (for example "-" or "()", D13). The other `org_name_invalid` case - a
+ * newline or other control character - is applied by services/orgNames.ts
+ * BEFORE it calls checkNewName (plan 3.5).
+ */
+export type NameProblem =
+  | { code: 'org_name_empty' }
+  | { code: 'org_name_too_long' }
+  | { code: 'org_name_taken'; entry: OrgEntry }
+  | { code: 'org_name_compound'; spans: OrgEntry[][] }
+  | { code: 'org_name_invalid' };
+
+/**
+ * D13 + D12: a new name (add, Add as new, rename). Refused when blank, over
+ * 120 chars, nothing once normalized, equal (normalized) to any OTHER entry's
+ * name or spelling of either kind, or compound. `excludeOrgId` is the entry
+ * being renamed - its own name and spellings do not count against it.
+ */
+export function checkNewName(
+  entries: readonly OrgEntry[],
+  name: string,
+  opts: { excludeOrgId?: string } = {},
+): NameProblem | null {
+  const trimmed = name.trim();
+  if (trimmed === '') return { code: 'org_name_empty' };
+  if (trimmed.length > ORG_NAME_MAX) return { code: 'org_name_too_long' };
+  const n = normalizeOrgText(trimmed);
+  // D13: punctuation alone - nothing a lookup or a rewrite could ever match.
+  if (n === '') return { code: 'org_name_invalid' };
+  const others = entries.filter((e) => e.orgId !== opts.excludeOrgId);
+  const taken = others.find((e) => matchesText(e, n));
+  if (taken) return { code: 'org_name_taken', entry: taken };
+  const spans = compoundSpans(others, n);
+  if (spans !== null) return { code: 'org_name_compound', spans };
+  return null;
+}
+
+export type SpellingProblem =
+  | { problem: 'empty' }
+  | { problem: 'too_long' }
+  | { problem: 'too_many' }
+  | { problem: 'duplicate' }
+  | { problem: 'equals_name'; entries: OrgEntry[] }
+  | { problem: 'cross_kind'; entries: OrgEntry[] }
+  | { problem: 'compound' }
+  | { problem: 'shared_same_kind'; entries: OrgEntry[] };
+
+/**
+ * D12: can `spelling` be added to `target`? null = yes. `shared_same_kind`
+ * is allowed only for an admin with an explicit confirm; automatic additions
+ * (rename keeping the old name, Use with "Remember this spelling") treat
+ * EVERY problem as a skip. Merge's transfer does not use this check (D11).
+ */
+export function checkSpelling(
+  entries: readonly OrgEntry[],
+  target: OrgEntry,
+  spelling: string,
+): SpellingProblem | null {
+  const trimmed = spelling.trim();
+  if (trimmed === '') return { problem: 'empty' };
+  if (trimmed.length > ORG_SPELLING_MAX) return { problem: 'too_long' };
+  const n = normalizeOrgText(trimmed);
+  // D13: a spelling with no letters or digits ("-", "()") matches nothing.
+  if (n === '') return { problem: 'empty' };
+  if (matchesText(target, n)) return { problem: 'duplicate' };
+  if (target.spellings.length >= ORG_SPELLINGS_PER_ENTRY_MAX) return { problem: 'too_many' };
+  const others = entries.filter((e) => e.orgId !== target.orgId);
+  const nameHits = others.filter((e) => normalizeOrgText(e.name) === n);
+  if (nameHits.length > 0) return { problem: 'equals_name', entries: nameHits };
+  const spellingHits = others.filter((e) => e.spellings.some((s) => normalizeOrgText(s) === n));
+  const crossKind = spellingHits.filter((e) => e.kind !== target.kind);
+  if (crossKind.length > 0) return { problem: 'cross_kind', entries: crossKind };
+  if (compoundSpans(entries, n) !== null) return { problem: 'compound' };
+  if (spellingHits.length > 0) return { problem: 'shared_same_kind', entries: spellingHits };
+  return null;
+}

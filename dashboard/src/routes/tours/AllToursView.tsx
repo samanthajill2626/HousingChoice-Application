@@ -34,7 +34,7 @@
 // range message; ready -> the rows, then ONE action area. The count line is
 // ONE role="status" element that stays mounted, empty, while nothing is ready
 // (a live region inserted together with its text is not reliably announced).
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigationType, useSearchParams } from 'react-router-dom';
 import {
   TOUR_OUTCOME_LABELS,
@@ -383,7 +383,14 @@ export function AllToursView(): React.JSX.Element {
 
   const needle = chosen.q.trim().toLowerCase();
   const searching = needle !== '';
-  const views = data.rows.map((r) => rowView(r, data.contacts, data.units));
+  // The rows as displayed, derived again only when the loaded rows or names
+  // change - a landed page, a new list (planner review ADV-F2). A keystroke
+  // changes only the local selection, so it re-filters these views without
+  // re-formatting every loaded row.
+  const views = useMemo(
+    () => data.rows.map((r) => rowView(r, data.contacts, data.units)),
+    [data.rows, data.contacts, data.units],
+  );
   const visible = searching
     ? views.filter((v) => v.tenant.toLowerCase().includes(needle) || v.property.toLowerCase().includes(needle))
     : views;

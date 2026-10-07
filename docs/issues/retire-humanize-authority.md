@@ -1,13 +1,31 @@
 ---
 id: retire-humanize-authority
-title: Normalize seed authority slugs to canonical names, then delete humanizeAuthority
+title: Remove the unit PATCH tombstones for jurisdiction and accepted_programs (seed slugs and humanizeAuthority are done)
 type: debt
-severity: med
+severity: low
 status: open
-area: dashboard
+area: app
 created: 2026-08-10
+updated: 2026-10-07
 refs: app/src/lib/seed/matrix.ts, app/src/lib/seed/cast.ts, app/src/lib/seed/lean.ts, app/src/lib/seed/live.ts, app/src/lib/import/apply.ts, app/src/lib/unitFields.ts, app/src/routes/units.ts
 ---
+
+**Progress (2026-10-07): steps 1 and 3 are DONE by `feat/clean-org-names` (tracker #2),
+so step 4 is all that remains.** Every seed - lean, full cast, matrix, live and
+performance, the seeded broadcast filters and the landlord-only `authorities_served`
+included - now writes NAMES from the organization list (the `org-list` settings item;
+the slug mapping is in section 7 of
+`docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md`), and the
+e2e specs that read the lean world were updated with it. Step 1's target changed on the
+way: seeds speak the stored list's names, not the retired `CANONICAL_AUTHORITY`
+spellings. The one-time cleanup script (`app/scripts/clean-org-names.ts`) backfills
+`accepted_authorities` from a legacy `jurisdiction`, so once it has run in an environment
+no stored unit depends on the read-time synthesis. Step 4 stays open: `TOMBSTONED_FIELDS`
+and `sawTombstone` in `app/src/lib/unitFields.ts`, and the retired-fields-only no-op return
+of the unit PATCH in `app/src/routes/units.ts`, still accept-and-discard the retired
+`jurisdiction` / `accepted_programs` keys, until no deployed dashboard bundle predates the
+accepted-authorities consolidation. Severity lowered to low and area moved to app: what
+remains is a small app-side deletion with no user-facing effect.
 
 **Progress (2026-10-01): step 2 is DONE, ahead of step 1, by Cameron's decision.**
 `feat/properties-available-view` (tracker #1) deleted `humanizeAuthority`; the properties list's

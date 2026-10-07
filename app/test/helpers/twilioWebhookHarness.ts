@@ -142,6 +142,7 @@ import {
   type ContactVocabulary,
   type ContactVocabularyRepo,
 } from '../../src/repos/contactVocabularyRepo.js';
+import type { OrgListRepo } from '../../src/repos/orgListRepo.js';
 import {
   type BroadcastItem,
   type BroadcastRecipient,
@@ -216,6 +217,7 @@ import {
   type FakeUsersRepo,
 } from './authSession.js';
 import { createLogCapture, type LogCapture } from './logCapture.js';
+import { createOrgListFake } from './orgListFake.js';
 import { createSuggestionResolutionFake } from './suggestionResolutionFake.js';
 import { queryUnreadPageFromItems } from './unreadIndexFake.js';
 import type { SuggestionResolutionHooks } from '../../src/services/suggestionResolution.js';
@@ -410,6 +412,13 @@ export interface FakeWorld {
   vocabularyAdds: Partial<Record<'roles' | 'relationshipRoles' | 'fieldLabels', string[]>>[];
   /** Fake vocabulary repo (Task 4): in-memory union of all add() tokens. */
   vocabularyRepo: ContactVocabularyRepo;
+  /**
+   * The housing authority + agency lists (spec 2026-10-06 D1; plan 3.4b): an
+   * in-memory twin of repos/orgListRepo.ts (helpers/orgListFake.ts). EMPTY
+   * until its first read, which serves the starting list, as the real repo
+   * does. Seed a fixture with `putForSeed(...)`; read it back with `peek()`.
+   */
+  orgListRepo: OrgListRepo;
   /** Every pushService.sendToUser call (M1.9b pre-ring/missed-call pushes), in order. */
   pushSends: { userId: string; notification: PushNotification }[];
   /** sendToAll broadcasts (inbound-message pushes) - never used by voice. */
@@ -2664,6 +2673,10 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // The org list (spec 2026-10-06 D1): starts empty; the first read serves the
+  // starting list (helpers/orgListFake.ts).
+  const orgListRepo = createOrgListFake();
+
   // Fake push service (M1.9b): records every sendToUser so tests can assert the
   // pre-ring / missed-call pushes (kind + payload — and that NO raw phone leaks
   // into them). Returns a "configured, 1 sent" tally; never touches the network.
@@ -4887,6 +4900,7 @@ export function createFakeWorld(): FakeWorld {
     settingsRepo,
     vocabularyAdds,
     vocabularyRepo,
+    orgListRepo,
     pushSends,
     pushBroadcasts,
     pushService,

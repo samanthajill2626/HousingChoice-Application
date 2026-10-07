@@ -93,10 +93,12 @@ describe('old values resolve as spec Appendix A says', () => {
     ['Henry County', 'Georgia Department of Community Affairs'],
     ['Clayton County', 'Jonesboro Housing Authority'],
     ['Housing Authority of Clayton County', 'Jonesboro Housing Authority'],
-    // The retired alias map read a bare `clayton` as Clayton County;
-    // Cameron's launch-gate ruling (2026-10-06): a bare "Clayton" is the
-    // city in Rabun County, which DCA serves.
-    ['Clayton', 'Georgia Department of Community Affairs'],
+    // The retired alias map read a bare `clayton` as Clayton County, and
+    // Jonesboro Housing Authority is that county's only voucher administrator
+    // (DCA does not serve Clayton County) - Cameron, 2026-10-07, reversing
+    // the launch-gate default of DCA (the Rabun County city is not in this
+    // caseload).
+    ['Clayton', 'Jonesboro Housing Authority'],
     ['Cobb County', 'Marietta Housing Authority'],
   ];
   it.each(samMappings)('%s -> %s (Sam, 2026-10-06)', (text, name) => {

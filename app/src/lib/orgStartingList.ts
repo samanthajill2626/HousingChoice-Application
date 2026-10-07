@@ -20,7 +20,7 @@ export const STARTING_ORG_LIST: readonly StartingOrg[] = [
   {
     kind: 'housing_authority',
     name: 'Georgia Department of Community Affairs',
-    spellings: ['DCA', 'Georgia DCA', 'GA DCA', 'Department of Community Affairs', 'DCA, Department of Community Affairs', 'McDonough', 'Henry County', 'Clayton'],
+    spellings: ['DCA', 'Georgia DCA', 'GA DCA', 'Department of Community Affairs', 'DCA, Department of Community Affairs', 'McDonough', 'Henry County'],
     notes: 'Runs vouchers in 149 of Georgia\'s 159 counties (not Fulton, DeKalb, Clayton, Cobb, Bibb, Chatham, Glynn, Muscogee, Richmond or Sumter). North Regional Office in Atlanta.',
   },
   {
@@ -39,6 +39,10 @@ export const STARTING_ORG_LIST: readonly StartingOrg[] = [
   {
     kind: 'housing_authority',
     name: 'Jonesboro Housing Authority',
+    // Jonesboro Housing Authority is Clayton County's only voucher administrator
+    // (DCA names Clayton among the ten counties it does not serve), so a bare
+    // "Clayton" - the old importer's alias for Clayton County - is its too
+    // (Cameron, 2026-10-07).
     spellings: [
       'JHA',
       'Jonesboro (JHA)',
@@ -46,6 +50,7 @@ export const STARTING_ORG_LIST: readonly StartingOrg[] = [
       'Jonesboro, JHA, Jonesboro housing',
       'Clayton County',
       'Housing Authority of Clayton County',
+      'Clayton',
     ],
   },
   { kind: 'housing_authority', name: 'East Point Housing Authority', spellings: ['EPHA', 'East Point', 'Eastpoint Housing Authority'] },

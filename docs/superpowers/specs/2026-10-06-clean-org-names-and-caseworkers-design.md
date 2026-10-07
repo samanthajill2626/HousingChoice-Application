@@ -10,7 +10,8 @@ lock-loss stop, and section 6's endpoint shapes; revision 8 records Sam's
 answers from the 2026-10-06 meeting (section 13, Appendix A: the old county
 values become spellings of the authority that runs those vouchers) and plan
 review round 2 (D13's no-empty rule covers spellings; D8's place-name rule;
-`Clayton` on DCA by Cameron's launch-gate ruling); the final independent
+`Clayton` on Jonesboro - Cameron's 2026-10-07 ruling after verification,
+reversing the launch-gate default of DCA); the final independent
 review (2026-10-07) added two precision lines - D4 folds typographic
 punctuation and strips invisible characters; section 8's apply refuses an
 environment with no stored list. Design review: rounds 1-4,
@@ -964,9 +965,12 @@ So the old values are spellings of the entry that runs those vouchers
 `Henry County` -> Georgia Department of Community Affairs; `Clayton County`
 and `Housing Authority of Clayton County` -> Jonesboro Housing Authority;
 `Cobb County` -> Marietta Housing Authority. The retired importer alias
-`Clayton` (bare) -> Georgia Department of Community Affairs, by Cameron's
-launch-gate ruling (2026-10-06): a bare "Clayton" is the city of Clayton in
-Rabun County, which DCA serves, not Clayton County. "McDonough Housing Authority" is
+`Clayton` (bare) -> Jonesboro Housing Authority too (Cameron, 2026-10-07,
+reversing his 2026-10-06 launch-gate ruling after verification: DCA does not
+administer vouchers in Clayton County - it is one of the ten counties with
+their own authority - and Jonesboro Housing Authority is Clayton County's only
+voucher administrator; the city of Clayton in Rabun County, which DCA serves,
+is not in this caseload). "McDonough Housing Authority" is
 deliberately NOT a spelling (a public-housing authority with no vouchers). The
 seeds map `fulton_housing` to Fulton County Housing Authority.
 
@@ -979,12 +983,12 @@ Housing authorities:
 | Name | Spellings |
 |---|---|
 | Atlanta Housing Authority | AHA; Atlanta Housing; Housing Authority of the City of Atlanta; Atlanta (AHA); Atlanta, aha, Atlanta housing |
-| Georgia Department of Community Affairs | DCA; Georgia DCA; GA DCA; Department of Community Affairs; DCA, Department of Community Affairs; McDonough; Henry County; Clayton |
+| Georgia Department of Community Affairs | DCA; Georgia DCA; GA DCA; Department of Community Affairs; DCA, Department of Community Affairs; McDonough; Henry County |
 | Georgia Housing Voucher Program (DBHDD) | GHV; GHVP; DBHDD; Georgia Housing Voucher; Georgia Housing Voucher (GHV) |
 | DeKalb County Housing Authority | HADC; Housing Authority of DeKalb County; Dekalb County Housing; Dekalb Housing |
 | Decatur Housing Authority | Housing Authority of the City of Decatur |
 | Marietta Housing Authority | MHA; Cobb County |
-| Jonesboro Housing Authority | JHA; Jonesboro (JHA); Jonesboro housing; Jonesboro, JHA, Jonesboro housing; Clayton County; Housing Authority of Clayton County |
+| Jonesboro Housing Authority | JHA; Jonesboro (JHA); Jonesboro housing; Jonesboro, JHA, Jonesboro housing; Clayton County; Housing Authority of Clayton County; Clayton |
 | East Point Housing Authority | EPHA; East Point; Eastpoint Housing Authority |
 | College Park Housing Authority | Housing Authority of the City of College Park; College Park |
 | Macon-Bibb County Housing Authority | Macon Housing Authority; MHA |

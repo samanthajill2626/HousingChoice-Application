@@ -578,6 +578,7 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       return Item as UnitItem | undefined;
     },
 
+    // TODO(units-contacts-batchget-walk-duplicated): one shared walk with its twin, contactsRepo's private batchGetByIds.
     async getDisplaysByIds(unitIds) {
       const found = new Map<string, UnitDisplayItem>();
       // BatchGetItem REJECTS duplicate keys; callers may repeat an id.

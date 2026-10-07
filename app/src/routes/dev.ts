@@ -68,6 +68,7 @@ import { createExtractionRepo } from '../repos/extractionRepo.js';
 import { createAiRunsRepo } from '../repos/aiRunsRepo.js';
 import { createAuditRepo } from '../repos/auditRepo.js';
 import { createExtractionDriver } from '../adapters/extraction.js';
+import { createOrgListRepo } from '../repos/orgListRepo.js';
 import { appEvents } from '../lib/events.js';
 import { runDueExtractions, type ExtractionJobDeps } from '../jobs/extraction.js';
 import {
@@ -709,6 +710,10 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       const contactsRepo = createContactsRepo({ logger: log });
       extractionTickDeps = {
         repo: extractionRepo,
+        // The organization list (spec 2026-10-06 D8): one consistent read per
+        // run, like the worker. Reusing one repo INSTANCE is fine - D1 forbids
+        // caching the LIST, and get() reads it every time.
+        orgListRepo: createOrgListRepo({ logger: log }),
         // AI run log: the dev tick records runs too, which is what makes
         // /settings/ai-runs exercisable in e2e and local development.
         aiRuns: createAiRunsRepo({ logger: log }),

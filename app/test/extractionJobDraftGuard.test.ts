@@ -54,10 +54,19 @@ import { FakeExtractionDriver } from '../src/adapters/extractionFake.js';
 import type { ApplyDeps } from '../src/services/extraction/apply.js';
 import type { Logger } from '../src/lib/logger.js';
 import type { AiRunRecordInput } from '../src/repos/aiRunsRepo.js';
+import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import type { OrgListItem } from '../src/repos/orgListRepo.js';
 
 const NOW = '2026-07-17T00:00:00.000Z';
 const WALL_NOW = '2026-07-17T09:30:00.000Z';
 const DEBOUNCE = 30_000;
+/** Spec 2026-10-06 D8: the organization list every run reads (the starting list). */
+let orgSeq = 0;
+const ORG_LIST_ITEM: OrgListItem = {
+  settingId: 'org-list',
+  version: 1,
+  entries: buildStartingEntries(NOW, () => `org-${(orgSeq += 1)}`),
+};
 
 function makeLogger(): Logger & { warn: ReturnType<typeof vi.fn> } {
   return {
@@ -161,6 +170,7 @@ function makeHarness(opts: { dueRows: DueExtractionItem[]; messages: MessageItem
   };
   const deps: ExtractionJobDeps = {
     repo,
+    orgListRepo: { get: vi.fn(async () => ORG_LIST_ITEM) },
     aiRuns: {
       beginFinalization: vi.fn(async () => true),
       putRun: vi.fn(async (r: AiRunRecordInput) => {

@@ -46,6 +46,9 @@ import { isDecisionTarget, type DecisionTarget, type RunDecision, type RunWindow
 import { buildFullRunWindow, buildLightRunWindow, type WindowMessagePieces } from '../services/extraction/runWindow.js';
 import { buildDecisions } from '../services/extraction/decisions.js';
 import { parseExtractionOps } from '../services/extraction/schema.js';
+import type { OrgEntry } from '../lib/orgNames.js';
+import type { OrgListRepo } from '../repos/orgListRepo.js';
+import { renderOrgListBlock } from '../services/extraction/orgListBlock.js';
 
 /** Consecutive failures before an item is PARKED (no further auto-retries). */
 export const MAX_EXTRACTION_ATTEMPTS = 5;
@@ -95,6 +98,14 @@ export interface ExtractionJobDeps {
   applyDeps: ApplyDeps;
   config: Pick<AppConfig, 'aiExtractionDebounceMs'>;
   logger: Logger;
+  /**
+   * The organization list store (spec 2026-10-06 D8), read ONCE per run after
+   * the skip gates. REQUIRED, like `aiRuns` below, so a missed construction
+   * site is a typecheck failure: worker.ts and routes/dev.ts each build their
+   * own repo (plan 3.4b), and the two unit-test harnesses (extractionJob,
+   * extractionJobDraftGuard) supply a fake.
+   */
+  orgListRepo: Pick<OrgListRepo, 'get'>;
   /**
    * The run-log writer. REQUIRED so a missed construction site is a typecheck
    * failure, not a silently empty log. All three sites must supply it:
@@ -301,6 +312,8 @@ export interface RunDraft {
   driver?: 'anthropic' | 'console' | 'fake';
   model?: string;
   promptFingerprint?: string;
+  /** sha256 hex of the organization list block this run sent (spec 2026-10-06 D8). */
+  orgListFingerprint?: string;
   usage?: { inputTokens: number; outputTokens: number };
   window?: RunWindow;
   profileFieldsPopulated?: string[];
@@ -541,6 +554,32 @@ async function processRow(
   }));
   if (fullWindow !== undefined) draft.window = fullWindow;
 
+  // The organization list (spec 2026-10-06 D8): read ONCE per run, after every
+  // skip gate above (a skipped run never reads it) and before the model call.
+  // The SAME snapshot renders the prompt block and resolves housingAuthority in
+  // apply.ts, so prompt and resolution agree within a run. A failed read is a
+  // repo failure like the reads above: attempt burned, backoff, parked after
+  // MAX_EXTRACTION_ATTEMPTS.
+  let orgEntries: readonly OrgEntry[];
+  try {
+    orgEntries = (await deps.orgListRepo.get()).entries;
+  } catch (err) {
+    return failed('repo', err);
+  }
+  const orgBlock = renderOrgListBlock(orgEntries);
+  // BUDGET drops only (spec D8). An entry that can never be rendered (blank,
+  // or holding the word TRANSCRIPT) is counted in `unrenderable` - more budget
+  // would not bring it back, so it is no budget problem and no WARN.
+  const { spellings, agencies, authorities } = orgBlock.dropped;
+  if (spellings + agencies + authorities > 0) {
+    logger.warn(
+      { conversationId, droppedSpellings: spellings, droppedAgencies: agencies, droppedAuthorities: authorities },
+      'extraction: organization list over the prompt budget - entries left out',
+    );
+  }
+  // Before the call, so a FAILED call still records which list it was sent.
+  draft.orgListFingerprint = orgBlock.fingerprint;
+
   const profile = toProfile(contact);
   const profileFields = draftPiece(logger, draft, () => profileFieldNames(profile));
   if (profileFields !== undefined) draft.profileFieldsPopulated = profileFields;
@@ -621,6 +660,7 @@ async function recordRun(deps: ExtractionJobDeps, outcome: RunOutcome, draft: Ru
       driver: draft.driver ?? deps.driver.kind,
       ...(draft.model !== undefined && { model: draft.model }),
       ...(draft.promptFingerprint !== undefined && { promptFingerprint: draft.promptFingerprint }),
+      ...(draft.orgListFingerprint !== undefined && { orgListFingerprint: draft.orgListFingerprint }),
       ...(draft.usage !== undefined && { usage: draft.usage }),
       ...(draft.window !== undefined && { window: draft.window }),
       ...(draft.profileFieldsPopulated !== undefined && { profileFieldsPopulated: draft.profileFieldsPopulated }),

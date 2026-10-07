@@ -42,12 +42,22 @@ import type { ApplyDeps } from '../src/services/extraction/apply.js';
 import { createLogger, type Logger } from '../src/lib/logger.js';
 import type { AiRunRecordInput } from '../src/repos/aiRunsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import type { OrgEntry } from '../src/lib/orgNames.js';
+import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import type { OrgListItem } from '../src/repos/orgListRepo.js';
+import { renderOrgListBlock } from '../src/services/extraction/orgListBlock.js';
 
 const NOW = '2026-07-17T00:00:00.000Z';
 /** The job's WALL clock for run-record timestamps - deliberately DIFFERENT from
  *  NOW, so a test can prove the record does not use the poll clock. */
 const WALL_NOW = '2026-07-17T09:30:00.000Z';
 const DEBOUNCE = 30_000;
+/** Spec 2026-10-06 D8: the organization list every run reads unless a test supplies its own. */
+let orgSeq = 0;
+const ORG_ENTRIES: OrgEntry[] = buildStartingEntries(NOW, () => `org-${(orgSeq += 1)}`);
+function orgListItem(entries: OrgEntry[] = ORG_ENTRIES): OrgListItem {
+  return { settingId: 'org-list', version: 1, entries };
+}
 
 const silentLogger = {
   debug: vi.fn(),
@@ -223,6 +233,7 @@ interface Harness {
   aiRuns: { beginFinalization: ReturnType<typeof vi.fn>; putRun: ReturnType<typeof vi.fn>; setVerdict: ReturnType<typeof vi.fn> };
   applyEvents: { emit: ReturnType<typeof vi.fn> };
   jobEvents: { emit: ReturnType<typeof vi.fn> };
+  orgListRepo: { get: ReturnType<typeof vi.fn> };
 }
 
 function makeHarness(opts: {
@@ -234,6 +245,7 @@ function makeHarness(opts: {
   driver?: ExtractionDriver;
   aiRuns?: { beginFinalization: ReturnType<typeof vi.fn>; putRun: ReturnType<typeof vi.fn>; setVerdict: ReturnType<typeof vi.fn> };
   logger?: Logger;
+  orgListRepo?: { get: ReturnType<typeof vi.fn> };
 }): Harness {
   const repo = makeRepo(opts.dueRows, opts.claimResult ?? true);
   const seen: ExtractionInput[] = [];
@@ -282,8 +294,10 @@ function makeHarness(opts: {
     now: () => NOW,
   };
 
+  const orgListRepo = opts.orgListRepo ?? { get: vi.fn(async () => orgListItem()) };
   const deps: ExtractionJobDeps = {
     repo,
+    orgListRepo,
     aiRuns,
     events: jobEvents,
     now: () => WALL_NOW,
@@ -296,7 +310,7 @@ function makeHarness(opts: {
     logger: opts.logger ?? silentLogger,
   };
 
-  return { deps, repo, seen, contactsUpdate, runs, aiRuns, applyEvents, jobEvents };
+  return { deps, repo, seen, contactsUpdate, runs, aiRuns, applyEvents, jobEvents, orgListRepo };
 }
 
 function dueRow(overrides: Partial<DueExtractionItem> = {}): DueExtractionItem {
@@ -1747,5 +1761,121 @@ describe('ai_run.completed', () => {
     const result = await runDueExtractions(NOW, h.deps);
     expect(result).toEqual({ processed: 1, failed: 0 });
     expect(h.repo.complete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('runDueExtractions - the organization list (spec 2026-10-06 D8)', () => {
+  it('reads the list ONCE per run and records the block fingerprint on the run', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.orgListRepo.get).toHaveBeenCalledTimes(1);
+    expect(h.runs[0]!.orgListFingerprint).toBe(renderOrgListBlock(ORG_ENTRIES).fingerprint);
+  });
+
+  it('records the fingerprint on a FAILED model call too - it is stamped before the call', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      driver: { kind: 'fake', extract: async () => ({ ok: false, meta: { driver: 'fake' }, failure: 'driver', message: 'boom' }) },
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ outcome: 'failed', error: { kind: 'driver' } });
+    expect(h.runs[0]!.orgListFingerprint).toBe(renderOrgListBlock(ORG_ENTRIES).fingerprint);
+  });
+
+  it('(PIN) never reads the list on a skip path', async () => {
+    const landlord = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: landlordContact(), conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, landlord.deps);
+    expect(landlord.orgListRepo.get).not.toHaveBeenCalled();
+    expect(landlord.runs[0]!.orgListFingerprint).toBeUndefined();
+
+    const seen = msg(10, 'inbound', 'older');
+    const noNew = makeHarness({
+      dueRows: [dueRow({ cursor: seen.tsMsgId })], messages: [seen], contact: tenantContact(), conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, noNew.deps);
+    expect(noNew.orgListRepo.get).not.toHaveBeenCalled();
+  });
+
+  it('fails the run as a repo error, before any model call, when the list read throws', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      orgListRepo: { get: vi.fn(async () => { throw new Error('settings down'); }) },
+    });
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out).toEqual({ processed: 0, failed: 1 });
+    expect(h.seen).toHaveLength(0);
+    expect(h.repo.fail).toHaveBeenCalledTimes(1);
+    expect(h.runs[0]).toMatchObject({ outcome: 'failed', error: { kind: 'repo', message: 'settings down' } });
+  });
+
+  it('WARNs with the dropped counts when the block is over budget', async () => {
+    const big: OrgEntry[] = Array.from({ length: 200 }, (_, i) => ({
+      orgId: `big-${i}`,
+      kind: 'housing_authority' as const,
+      name: `Authority ${String(i).padStart(3, '0')} ${'x'.repeat(86)}`,
+      spellings: [],
+      createdAt: NOW,
+      createdBy: 'test',
+      updatedAt: NOW,
+      updatedBy: 'test',
+    }));
+    const expected = renderOrgListBlock(big).dropped;
+    expect(expected.authorities).toBeGreaterThan(0);
+    const warn = vi.fn();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() } as unknown as Logger;
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      orgListRepo: { get: vi.fn(async () => orgListItem(big)) },
+      logger,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(warn).toHaveBeenCalledWith(
+      {
+        conversationId: 'conv1',
+        droppedSpellings: expected.spellings,
+        droppedAgencies: expected.agencies,
+        droppedAuthorities: expected.authorities,
+      },
+      'extraction: organization list over the prompt budget - entries left out',
+    );
+  });
+
+  it('does not WARN when the whole list fits (PIN)', async () => {
+    const warn = vi.fn();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() } as unknown as Logger;
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      logger,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(warn.mock.calls.filter((call) => String(call[1]).includes('organization list'))).toHaveLength(0);
+  });
+
+  it('does not WARN for an entry that can never be rendered - that is no budget drop (PIN)', async () => {
+    const transcriptNamed: OrgEntry = {
+      orgId: 'org-transcript',
+      kind: 'housing_authority',
+      name: 'Transcript Housing Authority',
+      spellings: [],
+      createdAt: NOW,
+      createdBy: 'test',
+      updatedAt: NOW,
+      updatedBy: 'test',
+    };
+    const entries = [...ORG_ENTRIES, transcriptNamed];
+    expect(renderOrgListBlock(entries).unrenderable.authorities).toBe(1);
+    const warn = vi.fn();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() } as unknown as Logger;
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      orgListRepo: { get: vi.fn(async () => orgListItem(entries)) },
+      logger,
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(warn.mock.calls.filter((call) => String(call[1]).includes('organization list'))).toHaveLength(0);
   });
 });

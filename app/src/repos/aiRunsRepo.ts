@@ -52,6 +52,10 @@ export interface AiRunRecord {
   driver: 'anthropic' | 'console' | 'fake';
   model?: string;
   promptFingerprint?: string;
+  /** sha256 hex of the organization list block the run sent (spec 2026-10-06
+   *  D8); absent on runs that skipped before reading the list. putRun spreads
+   *  its input, so no write change. Dashboard twin: AiRunRecordView (S11). */
+  orgListFingerprint?: string;
   usage?: RunUsage;
   window?: RunWindow;
   profileFieldsPopulated?: string[];

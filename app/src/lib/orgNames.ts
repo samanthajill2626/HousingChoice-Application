@@ -346,6 +346,8 @@ export function checkNewName(
   return null;
 }
 
+/** `invalid` (a control character, spec D13) is never returned by
+ *  checkSpelling: services/orgNames.ts applies that rule first (plan 3.5). */
 export type SpellingProblem =
   | { problem: 'empty' }
   | { problem: 'too_long' }
@@ -354,7 +356,8 @@ export type SpellingProblem =
   | { problem: 'equals_name'; entries: OrgEntry[] }
   | { problem: 'cross_kind'; entries: OrgEntry[] }
   | { problem: 'compound' }
-  | { problem: 'shared_same_kind'; entries: OrgEntry[] };
+  | { problem: 'shared_same_kind'; entries: OrgEntry[] }
+  | { problem: 'invalid' };
 
 /**
  * D12: can `spelling` be added to `target`? null = yes. `shared_same_kind`

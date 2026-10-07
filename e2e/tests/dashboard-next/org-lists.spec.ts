@@ -26,9 +26,17 @@
 // Atlanta and Augusta (which share the spelling AHA) and the agency Step Up -
 // are never changed. A rewrite is lane-global and one runs at a time (D11), so
 // every action that starts one waits for it to finish.
-import { test, expect, type APIRequestContext, type Page, type Request } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Locator, type Page, type Request } from '@playwright/test';
 import { ORG_PICKER, pickOrgName } from '../../scenarios/steps.js';
-import { addOrg, getOrgList, sameOrgText, setOffListValue } from '../../fixtures/orgFixture.js';
+import {
+  addOrg,
+  getOrgList,
+  getOrgUsage,
+  requireOrg,
+  sameOrgText,
+  setOffListValue,
+  waitForRewrite,
+} from '../../fixtures/orgFixture.js';
 import { expectTodayReady } from '../../support/today.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
@@ -342,5 +350,131 @@ test.describe('Org pickers (spec D6, D7)', () => {
     const list = page.getByRole('list', { name: 'Candidate recipients' });
     await expect(list.getByText(first)).toBeVisible();
     await expect(list.getByText(second)).toBeVisible();
+  });
+});
+
+// ---- Settings > Housing authorities & agencies (spec D10-D13) ----
+
+/** Sign in as a named dev persona (founder@example.com is the admin). */
+async function devLoginAs(page: Page, email: string): Promise<void> {
+  const res = await page.request.post(`${NEXT}/auth/dev-login`, { data: { email } });
+  expect(res.ok(), `dev-login as ${email}`).toBeTruthy();
+  await page.goto(`${NEXT}/`);
+  await expectTodayReady(page);
+}
+
+/** A named section of the tab (each <section> is labelled by its heading). */
+function region(page: Page, name: string): Locator {
+  return page.getByRole('region', { name, exact: true });
+}
+
+/** One entry's row in its list section, by its exact name. */
+function entryRow(page: Page, regionName: string, name: string): Locator {
+  return region(page, regionName)
+    .getByRole('row')
+    .filter({ has: page.getByRole('rowheader', { name, exact: true }) });
+}
+
+/** Settings > Housing authorities & agencies through its tab (visible to every
+ *  signed-in user, D10); waits until the starting list has rendered. */
+async function openOrgSettings(page: Page): Promise<void> {
+  await page.goto(`${NEXT}/settings`);
+  await page.getByRole('tab', { name: UI.settingsTab }).click();
+  await expect(entryRow(page, UI.haRegion, 'Atlanta Housing Authority')).toBeVisible();
+}
+
+test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => {
+  test('a VA sees the three sections, adds an agency with notes and edits them - and cannot rename', async ({
+    page,
+  }) => {
+    await devLogin(page); // the seeded VA
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const finch = `Finch Mission ${stamp}`;
+    await openOrgSettings(page);
+    await expect(entryRow(page, UI.agencyRegion, 'Step Up')).toBeVisible();
+    await expect(region(page, UI.notOnListRegion)).toBeVisible();
+    // Admin-only actions are not offered to a VA (D10).
+    await expect(region(page, UI.haRegion).getByRole('button', { name: /^Rename / })).toHaveCount(0);
+
+    // Add: a name and notes, through "Is this really new?" (D10).
+    await region(page, UI.agencyRegion).getByRole('button', { name: UI.addAgency, exact: true }).click();
+    const isNew = page.getByRole('dialog', { name: UI.newDialog });
+    await isNew.getByRole('textbox', { name: UI.nameBox, exact: true }).fill(finch);
+    await isNew.getByRole('textbox', { name: UI.notesBox, exact: true }).fill(`Added by e2e ${stamp}`);
+    await isNew.getByRole('button', { name: UI.yesAddIt, exact: true }).click();
+    await expect(isNew).toHaveCount(0);
+    const row = entryRow(page, UI.agencyRegion, finch);
+    await expect(row).toContainText(`Added by e2e ${stamp}`);
+
+    // Notes: everyone edits them, and they touch no records (D10).
+    await row.getByRole('button', { name: UI.editNotes(finch), exact: true }).click();
+    const notes = page.getByRole('dialog', { name: UI.editNotesDialog });
+    await notes.getByRole('textbox', { name: UI.notesBox, exact: true }).fill(`Edited by e2e ${stamp}`);
+    await notes.getByRole('button', { name: UI.save, exact: true }).click();
+    await expect(notes).toHaveCount(0);
+    await expect(row).toContainText(`Edited by e2e ${stamp}`);
+
+    const entry = await requireOrg(req, finch);
+    expect(entry).toMatchObject({ kind: 'agency', notes: `Edited by e2e ${stamp}` });
+    // The server refuses a VA's rename too (requireRole('admin')).
+    const rename = await req.patch(`${NEXT}/api/organizations/${entry.orgId}`, {
+      data: { name: `Finch Renamed ${stamp}` },
+    });
+    expect(rename.status()).toBe(403);
+  });
+
+  test('an admin renames an entry: the rewrite job finishes and every record holds the new name', async ({
+    page,
+  }) => {
+    test.slow(); // a rewrite job runs in-process, deferred, and is polled to done
+    await devLoginAs(page, 'founder@example.com');
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const oldName = `Egret Housing Authority ${stamp}`;
+    const newName = `Egret Valley Housing Authority ${stamp}`;
+    const entry = await addOrg(req, { kind: 'housing_authority', name: oldName });
+    const tenants = [
+      (await createTenant(req, { firstName: `RenameA${stamp}`, housingAuthority: oldName })).contactId,
+      (await createTenant(req, { firstName: `RenameB${stamp}`, housingAuthority: oldName })).contactId,
+    ];
+    const unitId = await createUnit(req, { line1: `${stamp} Egret Row`, authorities: [oldName] });
+
+    // What uses the entry, counted per kind of record (D3, D10).
+    expect((await getOrgUsage(req))[entry.orgId]).toEqual({
+      tenants: 2,
+      otherContacts: 0,
+      properties: 1,
+      deleted: 0,
+    });
+
+    await openOrgSettings(page);
+    const row = entryRow(page, UI.haRegion, oldName);
+    await expect(row).toContainText(UI.usedByTenants(2));
+    await expect(row).toContainText(UI.usedByProperties(1));
+    await row.getByRole('button', { name: UI.rename(oldName), exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('textbox', { name: UI.newNameBox, exact: true }).fill(newName);
+    await dialog.getByRole('button', { name: UI.renameConfirm, exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+
+    // A 202 starts the job; the lane runs it in-process and deferred - poll it.
+    const rewrite = await waitForRewrite(req, (r) => r.action === 'rename' && r.toName === newName);
+    expect(rewrite.counts).toMatchObject({ housingAuthority: 2, accepted_authorities: 1 });
+    for (const contactId of tenants) {
+      expect((await getContact(req, contactId)).housingAuthority).toBe(newName);
+    }
+    expect(await getUnitAuthorities(req, unitId)).toEqual([newName]);
+
+    // The list shows the new name and keeps the old one as a spelling (D11).
+    await page.reload();
+    await expect(entryRow(page, UI.haRegion, newName)).toContainText(oldName);
+    await expect(entryRow(page, UI.haRegion, oldName)).toHaveCount(0);
+
+    // The property's Activity names the machine rewrite (plan 3.8).
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    const activity = page.locator('section', { has: page.getByRole('heading', { name: 'Activity' }) });
+    await expect(activity.getByText(UI.activityLabel).first()).toBeVisible();
+    await expect(activity).toContainText(newName);
   });
 });

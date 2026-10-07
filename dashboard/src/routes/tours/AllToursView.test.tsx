@@ -988,6 +988,34 @@ describe('AllToursView - the URL (spec 4.7)', () => {
     }
   });
 
+  it('a SORT change made while a search is set walks the NEW list at once, even within 300 ms of the last keystroke (spec 9)', async () => {
+    // The same fake-timer idiom as the When case above: with real timers the
+    // keystroke's own 300 ms timer could start the walk instead.
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    try {
+      reply('', namedPage([['t1', 'Ray Smith', '1 Oak St']], 'c1'), namedPage([['e1', 'Jo Smith', '2 Elm St']], 'e-c1'));
+      renderAt();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(optsOf()).toStrictEqual([{ limit: 50 }]);
+
+      typeSearch('Smith');
+      pick(select('Sort'), 'earliest');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(call(1).params).toStrictEqual({ when: 'any', sort: 'earliest' });
+      expect(optsOf()).toStrictEqual([{ limit: 50 }, { limit: 50 }, { cursor: 'e-c1', limit: 100 }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('Clear filters and the Status Clear are judged on the PRUNED selection', async () => {
     renderAt();
     await settle();

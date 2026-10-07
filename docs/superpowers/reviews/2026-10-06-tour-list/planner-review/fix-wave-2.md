@@ -257,4 +257,66 @@ anchor's idiom: focus without scrolling, then `scrollIntoView` nearest.
 
 ## Gates (orchestrator)
 
-(appended by the orchestrator after its verification run)
+Run by the orchestrator (Fable 5.1) on 1fc7626f (the wave's last code commit
+is 8e101714; 1fc7626f adds only this report), bare, real exit codes, output
+redirected to files under `.superpowers/sdd/` and read after:
+
+1. `npm run typecheck` - exit 0.
+2. `npm test` - exit 0: app 410 files / 8370 passed + 1 skipped (the by-design
+   built-dashboard diagnostic), dashboard 220 / 3909 (+10 over the previous
+   wave: the focus cases and the stale-copy case), e2e workspace 22 / 503,
+   fake-twilio 34 / 275, fake-twilio-web 13 / 111; zero `[dynamoAdmin]` lines.
+3. `npm run smoke` - exit 0 ("1556 import specifier(s) across 272 emitted
+   file(s) resolve under plain Node").
+5. eslint over the branch's 54 lintable files (the synced run's 53 plus
+   `app/src/lib/tables.ts`, comment-only in R2-5) - exit 1 as expected; by
+   baseline comparison on the same paths at the merge base a5eabcb3 (rows
+   keyed file|severity|rule|first message line): 13 rows = 13 rows, ZERO new,
+   zero gone; `tables.ts` has 0 rows at the base and 0 on the branch.
+4. (affected specs only - the planner reruns the full battery) on a fresh
+   `npm run e2e:session` lane 7 booted at 1fc7626f (`/__dev/ping` appCommit
+   1fc7626f), reused by the single-hop runs: `tests/dashboard-next/tours-all.spec.ts`
+   exit 0, "5 passed (7.1s)"; `tests/dashboard-next/tours-past.spec.ts` exit
+   0, "2 passed (6.5s)".
+
+Live keyboard check of R2-1 (Playwright MCP on the same lane, 76 API-seeded
+tours plus the specs' leftovers; every fact read from `document.activeElement`
+and a 40 ms page-side sampler; the cursor page slowed by a 1500 ms route delay
+so the busy state is observable):
+
+- The count line (`role="status"`) has `tabIndex` -1.
+- From the search box, 52 Tabs reached the `Load more` button (50 row links
+  between). Enter: ONE `/api/tours/list?...cursor=...` request; while it ran
+  the SAME button kept focus with `aria-busy="true"` and
+  `aria-disabled="true"` and NO `disabled` attribute (sampler: "BUTTON 'Load
+  more' busy=true rows=50" from 491 ms); a second Enter and a Space while busy
+  sent NO request (still 1). When the page landed (2020 ms) focus was on the
+  row link at index 50 - the first newly added row - inside the viewport;
+  "81 tours", Load more gone (the list complete).
+- Failure path (the cursor page aborted by a route): Enter on Load more ->
+  the `Retry` button replaced it inside the alert "We couldn't load tours.
+  Please try again." and HELD focus (rows 50); Enter on Retry (the route now
+  passing, 800 ms delay) -> Retry stayed focused with `aria-busy="true"` /
+  `aria-disabled="true"`, the failure sentence withdrawn (the alert read
+  "Retry" alone); when the page landed focus was on the row link at index 50,
+  "61 tours".
+- Not exercised live (no fixture reaches them cheaply): Keep checking (a
+  capped empty-page follow) and Start over (a second cursor 400); both are
+  covered by the new view cases. The browser console held one error, the
+  route-aborted request of the failure path.
+
+Lane stopped afterwards: `npm run e2e:stop` exit 0 (tables dropped, lease
+released), `e2e/.artifacts/session.pid` gone, no listener on
+9701/9711/9721/9731. Main unmoved (0 behind); no second sync.
+
+Orchestrator notes on the diff (read in full): the pressed control is keyed,
+so its busy and settled renders are ONE element; `requestMore` returns early
+while `loader === 'more'`; the focus effect reads refs only inside the effect,
+calls no setState, waits for the request to be seen in flight, hands off when
+the list key changed or the user moved focus elsewhere; the rebuild path
+focuses the count line before the state change; `mergeRows` keeps the copy
+that is not older by `updatedAt`; the `TODO(units-contacts-batchget-walk-duplicated)`
+marker sits at `getDisplaysByIds`; the GSI comments name only readers that
+exist. The child's one precision (a failed OWN request hands focus to the
+Retry / Start over that replaced the control, not to the count line) keeps
+the keyboard user one Enter from retrying and is recorded for the re-review.

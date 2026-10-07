@@ -2889,8 +2889,10 @@ export function checkOrgText(
 
 /** POST /api/organizations { kind, name, notes? } - add an entry (everyone).
  *  409 org_name_taken (body.entry) / org_name_compound (body.spans) /
- *  org_list_full; 400 org_name_empty / org_name_too_long / org_name_invalid /
- *  org_notes_too_long. Unwrapped from { entry }. */
+ *  org_list_full / org_rewrite_running (body.lastRewrite: a running rewrite
+ *  would rewrite the new name away - its from-texts hold it, normalized;
+ *  code review R1-ADV-FE-3); 400 org_name_empty / org_name_too_long /
+ *  org_name_invalid / org_notes_too_long. Unwrapped from { entry }. */
 export async function addOrg(body: { kind: OrgKind; name: string; notes?: string }): Promise<OrgEntry> {
   const res = await request<{ entry: OrgEntry }>('/api/organizations', { method: 'POST', body });
   return res.entry;

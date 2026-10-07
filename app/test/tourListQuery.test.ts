@@ -158,6 +158,23 @@ describe('parseTourListQuery', () => {
     expect(parsed({ when: 'range', from: '2028-02-29T00:00:00Z' }).filters.from).toBe('2028-02-29T00:00:00.000Z');
     expect(parsed({ when: 'range', from: '0050-06-15T00:00:00Z' }).filters.from).toBe('0050-06-15T00:00:00.000Z');
 
+    // Every field check, one row each, in the builder's order: the leap rule,
+    // month 00, day 00, minute 60, second 60, offset hour 24, offset minute
+    // 60 - Date.parse no longer backs them up (R3-2). expect.soft, so a
+    // regression that drops the checks names every row it lets through.
+    for (const bad of [
+      '2026-02-29T00:00:00Z',
+      '2026-00-10T00:00:00Z',
+      '2026-10-00T00:00:00Z',
+      '2026-10-06T12:60:00Z',
+      '2026-10-06T12:00:60Z',
+      '2026-10-06T00:00:00+24:00',
+      '2026-10-06T00:00:00+00:60',
+    ]) {
+      expect.soft(parseTourListQuery({ when: 'range', from: bad }), `from ${bad}`).toEqual({ ok: false, error: ISO_ERROR });
+      expect.soft(parseTourListQuery({ when: 'range', to: bad }), `to ${bad}`).toEqual({ ok: false, error: ISO_ERROR });
+    }
+
     // The canonical instant keeps a plain four-digit year. Past the last
     // instant of 9999, toISOString() writes '+010000-...', and '+' sorts
     // below every digit, so the range would invert; before year 0000 it

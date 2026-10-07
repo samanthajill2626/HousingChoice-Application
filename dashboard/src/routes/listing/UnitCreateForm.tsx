@@ -79,7 +79,11 @@ export function UnitCreateForm({
   // R2-FE-6): one rule (useTypedOrgText) writes the note under the picker and
   // decides Create - text naming exactly one entry is sent as a pick would
   // be; any other text refuses to create, saying why under the picker. A
-  // property is never created without the authority staff typed.
+  // property is never created without the authority staff typed - not even
+  // when the list failed to load (code review R3-FE-3): a failed re-read
+  // settles against the list in hand, and with no list in hand Create
+  // refuses until the text is cleared (the field stays usable while it
+  // holds text).
   const authoritiesPicker = useRef<OrgPickerHandle>(null);
   const authorityText = useTypedOrgText(orgList, HOUSING_AUTHORITY_KINDS, authoritiesPicker);
   /** The authorities to send with the typed text settled, or null when Create is refused. */
@@ -354,7 +358,7 @@ export function UnitCreateForm({
             kinds={HOUSING_AUTHORITY_KINDS}
             entries={orgList.entries}
             loading={orgListUnknown(orgList)}
-            disabled={orgList.error}
+            disabled={authorityText.disabled}
             value={authorities}
             onChange={(next) => {
               setAuthorities(next);

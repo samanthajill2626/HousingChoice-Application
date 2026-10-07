@@ -958,14 +958,16 @@ describe('ContactEditForm - text typed in a picker but never picked', () => {
   });
 });
 
-// --- Code review R2-FE-1: Save never waits on a picker staff cannot use ------
-// A list read that fails disables the pickers WITH any typed text inside: that
-// text is left unused (the field keeps its value) and the load error stays in
-// view. Text typed before the first read lands cannot be settled yet: Save
-// says the list is still loading - not that the text is unknown.
+// --- Code review R2-FE-1, R3-FE-3: Save never waits on a picker staff cannot --
+// use, and never drops typed text. A re-read that fails keeps the list in
+// hand: typed text settles against it as usual. A read that fails with no list
+// in hand leaves a picker holding text usable - clear-only - and Save says so
+// until the text is cleared. Text typed before the first read lands cannot be
+// settled yet: Save says the list is still loading - not that it is unknown.
 describe('ContactEditForm - a picker whose list is not there', () => {
   const BLOCKED = 'Pick a name from the list, add it as new, or clear the text.';
   const STILL_LOADING = 'Still loading the list - try again in a moment.';
+  const NOT_LOADED = 'The list did not load - clear the text to save without it.';
   const housingAuthority = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authority' });
   const agency = (): HTMLElement => screen.getByRole('combobox', { name: 'Agency' });
   const save = (): HTMLElement => screen.getByRole('button', { name: /^Save$/i });
@@ -982,22 +984,66 @@ describe('ContactEditForm - a picker whose list is not there', () => {
     return held;
   }
 
-  it('the read fails while text is typed: Save goes on without that field, the load error stays', async () => {
+  it('the read fails while text is typed: the field stays clearable and Save waits for it (R3-FE-3)', async () => {
     const user = userEvent.setup();
     const read = heldListRead();
     updateContact.mockResolvedValue({ ...TENANT, firstName: 'TashaX' });
-    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const onSaved = vi.fn();
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={onSaved} />);
     await user.type(housingAuthority(), 'Atlanta Housing Authority');
     await act(async () => read.reject(new ApiError(503, 'org_list_busy', 'org_list_busy')));
-    expect(housingAuthority()).toBeDisabled();
+    expect(screen.getByText("Couldn't load housing authorities")).toBeInTheDocument();
+    // Clear-only: the text stays in an enabled field, with nothing to pick or add.
+    expect(housingAuthority()).toBeEnabled();
+    expect(housingAuthority()).toHaveValue('Atlanta Housing Authority');
+    expect(housingAuthority()).toHaveFocus();
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    // An empty picker is still disabled.
+    expect(agency()).toBeDisabled();
     await user.type(screen.getByLabelText(/First name/i), 'X');
     await user.click(save());
+    // Never saved without the authority staff typed - and never silently.
+    const refusal = await screen.findByText(NOT_LOADED);
+    expect(refusal).toHaveAttribute('role', 'alert');
+    expect(housingAuthority().getAttribute('aria-describedby')?.split(' ')).toContain(refusal.id);
+    expect(screen.getByText("Couldn't load agencies")).toBeInTheDocument();
+    expect(housingAuthority()).toHaveFocus();
+    expect(updateContact).not.toHaveBeenCalled();
+    // Cleared, the field is done with (disabled again) and the rest saves.
+    await user.clear(housingAuthority());
+    expect(housingAuthority()).toBeDisabled();
+    await user.click(save());
     await waitFor(() => expect(updateContact).toHaveBeenCalledWith('k1', { firstName: 'TashaX' }));
-    expect(screen.getByText("Couldn't load housing authorities")).toBeInTheDocument();
-    expect(screen.queryByText(BLOCKED)).not.toBeInTheDocument();
+    expect(onSaved).toHaveBeenCalled();
   });
 
-  it('a re-read after "Yes, add it" fails while Agency holds refused text: the load error replaces the refusal and Save goes on', async () => {
+  it('a re-read after "Yes, add it" fails: typed Agency text naming one entry is still saved (R3-FE-3)', async () => {
+    const user = userEvent.setup();
+    addOrg.mockResolvedValue(orgEntry('housing_authority', 'Metro Housing Authority'));
+    updateContact.mockResolvedValue({ ...TENANT, housingAuthority: 'Metro Housing Authority', agency: 'Step Up' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(agency(), 'Step Up');
+    await screen.findByRole('option', { name: 'Step Up' });
+    // The read "Yes, add it" starts fails.
+    getOrgList.mockRejectedValue(new ApiError(503, 'org_list_busy', 'org_list_busy'));
+    await user.type(housingAuthority(), 'Metro Housing Authority');
+    await user.click(
+      await screen.findByRole('option', { name: 'Add Metro Housing Authority as a new housing authority' }),
+    );
+    const isNew = screen.getByRole('dialog', { name: 'Is this really new?' });
+    const yes = within(isNew).getByRole('button', { name: 'Yes, add it' });
+    await waitFor(() => expect(yes).toBeEnabled());
+    await user.click(yes);
+    expect(await screen.findByText("Couldn't load agencies")).toBeInTheDocument();
+    // The list read before is still in hand: the text settles against it as usual.
+    expect(agency()).toHaveAccessibleDescription(/^Save will use Step Up\./);
+    await user.click(save());
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: 'Metro Housing Authority', agency: 'Step Up' }),
+    );
+  });
+
+  it('a re-read after "Yes, add it" fails while Agency holds refused text: still refused, still editable, and Save goes on once it is cleared (R3-FE-3)', async () => {
     const user = userEvent.setup();
     addOrg.mockResolvedValue(orgEntry('housing_authority', 'Metro Housing Authority'));
     updateContact.mockResolvedValue({ ...TENANT, housingAuthority: 'Metro Housing Authority' });
@@ -1016,10 +1062,15 @@ describe('ContactEditForm - a picker whose list is not there', () => {
     const yes = within(isNew).getByRole('button', { name: 'Yes, add it' });
     await waitFor(() => expect(yes).toBeEnabled());
     await user.click(yes);
-    expect(await screen.findByText("Couldn't load agencies")).toBeInTheDocument();
-    expect(agency()).toBeDisabled();
+    expect(await screen.findByText("Couldn't load housing authorities")).toBeInTheDocument();
+    // The list in hand still refuses "Hope": the field says so and stays editable.
+    expect(agency()).toBeEnabled();
     expect(agency()).toHaveValue('Hope');
-    expect(screen.queryByText(BLOCKED)).not.toBeInTheDocument();
+    expect(screen.getByText(BLOCKED)).toBeInTheDocument();
+    await user.click(save());
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(agency()).toHaveFocus();
+    await user.clear(agency());
     await user.click(save());
     await waitFor(() =>
       expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: 'Metro Housing Authority' }),

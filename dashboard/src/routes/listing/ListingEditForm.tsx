@@ -272,7 +272,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
             kinds={HOUSING_AUTHORITY_KINDS}
             entries={orgList.entries}
             loading={orgListUnknown(orgList)}
-            disabled={orgList.error}
+            disabled={authorityText.disabled}
             value={authorities}
             onChange={(next) => {
               setAuthorities(next);

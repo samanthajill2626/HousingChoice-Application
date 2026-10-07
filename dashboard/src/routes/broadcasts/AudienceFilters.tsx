@@ -59,8 +59,9 @@ export function AudienceFilters({
   const orgList = useOrgList();
   // The picker's typed text: while it holds any, a list that failed to load
   // leaves the field enabled so the text can still be cleared - it holds
-  // Preview back, and a disabled field could never let it go (R2-FE-3, the
-  // rule R2-FE-1 set for the forms: never block on a field staff cannot use).
+  // Preview back, and a disabled field could never let it go (R2-FE-3). The
+  // forms keep a picker holding text usable the same way (useTypedOrgText,
+  // R3-FE-3): nothing ever waits on a field staff cannot use.
   const [typed, setTyped] = useState('');
 
   function pickSize(value: number): void {

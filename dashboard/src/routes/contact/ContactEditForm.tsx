@@ -600,7 +600,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               kinds={HOUSING_AUTHORITY_KINDS}
               entries={orgList.entries}
               loading={orgListUnknown(orgList)}
-              disabled={orgList.error}
+              disabled={housingAuthorityText.disabled}
               value={housingAuthority}
               onChange={(next) => {
                 setHousingAuthority(next);
@@ -624,7 +624,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               kinds={AGENCY_KINDS}
               entries={orgList.entries}
               loading={orgListUnknown(orgList)}
-              disabled={orgList.error}
+              disabled={agencyText.disabled}
               value={agency}
               onChange={(next) => {
                 setAgency(next);

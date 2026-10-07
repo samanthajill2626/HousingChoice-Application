@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type OrgEntry, type UnitItem } from '../../api/index.js';
@@ -459,6 +459,40 @@ describe('ListingEditForm - text typed in the picker but never picked', () => {
     expect(second).not.toBe(first);
     expect(second).toHaveTextContent(BLOCKED);
     expect(updateUnit).not.toHaveBeenCalled();
+  });
+
+  it('the read fails while text is typed: the field stays clearable and Save waits for it (R3-FE-3)', async () => {
+    const user = userEvent.setup();
+    const held = { reject: (_err: unknown): void => {} };
+    getOrgList.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        held.reject = reject;
+      }),
+    );
+    updateUnit.mockResolvedValue({ ...UNIT });
+    const onSaved = vi.fn();
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={onSaved} />);
+    await user.type(authorities(), 'DCA');
+    await act(async () => held.reject(new ApiError(503, 'org_list_busy', 'org_list_busy')));
+    expect(screen.getByText("Couldn't load housing authorities")).toBeInTheDocument();
+    // Clear-only: the text stays in an enabled field, with nothing to pick or add.
+    expect(authorities()).toBeEnabled();
+    expect(authorities()).toHaveFocus();
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    await user.clear(screen.getByLabelText(/Tenant-paid utilities/i));
+    await user.type(screen.getByLabelText(/Tenant-paid utilities/i), 'Gas only');
+    await user.click(save());
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The list did not load - clear the text to save without it.',
+    );
+    expect(authorities()).toHaveFocus();
+    expect(updateUnit).not.toHaveBeenCalled();
+    // Cleared, the field is done with (disabled again) and the rest saves.
+    await user.clear(authorities());
+    expect(authorities()).toBeDisabled();
+    await user.click(save());
+    await waitFor(() => expect(updateUnit).toHaveBeenCalledWith('u1', { utilities: 'Gas only' }));
+    expect(onSaved).toHaveBeenCalled();
   });
 
   it('(PIN) a typed name the list already holds changes nothing', async () => {

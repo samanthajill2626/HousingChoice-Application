@@ -125,16 +125,21 @@ export const ORG_TYPED_BLOCKED = 'Pick a name from the list, add it as new, or c
 /** Under a form picker whose Save came before its list loaded (role="alert", code review R2-FE-1). */
 export const ORG_LIST_STILL_LOADING = 'Still loading the list - try again in a moment.';
 
-/** Under a FORM picker holding text while its list failed to load: Save
- *  leaves the field as it is (code review R2-FE-1). */
+/** Under a FORM picker holding text while no list has loaded: nothing can
+ *  settle it, so Save refuses it until it is cleared (code review R3-FE-3). */
 export const ORG_TYPED_LIST_FAILED = 'Not saved - the list did not load.';
+
+/** Under a form picker whose Save came while no list had loaded (role="alert",
+ *  code review R3-FE-3): never saved without the text, never dropped silently. */
+export const ORG_TYPED_LIST_NOT_LOADED = 'The list did not load - clear the text to save without it.';
 
 /** A picker's list as a form holds it (useOrgList's state). */
 export interface OrgListView {
   entries: readonly OrgEntry[];
   /** True until the first read settles. */
   loading: boolean;
-  /** True when the latest read failed - the pickers are disabled. */
+  /** True when the latest read failed - the pickers are disabled, except
+   *  one holding typed text (code review R3-FE-3). */
   error: boolean;
 }
 
@@ -157,8 +162,9 @@ export type TypedOrgText =
   | { status: 'blocked' }
   /** The list has not loaded yet: nothing can be settled (Save refuses, R2-FE-1). */
   | { status: 'loading' }
-  /** The list failed to load: the picker is disabled, so its text is left
-   *  unused and the field keeps its value (never refused, R2-FE-1). */
+  /** The list failed to load with nothing in hand (no read ever landed):
+   *  nothing can be settled, so Save refuses until the text is cleared - the
+   *  picker stays usable while it holds text (code review R3-FE-3). */
   | { status: 'unavailable' };
 
 /**
@@ -172,16 +178,19 @@ export type TypedOrgText =
  * rule: a form's Save and the note under its picker both read it, through
  * useTypedOrgText (code review R2-FE-6). The blast composer never uses this:
  * only a pick or a clear changes its filter (D7).
- * A Save never waits on a picker staff cannot use (code review R2-FE-1): while
- * the list failed to load the picker is disabled WITH the text inside, so the
- * text is left unused ('unavailable') rather than refused; before the first
- * read lands nothing can be settled yet ('loading' - refused, with its own
- * words, never as unknown text).
+ * Typed text is never dropped silently, and a Save never waits on a picker
+ * staff cannot use (code review R2-FE-1, R3-FE-3). Before the first read
+ * lands nothing can be settled yet ('loading' - refused, with its own words,
+ * never as unknown text). A RE-read that fails keeps the last list in hand
+ * (useOrgList), and the text settles against it as usual. A read that fails
+ * with nothing in hand leaves nothing to settle against ('unavailable' -
+ * refused until the text is cleared); the picker stays usable while it holds
+ * text (useTypedOrgText `disabled`), so the refusal never locks the form.
  */
 export function settleTypedOrgText(list: OrgListView, kinds: readonly OrgKind[], text: string): TypedOrgText {
   if (text.trim() === '') return { status: 'empty' };
-  if (list.error) return { status: 'unavailable' };
   if (list.loading) return { status: 'loading' };
+  if (orgListUnknown(list)) return { status: 'unavailable' };
   const q = normalizeOrgText(text);
   const ofKinds = list.entries.filter((e) => kinds.includes(e.kind));
   const byName = ofKinds.filter((e) => normalizeOrgText(e.name) === q);
@@ -198,6 +207,8 @@ export function typedOrgRefusal(verdict: TypedOrgText): string | null {
       return ORG_TYPED_BLOCKED;
     case 'loading':
       return ORG_LIST_STILL_LOADING;
+    case 'unavailable':
+      return ORG_TYPED_LIST_NOT_LOADED;
     default:
       return null;
   }

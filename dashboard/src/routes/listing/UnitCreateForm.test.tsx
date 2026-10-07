@@ -413,15 +413,18 @@ describe('UnitCreateForm - text typed in the picker but never picked', () => {
   });
 });
 
-// --- Code review R2-FE-1: Create never waits on a picker staff cannot use ----
-// A list read that fails disables the picker WITH the typed text inside: the
-// text is left unused and the load error stays in view. Text typed before the
-// read lands cannot be settled yet: Create says the list is still loading.
+// --- Code review R2-FE-1, R3-FE-3: Create never waits on a picker staff -----
+// cannot use, and never drops the authority staff typed. A list read that
+// fails with no list in hand leaves the picker usable while it holds text -
+// clear-only: nothing to pick or add - and Create says so until the text is
+// cleared. Text typed before the read lands cannot be settled yet: Create says
+// the list is still loading.
 describe('UnitCreateForm - a picker whose list is not there', () => {
+  const NOT_LOADED = 'The list did not load - clear the text to save without it.';
   const authorities = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authorities' });
   const create = (): HTMLElement => screen.getByRole('button', { name: /^Create$/ });
 
-  it('the read fails while text is typed: Create goes on without it, the load error stays', async () => {
+  it('the read fails while text is typed: the field stays clearable and Create waits for it (R3-FE-3)', async () => {
     const user = userEvent.setup();
     const held = { reject: (_err: unknown): void => {} };
     getOrgList.mockReturnValueOnce(
@@ -430,16 +433,28 @@ describe('UnitCreateForm - a picker whose list is not there', () => {
       }),
     );
     createUnit.mockResolvedValue(newUnit());
-    setup({ landlordId: 'contact-landlord-0001' });
+    const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
     await screen.findByRole('dialog', { name: 'New property' });
     await user.type(authorities(), 'DCA');
     await act(async () => held.reject(new ApiError(503, 'org_list_busy', 'org_list_busy')));
+    expect(screen.getByText("Couldn't load housing authorities")).toBeInTheDocument();
+    // Clear-only: the text stays in an enabled field, with nothing to pick or add.
+    expect(authorities()).toBeEnabled();
+    expect(authorities()).toHaveValue('DCA');
+    expect(authorities()).toHaveFocus();
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    // A property is never created without the authority staff typed.
+    await user.click(create());
+    expect(await screen.findByRole('alert')).toHaveTextContent(NOT_LOADED);
+    expect(authorities()).toHaveFocus();
+    expect(createUnit).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+    // Cleared, the field is done with (disabled again) and Create goes on.
+    await user.clear(authorities());
     expect(authorities()).toBeDisabled();
     await user.click(create());
     await waitFor(() => expect(createUnit).toHaveBeenCalled());
     expect(createUnit.mock.calls[0]?.[0]).toEqual({ landlordId: 'contact-landlord-0001' });
-    expect(screen.getByText("Couldn't load housing authorities")).toBeInTheDocument();
-    expect(screen.queryByText('Pick a name from the list, add it as new, or clear the text.')).not.toBeInTheDocument();
   });
 
   it('Create before the list loads says it is still loading - nothing is created', async () => {

@@ -367,26 +367,39 @@ describe('settleTypedOrgText - text typed in a form picker but never picked (cod
     }
   });
 
-  it('a list still loading cannot settle text yet; a list that failed leaves it unused, never refused (R2-FE-1)', () => {
+  it('a list still loading cannot settle text yet (R2-FE-1)', () => {
     const loading = { entries: [], loading: true, error: false };
-    const failed = { entries: ENTRIES, loading: false, error: true };
     expect(settleTypedOrgText(loading, HA, 'Atlanta Housing Authority')).toEqual({ status: 'loading' });
-    // A failed re-read keeps the old entries, but the picker is disabled: its text is not used.
-    expect(settleTypedOrgText(failed, HA, 'Atlanta Housing Authority')).toEqual({ status: 'unavailable' });
-    expect(settleTypedOrgText(failed, HA, 'AHA')).toEqual({ status: 'unavailable' });
-    // Blank is still nothing typed.
     expect(settleTypedOrgText(loading, HA, ' ')).toEqual({ status: 'empty' });
-    expect(settleTypedOrgText(failed, HA, '')).toEqual({ status: 'empty' });
   });
 
-  it('Save refuses blocked text and text typed before the list loaded - with its own words for each', () => {
+  it('a failed RE-read settles against the list still in hand, as usual (code review R3-FE-3)', () => {
+    const reReadFailed = { entries: ENTRIES, loading: false, error: true };
+    expect(settleTypedOrgText(reReadFailed, HA, 'Atlanta Housing Authority')).toEqual({
+      status: 'resolved',
+      name: 'Atlanta Housing Authority',
+    });
+    expect(settleTypedOrgText(reReadFailed, ['agency'], 'step up')).toEqual({ status: 'resolved', name: 'Step Up' });
+    expect(settleTypedOrgText(reReadFailed, HA, 'AHA')).toEqual({ status: 'blocked' });
+    expect(settleTypedOrgText(reReadFailed, HA, '')).toEqual({ status: 'empty' });
+  });
+
+  it('when no list ever loaded, nothing can be settled: the text is refused, never dropped (code review R3-FE-3)', () => {
+    const neverLoaded = { entries: [], loading: false, error: true };
+    expect(settleTypedOrgText(neverLoaded, HA, 'Atlanta Housing Authority')).toEqual({ status: 'unavailable' });
+    expect(settleTypedOrgText(neverLoaded, HA, 'AHA')).toEqual({ status: 'unavailable' });
+    expect(settleTypedOrgText(neverLoaded, HA, '  ')).toEqual({ status: 'empty' });
+  });
+
+  it('Save refuses blocked text, text typed before the list loaded and text no list can settle - with its own words for each', () => {
     expect(refusesSave({ status: 'blocked' })).toBe(true);
     expect(refusesSave({ status: 'loading' })).toBe(true);
+    expect(refusesSave({ status: 'unavailable' })).toBe(true);
     expect(typedOrgRefusal({ status: 'blocked' })).toBe('Pick a name from the list, add it as new, or clear the text.');
     expect(typedOrgRefusal({ status: 'loading' })).toBe('Still loading the list - try again in a moment.');
+    expect(typedOrgRefusal({ status: 'unavailable' })).toBe('The list did not load - clear the text to save without it.');
     for (const verdict of [
       { status: 'empty' as const },
-      { status: 'unavailable' as const },
       { status: 'resolved' as const, name: 'Step Up' },
     ]) {
       expect(refusesSave(verdict), verdict.status).toBe(false);

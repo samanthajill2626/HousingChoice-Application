@@ -56,9 +56,11 @@
   copy the line's exact text as the old_string (the character pasted from
   the Read output, never typed as a `\u` escape and never via PowerShell),
   and write the REPLACEMENT in ASCII (the "with" block, which is already
-  ASCII). If the Edit tool still cannot match, take a unique ASCII
-  substring of the line as the old_string and replace the whole line
-  around it. Never "fix" a placeholder by retyping the glyph from memory.
+  ASCII). If the Edit tool still cannot match, rewrite that ONE line with
+  a short node script (read the file as UTF-8, replace the single line
+  that contains the unique ASCII substring with the ASCII replacement,
+  assert exactly one line matched, write UTF-8 back) - never PowerShell,
+  and never leave the glyph on the touched line. Never "fix" a placeholder by retyping the glyph from memory.
 - e2e pins move with their copy (plan review R1 ruling A3): a task that
   changes user-facing copy an e2e spec asserts edits that spec line in the
   SAME task (the S6.5 timeline task and the S9 tasks list their pins), so
@@ -475,7 +477,7 @@ only verifies it.
 | property Activity share row | "Sent to 1 recipient" / "Sent to <n> recipients"; zero "No recipients reached" |
 | landlord timeline | "Sent to 1 recipient" / "Sent to <n> recipients" at both sites; "No recipients reached" at the recount site only (3.7) |
 | "Sent to" row label | resolved non-tenant row: `displayKind` (role, else the type label, e.g. "Partner"); tenant and unresolved rows: none |
-| UNCHANGED on purpose | "Add more tenants by filters", "Add a tenant", "No candidates - add a tenant below." (as today), the filter summary "Tenants - ...", TenantFile's "Send a property to this tenant", "Couldn't add that tenant - try the search again." (as today) |
+| UNCHANGED on purpose (named by meaning; their bytes - em dashes included - stay exactly as today) | "Add more tenants by filters", "Add a tenant", the "No candidates ... add a tenant below." line, the filter summary "Tenants - ...", TenantFile's "Send a property to this tenant", the "Couldn't add that tenant ... try the search again." line |
 
 ## Slices
 
@@ -3128,7 +3130,7 @@ the base; match the quoted text, never the number):
 Step 0 for EVERY S3 task (S1 and S2 deliver these; verify, never
 re-create - any mismatch: STOP and report):
 
-1. `grep -n "export const CASEWORKER_ROLE = 'Caseworker';" "W:/tmp/caseworkers/app/src/services/extraction/contactKinds.ts"` prints one line.
+1. `grep -n "export const CASEWORKER_ROLE = 'Caseworker';" "W:/tmp/caseworkers/app/src/lib/caseworkers.ts"` prints one line (the leaf definition, plan review ruling A2), and `grep -n "CASEWORKER_ROLE" "W:/tmp/caseworkers/app/src/services/extraction/contactKinds.ts"` shows its import and re-export.
 2. `grep -n "export function isCaseworker\b\|export function mentionsCaseworker\|export function hasAiCaseworkerNote\|export type PossibleSignal" "W:/tmp/caseworkers/app/src/lib/caseworkers.ts"` prints four lines.
 3. `grep -n "organization: \['housing_authority', 'agency'\]" "W:/tmp/caseworkers/app/src/lib/orgNames.ts"` prints one line (`KINDS_FOR_FIELD.organization`), and `OrgField` includes `'organization'`.
 4. `app/src/repos/contactsRepo.ts` exports `CaseworkerConversionRecord`; `ContactItem` has `organization?`, `caseworker_review?`, `caseworker_conversion?`, `type_source?`; `UpdateContactOptions` has `expect?: ExpectClause | ExpectClause[]` and `notDeleted?: true`; the `ContactsRepo` interface has `findAllByPhone` and `findAllByEmail`.
@@ -10322,6 +10324,12 @@ Implement (`dashboard/src/routes/settings/NotOnListSection.tsx`):
      ```
 4. `dashboard/src/routes/orgs/orgCopy.ts`: delete `kindForField` (doc + body) -
    `grep -rn kindForField dashboard/src` must print nothing.
+5. The Settle dialog's failure copy: on an organization row every
+   `orgErrorCopy(...)` call passes `{ organization: true }` (Task 7.3's
+   option), so it never says "Use Split instead." (plan review round 1 fix
+   pass, open question 2 - ruling S8 extended). Add a case to
+   NotOnListSection.test: an organization row's Add as new answered 409/400
+   `org_name_compound` shows the organization sentence and no "Split".
 
 GREEN: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/settings src/routes/orgs`
 (every A case in NotOnListSection.test stays green - housing authority,
@@ -10751,8 +10759,8 @@ export interface CaseworkerPreview {
   alreadyCaseworker: boolean;
   refusals: CaseworkerRefusal[];
   removes: { housingAuthority?: string; agency?: string; pendingSuggestions: number };
-  /** leftShared = another live contact holds the phone or address; leftOther =
-   *  typed for another identity, or type-less. */
+  /** leftShared = another live contact holds the phone or address, or the
+   *  participant contactId is another contact; leftOther = type-less rows only. */
   threads: { retype: number; leftShared: number; leftOther: number };
   organization: { value?: string; source: Exclude<OrganizationSource, 'request'> };
 }
@@ -19120,7 +19128,10 @@ roster index (or a reverse `rosterUnitIds` attribute maintained by the
 roster routes) for the refusal. Profile the page first.
 ```
 
-Step 8 - update `docs/issues/staff-notes-on-landlord-partner-files.md`
+Step 8 - SKIP IF DONE (Task 8.9 already updated this file; plan review
+round 1 fix pass, open question 1): `grep -n "partner" docs/issues/staff-notes-on-landlord-partner-files.md`
+- when it already records the partner half as built, skip this step.
+Otherwise update `docs/issues/staff-notes-on-landlord-partner-files.md`
 (planner ruling R4-19: the partner half is built; the landlord half stays
 open). Current (`:3`):
 

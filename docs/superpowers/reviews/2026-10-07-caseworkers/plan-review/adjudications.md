@@ -68,3 +68,28 @@ Fix report: `R1-fix-report.md` (every row applied; plan 18596 -> 19294 lines).
    describes a filter-resolved broadcast, which stays tenant-only (D20).
 6. Task 10.3 made skip-if-done - CONFIRMED (assembly ruling S5/S7-5: S5 owns
    those pins).
+
+## Round 2 (2026-10-07) - plan @5af82883 - TERMINAL
+
+Reviewer A continued (it holds reviewer B's report too): `R2-reviewer-a.md`,
+3 findings (1 HIGH, 2 LOW). It covered every changed line against HEAD
+(A2 across 3.2/1.1/1.2/1.4, the glyph legend, the moved pins in 6.5/9.1/9.3/
+9.4, Task 10.4's grep, the Checkpoint after S9, Task 10.14 line by line
+against AGENTS.md, Task 10.8a, 10.1/10.2 vs 8.13, 10.7, 8.9(d), 9.6, 8.3,
+10.10) and read in full the tasks it had skimmed (8.1, 8.2, 8.4, 8.6, 8.11,
+6.1 GREEN, 8.3's dialog). It agreed with the REJECT of open question 3 and
+contested no ruling. Its verdict: nothing found changes WHAT gets built.
+
+| # | finding | ruling (applied by the planner) |
+|---|---|---|
+| 1 HIGH | S3's Step 0 (and S4's inherited one) greps `contactKinds.ts` for the `CASEWORKER_ROLE` definition the A2 fix moved | Step 0 greps the leaf `lib/caseworkers.ts` for the definition and `contactKinds.ts` for its import/re-export. |
+| 2 LOW | Task 8.1's dashboard mirror comment still defines `leftOther` the old way | Comment matches plan 3.2. |
+| 3 LOW | the glyph-legend fallback leaves the glyph on the touched line | Fallback rewrites the ONE line with a short UTF-8 node script (never PowerShell), asserting one match, writing ASCII. |
+
+Also applied: the deferred fix-pass open questions 1 (Task 10.12 step 8
+skip-if-done), 2 (Task 7.5 step 5: organization rows pass `{ organization:
+true }` to `orgErrorCopy`, with a test) and 4 (plan 3.9's UNCHANGED row names
+strings by meaning; their bytes stay as today).
+
+Decision check: no accepted finding changed what gets built, added or
+removed a surface, or moved an invariant. Plan review CLOSED after round 2.

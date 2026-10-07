@@ -39,10 +39,12 @@
 // R2-1). The user's OWN request (Load more, Keep checking, Retry after a
 // failed page) keeps the pressed control in place, busy (aria-disabled, never
 // `disabled`, which can drop focus) and focused; when it settles, focus goes
-// to the first new row, else to the action control then shown, else to the
-// count line. Start over and the first-page Retry rebuild the list: focus
-// goes to the count line at once, then to the new list's first row. Only
-// after a press - never after an automatic page or the return restore.
+// to the first new visible row, else to the action control then shown, else
+// to the LAST visible row, else (no row shown) to the count line - focused
+// WITHOUT a scroll (round 3, R3-1: the count line sits above the list).
+// Start over and the first-page Retry rebuild the list: focus goes to the
+// count line at once, then to the new list's first row, scrolled into view.
+// Only after a press - never after an automatic page or the return restore.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigationType, useSearchParams } from 'react-router-dom';
 import {
@@ -528,13 +530,15 @@ export function AllToursView(): React.JSX.Element {
     link?.scrollIntoView({ block: 'nearest' });
   }, [record, data.restoreOutcome, visible]);
 
-  // FOCUS AFTER A PRESSED ACTION CONTROL (spec 4.5, R2-1). Waits until the
-  // pressed control's request is seen in flight, then settles once it is
+  // FOCUS AFTER A PRESSED ACTION CONTROL (spec 4.5, R2-1, R3-1). Waits until
+  // the pressed control's request is seen in flight, then settles once it is
   // over: on the first NEW row's link (visible); else, after the user's own
   // request, the action control now shown (the pressed one when it stayed, or
-  // the Retry or Start over that replaced it on a failure); else the count
-  // line. Hands off when the list changed meanwhile, or when the user has put
-  // focus somewhere else since. No setState here: focus and the ref only.
+  // the Retry or Start over that replaced it on a failure), else the LAST
+  // visible row's link (the row the user was just at - an empty last page, or
+  // an empty page handed to the follow); else the count line. Hands off when
+  // the list changed meanwhile, or when the user has put focus somewhere else
+  // since. No setState here: focus and the ref only.
   useEffect(() => {
     const pending = pendingFocus.current;
     if (pending === null) return;
@@ -550,16 +554,20 @@ export function AllToursView(): React.JSX.Element {
     const active = document.activeElement;
     if (active !== null && active !== document.body && active !== pending.from && active !== count) return;
     const added = new Set(data.rows.slice(pending.rowsBefore).map((r) => r.tourId));
-    const newRow = [...(listRef.current?.querySelectorAll<HTMLAnchorElement>('a[data-tour-id]') ?? [])].find((a) =>
-      added.has(a.dataset['tourId'] ?? ''),
-    );
-    const shown = pending.kind === 'more' ? actionsRef.current?.querySelector<HTMLButtonElement>('button') : null;
-    const target = newRow ?? shown ?? count;
+    // The list's row links are the VISIBLE rows (the search hides the rest).
+    const links = [...(listRef.current?.querySelectorAll<HTMLAnchorElement>('a[data-tour-id]') ?? [])];
+    const newRow = links.find((a) => added.has(a.dataset['tourId'] ?? ''));
+    const more = pending.kind === 'more';
+    const shown = more ? actionsRef.current?.querySelector<HTMLButtonElement>('button') : null;
+    const target = newRow ?? shown ?? (more ? links.at(-1) : undefined) ?? count;
     if (target === null || target === active) return;
-    // The anchor's idiom: focus without the browser's own scroll, then the
-    // smallest scroll that shows it.
+    // Never the browser's own scroll. The user's own request moves no
+    // viewport either (R3-1): its target takes the place of the pressed
+    // control, which was in view, and a mouse user's scroll is theirs. A
+    // rebuilt list belongs at its top: the anchor's idiom, the smallest
+    // scroll that shows its first row.
     target.focus({ preventScroll: true });
-    target.scrollIntoView({ block: 'nearest' });
+    if (!more) target.scrollIntoView({ block: 'nearest' });
   }, [data.loader, data.status, data.rows, listKey]);
 
   /** An unmodified primary click on a row opens it HERE: the list's own entry

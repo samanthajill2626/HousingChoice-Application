@@ -377,15 +377,24 @@ of 4.8.
 - **Load more** appears while the last response carried a `nextCursor` and no
   loader is running, and stays, busy, while its own request runs (above); it
   appends the next page.
-- Keyboard focus after the action controls (planner review, round 2, R2-1).
-  When the user's own request settles, focus moves to the link of the first
-  NEWLY ADDED visible row; when no row was added, to the action control then
-  shown (the pressed one, still in place, or the Retry or Start over that
-  replaced it when the request failed); else to the count line, which is
-  programmatically focusable (`tabindex="-1"`, mounted throughout). Start over
+- Keyboard focus after the action controls (planner review, round 2, R2-1;
+  round 3, R3-1). When the user's own request settles, focus moves to the link
+  of the first NEWLY ADDED visible row; when no visible row was added, to the
+  action control then shown (the pressed one, still in place, or the Retry or
+  Start over that replaced it when the request failed); else to the link of
+  the LAST visible row (the row the user was just at - after an empty page
+  that completed the list, or one handed to the automatic follow); and only
+  when no row is visible, to the count line, which is programmatically
+  focusable (`tabindex="-1"`, mounted throughout). That move never scrolls the
+  page (`preventScroll`, no `scrollIntoView`): its target takes the pressed
+  control's place, which was in view, and a mouse user's scroll position is
+  theirs. (Amended by the planner review, round 3, R3-1, from "else to the
+  count line" with a scroll to it: the count line sits ABOVE the list, so an
+  empty page sent focus and the viewport to the top.) Start over
   and the first-page Retry rebuild the list, so the pressed control leaves with
   it: the press moves focus to the count line at once; when the new first page
-  lands, focus goes to the first row's link, else (an empty list) it stays on
+  lands, focus goes to the first row's link, scrolled into view (the smallest
+  scroll - a new list starts at its top), else (an empty list) it stays on
   the count line; when that page FAILS, it stays on the count line (mounted in
   the error state too), and the failure's Retry is the next Tab stop. Focus
   moves only after a user-pressed control - never after the first page, an

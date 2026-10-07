@@ -1478,6 +1478,16 @@ function expectBusyWithFocus(name: string, pressed: HTMLElement): void {
 }
 
 describe('AllToursView - keyboard focus after the action controls (spec 4.5, planner review round 2 R2-1)', () => {
+  // The user's own request focuses WITHOUT a scroll; a rebuild scrolls its
+  // new first row into view (planner review round 3, R3-1).
+  let scrolled: MockInstance<HTMLElement['scrollIntoView']>;
+  beforeEach(() => {
+    scrolled = vi.spyOn(HTMLElement.prototype, 'scrollIntoView');
+  });
+  afterEach(() => {
+    scrolled.mockRestore();
+  });
+
   it('Load more stays, busy and focused, while its page loads; then the first NEW row has focus', async () => {
     reply('', page([row('a1'), row('a2')], 'c1'));
     renderAt();
@@ -1506,7 +1516,47 @@ describe('AllToursView - keyboard focus after the action controls (spec 4.5, pla
     expect(document.activeElement).toBe(more);
   });
 
-  it('Keep checking stays, busy and focused; an empty page hands the list back to the automatic follow, so focus goes to the count line - and an automatic page moves nothing', async () => {
+  it('a Load more page that comes back EMPTY and completes the list hands focus to the LAST row, never the count line above the list, and scrolls nothing (round 3, R3-1)', async () => {
+    reply('', page([row('a1'), row('a2')], 'c1'));
+    renderAt();
+    await settle();
+    const scrolls = scrolled.mock.calls.length;
+    press(button('Load more'));
+    // Spec 5.4's phantom page: no row, and the list is complete - Load more
+    // leaves and no other action control shows.
+    await land(lastCall(), page([], null));
+    expect(rowIds()).toEqual(['a1', 'a2']);
+    expect(countText()).toBe('2 tours');
+    for (const name of ['Load more', 'Keep checking', 'Retry', 'Start over']) expectNoButton(name);
+    expect(document.activeElement).toBe(linkFor('a2'));
+    expect(document.activeElement).not.toBe(countLine());
+    expect(scrolled).toHaveBeenCalledTimes(scrolls);
+  });
+
+  it('a Load more page that comes back EMPTY with a cursor hands the list to the automatic follow: focus goes to the LAST row, never the body or the count line, and scrolls nothing; the follow moves nothing (round 3, R3-1)', async () => {
+    reply('', page([row('a1'), row('a2')], 'c1'));
+    renderAt();
+    await settle();
+    const scrolls = scrolled.mock.calls.length;
+    press(button('Load more'));
+    await land(lastCall(), page([], 'k1'));
+    // The follow is in flight (automatic, held there): no action control.
+    expect(lastCall().opts).toStrictEqual({ cursor: 'k1', limit: 50 });
+    expect(countText()).toBe('Checking more tours...');
+    for (const name of ['Load more', 'Keep checking', 'Retry', 'Start over']) expectNoButton(name);
+    expect(document.activeElement).toBe(linkFor('a2'));
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).not.toBe(countLine());
+    expect(scrolled).toHaveBeenCalledTimes(scrolls);
+
+    // The follow's rows land below it: one Tab away, and focus stays put.
+    await land(lastCall(), page([row('a3')], null));
+    expect(rowIds()).toEqual(['a1', 'a2', 'a3']);
+    expect(document.activeElement).toBe(linkFor('a2'));
+    expect(scrolled).toHaveBeenCalledTimes(scrolls);
+  });
+
+  it('Keep checking stays, busy and focused; an empty page hands the list back to the automatic follow, so with no row shown focus goes to the count line - and an automatic page moves nothing', async () => {
     reply('', page([], 'f0'));
     for (let i = 0; i < 10; i++) reply(`f${i}`, page([], `f${i + 1}`));
     renderAt();
@@ -1583,6 +1633,8 @@ describe('AllToursView - keyboard focus after the action controls (spec 4.5, pla
 
     await land(lastCall(), page([row('s1'), row('s2')], null));
     expect(document.activeElement).toBe(linkFor('s1'));
+    // A rebuilt list belongs at its top: its first row is scrolled into view.
+    expect(scrolled.mock.contexts.at(-1)).toBe(linkFor('s1'));
   });
 
   it('the first-page Retry hands focus to the count line at once; a second failure keeps it there (Retry is the next Tab stop); an empty list keeps it there too', async () => {
@@ -1617,6 +1669,9 @@ describe('AllToursView - keyboard focus after the action controls (spec 4.5, pla
     press(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' }));
     await land(lastCall(), page([row('a1'), row('a2')], 'c1'));
     expect(document.activeElement).toBe(linkFor('a1'));
+    // A rebuilt list belongs at its top: its first row is scrolled into view.
+    expect(scrolled).toHaveBeenCalledTimes(1);
+    expect(scrolled.mock.contexts[0]).toBe(linkFor('a1'));
   });
 
   it('focus the user moved while the page loaded is left where they put it', async () => {

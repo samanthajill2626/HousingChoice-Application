@@ -5,6 +5,7 @@ import type { AiRunsRepo } from '../repos/aiRunsRepo.js';
 import { contactPhones, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import type { ExtractionRepo, SuggestionItem } from '../repos/extractionRepo.js';
 import {
+  resolutionValueKey,
   suggestionIdentityKey,
   tokenFor,
   type ActiveSuggestionResolution,
@@ -24,7 +25,7 @@ import { isDecisionTarget } from './extraction/runTypes.js';
 import { buildContactStatusTransitionPlan } from './statusTransition.js';
 import type { TenantStatus } from '../lib/statusModel.js';
 import { statusAllowlistFor } from '../lib/statusModel.js';
-import { checkScalarWrite, type OrgEntry } from '../lib/orgNames.js';
+import { checkScalarWrite, KINDS_FOR_FIELD, resolveOrgText, type OrgEntry } from '../lib/orgNames.js';
 import type { OrgNamesService } from './orgNames.js';
 
 const EXTRACTABLE = new Set<string>(EXTRACTABLE_FIELDS);
@@ -73,6 +74,14 @@ export interface SuggestionResolutionService {
     action: ResolutionAction;
     identity: SuggestionRequestIdentity;
     actorId?: string;
+    /**
+     * Spec 2026-10-06 D8: the list name staff chose for a housingAuthority
+     * accept. Allowed only when it is the D4 resolution of the suggestion's
+     * text or one of the text's ambiguity candidates (else 422
+     * value_not_from_suggestion); refused on every other target; ignored on a
+     * dismiss.
+     */
+    value?: string;
   }): Promise<ResolutionOutcomeSummary>;
   /**
    * F1 lazy recovery. A crash between claim and commit deletes the `sugg#` row,
@@ -200,12 +209,30 @@ function guardForPatch(
 /**
  * Spec 2026-10-06 D8 + D5: the name an accepted housingAuthority suggestion
  * writes, decided against the CURRENT list inside buildPlan - before the
- * claim, so a refusal never consumes the suggestion. The text must resolve to
- * one housing authority (an exact name, or a unique spelling stored as its
- * entry's exact name); anything else is 422 org_not_on_list with the D5
- * details.
+ * claim, so a refusal never consumes the suggestion.
+ *  - With `value` (the name staff chose): allowed only when it is exactly the
+ *    name the suggestion's text resolves to, or one of the text's ambiguity
+ *    candidates (a name staff just added from the text resolves); anything
+ *    else is 422 value_not_from_suggestion.
+ *  - Without: the text itself must resolve to one housing authority (an exact
+ *    name, or a unique spelling stored as its entry's exact name); anything
+ *    else is 422 org_not_on_list with the D5 details.
  */
-function acceptedAuthorityName(text: string, entries: readonly OrgEntry[]): string {
+function acceptedAuthorityName(
+  text: string,
+  value: string | undefined,
+  entries: readonly OrgEntry[],
+): string {
+  if (value !== undefined) {
+    const resolved = resolveOrgText(entries, text, KINDS_FOR_FIELD.housingAuthority);
+    const allowed = resolved.status === 'match'
+      ? [resolved.entry.name]
+      : resolved.status === 'ambiguous'
+        ? resolved.candidates.map((entry) => entry.name)
+        : [];
+    if (!allowed.includes(value)) throw new SuggestionResolutionError(422, 'value_not_from_suggestion');
+    return value;
+  }
   const check = checkScalarWrite(entries, 'housingAuthority', text, undefined);
   if (!check.ok) {
     const { error: code, ...details } = check.error;
@@ -222,7 +249,7 @@ function buildPlan(
   action: ResolutionAction,
   actorId: string | undefined,
   at: string,
-  opts: { orgEntries: readonly OrgEntry[] },
+  opts: { orgEntries: readonly OrgEntry[]; value?: string },
 ): ResolutionReplayPlan {
   const target = suggestion.target;
   if (action === 'dismiss') {
@@ -234,6 +261,10 @@ function buildPlan(
         payload: { ...(actorId !== undefined && { actor: actorId }), target },
       },
     };
+  }
+  // Spec 2026-10-06 D8: `value` belongs to a housingAuthority accept only.
+  if (opts.value !== undefined && target !== 'housingAuthority') {
+    throw new SuggestionResolutionError(422, 'value_not_from_suggestion');
   }
   if (target === 'type') throw new SuggestionResolutionError(400, 'accept_type_via_triage');
   if (target === 'status') {
@@ -299,7 +330,7 @@ function buildPlan(
     // the list (the generic arm below would write the text as-is).
     const coerced = coerceAccept('housingAuthority', suggestion.suggestedValue);
     if (!coerced.ok) throw new SuggestionResolutionError(400, 'invalid_suggestion_value');
-    const name = acceptedAuthorityName(String(coerced.value), opts.orgEntries);
+    const name = acceptedAuthorityName(String(coerced.value), opts.value, opts.orgEntries);
     const patch = {
       housingAuthority: name,
       housingAuthority_source: provenance(suggestion, at, actorId),
@@ -686,6 +717,13 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
 
     async resolve(input) {
       const identityKey = requestedIdentityKey(input.contactId, input.target, input.identity);
+      // Spec 2026-10-06 D8: the accepted value's PII-free key. The completed
+      // row keeps it (absent when the accept carried no value), so a re-accept
+      // with a DIFFERENT value is told the suggestion already resolved instead
+      // of reading as an idempotent retry. Absent equals absent.
+      const valueKey = input.action === 'accept' && input.value !== undefined
+        ? resolutionValueKey(input.value)
+        : undefined;
       // A help that commits somebody else's domain effect must still reach the
       // SSE, even when this request then fails on its own identity (adv P3-25).
       let helpedCommitted = false;
@@ -716,7 +754,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             continue;
           }
           if (current?.state === 'completed' && current.identityKey === identityKey) {
-            if (current.action !== input.action) {
+            if (current.action !== input.action || current.valueKey !== valueKey) {
               throw new SuggestionResolutionError(409, 'suggestion_already_resolved');
             }
             // An identity match is normally proof the action already applied,
@@ -747,7 +785,10 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             ? (await deps.orgNamesService.read()).entries
             : [];
           const claimedAt = now();
-          const plan = buildPlan(contact, suggestion, input.action, input.actorId, claimedAt, { orgEntries });
+          const plan = buildPlan(contact, suggestion, input.action, input.actorId, claimedAt, {
+            orgEntries,
+            ...(input.value !== undefined && { value: input.value }),
+          });
 
           if (plan.kind === 'phone') {
             const owner = await deps.contactsRepo.findByPhone(plan.phone);
@@ -762,6 +803,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             plan,
             now: claimedAt,
             leaseId: nextLeaseId(),
+            ...(valueKey !== undefined && { valueKey }),
             ...(input.actorId !== undefined && { actorId: input.actorId }),
             ...(deps.leaseMs !== undefined && { leaseMs: deps.leaseMs }),
           });
@@ -773,7 +815,11 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             throw new SuggestionResolutionError(409, 'suggestion_resolution_in_progress', true);
           }
           if (claim.status === 'completed') {
-            if (claim.journal.identityKey === identityKey && claim.journal.action === input.action) {
+            if (
+              claim.journal.identityKey === identityKey
+              && claim.journal.action === input.action
+              && claim.journal.valueKey === valueKey
+            ) {
               // Same reading as the completed-row branch above: this is the
               // race where the journal finished between our read and our claim.
               if (claim.journal.disposition === 'released_unsafe') {

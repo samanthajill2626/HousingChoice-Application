@@ -1,6 +1,7 @@
 // Durable review API for pending AI suggestions. Every accept/dismiss request
 // carries the immutable suggestion identity and resolves through the same
-// phase-fenced journal executor.
+// phase-fenced journal executor. A housingAuthority accept may also carry
+// `value`, the list name staff chose (spec 2026-10-06 D8).
 import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -75,6 +76,20 @@ function parseIdentity(body: unknown): SuggestionRequestIdentity | undefined {
   };
 }
 
+/**
+ * Spec 2026-10-06 D8: an accept may carry `value`, the list name staff chose
+ * for a housingAuthority suggestion. Absent is fine; present, it must be a
+ * non-blank string (it is sent on trimmed). Whether it is ALLOWED is the
+ * service's call.
+ */
+function parseAcceptValue(body: unknown): { ok: true; value?: string } | { ok: false } {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return { ok: true };
+  const raw = (body as Record<string, unknown>)['value'];
+  if (raw === undefined) return { ok: true };
+  if (typeof raw !== 'string' || raw.trim().length === 0) return { ok: false };
+  return { ok: true, value: raw.trim() };
+}
+
 export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
@@ -144,6 +159,17 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         ...(pending.runId !== undefined && { runId: pending.runId }),
       };
     }
+    // Spec 2026-10-06 D8: only an accept carries a value (a dismiss ignores
+    // one). A malformed value is refused before the service runs.
+    let value: string | undefined;
+    if (action === 'accept') {
+      const parsed = parseAcceptValue(req.body);
+      if (!parsed.ok) {
+        res.status(400).json({ error: 'invalid_suggestion_value' });
+        return;
+      }
+      value = parsed.value;
+    }
     try {
       const outcome = await service.resolve({
         contactId,
@@ -151,6 +177,7 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         action,
         identity,
         ...(req.user?.userId !== undefined && { actorId: req.user.userId }),
+        ...(value !== undefined && { value }),
       });
       // Emit BEFORE the response's list read. The emit announces DURABLE state
       // that already committed, so it must not be contingent on a read that

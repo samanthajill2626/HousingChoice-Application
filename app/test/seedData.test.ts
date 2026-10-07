@@ -213,6 +213,6 @@ describe('seed contact types match the glossary', () => {
     const renee = contacts.find((c) => c['contactId'] === 'contact-hastaff-0001');
     expect(renee, 'the pinned HA staffer is missing from the lean seed').toBeDefined();
     expect(renee!['type']).toBe('partner');
-    expect(renee!['housingAuthority']).toBe('atlanta_housing');
+    expect(renee!['housingAuthority']).toBe('Atlanta Housing Authority');
   });
 });

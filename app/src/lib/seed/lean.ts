@@ -13,7 +13,7 @@
 import { conversationIdForGroup } from '../import/ids.js';
 import type { SeedConversationRow } from './types.js';
 import { withSeedTransport } from './messageTransport.js';
-import { seedOrgListRow } from './orgList.js';
+import { SEED_AUTHORITY, seedOrgListRow } from './orgList.js';
 
 // Stable timestamps so re-runs write byte-identical items.
 const T0 = '2026-06-01T14:00:00.000Z';
@@ -106,7 +106,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       // ASCII + stable so re-runs stay byte-identical.
       email: 'tasha.nguyen@example.com', // byEmail
       emails: [{ email: 'tasha.nguyen@example.com', primary: true }],
-      housingAuthority: 'atlanta_housing', // byHousingAuthority (tenants only)
+      housingAuthority: SEED_AUTHORITY.atlanta, // byHousingAuthority (any contact type)
       // Name, voucher size, and housingAuthority are camelCase EVERYWHERE the app
       // reads them (contactFullName / displayNameOf / audienceResolution.voucherSizeOf;
       // the byHousingAuthority GSI hash key is `housingAuthority`); the flexible-doc
@@ -145,7 +145,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       lastName: 'Bell',
       lead_status: 'registered',
       contract_status: 'signed',
-      authorities_served: ['atlanta_housing', 'ga_dca'],
+      authorities_served: [SEED_AUTHORITY.atlanta, SEED_AUTHORITY.dca],
       // A2P/CTIA consent: a registered + contract-signed active landlord was
       // onboarded through a human conversation (and, in the full profile, texts us
       // inbound in the cast relay-group tours) — so he carries consent and proactive
@@ -172,7 +172,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       phone: '+15550100003',
       firstName: 'Renee',
       lastName: 'Carter',
-      housingAuthority: 'atlanta_housing',
+      housingAuthority: SEED_AUTHORITY.atlanta,
       role_title: 'HCV Program Specialist',
       created_at: T0,
     },
@@ -184,13 +184,13 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       // REFUSED manual_mode BY DESIGN: no other spec - the retry-send-window
       // one-to-one e2e included - may use him as a recipient of a reminder,
       // a retry or any other automated text. voucherSize 1 keeps him out of
-      // every 2-BR audience the existing specs build; atlanta_housing keeps
-      // the facet spec's DCA/Fulton discriminators unused.
+      // every 2-BR audience the existing specs build; Atlanta Housing Authority
+      // keeps the facet spec's DCA/Fulton discriminators unused.
       contactId: IDS.tenantOff,
       type: 'tenant', // byTypeStatus HASH
       status: 'searching', // byTypeStatus RANGE
       phone: '+15550100004', // byPhone
-      housingAuthority: 'atlanta_housing', // byHousingAuthority
+      housingAuthority: SEED_AUTHORITY.atlanta, // byHousingAuthority
       firstName: 'Dario',
       lastName: 'Reyes',
       voucherSize: 1,
@@ -220,7 +220,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       // 'manual' here would disagree with §7 AND block the first derived write.)
       status: 'under_application', // byStatus
       status_source: 'derived', // §8 provenance — derivation-permitting
-      accepted_authorities: ['atlanta_housing'], // accepted authorities (spec section 8)
+      accepted_authorities: [SEED_AUTHORITY.atlanta], // accepted authorities (spec section 8)
       address: '1450 Joseph E. Boone Blvd NW, Atlanta, GA 30314',
       beds: 2,
       rent_min: 1650,
@@ -243,7 +243,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       status: 'occupied',
       status_source: 'manual',
       final_rent: 1975,
-      accepted_authorities: ['ga_dca'],
+      accepted_authorities: [SEED_AUTHORITY.dca],
       address: '88 Sycamore St, Decatur, GA 30030',
       beds: 3,
       rent_min: 1975,

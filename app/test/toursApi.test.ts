@@ -5922,11 +5922,13 @@ describe('GET /api/tours/list', () => {
     const withCursor = await authed(app).get(`/api/tours/list?when=past&limit=1&cursor=${encodeURIComponent(cursor)}`);
     expect(withCursor.status).toBe(400);
     expect(withCursor.body).toStrictEqual({ error: 'invalid cursor' });
-    // The 400 path says so in ONE warn line: the refusal's name and the phase
-    // kind, never an id (AD-1).
+    // The 400 path says so in ONE warn line: the refusal under the house `err`
+    // key (the serializer's type and message) and the phase kind, never an id
+    // (AD-1; code review r2 note).
     const refusals = (): Array<Record<string, unknown>> => capture.atLevel(40).filter((l) => l['msg'] === REFUSED);
     expect(refusals()).toHaveLength(1);
-    expect(refusals()[0]).toMatchObject({ name: 'ValidationException', phase: 'd' });
+    expect(refusals()[0]).toMatchObject({ err: { type: 'ValidationException', message: 'bad key' }, phase: 'd' });
+    expect(refusals()[0]).not.toHaveProperty('name');
     expect(JSON.stringify(refusals()[0])).not.toContain('tl9-');
 
     const without = await authed(app).get('/api/tours/list?when=past&limit=1');
@@ -5950,7 +5952,11 @@ describe('GET /api/tours/list', () => {
     expect(rejected.status).toBe(400);
     expect(rejected.body).toStrictEqual({ error: 'invalid cursor' });
     expect(refusals()).toHaveLength(2);
-    expect(refusals()[1]).toMatchObject({ name: 'ValidationException', phase: 'd' });
+    expect(refusals()[1]).toMatchObject({
+      err: { type: 'ValidationException', message: 'The provided starting key does not match the range key predicate' },
+      phase: 'd',
+    });
+    expect(JSON.stringify(refusals()[1])).not.toContain('tl9-');
   });
 
   it("10: the one info line 'tours list page' carries counts only - no tour, tenant or unit id", async () => {

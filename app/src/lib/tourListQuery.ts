@@ -4,9 +4,6 @@
 // fingerprint the filters, and encode / decode / locate the opaque cursor.
 // No AWS and no Express here: toursRepo.queryListPhase runs ONE phase batch
 // and services/tourListPage.ts runs the paging loop.
-// String.prototype.isWellFormed (the cursor key check) is ES2024 - in Node 20+,
-// outside the ES2023 lib this workspace compiles against.
-/// <reference lib="es2024.string" />
 import { createHash } from 'node:crypto';
 import {
   TOUR_STATUSES,
@@ -282,11 +279,16 @@ export function encodeTourListCursor(c: TourListCursor): string {
  *  partition name - is far below it. */
 const MAX_KEY_VALUE_BYTES = 1024;
 
+/** A lone surrogate - what makes a string NOT well-formed (no valid UTF-8).
+ *  Under the `u` flag a surrogate pair is one astral code point, never a
+ *  match: String.prototype.isWellFormed without the ES2024 lib. */
+const LONE_SURROGATE = /\p{Surrogate}/u;
+
 function isKeyValue(value: unknown): value is string {
   return (
     typeof value === 'string' &&
     value.length > 0 &&
-    value.isWellFormed() &&
+    !LONE_SURROGATE.test(value) &&
     Buffer.byteLength(value, 'utf8') <= MAX_KEY_VALUE_BYTES
   );
 }

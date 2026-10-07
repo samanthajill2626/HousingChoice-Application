@@ -388,6 +388,10 @@ describe('tour list cursor', () => {
     // The cap is inclusive: exactly 1,024 bytes still decodes.
     const atCap: TourListCursor = { v: 1, f: F, n: N, ph: 'd', k: { ...D_KEY, tourId: 'x'.repeat(1024) } };
     expect(decodeTourListCursor(encodeTourListCursor(atCap))).toStrictEqual(atCap);
+    // A surrogate PAIR is one astral character - well-formed, so it decodes.
+    const astral = String.fromCharCode(0xd83d, 0xde00);
+    const paired: TourListCursor = { v: 1, f: F, n: N, ph: 'd', k: { ...D_KEY, tourId: `tour-${astral}` } };
+    expect(decodeTourListCursor(encodeTourListCursor(paired))).toStrictEqual(paired);
   });
 
   it('4: locate - a d cursor resumes phase D only with a tours-partition key', () => {

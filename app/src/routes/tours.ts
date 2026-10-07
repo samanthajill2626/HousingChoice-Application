@@ -515,8 +515,10 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       });
     } catch (err) {
       if (err instanceof ClientStartKeyRefusedError) {
-        // The refusal's name and the phase kind - never an id.
-        log.warn({ name: err.refusal.name, phase: err.phaseKind }, 'tours list: cursor start key refused');
+        // The refusal under the house `err` key (the serializer keeps its type
+        // and message; DynamoDB's text names no key value) and the phase kind -
+        // never an id.
+        log.warn({ err: err.refusal, phase: err.phaseKind }, 'tours list: cursor start key refused');
         res.status(400).json({ error: 'invalid cursor' });
         return;
       }

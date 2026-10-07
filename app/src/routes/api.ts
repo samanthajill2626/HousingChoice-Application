@@ -974,6 +974,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // unit-photo-transcode: the shared transcode gate for the confirm >5MB
       // branch (test seam; createUnitsRouter defaults to the shared instance).
       ...(deps.transcodeGate !== undefined && { transcodeGate: deps.transcodeGate }),
+      // Organization names (spec 2026-10-06 D5): the ONE service built above.
+      orgNamesService: orgNames,
     }),
   );
   // Tours CRUD (Tours feature; requireAuth — VAs schedule tours, no admin gate).

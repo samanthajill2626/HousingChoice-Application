@@ -43,7 +43,7 @@ describe('POST /api/units — create', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({
         landlordId: 'contact-ll-9',
-        accepted_authorities: ['Fulton County'],
+        accepted_authorities: ['Atlanta Housing Authority'],
         beds: 3,
         rent_min: 1700,
         address: { line1: '12 Peachtree St', line2: 'Apt 4', city: 'Atlanta', state: 'GA', zip: '30303' },
@@ -53,7 +53,7 @@ describe('POST /api/units — create', () => {
     expect(res.body.unit).toMatchObject({
       landlordId: 'contact-ll-9',
       status: 'setup',
-      accepted_authorities: ['Fulton County'],
+      accepted_authorities: ['Atlanta Housing Authority'],
       beds: 3,
       rent_min: 1700,
       address: { line1: '12 Peachtree St', line2: 'Apt 4', city: 'Atlanta', state: 'GA', zip: '30303' },

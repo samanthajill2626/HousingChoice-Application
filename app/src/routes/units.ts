@@ -70,6 +70,7 @@ import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRe
 import { deriveTourSignal } from '../lib/listingSendTour.js';
 import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { reachedCount } from '../services/shareRecipientState.js';
+import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -105,6 +106,12 @@ export interface UnitsRouterDeps {
    * instance.
    */
   transcodeGate?: Semaphore;
+  /**
+   * Organization names (spec 2026-10-06 D5): POST and PATCH check
+   * accepted_authorities members against the stored org list. Built ONCE in
+   * createApiRouter and threaded down.
+   */
+  orgNamesService?: OrgNamesService;
 }
 
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
@@ -299,6 +306,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
   const mediaStore = deps.mediaStore;
   const transcodeGate = deps.transcodeGate ?? sharedTranscodeGate;
+  const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
 
   const router = Router();
 
@@ -439,6 +447,26 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     if (!validation.ok) {
       res.status(400).json({ error: validation.error });
       return;
+    }
+    // ORGANIZATION NAMES (spec 2026-10-06 D5): a new unit holds nothing yet,
+    // so EVERY accepted_authorities member must resolve to a housing
+    // authority on the stored list - a tombstoned `jurisdiction` in the same
+    // body grants no pass (the validator drops it). Members are trimmed and
+    // de-duplicated, and a unique spelling is stored as its entry's exact
+    // name. The validator's 400s ran first; a 422 creates nothing.
+    if (Array.isArray(validation.fields['accepted_authorities'])) {
+      const check = await orgNames.checkList(
+        'accepted_authorities',
+        validation.fields['accepted_authorities'] as string[],
+        undefined,
+        undefined,
+      );
+      if (!check.ok) {
+        log.info({ actor: req.user?.userId }, 'unit create refused: accepted authority not on the list');
+        res.status(422).json(check.error);
+        return;
+      }
+      validation.fields['accepted_authorities'] = check.value;
     }
     // status is NOT a writable CRUD field (§8: property-status changes route
     // through PATCH /api/units/:unitId/listing-status). Create is not a

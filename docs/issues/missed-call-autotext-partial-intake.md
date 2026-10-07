@@ -11,8 +11,13 @@ refs: app/src/jobs/missedCallAutoText.ts, dashboard/src/routes/settings/Template
 
 **Problem.** The 2026-08-19 intake gate sends the missed-call auto-text only to a
 caller we hold NONE of the intake facts for (firstName, lastName, voucherSize,
-housingAuthority - and never to a landlord/partner/team member). Any single fact
-already on file suppresses the send entirely.
+housingAuthority, agency - and never to a landlord/partner/team member). Any
+single fact already on file suppresses the send entirely. `agency` joined the
+list on 2026-10-06 (clean org names spec D15): the copy does not ask for it, but
+a contact holding one is known to us, and the one-time cleanup that moves agency
+names out of housingAuthority must not re-arm the text for those contacts. A
+contact whose only fact was a junk value that staff clear is genuinely blank
+again and may receive the text (accepted).
 
 That is deliberate, but it leaves a gap: a caller we hold a NAME for and nothing
 else gets no auto-reply at all, even though we still want their voucher size and

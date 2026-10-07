@@ -15,8 +15,9 @@
 //
 // GATING: load OrgSettings; if missedCallAutoTextEnabled is false → mark done +
 // skip (no send). Then the INTAKE GATE (2026-08-19): resolve the caller and skip
-// when we already hold any of the facts the copy asks for, or when the caller is
-// a landlord/partner/team member - see needsMissedCallIntakeText below.
+// when we already hold any of the facts the copy asks for (or an agency - spec
+// 2026-10-06 D15), or when the caller is a landlord/partner/team member - see
+// needsMissedCallIntakeText below.
 // Acquire ONE A2P token (shared bucket) before the send so the
 // auto-text is paced under the registered tier alongside relay/broadcast. The
 // send goes through sendMessage(automated:true), so the opt-out gate + the
@@ -73,11 +74,21 @@ const NON_INTAKE_CONTACT_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The intake facts the auto-text asks for. They ride ContactItem's flexible-doc
- * index signature rather than being declared fields (same as lib/contactName.ts
- * reads them), so every read here is defensive.
+ * The intake facts that mark a caller as KNOWN. The first four are what the
+ * auto-text asks for. `agency` (spec 2026-10-06 D15) is not asked for, but a
+ * contact holding one is known to us - and the org-names cleanup MOVES agency
+ * names out of housingAuthority into agency, which must not re-arm the text for
+ * a contact the gate used to skip. They ride ContactItem's flexible-doc index
+ * signature rather than being declared fields (same as lib/contactName.ts reads
+ * them), so every read here is defensive.
  */
-const INTAKE_FIELDS: readonly string[] = ['firstName', 'lastName', 'voucherSize', 'housingAuthority'];
+const INTAKE_FIELDS: readonly string[] = [
+  'firstName',
+  'lastName',
+  'voucherSize',
+  'housingAuthority',
+  'agency',
+];
 
 /**
  * Is one intake fact actually on file? PRESENCE, never truthiness:
@@ -95,11 +106,14 @@ function hasIntakeFact(contact: ContactItem, field: string): boolean {
 /**
  * THE INTAKE GATE (2026-08-19 product decision). The missed-call auto-text asks
  * the caller for their full name, voucher size, and housing authority, so it is
- * only correct for a caller we hold NONE of that on. Send when:
+ * only correct for a caller we hold NONE of that on - nor an agency, which marks
+ * a known contact although the copy never asks for it (spec 2026-10-06 D15).
+ * Send when:
  *
  *   - there is no contact record at all (a true first-time caller), OR
  *   - the contact is not a landlord/partner/team member AND every one of the
- *     four intake fields is blank.
+ *     five INTAKE_FIELDS is blank. A contact whose only fact was a junk value
+ *     that staff cleared is genuinely blank again and may receive it (D15).
  *
  * Any single fact already on file suppresses the send: re-asking for all three
  * when we hold some of them reads as not having listened. The partial case
@@ -193,7 +207,7 @@ export function registerMissedCallAutoTextJobHandler(deps: MissedCallAutoTextJob
     }
 
     // INTAKE GATE: resolve the caller and skip when we already hold any of the
-    // intake facts the copy asks for (see needsMissedCallIntakeText). The marker
+    // intake facts (INTAKE_FIELDS - see needsMissedCallIntakeText). The marker
     // is already claimed above, exactly like the disabled-toggle branch, so a
     // redelivery stays a no-op.
     //

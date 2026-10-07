@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { ConversationSummary, ConversationsPage, PlacementItem, PlacementsPage, TodayResponse } from '../../api/index.js';
+import type { ConversationSummary, PlacementItem, TodayResponse } from '../../api/index.js';
 
 // Mock the api barrel: stub the three fetchers + capture the SSE handlers so the
 // test can drive a live event. ApiError is re-exported real.

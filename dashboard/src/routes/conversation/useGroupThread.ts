@@ -163,9 +163,7 @@ export function useGroupThread(conversationId: string): GroupThreadState {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPending([]);
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setHasOlder(false);
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoadingOlder(false);
     loadingOlderRef.current = false;
     oldestFetchedIdRef.current = null;
@@ -278,7 +276,6 @@ export function useGroupThread(conversationId: string): GroupThreadState {
   }, [conversationId]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchNow();
     return () => abortRef.current?.abort();
   }, [fetchNow]);

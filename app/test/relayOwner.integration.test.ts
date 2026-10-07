@@ -23,7 +23,6 @@ import {
   createConversationsRepo,
   getOwner,
 } from '../src/repos/conversationsRepo.js';
-import { createPoolNumbersRepo } from '../src/repos/poolNumbersRepo.js';
 import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
@@ -71,7 +70,6 @@ describe.skipIf(!reachable)('relay-group owner generalization — DynamoDB Local
   const repoDeps = { doc, env: testEnv, logger };
 
   const conversations = createConversationsRepo(repoDeps);
-  const poolNumbers = createPoolNumbersRepo(repoDeps);
 
   const bases = ['conversations', 'pool_numbers'] as const;
 

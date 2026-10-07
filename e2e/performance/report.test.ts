@@ -12,7 +12,6 @@ import {
 } from './report.js';
 import {
   ROUTES,
-  expectedBlockedWrites,
   expectedGets,
   type RouteContractBranch,
 } from './routes.js';

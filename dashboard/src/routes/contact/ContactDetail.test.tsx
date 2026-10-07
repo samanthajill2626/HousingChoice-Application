@@ -5,10 +5,8 @@ import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import type {
   Contact,
   PlacementItem,
-  PlacementsPage,
   TimelineItem,
   UnitItem,
-  UnitsPage,
 } from '../../api/index.js';
 import {
   installImageViewerResizeObserver,

@@ -2,7 +2,7 @@
 //
 // In-memory stubs for every dep (no DynamoDB). Each behavior in plan Task 5
 // items 1-11 is pinned by at least one test.
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import {
   SuggestionDismissedError,

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { PlacementItem, PlacementsPage, UnitItem, UnitsPage } from '../../api/index.js';
+import type { PlacementItem, UnitItem } from '../../api/index.js';
 
 const getAllPlacements = vi.fn();
 const getAllUnits = vi.fn();

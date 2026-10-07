@@ -126,13 +126,10 @@ export function useAiRun(runId: string | undefined): AiRunState {
     if (runId === undefined) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setDetail(undefined);
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setStatus('idle');
       return () => abortRef.current?.abort();
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDetail(undefined);
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus('loading');
     void load();
     return () => abortRef.current?.abort();

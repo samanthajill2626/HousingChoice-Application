@@ -30,7 +30,7 @@ import {
   StartQueryCommand,
   StopQueryCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createCloudWatchClient,
   OOM_APP_INSIGHTS_FILTER,

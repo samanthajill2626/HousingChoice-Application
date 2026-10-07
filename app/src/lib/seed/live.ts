@@ -125,10 +125,6 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
   const derivedRta = deriveStatuses('awaiting_landlord_submission');
   const derivedFollowUp = deriveStatuses('collect_rta');
 
-  // Overdue RTA deadline: set in the past (2 hours ago).
-  const overdueAt = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
-  // Due follow-up: set at (now - 5 minutes) so it is definitively ≤ now.
-  const followUpAt = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
   // Upcoming voucher expiration (tenant A): 20 days out — NOT yet due, so it
   // shows on the card but not in Today's needs_you_now (a realistic future clock).
   const voucherAt = new Date(now.getTime() + 20 * 24 * 60 * 60 * 1000).toISOString();

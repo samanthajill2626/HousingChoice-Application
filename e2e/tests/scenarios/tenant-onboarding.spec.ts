@@ -31,11 +31,9 @@ test.afterEach(async ({ page }) => {
   test.setTimeout(0); // don't let the per-test timeout close the browser mid-look
   if (mode === 'hold') {
     const ms = Number(process.env.E2E_PAUSE_MS ?? 600_000);
-    // eslint-disable-next-line no-console
     console.log(`\n[E2E_PAUSE] test done — browser open ~${Math.round(ms / 1000)}s (Ctrl+C to quit).\n`);
     await page.waitForTimeout(ms);
   } else {
-    // eslint-disable-next-line no-console
     console.log('\n[E2E_PAUSE] test done — click "Resume" (▶) in the Playwright Inspector window to continue to the next test.\n');
     await page.pause();
   }

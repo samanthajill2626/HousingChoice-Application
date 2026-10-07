@@ -19,7 +19,6 @@ import {
 } from './cli.js';
 import { createFirewallRecordingToken, FirewallEscapedWriteError } from './firewall.js';
 import type { TerminalUiProbe } from './readiness.js';
-import type { RunConfig } from './config.js';
 import { ROUTES } from './routes.js';
 import { NetworkCollector, summarizePageMetrics, type SampleBrowser, type SampleInstrumentation } from './collect.js';
 

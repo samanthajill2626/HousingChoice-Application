@@ -19,7 +19,7 @@
 // conversationId / contactId / counts.
 import type { AppConfig } from '../lib/config.js';
 import type { EventBus } from '../lib/events.js';
-import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { type Logger } from '../lib/logger.js';
 import type { createExtractionRepo, DueExtractionItem } from '../repos/extractionRepo.js';
 import type { ConversationsRepo } from '../repos/conversationsRepo.js';
 import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';

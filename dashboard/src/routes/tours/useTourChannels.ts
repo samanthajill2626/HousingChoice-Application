@@ -233,7 +233,6 @@ export function useTourChannels(tour: Tour, people: PersonChannelInput[]): TourC
 
   useEffect(() => {
     // fetchNow sets state only after an await (never synchronously).
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchNow();
     return () => abortRef.current?.abort();
   }, [fetchNow]);

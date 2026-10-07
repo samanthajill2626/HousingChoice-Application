@@ -197,7 +197,6 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
   let contactCId: string;
   let convA1Id: string;
   let convA2Id: string;
-  let convBId: string;
   let convUnkId: string;
 
   beforeAll(async () => {
@@ -239,8 +238,7 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
     convA1Id = cA1.conversationId;
     const cA2 = await seedConv({ phone: PHONE_A2, lastActivityAt: '2026-06-17T05:00:00.000Z', unread: 3 });
     convA2Id = cA2.conversationId;
-    const cB  = await seedConv({ phone: PHONE_B,  lastActivityAt: '2026-06-17T03:00:00.000Z' });
-    convBId = cB.conversationId;
+    await seedConv({ phone: PHONE_B,  lastActivityAt: '2026-06-17T03:00:00.000Z' });
     await seedConv({ phone: PHONE_C,  lastActivityAt: '2026-06-17T08:00:00.000Z', unread: 1 });
     const cUnk = await seedConv({ phone: PHONE_UNK, lastActivityAt: '2026-06-17T06:00:00.000Z', unread: 1 });
     convUnkId = cUnk.conversationId;

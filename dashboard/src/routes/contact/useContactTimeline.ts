@@ -359,9 +359,7 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPending([]);
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoadingOlder(false);
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setHasOlder(false);
     loadingOlderRef.current = false;
     cursorRef.current = null;

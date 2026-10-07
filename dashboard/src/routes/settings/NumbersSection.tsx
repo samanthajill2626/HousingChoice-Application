@@ -118,7 +118,6 @@ function usePoolNumbers(enabled: boolean): {
       setStatus('ready');
       return undefined;
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus('loading');
     void load();
     return () => abortRef.current?.abort();

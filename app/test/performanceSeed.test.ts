@@ -18,6 +18,8 @@ import {
 const ANCHOR = '2026-08-11T16:00:00.000Z';
 
 type OptionalKeyOf<T> = {
+  // `{}` is the point: it extends Pick<T, Key> exactly when Key is optional.
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
   [Key in keyof T]-?: {} extends Pick<T, Key> ? Key : never;
 }[keyof T];
 type AssertNoOptionalKeys<Keys extends never> = Keys;

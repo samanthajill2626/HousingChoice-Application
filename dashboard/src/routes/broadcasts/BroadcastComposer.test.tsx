@@ -8,7 +8,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { Contact, ContactsPage, EventStreamHandlers, UnitItem, UnitsPage } from '../../api/index.js';
+import type { Contact, EventStreamHandlers, UnitItem } from '../../api/index.js';
 
 const getUnit = vi.fn();
 const getAllUnits = vi.fn();
@@ -34,7 +34,6 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import { BroadcastComposer } from './BroadcastComposer.js';
-import { DEFAULT_SEND_TEMPLATE } from './resolveTemplate.js';
 
 function unit(over: Partial<UnitItem> = {}): UnitItem {
   return {

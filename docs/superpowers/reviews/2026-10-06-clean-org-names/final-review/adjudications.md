@@ -107,7 +107,21 @@ Cameron merges.
   change), which replaces the planned skip below.
 - **No e2e re-run for the Clayton change alone (Cameron's call, planner's
   recommendation) - superseded by the line above: the final tip gets a
-  full run because the merged tip's run had the environmental failure.** No e2e spec mentions "Clayton" in any form; the list
+  full run because the merged tip's run had the environmental failure.**
+
+## Gates on the FINAL tip a8b66cd6 (cdc85b07 = bare Clayton -> Jonesboro; a8b66cd6 = records), bare, from the worktree
+
+| Gate | Exit | Result |
+|---|---|---|
+| 1 `npm run typecheck` | 0 | |
+| 2 `npm test` | 0 | app 429 files, dashboard 227, e2e 22, fake-twilio 34 + 13 - all passed; 0 `[dynamoAdmin]` lines; `orgStartingList.test.ts` 32/32 with the Clayton row flipped |
+| 3 `npm run smoke` | 0 | 1612 specifiers / 281 files |
+| 4 `timeout 2700 npm run e2e` | 0 | 329 passed, 21.6 min, no flakes (sockets drained to 778 TIME_WAIT before the run); lane 13 torn down |
+| 5 `npx eslint <153 files changed vs 25cfdedd>` | 1 | 25 errors = 25 pre-existing at the merge base, 0 NEW; the two Clayton files lint clean. (A `main...HEAD` file list came back EMPTY because main had already been fast-forwarded to this tip - the explicit pre-merge base 25cfdedd was used, and an empty list is refused rather than linted repo-wide.) |
+
+MERGED: Cameron fast-forwarded main to a8b66cd6 on 2026-10-07 while the
+final gates ran. The branch is merged (`--is-ancestor` and 0 ahead); this
+records commit is the only thing after the merge. No e2e spec mentions "Clayton" in any form; the list
   reaches the test world only through the seed, and no spec reads that
   spelling; the dashboard holds no copy of the list. The e2e gate on
   98971183 - one data token away - stands as the e2e evidence; typecheck,

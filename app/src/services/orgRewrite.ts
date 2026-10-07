@@ -29,7 +29,12 @@
 import { randomUUID } from 'node:crypto';
 import { enqueue } from '../jobs/jobs.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import { normalizeOrgText, type OrgEntry, type SpellingProblem } from '../lib/orgNames.js';
+import {
+  normalizeOrgText,
+  ORG_SPELLINGS_PER_ENTRY_MAX,
+  type OrgEntry,
+  type SpellingProblem,
+} from '../lib/orgNames.js';
 import {
   createOrgListRepo,
   type OrgListItem,
@@ -62,6 +67,7 @@ export const ORG_REWRITE_ENQUEUE_FAILED = 'enqueue_failed';
 /** Plan 3.4 - Tasks 3.9-3.10 add merge, resolveNotOnList, runAgain and acquireForCleanup. */
 export interface OrgRewriteService {
   rename(orgId: string, newName: string, actor: string): Promise<{ entry: OrgEntry; lastRewrite: OrgRewriteState; skippedSpellings: SkippedSpelling[] }>;
+  merge(orgId: string, intoOrgId: string, actor: string): Promise<{ lastRewrite: OrgRewriteState }>;
   /** For the job and the cleanup script. true = the lock is still the
    *  caller's (its heartbeat was written); false = it is not (another id holds
    *  it, or it is no longer running) - the caller stops writing records and
@@ -241,6 +247,48 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
           // `fields` fixed now, from the entry's kind (spec 5.1).
           def: { action: 'rename', fromTexts: [entry.name], fields: recordFieldsForKind(entry.kind), toName: name },
           result: { entry: renamed, skippedSpellings },
+        };
+      });
+    },
+
+    async merge(orgId, intoOrgId, actor) {
+      return start(actor, (current) => {
+        const source = findEntry(current.entries, orgId);
+        const target = findEntry(current.entries, intoOrgId);
+        if (source.orgId === target.orgId || source.kind !== target.kind) {
+          throw new OrgHttpError(400, { error: 'intoOrgId must name a different entry of the same kind' });
+        }
+        // From-texts (D11): the merged name and its spellings that no OTHER entry shares.
+        const others = current.entries.filter((e) => e.orgId !== source.orgId);
+        const unshared = source.spellings.filter((s) => {
+          const n = normalizeOrgText(s);
+          return !others.some((o) => o.spellings.some((x) => normalizeOrgText(x) === n));
+        });
+        // The transfer (D11): the name and ALL spellings move onto the target.
+        // D12's automatic-addition skips do not apply, so a cap is a refusal,
+        // never a silent drop. A spelling shared with a third entry stays shared
+        // (the target replaces the merged carrier).
+        const spellings = [...target.spellings];
+        const held = new Set([normalizeOrgText(target.name), ...target.spellings.map(normalizeOrgText)]);
+        for (const s of [source.name, ...source.spellings]) {
+          const n = normalizeOrgText(s);
+          if (held.has(n)) continue;
+          held.add(n);
+          spellings.push(s);
+        }
+        if (spellings.length > ORG_SPELLINGS_PER_ENTRY_MAX) throw new OrgHttpError(409, { error: 'org_spellings_full' });
+        const merged: OrgEntry = { ...target, spellings, updatedAt: now(), updatedBy: actor };
+        const entries = replaceEntry(others, merged);
+        return {
+          entries,
+          def: {
+            action: 'merge',
+            fromTexts: [source.name, ...unshared],
+            // `fields` fixed now, from the target's kind (spec 5.1).
+            fields: recordFieldsForKind(target.kind),
+            toName: target.name,
+          },
+          result: {},
         };
       });
     },

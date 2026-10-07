@@ -203,3 +203,80 @@ describe('OrgRewriteService - an enqueue failure (spec D11)', () => {
     expect(stored?.lastRewrite).toEqual(out.lastRewrite);
   });
 });
+
+describe('OrgRewriteService.merge (spec D11)', () => {
+  it('moves the name and every spelling onto the target and removes the merged entry, in ONE write', async () => {
+    const { repo, svc, enqueued } = await rewriteService();
+    const out = await svc.merge('org-aug', 'org-atl', 'usr_admin');
+    // AHA is shared with Atlanta - another entry - so it is no from-text.
+    expect(out.lastRewrite).toEqual({
+      jobId: 'id-1',
+      action: 'merge',
+      fromTexts: ['Augusta Housing Authority'],
+      fields: ['housingAuthority', 'accepted_authorities'],
+      toName: ATLANTA.name,
+      status: 'running',
+      heartbeatAt: T1,
+      startedAt: T1,
+      startedBy: 'usr_admin',
+    });
+    expect(enqueued).toEqual([{ jobName: 'org.rewrite', payload: { jobId: 'id-1' } }]);
+    const stored = await repo.peek();
+    expect(stored?.version).toBe(2);
+    expect(stored?.entries.map((e) => e.orgId)).toEqual(['org-atl', 'org-dca', 'org-vash', 'org-stepup']);
+    expect(stored?.entries[0]).toMatchObject({
+      spellings: ['AHA', 'Atlanta Housing', 'Atlanta (AHA)', 'Augusta Housing Authority'],
+      updatedAt: T1,
+      updatedBy: 'usr_admin',
+    });
+  });
+
+  it('a spelling the merged entry shared with a third entry stays shared, and is no from-text', async () => {
+    const marietta = orgEntry({ orgId: 'org-mar', kind: 'housing_authority', name: 'Marietta Housing Authority', spellings: ['MHA'] });
+    const macon = orgEntry({
+      orgId: 'org-mac',
+      kind: 'housing_authority',
+      name: 'Macon-Bibb County Housing Authority',
+      spellings: ['Macon Housing Authority', 'MHA'],
+    });
+    const dekalb = orgEntry({ orgId: 'org-dek', kind: 'housing_authority', name: 'DeKalb County Housing Authority', spellings: ['HADC'] });
+    const { repo, svc } = await rewriteService({ entries: [marietta, macon, dekalb] });
+    const out = await svc.merge('org-mar', 'org-dek', 'usr_admin');
+    expect(out.lastRewrite.fromTexts).toEqual(['Marietta Housing Authority']);
+    const stored = await repo.peek();
+    expect(stored?.entries.find((e) => e.orgId === 'org-dek')?.spellings).toEqual([
+      'HADC',
+      'Marietta Housing Authority',
+      'MHA',
+    ]);
+    expect(stored?.entries.find((e) => e.orgId === 'org-mac')?.spellings).toContain('MHA');
+  });
+
+  it('refuses an unknown entry, itself, the other kind, a running rewrite and a transfer past 20 - writing nothing', async () => {
+    const crowded = orgEntry({
+      orgId: 'org-crowd',
+      kind: 'agency',
+      name: 'Crowded Agency',
+      spellings: Array.from({ length: 19 }, (_, i) => `Crowded ${i}`),
+    });
+    const { repo, svc, enqueued } = await rewriteService({ entries: [...ORG_FIXTURE, crowded] });
+    await expect(svc.merge('org-nope', 'org-atl', 'a')).rejects.toMatchObject({ status: 404, body: { error: 'org_not_found' } });
+    await expect(svc.merge('org-atl', 'org-nope', 'a')).rejects.toMatchObject({ status: 404, body: { error: 'org_not_found' } });
+    await expect(svc.merge('org-atl', 'org-atl', 'a')).rejects.toMatchObject({ status: 400 });
+    await expect(svc.merge('org-atl', 'org-vash', 'a')).rejects.toMatchObject({ status: 400 });
+    // HUD-VASH's name and two spellings onto 19 spellings: 22 > 20 - refused, never dropped.
+    await expect(svc.merge('org-vash', 'org-crowd', 'a')).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_spellings_full' },
+    });
+    expect((await repo.peek())?.version).toBe(1);
+    expect(enqueued).toEqual([]);
+    const running = await rewriteService({
+      lastRewrite: runningRewrite({ action: 'clear', field: 'agency', fromTexts: ['x'], heartbeatAt: T1 }),
+    });
+    await expect(running.svc.merge('org-aug', 'org-atl', 'a')).rejects.toMatchObject({
+      status: 409,
+      body: { error: 'org_rewrite_running' },
+    });
+  });
+});

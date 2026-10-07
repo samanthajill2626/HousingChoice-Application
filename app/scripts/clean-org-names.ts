@@ -145,6 +145,11 @@ const LIST = KINDS_FOR_FIELD.accepted_authorities;
 
 const isText = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
 
+/** A whitespace-only housingAuthority or agency - not '', which is a cleared agency (spec D5). */
+const isWhitespaceOnly = (v: unknown): boolean => typeof v === 'string' && v !== '' && v.trim() === '';
+/** A blank list member: whitespace, or '' (what the body trim makes of whitespace; a list has no cleared member). */
+const isBlankMember = (m: unknown): boolean => typeof m === 'string' && m.trim() === '';
+
 function bump(changes: Partial<CleanupChanges>, key: keyof CleanupChanges, by = 1): void {
   if (by > 0) changes[key] = (changes[key] ?? 0) + by;
 }
@@ -365,6 +370,14 @@ export interface CleanupResult {
    * list" read contacts through that index and never do. Counted only.
    */
   contactsMissingTypeOrStatus: number;
+  /**
+   * Records (contacts and units, deleted included) holding a value no request
+   * can name and "Not on the list" never shows (code review R1-CONF-1): a
+   * whitespace-only housingAuthority or agency (pre-2026-07-14 data, before
+   * the body trim), or a blank accepted_authorities member. The cleanup leaves
+   * them as they are. Expected 0. Counted only.
+   */
+  recordsWithBlankValues: number;
   /** Values the plan leaves for the Settings page: by field, most held first. */
   leftovers: CleanupLeftover[];
 }
@@ -441,6 +454,7 @@ function emptyResult(): CleanupResult {
     auditFailed: 0,
     changes: { ...NO_CHANGES },
     contactsMissingTypeOrStatus: 0,
+    recordsWithBlankValues: 0,
     leftovers: [],
   };
 }
@@ -667,6 +681,8 @@ async function run(
     if ((isText(row['housingAuthority']) || isText(row['agency'])) && !(isIndexKey(row['type']) && isIndexKey(row['status']))) {
       result.contactsMissingTypeOrStatus += 1;
     }
+    // Invisible to Settings as well (recordsWithBlankValues): counted only.
+    if (isWhitespaceOnly(row['housingAuthority']) || isWhitespaceOnly(row['agency'])) result.recordsWithBlankValues += 1;
     let plan: RecordPlan<ContactWrite>;
     try {
       plan = planContact(row, entries);
@@ -706,6 +722,8 @@ async function run(
     await beat();
     const unitId = String(row['unitId'] ?? '');
     result.unitsScanned += 1;
+    const members = row['accepted_authorities'];
+    if (Array.isArray(members) && members.some(isBlankMember)) result.recordsWithBlankValues += 1;
     let plan: RecordPlan<UnitWrite>;
     try {
       plan = planUnit(row, entries);
@@ -749,6 +767,7 @@ export function reportCleanupRun(result: CleanupResult, apply: boolean, log: Log
     listSource: result.listSource,
     leftoverValues: result.leftovers.length,
     contactsMissingTypeOrStatus: result.contactsMissingTypeOrStatus,
+    recordsWithBlankValues: result.recordsWithBlankValues,
     auditFailed: result.auditFailed,
     apply,
   };
@@ -813,6 +832,11 @@ export function formatSummary(result: CleanupResult, apply: boolean): string[] {
       lines.push(`  ${l.field}  ${JSON.stringify(l.value)}  x${l.count}${deleted}  - ${why}`);
     }
   }
+  // Records holding a blank value (code review R1-CONF-1): nothing above lists
+  // them, and "Not on the list" never shows them.
+  lines.push(
+    `Records holding a whitespace-only housing authority or agency, or a blank property-list member: ${result.recordsWithBlankValues} (expected 0 - Settings cannot see or settle them)`,
+  );
   // Beside the leftovers: contacts the Settings page cannot see at all (no
   // byTypeStatus key) - their values above never reach "Not on the list".
   lines.push(

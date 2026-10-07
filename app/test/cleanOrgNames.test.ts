@@ -348,6 +348,7 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
       auditFailed: 0,
       changes: CHANGES,
       contactsMissingTypeOrStatus: 0,
+      recordsWithBlankValues: 0,
       leftovers: LEFTOVERS,
     });
     // The Scan paging loop: two rows a page reaches the same plan.
@@ -380,6 +381,45 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
     expect(result).toMatchObject({ contactsScanned: 12, contactsMissingTypeOrStatus: 2, recordsPlanned: 9 });
   }, 120_000);
 
+  it('counts records holding a blank value Settings cannot see (expected 0) - and leaves them as they are', async () => {
+    const w = await seedWorld();
+    const put = (base: 'contacts' | 'units', item: Record<string, unknown>) =>
+      doc.send(new PutCommand({ TableName: tableName(base, w.env), Item: item }));
+    // Code review R1-CONF-1: pre-trim whitespace that "Not on the list" skips
+    // and no request can name. A record is counted once, deleted ones too.
+    await put('contacts', { contactId: 'c-blank-ha', type: 'tenant', status: 'searching', housingAuthority: '  ' });
+    await put('contacts', { contactId: 'c-blank-agency', type: 'partner', status: 'active', agency: '   ' });
+    await put('contacts', {
+      contactId: 'c-blank-both-deleted',
+      type: 'tenant',
+      status: 'searching',
+      housingAuthority: ' ',
+      agency: ' ',
+      deleted_at: NOW,
+    });
+    // A cleared agency ('' - spec D5) is not blank text: not counted.
+    await put('contacts', { contactId: 'c-cleared-agency', type: 'partner', status: 'active', agency: '' });
+    const unit = { landlordId: 'c-landlord', status: 'available', created_at: NOW };
+    await put('units', { unitId: 'u-blank-member', ...unit, accepted_authorities: ['Atlanta Housing Authority', ' '] });
+    // '' is what the body trim makes of a whitespace member: blank too (a list has no cleared member).
+    await put('units', { unitId: 'u-blank-members', ...unit, accepted_authorities: ['', '  '] });
+    const result = await cleanOrgNames({ doc, env: w.env, logger: silent });
+    // Counted only: the seeded world's plan, changes and leftovers are exactly as before.
+    expect(result).toMatchObject({
+      contactsScanned: 9 + 4,
+      unitsScanned: 5 + 2,
+      recordsPlanned: 8,
+      recordsWithBlankValues: 5,
+      changes: CHANGES,
+      leftovers: LEFTOVERS,
+    });
+    // The apply counts them the same way and writes none of them.
+    const applied = await cleanOrgNames({ doc, env: w.env, apply: true, logger: silent });
+    expect(applied).toMatchObject({ recordsWritten: 8, recordsWithBlankValues: 5 });
+    expect(await w.get('contacts', 'c-blank-both-deleted')).toMatchObject({ housingAuthority: ' ', agency: ' ' });
+    expect(await w.get('units', 'u-blank-members')).toMatchObject({ accepted_authorities: ['', '  '] });
+  }, 120_000);
+
   it('apply: takes the lock, writes each change conditionally with one audit event per field, never stamps updated_at, releases the lock done', async () => {
     const w = await seedWorld();
     const result = await cleanOrgNames({ doc, env: w.env, apply: true, logger: silent });
@@ -395,6 +435,7 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
       auditFailed: 0,
       changes: CHANGES,
       contactsMissingTypeOrStatus: 0,
+      recordsWithBlankValues: 0,
       leftovers: LEFTOVERS,
     });
 
@@ -703,6 +744,7 @@ const SUMMARY_RESULT: CleanupResult = {
   auditFailed: 0,
   changes: CHANGES,
   contactsMissingTypeOrStatus: 0,
+  recordsWithBlankValues: 0,
   leftovers: [
     { field: 'housingAuthority', value: 'AHA', count: 1, deletedCount: 1, resolution: 'ambiguous' },
     { field: 'agency', value: 'Atlanta Housing Authority', count: 1, deletedCount: 0, resolution: 'other_kind' },
@@ -730,6 +772,13 @@ describe('formatSummary - what the CLI prints (organization values only, never a
     );
     expect(formatSummary({ ...SUMMARY_RESULT, leftovers: [], contactsMissingTypeOrStatus: 2 }, true).at(-1)).toBe(
       'Contacts missing type or status but holding a housing authority or agency: 2 (expected 0 - Settings cannot see or rewrite them)',
+    );
+    // Right above it (code review R1-CONF-1): records holding a blank value. Expected 0.
+    expect(lines.at(-2)).toBe(
+      'Records holding a whitespace-only housing authority or agency, or a blank property-list member: 0 (expected 0 - Settings cannot see or settle them)',
+    );
+    expect(formatSummary({ ...SUMMARY_RESULT, leftovers: [], recordsWithBlankValues: 3 }, true).at(-2)).toBe(
+      'Records holding a whitespace-only housing authority or agency, or a blank property-list member: 3 (expected 0 - Settings cannot see or settle them)',
     );
     // An apply's audit gaps (code review R1-ADV-BE-4), under the change
     // counts. A dry run appends no event, so it prints no such line.

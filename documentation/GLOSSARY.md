@@ -363,10 +363,13 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   before booking, or one of those closed - reads "Undated": dateless history,
   not work, so the property page's "Tours on this property" card lists it
   after the dated tours, never among the requests (`sortToursForPanel`). One
-  helper, `undatedTourLabel` (`dashboard/src/api/types.ts`), is the only
-  reader of that wording rule. These two labels retire "Not booked", the
-  single label every undated tour used to show (its record:
-  `docs/issues/undated-tour-wording.md`). Also: the All tab (`/tours/all`,
+  helper, `undatedTourLabel` (`dashboard/src/api/types.ts`), is the one
+  implementation of that wording rule; every surface that shows a tour's
+  missing date reads it. These two labels retire "Not booked", which the tour
+  page and the tenant, landlord and property files' tour lists showed for
+  every undated tour (the Past tab and Today already said "Undated"; the
+  Closed tab showed a blank date) - its record:
+  `docs/issues/undated-tour-wording.md`. Also: the All tab (`/tours/all`,
   listed first; `/tours` stays Active) is a server-filtered, server-paged
   list of every tour (`GET /api/tours/list`); its Upcoming / Past are pure
   date splits across every status, unlike the Active tab's Upcoming section

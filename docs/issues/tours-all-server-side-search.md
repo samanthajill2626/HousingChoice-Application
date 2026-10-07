@@ -50,13 +50,20 @@ F3 and F2).
   (or the 50-request cap) before the restore can anchor. At about 3,000
   tours one walk is about 30 requests plus the undated tail, so opening 8
   matching tours in turn with the back arrow costs about 250 requests and a
-  "Searching..." wait on every return. Options: keep the last list (rows,
-  name maps, cursor) in a short-TTL module cache keyed by the list key, and
-  reuse it when a restore record for that list arrives - the Past tab's
-  batch store, `ToursPage.tsx`'s module store
-  (`dashboard/src/routes/tours/ToursPage.tsx:324`), is the house precedent
-  for state that outlives the view; or the server-side search above, which
-  removes the walk.
+  "Searching..." wait on every return. Options, preferred first: (1) the
+  server-side search above, which removes the walk and keeps every read
+  fresh; (2) keep the last list (rows, name maps, cursor) in a short-TTL
+  module cache keyed by the list key, and reuse it when a restore record for
+  that list arrives - the Past tab's batch store, `ToursPage.tsx`'s module
+  store (`dashboard/src/routes/tours/ToursPage.tsx:324`), is the house
+  precedent for state that outlives the view. Option (2) NEEDS A SPEC CHANGE
+  (planner review round 2, R2-F2): spec 4.9 makes restore pages "fresh
+  reads, never a cache", and a cached list still holds the row just handled -
+  the return would focus that row, with its old status, instead of the next
+  one to work on (P14, D9). It also needs per-tour invalidation: any write
+  from the tour page evicts or patches the cached row, or the cache is reused
+  only when no tour was written since. A TTL alone does not help - the return
+  comes seconds after the write.
 - Each landed walk page re-derives every loaded row, so a long walk is
   quadratic in rows formatted (the row views are memoized since the planner
   review's fix wave, so a keystroke no longer re-derives them). Each

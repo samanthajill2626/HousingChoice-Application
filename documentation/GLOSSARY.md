@@ -366,7 +366,7 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   helper, `undatedTourLabel` (`dashboard/src/api/types.ts`), is the one
   implementation of that wording rule; every surface that shows a tour's
   missing date reads it. These two labels retire "Not booked", which the tour
-  page and the tenant, landlord and property files' tour lists showed for
+  page and the tenant and landlord files' tour lists and the property page showed for
   every undated tour (the Past tab and Today already said "Undated"; the
   Closed tab showed a blank date) - its record:
   `docs/issues/undated-tour-wording.md`. Also: the All tab (`/tours/all`,

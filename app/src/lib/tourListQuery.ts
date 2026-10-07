@@ -65,6 +65,18 @@ function canonicalInstant(raw: string): string | undefined {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
 }
 
+/** An ISO 8601 date-time WITH an explicit zone (spec 5.1: `from` / `to` are
+ *  instants). Date.parse alone also takes zone-less and date-only forms, read
+ *  in the server's own zone or as UTC midnight, so the same request would mean
+ *  a different instant per host (code review r1 SC-2). */
+const ISO_ZONED_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/;
+
+/** A request bound -> its canonical instant, or undefined when it is not an
+ *  ISO 8601 date-time with a zone that Date.parse accepts. */
+function boundInstant(raw: string): string | undefined {
+  return ISO_ZONED_DATE_TIME.test(raw) ? canonicalInstant(raw) : undefined;
+}
+
 const fail = (error: string): TourListParse => ({ ok: false, error });
 
 export function parseTourListQuery(query: Record<string, unknown>): TourListParse {
@@ -106,8 +118,8 @@ export function parseTourListQuery(query: Record<string, unknown>): TourListPars
   const hasFrom = fromRaw !== undefined && fromRaw !== '';
   const hasTo = toRaw !== undefined && toRaw !== '';
   if ((hasFrom || hasTo) && w !== 'range') return fail('from and to are accepted only with when=range');
-  const from = hasFrom ? canonicalInstant(fromRaw) : undefined;
-  const to = hasTo ? canonicalInstant(toRaw) : undefined;
+  const from = hasFrom ? boundInstant(fromRaw) : undefined;
+  const to = hasTo ? boundInstant(toRaw) : undefined;
   if ((hasFrom && from === undefined) || (hasTo && to === undefined)) {
     return fail('from and to must be valid ISO 8601 datetimes');
   }

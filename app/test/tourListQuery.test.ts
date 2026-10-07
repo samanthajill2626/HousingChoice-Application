@@ -134,6 +134,17 @@ describe('parseTourListQuery', () => {
     expect(parseTourListQuery({ cursor: '' })).toEqual({ ok: false, error: 'invalid cursor' });
     expect(parseTourListQuery({ cursor: ['a', 'b'] })).toEqual({ ok: false, error: 'invalid cursor' });
   });
+
+  it('9: from / to are ISO 8601 date-times WITH a zone - a zone-less or date-only form would mean a different instant per host (SC-2)', () => {
+    for (const bad of ['10/06/2026', 'Oct 6 2026', '2026', '2026-10-06', '2026-10-06T00:00:00', '2026-10-06T00:00:00.000']) {
+      expect(parseTourListQuery({ when: 'range', from: bad }), `from ${bad}`).toEqual({ ok: false, error: ISO_ERROR });
+      expect(parseTourListQuery({ when: 'range', to: bad }), `to ${bad}`).toEqual({ ok: false, error: ISO_ERROR });
+    }
+    expect(parsed({ when: 'range', from: '2026-10-06T00:00:00-04:00' }).filters.from).toBe('2026-10-06T04:00:00.000Z');
+    expect(parsed({ when: 'range', from: '2026-10-06T00:00:00Z' }).filters.from).toBe('2026-10-06T00:00:00.000Z');
+    expect(parsed({ when: 'range', to: '2026-10-06T23:59:59.999-04:00' }).filters.to).toBe('2026-10-07T03:59:59.999Z');
+    expect(parsed({ when: 'range', to: '2026-10-06T12:30Z' }).filters.to).toBe('2026-10-06T12:30:00.000Z');
+  });
 });
 
 describe('planTourListPhases', () => {

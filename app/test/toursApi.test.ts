@@ -5659,6 +5659,7 @@ describe('GET /api/tours/list', () => {
       ['when=past&from=2026-10-01T00:00:00.000Z', 'from and to are accepted only with when=range'],
       ['to=2026-10-01T00:00:00.000Z', 'from and to are accepted only with when=range'],
       ['when=range&from=yesterday', 'from and to must be valid ISO 8601 datetimes'],
+      ['when=range&from=10/06/2026', 'from and to must be valid ISO 8601 datetimes'],
       ['when=range&from=2026-10-02T00:00:00.000Z&to=2026-10-01T00:00:00.000Z', 'from must be on or before to'],
       ['limit=0', 'limit must be an integer 1..100'],
       ['limit=101', 'limit must be an integer 1..100'],

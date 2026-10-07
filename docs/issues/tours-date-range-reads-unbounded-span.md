@@ -6,12 +6,12 @@ severity: low
 status: open
 area: app/tours
 created: 2026-10-06
-refs: app/src/repos/toursRepo.ts:417, app/src/lib/dynamoPaging.ts:20, app/src/routes/tours.ts:428, app/src/routes/today.ts:287, app/src/routes/today.ts:550, docs/superpowers/reviews/2026-10-06-tour-list/code-review/r1-adversarial.md, docs/superpowers/reviews/2026-10-06-tour-list/code-review/r2-re-review.md
+refs: app/src/repos/toursRepo.ts:420, app/src/lib/dynamoPaging.ts:20, app/src/routes/tours.ts:428, app/src/routes/today.ts:287, app/src/routes/today.ts:550, docs/superpowers/reviews/2026-10-06-tour-list/code-review/r1-adversarial.md, docs/superpowers/reviews/2026-10-06-tour-list/code-review/r2-re-review.md
 ---
 
 **Problem.** The unbounded walk is NEW on feat/tour-list. Spec
 `docs/superpowers/specs/2026-10-06-tour-list-design.md` section 7 turned
-`toursRepo.listByScheduledRange` (`app/src/repos/toursRepo.ts:417`) from a
+`toursRepo.listByScheduledRange` (`app/src/repos/toursRepo.ts:420`) from a
 one-page read into a `queryAll` walk of every page (commit 17f07803), capped
 only by `DEFAULT_MAX_PAGES = 100` (`app/src/lib/dynamoPaging.ts:20`). The
 walk itself is right - the old one-page read dropped the newest tours of a
@@ -57,3 +57,18 @@ callers. Regression tests:
 `GET /api/today?toursFrom=0001-01-01T00:00:00.000Z&toursTo=9999-12-31T00:00:00.000Z`
 and `GET /api/tours?from=2026-10-02T00:00:00.000Z&to=2026-10-01T00:00:00.000Z`
 each expect a 400.
+
+**Severity at scale (2026-10-06, feat/tour-list planner review).** The
+plan-blind reviewer's note
+(`docs/superpowers/reviews/2026-10-06-tour-list/planner-review/adversarial.md`,
+"Already filed"): at scale the risk is availability, not only cost. One such
+request can make the API process materialize about 100 MB of tour items and
+serialize them as one JSON body, blocking that container's event loop while
+it does. Unreachable at today's volume, and the interim bound above (a small
+`maxPages` for the two callers) is one line. The bound belongs in
+`queryAll`'s `maxPages`, NOT in the knob beside it: the same review renamed
+`listByScheduledRange`'s optional third argument from `pageLimit` to
+`queryLimit`, because it is EACH Query's `Limit` - a test knob that forces
+paging. A small `queryLimit` only multiplies the round trips, and at the
+100-page cap the walk returns a prefix (`queryAll` logs a WARN, now through
+the repo's logger).

@@ -6,7 +6,7 @@ severity: low
 status: open
 area: dashboard/tours
 created: 2026-10-06
-refs: dashboard/src/routes/tours/useAllTours.ts:31, dashboard/src/routes/tours/AllToursView.tsx, app/src/routes/tours.ts:440, docs/issues/typeahead-scale-needs-server-side-search.md
+refs: dashboard/src/routes/tours/useAllTours.ts:31, dashboard/src/routes/tours/AllToursView.tsx, app/src/routes/tours.ts:440, docs/issues/typeahead-scale-needs-server-side-search.md, dashboard/src/routes/tours/tourTime.ts:62, dashboard/src/routes/tours/ToursPage.tsx:324
 ---
 
 **Problem.** The Tours page's All tab (`/tours/all`) filters and pages on the
@@ -36,3 +36,33 @@ normalized search label stored on the tour item, or a name lookup per
 evaluated row. The house precedent is
 [`typeahead-scale-needs-server-side-search`](./typeahead-scale-needs-server-side-search.md),
 the same browser-side matching limit for the contact and property typeaheads.
+
+**Costs at thousands of tours (2026-10-06, feat/tour-list planner review).**
+Two costs the price above leaves out. Neither shows at today's volume
+(hundreds of tours); both come from the branch's plan-blind review
+(`docs/superpowers/reviews/2026-10-06-tour-list/planner-review/adversarial.md`,
+F3 and F2).
+
+- Every return from a tour page to a SEARCHED All list re-runs the whole
+  walk. The loaded list lives in `useAllTours` state and dies with the view;
+  a row link carries the search in its back URL, and on the return the walk
+  outranks the restore, so each return reloads page 1 and walks to the end
+  (or the 50-request cap) before the restore can anchor. At about 3,000
+  tours one walk is about 30 requests plus the undated tail, so opening 8
+  matching tours in turn with the back arrow costs about 250 requests and a
+  "Searching..." wait on every return. Options: keep the last list (rows,
+  name maps, cursor) in a short-TTL module cache keyed by the list key, and
+  reuse it when a restore record for that list arrives - the Past tab's
+  batch store, `ToursPage.tsx`'s module store
+  (`dashboard/src/routes/tours/ToursPage.tsx:324`), is the house precedent
+  for state that outlives the view; or the server-side search above, which
+  removes the walk.
+- Each landed walk page re-derives every loaded row, so a long walk is
+  quadratic in rows formatted (the row views are memoized since the planner
+  review's fix wave, so a keystroke no longer re-derives them). Each
+  derivation formats a date and a time with `toLocaleDateString` /
+  `toLocaleTimeString` and explicit options, which builds a new formatter
+  per call. Module-level `Intl.DateTimeFormat` instances in
+  `dashboard/src/routes/tours/tourTime.ts` would cut that per-row cost. The
+  helper is shared - the Active, Past and Closed tabs and Today format
+  through it too - so that change is theirs as well.

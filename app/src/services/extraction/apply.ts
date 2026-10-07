@@ -249,6 +249,14 @@ export async function applyExtraction(
     // 'write'` below records it without overloading that audit's meaning.
     let value: unknown = coerced.value;
     let notOnList = false;
+    // Worklist ruling RG-2 (2026-10-06): the other texts a matched entry was
+    // suggested under before this change - the model's own text and the entry's
+    // spellings (on the starting list, each old alias spelling of a housing
+    // authority is one of them). The suggest path treats a dismissal of any of
+    // them as a dismissal of the name, so a value dismissed before the deploy
+    // is still never re-suggested. Writes never consult dismissals; every
+    // other field passes none.
+    let alsoDismissedAs: readonly string[] = [];
     if (field === 'housingAuthority') {
       const resolved = resolveOrgText(ctx.orgEntries, String(coerced.value), KINDS_FOR_FIELD.housingAuthority);
       if (resolved.status === 'other_kind') {
@@ -264,6 +272,7 @@ export async function applyExtraction(
       }
       if (resolved.status === 'match') {
         value = resolved.entry.name;
+        alsoDismissedAs = [String(coerced.value), ...resolved.entry.spellings];
       } else {
         notOnList = true;
         if (fieldOp.op === 'write') {
@@ -327,7 +336,7 @@ export async function applyExtraction(
         conversationId,
         ...(cursorTsMsgId !== undefined && { tsMsgId: cursorTsMsgId }),
         ...(ctx.runId !== undefined && { runId: ctx.runId }),
-      });
+      }, alsoDismissedAs);
       if (put.ok) {
         suggested.push(field);
         noteDisplaced(field, put.displaced);
@@ -803,18 +812,31 @@ type SafePutResult =
 async function putSuggestionSafe(
   deps: ApplyDeps,
   s: Parameters<ApplyDeps['extraction']['putSuggestion']>[0],
+  alsoDismissedAs: readonly string[] = [],
 ): Promise<SafePutResult> {
   try {
     // Dismissal tombstone check (single choke point for EVERY suggest path):
     // a value a human already rejected for this target is never re-suggested
     // (permanent by ruling 2026-07-21); a different value still comes through.
+    // The suggestion's own key is checked first; then each distinct key of
+    // `alsoDismissedAs` - other texts that name the SAME value (worklist RG-2:
+    // a housing authority suggested under its list name is also suppressed by
+    // a dismissal of its spellings or of the model's own text). `s` itself is
+    // stored as is.
     const norm = normalizeSuggestionValue(s.target, s.suggestedValue);
-    if (await deps.extraction.hasDismissal(s.ownerContactId, s.target, norm)) {
-      deps.logger.debug(
-        { contactId: s.ownerContactId, target: s.target },
-        'suggestion suppressed (previously dismissed value)',
-      );
-      return { ok: false, dropReason: 'dismissed_before' };
+    const keys = [norm];
+    for (const alt of alsoDismissedAs) {
+      const key = normalizeSuggestionValue(s.target, alt);
+      if (!keys.includes(key)) keys.push(key);
+    }
+    for (const key of keys) {
+      if (await deps.extraction.hasDismissal(s.ownerContactId, s.target, key)) {
+        deps.logger.debug(
+          { contactId: s.ownerContactId, target: s.target },
+          'suggestion suppressed (previously dismissed value)',
+        );
+        return { ok: false, dropReason: 'dismissed_before' };
+      }
     }
     const { item, displaced } = await deps.extraction.putSuggestion(s);
     return { ok: true, item, ...(displaced !== undefined && { displaced }) };

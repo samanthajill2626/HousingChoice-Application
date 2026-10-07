@@ -16,6 +16,7 @@ import { createLogCapture } from './helpers/logCapture.js';
 import { applyExtraction, type ApplyDeps } from '../src/services/extraction/apply.js';
 import type { OrgEntry } from '../src/lib/orgNames.js';
 import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import { normalizeSuggestionValue } from '../src/services/extraction/schema.js';
 
 const NOW = '2026-07-16T12:00:00.000Z';
 const CONV = 'conv-1';
@@ -1418,5 +1419,81 @@ describe('applyExtraction - housingAuthority against the organization list (spec
     );
     expect(outcome.wrote).toEqual(['housingAuthority']);
     expect(records.updates[0]!.patch['housingAuthority']).toBe('Metro Housing Authority');
+  });
+});
+
+// Worklist ruling RG-2 (2026-10-06): a dismissal tombstone is keyed on the
+// suggestion's TEXT (normalizeSuggestionValue). Before spec 2026-10-06 D8 a
+// known authority was suggested under its old alias spelling ("Atlanta (AHA)",
+// "DCA", "Fulton County", ...) and anything else as the model said it; now a
+// list match is suggested under the entry's full NAME - a different key. So
+// the suggest path also checks the model's own text and every spelling of the
+// matched entry, and a value dismissed before the deploy is still never
+// re-suggested (ruling 2026-07-21). Writes never consult dismissals.
+describe('applyExtraction - a list match honors dismissals of its other spellings (worklist RG-2)', () => {
+  const tombstone = (text: string): string =>
+    `housingAuthority#${normalizeSuggestionValue('housingAuthority', text)}`;
+
+  it('drops the full name when an old spelling of the entry was dismissed', async () => {
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone('Atlanta (AHA)')] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: 'Atlanta Housing Authority', reason: 'said so' } },
+    });
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions).toEqual([{
+      target: 'housingAuthority',
+      outcome: 'dropped',
+      dropReason: 'dismissed_before',
+      proposedValue: 'Atlanta Housing Authority',
+    }]);
+  });
+
+  it('drops the full name when the model\'s own text was dismissed', async () => {
+    const said = 'Housing Authority of the City of Atlanta';
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone(said)] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: said } },
+    });
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions[0]).toMatchObject({
+      target: 'housingAuthority', outcome: 'dropped', dropReason: 'dismissed_before', proposedValue: said,
+    });
+  });
+
+  it('drops it when the dismissed text is no spelling but resolves to the entry', async () => {
+    // D4 reads 'atlanta housing authority.' as the name, but its dismissal key
+    // keeps the period: only the check of the model's own text catches it.
+    const said = 'atlanta housing authority.';
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone(said)] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: said } },
+    });
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions[0]).toMatchObject({ outcome: 'dropped', dropReason: 'dismissed_before' });
+  });
+
+  it('(PIN) a dismissal of ANOTHER entry\'s spelling does not suppress it', async () => {
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone('DCA')] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: 'Atlanta Housing Authority' } },
+    });
+    expect(outcome.suggested).toEqual(['housingAuthority']);
+    expect(records.suggestions[0]).toMatchObject({
+      target: 'housingAuthority', suggestedValue: 'Atlanta Housing Authority',
+    });
+  });
+
+  it('(PIN) a WRITE of a list match never consults dismissals', async () => {
+    // The ruling leaves writes as they were: D8 handles a match exactly as a
+    // known authority always was, and a write never read the tombstones.
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone('Atlanta (AHA)')] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'write', value: 'Atlanta Housing Authority' } },
+    });
+    expect(outcome.wrote).toEqual(['housingAuthority']);
+    expect(records.updates[0]!.patch['housingAuthority']).toBe('Atlanta Housing Authority');
   });
 });

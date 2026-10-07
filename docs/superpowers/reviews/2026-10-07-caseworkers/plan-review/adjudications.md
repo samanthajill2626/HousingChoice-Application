@@ -47,3 +47,24 @@ fixes.
 Decision check: no finding changed what the product does; one e2e task and
 one checkpoint are added (test surfaces). The fixes are new, unreviewed text,
 so round 2 (reviewer A continued) reviews them.
+
+### Round 1 fix pass - the fixer's open questions (planner rulings)
+
+Fix report: `R1-fix-report.md` (every row applied; plan 18596 -> 19294 lines).
+1. Task 10.12 step 8 repeats Task 8.9's staff-notes issue edit - make it
+   skip-if-done (applied in the round 2 fix pass).
+2. The Task 7.5 Settle dialog can still say "Use Split instead." on an
+   organization row - EXTEND ruling S8: organization rows use the no-Split
+   organization copy there too (round 2 fix pass).
+3. `conversation-fact-extraction.spec.ts`'s own page-1 `?type=unknown` lookup -
+   REJECT: pre-existing in a spec B does not otherwise change; B adds no
+   unknown contacts that would push its row off page 1 beyond what other specs
+   already do. Not B's change.
+4. Plan 3.9 writes "No candidates - add a tenant below." with an ASCII hyphen
+   for a string B leaves UNCHANGED (it keeps its em dash) - clarify the row:
+   the UNCHANGED strings are named by meaning; their bytes stay as today
+   (round 2 fix pass).
+5. `sequence-diagram-to-test.md:133` "Broadcast to tenants" - no change: it
+   describes a filter-resolved broadcast, which stays tenant-only (D20).
+6. Task 10.3 made skip-if-done - CONFIRMED (assembly ruling S5/S7-5: S5 owns
+   those pins).

@@ -3,7 +3,7 @@
 - Spec (the contract - read sections 2, 3 and 4 "Branch B" (D16-D22) in
   full, and every "(B)" line in D6, D10, 5.2, 6, 9, 10, 11 and 12, before
   Task 1.1): `docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md`
-  (revision 14). Branch A (the org list) is MERGED; its code is the base.
+  (revision 15). Branch A (the org list) is MERGED; its code is the base.
 - Branch `feat/caseworkers`, worktree `W:\tmp\caseworkers`, cut from main
   @a8b66cd6, main merged in @c1530f9d. Mission records:
   `docs/superpowers/reviews/2026-10-07-caseworkers/`.
@@ -16,7 +16,15 @@
   worktree's gitignored `.superpowers/sdd/plan-research/R<n>-reference.md`).
 - Status: PLAN (planner) - assembled from six section drafts; contract
   rulings in `docs/superpowers/reviews/2026-10-07-caseworkers/plan-research/plan-assembly-rulings.md`
-  (folded into section 3). Plan review pending.
+  (folded into section 3; plan review round 1 applied, round 2 pending).
+  Cited as "assembly ruling <writer>-<n>": `S1/S2-3`
+  is item 3 under "S1/S2 writer" in that file, `S8-4` item 4 under "S8
+  writer"; the S10 writer's items are cited by their subject ("S10 row
+  lists", "S10 dismiss confirm container"). The section drafts themselves
+  are gitignored and are NEVER the authority.
+- Plan review round 1: rulings in
+  `docs/superpowers/reviews/2026-10-07-caseworkers/plan-review/adjudications.md`
+  (cited as "plan review R1 ruling A2", "... B10" ...), applied to this text.
 
 ## 0. Ground rules for this plan
 
@@ -37,6 +45,26 @@
 - Never rewrite source with PowerShell `Get-Content | -replace |
   Set-Content`. Use the Edit tool. The Edit tool DECODES `\u` escapes -
   never type a `\u` escape through it.
+- Glyph placeholders in "Current" anchors (plan review R1 ruling B3). This
+  plan is ASCII, so where a quoted CURRENT line of a file holds a non-ASCII
+  character the plan writes a placeholder instead:
+  `{--}` = U+2014 em dash; `{->}` = U+2192 rightwards arrow; `{...h}` =
+  U+22EF midline horizontal ellipsis; `{"}` = U+201C or U+201D curly
+  double quote (left or right, as the file has it). The placeholder text
+  does NOT exist in the file - an Edit whose old_string contains one fails.
+  Procedure: Read the real line (the Read tool shows the true character),
+  copy the line's exact text as the old_string (the character pasted from
+  the Read output, never typed as a `\u` escape and never via PowerShell),
+  and write the REPLACEMENT in ASCII (the "with" block, which is already
+  ASCII). If the Edit tool still cannot match, take a unique ASCII
+  substring of the line as the old_string and replace the whole line
+  around it. Never "fix" a placeholder by retyping the glyph from memory.
+- e2e pins move with their copy (plan review R1 ruling A3): a task that
+  changes user-facing copy an e2e spec asserts edits that spec line in the
+  SAME task (the S6.5 timeline task and the S9 tasks list their pins), so
+  `npm run e2e` is not knowingly red between tasks. S10 Task 10.4 only
+  verifies them (skip-if-done). A task that edits an e2e spec does not have
+  to run the e2e suite itself; Task 10.13 and the final gates task run it.
 - The Bash tool truncates a single command near 10 KB: write files with the
   Write tool, never with a long heredoc.
 - Run commands with absolute paths (`cd "W:/tmp/caseworkers/app"` etc.); the
@@ -88,7 +116,9 @@
 ## 2. Work map
 
 Server first (S1-S6), a full typecheck + `npm test` checkpoint, then the
-dashboard (S7-S9), then e2e, pins and docs (S10). Each slice lists its files;
+dashboard (S7-S9), a second typecheck + `npm test` checkpoint, then e2e,
+pins and docs (S10), ending with the main sync and the five AGENTS.md
+completion gates (Task 10.14). Each slice lists its files;
 plan section 3 is binding for every name that crosses a slice.
 
 | slice | what | spec |
@@ -103,7 +133,8 @@ plan section 3 is binding for every name that crosses a slice.
 | S7 | dashboard org UI for both kinds: OrgPicker, NewOrgDialog organization mode, orgCopy, the Settings usage totals, Not on the list organization rows and the Settle dialog | D6, D10, D17, R2, R4-07 |
 | S8 | dashboard contacts: the role mirror module, KindPicker, create/edit forms, UnknownFile, ContactDetail header and More actions, the conversion dialog, PartnerFile (role, organization, Staff notes), the Caseworkers page, nav and tabs, API client | D16-D19, D22, R4 |
 | S9 | dashboard shares: PartnerFile Properties sent card + Send, neutral wording, the "Sent to" list labels | D20, D22, R3 |
-| S10 | e2e specs and pins, perf/mutation pins, GLOSSARY, RUNBOOK, selectors.md, e2e README, issues | D18, D20, sections 11-12, R4-13, R5 |
+| CP2 | checkpoint after S9: `npm run typecheck`, `npm test` (every workspace) - plan review R1 ruling B10 | - |
+| S10 | e2e specs and pins, perf/mutation pins, GLOSSARY, RUNBOOK, selectors.md, e2e README, issues; the final task (10.14) syncs main and runs the five completion gates bare | D18, D20, sections 11-12, R4-13, R5 |
 
 ## 3. Interfaces (BINDING for every slice)
 
@@ -132,16 +163,25 @@ plan section 3 is binding for every name that crosses a slice.
 
 ### 3.2 Shared app types and helpers
 
-`app/src/services/extraction/contactKinds.ts` gains
-`export const CASEWORKER_ROLE = 'Caseworker';` beside
-`PROPERTY_MANAGER_ROLE`, and `canonicalSuggestedContactKind` returns
-`'partner'` for `type: 'partner'` with role EXACTLY `CASEWORKER_ROLE` (any
-other non-empty partner role stays `undefined`).
+`CASEWORKER_ROLE = 'Caseworker'` is DEFINED in the leaf
+`app/src/lib/caseworkers.ts` (`export const CASEWORKER_ROLE = 'Caseworker';`).
+`app/src/services/extraction/contactKinds.ts` imports it from there and
+re-exports it beside `PROPERTY_MANAGER_ROLE` (`export { CASEWORKER_ROLE };`),
+so both import paths name ONE constant; `canonicalSuggestedContactKind`
+returns `'partner'` for `type: 'partner'` with role EXACTLY
+`CASEWORKER_ROLE` (any other non-empty partner role stays `undefined`). The
+direction matters (plan review R1 ruling A2): `contactKinds.ts` type-imports
+the extraction adapter and `contactsRepo.ts` (the AWS SDK, the Anthropic SDK,
+`lib/config.ts`), so a module that imported the constant FROM
+`contactKinds.ts` would drag that graph into the dashboard typecheck through
+the S1 mirror test. `lib/caseworkers.ts` imports nothing but
+`lib/orgNames.ts` (itself import-free).
 
-`app/src/lib/caseworkers.ts` (pure; imports `normalizeOrgText` from
-`lib/orgNames.ts` and `CASEWORKER_ROLE`):
+`app/src/lib/caseworkers.ts` (pure; imports only `normalizeOrgText` from
+`lib/orgNames.ts`; defines `CASEWORKER_ROLE`):
 
 ```ts
+export const CASEWORKER_ROLE = 'Caseworker';
 export function isCaseworkerRole(role: unknown): boolean;
 //   string, normalizeOrgText(role) === 'caseworker' || === 'case worker'
 export function mentionsCaseworker(role: unknown): boolean;
@@ -350,8 +390,10 @@ Importer (`lib/import/apply.ts` `upsertContact`): a stored
   organization, deleted, inUse: { active, deleted }, kindLocked: { active,
   deleted } }` (types `OrgUsageCounts`, `OrgUseTotal`) - the first five as
   today plus `organization` (display; a deleted organization holder counts
-  in `deleted` once per column, for display only); the two totals count
-  DISTINCT records (R2-F1) and every refusal reads them. `refuseWhileUsed(mode:
+  in `deleted` once per column - that per-column `deleted` stays on the wire
+  for compatibility ONLY: the dashboard shows the distinct `inUse.deleted`
+  for "+N deleted" and in the Delete sentence, plan review R1 ruling A10);
+  the two totals count DISTINCT records (R2-F1) and every refusal reads them. `refuseWhileUsed(mode:
   'delete' | 'kind')` reads `inUse` / `kindLocked`; the 409 `org_in_use`
   `uses` body reports the mode's total.
 - `recordFieldsForKind`: housing authority -> `housingAuthority`,
@@ -397,7 +439,9 @@ organization?: string })`, `dismissPossibleCaseworker(contactId)`;
 wire types, `OrgUsage`'s new fields (S7), recipient rows' `type?`/`role?`
 (S9) and `ContactItem`'s new fields. The mutation catalog
 (`e2e/performance/mutationCatalog.ts` and its count pin, 118 today) gains
-TWO entries (`makeCaseworker`, `dismissPossibleCaseworker`) - S10.
+TWO entries (`makeCaseworker`, `dismissPossibleCaseworker`) - S8 Task 8.1,
+in the same task as the endpoints (assembly ruling S8-2); S10 Task 10.1
+only verifies it.
 
 ### 3.9 Copy and accessible names (BINDING - unit tests and e2e use these)
 
@@ -411,7 +455,7 @@ TWO entries (`makeCaseworker`, `dismissPossibleCaseworker`) - S10.
 | KindPicker | segment "Caseworker" (order Tenant, Landlord, Partner, Caseworker, Property Manager, Other); shown on a new contact or one already a caseworker |
 | Unknown card | button "Mark as Caseworker" (4th: Tenant, Landlord, Partner, Caseworker, Property Manager) - opens the dialog |
 | contact header More actions | menuitem "Make caseworker" (tenant, landlord, partner; live; not already a caseworker) |
-| conversion dialog | dialog name "Make <name> a caseworker"; buttons "Make caseworker" (disabled while a refusal shows) and "Cancel"; picker label "Organization"; "This removes" list: "Housing authority: <x>", "Agency: <x>", "<n> pending AI suggestion(s)"; "Past tours, closed placements, properties sent and other details stay on the record."; "1 conversation will become a partner conversation." / "<n> conversations will become partner conversations."; "1 shared conversation stays as it is." / "<n> shared conversations stay as they are."; "1 conversation without a type stays as it is." / "<n> conversations without a type stay as they are." (each line only when its count > 0) |
+| conversion dialog | dialog name "Make <name> a caseworker"; buttons "Make caseworker" (disabled while a refusal shows) and "Cancel"; picker label "Organization"; "This removes" list: "Housing authority: <x>", "Agency: <x>", "<n> pending AI suggestion(s)"; "Past tours, closed placements, properties sent and other details stay on the record."; "1 conversation will become a partner conversation." / "<n> conversations will become partner conversations."; "1 shared conversation stays as it is." / "<n> shared conversations stay as they are."; "1 conversation without a type stays as it is." / "<n> conversations without a type stay as they are." (each line only when its count > 0); when the preview says `alreadyCaseworker`, NO Organization picker and the line "This contact is already a caseworker. Confirming re-runs the cleanup." (plan review R1 ruling B8) |
 | refusal sentences (links in parentheses) | open placement: "Finish or close this contact's placement first." ("View placement"); open tour: "Cancel or close this contact's open tour first." ("View tour"); landlord of record: "This contact is the landlord of record for a property. Change that property's landlord first." ("View property"); roster: "This contact is on a property's contact list. Remove them from it first." ("View property") |
 | other errors | `contact_changed`: "This contact changed while this was open. Review and try again." (reloads the preview); `caseworker_use_conversion` (edit form): "To make this contact a caseworker, use More actions > Make caseworker." |
 | partner header facts | the organization, when set |
@@ -445,8 +489,13 @@ these names (plan 3.2); do not rename them.
 
 ### Task 1.1 - `CASEWORKER_ROLE` and the canonicalizer accepts partner + `Caseworker` (D16)
 
-Files: `app/src/services/extraction/contactKinds.ts`,
+Files: `app/src/lib/caseworkers.ts` (new - the constant only; Task 1.2
+adds the helpers), `app/src/services/extraction/contactKinds.ts`,
 `app/test/contactKinds.test.ts`.
+
+Where the constant lives (plan 3.2, plan review R1 ruling A2): DEFINED in
+the leaf `app/src/lib/caseworkers.ts`; `contactKinds.ts` imports and
+re-exports it. Never the other way round.
 
 RED: edit `app/test/contactKinds.test.ts`.
 
@@ -537,31 +586,53 @@ Run: `cd "W:/tmp/caseworkers/app"; npx vitest run test/contactKinds.test.ts`
   'Caseworker' } to partner" fails (the canonicalizer answers undefined for
   any non-empty partner role). The new unsupported rows are PINs (green).
 
-GREEN: edit `app/src/services/extraction/contactKinds.ts`.
+GREEN:
 
-1. Replace
+1. Create `app/src/lib/caseworkers.ts` (Write tool; Task 1.2 replaces it
+   with the full module, keeping this constant and its comment):
 
 ```ts
+// The caseworker matching rules (spec
+// docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md
+// D16, D22 "Matching"; plan 3.2). PURE - no I/O. Task 1.2 adds the helpers.
+
+/**
+ * The caseworker preset role (spec 2026-10-06 D16), byte-exact like
+ * PROPERTY_MANAGER_ROLE. A caseworker is `type: 'partner'` with a role that
+ * satisfies isCaseworkerRole; this exact text is the role the KindPicker
+ * preset and the caseworker conversion write. DEFINED here, in a leaf
+ * module, and re-exported by services/extraction/contactKinds.ts (never the
+ * reverse: contactKinds.ts type-imports the AWS and Anthropic graph, and the
+ * dashboard mirror test imports THIS file). The dashboard copy lives in
+ * dashboard/src/routes/contact/caseworkerRole.ts (caseworkerRoleMirror.test.ts
+ * pins the two together).
+ */
+export const CASEWORKER_ROLE = 'Caseworker';
+```
+
+2. Edit `app/src/services/extraction/contactKinds.ts` - replace
+
+```ts
+import type { ContactItem } from '../../repos/contactsRepo.js';
+
 export const PROPERTY_MANAGER_ROLE = 'Property Manager';
 ```
 
 with
 
 ```ts
+import type { ContactItem } from '../../repos/contactsRepo.js';
+import { CASEWORKER_ROLE } from '../../lib/caseworkers.js';
+
 export const PROPERTY_MANAGER_ROLE = 'Property Manager';
 
-/**
- * The caseworker preset role (spec 2026-10-06 D16), byte-exact like
- * PROPERTY_MANAGER_ROLE. A caseworker is `type: 'partner'` with a role that
- * satisfies lib/caseworkers.ts `isCaseworkerRole`; this exact text is the
- * role the KindPicker preset and the caseworker conversion write. The
- * dashboard copy lives in dashboard/src/routes/contact/caseworkerRole.ts
- * (caseworkerRoleMirror.test.ts pins the two together).
- */
-export const CASEWORKER_ROLE = 'Caseworker';
+// The caseworker preset (spec 2026-10-06 D16) is DEFINED in the leaf
+// lib/caseworkers.ts and re-exported here, so both import paths name one
+// constant (plan 3.2).
+export { CASEWORKER_ROLE };
 ```
 
-2. Replace
+3. In the same file, replace
 
 ```ts
   if (contact.type === 'landlord' && role === PROPERTY_MANAGER_ROLE) {
@@ -592,14 +663,16 @@ caller of the canonicalizer, `app/src/routes/contacts.ts:1719`):
 - GREEN, unchanged.
 
 Commit: `git -C "W:/tmp/caseworkers" status` (read it; no `.git/MERGE_HEAD`),
-then stage `app/src/services/extraction/contactKinds.ts` and
+then stage `app/src/lib/caseworkers.ts`,
+`app/src/services/extraction/contactKinds.ts` and
 `app/test/contactKinds.test.ts`;
 message `feat(caseworkers): CASEWORKER_ROLE preset; the kind canonicalizer maps partner + Caseworker to partner (D16)`
 with the `Co-Authored-By:` trailer.
 
 ### Task 1.2 - `app/src/lib/caseworkers.ts`: `isCaseworkerRole`, `mentionsCaseworker`, `hasAiCaseworkerNote`, `isCaseworker`, `PossibleSignal` (D16, D22)
 
-Files: `app/src/lib/caseworkers.ts` (new), `app/test/caseworkers.test.ts`
+Files: `app/src/lib/caseworkers.ts` (created by Task 1.1 with the constant
+only; this task replaces it with the full module), `app/test/caseworkers.test.ts`
 (new).
 
 The three matching tiers (plan 3.2, spec D22 "Matching"): the
@@ -647,7 +720,7 @@ const UNICODE_HYPHEN = String.fromCharCode(0x2010);
 const PROMPT_NOTE = /add "(Identified as a caseworker[^"]*)"/.exec(buildExtractionSystemPrompt())?.[1];
 
 describe('the caseworker preset', () => {
-  it('is the contactKinds constant, re-exported (one constant, D16)', () => {
+  it('is defined here and re-exported by contactKinds (one constant, D16)', () => {
     expect(CASEWORKER_ROLE).toBe(KINDS_CASEWORKER_ROLE);
     expect(CASEWORKER_ROLE).toBe('Caseworker');
   });
@@ -776,9 +849,14 @@ describe('PossibleSignal (plan 3.2 wire names)', () => {
 ```
 
 Run: `cd "W:/tmp/caseworkers/app"; npx vitest run test/caseworkers.test.ts`
-- RED: the suite fails to load - `../src/lib/caseworkers.js` does not exist.
+- RED: `../src/lib/caseworkers.js` holds only Task 1.1's constant, so every
+  helper case fails (`isCaseworkerRole`, `mentionsCaseworker`,
+  `hasAiCaseworkerNote` and `isCaseworker` are not exported - a TypeError
+  "is not a function", or a load error naming the missing export). The
+  "is defined here and re-exported by contactKinds" case is green (Task
+  1.1). Any other failure: stop and report.
 
-GREEN: create `app/src/lib/caseworkers.ts`:
+GREEN: replace the whole of `app/src/lib/caseworkers.ts` (Write tool) with:
 
 ```ts
 // The caseworker matching rules (spec
@@ -796,10 +874,25 @@ GREEN: create `app/src/lib/caseworkers.ts`:
 // Only `role` counts (`role_title` is ignored). The dashboard copy is
 // dashboard/src/routes/contact/caseworkerRole.ts, pinned to this module by
 // caseworkerRoleMirror.test.ts - change both together.
-import { CASEWORKER_ROLE } from '../services/extraction/contactKinds.js';
+//
+// LEAF MODULE: import nothing but lib/orgNames.ts (itself import-free). The
+// dashboard mirror test imports this file, so an import of anything that
+// reaches the repos, the adapters or lib/config.ts drags the app's AWS and
+// Anthropic graph into the dashboard typecheck (plan 3.2).
 import { normalizeOrgText } from './orgNames.js';
 
-export { CASEWORKER_ROLE };
+/**
+ * The caseworker preset role (spec 2026-10-06 D16), byte-exact like
+ * PROPERTY_MANAGER_ROLE. A caseworker is `type: 'partner'` with a role that
+ * satisfies isCaseworkerRole; this exact text is the role the KindPicker
+ * preset and the caseworker conversion write. DEFINED here, in a leaf
+ * module, and re-exported by services/extraction/contactKinds.ts (never the
+ * reverse: contactKinds.ts type-imports the AWS and Anthropic graph, and the
+ * dashboard mirror test imports THIS file). The dashboard copy lives in
+ * dashboard/src/routes/contact/caseworkerRole.ts (caseworkerRoleMirror.test.ts
+ * pins the two together).
+ */
+export const CASEWORKER_ROLE = 'Caseworker';
 
 /** The Possible caseworkers row signals (plan 3.2), in wire/declaration order. */
 export type PossibleSignal = 'role_mentions' | 'ai_note' | 'relationship' | 'partner_no_role';
@@ -871,7 +964,7 @@ with the trailer.
 Files: `app/src/lib/orgNames.ts`, `app/test/orgNames.test.ts`.
 
 Scope: `OrgField` and `KINDS_FOR_FIELD` ONLY. `OrgRecordField`
-(`app/src/repos/orgListRepo.ts`) is S5's (CONTRACT ISSUE 2) - do not touch
+(`app/src/repos/orgListRepo.ts`) is S5's (assembly ruling S1/S2-2) - do not touch
 it here.
 
 RED: edit `app/test/orgNames.test.ts`.
@@ -1015,9 +1108,11 @@ RED: create `dashboard/src/routes/contact/caseworkerRoleMirror.test.ts`:
 // the record the Possible caseworkers list exists to clean up.
 //
 // MECHANISM: the mediaTypeMirror.test.ts one - import both copies and compare
-// RESOLVED answers over one table. The app module is a near-leaf: the pure
-// lib/orgNames.ts plus services/extraction/contactKinds.ts, whose other
-// imports are type-only (erased at run time).
+// RESOLVED answers over one table. The app module is a LEAF: it imports only
+// the import-free lib/orgNames.ts and itself DEFINES CASEWORKER_ROLE
+// (contactKinds.ts re-exports it), so the dashboard typecheck compiles two
+// app files and never the repos, adapters or lib/config.ts. Import nothing
+// else from app/ here.
 import { describe, expect, it } from 'vitest';
 import {
   CASEWORKER_ROLE as APP_CASEWORKER_ROLE,
@@ -1127,9 +1222,13 @@ export function mentionsCaseworker(role: unknown): boolean {
 
 Run the suite - GREEN. ASCII check (`tr -d '\11\12\15\40-\176' < FILE | wc -c`
 prints 0) on both new files. Then `cd "W:/tmp/caseworkers"; npm run
-typecheck` - exit 0 (the dashboard tsc now compiles the app module graph
-through the mirror test; see the verified note at the end of CONTRACT
-ISSUES).
+typecheck` - exit 0. The dashboard tsc now compiles exactly two app files
+through the mirror test: `app/src/lib/caseworkers.ts` and
+`app/src/lib/orgNames.ts`. Prove it before committing:
+`grep -n "^import" "W:/tmp/caseworkers/app/src/lib/caseworkers.ts" "W:/tmp/caseworkers/app/src/lib/orgNames.ts"`
+prints exactly one line, `caseworkers.ts`'s import of `./orgNames.js`
+(plan 3.2; plan review R1 ruling A2). Any other import line: stop and
+report.
 
 Commit: `git -C "W:/tmp/caseworkers" status`, then stage
 `dashboard/src/routes/contact/caseworkerRole.ts` and
@@ -1141,7 +1240,7 @@ with the trailer.
 
 ## S2 - repo primitives and their fakes (`app/src/repos/contactsRepo.ts`, `app/src/repos/conversationsRepo.ts`, `app/src/repos/unitsRepo.ts`, `app/test/helpers/twilioWebhookHarness.ts`; the full-repo test fakes in `app/test/audienceResolution.test.ts`, `contactCapture.test.ts`, `sendMessage.test.ts`, `scheduledSendSuppression.test.ts`; test `app/test/caseworkerRepoParity.integration.test.ts` (new))
 
-Spec D19, D21, D22; plan 3.3 (as amended by CONTRACT ISSUES 1, 3, 4);
+Spec D19, D21, D22; plan 3.3 (as amended by assembly rulings S1/S2-1, S1/S2-3, S1/S2-4);
 rulings R1-F1, R1-F3, R1-F15, R3-F4, R5-F17. Every primitive changes in the
 REAL repo and the FakeWorld in the SAME task, and every case in
 `caseworkerRepoParity.integration.test.ts` runs against BOTH (the
@@ -1518,7 +1617,7 @@ with
 export interface CaseworkerConversionRecord {
   /** ISO 8601. */
   at: string;
-  /** The actor's email. */
+  /** The actor's userId (the session's `req.user.userId`, as audit rows record actors) - never an email. */
   by: string;
   fromType: ContactType;
   fromRole?: string;
@@ -2382,7 +2481,7 @@ Commit: `git -C "W:/tmp/caseworkers" status`, then stage
 message `feat(caseworkers): contactsRepo.getRecipientDisplaysByIds - a recipient projection with type and role (R3-F4)`
 with the trailer.
 
-### Task 2.4 - `conversationsRepo.setTypeIfCurrent` - the conditional re-type (D21; R1-F15; CONTRACT ISSUE 4)
+### Task 2.4 - `conversationsRepo.setTypeIfCurrent` - the conditional re-type (D21; R1-F15; assembly ruling S1/S2-4)
 
 Files: `app/src/repos/conversationsRepo.ts`,
 `app/test/helpers/twilioWebhookHarness.ts`,
@@ -2676,7 +2775,7 @@ Commit: `git -C "W:/tmp/caseworkers" status`, then stage
 message `feat(caseworkers): conversationsRepo.setTypeIfCurrent - re-type only while the read type holds (D21)`
 with the trailer.
 
-### Task 2.5 - unit lists: FakeWorld `list` pages; `ListUnitsOpts.deleted: 'any'` (D22; R5-F17; CONTRACT ISSUE 3)
+### Task 2.5 - unit lists: FakeWorld `list` pages; `ListUnitsOpts.deleted: 'any'` (D22; R5-F17; assembly ruling S1/S2-3)
 
 Files: `app/src/repos/unitsRepo.ts`,
 `app/test/helpers/twilioWebhookHarness.ts`,
@@ -3036,7 +3135,7 @@ re-create - any mismatch: STOP and report):
 5. The `ConversationsRepo` interface has `setTypeIfCurrent(conversationId, expected, next, displayName)` returning `SetTypeIfCurrentResult` (`{ outcome: 'updated'; conversation } | { outcome: 'skipped' }`), and the FakeWorld implements it, `findAllByPhone`/`findAllByEmail`, and the multi-clause `expect` + `notDeleted`.
 6. `ListUnitsOpts.deleted` accepts `'any'` and the FakeWorld units fake honors it in `listByLandlord` and `list`: `grep -n "'any'" "W:/tmp/caseworkers/app/src/repos/unitsRepo.ts"` prints the option and its filter handling.
 
-### Task 3.1 - move the PATCH's classification side effects into `services/contactClassification.ts` (contract issue 2)
+### Task 3.1 - move the PATCH's classification side effects into `services/contactClassification.ts` (assembly ruling S3/S4-2)
 
 A refactor with a real RED (the new module's own tests) and the PATCH's
 existing pins as the safety net: `app/test/aiRunVerdicts.test.ts`
@@ -4840,7 +4939,7 @@ GREEN - in `app/src/services/caseworkerConversion.ts`:
             continue;
           }
           retyped += 1;
-          // Built from the UPDATED row the primitive returns (contract issue 7).
+          // Built from the UPDATED row setTypeIfCurrent returns (plan 3.3).
           events.emit('conversation.updated', toConversationUpdatedEvent(result.conversation));
         } catch (err) {
           log.error({ err, contactId, conversationId: conv.conversationId }, 'caseworker conversion: thread re-type failed after the commit (make again repairs)');
@@ -4973,7 +5072,7 @@ service: `cd "W:/tmp/caseworkers"; npx eslint app/src/services/caseworkerConvers
 Commit (stage the two files)
 `feat(caseworkers): dismiss a possible caseworker (D19, D22)`.
 
-### Task 3.8 - `possibleCaseworkers.ts` (D19, D22, contract issue 6)
+### Task 3.8 - `possibleCaseworkers.ts` (D19, D22, assembly ruling S3/S4-6)
 
 RED: create `app/test/possibleCaseworkers.test.ts`:
 
@@ -5965,7 +6064,7 @@ export function registerCaseworkerRoutes(router: Router, deps: CaseworkerRoutesD
       return;
     }
     // The actor is the session userId - the audit's `actor` and
-    // caseworker_conversion.by (contract issue 3).
+    // caseworker_conversion.by (plan 3.2: a userId, never an email).
     const actor = req.user?.userId ?? 'unknown';
     try {
       const contact = body.action === 'make'
@@ -6630,12 +6729,18 @@ replace
 `counts: { housingAuthority: 2, agency: 0, accepted_authorities: 1, organization: 0, skipped: 0, conflicts: 0 },`.
 
 Run: `cd "W:/tmp/caseworkers/app"; npx vitest run test/orgRecords.test.ts test/orgRewriteService.test.ts test/orgRewriteJob.test.ts test/organizationsApi.test.ts`.
-Expected RED: the organization pass case writes `agency` instead (today's
-`planContactRewrite` sends any non-housing-authority field to `agency`) and
-its counts lack the `organization` key; every `ZERO` comparison misses
+Expected RED (plan review R1 ruling S10): the organization pass case fails
+on its FIRST count. At HEAD `planContactRewrite`'s
+`default: // rename, merge, use` branch sends any non-housing-authority
+field to an `agency` write CONDITIONAL on `agency` still holding the value;
+p-1 holds no agency, so `rewriteOrgFields` misses its condition and the pass
+answers `{ housingAuthority: 0, agency: 0, accepted_authorities: 0,
+skipped: 1, conflicts: 0 }` - a `skipped: 1` and no `organization` key -
+and p-1 keeps `'Steps'`. Every other `ZERO` comparison misses
 `organization: 0`; the rename/merge `fields` lack `'organization'`; the job
-case writes `agency` on p-1. The (PIN) Move/Split case is green already
-(`passField` refuses them).
+case answers `agency: 1, skipped: 1` and leaves p-1's organization
+unchanged. The (PIN) Move/Split case is green already (`passField` refuses
+them). Any other failure: stop and report.
 
 Implement:
 
@@ -6711,9 +6816,19 @@ Implement:
      `const counts: RewriteCounts = { housingAuthority: 0, agency: 0, accepted_authorities: 0, organization: 0, skipped: 0, conflicts: 0 };`.
      The contact branch (`const plan = planContactRewrite(def, field, value, c);`)
      compiles unchanged: `field` is narrowed to the three contact fields.
-   - header: in the paragraph `// THE REWRITE PASS. One call is ONE pass over ONE field (\`def.field\`); the`
-     change "(fixed when the rewrite started - recordFieldsForKind for a rename/merge)" to
-     "(fixed when the rewrite started - recordFieldsForKind for a rename/merge, organization last)".
+   - header: in the paragraph that starts
+     `// THE REWRITE PASS. One call is ONE pass over ONE field (\`def.field\`); the`,
+     the parenthesis spans two lines. Replace the line
+     `// the rewrite started - recordFieldsForKind for a rename/merge). A record's`
+     (unique, one line) with the two lines
+
+     ```ts
+     // the rewrite started - recordFieldsForKind for a rename/merge, organization
+     // last). A record's
+     ```
+
+     (the line above it, `` // org.rewrite job runs one pass per member of `lastRewrite.fields` (fixed when ``,
+     is unchanged).
 
 3. `app/src/services/orgRewrite.ts` header: the line
    `// one field; a rename or merge, every field of the target entry's kind at that`
@@ -6900,7 +7015,9 @@ Implement:
     * active records holding the exact name in its fields (a field of the
     * entry's kind; `organization` - a contact's organization, any type, either
     * kind), so one record can count in two columns; `deleted` counts deleted
-    * holders the same way, once per column hit. The two totals count DISTINCT
+    * holders the same way, once per column hit - kept on the wire for
+    * compatibility only: the dashboard shows the distinct `inUse.deleted`
+    * (plan review R1 ruling A10). The two totals count DISTINCT
     * records and are what the refusals read: `inUse` - any field, organization
     * included (Delete); `kindLocked` - a field of the entry's kind only, so an
     * organization holder never blocks a kind change (spec D17).
@@ -7030,7 +7147,7 @@ Implement:
    `await refuseWhileUsed(await entryOr404(orgId));` becomes
    `await refuseWhileUsed(await entryOr404(orgId), 'delete');`.
 
-4. e2e (R5-F12, CI-5): `e2e/fixtures/orgFixture.ts` replace
+4. e2e (R5-F12, assembly ruling S5/S7-5): `e2e/fixtures/orgFixture.ts` replace
 
    ```ts
    export type OrgUsageWire = Record<
@@ -7311,6 +7428,36 @@ add:
   });
 ```
 
+RED 2b (plan review R1 ruling S2 - the job's claim path shares
+`revalidationProblem` with Run again, so it gets its own case): same file,
+inside `describe('OrgRewriteService.claim (code review R2-BE-1)', () => {`,
+after the case
+`it('a LAPSED lock is re-validated as Run again does: claimed while the definition fits the list, else recorded failed', async () => {`
+(its closing `});`), add:
+
+```ts
+  it('a LAPSED organization Use of an AGENCY name is claimed - the claim re-checks both kinds, as Run again does (spec D17; R2-F2)', async () => {
+    const late = '2026-10-06T12:15:00.000Z'; // exactly 15 minutes after T1: lapsed
+    const orgUse = runningRewrite({
+      jobId: 'job-1',
+      action: 'use',
+      field: 'organization',
+      fromTexts: ['Steps'],
+      toName: STEP_UP.name,
+      heartbeatAt: T1,
+    });
+    const fits = await rewriteService({ lastRewrite: orgUse, now: () => late });
+    expect(await fits.svc.claim('job-1')).toEqual({ outcome: 'claimed', lastRewrite: { ...orgUse, heartbeatAt: late } });
+    // ...and it is refused once the name left BOTH lists.
+    const gone = await rewriteService({
+      entries: ORG_FIXTURE.filter((e) => e.orgId !== STEP_UP.orgId),
+      lastRewrite: orgUse,
+      now: () => late,
+    });
+    expect(await gone.svc.claim('job-1')).toMatchObject({ outcome: 'refused', lastRewrite: { status: 'failed' } });
+  });
+```
+
 RED 3: `app/test/organizationsApi.test.ts`, inside
 `describe('rewrites through the real in-process queue and the org.rewrite job (spec D10, D11)', () => {`,
 before `it('Run again with nothing failed or stalled is 409 org_rewrite_not_rerunnable', async () => {`, add:
@@ -7345,8 +7492,11 @@ service derives one kind - housing authority - from any field but `agency`);
 `add` with no kind is accepted (adds a housing authority); `kind` is never
 read; Run again of the organization Use answers 409 (the target is looked up
 as a housing authority); the reordered agency rename answers 409
-(`fields[0]` is `organization`). The second runAgain case is a (PIN): S1's
-`KINDS_FOR_FIELD.organization` already widens the union.
+(`fields[0]` is `organization`); the RED 2b claim of the lapsed
+organization Use answers `outcome: 'refused'` (the same housing-authority
+lookup, through the claim). The second runAgain case is a (PIN): S1's
+`KINDS_FOR_FIELD.organization` already widens the union; the "gone" half of
+RED 2b is green before and after.
 
 Implement:
 
@@ -7567,10 +7717,16 @@ Implement:
        ): Promise<OrgCheckResult>;
      ```
 
-   - the implementation's first lines
-     `async check({ kind, text, spellingFor }) {` /
-     `const resolution = resolveOrgText(entries, text, [kind]);`
-     become:
+   - the implementation's first THREE lines, which are consecutive in this
+     order (plan review R1 ruling S3) -
+
+     ```ts
+         async check({ kind, text, spellingFor }) {
+           const { entries } = await list.get();
+           const resolution = resolveOrgText(entries, text, [kind]);
+     ```
+
+     - become, as one replacement of all three lines:
 
      ```ts
          async check(input) {
@@ -7580,9 +7736,13 @@ Implement:
            const resolution = resolveOrgText(entries, text, kinds);
      ```
 
-     (delete the old `const { entries } = await list.get();` line that
-     followed; the rest is unchanged - `nameProblem` and `spellingProblem`
-     are kind-independent).
+     (`const { entries } = await list.get();` therefore appears ONCE in
+     `check` afterwards - the old one is inside the replaced block, not left
+     behind; `const { entries } = await list.get();` also occurs in other
+     methods of this file, so anchor on the three-line block, starting at
+     `async check({ kind, text, spellingFor }) {`, which is unique. The rest
+     of `check` is unchanged - `nameProblem` and `spellingProblem` are
+     kind-independent).
 2. `app/src/routes/organizations.ts`:
    - header `//   POST   /check  { kind, text, spellingFor? }  -> OrgCheckResult (text <= 200 chars, else 400)`
      becomes `//   POST   /check  { kind | kinds, text, spellingFor? }  -> OrgCheckResult (text <= 200 chars, else 400)`;
@@ -7717,7 +7877,7 @@ Commit: `git status` (read it), then
 
 Spec D20, D22 ("Share wording"), invariant I2; rulings R3-F1..F14. Depends on
 S2 (`contactsRepo.getRecipientDisplaysByIds` and its FakeWorld twin, with
-`RecipientDisplay` exported - contract issue 1). Nothing here touches the
+`RecipientDisplay` exported - assembly ruling S1/S2-1). Nothing here touches the
 dashboard.
 
 What S6 deliberately does NOT do (rulings R3-F11, F12, F14):
@@ -8520,15 +8680,17 @@ describe('caseworkers D20: recipients rows carry the contact type and role', () 
 });
 ```
 
-3. The file's describe title (it contains an em dash). Current:
+3. The file's describe title (it contains an em dash; `{--}` below is the
+   section 0 glyph placeholder, plan review R1 ruling B3). Current:
    `describe('GET /api/units/:unitId/recipients (BE4/C4 {--} "Sent to tenants")', () => {`
-   Replace with:
+   (the line holding the unique ASCII substring `recipients (BE4/C4 `; Read
+   it, replace the WHOLE line). Replace with:
    `describe('GET /api/units/:unitId/recipients (BE4/C4 - "Sent to")', () => {`
    and the header line `// BE4/C4 route tests -- the sent-to-tenants / listings-sent endpoints:`
    -> `// BE4/C4 route tests -- the "Sent to" / listings-sent endpoints:`.
 
 RED - `app/test/contactsBatchReads.test.ts` (the second pin on this route,
-contract issue 4).
+assembly ruling S6/S9-4).
 
 1. The spy helper. Current:
 
@@ -8797,7 +8959,10 @@ function recipientFactsOf(contact: RecipientDisplay): ListingSendRecipientFacts 
    Comment-only: `  /** BE4/C4: the listing-send record (the "Sent to tenants" recipients read). */`
    -> `  /** BE4/C4: the listing-send record (the "Sent to" recipients read). */`;
    the route comment line (it contains an em dash; the WHOLE line is replaced
-   with ASCII) `  // GET /api/units/:unitId/recipients {--} the "Sent to tenants" list (BE4/C4).`
+   with ASCII; `{--}` is the section 0 glyph placeholder, plan review R1
+   ruling B3 - the line holding the unique ASCII substring
+   `// GET /api/units/:unitId/recipients `)
+   `  // GET /api/units/:unitId/recipients {--} the "Sent to tenants" list (BE4/C4).`
    -> `  // GET /api/units/:unitId/recipients - the property's "Sent to" list (BE4/C4).`;
    `  // D5); the per-tenant view is the "Sent to tenants" card (GET`
    -> `  // D5); the per-recipient view is the "Sent to" card (GET`.
@@ -8827,7 +8992,7 @@ Commit (stage `app/src/repos/listingSendsRepo.ts`, `app/src/routes/units.ts`,
 `app/test/listingSendsApi.test.ts`, `app/test/contactsBatchReads.test.ts`)
 `feat(caseworkers): property recipients rows carry type and role (D20)`.
 
-### Task 6.5 - landlord timeline share labels go neutral (D20, D22; contract issue 2)
+### Task 6.5 - landlord timeline share labels go neutral (D20, D22; assembly ruling S6/S9-2)
 
 Both label sites: the read-time recount (`sentToLabel`, applied to a
 landlord's share pins) and the stored-count fallback in
@@ -8960,15 +9125,31 @@ function sentToCountLabel(n: number): string {
    `    // share-sent-outcome D5: a landlord's "Sent to N tenants" pin (the`
    -> `    // share-sent-outcome D5: a landlord's "Sent to N recipients" pin (the`.
 
-Run: `cd "W:/tmp/caseworkers/app"; npx vitest run test/contactTimeline.test.ts` - GREEN. Typecheck exit 0.
+4. The e2e pin of this copy, in this task (plan review R1 ruling A3).
+   `e2e/tests/dashboard-next/landlord-activity.spec.ts:122`. Current (ASCII,
+   unique):
 
-Pins changed: app `contactTimeline.test.ts:1234` (title), `:1264`, `:1290`
-(edited above). e2e - for S10 to apply:
-`e2e/tests/dashboard-next/landlord-activity.spec.ts:122`
-`timeline.getByRole('link', { name: /Sent to 2 tenants/ }).first()` ->
-`timeline.getByRole('link', { name: /Sent to 2 recipients/ }).first()`.
+```ts
+    const bcast = timeline.getByRole('link', { name: /Sent to 2 tenants/ }).first();
+```
 
-Commit (stage `app/src/routes/contactTimeline.ts`, `app/test/contactTimeline.test.ts`)
+   Replace with:
+
+```ts
+    const bcast = timeline.getByRole('link', { name: /Sent to 2 recipients/ }).first();
+```
+
+Run: `cd "W:/tmp/caseworkers/app"; npx vitest run test/contactTimeline.test.ts` - GREEN. Typecheck
+(`cd "W:/tmp/caseworkers"; npm run typecheck`, the e2e workspace included)
+exit 0. Lint: `cd "W:/tmp/caseworkers"; npx eslint e2e/tests/dashboard-next/landlord-activity.spec.ts`
+- no error on an added line. (No e2e run here: Task 10.4 runs every pinned
+test, Task 10.13 the suite.)
+
+Pins changed: app `contactTimeline.test.ts:1234` (title), `:1264`, `:1290`;
+e2e `landlord-activity.spec.ts:122` (all edited above).
+
+Commit (stage `app/src/routes/contactTimeline.ts`, `app/test/contactTimeline.test.ts`,
+`e2e/tests/dashboard-next/landlord-activity.spec.ts`)
 `feat(caseworkers): landlord timeline share labels say recipients (D20, D22)`.
 
 ---
@@ -8985,8 +9166,8 @@ Files: `dashboard/src/api/types.ts`, `dashboard/src/api/endpoints.ts`,
 `dashboard/src/routes/settings/OrgEntryDialogs.tsx`, `NotOnListSection.tsx`,
 `dashboard/src/routes/contact/ContactEditForm.tsx`; tests beside each.
 
-Depends on S5 (the wire). S8 consumes CI-1's names and builds on Task 7.6's
-seam (CI-2).
+Depends on S5 (the wire). S8 consumes S7's names (assembly ruling S5/S7-1) and builds on Task
+7.6's seam (assembly ruling S5/S7-2).
 
 Pins this slice changes:
 
@@ -9030,8 +9211,10 @@ RED: `dashboard/src/routes/orgs/orgCopy.test.ts`:
   ```
 
 - in `it('counts active records and shows deleted ones beside them', () => {`
-  wrap the two literal arguments: `usageText(counts({ tenants: 3, otherContacts: 1, deleted: 2 }))` and
-  `usageBreakdown(counts({ tenants: 1, properties: 1 }))` (expected strings unchanged).
+  wrap the two literal arguments: `usageText(counts({ tenants: 3, otherContacts: 1, deleted: 2, inUse: { active: 4, deleted: 2 } }))` and
+  `usageBreakdown(counts({ tenants: 1, properties: 1, inUse: { active: 2, deleted: 0 } }))` (expected strings unchanged;
+  the `inUse` values are what the server sends for those columns, and Task 7.4
+  makes the deleted count read `inUse.deleted` - plan review R1 ruling A10).
 - add a describe at the end of the file:
 
   ```ts
@@ -9070,7 +9253,7 @@ RED: `dashboard/src/routes/orgs/orgCopy.test.ts`:
     });
 
     it('the usage text shows organization holders only when there are some', () => {
-      expect(usageText(counts({ tenants: 1, organization: 2, deleted: 1 }))).toBe(
+      expect(usageText(counts({ tenants: 1, organization: 2, deleted: 1, inUse: { active: 3, deleted: 1 } }))).toBe(
         '1 tenant, 0 other contacts, 0 properties, 2 organization fields (+1 deleted)',
       );
       expect(usageBreakdown(counts({ organization: 1 }))).toBe(
@@ -9131,10 +9314,13 @@ Implement:
      /**
       * Records holding an entry's exact name (spec D10, D17; mirrors app
       * services/orgRecords.ts OrgUsageCounts). The columns are for display - one
-      * record can count in two; `deleted` counts deleted holders per column hit.
-      * Delete waits for `inUse` (any field, organization included) and Change
-      * kind for `kindLocked` (a field of the entry's kind only): both are
-      * distinct-record totals the server computes.
+      * record can count in two. `deleted` counts deleted holders per column hit
+      * and stays on the wire for compatibility ONLY: the dashboard shows
+      * `inUse.deleted` (distinct records) for "+N deleted" and in every confirm
+      * sentence, so one deleted record holding the name in two fields reads
+      * "+1 deleted" (Task 7.4). Delete waits for `inUse` (any field,
+      * organization included) and Change kind for `kindLocked` (a field of the
+      * entry's kind only): both are distinct-record totals the server computes.
       */
      export interface OrgUsageCounts {
        tenants: number;
@@ -9252,7 +9438,11 @@ Implement:
      }
      ```
 
-     (`usageTotal` stays until Task 7.4.)
+     (`usageTotal` stays until Task 7.4. These two functions still read the
+     per-column `u.deleted` here; Task 7.4 switches both to the distinct
+     `u.inUse.deleted` once the Settings test fixtures carry `inUse` - doing
+     it here would crash A's `OrgListSection.test.tsx` cases, whose USAGE
+     rows have no `inUse` until Task 7.4 replaces them.)
    - `resolutionText`: `const kind = kindForField(field);` becomes
      `const kind: OrgKind = kindsForField(field)[0] ?? 'housing_authority';`
      (an organization row is never `other_kind`). `kindForField` stays until Task 7.5.
@@ -9311,9 +9501,22 @@ Implement: in `OrgPicker.tsx` replace
   const addNoun = kinds.length > 1 ? 'organization' : KIND_NOUN[kinds[0] ?? 'housing_authority'];
 ```
 
-and in the header, `// kinds - the one option is "Add <text> as a new housing authority" (or` /
-`// agency).` becomes `... "Add <text> as a new housing authority" (or agency, or - over
-both lists - organization).`; the `kinds` prop doc
+and in the header (plan review R1 ruling S5: the sentence spans two lines;
+anchor on the SECOND, which is unique and on one line) replace the line
+
+```ts
+// agency). The HOST renders "Is this really new?" (NewOrgDialog) outside its
+```
+
+with the two lines
+
+```ts
+// agency; over both lists - a contact's organization, spec D17 - organization).
+// The HOST renders "Is this really new?" (NewOrgDialog) outside its
+```
+
+(the line above it, `// kinds matches, the one option is "Add <text> as a new housing authority" (or`,
+is unchanged); the `kinds` prop doc
 `/** The entry kinds offered (branch A: one kind per field). */` becomes
 `/** The entry kinds offered: one per field, or both (a contact's organization, spec D17). */`.
 
@@ -9327,7 +9530,10 @@ Commit: `git status` (read it), then
 Files: `dashboard/src/routes/orgs/NewOrgDialog.tsx`,
 `dashboard/src/routes/orgs/OrgKindChoice.tsx` (new),
 `dashboard/src/routes/orgs/OrgKindChoice.test.tsx` (new),
-`dashboard/src/routes/orgs/OrgPicker.module.css`; test `NewOrgDialog.test.tsx`.
+`dashboard/src/routes/orgs/OrgPicker.module.css`,
+`dashboard/src/routes/orgs/orgCopy.ts` (`orgErrorCopy` gains an organization
+option - plan review R1 ruling S8), `e2e/support/selectors.md` (the org-picker
+row - ruling S9); test `NewOrgDialog.test.tsx`.
 
 RED 1: create `dashboard/src/routes/orgs/OrgKindChoice.test.tsx`:
 
@@ -9421,14 +9627,36 @@ describe('NewOrgDialog - organization mode (both lists; spec D6, D17; R2-F3, R2-
     ).toBeInTheDocument();
     expect(screen.queryByText(/Split/)).not.toBeInTheDocument();
   });
+
+  it('a REFUSED add of a compound name never points to Split either (plan 3.9; plan review R1 ruling S8)', async () => {
+    const user = userEvent.setup();
+    checkOrgText.mockResolvedValue({ candidates: [], close: [] });
+    addOrg.mockRejectedValue(
+      new ApiError(422, 'org_name_compound', 'org_name_compound', { error: 'org_name_compound', spans: [[DCA], [VASH]] }),
+    );
+    renderDialog({ kind: 'organization', text: 'DCA and VASH' });
+    await waitFor(() => expect(screen.queryByText('Checking the list...')).not.toBeInTheDocument());
+    await user.click(within(screen.getByRole('group', { name: 'Kind' })).getByRole('radio', { name: 'Agency' }));
+    await user.click(yes());
+    expect(
+      await screen.findByText(
+        'That names more than one organization (Georgia Department of Community Affairs and HUD-Veterans Affairs Supportive Housing (HUD-VASH)), so it cannot be one entry. Pick one of them.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Split/)).not.toBeInTheDocument();
+  });
 });
 ```
+
+(`ApiError` is already imported in this file; `DCA` and `VASH` are the
+`OrgRef` constants the compound case above uses.)
 
 Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/orgs/OrgKindChoice.test.tsx src/routes/orgs/NewOrgDialog.test.tsx`.
 Expected RED: `OrgKindChoice.js` does not exist; NewOrgDialog sends
 `{ kind: 'organization', text }`, says "Check that this organization is not
 already on the list ...", shows no Kind group, and adds with
-`kind: 'organization'`.
+`kind: 'organization'`; the refused compound add reads "... Use Split
+instead." (`orgErrorCopy`'s single-kind wording).
 
 Implement:
 
@@ -9581,12 +9809,77 @@ Implement:
                  }`}
      ```
 
-GREEN: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/orgs`
+   - in `add()`'s catch, `setError(orgErrorCopy(err));` (the one in
+     NewOrgDialog.tsx) becomes
+     `setError(orgErrorCopy(err, { organization: kind === 'organization' }));`.
+
+4. `dashboard/src/routes/orgs/orgCopy.ts` - a refused compound add in
+   organization mode must not say "Use Split instead." (plan 3.9: an
+   organization never points to Split; plan review R1 ruling S8). Every
+   other caller keeps today's copy (the option defaults off).
+   - Replace `export function orgErrorCopy(err: unknown): string {` with
+
+     ```ts
+     /**
+      * `organization`: the caller adds or settles a contact's ORGANIZATION
+      * (both lists, spec D17) - a compound name is refused with "Pick one of
+      * them.", never "Use Split instead." (Split rewrites a STORED housing
+      * authority; it is refused for an organization value).
+      */
+     export function orgErrorCopy(err: unknown, opts: { organization?: boolean } = {}): string {
+     ```
+
+     (the existing doc line above it,
+     `/** Staff copy for any /api/organizations failure, using the body when it helps. */`,
+     stays.)
+   - In `case 'org_name_compound': {`, replace
+     `      if (spans.length === 0) return orgErrorMessage(err.code);` with
+
+     ```ts
+           if (spans.length === 0) {
+             return opts.organization === true
+               ? 'That names more than one organization, so it cannot be one entry. Pick one of them.'
+               : orgErrorMessage(err.code);
+           }
+     ```
+
+     and the case's return line (unique in the file)
+     (``      return `That names more than one organization (${parts}), so it cannot be one entry. Use Split instead.`;``)
+     with
+
+     ```ts
+           const next = opts.organization === true ? 'Pick one of them.' : 'Use Split instead.';
+           return `That names more than one organization (${parts}), so it cannot be one entry. ${next}`;
+     ```
+
+5. `e2e/support/selectors.md`, the
+   `| Org pickers (contact form, property forms, composer) | options and the add step |`
+   row (plan review R1 ruling S9; the row is ASCII). Replace the substring
+
+   ```
+   `ORG_PICKER.addOption` (`Add <text> as a new housing authority`/`agency`), which opens `getByRole('dialog', { name: 'Is this really new?' })`: close names as `Use <name>` buttons, then `Yes, add it`.
+   ```
+
+   with
+
+   ```
+   `ORG_PICKER.addOption` (`Add <text> as a new housing authority`/`agency`; over BOTH lists - a partner's `Organization` picker, caseworkers spec D17 - `Add <text> as a new organization`), which opens `getByRole('dialog', { name: 'Is this really new?' })`: close names as `Use <name>` buttons, then `Yes, add it` - for an organization only after a kind is chosen in `getByRole('group', { name: 'Kind' })` (radios `Housing authority` / `Agency`, NO default; `Yes, add it` stays disabled until one is checked).
+   ```
+
+   and the substring
+   ``Labels `Housing authority`, `Agency`, `Housing authorities` - always `exact: true`.``
+   with
+   ``Labels `Housing authority`, `Agency`, `Housing authorities`, `Organization` - always `exact: true`.``
+   (each substring occurs once in the file).
+
+GREEN: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/orgs src/routes/settings`
 (every single-kind NewOrgDialog case stays green: their check body is still
-`{ kind, text }` and their kind is preset); typecheck.
+`{ kind, text }` and their kind is preset; every other `orgErrorCopy` caller
+passes no option and keeps "Use Split instead."); typecheck. ASCII check on
+the added lines of `e2e/support/selectors.md`.
 
 Commit: `git status` (read it), then
-`cd "W:/tmp/caseworkers"; git add dashboard/src/routes/orgs/NewOrgDialog.tsx dashboard/src/routes/orgs/NewOrgDialog.test.tsx dashboard/src/routes/orgs/OrgKindChoice.tsx dashboard/src/routes/orgs/OrgKindChoice.test.tsx dashboard/src/routes/orgs/OrgPicker.module.css; git commit -m "feat(caseworkers): Is this really new? gains an organization mode that asks the kind" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
+`cd "W:/tmp/caseworkers"; git add dashboard/src/routes/orgs/NewOrgDialog.tsx dashboard/src/routes/orgs/NewOrgDialog.test.tsx dashboard/src/routes/orgs/OrgKindChoice.tsx dashboard/src/routes/orgs/OrgKindChoice.test.tsx dashboard/src/routes/orgs/OrgPicker.module.css dashboard/src/routes/orgs/orgCopy.ts e2e/support/selectors.md; git commit -m "feat(caseworkers): Is this really new? gains an organization mode that asks the kind" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
 
 ### Task 7.4 - Settings: the Used by cell, and Delete / Change kind read the server totals
 
@@ -9604,6 +9897,14 @@ RED 1: `dashboard/src/routes/orgs/orgCopy.test.ts`: add `blockingUses` to the
     expect(blockingUses(u, 'delete')).toBe(3);
     expect(blockingUses(u, 'kind')).toBe(0);
     expect(blockingUses(undefined, 'delete')).toBeUndefined();
+  });
+
+  it('one deleted record holding the name in two fields reads "+1 deleted", never "+2" (plan review R1 ruling A10)', () => {
+    // A deleted tenant holding the name as housingAuthority AND organization:
+    // the per-column wire `deleted` counts 2 hits; the distinct inUse.deleted is 1.
+    const u = counts({ deleted: 2, inUse: { active: 0, deleted: 1 }, kindLocked: { active: 0, deleted: 1 } });
+    expect(usageText(u)).toBe('0 tenants, 0 other contacts, 0 properties (+1 deleted)');
+    expect(usageBreakdown(u)).toBe('0 tenants, 0 other contacts, 0 properties, 1 deleted');
   });
 ```
 
@@ -9699,7 +10000,9 @@ RED 2: `dashboard/src/routes/settings/OrgListSection.test.tsx`:
   `Delete ${entry.name}` - `OrgListSection.tsx` - for both sections.)
 
 Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/orgs/orgCopy.test.ts src/routes/settings/OrgListSection.test.tsx`.
-Expected RED: `blockingUses` is not exported; the Delete dialog counts the
+Expected RED: `blockingUses` is not exported; the "+1 deleted" case reads
+"(+2 deleted)" and "2 deleted" (Task 7.1's functions still read the
+per-column `deleted`); the Delete dialog counts the
 column sum (0+0+0+1 = 1, and says "1 record still holds"); Change kind of
 Step Up is DISABLED (the column sum counts the deleted organization holder)
 and lacks the organization sentence; the Atlanta Change kind sentence is A's
@@ -9724,6 +10027,23 @@ Implement:
      return t.active + t.deleted;
    }
    ```
+
+   In the same file, the deleted count both usage texts show becomes the
+   DISTINCT `inUse.deleted` (plan review R1 ruling A10; the per-column wire
+   `deleted` stays in the type for compatibility only). In `usageText` replace
+   `` return u.deleted > 0 ? `${base} (+${u.deleted} deleted)` : base; `` with
+
+   ```ts
+     // Distinct deleted records (R1 ruling A10): one deleted record holding the
+     // name in two fields is ONE record; the per-column `deleted` would say 2.
+     return u.inUse.deleted > 0 ? `${base} (+${u.inUse.deleted} deleted)` : base;
+   ```
+
+   and in `usageBreakdown` replace
+   `` return `${usageColumns(u)}, ${u.deleted} deleted`; `` with
+   `` return `${usageColumns(u)}, ${u.inUse.deleted} deleted`; ``
+   (both lines are Task 7.1's text; `grep -n "u\.deleted" "W:/tmp/caseworkers/dashboard/src/routes/orgs/orgCopy.ts"`
+   prints nothing afterwards - step 1 above already replaced `usageTotal`).
 
 2. `dashboard/src/routes/settings/OrgEntryDialogs.tsx`:
    - in the `../orgs/orgCopy.js` import replace `usageTotal,` with `blockingUses,` and add `withArticle,`.
@@ -9900,15 +10220,36 @@ Implement (`dashboard/src/routes/settings/NotOnListSection.tsx`):
 1. Imports: from `'../../api/index.js'` add `type OrgKind`; in the
    `'../orgs/orgCopy.js'` import replace `kindForField,` with `kindsForField,`;
    add `import { OrgKindChoice } from '../orgs/OrgKindChoice.js';`.
-2. `function settleChoices(row: NotOnListRow)`: `const kind = kindForField(row.field);` becomes
-   `const kinds = kindsForField(row.field);` and
+2. `function settleChoices(row: NotOnListRow)`: its `const kind = kindForField(row.field);`
+   (the FIRST of the file's two occurrences - the one inside `settleChoices`)
+   becomes `const kinds = kindsForField(row.field);` and
    `for (const ref of spans) if (ref.kind === kind) offerUse(ref.name);` becomes
    `for (const ref of spans) if (kinds.includes(ref.kind)) offerUse(ref.name);`.
-   In its doc, "a compound value's halves of the field's kind" becomes
-   "a compound value's halves of a kind the field accepts (both, for an
-   organization - spec D17)" and add "An organization row is never offered
-   Move or Split (the field has no other kind)."
-3. `function SettleDialog(`: replace `const kind = kindForField(row.field);` with:
+   Its doc (plan review R1 ruling S6: the phrase "a compound value's halves
+   of the field's kind" spans two lines; anchor on the second, which is
+   unique and on one line) - replace the line
+
+   ```ts
+    * the field's kind, its close names); Split for a compound housing authority
+   ```
+
+   with the two lines
+
+   ```ts
+    * a kind the field accepts - both, for an organization, spec D17 - its close
+    * names); Split for a compound housing authority
+   ```
+
+   and replace the doc's last text line
+   ` * server refuses it (409 org_value_is_name_variant).` (unique) with
+
+   ```ts
+    * server refuses it (409 org_value_is_name_variant). An organization row is
+    * never offered Move or Split (the field has no other kind).
+   ```
+
+3. `function SettleDialog(`: replace its `const kind = kindForField(row.field);`
+   (the SECOND occurrence - the one inside `SettleDialog`) with:
 
    ```ts
      const kinds = kindsForField(row.field);
@@ -9953,17 +10294,32 @@ Implement (`dashboard/src/routes/settings/NotOnListSection.tsx`):
      ```
 
    - the "Name to use" picker `kinds={kind === 'agency' ? AGENCY_KINDS : HOUSING_AUTHORITY_KINDS}` becomes `kinds={kinds}`.
-   - in the `{settle.action === 'add' ? (` block, after the Name input's closing
-     `</div>` and before the block's `) : null}`, insert:
+   - the Kind choice: ONE placement (plan review R1 ruling S4) - a SIBLING
+     right after the Name block's whole `{settle.action === 'add' ? ( ... ) : null}`
+     expression, never inside it (two JSX siblings inside that ternary would
+     be a syntax error). Replace (unique: `setAddName(e.target.value)` and
+     `{rememberApplies ? (` each occur once in the file)
 
      ```tsx
-             {settle.action === 'add' && organizationRow ? (
-               <OrgKindChoice value={addKind} onChange={setAddKind} disabled={busy} />
-             ) : null}
+              onChange={(e) => setAddName(e.target.value)}
+            />
+          </div>
+        ) : null}
+        {rememberApplies ? (
      ```
 
-     (place it as a sibling right after that `{settle.action === 'add' ? ( ... ) : null}`
-     expression - not inside the `.field` div).
+     with
+
+     ```tsx
+              onChange={(e) => setAddName(e.target.value)}
+            />
+          </div>
+        ) : null}
+        {settle.action === 'add' && organizationRow ? (
+          <OrgKindChoice value={addKind} onChange={setAddKind} disabled={busy} />
+        ) : null}
+        {rememberApplies ? (
+     ```
 4. `dashboard/src/routes/orgs/orgCopy.ts`: delete `kindForField` (doc + body) -
    `grep -rn kindForField dashboard/src` must print nothing.
 
@@ -9981,7 +10337,7 @@ Files: `dashboard/src/routes/orgs/orgCopy.ts`,
 `dashboard/src/routes/orgs/orgCopy.test.ts`,
 `dashboard/src/routes/contact/ContactEditForm.test.tsx` (PIN only).
 
-This task builds the seam of CI-2: the form's org plumbing becomes
+This task builds the seam of assembly ruling S5/S7-2: the form's org plumbing becomes
 field-keyed with the two tenant arms; S8 adds the organization arm and the
 partner picker. Nothing here changes what a tenant form does.
 
@@ -10104,7 +10460,7 @@ typecheck and `cd "W:/tmp/caseworkers"; npx eslint dashboard/src/routes/contact/
 Commit: `git status` (read it), then
 `cd "W:/tmp/caseworkers"; git add dashboard/src/routes/orgs/orgCopy.ts dashboard/src/routes/orgs/orgCopy.test.ts dashboard/src/routes/contact/ContactEditForm.tsx; git commit -m "feat(caseworkers): the contact edit form routes org answers by field" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
 
-S8 picks up from here (CI-2): the `organization` state, `orgSetters.organization`,
+S8 picks up from here (assembly ruling S5/S7-2): the `organization` state, `orgSetters.organization`,
 the partner Organization picker with `onRequestAdd={(text) => setAdding({ field: 'organization', text })}`,
 its typed text (`useTypedOrgText(orgList, ORGANIZATION_KINDS, organizationPicker)`),
 `settleTypedText` and `buildPatch` arms, and the error line
@@ -10116,14 +10472,14 @@ with `orgListLoadError(ORGANIZATION_KINDS)`.
 > **Assembly notes (BINDING - they override the task text below where they differ;
 > `plan-research/plan-assembly-rulings.md`):**
 > - `isCaseworkerContact` lives in `dashboard/src/routes/contact/caseworkerRole.ts` (S1's module), not in `CaseworkerDialog.tsx`; Task 8.3 adds it there and every importer imports it from there (S8-7).
-> - The Caseworkers and Possible lists render `<ul aria-label="Caseworkers">` / `<ul aria-label="Possible caseworkers">`, one `<li>` per row (S10 CI-2).
+> - The Caseworkers and Possible lists render `<ul aria-label="Caseworkers">` / `<ul aria-label="Possible caseworkers">`, one `<li>` per row (assembly ruling S10 "row lists").
 > - The dialog count sentences, including the `leftOther` line, are plan 3.9 verbatim (S8-4).
 
 Read spec D16-D19, D21 and D22, plan sections 3.1, 3.2, 3.8 and 3.9, rulings
 R4 (all) and R2-F3/F4/F8, and `.superpowers/sdd/plan-research/R4-reference.md`
 before Task 8.1. This slice assumes S1 (the dashboard module
 `dashboard/src/routes/contact/caseworkerRole.ts` exporting `CASEWORKER_ROLE`,
-`isCaseworkerRole`, `mentionsCaseworker`) and S7 (CONTRACT ISSUE C1's names)
+`isCaseworkerRole`, `mentionsCaseworker`) and S7 (assembly ruling S5/S7-1's names)
 are in. The server (S1-S6) is mocked in every unit test here; no e2e spec is
 added (S10 owns them), but two e2e-workspace unit pins and one e2e selector
 move here (C2, C3).
@@ -10366,7 +10722,7 @@ export interface ContactsPage {
 export interface CaseworkerConversionRecord {
   /** ISO 8601. */
   at: string;
-  /** The actor's email. */
+  /** The actor's userId (the session's `req.user.userId`, as audit rows record actors) - never an email. */
   by: string;
   fromType: ContactType;
   fromRole?: string;
@@ -10881,9 +11237,13 @@ Commit `feat(dashboard): KindPicker offers the Caseworker preset and filters cas
 
 ### Task 8.3 - CaseworkerDialog: the conversion's one confirm dialog (and `isCaseworkerContact`)
 
-Files (all new, plan 3.1): `dashboard/src/routes/contact/CaseworkerDialog.tsx`,
+Files (new, plan 3.1): `dashboard/src/routes/contact/CaseworkerDialog.tsx`,
 `dashboard/src/routes/contact/CaseworkerDialog.test.tsx`,
-`dashboard/src/routes/contact/CaseworkerDialog.module.css`.
+`dashboard/src/routes/contact/CaseworkerDialog.module.css`; and
+`dashboard/src/routes/contact/caseworkerRole.ts` (S1's module) gains
+`isCaseworkerContact` - it is DEFINED there, never in the dialog, and every
+importer (this task's test, Tasks 8.5, 8.8 and 8.12) imports it from
+`caseworkerRole.js` (assembly ruling S8-7; plan review R1 ruling A9).
 
 Existing tests this task changes: none.
 
@@ -10903,6 +11263,13 @@ Design (spec D19, D22; rulings R4-03, R4-08, R4-09, R4-13, R4-14; C4, C5, C7):
   the preview's refusals; `contact_changed` says so and re-reads the preview
   (and resets the picker's baseline); a 422 `org_not_on_list` on `organization`
   shows under the picker; anything else is the generic line.
+- `preview.alreadyCaseworker` (the server's `make` then re-runs steps 2-4 and
+  IGNORES a request organization, plan 3.4 rule 2): the dialog hides the
+  Organization picker, says "This contact is already a caseworker. Confirming
+  re-runs the cleanup." and sends no `organization` (plan review R1 ruling
+  B8 - staff must not believe they set one).
+- The thread-count sentences are plan 3.9 verbatim, the `leftOther` line
+  included ("... without a type ...", plan review R1 ruling A15).
 
 RED - create `dashboard/src/routes/contact/CaseworkerDialog.test.tsx`:
 
@@ -10930,7 +11297,8 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { CaseworkerDialog, isCaseworkerContact } from './CaseworkerDialog.js';
+import { CaseworkerDialog } from './CaseworkerDialog.js';
+import { isCaseworkerContact } from './caseworkerRole.js';
 
 function orgEntry(kind: OrgEntry['kind'], name: string, spellings: string[] = []): OrgEntry {
   return {
@@ -11024,10 +11392,36 @@ describe('CaseworkerDialog', () => {
     expect(within(d).getByText('2 pending AI suggestions')).toBeInTheDocument();
     expect(within(d).getByText('1 conversation will become a partner conversation.')).toBeInTheDocument();
     expect(within(d).getByText('2 shared conversations stay as they are.')).toBeInTheDocument();
-    expect(within(d).getByText('1 other conversation stays as it is.')).toBeInTheDocument();
+    expect(within(d).getByText('1 conversation without a type stays as it is.')).toBeInTheDocument();
     // The picker shows the preview's organization.
     expect(organization()).toBeInTheDocument();
     expect(within(d).getByRole('button', { name: 'Remove Hope Atlanta' })).toBeInTheDocument();
+  });
+
+  it('the plural thread sentences are plan 3.9 verbatim', async () => {
+    previewCaseworker.mockResolvedValue({ ...CLEAN, threads: { retype: 2, leftShared: 3, leftOther: 2 } });
+    renderDialog();
+    await ready();
+    const d = dialog();
+    expect(within(d).getByText('2 conversations will become partner conversations.')).toBeInTheDocument();
+    expect(within(d).getByText('3 shared conversations stay as they are.')).toBeInTheDocument();
+    expect(within(d).getByText('2 conversations without a type stay as they are.')).toBeInTheDocument();
+  });
+
+  it('an existing caseworker: no Organization picker, it says Confirm re-runs the cleanup, and sends no organization (plan review R1 ruling B8)', async () => {
+    const user = userEvent.setup();
+    previewCaseworker.mockResolvedValue({
+      ...CLEAN,
+      alreadyCaseworker: true,
+      organization: { value: 'Hope Atlanta', source: 'stored' },
+    });
+    renderDialog();
+    await ready();
+    const d = dialog();
+    expect(within(d).getByText('This contact is already a caseworker. Confirming re-runs the cleanup.')).toBeInTheDocument();
+    expect(within(d).queryByRole('combobox', { name: 'Organization' })).toBeNull();
+    await user.click(confirm());
+    expect(makeCaseworker).toHaveBeenCalledWith('c1', {});
   });
 
   it('says nothing about a count that is zero', async () => {
@@ -11346,16 +11740,13 @@ import {
 } from '../orgs/orgCopy.js';
 import { useOrgList } from '../orgs/useOrgList.js';
 import { useTypedOrgText } from '../orgs/useTypedOrgText.js';
-import { isCaseworkerRole } from './caseworkerRole.js';
 import { Modal } from './Modal.js';
 import styles from './CaseworkerDialog.module.css';
 
-/** "A caseworker", everywhere in this design (spec D16): a partner whose role
- *  satisfies isCaseworkerRole. Hosts pass the STORED contact (ruling R4-15). */
-export function isCaseworkerContact(contact: Pick<Contact, 'type' | 'role'>): boolean {
-  return contact.type === 'partner' && isCaseworkerRole(contact.role);
-}
+// isCaseworkerContact is NOT here: it lives in ./caseworkerRole.ts (assembly
+// ruling S8-7), so a page that only needs the predicate never imports the dialog.
 
+export const ALREADY_CASEWORKER = 'This contact is already a caseworker. Confirming re-runs the cleanup.';
 export const CASEWORKER_STAYS =
   'Past tours, closed placements, properties sent and other details stay on the record.';
 export const CONTACT_CHANGED_COPY = 'This contact changed while this was open. Review and try again.';
@@ -11455,10 +11846,11 @@ function threadLines(preview: CaseworkerPreview): string[] {
     );
   }
   if (leftOther > 0) {
+    // Type-less rows only (plan 3.2, R1-F15) - plan 3.9 verbatim.
     lines.push(
       leftOther === 1
-        ? '1 other conversation stays as it is.'
-        : `${leftOther} other conversations stay as they are.`,
+        ? '1 conversation without a type stays as it is.'
+        : `${leftOther} conversations without a type stay as they are.`,
     );
   }
   return lines;
@@ -11533,15 +11925,18 @@ export function CaseworkerDialog({ contactId, name, onConverted, onClose }: Case
 
   async function onConfirm(): Promise<void> {
     if (!canConfirm) return;
+    // An existing caseworker (B8): the picker is hidden and the server ignores
+    // a request organization, so nothing is settled and none is sent.
+    const already = preview !== null && preview.alreadyCaseworker;
     // Typed text is never dropped silently (R4-08): text naming one entry is
     // committed as a pick would be; any other text stops Confirm and says why.
-    const typed = organizationText.settle();
-    if (refusesSave(typed)) {
+    const typed = already ? null : organizationText.settle();
+    if (typed !== null && refusesSave(typed)) {
       organizationText.focus();
       return;
     }
     let next = organization;
-    if (typed.status === 'resolved') {
+    if (typed !== null && typed.status === 'resolved') {
       next = typed.name;
       setOrganization(typed.name);
     }
@@ -11549,7 +11944,7 @@ export function CaseworkerDialog({ contactId, name, onConverted, onClose }: Case
     setError(null);
     setOrgError(null);
     try {
-      const contact = await makeCaseworker(contactId, next !== baseline ? { organization: next } : {});
+      const contact = await makeCaseworker(contactId, !already && next !== baseline ? { organization: next } : {});
       onConverted(contact);
     } catch (err) {
       const refused = refusalsFrom(err);
@@ -11635,6 +12030,9 @@ export function CaseworkerDialog({ contactId, name, onConverted, onClose }: Case
               </p>
             ))}
             <p className={styles.note}>{CASEWORKER_STAYS}</p>
+            {preview.alreadyCaseworker ? (
+              <p className={styles.note}>{ALREADY_CASEWORKER}</p>
+            ) : (
             <OrgPicker
               ref={organizationPicker}
               label="Organization"
@@ -11657,6 +12055,7 @@ export function CaseworkerDialog({ contactId, name, onConverted, onClose }: Case
               }
               errorAttempt={organizationText.refusalAttempt}
             />
+            )}
           </div>
         )}
         {error !== null ? (
@@ -11682,7 +12081,27 @@ export function CaseworkerDialog({ contactId, name, onConverted, onClose }: Case
 }
 ```
 
+GREEN (c) - `dashboard/src/routes/contact/caseworkerRole.ts` (S1's module),
+append at the end:
+
+```ts
+
+/**
+ * "A caseworker", everywhere in this design (spec D16): a partner whose role
+ * satisfies isCaseworkerRole. Hosts pass the STORED contact (ruling R4-15).
+ * Structurally typed, so this module keeps its import rule (the D4
+ * normalizer only); a dashboard `Contact` satisfies it. Every importer
+ * imports it from HERE (assembly ruling S8-7), never from CaseworkerDialog.
+ */
+export function isCaseworkerContact(contact: { type?: unknown; role?: unknown }): boolean {
+  return contact.type === 'partner' && isCaseworkerRole(contact.role);
+}
+```
+
 Notes for the builder:
+- In GREEN (b) the `<OrgPicker ... />` element sits in the second branch of
+  the `preview.alreadyCaseworker ? ( ... ) : ( ... )` ternary; its props are
+  as written - re-indent the element two spaces when you write the file.
 - `onClose={busy ? () => {} : onClose}` is NewOrgDialog's precedent
   (`NewOrgDialog.tsx:184`): a close while `make` is in flight is ignored.
 - The preview effect sets state only inside the promise callbacks (never
@@ -11696,12 +12115,17 @@ Notes for the builder:
 GREEN:
 - `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/contact/CaseworkerDialog.test.tsx` - all pass.
 - `cd "W:/tmp/caseworkers"; npm run typecheck` - exit 0.
-- `cd "W:/tmp/caseworkers"; npx eslint dashboard/src/routes/contact/CaseworkerDialog.tsx dashboard/src/routes/contact/CaseworkerDialog.test.tsx` - no errors.
+- `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/contact/caseworkerRoleMirror.test.ts` - still green.
+- `cd "W:/tmp/caseworkers"; npm run typecheck` is above; then
+  `cd "W:/tmp/caseworkers"; npx eslint dashboard/src/routes/contact/CaseworkerDialog.tsx dashboard/src/routes/contact/CaseworkerDialog.test.tsx dashboard/src/routes/contact/caseworkerRole.ts` - no errors.
+- `cd "W:/tmp/caseworkers"; git grep -n "isCaseworkerContact" -- dashboard/src` - the definition is in
+  `caseworkerRole.ts` only (no `export function isCaseworkerContact` in `CaseworkerDialog.tsx`).
 
 Commit `feat(dashboard): the caseworker conversion dialog`
 (stage `dashboard/src/routes/contact/CaseworkerDialog.tsx`,
 `dashboard/src/routes/contact/CaseworkerDialog.test.tsx`,
-`dashboard/src/routes/contact/CaseworkerDialog.module.css`).
+`dashboard/src/routes/contact/CaseworkerDialog.module.css`,
+`dashboard/src/routes/contact/caseworkerRole.ts`).
 
 ### Task 8.4 - ContactCreateForm offers Caseworker (a new contact)
 
@@ -11951,7 +12375,7 @@ Every pre-existing case passes.
 GREEN - `dashboard/src/routes/contact/ContactEditForm.tsx`.
 
 Base: this task runs AFTER S7, which made the form FIELD-keyed (planner
-ruling, see CONTRACT ISSUE C1): `adding` is `{ field: OrgFormField; text }`,
+ruling, see assembly ruling S5/S7-2): `adding` is `{ field: OrgFormField; text }`,
 an `orgSetters` map holds the tenant arms (`housingAuthority`, `agency`),
 `applyOrg(field, ref)` writes `orgSetters[field](ref.name)` and clears the
 refused-save message, and the one `NewOrgDialog` after the `</form>` opens
@@ -11985,7 +12409,7 @@ Replace with:
 
 ```tsx
 import { KindPicker, type KindPickerValue } from './KindPicker.js';
-import { isCaseworkerContact } from './CaseworkerDialog.js';
+import { isCaseworkerContact } from './caseworkerRole.js';
 ```
 
 (c) In the `from '../orgs/orgCopy.js'` import list (S7 may have reshaped it),
@@ -12875,7 +13299,8 @@ Replace with:
 
 ```tsx
 import { PartnerFile } from './PartnerFile.js';
-import { CaseworkerDialog, isCaseworkerContact } from './CaseworkerDialog.js';
+import { CaseworkerDialog } from './CaseworkerDialog.js';
+import { isCaseworkerContact } from './caseworkerRole.js';
 ```
 
 (c) Current (`:199`):
@@ -13047,7 +13472,9 @@ Commit `feat(dashboard): contact page - Make caseworker, the conversion dialog, 
 Files: `dashboard/src/routes/contact/PartnerFile.tsx`,
 `dashboard/src/routes/contact/files.test.tsx`,
 `dashboard/src/routes/contact/ContactDetail.tsx` (one prop),
-`docs/issues/staff-notes-on-landlord-partner-files.md`.
+`docs/issues/staff-notes-on-landlord-partner-files.md`,
+`e2e/tests/flows/conversation-fact-extraction.spec.ts` (one assertion
+scoped - plan review R1 ruling A14).
 
 Existing tests this task changes: none - the existing `PartnerFile` describe
 (`files.test.tsx:544-591`, Group threads) is a PIN; new cases go in their own
@@ -13320,16 +13747,43 @@ confirmed 2026-10-07). The LANDLORD half (and the `UnknownFile` question)
 stays open, still a product question for Sam.
 ```
 
+GREEN (d) - the e2e assertion this task makes ambiguous (plan review R1
+ruling A14). After this task a role-less partner's page shows "Partner"
+TWICE - the header pill and the new Details "Role" row - so the page-wide
+exact `getByText('Partner')` in
+`e2e/tests/flows/conversation-fact-extraction.spec.ts:342` (right after
+"Mark as Partner") resolves two elements: a strict-mode violation. Scope it,
+exact, within its card. Current (ASCII, unique in the file):
+
+```ts
+  await expect(page.getByText('Partner', { exact: true })).toBeVisible();
+```
+
+Replace with:
+
+```ts
+  // Scoped to the Details card, exact (caseworkers: the partner page shows
+  // "Partner" twice - the header pill and the Details card's Role row, which
+  // reads the type for a role-less partner).
+  const partnerDetails = page.locator('section', { has: page.getByRole('heading', { name: /^Details/ }) });
+  await expect(partnerDetails.getByText('Partner', { exact: true })).toBeVisible();
+```
+
+(The Details card's heading name may carry its "Edit" aside, hence the
+anchored regex; `selectors.md:37`.)
+
 GREEN:
 - `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/contact/files.test.tsx src/routes/contact/ContactDetail.test.tsx src/routes/contact/TenantFile.test.tsx` - all pass.
-- `cd "W:/tmp/caseworkers"; npm run typecheck` - exit 0.
+- `cd "W:/tmp/caseworkers"; npm run typecheck` - exit 0 (the e2e workspace included).
+- `cd "W:/tmp/caseworkers"; npx eslint e2e/tests/flows/conversation-fact-extraction.spec.ts` - no error on an added line.
 - `cd "W:/tmp/caseworkers"; npm run issues` - regenerates the gitignored index; nothing to stage from it.
 
 Commit `feat(dashboard): partner page shows Role, Organization and Staff notes`
 (stage `dashboard/src/routes/contact/PartnerFile.tsx`,
 `dashboard/src/routes/contact/files.test.tsx`,
 `dashboard/src/routes/contact/ContactDetail.tsx`,
-`docs/issues/staff-notes-on-landlord-partner-files.md`).
+`docs/issues/staff-notes-on-landlord-partner-files.md`,
+`e2e/tests/flows/conversation-fact-extraction.spec.ts`).
 
 ### Task 8.10 - FilterChips: `ChipGroup` and `Chip` factored out of TenantFilters
 
@@ -14141,7 +14595,8 @@ import {
   type PossibleSignal,
 } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
-import { CaseworkerDialog, isCaseworkerContact } from '../contact/CaseworkerDialog.js';
+import { CaseworkerDialog } from '../contact/CaseworkerDialog.js';
+import { isCaseworkerContact } from '../contact/caseworkerRole.js';
 import { Modal } from '../contact/Modal.js';
 import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
 import { contactDisplayName, formatPhone } from '../contact/format.js';
@@ -14540,11 +14995,15 @@ Replace with:
     expect(screen.getByRole('link', { name: 'Contacts' })).toHaveAttribute('href', '/contacts');
     // Spec 2026-10-06 D18: the one addition to the locked nav.
     expect(screen.getByRole('link', { name: 'Caseworkers' })).toHaveAttribute('href', '/contacts/caseworkers');
+    // The child links carry NO aria-label (NavContents renders them as
+    // <NavLink> with the label as a child span; only the parent link sets
+    // aria-label), so match them by their ACCESSIBLE NAME - getAllByRole
+    // returns them in document order - and read the visible label
+    // (plan review R1 ruling A13).
     const workspace = screen.getByRole('navigation', { name: 'Workspace' });
     const children = within(workspace)
-      .getAllByRole('link')
-      .map((a) => a.getAttribute('aria-label'))
-      .filter((label) => label === 'Tenants' || label === 'Landlords' || label === 'Caseworkers' || label === 'Unknown');
+      .getAllByRole('link', { name: /^(Tenants|Landlords|Caseworkers|Unknown)$/ })
+      .map((a) => a.textContent);
     expect(children).toEqual(['Tenants', 'Landlords', 'Caseworkers', 'Unknown']);
   });
 ```
@@ -14838,7 +15297,7 @@ errors stay named, not fixed).
 > `plan-research/plan-assembly-rulings.md`):**
 > - The landlord timeline stored-count site keeps "Sent to N recipient(s)" at every N (S6/S9-2); the plan 3.9 share-wording table is binding byte-for-byte.
 
-Spec D20, D22 "Share wording" (strings: contract issue 3's table), rulings
+Spec D20, D22 "Share wording" (strings: plan 3.9's table, assembly ruling S6/S9-3), rulings
 R3-F1, F2, F3, F5, F7, F9, F13. Depends on S6 (the recipients wire's
 `type`/`role`; the server accepting a partner seed) and runs after S8 (which
 edits PartnerFile / ContactDetail too - see the coordination note at the top).
@@ -14846,10 +15305,14 @@ No new GET: PartnerFile's card reads the `units` and `listingsSent` slices
 `useContactFile` already loads for every contact (R3 P4), so the page
 profiler is unaffected.
 
-Every task's e2e pin edits are LISTED for S10 (which owns the e2e files and
-runs the suite); a dashboard task never edits `e2e/tests/**`. Task 9.6 owns
-the one `e2e/support/selectors.md` change. The consolidated S10 list is at
-the end of this slice.
+Every task edits the e2e pins of the copy it changes, IN THE SAME TASK
+(plan review R1 ruling A3; section 0 "e2e pins move with their copy"): the
+spec lines are quoted in the task, the task runs the e2e workspace typecheck
+and eslint on them, and stages them with its dashboard files. It does not run
+the e2e suite (Task 10.4 re-runs every pinned test; Task 10.13 the whole
+suite). Task 9.6 owns the `e2e/support/selectors.md` share rows (line 45, the
+partner card row and the "Sent to" card row). The S9 -> S10 handoff at the
+end of this slice is now a record of what moved where.
 
 Unchanged on purpose (D22, ruling R3-F2) - do not "fix" these:
 `Add more tenants by filters` (BroadcastComposer), `Add a tenant` (label and
@@ -14862,10 +15325,18 @@ tenant-only filter or search.
 
 Files: `dashboard/src/routes/listing/ListingActionsMenu.tsx`,
 `dashboard/src/routes/listing/ListingDetail.tsx`,
-`dashboard/src/routes/listing/ListingDetail.test.tsx`.
+`dashboard/src/routes/listing/ListingDetail.test.tsx`,
+`dashboard/src/routes/contact/Card.tsx` (comment only, plan review R1 ruling
+A12); e2e pins (ruling A3): `e2e/tests/dashboard-next/broadcasts.spec.ts`,
+`e2e/scenarios/steps.ts`, `e2e/tests/dashboard-next/matching-entry-points.spec.ts`,
+`e2e/tests/dashboard-next/listing-activity.spec.ts`.
 
 RED - `dashboard/src/routes/listing/ListingDetail.test.tsx`. Current (two
-lines carry U+22EF):
+lines carry U+22EF, written `{...h}` below - the section 0 glyph legend,
+plan review R1 ruling B3: Read the block and copy it exactly as the
+old_string; if that cannot match, replace from the line holding the unique
+ASCII substring `menu holds Start placement + Send to tenants (moved off the hero)`
+through the closing `});` of the test after it):
 
 ```ts
   it('the {...h} menu holds Start placement + Send to tenants (moved off the hero)', async () => {
@@ -14946,7 +15417,9 @@ GREEN.
               Send this property
 ```
 
-   And the JSDoc line (it contains U+2192 - the WHOLE line becomes ASCII).
+   And the JSDoc line (it contains U+2192, written `{->}` - section 0 glyph
+   legend; the line holding the unique ASCII substring
+   `Omitted on a deleted property` - the WHOLE line becomes ASCII).
    Current `  /** Send this property to tenants. Omitted on a deleted property {->} no item. */`
    Replace with:
 
@@ -14994,32 +15467,196 @@ GREEN.
 // a full-width Photos gallery:
 ```
 
-   The Tours comment line contains an em dash (the WHOLE line becomes
-   ASCII). Current `          {/* Tours sit between Sent-to-tenants and Placements {--} the flow order`
+   The Tours comment line contains an em dash, written `{--}` (section 0
+   glyph legend; the line holding the unique ASCII substring
+   `Tours sit between Sent-to-tenants and Placements` - the WHOLE line
+   becomes ASCII). Current `          {/* Tours sit between Sent-to-tenants and Placements {--} the flow order`
    Replace with `          {/* Tours sit between Sent-to and Placements - the flow order`.
 
+3. `dashboard/src/routes/contact/Card.tsx` (comment only, plan review R1
+   ruling A12). Current (ASCII, unique):
+
+```ts
+/** The ONE shared tour-state chip both send-roster cards render ("Sent to
+ *  tenants" on the property page + "Properties sent" on the tenant file). It is a
+```
+
+   Replace with:
+
+```ts
+/** The ONE shared tour-state chip both send-roster cards render ("Sent to"
+ *  on the property page + "Properties sent" on a contact's file). It is a
+```
+
+4. The e2e pins of this copy (plan review R1 ruling A3). Every "Current"
+   below is unique in its file unless the line says otherwise; all ASCII.
+
+   (a) `e2e/tests/dashboard-next/broadcasts.spec.ts:140-143`. Current:
+
+```ts
+    // --- Compose from the property: "Send to tenants" in the kebab menu. ---
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: 'Send to tenants' }).click();
+```
+
+   Replace with:
+
+```ts
+    // --- Compose from the property: "Send this property" in the kebab menu. ---
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    await page.getByRole('button', { name: 'More actions' }).click();
+    await page.getByRole('menuitem', { name: 'Send this property', exact: true }).click();
+```
+
+   (b) `e2e/scenarios/steps.ts:1051-1054`. Current:
+
+```ts
+      // "Send to tenants" lives in the header kebab (More actions) menu now,
+      // not as a standalone hero button.
+      await this.page.getByRole('button', { name: 'More actions' }).click();
+      await this.page.getByRole('menuitem', { name: 'Send to tenants' }).click();
+```
+
+   Replace with:
+
+```ts
+      // "Send this property" lives in the header kebab (More actions) menu,
+      // not as a standalone hero button (neutral since caseworkers, D22).
+      await this.page.getByRole('button', { name: 'More actions' }).click();
+      await this.page.getByRole('menuitem', { name: 'Send this property', exact: true }).click();
+```
+
+   (`steps.ts:1059` carries a pre-existing non-ASCII dash: do not touch it.)
+
+   (c) `e2e/tests/dashboard-next/matching-entry-points.spec.ts`, three edits
+   (its `:152` / `:235` composer pins are Task 9.4's).
+
+   Header comment, current (`:13-16`):
+
+```ts
+//   2. From a PROPERTY detail page ("Sent to tenants" card -> "+ Send"): the
+//      audience-filtered composer with the unit pre-filled, curated down to one
+//      hand-picked tenant (Deselect all -> add one via search) -> Send -> the
+//      "Sent to tenants" card lists them.
+```
+
+   Replace with:
+
+```ts
+//   2. From a PROPERTY detail page ("Sent to" card -> "+ Send"): the
+//      audience-filtered composer with the unit pre-filled, curated down to one
+//      hand-picked tenant (Deselect all -> add one via search) -> Send -> the
+//      "Sent to" card lists them.
+```
+
+   `:203-206`. Current:
+
+```ts
+    // From the property page, the "Sent to tenants" card "+ Send" action opens the
+    // audience-filtered composer with the unit pre-filled (?unitId=).
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    await page.getByRole('button', { name: 'Send this property to tenants' }).click();
+```
+
+   Replace with:
+
+```ts
+    // From the property page, the "Sent to" card "+ Send" action opens the
+    // audience-filtered composer with the unit pre-filled (?unitId=).
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    await page.getByRole('button', { name: 'Send this property', exact: true }).click();
+```
+
+   `:260-264`. Current:
+
+```ts
+    // The property page's "Sent to tenants" card now lists the hand-picked tenant.
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    const sentCard = page.locator('section', {
+      has: page.getByRole('heading', { name: 'Sent to tenants' }),
+    });
+```
+
+   Replace with:
+
+```ts
+    // The property page's "Sent to" card now lists the hand-picked tenant. The
+    // heading's name is "Sent to" PLUS its "Send this property" action (Card
+    // renders the aside inside the <h3>), so match the prefix, never exact.
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    const sentCard = page.locator('section', {
+      has: page.getByRole('heading', { name: /^Sent to\b/ }),
+    });
+```
+
+   (d) `e2e/tests/dashboard-next/listing-activity.spec.ts`, three edits (its
+   `:143` Activity pin is Task 9.3's).
+
+   `:180` (comment). Current:
+
+```ts
+    // records a listing_sends row (the "Sent to tenants" ledger).
+```
+
+   Replace with:
+
+```ts
+    // records a listing_sends row (the "Sent to" ledger).
+```
+
+   `:161`. Current:
+
+```ts
+test.describe('Property detail - "Sent to tenants" tour chip (listing-response-tour-chip)', () => {
+```
+
+   Replace with:
+
+```ts
+test.describe('Property detail - "Sent to" tour chip (listing-response-tour-chip)', () => {
+```
+
+   `:211-216`. Current:
+
+```ts
+    // The "Sent to tenants" card shows both recipients with NO tour chip, and
+    // the dead "No reply" label appears nowhere on the page.
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    const card = page.locator('section', {
+      has: page.getByRole('heading', { name: 'Sent to tenants' }),
+    });
+```
+
+   Replace with:
+
+```ts
+    // The "Sent to" card shows both recipients with NO tour chip, and the dead
+    // "No reply" label appears nowhere on the page. The heading's name carries
+    // its "Send this property" action too: match the prefix.
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    const card = page.locator('section', {
+      has: page.getByRole('heading', { name: /^Sent to\b/ }),
+    });
+```
+
 Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/listing` - GREEN. Typecheck
-(`cd "W:/tmp/caseworkers"; npm run typecheck`) exit 0.
+(`cd "W:/tmp/caseworkers"; npm run typecheck`) exit 0 (it typechecks the e2e
+workspace too). Lint the edited e2e files:
+`cd "W:/tmp/caseworkers"; npx eslint e2e/tests/dashboard-next/broadcasts.spec.ts e2e/scenarios/steps.ts e2e/tests/dashboard-next/matching-entry-points.spec.ts e2e/tests/dashboard-next/listing-activity.spec.ts`
+- no error on an added line (`steps.ts` may carry pre-existing errors: leave
+them). ASCII: `cd "W:/tmp/caseworkers"; git diff -U0 | grep '^+' | grep -nP '[^\x00-\x7F]'` prints nothing.
 
 Pins changed (dashboard): `ListingDetail.test.tsx:980-998` and the three
-titles (edited above). e2e - for S10:
-- `e2e/tests/dashboard-next/broadcasts.spec.ts:143`
-  `getByRole('menuitem', { name: 'Send to tenants' })` ->
-  `getByRole('menuitem', { name: 'Send this property' })` (comment `:140`
-  "Send to tenants" -> "Send this property");
-- `e2e/scenarios/steps.ts:1054` the same menuitem change (comment `:1051`);
-- `e2e/tests/dashboard-next/matching-entry-points.spec.ts:206`
-  `getByRole('button', { name: 'Send this property to tenants' })` ->
-  `getByRole('button', { name: 'Send this property', exact: true })`;
-- `matching-entry-points.spec.ts:263` and
-  `e2e/tests/dashboard-next/listing-activity.spec.ts:215`
-  `getByRole('heading', { name: 'Sent to tenants' })` ->
-  `getByRole('heading', { name: /^Sent to\b/ })` (the heading's accessible
-  name includes its "+ Send" action's name, so never `exact: true` here);
-- comments/titles only: `matching-entry-points.spec.ts:13, 16, 203, 260`,
-  `listing-activity.spec.ts:161, 180, 211` ("Sent to tenants" -> "Sent to").
+titles; e2e: step 4 (a)-(d) (all edited above; Task 10.4 runs them).
 
-Commit (stage the three dashboard files)
+Commit (stage the four dashboard files `dashboard/src/routes/listing/ListingActionsMenu.tsx`,
+`dashboard/src/routes/listing/ListingDetail.tsx`,
+`dashboard/src/routes/listing/ListingDetail.test.tsx`,
+`dashboard/src/routes/contact/Card.tsx`, and the four e2e files
+`e2e/tests/dashboard-next/broadcasts.spec.ts`, `e2e/scenarios/steps.ts`,
+`e2e/tests/dashboard-next/matching-entry-points.spec.ts`,
+`e2e/tests/dashboard-next/listing-activity.spec.ts`)
 `feat(caseworkers): property page says Send this property and Sent to (D22)`.
 
 ### Task 9.2 - "Sent to" rows label a resolved non-tenant recipient by its displayKind (D20, D22, ruling R3-F3)
@@ -15348,7 +15985,9 @@ Commit (stage `dashboard/src/api/types.ts`, `dashboard/src/api/endpoints.ts`,
 ### Task 9.3 - the property Activity share row says recipients (D20, D22)
 
 Files: `dashboard/src/routes/listing/listingFormat.ts`,
-`dashboard/src/routes/listing/listingFormat.test.ts`.
+`dashboard/src/routes/listing/listingFormat.test.ts`; e2e pins (plan review
+R1 ruling A3): `e2e/tests/dashboard-next/listing-activity.spec.ts`,
+`e2e/tests/dashboard-next/share-sent-outcome.spec.ts`.
 
 RED - `dashboard/src/routes/listing/listingFormat.test.ts`. Current:
 
@@ -15372,8 +16011,10 @@ Replace with:
   });
 ```
 
-Then the pluralization case (its title carries U+2192 - the WHOLE title line
-becomes ASCII). Current:
+Then the pluralization case (its title carries U+2192, written `{->}` -
+section 0 glyph legend, plan review R1 ruling B3; the title line holds the
+unique ASCII substring `pluralizes the recipient count (1 ` - the WHOLE title
+line becomes ASCII). Current:
 
 ```ts
   it('pluralizes the recipient count (1 {->} tenant) and omits the link when no broadcastId', () => {
@@ -15442,18 +16083,72 @@ Replace with:
 
 (The persisted `tenantCount` field is read as before - R3-F12.)
 
-Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/listing` - GREEN. Typecheck exit 0.
+The e2e pins of this copy (plan review R1 ruling A3; all ASCII, each
+"Current" unique in its file):
 
-Pins changed: dashboard `listingFormat.test.ts:229-253` (edited above). e2e - for S10:
-- `e2e/tests/dashboard-next/listing-activity.spec.ts:143`
-  `activity.getByRole('link', { name: /Sent to 2 tenants/ })` ->
-  `activity.getByRole('link', { name: /Sent to 2 recipients/ })`;
-- `e2e/tests/dashboard-next/share-sent-outcome.spec.ts:671`
-  `activity.getByRole('link', { name: /No tenants reached/ })` ->
-  `activity.getByRole('link', { name: /No recipients reached/ })` (title
-  `:621` and comment `:27`: "No tenants reached" -> "No recipients reached").
+(a) `e2e/tests/dashboard-next/listing-activity.spec.ts:143`. Current:
 
-Commit (stage the two files)
+```ts
+    const bcast = activity.getByRole('link', { name: /Sent to 2 tenants/ });
+```
+
+Replace with:
+
+```ts
+    const bcast = activity.getByRole('link', { name: /Sent to 2 recipients/ });
+```
+
+(b) `e2e/tests/dashboard-next/share-sent-outcome.spec.ts`, three edits.
+
+`:27` (header comment). Current:
+
+```ts
+//                                       flagged, "No tenants reached";
+```
+
+Replace with:
+
+```ts
+//                                       flagged, "No recipients reached";
+```
+
+`:621`, current (substring of the test title):
+
+```ts
+the tenant not flagged, the property Activity "No tenants reached"', async ({
+```
+
+Replace with:
+
+```ts
+the tenant not flagged, the property Activity "No recipients reached"', async ({
+```
+
+`:671`. Current:
+
+```ts
+    const entry = activity.getByRole('link', { name: /No tenants reached/ });
+```
+
+Replace with:
+
+```ts
+    const entry = activity.getByRole('link', { name: /No recipients reached/ });
+```
+
+Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/listing` - GREEN. Typecheck
+(`cd "W:/tmp/caseworkers"; npm run typecheck`, the e2e workspace included)
+exit 0. Lint the two e2e files:
+`cd "W:/tmp/caseworkers"; npx eslint e2e/tests/dashboard-next/listing-activity.spec.ts e2e/tests/dashboard-next/share-sent-outcome.spec.ts`
+- no error on an added line.
+
+Pins changed: dashboard `listingFormat.test.ts:229-253`; e2e (a) and (b)
+(all edited above; Task 10.4 runs them).
+
+Commit (stage `dashboard/src/routes/listing/listingFormat.ts`,
+`dashboard/src/routes/listing/listingFormat.test.ts`,
+`e2e/tests/dashboard-next/listing-activity.spec.ts`,
+`e2e/tests/dashboard-next/share-sent-outcome.spec.ts`)
 `feat(caseworkers): property Activity share row says recipients (D20)`.
 
 ### Task 9.4 - the composer's review step and reach line say recipients (D20, D22)
@@ -15462,7 +16157,11 @@ Files: `dashboard/src/routes/broadcasts/RecipientPreview.tsx`,
 `dashboard/src/routes/broadcasts/AudienceFilters.tsx`,
 `dashboard/src/routes/broadcasts/BroadcastComposer.tsx` (comment), and tests
 `RecipientPreview.test.tsx`, `BroadcastComposer.test.tsx`,
-`AudienceFilters.test.tsx`.
+`AudienceFilters.test.tsx`; e2e pins (plan review R1 ruling A3):
+`e2e/tests/dashboard-next/broadcasts.spec.ts`,
+`e2e/tests/dashboard-next/matching-entry-points.spec.ts`,
+`e2e/tests/dashboard-next/share-skip-fix.spec.ts`,
+`e2e/tests/dashboard-next/org-lists.spec.ts`.
 
 RED (pin edits first - each is a wording RED).
 
@@ -15537,8 +16236,10 @@ Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/broadcasts/Re
 GREEN.
 
 1. `dashboard/src/routes/broadcasts/RecipientPreview.tsx`.
-   - The empty_audience line contains an em dash (the WHOLE line becomes
-     ASCII). Current
+   - The empty_audience line contains an em dash, written `{--}` (section 0
+     glyph legend, plan review R1 ruling B3; the line holding the unique
+     ASCII substring `check at least one tenant to send` - the WHOLE line
+     becomes ASCII). Current
      `          setError('Nothing selected {--} check at least one tenant to send.');`
      Replace with:
 
@@ -15623,31 +16324,108 @@ GREEN.
    -> `// ?contactId= (compose to ONE contact - a tenant or a partner: property step first, then a seeds-only`.
    `Add more tenants by filters` stays.
 
-Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/broadcasts` - GREEN. Typecheck exit 0.
+4. The e2e pins of this copy (plan review R1 ruling A3; all ASCII, each
+   "Current" unique in its file unless the line says otherwise).
+
+   (a) `e2e/tests/dashboard-next/broadcasts.spec.ts:247`. Current:
+
+```ts
+    await page.getByRole('button', { name: /^Send to \d+ tenants?$/ }).click();
+```
+
+   Replace with:
+
+```ts
+    await page.getByRole('button', { name: /^Send to \d+ recipients?$/ }).click();
+```
+
+   (b) `e2e/tests/dashboard-next/matching-entry-points.spec.ts:152` and
+   `:235` - the same line twice; use the Edit tool with `replace_all: true`.
+   Current:
+
+```ts
+    await page.getByRole('button', { name: /^Send to 1 tenant\b/ }).click();
+```
+
+   Replace with:
+
+```ts
+    await page.getByRole('button', { name: /^Send to 1 recipient\b/ }).click();
+```
+
+   (c) `e2e/tests/dashboard-next/share-skip-fix.spec.ts:31`. Current:
+
+```ts
+const NOTE = 'Flagged tenants you picked stay checked; "Select all" skips the others.';
+```
+
+   Replace with:
+
+```ts
+const NOTE = 'Flagged recipients you picked stay checked; "Select all" skips the others.';
+```
+
+   `share-skip-fix.spec.ts:190`. Current:
+
+```ts
+    await page.getByRole('button', { name: /^Send to 1 tenant\b/ }).click();
+```
+
+   Replace with:
+
+```ts
+    await page.getByRole('button', { name: /^Send to 1 recipient\b/ }).click();
+```
+
+   (d) `e2e/tests/dashboard-next/org-lists.spec.ts`, two edits.
+
+   `:349`. Current:
+
+```ts
+    await expect(page.getByText('Reaches 2 tenants', { exact: true })).toBeVisible();
+```
+
+   Replace with:
+
+```ts
+    await expect(page.getByText('Reaches 2 recipients', { exact: true })).toBeVisible();
+```
+
+   `:465`. Current:
+
+```ts
+    await expect(page.getByText('Reaches 1 tenant', { exact: true })).toBeVisible();
+```
+
+   Replace with:
+
+```ts
+    await expect(page.getByText('Reaches 1 recipient', { exact: true })).toBeVisible();
+```
+
+   Survive unchanged: `/^Send to/` at `broadcasts.spec.ts:191`,
+   `a2p-compliance.spec.ts:402`, `e2e/scenarios/steps.ts:1074`.
+
+Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/broadcasts` - GREEN. Typecheck
+(`cd "W:/tmp/caseworkers"; npm run typecheck`, the e2e workspace included)
+exit 0. Lint the four e2e files:
+`cd "W:/tmp/caseworkers"; npx eslint e2e/tests/dashboard-next/broadcasts.spec.ts e2e/tests/dashboard-next/matching-entry-points.spec.ts e2e/tests/dashboard-next/share-skip-fix.spec.ts e2e/tests/dashboard-next/org-lists.spec.ts`
+- no error on an added line.
 
 Pins changed (dashboard): the RecipientPreview / BroadcastComposer /
-AudienceFilters lines listed above. e2e - for S10:
-- `e2e/tests/dashboard-next/broadcasts.spec.ts:247`
-  `getByRole('button', { name: /^Send to \d+ tenants?$/ })` ->
-  `getByRole('button', { name: /^Send to \d+ recipients?$/ })`;
-- `e2e/tests/dashboard-next/matching-entry-points.spec.ts:152` and `:235`
-  `{ name: /^Send to 1 tenant\b/ }` -> `{ name: /^Send to 1 recipient\b/ }`;
-- `e2e/tests/dashboard-next/share-skip-fix.spec.ts:190` the same;
-  `share-skip-fix.spec.ts:31`
-  `const NOTE = 'Flagged tenants you picked stay checked; "Select all" skips the others.';`
-  -> `const NOTE = 'Flagged recipients you picked stay checked; "Select all" skips the others.';`;
-- `e2e/tests/dashboard-next/org-lists.spec.ts:349`
-  `getByText('Reaches 2 tenants', { exact: true })` -> `getByText('Reaches 2 recipients', { exact: true })`;
-  `:465` `'Reaches 1 tenant'` -> `'Reaches 1 recipient'`.
-Survive unchanged: `/^Send to/` at `broadcasts.spec.ts:191`,
-`a2p-compliance.spec.ts:402`, `e2e/scenarios/steps.ts:1074`.
+AudienceFilters lines listed above; e2e: step 4 (a)-(d) (Task 10.4 runs
+them).
 
 Commit (stage `dashboard/src/routes/broadcasts/RecipientPreview.tsx`,
 `dashboard/src/routes/broadcasts/AudienceFilters.tsx`,
 `dashboard/src/routes/broadcasts/BroadcastComposer.tsx`,
 `dashboard/src/routes/broadcasts/RecipientPreview.test.tsx`,
 `dashboard/src/routes/broadcasts/BroadcastComposer.test.tsx`,
-`dashboard/src/routes/broadcasts/AudienceFilters.test.tsx`)
+`dashboard/src/routes/broadcasts/AudienceFilters.test.tsx`,
+`e2e/tests/dashboard-next/broadcasts.spec.ts`,
+`e2e/tests/dashboard-next/matching-entry-points.spec.ts`,
+`e2e/tests/dashboard-next/share-skip-fix.spec.ts`,
+`e2e/tests/dashboard-next/org-lists.spec.ts`)
 `feat(caseworkers): composer review and reach say recipients (D20, D22)`.
 
 ### Task 9.5 - the Matching list and results say recipients; the results fallback is "Recipient" (D20, D22, ruling R3-F7)
@@ -15777,8 +16555,11 @@ GREEN.
           <p className={styles.sub}>Share a property with a curated set of recipients.</p>
 ```
 
-   The empty state (both lines carry curly quotes - the WHOLE two lines
-   become ASCII, the quotes rendered from entities). Current:
+   The empty state (both lines carry curly quotes, written `{"}` below -
+   section 0 glyph legend, plan review R1 ruling B3; the two lines hold the
+   unique ASCII substrings `Start one from a property&apos;s` and
+   `, or with ` - the WHOLE two lines become ASCII, the quotes rendered from
+   entities). Current:
 
 ```
             Start one from a property&apos;s {"}Send to tenants{"}, from a tenant&apos;s {"}Properties
@@ -15863,10 +16644,33 @@ RED.
         />
 ```
 
-   (If S8 rewrote this `renderIt`, add the same three props to its
-   `<PartnerFile` element.) Then append at the END of the file (after the
-   PartnerFile describe's closing `});`; if S8 appended its own describe,
-   after that):
+   Then S8 Task 8.9's `renderPartner` helper (in
+   `describe('PartnerFile - role, organization and staff notes', () => {`)
+   gains the same three props in this SAME step (plan review R1 rulings
+   A5/B1 - without them its four cases crash on `units.map` and the dashboard
+   typecheck fails TS2741). Current (unique in the file - the only
+   `onContactUpdated` spread in `files.test.tsx` is Task 8.9's):
+
+```tsx
+          groupThreadsTruncated={false}
+          {...(onContactUpdated !== undefined && { onContactUpdated })}
+        />
+```
+
+   Replace with:
+
+```tsx
+          groupThreadsTruncated={false}
+          units={[]}
+          listingsSentPending={false}
+          listingsSent={[]}
+          {...(onContactUpdated !== undefined && { onContactUpdated })}
+        />
+```
+
+   Then append at the END of the file (after Task 8.9's
+   `describe('PartnerFile - role, organization and staff notes', () => {`
+   block's closing `});`, which is the file's last describe after S8):
 
 ```tsx
 
@@ -16142,24 +16946,21 @@ function sentUnitLabel(units: Map<string, UnitItem>, unitId: string): string {
    - `unitMap`: current (in the function body)
      `  const phoneList = phones.map((p) => formatPhone(p.phone)).join(' - ');`
      -> that line, then `  const unitMap = new Map(units.map((u) => [u.unitId, u]));`.
-   - The header comment (S8 may also edit it for its Staff notes / role /
-     organization changes - keep S8's text and change only these lines).
-     Current:
+   - The header comment. Task 8.9 REPLACED the whole header (HEAD's
+     "Preferences & notes, and Media from comms" text no longer exists);
+     anchor on 8.9's text (plan review R1 ruling A6). Current (one line,
+     unique - it is Task 8.9's fourth header line):
 
 ```ts
-// Preferences & notes, and Media from comms. Deliberately omits the tenant cards
-// (voucher / housing authority / listings-sent / tours / placements) and the
-// landlord cards (units): a partner has no housing pipeline. Unlike UnknownFile it
+// Preferences & notes, Group threads and Media from comms. Deliberately omits
 ```
 
      Replace with:
 
 ```ts
-// Preferences & notes, Properties sent, and Media from comms. Deliberately omits
-// the tenant cards (voucher / housing authority / tours / placements) and the
-// landlord cards (units): a partner has no housing pipeline. Properties sent +
-// Send (spec 2026-10-06 D20): a partner can be sent a property directly; its
-// rows carry no tour chips (ruling R3-F5). Unlike UnknownFile it
+// Preferences & notes, Properties sent (+ Send, spec 2026-10-06 D20: a partner
+// can be sent a property directly; its rows carry no tour chips, ruling
+// R3-F5), Group threads and Media from comms. Deliberately omits
 ```
 
 2. `dashboard/src/routes/contact/ContactDetail.tsx`. Current (the opening of
@@ -16185,9 +16986,14 @@ function sentUnitLabel(units: Map<string, UnitItem>, unitId: string): string {
 
    (The same wiring TenantFile gets a few lines below; no new GET.)
 
-3. `e2e/support/selectors.md`.
-   - The `| Thread | send |` row (it contains one em dash after the first code
-     span; the WHOLE line becomes ASCII). Replace the line with:
+3. `e2e/support/selectors.md`. This task OWNS line 45 (the `| Thread | send |`
+   row) and the two share rows below, each with ONE regex (plan review R1
+   ruling A7): the Properties sent heading is `/^Properties sent/` and the
+   "Sent to" heading `/^Sent to\b/`. Task 10.9 only verifies these three
+   rows (skip-if-done) and never adds a second row for either card.
+   - The `| Thread | send |` row (the one line starting `| Thread | send |`,
+     unique; it contains one em dash after the first code span - Read it and
+     replace the WHOLE line, which becomes ASCII). Replace the line with:
 
 ```
 | Thread | send | `getByRole('button', { name: 'Send', exact: true })` - non-exact name matching is substring-based, so a bare `{ name: 'Send' }` also matches the contact page's "+ Send" Properties sent action - aria-label "Send a property to this tenant" on a tenant page, "Send a property to this partner" on a partner page: a strict-mode violation |
@@ -16207,14 +17013,19 @@ function sentUnitLabel(units: Map<string, UnitItem>, unitId: string): string {
 | Property page (Sent to card) | heading, action, row label | `getByRole('heading', { name: /^Sent to\b/ })` - the heading's accessible name includes the "+ Send" action's name, so never `exact: true`. The action: `getByRole('button', { name: 'Send this property', exact: true })`; the kebab twin: `getByRole('menuitem', { name: 'Send this property' })`. A row's link is named by the recipient's name; a non-tenant row's kind (`Partner`, a role such as `Caseworker`, `Landlord`) is SIBLING text after the link, never part of its name |
 ```
 
-Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/contact src/routes/broadcasts` - GREEN.
+Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/contact src/routes/broadcasts` - GREEN
+(Task 8.9's four `PartnerFile - role, organization and staff notes` cases
+included).
 Then `cd "W:/tmp/caseworkers"; npm run typecheck` - exit 0 (proves the
-required props are wired at the one `<PartnerFile` call site).
+required props are wired at EVERY `<PartnerFile` site: `ContactDetail.tsx`,
+and in `files.test.tsx` the original `renderIt`, Task 8.9's `renderPartner`
+and this task's `renderSent` - `git grep -n "<PartnerFile" -- dashboard/src`
+lists exactly those four).
 ASCII check on `e2e/support/selectors.md`: the added/changed lines of
 `git diff -- e2e/support/selectors.md` carry no byte outside 0x20-0x7E.
 
-Pins changed (dashboard): `files.test.tsx` PartnerFile `renderIt` (props
-added above). Stays: `files.test.tsx:227-262` (TenantFile "Send a property to
+Pins changed (dashboard): `files.test.tsx` PartnerFile `renderIt` and Task
+8.9's `renderPartner` (props added above). Stays: `files.test.tsx:227-262` (TenantFile "Send a property to
 this tenant"), `ContactDetail.test.tsx:510` (Unknown page has no "Properties
 sent"). e2e: no existing spec drives a partner page's "+ Send"; the four
 group-text specs' `{ name: 'Send', exact: true }` already avoid the collision.
@@ -16229,7 +17040,11 @@ Commit (stage `dashboard/src/routes/contact/PartnerFile.tsx`,
 
 ### S9 -> S10 handoff: every e2e pin and doc line the share wording breaks
 
-Apply in S10 (byte-exact old -> new; prefer `exact: true` on a button name):
+A RECORD, not a to-do list (plan review R1 ruling A3): each pin below is
+edited by the task in its `from` column, in the same commit as the copy it
+pins (Task 6.5 step 4; Task 9.1 step 4; Task 9.3; Task 9.4 step 4). S10
+Task 10.4 only verifies them (skip-if-done) and runs the pinned tests.
+(byte-exact old -> new; prefer `exact: true` on a button name):
 
 | file:line (base) | old | new | from |
 |---|---|---|---|
@@ -16255,10 +17070,10 @@ Survive unchanged: `/^Send to/` at `broadcasts.spec.ts:191`,
 `a2p-compliance.spec.ts:402`, `steps.ts:1074`; `matching-entry-points.spec.ts:120`
 (`'Send a property to this tenant'`, the tenant page).
 
-Docs (S10 owns them): `documentation/GLOSSARY.md:120` ("offers 'Send to
-tenants'" -> "offers 'Send this property'"),
-`documentation/sequence-diagram-to-test.md:135` ("Send to N tenant(s)" ->
-"Send to N recipient(s)").
+Docs (S10 owns them; plan review R1 ruling A8): `documentation/GLOSSARY.md:120`
+("offers 'Send to tenants'" -> "offers 'Send this property'") - Task 10.10
+step 4; `documentation/sequence-diagram-to-test.md:135` ("Send to N
+tenant(s)" -> "Send to N recipient(s)") - Task 10.11 step 3.
 
 New e2e coverage for S10's `partner-share.spec.ts` (E2E rule 3: mint a
 run-unique CONSENTED partner through the API, never pre-open its
@@ -16269,13 +17084,30 @@ property (no tour chip) -> the property's "Sent to" card lists the partner
 with `Partner` beside the name -> the partner's thread is `partner_1to1`
 (read through the API).
 
+## Checkpoint after S9 - the full typecheck and `npm test` (every workspace)
+
+Plan review R1 ruling B10: S7-S9 touch `dashboard/src/api/types.ts` (which
+the app compiles), the e2e workspace's pins and fixtures, and many dashboard
+suites that only per-file runs have exercised. Run bare from the worktree,
+DynamoDB Local up (`npm run db:start`, section 0):
+`cd "W:/tmp/caseworkers"; npm run typecheck`, then
+`cd "W:/tmp/caseworkers"; npm test`. Both must exit 0 before S10 starts.
+Never pipe either. A red DynamoDB-suite file is adjudicated by
+re-run-and-compare (AGENTS.md: re-run the failing FILE alone more than once,
+run the full suite at the merge base, compare failing FILES), never waved
+through; any `[dynamoAdmin]` line in the output is a real container fault -
+capture its `err.$metadata.httpStatusCode` and `attempts` first. Nothing to
+commit.
+
 ## S10 - e2e specs and pins, perf/mutation pins, GLOSSARY, RUNBOOK, selectors.md, e2e README, issues (spec D16-D22, sections 3, 11, 12; planner rulings R4-13, R5-F11..F16, "E2E rules"; plan 3.8, 3.9)
 
 > **Assembly notes (BINDING - they override the task text below where they differ;
 > `plan-research/plan-assembly-rulings.md`):**
-> - Task 10.1's catalog and profiler steps and Task 10.2's `contact-create.spec.ts:201` step were MOVED into S8 (Tasks 8.1, 8.13): run each as skip-if-done - grep for the change first and skip the step when it is present (S8-2, S8-3).
+> - Task 10.1's catalog and profiler steps and Task 10.2's `contact-create.spec.ts:201` step were MOVED into S8 (Tasks 8.1, 8.13; S8-2, S8-3). Task 10.1 is now a verification task (greps and the e2e-workspace unit run; no RED, no edit, never re-create the issue file) and Task 10.2 keeps only its two additions (plan review R1 ruling A16).
 > - Task 10.3's e2e fixture types, README dev-seam line and the `org-lists.spec.ts:557-562` usage pin are S5's (S5/S7-5): skip if done.
-> - The dismiss confirm is a Modal named by its first sentence (S8 as built); locate it by that sentence (CI-3).
+> - Task 10.4's share-wording pins were MOVED into the tasks that change the copy (Tasks 6.5, 9.1, 9.3, 9.4; plan review R1 ruling A3): Task 10.4 verifies them (skip-if-done) and runs the pinned tests.
+> - Task 10.9's partner "Properties sent" row, "Sent to" card row and line 45 are Task 9.6's (plan review R1 ruling A7): Task 10.9 verifies them and adds only the caseworker rows.
+> - The dismiss confirm is a Modal named by its first sentence (S8 as built); locate it by that sentence (assembly ruling S10 "dismiss confirm container").
 > - The `empty_audience` line is "Nothing selected - check at least one recipient to send." (ASCII hyphen, S6/S9-3).
 
 Read spec D16-D22 and sections 3, 11 and 12; plan 3.8 and 3.9; the planner
@@ -16291,15 +17123,21 @@ rulings' "E2E rules"; `AGENTS.md` "UI testing and verification";
   `cd "W:/tmp/caseworkers"; git grep -n "contacts/caseworkers" -- dashboard/src/App.tsx dashboard/src/app/nav.ts`
   If any is missing, stop and report.
 - This slice edits ONLY files under `e2e/`, `documentation/`, `docs/issues/`
-  and `RUNBOOK.md`. Never edit app or dashboard source in this slice (a lane
+  and `RUNBOOK.md` - except Task 10.14, whose main sync merges whatever main
+  changed and whose gate fixes may touch source (never while an e2e run is
+  live). Never edit app or dashboard source otherwise in this slice (a lane
   serves source live). A test that fails because the app or dashboard
   differs from plan 3.x is a finding for the orchestrator, not something to
   patch here.
 - Docker must be running; `npm run db:start` per section 0.
-- Expected state at S10 start (the RED evidence of Tasks 10.1-10.4): the
-  e2e workspace's `routes.test.ts` and `mutationCatalog.test.ts` are red
-  (CI-6), and the Playwright specs named in Tasks 10.2-10.4 fail at the
-  lines those tasks name.
+- Expected state at S10 start (plan review R1 ruling A16): the e2e
+  workspace's `routes.test.ts` and `mutationCatalog.test.ts` are GREEN (S8
+  Tasks 8.1 and 8.13 made the catalog, route-exclusion, TODO, issue-file and
+  `contact-create.spec.ts:201` changes - assembly rulings S8-2, S8-3); the
+  share-wording e2e pins are already edited (Tasks 6.5, 9.1, 9.3, 9.4 -
+  ruling A3); the usage pin is S5's. No existing Playwright spec is known to
+  be red: Tasks 10.1, 10.3 and 10.4 VERIFY (skip-if-done), and S10's RED
+  evidence is the new specs' own cases (Tasks 10.5-10.8 and 10.8a).
 
 ### How to run e2e in this slice
 
@@ -16328,38 +17166,40 @@ rulings' "E2E rules"; `AGENTS.md` "UI testing and verification";
 ### Selector contract (verify against S8 and S9 before Task 10.5)
 
 S10 relies on these names. Rows marked "3.9" are binding (a difference is an
-S8/S9 bug: stop and report). Rows marked "CI-n" assume this slice's contract
-fix. Rows marked "assumed" are S10's reading: before Task 10.5 open S8's
+S8/S9 bug: stop and report). Rows marked "S10 row lists" / "S10 dismiss
+confirm container" / an assembly ruling id rest on that ruling in
+`plan-assembly-rulings.md` ("S10 writer" items). Rows marked "assumed" are
+S10's reading: before Task 10.5 open S8's
 `CaseworkersList.tsx`, `CaseworkerDialog.tsx`, `ContactActionsMenu.tsx`,
 `UnknownFile.tsx`, `KindPicker.tsx`, `FilterChips.tsx`, and S9's
 `PartnerFile.tsx`, `ListingDetail.tsx`, `RecipientPreview.tsx`,
 `AudienceFilters.tsx`, `ListingActionsMenu.tsx`, `listingFormat.ts` and the
-server's `app/src/routes/contactTimeline.ts`. Where an "assumed" or "CI-n"
-name differs as built, change it in the spec's `UI` object only, name the
+server's `app/src/routes/contactTimeline.ts`. Where an "assumed" or
+ruling-marked name differs as built, change it in the spec's `UI` object only, name the
 difference in the commit body, and keep the assertions.
 
 | id | element | locator S10 uses | source |
 |---|---|---|---|
 | C1 | nav link | `getByRole('navigation', { name: 'Workspace' }).getByRole('link', { name: 'Caseworkers', exact: true })` -> `/contacts/caseworkers` | 3.9 |
-| C2 | page heading | `getByRole('heading', { name: 'Caseworkers', exact: true })` | 3.9 (+ `exact`, CI-2) |
-| C3 | caseworker rows | `getByRole('list', { name: 'Caseworkers', exact: true }).getByRole('listitem').filter({ hasText: <full name> })`; the row text holds the organization | CI-2 |
-| C4 | Possible rows | `getByRole('list', { name: 'Possible caseworkers', exact: true }).getByRole('listitem').filter({ hasText: <full name> })`; the row text holds each signal label | CI-2 |
+| C2 | page heading | `getByRole('heading', { name: 'Caseworkers', exact: true })` | 3.9 (+ `exact`, S10 row lists) |
+| C3 | caseworker rows | `getByRole('list', { name: 'Caseworkers', exact: true }).getByRole('listitem').filter({ hasText: <full name> })`; the row text holds the organization | S10 row lists |
+| C4 | Possible rows | `getByRole('list', { name: 'Possible caseworkers', exact: true }).getByRole('listitem').filter({ hasText: <full name> })`; the row text holds each signal label | S10 row lists |
 | C5 | Organization chips | `getByRole('group', { name: 'Organization', exact: true }).getByRole('button', { name: /^<org> \(/ })`; selected = `aria-pressed="true"`; URL param `org` | 3.9 (group, param); chip name = the factored `Chip`'s `<label> (<count>)` (assumed, `TenantFilters.tsx:66`) |
 | C6 | Possible row actions | buttons `Make <full name> a caseworker`, `<full name> is not a caseworker` | 3.9 |
 | C7 | signal labels | `Role mentions caseworker`, `AI noted caseworker`, `Linked as a caseworker`, `Partner with no role` | 3.9 |
-| C8 | dismiss confirm | `page.getByRole('dialog').filter({ hasText: 'Hide <full name> from Possible caseworkers?' })` containing `This can't be undone in the app.`; button `Hide` | 3.9 copy; container CI-3 |
+| C8 | dismiss confirm | `page.getByRole('dialog').filter({ hasText: 'Hide <full name> from Possible caseworkers?' })` containing `This can't be undone in the app.`; button `Hide` | 3.9 copy; container S10 dismiss confirm container |
 | C9 | header action | `getByRole('button', { name: 'More actions' })` then `getByRole('menuitem', { name: 'Make caseworker', exact: true })` | 3.9 |
 | C10 | conversion dialog | `getByRole('dialog', { name: 'Make <full name> a caseworker', exact: true })`; buttons `Make caseworker` (exact; disabled while a refusal shows) and `Cancel`; picker `getByRole('combobox', { name: 'Organization', exact: true })` | 3.9 |
-| C11 | preview text | `Housing authority: <x>`, `Agency: <x>`, `/^1 conversation will become (a )?partner conversations?\.$/` | 3.9 (singular CI-7) |
+| C11 | preview text | `Housing authority: <x>`, `Agency: <x>`, `/^1 conversation will become (a )?partner conversations?\.$/` | 3.9 (singular S8-4) |
 | C12 | refusals | `Finish or close this contact's placement first.` + link `View placement` (href `/placements/<placementId>`); `This contact is the landlord of record for a property. Change that property's landlord first.` + link `View property` (href `/listings/<unitId>`), one per blocking record | 3.9 text; hrefs assumed (the app's routes) |
 | C13 | picker chip | `getByRole('button', { name: 'Remove <value>', exact: true })` = `ORG_PICKER.removeChip` | A's OrgPicker (existing) |
 | C14 | Unknown card | `locator('section').filter({ has: getByRole('heading', { name: 'Needs triage' }) }).getByRole('button', { name: 'Mark as Caseworker', exact: true })` | 3.9 |
 | C15 | KindPicker | `getByRole('group', { name: 'Contact kind' }).getByRole('button', { name: 'Caseworker', exact: true })` | 3.9 |
 | C16 | partner card | `locator('section', { has: getByRole('heading', { name: /Properties sent/ }) })`, button `Send a property to this partner` (exact) | 3.9 |
-| C17 | composer Send | `getByRole('button', { name: /^Send to 1 recipient\b/ })`, `/^Send to \d+ recipients?$/` | D20 + CI-4 |
+| C17 | composer Send | `getByRole('button', { name: /^Send to 1 recipient\b/ })`, `/^Send to \d+ recipients?$/` | D20 + S6/S9-3 |
 | C18 | property "Sent to" card | `locator('section', { has: getByRole('heading', { name: /^Sent to\b/ }) })` - the heading's name is the title PLUS the aside's label (Card renders the aside inside the `<h3>`, `selectors.md:37`), so `{ name: 'Sent to', exact: true }` finds nothing; a non-tenant row's label (role, else `Partner`) is text inside the card | D22 |
 | C19 | share action | kebab `getByRole('menuitem', { name: 'Send this property', exact: true })`; card `getByRole('button', { name: 'Send this property', exact: true })` | D22 |
-| C20 | share wording | `Sent to <n> recipient(s)`, `No recipients reached`, `Reaches <n> recipient(s)`, `Flagged recipients you picked stay checked; "Select all" skips the others.` | D22 + CI-4 |
+| C20 | share wording | `Sent to <n> recipient(s)`, `No recipients reached`, `Reaches <n> recipient(s)`, `Flagged recipients you picked stay checked; "Select all" skips the others.` | D22 + S6/S9-3 |
 
 ### Isolation rules for this slice (planner rulings, "E2E rules" - binding)
 
@@ -16378,188 +17218,44 @@ difference in the commit body, and keep the assertions.
    `addOrg` (`e2e/fixtures/orgFixture.ts`); starting-list entries are only
    read.
 
-### Task 10.1 - the profiler pins: /contacts/caseworkers excluded with a filed issue; the mutation catalog +2
+### Task 10.1 - VERIFY the profiler pins and the mutation catalog (S8 made them; no RED, no edit)
 
-Files: `e2e/performance/routes.test.ts`, `e2e/performance/routes.ts`,
-`e2e/performance/mutationCatalog.ts`, `e2e/performance/mutationCatalog.test.ts`,
-`docs/issues/perf-pages-contacts-caseworkers-surface.md` (new).
-Made pass by: S8 (the route, the nav child and the two dashboard POST
-functions) plus this task's pins. Planner ruling R4-13: EXCLUDE, with an
-issue naming the three-partition scan (A's `/settings/organizations`
-precedent).
+Plan review R1 ruling A16: S8 Task 8.1 added the two mutation-catalog
+entries and bumped the count pin 118 -> 120 (assembly ruling S8-2); S8 Task
+8.13 added `/contacts/caseworkers` to the route pin's `excluded` set, the
+`TODO(perf-pages-contacts-caseworkers-surface)` comment in `routes.ts`, the
+README line and the issue file (S8-3). This task only PROVES that is in
+place. It writes nothing and commits nothing. Never re-create the issue
+file, never add a second catalog entry (a duplicate trips
+`mutationCatalog.test.ts`'s fingerprint uniqueness) and never add a second
+TODO.
 
-Step 1 - RED (before any edit):
+Step 1 - the greps (each from `cd "W:/tmp/caseworkers"`):
 
-`cd "W:/tmp/caseworkers/e2e"; npx vitest run performance/routes.test.ts performance/mutationCatalog.test.ts`
+- `git grep -n "'/contacts/caseworkers'," -- e2e/performance/routes.test.ts`
+  prints exactly ONE line (the `excluded` entry).
+- `git grep -n "TODO(perf-pages-contacts-caseworkers-surface)" -- e2e/performance/routes.ts`
+  prints exactly ONE line.
+- `git grep -n "'makeCaseworker'" -- e2e/performance/mutationCatalog.ts` and
+  `git grep -n "'dismissPossibleCaseworker'" -- e2e/performance/mutationCatalog.ts`
+  print exactly ONE line each.
+- `git grep -n "toHaveLength(120)" -- e2e/performance/mutationCatalog.test.ts`
+  prints exactly ONE line.
+- `ls docs/issues/perf-pages-contacts-caseworkers-surface.md` lists the file.
 
-Expected: 2 failed tests, for these reasons only:
-- routes.test.ts "mechanically matches App route elements and proves
-  generated placeholders are empty": the `toEqual` diff shows
-  `"/contacts/caseworkers"` as an extra received path. (If instead the
-  `navTargets ... implemented` assertion fails, S8 did not add
-  `'/contacts/caseworkers'` to App.tsx's `IMPLEMENTED` set: stop and report.)
-- mutationCatalog.test.ts "matches the complete checked-in catalog in both
-  directions without line fingerprints": length 120 received, 118 expected,
-  and/or a fingerprint diff naming `makeCaseworker` and
-  `dismissPossibleCaseworker`. Note the two discovered fingerprints exactly
-  as the failure prints them (file, symbol, method class, path category):
-  Step 4 must match them.
-Any other failure: stop and report.
-
-Step 2 - `e2e/performance/routes.test.ts`. Current (`:384-389`, unique):
-
-```ts
-      // A new Settings tab, not yet a profiler surface
-      // (issue perf-pages-settings-organizations-surface).
-      '/settings/organizations',
-```
-
-Replace with:
-
-```ts
-      // A new Settings tab, not yet a profiler surface
-      // (issue perf-pages-settings-organizations-surface).
-      '/settings/organizations',
-      // Contacts > Caseworkers (caseworkers spec D18), not yet a profiler
-      // surface (issue perf-pages-contacts-caseworkers-surface).
-      '/contacts/caseworkers',
-```
-
-Step 3 - `e2e/performance/routes.ts`: the KNOWN GAP comment beside the
-contact list rows. Current (unique):
-
-```ts
-  row({ surfaceId: '/contacts/deleted', label: 'Deleted contacts',
-```
-
-Insert ABOVE that line (leave the line itself unchanged):
-
-```ts
-  // TODO(perf-pages-contacts-caseworkers-surface): KNOWN GAP - there is NO
-  // row for /contacts/caseworkers (Contacts > Caseworkers, caseworkers spec
-  // D18), so `npm run perf:pages` never measures it. It is excluded on
-  // purpose (the route pin in routes.test.ts lists it with the same issue),
-  // not forgotten. Registering it needs: a source (the Workspace nav link), a
-  // terminal (the "Caseworkers" heading with its rows or empty text, and the
-  // "Possible caseworkers" list settled), and its GETs - the partner-contact
-  // walk the rows come from and GET /api/contacts/possible-caseworkers, a
-  // scan of the tenant, landlord and partner partitions on every load
-  // (docs/issues/perf-pages-contacts-caseworkers-surface.md).
-```
-
-Step 4 - `e2e/performance/mutationCatalog.ts`. Current (unique):
-
-```ts
-  entry(ENDPOINTS, 'runExtraction', 'request:POST', '/api/contacts/:contactId/extraction-run'),
-```
-
-Replace with:
-
-```ts
-  entry(ENDPOINTS, 'runExtraction', 'request:POST', '/api/contacts/:contactId/extraction-run'),
-  // Caseworkers (spec 2026-10-06 D19): workflow_only - both fire only from a
-  // click (the conversion dialog's "Make caseworker", the Possible list's
-  // "Hide"). The preview and the Possible list are GETs: not catalogued.
-  entry(ENDPOINTS, 'makeCaseworker', 'request:POST', '/api/contacts/:contactId/caseworker-review'),
-  entry(ENDPOINTS, 'dismissPossibleCaseworker', 'request:POST', '/api/contacts/:contactId/caseworker-review'),
-```
-
-If Step 1 printed a different path category or method class for either
-function, use the printed value (it is what S8's source says) and name it in
-the commit body.
-
-Step 5 - `e2e/performance/mutationCatalog.test.ts`. Current (unique):
-
-```ts
-    // + the seven organization-list writes (clean-org-names: checkOrgText,
-    // addOrg, patchOrg, mergeOrg, deleteOrg, resolveNotOnList, runOrgRewriteAgain).
-    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(118);
-```
-
-Replace with:
-
-```ts
-    // + the seven organization-list writes (clean-org-names: checkOrgText,
-    // addOrg, patchOrg, mergeOrg, deleteOrg, resolveNotOnList, runOrgRewriteAgain).
-    // + makeCaseworker and dismissPossibleCaseworker (caseworkers: both
-    // POST /api/contacts/:contactId/caseworker-review).
-    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(120);
-```
-
-Step 6 - create `docs/issues/perf-pages-contacts-caseworkers-surface.md`
-(`<BUILD-DATE>` = `date +%F`):
-
-```md
----
-id: perf-pages-contacts-caseworkers-surface
-title: Contacts > Caseworkers (/contacts/caseworkers) is excluded from the perf:pages route-registry pin instead of being a profiled surface
-type: improvement
-severity: low
-status: open
-area: e2e/performance
-created: <BUILD-DATE>
-refs: e2e/performance/routes.test.ts, e2e/performance/routes.ts, dashboard/src/App.tsx, dashboard/src/routes/contacts/CaseworkersList.tsx, app/src/services/possibleCaseworkers.ts
----
-
-**Problem.** The caseworkers feature (spec
-`docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md`
-D18, D19) adds a Contacts sub-page, `/contacts/caseworkers`, to
-`dashboard/src/App.tsx` and to the Workspace nav.
-`e2e/performance/routes.test.ts` ("mechanically matches App route elements
-and proves generated placeholders are empty") requires the route set, minus
-its local `excluded` set, to equal the profiler's `EXPECTED_KEYS` (31
-registered surfaces). Registering the page as a 32nd surface changes that
-`perf:pages` contract (the 31 pins, `EXPECTED_WARM`, the README count, the
-citation ledgers in `routes.ts`, a new GET contract), which the feature did
-not take on: the path joined the `excluded` set instead, the
-`/settings/organizations` precedent (`perf-pages-settings-organizations-surface`).
-So a staff destination the page profiler never measures carries the most
-scale-bearing read the feature adds: `GET /api/contacts/possible-caseworkers`
-reads the WHOLE tenant, landlord and partner partitions on every load (no
-index exists for any of its signals - see
-`possible-caseworkers-and-roster-refusal-scans`).
-
-**Suggested fix.** Add a `/contacts/caseworkers` row to `ROUTES` in
-`e2e/performance/routes.ts` modeled on the `/contacts/unknown` row: source =
-the Workspace nav link "Caseworkers"; terminal = the "Caseworkers" heading
-with its rows list or the "No caseworkers yet." text, AND the "Possible
-caseworkers" list settled (or its load alert); GET contract = whatever the
-page reads on mount (the partner-contact walk its rows come from, and
-`GET /api/contacts/possible-caseworkers`). Then add the key to
-`EXPECTED_KEYS` / `EXPECTED_WARM` and the CONTACT shapes, bump the 31 pins to
-32, refresh both `CONTRACT_SOURCE_LEDGER` maps, update the README count,
-remove the `excluded` entry and the `TODO(perf-pages-contacts-caseworkers-surface)`
-comment in `routes.ts`, and re-run the profiler self-QA
-(`npm run perf:pages -- hermetic --self-qa=full`, human-owned per
-`e2e/README.md`). `surfaceScaleBearing` and `loadScaleBearing` are both
-true (the three-partition scan).
-```
-
-Step 7 - GREEN:
+Step 2 - the unit runs:
 
 `cd "W:/tmp/caseworkers/e2e"; npx vitest run performance/routes.test.ts performance/mutationCatalog.test.ts`
--> both files pass, `0 failed`.
+-> `0 failed`; then `cd "W:/tmp/caseworkers/e2e"; npx vitest run` -> `0 failed`
+(the whole e2e workspace unit suite). Then `cd "W:/tmp/caseworkers"; npm run issues`
+-> lists `perf-pages-contacts-caseworkers-surface` as open, no warning naming
+it (`docs/issues/INDEX.md` is gitignored: never stage it).
 
-`cd "W:/tmp/caseworkers/e2e"; npx vitest run` -> `0 failed` (the whole e2e
-workspace unit suite: no other profiler test reads the excluded set or the
-catalog count).
+Any grep that prints zero or two lines, or any red run: STOP and report to
+the orchestrator - it is an S8 defect (Tasks 8.1 / 8.13), not something to
+patch in this slice. Nothing to commit when all pass.
 
-`cd "W:/tmp/caseworkers"; npm run typecheck -w @housingchoice/e2e` -> exit 0.
-
-`cd "W:/tmp/caseworkers"; npx eslint e2e/performance/routes.test.ts e2e/performance/routes.ts e2e/performance/mutationCatalog.ts e2e/performance/mutationCatalog.test.ts`
--> no error on an added line.
-
-ASCII: the four edited files' added lines and the new issue file (section
-"How to run").
-
-`cd "W:/tmp/caseworkers"; npm run issues` -> lists
-`perf-pages-contacts-caseworkers-surface` as open, no warning naming it
-(`docs/issues/INDEX.md` is gitignored: never stage it).
-
-Commit `test(perf): exclude /contacts/caseworkers with a filed issue; catalog makeCaseworker and dismissPossibleCaseworker`
-(stage the five paths explicitly).
-
-### Task 10.2 - the nav pins: contact-create's relationship assertion scoped and exact, the frame's nav list, and the Caseworker preset
+### Task 10.2 - the nav pins: the frame's nav list and the Caseworker preset (the contact-create relationship fix is S8's)
 
 Files: `e2e/tests/dashboard-next/contact-create.spec.ts`,
 `e2e/tests/dashboard-next/frame.spec.ts`.
@@ -16567,38 +17263,17 @@ Made pass by: S8 (the always-visible "Caseworkers" Workspace nav link, the
 KindPicker's "Caseworker" segment, `/contacts/caseworkers`). Planner ruling
 R5-F11.
 
-Step 1 - RED (before any edit):
+This task is PIN-only (section 0): both additions are green on arrival -
+S8 built the behavior they pin. It makes no RED claim (plan review R1
+ruling A16).
 
-`cd "W:/tmp/caseworkers"; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/contact-create.spec.ts:157`
+Step 1 - skip-if-done check (S8 Task 8.13 GREEN (i) scoped
+`contact-create.spec.ts:201`): `cd "W:/tmp/caseworkers"; git grep -n "relationshipsCard.getByText('Caseworker', { exact: true })" -- e2e/tests/dashboard-next/contact-create.spec.ts`
+prints one line, and `git grep -n "await expect(page.getByText('Caseworker')).toBeVisible();" -- e2e/tests/dashboard-next/contact-create.spec.ts`
+prints nothing. If not: stop and report (an S8 defect). Do not edit `:201`
+here.
 
-Expected: `1 failed`, at `contact-create.spec.ts:201`
-(`await expect(page.getByText('Caseworker')).toBeVisible();`) with a
-strict-mode violation: `getByText('Caseworker')` resolved to 2 (or more)
-elements, one of them the Workspace nav link "Caseworkers" (non-exact
-`getByText` is a case-insensitive substring match). Any other failure: stop
-and report.
-
-Step 2 - `contact-create.spec.ts:201`. Current (unique):
-
-```ts
-    await expect(page.getByText('Caseworker')).toBeVisible();
-```
-
-Replace with:
-
-```ts
-    // Scoped to the Relationships card and exact: the Workspace nav's
-    // "Caseworkers" link (caseworkers spec D18) also contains the word.
-    const relationships = page.locator('section', {
-      has: page.getByRole('heading', { name: /^Relationships/ }),
-    });
-    await expect(relationships.getByText('Caseworker', { exact: true })).toBeVisible();
-```
-
-(The card heading's accessible name is "Relationships" plus its "Edit
-relationships" aside - `selectors.md:37` - hence the anchored regex.)
-
-Step 3 - add the Caseworker preset test. Current (unique; the end of the
+Step 2 - add the Caseworker preset test. Current (unique; the end of the
 Property Manager preset test):
 
 ```ts
@@ -16668,7 +17343,7 @@ Replace with:
   });
 ```
 
-Step 4 - `frame.spec.ts:26`. Current (unique):
+Step 3 - `frame.spec.ts:26`. Current (unique):
 
 ```ts
   for (const label of ['Today', 'Placements', 'Tours', 'Contacts', 'Tenants', 'Landlords', 'Unknown', 'Properties']) {
@@ -16680,7 +17355,7 @@ Replace with:
   for (const label of ['Today', 'Placements', 'Tours', 'Contacts', 'Tenants', 'Landlords', 'Caseworkers', 'Unknown', 'Properties']) {
 ```
 
-Step 5 - GREEN:
+Step 4 - GREEN (both additions are PINs):
 
 `cd "W:/tmp/caseworkers"; npm run typecheck -w @housingchoice/e2e` -> exit 0.
 
@@ -16689,30 +17364,33 @@ Step 5 - GREEN:
 
 `cd "W:/tmp/caseworkers"; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/contact-create.spec.ts tests/dashboard-next/frame.spec.ts`
 -> `0 failed` (contact-create: its 6 tests plus the new one; frame: all).
-The new preset test is a PIN of S8 (green on arrival); this task's RED is
-Step 1.
+Both additions are PINs of S8 (green on arrival).
 
 ASCII check on both files' added lines (`contact-create.spec.ts:197` is a
 pre-existing non-ASCII comment: do not touch it).
 
-Commit `test(e2e): scope the relationship pin past the Caseworkers nav link; nav list and Caseworker preset`.
+Commit `test(e2e): the nav list and the Caseworker preset` (stage the two spec files).
 
 ### Task 10.3 - the organization usage wire pin, the fixture types and the dev-seam README line
 
 Files: `e2e/fixtures/orgFixture.ts`, `e2e/tests/dashboard-next/org-lists.spec.ts`,
 `e2e/README.md`.
 Made pass by: S5 (usage gains `organization`, `inUse`, `kindLocked`; the dev
-seam accepts `organization`). Planner rulings R5-F12, R5-F13, R2-F1; CI-5.
+seam accepts `organization`). Planner rulings R5-F12, R5-F13, R2-F1; assembly ruling S5/S7-5.
 
-Step 1 - RED (before any edit):
-
-`cd "W:/tmp/caseworkers"; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/org-lists.spec.ts:540`
-
-Expected: `1 failed`, at `org-lists.spec.ts:557` - the `toEqual` diff shows
-the received usage entry carrying `organization: 0`,
-`inUse: { active: 3, deleted: 0 }` and `kindLocked: { active: 3, deleted: 0 }`
-beyond the four expected keys. Any other failure (the rename itself, the
-rewrite job): stop and report.
+Step 1 - skip-if-done check FIRST (assembly ruling S5/S7-5: S5 Task 5.3
+step 4 edits `OrgUsageWire` and the `org-lists.spec.ts` usage pin, S5 Task
+5.7 edits `OrgRecordField`, the README dev-seam line and the selectors row;
+the S10 start state - plan review R1 ruling A16 - says so). From
+`cd "W:/tmp/caseworkers"`:
+`git grep -n "kindLocked: { active: 3, deleted: 0 }" -- e2e/tests/dashboard-next/org-lists.spec.ts`,
+`git grep -n "'organization'" -- e2e/fixtures/orgFixture.ts` and
+`git grep -n "housingAuthority|agency|organization" -- e2e/README.md` each
+print at least one line -> S5 did Steps 2-4: skip them, run only Step 5's
+e2e command as a VERIFICATION (`0 failed`) and commit nothing. Only when a
+grep prints nothing does that step below apply - and then it is an S5 gap:
+make the edit, and name it in the commit body. No RED run: with S5 in, the
+usage pin is already green.
 
 Step 2 - `e2e/fixtures/orgFixture.ts` (skip any edit S5 already made:
 `git grep -n "'organization'" -- e2e/fixtures/orgFixture.ts`).
@@ -16838,9 +17516,10 @@ ASCII check on the three files' added lines.
 
 Commit `test(e2e): the organization usage wire and fixture types gain organization, inUse and kindLocked`.
 
-### Task 10.4 - the share-wording pins (recipients, "Send this property", "Sent to")
+### Task 10.4 - VERIFY the share-wording pins (recipients, "Send this property", "Sent to") - skip-if-done
 
-Files: `e2e/tests/dashboard-next/broadcasts.spec.ts`, `e2e/scenarios/steps.ts`,
+Files (edited by Tasks 6.5, 9.1, 9.3 and 9.4 - this task only reads them
+unless Step 1 finds a missed pin): `e2e/tests/dashboard-next/broadcasts.spec.ts`, `e2e/scenarios/steps.ts`,
 `e2e/tests/dashboard-next/matching-entry-points.spec.ts`,
 `e2e/tests/dashboard-next/share-skip-fix.spec.ts`,
 `e2e/tests/dashboard-next/listing-activity.spec.ts`,
@@ -16850,343 +17529,52 @@ Files: `e2e/tests/dashboard-next/broadcasts.spec.ts`, `e2e/scenarios/steps.ts`,
 Made pass by: S9 (the dashboard wording: RecipientPreview, AudienceFilters,
 ListingActionsMenu, ListingDetail, listingFormat) and S6 (the landlord
 timeline's two label sites in `app/src/routes/contactTimeline.ts`). Planner
-rulings R3-F1, R5-F4, R5-F5; CI-4. Every share label keeps the "Sent to "
+rulings R3-F1, R5-F4, R5-F5; assembly ruling S6/S9-3. Every share label keeps the "Sent to "
 prefix, so the prefix regexes at `a2p-compliance.spec.ts:402`,
 `broadcasts.spec.ts:191` and `steps.ts:1074` (`/^Send to/`) stay as they
 are; "Add a tenant", "Add more tenants by filters" and "Send a property to
 this tenant" (`matching-entry-points.spec.ts:120,227`) are tenant-worded on
 purpose (D22) and stay.
 
-Step 1 - RED (before any edit), in the BACKGROUND (Bash tool
+Plan review R1 ruling A3: every pin this task used to edit now moves with
+its copy - `landlord-activity.spec.ts:122` in Task 6.5 (step 4);
+`broadcasts.spec.ts:140-143`, `steps.ts:1051-1054`,
+`matching-entry-points.spec.ts:13-16, 203-206, 260-264` and
+`listing-activity.spec.ts:161, 180, 211-216` in Task 9.1 (step 4);
+`listing-activity.spec.ts:143` and `share-sent-outcome.spec.ts:27, 621, 671`
+in Task 9.3; `broadcasts.spec.ts:247`, `matching-entry-points.spec.ts:152,
+235`, `share-skip-fix.spec.ts:31, 190` and `org-lists.spec.ts:349, 465` in
+Task 9.4 (step 4). This task proves none was missed and runs the pinned
+tests. No RED claim.
+
+Step 1 - prove nothing stale is left:
+
+`cd "W:/tmp/caseworkers"; git grep -n -E "(Send|Sent) to (tenants|[^ ]+ tenants?)|No tenants reached|Flagged tenants|Reaches [0-9]+ tenant|Send this property to tenants" -- e2e`
+-> prints nothing. (Before the moved edits it printed 26 lines - the pins
+and comments those tasks edit; checked against `feat/caseworkers` @a6ce07e9.)
+If it prints a line: that pin was missed by its owning task - apply the
+"Current" -> "Replace with" pair that task quotes for it (Task 6.5 step 4,
+Task 9.1 step 4, Task 9.3, Task 9.4 step 4), then continue; name the missed
+pin and its owning task in the commit body (Step 3).
+
+Step 2 - run the pinned tests, in the BACKGROUND (Bash tool
 `run_in_background: true`; about 15 minutes):
 
 `cd "W:/tmp/caseworkers"; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/broadcasts.spec.ts:96 tests/dashboard-next/broadcasts.spec.ts:231 tests/dashboard-next/landlord-activity.spec.ts:67 tests/dashboard-next/listing-activity.spec.ts:85 tests/dashboard-next/listing-activity.spec.ts:162 tests/dashboard-next/matching-entry-points.spec.ts:103 tests/dashboard-next/matching-entry-points.spec.ts:192 tests/dashboard-next/share-skip-fix.spec.ts:156 tests/dashboard-next/share-sent-outcome.spec.ts:621 tests/dashboard-next/org-lists.spec.ts:309 tests/dashboard-next/org-lists.spec.ts:438 tests/scenarios/sending-unit.spec.ts`
 
-Expected: every listed test fails, each at its first stale pin:
-
-| test | fails at | why |
-|---|---|---|
-| broadcasts:96 | :143 menuitem `Send to tenants` | kebab is "Send this property" |
-| broadcasts:231 | :247 `/^Send to \d+ tenants?$/` | button is "Send to N recipient(s)" |
-| landlord-activity:67 | :122 `/Sent to 2 tenants/` | timeline reads "Sent to 2 recipients" (S6) |
-| listing-activity:85 | :143 `/Sent to 2 tenants/` | Activity reads "Sent to 2 recipients" |
-| listing-activity:162 | :215 heading `Sent to tenants` | card title is "Sent to" |
-| matching-entry-points:103 | :152 `/^Send to 1 tenant\b/` | "Send to 1 recipient" |
-| matching-entry-points:192 | :206 button `Send this property to tenants` | "Send this property" |
-| share-skip-fix:156 | :189 `getByText(NOTE)` | "Flagged recipients you picked ..." |
-| share-sent-outcome:621 | :671 `/No tenants reached/` | "No recipients reached" |
-| org-lists:309 | :349 `Reaches 2 tenants` | "Reaches 2 recipients" |
-| org-lists:438 | :465 `Reaches 1 tenant` | "Reaches 1 recipient" |
-| sending-unit (the tests that call `teamSendsListing`) | `steps.ts:1054` menuitem `Send to tenants` | kebab is "Send this property" |
-
-A test failing ANYWHERE else (or passing): stop and report - it means S9's
-wording differs from CI-4's, or the test hit an unrelated regression.
-
-Step 2 - the edits. Every "Current" string below is unique in its file
-unless the line says otherwise; all are ASCII.
-
-(a) `broadcasts.spec.ts:140-143`. Current:
-
-```ts
-    // --- Compose from the property: "Send to tenants" in the kebab menu. ---
-    await page.goto(`${NEXT}/listings/${unitId}`);
-    await page.getByRole('button', { name: 'More actions' }).click();
-    await page.getByRole('menuitem', { name: 'Send to tenants' }).click();
-```
-
-Replace with:
-
-```ts
-    // --- Compose from the property: "Send this property" in the kebab menu. ---
-    await page.goto(`${NEXT}/listings/${unitId}`);
-    await page.getByRole('button', { name: 'More actions' }).click();
-    await page.getByRole('menuitem', { name: 'Send this property', exact: true }).click();
-```
-
-(b) `broadcasts.spec.ts:247`. Current:
-
-```ts
-    await page.getByRole('button', { name: /^Send to \d+ tenants?$/ }).click();
-```
-
-Replace with:
-
-```ts
-    await page.getByRole('button', { name: /^Send to \d+ recipients?$/ }).click();
-```
-
-(c) `e2e/scenarios/steps.ts:1051-1054`. Current:
-
-```ts
-      // "Send to tenants" lives in the header kebab (More actions) menu now,
-      // not as a standalone hero button.
-      await this.page.getByRole('button', { name: 'More actions' }).click();
-      await this.page.getByRole('menuitem', { name: 'Send to tenants' }).click();
-```
-
-Replace with:
-
-```ts
-      // "Send this property" lives in the header kebab (More actions) menu,
-      // not as a standalone hero button (neutral since caseworkers, D22).
-      await this.page.getByRole('button', { name: 'More actions' }).click();
-      await this.page.getByRole('menuitem', { name: 'Send this property', exact: true }).click();
-```
-
-(`steps.ts:1059` carries a pre-existing non-ASCII dash: do not touch it.)
-
-(d) `matching-entry-points.spec.ts`, five edits.
-
-Header comment, current (`:13-16`):
-
-```ts
-//   2. From a PROPERTY detail page ("Sent to tenants" card -> "+ Send"): the
-//      audience-filtered composer with the unit pre-filled, curated down to one
-//      hand-picked tenant (Deselect all -> add one via search) -> Send -> the
-//      "Sent to tenants" card lists them.
-```
-
-Replace with:
-
-```ts
-//   2. From a PROPERTY detail page ("Sent to" card -> "+ Send"): the
-//      audience-filtered composer with the unit pre-filled, curated down to one
-//      hand-picked tenant (Deselect all -> add one via search) -> Send -> the
-//      "Sent to" card lists them.
-```
-
-`:152` and `:235` - the same line twice; use the Edit tool with
-`replace_all: true`. Current:
-
-```ts
-    await page.getByRole('button', { name: /^Send to 1 tenant\b/ }).click();
-```
-
-Replace with:
-
-```ts
-    await page.getByRole('button', { name: /^Send to 1 recipient\b/ }).click();
-```
-
-`:203-206`. Current:
-
-```ts
-    // From the property page, the "Sent to tenants" card "+ Send" action opens the
-    // audience-filtered composer with the unit pre-filled (?unitId=).
-    await page.goto(`${NEXT}/listings/${unitId}`);
-    await page.getByRole('button', { name: 'Send this property to tenants' }).click();
-```
-
-Replace with:
-
-```ts
-    // From the property page, the "Sent to" card "+ Send" action opens the
-    // audience-filtered composer with the unit pre-filled (?unitId=).
-    await page.goto(`${NEXT}/listings/${unitId}`);
-    await page.getByRole('button', { name: 'Send this property', exact: true }).click();
-```
-
-`:260-264`. Current:
-
-```ts
-    // The property page's "Sent to tenants" card now lists the hand-picked tenant.
-    await page.goto(`${NEXT}/listings/${unitId}`);
-    const sentCard = page.locator('section', {
-      has: page.getByRole('heading', { name: 'Sent to tenants' }),
-    });
-```
-
-Replace with:
-
-```ts
-    // The property page's "Sent to" card now lists the hand-picked tenant. The
-    // heading's name is "Sent to" PLUS its "Send this property" action (Card
-    // renders the aside inside the <h3>), so match the prefix, never exact.
-    await page.goto(`${NEXT}/listings/${unitId}`);
-    const sentCard = page.locator('section', {
-      has: page.getByRole('heading', { name: /^Sent to\b/ }),
-    });
-```
-
-(e) `share-skip-fix.spec.ts:31`. Current:
-
-```ts
-const NOTE = 'Flagged tenants you picked stay checked; "Select all" skips the others.';
-```
-
-Replace with:
-
-```ts
-const NOTE = 'Flagged recipients you picked stay checked; "Select all" skips the others.';
-```
-
-`share-skip-fix.spec.ts:190`. Current:
-
-```ts
-    await page.getByRole('button', { name: /^Send to 1 tenant\b/ }).click();
-```
-
-Replace with:
-
-```ts
-    await page.getByRole('button', { name: /^Send to 1 recipient\b/ }).click();
-```
-
-(f) `listing-activity.spec.ts`, four edits.
-
-`:180` (comment). Current:
-
-```ts
-    // records a listing_sends row (the "Sent to tenants" ledger).
-```
-
-Replace with:
-
-```ts
-    // records a listing_sends row (the "Sent to" ledger).
-```
-
-`:143`. Current:
-
-```ts
-    const bcast = activity.getByRole('link', { name: /Sent to 2 tenants/ });
-```
-
-Replace with:
-
-```ts
-    const bcast = activity.getByRole('link', { name: /Sent to 2 recipients/ });
-```
-
-`:161`. Current:
-
-```ts
-test.describe('Property detail - "Sent to tenants" tour chip (listing-response-tour-chip)', () => {
-```
-
-Replace with:
-
-```ts
-test.describe('Property detail - "Sent to" tour chip (listing-response-tour-chip)', () => {
-```
-
-`:211-216`. Current:
-
-```ts
-    // The "Sent to tenants" card shows both recipients with NO tour chip, and
-    // the dead "No reply" label appears nowhere on the page.
-    await page.goto(`${NEXT}/listings/${unitId}`);
-    const card = page.locator('section', {
-      has: page.getByRole('heading', { name: 'Sent to tenants' }),
-    });
-```
-
-Replace with:
-
-```ts
-    // The "Sent to" card shows both recipients with NO tour chip, and the dead
-    // "No reply" label appears nowhere on the page. The heading's name carries
-    // its "Send this property" action too: match the prefix.
-    await page.goto(`${NEXT}/listings/${unitId}`);
-    const card = page.locator('section', {
-      has: page.getByRole('heading', { name: /^Sent to\b/ }),
-    });
-```
-
-(g) `landlord-activity.spec.ts:122`. Current:
-
-```ts
-    const bcast = timeline.getByRole('link', { name: /Sent to 2 tenants/ }).first();
-```
-
-Replace with:
-
-```ts
-    const bcast = timeline.getByRole('link', { name: /Sent to 2 recipients/ }).first();
-```
-
-(h) `share-sent-outcome.spec.ts`, three edits.
-
-`:27` (header comment). Current:
-
-```ts
-//                                       flagged, "No tenants reached";
-```
-
-Replace with:
-
-```ts
-//                                       flagged, "No recipients reached";
-```
-
-`:621`, current (substring of the test title):
-
-```ts
-the tenant not flagged, the property Activity "No tenants reached"', async ({
-```
-
-Replace with:
-
-```ts
-the tenant not flagged, the property Activity "No recipients reached"', async ({
-```
-
-`:671`. Current:
-
-```ts
-    const entry = activity.getByRole('link', { name: /No tenants reached/ });
-```
-
-Replace with:
-
-```ts
-    const entry = activity.getByRole('link', { name: /No recipients reached/ });
-```
-
-(i) `org-lists.spec.ts`, two edits.
-
-`:349`. Current:
-
-```ts
-    await expect(page.getByText('Reaches 2 tenants', { exact: true })).toBeVisible();
-```
-
-Replace with:
-
-```ts
-    await expect(page.getByText('Reaches 2 recipients', { exact: true })).toBeVisible();
-```
-
-`:465`. Current:
-
-```ts
-    await expect(page.getByText('Reaches 1 tenant', { exact: true })).toBeVisible();
-```
-
-Replace with:
-
-```ts
-    await expect(page.getByText('Reaches 1 recipient', { exact: true })).toBeVisible();
-```
-
-Step 3 - prove nothing stale is left:
-
-`cd "W:/tmp/caseworkers"; git grep -n -E "(Send|Sent) to (tenants|[^ ]+ tenants?)|No tenants reached|Flagged tenants|Reaches [0-9]+ tenant|Send this property to tenants" -- e2e`
--> prints nothing. (Before this task it printed 26 lines - the pins and
-comments edited above; checked against `feat/caseworkers` @a6ce07e9.)
-
-Step 4 - GREEN:
+-> `0 failed`. (Line numbers are the base's: every moved edit above a test
+is line-for-line or below it, so each `file:line` still names the same test.
+If a run reports that no test matched, find the test's current line by its
+title with `git grep -n` and re-run.) A failure: diagnose it against plan
+3.9's share wording - a copy mismatch is an S6/S9 finding (stop and report);
+a pin the owning task missed is fixed as in Step 1.
 
 `cd "W:/tmp/caseworkers"; npm run typecheck -w @housingchoice/e2e` -> exit 0.
 
-`cd "W:/tmp/caseworkers"; npx eslint e2e/tests/dashboard-next/broadcasts.spec.ts e2e/scenarios/steps.ts e2e/tests/dashboard-next/matching-entry-points.spec.ts e2e/tests/dashboard-next/share-skip-fix.spec.ts e2e/tests/dashboard-next/listing-activity.spec.ts e2e/tests/dashboard-next/landlord-activity.spec.ts e2e/tests/dashboard-next/share-sent-outcome.spec.ts e2e/tests/dashboard-next/org-lists.spec.ts`
--> no error on an added line.
-
-The Step 1 command again (background) -> `0 failed`.
-
-ASCII check on the eight files' added lines.
-
-Commit `test(e2e): share pins read the neutral recipient wording (caseworkers D20, D22)`.
+Step 3 - commit ONLY if Step 1 or Step 2 changed a file (stage those spec
+files explicitly; ASCII check on their added lines):
+`test(e2e): share pins a moved task missed (caseworkers D20, D22)`.
+Otherwise nothing to commit.
 
 ### Task 10.5 - caseworkers.spec.ts, part 1: the conversion from a contact page, and the read-only refusals
 
@@ -17247,7 +17635,8 @@ function escapeRegExp(text: string): string {
 
 /**
  * Every accessible name and copy string this spec uses - the S10 selector
- * contract (plan 3.9 and S10's CI-2, CI-3, CI-7). When S8's as-built name
+ * contract (plan 3.9; the plan's assembly rulings on the row lists, the
+ * dismiss confirm container and the singular dialog sentences). When S8's as-built name
  * differs from a non-binding row, change it HERE only.
  */
 const UI = {
@@ -17517,7 +17906,7 @@ to `.toBe('tenant_1to1')` (the pre-B world) and run:
 
 Expected: `1 failed` (that test, at that line, `Received: "partner_1to1"`),
 `1 passed`. Any other failure: diagnose against the selector contract (an
-"assumed" or "CI-n" name -> fix it in `UI` and re-run; a 3.9 name -> stop and
+"assumed" or "S10 ruling" name -> fix it in `UI` and re-run; a 3.9 name -> stop and
 report).
 
 (b) Revert the edit: `cd "W:/tmp/caseworkers"; git diff -- e2e/tests/dashboard-next/caseworkers.spec.ts`
@@ -17739,16 +18128,22 @@ test.beforeAll(async ({ request }) => {
 Replace with:
 
 ```ts
-/** The auto-captured (unknown) contact an inbound created, by phone. */
+/**
+ * The auto-captured (unknown) contact an inbound created, by phone - through
+ * the EXACT `?phone=` lookup (a byPhone Query answering 0 or 1 contact,
+ * app/src/routes/contacts.ts), never by scanning `?type=unknown`: that list is
+ * one page of 50, unordered within a status, so a lane holding more than 50
+ * unknowns would hide this one (plan review R1 ruling A11).
+ */
 async function findUnknownContactId(request: APIRequestContext, phone: string): Promise<string> {
   let contactId: string | undefined;
   await expect
     .poll(
       async () => {
-        const res = await request.get(`${NEXT}/api/contacts?type=unknown`);
+        const res = await request.get(`${NEXT}/api/contacts?phone=${encodeURIComponent(phone)}`);
         if (!res.ok()) return false;
-        contactId = ((await res.json()) as { contacts: Array<{ contactId: string; phone?: string }> }).contacts.find(
-          (c) => c.phone === phone,
+        contactId = ((await res.json()) as { contacts: Array<{ contactId: string; type?: string }> }).contacts.find(
+          (c) => c.type === 'unknown',
         )?.contactId;
         return contactId !== undefined;
       },
@@ -17888,7 +18283,7 @@ import { expectTodayReady } from '../../support/today.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
-/** The S10 selector contract rows C16-C19 (plan 3.9, spec D22, CI-4). */
+/** The S10 selector contract rows C16-C19 (plan 3.9, spec D22). */
 const UI = {
   propertiesSent: /Properties sent/,
   partnerSend: 'Send a property to this partner',
@@ -18082,29 +18477,182 @@ Step 4 - GREEN:
 
 Commit `test(e2e): partner-share spec - a property sent from a partner page mints partner_1to1`.
 
+### Task 10.8a - org-lists.spec.ts: an organization value under Settings > "Not on the list" - Add as new asks the Kind, Use takes a list name
+
+Plan review R1 ruling S1: no e2e drove S7's Settings organization rows, and
+S5 Task 5.7's dev-seam extension (`field: 'organization'`) was never called.
+This task adds ONE test to the existing `"Not on the list"` describe of
+`e2e/tests/dashboard-next/org-lists.spec.ts`, reusing its helpers
+(`devLoginAs`, `uniquePhone`, `openOrgSettings`, `notOnListRow`, `UI`) and
+the fixtures it already imports (`addOrg`, `requireOrg`, `sameOrgText`,
+`setOffListValue`, `waitForRewrite`).
+
+Files: `e2e/tests/dashboard-next/org-lists.spec.ts`.
+Made pass by: S5 (organization rows, resolve `kind`, the dev seam) and S7
+(Task 7.5's organization rows and the Settle dialog's Kind choice).
+
+E2E rules (section 0 and this slice's isolation rules): every value and
+name is RUN-UNIQUE (a stamp per test; no value contains another, because
+`notOnListRow` matches a case-insensitive substring); the holders are
+partners this test creates; the one list entry it adds through the API goes
+through `addOrg`, and the one the UI adds ("Add as new") carries the stamp
+too; NO count is asserted anywhere (no `count` / `deletedCount`, no number
+of rows, no empty state); each rewrite is lane-global, so the test waits for
+each before the next.
+
+This task is PIN-only (section 0): it covers behavior S5 and S7 proved with
+unit tests, so it is green on arrival. Its assertions that CAN fail on a
+regression: the row is labelled `Organization`; "Add as new" in the dialog
+stays disabled until a `Kind` radio is chosen; the added entry's kind is the
+one picked; Use writes the list name onto the holder's `organization`.
+
+Step 1 - helpers. In `e2e/tests/dashboard-next/org-lists.spec.ts`, current
+(unique):
+
+```ts
+test.describe('"Not on the list" (spec D10, D11)', () => {
+```
+
+Replace with:
+
+```ts
+/** A run-unique partner (a caseworker - type partner, role Caseworker)
+ *  through the real POST; its `organization` is planted by the dev seam. */
+async function createPartner(request: APIRequestContext, firstName: string): Promise<string> {
+  const res = await request.post(`${NEXT}/api/contacts`, {
+    data: { type: 'partner', role: 'Caseworker', firstName, lastName: 'Orglist', phone: uniquePhone() },
+  });
+  expect(res.ok(), await res.text()).toBeTruthy();
+  return ((await res.json()) as { contact: { contactId: string } }).contact.contactId;
+}
+
+/** A contact's stored organization (caseworkers spec D17). */
+async function organizationOf(request: APIRequestContext, contactId: string): Promise<string | undefined> {
+  const res = await request.get(`${NEXT}/api/contacts/${contactId}`);
+  expect(res.ok(), await res.text()).toBeTruthy();
+  return ((await res.json()) as { contact: { organization?: string } }).contact.organization;
+}
+
+test.describe('"Not on the list" (spec D10, D11)', () => {
+```
+
+Step 2 - the test, the last one in that describe. Current (unique - the
+end of the `an admin settles values: Use, Move to Agency, Split and Clear
+each rewrite the records` test and of the describe):
+
+```ts
+    for (const value of [useValue, moveValue, splitValue, clearValue]) {
+      await expect(notOnListRow(page, value)).toHaveCount(0);
+    }
+  });
+});
+```
+
+Replace with:
+
+```ts
+    for (const value of [useValue, moveValue, splitValue, clearValue]) {
+      await expect(notOnListRow(page, value)).toHaveCount(0);
+    }
+  });
+
+  test('an organization value (caseworkers D17): its own row; Add as new asks the Kind; Use takes a name of either kind', async ({
+    page,
+  }) => {
+    test.slow(); // two rewrite jobs, strictly one at a time (D11)
+    await devLoginAs(page, 'founder@example.com');
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    // An AGENCY on the list: an organization value is settled against BOTH lists.
+    const wren = `Wren Aid ${stamp}`;
+    await addOrg(req, { kind: 'agency', name: wren });
+    // Two values, neither containing the other.
+    const useValue = wren.toLowerCase(); // resolves to the agency, but is not its exact text
+    const addValue = `Starling Partners ${stamp}`; // resolves to nothing
+    const useHolder = await createPartner(req, `OrgUse${stamp}`);
+    const addHolder = await createPartner(req, `OrgAdd${stamp}`);
+    await setOffListValue(req, { contactId: useHolder, field: 'organization', value: useValue });
+    await setOffListValue(req, { contactId: addHolder, field: 'organization', value: addValue });
+
+    await openOrgSettings(page);
+    const dialog = page.getByRole('dialog');
+
+    // Each value is an ORGANIZATION row (FIELD_LABEL.organization).
+    await expect(notOnListRow(page, addValue)).toBeVisible();
+    await expect(notOnListRow(page, addValue)).toContainText('Organization');
+    await expect(notOnListRow(page, useValue)).toContainText('Organization');
+
+    // Add as new: staff must pick the list - no default kind (D17; R2-F3).
+    await notOnListRow(page, addValue).getByRole('button', { name: 'Add as new', exact: true }).click();
+    const add = dialog.getByRole('button', { name: 'Add as new', exact: true });
+    await expect(add).toBeDisabled();
+    const kind = dialog.getByRole('group', { name: 'Kind' });
+    await expect(kind.getByRole('radio', { name: 'Housing authority' })).not.toBeChecked();
+    await expect(kind.getByRole('radio', { name: 'Agency' })).not.toBeChecked();
+    await kind.getByRole('radio', { name: 'Housing authority' }).click();
+    await expect(add).toBeEnabled();
+    await add.click();
+    await waitForRewrite(req, (r) => r.fromTexts.some((t) => sameOrgText(t, addValue)));
+    expect((await requireOrg(req, addValue)).kind).toBe('housing_authority');
+    expect(await organizationOf(req, addHolder)).toBe(addValue);
+
+    // Use <name>: the value resolves to the AGENCY - an organization takes either kind.
+    await page.reload();
+    await notOnListRow(page, useValue).getByRole('button', { name: UI.use(wren), exact: true }).click();
+    await expect(dialog).toContainText(useValue);
+    await dialog.getByRole('button', { name: UI.use(wren), exact: true }).click();
+    await waitForRewrite(req, (r) => r.action === 'use' && r.fromTexts.some((t) => sameOrgText(t, useValue)));
+    expect(await organizationOf(req, useHolder)).toBe(wren);
+
+    // Both settled values leave the section.
+    await page.reload();
+    await expect(notOnListRow(page, wren)).toHaveCount(0); // the use value, any case
+    await expect(notOnListRow(page, addValue)).toHaveCount(0);
+  });
+});
+```
+
+(`UI.use(name)` is `Use <name>`; the Settle dialog's Add button and the
+row's button share the name `Add as new`, hence the dialog scope. If an
+as-built name differs - the Kind group or its radios, Task 7.3's
+`OrgKindChoice` - it is an S7 defect against plan 3.9: stop and report.)
+
+Step 3 - GREEN:
+
+`cd "W:/tmp/caseworkers"; npm run typecheck -w @housingchoice/e2e` -> exit 0.
+
+`cd "W:/tmp/caseworkers"; npx eslint e2e/tests/dashboard-next/org-lists.spec.ts`
+-> no error on an added line.
+
+`cd "W:/tmp/caseworkers"; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/org-lists.spec.ts`
+-> `0 failed` (every org-lists test, the new one included).
+
+ASCII check on the file's added lines (section "How to run").
+
+Commit `test(e2e): an organization value under Not on the list - Add as new asks the kind, Use takes either kind`
+(stage `e2e/tests/dashboard-next/org-lists.spec.ts`).
+
 ### Task 10.9 - selectors.md: the caseworker surfaces, the partner Send, the neutral share names
 
 File: `e2e/support/selectors.md`. Word every row with the names the specs
 use after Tasks 10.2-10.8 (the selector contract as conformed). Lines 6-10,
 44 and 164-166 carry pre-existing non-ASCII characters and are not touched;
-line 45 IS rewritten (its em dash becomes ` - `), so every added line is
-ASCII.
+every added line is ASCII.
 
-Step 1 - line 45 (the Thread send row). Current: the whole line 45, which
-reads (with `<U+2014 EM DASH>` standing for the one non-ASCII character):
+Ownership (plan review R1 ruling A7): Task 9.6 OWNS line 45 (the
+`| Thread | send |` row), the `| Contact page | Properties sent card |` row
+(heading `/^Properties sent/`) and the `| Property page (Sent to card) |`
+row (heading `/^Sent to\b/`) - one row and one regex each. Task 7.3 owns the
+org-picker row's organization wording and Task 5.7 the dev-seam row. This
+task adds only the caseworker rows and the share-wording row below, and
+NEVER a second row for either share card.
 
-```md
-| Thread | send | `getByRole('button', { name: 'Send', exact: true })` <U+2014 EM DASH> non-exact name matching is substring-based, so a bare `{ name: 'Send' }` also matches the tenant contact page's "+ Send" card action (aria-label "Send a property to this tenant"): a strict-mode violation |
-```
-
-Replace the whole line with:
-
-```md
-| Thread | send | `getByRole('button', { name: 'Send', exact: true })` - non-exact name matching is substring-based, so a bare `{ name: 'Send' }` also matches the "+ Send" card action on the tenant page (aria-label "Send a property to this tenant") and on the partner page (aria-label "Send a property to this partner", since caseworkers): a strict-mode violation |
-```
-
-(Use the Edit tool with the em dash typed literally in `old_string`; check
-afterwards with the ASCII command that the new line 45 is ASCII.)
+Step 1 - skip-if-done verification of Task 9.6's rows (no edit):
+`cd "W:/tmp/caseworkers"; git grep -n -F "Send a property to this partner" -- e2e/support/selectors.md`
+prints the line-45 `| Thread | send |` row and the `| Contact page | Properties sent card |`
+row, and `git grep -n -F "| Property page (Sent to card) |" -- e2e/support/selectors.md`
+prints one line. If any is missing: stop and report (a Task 9.6 gap) - do
+not add a substitute row here.
 
 Step 2 - insert after line 114 (the "Contacts list" row). Current (the
 whole line 114, unique, ASCII):
@@ -18118,24 +18666,22 @@ Replace with that same line followed by these rows:
 ```md
 | Contacts > Caseworkers (`/contacts/caseworkers`) | page, rows and Organization chips | nav `getByRole('navigation', { name: 'Workspace' }).getByRole('link', { name: 'Caseworkers', exact: true })` (a link of the same name sits in `navigation` `Filter contacts`); heading `getByRole('heading', { name: 'Caseworkers', exact: true })`; rows `getByRole('list', { name: 'Caseworkers', exact: true }).getByRole('listitem').filter({ hasText: <full name> })`, each row showing the organization. ALWAYS `exact`: a bare `Caseworkers` substring-matches the `Possible caseworkers` heading and list on the same page. Chips `getByRole('group', { name: 'Organization', exact: true }).getByRole('button', { name: /^<org> \(/ })` - live counts in the name, as the tenant facets; selection is `aria-pressed` and the URL param `org`. The lane keeps every earlier spec's caseworkers: assert only rows the spec created, never a count or the empty text `No caseworkers yet.` |
 | Contacts > Caseworkers | the Possible caseworkers list | `getByRole('list', { name: 'Possible caseworkers', exact: true }).getByRole('listitem').filter({ hasText: <run-unique full name> })`; a row states its signals as text: `Role mentions caseworker`, `AI noted caseworker`, `Linked as a caseworker`, `Partner with no role`. Row buttons are named per contact: `Make <Full Name> a caseworker` (the conversion dialog) and `<Full Name> is not a caseworker` (a confirm dialog - find it by `page.getByRole('dialog').filter({ hasText: 'Hide <Full Name> from Possible caseworkers?' })` - with `Hide` / `Cancel`). Every lane spec adds rows (contact-create's `Case worker <stamp>` tenants, conversation-fact-extraction's role-less partners), so never assert the list's length or emptiness. NEVER convert or dismiss a seeded contact: Renee Carter is a row on a fresh lean world, and a dismissal hides her until the next reseed. Plant an AI-note row with a contacts POST `notes` line that starts `[Auto - <date>] Identified as a caseworker` - without the prefix it is not the AI's line |
-| Contact page | Make caseworker and the conversion dialog | `getByRole('button', { name: 'More actions' })` then `getByRole('menuitem', { name: 'Make caseworker', exact: true })` - on a live tenant, landlord or partner that is not yet a caseworker (absent otherwise); the Unknown card's `Mark as Caseworker` (between `Mark as Partner` and `Mark as Property Manager`) opens the same dialog. Dialog `getByRole('dialog', { name: 'Make <Full Name> a caseworker', exact: true })` (an unnamed unknown is named by its phone: use `/^Make .+ a caseworker$/`); its read-only preview as text (`Housing authority: <x>`, `Agency: <x>`, `<n> conversation(s) will become partner conversations.`); the Organization picker `getByRole('combobox', { name: 'Organization', exact: true })` (both lists; options portaled - see Org pickers); confirm `getByRole('button', { name: 'Make caseworker', exact: true })`, DISABLED while a refusal shows: `Finish or close this contact's placement first.` + link `View placement`, or the landlord-of-record sentence + `View property` - one sentence per blocking record, so take `.first()`. Tasha Nguyen (open placement) and Marcus Bell (landlord of record) are READ-ONLY refusal fixtures: Cancel, and read refusals through `GET /api/contacts/:id/caseworker-review/preview`, never a POST |
+| Contact page | Make caseworker and the conversion dialog | `getByRole('button', { name: 'More actions' })` then `getByRole('menuitem', { name: 'Make caseworker', exact: true })` - on a live tenant, landlord or partner that is not yet a caseworker (absent otherwise); the Unknown card's `Mark as Caseworker` (between `Mark as Partner` and `Mark as Property Manager`) opens the same dialog. Dialog `getByRole('dialog', { name: 'Make <Full Name> a caseworker', exact: true })` (an unnamed unknown is named by its phone: use `/^Make .+ a caseworker$/`); its read-only preview as text (`Housing authority: <x>`, `Agency: <x>`, `<n> conversation(s) will become partner conversations.`); the Organization picker `getByRole('combobox', { name: 'Organization', exact: true })` (both lists; options portaled - see Org pickers; ABSENT, replaced by the text `This contact is already a caseworker. Confirming re-runs the cleanup.`, when the contact already is one); confirm `getByRole('button', { name: 'Make caseworker', exact: true })`, DISABLED while a refusal shows: `Finish or close this contact's placement first.` + link `View placement`, or the landlord-of-record sentence + `View property` - one sentence per blocking record, so take `.first()`. Tasha Nguyen (open placement) and Marcus Bell (landlord of record) are READ-ONLY refusal fixtures: Cancel, and read refusals through `GET /api/contacts/:id/caseworker-review/preview`, never a POST |
 | Contact page (new contact form) | the Caseworker preset | `getByRole('group', { name: 'Contact kind' }).getByRole('button', { name: 'Caseworker', exact: true })` - saves `{ type: 'partner', role: 'Caseworker' }`; no `Role` input and no Organization picker on the create form (Organization is set on the partner page) |
-| Partner page | Properties sent and its Send | `page.locator('section', { has: page.getByRole('heading', { name: /Properties sent/ }) })` and `getByRole('button', { name: 'Send a property to this partner', exact: true })` (the tenant page's twin is `Send a property to this tenant`). A share to a partner mints `partner_1to1`: never "prove" it after calling `POST /api/contacts/:id/conversation` BEFORE the share - that route mints the thread by contact type itself; read the type only after the send. Renee Carter has no consent: mint a run-unique consented partner instead |
-| Property page | the "Sent to" card | `page.locator('section', { has: page.getByRole('heading', { name: /^Sent to\b/ }) })` - the card title is `Sent to`, but the heading's accessible name also carries its `Send this property` action (see Relay groups card heading), so `{ name: 'Sent to', exact: true }` finds NOTHING. Rows are `div`s: address one by its identity link `a[href="/contacts/<id>"]`; a non-tenant row carries its kind label (the role, else `Partner`) as text in the card; tenant rows carry none. The card action and the property kebab's menuitem are both `Send this property` (exact) |
-| Share composer and its echoes | recipient wording | neutral since caseworkers (D20, D22): Send `getByRole('button', { name: /^Send to 1 recipient\b/ })` / `/^Send to \d+ recipients?$/`; reach line `Reaches <n> recipient(s)`; note `Flagged recipients you picked stay checked; "Select all" skips the others.`; property Activity and landlord timeline rows `Sent to <n> recipient(s)` / `No recipients reached` (every share label keeps the `Sent to ` prefix the landlord timeline's relabel keys on). Tenant-worded ON PURPOSE because the control reaches tenants only: `Add a tenant`, `Add more tenants by filters`, `No candidates - add a tenant below.`, the filter summary `Tenants - ...` |
+| Share composer and its echoes | recipient wording | neutral since caseworkers (D20, D22): Send `getByRole('button', { name: /^Send to 1 recipient\b/ })` / `/^Send to \d+ recipients?$/`; reach line `Reaches <n> recipient(s)`; note `Flagged recipients you picked stay checked; "Select all" skips the others.`; property Activity and landlord timeline rows `Sent to <n> recipient(s)` / `No recipients reached` (every share label keeps the `Sent to ` prefix the landlord timeline's relabel keys on). Tenant-worded ON PURPOSE because the control reaches tenants only: `Add a tenant`, `Add more tenants by filters`, `No candidates - add a tenant below.`, the filter summary `Tenants - ...`. The partner page's Properties sent card and the property's "Sent to" card are Task 9.6's rows above. A share to a partner mints `partner_1to1`: never "prove" it after calling `POST /api/contacts/:id/conversation` BEFORE the share - that route mints the thread by contact type itself; read the type only after the send. Renee Carter has no consent: mint a run-unique consented partner instead |
 ```
 
 Step 3 - check:
 `cd "W:/tmp/caseworkers"; git diff -U0 -- e2e/support/selectors.md | grep '^+' | grep -nP '[^\x00-\x7F]'`
 -> prints nothing.
 
-Commit `docs(e2e): selectors for the Caseworkers page, the conversion dialog, partner shares and the neutral share wording`.
+Commit `docs(e2e): selectors for the Caseworkers page, the conversion dialog and the neutral share wording` (stage `e2e/support/selectors.md`).
 
 ### Task 10.10 - GLOSSARY: caseworker and organization (of a caseworker); partner and "not on the list" cross-referenced
 
 File: `documentation/GLOSSARY.md` (spec section 3, planner rulings R1-F17,
-R4-22). Lines 215-345 are ASCII; the file's other non-ASCII lines are not
-touched.
+R4-22; plan review R1 ruling A8 adds Step 4). Lines 215-345 and line 120 are
+ASCII; the file's other non-ASCII lines are not touched.
 
 Step 1 - the `partner` entry. Current (`:227-228`, unique):
 
@@ -18221,18 +18767,34 @@ Replace with:
 - **accepted authorities** (tenant-list-visibility, 2026-08-10; updated by
 ```
 
-Step 4 - check:
+Step 4 - the share entry's retired label (`:120`; AGENTS.md: GLOSSARY
+changes in the same change as the wording; plan review R1 ruling A8).
+Current (ASCII, unique):
+
+```md
+  offers "Send to tenants". Replaces the earlier on-screen label "Broadcasts"
+```
+
+Replace with:
+
+```md
+  offers "Send this property". Replaces the earlier on-screen label "Broadcasts"
+```
+
+Step 5 - check:
 `cd "W:/tmp/caseworkers"; git diff -U0 -- documentation/GLOSSARY.md | grep '^+' | grep -nP '[^\x00-\x7F]'`
 -> prints nothing.
 
-Commit `docs(glossary): caseworker and organization (of a caseworker); partner and not-on-the-list cross-referenced`.
+Commit `docs(glossary): caseworker and organization (of a caseworker); partner and not-on-the-list cross-referenced; Send this property`.
 
 ### Task 10.11 - RUNBOOK: the caseworker conversion's repair, putting a mistaken conversion back, and what it does not fence
 
-File: `RUNBOOK.md` (spec section 11; planner rulings R1-F4, R2-F9). The new
-section goes BEFORE "Tour reminder supersession" - not inside the
-organization-names section, which main's `20ccdb12` rewrote (keeping the two
-edits apart keeps the final main sync clean). The inserted block is ASCII.
+Files: `RUNBOOK.md` (spec section 11; planner rulings R1-F4, R2-F9; plan
+review R1 ruling A12 adds Step 2), `documentation/sequence-diagram-to-test.md`
+(ruling A8, Step 3). The new section goes BEFORE "Tour reminder
+supersession" - not inside the organization-names section, which main's
+`20ccdb12` rewrote (keeping the two edits apart keeps the final main sync
+clean). The inserted block is ASCII.
 
 Step 1 - Current (unique):
 
@@ -18272,17 +18834,54 @@ await (await fetch('/api/contacts/<contactId>/caseworker-review', { method: 'POS
 ### Tour reminder supersession (2026-09-01): NOTHING is owed - no backfill, no Terraform, no sweep
 ````
 
-Step 2 - check:
-`cd "W:/tmp/caseworkers"; git diff -U0 -- RUNBOOK.md | grep '^+' | grep -nP '[^\x00-\x7F]'`
+Step 2 - the stale "Sent to tenants" card name elsewhere in `RUNBOOK.md`
+(plan review R1 ruling A12; the card is "Sent to" since Task 9.1). Four
+edits, each anchor unique in the file:
+
+- `:179` - the line holds an em dash, written `{--}` (section 0 glyph
+  legend; the line holding the unique ASCII prefix
+  ``| BE4 listings-sent | `listing_sends` | **new table** ``) - Read it and
+  replace the WHOLE line, which becomes ASCII. Current
+  ``| BE4 listings-sent | `listing_sends` | **new table** {--} PK `unitId`, SK `contactId`, GSI `byContact` (`contactId`+`sentAt`) | "Sent to tenants" / "Properties sent" |``
+  Replace with
+  ``| BE4 listings-sent | `listing_sends` | **new table** - PK `unitId`, SK `contactId`, GSI `byContact` (`contactId`+`sentAt`) | "Sent to" (the property card; "Sent to tenants" before caseworkers) / "Properties sent" |``.
+- `:376` (ASCII) - replace the substring
+  `"Properties sent" and "Sent to tenants". The deployed code fixes new sends;`
+  with `"Properties sent" and the property's "Sent to" card. The deployed code fixes new sends;`.
+- `:386` (ASCII) - replace the substring
+  `the property's "Sent to tenants"), a created counted row included.`
+  with `the property's "Sent to" card), a created counted row included.`.
+- `:415` (ASCII) - replace the substring
+  `the tour chip on the "Sent to tenants" / "Properties sent" lists`
+  with `the tour chip on the "Sent to" / "Properties sent" lists`.
+
+Afterwards `cd "W:/tmp/caseworkers"; git grep -n "Sent to tenants" -- RUNBOOK.md`
+prints only the line-179 parenthesis "(... "Sent to tenants" before caseworkers)".
+
+Step 3 - `documentation/sequence-diagram-to-test.md:135` (plan review R1
+ruling A8). The line holds U+2192 arrows, written `{->}` (section 0 glyph
+legend; the line holding the unique ASCII substring
+`"Send to N tenant(s)"), which sends a templated SMS`) - Read it and replace
+the WHOLE line, which becomes ASCII. Current
+``  {->} curate {->} "Send to N tenant(s)"), which sends a templated SMS (`[Address]`, `[Rent]`,``
+Replace with
+``  -> curate -> "Send to N recipient(s)"), which sends a templated SMS (`[Address]`, `[Rent]`,``.
+(If the Read shows the line's leading text differs from `  {->} curate {->}`,
+keep its leading text, retyped in ASCII, and change only "tenant(s)" ->
+"recipient(s)".)
+
+Step 4 - check:
+`cd "W:/tmp/caseworkers"; git diff -U0 -- RUNBOOK.md documentation/sequence-diagram-to-test.md | grep '^+' | grep -nP '[^\x00-\x7F]'`
 -> prints nothing.
 
-Commit `docs(runbook): caseworkers - the conversion's repair, putting a conversion back, what it does not fence`.
+Commit `docs(runbook): caseworkers - the conversion's repair, putting a conversion back, what it does not fence; the "Sent to" card name`
+(stage `RUNBOOK.md` and `documentation/sequence-diagram-to-test.md`).
 
 ### Task 10.12 - issues: the section 12 B follow-ups, and staff-notes-on-landlord-partner-files updated
 
 Spec section 12's B lines, each checked against `docs/issues/` before this
 plan was written: none is filed yet. The cost line pairs with the profiler
-issue filed in Task 10.1. Create the six files below (the
+issue S8 Task 8.13 filed (Task 10.1 verifies it). Create the six files below (the
 `docs/issues/_TEMPLATE.md` schema; filename minus `.md` is the id;
 `<BUILD-DATE>` = `date +%F`), then update one existing issue.
 
@@ -18342,13 +18941,13 @@ Step 3 - `docs/issues/tours-placements-no-contact-type-check.md`:
 ```md
 ---
 id: tours-placements-no-contact-type-check
-title: Tours and placements check no contact type on create or reopen, so a caseworker can be given an open tour or placement after the conversion refused one
+title: Tours, placements, a property's landlord of record and its contact list check no contact type, so a caseworker can be given what the conversion refused
 type: bug
 severity: low
 status: open
 area: app/tours
 created: <BUILD-DATE>
-refs: app/src/routes/tours.ts, app/src/routes/placements.ts, app/src/services/statusTransition.ts:335, app/src/jobs/tourReminders.ts:1093, app/src/routes/tourReminders.ts:1027
+refs: app/src/routes/tours.ts, app/src/routes/placements.ts, app/src/services/statusTransition.ts:335, app/src/jobs/tourReminders.ts:1093, app/src/routes/tourReminders.ts:1027, app/src/routes/units.ts, app/src/lib/unitFields.ts, app/src/services/rosterEdits.ts
 ---
 
 **Problem.** The caseworker conversion (`feat/caseworkers`, spec D19)
@@ -18363,12 +18962,25 @@ names, a caseworker included; and a tour reopened after a conversion has NO
 reminder thread - the conversion re-typed the contact's thread to
 `partner_1to1`, and reminders look only for `tenant_1to1` or `unknown_1to1`
 (`jobs/tourReminders.ts:1093`, `routes/tourReminders.ts:1027`), so every rung
-finds no conversation. Pre-existing guard gap; accepted for branch B.
+finds no conversation. The same holds for the conversion's other two
+refusals (plan review R1 ruling A4): a property's landlord of record and its
+contact list. The units routes set `landlordId` (create, and the unit PATCH -
+`app/src/routes/units.ts`, validated only as a non-empty string by
+`app/src/lib/unitFields.ts`) without reading that contact's type, and the
+roster edits (`app/src/services/rosterEdits.ts`, which pass the owner's type
+through but never check the added contact's) add any contact to a
+property's contact list - so after a conversion refused "landlord of
+record" or "on a property's contact list", staff can make the caseworker
+exactly that. Pre-existing guard gaps; accepted for branch B.
 
 **Suggested fix.** Refuse a tour or placement whose tenant is not typed
 `tenant` (or `unknown`, for triage) on create and reopen, with a sentence
 naming the contact's kind; make `deriveTenantStatus` skip a contact that is
-not a tenant. Related: `contact-retype-skips-caseworker-refusals`.
+not a tenant. Decide (Sam and Cameron) whether a caseworker may be a
+property's landlord of record or sit on its contact list: if not, the unit
+create / PATCH `landlordId` write and the roster add refuse a contact for
+which `isCaseworker` (`app/src/lib/caseworkers.ts`) holds, with a sentence
+naming why. Related: `contact-retype-skips-caseworker-refusals`.
 ```
 
 Step 4 - `docs/issues/extraction-in-flight-writes-onto-converted-caseworker.md`:
@@ -18557,7 +19169,7 @@ Step 9 - checks:
 
 `cd "W:/tmp/caseworkers"; npm run issues` -> prints its summary, lists the
 six new ids as open (and `perf-pages-contacts-caseworkers-surface` from
-Task 10.1), and prints no warning naming any of them. `docs/issues/INDEX.md`
+S8 Task 8.13), and prints no warning naming any of them. `docs/issues/INDEX.md`
 is gitignored: never stage it.
 
 Commit `docs(issues): file the caseworkers follow-ups; staff notes now on the partner file` (stage the seven paths explicitly).
@@ -18577,14 +19189,15 @@ Do not edit app or dashboard source and do not start another e2e run while
 it runs.
 
 Expected: the list reporter's last lines show `0 failed` (the suite count is
-main's plus the 6 new tests: caseworkers.spec.ts 4, partner-share.spec.ts 1,
-contact-create's Caseworker preset 1).
+main's plus the 7 new tests: caseworkers.spec.ts 4, partner-share.spec.ts 1,
+contact-create's Caseworker preset 1, org-lists' organization value 1 - Task
+10.8a).
 
 Step 2 - only if something failed:
 - Re-run the failing file alone (`npm run e2e -w @housingchoice/e2e -- <file>`).
 - If it reads a share label, a contact-list or nav name, the usage wire, or
-  a Possible-list / Caseworkers-tab count: fix it the way Tasks 10.2-10.4 did
-  (neutral wording per CI-4, `exact: true` past the Caseworkers names,
+  a Possible-list / Caseworkers-tab count: fix it the way Tasks 6.5, 9.1-9.4 and 10.2 did
+  (neutral wording per plan 3.9, `exact: true` past the Caseworkers names,
   run-unique rows only), run that file green, commit
   `test(e2e): <spec name> on the caseworkers world`, then re-run the whole
   suite.
@@ -18594,3 +19207,88 @@ Step 2 - only if something failed:
   on the lane's ports before the next run.
 
 No commit when the suite is green.
+
+
+### Task 10.14 - sync main once, then the five completion gates, bare (AGENTS.md "Required completion gates")
+
+Plan review R1 ruling B10. The LAST task before handback; nothing else runs
+in this worktree meanwhile (no e2e session, no other suite). Every gate runs
+BARE - never piped, never `;`-chained into another command, its exit code
+read directly. Record each gate's command, exit code and counts for the
+handback.
+
+Step 1 - sync `main` into the branch, ONCE (AGENTS.md; never move `HEAD` in
+the shared main checkout - this merge happens in `W:/tmp/caseworkers`):
+
+- `git -C "W:/tmp/caseworkers" status` - clean, and no MERGE_HEAD:
+  `ls "$(git -C "W:/tmp/caseworkers" rev-parse --git-dir)/MERGE_HEAD"` reports
+  no such file.
+- `git -C "W:/tmp/caseworkers" log --oneline HEAD..main` - what main added
+  since the branch's last sync. Empty -> skip to Step 2.
+- `git -C "W:/tmp/caseworkers" merge-tree --write-tree HEAD main` - a
+  conflict listed here that touches work another agent has in flight: STOP
+  and ask before syncing (AGENTS.md). Otherwise:
+  `git -C "W:/tmp/caseworkers" merge main -m "Merge branch 'main' into feat/caseworkers" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`.
+  On conflicts: resolve each preserving BOTH sides' intent (the plan's text
+  for this branch, main's for its own change), `git status` (read it), stage
+  the resolved paths explicitly, commit the merge with the same message.
+- If the merge changed any `package-lock.json` / `package.json`:
+  `cd "W:/tmp/caseworkers"; npm ci`.
+
+Step 2 - gate 1: `cd "W:/tmp/caseworkers"; npm run typecheck` -> exit 0.
+
+Step 3 - gate 2: `cd "W:/tmp/caseworkers"; npm test` (DynamoDB Local up -
+`npm run db:start`; it FAILS rather than skips without it) -> exit 0. A red
+DynamoDB-suite file: re-run-and-compare (re-run the failing FILE alone more
+than once - `cd "W:/tmp/caseworkers/app"; npx vitest run test/<file>`; run
+the full suite at the merge base; compare failing FILES, not cases; report
+both runs). Any `[dynamoAdmin]` line is one real container fault: capture
+its `err.$metadata.httpStatusCode` and `attempts` first. Never
+`ALLOW_SKIP_DYNAMO_TESTS=1` here - that is not a gate.
+
+Step 4 - gate 3: `cd "W:/tmp/caseworkers"; npm run smoke` -> exit 0 (the
+compiled app's imports resolve under plain Node).
+
+Step 5 - gate 4: the whole e2e suite under a hard outer timeout, in the
+BACKGROUND (Bash tool `run_in_background: true`):
+`cd "W:/tmp/caseworkers"; timeout 2700 npm run e2e`
+-> exit 0, the list reporter's last lines `0 failed`. Exit 124 = the 45-minute
+budget fired: `cd "W:/tmp/caseworkers"; npm run e2e:stop`, confirm no listener
+survives on the lane's ports, and report (a stall is a TRACE question, not a
+log one - AGENTS.md). Never edit source and never start another suite while
+it runs. A failure is a regression to diagnose (there is no named-flake
+list), handled as Task 10.13 Step 2.
+
+Step 6 - gate 5: no NEW lint errors in the files this branch touched -
+the branch's own `.ts`/`.tsx`/`.js`/`.mjs`/`.cjs` files against the EXPLICIT
+merge base (after Step 1's sync that is main's tip). In the Bash tool:
+
+```bash
+cd "W:/tmp/caseworkers"
+BASE=$(git merge-base main HEAD)
+echo "merge base: $BASE"
+FILES=$(git diff --name-only --diff-filter=d "$BASE"...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')
+if [ -z "$FILES" ]; then echo "GATE 5: EMPTY FILE LIST - STOP"; else npx eslint $FILES; fi
+```
+
+- EMPTY-list guard: this branch changes `.ts`/`.tsx` files, so an empty list
+  means the base is wrong (e.g. `main` was already fast-forwarded to this
+  branch, or the diff ran unstaged): STOP and report. NEVER run `npx eslint`
+  with no path arguments - it lints the whole repo and fails on the 23
+  pre-existing `react-hooks/*` errors (AGENTS.md).
+- Exit 0 -> done. Errors reported -> attribute them by BASELINE, never by
+  line number: for each reported file that exists at `$BASE`, lint the base
+  version - `git show "$BASE:<file>" | npx eslint --stdin --stdin-filename <file>`
+  (a pipe is fine here: this is attribution, not the gate's exit code) - and
+  compare. An error present now and absent at the base is THIS branch's and
+  BLOCKING (fix it, commit, re-run gate 5); an error in a file that is new on
+  this branch is always this branch's. Pre-existing errors stay unfixed and
+  are NAMED in the handback.
+- Known hole: the config lints `.ts`/`.tsx` only - a green result on a
+  `.mjs`/`.js` file checked nothing.
+
+Step 7 - nothing to commit unless a gate forced a fix (each fix its own
+commit: `git status` first, explicit paths, the trailer). If a fix touched
+app or dashboard source, re-run gates 1-5 from Step 2. Hand back with the
+sync's result and each gate's command, exit code and counts, and any
+pre-existing lint errors named.

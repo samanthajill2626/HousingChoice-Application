@@ -6,6 +6,8 @@ import {
   resolveOrgText,
   compoundSpans,
   closeNames,
+  checkScalarWrite,
+  checkListWrite,
   type OrgEntry,
 } from '../src/lib/orgNames.js';
 
@@ -138,5 +140,72 @@ describe('closeNames (prompts only)', () => {
     // Three of its four words begin words of Atlanta's name - a close name at 120 characters or fewer.
     expect(closeNames(HA_ONLY, `atlanta housing authority ${'x'.repeat(100)}`)).toEqual([]);
     expect(closeNames(HA_ONLY, `atlanta housing authority ${'x'.repeat(90)}`)[0]).toBe(ATLANTA);
+  });
+});
+
+describe('checkScalarWrite (D5)', () => {
+  it('passes an unchanged value even when it is not on the list', () => {
+    expect(checkScalarWrite(LIST, 'housingAuthority', 'atlanta_housing', 'atlanta_housing')).toEqual({
+      ok: true,
+      value: 'atlanta_housing',
+    });
+  });
+  it('clears on blank', () => {
+    expect(checkScalarWrite(LIST, 'housingAuthority', '  ', 'Atlanta Housing Authority')).toEqual({ ok: true, value: null });
+  });
+  it('stores an exact name as is and a unique spelling as its name', () => {
+    expect(checkScalarWrite(LIST, 'housingAuthority', 'Atlanta Housing Authority', undefined)).toEqual({
+      ok: true,
+      value: 'Atlanta Housing Authority',
+    });
+    expect(checkScalarWrite(LIST, 'housingAuthority', 'Georgia DCA', undefined)).toEqual({
+      ok: true,
+      value: 'Georgia Department of Community Affairs',
+    });
+  });
+  it('refuses ambiguous, other-kind, compound and unknown text with details', () => {
+    const amb = checkScalarWrite(LIST, 'housingAuthority', 'AHA', undefined);
+    expect(amb.ok).toBe(false);
+    if (!amb.ok) {
+      expect(amb.error.error).toBe('org_not_on_list');
+      expect(amb.error.field).toBe('housingAuthority');
+      expect(amb.error.candidates.map((c) => c.name)).toEqual([ATLANTA.name, AUGUSTA.name]);
+    }
+    const other = checkScalarWrite(LIST, 'housingAuthority', 'Step Up', undefined);
+    expect(!other.ok && other.error.otherKind?.map((c) => c.name)).toEqual(['Step Up']);
+    const comp = checkScalarWrite(LIST, 'housingAuthority', 'DCA VASH', undefined);
+    expect(!comp.ok && comp.error.compound?.length).toBe(2);
+    const unk = checkScalarWrite(LIST, 'agency', 'Nowhere Org', undefined);
+    expect(!unk.ok && unk.error.close).toEqual([]);
+  });
+});
+
+describe('checkListWrite (D5 per member)', () => {
+  it('keeps members the record already holds and the legacy jurisdiction', () => {
+    expect(checkListWrite(LIST, 'accepted_authorities', ['atlanta_housing', 'Old Place'], ['atlanta_housing'], 'Old Place')).toEqual({
+      ok: true,
+      value: ['atlanta_housing', 'Old Place'],
+    });
+  });
+  it('compares held members after trimming both sides', () => {
+    expect(checkListWrite(LIST, 'accepted_authorities', ['Old Place'], ['  Old Place '], undefined)).toEqual({
+      ok: true,
+      value: ['Old Place'],
+    });
+    expect(checkListWrite(LIST, 'accepted_authorities', ['Old Place'], [], ' Old Place ')).toEqual({
+      ok: true,
+      value: ['Old Place'],
+    });
+  });
+  it('resolves new members, trims and de-duplicates', () => {
+    expect(checkListWrite(LIST, 'accepted_authorities', [' Georgia DCA ', 'Georgia Department of Community Affairs', ''], [], undefined)).toEqual({
+      ok: true,
+      value: ['Georgia Department of Community Affairs'],
+    });
+  });
+  it('refuses the first new member that does not resolve', () => {
+    const r = checkListWrite(LIST, 'accepted_authorities', ['Atlanta Housing Authority', 'Step Up'], [], undefined);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.text).toBe('Step Up');
   });
 });

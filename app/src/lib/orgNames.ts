@@ -214,3 +214,96 @@ export function closeNames(
     .slice(0, limit)
     .map((s) => s.e);
 }
+
+export interface OrgRef {
+  orgId: string;
+  kind: OrgKind;
+  name: string;
+}
+
+export interface OrgNotOnList {
+  error: 'org_not_on_list';
+  field: OrgField;
+  text: string;
+  candidates: OrgRef[];
+  close: OrgRef[];
+  otherKind?: OrgRef[];
+  compound?: OrgRef[][];
+}
+
+function ref(e: OrgEntry): OrgRef {
+  return { orgId: e.orgId, kind: e.kind, name: e.name };
+}
+
+function notOnList(field: OrgField, text: string, r: OrgResolution): OrgNotOnList {
+  return {
+    error: 'org_not_on_list',
+    field,
+    text,
+    candidates: r.status === 'ambiguous' ? r.candidates.map(ref) : [],
+    close: r.status === 'unknown' ? r.close.map(ref) : [],
+    ...(r.status === 'other_kind' && { otherKind: r.entries.map(ref) }),
+    ...(r.status === 'compound' && { compound: r.spans.map((s) => s.map(ref)) }),
+  };
+}
+
+export type ScalarCheck = { ok: true; value: string | null } | { ok: false; error: OrgNotOnList };
+
+/**
+ * D5 for one field. `current` is what the record holds now. Blank clears
+ * (value null). An unchanged value passes even when it is not on the list.
+ * An exact name is kept; a unique spelling (or the name in another case) is
+ * stored as the entry's exact name; anything else is refused.
+ */
+export function checkScalarWrite(
+  entries: readonly OrgEntry[],
+  field: OrgField,
+  next: string,
+  current: string | undefined,
+): ScalarCheck {
+  const trimmed = next.trim();
+  if (trimmed === '') return { ok: true, value: null };
+  if (current !== undefined && trimmed === current) return { ok: true, value: current };
+  const kinds = KINDS_FOR_FIELD[field];
+  if (isOnListFor(entries, trimmed, kinds)) return { ok: true, value: trimmed };
+  const r = resolveOrgText(entries, trimmed, kinds);
+  if (r.status === 'match') return { ok: true, value: r.entry.name };
+  return { ok: false, error: notOnList(field, trimmed, r) };
+}
+
+export type ListCheck = { ok: true; value: string[] } | { ok: false; error: OrgNotOnList };
+
+/**
+ * D5 for a list field. Members are trimmed, blanks dropped, duplicates
+ * dropped (first wins). A member the record already holds, or equal to
+ * `legacyJurisdiction`, passes unchanged (both compared after trimming both
+ * sides); every other member must resolve to an entry name. The first failing
+ * member is reported. CALLERS pass `legacyJurisdiction` ONLY while the stored
+ * unit has no `accepted_authorities` (planner ruling R1-F1); otherwise
+ * undefined.
+ */
+export function checkListWrite(
+  entries: readonly OrgEntry[],
+  field: OrgField,
+  next: readonly string[],
+  current: readonly string[] | undefined,
+  legacyJurisdiction: string | undefined,
+): ListCheck {
+  const held = new Set((current ?? []).map((c) => c.trim()));
+  const legacy = legacyJurisdiction?.trim();
+  const out: string[] = [];
+  for (const raw of next) {
+    const member = raw.trim();
+    if (member === '') continue;
+    let value: string;
+    if (held.has(member) || (legacy !== undefined && legacy !== '' && member === legacy)) {
+      value = member;
+    } else {
+      const check = checkScalarWrite(entries, field, member, undefined);
+      if (!check.ok) return check;
+      value = check.value as string;
+    }
+    if (!out.includes(value)) out.push(value);
+  }
+  return { ok: true, value: out };
+}

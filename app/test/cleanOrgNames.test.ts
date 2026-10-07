@@ -163,6 +163,24 @@ describe('planUnit', () => {
     expect(dropped.changes).toEqual({ unitAgencyMembersDropped: 1 });
   });
 
+  // Code review R3-BE-3: the leftovers preview the Settings section, which
+  // counts a value once per property - so a repeated member is one leftover,
+  // and a repeated agency kept as the only entry is kept (and counted) once.
+  it('a repeated member leaves ONE leftover per value, and a kept agency counts once per property', () => {
+    const smyrna = planUnit({ accepted_authorities: ['Smyrna Housing Office', 'Smyrna Housing Office'] }, ENTRIES);
+    expect(smyrna.leftovers).toEqual([{ field: 'accepted_authorities', value: 'Smyrna Housing Office', resolution: 'unknown' }]);
+    // The apply de-duplicates the list as before.
+    expect(smyrna.write).toEqual({
+      expected: ['Smyrna Housing Office', 'Smyrna Housing Office'],
+      next: ['Smyrna Housing Office'],
+    });
+    expect(smyrna.changes).toEqual({ unitDuplicatesRemoved: 1 });
+    const stepUp = planUnit({ accepted_authorities: ['Step Up', 'Step Up'] }, ENTRIES);
+    expect(stepUp.leftovers).toEqual([{ field: 'accepted_authorities', value: 'Step Up', resolution: 'other_kind' }]);
+    expect(stepUp.write).toEqual({ expected: ['Step Up', 'Step Up'], next: ['Step Up'] });
+    expect(stepUp.changes).toEqual({ unitAgencyMembersKept: 1, unitDuplicatesRemoved: 1 });
+  });
+
   it('keeps ambiguous and unknown members in place and reports them', () => {
     const plan = planUnit({ accepted_authorities: ['DCA', 'MHA', 'Smyrna Housing Office'] }, ENTRIES);
     expect(plan.write?.next).toEqual(['Georgia Department of Community Affairs', 'MHA', 'Smyrna Housing Office']);
@@ -380,6 +398,32 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
     expect(await w.orgList.peek()).toBeNull();
     expect(reportCleanupRun(result, false, silent)).toBe(0);
     expect(reportCleanupRun({ ...result, failed: 1 }, false, silent)).toBe(1);
+  }, 120_000);
+
+  // Code review R3-BE-3: the dry run's leftover list is the preview of the
+  // Settings section reviewed with Sam, which counts a property once.
+  it('the dry run counts a property once for a repeated member - in the leftovers and the kept agencies', async () => {
+    const w = await seedWorld();
+    const unit = (unitId: string, members: string[]) =>
+      doc.send(
+        new PutCommand({
+          TableName: tableName('units', w.env),
+          Item: { unitId, landlordId: 'c-landlord', status: 'available', created_at: NOW, accepted_authorities: members },
+        }),
+      );
+    await unit('u-repeated-unknown', ['Smyrna Housing Office', 'Smyrna Housing Office']);
+    await unit('u-repeated-agency', ['Step Up', 'Step Up']);
+    const result = await cleanOrgNames({ doc, env: w.env, logger: silent });
+    // Beside the seeded world's u-legacy-deleted (Smyrna) and u-only-agency (Step Up).
+    expect(result.leftovers.filter((l) => l.field === 'accepted_authorities')).toEqual([
+      { field: 'accepted_authorities', value: 'Smyrna Housing Office', count: 1, deletedCount: 1, resolution: 'unknown' },
+      { field: 'accepted_authorities', value: 'Step Up', count: 2, deletedCount: 0, resolution: 'other_kind' },
+      { field: 'accepted_authorities', value: 'MHA', count: 1, deletedCount: 0, resolution: 'ambiguous' },
+    ]);
+    expect(result.changes).toMatchObject({
+      unitAgencyMembersKept: CHANGES.unitAgencyMembersKept + 1,
+      unitDuplicatesRemoved: CHANGES.unitDuplicatesRemoved + 2,
+    });
   }, 120_000);
 
   it('counts contacts holding an organization value but lacking type or status (invisible to Settings; expected 0) - and still plans them', async () => {

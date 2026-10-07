@@ -100,7 +100,7 @@ export interface CleanupChanges {
   unitMembersRewritten: number;
   /** Property list members naming an agency, dropped. */
   unitAgencyMembersDropped: number;
-  /** ...kept instead: dropping them would have emptied the list. */
+  /** ...kept instead: dropping them would have emptied the list (a repeated one counts once per property). */
   unitAgencyMembersKept: number;
   /** Duplicate members removed from property lists. */
   unitDuplicatesRemoved: number;
@@ -279,6 +279,13 @@ export function planUnit(
     throw new Error('accepted_authorities is not a list of strings');
   }
   const members = stored as string[];
+  // ONE leftover per value per property (code review R3-BE-3): the preview of
+  // the Settings section, which counts a repeated member's property once.
+  const leave = (value: string, resolution: LeftoverResolution): void => {
+    if (!plan.leftovers.some((l) => l.value === value)) {
+      plan.leftovers.push({ field: 'accepted_authorities', value, resolution });
+    }
+  };
 
   // Each member: kept as it is, rewritten to its name, or flagged as an agency.
   const steps = members.map((raw) => {
@@ -288,9 +295,7 @@ export function planUnit(
       bump(plan.changes, 'unitMembersRewritten');
       return { raw, value: r.entry.name, agency: false };
     }
-    if (r.status !== 'other_kind') {
-      plan.leftovers.push({ field: 'accepted_authorities', value: raw, resolution: r.status });
-    }
+    if (r.status !== 'other_kind') leave(raw, r.status);
     return { raw, value: raw, agency: r.status === 'other_kind' };
   });
   // An agency never belongs on a property: drop it - unless nothing else would
@@ -304,8 +309,9 @@ export function planUnit(
       continue;
     }
     if (s.agency) {
-      bump(plan.changes, 'unitAgencyMembersKept');
-      plan.leftovers.push({ field: 'accepted_authorities', value: s.raw, resolution: 'other_kind' });
+      // Once per property: a repeat is a duplicate the list drops below.
+      if (!kept.includes(s.value)) bump(plan.changes, 'unitAgencyMembersKept');
+      leave(s.raw, 'other_kind');
     }
     kept.push(s.value);
   }

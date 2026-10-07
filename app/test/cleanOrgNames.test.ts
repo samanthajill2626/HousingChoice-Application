@@ -420,6 +420,30 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
     expect(await w.get('units', 'u-blank-members')).toMatchObject({ accepted_authorities: ['', '  '] });
   }, 120_000);
 
+  // Code review R2-BE-3: a whitespace agency is FREE for a move, so the move
+  // fills it - that record holds no blank value once the write lands.
+  it('counts a blank value only when the plan leaves it as it is - never a blank agency the move fills', async () => {
+    const w = await seedWorld();
+    const put = (item: Record<string, unknown>) =>
+      doc.send(new PutCommand({ TableName: tableName('contacts', w.env), Item: { type: 'tenant', status: 'searching', ...item } }));
+    // The move fills the blank agency: nothing blank is left.
+    await put({ contactId: 'c-blank-agency-filled', housingAuthority: 'HUD VASH', agency: '  ' });
+    // Only the housing authority is rewritten: the blank agency stays.
+    await put({ contactId: 'c-blank-agency-kept', housingAuthority: 'Atlanta (AHA)', agency: '  ' });
+    const dry = await cleanOrgNames({ doc, env: w.env, logger: silent });
+    expect(dry).toMatchObject({ recordsPlanned: 8 + 2, recordsWithBlankValues: 1 });
+    // The apply counts from the same plan, and writes exactly that.
+    const applied = await cleanOrgNames({ doc, env: w.env, apply: true, logger: silent });
+    expect(applied).toMatchObject({ recordsWritten: 8 + 2, recordsWithBlankValues: 1 });
+    const filled = await w.get('contacts', 'c-blank-agency-filled');
+    expect(filled?.['agency']).toBe('HUD-Veterans Affairs Supportive Housing (HUD-VASH)');
+    expect(filled?.['housingAuthority']).toBeUndefined();
+    expect(await w.get('contacts', 'c-blank-agency-kept')).toMatchObject({
+      housingAuthority: 'Atlanta Housing Authority',
+      agency: '  ',
+    });
+  }, 120_000);
+
   it('apply: takes the lock, writes each change conditionally with one audit event per field, never stamps updated_at, releases the lock done', async () => {
     const w = await seedWorld();
     const result = await cleanOrgNames({ doc, env: w.env, apply: true, logger: silent });

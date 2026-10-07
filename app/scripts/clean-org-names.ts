@@ -150,6 +150,24 @@ const isWhitespaceOnly = (v: unknown): boolean => typeof v === 'string' && v !==
 /** A blank list member: whitespace, or '' (what the body trim makes of whitespace; a list has no cleared member). */
 const isBlankMember = (m: unknown): boolean => typeof m === 'string' && m.trim() === '';
 
+/**
+ * recordsWithBlankValues counts from the PLAN's outcome: only a blank the
+ * write leaves as it is (code review R2-BE-3) - a move fills a whitespace
+ * agency, which is then no blank at all. No write (nothing to change, or a
+ * record that could not be planned) leaves every blank.
+ */
+function contactKeepsBlank(row: Record<string, unknown>, write: ContactWrite | undefined): boolean {
+  return (
+    (isWhitespaceOnly(row['housingAuthority']) && write?.next.housingAuthority === undefined) ||
+    (isWhitespaceOnly(row['agency']) && write?.next.agency === undefined)
+  );
+}
+
+function unitKeepsBlank(stored: unknown, write: UnitWrite | undefined): boolean {
+  const after: unknown = write?.next ?? stored;
+  return Array.isArray(after) && after.some(isBlankMember);
+}
+
 function bump(changes: Partial<CleanupChanges>, key: keyof CleanupChanges, by = 1): void {
   if (by > 0) changes[key] = (changes[key] ?? 0) + by;
 }
@@ -376,8 +394,9 @@ export interface CleanupResult {
    * Records (contacts and units, deleted included) holding a value no request
    * can name and "Not on the list" never shows (code review R1-CONF-1): a
    * whitespace-only housingAuthority or agency (pre-2026-07-14 data, before
-   * the body trim), or a blank accepted_authorities member. The cleanup leaves
-   * them as they are. Expected 0. Counted only.
+   * the body trim), or a blank accepted_authorities member - counted only when
+   * the plan leaves it as it is (a move fills a whitespace agency: code review
+   * R2-BE-3). Expected 0. Counted only.
    */
   recordsWithBlankValues: number;
   /** Values the plan leaves for the Settings page: by field, most held first. */
@@ -690,16 +709,18 @@ async function run(
     if ((isText(row['housingAuthority']) || isText(row['agency'])) && !(isIndexKey(row['type']) && isIndexKey(row['status']))) {
       result.contactsMissingTypeOrStatus += 1;
     }
-    // Invisible to Settings as well (recordsWithBlankValues): counted only.
-    if (isWhitespaceOnly(row['housingAuthority']) || isWhitespaceOnly(row['agency'])) result.recordsWithBlankValues += 1;
     let plan: RecordPlan<ContactWrite>;
     try {
       plan = planContact(row, entries);
     } catch (err) {
       result.failed += 1;
+      if (contactKeepsBlank(row, undefined)) result.recordsWithBlankValues += 1;
       log.error({ err, contactId }, `${SCRIPT_NAME} - contact could not be PLANNED; stepped over and counted failed`);
       continue;
     }
+    // Invisible to Settings as well (recordsWithBlankValues): counted only -
+    // a blank this plan leaves as it is.
+    if (contactKeepsBlank(row, plan.write)) result.recordsWithBlankValues += 1;
     // The repos' own "deleted" rule (a NON-EMPTY deleted_at string), so these
     // counts match what Settings > "Not on the list" shows; it reads only that attribute.
     tallyLeftovers(tally, plan, isContactDeleted(row as Pick<ContactItem, 'deleted_at'>));
@@ -732,15 +753,16 @@ async function run(
     const unitId = String(row['unitId'] ?? '');
     result.unitsScanned += 1;
     const members = row['accepted_authorities'];
-    if (Array.isArray(members) && members.some(isBlankMember)) result.recordsWithBlankValues += 1;
     let plan: RecordPlan<UnitWrite>;
     try {
       plan = planUnit(row, entries);
     } catch (err) {
       result.failed += 1;
+      if (unitKeepsBlank(members, undefined)) result.recordsWithBlankValues += 1;
       log.error({ err, unitId }, `${SCRIPT_NAME} - unit could not be PLANNED; stepped over and counted failed`);
       continue;
     }
+    if (unitKeepsBlank(members, plan.write)) result.recordsWithBlankValues += 1;
     tallyLeftovers(tally, plan, isUnitDeleted(row as Pick<UnitItem, 'deleted_at'>));
     if (plan.write === undefined) {
       // Nothing to write - but an agency kept as a list's only member is still counted.

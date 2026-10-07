@@ -1,10 +1,12 @@
 // OrgListSection tests - Settings > Housing authorities & agencies (spec
-// 2026-10-06 D10-D13; S14 selector contract S1-S8): the lists as tables with
-// use counts, Add through "Is this really new?", notes, the latest rewrite,
-// and the admin-only actions that never render for a VA.
+// 2026-10-06 D10-D13; S14 selector contract S1-S8; design review 2026-10-07
+// Option B): three segments with counts and a search, a list of links beside
+// a detail panel, the selection in the URL and focus following it, Add
+// through "Is this really new?", notes, the latest rewrite, and the
+// admin-only actions that never render for a VA.
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type OrgEntry, type OrgRewriteState } from '../../api/index.js';
 import { noteServerDate, resetServerClockForTests } from '../../api/serverClock.js';
@@ -92,26 +94,61 @@ const FAILED: OrgRewriteState = {
 };
 const RUNNING: OrgRewriteState = { ...FAILED, status: 'running', heartbeatAt: '2026-07-01T11:59:59.000Z' };
 
-function renderSection(): void {
+/** The URL the page is on, read after each render (the URL is the selection). */
+let currentUrl = '';
+function LocationProbe(): null {
+  const location = useLocation();
+  currentUrl = `${location.pathname}${location.search}`;
+  return null;
+}
+
+function renderSection(path = '/settings/organizations'): void {
   render(
-    <MemoryRouter>
-      <OrgListSection />
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/settings/organizations/:orgId?" element={<OrgListSection />} />
+      </Routes>
+      <LocationProbe />
     </MemoryRouter>,
   );
 }
 
+/** Stub matchMedia: true = the two-pane shell's narrow width (one pane at a time). */
+function stubNarrow(matches: boolean): void {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn().mockImplementation((query: string) => ({
+      matches,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  );
+}
+
+type User = ReturnType<typeof userEvent.setup>;
+
 const region = (name: string): HTMLElement => screen.getByRole('region', { name });
 
-/** One entry's row in a list region, by its exact name (S14 S3). */
-function entryRow(regionName: string, name: string): HTMLElement {
-  const header = within(region(regionName)).getByRole('rowheader', { name });
-  const row = header.closest('tr');
-  if (row === null) throw new Error(`no row for ${name}`);
-  return row;
+/** One entry's row in a list (a link named by the exact name), once loaded. */
+async function findRow(list: string, name: string): Promise<HTMLElement> {
+  return within(await screen.findByRole('region', { name: list })).findByRole('link', { name });
+}
+
+/** Pick an entry in its list; returns the detail panel (a region named by the entry). */
+async function openEntry(user: User, list: string, name: string): Promise<HTMLElement> {
+  if (list === 'Agencies') await user.click(await screen.findByRole('button', { name: /^Agencies/ }));
+  await user.click(await findRow(list, name));
+  return screen.getByRole('region', { name });
 }
 
 beforeEach(() => {
   viewerIsAdmin = false;
+  stubNarrow(false);
   getOrgList.mockReset().mockResolvedValue({ version: 1, entries: [ATLANTA, DEKALB, STEP_UP] });
   getOrgUsage.mockReset().mockResolvedValue(USAGE);
   getNotOnList.mockReset().mockResolvedValue([]);
@@ -125,32 +162,177 @@ beforeEach(() => {
   runOrgRewriteAgain.mockReset();
 });
 
-describe('OrgListSection - everyone', () => {
-  it('shows both lists as tables: the name, its spellings, its notes and what uses it', async () => {
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('OrgListSection - the lists', () => {
+  it('shows three segments with counts; a list row names the entry and how many records use it', async () => {
+    getNotOnList.mockResolvedValue([
+      { field: 'agency', value: 'Step-Up', count: 1, deletedCount: 0, resolution: { status: 'unknown', close: [] } },
+    ]);
     renderSection();
-    const atlanta = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
-    expect(atlanta).toHaveTextContent('AHA');
-    expect(atlanta).toHaveTextContent('Main office downtown');
-    await waitFor(() => expect(atlanta).toHaveTextContent('3 tenants, 1 other contact, 2 properties (+2 deleted)'));
-    expect(entryRow('Agencies', 'Step Up')).toHaveTextContent('1 tenant, 0 other contacts, 0 properties');
-    expect(within(region('Housing authorities')).queryByRole('rowheader', { name: 'Step Up' })).not.toBeInTheDocument();
+    const atlanta = await findRow('Housing authorities', 'Atlanta Housing Authority');
+    expect(atlanta).toHaveAttribute('href', '/settings/organizations/o-atl');
+    await waitFor(() => expect(atlanta).toHaveAccessibleDescription('8 records'));
+    expect(await findRow('Housing authorities', 'DeKalb County Housing Authority')).toHaveAccessibleDescription(
+      'Not used',
+    );
+    expect(within(region('Housing authorities')).queryByRole('link', { name: 'Step Up' })).not.toBeInTheDocument();
+    const lists = screen.getByRole('group', { name: 'Lists' });
+    expect(within(lists).getByRole('button', { name: 'Housing authorities 2' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(lists).getByRole('button', { name: 'Agencies 1' })).toHaveAttribute('aria-pressed', 'false');
+    expect(await within(lists).findByRole('button', { name: 'Not on the list 1' })).toBeInTheDocument();
   });
 
-  it('a VA gets Add and Edit notes, and no admin action at all', async () => {
+  it('a segment switches the list on screen and is kept in the URL', async () => {
+    const user = userEvent.setup();
     renderSection();
-    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
-    expect(within(row).getAllByRole('button')).toHaveLength(1);
-    expect(within(row).getByRole('button', { name: 'Edit notes for Atlanta Housing Authority' })).toBeInTheDocument();
+    await findRow('Housing authorities', 'Atlanta Housing Authority');
+    await user.click(screen.getByRole('button', { name: /^Agencies/ }));
+    expect(currentUrl).toBe('/settings/organizations?view=agencies');
+    expect(await findRow('Agencies', 'Step Up')).toHaveAccessibleDescription('1 record');
+    expect(screen.queryByRole('region', { name: 'Housing authorities' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Not on the list/ }));
+    expect(currentUrl).toBe('/settings/organizations?view=not-on-list');
+    expect(within(region('Not on the list')).getByText('Every stored value is on the lists.')).toBeInTheDocument();
+  });
+
+  it('the search finds names and spellings in every list, and the counts say where', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    await findRow('Housing authorities', 'Atlanta Housing Authority');
+    const search = screen.getByRole('searchbox', { name: 'Search names and spellings' });
+    await user.type(search, 'hadc');
+    const list = region('Housing authorities');
+    expect(within(list).getByRole('link', { name: 'DeKalb County Housing Authority' })).toBeInTheDocument();
+    expect(within(list).queryByRole('link', { name: 'Atlanta Housing Authority' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Housing authorities 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Agencies 0' })).toBeInTheDocument();
+    // Compared the way names are: case and punctuation do not matter.
+    await user.clear(search);
+    await user.type(search, 'step-up');
+    expect(within(list).getByText('No housing authorities match "step-up".')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Agencies 1' })).toBeInTheDocument();
+  });
+
+  it('a VA gets Add on each list and only Edit notes in the panel - no admin action at all', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    expect(
+      within(await screen.findByRole('region', { name: 'Housing authorities' })).getByRole('button', {
+        name: 'Add housing authority',
+      }),
+    ).toBeInTheDocument();
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    expect(within(panel).getAllByRole('button').map((b) => b.textContent)).toEqual(['Edit notes']);
+    expect(within(panel).getByRole('button', { name: 'Edit notes for Atlanta Housing Authority' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Agencies/ }));
     expect(within(region('Agencies')).getByRole('button', { name: 'Add agency' })).toBeInTheDocument();
-    expect(within(region('Housing authorities')).getByRole('button', { name: 'Add housing authority' })).toBeInTheDocument();
   });
 
-  it('Add opens "Is this really new?" with an empty Name; the added entry appears with its notes', async () => {
+  it('a list that fails to load offers Retry', async () => {
+    const user = userEvent.setup();
+    getOrgList.mockRejectedValueOnce(new ApiError(503, 'org_list_busy', 'org_list_busy'));
+    renderSection();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("Couldn't load housing authorities and agencies.");
+    await user.click(within(alert).getByRole('button', { name: 'Retry' }));
+    expect(await findRow('Housing authorities', 'Atlanta Housing Authority')).toBeInTheDocument();
+  });
+});
+
+describe('OrgListSection - the detail panel', () => {
+  it('shows the spellings as chips, the notes and what uses the entry', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    expect(within(panel).getByRole('heading', { name: 'Atlanta Housing Authority' })).toBeInTheDocument();
+    expect(panel).toHaveTextContent('Housing authority');
+    const chips = within(panel).getByRole('list', { name: 'Spellings of Atlanta Housing Authority' });
+    expect(within(chips).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['AHA']);
+    expect(panel).toHaveTextContent('Main office downtown');
+    await waitFor(() => expect(panel).toHaveTextContent('3 tenants, 1 other contact, 2 properties (+2 deleted)'));
+  });
+
+  it('a spelling that holds a comma stays one chip (design review P7)', async () => {
+    const user = userEvent.setup();
+    const commas = { ...ATLANTA, spellings: ['AHA', 'Atlanta, aha, Atlanta housing'] };
+    getOrgList.mockResolvedValue({ version: 1, entries: [commas, DEKALB, STEP_UP] });
+    renderSection();
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    const chips = within(panel).getByRole('list', { name: 'Spellings of Atlanta Housing Authority' });
+    expect(within(chips).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      'AHA',
+      'Atlanta, aha, Atlanta housing',
+    ]);
+  });
+
+  it('an unused entry says so; empty spellings and notes say so in words', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    const panel = await openEntry(user, 'Housing authorities', 'DeKalb County Housing Authority');
+    await waitFor(() => expect(panel).toHaveTextContent('Not used'));
+    expect(panel).toHaveTextContent('No notes yet.');
+    const stepUp = await openEntry(user, 'Agencies', 'Step Up');
+    expect(stepUp).toHaveTextContent('No spellings.');
+  });
+
+  it('picking an entry puts it in the URL and moves focus to the panel; Close returns it to the row', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    const row = await findRow('Housing authorities', 'Atlanta Housing Authority');
+    await user.click(row);
+    expect(currentUrl).toBe('/settings/organizations/o-atl');
+    expect(row).toHaveAttribute('aria-current', 'page');
+    const panel = region('Atlanta Housing Authority');
+    expect(within(panel).getByRole('heading', { name: 'Atlanta Housing Authority' })).toHaveFocus();
+    await user.click(within(panel).getByRole('link', { name: 'Close' }));
+    expect(currentUrl).toBe('/settings/organizations');
+    expect(screen.queryByRole('region', { name: 'Atlanta Housing Authority' })).not.toBeInTheDocument();
+    expect(await findRow('Housing authorities', 'Atlanta Housing Authority')).toHaveFocus();
+  });
+
+  it('a link to an entry opens it in its own list without taking focus', async () => {
+    renderSection('/settings/organizations/o-step');
+    const panel = await screen.findByRole('region', { name: 'Step Up' });
+    expect(within(panel).getByRole('heading', { name: 'Step Up' })).not.toHaveFocus();
+    expect(screen.getByRole('button', { name: /^Agencies/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(region('Agencies')).getByRole('link', { name: 'Step Up' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('a link to an entry that is gone says so', async () => {
+    renderSection('/settings/organizations/o-gone');
+    const panel = await screen.findByRole('region', { name: 'Name not found' });
+    expect(panel).toHaveTextContent('it may have been merged or deleted');
+    expect(within(panel).getByRole('link', { name: 'Close' })).toHaveAttribute('href', '/settings/organizations');
+  });
+
+  it('on a phone one pane shows at a time: the panel has a Back link, and Back returns focus to the row', async () => {
+    stubNarrow(true);
+    const user = userEvent.setup();
+    renderSection();
+    const row = await findRow('Housing authorities', 'Atlanta Housing Authority');
+    expect(screen.getByRole('searchbox', { name: 'Search names and spellings' })).toBeInTheDocument();
+    await user.click(row);
+    const panel = region('Atlanta Housing Authority');
+    // Nothing above the panel but the update status: no segments, no search.
+    expect(screen.queryByRole('group', { name: 'Lists' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
+    await user.click(within(panel).getByRole('link', { name: 'Back to Housing authorities' }));
+    expect(currentUrl).toBe('/settings/organizations');
+    expect(await findRow('Housing authorities', 'Atlanta Housing Authority')).toHaveFocus();
+  });
+});
+
+describe('OrgListSection - Add and notes (everyone)', () => {
+  it('Add opens "Is this really new?" with an empty Name; the added entry opens in the panel with its notes', async () => {
     const user = userEvent.setup();
     const finch = entry('agency', 'Finch Mission', { orgId: 'o-finch', notes: 'Added today' });
     addOrg.mockResolvedValue(finch);
     renderSection();
-    await user.click(await screen.findByRole('button', { name: 'Add agency' }));
+    await user.click(await screen.findByRole('button', { name: /^Agencies/ }));
+    await user.click(screen.getByRole('button', { name: 'Add agency' }));
     const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
     const name = within(dialog).getByRole('textbox', { name: 'Name' });
     expect(name).toHaveValue('');
@@ -161,15 +343,17 @@ describe('OrgListSection - everyone', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Yes, add it' }));
     expect(addOrg).toHaveBeenCalledWith({ kind: 'agency', name: 'Finch Mission', notes: 'Added today' });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(await waitFor(() => entryRow('Agencies', 'Finch Mission'))).toHaveTextContent('Added today');
+    expect(currentUrl).toBe('/settings/organizations/o-finch');
+    expect(await screen.findByRole('region', { name: 'Finch Mission' })).toHaveTextContent('Added today');
+    expect(await findRow('Agencies', 'Finch Mission')).toHaveAttribute('aria-current', 'page');
   });
 
   it('everyone edits notes; Save sends only the notes and re-reads the list', async () => {
     const user = userEvent.setup();
     patchOrg.mockResolvedValue({ entry: { ...ATLANTA, notes: 'Moved to Peachtree' } });
     renderSection();
-    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
-    await user.click(within(row).getByRole('button', { name: 'Edit notes for Atlanta Housing Authority' }));
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    await user.click(within(panel).getByRole('button', { name: 'Edit notes for Atlanta Housing Authority' }));
     const dialog = screen.getByRole('dialog', { name: 'Edit notes' });
     const notes = within(dialog).getByRole('textbox', { name: 'Notes' });
     expect(notes).toHaveValue('Main office downtown');
@@ -179,17 +363,15 @@ describe('OrgListSection - everyone', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Save' }));
     expect(patchOrg).toHaveBeenCalledWith('o-atl', { notes: 'Moved to Peachtree' });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    await waitFor(() =>
-      expect(entryRow('Housing authorities', 'Atlanta Housing Authority')).toHaveTextContent('Moved to Peachtree'),
-    );
+    await waitFor(() => expect(region('Atlanta Housing Authority')).toHaveTextContent('Moved to Peachtree'));
   });
 
   it('a refused notes save says why in staff words', async () => {
     const user = userEvent.setup();
     patchOrg.mockRejectedValue(new ApiError(400, 'org_notes_too_long', 'org_notes_too_long'));
     renderSection();
-    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
-    await user.click(within(row).getByRole('button', { name: 'Edit notes for Atlanta Housing Authority' }));
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    await user.click(within(panel).getByRole('button', { name: 'Edit notes for Atlanta Housing Authority' }));
     const dialog = screen.getByRole('dialog', { name: 'Edit notes' });
     await user.type(within(dialog).getByRole('textbox', { name: 'Notes' }), ' and more');
     await user.click(within(dialog).getByRole('button', { name: 'Save' }));
@@ -205,16 +387,6 @@ describe('OrgListSection - everyone', () => {
       ),
     ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Run again' })).not.toBeInTheDocument();
-  });
-
-  it('a list that fails to load offers Retry', async () => {
-    const user = userEvent.setup();
-    getOrgList.mockRejectedValueOnce(new ApiError(503, 'org_list_busy', 'org_list_busy'));
-    renderSection();
-    const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent("Couldn't load housing authorities and agencies.");
-    await user.click(within(alert).getByRole('button', { name: 'Retry' }));
-    expect(await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'))).toBeInTheDocument();
   });
 });
 
@@ -280,13 +452,13 @@ describe('OrgListSection - the latest rewrite on the server clock', () => {
       entries: [ATLANTA],
       lastRewrite: { ...RUNNING, heartbeatAt: '2026-07-01T11:39:50.000Z' },
     });
-    renderSection();
+    renderSection('/settings/organizations/o-atl');
     expect(
       await screen.findByText('Updating records: merging Atlanta HA into Atlanta Housing Authority.'),
     ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Run again' })).not.toBeInTheDocument();
-    const row = entryRow('Housing authorities', 'Atlanta Housing Authority');
-    expect(within(row).getByRole('button', { name: 'Rename Atlanta Housing Authority' })).toBeDisabled();
+    const panel = region('Atlanta Housing Authority');
+    expect(within(panel).getByRole('button', { name: 'Rename Atlanta Housing Authority' })).toBeDisabled();
   });
 
   it('a browser running 20 minutes SLOW: a stalled rewrite says so and offers Run again', async () => {
@@ -309,11 +481,20 @@ describe('OrgListSection - admin entry actions', () => {
     viewerIsAdmin = true;
   });
 
-  it('an admin gets every entry action', async () => {
+  it('an admin gets every entry action, labeled, in the panel', async () => {
+    const user = userEvent.setup();
     renderSection();
-    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    expect(within(panel).getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'Edit notes',
+      'Edit spellings',
+      'Rename',
+      'Merge',
+      'Change kind',
+      'Delete',
+    ]);
     for (const name of ['Edit notes for', 'Edit spellings for', 'Rename', 'Merge', 'Change kind of', 'Delete']) {
-      expect(within(row).getByRole('button', { name: `${name} Atlanta Housing Authority` })).toBeInTheDocument();
+      expect(within(panel).getByRole('button', { name: `${name} Atlanta Housing Authority` })).toBeEnabled();
     }
   });
 
@@ -325,9 +506,9 @@ describe('OrgListSection - admin entry actions', () => {
       skippedSpellings: [],
     });
     renderSection();
-    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
-    await waitFor(() => expect(row).toHaveTextContent('3 tenants'));
-    await user.click(within(row).getByRole('button', { name: 'Rename Atlanta Housing Authority' }));
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    await waitFor(() => expect(panel).toHaveTextContent('3 tenants'));
+    await user.click(within(panel).getByRole('button', { name: 'Rename Atlanta Housing Authority' }));
     const dialog = screen.getByRole('dialog', { name: 'Rename Atlanta Housing Authority' });
     expect(dialog).toHaveTextContent('3 tenants, 1 other contact, 2 properties, 2 deleted');
     const rename = within(dialog).getByRole('button', { name: 'Rename' });
@@ -335,10 +516,18 @@ describe('OrgListSection - admin entry actions', () => {
     const box = within(dialog).getByRole('textbox', { name: 'New name' });
     await user.clear(box);
     await user.type(box, 'Atlanta Housing Authority of Fulton');
+    getOrgList.mockResolvedValue({
+      version: 2,
+      entries: [{ ...ATLANTA, name: 'Atlanta Housing Authority of Fulton' }, DEKALB, STEP_UP],
+      lastRewrite: RUNNING,
+    });
     await user.click(rename);
     expect(patchOrg).toHaveBeenCalledWith('o-atl', { name: 'Atlanta Housing Authority of Fulton' });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await waitFor(() => expect(getOrgList).toHaveBeenCalledTimes(2));
+    // The same entry stays selected under its new name.
+    expect(await screen.findByRole('region', { name: 'Atlanta Housing Authority of Fulton' })).toBeInTheDocument();
+    expect(currentUrl).toBe('/settings/organizations/o-atl');
   });
 
   it('a compound new name is refused with what it names and a pointer to Split', async () => {
@@ -353,8 +542,8 @@ describe('OrgListSection - admin entry actions', () => {
       }),
     );
     renderSection();
-    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
-    await user.click(within(row).getByRole('button', { name: 'Rename Atlanta Housing Authority' }));
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    await user.click(within(panel).getByRole('button', { name: 'Rename Atlanta Housing Authority' }));
     const dialog = screen.getByRole('dialog', { name: 'Rename Atlanta Housing Authority' });
     const box = within(dialog).getByRole('textbox', { name: 'New name' });
     await user.clear(box);
@@ -373,8 +562,8 @@ describe('OrgListSection - admin entry actions', () => {
       skippedSpellings: [{ spelling: 'Atlanta Housing Authority', problem: 'shared_same_kind' }],
     });
     renderSection();
-    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
-    await user.click(within(row).getByRole('button', { name: 'Rename Atlanta Housing Authority' }));
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    await user.click(within(panel).getByRole('button', { name: 'Rename Atlanta Housing Authority' }));
     const dialog = screen.getByRole('dialog', { name: 'Rename Atlanta Housing Authority' });
     const box = within(dialog).getByRole('textbox', { name: 'New name' });
     await user.clear(box);
@@ -399,8 +588,8 @@ describe('OrgListSection - admin entry actions', () => {
       )
       .mockResolvedValueOnce({ entry: { ...ATLANTA, spellings: ['AHA', 'ATL'] } });
     renderSection();
-    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
-    await user.click(within(row).getByRole('button', { name: 'Edit spellings for Atlanta Housing Authority' }));
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    await user.click(within(panel).getByRole('button', { name: 'Edit spellings for Atlanta Housing Authority' }));
     const dialog = screen.getByRole('dialog', { name: 'Edit spellings' });
     await user.type(within(dialog).getByRole('textbox', { name: 'New spelling' }), 'ATL');
     await user.click(within(dialog).getByRole('button', { name: 'Add' }));
@@ -417,12 +606,12 @@ describe('OrgListSection - admin entry actions', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
-  it('merge offers only entries of the same kind, then Merge starts the update', async () => {
+  it('merge offers only entries of the same kind; Merge starts the update and the panel goes back to the list', async () => {
     const user = userEvent.setup();
     mergeOrg.mockResolvedValue(RUNNING);
     renderSection();
-    const row = await waitFor(() => entryRow('Housing authorities', 'DeKalb County Housing Authority'));
-    await user.click(within(row).getByRole('button', { name: 'Merge DeKalb County Housing Authority' }));
+    const panel = await openEntry(user, 'Housing authorities', 'DeKalb County Housing Authority');
+    await user.click(within(panel).getByRole('button', { name: 'Merge DeKalb County Housing Authority' }));
     const dialog = screen.getByRole('dialog', { name: 'Merge DeKalb County Housing Authority' });
     expect(within(dialog).getByRole('button', { name: 'Merge' })).toBeDisabled();
     const select = within(dialog).getByRole('combobox', { name: 'Merge into' });
@@ -435,6 +624,9 @@ describe('OrgListSection - admin entry actions', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Merge' }));
     expect(mergeOrg).toHaveBeenCalledWith('o-dek', 'o-atl');
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The merged entry leaves the list: focus goes to the list, not to its row.
+    expect(currentUrl).toBe('/settings/organizations');
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Housing authorities' })).toHaveFocus());
   });
 
   it('delete and kind change wait until no record (deleted ones included) uses the entry', async () => {
@@ -442,7 +634,7 @@ describe('OrgListSection - admin entry actions', () => {
     deleteOrg.mockResolvedValue(undefined);
     patchOrg.mockResolvedValue({ entry: { ...DEKALB, kind: 'agency' } });
     renderSection();
-    const atlanta = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
+    const atlanta = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
     await waitFor(() => expect(atlanta).toHaveTextContent('3 tenants'));
     await user.click(within(atlanta).getByRole('button', { name: 'Delete Atlanta Housing Authority' }));
     let dialog = screen.getByRole('dialog', { name: 'Delete Atlanta Housing Authority' });
@@ -452,32 +644,47 @@ describe('OrgListSection - admin entry actions', () => {
     expect(within(dialog).getByRole('button', { name: 'Delete' })).toBeDisabled();
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
 
-    const dekalb = entryRow('Housing authorities', 'DeKalb County Housing Authority');
+    const dekalb = await openEntry(user, 'Housing authorities', 'DeKalb County Housing Authority');
     await user.click(within(dekalb).getByRole('button', { name: 'Change kind of DeKalb County Housing Authority' }));
     dialog = screen.getByRole('dialog', { name: 'Change kind of DeKalb County Housing Authority' });
+    getOrgList.mockResolvedValue({ version: 2, entries: [ATLANTA, { ...DEKALB, kind: 'agency' }, STEP_UP] });
     await user.click(within(dialog).getByRole('button', { name: 'Move to Agencies' }));
     expect(patchOrg).toHaveBeenCalledWith('o-dek', { kind: 'agency' });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The entry stays selected and its new kind's list comes with it.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^Agencies/ })).toHaveAttribute('aria-pressed', 'true'),
+    );
+    expect(within(region('Agencies')).getByRole('link', { name: 'DeKalb County Housing Authority' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
 
     await user.click(
-      within(entryRow('Housing authorities', 'DeKalb County Housing Authority')).getByRole('button', {
+      within(region('DeKalb County Housing Authority')).getByRole('button', {
         name: 'Delete DeKalb County Housing Authority',
       }),
     );
     dialog = screen.getByRole('dialog', { name: 'Delete DeKalb County Housing Authority' });
     await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
     expect(deleteOrg).toHaveBeenCalledWith('o-dek');
+    await waitFor(() => expect(currentUrl).toBe('/settings/organizations?view=agencies'));
   });
 
-  it('while an update runs, Rename, Merge, Change kind and Delete wait for it', async () => {
+  it('while an update runs, Rename, Merge, Change kind and Delete wait - and say why in visible text', async () => {
     getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA, DEKALB, STEP_UP], lastRewrite: RUNNING });
-    renderSection();
-    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
+    renderSection('/settings/organizations/o-atl');
+    const panel = await screen.findByRole('region', { name: 'Atlanta Housing Authority' });
+    const reason = 'Another update is still running. Rename, Merge, Change kind and Delete wait until it finishes.';
+    expect(within(panel).getByText(reason)).toBeVisible();
     // The server refuses all four with 409 org_rewrite_running while one runs (D11; plan 3.5).
     for (const name of ['Rename', 'Merge', 'Change kind of', 'Delete']) {
-      expect(within(row).getByRole('button', { name: `${name} Atlanta Housing Authority` }), name).toBeDisabled();
+      const button = within(panel).getByRole('button', { name: `${name} Atlanta Housing Authority` });
+      expect(button, name).toBeDisabled();
+      expect(button, name).toHaveAccessibleDescription(reason);
+      expect(button, name).not.toHaveAttribute('title');
     }
-    expect(within(row).getByRole('button', { name: 'Edit spellings for Atlanta Housing Authority' })).toBeEnabled();
+    expect(within(panel).getByRole('button', { name: 'Edit spellings for Atlanta Housing Authority' })).toBeEnabled();
   });
 });
 
@@ -489,9 +696,9 @@ describe('OrgListSection - Save in Edit spellings never drops a typed spelling',
     viewerIsAdmin = true;
   });
 
-  async function openSpellings(user: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> {
-    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
-    await user.click(within(row).getByRole('button', { name: 'Edit spellings for Atlanta Housing Authority' }));
+  async function openSpellings(user: User): Promise<HTMLElement> {
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    await user.click(within(panel).getByRole('button', { name: 'Edit spellings for Atlanta Housing Authority' }));
     return screen.getByRole('dialog', { name: 'Edit spellings' });
   }
 
@@ -555,9 +762,9 @@ describe('OrgListSection - a notice never outlives a later clean action', () => 
     viewerIsAdmin = true;
   });
 
-  async function renameAtlanta(user: ReturnType<typeof userEvent.setup>, to: string): Promise<void> {
-    const row = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
-    await user.click(within(row).getByRole('button', { name: 'Rename Atlanta Housing Authority' }));
+  async function renameAtlanta(user: User, to: string): Promise<void> {
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    await user.click(within(panel).getByRole('button', { name: 'Rename Atlanta Housing Authority' }));
     const dialog = screen.getByRole('dialog', { name: 'Rename Atlanta Housing Authority' });
     const box = within(dialog).getByRole('textbox', { name: 'New name' });
     await user.clear(box);
@@ -574,7 +781,7 @@ describe('OrgListSection - a notice never outlives a later clean action', () => 
     renderSection();
     await renameAtlanta(user, 'Atlanta Metro Housing');
     expect(await screen.findByText(SKIPPED_NOTICE)).toBeInTheDocument();
-    const dekalb = entryRow('Housing authorities', 'DeKalb County Housing Authority');
+    const dekalb = await openEntry(user, 'Housing authorities', 'DeKalb County Housing Authority');
     await user.click(within(dekalb).getByRole('button', { name: 'Edit notes for DeKalb County Housing Authority' }));
     const dialog = screen.getByRole('dialog', { name: 'Edit notes' });
     await user.type(within(dialog).getByRole('textbox', { name: 'Notes' }), 'Decatur office');
@@ -591,6 +798,7 @@ describe('OrgListSection - a notice never outlives a later clean action', () => 
     renderSection();
     await renameAtlanta(user, 'Atlanta Metro Housing');
     expect(await screen.findByText(SKIPPED_NOTICE)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Agencies/ }));
     await user.click(screen.getByRole('button', { name: 'Add agency' }));
     const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
     await user.type(within(dialog).getByRole('textbox', { name: 'Name' }), 'Finch Mission');
@@ -616,7 +824,19 @@ describe('OrgListSection - a notice never outlives a later clean action', () => 
 });
 
 describe('OrgListSection - "Not on the list"', () => {
-  it('everyone sees the values that are not on the list', async () => {
+  const ATL_HA = {
+    field: 'housingAuthority' as const,
+    value: 'Atl HA',
+    count: 1,
+    deletedCount: 0,
+    resolution: {
+      status: 'unknown' as const,
+      close: [{ orgId: 'o-atl', kind: 'housing_authority' as const, name: 'Atlanta Housing Authority' }],
+    },
+  };
+
+  it('everyone sees the values, each a link to its own URL; a VA gets no settling', async () => {
+    const user = userEvent.setup();
     getNotOnList.mockResolvedValue([
       {
         field: 'housingAuthority',
@@ -627,37 +847,52 @@ describe('OrgListSection - "Not on the list"', () => {
       },
     ]);
     renderSection();
-    const notOnList = await screen.findByRole('region', { name: 'Not on the list' });
-    expect(await within(notOnList).findByRole('rowheader', { name: 'atlanta_housing' })).toBeInTheDocument();
-    expect(within(notOnList).queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: 'Not on the list 1' }));
+    const row = within(region('Not on the list')).getByRole('link', { name: 'atlanta_housing' });
+    expect(row).toHaveAccessibleDescription('Housing authority - 1 record');
+    expect(row).toHaveAttribute(
+      'href',
+      '/settings/organizations?view=not-on-list&field=housingAuthority&value=atlanta_housing',
+    );
+    await user.click(row);
+    const panel = screen.getByRole('region', { name: 'atlanta_housing' });
+    expect(within(panel).getByRole('heading', { name: 'atlanta_housing' })).toHaveFocus();
+    expect(within(panel).queryByRole('group', { name: 'Settle this value' })).not.toBeInTheDocument();
+    expect(within(panel).getAllByRole('button').map((b) => b.textContent)).toEqual(['Show records']);
   });
 
-  it('an admin settle re-reads the page and names a spelling it could not keep', async () => {
+  it('a link to a value opens it; a value no record holds any more says so', async () => {
+    getNotOnList.mockResolvedValue([ATL_HA]);
+    renderSection('/settings/organizations?view=not-on-list&field=housingAuthority&value=Atl%20HA');
+    expect(await screen.findByRole('region', { name: 'Atl HA' })).toHaveTextContent('Unknown - close to');
+    expect(within(region('Not on the list')).getByRole('link', { name: 'Atl HA' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+  });
+
+  it('a value that is gone from the list says so', async () => {
+    renderSection('/settings/organizations?view=not-on-list&field=agency&value=Gone%20Aid');
+    expect(await screen.findByRole('region', { name: 'Gone Aid' })).toHaveTextContent(
+      'No record holds this value any more - it was settled or changed.',
+    );
+  });
+
+  it('an admin settle re-reads the page, names a spelling it could not keep, and goes back to the list', async () => {
     viewerIsAdmin = true;
     const user = userEvent.setup();
-    getNotOnList.mockResolvedValue([
-      {
-        field: 'housingAuthority',
-        value: 'Atl HA',
-        count: 1,
-        deletedCount: 0,
-        resolution: {
-          status: 'unknown',
-          close: [{ orgId: 'o-atl', kind: 'housing_authority', name: 'Atlanta Housing Authority' }],
-        },
-      },
-    ]);
+    getNotOnList.mockResolvedValue([ATL_HA]);
     checkOrgText.mockResolvedValue({ candidates: [], close: [], spellingProblem: null });
     resolveNotOnList.mockResolvedValue({
       lastRewrite: { ...RUNNING, action: 'use' },
       skippedSpellings: [{ spelling: 'Atl HA', problem: 'shared_same_kind' }],
     });
     renderSection();
-    const notOnList = await screen.findByRole('region', { name: 'Not on the list' });
-    const header = await within(notOnList).findByRole('rowheader', { name: 'Atl HA' });
-    await user.click(within(header.closest('tr')!).getByRole('button', { name: 'Use Atlanta Housing Authority' }));
-    const dialog = screen.getByRole('dialog', { name: 'Settle Atl HA' });
-    await user.click(within(dialog).getByRole('button', { name: 'Use Atlanta Housing Authority' }));
+    await user.click(await screen.findByRole('button', { name: 'Not on the list 1' }));
+    await user.click(within(region('Not on the list')).getByRole('link', { name: 'Atl HA' }));
+    const settle = within(region('Atl HA')).getByRole('group', { name: 'Settle this value' });
+    await user.click(within(settle).getByRole('radio', { name: 'Use Atlanta Housing Authority' }));
+    await user.click(within(settle).getByRole('button', { name: 'Use Atlanta Housing Authority' }));
     expect(resolveNotOnList).toHaveBeenCalledWith({
       field: 'housingAuthority',
       value: 'Atl HA',
@@ -671,5 +906,7 @@ describe('OrgListSection - "Not on the list"', () => {
       ),
     ).toBeInTheDocument();
     await waitFor(() => expect(getNotOnList).toHaveBeenCalledTimes(2));
+    expect(currentUrl).toBe('/settings/organizations?view=not-on-list');
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Not on the list' })).toHaveFocus());
   });
 });

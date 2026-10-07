@@ -4,8 +4,10 @@
 // deleted ones included - one row per value and field, with its record counts
 // and what it resolves to (D4). Everyone sees the rows and, through "Show
 // records", the records holding a value (per-record links - R5 ruling, never
-// facet URLs). Admins settle a value with one rewrite (D11) through "Settle
-// <value>", whose confirm repeats the row's action (S14 L3-L6).
+// facet URLs). Admins settle a value with one rewrite (D11): in the detail
+// panel (design review 2026-10-07 Option B) they pick what it becomes from
+// one radio group, and the confirm under the pick repeats the action (S14
+// L3-L6). The list of values itself is OrgListPane's NotOnListList.
 import { useEffect, useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
@@ -21,7 +23,6 @@ import {
   type OrgSpellingProblem,
 } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
-import { Modal } from '../contact/Modal.js';
 import { OrgPicker } from '../orgs/OrgPicker.js';
 import {
   AGENCY_KINDS,
@@ -37,7 +38,9 @@ import {
   resolutionText,
   spellingProblemCopy,
 } from '../orgs/orgCopy.js';
+import { PanelBack } from './OrgDetailPanel.js';
 import styles from './OrgListSection.module.css';
+import layout from './OrgSettings.module.css';
 
 /** One admin action on one row (spec D10), as its button names it. */
 type Settle =
@@ -104,10 +107,6 @@ function settleChoices(row: NotOnListRow): { label: string; settle: Settle }[] {
   if (res.status === 'unknown') choices.push({ label: 'Add as new', settle: { action: 'add', row } });
   choices.push({ label: 'Clear', settle: { action: 'clear', row } });
   return choices;
-}
-
-function rowKey(row: NotOnListRow): string {
-  return JSON.stringify([row.field, row.value]);
 }
 
 /** "a", "a or b", "a, b or c". */
@@ -209,19 +208,19 @@ function HolderList({ field, value }: { field: OrgRecordField; value: string }):
   );
 }
 
-interface SettleDialogProps {
+interface SettleConfirmProps {
   settle: Settle;
   entries: readonly OrgEntry[];
   /** Every "Not on the list" row: the confirm counts the settled row's
    *  siblings (recordsText). */
   rows: readonly NotOnListRow[];
   onDone: (result: OrgRewriteStarted) => void;
-  onClose: () => void;
 }
 
-/** "Settle <value>": one rewrite of every record holding the value in the
- *  row's field (spec D10, D11). The confirm repeats the action. */
-function SettleDialog({ settle, entries, rows, onDone, onClose }: SettleDialogProps): React.JSX.Element {
+/** The confirm under the picked choice in "Settle this value": one rewrite of
+ *  every record holding the value in the row's field (spec D10, D11). It says
+ *  what will change and its button repeats the action. */
+function SettleConfirm({ settle, entries, rows, onDone }: SettleConfirmProps): React.JSX.Element {
   const { row } = settle;
   const kind = kindForField(row.field);
   const nameId = useId();
@@ -348,31 +347,8 @@ function SettleDialog({ settle, entries, rows, onDone, onClose }: SettleDialogPr
   }
 
   return (
-    <Modal
-      title={`Settle ${row.value}`}
-      onClose={busy ? () => {} : onClose}
-      footer={
-        <>
-          <Button variant="secondary" size="sm" type="button" onClick={onClose} disabled={busy}>
-            Cancel
-          </Button>
-          <Button
-            variant={settle.action === 'clear' ? 'danger' : 'primary'}
-            size="sm"
-            type="button"
-            onClick={() => void confirm()}
-            disabled={busy || request === null}
-          >
-            {confirmLabel}
-          </Button>
-        </>
-      }
-    >
+    <div className={layout.confirm}>
       <div className={styles.dialogBody}>
-        <p className={styles.dialogText}>
-          {`${field}: `}
-          <strong>{row.value}</strong>
-        </p>
         <p className={styles.dialogText}>{sentence}</p>
         {settle.action === 'use' && settle.name === undefined ? (
           <OrgPicker
@@ -441,173 +417,142 @@ function SettleDialog({ settle, entries, rows, onDone, onClose }: SettleDialogPr
           </p>
         ) : null}
       </div>
-    </Modal>
+      <div className={layout.confirmActions}>
+        <Button
+          variant={settle.action === 'clear' ? 'danger' : 'primary'}
+          size="sm"
+          type="button"
+          onClick={() => void confirm()}
+          disabled={busy || request === null}
+        >
+          {confirmLabel}
+        </Button>
+      </div>
+    </div>
   );
 }
 
-function NotOnListTableRow({
-  row,
-  isAdmin,
-  rewriteLive,
-  onSettle,
-}: {
+/** Why settling waits - visible text, never a title (review P11). */
+export const SETTLE_WAIT_REASON = 'Another update is still running. Settling waits until it finishes.';
+
+export interface NotOnListPanelProps {
   row: NotOnListRow;
-  isAdmin: boolean;
-  rewriteLive: boolean;
-  onSettle: (settle: Settle) => void;
-}): React.JSX.Element {
-  const [open, setOpen] = useState(false);
-  const recordsId = useId();
-  return (
-    <>
-      <tr>
-        <th scope="row" className={`${styles.cell} ${styles.nameCell}`}>
-          {row.value}
-        </th>
-        <td className={styles.cell}>{FIELD_LABEL[row.field]}</td>
-        <td className={styles.cell}>
-          {row.deletedCount > 0 ? `${row.count} (+${row.deletedCount} deleted)` : String(row.count)}
-        </td>
-        <td className={styles.cell}>{resolutionText(row.resolution, row.field)}</td>
-        <td className={styles.cell}>
-          <div className={styles.actions}>
-            <Button
-              variant="ghost"
-              size="sm"
-              type="button"
-              aria-expanded={open}
-              aria-controls={open ? recordsId : undefined}
-              onClick={() => setOpen((v) => !v)}
-            >
-              {open ? 'Hide records' : 'Show records'}
-            </Button>
-            {isAdmin
-              ? settleChoices(row).map(({ label, settle }) => (
-                  <Button
-                    key={label}
-                    variant="ghost"
-                    size="sm"
-                    type="button"
-                    disabled={rewriteLive}
-                    title={rewriteLive ? 'Another update is still running' : undefined}
-                    onClick={() => onSettle(settle)}
-                  >
-                    {label}
-                  </Button>
-                ))
-              : null}
-          </div>
-        </td>
-      </tr>
-      {open ? (
-        <tr id={recordsId}>
-          <td colSpan={5} className={styles.detailCell}>
-            <HolderList field={row.field} value={row.value} />
-          </td>
-        </tr>
-      ) : null}
-    </>
-  );
-}
-
-export interface NotOnListSectionProps {
-  /** null until the first read. */
-  rows: NotOnListRow[] | null;
-  error: boolean;
+  /** Every "Not on the list" row: the confirm counts the value's siblings. */
+  rows: readonly NotOnListRow[];
   /** Both lists: the pickers in "Use another name" and Split. */
   entries: readonly OrgEntry[];
   isAdmin: boolean;
   /** True while a rewrite runs: settling waits (one at a time, spec D11). */
   rewriteLive: boolean;
-  onRetry: () => void;
-  /** A settle started (202): the parent re-reads and names skipped spellings. */
+  /** One pane at a time (the two-pane shell's narrow width). */
+  narrow: boolean;
+  headingRef: React.Ref<HTMLHeadingElement>;
+  /** A settle started (202): the page re-reads and names skipped spellings. */
   onSettled: (result: OrgRewriteStarted) => void;
 }
 
-export function NotOnListSection({
+/**
+ * One "Not on the list" value in the detail panel (design review 2026-10-07
+ * Option B): its field, its records and what it resolves to, and "Show
+ * records" for everyone. An admin settles it in ONE pick-and-confirm step: the
+ * choices settleChoices() allows, as one radio group (Clear last, set apart),
+ * and under the picked one its confirm. Absent for a VA (spec D10).
+ */
+export function NotOnListPanel({
+  row,
   rows,
-  error,
   entries,
   isAdmin,
   rewriteLive,
-  onRetry,
+  narrow,
+  headingRef,
   onSettled,
-}: NotOnListSectionProps): React.JSX.Element {
+}: NotOnListPanelProps): React.JSX.Element {
   const headingId = useId();
-  const [settling, setSettling] = useState<Settle | null>(null);
+  const recordsId = useId();
+  const choiceName = useId();
+  const reasonId = useId();
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState<string | null>(null);
+  const choices = isAdmin ? settleChoices(row) : [];
+  const chosen = choices.find((c) => c.label === picked);
   return (
-    <section className={styles.section} aria-labelledby={headingId}>
-      <div className={styles.sectionHead}>
-        <h2 id={headingId} className={styles.heading}>
-          Not on the list
+    <section className={layout.panel} aria-labelledby={headingId}>
+      <div className={layout.panelTop}>
+        <PanelBack segment="not-on-list" narrow={narrow} />
+        <h2 id={headingId} ref={headingRef} tabIndex={-1} className={layout.panelHeading}>
+          {row.value}
         </h2>
+        <p className={layout.panelKind}>Not on the list</p>
       </div>
-      <p className={styles.lede}>
-        Values stored on contacts and properties, deleted ones included, that are not exactly a name on the
-        lists. A tenant or a property can also be fixed one at a time on its own page.
-      </p>
-      {rows === null ? (
-        error ? (
-          <div className={styles.errorBlock} role="alert">
-            <p>{"Couldn't load the values that are not on the list."}</p>
-            <Button variant="secondary" size="sm" type="button" onClick={onRetry}>
-              Retry
-            </Button>
+      <dl className={layout.facts}>
+        <dt className={layout.factLabel}>Field</dt>
+        <dd className={layout.factValue}>{FIELD_LABEL[row.field]}</dd>
+        <dt className={layout.factLabel}>Records</dt>
+        <dd className={layout.factValue}>
+          {row.deletedCount > 0 ? `${row.count} (+${row.deletedCount} deleted)` : String(row.count)}
+        </dd>
+        <dt className={layout.factLabel}>What it is</dt>
+        <dd className={layout.factValue}>{resolutionText(row.resolution, row.field)}</dd>
+      </dl>
+      <div className={layout.recordsBlock}>
+        <Button
+          variant="secondary"
+          size="sm"
+          type="button"
+          aria-expanded={open}
+          aria-controls={open ? recordsId : undefined}
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? 'Hide records' : 'Show records'}
+        </Button>
+        {open ? (
+          <div id={recordsId}>
+            <HolderList field={row.field} value={row.value} />
           </div>
-        ) : (
-          <div className={styles.center}>
-            <Spinner />
-          </div>
-        )
-      ) : rows.length === 0 ? (
-        <p className={styles.empty}>Every stored value is on the lists.</p>
-      ) : (
-        <div className={styles.tableWrap}>
-          <table className={styles.table}>
-            <thead>
-              <tr>
-                <th scope="col" className={styles.th}>
-                  Value
-                </th>
-                <th scope="col" className={styles.th}>
-                  Field
-                </th>
-                <th scope="col" className={styles.th}>
-                  Records
-                </th>
-                <th scope="col" className={styles.th}>
-                  What it is
-                </th>
-                <th scope="col" className={styles.th}>
-                  <span className={styles.srOnly}>Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <NotOnListTableRow
-                  key={rowKey(row)}
-                  row={row}
-                  isAdmin={isAdmin}
-                  rewriteLive={rewriteLive}
-                  onSettle={setSettling}
+        ) : null}
+      </div>
+      {isAdmin ? (
+        <fieldset
+          className={layout.settle}
+          disabled={rewriteLive}
+          aria-describedby={rewriteLive ? reasonId : undefined}
+        >
+          <legend className={layout.settleLegend}>Settle this value</legend>
+          {rewriteLive ? (
+            <p id={reasonId} className={layout.reason}>
+              {SETTLE_WAIT_REASON}
+            </p>
+          ) : null}
+          <div className={layout.choices}>
+            {choices.map(({ label, settle }) => (
+              <label
+                key={label}
+                className={`${layout.choice} ${settle.action === 'clear' ? layout.choiceDanger : ''}`.trim()}
+              >
+                <input
+                  type="radio"
+                  name={choiceName}
+                  value={label}
+                  checked={picked === label}
+                  onChange={() => setPicked(label)}
                 />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {settling !== null ? (
-        <SettleDialog
-          settle={settling}
-          entries={entries}
-          rows={rows ?? []}
-          onDone={(result) => {
-            setSettling(null);
-            onSettled(result);
-          }}
-          onClose={() => setSettling(null)}
-        />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+          {chosen !== undefined ? (
+            <SettleConfirm
+              key={chosen.label}
+              settle={chosen.settle}
+              entries={entries}
+              rows={rows}
+              onDone={onSettled}
+            />
+          ) : (
+            <p className={styles.dialogMuted}>Pick what the value should become, then confirm it.</p>
+          )}
+        </fieldset>
       ) : null}
     </section>
   );

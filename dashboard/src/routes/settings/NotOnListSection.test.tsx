@@ -1,8 +1,10 @@
-// NotOnListSection tests - "Not on the list" (spec 2026-10-06 D10, D11; S14
-// selector contract L1-L6): the rows, the records with per-record links, and
-// the admin-only settling actions, each through "Settle <value>" whose confirm
-// repeats the action.
-import { render, screen, waitFor, within } from '@testing-library/react';
+// NotOnListSection tests - one "Not on the list" value in the detail panel
+// (spec 2026-10-06 D10, D11; S14 selector contract L1-L6; design review
+// 2026-10-07 Option B): its field, records and resolution, the records with
+// per-record links, and the admin-only settle - one radio group of the
+// choices its resolution allows, and under the pick a confirm that repeats
+// the action.
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -21,7 +23,7 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { NotOnListSection, type NotOnListSectionProps } from './NotOnListSection.js';
+import { NotOnListPanel, type NotOnListPanelProps } from './NotOnListSection.js';
 
 function entry(kind: OrgEntry['kind'], name: string, orgId: string): OrgEntry {
   return {
@@ -105,30 +107,49 @@ const RUNNING: OrgRewriteState = {
   startedBy: 'u1',
 };
 
-function renderSection(over: Partial<NotOnListSectionProps> = {}): NotOnListSectionProps {
-  const props: NotOnListSectionProps = {
-    rows: ROWS,
-    error: false,
+type User = ReturnType<typeof userEvent.setup>;
+
+/** Render the panel for the row holding `value` (exactly) among `rows`. */
+function renderPanel(value: string, over: Partial<NotOnListPanelProps> = {}): NotOnListPanelProps {
+  const rows = over.rows ?? ROWS;
+  const row = rows.find((r) => r.value === value);
+  if (row === undefined) throw new Error(`no row ${value}`);
+  const props: NotOnListPanelProps = {
+    row,
+    rows,
     entries: ENTRIES,
     isAdmin: true,
     rewriteLive: false,
-    onRetry: vi.fn(),
+    narrow: false,
+    headingRef: { current: null },
     onSettled: vi.fn(),
     ...over,
   };
   render(
     <MemoryRouter>
-      <NotOnListSection {...props} />
+      <NotOnListPanel {...props} />
     </MemoryRouter>,
   );
   return props;
 }
 
-/** A value's row, by its row header (the exact value). */
-function valueRow(value: string): HTMLElement {
-  const row = screen.getByRole('rowheader', { name: value }).closest('tr');
-  if (row === null) throw new Error(`no row for ${value}`);
-  return row;
+const panel = (value: string): HTMLElement => screen.getByRole('region', { name: value });
+
+/** A fact in the panel (Field, Records, What it is): the text beside its label. */
+function fact(value: string, label: string): string {
+  const term = within(panel(value)).getByText(label, { selector: 'dt' });
+  return term.nextElementSibling?.textContent ?? '';
+}
+const settleGroup = (): HTMLElement => screen.getByRole('group', { name: 'Settle this value' });
+const choices = (): string[] =>
+  within(settleGroup())
+    .getAllByRole('radio')
+    .map((r) => r.closest('label')?.textContent ?? '');
+
+/** Pick a choice; returns the settle group (its confirm sits under the pick). */
+async function pick(user: User, label: string): Promise<HTMLElement> {
+  await user.click(within(settleGroup()).getByRole('radio', { name: label }));
+  return settleGroup();
 }
 
 beforeEach(() => {
@@ -137,16 +158,22 @@ beforeEach(() => {
   checkOrgText.mockReset().mockResolvedValue({ candidates: [], close: [], spellingProblem: null });
 });
 
-describe('NotOnListSection - everyone', () => {
-  it('shows each value with its field, its record counts and what it resolves to', () => {
-    renderSection({ isAdmin: false });
-    expect(screen.getByRole('region', { name: 'Not on the list' })).toBeInTheDocument();
-    const merlin = valueRow('merlin housing authority');
-    expect(merlin).toHaveTextContent('Housing authority');
-    expect(merlin).toHaveTextContent('2 (+1 deleted)');
-    expect(merlin).toHaveTextContent('Matches Merlin Housing Authority');
-    expect(valueRow('Kite Aid')).toHaveTextContent('An agency: Kite Aid');
-    expect(valueRow('Rook Junk')).toHaveTextContent('Property housing authorities');
+describe('NotOnListPanel - everyone', () => {
+  it('shows the value with its field, its record counts and what it resolves to', () => {
+    renderPanel('merlin housing authority', { isAdmin: false });
+    const merlin = panel('merlin housing authority');
+    expect(within(merlin).getByRole('heading', { name: 'merlin housing authority' })).toBeInTheDocument();
+    expect(fact('merlin housing authority', 'Field')).toBe('Housing authority');
+    expect(fact('merlin housing authority', 'Records')).toBe('2 (+1 deleted)');
+    expect(fact('merlin housing authority', 'What it is')).toBe('Matches Merlin Housing Authority');
+  });
+
+  it.each([
+    ['Kite Aid', 'What it is', 'An agency: Kite Aid'],
+    ['Rook Junk', 'Field', 'Property housing authorities'],
+  ])('%s: %s reads %s', (value, label, text) => {
+    renderPanel(value, { isAdmin: false });
+    expect(fact(value, label)).toBe(text);
   });
 
   it('Show records links each holder to its own page; a deleted one is marked', async () => {
@@ -156,8 +183,10 @@ describe('NotOnListSection - everyone', () => {
       { kind: 'contact', contactId: 'c-gone', name: 'Gus Gone', type: 'tenant', deleted: true },
       { kind: 'unit', unitId: 'u-1', address: '1 Linnet Lane', deleted: false },
     ]);
-    renderSection({ isAdmin: false });
-    await user.click(within(valueRow('merlin housing authority')).getByRole('button', { name: 'Show records' }));
+    renderPanel('merlin housing authority', { isAdmin: false });
+    const show = screen.getByRole('button', { name: 'Show records' });
+    expect(show).toHaveAttribute('aria-expanded', 'false');
+    await user.click(show);
     expect(getNotOnListRecords).toHaveBeenCalledWith(
       'housingAuthority',
       'merlin housing authority',
@@ -166,70 +195,62 @@ describe('NotOnListSection - everyone', () => {
     expect(await screen.findByRole('link', { name: 'Lena Live' })).toHaveAttribute('href', '/contacts/c-live');
     expect(screen.getByRole('link', { name: 'Gus Gone' })).toHaveAttribute('href', '/contacts/c-gone');
     expect(screen.getByRole('link', { name: '1 Linnet Lane' })).toHaveAttribute('href', '/listings/u-1');
-    const items = screen.getAllByRole('listitem');
+    const items = within(screen.getByRole('list', { name: 'Records holding merlin housing authority' })).getAllByRole(
+      'listitem',
+    );
     expect(items.find((li) => (li.textContent ?? '').includes('Gus Gone'))).toHaveTextContent(/deleted/);
     expect(items.find((li) => (li.textContent ?? '').includes('Lena Live'))).not.toHaveTextContent(/deleted/);
+    expect(screen.getByRole('button', { name: 'Hide records' })).toHaveAttribute('aria-expanded', 'true');
   });
 
-  it('a VA gets no settling action', () => {
-    renderSection({ isAdmin: false });
-    const row = valueRow('Rook Junk');
-    expect(within(row).getAllByRole('button').map((b) => b.textContent)).toEqual(['Show records']);
+  it('a VA gets no settling at all - the group is absent, not disabled', () => {
+    renderPanel('Rook Junk', { isAdmin: false });
+    expect(screen.queryByRole('group', { name: 'Settle this value' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+    expect(within(panel('Rook Junk')).getAllByRole('button').map((b) => b.textContent)).toEqual(['Show records']);
   });
 
-  it('says so when every value is on the list, and offers Retry when the rows failed to load', async () => {
-    const user = userEvent.setup();
-    const { unmount } = render(
-      <MemoryRouter>
-        <NotOnListSection rows={[]} error={false} entries={ENTRIES} isAdmin rewriteLive={false} onRetry={vi.fn()} onSettled={vi.fn()} />
-      </MemoryRouter>,
+  it('Back (phone) or Close (desktop) leads back to the list', () => {
+    renderPanel('Rook Junk', { narrow: true });
+    expect(screen.getByRole('link', { name: 'Back to Not on the list' })).toHaveAttribute(
+      'href',
+      '/settings/organizations?view=not-on-list',
     );
-    expect(screen.getByText('Every stored value is on the lists.')).toBeInTheDocument();
-    unmount();
-    const props = renderSection({ rows: null, error: true });
-    await user.click(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' }));
-    expect(props.onRetry).toHaveBeenCalledTimes(1);
   });
 });
 
-describe('NotOnListSection - admin settling', () => {
-  it('offers each row the actions its resolution allows', () => {
-    renderSection();
-    const names = (value: string): (string | null)[] =>
-      within(valueRow(value)).getAllByRole('button').map((b) => b.textContent);
+describe('NotOnListPanel - admin settling', () => {
+  it.each([
     // A NAME VARIANT (spec D10): only Use <that entry> - any other action would
     // also rewrite every record holding the exact name (the server refuses it).
-    expect(names('merlin housing authority')).toEqual(['Show records', 'Use Merlin Housing Authority']);
-    expect(names('Kite Aid')).toEqual(['Show records', 'Move to Agency as Kite Aid', 'Use another name', 'Clear']);
+    ['merlin housing authority', ['Use Merlin Housing Authority']],
+    ['Kite Aid', ['Move to Agency as Kite Aid', 'Use another name', 'Clear']],
     // An agency value that names a housing authority moves the other way.
-    expect(names('Shrike Housing')).toEqual([
-      'Show records',
-      'Move to Housing authority as Shrike Housing Authority',
-      'Use another name',
-      'Clear',
-    ]);
-    expect(names('Shrike Housing Authority Shrike Aid')).toEqual([
-      'Show records',
-      'Use Shrike Housing Authority',
-      'Split into Shrike Housing Authority + Shrike Aid',
-      'Use another name',
-      'Clear',
-    ]);
+    ['Shrike Housing', ['Move to Housing authority as Shrike Housing Authority', 'Use another name', 'Clear']],
+    [
+      'Shrike Housing Authority Shrike Aid',
+      ['Use Shrike Housing Authority', 'Split into Shrike Housing Authority + Shrike Aid', 'Use another name', 'Clear'],
+    ],
     // A property list takes housing authorities only: no Move, no Split.
-    expect(names('Rook Junk')).toEqual(['Show records', 'Use another name', 'Add as new', 'Clear']);
+    ['Rook Junk', ['Use another name', 'Add as new', 'Clear']],
+  ])('%s offers the choices its resolution allows, one radio each', (value, expected) => {
+    renderPanel(value);
+    expect(choices()).toEqual(expected);
+    // Nothing is picked, so nothing can be confirmed yet.
+    expect(within(settleGroup()).queryByRole('button')).not.toBeInTheDocument();
+    expect(settleGroup()).toHaveTextContent('Pick what the value should become, then confirm it.');
   });
 
-  it('Use <name>: the dialog shows the value; a value that IS the name is never remembered', async () => {
+  it('Use <name>: a value that IS the name is never remembered', async () => {
     const user = userEvent.setup();
-    const props = renderSection();
-    await user.click(within(valueRow('merlin housing authority')).getByRole('button', { name: 'Use Merlin Housing Authority' }));
-    const dialog = screen.getByRole('dialog', { name: 'Settle merlin housing authority' });
-    const remember = within(dialog).getByRole('checkbox', { name: 'Remember this spelling' });
+    const props = renderPanel('merlin housing authority');
+    const group = await pick(user, 'Use Merlin Housing Authority');
+    const remember = within(group).getByRole('checkbox', { name: 'Remember this spelling' });
     expect(remember).not.toBeChecked();
     expect(remember).toBeDisabled();
-    expect(dialog).toHaveTextContent('Not remembered: it is the name itself, written another way.');
+    expect(group).toHaveTextContent('Not remembered: it is the name itself, written another way.');
     expect(checkOrgText).not.toHaveBeenCalled();
-    await user.click(within(dialog).getByRole('button', { name: 'Use Merlin Housing Authority' }));
+    await user.click(within(group).getByRole('button', { name: 'Use Merlin Housing Authority' }));
     expect(resolveNotOnList).toHaveBeenCalledWith({
       field: 'housingAuthority',
       value: 'merlin housing authority',
@@ -238,22 +259,23 @@ describe('NotOnListSection - admin settling', () => {
       rememberSpelling: false,
     });
     await waitFor(() => expect(props.onSettled).toHaveBeenCalledWith({ lastRewrite: RUNNING, skippedSpellings: [] }));
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   it('Use <close name>: Remember this spelling is on, checked against the target entry', async () => {
     const user = userEvent.setup();
-    renderSection();
-    await user.click(within(valueRow('Merln Housng')).getByRole('button', { name: 'Use Merlin Housing Authority' }));
-    const dialog = screen.getByRole('dialog', { name: 'Settle Merln Housng' });
+    renderPanel('Merln Housng');
+    const group = await pick(user, 'Use Merlin Housing Authority');
     await waitFor(() =>
       expect(checkOrgText).toHaveBeenCalledWith(
         { kind: 'housing_authority', text: 'Merln Housng', spellingFor: 'o-merlin' },
         expect.any(AbortSignal),
       ),
     );
-    expect(within(dialog).getByRole('checkbox', { name: 'Remember this spelling' })).toBeChecked();
-    await user.click(within(dialog).getByRole('button', { name: 'Use Merlin Housing Authority' }));
+    expect(group).toHaveTextContent(
+      'Every record holding this value in Housing authority changes to Merlin Housing Authority (3 records).',
+    );
+    expect(within(group).getByRole('checkbox', { name: 'Remember this spelling' })).toBeChecked();
+    await user.click(within(group).getByRole('button', { name: 'Use Merlin Housing Authority' }));
     expect(resolveNotOnList).toHaveBeenCalledWith({
       field: 'housingAuthority',
       value: 'Merln Housng',
@@ -266,35 +288,39 @@ describe('NotOnListSection - admin settling', () => {
   it('a spelling the check refuses turns Remember off and says why', async () => {
     const user = userEvent.setup();
     checkOrgText.mockResolvedValue({ candidates: [], close: [], spellingProblem: 'shared_same_kind' });
-    renderSection();
-    await user.click(within(valueRow('Merln Housng')).getByRole('button', { name: 'Use Merlin Housing Authority' }));
-    const dialog = screen.getByRole('dialog', { name: 'Settle Merln Housng' });
+    renderPanel('Merln Housng');
+    const group = await pick(user, 'Use Merlin Housing Authority');
     await waitFor(() =>
-      expect(within(dialog).getByRole('checkbox', { name: 'Remember this spelling' })).not.toBeChecked(),
+      expect(within(group).getByRole('checkbox', { name: 'Remember this spelling' })).not.toBeChecked(),
     );
-    expect(dialog).toHaveTextContent(
+    expect(group).toHaveTextContent(
       'Not remembered: another entry already has it, and a shared spelling is never applied automatically.',
     );
-    await user.click(within(dialog).getByRole('button', { name: 'Use Merlin Housing Authority' }));
+    await user.click(within(group).getByRole('button', { name: 'Use Merlin Housing Authority' }));
     expect(resolveNotOnList).toHaveBeenCalledWith(expect.objectContaining({ rememberSpelling: false }));
   });
 
-  it('Move to Agency and Clear confirm with the same words', async () => {
+  it('Move to Agency confirms with the same words', async () => {
     const user = userEvent.setup();
-    renderSection();
-    await user.click(within(valueRow('Kite Aid')).getByRole('button', { name: 'Move to Agency as Kite Aid' }));
-    let dialog = screen.getByRole('dialog', { name: 'Settle Kite Aid' });
-    await user.click(within(dialog).getByRole('button', { name: 'Move to Agency as Kite Aid' }));
+    renderPanel('Kite Aid');
+    const group = await pick(user, 'Move to Agency as Kite Aid');
+    await user.click(within(group).getByRole('button', { name: 'Move to Agency as Kite Aid' }));
     expect(resolveNotOnList).toHaveBeenLastCalledWith({
       field: 'housingAuthority',
       value: 'Kite Aid',
       action: 'move_to_agency',
       name: 'Kite Aid',
     });
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    await user.click(within(valueRow('Rook Junk')).getByRole('button', { name: 'Clear' }));
-    dialog = screen.getByRole('dialog', { name: 'Settle Rook Junk' });
-    await user.click(within(dialog).getByRole('button', { name: 'Clear' }));
+  });
+
+  it('Clear confirms with the same words, as the danger action', async () => {
+    const user = userEvent.setup();
+    renderPanel('Rook Junk');
+    const group = await pick(user, 'Clear');
+    expect(group).toHaveTextContent(
+      'The value is removed from Property housing authorities on every record that holds it (1 record).',
+    );
+    await user.click(within(group).getByRole('button', { name: 'Clear' }));
     expect(resolveNotOnList).toHaveBeenLastCalledWith({
       field: 'accepted_authorities',
       value: 'Rook Junk',
@@ -302,19 +328,26 @@ describe('NotOnListSection - admin settling', () => {
     });
   });
 
+  it('a new pick replaces the confirm under the old one', async () => {
+    const user = userEvent.setup();
+    renderPanel('Kite Aid');
+    let group = await pick(user, 'Move to Agency as Kite Aid');
+    expect(within(group).getByRole('button', { name: 'Move to Agency as Kite Aid' })).toBeInTheDocument();
+    group = await pick(user, 'Clear');
+    expect(within(group).queryByRole('button', { name: 'Move to Agency as Kite Aid' })).not.toBeInTheDocument();
+    expect(within(group).getByRole('button', { name: 'Clear' })).toBeEnabled();
+  });
+
   it('Move to Housing authority settles an agency value that names a housing authority', async () => {
     const user = userEvent.setup();
-    renderSection();
-    await user.click(
-      within(valueRow('Shrike Housing')).getByRole('button', {
-        name: 'Move to Housing authority as Shrike Housing Authority',
-      }),
+    renderPanel('Shrike Housing');
+    expect(fact('Shrike Housing', 'Field')).toBe('Agency');
+    const group = await pick(user, 'Move to Housing authority as Shrike Housing Authority');
+    expect(group).toHaveTextContent(
+      'The value leaves Agency and goes into Housing authority as Shrike Housing Authority',
     );
-    const dialog = screen.getByRole('dialog', { name: 'Settle Shrike Housing' });
-    expect(dialog).toHaveTextContent('Agency: Shrike Housing');
-    expect(dialog).toHaveTextContent('The value leaves Agency and goes into Housing authority as Shrike Housing Authority');
     await user.click(
-      within(dialog).getByRole('button', { name: 'Move to Housing authority as Shrike Housing Authority' }),
+      within(group).getByRole('button', { name: 'Move to Housing authority as Shrike Housing Authority' }),
     );
     expect(resolveNotOnList).toHaveBeenCalledWith({
       field: 'agency',
@@ -322,21 +355,15 @@ describe('NotOnListSection - admin settling', () => {
       action: 'move_to_housing_authority',
       name: 'Shrike Housing Authority',
     });
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
   it('Split prefills both halves (editable) and sends them', async () => {
     const user = userEvent.setup();
-    renderSection();
-    await user.click(
-      within(valueRow('Shrike Housing Authority Shrike Aid')).getByRole('button', {
-        name: 'Split into Shrike Housing Authority + Shrike Aid',
-      }),
-    );
-    const dialog = screen.getByRole('dialog', { name: 'Settle Shrike Housing Authority Shrike Aid' });
-    expect(within(dialog).getByRole('button', { name: 'Remove Shrike Housing Authority' })).toBeInTheDocument();
-    expect(within(dialog).getByRole('button', { name: 'Remove Shrike Aid' })).toBeInTheDocument();
-    await user.click(within(dialog).getByRole('button', { name: 'Split' }));
+    renderPanel('Shrike Housing Authority Shrike Aid');
+    const group = await pick(user, 'Split into Shrike Housing Authority + Shrike Aid');
+    expect(within(group).getByRole('button', { name: 'Remove Shrike Housing Authority' })).toBeInTheDocument();
+    expect(within(group).getByRole('button', { name: 'Remove Shrike Aid' })).toBeInTheDocument();
+    await user.click(within(group).getByRole('button', { name: 'Split' }));
     expect(resolveNotOnList).toHaveBeenCalledWith({
       field: 'housingAuthority',
       value: 'Shrike Housing Authority Shrike Aid',
@@ -348,13 +375,12 @@ describe('NotOnListSection - admin settling', () => {
 
   it('Use another name picks from the field kind list', async () => {
     const user = userEvent.setup();
-    renderSection();
-    await user.click(within(valueRow('Rook Junk')).getByRole('button', { name: 'Use another name' }));
-    const dialog = screen.getByRole('dialog', { name: 'Settle Rook Junk' });
-    expect(within(dialog).getByRole('button', { name: 'Use' })).toBeDisabled();
-    await user.type(within(dialog).getByRole('combobox', { name: 'Name to use' }), 'Merlin');
+    renderPanel('Rook Junk');
+    const group = await pick(user, 'Use another name');
+    expect(within(group).getByRole('button', { name: 'Use' })).toBeDisabled();
+    await user.type(within(group).getByRole('combobox', { name: 'Name to use' }), 'Merlin');
     await user.click(await screen.findByRole('option', { name: /^Merlin Housing Authority/ }));
-    await user.click(within(dialog).getByRole('button', { name: 'Use Merlin Housing Authority' }));
+    await user.click(within(group).getByRole('button', { name: 'Use Merlin Housing Authority' }));
     expect(resolveNotOnList).toHaveBeenCalledWith({
       field: 'accepted_authorities',
       value: 'Rook Junk',
@@ -366,17 +392,16 @@ describe('NotOnListSection - admin settling', () => {
 
   it('Add as new: from the value, or a corrected name that remembers the value', async () => {
     const user = userEvent.setup();
-    renderSection();
-    await user.click(within(valueRow('Rook Junk')).getByRole('button', { name: 'Add as new' }));
-    const dialog = screen.getByRole('dialog', { name: 'Settle Rook Junk' });
-    const name = within(dialog).getByRole('textbox', { name: 'Name' });
+    renderPanel('Rook Junk');
+    const group = await pick(user, 'Add as new');
+    const name = within(group).getByRole('textbox', { name: 'Name' });
     expect(name).toHaveValue('Rook Junk');
     // The value itself as the name: nothing to remember.
-    expect(within(dialog).queryByRole('checkbox', { name: 'Remember this spelling' })).not.toBeInTheDocument();
+    expect(within(group).queryByRole('checkbox', { name: 'Remember this spelling' })).not.toBeInTheDocument();
     await user.clear(name);
     await user.type(name, 'Rook Housing Authority');
-    expect(within(dialog).getByRole('checkbox', { name: 'Remember this spelling' })).toBeChecked();
-    await user.click(within(dialog).getByRole('button', { name: 'Add as new' }));
+    expect(within(group).getByRole('checkbox', { name: 'Remember this spelling' })).toBeChecked();
+    await user.click(within(group).getByRole('button', { name: 'Add as new' }));
     expect(resolveNotOnList).toHaveBeenCalledWith({
       field: 'accepted_authorities',
       value: 'Rook Junk',
@@ -386,10 +411,15 @@ describe('NotOnListSection - admin settling', () => {
     });
   });
 
-  it('settling waits while an update runs; the records stay readable', () => {
-    renderSection({ rewriteLive: true });
-    expect(within(valueRow('Rook Junk')).getByRole('button', { name: 'Clear' })).toBeDisabled();
-    expect(within(valueRow('Rook Junk')).getByRole('button', { name: 'Show records' })).toBeEnabled();
+  it('settling waits while an update runs and says why in visible text; the records stay readable', () => {
+    renderPanel('Rook Junk', { rewriteLive: true });
+    const group = settleGroup();
+    expect(group).toBeDisabled();
+    const reason = 'Another update is still running. Settling waits until it finishes.';
+    expect(within(group).getByText(reason)).toBeVisible();
+    expect(group).toHaveAccessibleDescription(reason);
+    for (const radio of within(group).getAllByRole('radio')) expect(radio).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Show records' })).toBeEnabled();
   });
 
   it('a settle confirm counts every row of the field written the same way, and names them (R1-ADV-FE-9)', async () => {
@@ -397,24 +427,30 @@ describe('NotOnListSection - admin settling', () => {
     // the holders of all three. The agency row is another field - never counted.
     const user = userEvent.setup();
     const unknown = { status: 'unknown' as const, close: [] };
-    renderSection({
+    const rows: NotOnListRow[] = [
+      { field: 'housingAuthority', value: 'Rook Junk', count: 2, deletedCount: 1, resolution: unknown },
+      { field: 'housingAuthority', value: 'rook junk', count: 3, deletedCount: 0, resolution: unknown },
+      { field: 'housingAuthority', value: 'Rook-Junk', count: 1, deletedCount: 0, resolution: unknown },
+      { field: 'agency', value: 'ROOK JUNK', count: 4, deletedCount: 0, resolution: unknown },
+    ];
+    renderPanel('rook junk', { rows });
+    expect(await pick(user, 'Clear')).toHaveTextContent(
+      'The value is removed from Housing authority on every record that holds it (6 records (+1 deleted), written as Rook Junk, rook junk or Rook-Junk).',
+    );
+  });
+
+  it('(PIN) a value with no sibling in its field keeps the one-row wording', async () => {
+    const user = userEvent.setup();
+    const unknown = { status: 'unknown' as const, close: [] };
+    renderPanel('ROOK JUNK', {
       rows: [
         { field: 'housingAuthority', value: 'Rook Junk', count: 2, deletedCount: 1, resolution: unknown },
-        { field: 'housingAuthority', value: 'rook junk', count: 3, deletedCount: 0, resolution: unknown },
-        { field: 'housingAuthority', value: 'Rook-Junk', count: 1, deletedCount: 0, resolution: unknown },
         { field: 'agency', value: 'ROOK JUNK', count: 4, deletedCount: 0, resolution: unknown },
       ],
     });
-    await user.click(within(valueRow('rook junk')).getByRole('button', { name: 'Clear' }));
-    let dialog = screen.getByRole('dialog', { name: 'Settle rook junk' });
-    expect(dialog).toHaveTextContent(
-      'The value is removed from Housing authority on every record that holds it (6 records (+1 deleted), written as Rook Junk, rook junk or Rook-Junk).',
+    expect(await pick(user, 'Clear')).toHaveTextContent(
+      'The value is removed from Agency on every record that holds it (4 records).',
     );
-    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-    // (PIN) a value with no sibling in its field keeps the one-row wording.
-    await user.click(within(valueRow('ROOK JUNK')).getByRole('button', { name: 'Clear' }));
-    dialog = screen.getByRole('dialog', { name: 'Settle ROOK JUNK' });
-    expect(dialog).toHaveTextContent('The value is removed from Agency on every record that holds it (4 records).');
   });
 
   it('a placeholder value counts only the rows the server rewrites with it - its trimmed exact text (R2-FE-4)', async () => {
@@ -423,34 +459,32 @@ describe('NotOnListSection - admin settling', () => {
     // settle of "-" reaches "-" and " - " only - never "--" or "()".
     const user = userEvent.setup();
     const unknown = { status: 'unknown' as const, close: [] };
-    renderSection({
-      rows: [
-        { field: 'housingAuthority', value: '-', count: 2, deletedCount: 0, resolution: unknown },
-        { field: 'housingAuthority', value: ' - ', count: 1, deletedCount: 1, resolution: unknown },
-        { field: 'housingAuthority', value: '--', count: 3, deletedCount: 0, resolution: unknown },
-        { field: 'housingAuthority', value: '()', count: 1, deletedCount: 0, resolution: unknown },
-      ],
-    });
-    await user.click(within(valueRow('--')).getByRole('button', { name: 'Clear' }));
-    let dialog = screen.getByRole('dialog', { name: 'Settle --' });
-    expect(dialog).toHaveTextContent('The value is removed from Housing authority on every record that holds it (3 records).');
-    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    const rows: NotOnListRow[] = [
+      { field: 'housingAuthority', value: '-', count: 2, deletedCount: 0, resolution: unknown },
+      { field: 'housingAuthority', value: ' - ', count: 1, deletedCount: 1, resolution: unknown },
+      { field: 'housingAuthority', value: '--', count: 3, deletedCount: 0, resolution: unknown },
+      { field: 'housingAuthority', value: '()', count: 1, deletedCount: 0, resolution: unknown },
+    ];
+    const first = renderPanel('--', { rows });
+    expect(first.row.value).toBe('--');
+    expect(await pick(user, 'Clear')).toHaveTextContent(
+      'The value is removed from Housing authority on every record that holds it (3 records).',
+    );
+    cleanup();
     // "-" and " - " are one value to the server: both rows are counted and named.
-    const [dash] = screen.getAllByRole('rowheader', { name: '-' });
-    await user.click(within(dash!.closest('tr')!).getByRole('button', { name: 'Clear' }));
-    dialog = screen.getByRole('dialog');
-    expect(dialog.textContent).toContain('(3 records (+1 deleted), written as - or  - ).');
+    renderPanel('-', { rows });
+    expect((await pick(user, 'Clear')).textContent).toContain('(3 records (+1 deleted), written as - or  - ).');
   });
 
   it('a refused settle says why in staff words', async () => {
     const user = userEvent.setup();
     resolveNotOnList.mockRejectedValue(new ApiError(409, 'org_rewrite_running', 'org_rewrite_running'));
-    renderSection();
-    await user.click(within(valueRow('Rook Junk')).getByRole('button', { name: 'Clear' }));
-    const dialog = screen.getByRole('dialog', { name: 'Settle Rook Junk' });
-    await user.click(within(dialog).getByRole('button', { name: 'Clear' }));
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+    const props = renderPanel('Rook Junk');
+    const group = await pick(user, 'Clear');
+    await user.click(within(group).getByRole('button', { name: 'Clear' }));
+    expect(await within(group).findByRole('alert')).toHaveTextContent(
       'Another update is still running - try again when it finishes.',
     );
+    expect(props.onSettled).not.toHaveBeenCalled();
   });
 });

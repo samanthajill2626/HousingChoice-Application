@@ -6,20 +6,22 @@
 // only for `useAuth().isAdmin` - absent, never merely disabled, for a VA (S14
 // S8) - and the server enforces requireRole('admin') on each. The data and the
 // polling while a rewrite runs: useOrgAdmin.
-import { useId, useState } from 'react';
-import { runOrgRewriteAgain, type OrgEntry, type OrgKind, type OrgUsage } from '../../api/index.js';
+//
+// Layout (design review 2026-10-07 Option B): three segments with counts and
+// a search (OrgListPane), a compact list beside a detail panel
+// (OrgDetailPanel; NotOnListPanel for a value) on the shared two-pane shell -
+// one pane at a time at its narrow width, with a Back link. What is selected
+// lives in the URL (orgSelection). Focus follows the selection: into the
+// panel's heading when something is picked, back to its row on Back or Close.
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { runOrgRewriteAgain, type OrgEntry, type OrgKind } from '../../api/index.js';
 import { serverNowMs } from '../../api/serverClock.js';
 import { useAuth } from '../../app/AuthContext.js';
-import { Button, Spinner } from '../../ui/index.js';
+import { Button, Spinner, useTwoPaneNarrow } from '../../ui/index.js';
+import shell from '../../ui/twoPaneShell.module.css';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
-import {
-  KIND_NOUN,
-  KIND_PLURAL_TITLE,
-  canRunAgain,
-  orgErrorCopy,
-  rewriteStatusText,
-  usageText,
-} from '../orgs/orgCopy.js';
+import { canRunAgain, orgErrorCopy, rewriteStatusText } from '../orgs/orgCopy.js';
 import {
   DeleteDialog,
   KindDialog,
@@ -29,17 +31,30 @@ import {
   SpellingsDialog,
   skippedSpellingsNotice,
 } from './OrgEntryDialogs.js';
-import { NotOnListSection } from './NotOnListSection.js';
+import { OrgEntryPanel, OrgPanelMessage, OrgPanelPlaceholder, type EntryAction } from './OrgDetailPanel.js';
+import { NotOnListList, OrgEntryList, OrgViewBar, type RowRef } from './OrgListPane.js';
+import { NotOnListPanel } from './NotOnListSection.js';
+import {
+  SEGMENT_KIND,
+  entryHref,
+  entryMatches,
+  listHref,
+  readOrgLocation,
+  segmentForKind,
+  selectionKey,
+  valueKey,
+  valueMatches,
+  type OrgSegment,
+} from './orgSelection.js';
 import { useOrgAdmin } from './useOrgAdmin.js';
 import styles from './OrgListSection.module.css';
+import layout from './OrgSettings.module.css';
 
 /** The entry dialog that is open, if any (everything but notes is admin-only). */
 type EntryDialog = {
-  action: 'notes' | 'spellings' | 'rename' | 'merge' | 'kind' | 'delete';
+  action: EntryAction;
   entry: OrgEntry;
 };
-
-const KINDS: readonly OrgKind[] = ['housing_authority', 'agency'];
 
 const LEDE =
   'The names records use for who runs a tenant voucher (housing authorities) and who helps the tenant ' +
@@ -50,90 +65,6 @@ function byName(a: OrgEntry, b: OrgEntry): number {
   return a.name.localeCompare(b.name);
 }
 
-interface EntrySectionProps {
-  kind: OrgKind;
-  entries: readonly OrgEntry[];
-  usage: OrgUsage | null;
-  onAdd: () => void;
-  onEditNotes: (entry: OrgEntry) => void;
-  /** Extra row actions (the admin-only ones), after Edit notes. */
-  rowActions?: (entry: OrgEntry) => React.ReactNode;
-}
-
-/** One list as a region (S14 S2): a table whose row header is the exact name. */
-function EntrySection({ kind, entries, usage, onAdd, onEditNotes, rowActions }: EntrySectionProps): React.JSX.Element {
-  const headingId = useId();
-  const title = KIND_PLURAL_TITLE[kind];
-  const rows = [...entries].sort(byName);
-  return (
-    <section className={styles.section} aria-labelledby={headingId}>
-      <div className={styles.sectionHead}>
-        <h2 id={headingId} className={styles.heading}>
-          {title}
-        </h2>
-        <Button variant="secondary" size="sm" type="button" onClick={onAdd}>
-          {`Add ${KIND_NOUN[kind]}`}
-        </Button>
-      </div>
-      {rows.length === 0 ? (
-        <p className={styles.empty}>{`No ${title.toLowerCase()} on the list yet.`}</p>
-      ) : (
-        <div className={styles.tableWrap}>
-          <table className={styles.table}>
-            <thead>
-              <tr>
-                <th scope="col" className={styles.th}>
-                  Name
-                </th>
-                <th scope="col" className={styles.th}>
-                  Spellings
-                </th>
-                <th scope="col" className={styles.th}>
-                  Notes
-                </th>
-                <th scope="col" className={styles.th}>
-                  Used by
-                </th>
-                <th scope="col" className={styles.th}>
-                  <span className={styles.srOnly}>Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((entry) => (
-                <tr key={entry.orgId}>
-                  <th scope="row" className={`${styles.cell} ${styles.nameCell}`}>
-                    {entry.name}
-                  </th>
-                  <td className={styles.cell}>{entry.spellings.length > 0 ? entry.spellings.join(', ') : '-'}</td>
-                  <td className={`${styles.cell} ${styles.notesCell}`}>
-                    {entry.notes !== undefined && entry.notes !== '' ? entry.notes : '-'}
-                  </td>
-                  <td className={styles.cell}>{usageText(usage?.[entry.orgId])}</td>
-                  <td className={styles.cell}>
-                    <div className={styles.actions}>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        type="button"
-                        aria-label={`Edit notes for ${entry.name}`}
-                        onClick={() => onEditNotes(entry)}
-                      >
-                        Edit notes
-                      </Button>
-                      {rowActions?.(entry)}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
 export function OrgListSection(): React.JSX.Element {
   const admin = useOrgAdmin();
   const { isAdmin } = useAuth();
@@ -142,7 +73,54 @@ export function OrgListSection(): React.JSX.Element {
   const [runAgainBusy, setRunAgainBusy] = useState(false);
   // A result to tell staff about (a failed Run again, a spelling D12 skipped).
   const [notice, setNotice] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  // An entry just added, shown in the panel until the re-read lists it.
+  const [justAdded, setJustAdded] = useState<OrgEntry | null>(null);
   const { list } = admin;
+
+  const { orgId } = useParams();
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const narrow = useTwoPaneNarrow();
+  const { view, selection } = readOrgLocation(orgId, searchParams);
+  const selectedEntry =
+    selection?.type === 'entry'
+      ? (list.entries.find((e) => e.orgId === selection.orgId) ??
+        (justAdded?.orgId === selection.orgId ? justAdded : undefined))
+      : undefined;
+  // An entry's kind picks its list (so a kind change follows it); a value is
+  // always "Not on the list"; otherwise the URL's view.
+  const segment: OrgSegment =
+    selectedEntry !== undefined
+      ? segmentForKind(selectedEntry.kind)
+      : selection?.type === 'value'
+        ? 'not-on-list'
+        : view;
+  const selectedKey = selectionKey(selection);
+
+  // Focus follows the selection (review P11): a new pick moves it to the
+  // panel's heading; leaving the panel (Back, Close, the browser's Back)
+  // returns it to the row it came from - or, after the entry or value left
+  // the list (Delete, Merge, a settle), to the list's heading. The first
+  // render takes no focus: a deep link must not steal it on page load.
+  const panelHeadingRef = useRef<HTMLHeadingElement>(null);
+  const listHeadingRef = useRef<HTMLHeadingElement>(null);
+  const rowLinks = useRef(new Map<string, HTMLAnchorElement>());
+  const focusListNext = useRef(false);
+  const previousKey = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    const previous = previousKey.current;
+    previousKey.current = selectedKey;
+    if (previous === undefined || previous === selectedKey) return;
+    if (selectedKey !== null) {
+      panelHeadingRef.current?.focus();
+    } else if (focusListNext.current) {
+      listHeadingRef.current?.focus();
+    } else if (previous !== null) {
+      rowLinks.current.get(previous)?.focus();
+    }
+    focusListNext.current = false;
+  }, [selectedKey]);
 
   if (list.loading) {
     return (
@@ -189,72 +167,107 @@ export function OrgListSection(): React.JSX.Element {
     }
   }
 
-  // Admin-only row actions (spec D10): absent for a VA. Rename and Merge start
-  // a rewrite, so they wait while one runs (D11: one at a time); Change kind
-  // and Delete wait too - the server refuses both with 409 org_rewrite_running
-  // while one runs (plan 3.5), so an enabled button could only fail.
-  const busyTitle = admin.rewriteLive ? 'Another update is still running' : undefined;
-  const adminActions = (entry: OrgEntry): React.ReactNode => (
-    <>
-      <Button
-        variant="ghost"
-        size="sm"
-        type="button"
-        aria-label={`Edit spellings for ${entry.name}`}
-        onClick={() => setDialog({ action: 'spellings', entry })}
-      >
-        Spellings
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        type="button"
-        aria-label={`Rename ${entry.name}`}
-        disabled={admin.rewriteLive}
-        title={busyTitle}
-        onClick={() => setDialog({ action: 'rename', entry })}
-      >
-        Rename
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        type="button"
-        aria-label={`Merge ${entry.name}`}
-        disabled={admin.rewriteLive}
-        title={busyTitle}
-        onClick={() => setDialog({ action: 'merge', entry })}
-      >
-        Merge
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        type="button"
-        aria-label={`Change kind of ${entry.name}`}
-        disabled={admin.rewriteLive}
-        title={busyTitle}
-        onClick={() => setDialog({ action: 'kind', entry })}
-      >
-        Change kind
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        type="button"
-        aria-label={`Delete ${entry.name}`}
-        disabled={admin.rewriteLive}
-        title={busyTitle}
-        onClick={() => setDialog({ action: 'delete', entry })}
-      >
-        Delete
-      </Button>
-    </>
-  );
+  // Leave the panel once its entry or value has left the list (Delete, Merge,
+  // a settle): focus then goes to the list's heading, not to a row that is
+  // about to disappear.
+  const leaveForList = (): void => {
+    focusListNext.current = true;
+    void navigate(listHref(segment));
+  };
+  const rowRef: RowRef = (key) => (el) => {
+    if (el !== null) rowLinks.current.set(key, el);
+    else rowLinks.current.delete(key);
+  };
+
+  // The search narrows every list at once, so each segment's count says
+  // where the matches are.
+  const ofKind = (kind: OrgKind): OrgEntry[] => list.entries.filter((e) => e.kind === kind);
+  const matching = (kind: OrgKind): OrgEntry[] => ofKind(kind).filter((e) => entryMatches(e, query)).sort(byName);
+  const housingAuthorities = matching('housing_authority');
+  const agencies = matching('agency');
+  const notOnList = admin.notOnList?.filter((row) => valueMatches(row, query)) ?? null;
+  const counts: Record<OrgSegment, number | null> = {
+    'housing-authorities': housingAuthorities.length,
+    agencies: agencies.length,
+    'not-on-list': notOnList?.length ?? null,
+  };
+
+  let panel: React.ReactNode;
+  if (selection === null) {
+    panel = <OrgPanelPlaceholder segment={segment} isAdmin={isAdmin} />;
+  } else if (selection.type === 'entry') {
+    panel =
+      selectedEntry !== undefined ? (
+        <OrgEntryPanel
+          entry={selectedEntry}
+          usage={admin.usage?.[selectedEntry.orgId]}
+          isAdmin={isAdmin}
+          rewriteLive={admin.rewriteLive}
+          segment={segment}
+          narrow={narrow}
+          headingRef={panelHeadingRef}
+          onAction={(action) => setDialog({ action, entry: selectedEntry })}
+        />
+      ) : (
+        <OrgPanelMessage
+          segment={segment}
+          narrow={narrow}
+          headingRef={panelHeadingRef}
+          title="Name not found"
+          text="This name is not on the list - it may have been merged or deleted, or the link is out of date."
+        />
+      );
+  } else {
+    const row = admin.notOnList?.find((r) => r.field === selection.field && r.value === selection.value);
+    if (row !== undefined) {
+      panel = (
+        <NotOnListPanel
+          key={valueKey(row.field, row.value)}
+          row={row}
+          rows={admin.notOnList ?? []}
+          entries={list.entries}
+          isAdmin={isAdmin}
+          rewriteLive={admin.rewriteLive}
+          narrow={narrow}
+          headingRef={panelHeadingRef}
+          onSettled={(result) => {
+            admin.reload();
+            setNotice(result.skippedSpellings.length > 0 ? skippedSpellingsNotice(result.skippedSpellings) : null);
+            leaveForList();
+          }}
+        />
+      );
+    } else if (admin.notOnList === null && !admin.notOnListError) {
+      panel = (
+        <div className={layout.center}>
+          <Spinner />
+        </div>
+      );
+    } else {
+      panel = (
+        <OrgPanelMessage
+          segment={segment}
+          narrow={narrow}
+          headingRef={panelHeadingRef}
+          title={selection.value}
+          text={
+            admin.notOnList === null
+              ? "Couldn't load the values that are not on the list."
+              : 'No record holds this value any more - it was settled or changed.'
+          }
+        />
+      );
+    }
+  }
+
+  // One pane at a time at the shell's narrow width: the list, or the panel
+  // (whose Back link returns to the list) - with nothing above the panel but
+  // the update status.
+  const panelOnly = narrow && selection !== null;
 
   return (
-    <div className={styles.page}>
-      <p className={styles.lede}>{LEDE}</p>
+    <div className={layout.page}>
+      {panelOnly ? null : <p className={layout.lede}>{LEDE}</p>}
       {lastRewrite !== undefined ? (
         <div className={styles.statusRow}>
           <p className={styles.status}>{rewriteStatusText(lastRewrite, serverNow)}</p>
@@ -280,40 +293,60 @@ export function OrgListSection(): React.JSX.Element {
           </Button>
         </div>
       ) : null}
-      {KINDS.map((kind) => (
-        <EntrySection
-          key={kind}
-          kind={kind}
-          entries={list.entries.filter((e) => e.kind === kind)}
-          usage={admin.usage}
-          onAdd={() => setAdding(kind)}
-          onEditNotes={(entry) => setDialog({ action: 'notes', entry })}
-          {...(isAdmin && { rowActions: adminActions })}
+      {panelOnly ? null : (
+        <OrgViewBar
+          segment={segment}
+          counts={counts}
+          query={query}
+          onSegment={(next) => void navigate(listHref(next))}
+          onQuery={setQuery}
         />
-      ))}
-      <NotOnListSection
-        rows={admin.notOnList}
-        error={admin.notOnListError}
-        entries={list.entries}
-        isAdmin={isAdmin}
-        rewriteLive={admin.rewriteLive}
-        onRetry={admin.reload}
-        onSettled={(result) => {
-          admin.reload();
-          setNotice(result.skippedSpellings.length > 0 ? skippedSpellingsNotice(result.skippedSpellings) : null);
-        }}
-      />
+      )}
+      <div className={layout.split}>
+        <div className={`${layout.listPane} ${selection === null ? shell.paneActive : shell.paneHidden}`}>
+          {segment === 'not-on-list' ? (
+            <NotOnListList
+              rows={notOnList}
+              total={admin.notOnList?.length ?? 0}
+              error={admin.notOnListError}
+              query={query}
+              selectedKey={selectedKey}
+              headingRef={listHeadingRef}
+              rowRef={rowRef}
+              onRetry={admin.reload}
+            />
+          ) : (
+            <OrgEntryList
+              kind={SEGMENT_KIND[segment]}
+              entries={segment === 'agencies' ? agencies : housingAuthorities}
+              total={ofKind(SEGMENT_KIND[segment]).length}
+              query={query}
+              usage={admin.usage}
+              selectedKey={selectedKey}
+              headingRef={listHeadingRef}
+              rowRef={rowRef}
+              onAdd={() => setAdding(SEGMENT_KIND[segment])}
+            />
+          )}
+        </div>
+        <div className={`${layout.detailPane} ${selection !== null ? shell.paneActive : shell.paneHidden}`}>
+          {panel}
+        </div>
+      </div>
       {adding !== null ? (
         <NewOrgDialog
           kind={adding}
           text=""
           mode="settings"
-          onAdded={() => {
+          onAdded={(entry) => {
             // A clean action: an earlier notice no longer describes the page
-            // (worklist RE2-3; code review R1-CONF-2).
+            // (worklist RE2-3; code review R1-CONF-2). The new entry opens in
+            // the panel at once; the re-read then lists it.
             setAdding(null);
             setNotice(null);
+            setJustAdded(entry);
             admin.reload();
+            void navigate(entryHref(entry.orgId));
           }}
           onClose={() => setAdding(null)}
         />
@@ -344,7 +377,10 @@ export function OrgListSection(): React.JSX.Element {
           entry={dialog.entry}
           entries={list.entries}
           usage={admin.usage?.[dialog.entry.orgId]}
-          onMerged={closeAndReload}
+          onMerged={() => {
+            closeAndReload();
+            leaveForList();
+          }}
           onClose={closeDialog}
         />
       ) : null}
@@ -360,7 +396,10 @@ export function OrgListSection(): React.JSX.Element {
         <DeleteDialog
           entry={dialog.entry}
           usage={admin.usage?.[dialog.entry.orgId]}
-          onDeleted={closeAndReload}
+          onDeleted={() => {
+            closeAndReload();
+            leaveForList();
+          }}
           onClose={closeDialog}
         />
       ) : null}

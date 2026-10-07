@@ -29,6 +29,7 @@ import {
   HOUSING_AUTHORITY_KINDS,
   notOnListMessage,
   orgListLoadError,
+  orgListUnknown,
   orgNotOnListBody,
   refusesSave,
 } from '../orgs/orgCopy.js';
@@ -352,7 +353,7 @@ export function UnitCreateForm({
             label="Housing authorities"
             kinds={HOUSING_AUTHORITY_KINDS}
             entries={orgList.entries}
-            loading={orgList.loading}
+            loading={orgListUnknown(orgList)}
             disabled={orgList.error}
             value={authorities}
             onChange={(next) => {

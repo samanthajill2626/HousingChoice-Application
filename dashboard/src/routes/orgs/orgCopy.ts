@@ -138,6 +138,18 @@ export interface OrgListView {
   error: boolean;
 }
 
+/**
+ * Nothing is known about a picker's list: its first read is still in flight,
+ * or a read failed with nothing in hand (no read ever landed). A failed
+ * RE-read keeps the last list in hand (useOrgList), so that list is known.
+ * Every host passes this as its OrgPicker's `loading`: while the list is
+ * unknown the picker marks no stored value "Not on the list" - it cannot
+ * know (code review R3-FE-5) - and offers no add step.
+ */
+export function orgListUnknown(list: OrgListView): boolean {
+  return list.loading || (list.error && list.entries.length === 0);
+}
+
 /** What a form's Save does with one picker's typed text. */
 export type TypedOrgText =
   | { status: 'empty' }

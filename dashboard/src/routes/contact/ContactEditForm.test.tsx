@@ -730,6 +730,18 @@ describe('ContactEditForm', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('a list that fails to load marks no stored value "Not on the list" - nothing is known about it (R3-FE-5)', async () => {
+    getOrgList.mockRejectedValue(new ApiError(503, 'org_list_busy', 'org_list_busy'));
+    const stored: Contact = { ...TENANT, housingAuthority: 'Atlanta Housing Authority', agency: 'Step Up' };
+    render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(await screen.findByText("Couldn't load housing authorities")).toBeInTheDocument();
+    expect(screen.getByText("Couldn't load agencies")).toBeInTheDocument();
+    // Both chips are shown as they are, with no claim about the list.
+    expect(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove Step Up' })).toBeInTheDocument();
+    expect(screen.queryByText('Not on the list')).not.toBeInTheDocument();
+  });
+
   it('a list that fails to load says so and leaves the rest of the form working', async () => {
     const user = userEvent.setup();
     getOrgList.mockRejectedValue(new ApiError(503, 'org_list_busy', 'org_list_busy'));

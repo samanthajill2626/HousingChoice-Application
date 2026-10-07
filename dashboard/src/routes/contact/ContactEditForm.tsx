@@ -79,6 +79,7 @@ import {
   HOUSING_AUTHORITY_KINDS,
   notOnListMessage,
   orgListLoadError,
+  orgListUnknown,
   orgNotOnListBody,
   refusesSave,
 } from '../orgs/orgCopy.js';
@@ -598,7 +599,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               hint="The organization that runs the voucher."
               kinds={HOUSING_AUTHORITY_KINDS}
               entries={orgList.entries}
-              loading={orgList.loading}
+              loading={orgListUnknown(orgList)}
               disabled={orgList.error}
               value={housingAuthority}
               onChange={(next) => {
@@ -622,7 +623,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               label="Agency"
               kinds={AGENCY_KINDS}
               entries={orgList.entries}
-              loading={orgList.loading}
+              loading={orgListUnknown(orgList)}
               disabled={orgList.error}
               value={agency}
               onChange={(next) => {

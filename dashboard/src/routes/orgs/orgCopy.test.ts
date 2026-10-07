@@ -15,6 +15,7 @@ import {
   orgErrorCopy,
   orgErrorMessage,
   orgListLoadError,
+  orgListUnknown,
   orgNotOnListBody,
   refusesSave,
   resolutionText,
@@ -283,6 +284,30 @@ describe('Settings counts and resolutions', () => {
   it('words a picker load failure per kind', () => {
     expect(orgListLoadError(['housing_authority'])).toBe("Couldn't load housing authorities");
     expect(orgListLoadError(['agency'])).toBe("Couldn't load agencies");
+  });
+});
+
+describe('orgListUnknown - nothing is known about a picker list (code review R3-FE-5)', () => {
+  const ENTRY: OrgEntry = {
+    orgId: 'o1',
+    kind: 'housing_authority',
+    name: 'Atlanta Housing Authority',
+    spellings: [],
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  };
+
+  it('while the first read is in flight, and after a read failed with nothing in hand', () => {
+    expect(orgListUnknown({ entries: [], loading: true, error: false })).toBe(true);
+    expect(orgListUnknown({ entries: [], loading: false, error: true })).toBe(true);
+  });
+
+  it('never once a list is in hand - a failed RE-read keeps the last one - or a list loaded empty', () => {
+    expect(orgListUnknown({ entries: [ENTRY], loading: false, error: true })).toBe(false);
+    expect(orgListUnknown({ entries: [ENTRY], loading: false, error: false })).toBe(false);
+    expect(orgListUnknown({ entries: [], loading: false, error: false })).toBe(false);
   });
 });
 

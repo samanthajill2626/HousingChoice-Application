@@ -48,6 +48,7 @@ function Harness({
   truncated = false,
   onChangeSpy,
   onAuthorityTextChange,
+  initialFilter = { contact_type: 'tenant' },
 }: {
   propertyBeds?: number;
   reachCount?: number;
@@ -56,8 +57,9 @@ function Harness({
   onChangeSpy?: (f: AudienceFilter) => void;
   authorityError?: string;
   onAuthorityTextChange?: (text: string) => void;
+  initialFilter?: AudienceFilter;
 }): React.JSX.Element {
-  const [filter, setFilter] = useState<AudienceFilter>({ contact_type: 'tenant' });
+  const [filter, setFilter] = useState<AudienceFilter>(initialFilter);
   return (
     <AudienceFilters
       filter={filter}
@@ -157,6 +159,14 @@ describe('AudienceFilters — voucher size pre-fill + override', () => {
     expect(onAuthorityTextChange).toHaveBeenLastCalledWith('AHA');
     await u.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
     expect(onAuthorityTextChange).toHaveBeenLastCalledWith('');
+  });
+
+  it('a list that fails to load marks no picked filter "Not on the list" - nothing is known about it (R3-FE-5)', () => {
+    useOrgList.mockReturnValue({ ...LOADED, entries: [], version: null, error: true });
+    render(<Harness initialFilter={{ contact_type: 'tenant', housing_authority: 'Atlanta Housing Authority' }} />);
+    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load housing authorities");
+    expect(screen.getByText('Atlanta Housing Authority')).toBeInTheDocument();
+    expect(screen.queryByText('Not on the list')).not.toBeInTheDocument();
   });
 
   it('a list that fails while text is typed keeps the field clearable - that text holds Preview back', async () => {

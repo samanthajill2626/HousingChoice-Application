@@ -12,7 +12,7 @@
 import { useId, useState } from 'react';
 import type { AudienceFilter } from '../../api/index.js';
 import { OrgPicker } from '../orgs/OrgPicker.js';
-import { HOUSING_AUTHORITY_KINDS, ORG_TYPED_NOT_A_FILTER, orgListLoadError } from '../orgs/orgCopy.js';
+import { HOUSING_AUTHORITY_KINDS, ORG_TYPED_NOT_A_FILTER, orgListLoadError, orgListUnknown } from '../orgs/orgCopy.js';
 import { useOrgList } from '../orgs/useOrgList.js';
 import {
   VOUCHER_SIZE_CHOICES,
@@ -133,7 +133,7 @@ export function AudienceFilters({
           label="Housing authority"
           kinds={HOUSING_AUTHORITY_KINDS}
           entries={orgList.entries}
-          loading={orgList.loading}
+          loading={orgListUnknown(orgList)}
           disabled={orgList.error && typed.trim() === ''}
           value={filter.housing_authority ?? ''}
           onChange={setAuthority}

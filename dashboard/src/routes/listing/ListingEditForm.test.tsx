@@ -281,6 +281,15 @@ describe('ListingEditForm', () => {
     expect(updateUnit).toHaveBeenCalledWith('u1', { utilities: 'Gas only' });
   });
 
+  it('a list that fails to load marks no member "Not on the list" - nothing is known about it (R3-FE-5)', async () => {
+    getOrgList.mockRejectedValue(new ApiError(503, 'org_list_busy', 'org_list_busy'));
+    const listed: UnitItem = { ...UNIT, accepted_authorities: ['Atlanta Housing Authority', ' DCA '] };
+    render(<ListingEditForm unit={listed} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(await screen.findByText("Couldn't load housing authorities")).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
+    expect(screen.queryByText('Not on the list')).not.toBeInTheDocument();
+  });
+
   it('removing one member sends the rest byte-exact', async () => {
     const user = userEvent.setup();
     updateUnit.mockResolvedValue({ ...UNIT });

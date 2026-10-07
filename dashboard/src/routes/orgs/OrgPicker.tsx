@@ -63,7 +63,9 @@ interface OrgPickerBaseProps {
   /** The entry kinds offered (branch A: one kind per field). */
   kinds: readonly OrgKind[];
   entries: readonly OrgEntry[];
-  /** True while the list loads: no "Not on the list" marks, no add option yet. */
+  /** True while nothing is known about the list - it is still loading, or
+   *  it failed to load with nothing in hand (orgCopy orgListUnknown, code
+   *  review R3-FE-5): no "Not on the list" marks, no add option. */
   loading?: boolean;
   /** Present = the add step. Absent in the blast composer (spec D7). */
   onRequestAdd?: (text: string) => void;

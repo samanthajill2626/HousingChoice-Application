@@ -5,8 +5,9 @@
 // details read in flight is never aborted.
 import { act, render, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type OrgRewriteState } from '../../api/index.js';
+import { noteServerDate, resetServerClockForTests } from '../../api/serverClock.js';
 
 const getOrgList = vi.fn();
 const getOrgUsage = vi.fn();
@@ -158,5 +159,39 @@ describe('useOrgAdmin', () => {
     await waitFor(() => expect(getNotOnList).toHaveBeenCalledTimes(2));
     expect(getOrgList).toHaveBeenCalledTimes(2);
     expect(getOrgUsage).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Code review R1-ADV-FE-4: the heartbeat is a SERVER stamp and the server's
+// 15-minute lock reads it on the server's clock, so the page must too
+// (api/serverClock.ts). The browser is pinned to 12:00:00Z.
+describe('useOrgAdmin - the heartbeat on the server clock', () => {
+  afterEach(() => resetServerClockForTests());
+
+  it('a browser running 20 minutes FAST still polls a rewrite whose heartbeat is 10 s old', async () => {
+    noteServerDate('Wed, 01 Jul 2026 11:40:00 GMT', Date.now());
+    getOrgList.mockResolvedValue({
+      version: 1,
+      entries: [],
+      lastRewrite: { ...RUNNING, heartbeatAt: '2026-07-01T11:39:50.000Z' },
+    });
+    render(<Probe pollMs={20} />);
+    await waitFor(() => expect(latest!.list.lastRewrite).toBeDefined());
+    expect(latest!.rewriteLive).toBe(true);
+    await waitFor(() => expect(getOrgList.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it('a browser running 20 minutes SLOW stops polling a rewrite whose heartbeat is 16 minutes old', async () => {
+    noteServerDate('Wed, 01 Jul 2026 12:20:00 GMT', Date.now());
+    getOrgList.mockResolvedValue({
+      version: 1,
+      entries: [],
+      lastRewrite: { ...RUNNING, heartbeatAt: '2026-07-01T12:04:00.000Z' },
+    });
+    render(<Probe pollMs={20} />);
+    await waitFor(() => expect(latest!.list.lastRewrite).toBeDefined());
+    expect(latest!.rewriteLive).toBe(false);
+    await pause(100);
+    expect(getOrgList).toHaveBeenCalledTimes(1);
   });
 });

@@ -5,8 +5,9 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type OrgEntry, type OrgRewriteState } from '../../api/index.js';
+import { noteServerDate, resetServerClockForTests } from '../../api/serverClock.js';
 
 const getOrgList = vi.fn();
 const getOrgUsage = vi.fn();
@@ -242,6 +243,46 @@ describe('OrgListSection - admin', () => {
     renderSection();
     expect(await screen.findByText(/Re-run the cleanup script to finish it\./)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Run again' })).not.toBeInTheDocument();
+  });
+});
+
+// Code review R1-ADV-FE-4: the heartbeat is a SERVER stamp, judged by the
+// server's 15-minute lock on the server's clock - so the page judges it on
+// serverNowMs() too, never on a skewed browser clock (pinned to 12:00:00Z).
+describe('OrgListSection - the latest rewrite on the server clock', () => {
+  beforeEach(() => {
+    viewerIsAdmin = true;
+  });
+  afterEach(() => resetServerClockForTests());
+
+  it('a browser running 20 minutes FAST: a live rewrite reads as running, Rename waits, no Run again', async () => {
+    noteServerDate('Wed, 01 Jul 2026 11:40:00 GMT', Date.now());
+    getOrgList.mockResolvedValue({
+      version: 3,
+      entries: [ATLANTA],
+      lastRewrite: { ...RUNNING, heartbeatAt: '2026-07-01T11:39:50.000Z' },
+    });
+    renderSection();
+    expect(
+      await screen.findByText('Updating records: merging Atlanta HA into Atlanta Housing Authority.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Run again' })).not.toBeInTheDocument();
+    const row = entryRow('Housing authorities', 'Atlanta Housing Authority');
+    expect(within(row).getByRole('button', { name: 'Rename Atlanta Housing Authority' })).toBeDisabled();
+  });
+
+  it('a browser running 20 minutes SLOW: a stalled rewrite says so and offers Run again', async () => {
+    noteServerDate('Wed, 01 Jul 2026 12:20:00 GMT', Date.now());
+    getOrgList.mockResolvedValue({
+      version: 3,
+      entries: [ATLANTA],
+      lastRewrite: { ...RUNNING, heartbeatAt: '2026-07-01T12:04:00.000Z' },
+    });
+    renderSection();
+    expect(
+      await screen.findByText('An update stopped responding: merging Atlanta HA into Atlanta Housing Authority.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Run again' })).toBeInTheDocument();
   });
 });
 

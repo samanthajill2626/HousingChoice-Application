@@ -8,6 +8,7 @@
 // polling while a rewrite runs: useOrgAdmin.
 import { useId, useState } from 'react';
 import { runOrgRewriteAgain, type OrgEntry, type OrgKind, type OrgUsage } from '../../api/index.js';
+import { serverNowMs } from '../../api/serverClock.js';
 import { useAuth } from '../../app/AuthContext.js';
 import { Button, Spinner } from '../../ui/index.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
@@ -162,6 +163,9 @@ export function OrgListSection(): React.JSX.Element {
   }
 
   const lastRewrite = list.lastRewrite;
+  // The heartbeat is a SERVER stamp: judge it on the server's clock, as the
+  // server's lock does (code review R1-ADV-FE-4; api/serverClock.ts).
+  const serverNow = serverNowMs();
   const closeDialog = (): void => setDialog(null);
   // An action that succeeds clears the notice an earlier one left: it would no
   // longer describe the page (worklist RE2-3).
@@ -253,8 +257,8 @@ export function OrgListSection(): React.JSX.Element {
       <p className={styles.lede}>{LEDE}</p>
       {lastRewrite !== undefined ? (
         <div className={styles.statusRow}>
-          <p className={styles.status}>{rewriteStatusText(lastRewrite)}</p>
-          {isAdmin && canRunAgain(lastRewrite) ? (
+          <p className={styles.status}>{rewriteStatusText(lastRewrite, serverNow)}</p>
+          {isAdmin && canRunAgain(lastRewrite, serverNow) ? (
             <Button
               variant="secondary"
               size="sm"

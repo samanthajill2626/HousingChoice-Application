@@ -20,7 +20,7 @@ import type { createExtractionRepo, SuggestionItem } from '../../repos/extractio
 import type { ExtractableField, ExtractionResult } from '../../adapters/extraction.js';
 import { normalizeToE164 } from '../../lib/phone.js';
 import { EXTRACTABLE_FIELDS, normalizeSuggestionValue } from './schema.js';
-import { housingAuthorityFor, isKnownAuthority } from '../../lib/housingAuthority.js';
+import { KINDS_FOR_FIELD, resolveOrgText, type OrgEntry } from '../../lib/orgNames.js';
 import {
   ADDRESS_PART_KEYS,
   cleanAddressParts,
@@ -93,8 +93,9 @@ type Coerced = { ok: true; value: unknown } | { ok: false; reason: string };
 /**
  * Coerce/validate a raw string op value per its field. Invalid -> ok:false
  * (caller skips + logs). voucherSize -> int 0..12; porting -> boolean;
- * housingAuthority -> controlled vocabulary; names/pets/evictions/tenure ->
- * non-empty trimmed string <= 120 chars.
+ * housingAuthority -> trimmed, whitespace-collapsed text <= 120 chars (the
+ * field loop resolves it against the organization list); names/pets/
+ * evictions/tenure -> non-empty trimmed string <= 120 chars.
  */
 function coerceField(field: ExtractableField, raw: string | undefined): Coerced {
   if (raw === undefined) return { ok: false, reason: 'no value supplied' };
@@ -114,24 +115,14 @@ function coerceField(field: ExtractableField, raw: string | undefined): Coerced 
       return { ok: false, reason: 'porting is not true|false' };
     }
     case 'housingAuthority': {
-      // FREE TEXT, normalized - never a closed vocabulary (Cameron, 2026-08-09
-      // for the importer; 2026-08-16 for extraction). This branch used to reject
-      // anything outside HOUSING_AUTHORITY_VOCAB, which made the AI the only one
-      // of the three writers to this field that could not record a real answer:
-      // a human types free text into ContactEditForm, the importer passes
-      // unknown values through verbatim, and the extractor alone dropped them.
-      // A client saying "DeKalb County" is data, not a validation error.
-      //
-      // housingAuthorityFor collapses known variants to one spelling (the GSI is
-      // an exact hash, so "Dekalb Housing" and "Dekalb County Housing" would be
-      // two audiences) and returns anything else verbatim. Whether the RESULT is
-      // recognised decides write vs suggest at the call site, not here - a
-      // novel authority is valid, just not yet trusted.
+      // Shape checks only. The field loop resolves the text against the stored
+      // organization list (spec 2026-10-06 D8 + D4), where the run's list is in
+      // scope. Whitespace runs collapse to one space, as the old alias
+      // normalizer did, so text that is suggested as said stays tidy. A client
+      // naming an authority we do not know is data, not a validation error.
       if (trimmed.length === 0) return { ok: false, reason: 'empty after trim' };
       if (trimmed.length > MAX_TEXT_CHARS) return { ok: false, reason: 'exceeds 120 chars' };
-      const normalized = housingAuthorityFor(trimmed);
-      if (normalized === undefined) return { ok: false, reason: 'empty after trim' };
-      return { ok: true, value: normalized };
+      return { ok: true, value: trimmed.replace(/\s+/g, ' ') };
     }
     default: {
       // firstName / lastName / pets / evictions / tenure - free text.
@@ -170,6 +161,12 @@ export async function applyExtraction(
     hasInferredRoleContent?: boolean;
     /** Opaque ai_runs id stamped on every suggestion produced by this apply. */
     runId?: string;
+    /**
+     * The organization list this run read (spec 2026-10-06 D8): housingAuthority
+     * resolves against it (D4). The job passes the SAME snapshot its prompt
+     * block was rendered from, so prompt and resolution agree within a run.
+     */
+    orgEntries: readonly OrgEntry[];
   },
 ): Promise<ApplyOutcome> {
   const { contact, conversationId, cursorTsMsgId, result } = ctx;
@@ -235,33 +232,55 @@ export async function applyExtraction(
       continue;
     }
 
-    // A housing authority we have never seen is valid but not yet trusted, so it
-    // is SUGGESTED rather than written. The importer's input is a curated
-    // Airtable column and a human typing into ContactEditForm is a human
-    // deciding; this one is a phone transcript, where a mishearing or a client
-    // naming their caseworker's agency looks identical to a real new authority.
-    // One confirmation is cheap, and it is also the moment someone notices a
-    // genuinely new authority worth adding to the canonical spellings.
+    // Spec 2026-10-06 D8: a housing authority is resolved (D4) against the
+    // organization list this run read (ctx.orgEntries - the snapshot its prompt
+    // block was rendered from). A match is handled exactly as a known authority
+    // always was: the model's op still decides write or suggest, and the value
+    // written or suggested is the entry's exact NAME. An agency name is never a
+    // housing authority: it is dropped (agency_not_authority) - never written,
+    // never suggested. Anything else - ambiguous, compound, unknown - is valid
+    // but not yet trusted, so it is SUGGESTED as said: a phone transcript can
+    // mishear, and a staff confirmation is where a genuinely new authority is
+    // added to the list.
     //
-    // Deliberately NOT pushed onto demotedFields: that list feeds the
-    // `ai_extraction_demoted` audit, which means Layer-3 inferred-role demotion
-    // specifically. The per-decision `demotedFrom: 'write'` below records this
-    // one accurately without overloading that audit's meaning.
-    const novelAuthority =
-      field === 'housingAuthority' && !isKnownAuthority(String(coerced.value));
-    if (novelAuthority && fieldOp.op === 'write') {
-      logger.debug(
-        { contactId, field, known: false },
-        'extraction: unrecognised housing authority demoted to a suggestion',
-      );
+    // A not-on-the-list demotion is deliberately NOT pushed onto demotedFields:
+    // that list feeds the `ai_extraction_demoted` audit, which means Layer-3
+    // inferred-role demotion specifically. The per-decision `demotedFrom:
+    // 'write'` below records it without overloading that audit's meaning.
+    let value: unknown = coerced.value;
+    let notOnList = false;
+    if (field === 'housingAuthority') {
+      const resolved = resolveOrgText(ctx.orgEntries, String(coerced.value), KINDS_FOR_FIELD.housingAuthority);
+      if (resolved.status === 'other_kind') {
+        logger.debug({ contactId, field }, 'extraction: agency name proposed as a housing authority - dropped');
+        decide({
+          target: field,
+          outcome: 'dropped',
+          dropReason: 'agency_not_authority',
+          ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
+          ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
+        });
+        continue;
+      }
+      if (resolved.status === 'match') {
+        value = resolved.entry.name;
+      } else {
+        notOnList = true;
+        if (fieldOp.op === 'write') {
+          logger.debug(
+            { contactId, field, resolution: resolved.status },
+            'extraction: housing authority not on the list demoted to a suggestion',
+          );
+        }
+      }
     }
-    if (fieldOp.op === 'write' && ctx.hasInferredRoleContent !== true && !novelAuthority) {
-      writePatch[field] = coerced.value;
+    if (fieldOp.op === 'write' && ctx.hasInferredRoleContent !== true && !notOnList) {
+      writePatch[field] = value;
       writePatch[`${field}_source`] = sourceStamp;
       auditFields.push({
         field,
         from: contact[field],
-        to: coerced.value,
+        to: value,
         ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
       });
       pendingWrites.push(field);
@@ -269,7 +288,7 @@ export async function applyExtraction(
         target: field,
         outcome: 'wrote',
         ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
-        coercedValue: coerced.value,
+        coercedValue: value,
         ...(contact[field] !== undefined && { previousValue: String(contact[field]) }),
         ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
       });
@@ -277,16 +296,16 @@ export async function applyExtraction(
       // op === 'suggest', OR a demoted op:'write' (inferred-role content, spec
       // Layer 3): route the write through the SAME suggest path - no direct write,
       // no <field>_source provenance stamped (nothing is written).
-      // Gate on the CAUSE, not merely on "was a write". Before the novel-
-      // authority demotion existed these were the same statement - the only way
-      // to reach this branch with op:'write' was inferred-role content - but
-      // they are no longer, and `demotedFields` feeds the Layer-3
+      // Gate on the CAUSE, not merely on "was a write". Before the not-on-the-
+      // list demotion existed these were the same statement - the only way to
+      // reach this branch with op:'write' was inferred-role content - but they
+      // are no longer, and `demotedFields` feeds the Layer-3
       // `ai_extraction_demoted` audit specifically. Being explicit keeps a
-      // novel-authority demotion out of an audit that would misattribute it.
+      // not-on-the-list demotion out of an audit that would misattribute it.
       if (fieldOp.op === 'write' && ctx.hasInferredRoleContent === true) demotedFields.push(field);
       // Belt-and-braces: skip when the suggestion string-equals the current value.
       const currentValue = contact[field] !== undefined ? String(contact[field]) : undefined;
-      const suggestedValue = String(coerced.value);
+      const suggestedValue = String(value);
       if (currentValue !== undefined && currentValue === suggestedValue) {
         logger.debug({ contactId, field }, 'extraction suggestion skipped (equal to current)');
         decide({
@@ -316,7 +335,7 @@ export async function applyExtraction(
           target: field,
           outcome: 'suggested',
           ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
-          coercedValue: coerced.value,
+          coercedValue: value,
           ...(currentValue !== undefined && { previousValue: currentValue }),
           ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
           ...(fieldOp.op === 'write' && { demotedFrom: 'write' as const }),

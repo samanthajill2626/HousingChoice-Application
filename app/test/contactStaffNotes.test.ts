@@ -321,6 +321,7 @@ describe('the AI neither reads nor writes staff_notes (spec 3.4)', () => {
       contact,
       conversationId: 'conv-1',
       cursorTsMsgId: 'ts-1',
+      orgEntries: [],
       // One direct field write (the schema-keyed patch, apply.ts:455-460) AND
       // one note line (the notes append, apply.ts:704): two update calls.
       result: { fields: { pets: { op: 'write', value: 'has a dog' } }, noteLines: ['stairs are a problem'] },

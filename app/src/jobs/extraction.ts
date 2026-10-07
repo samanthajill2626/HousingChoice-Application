@@ -614,6 +614,8 @@ async function processRow(
   const applyOutcome = await applyExtraction(applyDeps, {
     contact, conversationId, cursorTsMsgId: newestTsMsgId, result: call.result, hasInferredRoleContent,
     runId: draft.runId,
+    // The SAME snapshot the prompt block was rendered from (spec 2026-10-06 D8).
+    orgEntries,
   });
   // The most damaging site: applyExtraction has ALREADY committed the contact
   // write. A throw here used to skip completeOrFail below, so the cursor never

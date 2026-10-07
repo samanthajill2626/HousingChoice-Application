@@ -1889,3 +1889,46 @@ describe('runDueExtractions - the block reaches the model (spec 2026-10-06 D8)',
     expect(h.seen[0]!.orgListBlock).toBe(renderOrgListBlock(ORG_ENTRIES).text);
   });
 });
+
+describe('runDueExtractions - apply resolves against the list the run read (spec 2026-10-06 D8)', () => {
+  it('writes the full list name for a spelling the model returned', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"housingAuthority":{"op":"write","value":"Atlanta (AHA)","reason":"said AHA Atlanta"}}}')],
+      contact: tenantContact(), conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.contactsUpdate).toHaveBeenCalledWith('c1', expect.objectContaining({ housingAuthority: 'Atlanta Housing Authority' }));
+    expect(h.runs[0]!.decisions['housingAuthority']).toMatchObject({ outcome: 'wrote', coercedValue: 'Atlanta Housing Authority' });
+  });
+
+  it('uses the list THIS run read - the same snapshot its prompt block came from', async () => {
+    const metro: OrgEntry = {
+      orgId: 'metro', kind: 'housing_authority', name: 'Metro Housing Authority', spellings: ['Metro HA'],
+      createdAt: NOW, createdBy: 'test', updatedAt: NOW, updatedBy: 'test',
+    };
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"housingAuthority":{"op":"write","value":"Metro HA","reason":"said so"}}}')],
+      contact: tenantContact(), conversation: convWith('c1'),
+      orgListRepo: { get: vi.fn(async () => orgListItem([metro])) },
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.seen[0]!.orgListBlock).toContain('- Metro Housing Authority | also: Metro HA');
+    expect(h.contactsUpdate).toHaveBeenCalledWith('c1', expect.objectContaining({ housingAuthority: 'Metro Housing Authority' }));
+  });
+
+  it('records an agency name as dropped agency_not_authority in the run log', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"housingAuthority":{"op":"write","value":"Hope Atlanta","reason":"works with Hope Atlanta"}}}')],
+      contact: tenantContact(), conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.contactsUpdate).not.toHaveBeenCalled();
+    expect(h.runs[0]!.outcome).toBe('no_op');
+    expect(h.runs[0]!.decisions['housingAuthority']).toMatchObject({
+      proposedOp: 'write', outcome: 'dropped', dropReason: 'agency_not_authority', verdict: 'not_presented',
+    });
+  });
+});

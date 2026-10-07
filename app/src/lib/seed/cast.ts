@@ -77,7 +77,6 @@ const CL = '2026-05-05T14:05:00.000Z';
 const CM = '2026-05-05T14:10:00.000Z';
 const CN = '2026-05-06T08:00:00.000Z';
 const CO = '2026-05-06T08:05:00.000Z';
-const CP = '2026-05-06T08:10:00.000Z';
 const CQ = '2026-05-07T09:00:00.000Z';
 const CR = '2026-05-07T09:05:00.000Z';
 const CS = '2026-05-07T09:10:00.000Z';
@@ -107,8 +106,6 @@ const reminderId = (slug: string, kind: string) => `reminder-cast-${slug}-${kind
 // terminal tour must point at a generation none of its rows carries.
 const ladderId = (slug: string) => `ladder-cast-${slug}`;
 const ladderRotated = (slug: string) => `ladder-cast-${slug}-rotated`;
-const poolNum = (slug: string) => `pool-cast-${slug}`;
-const listingSendId = (unit: string, tenant: string) => `${unitId(unit)}#${contactId(tenant)}`;
 
 // ---------------------------------------------------------------------------
 // Phone numbers — +1555010010X block (0101..0109)
@@ -432,7 +429,6 @@ const C_SEARCHING = contactId(SLUG_SEARCHING);
 const CONV_SEARCHING_1TO1 = convId('searching-tenant-1to1');
 const CONV_SEARCHING_RELAY = convId('searching-tenant-relay');
 const TOUR_SEARCHING = tourId(SLUG_SEARCHING);
-const UNIT_SEARCHING_A = 'unit-mx-available-01'; // available unit in matrix (reuse its ID)
 // We create our own unit for this tenant so we don't couple to matrix ordering
 const UNIT_CAST_SEARCHING = unitId('searching-a');
 

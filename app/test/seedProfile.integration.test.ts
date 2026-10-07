@@ -14,7 +14,7 @@ import { GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
-import { getTableSpec, TABLES } from '../src/lib/tables.js';
+import { TABLES } from '../src/lib/tables.js';
 import { SEED, SEED_INBOUND_VOICE_CELL, seedAll, createTableNamespace } from '../src/lib/seedData.js';
 import { loadConfig } from '../src/lib/config.js';
 import { HOLDER_POINTER_KEY } from '../src/repos/usersRepo.js';

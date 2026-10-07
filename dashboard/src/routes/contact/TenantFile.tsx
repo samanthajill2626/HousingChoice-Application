@@ -13,7 +13,6 @@ import {
   type PlacementItem,
   type Contact,
   type ContactPhone,
-  type FieldSource,
   type GroupThreadRow,
   type RelayGroupRow,
   type SuggestionItem,

@@ -52,7 +52,6 @@ export function AdHocDialog({ onSubmit, onClose, error }: AdHocDialogProps): Rea
     // Mount-only: capture the opener on open, restore it on close. Excluding deps
     // (onClose is proxied via onCloseRef) keeps a changing handler from clobbering
     // the captured opener or re-stealing focus.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSubmit = (e: React.FormEvent): void => {

@@ -5,7 +5,7 @@
 // (PATCH {canceled} then refetch the honest ladder). vitest footgun: mockReset
 // (not just clearAllMocks) when reusing a mockResolvedValueOnce queue.
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import type { EventStreamHandlers, PlacementNudgeView } from '../../api/index.js';
 

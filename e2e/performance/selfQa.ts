@@ -220,7 +220,7 @@ export async function reduceSelfQaSnapshot(
   // /__dev/outbox app route, remove-dev-outbox-proof-of-send.)
   proofOfSendUrl: string,
 ): Promise<SelfQaSnapshot> {
-  const [inboxPage, contactConversation, conversation, unmatchedPage, tourGroup, placementGroup, proofOfSend] =
+  const [inboxPage, contactConversation, _conversation, unmatchedPage, tourGroup, placementGroup, proofOfSend] =
     await Promise.all([
       api.get('/api/inbox', { filter: 'all', limit: '30' }),
       api.get(`/api/conversations/${bindings.conversation_detail}`),

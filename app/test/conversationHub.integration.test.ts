@@ -18,7 +18,7 @@ import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createAuditRepo } from '../src/repos/auditRepo.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
-import { createConversationsRepo, type ConversationItem } from '../src/repos/conversationsRepo.js';
+import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
 import { createContactCapture } from '../src/services/contactCapture.js';
 import { createLogCapture } from './helpers/logCapture.js';
 

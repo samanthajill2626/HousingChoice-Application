@@ -520,7 +520,7 @@ export class CallEngine {
   }
 
   /** Pick which dialed leg "answers" per the scenario. Defaults to the first leg. */
-  private chooseAnsweringLeg(numbers: DialNumber[], scenario: CallScenario): DialNumber {
+  private chooseAnsweringLeg(numbers: DialNumber[], _scenario: CallScenario): DialNumber {
     // For 'callee'/'founder'/'team' we currently model a single answering leg; the
     // first dialed number is the default. (Group/parallel dial fan-out is a future
     // extension — the leg array already supports it.)

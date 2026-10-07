@@ -37,7 +37,7 @@ import {
   createUnmatchedEmailRepo,
   type UnmatchedEmailRepo,
 } from '../../repos/unmatchedEmailRepo.js';
-import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
+import { type AuditRepo } from '../../repos/auditRepo.js';
 import { ingestInboundEmail, type InboundEmailNotice, type IngestResult } from '../../services/inboundEmail.js';
 import { parseSnsSesNotification } from '../../services/sesNotifications.js';
 import { createApplyEmailEvent } from '../../services/emailEvents.js';

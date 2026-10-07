@@ -144,8 +144,7 @@ const matrixConsent = (i: number) => MATRIX_CONSENT_METHODS[i % MATRIX_CONSENT_M
 // ---------------------------------------------------------------------------
 // The three live deadline types (placement-deadline-model): tour_reminder /
 // stuck_placement are retired (tours are first-class; stuck is derived).
-const DEADLINE_TYPES = ['rta_window', 'voucher_expiration', 'follow_up'] as const;
-type DeadlineType = typeof DEADLINE_TYPES[number];
+type DeadlineType = 'rta_window' | 'voucher_expiration' | 'follow_up';
 
 // A PLACEMENT deadline is never a tour_reminder — tours own that type. Making it
 // a distinct type means the phase→type map below CANNOT even reference it.

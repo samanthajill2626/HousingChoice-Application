@@ -29,7 +29,7 @@ import { normalizeToE164 } from '../phone.js';
 import type { Logger } from '../logger.js';
 import { logger as defaultLogger } from '../logger.js';
 import type { ContactsRepo } from '../../repos/contactsRepo.js';
-import type { ConversationParticipant, ConversationsRepo } from '../../repos/conversationsRepo.js';
+import type { ConversationsRepo } from '../../repos/conversationsRepo.js';
 import {
   convertConnectingRelayGroupToGroupText,
   type GroupConvertResult,

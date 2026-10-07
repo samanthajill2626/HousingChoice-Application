@@ -208,7 +208,6 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
     })();
 
     return () => controller.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contactId, opts.contactType, reloadNonce]);
 
   // Committed state is for the previous contactId → the new fetch is in flight.

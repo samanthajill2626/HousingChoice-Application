@@ -24,7 +24,6 @@ import { expectTodayReady } from '../../support/today.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const TENANT_ID = 'contact-tenant-0001'; // Tasha Nguyen
-const UNIT_A_ADDRESS = '1450 Joseph E. Boone Blvd NW'; // unit-0001 — has tour_process
 
 /** A datetime-local string (HTML input format, YYYY-MM-DDTHH:MM) at a fixed
  *  wall-clock `hour`:`minute` on `base`'s LOCAL calendar date. Paired with a
@@ -266,9 +265,6 @@ test.describe('Tours page', () => {
     // Either the "Tours today" section is absent entirely, or it doesn't contain
     // a link to the requested tour.
     const toursTodayList = page.getByRole('list', { name: 'Tours today' });
-    const todayLinkForRequestedTour = toursTodayList.getByRole('link', {
-      name: /Tasha Nguyen/,
-    });
 
     // We don't know whether a PREVIOUS test's scheduled tour is still visible;
     // but THIS requested tour must not be there. If "Tours today" exists at all,

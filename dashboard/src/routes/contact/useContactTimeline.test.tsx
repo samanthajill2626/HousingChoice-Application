@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { ContactTimelinePage, ConversationSummary, ConversationsPage, Message } from '../../api/index.js';
+import type { ContactTimelinePage, ConversationSummary, Message } from '../../api/index.js';
 
 const getContactTimeline = vi.fn();
 const getAllConversations = vi.fn();

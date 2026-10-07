@@ -632,7 +632,6 @@ describe('TwilioMessagingDriver.getMediaStream — SSRF guard + size cap', () =>
     // Draining the stream must reject with the typed too_large refusal, NOT run
     // unbounded. (Consume it the way mediaStore.put would.)
     const drain = (async () => {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of stream) {
         /* discard */
       }

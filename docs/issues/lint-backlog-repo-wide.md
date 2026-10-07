@@ -1,6 +1,6 @@
 ---
 id: lint-backlog-repo-wide
-title: 117 pre-existing lint errors across 65 files keep `npm run lint` from being a bare completion gate
+title: 23 pre-existing react-hooks lint errors across 18 files keep `npm run lint` from being a bare completion gate
 type: debt
 severity: med
 status: open
@@ -8,6 +8,29 @@ area: repo
 created: 2026-08-24
 refs: eslint.config.mjs, AGENTS.md
 ---
+
+**Status 2026-10-07 (`fix/lint-cleanup`).** Down from 111 errors / 61 files
+(plus 36 warnings) on `main` that day to **23 errors across 18 files, 0
+warnings**. Every remaining error is a `react-hooks/*` rule in `dashboard/src`
+(item 3 below) - deliberately PAUSED by Cameron, not forgotten. What closed:
+
+- Item 1: all `no-unused-vars` fixed by hand. Each production-code hit was
+  checked against history first; none was a lost caller (`nameFromContact`,
+  the relay `resolveMessage` import and `useUnmatchedEmail`'s `PAGE_LIMIT`
+  were all left behind by intentional refactors, and `PAGE_LIMIT` was never
+  wired - the page has always used the server's default limit).
+- Item 2: `no-explicit-any` is OFF in test files (`*.test.*`, `*.spec.*`,
+  `test/**`) by Cameron's call. Shipped code keeps the rule.
+- Item 4: Cameron's decision - the two import sources
+  (`app/src/lib/import/{airtableSource,quoSource}.ts`) are exempt from the
+  `readFileSync` ban. The import is a manual, operator-run process over small
+  CSV exports, not a media path. The ban stands for the rest of `app/src`.
+- The 36 unused `eslint-disable` directives were deleted. The stray
+  `prefer-const` and the fake-twilio-web "rule not found" directive were fixed;
+  the one `no-empty-object-type` hit (`app/test/performanceSeed.test.ts`) keeps
+  `{}` on purpose and carries a commented disable.
+
+The table and plan below are the 2026-08-24 snapshot, kept for history.
 
 **Problem.** `npm run lint` has been red on `main` for long enough that nobody
 reads it. Found on 2026-08-24 while a mission touched

@@ -732,10 +732,12 @@ items evaluated, Query calls, phases touched) - never an id, name or address.
 
 - `listByScheduledRange` walks every page through `queryAll`
   (`app/src/lib/dynamoPaging.ts`), like the other tours reads, and gains an
-  optional third argument `{ pageLimit?: number }` (the Query's `Limit`, used
-  only by tests). Its two callers (`tours.ts:387`, `today.ts:550`) are unchanged.
+  optional third argument `{ queryLimit?: number }` (EACH Query's `Limit`, used
+  only by tests - not a page cap; amended by the planner review, ADV-F4, from
+  `pageLimit`). Its two callers (`tours.ts:387`, `today.ts:550`) are unchanged.
 - A DynamoDB Local integration test writes several tours in one window, reads
-  it with `pageLimit: 1`, and proves the window comes back whole.
+  it with `queryLimit: 1` (amended, ADV-F4), and proves the window comes back
+  whole.
 - Today's `warnIfCapped('tours_today', ...)` call (3.8) is removed: it fires
   on a COUNT of 100 or more over a read that pages to completion, so it could
   only be false; the remaining cap (100 pages of 1 MB, unreachable in
@@ -800,8 +802,8 @@ for any other tour without a date.
     page that ends exactly on the last row answers `nextCursor: null`; the
     status-filter normalization (every dated status pressed = no filter).
   - `unitsRepo.getDisplaysByIds` (chunks, retries, best-effort); the harness
-    fakes; the paged range read (`pageLimit: 1`); Today without the cap warning;
-    the seed pin and the inverted matrix assertion.
+    fakes; the paged range read (`queryLimit: 1` - amended, ADV-F4); Today
+    without the cap warning; the seed pin and the inverted matrix assertion.
 - dashboard:
   - The tab order (All first), `/tours` landing on Active, P15's no-op re-click
     (and a Ctrl/Cmd-click left to the browser).

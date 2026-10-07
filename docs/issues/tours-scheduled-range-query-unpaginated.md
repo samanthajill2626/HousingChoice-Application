@@ -84,3 +84,5 @@ is complete:
 
 The line numbers above the Resolution cite the pre-fix code; they are left as
 the record.
+
+Renamed later on feat/tour-list (planner review ADV-F4, commit `e84dfbfa`): the test knob `pageLimit` above is now `queryLimit` - EACH Query's `Limit`, not a page cap (the `listByScheduledRange` docblock in `app/src/repos/toursRepo.ts`); the integration test reads with `queryLimit: 1`.

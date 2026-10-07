@@ -31,6 +31,8 @@ one caseworker conversion behind every path into the role, the generic type
 change keeping today's thread rule, threads matched by participant, all
 pending suggestions superseded, off-list employer text carried into
 `organization`, the AI's own caseworker line instead of the bare words.
+Revision 14 (2026-10-07) adds D22, the binding precision from the branch B
+plan research.
 Revision 13 (2026-10-07) folds in round 4's three precision lines; the
 branch B design review is CLOSED (round 4 terminal).
 Revision 12 (2026-10-07) folds in round 3 (terminal: two contract gaps -
@@ -931,6 +933,60 @@ contact header shows voucher size and housing authority only when
 kind, because team_member maps to the tenant kind; `unknown` keeps them
 because an imported authority is a triage hint).
 
+D22. **Branch B precision from the plan research (revision 14).** Binding
+details the plan research pinned
+(`docs/superpowers/reviews/2026-10-07-caseworkers/plan-research/planner-rulings.md`).
+Where a line here is more precise than D16-D21, this line governs.
+- Matching. "Mentions": D4's `normalizeOrgText(role)` contains `caseworker`,
+  `case worker` or `case manager`; it applies to tenant and landlord roles,
+  to the relationship row's role (a relationship counts only when its role
+  mentions), and to the KindPicker "Other" datalist filter (which therefore
+  uses mentions, not `isCaseworkerRole`). Only `role` counts; `role_title`
+  is ignored. The AI-note signal is a `notes` line that starts with the
+  extraction prefix `[Auto - <date>]` and whose text after it, normalized,
+  starts with "identified as" followed by "a caseworker", "caseworker", "a
+  case worker" or "case worker"; a line without the prefix does not count.
+  "No path gives a partner a role" means no UI path and no seed (the API
+  can).
+- Possible rows carry `signals: Array<'role_mentions' | 'ai_note' |
+  'relationship' | 'partner_no_role'>`.
+- The route domain: a pointer row (`phone_ref` / `email_ref`) or a row whose
+  `type` is not a ContactType answers 404 like a missing contact; `dismiss`
+  on an `unknown` or with an `organization` in the body answers 400;
+  `dismiss` writes `contact_updated` (`fields: ['caseworker_review']`) and
+  does not bump the revision. `make` and `dismiss` answer `{ contact }`.
+- The commit guard has a fifth clause, `attribute_not_exists(deleted_at)`; a
+  failed condition whose re-read finds the contact missing or deleted
+  answers 404. "Clears `agency`" means SET `''`.
+- Refusals carry the blocking ids (`placementId`, `tourId`, `unitId`) in the
+  409 body and the preview; the server sends codes only and the dashboard
+  owns the sentences (A's convention). Soft-deleted units count: the
+  landlord-of-record refusal reads live and deleted units by landlord; the
+  roster refusal is one unit Scan without the deleted filter.
+- Contacts POST refuses client-sent `caseworker_review`,
+  `caseworker_conversion` and `type_source`, as the PATCH does.
+- UI placement: today's Unknown card order is Tenant, Landlord, Partner,
+  Property Manager; B makes it Tenant, Landlord, Partner, Caseworker,
+  Property Manager, and the KindPicker follows it (then Other). Make
+  caseworker on a contact page is a menuitem in the header's More actions
+  menu. A partner's header facts line shows its organization.
+- Settings usage: the per-field columns stay for display (the organization
+  count shows inside the "Used by" cell) and the wire adds two distinct-record
+  totals per entry, `inUse { active, deleted }` (any field: Delete) and
+  `kindLocked { active, deleted }` (fields of the entry's kind only: Change
+  kind); both refusals and both dialogs read the totals.
+- Share wording (D20, completed): neutral - the property kebab and card action
+  "Send this property", the Matching empty state, "check at least one
+  recipient", "Flagged recipients you picked", "No recipients reached" on the
+  property Activity and BOTH landlord-timeline label sites; every share label
+  keeps the "Sent to " prefix. Tenant-worded on purpose (the control reaches
+  only tenants): "Add more tenants by filters", "Add a tenant", "No
+  candidates - add a tenant below.", the filter summary "Tenants - ...",
+  TenantFile's "Send a property to this tenant". A resolved non-tenant
+  recipient row is labelled `displayKind` (role, else "Partner"); tenant rows
+  stay unlabelled; an unresolved row omits `type` and `role`. The results
+  fallback name is "Recipient".
+
 ---
 
 ## 5. Data model
@@ -1297,7 +1353,12 @@ the public intake routes still mint `tenant_1to1` for any phone (tracker
   re-typed to Landlord or Partner today (pre-existing; B keeps that path's
   thread behavior unchanged, so reminders still find the tenant thread, and
   guards only the caseworker conversion). File for a decision.
-- (B) Tours and placements check no contact type on create or reopen, so a
+- (B) An extraction run in flight can write tenant facts or new suggestions
+  onto a just-converted caseworker (its writes are unconditional against a
+  run-start snapshot); accepted for B.
+- (B) Tours and placements check no contact type on create or reopen (and
+  `deriveTenantStatus` writes tenant statuses onto whatever contact a
+  placement names), so a
   caseworker can be given an open tour or placement after the conversion
   refused one; a tour reopened after a conversion has NO reminder thread
   (the conversion re-typed it to `partner_1to1`, and reminders look for

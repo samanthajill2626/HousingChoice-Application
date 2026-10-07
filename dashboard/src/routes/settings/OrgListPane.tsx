@@ -158,7 +158,7 @@ export function OrgEntryList({
             return (
               <ListRow
                 key={entry.orgId}
-                to={entryHref(entry.orgId)}
+                to={entryHref(entry.orgId, entry.kind)}
                 name={entry.name}
                 meta={used === undefined ? null : used === 0 ? 'Not used' : plural(used, 'record', 'records')}
                 quiet={used === 0}

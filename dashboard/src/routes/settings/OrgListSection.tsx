@@ -13,6 +13,9 @@
 // one pane at a time at its narrow width, with a Back link. What is selected
 // lives in the URL (orgSelection). Focus follows the selection: into the
 // panel's heading when something is picked, back to its row on Back or Close.
+// A settle request is the page's, not the panel's (code review r1 F1): one at
+// a time, and an answer that lands after the admin moved on neither moves
+// them nor is lost.
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { runOrgRewriteAgain, type OrgEntry, type OrgKind } from '../../api/index.js';
@@ -33,10 +36,11 @@ import {
 } from './OrgEntryDialogs.js';
 import { OrgEntryPanel, OrgPanelMessage, OrgPanelPlaceholder, type EntryAction } from './OrgDetailPanel.js';
 import { NotOnListList, OrgEntryList, OrgViewBar, type RowRef } from './OrgListPane.js';
-import { NotOnListPanel } from './NotOnListSection.js';
+import { NotOnListPanel, type SettleGate } from './NotOnListSection.js';
 import {
   SEGMENT_KIND,
   entryHref,
+  entryKey,
   entryMatches,
   listHref,
   readOrgLocation,
@@ -74,8 +78,15 @@ export function OrgListSection(): React.JSX.Element {
   // A result to tell staff about (a failed Run again, a spelling D12 skipped).
   const [notice, setNotice] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  // An entry just added, shown in the panel until the re-read lists it.
-  const [justAdded, setJustAdded] = useState<OrgEntry | null>(null);
+  // An entry just added, shown in the panel until the re-read lands. It holds
+  // only while the list is still the version it was added to, so once the
+  // re-read lists the entry - or a Delete or Merge took it away - its URL can
+  // never bring back a live panel (code review r1 F2).
+  const [justAdded, setJustAdded] = useState<{ entry: OrgEntry; listVersion: number | null } | null>(null);
+  // The value whose settle request is out (F1); the ref claims the slot
+  // synchronously, so a second request cannot slip in before a re-render.
+  const [settlePendingKey, setSettlePendingKey] = useState<string | null>(null);
+  const settleInFlight = useRef(false);
   const { list } = admin;
 
   const { orgId } = useParams();
@@ -83,10 +94,11 @@ export function OrgListSection(): React.JSX.Element {
   const navigate = useNavigate();
   const narrow = useTwoPaneNarrow();
   const { view, selection } = readOrgLocation(orgId, searchParams);
+  const pendingAdd = justAdded !== null && justAdded.listVersion === list.version ? justAdded.entry : undefined;
   const selectedEntry =
     selection?.type === 'entry'
       ? (list.entries.find((e) => e.orgId === selection.orgId) ??
-        (justAdded?.orgId === selection.orgId ? justAdded : undefined))
+        (pendingAdd?.orgId === selection.orgId ? pendingAdd : undefined))
       : undefined;
   // An entry's kind picks its list (so a kind change follows it); a value is
   // always "Not on the list"; otherwise the URL's view.
@@ -100,26 +112,34 @@ export function OrgListSection(): React.JSX.Element {
 
   // Focus follows the selection (review P11): a new pick moves it to the
   // panel's heading; leaving the panel (Back, Close, the browser's Back)
-  // returns it to the row it came from - or, after the entry or value left
-  // the list (Delete, Merge, a settle), to the list's heading. The first
-  // render takes no focus: a deep link must not steal it on page load.
+  // returns it to the row it came from - or to the list's heading when that
+  // row is not on screen (a search hides it, another list shows; r1 F3) or
+  // the entry or value has left the list (Delete, Merge, a settle). A
+  // segment click keeps focus on its button (F3). The first render takes no
+  // focus: a deep link must not steal it on page load.
   const panelHeadingRef = useRef<HTMLHeadingElement>(null);
   const listHeadingRef = useRef<HTMLHeadingElement>(null);
   const rowLinks = useRef(new Map<string, HTMLAnchorElement>());
   const focusListNext = useRef(false);
-  const previousKey = useRef<string | null | undefined>(undefined);
+  const keepFocusNext = useRef(false);
+  /** The selection on screen as of the last commit - what a late answer
+   *  (a settle, a Delete) is compared against. */
+  const shownKey = useRef<string | null | undefined>(undefined);
   useEffect(() => {
-    const previous = previousKey.current;
-    previousKey.current = selectedKey;
-    if (previous === undefined || previous === selectedKey) return;
+    const previous = shownKey.current;
+    shownKey.current = selectedKey;
+    const toList = focusListNext.current;
+    const keep = keepFocusNext.current;
+    focusListNext.current = false;
+    keepFocusNext.current = false;
+    if (previous === undefined || previous === selectedKey || keep) return;
     if (selectedKey !== null) {
       panelHeadingRef.current?.focus();
-    } else if (focusListNext.current) {
+    } else if (toList || previous === null) {
       listHeadingRef.current?.focus();
-    } else if (previous !== null) {
-      rowLinks.current.get(previous)?.focus();
+    } else {
+      (rowLinks.current.get(previous) ?? listHeadingRef.current)?.focus();
     }
-    focusListNext.current = false;
   }, [selectedKey]);
 
   if (list.loading) {
@@ -169,10 +189,32 @@ export function OrgListSection(): React.JSX.Element {
 
   // Leave the panel once its entry or value has left the list (Delete, Merge,
   // a settle): focus then goes to the list's heading, not to a row that is
-  // about to disappear.
-  const leaveForList = (): void => {
+  // about to disappear. The exit REPLACES the history entry, so the browser's
+  // Back cannot land on the dead URL (r1 M1). Only while that entry or value
+  // is still what the page shows: an answer that lands after the admin moved
+  // on leaves them where they are (F1).
+  const leaveForList = (key: string, target: OrgSegment): void => {
+    if (shownKey.current !== key) return;
     focusListNext.current = true;
-    void navigate(listHref(segment));
+    void navigate(listHref(target), { replace: true });
+  };
+  const leaveAfter = (entry: OrgEntry): void => {
+    closeAndReload();
+    setJustAdded(null);
+    leaveForList(entryKey(entry.orgId), segmentForKind(entry.kind));
+  };
+  const settleGate: SettleGate = {
+    pendingKey: settlePendingKey,
+    begin: (key) => {
+      if (settleInFlight.current) return false;
+      settleInFlight.current = true;
+      setSettlePendingKey(key);
+      return true;
+    },
+    end: () => {
+      settleInFlight.current = false;
+      setSettlePendingKey(null);
+    },
   };
   const rowRef: RowRef = (key) => (el) => {
     if (el !== null) rowLinks.current.set(key, el);
@@ -230,11 +272,13 @@ export function OrgListSection(): React.JSX.Element {
           rewriteLive={admin.rewriteLive}
           narrow={narrow}
           headingRef={panelHeadingRef}
+          settleGate={settleGate}
           onSettled={(result) => {
             admin.reload();
             setNotice(result.skippedSpellings.length > 0 ? skippedSpellingsNotice(result.skippedSpellings) : null);
-            leaveForList();
+            leaveForList(valueKey(row.field, row.value), 'not-on-list');
           }}
+          onSettleFailedAway={(message) => setNotice(`"${row.value}" was not settled: ${message}`)}
         />
       );
     } else if (admin.notOnList === null && !admin.notOnListError) {
@@ -255,6 +299,7 @@ export function OrgListSection(): React.JSX.Element {
               ? "Couldn't load the values that are not on the list."
               : 'No record holds this value any more - it was settled or changed.'
           }
+          {...(admin.notOnList === null && { onRetry: admin.reload })}
         />
       );
     }
@@ -270,7 +315,9 @@ export function OrgListSection(): React.JSX.Element {
       {panelOnly ? null : <p className={layout.lede}>{LEDE}</p>}
       {lastRewrite !== undefined ? (
         <div className={styles.statusRow}>
-          <p className={styles.status}>{rewriteStatusText(lastRewrite, serverNow)}</p>
+          <p role="status" className={styles.status}>
+            {rewriteStatusText(lastRewrite, serverNow)}
+          </p>
           {isAdmin && canRunAgain(lastRewrite, serverNow) ? (
             <Button
               variant="secondary"
@@ -284,7 +331,10 @@ export function OrgListSection(): React.JSX.Element {
           ) : null}
         </div>
       ) : null}
-      {notice !== null ? <p className={styles.notice}>{notice}</p> : null}
+      {/* Always mounted, so a notice that appears is announced (r1 M6). */}
+      <div role="status" className={layout.noticeSlot}>
+        {notice !== null ? <p className={styles.notice}>{notice}</p> : null}
+      </div>
       {admin.usageError ? (
         <div className={styles.errorBlock} role="alert">
           <p>{"Couldn't load how many records use each name."}</p>
@@ -298,7 +348,12 @@ export function OrgListSection(): React.JSX.Element {
           segment={segment}
           counts={counts}
           query={query}
-          onSegment={(next) => void navigate(listHref(next))}
+          onSegment={(next) => {
+            // Leaving a selection from the segment bar keeps focus on the
+            // button just pressed (r1 F3).
+            if (selection !== null) keepFocusNext.current = true;
+            void navigate(listHref(next));
+          }}
           onQuery={setQuery}
         />
       )}
@@ -344,9 +399,9 @@ export function OrgListSection(): React.JSX.Element {
             // the panel at once; the re-read then lists it.
             setAdding(null);
             setNotice(null);
-            setJustAdded(entry);
+            setJustAdded({ entry, listVersion: list.version });
             admin.reload();
-            void navigate(entryHref(entry.orgId));
+            void navigate(entryHref(entry.orgId, entry.kind));
           }}
           onClose={() => setAdding(null)}
         />
@@ -377,10 +432,7 @@ export function OrgListSection(): React.JSX.Element {
           entry={dialog.entry}
           entries={list.entries}
           usage={admin.usage?.[dialog.entry.orgId]}
-          onMerged={() => {
-            closeAndReload();
-            leaveForList();
-          }}
+          onMerged={() => leaveAfter(dialog.entry)}
           onClose={closeDialog}
         />
       ) : null}
@@ -396,10 +448,7 @@ export function OrgListSection(): React.JSX.Element {
         <DeleteDialog
           entry={dialog.entry}
           usage={admin.usage?.[dialog.entry.orgId]}
-          onDeleted={() => {
-            closeAndReload();
-            leaveForList();
-          }}
+          onDeleted={() => leaveAfter(dialog.entry)}
           onClose={closeDialog}
         />
       ) : null}

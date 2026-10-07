@@ -37,6 +37,24 @@ describe('readOrgLocation', () => {
     expect(readOrgLocation(undefined, params('field=agency&value=x')).selection).toBeNull();
     expect(readOrgLocation(undefined, params('view=not-on-list&field=nope&value=x')).selection).toBeNull();
   });
+
+  it('treats an empty value as no selection (code review r1 M4)', () => {
+    expect(readOrgLocation(undefined, params('view=not-on-list&field=agency&value=')).selection).toBeNull();
+    expect(readOrgLocation(undefined, params('view=not-on-list&field=agency&value=')).view).toBe('not-on-list');
+    // A value of spaces is a real stored value (a placeholder), kept as is.
+    expect(readOrgLocation(undefined, params('view=not-on-list&field=agency&value=+')).selection).toEqual({
+      type: 'value',
+      field: 'agency',
+      value: ' ',
+    });
+  });
+
+  it("keeps an entry link's view, so a gone agency stays on its list (r1 M3)", () => {
+    expect(readOrgLocation('o-gone', params('view=agencies'))).toEqual({
+      view: 'agencies',
+      selection: { type: 'entry', orgId: 'o-gone' },
+    });
+  });
 });
 
 describe('the hrefs', () => {
@@ -47,6 +65,11 @@ describe('the hrefs', () => {
 
   it('escape an id in the path', () => {
     expect(entryHref('a/b')).toBe('/settings/organizations/a%2Fb');
+  });
+
+  it("carry an agency's list in its link; a housing authority's link stays bare (r1 M3)", () => {
+    expect(entryHref('o-step', 'agency')).toBe('/settings/organizations/o-step?view=agencies');
+    expect(entryHref('o-atl', 'housing_authority')).toBe('/settings/organizations/o-atl');
   });
 
   it('carry any value text through the query and read it back unchanged', () => {

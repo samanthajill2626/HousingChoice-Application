@@ -4,9 +4,9 @@
 // a detail panel, the selection in the URL and focus following it, Add
 // through "Is this really new?", notes, the latest rewrite, and the
 // admin-only actions that never render for a VA.
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type OrgEntry, type OrgRewriteState } from '../../api/index.js';
 import { noteServerDate, resetServerClockForTests } from '../../api/serverClock.js';
@@ -94,12 +94,37 @@ const FAILED: OrgRewriteState = {
 };
 const RUNNING: OrgRewriteState = { ...FAILED, status: 'running', heartbeatAt: '2026-07-01T11:59:59.000Z' };
 
-/** The URL the page is on, read after each render (the URL is the selection). */
+/** The URL the page is on, read after each render (the URL is the selection),
+ *  and the router's navigate - the browser's Back is navigate(-1). */
 let currentUrl = '';
+let routerNavigate: (to: string | number) => void = () => {};
 function LocationProbe(): null {
   const location = useLocation();
+  const navigate = useNavigate();
   currentUrl = `${location.pathname}${location.search}`;
+  routerNavigate = (to) => {
+    if (typeof to === 'number') void navigate(to);
+    else void navigate(to);
+  };
   return null;
+}
+
+/** Go to a URL (or back, with -1) as the browser would. */
+async function go(to: string | number): Promise<void> {
+  await act(async () => {
+    routerNavigate(to);
+  });
+}
+
+/** A promise settled from the test. */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
+  let resolve: (v: T) => void = () => {};
+  let reject: (e: unknown) => void = () => {};
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 function renderSection(path = '/settings/organizations'): void {
@@ -343,7 +368,8 @@ describe('OrgListSection - Add and notes (everyone)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Yes, add it' }));
     expect(addOrg).toHaveBeenCalledWith({ kind: 'agency', name: 'Finch Mission', notes: 'Added today' });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(currentUrl).toBe('/settings/organizations/o-finch');
+    // An agency's link keeps its list (r1 M3).
+    expect(currentUrl).toBe('/settings/organizations/o-finch?view=agencies');
     expect(await screen.findByRole('region', { name: 'Finch Mission' })).toHaveTextContent('Added today');
     expect(await findRow('Agencies', 'Finch Mission')).toHaveAttribute('aria-current', 'page');
   });
@@ -908,5 +934,237 @@ describe('OrgListSection - "Not on the list"', () => {
     await waitFor(() => expect(getNotOnList).toHaveBeenCalledTimes(2));
     expect(currentUrl).toBe('/settings/organizations?view=not-on-list');
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Not on the list' })).toHaveFocus());
+  });
+});
+
+describe('OrgListSection - fix round 1 (code review r1)', () => {
+  const ATL_HA = {
+    field: 'housingAuthority' as const,
+    value: 'Atl HA',
+    count: 1,
+    deletedCount: 0,
+    resolution: { status: 'unknown' as const, close: [] },
+  };
+  const ROOK = {
+    field: 'agency' as const,
+    value: 'Rook Aid',
+    count: 2,
+    deletedCount: 0,
+    resolution: { status: 'unknown' as const, close: [] },
+  };
+  const VALUE_URL = '/settings/organizations?view=not-on-list&field=housingAuthority&value=Atl+HA';
+  const ROOK_URL = '/settings/organizations?view=not-on-list&field=agency&value=Rook+Aid';
+
+  async function startClear(user: User, value: string): Promise<HTMLElement> {
+    const settle = within(await screen.findByRole('region', { name: value })).getByRole('group', {
+      name: 'Settle this value',
+    });
+    await user.click(within(settle).getByRole('radio', { name: 'Clear' }));
+    await user.click(within(settle).getByRole('button', { name: 'Clear' }));
+    return settle;
+  }
+
+  beforeEach(() => {
+    viewerIsAdmin = true;
+    getNotOnList.mockResolvedValue([ATL_HA, ROOK]);
+  });
+
+  it('F1: while a settle is out the group is locked - no new pick, no second request', async () => {
+    const user = userEvent.setup();
+    const answer = deferred<unknown>();
+    resolveNotOnList.mockReturnValueOnce(answer.promise);
+    renderSection(VALUE_URL);
+    const settle = await startClear(user, 'Atl HA');
+    expect(settle).toBeDisabled();
+    expect(settle).toHaveTextContent('Settling this value - waiting for the answer.');
+    for (const radio of within(settle).getAllByRole('radio')) expect(radio).toBeDisabled();
+    await user.click(within(settle).getByRole('radio', { name: 'Use another name' }));
+    await user.click(within(settle).getByRole('button', { name: 'Clear' }));
+    expect(within(settle).getByRole('radio', { name: 'Clear' })).toBeChecked();
+    // Another value's panel waits too: one settle at a time.
+    await user.click(within(region('Not on the list')).getByRole('link', { name: 'Rook Aid' }));
+    expect(within(region('Rook Aid')).getByRole('group', { name: 'Settle this value' })).toHaveTextContent(
+      'Another value is still being settled. Settling waits until it answers.',
+    );
+    expect(resolveNotOnList).toHaveBeenCalledTimes(1);
+    await act(async () => answer.resolve({ lastRewrite: { ...RUNNING, action: 'clear' }, skippedSpellings: [] }));
+    expect(within(region('Rook Aid')).getByRole('group', { name: 'Settle this value' })).toBeEnabled();
+  });
+
+  it('F1: an answer that lands after the admin moved on does not move them', async () => {
+    const user = userEvent.setup();
+    const answer = deferred<unknown>();
+    resolveNotOnList.mockReturnValueOnce(answer.promise);
+    renderSection(VALUE_URL);
+    await startClear(user, 'Atl HA');
+    await user.click(within(region('Not on the list')).getByRole('link', { name: 'Rook Aid' }));
+    expect(currentUrl).toBe(ROOK_URL);
+    const rookHeading = within(region('Rook Aid')).getByRole('heading', { name: 'Rook Aid' });
+    expect(rookHeading).toHaveFocus();
+    await act(async () => answer.resolve({ lastRewrite: { ...RUNNING, action: 'clear' }, skippedSpellings: [] }));
+    await waitFor(() => expect(getNotOnList).toHaveBeenCalledTimes(2)); // the page still re-reads
+    expect(currentUrl).toBe(ROOK_URL);
+    expect(rookHeading).toHaveFocus();
+    // ...and the next Close goes back to the row, not to the list heading.
+    await user.click(within(region('Rook Aid')).getByRole('link', { name: 'Close' }));
+    expect(within(region('Not on the list')).getByRole('link', { name: 'Rook Aid' })).toHaveFocus();
+  });
+
+  it('F1: a failure that lands after Close reaches the admin as a notice', async () => {
+    const user = userEvent.setup();
+    const answer = deferred<unknown>();
+    resolveNotOnList.mockReturnValueOnce(answer.promise);
+    renderSection(VALUE_URL);
+    await startClear(user, 'Atl HA');
+    await user.click(within(region('Atl HA')).getByRole('link', { name: 'Close' }));
+    expect(currentUrl).toBe('/settings/organizations?view=not-on-list');
+    await act(async () => answer.reject(new ApiError(409, 'org_rewrite_running', 'org_rewrite_running')));
+    const notice = await screen.findByText(
+      '"Atl HA" was not settled: Another update is still running - try again when it finishes.',
+    );
+    // A polite live region, mounted before the notice arrived (r1 M6).
+    expect(notice.closest('[role="status"]')).not.toBeNull();
+    expect(currentUrl).toBe('/settings/organizations?view=not-on-list');
+  });
+
+  it('F1 / M1: a settle that lands on the same panel leaves it, replacing the dead URL in history', async () => {
+    const user = userEvent.setup();
+    resolveNotOnList.mockResolvedValue({ lastRewrite: { ...RUNNING, action: 'clear' }, skippedSpellings: [] });
+    renderSection('/settings/organizations?view=not-on-list');
+    await user.click(await within(await screen.findByRole('region', { name: 'Not on the list' })).findByRole('link', { name: 'Atl HA' }));
+    await startClear(user, 'Atl HA');
+    await waitFor(() => expect(currentUrl).toBe('/settings/organizations?view=not-on-list'));
+    expect(screen.getByRole('heading', { name: 'Not on the list' })).toHaveFocus();
+    await go(-1);
+    // Back skips the settled value's URL: it was replaced.
+    expect(currentUrl).toBe('/settings/organizations?view=not-on-list');
+  });
+
+  it("F2: once the re-read lands, an added entry's URL shows only what the list holds", async () => {
+    const user = userEvent.setup();
+    viewerIsAdmin = false;
+    const finch = entry('agency', 'Finch Mission', { orgId: 'o-finch' });
+    addOrg.mockResolvedValue(finch);
+    const reread = deferred<unknown>();
+    renderSection('/settings/organizations?view=agencies');
+    await user.click(await screen.findByRole('button', { name: 'Add agency' }));
+    const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Name' }), 'Finch Mission');
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Yes, add it' })).toBeEnabled());
+    getOrgList.mockReturnValueOnce(reread.promise);
+    await user.click(within(dialog).getByRole('button', { name: 'Yes, add it' }));
+    // Before the re-read: the panel shows the entry from the add's answer.
+    expect(await screen.findByRole('region', { name: 'Finch Mission' })).toBeInTheDocument();
+    // The re-read lands WITHOUT it (someone removed it meanwhile): gone.
+    await act(async () => reread.resolve({ version: 2, entries: [ATLANTA, DEKALB, STEP_UP] }));
+    expect(await screen.findByRole('region', { name: 'Name not found' })).toBeInTheDocument();
+  });
+
+  it('F2 / M1: a deleted entry just added is "Name not found" at its URL, and Back skips that URL', async () => {
+    const user = userEvent.setup();
+    const finch = entry('agency', 'Finch Mission', { orgId: 'o-finch' });
+    addOrg.mockResolvedValue(finch);
+    deleteOrg.mockResolvedValue(undefined);
+    renderSection('/settings/organizations?view=agencies');
+    await user.click(await screen.findByRole('button', { name: 'Add agency' }));
+    const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Name' }), 'Finch Mission');
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Yes, add it' })).toBeEnabled());
+    getOrgList.mockResolvedValue({ version: 2, entries: [ATLANTA, DEKALB, STEP_UP, finch] });
+    await user.click(within(dialog).getByRole('button', { name: 'Yes, add it' }));
+    const panel = await screen.findByRole('region', { name: 'Finch Mission' });
+    await waitFor(() => expect(getOrgList).toHaveBeenCalledTimes(2));
+    await user.click(within(panel).getByRole('button', { name: 'Delete Finch Mission' }));
+    getOrgList.mockResolvedValue({ version: 3, entries: [ATLANTA, DEKALB, STEP_UP] });
+    const confirm = screen.getByRole('dialog', { name: 'Delete Finch Mission' });
+    await waitFor(() => expect(within(confirm).getByRole('button', { name: 'Delete' })).toBeEnabled());
+    await user.click(within(confirm).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(currentUrl).toBe('/settings/organizations?view=agencies'));
+    await waitFor(() => expect(getOrgList).toHaveBeenCalledTimes(3));
+    // Back does not land on the deleted entry's URL (it was replaced)...
+    await go(-1);
+    expect(currentUrl).toBe('/settings/organizations?view=agencies');
+    // ...and the URL itself, opened again, never shows a live panel.
+    await go('/settings/organizations/o-finch?view=agencies');
+    expect(await screen.findByRole('region', { name: 'Name not found' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete Finch Mission' })).not.toBeInTheDocument();
+  });
+
+  it('F3: Close returns focus to the list heading when a search hides the row', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    const panel = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    await user.type(screen.getByRole('searchbox', { name: 'Search names and spellings' }), 'dekalb');
+    await user.click(within(panel).getByRole('link', { name: 'Close' }));
+    expect(screen.getByRole('heading', { name: 'Housing authorities' })).toHaveFocus();
+  });
+
+  it('F3: the browser Back to a list whose row is not shown focuses the list heading', async () => {
+    const user = userEvent.setup();
+    renderSection('/settings/organizations?view=agencies');
+    await openEntry(user, 'Agencies', 'Step Up');
+    await user.type(screen.getByRole('searchbox', { name: 'Search names and spellings' }), 'zzz');
+    await go(-1);
+    expect(currentUrl).toBe('/settings/organizations?view=agencies');
+    expect(screen.getByRole('heading', { name: 'Agencies' })).toHaveFocus();
+  });
+
+  it('F3: a segment click leaves focus on the segment button', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    const pressed = screen.getByRole('button', { name: /^Housing authorities/ });
+    await user.click(pressed);
+    expect(currentUrl).toBe('/settings/organizations');
+    expect(pressed).toHaveFocus();
+    await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    const agencies = screen.getByRole('button', { name: /^Agencies/ });
+    await user.click(agencies);
+    expect(agencies).toHaveFocus();
+  });
+
+  it('M3: a link to an agency that is gone stays on Agencies', async () => {
+    renderSection('/settings/organizations/o-gone?view=agencies');
+    const panel = await screen.findByRole('region', { name: 'Name not found' });
+    expect(screen.getByRole('button', { name: /^Agencies/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(panel).getByRole('link', { name: 'Close' })).toHaveAttribute(
+      'href',
+      '/settings/organizations?view=agencies',
+    );
+    expect(await findRow('Agencies', 'Step Up')).toHaveAttribute(
+      'href',
+      '/settings/organizations/o-step?view=agencies',
+    );
+  });
+
+  it('M3: on a phone the Back link names the right list', async () => {
+    stubNarrow(true);
+    renderSection('/settings/organizations/o-gone?view=agencies');
+    const panel = await screen.findByRole('region', { name: 'Name not found' });
+    expect(within(panel).getByRole('link', { name: 'Back to Agencies' })).toBeInTheDocument();
+  });
+
+  it('M2: a value link whose read failed offers Retry in the panel', async () => {
+    stubNarrow(true);
+    const user = userEvent.setup();
+    getNotOnList.mockReset().mockRejectedValueOnce(new ApiError(503, 'busy', 'busy')).mockResolvedValue([ATL_HA]);
+    renderSection(VALUE_URL);
+    const panel = await screen.findByRole('region', { name: 'Atl HA' });
+    expect(panel).toHaveTextContent("Couldn't load the values that are not on the list.");
+    await user.click(within(panel).getByRole('button', { name: 'Retry' }));
+    expect(
+      await within(await screen.findByRole('region', { name: 'Atl HA' })).findByRole('group', {
+        name: 'Settle this value',
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it('M6: the update status line is a polite live region', async () => {
+    getOrgList.mockResolvedValue({ version: 3, entries: [ATLANTA], lastRewrite: FAILED });
+    renderSection();
+    const line = await screen.findByText(
+      'The last update failed: merging Atlanta HA into Atlanta Housing Authority. Housing authority fields: 2.',
+    );
+    expect(line).toHaveAttribute('role', 'status');
   });
 });

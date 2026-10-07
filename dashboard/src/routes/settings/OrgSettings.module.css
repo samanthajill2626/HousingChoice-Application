@@ -21,6 +21,12 @@
   font-size: var(--fs-sm);
 }
 
+/* The notice's live region stays mounted; while empty it gives back the gap
+ * the page's flex column puts before it. */
+.noticeSlot:empty {
+  margin-top: calc(-1 * var(--sp-4));
+}
+
 /* --- Segments and search ------------------------------------------------- */
 .viewBar {
   display: flex;
@@ -295,17 +301,14 @@
   text-decoration: none;
 }
 
-.back::before {
-  content: '\2039\00a0';
+/* The Back chevron: decoration, aria-hidden in the markup. */
+.chevron {
+  margin-right: 0.25em;
 }
 
-/* Desktop: Close sits at the panel's top right, without the Back chevron. */
+/* Desktop: Close sits at the panel's top right. */
 .close {
   align-self: flex-end;
-}
-
-.close::before {
-  content: none;
 }
 
 .back:hover {

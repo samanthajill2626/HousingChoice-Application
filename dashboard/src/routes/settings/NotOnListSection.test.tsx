@@ -23,7 +23,7 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { NotOnListPanel, type NotOnListPanelProps } from './NotOnListSection.js';
+import { NotOnListPanel, type NotOnListPanelProps, type SettleGate } from './NotOnListSection.js';
 
 function entry(kind: OrgEntry['kind'], name: string, orgId: string): OrgEntry {
   return {
@@ -122,7 +122,9 @@ function renderPanel(value: string, over: Partial<NotOnListPanelProps> = {}): No
     rewriteLive: false,
     narrow: false,
     headingRef: { current: null },
+    settleGate: gate(),
     onSettled: vi.fn(),
+    onSettleFailedAway: vi.fn(),
     ...over,
   };
   render(
@@ -131,6 +133,33 @@ function renderPanel(value: string, over: Partial<NotOnListPanelProps> = {}): No
     </MemoryRouter>,
   );
   return props;
+}
+
+/** A settle gate as the page keeps one: one request out at a time. */
+function gate(pendingKey: string | null = null): SettleGate & { begin: ReturnType<typeof vi.fn> } {
+  let out = pendingKey !== null;
+  return {
+    pendingKey,
+    begin: vi.fn(() => {
+      if (out) return false;
+      out = true;
+      return true;
+    }),
+    end: vi.fn(() => {
+      out = false;
+    }),
+  };
+}
+
+/** A promise settled from the test. */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
+  let resolve: (v: T) => void = () => {};
+  let reject: (e: unknown) => void = () => {};
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 const panel = (value: string): HTMLElement => screen.getByRole('region', { name: value });
@@ -210,12 +239,13 @@ describe('NotOnListPanel - everyone', () => {
     expect(within(panel('Rook Junk')).getAllByRole('button').map((b) => b.textContent)).toEqual(['Show records']);
   });
 
-  it('Back (phone) or Close (desktop) leads back to the list', () => {
+  it('Back (phone) leads back to the list; its chevron is not part of its name (r1 M7)', () => {
     renderPanel('Rook Junk', { narrow: true });
-    expect(screen.getByRole('link', { name: 'Back to Not on the list' })).toHaveAttribute(
-      'href',
-      '/settings/organizations?view=not-on-list',
-    );
+    const back = screen.getByRole('link', { name: 'Back to Not on the list' });
+    expect(back).toHaveAttribute('href', '/settings/organizations?view=not-on-list');
+    expect(back).toHaveAccessibleName('Back to Not on the list');
+    const glyph = back.querySelector('[aria-hidden="true"]');
+    expect(glyph?.textContent).toBe(String.fromCharCode(0x2039));
   });
 });
 
@@ -485,6 +515,74 @@ describe('NotOnListPanel - admin settling', () => {
     expect(await within(group).findByRole('alert')).toHaveTextContent(
       'Another update is still running - try again when it finishes.',
     );
+    expect(props.onSettled).not.toHaveBeenCalled();
+  });
+});
+
+describe('NotOnListPanel - an in-flight settle (code review r1 F1, M5)', () => {
+  it('Cancel clears the pick and leaves focus on the choice it cleared', async () => {
+    const user = userEvent.setup();
+    renderPanel('Kite Aid');
+    const group = await pick(user, 'Clear');
+    await user.click(within(group).getByRole('button', { name: 'Cancel' }));
+    expect(within(settleGroup()).getByRole('radio', { name: 'Clear' })).not.toBeChecked();
+    expect(within(settleGroup()).getByRole('radio', { name: 'Clear' })).toHaveFocus();
+    expect(within(settleGroup()).queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument();
+    expect(resolveNotOnList).not.toHaveBeenCalled();
+  });
+
+  it('a confirm whose gate is taken sends nothing', async () => {
+    const user = userEvent.setup();
+    const taken = gate();
+    taken.begin.mockReturnValue(false);
+    renderPanel('Rook Junk', { settleGate: taken });
+    const group = await pick(user, 'Clear');
+    await user.click(within(group).getByRole('button', { name: 'Clear' }));
+    expect(taken.begin).toHaveBeenCalledWith(`value:${JSON.stringify(['accepted_authorities', 'Rook Junk'])}`);
+    expect(resolveNotOnList).not.toHaveBeenCalled();
+  });
+
+  it("while another value's request is out, this group waits and says why", () => {
+    renderPanel('Rook Junk', { settleGate: gate(`value:${JSON.stringify(['agency', 'Shrike Housing'])}`) });
+    const group = settleGroup();
+    expect(group).toBeDisabled();
+    const reason = 'Another value is still being settled. Settling waits until it answers.';
+    expect(within(group).getByText(reason)).toBeVisible();
+    expect(group).toHaveAccessibleDescription(reason);
+  });
+
+  it('while its own request is out, the group says so', () => {
+    renderPanel('Rook Junk', { settleGate: gate(`value:${JSON.stringify(['accepted_authorities', 'Rook Junk'])}`) });
+    expect(settleGroup()).toBeDisabled();
+    expect(settleGroup()).toHaveTextContent('Settling this value - waiting for the answer.');
+  });
+
+  it('the gate is released on an answer either way', async () => {
+    const user = userEvent.setup();
+    const g = gate();
+    resolveNotOnList.mockRejectedValueOnce(new ApiError(409, 'org_rewrite_running', 'org_rewrite_running'));
+    renderPanel('Rook Junk', { settleGate: g });
+    const group = await pick(user, 'Clear');
+    await user.click(within(group).getByRole('button', { name: 'Clear' }));
+    expect(await within(group).findByRole('alert')).toBeInTheDocument();
+    expect(g.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failure that lands after the panel left the screen goes to the page, not a dead panel', async () => {
+    const user = userEvent.setup();
+    const answer = deferred<never>();
+    resolveNotOnList.mockReturnValueOnce(answer.promise);
+    const props = renderPanel('Rook Junk');
+    const group = await pick(user, 'Clear');
+    await user.click(within(group).getByRole('button', { name: 'Clear' }));
+    cleanup(); // the admin moved on: the panel is gone
+    answer.reject(new ApiError(409, 'org_rewrite_running', 'org_rewrite_running'));
+    await waitFor(() =>
+      expect(props.onSettleFailedAway).toHaveBeenCalledWith(
+        'Another update is still running - try again when it finishes.',
+      ),
+    );
+    expect(props.settleGate.end).toHaveBeenCalledTimes(1);
     expect(props.onSettled).not.toHaveBeenCalled();
   });
 });

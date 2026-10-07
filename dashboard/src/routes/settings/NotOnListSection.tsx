@@ -8,7 +8,7 @@
 // panel (design review 2026-10-07 Option B) they pick what it becomes from
 // one radio group, and the confirm under the pick repeats the action (S14
 // L3-L6). The list of values itself is OrgListPane's NotOnListList.
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   checkOrgText,
@@ -39,6 +39,7 @@ import {
   spellingProblemCopy,
 } from '../orgs/orgCopy.js';
 import { PanelBack } from './OrgDetailPanel.js';
+import { valueKey } from './orgSelection.js';
 import styles from './OrgListSection.module.css';
 import layout from './OrgSettings.module.css';
 
@@ -208,19 +209,47 @@ function HolderList({ field, value }: { field: OrgRecordField; value: string }):
   );
 }
 
+/**
+ * The page's ONE in-flight settle (code review r1 F1). A settle request is
+ * owned by the page, not by the panel that sent it: while it is out, every
+ * settle group locks, so no second request can go out - not from another
+ * pick (which remounts the confirm) and not from another value's panel.
+ */
+export interface SettleGate {
+  /** The value whose request is out (orgSelection.valueKey), or null. */
+  pendingKey: string | null;
+  /** Claim the one slot, synchronously; false while a request is out. */
+  begin: (key: string) => boolean;
+  /** The request answered, either way: release the slot. */
+  end: () => void;
+}
+
 interface SettleConfirmProps {
   settle: Settle;
   entries: readonly OrgEntry[];
   /** Every "Not on the list" row: the confirm counts the settled row's
    *  siblings (recordsText). */
   rows: readonly NotOnListRow[];
+  gate: SettleGate;
   onDone: (result: OrgRewriteStarted) => void;
+  /** The request failed after this confirm left the screen: the page says so. */
+  onFailedAway: (message: string) => void;
+  /** Clear the pick (Cancel). */
+  onCancel: () => void;
 }
 
 /** The confirm under the picked choice in "Settle this value": one rewrite of
  *  every record holding the value in the row's field (spec D10, D11). It says
  *  what will change and its button repeats the action. */
-function SettleConfirm({ settle, entries, rows, onDone }: SettleConfirmProps): React.JSX.Element {
+function SettleConfirm({
+  settle,
+  entries,
+  rows,
+  gate,
+  onDone,
+  onFailedAway,
+  onCancel,
+}: SettleConfirmProps): React.JSX.Element {
   const { row } = settle;
   const kind = kindForField(row.field);
   const nameId = useId();
@@ -235,6 +264,17 @@ function SettleConfirm({ settle, entries, rows, onDone }: SettleConfirmProps): R
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Still on screen? A failure that lands after the admin moved on (another
+  // row, Close, the browser's Back) is handed to the page instead of being
+  // set on a confirm nobody can see. Set in the effect, so StrictMode's
+  // mount-cleanup-mount ends mounted.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   // "Remember this spelling" (spec D10, D12): on by default, off - with the
   // reason - when the value cannot become a spelling of the chosen entry. A
@@ -335,14 +375,22 @@ function SettleConfirm({ settle, entries, rows, onDone }: SettleConfirmProps): R
   const request = body;
 
   async function confirm(): Promise<void> {
-    if (busy || request === null) return;
+    if (busy || request === null || !gate.begin(valueKey(row.field, row.value))) return;
     setBusy(true);
     setError(null);
     try {
-      onDone(await resolveNotOnList(request));
+      const result = await resolveNotOnList(request);
+      gate.end();
+      onDone(result);
     } catch (err) {
-      setError(orgErrorCopy(err));
-      setBusy(false);
+      gate.end();
+      const message = orgErrorCopy(err);
+      if (mounted.current) {
+        setError(message);
+        setBusy(false);
+      } else {
+        onFailedAway(message);
+      }
     }
   }
 
@@ -427,6 +475,9 @@ function SettleConfirm({ settle, entries, rows, onDone }: SettleConfirmProps): R
         >
           {confirmLabel}
         </Button>
+        <Button variant="secondary" size="sm" type="button" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
       </div>
     </div>
   );
@@ -434,6 +485,10 @@ function SettleConfirm({ settle, entries, rows, onDone }: SettleConfirmProps): R
 
 /** Why settling waits - visible text, never a title (review P11). */
 export const SETTLE_WAIT_REASON = 'Another update is still running. Settling waits until it finishes.';
+/** This value's own request is out (code review r1 F1). */
+export const SETTLE_SENDING = 'Settling this value - waiting for the answer.';
+/** Another value's request is out: one settle at a time. */
+export const SETTLE_OTHER_PENDING = 'Another value is still being settled. Settling waits until it answers.';
 
 export interface NotOnListPanelProps {
   row: NotOnListRow;
@@ -447,8 +502,12 @@ export interface NotOnListPanelProps {
   /** One pane at a time (the two-pane shell's narrow width). */
   narrow: boolean;
   headingRef: React.Ref<HTMLHeadingElement>;
+  /** The page's one in-flight settle: locks every settle group while out. */
+  settleGate: SettleGate;
   /** A settle started (202): the page re-reads and names skipped spellings. */
   onSettled: (result: OrgRewriteStarted) => void;
+  /** A settle failed after this panel left the screen. */
+  onSettleFailedAway: (message: string) => void;
 }
 
 /**
@@ -466,7 +525,9 @@ export function NotOnListPanel({
   rewriteLive,
   narrow,
   headingRef,
+  settleGate,
   onSettled,
+  onSettleFailedAway,
 }: NotOnListPanelProps): React.JSX.Element {
   const headingId = useId();
   const recordsId = useId();
@@ -474,8 +535,24 @@ export function NotOnListPanel({
   const reasonId = useId();
   const [open, setOpen] = useState(false);
   const [picked, setPicked] = useState<string | null>(null);
+  const radios = useRef(new Map<string, HTMLInputElement>());
   const choices = isAdmin ? settleChoices(row) : [];
   const chosen = choices.find((c) => c.label === picked);
+  // Settling waits while a rewrite runs (D11) and while ANY settle request is
+  // out (F1): the pick cannot change under a request, and no second one goes.
+  const pendingKey = settleGate.pendingKey;
+  const reason = rewriteLive
+    ? SETTLE_WAIT_REASON
+    : pendingKey === null
+      ? null
+      : pendingKey === valueKey(row.field, row.value)
+        ? SETTLE_SENDING
+        : SETTLE_OTHER_PENDING;
+  // Cancel clears the pick; focus stays on the choice it cleared.
+  const cancel = (): void => {
+    if (picked !== null) radios.current.get(picked)?.focus();
+    setPicked(null);
+  };
   return (
     <section className={layout.panel} aria-labelledby={headingId}>
       <div className={layout.panelTop}>
@@ -515,13 +592,13 @@ export function NotOnListPanel({
       {isAdmin ? (
         <fieldset
           className={layout.settle}
-          disabled={rewriteLive}
-          aria-describedby={rewriteLive ? reasonId : undefined}
+          disabled={reason !== null}
+          aria-describedby={reason !== null ? reasonId : undefined}
         >
           <legend className={layout.settleLegend}>Settle this value</legend>
-          {rewriteLive ? (
+          {reason !== null ? (
             <p id={reasonId} className={layout.reason}>
-              {SETTLE_WAIT_REASON}
+              {reason}
             </p>
           ) : null}
           <div className={layout.choices}>
@@ -531,6 +608,10 @@ export function NotOnListPanel({
                 className={`${layout.choice} ${settle.action === 'clear' ? layout.choiceDanger : ''}`.trim()}
               >
                 <input
+                  ref={(el) => {
+                    if (el !== null) radios.current.set(label, el);
+                    else radios.current.delete(label);
+                  }}
                   type="radio"
                   name={choiceName}
                   value={label}
@@ -547,7 +628,10 @@ export function NotOnListPanel({
               settle={chosen.settle}
               entries={entries}
               rows={rows}
+              gate={settleGate}
               onDone={onSettled}
+              onFailedAway={onSettleFailedAway}
+              onCancel={cancel}
             />
           ) : (
             <p className={styles.dialogMuted}>Pick what the value should become, then confirm it.</p>

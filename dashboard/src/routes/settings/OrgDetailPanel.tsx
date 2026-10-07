@@ -24,11 +24,27 @@ export type EntryAction = 'notes' | 'spellings' | 'rename' | 'merge' | 'kind' | 
 export const REWRITE_WAIT_REASON =
   'Another update is still running. Rename, Merge, Change kind and Delete wait until it finishes.';
 
-/** Back to the list: "Back to <list>" when one pane shows at a time, else Close. */
+/** U+2039 SINGLE LEFT-POINTING ANGLE QUOTATION MARK, built at runtime so the
+ *  source stays ASCII (the REMOVE_GLYPH precedent in OrgEntryDialogs). */
+const BACK_GLYPH = String.fromCharCode(0x2039);
+
+/** Back to the list: "Back to <list>" when one pane shows at a time, else Close.
+ *  A plain push either way: the entry's URL is a real place to come back to.
+ *  The chevron is decoration, hidden from the accessible name (code review r1
+ *  M7). */
 export function PanelBack({ segment, narrow }: { segment: OrgSegment; narrow: boolean }): React.JSX.Element {
   return (
     <Link to={listHref(segment)} className={`${styles.back} ${narrow ? '' : styles.close}`.trim()}>
-      {narrow ? `Back to ${SEGMENT_LABEL[segment]}` : 'Close'}
+      {narrow ? (
+        <>
+          <span aria-hidden="true" className={styles.chevron}>
+            {BACK_GLYPH}
+          </span>
+          {`Back to ${SEGMENT_LABEL[segment]}`}
+        </>
+      ) : (
+        'Close'
+      )}
     </Link>
   );
 }
@@ -42,19 +58,23 @@ export function OrgPanelPlaceholder({ segment, isAdmin }: { segment: OrgSegment;
   return <p className={styles.placeholder}>{text}</p>;
 }
 
-/** A selection the page cannot show (merged, deleted, settled, or a stale link). */
+/** A selection the page cannot show (merged, deleted, settled, a stale link,
+ *  or a read that failed - then with Retry, which at the narrow width is the
+ *  only one on screen; code review r1 M2). */
 export function OrgPanelMessage({
   segment,
   narrow,
   title,
   text,
   headingRef,
+  onRetry,
 }: {
   segment: OrgSegment;
   narrow: boolean;
   title: string;
   text: string;
   headingRef: React.Ref<HTMLHeadingElement>;
+  onRetry?: () => void;
 }): React.JSX.Element {
   const headingId = useId();
   return (
@@ -66,6 +86,13 @@ export function OrgPanelMessage({
         </h2>
       </div>
       <p className={`${styles.factValue} ${styles.quiet}`}>{text}</p>
+      {onRetry !== undefined ? (
+        <div className={styles.actions}>
+          <Button variant="secondary" size="sm" type="button" onClick={onRetry}>
+            Retry
+          </Button>
+        </div>
+      ) : null}
     </section>
   );
 }

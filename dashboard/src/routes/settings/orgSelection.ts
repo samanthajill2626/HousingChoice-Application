@@ -10,6 +10,8 @@
 //   (view = housing-authorities | agencies | not-on-list; the first is the
 //   default and is left out)
 // - /settings/organizations/<orgId>          one entry; its kind picks the list
+//   (an agency's link also carries ?view=agencies, so a link to an agency that
+//   is gone - merged, deleted - still opens on its own list; code review r1 M3)
 // - /settings/organizations?view=not-on-list&field=<field>&value=<value>
 //   one "Not on the list" value. A value has no id - it IS its field and its
 //   exact stored text - so both ride as query parameters (any text survives
@@ -70,7 +72,8 @@ export function readOrgLocation(orgId: string | undefined, params: URLSearchPara
   if (orgId !== undefined && orgId !== '') return { view, selection: { type: 'entry', orgId } };
   const field = params.get('field');
   const value = params.get('value');
-  if (view === 'not-on-list' && isRecordField(field) && value !== null) {
+  // An empty value names nothing: no stored value is '' (code review r1 M4).
+  if (view === 'not-on-list' && isRecordField(field) && value !== null && value !== '') {
     return { view, selection: { type: 'value', field, value } };
   }
   return { view, selection: null };
@@ -81,8 +84,10 @@ export function listHref(segment: OrgSegment): string {
   return segment === DEFAULT_SEGMENT ? ORG_SETTINGS_PATH : `${ORG_SETTINGS_PATH}?view=${segment}`;
 }
 
-export function entryHref(orgId: string): string {
-  return `${ORG_SETTINGS_PATH}/${encodeURIComponent(orgId)}`;
+/** An entry's own URL. With its kind, an agency's link keeps its list. */
+export function entryHref(orgId: string, kind?: OrgKind): string {
+  const path = `${ORG_SETTINGS_PATH}/${encodeURIComponent(orgId)}`;
+  return kind === 'agency' ? `${path}?view=agencies` : path;
 }
 
 export function valueHref(field: OrgRecordField, value: string): string {

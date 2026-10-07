@@ -56,6 +56,9 @@ function flyerLinkFor(unitId: string): string {
   return `${window.location.origin}/p/${encodeURIComponent(unitId)}`;
 }
 
+/** R2 ruling F1's copy for both composer 422s. */
+const AUTHORITY_LEFT_THE_LIST = 'That housing authority is no longer on the list - pick it again';
+
 export function BroadcastComposer(): React.JSX.Element {
   const [params] = useSearchParams();
   const unitId = params.get('unitId') ?? undefined;
@@ -111,6 +114,25 @@ export function BroadcastComposer(): React.JSX.Element {
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
+  // Spec 2026-10-06 D7: a 422 org_not_on_list from the draft create or from
+  // Preview means the picked housing authority left the list. The pick is
+  // cleared and this message stays under the picker until the operator next
+  // changes a filter (a recreate clears the draft hook's own error, so the
+  // composer owns this one).
+  const [authorityNotice, setAuthorityNotice] = useState<string | null>(null);
+  function rejectAuthorityPick(): void {
+    setFilter((prev) => {
+      const next: AudienceFilter = { contact_type: 'tenant' };
+      if (prev.bedroomSize !== undefined) next.bedroomSize = prev.bedroomSize;
+      return next;
+    });
+    setAuthorityNotice(AUTHORITY_LEFT_THE_LIST);
+  }
+  function onFilterChange(next: AudienceFilter): void {
+    setAuthorityNotice(null);
+    setFilter(next);
+  }
+
   // Tenant candidates for the "add a tenant" search (loaded once).
   const [tenants, setTenants] = useState<Contact[]>([]);
   const [tenantsLoading, setTenantsLoading] = useState(true);
@@ -120,6 +142,7 @@ export function BroadcastComposer(): React.JSX.Element {
     bodyTemplate,
     ...(audienceEnabled && { filter }),
     ...(seedContactIds.length > 0 && { seedContactIds }),
+    onOrgNotOnList: rejectAuthorityPick,
     // Untouched pre-fill/auto-seed = zero operator work: the draft is deleted
     // on unmount instead of littering the Matching list. A resumed draft is
     // the operator's saved work — never disposable.
@@ -316,7 +339,11 @@ export function BroadcastComposer(): React.JSX.Element {
       const result = await previewBroadcast(draft.draftId);
       setPreview(result);
     } catch (err) {
-      if (err instanceof ApiError) {
+      if (err instanceof ApiError && err.status === 422 && err.code === 'org_not_on_list') {
+        // Spec D7: the stored filter's housing authority left the list after
+        // the draft was made - the same answer as the create's.
+        rejectAuthorityPick();
+      } else if (err instanceof ApiError) {
         setPreviewError(err.message);
       } else {
         setPreviewError("Couldn't load the recipient list — try again.");
@@ -462,7 +489,8 @@ export function BroadcastComposer(): React.JSX.Element {
           ) : (
             <AudienceFilters
               filter={filter}
-              onChange={setFilter}
+              onChange={onFilterChange}
+              authorityError={authorityNotice}
               {...(typeof unit?.beds === 'number' && { propertyBeds: unit.beds })}
               {...(draft.reachCount !== undefined && { reachCount: draft.reachCount })}
               reachPending={draft.reachPending}

@@ -42,6 +42,11 @@ export interface ComposerDraftInput {
    *  keep the stays-in-the-list behavior. A delete racing a just-sent broadcast
    *  is harmless: the DELETE route is draft-guarded (409, no side effects). */
   disposable?: boolean;
+  /** Called when a (re)create is refused 422 org_not_on_list - the picked
+   *  housing authority left the list (spec 2026-10-06 D7). The composer clears
+   *  the pick and owns the message, so this draft is NOT marked stale: the
+   *  cleared filter either matches the current draft again or recreates it. */
+  onOrgNotOnList?: () => void;
 }
 
 export interface ComposerDraftState {
@@ -101,6 +106,13 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
   // attempt is discarded (it must not adopt a stale id as current).
   const genRef = useRef(0);
   const lastKeyRef = useRef<string | null>(null);
+  // The latest refusal callback, read inside the async create without
+  // re-binding the effect. Updated in an effect, never during render (the
+  // react-hooks refs rule; the disposableRef write below predates it).
+  const onOrgNotOnListRef = useRef(input.onOrgNotOnList);
+  useEffect(() => {
+    onOrgNotOnListRef.current = input.onOrgNotOnList;
+  }, [input.onOrgNotOnList]);
 
   const adoptDraftId = useCallback((id: string) => {
     currentIdRef.current = id;
@@ -187,6 +199,18 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
         .catch((err: unknown) => {
           if (gen !== genRef.current) return;
           setReachPending(false);
+          const onOrgNotOnList = onOrgNotOnListRef.current;
+          if (
+            onOrgNotOnList !== undefined &&
+            err instanceof ApiError &&
+            err.status === 422 &&
+            err.code === 'org_not_on_list'
+          ) {
+            // Spec 2026-10-06 D7: the composer clears the pick and says so.
+            setError(null);
+            onOrgNotOnList();
+            return;
+          }
           // The recreate FAILED, so currentIdRef still points at the PRIOR draft
           // whose body/filter no longer match the screen — mark stale so Preview/
           // Send stay disabled until a fresh create succeeds.

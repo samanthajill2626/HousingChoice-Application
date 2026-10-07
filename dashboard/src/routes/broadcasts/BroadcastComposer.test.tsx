@@ -9,6 +9,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { Contact, ContactsPage, EventStreamHandlers, UnitItem, UnitsPage } from '../../api/index.js';
+import { ApiError } from '../../api/index.js';
 
 const getUnit = vi.fn();
 const getAllUnits = vi.fn();
@@ -609,5 +610,75 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
     await user.type(screen.getByRole('combobox', { name: 'Property' }), 'Findme');
     await waitFor(() => expect(propertyRows()).toHaveLength(1));
     expect(propertyRows()[0]).toHaveAccessibleName(/900 Findme Ave/);
+  });
+});
+
+// Spec 2026-10-06 D7: a picked housing authority can leave the list between
+// the pick and the server's check (the draft create, or Preview).
+describe('BroadcastComposer - a housing authority that left the list', () => {
+  const ATLANTA = {
+    orgId: 'o-atl',
+    kind: 'housing_authority',
+    name: 'Atlanta Housing Authority',
+    spellings: ['AHA'],
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  };
+  const GONE = 'That housing authority is no longer on the list - pick it again';
+  const refused = (): ApiError =>
+    new ApiError(422, 'org_not_on_list', 'org_not_on_list', {
+      error: 'org_not_on_list',
+      field: 'audience_filter',
+      text: 'Atlanta Housing Authority',
+      candidates: [],
+      close: [],
+    });
+
+  async function pickAtlanta(u: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await u.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'AHA');
+    await u.click(await screen.findByRole('option', { name: /^Atlanta Housing Authority/ }));
+  }
+
+  beforeEach(() => {
+    getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA] });
+  });
+
+  it('a refused draft create clears the pick and says so - and Preview works again', async () => {
+    const u = userEvent.setup();
+    createBroadcast.mockImplementation(async (body: { audience_filter?: { housing_authority?: string } }) => {
+      if (body.audience_filter?.housing_authority !== undefined) throw refused();
+      return { broadcastId: 'draft_1', status: 'draft', estimatedCount: 5, truncated: false };
+    });
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(1), { timeout: 4000 });
+    await pickAtlanta(u);
+    expect(await screen.findByText(GONE, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove Atlanta Housing Authority' })).not.toBeInTheDocument();
+    // The cleared filter is the first draft's again: no recreate needed, and
+    // the draft is not stale.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled());
+    expect(createBroadcast).toHaveBeenCalledTimes(2);
+    // The next filter change clears the message.
+    await u.click(screen.getByRole('button', { name: /^3-BR/ }));
+    expect(screen.queryByText(GONE)).not.toBeInTheDocument();
+  });
+
+  it('a refused Preview clears the pick, says so, and recreates the draft without it', async () => {
+    const u = userEvent.setup();
+    previewBroadcast.mockRejectedValue(refused());
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(1), { timeout: 4000 });
+    await pickAtlanta(u);
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(2), { timeout: 4000 });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled());
+    await u.click(screen.getByRole('button', { name: 'Preview recipients' }));
+    expect(await screen.findByText(GONE)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove Atlanta Housing Authority' })).not.toBeInTheDocument();
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(3), { timeout: 4000 });
+    expect(createBroadcast.mock.calls[2]?.[0]?.audience_filter).toEqual({ contact_type: 'tenant', bedroomSize: 2 });
+    // Never the raw code.
+    expect(screen.queryByText(/org_not_on_list/)).not.toBeInTheDocument();
   });
 });

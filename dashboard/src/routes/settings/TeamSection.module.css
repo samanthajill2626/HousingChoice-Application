@@ -256,6 +256,12 @@
   max-width: 24rem;
 }
 
+/* Role picks one of two short words: it needs no more room than that. */
+.roleField {
+  flex: 0 0 auto;
+  min-width: 8rem;
+}
+
 .fieldLabel {
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);

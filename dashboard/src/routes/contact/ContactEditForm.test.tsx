@@ -1077,6 +1077,39 @@ describe('ContactEditForm - a picker whose list is not there', () => {
     );
   });
 
+  it('a re-read after "Yes, add it" fails: a picker emptied to retype stays usable - the list is still in hand (code review R4-3)', async () => {
+    const user = userEvent.setup();
+    addOrg.mockResolvedValue(orgEntry('housing_authority', 'Metro Housing Authority'));
+    updateContact.mockResolvedValue({ ...TENANT, housingAuthority: 'Metro Housing Authority', agency: 'Step Up' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(agency(), 'Hope');
+    await screen.findByRole('option', { name: 'Add Hope as a new agency' });
+    // The read "Yes, add it" starts fails.
+    getOrgList.mockRejectedValue(new ApiError(503, 'org_list_busy', 'org_list_busy'));
+    await user.type(housingAuthority(), 'Metro Housing Authority');
+    await user.click(
+      await screen.findByRole('option', { name: 'Add Metro Housing Authority as a new housing authority' }),
+    );
+    const isNew = screen.getByRole('dialog', { name: 'Is this really new?' });
+    const yes = within(isNew).getByRole('button', { name: 'Yes, add it' });
+    await waitFor(() => expect(yes).toBeEnabled());
+    await user.click(yes);
+    expect(await screen.findByText("Couldn't load agencies")).toBeInTheDocument();
+    // Staff clear "Hope" to type the name they meant: the field stays usable.
+    await user.clear(agency());
+    expect(agency()).toBeEnabled();
+    // The Housing authority picker holds its new chip and no text: usable too.
+    expect(housingAuthority()).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Remove Metro Housing Authority' })).toBeEnabled();
+    // The list in hand offers the name.
+    await user.type(agency(), 'Step Up');
+    await user.click(await screen.findByRole('option', { name: 'Step Up' }));
+    await user.click(save());
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: 'Metro Housing Authority', agency: 'Step Up' }),
+    );
+  });
+
   it('a refusal follows its text: once the list lands and settles the text, the alert goes (R3-FE-6)', async () => {
     const user = userEvent.setup();
     const read = heldListRead();

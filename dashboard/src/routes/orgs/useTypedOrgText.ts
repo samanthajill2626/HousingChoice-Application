@@ -14,8 +14,9 @@
 //     and the text settles against it as usual; a read that fails with
 //     nothing in hand leaves nothing to settle against - Save refuses with
 //     "The list did not load - clear the text to save without it.". A picker
-//     whose list failed is disabled - but never while it holds text (here
-//     `disabled`), so the text can always be fixed or cleared.
+//     whose list failed with nothing in hand is disabled - but never while it
+//     holds text (here `disabled`), so the text can always be fixed or
+//     cleared; after a failed RE-read the list in hand still serves it.
 // Every form passes its picker's ref in, wires `onPendingTextChange`, `note`,
 // `refusal`, `refusalAttempt` and `disabled` to the OrgPicker (`errorAttempt`:
 // a refusal repeated word for word is announced again, code review R2-FE-10)
@@ -27,7 +28,14 @@
 import { useState, type RefObject } from 'react';
 import type { OrgKind } from '../../api/index.js';
 import type { OrgPickerHandle } from './OrgPicker.js';
-import { settleTypedOrgText, typedOrgNote, typedOrgRefusal, type OrgListView, type TypedOrgText } from './orgCopy.js';
+import {
+  orgListUnknown,
+  settleTypedOrgText,
+  typedOrgNote,
+  typedOrgRefusal,
+  type OrgListView,
+  type TypedOrgText,
+} from './orgCopy.js';
 
 export interface TypedOrgTextField {
   /** The picker's `onPendingTextChange`. */
@@ -41,9 +49,10 @@ export interface TypedOrgTextField {
   /** The picker's `errorAttempt`: one more per refused Save, so a refusal
    *  repeated word for word is announced again (code review R2-FE-10). */
   refusalAttempt: number;
-  /** The picker's `disabled`: a list that failed to load disables it -
-   *  unless it holds text, which stays usable so a Save can never wait on a
-   *  field staff cannot clear (code review R3-FE-3). */
+  /** The picker's `disabled`: a read that failed with no list in hand
+   *  disables it (a failed RE-read keeps one, code review R4-3) - unless it
+   *  holds text, which stays usable so a Save can never wait on a field
+   *  staff cannot clear (code review R3-FE-3). */
   disabled: boolean;
   /** Save's verdict on the text the field holds: a refusal is shown under
    *  the field; a committed text is emptied from it, as a pick would be. */
@@ -78,7 +87,9 @@ export function useTypedOrgText(
     // and must say why.
     refusal: refused ? typedOrgRefusal(verdict) : null,
     refusalAttempt,
-    disabled: list.error && text.trim() === '',
+    // orgListUnknown is also true while the first read is in flight; that
+    // disables nothing - text typed then waits for the list (R2-FE-1).
+    disabled: list.error && orgListUnknown(list) && text.trim() === '',
     settle: () => {
       const refusal = typedOrgRefusal(verdict);
       setRefused(refusal !== null);

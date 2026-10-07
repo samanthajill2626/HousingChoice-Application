@@ -138,8 +138,9 @@ export interface OrgListView {
   entries: readonly OrgEntry[];
   /** True until the first read settles. */
   loading: boolean;
-  /** True when the latest read failed - the pickers are disabled, except
-   *  one holding typed text (code review R3-FE-3). */
+  /** True when the latest read failed - with no list in hand the pickers
+   *  are disabled, except one holding typed text (code review R3-FE-3,
+   *  R4-3). */
   error: boolean;
 }
 

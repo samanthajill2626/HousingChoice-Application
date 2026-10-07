@@ -66,7 +66,10 @@ export function AudienceFilters({
   // leaves the field enabled so the text can still be cleared - it holds
   // Preview back, and a disabled field could never let it go (R2-FE-3). The
   // forms keep a picker holding text usable the same way (useTypedOrgText,
-  // R3-FE-3): nothing ever waits on a field staff cannot use.
+  // R3-FE-3): nothing ever waits on a field staff cannot use. An empty field
+  // follows their rule too (R4-3): only a failed read with no list in hand
+  // disables it - this list is read once per mount, so its failed read never
+  // has one.
   const [typed, setTyped] = useState('');
 
   function pickSize(value: number): void {
@@ -141,7 +144,7 @@ export function AudienceFilters({
           kinds={HOUSING_AUTHORITY_KINDS}
           entries={orgList.entries}
           loading={orgListUnknown(orgList)}
-          disabled={disabled || (orgList.error && typed.trim() === '')}
+          disabled={disabled || (orgList.error && orgListUnknown(orgList) && typed.trim() === '')}
           value={filter.housing_authority ?? ''}
           onChange={setAuthority}
           onPendingTextChange={(text) => {

@@ -6,8 +6,14 @@ severity: low
 status: open
 area: app
 created: 2026-08-10
+updated: 2026-10-07
 refs: app/src/lib/import/apply.ts:763,app/src/lib/import/apply.ts:797,app/src/lib/unitFields.ts:129,dashboard/src/routes/public/FlyerPage.tsx:249
 ---
+
+**Update (2026-10-07).** Case 2 is closed for every new write by feat/clean-org-names: the unit
+POST and PATCH run the organization-list check (spec D5), which drops blank members, so [''] is
+stored as []. A value already stored stays until it is edited. This branch does not change case 1
+(the importer still SETs the list on import-owned units).
 
 **Problem.** Two independent low-severity edge cases in the unit `accepted_authorities` field
 introduced by the tenant-list-visibility feature (spec section 8). Both are filed rather than fixed

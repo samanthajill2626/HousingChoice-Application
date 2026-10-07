@@ -17,18 +17,40 @@
 // USES (D3) count only a field of the entry's kind holding the exact name. A
 // unit that stores only the legacy `jurisdiction` holds no list: it is neither
 // a use nor a "Not on the list" row (the cleanup script backfills it).
+//
+// THE REWRITE PASS. One call is ONE pass over ONE field (`def.field`); the
+// org.rewrite job runs one pass per member of `lastRewrite.fields` (fixed when
+// the rewrite started - recordFieldsForKind for a rename/merge). A record's
+// value is rewritten when its NORMALIZED text is a from-text (D11) - or, for a
+// value action whose from-text normalizes to '' (a stored "-"), when it is
+// that EXACT text - through contactsRepo.rewriteOrgFields /
+// unitsRepo.rewriteAcceptedAuthorities - each conditional on the record still
+// holding exactly what was read, so a record changed meanwhile (or a stale GSI
+// page) is counted `skipped`, never overwritten. Unit writes never stamp
+// updated_at. A rename/merge/use pass leaves a value already equal to
+// `toName` alone. Every field a write changes gets its own audit event (Move
+// and Split write two). The heartbeat runs at most every 20 s, checked after
+// every record visited; when it answers false the lock is no longer the
+// caller's, and the pass writes nothing more (OrgRewriteLockLostError).
+// PRECONDITION for callers: no from-text may normalize equal to the exact
+// NAME of an entry of the field's kind other than `toName` - the pass has no
+// list to test "on the list" against, and such a value would be rewritten too
+// (services/orgRewrite.ts refuses those definitions; the cleanup script must
+// keep to the same rule).
 import { formatAddress } from '../lib/address.js';
 import { contactDisplayName } from '../lib/contactName.js';
-import type { Logger } from '../lib/logger.js';
+import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
   isOnListFor,
   KINDS_FOR_FIELD,
+  normalizeOrgText,
   resolveOrgText,
   type OrgEntry,
+  type OrgKind,
   type OrgRef,
   type OrgResolution,
 } from '../lib/orgNames.js';
-import type { AuditRepo } from '../repos/auditRepo.js';
+import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createContactsRepo,
   isDeleted as isContactDeleted,
@@ -36,7 +58,7 @@ import {
   type ContactType,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
-import type { OrgRecordField } from '../repos/orgListRepo.js';
+import type { OrgRecordField, OrgRewriteAction, OrgRewriteState } from '../repos/orgListRepo.js';
 import {
   createUnitsRepo,
   isDeleted as isUnitDeleted,
@@ -71,11 +93,20 @@ export interface OrgUsage {
   [orgId: string]: { tenants: number; otherContacts: number; properties: number; deleted: number };
 }
 
-/** Plan 3.4 - the reads. Task 3.5 adds rewrite(). */
 export interface OrgRecordsService {
   usage(entries: readonly OrgEntry[]): Promise<OrgUsage>;
   notOnList(entries: readonly OrgEntry[]): Promise<NotOnListRow[]>;
   holders(field: OrgRecordField, value: string): Promise<HolderRecord[]>;
+  /** Rewrite every record (all contact types and units, active and deleted)
+   *  per the definition; conditional per record; audits each field written
+   *  with `auditType` ('org_name_rewrite' for the job, 'org_name_cleanup' for
+   *  the script); calls `heartbeat` at most every 20 s and stops with
+   *  OrgRewriteLockLostError when it answers false; returns counts. ONE pass
+   *  over `def.field`, which is required (see the header). */
+  rewrite(
+    def: OrgRewriteState,
+    opts: { auditType: 'org_name_rewrite' | 'org_name_cleanup'; actor?: string; heartbeat?: () => Promise<boolean> },
+  ): Promise<Record<string, number>>;
 }
 
 /** Plan 3.4b: every dep optional, defaulting to the real repo. */
@@ -124,9 +155,205 @@ function storedAuthorities(unit: UnitItem): unknown[] | undefined {
   return Array.isArray(list) ? list : undefined;
 }
 
+/** A pass heartbeats at most this often (plan 3.4). */
+export const ORG_REWRITE_HEARTBEAT_MS = 20_000;
+
+/** A unit audit's `from` / `to`: the WHOLE list joined with ', ' (planner ruling - strings only). */
+function listText(members: readonly unknown[]): string {
+  return members.filter((m): m is string => typeof m === 'string').join(', ');
+}
+
+/** The record fields that hold an entry of each kind (branch A): one pass each. */
+export function recordFieldsForKind(kind: OrgKind): OrgRecordField[] {
+  return kind === 'housing_authority' ? ['housingAuthority', 'accepted_authorities'] : ['agency'];
+}
+
+/** A pass stopped part-way (a read or a write threw). `counts` are the writes that landed. */
+export class OrgRewriteAbortedError extends Error {
+  constructor(
+    readonly counts: Record<string, number>,
+    cause: unknown,
+  ) {
+    super(`org rewrite stopped: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = 'OrgRewriteAbortedError';
+  }
+}
+
+/**
+ * A pass stopped because its heartbeat answered that the lock is no longer the
+ * caller's (spec D11: a newer rewrite took it over, or a duplicate run already
+ * finished it). Nothing was written after that answer; `counts` are the writes
+ * that landed before it. The caller must not finish() - the lock is not its own.
+ */
+export class OrgRewriteLockLostError extends Error {
+  constructor(readonly counts: Record<string, number>) {
+    super('org rewrite stopped: the lock is no longer this run');
+    this.name = 'OrgRewriteLockLostError';
+  }
+}
+
+/** The plan-3.2 count keys, exactly. */
+interface RewriteCounts {
+  housingAuthority: number;
+  agency: number;
+  accepted_authorities: number;
+  /** The record changed between the read and the conditional write - left as it is. */
+  skipped: number;
+  /** Move / Split met a value already in the target field (spec D10). */
+  conflicts: number;
+}
+
+/** Actions that may target a property list. */
+const UNIT_ACTIONS: ReadonlySet<OrgRewriteAction> = new Set<OrgRewriteAction>(['rename', 'merge', 'use', 'clear']);
+/** Actions that write the target name into the matched value's own field. */
+const SAME_FIELD_ACTIONS: ReadonlySet<OrgRewriteAction> = new Set<OrgRewriteAction>(['rename', 'merge', 'use']);
+/** The "Not on the list" value actions: their from-text is one stored value. */
+const VALUE_ACTIONS: ReadonlySet<OrgRewriteAction> = new Set<OrgRewriteAction>([
+  'use',
+  'move_to_agency',
+  'move_to_housing_authority',
+  'split',
+  'clear',
+]);
+
+/** The pass's field, or an Error naming what is wrong with the definition. */
+function passField(def: OrgRewriteState): OrgRecordField {
+  if (def.action === 'cleanup') throw new Error('a cleanup lock carries no rewrite definition');
+  if (def.field === undefined) {
+    throw new Error('a rewrite pass needs def.field (a rename or merge runs one pass per field of its kind)');
+  }
+  if (def.action !== 'clear' && (def.toName === undefined || def.toName === '')) {
+    throw new Error(`a ${def.action} pass needs toName`);
+  }
+  if (def.action === 'split' && (def.agencyName === undefined || def.agencyName === '')) {
+    throw new Error('a split pass needs agencyName');
+  }
+  if ((def.action === 'move_to_agency' || def.action === 'split') && def.field !== 'housingAuthority') {
+    throw new Error(`${def.action} rewrites housingAuthority only`);
+  }
+  if (def.action === 'move_to_housing_authority' && def.field !== 'agency') {
+    throw new Error('move_to_housing_authority rewrites agency only');
+  }
+  if (def.field === 'accepted_authorities' && !UNIT_ACTIONS.has(def.action)) {
+    throw new Error(`${def.action} never rewrites a property list`);
+  }
+  return def.field;
+}
+
+/** One audit event: a field the write changes, from what to what ('' = absent or removed). */
+interface FieldAudit {
+  field: 'housingAuthority' | 'agency';
+  from: string;
+  to: string;
+}
+
+type ContactPlan =
+  | {
+      kind: 'write';
+      expect: { housingAuthority?: string | null; agency?: string | null };
+      next: { housingAuthority?: string | null; agency?: string };
+      /** One event per field the write changes (plan 3.8): the matched field first. */
+      audits: FieldAudit[];
+      conflict: boolean;
+    }
+  | { kind: 'conflict' };
+
+/**
+ * One contact's write for `def` (spec D10/D11): what it must still hold, what
+ * to write, what to audit, and whether it is a Move/Split conflict. `value` is
+ * the matched text in `field`; the other field is read from `c` as the pass
+ * saw it. An agency that already holds the SAME name is compatible, never a
+ * conflict (plan 3.8): Move drops the now-redundant authority and counts it.
+ */
+function planContactRewrite(
+  def: OrgRewriteState,
+  field: 'housingAuthority' | 'agency',
+  value: string,
+  c: ContactItem,
+): ContactPlan {
+  const toName = def.toName ?? '';
+  const rawAgency = c['agency'];
+  const agency = typeof rawAgency === 'string' ? rawAgency : undefined;
+  const rawHa = c['housingAuthority'];
+  const housingAuthority = typeof rawHa === 'string' ? rawHa : undefined;
+  const matched = (to: string): FieldAudit => ({ field, from: value, to });
+  switch (def.action) {
+    case 'clear':
+      return field === 'housingAuthority'
+        ? { kind: 'write', expect: { housingAuthority: value }, next: { housingAuthority: null }, audits: [matched('')], conflict: false }
+        : { kind: 'write', expect: { agency: value }, next: { agency: '' }, audits: [matched('')], conflict: false };
+    case 'move_to_agency':
+      if (agency === undefined || agency === '') {
+        return {
+          kind: 'write',
+          expect: { housingAuthority: value, agency: agency === undefined ? null : '' },
+          next: { housingAuthority: null, agency: toName },
+          audits: [matched(''), { field: 'agency', from: agency ?? '', to: toName }],
+          conflict: false,
+        };
+      }
+      if (agency === toName) {
+        return {
+          kind: 'write',
+          expect: { housingAuthority: value, agency },
+          next: { housingAuthority: null },
+          audits: [matched('')],
+          conflict: false,
+        };
+      }
+      return { kind: 'conflict' };
+    case 'move_to_housing_authority':
+      if (housingAuthority === undefined) {
+        return {
+          kind: 'write',
+          expect: { agency: value, housingAuthority: null },
+          next: { housingAuthority: toName, agency: '' },
+          audits: [matched(''), { field: 'housingAuthority', from: '', to: toName }],
+          conflict: false,
+        };
+      }
+      if (housingAuthority === toName) {
+        return {
+          kind: 'write',
+          expect: { agency: value, housingAuthority },
+          next: { agency: '' },
+          audits: [matched('')],
+          conflict: false,
+        };
+      }
+      return { kind: 'conflict' };
+    case 'split': {
+      const agencyName = def.agencyName ?? '';
+      if (agency === undefined || agency === '') {
+        return {
+          kind: 'write',
+          expect: { housingAuthority: value, agency: agency === undefined ? null : '' },
+          next: { housingAuthority: toName, agency: agencyName },
+          audits: [matched(toName), { field: 'agency', from: agency ?? '', to: agencyName }],
+          conflict: false,
+        };
+      }
+      // The authority is still set; an agency that holds something else is kept and counted.
+      return {
+        kind: 'write',
+        expect: { housingAuthority: value, agency },
+        next: { housingAuthority: toName },
+        audits: [matched(toName)],
+        conflict: agency !== agencyName,
+      };
+    }
+    default: // rename, merge, use
+      return field === 'housingAuthority'
+        ? { kind: 'write', expect: { housingAuthority: value }, next: { housingAuthority: toName }, audits: [matched(toName)], conflict: false }
+        : { kind: 'write', expect: { agency: value }, next: { agency: toName }, audits: [matched(toName)], conflict: false };
+  }
+}
+
 export function createOrgRecordsService(deps: OrgRecordsDeps = {}): OrgRecordsService {
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const log = deps.logger ?? defaultLogger;
 
   /** Every contact of every type, active then deleted, following each cursor. */
   async function* everyContact(): AsyncGenerator<ContactItem> {
@@ -261,6 +488,120 @@ export function createOrgRecordsService(deps: OrgRecordsDeps = {}): OrgRecordsSe
         });
       }
       return out;
+    },
+
+    async rewrite(def, opts) {
+      const counts: RewriteCounts = { housingAuthority: 0, agency: 0, accepted_authorities: 0, skipped: 0, conflicts: 0 };
+      let lastBeat = Date.now();
+      /** At most every 20 s; throws OrgRewriteLockLostError once the lock is not ours (spec D11). */
+      const beat = async (): Promise<void> => {
+        if (opts.heartbeat === undefined || Date.now() - lastBeat < ORG_REWRITE_HEARTBEAT_MS) return;
+        lastBeat = Date.now();
+        let ours: boolean;
+        try {
+          ours = await opts.heartbeat();
+        } catch (err) {
+          // A heartbeat that could not be WRITTEN (a busy list) says nothing
+          // about the lock: keep going - if every later beat fails too, the
+          // lock simply goes stale after 15 minutes.
+          log.warn({ err, jobId: def.jobId }, 'org rewrite: heartbeat failed - continuing');
+          return;
+        }
+        if (!ours) {
+          // A newer rewrite took the lock, or a duplicate run finished it:
+          // stop writing records at once.
+          log.warn({ jobId: def.jobId, ...counts }, 'org rewrite: the lock is no longer this run - stopping');
+          throw new OrgRewriteLockLostError({ ...counts });
+        }
+      };
+      // `from` and `to` are STRINGS (planner ruling): the property Activity
+      // projection shows them only when they are (routes/units.ts:191-221).
+      const record = async (entityKey: string, field: OrgRecordField, from: string, to: string): Promise<void> => {
+        const payload =
+          opts.auditType === 'org_name_rewrite'
+            ? { field, from, to, action: def.action, ...(opts.actor !== undefined && { actor: opts.actor }) }
+            : { field, from, to };
+        try {
+          await audit.append(entityKey, opts.auditType, payload);
+        } catch (err) {
+          log.error({ err, entityKey, jobId: def.jobId }, 'org rewrite: audit append failed (the record write landed)');
+        }
+      };
+      try {
+        const field = passField(def);
+        // From-texts compare NORMALIZED (D4). One that normalizes to '' (a
+        // stored "-" or "()") would match nothing that way, so a value action
+        // matches that stored text instead - TRIMMED on both sides, because a
+        // request's text arrives trimmed (trimJsonBody) while a stored " - "
+        // may not be - so every "Not on the list" row can be settled. (Rename
+        // and merge from-texts are entry names and spellings; a name never
+        // normalizes to '' - D13.)
+        const from = new Set<string>();
+        const exact = new Set<string>();
+        for (const text of def.fromTexts) {
+          const n = normalizeOrgText(text);
+          if (n !== '') from.add(n);
+          else if (VALUE_ACTIONS.has(def.action) && text.trim() !== '') exact.add(text.trim());
+        }
+        const matches = (value: unknown): value is string =>
+          typeof value === 'string' &&
+          value !== '' &&
+          (from.has(normalizeOrgText(value)) || exact.has(value.trim())) &&
+          // Already the target (a case-only rename, a variant's own entry): nothing to do.
+          !(SAME_FIELD_ACTIONS.has(def.action) && value === def.toName);
+        if (field === 'accepted_authorities') {
+          for await (const u of everyUnit()) {
+            const stored = storedAuthorities(u);
+            const hits: string[] = [];
+            const next: unknown[] = [];
+            for (const member of stored ?? []) {
+              let kept: unknown = member;
+              if (matches(member)) {
+                hits.push(member);
+                if (def.action === 'clear') continue;
+                kept = def.toName;
+              }
+              // De-duplicated after the rewrite (D11): the first occurrence wins.
+              if (!next.includes(kept)) next.push(kept);
+            }
+            if (stored !== undefined && hits.length > 0) {
+              const outcome = await units.rewriteAcceptedAuthorities(u.unitId, stored as string[], next as string[]);
+              if (outcome === 'skipped') counts.skipped += 1;
+              else {
+                counts.accepted_authorities += 1;
+                await record(`units#${u.unitId}`, field, listText(stored), listText(next));
+              }
+            }
+            await beat();
+          }
+        } else {
+          for await (const c of everyContact()) {
+            const value = c[field];
+            if (matches(value)) {
+              const plan = planContactRewrite(def, field, value, c);
+              if (plan.kind === 'conflict') {
+                counts.conflicts += 1;
+              } else {
+                const outcome = await contacts.rewriteOrgFields(c.contactId, plan.expect, plan.next);
+                if (outcome === 'skipped') counts.skipped += 1;
+                else {
+                  counts[field] += 1;
+                  if (plan.conflict) counts.conflicts += 1;
+                  // One event per field the write changed (plan 3.8).
+                  for (const a of plan.audits) await record(`contacts#${c.contactId}`, a.field, a.from, a.to);
+                }
+              }
+            }
+            await beat();
+          }
+        }
+      } catch (err) {
+        // Losing the lock is not a failure of the pass: the caller must not finish().
+        if (err instanceof OrgRewriteLockLostError) throw err;
+        throw new OrgRewriteAbortedError({ ...counts }, err);
+      }
+      log.info({ jobId: def.jobId, action: def.action, field: def.field, ...counts }, 'org rewrite pass finished');
+      return { ...counts };
     },
   };
 }

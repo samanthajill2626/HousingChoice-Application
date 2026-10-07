@@ -2332,10 +2332,11 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   // on the newest MESSAGE, with the Upcoming block just below the fold.
   //
   // Deliberately a rect DELTA, not `sentinel.offsetTop + offsetHeight -
-  // clientHeight`: `.stream` is not positioned, so the sentinel's offsetParent
-  // is `.streamWrap`, and offsetTop therefore carries the "Load older messages"
-  // row's height as a silent constant error that appears and disappears with
-  // that control. The delta form reads the SAME two numbers the anchor is
+  // clientHeight`: offsetTop is measured against whichever ancestor happens to
+  // be positioned (`.streamWrap` until `.stream` became positioned for the
+  // hidden-label overflow fix), so it silently changes meaning with CSS - it
+  // once carried the "Load older messages" row's height as a constant error
+  // that appeared and disappeared with that control. The delta form reads the SAME two numbers the anchor is
   // derived from, so the write and the derivation cannot disagree.
   //
   // Never `scrollIntoView` - it scrolls every scrollable ANCESTOR too, which

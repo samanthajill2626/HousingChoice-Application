@@ -268,46 +268,100 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   "primary landlord" wording collided with the primary contact, which is exactly
   the ambiguity this pair of names removes.
 
-- **housing authority** (tenant-list-visibility, 2026-08-10) - the org that ISSUES
-  a tenant's voucher: it determines the rent and pays the landlord. Atlanta (AHA),
-  Jonesboro (JHA), Dekalb County Housing, Fulton County, Clayton County, East
-  Point, McDonough - plus **DCA**, Georgia's statewide authority covering 120+
-  counties. A tenant has EXACTLY ONE (`contact.housingAuthority`, the
-  `byHousingAuthority` GSI hash), and **porting** is that voucher moving between
-  authorities (the informational `contact.porting` flag). "Voucher program" is NOT
-  a separate dimension - it dissolved into this term on 2026-08-10, because the
-  founder's tenant-side "voucher program" column was recording the
-  authority-or-agency mix all along. Values are FREE TEXT with canonical spellings
-  (`CANONICAL_AUTHORITY`, `app/src/lib/import/apply.ts`); staff see them exactly as
-  stored. Distinct from an **agency** (below) - the old data shoehorned both
-  kinds into this one field, which is what
-  `docs/issues/housing-authority-free-text-drift.md` tracks.
+- **housing authority** (tenant-list-visibility, 2026-08-10; rewritten by
+  clean-org-names, 2026-10-06) - the organization that RUNS a tenant's voucher:
+  it receives the RTA (or the program's unit request), approves and inspects the
+  unit, and pays the landlord. Usually a public housing authority; the Georgia
+  Housing Voucher Program (DBHDD) is the one listed entry that is a state program
+  rather than a housing authority. For a tenant who ports, it is the authority
+  that administers the voucher where they lease - **porting** is that voucher
+  moving between authorities (the informational `contact.porting` flag). A tenant
+  has EXACTLY ONE (`contact.housingAuthority`, the `byHousingAuthority` GSI
+  hash); a property lists the ones it accepts (**accepted authorities**, below).
+  Values are NAMES from the housing authority list (**organization list**,
+  below): a record stores the entry's exact name text, never an id, and every
+  writer checks a changed value against the list (a unique **alternate
+  spelling** is stored as its entry's name; every API writer refuses anything
+  else with 422 `org_not_on_list`; the AI turns it into a staff suggestion and
+  the importer reports it). Staff see the label "Housing authority" with the
+  help text "The organization that runs the voucher". "Voucher program" is NOT
+  a separate dimension - it dissolved into this term on 2026-08-10. Distinct
+  from an **agency** (below), which the old data shoehorned into this field. Design:
+  `docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md`.
 
-- **agency** (tenant-list-visibility, 2026-08-10) - a helper org that exists to get
-  a tenant a voucher or help them use one: Hope Atlanta, HUD VASH, Claratel, Step
-  Up. NOT a housing authority, and the two COEXIST - a tenant can be HUD VASH AND
-  AHA, or just AHA, or HUD VASH AND DCA - so it is its own optional field
-  (`contact.agency`, PATCH-allowlisted, no GSI and no facet; staff see it as the
-  "Agency" row on a tenant's Details card). Case workers in this app are tied to
-  agencies (authority-employed caseworkers are outside our workflow), and a UNIT is
-  never tied to an agency. The agency ENTITY plus the caseworker-to-agency link are
-  still owed on the drift issue; this feature ships the plain string field only.
+- **agency** (tenant-list-visibility, 2026-08-10; rewritten by clean-org-names,
+  2026-10-06) - a government or nonprofit organization that HELPS a tenant but
+  does not hold the voucher or process the RTA: a caseworker's employer, a
+  community service board, or the VA for HUD-VASH (HOPE Atlanta, Step Up,
+  Claratel Behavioral Health and HUD-Veterans Affairs Supportive Housing
+  (HUD-VASH) are on the starting list). NOT a housing authority, and the two
+  COEXIST - a tenant can hold one of each - so it is its own optional field
+  (`contact.agency`, no GSI and no facet; staff see it as the "Agency" row on a
+  tenant's Details card). Values are names from the agency list (**organization
+  list**, below), checked like the housing authority. A property is never tied
+  to an agency, and an agency name is never stored as a housing authority: the
+  AI drops one it returns for that field (drop reason `agency_not_authority`,
+  shown as "Agency, not a housing authority").
 
-- **accepted authorities** (tenant-list-visibility, 2026-08-10) - the authorities
-  whose vouchers a property takes: `unit.accepted_authorities`, a string LIST with
-  at least one entry, chosen by the landlord. It REPLACED both `unit.jurisdiction`
+- **organization list** (clean-org-names, 2026-10-06) - the two stored lists,
+  housing authorities and agencies, with each entry's alternate spellings and
+  notes: ONE item (`settingId: 'org-list'`) in the `settings` table, read fresh
+  by every use (no cache). An environment creates it once from the starting
+  list (`app/src/lib/orgStartingList.ts`) and from then on changes it only
+  through the app (the dev seeds write it whole for test worlds).
+  Managed on Settings > Housing authorities & agencies: everyone can view it,
+  add a name (through "Is this really new?") and edit notes; admins edit
+  spellings, rename, merge, delete and change an entry's kind. A rename, a merge
+  or a "Not on the list" action rewrites the records that hold the text (the
+  `org.rewrite` job). Names are unique across both kinds. Code:
+  `app/src/lib/orgNames.ts` (the rules), `app/src/repos/orgListRepo.ts` (the
+  stored item).
+
+- **alternate spelling** (clean-org-names, 2026-10-06) - an abbreviation or
+  other spelling that finds a listed name: AHA, HADC, DBHDD. Typing one in a
+  picker shows its name, and a writer given one stores the name. A spelling may
+  belong to more than one name of the SAME kind (AHA is Atlanta's and
+  Augusta's); such a shared spelling is never applied automatically - staff
+  pick. A spelling never equals a name and is never shared across kinds.
+  Spellings are curated - the starting list, admin edits, renamed and merged
+  names, and "Use <name>" with "Remember this spelling" - never learned from
+  form clicks. Code/data: `OrgEntry.spellings`.
+
+- **not on the list** (clean-org-names, 2026-10-06) - a stored value that is
+  not exactly a listed name of the kind its field takes: an old spelling,
+  unknown text, an agency name in a housing authority field, or a value the
+  one-time cleanup (`app/scripts/clean-org-names.ts`) left. Shown on Settings >
+  Housing authorities & agencies, in the "Not on the list" section, with its
+  record count and how it resolves, until staff settle it (Use <name>, Move to
+  Agency or Housing authority, Split, Add as new or Clear - admin actions that
+  rewrite the records). On a form it is a removable chip marked "Not on the
+  list", and an unrelated save never fails because of it.
+
+- **accepted authorities** (tenant-list-visibility, 2026-08-10; updated by
+  clean-org-names, 2026-10-06) - the authorities whose vouchers a property takes:
+  `unit.accepted_authorities`, a string LIST with at least one entry, chosen by
+  the landlord. Its members are NAMES from the housing authority list
+  (**organization list**, above): the unit POST and PATCH check every new member
+  against it (a unique **alternate spelling** is stored as its entry's name;
+  members the unit already holds pass unchanged), and staff pick them with the
+  "Housing authorities" multi-picker, where a held member that is not on the
+  list shows as a "Not on the list" chip. It REPLACED both `unit.jurisdiction`
   (a single string that could not hold the plural) and `unit.accepted_programs`
   (old-vocabulary program labels - `HCV`, `Section 8`, `VASH` - retired with the
   field, never folded in). Staff and landlords see ONE "Housing authorities"
-  input/row; tenants see it as the flyer's "Accepts:" line. Jurisdiction ("is the
+  picker/row; tenants see it as the flyer's "Accepts:" line. Jurisdiction ("is the
   unit in authority X's area?") and acceptance ("does this landlord take X's
   vouchers?") are two distinct QUESTIONS but explicitly ONE field (Cameron,
   2026-08-10): the two-question framing is how staff reason about FILLING the list,
   not two things to store, so there is deliberately no jurisdiction field beside it.
   Legacy documents are read through `authoritiesOf(unit)`, which synthesizes
-  `[jurisdiction]` when the list is absent - no backfill; the two retired keys are
-  accept-and-ignore tombstones on the unit PATCH until
-  `docs/issues/retire-humanize-authority.md` closes.
+  `[jurisdiction]` when the list is absent. The one-time cleanup
+  (`app/scripts/clean-org-names.ts`) BACKFILLS the stored list from that legacy
+  value - its list name when it resolves to one entry, else the raw value, which
+  then shows as **not on the list** (above) - so once it has run in an environment no
+  stored unit depends on the synthesis. The two retired keys are accept-and-ignore
+  tombstones on the unit PATCH until `docs/issues/retire-humanize-authority.md`
+  closes.
 
 - **"Coming soon"** (tracker #1, 2026-10-01) - the staff-facing name, on the
   Properties page's by-housing-authority summary ONLY, for properties in the

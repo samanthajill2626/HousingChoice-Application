@@ -43,8 +43,9 @@ afterwards. Screenshots are `.playwright-mcp/org-built-*.png` (gitignored).
 
 ## New minor finding
 
-- M7. The phone Back link's accessible name is "‹ Back to Housing
-  authorities": the decorative chevron is read aloud. Mark the glyph
+- M7. The phone Back link's accessible name starts with a single left-angle
+  quote glyph (U+2039) before "Back to Housing authorities": the decorative
+  chevron is read aloud. Mark the glyph
   `aria-hidden`.
 
 F1 (an in-flight settle is not locked) was not reproduced live. The window is

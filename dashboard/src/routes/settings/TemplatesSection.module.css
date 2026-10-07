@@ -15,6 +15,7 @@
 }
 
 .readonlyNote {
+  align-self: flex-start;
   margin: 0;
   padding: var(--sp-2) var(--sp-3);
   background: var(--c-surface-2);
@@ -57,6 +58,7 @@
 }
 
 .hint {
+  max-width: 70ch;
   font-size: var(--fs-xs);
   color: var(--c-text-subtle);
 }
@@ -79,8 +81,10 @@
   background: var(--c-surface);
 }
 
+/* A message box is as wide as a readable line, not as the page. */
 .textarea {
   width: 100%;
+  max-width: 48rem;
   border: 1px solid var(--c-border-strong);
   border-radius: var(--radius-sm);
   padding: var(--sp-2);
@@ -196,6 +200,7 @@
 .chipAddField {
   flex: 1;
   min-width: 0;
+  max-width: 32rem;
 }
 
 .chipAddBtn {

@@ -588,6 +588,11 @@ router module is not even imported there.
 - The `*/tick` seams - `tour-reminders`, `roster-actions`, `placement-nudges`,
   `extraction`, `group-guardrails` and `tour-auto-close` (plus
   `group-send-staleness/check`).
+- `POST /__dev/org-fixture` - plant a RAW organization value on a record the
+  spec created, bypassing the org-list check: `{ contactId, field:
+  housingAuthority|agency, value }` SETs it, `{ unitId, field:
+  accepted_authorities, value }` appends it. The only way to put a run-unique
+  value under Settings > "Not on the list" - nothing off-list is seeded.
 
 **THE TICKS ARE NOT A CONVENIENCE.** The lane runs jobs in-process in the APP
 *and* spawns a real worker with its own pollers. Only the app's log lines reach

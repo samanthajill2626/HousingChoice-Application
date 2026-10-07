@@ -10,7 +10,7 @@
 // GSIs:
 //   byTenant      — all tours for a tenant (contact-file tours card)
 //   byUnit        — all tours for a unit (property-file tours card)
-//   byScheduledAt — time-windowed queries (today's tours, reminder/no-show clock).
+//   byScheduledAt - read by Today's tours, GET /api/tours?from&to and the All tab's phase D.
 //                   Hash key is the constant '_schedPartition = "tours"' so a
 //                   datetime-range BETWEEN Query works without scatter-gather.
 //                   Sparse: items without scheduledAt never appear here.

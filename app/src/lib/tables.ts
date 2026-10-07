@@ -518,8 +518,8 @@ export const TABLES: readonly TableSpec[] = [
     // first-class Tour entity (a scheduled visit by a tenant to a unit). Separate
     // from placements — a tenant stays `searching`; no touring stage. Four read
     // directions share the GSIs: byTenant (all a tenant's tours), byUnit (all
-    // tours for a property), byScheduledAt (windowed time queries — "tours today",
-    // reminder/no-show clocks), byStatus (dashboard queue — all 'requested' tours,
+    // tours for a property), byScheduledAt (dated tours by time - its readers are
+    // named at the GSI below), byStatus (dashboard queue - all 'requested' tours,
     // all 'scheduled' tours, etc.). A fixed global partition key ('tours') on
     // byScheduledAt makes a datetime-range Query possible without a scatter-gather
     // Scan; keep it sparse so items without a scheduledAt never index there.
@@ -530,10 +530,10 @@ export const TABLES: readonly TableSpec[] = [
       { indexName: 'byTenant', hashKey: { name: 'tenantId', type: 'S' } },
       // All tours for a unit — powers the property-file tours card.
       { indexName: 'byUnit', hashKey: { name: 'unitId', type: 'S' } },
-      // Time-windowed tour queries (today's tours, no-show sweep, reminder job).
-      // Hash partition is the constant string 'tours' (all live tours share one
-      // partition); range key is scheduledAt (ISO 8601) so BETWEEN/>=/<= works.
-      // Sparse: items without scheduledAt never appear here.
+      // Dated tours by time, read by Today's tours (routes/today.ts), GET /api/tours?from&to
+      // (routes/tours.ts: the Active and Past tabs, Today's past-tours list) and the All tab's
+      // phase D (toursRepo.queryListPhase). Hash partition: the constant 'tours'; range key
+      // scheduledAt (ISO 8601), so BETWEEN/>=/<= works. Sparse: undated tours never appear.
       {
         indexName: 'byScheduledAt',
         hashKey: { name: '_schedPartition', type: 'S' },

@@ -14,7 +14,7 @@ import {
 } from '../src/services/extraction/prompt.js';
 import type { ExtractionInput } from '../src/adapters/extraction.js';
 import { housingAuthorityFor } from '../src/lib/import/apply.js';
-import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import { buildStartingEntries, STARTING_ORG_LIST } from '../src/lib/orgStartingList.js';
 import { renderOrgListBlock } from '../src/services/extraction/orgListBlock.js';
 
 // The structured-outputs contract: every object level carries
@@ -425,7 +425,7 @@ describe('prompt builders', () => {
   });
 
   it('renderUtteranceLine does NOT render tsMsgId (the wire format is unchanged)', () => {
-    // The system prompt hard-codes the line format at prompt.ts:20; rendering
+    // The system prompt hard-codes the line format in its transcript-line sentence; rendering
     // the id would contradict it and break the format assertions in this file.
     const line = renderUtteranceLine({
       tsMsgId: '2026-07-16T10:00:00.000Z#s1',
@@ -437,23 +437,37 @@ describe('prompt builders', () => {
     expect(line).not.toContain('#s1');
   });
 
-  it('system prompt lists every housing-authority vocabulary value', () => {
+  it('system prompt carries NO organization names - the list rides in the user content', () => {
+    // Spec 2026-10-06 D8: the system prompt stays a zero-argument static
+    // template, so its memoized fingerprint keeps identifying one contract. A
+    // name from the stored list here would make it list-dependent.
+    expect(buildExtractionSystemPrompt.length).toBe(0);
     const sys = buildExtractionSystemPrompt();
-    for (const value of HOUSING_AUTHORITY_VOCAB) expect(sys).toContain(value);
+    for (const org of STARTING_ORG_LIST) {
+      if (org.kind === 'housing_authority') expect(sys).not.toContain(org.name);
+    }
+    for (const old of ['Jonesboro (JHA)', 'Atlanta (AHA)', 'Dekalb County Housing', 'Georgia Housing Voucher (GHV)']) {
+      expect(sys).not.toContain(old);
+    }
   });
 
-  it('system prompt offers the authority list as SPELLINGS, never as permitted values', () => {
-    // Run 4bf0cf42: the client named DeKalb County, the vocabulary had no entry,
-    // and the model did exactly as told - op "none", fact discarded. The first
-    // fix routed unlisted authorities to a noteLine, which stopped the data loss
-    // but kept the AI as the only writer of this field that could not fill it.
-    // The list is now a spelling hint, so the model records what it heard and
-    // the apply layer decides write-vs-suggest.
+  it('system prompt explains the ORGANIZATION LIST block and the housingAuthority rules', () => {
+    // C3: every asserted phrase lives INSIDE one prompt line.
     const sys = buildExtractionSystemPrompt();
-    expect(sys).toMatch(/NOT exhaustive/);
-    expect(sys).toMatch(/record what they said/);
-    // The old gate and its workaround must both be gone - either one left
-    // behind would still tell the model to answer "none" for a new authority.
+    expect(sys).toContain('an ORGANIZATION LIST block');
+    expect(sys).toContain('Return the full name from the list, exactly as the list writes it.');
+    expect(sys).toContain('abbreviation belongs to more than one name');
+    expect(sys).toContain('the one the conversation supports, or return the text as said.');
+    expect(sys).toContain('Agency names are never housing authorities');
+    // Spec 2026-10-06 section 13: some spellings are place names (Cobb County,
+    // McDonough, Clayton) - a tenant's home or search area is not an authority.
+    expect(sys).toContain('Where the client lives or wants to live is not a housing authority');
+    // Run 4bf0cf42: an unlisted authority is still a real answer - the model
+    // records what it heard and a human confirms it (apply.ts suggests it).
+    expect(sys).toContain('record what they said');
+    expect(sys).not.toMatch(/NOT exhaustive/);
+    // The old gate and its workaround stay gone - either one would tell the
+    // model to answer "none" for a new authority.
     expect(sys).not.toContain('Housing authority stated:');
     expect(sys).not.toMatch(/housingAuthority MUST be exactly one/);
   });

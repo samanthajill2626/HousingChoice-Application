@@ -7,10 +7,9 @@
 // reconciliation rules below.
 import { createHash } from 'node:crypto';
 import type { ExtractionInput, TranscriptUtterance } from '../../adapters/extraction.js';
-import { EXTRACTION_SCHEMA, HOUSING_AUTHORITY_VOCAB } from './schema.js';
+import { EXTRACTION_SCHEMA } from './schema.js';
 
 export function buildExtractionSystemPrompt(): string {
-  const vocab = HOUSING_AUTHORITY_VOCAB.join(', ');
   return [
     'You extract facts about the CURRENT external contact from a conversation',
     'transcript of text messages and phone calls between housing navigation staff',
@@ -19,7 +18,8 @@ export function buildExtractionSystemPrompt(): string {
     'Output ONLY a JSON object matching the provided schema. Do not add any prose.',
     '',
     'The user message contains a CURRENT PROFILE JSON block (what we already know',
-    'about this contact) and a TRANSCRIPT of the conversation in chronological',
+    'about this contact), an ORGANIZATION LIST block (the housing authorities and',
+    'agencies we already know), and a TRANSCRIPT of the conversation in chronological',
     'order. Each transcript line is "<timestamp> [<speaker>/<channel>] <text>"',
     'where <speaker> is staff, client, or unknown and <channel> is sms, email, or voice.',
     '[unknown] lines come from a two-party phone call whose speakers are labeled',
@@ -53,14 +53,18 @@ export function buildExtractionSystemPrompt(): string {
     '- Only record facts stated by or about the CLIENT. A staff QUESTION is not a',
     '  fact. Never guess names.',
     '- voucherSize is the bedroom count as a string integer (for example "2").',
-    '- housingAuthority is the authority administering the client\'s voucher.',
-    '  These are the spellings we already use - PREFER them exactly when the',
-    '  client names one of these, so the same authority is not recorded two ways:',
-    `  ${vocab}`,
-    '  This list is NOT exhaustive and is not a permitted-values list. If the',
-    '  client names any other authority, record what they said (op "write").',
-    '  Never answer op "none" merely because an authority is missing from the',
-    '  list - a new authority is a real answer, and a human confirms it.',
+    '- housingAuthority is the organization that runs the client\'s voucher.',
+    '  The ORGANIZATION LIST block names the housing authorities we know, each',
+    '  with its other spellings, then agencies, which are not housing authorities:',
+    '  - Return the full name from the list, exactly as the list writes it.',
+    '  - When an abbreviation belongs to more than one name on the list, return',
+    '    the one the conversation supports, or return the text as said.',
+    '  - Agency names are never housing authorities - never return one here.',
+    '  - Where the client lives or wants to live is not a housing authority:',
+    '    a county or city name counts only when the client says it runs the voucher.',
+    '  - A name that is not on the list is still a real answer -',
+    '    record what they said (op "write"). Never answer op "none" merely',
+    '    because an authority is missing from the list; a human confirms it.',
     '- porting value is the string "true" or "false".',
     '- statusAdvance.suggest is true ONLY when the client clearly states that their',
     '  voucher or RTA (request for tenancy approval) is now in hand or approved.',
@@ -162,7 +166,7 @@ function toSingleLine(text: string): string {
  * permanent false hash mismatch (design 2026-08-06 section 6.1).
  *
  * Deliberately does NOT render tsMsgId - the wire format is fixed by the system
- * prompt at line 20 ("<timestamp> [<speaker>/<channel>] <text>").
+ * prompt's transcript-line sentence ("<timestamp> [<speaker>/<channel>] <text>").
  */
 export function renderUtteranceLine(u: TranscriptUtterance): string {
   return `${u.at} [${u.speaker}/${u.channel}] ${toSingleLine(u.text)}`;

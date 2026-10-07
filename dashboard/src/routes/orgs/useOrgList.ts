@@ -5,6 +5,9 @@
 // (spec R2 ruling 6). A reload keeps the current data until the answer lands.
 // noteAdded(): a name "Is this really new?" just added is counted at once, so
 // its chip never flashes "Not on the list" while the re-read is in flight.
+// poll(): a timer's re-read, SKIPPED while a read is in flight - reload()
+// aborts the read in flight to start afresh, which on a timer meant a read
+// slower than the timer never landed (code review R1-ADV-FE-5).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getOrgList, type OrgEntry, type OrgRewriteState } from '../../api/index.js';
 
@@ -17,8 +20,11 @@ export interface OrgListState {
   loading: boolean;
   /** True when the latest read failed. */
   error: boolean;
-  /** Re-read the list (after an add, or while a rewrite runs). */
+  /** Re-read the list (after an add or an action): a read in flight is aborted. */
   reload: () => void;
+  /** A timer's re-read (while a rewrite runs): skipped while a read is in
+   *  flight, so the poll never aborts its own previous read. */
+  poll: () => void;
   /** "Yes, add it" just added `entry` (spec D6): it counts as on the list AT
    *  ONCE - its chip never flashes "Not on the list" - and stays counted until
    *  a read returns it; the list is re-read. */
@@ -39,6 +45,7 @@ export function useOrgList(): OrgListState {
   const [error, setError] = useState(false);
   /** Entries this mount just added, counted until a read returns them. */
   const [added, setAdded] = useState<OrgEntry[]>([]);
+  /** The read in flight, null once it settles. */
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
@@ -57,6 +64,10 @@ export function useOrgList(): OrgListState {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
       setError(true);
       setLoading(false);
+    } finally {
+      // Settled: release the slot - unless a newer read already holds it
+      // (a reload, or StrictMode's second mount, started one meanwhile).
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }, []);
 
@@ -73,6 +84,11 @@ export function useOrgList(): OrgListState {
     void load();
   }, [load]);
 
+  const poll = useCallback(() => {
+    if (abortRef.current !== null) return; // the previous read has not landed yet
+    void load();
+  }, [load]);
+
   const noteAdded = useCallback(
     (entry: OrgEntry) => {
       setAdded((prev) => (prev.some((e) => e.orgId === entry.orgId) ? prev : [...prev, entry]));
@@ -86,5 +102,5 @@ export function useOrgList(): OrgListState {
     [data.entries, added],
   );
 
-  return { ...data, entries, loading, error, reload, noteAdded };
+  return { ...data, entries, loading, error, reload, poll, noteAdded };
 }

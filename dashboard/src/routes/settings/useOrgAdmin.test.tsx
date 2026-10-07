@@ -162,6 +162,54 @@ describe('useOrgAdmin', () => {
   });
 });
 
+// Code review R1-ADV-FE-5: every poll tick used to abort the list read in
+// flight, so once a read took longer than pollMs (a slow phone, a cold
+// backend) no read ever landed and the status line froze on "Updating
+// records". A tick never aborts the poll's own read now.
+describe('useOrgAdmin - a list read slower than the poll', () => {
+  /** A list read that lands after 60 ms and rejects on abort, like fetch. */
+  function slowRead(signal: AbortSignal, value: unknown): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve(value), 60);
+      signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          reject(new DOMException('The operation was aborted.', 'AbortError'));
+        },
+        { once: true },
+      );
+    });
+  }
+  const signals = (): AbortSignal[] => getOrgList.mock.calls.map((c) => c[0] as AbortSignal);
+
+  it('reads taking 60 ms with pollMs 25: the status still advances, and no poll read is aborted', async () => {
+    getOrgList
+      .mockResolvedValueOnce({ version: 1, entries: [], lastRewrite: RUNNING })
+      .mockImplementation((signal: AbortSignal) => slowRead(signal, { version: 2, entries: [], lastRewrite: DONE }));
+    render(<Probe pollMs={25} />);
+    await waitFor(() => expect(latest!.list.lastRewrite?.status).toBe('done'));
+    expect(latest!.rewriteLive).toBe(false);
+    expect(signals().filter((s) => s.aborted)).toHaveLength(0);
+  });
+
+  it('the same under StrictMode (mount, cleanup, mount)', async () => {
+    getOrgList
+      .mockResolvedValueOnce({ version: 1, entries: [], lastRewrite: RUNNING })
+      .mockResolvedValueOnce({ version: 1, entries: [], lastRewrite: RUNNING })
+      .mockImplementation((signal: AbortSignal) => slowRead(signal, { version: 2, entries: [], lastRewrite: DONE }));
+    render(
+      <StrictMode>
+        <Probe pollMs={25} />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(latest!.list.lastRewrite?.status).toBe('done'));
+    expect(latest!.rewriteLive).toBe(false);
+    // Only the first mount's read is aborted (by StrictMode's simulated unmount).
+    expect(signals().slice(1).filter((s) => s.aborted)).toHaveLength(0);
+  });
+});
+
 // Code review R1-ADV-FE-4: the heartbeat is a SERVER stamp and the server's
 // 15-minute lock reads it on the server's clock, so the page must too
 // (api/serverClock.ts). The browser is pinned to 12:00:00Z.

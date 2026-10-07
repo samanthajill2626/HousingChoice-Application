@@ -78,6 +78,28 @@ describe('useOrgList', () => {
     expect(getOrgList).toHaveBeenCalledTimes(2);
   });
 
+  it('poll() skips while a read is in flight, so a slow read is never aborted by a timer (R1-ADV-FE-5)', async () => {
+    let land: (value: unknown) => void = () => {};
+    getOrgList.mockReturnValueOnce(
+      new Promise((resolve) => {
+        land = resolve;
+      }),
+    );
+    render(<Probe />);
+    await waitFor(() => expect(getOrgList).toHaveBeenCalledTimes(1));
+    act(() => latest!.poll());
+    // Skipped: the mount read has not landed, and is not aborted.
+    expect(getOrgList).toHaveBeenCalledTimes(1);
+    expect((getOrgList.mock.calls[0]?.[0] as AbortSignal).aborted).toBe(false);
+    await act(async () => land({ version: 1, entries: [ENTRY] }));
+    expect(latest!.version).toBe(1);
+    // Once it landed, the next poll reads again.
+    getOrgList.mockResolvedValueOnce({ version: 2, entries: [ENTRY] });
+    act(() => latest!.poll());
+    await waitFor(() => expect(latest!.version).toBe(2));
+    expect(getOrgList).toHaveBeenCalledTimes(2);
+  });
+
   it('noteAdded counts a just-added entry at once, and until a read returns it (spec D6)', async () => {
     getOrgList.mockResolvedValueOnce({ version: 1, entries: [ENTRY] });
     render(<Probe />);

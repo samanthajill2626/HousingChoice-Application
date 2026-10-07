@@ -10,6 +10,9 @@
 // aborted to start another (the server would finish the scan anyway): a
 // request made meanwhile runs once, after it lands. A stalled rewrite
 // (heartbeat 15 min old) is not polled; the section offers "Run again" for it.
+// A poll tick is skipped while the previous list read is still in flight -
+// never aborted, or a read slower than pollMs would never land (code review
+// R1-ADV-FE-5).
 // The heartbeat is a SERVER stamp that the server's lock judges on its own
 // clock, so it is judged on serverNowMs() here too - never on a skewed
 // browser clock (code review R1-ADV-FE-4; api/serverClock.ts).
@@ -107,13 +110,15 @@ export function useOrgAdmin(options: { pollMs?: number } = {}): OrgAdminState {
 
   // Keyed on liveness only: a steady cadence while it runs, torn down the
   // moment the rewrite finishes, fails or goes stale (and on unmount). It
-  // re-reads ONLY the lists - the counts and rows wait for the rewrite to stop.
+  // re-reads ONLY the lists - the counts and rows wait for the rewrite to stop
+  // - and a tick finding the previous read still in flight is skipped.
   const rewriteLive = isRewriteLive(list.lastRewrite, serverNowMs());
+  const pollList = list.poll;
   useEffect(() => {
     if (!rewriteLive) return undefined;
-    const id = setInterval(reloadList, pollMs);
+    const id = setInterval(pollList, pollMs);
     return () => clearInterval(id);
-  }, [rewriteLive, reloadList, pollMs]);
+  }, [rewriteLive, pollList, pollMs]);
 
   // The rewrite just stopped (done, failed or stalled): read the counts and
   // the rows ONCE.

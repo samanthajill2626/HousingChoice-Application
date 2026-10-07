@@ -310,6 +310,24 @@ describe('UnitCreateForm', () => {
   });
 });
 
+// --- Code review R1-ADV-FE-7: a name "Is this really new?" answered with ----
+// The form's list is read once when it opens; /check knows a name added since.
+describe('UnitCreateForm - a name the server confirmed counts as on the list at once', () => {
+  it('"Use <name>": its chip is not marked Not on the list', async () => {
+    const user = userEvent.setup();
+    const metro = { orgId: 'o-metro', kind: 'housing_authority' as const, name: 'Metro Housing Authority' };
+    checkOrgText.mockResolvedValue({ match: metro, candidates: [], close: [], nameProblem: 'org_name_taken' });
+    setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByRole('dialog', { name: 'New property' });
+    await user.type(screen.getByRole('combobox', { name: 'Housing authorities' }), 'Metro HA');
+    await user.click(await screen.findByRole('option', { name: 'Add Metro HA as a new housing authority' }));
+    const isNew = screen.getByRole('dialog', { name: 'Is this really new?' });
+    await user.click(await within(isNew).findByRole('button', { name: 'Use Metro Housing Authority' }));
+    const chip = screen.getByRole('button', { name: 'Remove Metro Housing Authority' }).closest('li');
+    expect(chip).not.toHaveTextContent('Not on the list');
+  });
+});
+
 // --- Code review R1-ADV-FE-1: text typed in the picker but never picked ------
 // Create sends typed text that names exactly one entry (by name, or by a
 // spelling only that entry carries), as a pick would, and refuses anything

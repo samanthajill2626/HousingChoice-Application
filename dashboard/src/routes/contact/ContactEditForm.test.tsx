@@ -742,6 +742,40 @@ describe('ContactEditForm', () => {
   });
 });
 
+// --- Code review R1-ADV-FE-7: a name "Is this really new?" answered with ----
+// The form's list is read once when it opens. A name added (or renamed) by
+// someone else since is not in it, but the server's /check knows it - the
+// chip of a name taken from that answer must not say "Not on the list".
+describe('ContactEditForm - a name the server confirmed counts as on the list at once', () => {
+  const METRO = { orgId: 'o-metro', kind: 'housing_authority' as const, name: 'Metro Housing Authority' };
+  const HOPE = { orgId: 'o-hope', kind: 'agency' as const, name: 'Hope Atlanta' };
+  const housingAuthority = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authority' });
+  const chipOf = (name: string): HTMLElement | null =>
+    screen.getByRole('button', { name: `Remove ${name}` }).closest('li');
+
+  it('"Use <name>": its chip is not marked Not on the list', async () => {
+    const user = userEvent.setup();
+    checkOrgText.mockResolvedValue({ match: METRO, candidates: [], close: [], nameProblem: 'org_name_taken' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'Metro HA');
+    await user.click(await screen.findByRole('option', { name: 'Add Metro HA as a new housing authority' }));
+    const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    await user.click(await within(dialog).findByRole('button', { name: 'Use Metro Housing Authority' }));
+    expect(chipOf('Metro Housing Authority')).not.toHaveTextContent('Not on the list');
+  });
+
+  it('"Put it in Agency": the agency chip is not marked either', async () => {
+    const user = userEvent.setup();
+    checkOrgText.mockResolvedValue({ candidates: [], close: [], otherKind: [HOPE], nameProblem: 'org_name_taken' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'Hope Atlanta');
+    await user.click(await screen.findByRole('option', { name: 'Add Hope Atlanta as a new housing authority' }));
+    const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    await user.click(await within(dialog).findByRole('button', { name: 'Put it in Agency' }));
+    expect(chipOf('Hope Atlanta')).not.toHaveTextContent('Not on the list');
+  });
+});
+
 // --- Code review R1-ADV-FE-1: text typed in a picker but never picked --------
 // The pickers used to be free-text inputs: staff type the name and Save. Save
 // now commits typed text that names exactly one entry (by name, or by a

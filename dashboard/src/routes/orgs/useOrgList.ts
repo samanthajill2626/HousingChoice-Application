@@ -3,13 +3,15 @@
 // /api/organizations once). The status flavor of the useSettings idiom: a
 // picker must KNOW the list failed to load, because it cannot offer names then
 // (spec R2 ruling 6). A reload keeps the current data until the answer lands.
-// noteAdded(): a name "Is this really new?" just added is counted at once, so
-// its chip never flashes "Not on the list" while the re-read is in flight.
+// noteAdded(): a name "Is this really new?" just added - or one it answered
+// with ("Use X", "Put it in Agency": a name added or renamed since this list
+// was read, code review R1-ADV-FE-7) - is counted at once, so its chip never
+// says "Not on the list" while the re-read is in flight.
 // poll(): a timer's re-read, SKIPPED while a read is in flight - reload()
 // aborts the read in flight to start afresh, which on a timer meant a read
 // slower than the timer never landed (code review R1-ADV-FE-5).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getOrgList, type OrgEntry, type OrgRewriteState } from '../../api/index.js';
+import { getOrgList, type OrgEntry, type OrgRef, type OrgRewriteState } from '../../api/index.js';
 
 export interface OrgListState {
   entries: OrgEntry[];
@@ -25,10 +27,18 @@ export interface OrgListState {
   /** A timer's re-read (while a rewrite runs): skipped while a read is in
    *  flight, so the poll never aborts its own previous read. */
   poll: () => void;
-  /** "Yes, add it" just added `entry` (spec D6): it counts as on the list AT
-   *  ONCE - its chip never flashes "Not on the list" - and stays counted until
-   *  a read returns it; the list is re-read. */
-  noteAdded: (entry: OrgEntry) => void;
+  /** "Yes, add it" just added `entry` (spec D6), or "Is this really new?"
+   *  answered with it (R1-ADV-FE-7: a bare OrgRef): it counts as on the list
+   *  AT ONCE - its chip never flashes "Not on the list" - and stays counted
+   *  until a read returns it; the list is re-read. */
+  noteAdded: (entry: OrgRef) => void;
+}
+
+/** A name the server just confirmed, as a list entry until a read returns
+ *  the server's copy: an added entry is kept whole; a bare ref (a "Use"
+ *  answer) has no spellings yet. */
+function provisional(ref: OrgRef): OrgEntry {
+  return { spellings: [], createdAt: '', createdBy: '', updatedAt: '', updatedBy: '', ...ref };
 }
 
 interface Loaded {
@@ -90,8 +100,8 @@ export function useOrgList(): OrgListState {
   }, [load]);
 
   const noteAdded = useCallback(
-    (entry: OrgEntry) => {
-      setAdded((prev) => (prev.some((e) => e.orgId === entry.orgId) ? prev : [...prev, entry]));
+    (entry: OrgRef) => {
+      setAdded((prev) => (prev.some((e) => e.orgId === entry.orgId) ? prev : [...prev, provisional(entry)]));
       void load();
     },
     [load],

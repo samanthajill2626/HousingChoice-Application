@@ -941,10 +941,15 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
           text={adding.text}
           mode="field"
           onUse={(ref) => {
+            // The server's own answer: counted as on the list at once, even
+            // when this form's list was read before the name joined it
+            // (code review R1-ADV-FE-7).
+            orgList.noteAdded(ref);
             applyOrg(ref);
             setAdding(null);
           }}
           onUseOtherField={(ref) => {
+            orgList.noteAdded(ref);
             applyOrg(ref);
             setAdding(null);
           }}

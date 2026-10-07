@@ -330,7 +330,9 @@ export type CreateUnitInput = Partial<UnitItem> & { landlordId: string; status: 
 export interface UnitsRepo {
   /** Create a unit (generates unitId); returns the stored item. */
   create(input: CreateUnitInput): Promise<UnitItem>;
-  getById(unitId: string): Promise<UnitItem | undefined>;
+  /** `consistentRead` for a caller that decides a write from this read (the
+   *  D5 "already held" check of the units PATCH); default eventually consistent. */
+  getById(unitId: string, opts?: { consistentRead?: boolean }): Promise<UnitItem | undefined>;
   /**
    * SET-merge update: only the supplied fields are written; omitted fields are
    * LEFT as stored (never blanked) — the same no-overwrite contract as
@@ -572,8 +574,14 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       return item;
     },
 
-    async getById(unitId) {
-      const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { unitId } }));
+    async getById(unitId, opts) {
+      const { Item } = await doc.send(
+        new GetCommand({
+          TableName: table,
+          Key: { unitId },
+          ...(opts?.consistentRead === true && { ConsistentRead: true }),
+        }),
+      );
       return Item as UnitItem | undefined;
     },
 

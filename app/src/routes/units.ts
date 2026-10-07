@@ -1370,6 +1370,45 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.json({ unit: existing });
       return;
     }
+    // ORGANIZATION NAMES (spec 2026-10-06 D5). A PATCH carrying
+    // accepted_authorities is checked per member against the STORED unit (a
+    // new pre-read; an unknown unit 404s before any 422). A member the unit
+    // already holds (compared trimmed on both sides) passes unchanged, and so
+    // does its legacy `jurisdiction` - but ONLY while the unit has no stored
+    // accepted_authorities list, because only then did the edit form
+    // synthesize its list from that value (lib/unitFields.ts authoritiesOf; a
+    // stored list, even [], wins - ruling R1-F1). Every other member must
+    // resolve to a housing authority on the list; members are trimmed and
+    // de-duplicated, and a unique spelling is stored as the exact name. The
+    // pre-read is CONSISTENT: a stale read could pass an off-list value
+    // through as "already held" (the contacts PATCH precedent).
+    if (Array.isArray(validation.fields['accepted_authorities'])) {
+      const storedUnit = await units.getById(unitId, { consistentRead: true });
+      if (storedUnit === undefined) {
+        res.status(404).json({ error: 'unit_not_found' });
+        return;
+      }
+      const storedList: unknown = storedUnit.accepted_authorities;
+      const held = Array.isArray(storedList)
+        ? storedList.filter((a): a is string => typeof a === 'string').map((a) => a.trim())
+        : undefined;
+      const legacy =
+        held === undefined && typeof storedUnit.jurisdiction === 'string'
+          ? storedUnit.jurisdiction.trim()
+          : '';
+      const check = await orgNames.checkList(
+        'accepted_authorities',
+        validation.fields['accepted_authorities'] as string[],
+        held,
+        legacy.length > 0 ? legacy : undefined,
+      );
+      if (!check.ok) {
+        log.info({ unitId, actor: req.user?.userId }, 'unit patch refused: accepted authority not on the list');
+        res.status(422).json(check.error);
+        return;
+      }
+      validation.fields['accepted_authorities'] = check.value;
+    }
     // D1 delete-on-removal (the raw E5 seam): `media` is PATCH-writable and a
     // wholesale replace can drop stored keys. Snapshot the PRIOR list BEFORE the
     // write - as a COPY, because a read-modify-write repo can return the SAME

@@ -71,7 +71,7 @@ import {
   tourListFingerprint,
   type TourListPhase,
 } from '../lib/tourListQuery.js';
-import { listTourPage } from '../services/tourListPage.js';
+import { listTourPage, type QueryListPhase } from '../services/tourListPage.js';
 import { armTourReminders, readQuietHoursWindow } from '../jobs/tourReminders.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
@@ -228,6 +228,20 @@ function toTourListRow(t: TourItem): Record<string, unknown> {
     if (t[key] !== undefined) row[key] = t[key];
   }
   return row;
+}
+
+/** DynamoDB refused the CLIENT's start key: a ValidationException from a
+ *  page's FIRST Query while that Query carried the cursor's own key - the only
+ *  Query a cursor can break (spec 5.5; code review r1 AD-1). Every later Query
+ *  resumes from a key the server made, or from none. */
+class ClientStartKeyRefusedError extends Error {
+  constructor(
+    readonly phaseKind: TourListPhase['kind'],
+    readonly refusal: Error,
+  ) {
+    super('the cursor start key was refused');
+    this.name = 'ClientStartKeyRefusedError';
+  }
 }
 
 export interface ToursRouterDeps {
@@ -471,9 +485,27 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       phases = planTourListPhases(filters, pinnedNow);
     }
 
+    // Only the page's FIRST Query carries the client's key (the cursor's k), so
+    // only a ValidationException THERE is the client's cursor. Any other one -
+    // a later Query, a k-less cursor, a first page - is a defect in the query:
+    // a 500 via the app's error handler, which logs it.
+    let queries = 0;
+    const queryListPhase: QueryListPhase = async (phase, opts) => {
+      queries += 1;
+      const clientKey = queries === 1 && opts.startKey !== undefined;
+      try {
+        return await tours.queryListPhase(phase, opts);
+      } catch (err) {
+        if (clientKey && err instanceof Error && err.name === 'ValidationException') {
+          throw new ClientStartKeyRefusedError(phase.kind, err);
+        }
+        throw err;
+      }
+    };
+
     let page;
     try {
-      page = await listTourPage((phase, opts) => tours.queryListPhase(phase, opts), {
+      page = await listTourPage(queryListPhase, {
         phases,
         filters,
         fingerprint,
@@ -482,10 +514,9 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
         ...(start !== undefined && { start }),
       });
     } catch (err) {
-      // A start key DynamoDB refuses is the client's cursor; any other
-      // ValidationException is a defect in the query (500 via the app's
-      // error handler).
-      if (rawCursor !== undefined && err instanceof Error && err.name === 'ValidationException') {
+      if (err instanceof ClientStartKeyRefusedError) {
+        // The refusal's name and the phase kind - never an id.
+        log.warn({ name: err.refusal.name, phase: err.phaseKind }, 'tours list: cursor start key refused');
         res.status(400).json({ error: 'invalid cursor' });
         return;
       }

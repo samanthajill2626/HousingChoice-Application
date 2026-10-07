@@ -5645,6 +5645,10 @@ describe('GET /api/tours/list', () => {
 
   const decodeN = (cursor: string): unknown => (JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as TourListCursor).n;
 
+  /** The route's WARN when DynamoDB refuses the CLIENT's start key (AD-1). */
+  const REFUSED = 'tours list: cursor start key refused';
+  const validationException = (message: string): Error => Object.assign(new Error(message), { name: 'ValidationException' });
+
   it('1: every invalid parameter is a 400 whose message names it', async () => {
     const { app } = makeWebhookHarness();
     const cases: Array<[string, string]> = [
@@ -5915,6 +5919,12 @@ describe('GET /api/tours/list', () => {
     const withCursor = await authed(app).get(`/api/tours/list?when=past&limit=1&cursor=${encodeURIComponent(cursor)}`);
     expect(withCursor.status).toBe(400);
     expect(withCursor.body).toStrictEqual({ error: 'invalid cursor' });
+    // The 400 path says so in ONE warn line: the refusal's name and the phase
+    // kind, never an id (AD-1).
+    const refusals = (): Array<Record<string, unknown>> => capture.atLevel(40).filter((l) => l['msg'] === REFUSED);
+    expect(refusals()).toHaveLength(1);
+    expect(refusals()[0]).toMatchObject({ name: 'ValidationException', phase: 'd' });
+    expect(JSON.stringify(refusals()[0])).not.toContain('tl9-');
 
     const without = await authed(app).get('/api/tours/list?when=past&limit=1');
     expect(without.status).toBe(500);
@@ -5936,6 +5946,8 @@ describe('GET /api/tours/list', () => {
     const rejected = await authed(app).get(`/api/tours/list?when=upcoming&cursor=${encodeURIComponent(below)}`);
     expect(rejected.status).toBe(400);
     expect(rejected.body).toStrictEqual({ error: 'invalid cursor' });
+    expect(refusals()).toHaveLength(2);
+    expect(refusals()[1]).toMatchObject({ name: 'ValidationException', phase: 'd' });
   });
 
   it("10: the one info line 'tours list page' carries counts only - no tour, tenant or unit id", async () => {
@@ -5987,5 +5999,64 @@ describe('GET /api/tours/list', () => {
       const text = JSON.stringify(line);
       for (const s of fixtureStrings) expect(text.includes(s), s).toBe(false);
     }
+  });
+
+  // AD-1: only a cursor page's FIRST Query carries the client's key. A
+  // ValidationException from any other Query is a defect in the query, so it
+  // is a 500 with the app's error line - never a silent 400 'invalid cursor'.
+  it('11: a ValidationException from a LATER Query of a cursor page is a 500 with one error line, not a 400 (AD-1)', async () => {
+    const { app, world, capture } = makeWebhookHarness({ toursNow: () => NOW });
+    await world.toursRepo.create(tourInput('tl11-d1', 'toured', at(-1)));
+    await world.toursRepo.create(tourInput('tl11-d2', 'toured', at(-2)));
+    await world.toursRepo.create(tourInput('tl11-r1', 'requested'));
+
+    // Page 1 at limit=1 stops inside phase D: a d cursor with the client's key.
+    const first = await authed(app).get('/api/tours/list?limit=1');
+    expect(first.status).toBe(200);
+    const cursor = (first.body as ListBody).nextCursor;
+    if (cursor === null) throw new Error('expected a cursor');
+
+    // Page 2 at limit=2: Query 1 (phase D, from the client's key) runs for
+    // real and exhausts D; Query 2 (requested, no key) throws.
+    const real = world.toursRepo.queryListPhase.bind(world.toursRepo);
+    const seen: Array<{ kind: string; startKey: boolean }> = [];
+    const spy = vi.spyOn(world.toursRepo, 'queryListPhase').mockImplementation(async (phase, opts) => {
+      seen.push({ kind: phase.kind, startKey: opts.startKey !== undefined });
+      if (seen.length === 2) throw validationException('Invalid FilterExpression: an expression attribute name is not defined');
+      return real(phase, opts);
+    });
+    const res = await authed(app).get(`/api/tours/list?limit=2&cursor=${encodeURIComponent(cursor)}`);
+    spy.mockRestore();
+
+    expect(seen).toStrictEqual([
+      { kind: 'd', startKey: true },
+      { kind: 'u', startKey: false },
+    ]);
+    expect(res.status).toBe(500);
+    expect(res.body).toStrictEqual({ error: 'internal server error' });
+    expect(capture.atLevel(50).map((l) => l['msg'])).toEqual(['unhandled error while handling request: GET /list']);
+    expect(capture.atLevel(40).filter((l) => l['msg'] === REFUSED)).toEqual([]);
+  });
+
+  it('12: a k-less u cursor (the start of a status) carries no client key, so a ValidationException on its first Query is a 500 (AD-1)', async () => {
+    const { app, world, capture } = makeWebhookHarness({ toursNow: () => NOW });
+    await world.toursRepo.create(tourInput('tl12-r1', 'requested'));
+    const kless = encodeTourListCursor({ v: 1, f: fingerprintOf({}), n: NOW, ph: 'u', i: 0 });
+
+    // The cursor is valid: it pages before anything is injected.
+    const ok = await authed(app).get(`/api/tours/list?cursor=${encodeURIComponent(kless)}`);
+    expect(ok.status).toBe(200);
+    expect((ok.body as ListBody).tours.map((t) => t['tourId'])).toEqual(['tl12-r1']);
+
+    const spy = vi
+      .spyOn(world.toursRepo, 'queryListPhase')
+      .mockRejectedValueOnce(validationException('Invalid KeyConditionExpression'));
+    const res = await authed(app).get(`/api/tours/list?cursor=${encodeURIComponent(kless)}`);
+    spy.mockRestore();
+
+    expect(res.status).toBe(500);
+    expect(res.body).toStrictEqual({ error: 'internal server error' });
+    expect(capture.atLevel(50).map((l) => l['msg'])).toEqual(['unhandled error while handling request: GET /list']);
+    expect(capture.atLevel(40).filter((l) => l['msg'] === REFUSED)).toEqual([]);
   });
 });

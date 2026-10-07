@@ -5,7 +5,11 @@
 //   - the listbox is a position:FIXED popover PORTALED to document.body and
 //     measured from the input (Modal's body is a scroll container that would
 //     clip it); it is DISMISSED - never chased - on a scroll that moved the
-//     input, a resize, or a mousedown outside both the field and the list;
+//     input, a resize, a mousedown outside both the field and the list, or
+//     focus leaving the field (code review R1-ADV-FE-2: a list left open over
+//     the next field invited an Escape that closed the whole Modal). A press
+//     anywhere in the list keeps focus in the input, so a pick or a scrollbar
+//     drag never counts as leaving;
 //   - Escape preventDefaults, so a surrounding Modal stays open;
 //   - Enter acts ONLY on a highlighted option, so inside a <form> an Enter
 //     with nothing highlighted still submits it.
@@ -369,7 +373,15 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
             // Back in the field, its list follows the text it holds again.
             setDismissed(false);
           }}
-          onBlur={() => setFocused(false)}
+          onBlur={(e) => {
+            setFocused(false);
+            // Focus left the field (Tab, a click elsewhere): close the list
+            // rather than leave it painted over the next field (R1-ADV-FE-2).
+            const next = e.relatedTarget;
+            if (next instanceof Node && listRef.current?.contains(next)) return;
+            setDismissed(true);
+            setActiveIndex(-1);
+          }}
           onKeyDown={handleKeyDown}
         />
       </div>
@@ -397,6 +409,11 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
             role="listbox"
             aria-label={`${label} suggestions`}
             style={pos ? { top: pos.top, left: pos.left, width: pos.width, maxHeight: pos.maxHeight } : undefined}
+            onMouseDown={(e) => {
+              // A press on the list's scrollbar or padding must not blur the
+              // input: a blur closes the list (R1-ADV-FE-2).
+              e.preventDefault();
+            }}
           >
             {options.map((option, index) => (
               <li

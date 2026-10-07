@@ -237,6 +237,42 @@ describe('OrgPicker - the add step', () => {
   });
 });
 
+describe('OrgPicker - focus leaving the field (code review R1-ADV-FE-2)', () => {
+  it('Tab away closes the list: no stray popup over the next field, and aria-expanded is false', async () => {
+    const user = userEvent.setup();
+    render(
+      <Modal title="Edit contact" onClose={vi.fn()}>
+        <OrgPicker label="Housing authority" kinds={['housing_authority']} entries={ENTRIES} value="" onChange={vi.fn()} />
+        <OrgPicker label="Agency" kinds={['agency']} entries={ENTRIES} value="" onChange={vi.fn()} />
+      </Modal>,
+    );
+    const housingAuthority = combobox();
+    await user.type(housingAuthority, 'AHA');
+    expect(screen.getByRole('listbox', { name: 'Housing authority suggestions' })).toBeInTheDocument();
+    await user.tab();
+    expect(combobox('Agency')).toHaveFocus();
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(housingAuthority).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('a press anywhere in the list (its scrollbar, its padding) keeps focus in the field', () => {
+    render(<Single />);
+    fireEvent.change(combobox(), { target: { value: 'aha' } });
+    // false = the default (moving focus out of the input) was prevented.
+    expect(fireEvent.mouseDown(screen.getByRole('listbox'))).toBe(false);
+  });
+
+  it('a click on an option still picks it - focus never leaves the field', async () => {
+    const user = userEvent.setup();
+    const onChangeSpy = vi.fn();
+    render(<Single onChangeSpy={onChangeSpy} />);
+    await user.type(combobox(), 'aha');
+    await user.click(screen.getByRole('option', { name: /^Augusta Housing Authority/ }));
+    expect(onChangeSpy).toHaveBeenCalledWith('Augusta Housing Authority');
+    expect(combobox()).toHaveFocus();
+  });
+});
+
 describe('OrgPicker - text typed but never picked (code review R1-ADV-FE-1)', () => {
   const NOTE = 'Not saved - pick a name from the list, or clear the text.';
 

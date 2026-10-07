@@ -74,6 +74,9 @@ describe('TemplatesSection — admin edit', () => {
     // silent DELETION of the explanation does.
     expect(await screen.findByText(/hold no details on/i)).toBeInTheDocument();
     expect(screen.getByText(/landlord, partner,\s*or team member/i)).toBeInTheDocument();
+    // The facts that mark a caller as known, mirroring INTAKE_FIELDS in
+    // app/src/jobs/missedCallAutoText.ts - an agency counts (spec 2026-10-06 D15).
+    expect(screen.getByText(/voucher size, housing authority,\s*or agency saved/i)).toBeInTheDocument();
   });
 
   it('shows the served default welcome body as the empty box placeholder', async () => {

@@ -69,6 +69,7 @@ import {
 import { createContactsRepo } from '../repos/contactsRepo.js';
 import { createExtractionRepo } from '../repos/extractionRepo.js';
 import { createAiRunsRepo } from '../repos/aiRunsRepo.js';
+import { createOrgNamesService } from '../services/orgNames.js';
 import {
   createSuggestionResolutionService,
   type SuggestionResolutionService,
@@ -103,8 +104,9 @@ export interface JournalSweepOutcome {
 }
 
 function buildDefaultService(log: Logger): SuggestionResolutionService {
-  // The exact construction routes/suggestions.ts uses (its factory needs
-  // all four repos; the seams default). NOTE createContactsRepo comes from
+  // The exact construction routes/suggestions.ts uses (its factory needs all
+  // four repos and the organization list - which the sweep never reads: it
+  // only replays stored plans; the seams default). NOTE createContactsRepo comes from
   // a C1-mission file - IMPORTING is fine (edits are what is forbidden);
   // at the Task 14 merge reconcile, verify its factory signature survived
   // the C1 merge unchanged.
@@ -113,6 +115,7 @@ function buildDefaultService(log: Logger): SuggestionResolutionService {
     extractionRepo: createExtractionRepo({ logger: log }),
     aiRunsRepo: createAiRunsRepo({ logger: log }),
     resolutionRepo: createSuggestionResolutionRepo({ logger: log }),
+    orgNamesService: createOrgNamesService({ logger: log }),
     logger: log,
   });
 }

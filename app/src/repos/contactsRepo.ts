@@ -805,6 +805,25 @@ export interface ContactsRepo {
     contactId: string,
     at: string,
   ): Promise<'stamped' | 'already' | 'missing'>;
+  /**
+   * Organization-name rewrite (spec 2026-10-06 D11; plan 3.7) for the
+   * org.rewrite job and the cleanup script: ONE conditional UpdateItem that
+   * lands only while the contact still holds what the caller read. `expect`
+   * checks housingAuthority and/or agency - a string means exactly that text,
+   * null means the attribute is ABSENT, omitted means not checked.
+   * `next.housingAuthority` null REMOVEs it (a byHousingAuthority key is never
+   * SET to '' - EmptyIndexKeyError, the update() rule) together with its
+   * `housingAuthority_source` provenance stamp, which describes the removed
+   * value (code review R1-ADV-BE-2); a value replacement keeps the stamp.
+   * `next.agency` is SET, '' included. Writes nothing else: no classification
+   * fence, no stamp. Answers 'skipped' when the condition is lost (the record
+   * changed, or there is no such contact) - never throws for that.
+   */
+  rewriteOrgFields(
+    contactId: string,
+    expect: { housingAuthority?: string | null; agency?: string | null },
+    next: { housingAuthority?: string | null; agency?: string },
+  ): Promise<'written' | 'skipped'>;
 }
 
 export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
@@ -1648,6 +1667,73 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         const existing = await getByIdImpl(contactId);
         return existing ? 'already' : 'missing';
       }
+    },
+
+    async rewriteOrgFields(contactId, expected, next) {
+      // Refused at the seam, before the round trip - the update() rule: ''
+      // on a GSI key is a caller bug; null is the REMOVE.
+      if (next.housingAuthority === '') throw new EmptyIndexKeyError('housingAuthority');
+      const names: Record<string, string> = {};
+      const values: Record<string, unknown> = {};
+      const conditions = ['attribute_exists(contactId)'];
+      const sets: string[] = [];
+      const removes: string[] = [];
+      const guard = (attr: 'housingAuthority' | 'agency', alias: string, want: string | null | undefined): void => {
+        if (want === undefined) return;
+        names[alias] = attr;
+        if (want === null) {
+          conditions.push(`attribute_not_exists(${alias})`);
+        } else {
+          values[`:expect_${attr}`] = want;
+          conditions.push(`${alias} = :expect_${attr}`);
+        }
+      };
+      guard('housingAuthority', '#ha', expected.housingAuthority);
+      guard('agency', '#ag', expected.agency);
+      if (next.housingAuthority !== undefined) {
+        names['#ha'] = 'housingAuthority';
+        if (next.housingAuthority === null) {
+          removes.push('#ha');
+          // The AI provenance stamp describes the VALUE, and the dashboard
+          // renders "Auto" from the stamp alone: it goes with the value (code
+          // review R1-ADV-BE-2). A REMOVE of an absent attribute is a no-op.
+          names['#ha_source'] = 'housingAuthority_source';
+          removes.push('#ha_source');
+        } else {
+          values[':next_housingAuthority'] = next.housingAuthority;
+          sets.push('#ha = :next_housingAuthority');
+        }
+      }
+      if (next.agency !== undefined) {
+        names['#ag'] = 'agency';
+        values[':next_agency'] = next.agency;
+        sets.push('#ag = :next_agency');
+      }
+      if (sets.length === 0 && removes.length === 0) {
+        throw new Error('rewriteOrgFields: nothing to write');
+      }
+      const clauses: string[] = [];
+      if (sets.length > 0) clauses.push(`SET ${sets.join(', ')}`);
+      if (removes.length > 0) clauses.push(`REMOVE ${removes.join(', ')}`);
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { contactId },
+            UpdateExpression: clauses.join(' '),
+            ConditionExpression: conditions.join(' AND '),
+            ExpressionAttributeNames: names,
+            // A REMOVE-only write with no expectation has no values at all,
+            // and DynamoDB rejects an empty values map.
+            ...(Object.keys(values).length > 0 && { ExpressionAttributeValues: values }),
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return 'skipped';
+        throw err;
+      }
+      log.info({ contactId, setFields: sets.length, removedFields: removes.length }, 'contact org fields rewritten');
+      return 'written';
     },
   };
 }

@@ -9,6 +9,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { Contact, EventStreamHandlers, UnitItem } from '../../api/index.js';
+import { ApiError } from '../../api/index.js';
 
 const getUnit = vi.fn();
 const getAllUnits = vi.fn();
@@ -17,6 +18,10 @@ const getContact = vi.fn();
 const createBroadcast = vi.fn();
 const deleteBroadcast = vi.fn();
 const previewBroadcast = vi.fn();
+// RecipientPreview's Send (the review step).
+const sendBroadcast = vi.fn();
+// AudienceFilters' housing authority picker reads the list (spec 2026-10-06 D7).
+const getOrgList = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -29,6 +34,8 @@ vi.mock('../../api/index.js', async () => {
     createBroadcast: (...a: unknown[]) => createBroadcast(...a),
     deleteBroadcast: (...a: unknown[]) => deleteBroadcast(...a),
     previewBroadcast: (...a: unknown[]) => previewBroadcast(...a),
+    sendBroadcast: (...a: unknown[]) => sendBroadcast(...a),
+    getOrgList: (...a: unknown[]) => getOrgList(...a),
     useEventStream: (_h: EventStreamHandlers) => {},
   };
 });
@@ -84,6 +91,8 @@ beforeEach(() => {
     .mockResolvedValue({ broadcastId: 'draft_1', status: 'draft', estimatedCount: 5, truncated: false });
   deleteBroadcast.mockReset().mockResolvedValue({ deleted: true });
   previewBroadcast.mockReset();
+  sendBroadcast.mockReset().mockResolvedValue({});
+  getOrgList.mockReset().mockResolvedValue({ version: 1, entries: [] });
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -604,5 +613,365 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
     await user.type(screen.getByRole('combobox', { name: 'Property' }), 'Findme');
     await waitFor(() => expect(propertyRows()).toHaveLength(1));
     expect(propertyRows()[0]).toHaveAccessibleName(/900 Findme Ave/);
+  });
+});
+
+// Spec 2026-10-06 D7: a picked housing authority can leave the list between
+// the pick and the server's check (the draft create, or Preview).
+describe('BroadcastComposer - a housing authority that left the list', () => {
+  const ATLANTA = {
+    orgId: 'o-atl',
+    kind: 'housing_authority',
+    name: 'Atlanta Housing Authority',
+    spellings: ['AHA'],
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  };
+  const GONE = 'That housing authority is no longer on the list - pick it again';
+  const refused = (): ApiError =>
+    new ApiError(422, 'org_not_on_list', 'org_not_on_list', {
+      error: 'org_not_on_list',
+      field: 'audience_filter',
+      text: 'Atlanta Housing Authority',
+      candidates: [],
+      close: [],
+    });
+
+  async function pickAtlanta(u: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await u.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'AHA');
+    await u.click(await screen.findByRole('option', { name: /^Atlanta Housing Authority/ }));
+  }
+
+  beforeEach(() => {
+    getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA] });
+  });
+
+  it('a refused draft create clears the pick and says so - and Preview works again', async () => {
+    const u = userEvent.setup();
+    createBroadcast.mockImplementation(async (body: { audience_filter?: { housing_authority?: string } }) => {
+      if (body.audience_filter?.housing_authority !== undefined) throw refused();
+      return { broadcastId: 'draft_1', status: 'draft', estimatedCount: 5, truncated: false };
+    });
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(1), { timeout: 4000 });
+    await pickAtlanta(u);
+    expect(await screen.findByText(GONE, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove Atlanta Housing Authority' })).not.toBeInTheDocument();
+    // The cleared filter is the first draft's again: no recreate needed, and
+    // the draft is not stale.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled());
+    expect(createBroadcast).toHaveBeenCalledTimes(2);
+    // The next filter change clears the message.
+    await u.click(screen.getByRole('button', { name: /^3-BR/ }));
+    expect(screen.queryByText(GONE)).not.toBeInTheDocument();
+  });
+
+  it('a refused Preview clears the pick, says so, and recreates the draft without it', async () => {
+    const u = userEvent.setup();
+    previewBroadcast.mockRejectedValue(refused());
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(1), { timeout: 4000 });
+    await pickAtlanta(u);
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(2), { timeout: 4000 });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled());
+    await u.click(screen.getByRole('button', { name: 'Preview recipients' }));
+    expect(await screen.findByText(GONE)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove Atlanta Housing Authority' })).not.toBeInTheDocument();
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(3), { timeout: 4000 });
+    expect(createBroadcast.mock.calls[2]?.[0]?.audience_filter).toEqual({ contact_type: 'tenant', bedroomSize: 2 });
+    // Never the raw code.
+    expect(screen.queryByText(/org_not_on_list/)).not.toBeInTheDocument();
+  });
+});
+
+// Code review R2-FE-3: the composer's audience is a real send. Text typed in
+// the housing authority filter but never picked is NOT a filter (spec D7: the
+// draft changes only on a pick or a clear), so Preview waits until staff pick
+// a name or clear the text - an unfiltered preview never passes for a
+// filtered one.
+describe('BroadcastComposer - text typed in the housing authority filter', () => {
+  const ATLANTA = {
+    orgId: 'o-atl',
+    kind: 'housing_authority',
+    name: 'Atlanta Housing Authority',
+    spellings: ['AHA'],
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  };
+  const HINT = 'Pick the housing authority from the list, or clear the text.';
+  const preview = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
+  const authority = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authority' });
+  const draftAuthorities = (): unknown[] =>
+    createBroadcast.mock.calls.map(
+      ([body]) => (body as { audience_filter?: { housing_authority?: string } } | undefined)?.audience_filter?.housing_authority,
+    );
+
+  beforeEach(() => {
+    getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA] });
+  });
+
+  it('a full name typed but not picked holds Preview back and says why - a pick lets it go', async () => {
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    await u.type(authority(), 'Atlanta Housing Authority');
+    await screen.findByRole('option', { name: /^Atlanta Housing Authority/ });
+    expect(preview()).toBeDisabled();
+    expect(screen.getByText(HINT)).toBeInTheDocument();
+    expect(previewBroadcast).not.toHaveBeenCalled();
+    // Typing never recreated the draft (D7): no draft carried the text.
+    expect(draftAuthorities().every((a) => a === undefined)).toBe(true);
+    await u.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+    expect(draftAuthorities().at(-1)).toBe('Atlanta Housing Authority');
+  });
+
+  it('clearing the text lets Preview go again - with no new draft', async () => {
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    const drafts = createBroadcast.mock.calls.length;
+    await u.type(authority(), 'Atl');
+    expect(preview()).toBeDisabled();
+    await u.clear(authority());
+    expect(preview()).toBeEnabled();
+    expect(createBroadcast).toHaveBeenCalledTimes(drafts);
+  });
+
+  it('(PIN) text typed before "Change" goes with the compose step: Preview works for the next pick', async () => {
+    const u = userEvent.setup();
+    renderComposer();
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    await u.type(await screen.findByRole('combobox', { name: 'Housing authority' }), 'Atl');
+    await u.click(screen.getByRole('button', { name: 'Change property' }));
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(authority()).toHaveValue('');
+    expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+  });
+});
+
+// Code review R3-FE-1: a Preview pages the whole audience, so it can take
+// seconds - and the candidates it returns belong to the draft it previewed.
+// The audience is frozen while it loads, and a result whose draft is no
+// longer the one on screen is dropped ("The audience changed - preview
+// again."): Send must never post one draft's candidates to another draft.
+describe('BroadcastComposer - the audience while a preview loads (code review R3-FE-1)', () => {
+  const ATLANTA = {
+    orgId: 'o-atl',
+    kind: 'housing_authority',
+    name: 'Atlanta Housing Authority',
+    spellings: ['AHA'],
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  };
+  const CHANGED = 'The audience changed - preview again.';
+  // A tenant of another authority: a candidate of the unfiltered draft that an
+  // Atlanta filter would never reach.
+  const DEKALB_TENANT = {
+    contactId: 'c-dekalb',
+    firstName: 'Dana',
+    phone: '+14040000009',
+    alreadySentThisProperty: false,
+    has_consent: true,
+    seeded: false,
+  };
+  const previewOf = (candidates: (typeof DEKALB_TENANT)[]): unknown => ({
+    count: candidates.length,
+    truncated: false,
+    candidates,
+    priorRecipientContactIds: [],
+    seedContactIds: [],
+    unresolvedSeedIds: [],
+  });
+  const previewButton = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
+  const authority = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authority' });
+  const reviewHeading = (): HTMLElement | null => screen.queryByRole('heading', { name: 'Review recipients' });
+  const draftAuthorities = (): unknown[] =>
+    createBroadcast.mock.calls.map(
+      ([body]) => (body as { audience_filter?: { housing_authority?: string } } | undefined)?.audience_filter?.housing_authority,
+    );
+
+  /** The next Preview stays in flight until the test lands it. */
+  function heldPreview(): { land: (result: unknown) => Promise<void> } {
+    let resolve: (value: unknown) => void = () => {};
+    previewBroadcast.mockReturnValueOnce(
+      new Promise((r) => {
+        resolve = r;
+      }),
+    );
+    return {
+      land: async (result) => {
+        await act(async () => resolve(result));
+      },
+    };
+  }
+
+  /** Outlast the composer's 600 ms create debounce: any draft a change
+   *  started has been made by now. */
+  async function outlastDebounce(): Promise<void> {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 800));
+    });
+  }
+
+  beforeEach(() => {
+    getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA] });
+    createBroadcast
+      .mockResolvedValueOnce({ broadcastId: 'draft_1', status: 'draft', estimatedCount: 5, truncated: false })
+      .mockResolvedValue({ broadcastId: 'draft_2', status: 'draft', estimatedCount: 1, truncated: false });
+  });
+
+  it('a pick tried while the preview loads changes nothing: the review and Send stay on the previewed draft', async () => {
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(previewButton()).toBeEnabled(), { timeout: 4000 });
+    const held = heldPreview();
+    await u.click(previewButton());
+    // Staff notice the unfiltered audience and try to pick Atlanta.
+    await u.type(authority(), 'AHA');
+    await u.keyboard('{ArrowDown}{Enter}');
+    await held.land(previewOf([DEKALB_TENANT]));
+    await outlastDebounce();
+    expect(await screen.findByRole('heading', { name: 'Review recipients' })).toBeInTheDocument();
+    await u.click(screen.getByRole('button', { name: 'Send to 1 tenant' }));
+    // The candidates go to the draft they were previewed from - never to a
+    // draft made for another audience.
+    await waitFor(() => expect(sendBroadcast).toHaveBeenCalledWith('draft_1', ['c-dekalb']));
+    expect(draftAuthorities().every((a) => a === undefined)).toBe(true);
+  });
+
+  it('the filters are frozen while the preview loads - the picker, its chip and the voucher chips', async () => {
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(previewButton()).toBeEnabled(), { timeout: 4000 });
+    await u.type(authority(), 'AHA');
+    await u.click(await screen.findByRole('option', { name: /^Atlanta Housing Authority/ }));
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(2), { timeout: 4000 });
+    await waitFor(() => expect(previewButton()).toBeEnabled(), { timeout: 4000 });
+    const held = heldPreview();
+    await u.click(previewButton());
+    expect(authority()).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeDisabled();
+    for (const chip of screen.getAllByRole('button', { name: /^\d\+?-BR/ })) expect(chip).toBeDisabled();
+    await held.land(previewOf([DEKALB_TENANT]));
+    expect(await screen.findByRole('heading', { name: 'Review recipients' })).toBeInTheDocument();
+    // Back on the audience, the filters work again.
+    await u.click(screen.getByRole('button', { name: /Edit audience/ }));
+    expect(authority()).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeEnabled();
+  });
+
+  it('text typed while the preview loads: the frozen field takes none, so none is dropped unseen when the review opens', async () => {
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(previewButton()).toBeEnabled(), { timeout: 4000 });
+    const held = heldPreview();
+    await u.click(previewButton());
+    await u.type(authority(), 'Atlanta Housing Authority');
+    expect(authority()).toBeDisabled();
+    expect(authority()).toHaveValue('');
+    await held.land(previewOf([DEKALB_TENANT]));
+    expect(await screen.findByRole('heading', { name: 'Review recipients' })).toBeInTheDocument();
+    expect(draftAuthorities().every((a) => a === undefined)).toBe(true);
+  });
+
+  it('a message edited while the preview loads: the result is dropped - no review, no Send - and Preview reads the new draft', async () => {
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(previewButton()).toBeEnabled(), { timeout: 4000 });
+    const held = heldPreview();
+    await u.click(previewButton());
+    // The message is not frozen; changing it makes a new draft.
+    await u.type(screen.getByLabelText('Message'), ' Call us today.');
+    await held.land(previewOf([DEKALB_TENANT]));
+    expect(reviewHeading()).not.toBeInTheDocument();
+    expect(screen.getByText(CHANGED)).toBeInTheDocument();
+    // The new draft lands: the dropped result never comes back.
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(2), { timeout: 4000 });
+    await waitFor(() => expect(previewButton()).toBeEnabled(), { timeout: 4000 });
+    expect(reviewHeading()).not.toBeInTheDocument();
+    previewBroadcast.mockResolvedValueOnce(previewOf([DEKALB_TENANT]));
+    await u.click(previewButton());
+    expect(await screen.findByRole('heading', { name: 'Review recipients' })).toBeInTheDocument();
+    expect(previewBroadcast).toHaveBeenLastCalledWith('draft_2');
+    expect(screen.queryByText(CHANGED)).not.toBeInTheDocument();
+    expect(sendBroadcast).not.toHaveBeenCalled();
+  });
+
+  it('a property changed while the preview loads: its result is never reviewed under the next property', async () => {
+    const u = userEvent.setup();
+    const oak = unit({
+      unitId: 'u-2',
+      address: { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' },
+    });
+    getAllUnits.mockResolvedValue([...pickableUnits, oak]);
+    getUnit.mockImplementation(async (id: string) => (id === 'u-2' ? oak : pickableUnits[0]));
+    renderComposer();
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    await waitFor(() => expect(previewButton()).toBeEnabled(), { timeout: 4000 });
+    const held = heldPreview();
+    await u.click(previewButton());
+    await u.click(screen.getByRole('button', { name: 'Change property' }));
+    await u.click(await screen.findByRole('button', { name: /12 Oak St/ }));
+    // 77 Peachtree's candidates land after 12 Oak St was picked.
+    await held.land(previewOf([DEKALB_TENANT]));
+    expect(reviewHeading()).not.toBeInTheDocument();
+    expect(screen.getByText(CHANGED)).toBeInTheDocument();
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(2), { timeout: 4000 });
+    expect(createBroadcast.mock.calls[1]?.[0]).toMatchObject({ unitId: 'u-2' });
+    expect(reviewHeading()).not.toBeInTheDocument();
+    expect(sendBroadcast).not.toHaveBeenCalled();
+  });
+});
+
+// Code review R4-2: a change undone before its new draft is made - inside the
+// debounce, or after its recreate failed - puts the screen back on the live
+// draft. Nothing is pending and nothing is stale then: Preview works at once,
+// with no new draft.
+describe('BroadcastComposer - a change undone before its draft lands (code review R4-2)', () => {
+  const previewButton = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
+  const message = (): HTMLElement => screen.getByRole('textbox', { name: 'Message' });
+
+  /** Outlast the composer's 600 ms create debounce. */
+  async function outlastDebounce(): Promise<void> {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 800));
+    });
+  }
+
+  it('a character typed and deleted inside the debounce: Preview is enabled again, not left "Sizing the audience"', async () => {
+    const u = userEvent.setup();
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(previewButton()).toBeEnabled(), { timeout: 4000 });
+    await u.type(message(), 'X{Backspace}');
+    await outlastDebounce();
+    expect(createBroadcast).toHaveBeenCalledTimes(1);
+    expect(previewButton()).toBeEnabled();
+    expect(screen.queryByText(/Sizing the audience/)).not.toBeInTheDocument();
+  });
+
+  it('a change whose recreate failed, undone: the error goes and Preview is enabled again', async () => {
+    const u = userEvent.setup();
+    createBroadcast
+      .mockResolvedValueOnce({ broadcastId: 'draft_1', status: 'draft', estimatedCount: 5, truncated: false })
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(previewButton()).toBeEnabled(), { timeout: 4000 });
+    await u.type(message(), 'X');
+    expect(await screen.findByText(/estimate the audience/, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(previewButton()).toBeDisabled();
+    await u.type(message(), '{Backspace}');
+    expect(previewButton()).toBeEnabled();
+    expect(screen.queryByText(/estimate the audience/)).not.toBeInTheDocument();
+    await outlastDebounce();
+    expect(createBroadcast).toHaveBeenCalledTimes(2);
   });
 });

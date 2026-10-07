@@ -70,6 +70,7 @@ import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRe
 import { deriveTourSignal } from '../lib/listingSendTour.js';
 import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { reachedCount } from '../services/shareRecipientState.js';
+import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -105,6 +106,12 @@ export interface UnitsRouterDeps {
    * instance.
    */
   transcodeGate?: Semaphore;
+  /**
+   * Organization names (spec 2026-10-06 D5): POST and PATCH check
+   * accepted_authorities members against the stored org list. Built ONCE in
+   * createApiRouter and threaded down.
+   */
+  orgNamesService?: OrgNamesService;
 }
 
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
@@ -299,6 +306,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const broadcasts = deps.broadcastsRepo ?? createBroadcastsRepo({ logger: deps.logger });
   const mediaStore = deps.mediaStore;
   const transcodeGate = deps.transcodeGate ?? sharedTranscodeGate;
+  const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
 
   const router = Router();
 
@@ -439,6 +447,26 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     if (!validation.ok) {
       res.status(400).json({ error: validation.error });
       return;
+    }
+    // ORGANIZATION NAMES (spec 2026-10-06 D5): a new unit holds nothing yet,
+    // so EVERY accepted_authorities member must resolve to a housing
+    // authority on the stored list - a tombstoned `jurisdiction` in the same
+    // body grants no pass (the validator drops it). Members are trimmed and
+    // de-duplicated, and a unique spelling is stored as its entry's exact
+    // name. The validator's 400s ran first; a 422 creates nothing.
+    if (Array.isArray(validation.fields['accepted_authorities'])) {
+      const check = await orgNames.checkList(
+        'accepted_authorities',
+        validation.fields['accepted_authorities'] as string[],
+        undefined,
+        undefined,
+      );
+      if (!check.ok) {
+        log.info({ actor: req.user?.userId }, 'unit create refused: accepted authority not on the list');
+        res.status(422).json(check.error);
+        return;
+      }
+      validation.fields['accepted_authorities'] = check.value;
     }
     // status is NOT a writable CRUD field (§8: property-status changes route
     // through PATCH /api/units/:unitId/listing-status). Create is not a
@@ -1341,6 +1369,45 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       log.info({ unitId, actor: req.user?.userId }, 'unit patch was a no-op (retired fields only)');
       res.json({ unit: existing });
       return;
+    }
+    // ORGANIZATION NAMES (spec 2026-10-06 D5). A PATCH carrying
+    // accepted_authorities is checked per member against the STORED unit (a
+    // new pre-read; an unknown unit 404s before any 422). A member the unit
+    // already holds (compared trimmed on both sides) passes unchanged, and so
+    // does its legacy `jurisdiction` - but ONLY while the unit has no stored
+    // accepted_authorities list, because only then did the edit form
+    // synthesize its list from that value (lib/unitFields.ts authoritiesOf; a
+    // stored list, even [], wins - ruling R1-F1). Every other member must
+    // resolve to a housing authority on the list; members are trimmed and
+    // de-duplicated, and a unique spelling is stored as the exact name. The
+    // pre-read is CONSISTENT: a stale read could pass an off-list value
+    // through as "already held" (the contacts PATCH precedent).
+    if (Array.isArray(validation.fields['accepted_authorities'])) {
+      const storedUnit = await units.getById(unitId, { consistentRead: true });
+      if (storedUnit === undefined) {
+        res.status(404).json({ error: 'unit_not_found' });
+        return;
+      }
+      const storedList: unknown = storedUnit.accepted_authorities;
+      const held = Array.isArray(storedList)
+        ? storedList.filter((a): a is string => typeof a === 'string').map((a) => a.trim())
+        : undefined;
+      const legacy =
+        held === undefined && typeof storedUnit.jurisdiction === 'string'
+          ? storedUnit.jurisdiction.trim()
+          : '';
+      const check = await orgNames.checkList(
+        'accepted_authorities',
+        validation.fields['accepted_authorities'] as string[],
+        held,
+        legacy.length > 0 ? legacy : undefined,
+      );
+      if (!check.ok) {
+        log.info({ unitId, actor: req.user?.userId }, 'unit patch refused: accepted authority not on the list');
+        res.status(422).json(check.error);
+        return;
+      }
+      validation.fields['accepted_authorities'] = check.value;
     }
     // D1 delete-on-removal (the raw E5 seam): `media` is PATCH-writable and a
     // wholesale replace can drop stored keys. Snapshot the PRIOR list BEFORE the

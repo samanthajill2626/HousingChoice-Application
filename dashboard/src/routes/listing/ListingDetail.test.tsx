@@ -31,6 +31,8 @@ const setUnitPhotoCover = vi.fn();
 // Contacts-card edit mode (contact-rosters Task 9): the two unit-contact writes.
 const addUnitContact = vi.fn();
 const removeUnitContact = vi.fn();
+// The edit dialog's authorities picker reads the list (spec 2026-10-06 D6).
+const getOrgList = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -51,6 +53,7 @@ vi.mock('../../api/index.js', async () => {
     setUnitPhotoCover: (...a: unknown[]) => setUnitPhotoCover(...a),
     addUnitContact: (...a: unknown[]) => addUnitContact(...a),
     removeUnitContact: (...a: unknown[]) => removeUnitContact(...a),
+    getOrgList: (...a: unknown[]) => getOrgList(...a),
   };
 });
 
@@ -138,6 +141,7 @@ const READY: ListingState = {
 // The page asks for BOTH the live ('all') and soft-deleted ('deleted') lists —
 // answer per filter (deleted empty by default).
 beforeEach(() => {
+  getOrgList.mockReset().mockResolvedValue({ version: 1, entries: [] });
   useContacts.mockImplementation((filter: string) =>
     filter === 'deleted'
       ? { status: 'ready', contacts: [] }

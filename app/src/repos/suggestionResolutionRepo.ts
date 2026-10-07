@@ -107,6 +107,11 @@ export interface ActiveSuggestionResolution {
   leaseExpiresAt: string;
   fence: number;
   claimedAt: string;
+  /**
+   * Spec 2026-10-06 D8: resolutionValueKey() of the accept's `value`, when it
+   * carried one. Written at claim; copied onto the completed row.
+   */
+  valueKey?: string;
 }
 
 export interface CompletedSuggestionResolution {
@@ -118,6 +123,13 @@ export interface CompletedSuggestionResolution {
   action: ResolutionAction;
   completedAt: string;
   disposition?: ResolutionDisposition;
+  /**
+   * Spec 2026-10-06 D8: the accepted value's key (a sha256 hex - PII-free),
+   * absent when the accept carried no value. A re-accept of this identity
+   * compares it (absent equals absent) and answers 409
+   * suggestion_already_resolved on a mismatch.
+   */
+  valueKey?: string;
 }
 
 export type SuggestionResolutionItem =
@@ -159,6 +171,8 @@ export interface ClaimResolutionInput {
   now: string;
   leaseId?: string;
   leaseMs?: number;
+  /** Spec 2026-10-06 D8: resolutionValueKey() of the accept's `value`. */
+  valueKey?: string;
 }
 
 export interface PhaseInput {
@@ -262,6 +276,15 @@ export function suggestionIdentityKey(
   return `legacy#${createHash('sha256').update(exact, 'utf8').digest('hex').slice(0, 32)}`;
 }
 
+/**
+ * Spec 2026-10-06 D8: the PII-free key of an accept's `value` - the sha256 hex
+ * of its exact text. The completed row keeps it, so a re-accept of a resolved
+ * suggestion with a DIFFERENT value can be refused instead of replayed.
+ */
+export function resolutionValueKey(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
 export function tokenFor(journal: ActiveSuggestionResolution): ResolutionToken {
   return {
     contactId: journal.contactId,
@@ -287,6 +310,7 @@ export function makeCompletedResolution(
     action: active.action,
     completedAt,
     ...(disposition !== undefined && { disposition }),
+    ...(active.valueKey !== undefined && { valueKey: active.valueKey }),
   };
 }
 
@@ -628,6 +652,7 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
         identityKey,
         action: input.action,
         ...(input.actorId !== undefined && { actorId: input.actorId }),
+        ...(input.valueKey !== undefined && { valueKey: input.valueKey }),
         snapshot: input.suggestion,
         plan: input.plan,
         phase: 'claimed',

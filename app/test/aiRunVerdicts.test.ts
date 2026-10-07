@@ -5,9 +5,21 @@ import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarnes
 import { SuggestionDismissedError, type SuggestionItem } from '../src/repos/extractionRepo.js';
 import type { AiRunRecordInput } from '../src/repos/aiRunsRepo.js';
 import { makeCompletedResolution } from '../src/repos/suggestionResolutionRepo.js';
+import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import type { OrgListItem } from '../src/repos/orgListRepo.js';
 import type { DecisionTarget, Verdict } from '../src/services/extraction/runTypes.js';
 
 const ACTOR = 'usr_testva00000000000000000';
+
+/** The starting organization list (spec Appendix A) as a stored item. */
+function startingOrgList(): OrgListItem {
+  let n = 0;
+  return {
+    settingId: 'org-list',
+    version: 1,
+    entries: buildStartingEntries('2026-10-06T00:00:00.000Z', () => `org-${(n += 1)}`),
+  };
+}
 
 type SetVerdict = (
   runId: string,
@@ -554,10 +566,14 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
         },
       },
     }).app;
+    // A housingAuthority accept must reach the claim to crash after it, so its
+    // text is a name on the list (spec 2026-10-06 D8): an off-list text is now
+    // refused 422 BEFORE the claim and would leave no journal to recover.
+    await world.orgListRepo.putForSeed(startingOrgList());
     const targets = [
       ['pets', 'two cats'],
       ['tenure', '2 years'],
-      ['housingAuthority', 'Metro HA'],
+      ['housingAuthority', 'Atlanta Housing Authority'],
     ] as const;
     for (const [target, suggestedValue] of targets) {
       await seedSuggestion(world, {
@@ -970,6 +986,7 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect(res.body.suggestions).toHaveLength(1);
     expect(await world.extractionRepo.getSuggestion('c1', 'phone')).toEqual(replacement);
     const journal = [...world.suggestionResolutions.values()][0];
+    // No accept value was sent, so no valueKey (spec 2026-10-06 D8).
     expect(journal).toEqual({
       itemId: abandoned?.itemId,
       state: 'completed',

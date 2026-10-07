@@ -289,6 +289,35 @@ export interface AiRunDecision {
   verdictBy?: string;
 }
 
+/**
+ * Staff labels for a decision's `dropReason` (the AI run log's Reason cell).
+ * HAND MIRROR of DROP_REASONS in app/src/services/extraction/runTypes.ts -
+ * types.test.ts lists every server code, so a code without a label fails
+ * there. Every label before `agency_not_authority` is the humanized text the
+ * run log has always shown.
+ */
+export const AI_RUN_DROP_REASON_LABELS: Readonly<Record<string, string>> = {
+  wrong_contact_type: 'wrong contact type',
+  invalid_value: 'invalid value',
+  equal_to_current: 'equal to current',
+  status_not_onboarding_tenant: 'status not onboarding tenant',
+  type_already_classified: 'type already classified',
+  type_classification_changed: 'type classification changed',
+  phone_not_canonicalizable: 'phone not canonicalizable',
+  phone_already_owned: 'phone already owned',
+  phone_owned_by_other: 'phone owned by other',
+  dismissed_before: 'dismissed before',
+  repo_error: 'repo error',
+  empty_value_at_parse: 'empty value at parse',
+  // Spec 2026-10-06 D8: an agency name the model returned for housingAuthority.
+  agency_not_authority: 'Agency, not a housing authority',
+};
+
+/** A drop reason's label; a code this build does not know is humanized. */
+export function aiRunDropReasonLabel(code: string): string {
+  return AI_RUN_DROP_REASON_LABELS[code] ?? code.replaceAll('_', ' ');
+}
+
 /** One window message as the DETAIL endpoint returns it. */
 export interface AiRunWindowMessage {
   tsMsgId: string;
@@ -321,6 +350,10 @@ export interface AiRunRecordView {
   driver: AiRunDriver;
   model?: string;
   promptFingerprint?: string;
+  /** sha256 hex of the organization-list block the run's prompt carried
+   *  (spec 2026-10-06 D8; plan 3.10). Absent when the run exited at a skip
+   *  gate before reading the list. */
+  orgListFingerprint?: string;
   usage?: { inputTokens: number; outputTokens: number };
   window?: {
     detail: 'light' | 'full'; cursor: string; newestTsMsgId?: string; hasInferredRoleContent?: boolean;
@@ -1650,6 +1683,14 @@ const SUGGESTION_RESOLUTION_ERROR_COPY: Readonly<Record<string, string>> = {
     'We could not confirm whether that saved - reload to see the current value, then try again in a moment.',
   suggestion_resolution_retry_exhausted:
     'That suggestion was too busy to resolve - try again in a moment.',
+  // Spec 2026-10-06 D8: the accept named a housing authority that is neither
+  // what the AI heard nor one of its candidates. Nothing was claimed.
+  value_not_from_suggestion:
+    'That name is not what the AI heard, so nothing changed - set the field by hand instead.',
+  // D5 runs while the accept is planned: the value left the list (deleted, or
+  // moved to the other kind) after this page loaded it.
+  org_not_on_list:
+    'That housing authority is not on the list any more, so nothing changed - pick it from the list instead.',
 };
 
 /** Staff-facing copy for a failed suggestion accept/dismiss, given its code. */
@@ -3357,4 +3398,216 @@ export interface InboxUnreadCount {
   unreadCount: number;
   capped: boolean;
   truncated: boolean;
+}
+
+// --- Organization lists (/api/organizations) --------------------------------
+// MIRRORS the binding interfaces of docs/superpowers/plans/
+// 2026-10-06-clean-org-names.md section 3: app/src/lib/orgNames.ts (kinds,
+// entries, refs, the name and spelling problem codes), app/src/repos/
+// orgListRepo.ts (the rewrite state) and app/src/services/orgNames.ts,
+// orgRecords.ts, orgRewrite.ts + app/src/routes/organizations.ts (the wire
+// shapes). This package cannot import server types - keep them in step by hand.
+
+/** The two lists (spec D1): who runs the voucher vs who helps the tenant. */
+export type OrgKind = 'housing_authority' | 'agency';
+
+/** One list entry. Records store `name` - the exact text (spec D3). */
+export interface OrgEntry {
+  orgId: string;
+  kind: OrgKind;
+  name: string;
+  /** Abbreviations and other spellings that find this name (AHA, HADC). */
+  spellings: string[];
+  notes?: string;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  updatedBy: string;
+}
+
+/** An entry named in an answer (a match, a candidate, a close name). */
+export interface OrgRef {
+  orgId: string;
+  kind: OrgKind;
+  name: string;
+}
+
+/** The fields a D5 refusal can name (`audience_filter` = a blast filter). */
+export type OrgField = 'housingAuthority' | 'agency' | 'accepted_authorities' | 'audience_filter';
+
+/** The record fields a rewrite touches (branch A). */
+export type OrgRecordField = 'housingAuthority' | 'agency' | 'accepted_authorities';
+
+export type OrgRewriteAction =
+  | 'rename'
+  | 'merge'
+  | 'use'
+  | 'move_to_agency'
+  | 'move_to_housing_authority'
+  | 'split'
+  | 'clear'
+  | 'cleanup';
+
+/** The latest rename / merge / settle (spec D11) - one runs at a time. */
+export interface OrgRewriteState {
+  jobId: string;
+  action: OrgRewriteAction;
+  fromTexts: string[];
+  field?: OrgRecordField;
+  /** The record fields it rewrites, fixed when it started (spec 5.1). */
+  fields: OrgRecordField[];
+  toName?: string;
+  /** Split only: the agency half. */
+  agencyName?: string;
+  status: 'running' | 'done' | 'failed';
+  heartbeatAt: string;
+  /** Keys: housingAuthority, agency, accepted_authorities, skipped, conflicts. */
+  counts?: Record<string, number>;
+  error?: string;
+  startedAt: string;
+  finishedAt?: string;
+  startedBy: string;
+}
+
+/** GET /api/organizations. */
+export interface OrgListResponse {
+  version: number;
+  entries: OrgEntry[];
+  lastRewrite?: OrgRewriteState;
+}
+
+/** Records holding an entry's exact name (spec D10), active by group plus deleted. */
+export interface OrgUsageCounts {
+  tenants: number;
+  otherContacts: number;
+  properties: number;
+  deleted: number;
+}
+
+/** GET /api/organizations/usage -> { usage }: orgId -> counts. */
+export type OrgUsage = Record<string, OrgUsageCounts>;
+
+/** What a stored value resolves to (spec D4). */
+export type OrgResolutionStatus = 'match' | 'ambiguous' | 'other_kind' | 'compound' | 'unknown';
+
+export interface NotOnListResolution {
+  status: OrgResolutionStatus;
+  /** status 'match': the one entry it resolves to (it is not that exact name). */
+  match?: OrgRef;
+  candidates?: OrgRef[];
+  otherKind?: OrgRef[];
+  compound?: OrgRef[][];
+  close?: OrgRef[];
+}
+
+/** GET /api/organizations/not-on-list -> { rows }: one row per value and field. */
+export interface NotOnListRow {
+  field: OrgRecordField;
+  value: string;
+  /** Active records holding it. */
+  count: number;
+  /** Deleted records holding it. */
+  deletedCount: number;
+  resolution: NotOnListResolution;
+}
+
+/** GET /api/organizations/not-on-list/records -> { records }. */
+export type HolderRecord =
+  | { kind: 'contact'; contactId: string; name: string | null; type: string; deleted: boolean }
+  | { kind: 'unit'; unitId: string; address: string | null; deleted: boolean };
+
+/**
+ * Why a text cannot be a NEW name (spec D13; plan 3.4 `nameProblem`): the S1
+ * union. `org_name_invalid` covers a newline, another control character or an
+ * invisible format character (plan 3.5) and a name with nothing left once
+ * normalized (`-`, `()`).
+ */
+export type OrgNameProblem =
+  | 'org_name_empty'
+  | 'org_name_too_long'
+  | 'org_name_taken'
+  | 'org_name_compound'
+  | 'org_name_invalid';
+
+/** Why a spelling cannot be kept or remembered (spec D12; `invalid` per plan 3.5). */
+export type OrgSpellingProblem =
+  | 'empty'
+  | 'too_long'
+  | 'too_many'
+  | 'duplicate'
+  | 'equals_name'
+  | 'cross_kind'
+  | 'compound'
+  | 'shared_same_kind'
+  | 'invalid';
+
+/** POST /api/organizations/check - the D4 resolution of a text; no write. */
+export interface OrgCheckResult {
+  match?: OrgRef;
+  candidates: OrgRef[];
+  close: OrgRef[];
+  otherKind?: OrgRef[];
+  compound?: OrgRef[][];
+  /** Set when the text cannot be added as a new name. */
+  nameProblem?: OrgNameProblem;
+  /** Set when `spellingFor` was sent: null = it can be remembered. */
+  spellingProblem?: OrgSpellingProblem | null;
+}
+
+/** A spelling an automatic addition skipped (spec D12), named in a response. */
+export interface SkippedSpelling {
+  spelling: string;
+  problem: OrgSpellingProblem;
+}
+
+/** The 422 body every D5 writer answers with (spec D5, plan 3.5). */
+export interface OrgNotOnListBody {
+  error: 'org_not_on_list';
+  field: OrgField;
+  text: string;
+  candidates: OrgRef[];
+  close: OrgRef[];
+  otherKind?: OrgRef[];
+  compound?: OrgRef[][];
+}
+
+/** PATCH /api/organizations/:orgId - exactly ONE change per request. */
+export type OrgPatch =
+  | { notes: string }
+  | { spellings: string[]; confirmShared?: boolean }
+  | { name: string }
+  | { kind: OrgKind };
+
+export interface OrgPatchResult {
+  entry: OrgEntry;
+  /** A rename only (202): the rewrite it started. */
+  lastRewrite?: OrgRewriteState;
+  /** A rename only: the old name, when it could not be kept as a spelling. */
+  skippedSpellings?: SkippedSpelling[];
+}
+
+/** The "Not on the list" actions (spec D10). */
+export type NotOnListAction =
+  | 'use'
+  | 'move_to_agency'
+  | 'move_to_housing_authority'
+  | 'split'
+  | 'add'
+  | 'clear';
+
+/** POST /api/organizations/not-on-list/resolve. */
+export interface NotOnListResolveBody {
+  field: OrgRecordField;
+  value: string;
+  action: NotOnListAction;
+  name?: string;
+  /** Split only: the agency half. */
+  agencyName?: string;
+  rememberSpelling?: boolean;
+}
+
+/** A resolve's 202: the rewrite it started + any spelling D12 skipped. */
+export interface OrgRewriteStarted {
+  lastRewrite: OrgRewriteState;
+  skippedSpellings: SkippedSpelling[];
 }

@@ -1,0 +1,273 @@
+/* OrgPicker - the organization-list picker, and NewOrgDialog ("Is this really
+   new?"). Tokens only: ContactSearchField's portaled listbox idiom and the
+   TemplatesSection chip idiom. */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.label {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+
+.chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  max-width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--c-brand-soft);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.chipOffList {
+  background: var(--c-evt-amber-bg);
+  border-color: var(--c-evt-amber-border);
+}
+
+.chipText {
+  overflow-wrap: anywhere;
+}
+
+.offList {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-evt-amber-text);
+}
+
+/* 24 x 24 px: the minimum touch target at phone width (WCAG 2.2 target size). */
+.chipRemove {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--c-text-muted);
+  font-size: var(--fs-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chipRemove:hover {
+  background: var(--c-surface);
+  color: var(--c-danger);
+}
+
+.chipRemove:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.chipRemove:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.inputWrap {
+  position: relative;
+}
+
+.input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.input::placeholder {
+  color: var(--c-text-subtle);
+}
+
+.input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.hint {
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+/* The note under a field left holding typed text (code review R1-ADV-FE-1,
+   R2-FE-6): the amber of the "Not on the list" mark. Its line is RESERVED -
+   rendered empty while the field holds text and has focus - with the height of
+   one line of note, so a blur (which happens on mousedown) only fills it in
+   and never moves the controls below before the mouseup (R2-FE-8). A note
+   long enough to wrap still adds its extra lines. */
+.pendingNote {
+  margin: 0;
+  font-size: var(--fs-xs);
+  line-height: var(--lh-normal);
+  min-height: calc(var(--fs-xs) * var(--lh-normal));
+  color: var(--c-evt-amber-text);
+}
+
+.error {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-danger);
+}
+
+/* FIXED and portaled to <body> - see ContactSearchField.module.css. */
+.listbox {
+  position: fixed;
+  z-index: 100;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1) 0;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+}
+
+.option {
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  cursor: pointer;
+}
+
+.option:hover,
+.option[aria-selected='true'] {
+  background: var(--c-brand-soft);
+}
+
+.optionNote {
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+}
+
+.optionAdd {
+  font-weight: var(--fw-medium);
+  color: var(--c-brand);
+}
+
+/* --- NewOrgDialog ("Is this really new?") -------------------------------- */
+.dialogBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.dialogText {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.dialogMuted {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.dialogAlert {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+}
+
+.dialogField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.dialogLabel {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+
+.dialogInput,
+.dialogTextarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  background: var(--c-surface);
+}
+
+.dialogTextarea {
+  resize: vertical;
+}
+
+.dialogInput:focus-visible,
+.dialogTextarea:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.choiceGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.choiceButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+/* The shared Button never wraps (Button.module.css: white-space: nowrap), but a
+   "Use <name>" label can carry a 120-character name: here the label wraps
+   inside the dialog instead of pushing it sideways at phone width (360 px). */
+.choiceButtons > button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  line-height: 1.3;
+}
+
+.nameList {
+  margin: 0;
+  padding-left: var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.problem {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-evt-amber-text);
+}

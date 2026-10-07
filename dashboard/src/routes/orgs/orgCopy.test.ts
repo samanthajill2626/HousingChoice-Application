@@ -1,0 +1,477 @@
+// orgCopy tests - the organization lists' shared client vocabulary (spec
+// 2026-10-06 D3-D13): the code -> copy map and its parity list, the body-aware
+// refusal copy, the normalization mirror, and the rewrite-status helpers.
+import { describe, expect, it } from 'vitest';
+import { ApiError, type OrgEntry, type OrgKind, type OrgRewriteState } from '../../api/index.js';
+import {
+  ORG_GENERIC_ERROR,
+  canRunAgain,
+  describeRewrite,
+  isOnList,
+  isRewriteLive,
+  nameProblemCopy,
+  normalizeOrgText,
+  notOnListMessage,
+  orgErrorCopy,
+  orgErrorMessage,
+  orgListLoadError,
+  orgListUnknown,
+  orgNotOnListBody,
+  refusesSave,
+  resolutionText,
+  rewriteStatusText,
+  settleTypedOrgText,
+  spellingProblemCopy,
+  typedOrgNote,
+  typedOrgRefusal,
+  usageBreakdown,
+  usageText,
+} from './orgCopy.js';
+
+// Every { error } code /api/organizations and the D5 writers can answer with
+// (plan sections 3.5 and 3.6). Listed, not imported, so DELETING an entry from
+// the map fails here instead of silently falling back to the generic sentence.
+const ORG_SERVER_CODES = [
+  'org_not_on_list',
+  'org_name_empty',
+  'org_name_too_long',
+  'org_name_invalid',
+  'org_notes_too_long',
+  'org_name_taken',
+  'org_name_compound',
+  'org_spelling_refused',
+  'org_spelling_shared',
+  'org_spellings_full',
+  'org_in_use',
+  'org_not_found',
+  'org_rewrite_running',
+  'org_rewrite_not_rerunnable',
+  'org_rewrite_target_gone',
+  'org_value_is_name_variant',
+  'org_list_full',
+  'org_list_busy',
+  'one_change_per_request',
+];
+
+const ATL = { orgId: 'o1', kind: 'housing_authority' as const, name: 'Atlanta Housing Authority' };
+const AUG = { orgId: 'o2', kind: 'housing_authority' as const, name: 'Augusta Housing Authority' };
+const STEP = { orgId: 'o3', kind: 'agency' as const, name: 'Step Up' };
+
+describe('orgErrorMessage', () => {
+  it('covers every code with its own sentence', () => {
+    for (const code of ORG_SERVER_CODES) {
+      expect(orgErrorMessage(code), code).not.toBe(ORG_GENERIC_ERROR);
+    }
+  });
+
+  it('never puts a machine token in front of staff', () => {
+    for (const code of [...ORG_SERVER_CODES, 'some_future_code']) {
+      const copy = orgErrorMessage(code);
+      expect(copy, code).not.toContain('_');
+      expect(copy, code).not.toContain(code);
+    }
+  });
+
+  it('falls back to the generic sentence for an unknown code', () => {
+    expect(orgErrorMessage('some_future_code')).toBe(ORG_GENERIC_ERROR);
+  });
+
+  it('one sentence covers both Run again refusals for a changed list', () => {
+    // Build ruling B-2: org_rewrite_target_gone answers a target that left the
+    // list or changed kind AND a from-text that has since become a listed name.
+    expect(orgErrorMessage('org_rewrite_target_gone')).toBe(
+      'The list changed since this update started, so it cannot run again - start a new one from the list.',
+    );
+  });
+});
+
+const range = (from: number, to: number): number[] => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+/** The invisible format characters normalizeOrgText removes (review LOW-1). */
+const ORG_FORMAT_CODES = [
+  0xad,
+  ...range(0x200b, 0x200f),
+  ...range(0x202a, 0x202e),
+  ...range(0x2060, 0x2064),
+  ...range(0x2066, 0x206f),
+  0xfeff,
+];
+
+describe('normalizeOrgText (hand mirror of app/src/lib/orgNames.ts)', () => {
+  it('folds case, punctuation and underscores exactly like the server', () => {
+    expect(normalizeOrgText('  Atlanta (AHA) ')).toBe('atlanta aha');
+    expect(normalizeOrgText('atlanta_housing')).toBe('atlanta housing');
+    expect(normalizeOrgText('HUD-VASH')).toBe('hud vash');
+    expect(normalizeOrgText('Hope & Help, Inc.')).toBe('hope and help inc');
+  });
+  // Review LOW-1 - the same cases as app/test/orgNames.test.ts: an iPhone's
+  // smart punctuation and a pasted invisible character must not make a
+  // visually identical name compare different.
+  it('folds typographic quotes and dashes to their ASCII forms first, like the server', () => {
+    expect(normalizeOrgText('St. Jude\u2019s')).toBe(normalizeOrgText("St. Jude's"));
+    for (const single of ['\u2018', '\u2019', '\u201a', '\u201b', '\u2032']) {
+      expect(normalizeOrgText(`St. Jude${single}s`)).toBe('st jude s');
+    }
+    for (const double of ['\u201c', '\u201d', '\u201e', '\u2033']) {
+      expect(normalizeOrgText(`${double}Home${double}`)).toBe(normalizeOrgText('"Home"'));
+    }
+    expect(normalizeOrgText('Macon\u2013Bibb')).toBe(normalizeOrgText('Macon-Bibb'));
+    for (const dash of ['\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2015', '\u2212']) {
+      expect(normalizeOrgText(`Macon${dash}Bibb`)).toBe('macon bibb');
+    }
+  });
+  it('ignores invisible format characters - a zero-width space or a soft hyphen inside a word - like the server', () => {
+    expect(normalizeOrgText('Atl\u200banta Housing')).toBe(normalizeOrgText('Atlanta Housing'));
+    expect(normalizeOrgText('Hous\u00ading Authority')).toBe(normalizeOrgText('Housing Authority'));
+    for (const code of ORG_FORMAT_CODES) {
+      expect(normalizeOrgText(`Atl${String.fromCharCode(code)}anta`), code.toString(16)).toBe('atlanta');
+    }
+  });
+});
+
+describe('isOnList (spec D3)', () => {
+  const entries = [ATL, STEP];
+  it('is the exact text of an entry of an accepted kind, nothing else', () => {
+    expect(isOnList(entries, 'Atlanta Housing Authority', ['housing_authority'])).toBe(true);
+    expect(isOnList(entries, 'atlanta housing authority', ['housing_authority'])).toBe(false);
+    expect(isOnList(entries, 'Step Up', ['housing_authority'])).toBe(false);
+    expect(isOnList(entries, 'Step Up', ['agency'])).toBe(true);
+  });
+});
+
+describe('the 422 org_not_on_list body', () => {
+  const refused = (extra: Record<string, unknown>): ApiError =>
+    new ApiError(422, 'org_not_on_list', 'org_not_on_list', {
+      error: 'org_not_on_list',
+      field: 'housingAuthority',
+      candidates: [],
+      close: [],
+      ...extra,
+    });
+
+  it('narrows only a 422 org_not_on_list with a usable body', () => {
+    expect(orgNotOnListBody(new Error('x'))).toBeNull();
+    expect(orgNotOnListBody(new ApiError(409, 'org_name_taken', 'org_name_taken', {}))).toBeNull();
+    expect(orgNotOnListBody(refused({ text: 'AHA', candidates: [ATL, AUG] }))?.candidates).toEqual([ATL, AUG]);
+  });
+
+  it('explains each resolution in staff words', () => {
+    const say = (extra: Record<string, unknown>): string => {
+      const body = orgNotOnListBody(refused(extra));
+      if (body === null) throw new Error('not narrowed');
+      return notOnListMessage(body);
+    };
+    expect(say({ text: 'AHA', candidates: [ATL, AUG] })).toBe(
+      'AHA is a spelling of more than one housing authority (Atlanta Housing Authority, Augusta Housing Authority) - pick one.',
+    );
+    expect(say({ text: 'Step Up', otherKind: [STEP] })).toBe('Step Up is an agency, not a housing authority.');
+    expect(say({ text: 'Atlnta', close: [ATL] })).toBe('Atlnta is not on the list. Did you mean Atlanta Housing Authority?');
+    expect(say({ text: 'Nowhere' })).toBe('Nowhere is not on the list - pick a name from the list or add it.');
+  });
+});
+
+describe('orgErrorCopy (body-aware)', () => {
+  it('names the entry that already holds a name', () => {
+    const err = new ApiError(409, 'org_name_taken', 'org_name_taken', { error: 'org_name_taken', entry: ATL });
+    expect(orgErrorCopy(err)).toBe('That name is already on the list as Atlanta Housing Authority.');
+  });
+
+  it('says how many deleted records still hold an entry (spec D10)', () => {
+    const err = new ApiError(409, 'org_in_use', 'org_in_use', { error: 'org_in_use', uses: { active: 3, deleted: 2 } });
+    expect(orgErrorCopy(err)).toBe('5 records still hold this name (2 deleted), so it cannot be changed this way.');
+  });
+
+  it('names what a compound name contains and points to Split (spec D13)', () => {
+    const err = new ApiError(409, 'org_name_compound', 'org_name_compound', {
+      error: 'org_name_compound',
+      spans: [[{ orgId: 'o4', kind: 'housing_authority', name: 'Georgia Department of Community Affairs' }], [{ orgId: 'o5', kind: 'agency', name: 'HUD-VASH' }]],
+    });
+    expect(orgErrorCopy(err)).toBe(
+      'That names more than one organization (Georgia Department of Community Affairs and HUD-VASH), so it cannot be one entry. Use Split instead.',
+    );
+  });
+
+  it('confirms a shared spelling in D12 words', () => {
+    const err = new ApiError(409, 'org_spelling_shared', 'org_spelling_shared', {
+      error: 'org_spelling_shared',
+      spelling: 'AHA',
+      entries: [AUG],
+    });
+    expect(orgErrorCopy(err)).toBe('AHA is now shared with Augusta Housing Authority - it will no longer be applied automatically.');
+  });
+
+  it('a name variant can only be settled with Use <its entry> (spec D10)', () => {
+    const err = new ApiError(409, 'org_value_is_name_variant', 'org_value_is_name_variant', {
+      error: 'org_value_is_name_variant',
+      entry: ATL,
+    });
+    expect(orgErrorCopy(err)).toBe(
+      'That value is Atlanta Housing Authority written differently - settle it with Use Atlanta Housing Authority.',
+    );
+  });
+
+  it('a non-API failure is the generic sentence', () => {
+    expect(orgErrorCopy(new Error('boom'))).toBe(ORG_GENERIC_ERROR);
+  });
+});
+
+describe('problem copy', () => {
+  it('explains a name that cannot be added', () => {
+    expect(nameProblemCopy('org_name_taken', { match: ATL, candidates: [], close: [] })).toBe(
+      'It is already on the list as Atlanta Housing Authority.',
+    );
+    expect(nameProblemCopy('org_name_taken', { candidates: [ATL, AUG], close: [] })).toBe(
+      'It is already a spelling of Atlanta Housing Authority, Augusta Housing Authority.',
+    );
+    expect(nameProblemCopy('org_name_compound')).toBe('It names more than one organization, so it cannot be one entry.');
+  });
+
+  it('explains a spelling that cannot be remembered, never with a machine token', () => {
+    expect(spellingProblemCopy('shared_same_kind', [AUG])).toBe(
+      'it is also a spelling of Augusta Housing Authority, and a shared spelling is never applied automatically',
+    );
+    for (const problem of ['empty', 'too_long', 'too_many', 'duplicate', 'equals_name', 'cross_kind', 'compound', 'shared_same_kind', 'invalid', 'something_new']) {
+      expect(spellingProblemCopy(problem), problem).not.toContain('_');
+    }
+  });
+
+  it('names an invisible character wherever a refused name or spelling is explained', () => {
+    // The server answers a soft hyphen, a zero-width space or a bidi mark with the same code
+    // and problem as a line break, and a pasted name looks fine - so every sentence for that
+    // code has to say invisible characters are refused too.
+    const nameSentence =
+      'A name needs at least one letter or digit, and no line breaks, control characters or invisible characters (a pasted name can carry one - retype it).';
+    expect(orgErrorMessage('org_name_invalid')).toBe(nameSentence);
+    expect(nameProblemCopy('org_name_invalid')).toBe(nameSentence);
+    expect(spellingProblemCopy('invalid')).toBe('it contains a line break, a control character or an invisible character');
+    const refused = new ApiError(409, 'org_spelling_refused', 'org_spelling_refused', {
+      error: 'org_spelling_refused',
+      spelling: 'Atl HA',
+      problem: 'invalid',
+    });
+    expect(orgErrorCopy(refused)).toBe(
+      'Atl HA cannot be a spelling: it contains a line break, a control character or an invisible character.',
+    );
+  });
+});
+
+describe('rewrite status', () => {
+  // dashboard/src/test/setup.ts pins Date.now() to 2026-07-01T12:00:00Z.
+  const base: OrgRewriteState = {
+    jobId: 'j1',
+    action: 'rename',
+    fromTexts: ['Atlanta HA'],
+    fields: ['housingAuthority', 'accepted_authorities'],
+    toName: 'Atlanta Housing Authority',
+    status: 'running',
+    heartbeatAt: '2026-07-01T11:59:00.000Z',
+    startedAt: '2026-07-01T11:58:00.000Z',
+    startedBy: 'u1',
+  };
+
+  it('a running rewrite with a fresh heartbeat is live; a stale one can run again', () => {
+    expect(isRewriteLive(base)).toBe(true);
+    expect(canRunAgain(base)).toBe(false);
+    const stale = { ...base, heartbeatAt: '2026-07-01T11:40:00.000Z' };
+    expect(isRewriteLive(stale)).toBe(false);
+    expect(canRunAgain(stale)).toBe(true);
+    expect(canRunAgain({ ...base, status: 'failed' })).toBe(true);
+    expect(canRunAgain({ ...base, status: 'done' })).toBe(false);
+  });
+
+  it('never offers Run again for the cleanup script (spec D11)', () => {
+    expect(canRunAgain({ ...base, action: 'cleanup', status: 'failed' })).toBe(false);
+    expect(rewriteStatusText({ ...base, action: 'cleanup', status: 'failed' })).toContain('Re-run the cleanup script');
+  });
+
+  it('never offers Run again for an update the list outgrew - it says so instead (code review R3-BE-4)', () => {
+    // The job's claim re-checks a late update and records why it refused
+    // (org_rewrite_target_gone: <why>); Run again applies the same check to
+    // the same list, so it could only answer 409.
+    const gone: OrgRewriteState = {
+      ...base,
+      status: 'failed',
+      error: 'org_rewrite_target_gone: a value it rewrites became a name on the list',
+      counts: { housingAuthority: 0 },
+    };
+    expect(canRunAgain(gone)).toBe(false);
+    expect(rewriteStatusText(gone)).toBe(
+      'The last update failed: renaming Atlanta HA to Atlanta Housing Authority. The list changed since this update started, so it cannot run again - start a new one from the list.',
+    );
+    // Any other failure still runs again, and says nothing more.
+    const other: OrgRewriteState = { ...base, status: 'failed', error: 'Error: DynamoDB timed out' };
+    expect(canRunAgain(other)).toBe(true);
+    expect(rewriteStatusText(other)).toBe('The last update failed: renaming Atlanta HA to Atlanta Housing Authority.');
+  });
+
+  it('describes each action and its counts in staff words', () => {
+    expect(describeRewrite(base)).toBe('renaming Atlanta HA to Atlanta Housing Authority');
+    expect(
+      describeRewrite({ ...base, action: 'split', toName: 'Georgia Department of Community Affairs', agencyName: 'HUD-VASH' }),
+    ).toBe('splitting Atlanta HA into Georgia Department of Community Affairs + HUD-VASH');
+    expect(rewriteStatusText(base)).toBe('Updating records: renaming Atlanta HA to Atlanta Housing Authority.');
+    expect(rewriteStatusText({ ...base, status: 'done', counts: { housingAuthority: 3, skipped: 1, conflicts: 0 } })).toBe(
+      'Last update finished: renaming Atlanta HA to Atlanta Housing Authority. Housing authority fields: 3, Skipped (changed meanwhile): 1.',
+    );
+  });
+});
+
+describe('Settings counts and resolutions', () => {
+  it('counts active records and shows deleted ones beside them', () => {
+    expect(usageText(undefined)).toBe('-');
+    expect(usageText({ tenants: 3, otherContacts: 1, properties: 0, deleted: 2 })).toBe(
+      '3 tenants, 1 other contact, 0 properties (+2 deleted)',
+    );
+    expect(usageBreakdown({ tenants: 1, otherContacts: 0, properties: 1, deleted: 0 })).toBe(
+      '1 tenant, 0 other contacts, 1 property, 0 deleted',
+    );
+  });
+
+  it('names each resolution', () => {
+    expect(resolutionText({ status: 'other_kind', otherKind: [STEP] }, 'housingAuthority')).toBe('An agency: Step Up');
+    expect(resolutionText({ status: 'ambiguous', candidates: [ATL, AUG] }, 'housingAuthority')).toBe(
+      'Shared spelling: Atlanta Housing Authority or Augusta Housing Authority',
+    );
+    expect(resolutionText({ status: 'unknown', close: [] }, 'agency')).toBe('Unknown');
+  });
+
+  it('words a picker load failure per kind', () => {
+    expect(orgListLoadError(['housing_authority'])).toBe("Couldn't load housing authorities");
+    expect(orgListLoadError(['agency'])).toBe("Couldn't load agencies");
+  });
+});
+
+describe('orgListUnknown - nothing is known about a picker list (code review R3-FE-5)', () => {
+  const ENTRY: OrgEntry = {
+    orgId: 'o1',
+    kind: 'housing_authority',
+    name: 'Atlanta Housing Authority',
+    spellings: [],
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  };
+
+  it('while the first read is in flight, and after a read failed with nothing in hand', () => {
+    expect(orgListUnknown({ entries: [], loading: true, error: false })).toBe(true);
+    expect(orgListUnknown({ entries: [], loading: false, error: true })).toBe(true);
+  });
+
+  it('never once a list is in hand - a failed RE-read keeps the last one - or a list loaded empty', () => {
+    expect(orgListUnknown({ entries: [ENTRY], loading: false, error: true })).toBe(false);
+    expect(orgListUnknown({ entries: [ENTRY], loading: false, error: false })).toBe(false);
+    expect(orgListUnknown({ entries: [], loading: false, error: false })).toBe(false);
+  });
+});
+
+describe('settleTypedOrgText - text typed in a form picker but never picked (code review R1-ADV-FE-1)', () => {
+  const listed = (kind: OrgKind, name: string, spellings: string[] = []): OrgEntry => ({
+    orgId: `id-${name}`,
+    kind,
+    name,
+    spellings,
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  });
+  // AHA is a spelling two entries share; DCA and "Atlanta Housing" belong to one.
+  const ENTRIES = [
+    listed('housing_authority', 'Atlanta Housing Authority', ['AHA', 'Atlanta Housing']),
+    listed('housing_authority', 'Augusta Housing Authority', ['AHA']),
+    listed('housing_authority', 'Georgia Department of Community Affairs', ['DCA']),
+    listed('agency', 'Step Up'),
+  ];
+  /** The list as a loaded form holds it (useOrgList). */
+  const LIST = { entries: ENTRIES, loading: false, error: false };
+  const HA: OrgKind[] = ['housing_authority'];
+
+  it('blank text is nothing typed', () => {
+    expect(settleTypedOrgText(LIST, HA, '')).toEqual({ status: 'empty' });
+    expect(settleTypedOrgText(LIST, HA, '   ')).toEqual({ status: 'empty' });
+  });
+
+  it('a name, written any way the server folds it, commits that exact name', () => {
+    expect(settleTypedOrgText(LIST, HA, 'Atlanta Housing Authority')).toEqual({
+      status: 'resolved',
+      name: 'Atlanta Housing Authority',
+    });
+    expect(settleTypedOrgText(LIST, HA, '  atlanta housing-authority ')).toEqual({
+      status: 'resolved',
+      name: 'Atlanta Housing Authority',
+    });
+  });
+
+  it('a spelling only one entry carries commits that entry', () => {
+    expect(settleTypedOrgText(LIST, HA, 'dca')).toEqual({
+      status: 'resolved',
+      name: 'Georgia Department of Community Affairs',
+    });
+    expect(settleTypedOrgText(LIST, HA, 'Atlanta Housing')).toEqual({
+      status: 'resolved',
+      name: 'Atlanta Housing Authority',
+    });
+    expect(settleTypedOrgText(LIST, ['agency'], 'step up')).toEqual({ status: 'resolved', name: 'Step Up' });
+  });
+
+  it('a shared spelling, part of a name, the other kind and unknown text are refused', () => {
+    for (const text of ['AHA', 'Atl', 'Step Up', 'Metro Housing Board', '()']) {
+      expect(settleTypedOrgText(LIST, HA, text), text).toEqual({ status: 'blocked' });
+    }
+  });
+
+  it('a list still loading cannot settle text yet (R2-FE-1)', () => {
+    const loading = { entries: [], loading: true, error: false };
+    expect(settleTypedOrgText(loading, HA, 'Atlanta Housing Authority')).toEqual({ status: 'loading' });
+    expect(settleTypedOrgText(loading, HA, ' ')).toEqual({ status: 'empty' });
+  });
+
+  it('a failed RE-read settles against the list still in hand, as usual (code review R3-FE-3)', () => {
+    const reReadFailed = { entries: ENTRIES, loading: false, error: true };
+    expect(settleTypedOrgText(reReadFailed, HA, 'Atlanta Housing Authority')).toEqual({
+      status: 'resolved',
+      name: 'Atlanta Housing Authority',
+    });
+    expect(settleTypedOrgText(reReadFailed, ['agency'], 'step up')).toEqual({ status: 'resolved', name: 'Step Up' });
+    expect(settleTypedOrgText(reReadFailed, HA, 'AHA')).toEqual({ status: 'blocked' });
+    expect(settleTypedOrgText(reReadFailed, HA, '')).toEqual({ status: 'empty' });
+  });
+
+  it('when no list ever loaded, nothing can be settled: the text is refused, never dropped (code review R3-FE-3)', () => {
+    const neverLoaded = { entries: [], loading: false, error: true };
+    expect(settleTypedOrgText(neverLoaded, HA, 'Atlanta Housing Authority')).toEqual({ status: 'unavailable' });
+    expect(settleTypedOrgText(neverLoaded, HA, 'AHA')).toEqual({ status: 'unavailable' });
+    expect(settleTypedOrgText(neverLoaded, HA, '  ')).toEqual({ status: 'empty' });
+  });
+
+  it('Save refuses blocked text, text typed before the list loaded and text no list can settle - with its own words for each', () => {
+    expect(refusesSave({ status: 'blocked' })).toBe(true);
+    expect(refusesSave({ status: 'loading' })).toBe(true);
+    expect(refusesSave({ status: 'unavailable' })).toBe(true);
+    expect(typedOrgRefusal({ status: 'blocked' })).toBe('Pick a name from the list, add it as new, or clear the text.');
+    expect(typedOrgRefusal({ status: 'loading' })).toBe('Still loading the list - try again in a moment.');
+    expect(typedOrgRefusal({ status: 'unavailable' })).toBe('The list did not load - clear the text to save without it.');
+    for (const verdict of [
+      { status: 'empty' as const },
+      { status: 'resolved' as const, name: 'Step Up' },
+    ]) {
+      expect(refusesSave(verdict), verdict.status).toBe(false);
+      expect(typedOrgRefusal(verdict), verdict.status).toBeNull();
+    }
+  });
+});
+
+describe('typedOrgNote - the note under a form picker says what Save will do (code review R2-FE-6)', () => {
+  it('names the entry Save will use, or says the text is not saved and how to fix it', () => {
+    expect(typedOrgNote({ status: 'resolved', name: 'Step Up' })).toBe('Save will use Step Up.');
+    expect(typedOrgNote({ status: 'blocked' })).toBe(
+      'Not saved - pick a name from the list, add it as new, or clear the text.',
+    );
+    expect(typedOrgNote({ status: 'empty' })).toBeNull();
+  });
+
+  it('a list that failed to load says the text is not saved; one still loading says nothing yet (R2-FE-1)', () => {
+    expect(typedOrgNote({ status: 'unavailable' })).toBe('Not saved - the list did not load.');
+    expect(typedOrgNote({ status: 'loading' })).toBeNull();
+  });
+});

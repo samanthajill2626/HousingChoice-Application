@@ -337,7 +337,9 @@ export type CreateUnitInput = Partial<UnitItem> & { landlordId: string; status: 
 export interface UnitsRepo {
   /** Create a unit (generates unitId); returns the stored item. */
   create(input: CreateUnitInput): Promise<UnitItem>;
-  getById(unitId: string): Promise<UnitItem | undefined>;
+  /** `consistentRead` for a caller that decides a write from this read (the
+   *  D5 "already held" check of the units PATCH); default eventually consistent. */
+  getById(unitId: string, opts?: { consistentRead?: boolean }): Promise<UnitItem | undefined>;
   /**
    * Batch-read the display fields (unitId, address) of many units by primary
    * key - BEST-EFFORT, like contactsRepo.getDisplaysByIds: 100-key chunks,
@@ -443,6 +445,20 @@ export interface UnitsRepo {
    * choice, not an oversight.
    */
   list(opts?: ListUnitsOpts): Promise<UnitsPage>;
+  /**
+   * Organization-name rewrite (spec 2026-10-06 D11; plan 3.7): SET
+   * `accepted_authorities` to `next` only while the stored list is EXACTLY
+   * `expected` (whole-list equality, the updateRosterIfCurrent precedent) or,
+   * for `expected` null, while no list is stored. NEVER stamps updated_at - a
+   * machine write must not flip the importer's human-ownership signal
+   * (lib/import/apply.ts). Answers 'skipped' on a lost condition (the list
+   * changed, or there is no such unit).
+   */
+  rewriteAcceptedAuthorities(
+    unitId: string,
+    expected: string[] | null,
+    next: string[],
+  ): Promise<'written' | 'skipped'>;
 }
 
 export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
@@ -573,8 +589,14 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       return item;
     },
 
-    async getById(unitId) {
-      const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { unitId } }));
+    async getById(unitId, opts) {
+      const { Item } = await doc.send(
+        new GetCommand({
+          TableName: table,
+          Key: { unitId },
+          ...(opts?.consistentRead === true && { ConsistentRead: true }),
+        }),
+      );
       return Item as UnitItem | undefined;
     },
 
@@ -1000,6 +1022,35 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         items: (Items ?? []) as UnitItem[],
         ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey }),
       };
+    },
+
+    async rewriteAcceptedAuthorities(unitId, expected, next) {
+      const values: Record<string, unknown> = { ':next': next };
+      const conditions = ['attribute_exists(unitId)'];
+      if (expected === null) {
+        conditions.push('attribute_not_exists(#aa)');
+      } else {
+        values[':expected'] = expected;
+        conditions.push('#aa = :expected');
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { unitId },
+            // Deliberately no updated_at (see the interface note).
+            UpdateExpression: 'SET #aa = :next',
+            ConditionExpression: conditions.join(' AND '),
+            ExpressionAttributeNames: { '#aa': 'accepted_authorities' },
+            ExpressionAttributeValues: values,
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return 'skipped';
+        throw err;
+      }
+      log.info({ unitId, members: next.length }, 'unit accepted authorities rewritten');
+      return 'written';
     },
   };
 }

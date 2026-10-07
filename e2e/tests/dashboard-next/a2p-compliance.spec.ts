@@ -8,6 +8,7 @@ import {
   APP_NUMBER,
 } from '../../fixtures/fakeTwilio.js';
 import { callTimeline, uniqueVoicePhone, verifyCell } from '../../fixtures/voiceSetup.js';
+import { addOrg } from '../../fixtures/orgFixture.js';
 import { expectTodayReady } from '../../support/today.js';
 
 // A2P / SMS compliance (design §8) — end-to-end coverage of the front-of-lifecycle
@@ -452,7 +453,11 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
     await devLogin(page);
     const stamp = `${Date.now()}`.slice(-6);
     // Unique housing authority so this broadcast's audience is EXACTLY our two tenants.
-    const authority = `a2pfence_${stamp}`;
+    // Every housingAuthority write is checked against the organization list (spec
+    // D5), so the run-unique name is ADDED first; the PATCH, the draft's filter and
+    // the filter-resolved send's re-check (D7) then all see an exact list name.
+    const authority = `A2P Fence Authority ${stamp}`;
+    await addOrg(page.request, { kind: 'housing_authority', name: authority });
     const consented = await createContact(page.request, { firstName: `FenceYes${stamp}`, voucherSize: 2 });
     const noConsent = await createContact(page.request, { firstName: `FenceNo${stamp}`, voucherSize: 2 });
     await registerParty(request, { label: consented.firstName, role: 'tenant', number: consented.phone });

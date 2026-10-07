@@ -366,7 +366,9 @@ describe('route registry completeness', () => {
       .map((path) => path.startsWith('/') || path === '*' ? path : `/${path}`);
     const indexPath = appSource.includes('<Route index element={<Today />} />') ? ['/'] : [];
     const settingsChildren = relative
-      .filter((path) => ['/team', '/templates', '/notifications', '/voice', '/system', '/ai-runs', '/numbers'].includes(path))
+      .filter((path) =>
+        ['/team', '/templates', '/notifications', '/voice', '/system', '/ai-runs', '/numbers', '/organizations'].includes(path),
+      )
       .map((path) => `/settings${path}`);
     const rawPaths = [...relative.filter((path) => !settingsChildren.some((child) => child.endsWith(path))), ...settingsChildren, ...indexPath];
     // Routes the page profiler deliberately does not measure. `/quick-reply/:callId`
@@ -380,6 +382,9 @@ describe('route registry completeness', () => {
       '/quick-reply/:callId',
       // A new list view, not yet a profiler surface (issue perf-pages-tours-past-surface).
       '/tours/past',
+      // A new Settings tab, not yet a profiler surface
+      // (issue perf-pages-settings-organizations-surface).
+      '/settings/organizations',
       // The All tours view, not yet a profiler surface either (the same issue).
       '/tours/all',
       '/settings',

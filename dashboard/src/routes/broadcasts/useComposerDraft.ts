@@ -42,6 +42,11 @@ export interface ComposerDraftInput {
    *  keep the stays-in-the-list behavior. A delete racing a just-sent broadcast
    *  is harmless: the DELETE route is draft-guarded (409, no side effects). */
   disposable?: boolean;
+  /** Called when a (re)create is refused 422 org_not_on_list - the picked
+   *  housing authority left the list (spec 2026-10-06 D7). The composer clears
+   *  the pick and owns the message, so this draft is NOT marked stale: the
+   *  cleared filter either matches the current draft again or recreates it. */
+  onOrgNotOnList?: () => void;
 }
 
 export interface ComposerDraftState {
@@ -62,6 +67,15 @@ export interface ComposerDraftState {
    *  matches the on-screen audience/message — Preview/Send must stay disabled
    *  (don't act on a stale draft) until a fresh create succeeds. */
   stale: boolean;
+  /** The material key of the inputs on screen now (unit, message, filter,
+   *  seeds) - what a draft made now would be made for. */
+  key: string;
+  /** The material key the current draft was made for: null with no draft,
+   *  an adopted one, or no message. `draftKey === key` is "the current draft
+   *  is the one on screen", from the very render a change lands in - before
+   *  any recreate starts (code review R3-FE-1: a Preview's result belongs to
+   *  the draft it previewed). */
+  draftKey: string | null;
   /** Adopt an externally-known draft id (resuming a draft row) WITHOUT creating
    *  one — subsequent material edits still recreate + clean up as usual. */
   adoptDraftId: (id: string) => void;
@@ -93,6 +107,8 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
   const [flyerUrl, setFlyerUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
+  // lastKeyRef's twin for rendering: the key the current draft was made for.
+  const [draftKey, setDraftKey] = useState<string | null>(null);
 
   // The currently-live draft id, read inside async callbacks without re-binding.
   const currentIdRef = useRef<string | null>(null);
@@ -101,10 +117,18 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
   // attempt is discarded (it must not adopt a stale id as current).
   const genRef = useRef(0);
   const lastKeyRef = useRef<string | null>(null);
+  // The latest refusal callback, read inside the async create without
+  // re-binding the effect. Updated in an effect, never during render (the
+  // react-hooks refs rule; the disposableRef write below predates it).
+  const onOrgNotOnListRef = useRef(input.onOrgNotOnList);
+  useEffect(() => {
+    onOrgNotOnListRef.current = input.onOrgNotOnList;
+  }, [input.onOrgNotOnList]);
 
   const adoptDraftId = useCallback((id: string) => {
     currentIdRef.current = id;
     setDraftId(id);
+    setDraftKey(null); // what it was made for is not known here
   }, []);
 
   const key = materialKey(input);
@@ -137,6 +161,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
       if (!clearedRef.current) {
         clearedRef.current = true;
         lastKeyRef.current = null;
+        setDraftKey(null);
         setReachCount(undefined);
         setTruncated(false);
         setFlyerUrl(null);
@@ -146,8 +171,18 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
       return;
     }
     clearedRef.current = false;
-    // Same material inputs as the live draft → nothing to do.
-    if (lastKeyRef.current === key) return;
+    // Same material inputs as the live draft: no draft to make. A change
+    // undone before its own draft was made - inside the debounce, or after its
+    // recreate failed - lands here too. Its cleanup already cleared the timer
+    // and discarded any create in flight (genRef), so the screen matches the
+    // live draft again: nothing is pending, nothing is stale, and no error
+    // stands (code review R4-2).
+    if (lastKeyRef.current === key) {
+      setReachPending(false);
+      setStale(false);
+      setError(null);
+      return;
+    }
 
     if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
     setReachPending(true);
@@ -174,6 +209,7 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
           lastKeyRef.current = key;
           currentIdRef.current = created.broadcastId;
           setDraftId(created.broadcastId);
+          setDraftKey(key);
           setReachCount(created.estimatedCount);
           setTruncated(created.truncated);
           setFlyerUrl(created.flyerUrl ?? null);
@@ -187,6 +223,18 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
         .catch((err: unknown) => {
           if (gen !== genRef.current) return;
           setReachPending(false);
+          const onOrgNotOnList = onOrgNotOnListRef.current;
+          if (
+            onOrgNotOnList !== undefined &&
+            err instanceof ApiError &&
+            err.status === 422 &&
+            err.code === 'org_not_on_list'
+          ) {
+            // Spec 2026-10-06 D7: the composer clears the pick and says so.
+            setError(null);
+            onOrgNotOnList();
+            return;
+          }
           // The recreate FAILED, so currentIdRef still points at the PRIOR draft
           // whose body/filter no longer match the screen — mark stale so Preview/
           // Send stay disabled until a fresh create succeeds.
@@ -217,6 +265,8 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
     flyerUrl,
     error,
     stale,
+    key,
+    draftKey,
     adoptDraftId,
   };
 }

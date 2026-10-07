@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { expectTodayReady } from '../../support/today.js';
+import { pickOrgName } from '../../scenarios/steps.js';
 
 // Contact-detail actions (:5174) against the real backend. Proves the hardened
 // header + file pane actually FUNCTION end-to-end: the ⋯ menu, the Call menu's
@@ -84,14 +85,23 @@ test.describe('Contact detail — header actions + edit', () => {
   }) => {
     await devLogin(page);
     await page.goto(`${NEXT}/contacts/${TENANT}`);
-    // The seeded housingAuthority now DISPLAYS (was blank under the camel/snake split).
-    // It appears in BOTH the header subtitle and the Details panel, so scope to the
-    // first match (intent: the value displays at all).
-    await expect(page.getByText('atlanta_housing').first()).toBeVisible();
+    // The seeded housingAuthority DISPLAYS, as its organization-list name (the lean
+    // world speaks list names since clean-org-names). It appears in BOTH the header
+    // subtitle and the Details panel, so scope to the first match (intent: the
+    // value displays at all).
+    await expect(page.getByText('Atlanta Housing Authority').first()).toBeVisible();
 
-    // Edit the housing authority + fill a structured address.
+    // Edit the housing authority through its picker - typing the alternate
+    // spelling HADC finds DeKalb County Housing Authority (spec D6) - and fill a
+    // structured address.
     await page.getByRole('button', { name: 'Edit contact details' }).click();
-    await page.getByLabel('Housing authority').fill('dekalb_housing');
+    await pickOrgName(
+      page,
+      page.getByRole('dialog', { name: /Edit contact/i }),
+      'Housing authority',
+      'DeKalb County Housing Authority',
+      { query: 'HADC', replacing: 'Atlanta Housing Authority' },
+    );
     await page.getByLabel('Street address').fill('123 Peachtree St');
     await page.getByLabel('City', { exact: true }).fill('Atlanta');
     await page.getByLabel('State', { exact: true }).fill('GA');
@@ -101,18 +111,24 @@ test.describe('Contact detail — header actions + edit', () => {
 
     // Persisted across a reload (housingAuthority re-indexes; address is structured).
     await page.reload();
-    await expect(page.getByText('dekalb_housing').first()).toBeVisible();
+    await expect(page.getByText('DeKalb County Housing Authority').first()).toBeVisible();
     await expect(page.getByText(/123 Peachtree St/).first()).toBeVisible();
 
     // Cleanup — restore the seeded authority + clear the address.
     await page.getByRole('button', { name: 'Edit contact details' }).click();
-    await page.getByLabel('Housing authority').fill('atlanta_housing');
+    await pickOrgName(
+      page,
+      page.getByRole('dialog', { name: /Edit contact/i }),
+      'Housing authority',
+      'Atlanta Housing Authority',
+      { replacing: 'DeKalb County Housing Authority' },
+    );
     await page.getByLabel('Street address').fill('');
     await page.getByLabel('City', { exact: true }).fill('');
     await page.getByLabel('State', { exact: true }).fill('');
     await page.getByLabel('ZIP', { exact: true }).fill('');
     await page.getByRole('button', { name: 'Save', exact: true }).click();
-    await expect(page.getByText('dekalb_housing')).toHaveCount(0);
+    await expect(page.getByText('DeKalb County Housing Authority')).toHaveCount(0);
   });
 
   test('landlord contact carries notes only — preference fields moved to the property', async ({

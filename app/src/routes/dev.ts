@@ -29,7 +29,7 @@ import { resetLocalData } from '../lib/devReset.js';
 import { resetPerformanceData } from '../lib/performanceSeed.js';
 import { resolvePerformanceSeedConfig, type PerformanceSeedInput } from '../lib/seed/performance.js';
 import { createMessagingAdapter } from '../adapters/messaging.js';
-import { createContactsRepo } from '../repos/contactsRepo.js';
+import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
   createConversationsRepo,
   type ConversationItem,
@@ -53,7 +53,7 @@ import {
   type PlacementDeadlineType,
 } from '../repos/placementsRepo.js';
 import { createPlacementDeadlinesRepo } from '../repos/placementDeadlinesRepo.js';
-import { createUnitsRepo } from '../repos/unitsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { runDuePlacementNudges, type RunDuePlacementNudgesDeps } from '../jobs/placementNudges.js';
 import {
   runDuePendingRosterActions,
@@ -68,6 +68,7 @@ import { createExtractionRepo } from '../repos/extractionRepo.js';
 import { createAiRunsRepo } from '../repos/aiRunsRepo.js';
 import { createAuditRepo } from '../repos/auditRepo.js';
 import { createExtractionDriver } from '../adapters/extraction.js';
+import { createOrgListRepo } from '../repos/orgListRepo.js';
 import { appEvents } from '../lib/events.js';
 import { runDueExtractions, type ExtractionJobDeps } from '../jobs/extraction.js';
 import {
@@ -138,6 +139,9 @@ export interface DevRouterDeps {
   groupStaleness?: GroupSendStalenessService;
   performanceReseed?: typeof resetPerformanceData;
   performanceReseedRequestAllowed?: (remoteAddress: string | null) => boolean;
+  /** Repos for POST /__dev/org-fixture - injected in tests (the world fakes);
+   *  default to the real contacts and units repos. */
+  orgFixtureRepos?: { contactsRepo: ContactsRepo; unitsRepo: UnitsRepo };
 }
 
 export function isLoopbackRemoteAddress(remoteAddress: string | null): boolean {
@@ -709,6 +713,10 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       const contactsRepo = createContactsRepo({ logger: log });
       extractionTickDeps = {
         repo: extractionRepo,
+        // The organization list (spec 2026-10-06 D8): one consistent read per
+        // run, like the worker. Reusing one repo INSTANCE is fine - D1 forbids
+        // caching the LIST, and get() reads it every time.
+        orgListRepo: createOrgListRepo({ logger: log }),
         // AI run log: the dev tick records runs too, which is what makes
         // /settings/ai-runs exercisable in e2e and local development.
         aiRuns: createAiRunsRepo({ logger: log }),
@@ -1178,6 +1186,74 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       { placementId, deadlineType: armType ?? null, backdatedStage: stageEnteredAt !== undefined },
       'dev deadline-fixture applied',
     );
+    res.status(200).json({ ok: true });
+  });
+
+  // POST /__dev/org-fixture { contactId | unitId, field, value } - plant a RAW
+  // organization value on a record the e2e spec itself created, BYPASSING the
+  // org-list write check (clean-org-names spec section 7, plan 3.12). It is
+  // how a spec puts a run-unique "Not on the list" value in front of the
+  // Settings page without seeding junk into the shared lean world (one spec's
+  // settle action must never leak into another spec).
+  //   contact: SET `housingAuthority` | `agency` to the value
+  //   unit:    APPEND the value to `accepted_authorities` (never twice)
+  // The value must be non-empty: `housingAuthority` is the byHousingAuthority
+  // GSI key and can never hold ''. Same triple-gate/hermetic-LOCAL-only
+  // construction as the fixtures above (the dev router only mounts behind
+  // lib/devRoutes.ts, structurally absent in every deployed env); json() is
+  // scoped to this route. Logs ids and the field only - never the value.
+  let orgFixtureRepos = deps.orgFixtureRepos;
+  const orgFixtureDeps = (): { contactsRepo: ContactsRepo; unitsRepo: UnitsRepo } => {
+    orgFixtureRepos ??= {
+      contactsRepo: createContactsRepo({ logger: log }),
+      unitsRepo: createUnitsRepo({ logger: log }),
+    };
+    return orgFixtureRepos;
+  };
+  router.post('/__dev/org-fixture', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { contactId?: unknown; unitId?: unknown; field?: unknown; value?: unknown };
+    const contactId = typeof body.contactId === 'string' && body.contactId !== '' ? body.contactId : undefined;
+    const unitId = typeof body.unitId === 'string' && body.unitId !== '' ? body.unitId : undefined;
+    if ((contactId === undefined) === (unitId === undefined)) {
+      res.status(400).json({ error: 'exactly one of contactId or unitId is required' });
+      return;
+    }
+    if (typeof body.value !== 'string' || body.value.trim() === '') {
+      res.status(400).json({ error: 'value must be a non-empty string' });
+      return;
+    }
+    const value = body.value;
+    const { contactsRepo, unitsRepo } = orgFixtureDeps();
+    if (contactId !== undefined) {
+      const field = body.field;
+      if (field !== 'housingAuthority' && field !== 'agency') {
+        res.status(400).json({ error: 'field must be housingAuthority or agency for a contact' });
+        return;
+      }
+      if ((await contactsRepo.getById(contactId)) === undefined) {
+        res.status(404).json({ error: 'contact_not_found' });
+        return;
+      }
+      await contactsRepo.update(contactId, { [field]: value });
+      log.info({ contactId, field }, 'dev org-fixture applied');
+      res.status(200).json({ ok: true });
+      return;
+    }
+    if (body.field !== 'accepted_authorities') {
+      res.status(400).json({ error: 'field must be accepted_authorities for a unit' });
+      return;
+    }
+    const id = unitId as string;
+    const unit = await unitsRepo.getById(id);
+    if (unit === undefined) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    const current = unit.accepted_authorities ?? [];
+    if (!current.includes(value)) {
+      await unitsRepo.update(id, { accepted_authorities: [...current, value] });
+    }
+    log.info({ unitId: id, field: 'accepted_authorities' }, 'dev org-fixture applied');
     res.status(200).json({ ok: true });
   });
 

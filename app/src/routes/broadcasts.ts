@@ -15,6 +15,16 @@
 // ALWAYS excluded. The send fans out through the SHARED A2P throttle (the
 // broadcast.send job + worker a2pBucket).
 //
+// Organization names (spec 2026-10-06 D5): POST answers 422 org_not_on_list
+// (field `audience_filter`) when audience_filter.housing_authority is not a
+// housing authority on the stored org list; a unique spelling is stored as the
+// entry's exact name, and the 201 echoes the stored audience_filter.
+// Preview of a DRAFT and the filter-resolving send (no recipientContactIds, not
+// seeds_only) re-check the STORED value (D7): it must be EXACTLY a listed name,
+// else the same 422, where a stored spelling names its entry as the one
+// candidate. The curated send, seeds_only drafts and non-draft previews are
+// never re-checked; nothing rewrites a broadcast.
+//
 // PII (doc §9): the preview RESPONSE carries phones (authed/internal — the
 // operator needs to see who's in the audience), but LOG LINES never do — IDs/
 // counts only. Bodies/templates are never logged.
@@ -63,6 +73,8 @@ import {
   type ClassifiedRecipient,
 } from '../services/shareRecipientState.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
+import { checkScalarWrite, isOnListFor, KINDS_FOR_FIELD, type OrgNotOnList } from '../lib/orgNames.js';
+import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
 
 /** The lifecycle statuses ?status= may filter on (byStatus GSI partition). */
 const BROADCAST_STATUSES: ReadonlySet<string> = new Set<BroadcastStatus>([
@@ -95,6 +107,12 @@ export interface BroadcastsRouterDeps {
   sendAttemptsRepo?: SendAttemptsRepo;
   auditRepo?: AuditRepo;
   audienceResolutionService?: AudienceResolutionService;
+  /**
+   * Organization names (spec 2026-10-06): the housing authority filter is
+   * checked against the stored org list. Built ONCE in createApiRouter and
+   * threaded down.
+   */
+  orgNamesService?: OrgNamesService;
   events?: EventBus;
 }
 
@@ -395,6 +413,7 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const resolveAudience =
     deps.audienceResolutionService ?? createAudienceResolutionService({ logger: deps.logger });
+  const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
   // NOTE: broadcast.updated SSE events are emitted from the broadcast.send job
   // (on completion) and the delivery-callback rollup — NOT this router — so the
   // `events` dep is accepted for API symmetry but not used here.
@@ -432,6 +451,39 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       });
     }
     return { contacts: resolved, unresolved };
+  }
+
+  /**
+   * Spec 2026-10-06 D7: the STORED housing authority filter of a draft is
+   * re-checked before it is resolved - at preview of a DRAFT and in the send
+   * branch that re-resolves the filter. The value must be EXACTLY the name of
+   * a housing authority entry (D3); nothing rewrites a broadcast, so a stored
+   * spelling or slug that resolves to one entry is still refused, naming that
+   * entry as the one candidate so the composer can offer it (ruling R2
+   * decision 2). Returns the 422 body, or undefined when the filter names no
+   * housing authority or names one exactly. One list read, and only when a
+   * housing authority is present.
+   */
+  async function storedFilterRefusal(
+    filter: AudienceFilter | undefined,
+  ): Promise<OrgNotOnList | undefined> {
+    const text = filter?.housing_authority;
+    if (typeof text !== 'string' || text.length === 0) return undefined;
+    const { entries } = await orgNames.read();
+    const kinds = KINDS_FOR_FIELD.audience_filter;
+    if (isOnListFor(entries, text, kinds)) return undefined;
+    const check = checkScalarWrite(entries, 'audience_filter', text, undefined);
+    if (!check.ok) return check.error;
+    // The one entry the stored text resolves to (a spelling or slug of it).
+    const resolvedName = check.value;
+    const match = entries.find((e) => kinds.includes(e.kind) && e.name === resolvedName);
+    return {
+      error: 'org_not_on_list',
+      field: 'audience_filter',
+      text,
+      candidates: match === undefined ? [] : [{ orgId: match.orgId, kind: match.kind, name: match.name }],
+      close: [],
+    };
   }
 
   const router = Router();
@@ -500,6 +552,23 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     const audienceMode: BroadcastAudienceMode =
       seedContactIds !== undefined && !rawFilterProvided ? 'seeds_only' : 'filter';
 
+    // ORGANIZATION NAMES (spec 2026-10-06 D5): a housing authority filter must
+    // name a housing authority on the stored org list. Checked AFTER every 400
+    // shape check and the unit 404 above, and BEFORE the estimate, so the
+    // estimate and the stored row both use the entry's exact name (a unique
+    // spelling is stored as the name). Anything else is a 422 (field
+    // `audience_filter`) with no row and no audit. A seeds_only draft parsed
+    // `{}` and never carries a housing authority.
+    if (filter.housing_authority !== undefined) {
+      const check = await orgNames.checkScalar('audience_filter', filter.housing_authority, undefined);
+      if (!check.ok) {
+        log.info({ actor }, 'broadcast draft refused: housing authority filter not on the list');
+        res.status(422).json(check.error);
+        return;
+      }
+      if (check.value !== null) filter.housing_authority = check.value;
+    }
+
     // Estimate the audience now (save-for-later shows the operator the reach).
     const seeds =
       seedContactIds !== undefined
@@ -545,6 +614,9 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       broadcastId: created.broadcastId,
       status: 'draft',
       estimatedCount: estimatedAudience,
+      // Spec 2026-10-06 D5 (ruling R2 decision 5): echo the STORED filter, so a
+      // caller that sent a spelling sees the list name it was stored as.
+      audience_filter: created.audience_filter,
       // FIX 3+4: surface whether the estimate was truncated (page cap hit) so
       // the operator knows the draft's reach is incomplete before sending.
       truncated,
@@ -567,6 +639,18 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     if (!broadcast) {
       res.status(404).json({ error: 'broadcast_not_found' });
       return;
+    }
+    // Spec 2026-10-06 D7: a DRAFT's stored housing authority filter is
+    // re-checked before it is resolved (storedFilterRefusal). A sent, sending
+    // or failed share keeps its historical filter and previews as before
+    // (ruling R2 decision 3), and a seeds_only draft never resolves its filter.
+    if (broadcast.status === 'draft' && broadcast.audience_mode !== 'seeds_only') {
+      const refusal = await storedFilterRefusal(broadcast.audience_filter);
+      if (refusal !== undefined) {
+        log.info({ broadcastId }, 'broadcast preview refused: stored housing authority filter not on the list');
+        res.status(422).json(refusal);
+        return;
+      }
     }
     // Seeded recipients attached to the draft: resolve them (same fences as the
     // send path), then UNION into the previewed candidate list. A seeds_only
@@ -787,6 +871,17 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       // the draft estimate may be stale). Build the recipients map keyed by
       // contactKey (contactId else phone#<E164>, the shared convention),
       // all 'queued'.
+      // Spec 2026-10-06 D7: re-check the stored housing authority filter HERE,
+      // inside the one branch that re-resolves it - an explicit selection (a)
+      // and a seeds_only draft (b) never read the filter, so they are never
+      // refused for it. A refusal leaves the draft a draft: nothing is marked
+      // sending and nothing is enqueued.
+      const refusal = await storedFilterRefusal(broadcast.audience_filter);
+      if (refusal !== undefined) {
+        log.info({ broadcastId }, 'broadcast send refused: stored housing authority filter not on the list');
+        res.status(422).json(refusal);
+        return;
+      }
       const audience = await resolveAudience(broadcast.audience_filter);
       if (audience.count === 0) {
         // Empty audience: refuse clearly (no point marking a broadcast sending

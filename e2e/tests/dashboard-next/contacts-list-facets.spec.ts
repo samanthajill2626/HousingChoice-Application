@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { Scenario, freshTenant } from '../../scenarios/steps.js';
+import { addOrg } from '../../fixtures/orgFixture.js';
 
 // Tenant facets on the Contacts list (spec sections 5/6/10 of
 // docs/superpowers/specs/2026-08-06-tenant-list-visibility-design.md). Proves the
@@ -9,11 +10,13 @@ import { Scenario, freshTenant } from '../../scenarios/steps.js';
 // from the URL.
 //
 // Self-contained: the lean seed world holds two tenants (Tasha, 2-BR /
-// atlanta_housing, and Dario, 1-BR / atlanta_housing), neither of which can make
-// the DCA/Fulton or 3-BR facets discriminate - the spec creates its own three
-// tenants with run-unique names. DCA and Fulton County are used by no other
-// spec, so the "exactly one row" assertion is stable in a full suite run (other
-// specs' phoneless tenants land in the Not-recorded buckets).
+// Atlanta Housing Authority, and Dario, 1-BR / Atlanta Housing Authority),
+// neither of which can make these facets discriminate - the spec creates its
+// own three tenants with run-unique names, under two RUN-UNIQUE housing
+// authorities it first adds to the organization list (the tenant form can only
+// pick list names - spec D5/D6). No other spec holds those names, so the
+// "exactly one row" assertion is stable in a full suite run (other specs'
+// phoneless tenants land in the Not-recorded buckets).
 //
 // Chip accessible names carry a LIVE COUNT ("2-BR (3)"), and the count moves with
 // whatever earlier specs left in the lane - so every chip locator here is a REGEX
@@ -40,15 +43,22 @@ test('tenant facets narrow the list, state the row facts, and survive a reload',
 }) => {
   test.slow(); // three tenants, each a create dialog PLUS an edit-dialog round trip.
   const flow = new Scenario(page, request);
-  const match = freshTenant('FacetMatch'); // 2-BR / DCA  - the single survivor
-  const otherSize = freshTenant('FacetSize'); // 3-BR / DCA  - excluded by the voucher facet
-  const otherAuth = freshTenant('FacetAuth'); // 2-BR / Fulton County - excluded by the authority facet
+  const stamp = `${Date.now()}`.slice(-6);
+  // Letters, digits and spaces only, so each name is also a literal RegExp source.
+  const authority = `Facet Authority ${stamp}`;
+  const otherAuthority = `Facet Other Authority ${stamp}`;
+  const match = freshTenant('FacetMatch'); // 2-BR / authority - the single survivor
+  const otherSize = freshTenant('FacetSize'); // 3-BR / authority - excluded by the voucher facet
+  const otherAuth = freshTenant('FacetAuth'); // 2-BR / otherAuthority - excluded by the authority facet
 
   await flow.login();
+  for (const name of [authority, otherAuthority]) {
+    await addOrg(page.request, { kind: 'housing_authority', name });
+  }
   for (const t of [
-    { who: match, voucherSize: 2, housingAuthority: 'DCA' },
-    { who: otherSize, voucherSize: 3, housingAuthority: 'DCA' },
-    { who: otherAuth, voucherSize: 2, housingAuthority: 'Fulton County' },
+    { who: match, voucherSize: 2, housingAuthority: authority },
+    { who: otherSize, voucherSize: 3, housingAuthority: authority },
+    { who: otherAuth, voucherSize: 2, housingAuthority: otherAuthority },
   ]) {
     await flow.teamCreatesTenant({
       firstName: t.who.firstName,
@@ -70,30 +80,33 @@ test('tenant facets narrow the list, state the row facts, and survive a reload',
   const voucherFacet = page.getByRole('group', { name: 'Voucher size' });
   const authorityFacet = page.getByRole('group', { name: 'Housing authority' });
   const twoBr = voucherFacet.getByRole('button', { name: /^2-BR \(/ });
-  const dca = authorityFacet.getByRole('button', { name: /^DCA \(/ });
+  const authorityChip = authorityFacet.getByRole('button', { name: new RegExp(`^${authority} \\(`) });
 
   await twoBr.click();
-  await dca.click();
+  await authorityChip.click();
 
-  // AND across facets: only the 2-BR tenant whose authority is DCA survives.
+  // AND across facets: only the 2-BR tenant under `authority` survives.
   await expect(rows).toHaveCount(1);
   await expect(rows.filter({ hasText: match.firstName })).toHaveCount(1);
 
   // The row states the same two facts, exact (never bucketed - "2 BR", not
   // "2-BR"), joined by the middot, with the full value on `title`.
-  const facts = `2 BR${SEP}DCA`;
+  const facts = `2 BR${SEP}${authority}`;
   const row = rows.first();
   await expect(row.getByText(facts, { exact: true })).toBeVisible();
   await expect(row.getByTitle(facts)).toBeVisible();
 
-  // The URL is the only state carrier (repeated params, normalized authority key).
+  // The URL is the only state carrier (repeated params; the normalized
+  // authority key is lowercased with whitespace collapsed, and URLSearchParams
+  // writes each space as '+').
   await expect(page).toHaveURL(/[?&]voucher=2(&|$)/);
-  await expect(page).toHaveURL(/[?&]ha=dca(&|$)/);
+  const haParam = new URLSearchParams({ ha: authority.toLowerCase() }).toString();
+  await expect(page).toHaveURL(new RegExp(`[?&]${haParam.replace(/\+/g, '\\+')}(&|$)`));
 
   await page.reload();
 
   await expect(rows).toHaveCount(1);
   await expect(rows.filter({ hasText: match.firstName })).toHaveCount(1);
   await expect(twoBr).toHaveAttribute('aria-pressed', 'true');
-  await expect(dca).toHaveAttribute('aria-pressed', 'true');
+  await expect(authorityChip).toHaveAttribute('aria-pressed', 'true');
 });

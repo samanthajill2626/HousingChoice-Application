@@ -5,26 +5,63 @@
 import { useState } from 'react';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AudienceFilter } from '../../api/index.js';
 import { AudienceFilters } from './AudienceFilters.js';
+
+// The picker's list (spec 2026-10-06 D7) - the hook is mocked so each test
+// picks its own list state.
+const useOrgList = vi.fn();
+vi.mock('../orgs/useOrgList.js', () => ({ useOrgList: () => useOrgList() }));
+
+const ATLANTA = {
+  orgId: 'o-atl',
+  kind: 'housing_authority',
+  name: 'Atlanta Housing Authority',
+  spellings: ['AHA'],
+  createdAt: '2026-10-06T00:00:00.000Z',
+  createdBy: 'system',
+  updatedAt: '2026-10-06T00:00:00.000Z',
+  updatedBy: 'system',
+};
+const LOADED = {
+  entries: [ATLANTA],
+  version: 1,
+  lastRewrite: undefined,
+  loading: false,
+  error: false,
+  reload: vi.fn(),
+};
+
+beforeEach(() => {
+  useOrgList.mockReset();
+  useOrgList.mockReturnValue(LOADED);
+});
 
 /** Controlled harness — mirrors the composer owning the filter state so chip
  *  toggles round-trip through onChange. */
 function Harness({
+  authorityError,
   propertyBeds,
   reachCount,
   reachPending = false,
   truncated = false,
   onChangeSpy,
+  onAuthorityTextChange,
+  initialFilter = { contact_type: 'tenant' },
+  disabled,
 }: {
   propertyBeds?: number;
   reachCount?: number;
   reachPending?: boolean;
   truncated?: boolean;
   onChangeSpy?: (f: AudienceFilter) => void;
+  authorityError?: string;
+  onAuthorityTextChange?: (text: string) => void;
+  initialFilter?: AudienceFilter;
+  disabled?: boolean;
 }): React.JSX.Element {
-  const [filter, setFilter] = useState<AudienceFilter>({ contact_type: 'tenant' });
+  const [filter, setFilter] = useState<AudienceFilter>(initialFilter);
   return (
     <AudienceFilters
       filter={filter}
@@ -32,10 +69,13 @@ function Harness({
         onChangeSpy?.(next);
         setFilter(next);
       }}
+      {...(disabled !== undefined && { disabled })}
       {...(propertyBeds !== undefined && { propertyBeds })}
       {...(reachCount !== undefined && { reachCount })}
       reachPending={reachPending}
       truncated={truncated}
+      {...(authorityError !== undefined && { authorityError })}
+      {...(onAuthorityTextChange !== undefined && { onAuthorityTextChange })}
     />
   );
 }
@@ -71,12 +111,100 @@ describe('AudienceFilters — voucher size pre-fill + override', () => {
     expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant' });
   });
 
-  it('edits the housing authority', async () => {
+  it('sets the housing authority only by picking a list name (names and spellings match)', async () => {
     const u = userEvent.setup();
     const onChangeSpy = vi.fn();
     render(<Harness onChangeSpy={onChangeSpy} />);
-    await u.type(screen.getByLabelText('Housing authority'), 'A');
-    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', housing_authority: 'A' });
+    await u.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'AHA');
+    // Typing never commits (each filter change recreates the draft).
+    expect(onChangeSpy).not.toHaveBeenCalled();
+    await u.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
+    expect(onChangeSpy).toHaveBeenLastCalledWith({
+      contact_type: 'tenant',
+      housing_authority: 'Atlanta Housing Authority',
+    });
+    await u.click(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' }));
+    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant' });
+  });
+
+  it('a field left holding typed text says it is no filter - even a full list name (R2-FE-6)', async () => {
+    const u = userEvent.setup();
+    render(<Harness />);
+    const box = screen.getByRole('combobox', { name: 'Housing authority' });
+    await u.type(box, 'Atlanta Housing Authority');
+    await u.tab();
+    expect(box).toHaveAccessibleDescription('Not used as a filter - pick a name from the list, or clear the text.');
+  });
+
+  it('never offers to add a name (spec D7)', async () => {
+    const u = userEvent.setup();
+    render(<Harness />);
+    await u.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'Nowhere Board');
+    expect(screen.queryByRole('option')).not.toBeInTheDocument();
+  });
+
+  it('a list that fails to load says so and the filter cannot be set; voucher size still works', async () => {
+    const u = userEvent.setup();
+    const onChangeSpy = vi.fn();
+    useOrgList.mockReturnValue({ ...LOADED, entries: [], version: null, error: true });
+    render(<Harness onChangeSpy={onChangeSpy} />);
+    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load housing authorities");
+    expect(screen.getByRole('combobox', { name: 'Housing authority' })).toBeDisabled();
+    await u.click(screen.getByRole('button', { name: '2-BR' }));
+    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', bedroomSize: 2 });
+  });
+
+  it('tells the composer what is typed in the picker - and nothing once a name is picked (R2-FE-3)', async () => {
+    const u = userEvent.setup();
+    const onAuthorityTextChange = vi.fn();
+    render(<Harness onAuthorityTextChange={onAuthorityTextChange} />);
+    await u.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'AHA');
+    expect(onAuthorityTextChange).toHaveBeenLastCalledWith('AHA');
+    await u.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
+    expect(onAuthorityTextChange).toHaveBeenLastCalledWith('');
+  });
+
+  it('a list that fails to load marks no picked filter "Not on the list" - nothing is known about it (R3-FE-5)', () => {
+    useOrgList.mockReturnValue({ ...LOADED, entries: [], version: null, error: true });
+    render(<Harness initialFilter={{ contact_type: 'tenant', housing_authority: 'Atlanta Housing Authority' }} />);
+    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load housing authorities");
+    expect(screen.getByText('Atlanta Housing Authority')).toBeInTheDocument();
+    expect(screen.queryByText('Not on the list')).not.toBeInTheDocument();
+  });
+
+  it('a list that fails while text is typed keeps the field clearable - that text holds Preview back', async () => {
+    const u = userEvent.setup();
+    const onAuthorityTextChange = vi.fn();
+    const { rerender } = render(<Harness onAuthorityTextChange={onAuthorityTextChange} />);
+    const box = screen.getByRole('combobox', { name: 'Housing authority' });
+    await u.type(box, 'Atl');
+    useOrgList.mockReturnValue({ ...LOADED, entries: [], version: null, error: true });
+    rerender(<Harness onAuthorityTextChange={onAuthorityTextChange} />);
+    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load housing authorities");
+    expect(box).toBeEnabled();
+    await u.clear(box);
+    expect(onAuthorityTextChange).toHaveBeenLastCalledWith('');
+    expect(box).toBeDisabled();
+  });
+
+  it('disabled (a preview is loading): no voucher chip, pick or chip removal can change the audience (R3-FE-1)', () => {
+    render(
+      <Harness
+        disabled
+        initialFilter={{ contact_type: 'tenant', bedroomSize: 2, housing_authority: 'Atlanta Housing Authority' }}
+      />,
+    );
+    const chips = screen.getByRole('group', { name: 'Voucher size' });
+    for (const chip of Array.from(chips.querySelectorAll('button'))) expect(chip).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'Housing authority' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeDisabled();
+  });
+
+  it("shows the composer's message under the picker", () => {
+    render(<Harness authorityError="That housing authority is no longer on the list - pick it again" />);
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'That housing authority is no longer on the list - pick it again',
+    );
   });
 });
 

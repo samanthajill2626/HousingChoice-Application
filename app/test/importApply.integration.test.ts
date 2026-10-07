@@ -6,7 +6,7 @@
 //   - a re-run does NOT revert work done in the app after the import
 //   - `drop` in the workbook excludes a person and their traffic
 //   - a STOP sender imports suppressed
-//   - an applied unit records its authorities as a canonical list
+//   - an applied unit records its authorities as exact org-list names (spec D9)
 //
 // Self-skipping like the other integration suites: without DynamoDB Local at
 // DYNAMODB_ENDPOINT the suite is skipped so `npm test` stays green offline.
@@ -18,10 +18,11 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { normalizeAddress } from '../src/lib/import/addresses.js';
-import { housingAuthorityFor, runApply, splitReviewedName } from '../src/lib/import/apply.js';
+import { resolveImportedAuthority, runApply, splitReviewedName } from '../src/lib/import/apply.js';
 import { runPlan } from '../src/lib/import/plan.js';
 import { conversationIdFor1to1, conversationIdForGroup, contactIdForPhone, unitIdForAddress } from '../src/lib/import/ids.js';
 import { parseWorkbook } from '../src/lib/import/workbook.js';
+import { buildStartingEntries } from '../src/lib/orgStartingList.js';
 import { OUR_NUMBER, PHONES, writeFixture } from './importFixture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -44,6 +45,14 @@ if (!reachable) {
 }
 
 const TABLES = ['contacts', 'conversations', 'messages', 'units'] as const;
+
+/**
+ * The organization list the importer resolves against (spec D9): the
+ * starting list, passed explicitly where a test asserts org-name behavior
+ * (runApply's own default is the same list). No `settings` table needed.
+ */
+let orgIds = 0;
+const ORG_ENTRIES = buildStartingEntries('2026-10-06T00:00:00.000Z', () => `org-${(orgIds += 1)}`);
 
 describe.skipIf(!reachable)('import:apply', () => {
   const client = createDynamoClient({ endpoint });
@@ -184,45 +193,92 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(splitReviewedName('Ms.')).toEqual({ firstName: 'Ms.', lastName: '' });
   });
 
-  it('normalizes the Airtable program to one canonical spelling per authority', async () => {
-    // FREE FIELD (Cameron 2026-08-09), but consistently spelled: broadcast
-    // audience resolution does an exact hash match on the byHousingAuthority
-    // GSI, so two spellings of one authority are two audiences invisible to
-    // each other. Known variants collapse to one form; unknown values pass
-    // through verbatim instead of being dropped.
-    expect(housingAuthorityFor('Atlanta, aha, Atlanta housing')).toBe('Atlanta (AHA)');
-    expect(housingAuthorityFor('Jonesboro, JHA, Jonesboro housing')).toBe('Jonesboro (JHA)');
-    expect(housingAuthorityFor('Dekalb County Housing')).toBe('Dekalb County Housing');
-    expect(housingAuthorityFor('DCA, Department of Community Affairs')).toBe('DCA');
-    expect(housingAuthorityFor('Georgia Housing Voucher, GHV')).toBe(
-      'Georgia Housing Voucher (GHV)',
-    );
-    expect(housingAuthorityFor('HUD VASH')).toBe('HUD VASH');
-    expect(housingAuthorityFor('Hope Atlanta')).toBe('Hope Atlanta');
-    // Free field: an unknown value is WRITTEN (whitespace-collapsed), not lost.
-    expect(housingAuthorityFor('Some New Authority')).toBe('Some New Authority');
-    expect(housingAuthorityFor('  odd   spacing ')).toBe('odd spacing');
-    expect(housingAuthorityFor('')).toBeUndefined();
-    expect(housingAuthorityFor(undefined)).toBeUndefined();
+  it('resolves the Airtable program against the org list: names only, agencies to agency (spec D9)', async () => {
+    // Broadcast audience resolution is an exact hash match on the
+    // byHousingAuthority GSI, so the importer writes only exact LIST names.
+    // An agency named in the program column goes to `agency`; a value the
+    // list cannot place is not written (importOrgNames.test.ts covers the
+    // report).
+    const resolve = (raw: string | undefined) => resolveImportedAuthority(raw, ORG_ENTRIES);
+    expect(resolve('Atlanta, aha, Atlanta housing')).toEqual({ housingAuthority: 'Atlanta Housing Authority' });
+    expect(resolve('Jonesboro, JHA, Jonesboro housing')).toEqual({ housingAuthority: 'Jonesboro Housing Authority' });
+    expect(resolve('Dekalb County Housing')).toEqual({ housingAuthority: 'DeKalb County Housing Authority' });
+    expect(resolve('DCA, Department of Community Affairs')).toEqual({
+      housingAuthority: 'Georgia Department of Community Affairs',
+    });
+    expect(resolve('Georgia Housing Voucher, GHV')).toEqual({
+      housingAuthority: 'Georgia Housing Voucher Program (DBHDD)',
+    });
+    expect(resolve('HUD VASH')).toEqual({ agency: 'HUD-Veterans Affairs Supportive Housing (HUD-VASH)' });
+    expect(resolve('Hope Atlanta')).toEqual({ agency: 'HOPE Atlanta' });
+    expect(resolve('Some New Authority')).toEqual({
+      notWritten: { value: 'Some New Authority', resolution: 'unknown' },
+    });
+    expect(resolve('  odd   spacing ')).toEqual({ notWritten: { value: 'odd spacing', resolution: 'unknown' } });
+    expect(resolve('')).toEqual({});
+    expect(resolve(undefined)).toEqual({});
 
-    // And it lands on the contact: the fixture's caseworker carries Hope Atlanta.
-    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+    // And it lands on the contact: the fixture's caseworker carries Hope Atlanta - an AGENCY.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv, orgEntries: ORG_ENTRIES });
     const item = await doc.send(
       new GetCommand({
         TableName: table('contacts'),
         Key: { contactId: contactIdForPhone(PHONES.caseworker) },
       }),
     );
-    expect(item.Item!.housingAuthority).toBe('Hope Atlanta');
+    expect(item.Item!.agency).toBe('HOPE Atlanta');
+    expect(item.Item!.housingAuthority).toBeUndefined();
   });
 
-  it('writes an applied unit a canonical accepted_authorities list, never jurisdiction', async () => {
-    // Spec section 8: the unit-side field is the accepted-authorities LIST, and
-    // the founder's raw "Voucher Type" cell goes through the SAME canonicalizer
-    // the contact side uses - so the properties facet and the tenants facet group
-    // one authority under one spelling instead of two. The retired `jurisdiction`
-    // string is never written again.
-    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+  it('never replaces a housing authority or agency staff set, and refills one staff cleared (spec D9)', async () => {
+    const contactOf = async (phone: string): Promise<Record<string, unknown>> =>
+      (await doc.send(
+        new GetCommand({ TableName: table('contacts'), Key: { contactId: contactIdForPhone(phone) } }),
+      )).Item!;
+    const apply = () =>
+      runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv, orgEntries: ORG_ENTRIES });
+    await apply();
+
+    // Staff work after the import: Vera's authority changed, the caseworker's agency changed.
+    const { UpdateCommand } = await import('@aws-sdk/lib-dynamodb');
+    await doc.send(
+      new UpdateCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.conflictResolved) },
+        UpdateExpression: 'SET housingAuthority = :ha',
+        ExpressionAttributeValues: { ':ha': 'DeKalb County Housing Authority' },
+      }),
+    );
+    await doc.send(
+      new UpdateCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.caseworker) },
+        UpdateExpression: 'SET agency = :agency',
+        ExpressionAttributeValues: { ':agency': 'Step Up' },
+      }),
+    );
+    await apply();
+    expect((await contactOf(PHONES.conflictResolved)).housingAuthority).toBe('DeKalb County Housing Authority');
+    expect((await contactOf(PHONES.caseworker)).agency).toBe('Step Up');
+
+    // A staff CLEAR is a REMOVE, so the next re-import fills it again (accepted, spec D9).
+    await doc.send(
+      new UpdateCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.conflictResolved) },
+        UpdateExpression: 'REMOVE housingAuthority',
+      }),
+    );
+    await apply();
+    expect((await contactOf(PHONES.conflictResolved)).housingAuthority).toBe('Atlanta Housing Authority');
+  });
+
+  it('writes an applied unit an accepted_authorities list of LIST names, never jurisdiction', async () => {
+    // The unit-side field is the accepted-authorities LIST, and the founder's
+    // raw "Voucher Type" cell resolves against the SAME org list the contact
+    // side uses (spec D9) - so the properties facet and the tenants facet name
+    // one authority one way. The retired `jurisdiction` string is never written.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv, orgEntries: ORG_ENTRIES });
 
     // The unit key is derived exactly as upsertUnit derives it, from the reviewed
     // row - not hardcoded, so a change to either helper surfaces here.
@@ -234,7 +290,7 @@ describe.skipIf(!reachable)('import:apply', () => {
       new GetCommand({ TableName: table('units'), Key: { unitId } }),
     );
     expect(stored.Item).toBeDefined();
-    expect(stored.Item!.accepted_authorities).toEqual(['Atlanta (AHA)']);
+    expect(stored.Item!.accepted_authorities).toEqual(['Atlanta Housing Authority']);
     expect(stored.Item!.jurisdiction).toBeUndefined();
   });
 

@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   EXTRACTION_SCHEMA,
-  HOUSING_AUTHORITY_VOCAB,
   parseExtractionText,
 } from '../src/services/extraction/schema.js';
 import {
@@ -13,7 +12,8 @@ import {
   renderUtteranceLine,
 } from '../src/services/extraction/prompt.js';
 import type { ExtractionInput } from '../src/adapters/extraction.js';
-import { housingAuthorityFor } from '../src/lib/import/apply.js';
+import { buildStartingEntries, STARTING_ORG_LIST } from '../src/lib/orgStartingList.js';
+import { renderOrgListBlock } from '../src/services/extraction/orgListBlock.js';
 
 // The structured-outputs contract: every object level carries
 // additionalProperties:false and NONE of the unsupported constraint keywords
@@ -76,38 +76,6 @@ describe('EXTRACTION_SCHEMA', () => {
       'partner',
       'none',
     ]);
-  });
-});
-
-describe('HOUSING_AUTHORITY_VOCAB', () => {
-  it('lists the exact controlled vocabulary (14 entries)', () => {
-    expect(HOUSING_AUTHORITY_VOCAB).toEqual([
-      'Jonesboro (JHA)',
-      'Fulton County',
-      'Atlanta (AHA)',
-      'Clayton County',
-      'College Park',
-      'Georgia Housing Voucher (GHV)',
-      'Step Up',
-      'Claratel',
-      'Hope Atlanta',
-      'HUD VASH',
-      'DCA',
-      'McDonough',
-      'East Point',
-      'Dekalb County Housing',
-    ]);
-  });
-
-  it('agrees with the IMPORTER on DeKalb, character for character', () => {
-    // The invariant that actually matters, and the one a hand-written vocabulary
-    // silently breaks: broadcast audience resolution is an exact hash match on
-    // the byHousingAuthority GSI, so an AI-extracted tenant and an imported
-    // tenant only land in the same audience if these two strings are identical.
-    // Asserting the literal would pass while both drifted together; asserting
-    // MEMBERSHIP of the importer's own output is what pins them to each other.
-    expect(HOUSING_AUTHORITY_VOCAB).toContain(housingAuthorityFor('Dekalb Housing'));
-    expect(HOUSING_AUTHORITY_VOCAB).toContain(housingAuthorityFor('Dekalb County Housing'));
   });
 });
 
@@ -417,12 +385,13 @@ describe('prompt builders', () => {
     const user = buildExtractionUserContent({
       profile: { contactType: 'tenant', phones: [] },
       transcript: [u],
+      orgListBlock: '',
     });
     expect(user.endsWith(`\n${line}`)).toBe(true);
   });
 
   it('renderUtteranceLine does NOT render tsMsgId (the wire format is unchanged)', () => {
-    // The system prompt hard-codes the line format at prompt.ts:20; rendering
+    // The system prompt hard-codes the line format in its transcript-line sentence; rendering
     // the id would contradict it and break the format assertions in this file.
     const line = renderUtteranceLine({
       tsMsgId: '2026-07-16T10:00:00.000Z#s1',
@@ -434,23 +403,37 @@ describe('prompt builders', () => {
     expect(line).not.toContain('#s1');
   });
 
-  it('system prompt lists every housing-authority vocabulary value', () => {
+  it('system prompt carries NO organization names - the list rides in the user content', () => {
+    // Spec 2026-10-06 D8: the system prompt stays a zero-argument static
+    // template, so its memoized fingerprint keeps identifying one contract. A
+    // name from the stored list here would make it list-dependent.
+    expect(buildExtractionSystemPrompt.length).toBe(0);
     const sys = buildExtractionSystemPrompt();
-    for (const value of HOUSING_AUTHORITY_VOCAB) expect(sys).toContain(value);
+    for (const org of STARTING_ORG_LIST) {
+      if (org.kind === 'housing_authority') expect(sys).not.toContain(org.name);
+    }
+    for (const old of ['Jonesboro (JHA)', 'Atlanta (AHA)', 'Dekalb County Housing', 'Georgia Housing Voucher (GHV)']) {
+      expect(sys).not.toContain(old);
+    }
   });
 
-  it('system prompt offers the authority list as SPELLINGS, never as permitted values', () => {
-    // Run 4bf0cf42: the client named DeKalb County, the vocabulary had no entry,
-    // and the model did exactly as told - op "none", fact discarded. The first
-    // fix routed unlisted authorities to a noteLine, which stopped the data loss
-    // but kept the AI as the only writer of this field that could not fill it.
-    // The list is now a spelling hint, so the model records what it heard and
-    // the apply layer decides write-vs-suggest.
+  it('system prompt explains the ORGANIZATION LIST block and the housingAuthority rules', () => {
+    // C3: every asserted phrase lives INSIDE one prompt line.
     const sys = buildExtractionSystemPrompt();
-    expect(sys).toMatch(/NOT exhaustive/);
-    expect(sys).toMatch(/record what they said/);
-    // The old gate and its workaround must both be gone - either one left
-    // behind would still tell the model to answer "none" for a new authority.
+    expect(sys).toContain('an ORGANIZATION LIST block');
+    expect(sys).toContain('Return the full name from the list, exactly as the list writes it.');
+    expect(sys).toContain('abbreviation belongs to more than one name');
+    expect(sys).toContain('the one the conversation supports, or return the text as said.');
+    expect(sys).toContain('Agency names are never housing authorities');
+    // Spec 2026-10-06 section 13: some spellings are place names (Cobb County,
+    // McDonough, Clayton) - a tenant's home or search area is not an authority.
+    expect(sys).toContain('Where the client lives or wants to live is not a housing authority');
+    // Run 4bf0cf42: an unlisted authority is still a real answer - the model
+    // records what it heard and a human confirms it (apply.ts suggests it).
+    expect(sys).toContain('record what they said');
+    expect(sys).not.toMatch(/NOT exhaustive/);
+    // The old gate and its workaround stay gone - either one would tell the
+    // model to answer "none" for a new authority.
     expect(sys).not.toContain('Housing authority stated:');
     expect(sys).not.toMatch(/housingAuthority MUST be exactly one/);
   });
@@ -468,6 +451,7 @@ describe('prompt builders', () => {
 
   it('user content carries the profile JSON then a chronological transcript', () => {
     const input: ExtractionInput = {
+      orgListBlock: '',
       profile: { contactType: 'tenant', firstName: 'Ann', voucherSize: 2, phones: ['+14045550000'] },
       transcript: [
         { tsMsgId: '2026-07-16T10:01:00.000Z#s2', speaker: 'client', text: 'Hi there', at: '2026-07-16T10:01:00.000Z', channel: 'sms' },
@@ -489,6 +473,7 @@ describe('prompt builders', () => {
     // staff turn header. The builder must collapse the body to one line so no
     // TRANSCRIPT line can start with a bracketed speaker tag (adversarial F2).
     const input: ExtractionInput = {
+      orgListBlock: '',
       profile: { contactType: 'tenant', phones: ['+14045550000'] },
       transcript: [
         {
@@ -563,5 +548,47 @@ describe('prompt builders', () => {
     // with '\n'), never a phrase that spans a line break.
     expect(sys).toContain('OWN CURRENT residential address ONLY');
     expect(sys).toContain('Addresses NEVER go in noteLines');
+  });
+});
+
+describe('the ORGANIZATION LIST block in the user content (spec 2026-10-06 D8)', () => {
+  const u = {
+    tsMsgId: '2026-07-16T10:00:00.000Z#s1',
+    speaker: 'client' as const,
+    text: 'my voucher is from AHA',
+    at: '2026-07-16T10:00:00.000Z',
+    channel: 'sms' as const,
+  };
+  let n = 0;
+  const block = renderOrgListBlock(buildStartingEntries('2026-10-06T00:00:00.000Z', () => `org-${(n += 1)}`)).text;
+
+  it('sits after the profile and BEFORE the TRANSCRIPT header, which stays the first TRANSCRIPT in the content', () => {
+    const user = buildExtractionUserContent({
+      profile: { contactType: 'tenant', phones: [] },
+      transcript: [u],
+      orgListBlock: block,
+    });
+    const header = user.indexOf('\nTRANSCRIPT\n');
+    expect(user.indexOf(block)).toBeGreaterThan(-1);
+    expect(user.indexOf('CURRENT PROFILE')).toBeLessThan(user.indexOf(block));
+    expect(user.indexOf(block) + block.length).toBeLessThan(header);
+    // Every slice taken at the FIRST "TRANSCRIPT" still lands on the header.
+    expect(user.indexOf('TRANSCRIPT')).toBe(header + 1);
+    expect(user.endsWith(`\n${renderUtteranceLine(u)}`)).toBe(true);
+  });
+
+  it('adds nothing when the block is empty (PIN)', () => {
+    const user = buildExtractionUserContent({
+      profile: { contactType: 'tenant', phones: [] },
+      transcript: [u],
+      orgListBlock: '',
+    });
+    expect(user).toBe([
+      'CURRENT PROFILE',
+      JSON.stringify({ contactType: 'tenant', phones: [] }, null, 2),
+      '',
+      'TRANSCRIPT',
+      renderUtteranceLine(u),
+    ].join('\n'));
   });
 });

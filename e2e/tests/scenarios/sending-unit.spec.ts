@@ -61,7 +61,7 @@ async function searchingTenantWithListings(
     firstName: tenant.firstName,
     lastName: tenant.lastName,
     voucherSize: 2,
-    housingAuthority: 'atlanta_housing',
+    housingAuthority: 'Atlanta Housing Authority',
     phone: tenant.phone,
   });
   await flow.teamRecordsRtaDecision(true); // RTA in hand → searching

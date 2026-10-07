@@ -24,18 +24,18 @@ const {
   ExtractionRefusedError,
 } = await import('../src/adapters/extraction.js');
 import type { ExtractionInput } from '../src/adapters/extraction.js';
-import { extractionPromptFingerprint } from '../src/services/extraction/prompt.js';
+import { buildExtractionSystemPrompt, extractionPromptFingerprint } from '../src/services/extraction/prompt.js';
 import { parseExtractionOps } from '../src/services/extraction/schema.js';
 
 const model = 'claude-opus-4-8';
 
 const baseInput: ExtractionInput = {
-  profile: { contactType: 'tenant', phones: [] },
+  orgListBlock: '', profile: { contactType: 'tenant', phones: [] },
   transcript: [{ tsMsgId: '2026-07-16T10:00:00.000Z#s1', speaker: 'client', text: 'hi', at: '2026-07-16T10:00:00.000Z', channel: 'sms' }],
 };
 
 const markerInput: ExtractionInput = {
-  profile: { contactType: 'tenant', phones: [] },
+  orgListBlock: '', profile: { contactType: 'tenant', phones: [] },
   transcript: [{
     tsMsgId: '2026-07-16T10:00:00.000Z#s1',
     speaker: 'client',
@@ -82,7 +82,7 @@ describe('fake driver', () => {
   it('parses the EXTRACT marker from the NEWEST client utterance, ignoring staff and older markers', async () => {
     const driver = createExtractionDriver({ driver: 'fake', model });
     const input: ExtractionInput = {
-      profile: { contactType: 'tenant', phones: [] },
+      orgListBlock: '', profile: { contactType: 'tenant', phones: [] },
       transcript: [
         {
           tsMsgId: '2026-07-16T10:00:00.000Z#s1',
@@ -117,7 +117,7 @@ describe('fake driver', () => {
   it('merges a marker with no fields over EMPTY_EXTRACTION', async () => {
     const driver = createExtractionDriver({ driver: 'fake', model });
     const input: ExtractionInput = {
-      profile: { contactType: 'tenant', phones: [] },
+      orgListBlock: '', profile: { contactType: 'tenant', phones: [] },
       transcript: [
         {
           tsMsgId: '2026-07-16T10:00:00.000Z#s1',
@@ -138,7 +138,7 @@ describe('fake driver', () => {
   it('returns EMPTY_EXTRACTION on malformed marker JSON (never throws)', async () => {
     const driver = createExtractionDriver({ driver: 'fake', model });
     const input: ExtractionInput = {
-      profile: { contactType: 'tenant', phones: [] },
+      orgListBlock: '', profile: { contactType: 'tenant', phones: [] },
       transcript: [
         { tsMsgId: '2026-07-16T10:00:00.000Z#s1', speaker: 'client', text: 'EXTRACT:{not valid json', at: '2026-07-16T10:00:00.000Z', channel: 'sms' },
       ],
@@ -153,7 +153,7 @@ describe('fake driver', () => {
   it('returns EMPTY_EXTRACTION when no client utterance carries a marker', async () => {
     const driver = createExtractionDriver({ driver: 'fake', model });
     const input: ExtractionInput = {
-      profile: { contactType: 'tenant', phones: [] },
+      orgListBlock: '', profile: { contactType: 'tenant', phones: [] },
       transcript: [
         { tsMsgId: '2026-07-16T10:00:00.000Z#s1', speaker: 'client', text: 'just chatting, no marker', at: '2026-07-16T10:00:00.000Z', channel: 'sms' },
       ],
@@ -179,7 +179,7 @@ describe('fake driver', () => {
 
   it('a malformed marker keeps rawText so the run log shows what the driver was handed', async () => {
     const call = await createExtractionDriver({ driver: 'fake', model }).extract({
-      profile: { contactType: 'tenant', phones: [] },
+      orgListBlock: '', profile: { contactType: 'tenant', phones: [] },
       transcript: [{
         tsMsgId: '2026-07-16T10:00:00.000Z#s1',
         speaker: 'client', text: 'EXTRACT:{oops', at: '2026-07-16T10:00:00.000Z', channel: 'sms',
@@ -204,7 +204,7 @@ describe('fake driver', () => {
   // coverage. `__fail` is dev-only (EXTRACTION_DRIVER=fake is refused in
   // production, config.ts:811-814).
   const failMarker = (payload: Record<string, unknown>): ExtractionInput => ({
-    profile: { contactType: 'tenant', phones: [] },
+    orgListBlock: '', profile: { contactType: 'tenant', phones: [] },
     transcript: [{
       tsMsgId: '2026-07-16T10:00:00.000Z#s1',
       speaker: 'client',
@@ -413,5 +413,24 @@ describe('anthropic driver - malformed SDK responses (F9)', () => {
 describe('ExtractionRefusedError', () => {
   it('is an Error subclass', () => {
     expect(new ExtractionRefusedError('refused')).toBeInstanceOf(Error);
+  });
+});
+
+describe('anthropic driver - the organization list block (spec 2026-10-06 D8)', () => {
+  it('sends the block in the USER content before the transcript and keeps the system prompt static', async () => {
+    sdk.reply = {
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 12, output_tokens: 5 },
+      content: [{ type: 'text', text: '{"fields":{}}' }],
+    };
+    const orgListBlock = 'ORGANIZATION LIST\nHousing authorities (test):\n- Alpha Housing Authority';
+    await createExtractionDriver({ driver: 'anthropic', model, apiKey: 'sk-test' })
+      .extract({ ...baseInput, orgListBlock });
+    const messages = sdk.lastRequest?.['messages'] as Array<{ role: string; content: string }>;
+    const content = messages[0]!.content;
+    expect(content.indexOf(orgListBlock)).toBeGreaterThan(-1);
+    expect(content.indexOf(orgListBlock)).toBeLessThan(content.indexOf('\nTRANSCRIPT\n'));
+    expect(sdk.lastRequest?.['system']).toBe(buildExtractionSystemPrompt());
+    expect(String(sdk.lastRequest?.['system'])).not.toContain('Alpha Housing Authority');
   });
 });

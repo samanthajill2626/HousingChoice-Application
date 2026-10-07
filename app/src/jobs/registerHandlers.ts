@@ -24,6 +24,7 @@ import { registerRelayNumberReadyJobHandler } from './relayNumberReady.js';
 import { registerGroupRailJobHandler } from './groupRail.js';
 import { registerMediaMirrorJobHandler } from './mediaMirror.js';
 import { registerSendReconcileJobHandler } from './sendReconcile.js';
+import { registerOrgRewriteJobHandler } from './orgRewrite.js';
 
 export interface RegisterJobHandlersDeps {
   /** The shared A2P token bucket — every throttled outbound handler draws from it. */
@@ -42,7 +43,8 @@ export interface RegisterJobHandlersDeps {
  * `relay.fanOut` + `relay.intro` (both from the relay registrar), `relay.retryLeg`,
  * `broadcast.send`, `send.reconcile`,
  * `call.missedAutoText`, `voice.createTranscript` + `voice.reconcileTranscript`,
- * `relay.warmNumber`, `relay.numberReady`, `groupRail.ensure`, `media.mirror`.
+ * `relay.warmNumber`, `relay.numberReady`, `groupRail.ensure`, `media.mirror`,
+ * `org.rewrite`.
  * send.reconcile (SOR spec D11) resolves an ambiguous send by LOOKING IT UP at
  * the provider; it sends nothing itself (a re-drive is its owner's own send
  * job, metered there), so it draws no token.
@@ -89,4 +91,8 @@ export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   // Deferred inbound-media mirror (a Twilio media fetch + an S3 put; no
   // outbound traffic, no token).
   registerMediaMirrorJobHandler();
+  // Organization-name rewrite (spec 2026-10-06 D11): conditional record writes
+  // only - it sends nothing, so it draws no token. It catches its own errors and
+  // never rethrows, so SQS never redelivers it.
+  registerOrgRewriteJobHandler();
 }

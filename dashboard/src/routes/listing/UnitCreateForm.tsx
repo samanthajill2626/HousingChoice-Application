@@ -9,7 +9,7 @@
 // the initial status ('setup') — status is NOT a writable field here. Navigation
 // lives in the entry points: on a 201 the form calls onCreated and the caller
 // closes + navigates (parity with ContactCreateForm / PlacementCreateForm).
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   createUnit,
   getContact,
@@ -23,6 +23,18 @@ import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { contactDisplayName } from '../contact/format.js';
+import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
+import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
+import {
+  HOUSING_AUTHORITY_KINDS,
+  notOnListMessage,
+  orgListLoadError,
+  orgListUnknown,
+  orgNotOnListBody,
+  refusesSave,
+} from '../orgs/orgCopy.js';
+import { useOrgList } from '../orgs/useOrgList.js';
+import { useTypedOrgText } from '../orgs/useTypedOrgText.js';
 import styles from './ListingEditForm.module.css';
 
 export interface UnitCreateFormProps {
@@ -51,9 +63,40 @@ export function UnitCreateForm({
   const [landlordPick, setLandlordPick] = useState<ContactSearchValue>({ name: '' });
 
   // Property fields (mirror ListingEditForm; all optional on create).
-  // ONE comma-separated authorities input replaces the retired single
+  // The housing authorities the property takes: a multi-picker over the
+  // stored list (spec 2026-10-06 D6). It replaced the retired single
   // `jurisdiction` field and the `accepted_programs` list (spec section 8).
-  const [authorities, setAuthorities] = useState('');
+  const orgList = useOrgList();
+  const [authorities, setAuthorities] = useState<string[]>([]);
+  const [authoritiesError, setAuthoritiesError] = useState<string | null>(null);
+  // "Is this really new?" - rendered after the </form> (R5 ruling).
+  const [addingAuthority, setAddingAuthority] = useState<string | null>(null);
+  function addAuthority(name: string): void {
+    setAuthorities((prev) => (prev.includes(name) ? prev : [...prev, name]));
+    setAuthoritiesError(null);
+  }
+  // Text typed in the picker but never picked (code review R1-ADV-FE-1,
+  // R2-FE-6): one rule (useTypedOrgText) writes the note under the picker and
+  // decides Create - text naming exactly one entry is sent as a pick would
+  // be; any other text refuses to create, saying why under the picker. A
+  // property is never created without the authority staff typed - not even
+  // when the list failed to load (code review R3-FE-3): a failed re-read
+  // settles against the list in hand, and with no list in hand Create
+  // refuses until the text is cleared (the field stays usable while it
+  // holds text).
+  const authoritiesPicker = useRef<OrgPickerHandle>(null);
+  const authorityText = useTypedOrgText(orgList, HOUSING_AUTHORITY_KINDS, authoritiesPicker);
+  /** The authorities to send with the typed text settled, or null when Create is refused. */
+  function settleTypedAuthority(): string[] | null {
+    const typed = authorityText.settle();
+    if (refusesSave(typed)) {
+      authorityText.focus();
+      return null;
+    }
+    if (typed.status !== 'resolved') return authorities;
+    addAuthority(typed.name);
+    return authorities.includes(typed.name) ? authorities : [...authorities, typed.name];
+  }
   const [beds, setBeds] = useState('');
   const [baths, setBaths] = useState('');
   const [rentMin, setRentMin] = useState('');
@@ -143,8 +186,9 @@ export function UnitCreateForm({
   }
 
   /** Build the create body from the non-empty fields, or null on a validation
-   *  failure (an inline error was set). landlordId is guaranteed by canCreate. */
-  function buildBody(): Record<string, unknown> | null {
+   *  failure (an inline error was set). landlordId is guaranteed by canCreate.
+   *  `authoritiesNow`: the picker's list as Create settled it. */
+  function buildBody(authoritiesNow: string[]): Record<string, unknown> | null {
     const body: Record<string, unknown> = { landlordId: resolvedLandlordId };
 
     const addStr = (key: string, value: string): void => {
@@ -173,14 +217,11 @@ export function UnitCreateForm({
     if (!addNumber(body, 'application_fee', applicationFee, 'Application fee')) return null;
     if (!addNumber(body, 'voucher_size_accepted', voucherSize, 'Voucher size accepted')) return null;
 
-    // Housing authorities - comma-separated; send the array only when non-empty.
-    // The retired `jurisdiction` / `accepted_programs` keys are never written
-    // again (both are server-side tombstones - app/src/lib/unitFields.ts).
-    const normAuthorities = authorities
-      .split(',')
-      .map((a) => a.trim())
-      .filter(Boolean);
-    if (normAuthorities.length > 0) body['accepted_authorities'] = normAuthorities;
+    // Housing authorities - the picked list names; send the array only when
+    // non-empty. The retired `jurisdiction` / `accepted_programs` keys are
+    // never written again (both are server-side tombstones -
+    // app/src/lib/unitFields.ts).
+    if (authoritiesNow.length > 0) body['accepted_authorities'] = authoritiesNow;
 
     // Address — send the object only when at least one part is filled. The server
     // keeps only the non-empty parts.
@@ -195,14 +236,24 @@ export function UnitCreateForm({
     e.preventDefault();
     if (!canCreate) return;
     setError(null);
-    const body = buildBody();
+    const authoritiesNow = settleTypedAuthority();
+    if (authoritiesNow === null) return; // refused: the picker says why
+    const body = buildBody(authoritiesNow);
     if (body === null) return; // a validation error was set
     setBusy(true);
     try {
       const unit = await createUnit(body);
       setBusy(false);
       onCreated(unit);
-    } catch {
+    } catch (err) {
+      // A refused authority (422 org_not_on_list, spec D5): say why under the
+      // picker, from the body - never the raw code.
+      const refused = orgNotOnListBody(err);
+      if (refused !== null) {
+        setAuthoritiesError(notOnListMessage(refused));
+        setBusy(false);
+        return;
+      }
       setError("Couldn't create the property — please try again.");
       setBusy(false);
     }
@@ -300,16 +351,31 @@ export function UnitCreateForm({
         </div>
 
         <div className={styles.row}>
-          <label className={styles.field}>
-            <span className={styles.label}>Housing authorities</span>
-            <input
-              className={styles.input}
-              value={authorities}
-              onChange={(e) => setAuthorities(e.target.value)}
-              placeholder="e.g. Atlanta (AHA), DCA"
-              autoComplete="off"
-            />
-          </label>
+          <OrgPicker
+            ref={authoritiesPicker}
+            multiple
+            label="Housing authorities"
+            kinds={HOUSING_AUTHORITY_KINDS}
+            entries={orgList.entries}
+            loading={orgListUnknown(orgList)}
+            disabled={authorityText.disabled}
+            value={authorities}
+            onChange={(next) => {
+              setAuthorities(next);
+              setAuthoritiesError(null);
+            }}
+            onPendingTextChange={authorityText.onPendingTextChange}
+            pendingNote={authorityText.note}
+            onRequestAdd={setAddingAuthority}
+            error={
+              authorityText.refusal ??
+              authoritiesError ??
+              (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)
+            }
+            errorAttempt={authorityText.refusalAttempt}
+            className={styles.field}
+            labelClassName={styles.label}
+          />
         </div>
 
         <div className={styles.row}>
@@ -541,6 +607,28 @@ export function UnitCreateForm({
           </p>
         ) : null}
       </form>
+      {addingAuthority !== null ? (
+        <NewOrgDialog
+          kind="housing_authority"
+          text={addingAuthority}
+          mode="field"
+          onUse={(ref) => {
+            // The server's own answer: counted as on the list at once, even
+            // when this form's list was read before the name joined it
+            // (code review R1-ADV-FE-7).
+            orgList.noteAdded(ref);
+            addAuthority(ref.name);
+            setAddingAuthority(null);
+          }}
+          onAdded={(entry) => {
+            // Counted as on the list at once: no "Not on the list" flash on its chip.
+            orgList.noteAdded(entry);
+            addAuthority(entry.name);
+            setAddingAuthority(null);
+          }}
+          onClose={() => setAddingAuthority(null)}
+        />
+      ) : null}
     </Modal>
   );
 }

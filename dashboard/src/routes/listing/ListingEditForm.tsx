@@ -3,7 +3,7 @@
 // PATCHed; the server SET-merges, so an untouched field is never blanked). On
 // success the parent applies the returned unit in place (no refetch). The field
 // set + types match the backend allowlist (app/src/lib/unitFields.ts).
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   updateUnit,
   TOUR_TYPE_LABELS,
@@ -13,6 +13,18 @@ import {
 } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
+import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
+import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
+import {
+  HOUSING_AUTHORITY_KINDS,
+  notOnListMessage,
+  orgListLoadError,
+  orgListUnknown,
+  orgNotOnListBody,
+  refusesSave,
+} from '../orgs/orgCopy.js';
+import { useOrgList } from '../orgs/useOrgList.js';
+import { useTypedOrgText } from '../orgs/useTypedOrgText.js';
 import { authoritiesOf } from './listingFormat.js';
 import styles from './ListingEditForm.module.css';
 
@@ -32,11 +44,36 @@ function numStr(v: unknown): string {
 }
 
 export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps): React.JSX.Element {
-  // ONE comma-separated authorities input (spec section 8), prefilled from the
+  // The housing authorities picker (spec 2026-10-06 D6), prefilled from the
   // SYNTHESIZED list: a legacy unit that only carries `jurisdiction` shows that
-  // value here, so the first real edit migrates it into `accepted_authorities`.
-  const initialAuthorities = authoritiesOf(unit).join(', ');
-  const [authorities, setAuthorities] = useState(initialAuthorities);
+  // value as a chip, so the first real edit migrates it into
+  // `accepted_authorities`. Untouched members stay byte-exact.
+  const orgList = useOrgList();
+  const [authorities, setAuthorities] = useState<string[]>(() => authoritiesOf(unit));
+  const [authoritiesError, setAuthoritiesError] = useState<string | null>(null);
+  // "Is this really new?" - rendered after the </form> (R5 ruling).
+  const [addingAuthority, setAddingAuthority] = useState<string | null>(null);
+  function addAuthority(name: string): void {
+    setAuthorities((prev) => (prev.includes(name) ? prev : [...prev, name]));
+    setAuthoritiesError(null);
+  }
+  // Text typed in the picker but never picked (code review R1-ADV-FE-1,
+  // R2-FE-6): never dropped silently. One rule (useTypedOrgText) writes the
+  // note under the picker and decides Save: text naming exactly one entry is
+  // added as a pick would be; any other text refuses the save, saying why.
+  const authoritiesPicker = useRef<OrgPickerHandle>(null);
+  const authorityText = useTypedOrgText(orgList, HOUSING_AUTHORITY_KINDS, authoritiesPicker);
+  /** The authorities to save with the typed text settled, or null when Save is refused. */
+  function settleTypedAuthority(): string[] | null {
+    const typed = authorityText.settle();
+    if (refusesSave(typed)) {
+      authorityText.focus();
+      return null;
+    }
+    if (typed.status !== 'resolved') return authorities;
+    addAuthority(typed.name);
+    return authorities.includes(typed.name) ? authorities : [...authorities, typed.name];
+  }
   const [beds, setBeds] = useState(numStr(unit.beds));
   const [baths, setBaths] = useState(numStr(unit.baths));
   const [rentMin, setRentMin] = useState(numStr(unit.rent_min));
@@ -108,7 +145,8 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     return true;
   }
 
-  function buildPatch(): Record<string, unknown> | null {
+  /** `authoritiesNow`: the picker's list as Save settled it (settleTypedAuthority). */
+  function buildPatch(authoritiesNow: string[]): Record<string, unknown> | null {
     const patch: Record<string, unknown> = {};
     if (utilities !== str(unit.utilities)) patch['utilities'] = utilities;
     if (videoUrl !== str(unit.video_url)) patch['video_url'] = videoUrl;
@@ -151,19 +189,14 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
       return null;
     }
 
-    // Housing authorities - comma-separated; normalize (trim, drop empties) and
-    // send the array only when the normalized form changed. The baseline is the
-    // SYNTHESIZED list, so a legacy `jurisdiction` value that the operator leaves
-    // untouched stays put instead of being re-sent, and the retired
-    // `jurisdiction` / `accepted_programs` keys are never written again (both are
-    // server-side tombstones - app/src/lib/unitFields.ts).
-    const normAuthorities = authorities
-      .split(',')
-      .map((a) => a.trim())
-      .filter(Boolean);
-    const initNorm = authoritiesOf(unit).map((a) => a.trim()).filter(Boolean);
-    if (JSON.stringify(normAuthorities) !== JSON.stringify(initNorm)) {
-      patch['accepted_authorities'] = normAuthorities;
+    // Housing authorities - the picker's list, sent only when it changed. The
+    // baseline is the SYNTHESIZED list, so a legacy `jurisdiction` value that
+    // the operator leaves untouched stays put instead of being re-sent (and an
+    // unchanged list is never refused, spec 2026-10-06 D5); the retired
+    // `jurisdiction` / `accepted_programs` keys are never written again (both
+    // are server-side tombstones - app/src/lib/unitFields.ts).
+    if (JSON.stringify(authoritiesNow) !== JSON.stringify(authoritiesOf(unit))) {
+      patch['accepted_authorities'] = authoritiesNow;
     }
 
     // Address: if ANY part changed, send the whole object (the server keeps only
@@ -185,7 +218,9 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     e.preventDefault();
     if (saving) return;
     setError(null);
-    const patch = buildPatch();
+    const authoritiesNow = settleTypedAuthority();
+    if (authoritiesNow === null) return; // refused: the picker says why
+    const patch = buildPatch(authoritiesNow);
     if (patch === null) return; // a validation error was set
     if (Object.keys(patch).length === 0) {
       onClose(); // nothing changed
@@ -195,7 +230,15 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     try {
       const updated = await updateUnit(unit.unitId, patch);
       onSaved(updated);
-    } catch {
+    } catch (err) {
+      // A refused authority (422 org_not_on_list, spec D5): say why under the
+      // picker, from the body - never the raw code.
+      const refused = orgNotOnListBody(err);
+      if (refused !== null) {
+        setAuthoritiesError(notOnListMessage(refused));
+        setSaving(false);
+        return;
+      }
       setError("Couldn't save — please try again.");
       setSaving(false);
     }
@@ -222,16 +265,31 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
           terms are shown on the public flyer.
         </p>
         <div className={styles.row}>
-          <label className={styles.field}>
-            <span className={styles.label}>Housing authorities</span>
-            <input
-              className={styles.input}
-              value={authorities}
-              onChange={(e) => setAuthorities(e.target.value)}
-              placeholder="e.g. Atlanta (AHA), DCA"
-              autoComplete="off"
-            />
-          </label>
+          <OrgPicker
+            ref={authoritiesPicker}
+            multiple
+            label="Housing authorities"
+            kinds={HOUSING_AUTHORITY_KINDS}
+            entries={orgList.entries}
+            loading={orgListUnknown(orgList)}
+            disabled={authorityText.disabled}
+            value={authorities}
+            onChange={(next) => {
+              setAuthorities(next);
+              setAuthoritiesError(null);
+            }}
+            onPendingTextChange={authorityText.onPendingTextChange}
+            pendingNote={authorityText.note}
+            onRequestAdd={setAddingAuthority}
+            error={
+              authorityText.refusal ??
+              authoritiesError ??
+              (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)
+            }
+            errorAttempt={authorityText.refusalAttempt}
+            className={styles.field}
+            labelClassName={styles.label}
+          />
         </div>
 
         <div className={styles.row}>
@@ -519,6 +577,28 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
           </p>
         ) : null}
       </form>
+      {addingAuthority !== null ? (
+        <NewOrgDialog
+          kind="housing_authority"
+          text={addingAuthority}
+          mode="field"
+          onUse={(ref) => {
+            // The server's own answer: counted as on the list at once, even
+            // when this form's list was read before the name joined it
+            // (code review R1-ADV-FE-7).
+            orgList.noteAdded(ref);
+            addAuthority(ref.name);
+            setAddingAuthority(null);
+          }}
+          onAdded={(entry) => {
+            // Counted as on the list at once: no "Not on the list" flash on its chip.
+            orgList.noteAdded(entry);
+            addAuthority(entry.name);
+            setAddingAuthority(null);
+          }}
+          onClose={() => setAddingAuthority(null)}
+        />
+      ) : null}
     </Modal>
   );
 }

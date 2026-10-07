@@ -83,6 +83,10 @@ import { conversationsForContact } from '../lib/contactThreads.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
+import { createOrgListRepo, type OrgListRepo } from '../repos/orgListRepo.js';
+import { createOrgNamesService } from '../services/orgNames.js';
+import { createOrgRecordsService } from '../services/orgRecords.js';
+import { createOrgRewriteService } from '../services/orgRewrite.js';
 import { type ContactVocabularyRepo } from '../repos/contactVocabularyRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
@@ -153,6 +157,7 @@ import { serveMediaObject } from './serveMediaObject.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
+import { createOrganizationsRouter } from './organizations.js';
 import { createStatusTransitionRouter } from './statusTransition.js';
 import { createSystemRouter } from './system.js';
 import { createAiRunsRouter } from './aiRuns.js';
@@ -331,6 +336,12 @@ export interface ApiRouterDeps {
   settingsRepo?: SettingsRepo;
   /** Task 4: auto-suggest vocabulary (roles, relationship roles, field labels). */
   contactVocabularyRepo?: ContactVocabularyRepo;
+  /**
+   * The housing authority + agency lists (spec 2026-10-06 D1; plan 3.4b): ONE
+   * `settings` item. Injected in tests (the world fake); defaults to the real
+   * repo. Built once below, with the org services on top of it.
+   */
+  orgListRepo?: OrgListRepo;
   usersRepo?: UsersRepo;
   pushService?: PushService;
   /**
@@ -695,6 +706,23 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       }),
     });
 
+  // The housing authority + agency lists (spec 2026-10-06; plan 3.4b): the list
+  // repo is built ONCE here, then the three org services over it and the repos
+  // above, and the SAME instances go to every router that checks or rewrites
+  // organization names - the quiet-hours `settings` reasoning above: a
+  // sub-router that default-constructs its own would make a route test that
+  // injects the world fakes talk to the real AWS SDK. The services hold no
+  // state; every list read is one consistent GetItem (spec D1 - no cache).
+  const orgListRepo = deps.orgListRepo ?? createOrgListRepo({ logger: deps.logger });
+  const orgRecords = createOrgRecordsService({
+    contactsRepo: contacts,
+    unitsRepo: units,
+    auditRepo: audit,
+    logger: deps.logger,
+  });
+  const orgNames = createOrgNamesService({ orgListRepo, logger: deps.logger });
+  const orgRewrite = createOrgRewriteService({ orgListRepo, orgRecords, logger: deps.logger });
+
   const router = Router();
 
   // --- M1.4 sub-routers (all behind requireAuth via the /api mount; the
@@ -744,6 +772,18 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.settingsRepo !== undefined && { settingsRepo: deps.settingsRepo }),
       auditRepo: audit,
       ...(mediaStore !== undefined && { mediaStore }),
+    }),
+  );
+  // Housing authorities & agencies (spec 2026-10-06 section 6): viewing, adding
+  // and notes for every signed-in user; the admin-only actions are gated inside
+  // the router (requireRole('admin'), and the inline check on the mixed PATCH).
+  router.use(
+    '/organizations',
+    createOrganizationsRouter({
+      logger: deps.logger,
+      orgNamesService: orgNames,
+      orgRecordsService: orgRecords,
+      orgRewriteService: orgRewrite,
     }),
   );
   // Self cell verification + self view (Voice Phase 1, spec §7) — mounted at
@@ -838,6 +878,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // Triage re-extraction hook: a flip to tenant schedules an immediate
       // 'triage' run (gated by the same kill switch as the other schedule sites).
       aiExtractionEnabled: config.aiExtractionEnabled,
+      // Organization names (spec 2026-10-06 D5): the ONE service built above.
+      orgNamesService: orgNames,
       events,
     }),
   );
@@ -932,6 +974,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // unit-photo-transcode: the shared transcode gate for the confirm >5MB
       // branch (test seam; createUnitsRouter defaults to the shared instance).
       ...(deps.transcodeGate !== undefined && { transcodeGate: deps.transcodeGate }),
+      // Organization names (spec 2026-10-06 D5): the ONE service built above.
+      orgNamesService: orgNames,
     }),
   );
   // Tours CRUD (Tours feature; requireAuth — VAs schedule tours, no admin gate).
@@ -1052,6 +1096,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.audienceResolutionService !== undefined && {
         audienceResolutionService: deps.audienceResolutionService,
       }),
+      // Organization names (spec 2026-10-06 D5, D7): the ONE service built above.
+      orgNamesService: orgNames,
       auditRepo: audit,
       events,
     }),
@@ -1161,6 +1207,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       extractionRepo: extraction,
       aiRunsRepo: aiRuns,
       suggestionResolutionRepo: suggestionResolutions,
+      // Spec 2026-10-06 D8: a housingAuthority accept is checked against the
+      // organization list - the ONE service built above, never a second one.
+      orgNamesService: orgNames,
       ...(deps.suggestionResolutionHooks !== undefined && {
         suggestionResolutionHooks: deps.suggestionResolutionHooks,
       }),

@@ -35,6 +35,8 @@ export const DROP_REASONS = [
   'dismissed_before',
   'repo_error',
   'empty_value_at_parse',
+  // Spec 2026-10-06 D8: an agency name proposed as a housing authority.
+  'agency_not_authority',
 ] as const;
 
 export type DropReason = (typeof DROP_REASONS)[number];

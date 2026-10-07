@@ -125,6 +125,18 @@ export const DASHBOARD_MUTATION_CATALOG: readonly DashboardMutationCatalogEntry[
   entry(ENDPOINTS, 'putSettings', 'request:PUT', '/api/settings'),
   entry(ENDPOINTS, 'uploadVoicemailGreeting', 'request:PUT', '/api/settings/voicemail-greeting'),
   entry(ENDPOINTS, 'removeVoicemailGreeting', 'request:DELETE', '/api/settings/voicemail-greeting'),
+  // Clean org names (spec 2026-10-06 section 6): workflow_only - nothing here
+  // fires on a page load. The /check runs only inside a flow a click started:
+  // the AI accept, "Is this really new?" (on open, then 250 ms after its Name
+  // last changed) and the "Remember this spelling" pre-check; a picker never
+  // calls it.
+  entry(ENDPOINTS, 'checkOrgText', 'request:POST', '/api/organizations/check'),
+  entry(ENDPOINTS, 'addOrg', 'request:POST', '/api/organizations'),
+  entry(ENDPOINTS, 'patchOrg', 'request:PATCH', '/api/organizations/:orgId'),
+  entry(ENDPOINTS, 'mergeOrg', 'request:POST', '/api/organizations/:orgId/merge'),
+  entry(ENDPOINTS, 'deleteOrg', 'request:DELETE', '/api/organizations/:orgId'),
+  entry(ENDPOINTS, 'resolveNotOnList', 'request:POST', '/api/organizations/not-on-list/resolve'),
+  entry(ENDPOINTS, 'runOrgRewriteAgain', 'request:POST', '/api/organizations/rewrite/run-again'),
   entry(ENDPOINTS, 'subscribePush', 'request:POST', '/api/push/subscriptions'),
   entry(ENDPOINTS, 'unsubscribePush', 'request:DELETE', '/api/push/subscriptions'),
   entry(ENDPOINTS, 'sendPushTest', 'request:POST', '/api/push/test'),

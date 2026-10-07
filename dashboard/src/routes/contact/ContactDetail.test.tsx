@@ -41,6 +41,11 @@ const createTour = vi.fn();
 const getSuggestions = vi.fn();
 const acceptSuggestion = vi.fn();
 const dismissSuggestion = vi.fn();
+// The edit form's pickers and "Is this really new?" (spec 2026-10-06 D6, D8):
+// the list, the check and the add.
+const getOrgList = vi.fn();
+const checkOrgText = vi.fn();
+const addOrg = vi.fn();
 // Manual extraction trigger (Task 6): the press endpoint.
 const runExtraction = vi.fn();
 // The contact file's "Relay groups" card slice + the standalone create flow it
@@ -110,6 +115,9 @@ vi.mock('../../api/index.js', async () => {
     getSuggestions: (...a: unknown[]) => getSuggestions(...a),
     acceptSuggestion: (...a: unknown[]) => acceptSuggestion(...a),
     dismissSuggestion: (...a: unknown[]) => dismissSuggestion(...a),
+    getOrgList: (...a: unknown[]) => getOrgList(...a),
+    checkOrgText: (...a: unknown[]) => checkOrgText(...a),
+    addOrg: (...a: unknown[]) => addOrg(...a),
     runExtraction: (...a: unknown[]) => runExtraction(...a),
     getContactRelayGroups: (...a: unknown[]) => getContactRelayGroups(...a),
     previewRelayGroup: (...a: unknown[]) => previewRelayGroup(...a),
@@ -299,6 +307,9 @@ beforeEach(() => {
   getSuggestions.mockResolvedValue([]);
   acceptSuggestion.mockReset();
   dismissSuggestion.mockReset();
+  getOrgList.mockReset().mockResolvedValue({ version: 1, entries: [] });
+  checkOrgText.mockReset().mockResolvedValue({ candidates: [], close: [] });
+  addOrg.mockReset();
   getAllPlacements.mockResolvedValue(CASES);
   getAllUnits.mockResolvedValue(UNITS);
   getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
@@ -2392,5 +2403,132 @@ describe('ContactDetail - the kebab unread toggle (S7)', () => {
 
     expect(noteRowsCleared).not.toHaveBeenCalled();
     expect(rollbackRowsCleared).not.toHaveBeenCalled();
+  });
+});
+
+// Spec 2026-10-06 D8: Accept on a housing authority suggestion checks the
+// heard text first; anything but an exact list name opens "Is this really new?".
+describe('ContactDetail - accepting a housing authority suggestion', () => {
+  const ATL = { orgId: 'o-atl', kind: 'housing_authority' as const, name: 'Atlanta Housing Authority' };
+  const AUG = { orgId: 'o-aug', kind: 'housing_authority' as const, name: 'Augusta Housing Authority' };
+  const STEP = { orgId: 'o-step', kind: 'agency' as const, name: 'Step Up' };
+  const IDENTITY = { revision: 'rev-ha', createdAt: '2026-07-16T10:00:00.000Z', runId: 'run-ha' };
+  const haSuggestion = (heard: string): Record<string, unknown> => ({
+    itemId: 'sugg#k1#housingAuthority',
+    ownerContactId: 'k1',
+    target: 'housingAuthority',
+    suggestedValue: heard,
+    conversationId: 'conv-1',
+    ...IDENTITY,
+  });
+
+  async function pressAccept(heard: string): Promise<HTMLElement> {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(TENANT);
+    getSuggestions.mockResolvedValue([haSuggestion(heard)]);
+    renderAt('k1');
+    const chip = await screen.findByRole('group', { name: 'AI suggestion for housing authority' });
+    await user.click(within(chip).getByRole('button', { name: 'Accept' }));
+    return chip;
+  }
+
+  it('an exact list name is accepted as before - no dialog, no value', async () => {
+    checkOrgText.mockResolvedValue({ match: ATL, candidates: [], close: [], nameProblem: 'org_name_taken' });
+    acceptSuggestion.mockResolvedValue({ contact: { ...TENANT, housingAuthority: ATL.name }, suggestions: [] });
+    await pressAccept('Atlanta Housing Authority');
+    await waitFor(() => expect(acceptSuggestion).toHaveBeenCalledTimes(1));
+    expect(checkOrgText).toHaveBeenCalledWith({ kind: 'housing_authority', text: 'Atlanta Housing Authority' });
+    expect(acceptSuggestion.mock.calls[0]).toStrictEqual(['k1', 'housingAuthority', IDENTITY]);
+    expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument();
+  });
+
+  it('a shared spelling: "Use <candidate>" accepts WITH that value', async () => {
+    checkOrgText.mockResolvedValue({ candidates: [ATL, AUG], close: [], nameProblem: 'org_name_taken' });
+    acceptSuggestion.mockResolvedValue({ contact: { ...TENANT, housingAuthority: AUG.name }, suggestions: [] });
+    await pressAccept('AHA');
+    const dialog = await screen.findByRole('dialog', { name: 'Is this really new?' });
+    // The heard text is not editable here: a corrected name is not the AI's.
+    expect(within(dialog).queryByRole('textbox', { name: 'Name' })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Use Augusta Housing Authority' }));
+    await waitFor(() =>
+      expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'housingAuthority', IDENTITY, AUG.name),
+    );
+    expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole('group', { name: 'AI suggestion for housing authority' })).not.toBeInTheDocument(),
+    );
+    // The dialog used the answer the page already had.
+    expect(checkOrgText).toHaveBeenCalledTimes(1);
+  });
+
+  it('"Yes, add it" adds the heard name, then accepts it with that value', async () => {
+    const wren = {
+      ...ATL,
+      orgId: 'o-wren',
+      name: 'Wren Housing Authority',
+      spellings: [],
+      createdAt: '2026-10-06T00:00:00.000Z',
+      createdBy: 'u1',
+      updatedAt: '2026-10-06T00:00:00.000Z',
+      updatedBy: 'u1',
+    };
+    checkOrgText.mockResolvedValue({ candidates: [], close: [] });
+    addOrg.mockResolvedValue(wren);
+    acceptSuggestion.mockResolvedValue({ contact: { ...TENANT, housingAuthority: wren.name }, suggestions: [] });
+    await pressAccept('Wren Housing Authority');
+    const dialog = await screen.findByRole('dialog', { name: 'Is this really new?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, add it' }));
+    await waitFor(() =>
+      expect(addOrg).toHaveBeenCalledWith({ kind: 'housing_authority', name: 'Wren Housing Authority' }),
+    );
+    await waitFor(() =>
+      expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'housingAuthority', IDENTITY, 'Wren Housing Authority'),
+    );
+  });
+
+  it('a different (close) name is a normal contact edit, never an accept', async () => {
+    checkOrgText.mockResolvedValue({ candidates: [], close: [ATL] });
+    updateContact.mockResolvedValue({ ...TENANT, housingAuthority: ATL.name });
+    await pressAccept('Atlnta Housing');
+    const dialog = await screen.findByRole('dialog', { name: 'Is this really new?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Use Atlanta Housing Authority' }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: ATL.name }));
+    expect(acceptSuggestion).not.toHaveBeenCalled();
+    // The edit superseded the suggestion server-side; the page re-reads them.
+    await waitFor(() => expect(getSuggestions).toHaveBeenCalledTimes(2));
+  });
+
+  it('an agency name says so and offers Dismiss', async () => {
+    checkOrgText.mockResolvedValue({ candidates: [], close: [], otherKind: [STEP], nameProblem: 'org_name_taken' });
+    dismissSuggestion.mockResolvedValue([]);
+    await pressAccept('Step Up');
+    const dialog = await screen.findByRole('dialog', { name: 'Is this really new?' });
+    expect(within(dialog).getByText('Step Up is an agency, not a housing authority.')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Dismiss suggestion' }));
+    await waitFor(() => expect(dismissSuggestion).toHaveBeenCalledWith('k1', 'housingAuthority', IDENTITY));
+    expect(acceptSuggestion).not.toHaveBeenCalled();
+  });
+
+  it('a refused value (422 value_not_from_suggestion) lands on the chip in staff words', async () => {
+    checkOrgText.mockResolvedValue({ candidates: [ATL, AUG], close: [], nameProblem: 'org_name_taken' });
+    acceptSuggestion.mockRejectedValue(
+      new ApiError(422, 'value_not_from_suggestion', 'value_not_from_suggestion'),
+    );
+    const chip = await pressAccept('AHA');
+    const dialog = await screen.findByRole('dialog', { name: 'Is this really new?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Use Atlanta Housing Authority' }));
+    const alert = await within(chip).findByRole('alert');
+    expect(alert).toHaveTextContent('That name is not what the AI heard');
+    expect(alert.textContent ?? '').not.toContain('_');
+  });
+
+  it('a failed check lands on the chip and opens nothing', async () => {
+    checkOrgText.mockRejectedValue(new ApiError(503, 'org_list_busy', 'org_list_busy'));
+    const chip = await pressAccept('AHA');
+    const alert = await within(chip).findByRole('alert');
+    expect(alert).toHaveTextContent('Something went wrong - please try again.');
+    expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument();
+    expect(acceptSuggestion).not.toHaveBeenCalled();
   });
 });

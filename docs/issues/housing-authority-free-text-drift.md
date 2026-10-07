@@ -3,11 +3,43 @@ id: housing-authority-free-text-drift
 title: Housing authority has two vocabularies (human-readable vs seed slugs) and two field names (contact.housingAuthority vs unit.jurisdiction)
 type: debt
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-06
+updated: 2026-10-07
+resolved: 2026-10-07
 refs: app/src/services/extraction/schema.ts, app/src/lib/import/airtableSource.ts, dashboard/src/routes/listings/ListingsList.tsx, dashboard/src/routes/listing/listingFormat.ts, app/src/repos/contactsRepo.ts, app/src/repos/unitsRepo.ts
 ---
+
+**Resolution (2026-10-07).** Resolved by `feat/clean-org-names` (tracker #2; design
+`docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md`, branch A).
+There is now ONE stored list of housing authorities and one of agencies - the `org-list`
+item in the `settings` table, managed on Settings > Housing authorities & agencies - in
+place of the three hand-kept copies described below: the importer's alias map
+(`app/src/lib/housingAuthority.ts`), the AI hint list `HOUSING_AUTHORITY_VOCAB` and the
+form suggestions (`dashboard/src/routes/contact/orgVocabulary.ts`) are all retired. Every
+writer checks a changed value against the list (spec D5): the contact PATCH, the unit
+POST and PATCH, the blast filter (and its re-check at preview and on a filter-resolved
+send), the AI apply layer and suggestion accept, and the importer. A new value is
+therefore always a listed NAME, and the pickers and "Is this really new?" stop a variant
+spelling from becoming a second name. Agencies have their own list and field, and an
+agency name is never stored as a housing authority. Against the consequences below:
+(1) blast under-reach - the composer filter can name list entries only, and every stored
+value not on the list is shown with its count on the Settings page until staff settle
+it; (2) `humanizeAuthority` - deleted 2026-10-01; (3) facet fragmentation - new values are
+one name per authority, and old spellings are mapped by the one-time cleanup
+(`app/scripts/clean-org-names.ts`) or settled on the Settings page; (4) import - it
+writes resolved names only, fills an absent housing authority instead of replacing one,
+and reports unknown values instead of passing them through. The two field names were
+already one per record kind after the 2026-08-10 accepted-authorities consolidation,
+seed slugs are retired (see [[retire-humanize-authority]], which keeps only the unit
+PATCH tombstones), and the GHV question is settled: the Georgia Housing Voucher Program
+is DBHDD's, not DCA's, and is its own list entry. The adjacent `voucher_program` question
+was answered by the 2026-08-10 model decision (it dissolved into housing authority); the
+seeds' `voucher_program: 'HCV'` attribute is read by nothing. Not done here: the
+caseworker-to-agency link is branch B of the same design (`feat/caseworkers`, spec
+D16-D21), and production values are cleaned by running the cleanup script right after
+the deploy (RUNBOOK).
 
 **Update (2026-10-01).** `humanizeAuthority` - described below as live code at
 `ListingsList.tsx:36-42`, with its free-text corruption listed among the consequences - was

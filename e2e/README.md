@@ -88,6 +88,10 @@ The All tab (`/tours/all`, added 2026-10-06) is the same gap, excluded and
 tracked the same way: it reads GET /api/tours/list?when&sort&limit for the
 first page, the same plus cursor after it, and never the contact or unit walks.
 
+Known gap: Settings > Housing authorities & agencies (`/settings/organizations`,
+added 2026-10-06) is not a registered destination either, for the same reason;
+registering it is `docs/issues/perf-pages-settings-organizations-surface.md`.
+
 The three target commands are:
 
 ```powershell
@@ -591,6 +595,11 @@ router module is not even imported there.
 - The `*/tick` seams - `tour-reminders`, `roster-actions`, `placement-nudges`,
   `extraction`, `group-guardrails` and `tour-auto-close` (plus
   `group-send-staleness/check`).
+- `POST /__dev/org-fixture` - plant a RAW organization value on a record the
+  spec created, bypassing the org-list check: `{ contactId, field:
+  housingAuthority|agency, value }` SETs it, `{ unitId, field:
+  accepted_authorities, value }` appends it. The only way to put a run-unique
+  value under Settings > "Not on the list" - nothing off-list is seeded.
 
 **THE TICKS ARE NOT A CONVENIENCE.** The lane runs jobs in-process in the APP
 *and* spawns a real worker with its own pollers. Only the app's log lines reach
@@ -601,7 +610,7 @@ claimed the cadence period.
 
 ## Layout
 - `playwright.config.ts` - one `chromium` project, reporters, `webServer` (which runs `scripts/e2e-session.mjs`).
-- `fixtures/` - `reseed`, `fakeTwilio` (inbound injection incl. CARRIER GROUP texts, the Conversations inspectors, and `getOutboundTo` proof-of-send reads), `groupText` (log tail + guardrail ticks), `fakeEmail`, `fakeVoice`, `relayConnect`, `voiceSetup`, `extraction`.
+- `fixtures/` - `reseed`, `fakeTwilio` (inbound injection incl. CARRIER GROUP texts, the Conversations inspectors, and `getOutboundTo` proof-of-send reads), `groupText` (log tail + guardrail ticks), `fakeEmail`, `fakeVoice`, `relayConnect`, `voiceSetup`, `extraction`, `orgFixture` (the organization list over the API: add a run-unique name, read usage and "Not on the list", plant an off-list value through `/__dev/org-fixture`, and `waitForRewrite`).
 - `support/` - `selectors.md` (the selector conventions), `urls.ts` (central lane-URL module), `lane.mjs` (lane resolver), `preflight.ts` (globalSetup), `viewport.ts`.
 - `tests/` - `dashboard-next/`, `flows/`, `scenarios/`, plus two loose specs.
 - `scenarios/` - `steps.ts`, the sequence-diagram vocabulary.

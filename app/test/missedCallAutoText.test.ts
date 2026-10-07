@@ -150,9 +150,10 @@ describe('call.missedAutoText (M1.9b)', () => {
 
   // --- INTAKE GATE (2026-08-19) --------------------------------------------
   // The copy asks for full name, voucher size, and housing authority, so it may
-  // only go to a caller we hold NONE of that on. The default fixture seeds no
-  // contact at all, which is the first-time caller - covered by the 'enabled'
-  // test above and re-asserted explicitly here.
+  // only go to a caller we hold NONE of that on - nor an agency, which marks a
+  // known contact even though the copy never asks for it (spec 2026-10-06 D15).
+  // The default fixture seeds no contact at all, which is the first-time
+  // caller - covered by the 'enabled' test above and re-asserted explicitly here.
 
   it('gate: no contact record at all (first-time caller) - sends', async () => {
     expect(world.contacts).toHaveLength(0);
@@ -188,6 +189,16 @@ describe('call.missedAutoText (M1.9b)', () => {
     expect(world.sent).toHaveLength(0);
   });
 
+  it('gate: an agency alone marks the caller as known - skips (spec 2026-10-06 D15)', async () => {
+    // The org-names cleanup MOVES agency names out of housingAuthority into
+    // agency. Without this rule a contact the gate used to skip (its only fact
+    // was "Hope Atlanta" in housingAuthority) would start receiving the text.
+    seedCallerContact(world, { type: 'tenant', agency: 'HOPE Atlanta' });
+    await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
+    await queueAdapter.settle();
+    expect(world.sent).toHaveLength(0);
+  });
+
   it('gate: landlord with a blank profile - skips (never asked for a voucher)', async () => {
     seedCallerContact(world, { type: 'landlord', status: 'active' });
     await enqueueImmediate(MISSED_CALL_AUTOTEXT_JOB, { callSid: CALL_SID, conversationId: CONV_ID });
@@ -218,7 +229,7 @@ describe('call.missedAutoText (M1.9b)', () => {
     });
 
     it('any single fact present - skip', () => {
-      for (const field of ['firstName', 'lastName', 'housingAuthority']) {
+      for (const field of ['firstName', 'lastName', 'housingAuthority', 'agency']) {
         expect(needsMissedCallIntakeText(contact({ [field]: 'x' }))).toBe(false);
       }
       expect(needsMissedCallIntakeText(contact({ voucherSize: 3 }))).toBe(false);
@@ -233,6 +244,10 @@ describe('call.missedAutoText (M1.9b)', () => {
       expect(needsMissedCallIntakeText(contact({ firstName: null }))).toBe(true);
       expect(needsMissedCallIntakeText(contact({ voucherSize: Number.NaN }))).toBe(true);
       expect(needsMissedCallIntakeText(contact({ housingAuthority: { v: 1 } }))).toBe(true);
+      // (PIN) An agency cleared to '' (Move to Housing authority, Split) is blank
+      // too, so a contact whose only fact was cleared may receive it (D15).
+      expect(needsMissedCallIntakeText(contact({ agency: '' }))).toBe(true);
+      expect(needsMissedCallIntakeText(contact({ agency: '   ' }))).toBe(true);
     });
 
     it('landlord/partner/team member - skip regardless of blank fields', () => {

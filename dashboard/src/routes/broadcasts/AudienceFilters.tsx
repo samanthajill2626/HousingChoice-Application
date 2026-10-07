@@ -1,6 +1,6 @@
 // AudienceFilters — the extensible audience-filter framework (the composer's
 // centerpiece). v1 ships two criteria: a prominent VoucherSize chip control
-// (bedroomSize 0..4) and a HousingAuthority text input; the disabled "+ Add
+// (bedroomSize 0..4) and a HousingAuthority picker; the disabled "+ Add
 // filter" seam is the placeholder for future criteria (neighborhood,
 // accessibility…). The always-on hard fences (opted-out - unreachable) are noted
 // as informational text (the server enforces them — never sent by the client).
@@ -9,8 +9,11 @@
 // The voucher-size control pre-fills from the property's beds when composing from
 // a unit, shown with a "matches this N-bedroom property" tag (overridable — a
 // 2-BR home may suit other sizes).
-import { useId } from 'react';
+import { useId, useState } from 'react';
 import type { AudienceFilter } from '../../api/index.js';
+import { OrgPicker } from '../orgs/OrgPicker.js';
+import { HOUSING_AUTHORITY_KINDS, ORG_TYPED_NOT_A_FILTER, orgListLoadError, orgListUnknown } from '../orgs/orgCopy.js';
+import { useOrgList } from '../orgs/useOrgList.js';
 import {
   VOUCHER_SIZE_CHOICES,
   bedroomPhrase,
@@ -31,6 +34,18 @@ export interface AudienceFiltersProps {
   reachPending: boolean;
   /** True when the reach estimate hit the page/recipient cap (incomplete). */
   truncated: boolean;
+  /** A message for the housing authority filter, shown under its picker - the
+   *  composer's "no longer on the list" after a 422 (spec 2026-10-06 D7). */
+  authorityError?: string | null;
+  /** The text typed in the housing authority picker that is not a pick, on
+   *  every change ('' after a pick, an emptied field or an unmount). It is
+   *  never a filter (D7), so the composer holds Preview back while there is
+   *  any (code review R2-FE-3). */
+  onAuthorityTextChange?: (text: string) => void;
+  /** True while a Preview is in flight: the audience is frozen - no voucher
+   *  chip, pick, typing or chip removal - because the candidates it returns
+   *  belong to the draft it previewed (code review R3-FE-1). */
+  disabled?: boolean;
 }
 
 export function AudienceFilters({
@@ -40,9 +55,22 @@ export function AudienceFilters({
   reachCount,
   reachPending,
   truncated,
+  authorityError = null,
+  onAuthorityTextChange,
+  disabled = false,
 }: AudienceFiltersProps): React.JSX.Element {
   const uid = useId();
-  const authorityId = `${uid}-authority`;
+  // The housing authority list behind the picker (spec 2026-10-06 D7).
+  const orgList = useOrgList();
+  // The picker's typed text: while it holds any, a list that failed to load
+  // leaves the field enabled so the text can still be cleared - it holds
+  // Preview back, and a disabled field could never let it go (R2-FE-3). The
+  // forms keep a picker holding text usable the same way (useTypedOrgText,
+  // R3-FE-3): nothing ever waits on a field staff cannot use. An empty field
+  // follows their rule too (R4-3): only a failed read with no list in hand
+  // disables it - this list is read once per mount, so its failed read never
+  // has one.
+  const [typed, setTyped] = useState('');
 
   function pickSize(value: number): void {
     // Toggle: re-clicking the active chip clears the size narrower.
@@ -52,10 +80,11 @@ export function AudienceFilters({
     onChange(next);
   }
 
-  function setAuthority(raw: string): void {
+  /** A pick (an exact list name) or a removed chip (''): the only commits. */
+  function setAuthority(name: string): void {
     const next: AudienceFilter = { contact_type: 'tenant' };
     if (filter.bedroomSize !== undefined) next.bedroomSize = filter.bedroomSize;
-    if (raw.trim().length > 0) next.housing_authority = raw;
+    if (name !== '') next.housing_authority = name;
     onChange(next);
   }
 
@@ -85,6 +114,7 @@ export function AudienceFilters({
                 type="button"
                 className={`${styles.chip} ${active ? styles.chipActive : ''}`.trim()}
                 aria-pressed={active}
+                disabled={disabled}
                 onClick={() => pickSize(choice.value)}
               >
                 {choice.label}
@@ -101,19 +131,30 @@ export function AudienceFilters({
         ) : null}
       </div>
 
-      {/* Housing authority. */}
+      {/* Housing authority (spec 2026-10-06 D7): a picker over the stored
+          list - names and spellings, NO add option. Only a pick or a removed
+          chip changes the filter, so typing never recreates the draft - and
+          the note under a field left holding text says so (R2-FE-6), and the
+          composer holds Preview back until it is picked or cleared (R2-FE-3).
+          A list that failed to load leaves this filter unsettable; the
+          others work. */}
       <div className={styles.criterion}>
-        <label className={styles.criterionLabel} htmlFor={authorityId}>
-          Housing authority
-        </label>
-        <input
-          id={authorityId}
-          type="text"
-          className={styles.input}
+        <OrgPicker
+          label="Housing authority"
+          kinds={HOUSING_AUTHORITY_KINDS}
+          entries={orgList.entries}
+          loading={orgListUnknown(orgList)}
+          disabled={disabled || (orgList.error && orgListUnknown(orgList) && typed.trim() === '')}
           value={filter.housing_authority ?? ''}
+          onChange={setAuthority}
+          onPendingTextChange={(text) => {
+            setTyped(text);
+            onAuthorityTextChange?.(text);
+          }}
+          pendingNote={ORG_TYPED_NOT_A_FILTER}
+          error={authorityError ?? (orgList.error ? orgListLoadError(HOUSING_AUTHORITY_KINDS) : null)}
           placeholder="Any housing authority"
-          autoComplete="off"
-          onChange={(e) => setAuthority(e.target.value)}
+          labelClassName={styles.criterionLabel}
         />
       </div>
 

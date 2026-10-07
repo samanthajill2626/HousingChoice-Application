@@ -18,14 +18,16 @@
 //
 // dashboard-next dialect (e2e/support/selectors.md): a local NEXT const + a
 // local devLogin, raw page.request for setup, accessibility-first locators, no
-// Scenario verbs. Self-clean isolation: the landlord, the properties and BOTH
-// authority names are minted fresh per run (run-unique authority names make
-// every count below exact, whatever other specs left in the lane), so NOTHING
-// here reseeds (a reseed mid-suite would wipe other specs' data and log this
-// session out).
+// Scenario verbs. Self-clean isolation: the landlord, the properties and all
+// three authority names are minted fresh per run (run-unique authority names
+// make every count below exact, whatever other specs left in the lane), and the
+// names are ADDED to the organization list first (spec D5 checks every unit
+// write), so NOTHING here reseeds (a reseed mid-suite would wipe other specs'
+// data and log this session out).
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { NARROW_360, WIDE_RESTORE, expectNoHorizontalOverflow } from '../../support/viewport.js';
 import { expectTodayReady } from '../../support/today.js';
+import { addOrg } from '../../fixtures/orgFixture.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -89,9 +91,10 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
     // under them and every number below is exact.
     const authA = `Summary Authority ${stamp}`;
     const authB = `Summary Partner ${stamp}`;
-    // One long UNBROKEN stored spelling (a raw slug) on the coming-soon
-    // property: chips and the summary show stored text as-is, so step 7's
-    // 360px check proves such a name wraps instead of widening the page.
+    // One long UNBROKEN name (no space to wrap at) on the coming-soon property:
+    // chips and the summary show stored names as-is, so the 360px check (step
+    // 8) proves such a name wraps instead of widening the page. 61 characters,
+    // inside the 120-character name limit (spec D13).
     const longSlug = `long_unbroken_authority_name_${stamp}_for_the_phone_width_check`;
     const twoBr = `${stamp} Summary Avail Two St`;
     const both = `${stamp} Summary Avail Both Ave`;
@@ -101,6 +104,9 @@ test.describe('Properties page - available now vs. coming soon, by housing autho
     const bedsOnly = `${stamp} Summary Beds Only Way`;
 
     const landlordId = await createLandlord(req, stamp);
+    for (const name of [authA, authB, longSlug]) {
+      await addOrg(req, { kind: 'housing_authority', name });
+    }
     await createProperty(req, landlordId, { line1: twoBr, authorities: [authA], beds: 2, voucherSize: 2, available: true });
     await createProperty(req, landlordId, {
       line1: both,

@@ -455,6 +455,7 @@ if (config.aiExtractionEnabled) {
   const { createContactsRepo } = await import('./repos/contactsRepo.js');
   const { createAuditRepo } = await import('./repos/auditRepo.js');
   const { createExtractionDriver } = await import('./adapters/extraction.js');
+  const { createOrgListRepo } = await import('./repos/orgListRepo.js');
   const { appEvents } = await import('./lib/events.js');
   const { runDueExtractions } = await import('./jobs/extraction.js');
 
@@ -462,6 +463,9 @@ if (config.aiExtractionEnabled) {
   const contactsRepo = createContactsRepo({ logger });
   const extractionDeps = {
     repo: extractionRepo,
+    // The organization list (spec 2026-10-06 D8): the worker builds its own
+    // repo (plan 3.4b); one consistent read per run.
+    orgListRepo: createOrgListRepo({ logger }),
     // AI run log (design 2026-08-06). Best-effort: a failed run-log write must
     // never fail an extraction run, re-arm a due row, or burn a retry attempt.
     aiRuns: createAiRunsRepo({ logger }),

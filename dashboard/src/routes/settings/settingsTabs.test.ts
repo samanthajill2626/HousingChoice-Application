@@ -1,7 +1,8 @@
 // settingsTabs unit tests — the SINGLE source of truth for the Settings tab
 // model. Asserts the role-gating helpers: visibleTabs(isAdmin) and
 // defaultTabPath(isAdmin). Team + System status are the ONLY admin-only tabs;
-// Templates, Notifications, Voice and Phone numbers are visible to everyone.
+// Templates, Notifications, Voice and Phone numbers + Housing authorities &
+// agencies are visible to everyone.
 import { describe, expect, it } from 'vitest';
 import {
   SETTINGS_TABS,
@@ -20,6 +21,7 @@ describe('settingsTabs', () => {
       'system',
       'ai-runs',
       'numbers',
+      'organizations',
     ]);
     // `numbers` (Phone numbers) is NOT admin-only: OUR one business number is
     // read-only and visible to everyone; the pool inventory inside the section
@@ -36,15 +38,18 @@ describe('settingsTabs', () => {
       'system',
       'ai-runs',
       'numbers',
+      'organizations',
     ]);
   });
 
-  it('visibleTabs(false) returns Templates + Notifications + Voice + Phone numbers (no Team, no System)', () => {
+  it('visibleTabs(false) returns Templates + Notifications + Voice + Phone numbers + Housing authorities & agencies (no Team, no System)', () => {
     expect(visibleTabs(false).map((t) => t.id)).toEqual([
       'templates',
       'notifications',
       'voice',
       'numbers',
+      // Spec 2026-10-06 D10: every signed-in user sees the organization lists.
+      'organizations',
     ]);
   });
 

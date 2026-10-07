@@ -32,6 +32,7 @@ import {
 } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { contactDisplayName } from '../contact/format.js';
+import { ORG_FILTER_TYPED_HINT } from '../orgs/orgCopy.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { shortAddress } from '../listing/listingFormat.js';
 import { AudienceFilters } from './AudienceFilters.js';
@@ -55,6 +56,13 @@ const UNIT_BROWSE_BATCH = 12;
 function flyerLinkFor(unitId: string): string {
   return `${window.location.origin}/p/${encodeURIComponent(unitId)}`;
 }
+
+/** R2 ruling F1's copy for both composer 422s. */
+const AUTHORITY_LEFT_THE_LIST = 'That housing authority is no longer on the list - pick it again';
+
+/** Code review R3-FE-1: a Preview that landed after the audience or the
+ *  message changed is dropped - its candidates belong to another draft. */
+const AUDIENCE_CHANGED = 'The audience changed - preview again.';
 
 export function BroadcastComposer(): React.JSX.Element {
   const [params] = useSearchParams();
@@ -106,10 +114,38 @@ export function BroadcastComposer(): React.JSX.Element {
   // token template - there is no per-recipient variance to preserve.
   const resolvedMode = seedContactIds.length === 1 && !audienceEnabled;
 
-  // Preview step state.
-  const [preview, setPreview] = useState<PreviewResponse | null>(null);
+  // Preview step state. A result is kept with the draft it previewed and the
+  // inputs that draft was made for: those candidates belong to that draft
+  // alone (code review R3-FE-1 - see currentPreview below).
+  const [preview, setPreview] = useState<{ draftId: string; key: string; result: PreviewResponse } | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+
+  // Spec 2026-10-06 D7: a 422 org_not_on_list from the draft create or from
+  // Preview means the picked housing authority left the list. The pick is
+  // cleared and this message stays under the picker until the operator next
+  // changes a filter (a recreate clears the draft hook's own error, so the
+  // composer owns this one).
+  const [authorityNotice, setAuthorityNotice] = useState<string | null>(null);
+  function rejectAuthorityPick(): void {
+    setFilter((prev) => {
+      const next: AudienceFilter = { contact_type: 'tenant' };
+      if (prev.bedroomSize !== undefined) next.bedroomSize = prev.bedroomSize;
+      return next;
+    });
+    setAuthorityNotice(AUTHORITY_LEFT_THE_LIST);
+  }
+  function onFilterChange(next: AudienceFilter): void {
+    setAuthorityNotice(null);
+    setFilter(next);
+  }
+  // Code review R2-FE-3: text typed in the housing authority filter but never
+  // picked is NOT a filter (D7 - the draft changes only on a pick or a clear,
+  // never per keystroke), so Preview waits while there is any: a preview (and
+  // the send after it) of every tenant must never pass for a filtered one.
+  // AudienceFilters reports it; the picker reports '' when it unmounts.
+  const [authorityText, setAuthorityText] = useState('');
+  const authorityTyped = authorityText.trim() !== '';
 
   // Tenant candidates for the "add a tenant" search (loaded once).
   const [tenants, setTenants] = useState<Contact[]>([]);
@@ -120,6 +156,7 @@ export function BroadcastComposer(): React.JSX.Element {
     bodyTemplate,
     ...(audienceEnabled && { filter }),
     ...(seedContactIds.length > 0 && { seedContactIds }),
+    onOrgNotOnList: rejectAuthorityPick,
     // Untouched pre-fill/auto-seed = zero operator work: the draft is deleted
     // on unmount instead of littering the Matching list. A resumed draft is
     // the operator's saved work — never disposable.
@@ -310,13 +347,21 @@ export function BroadcastComposer(): React.JSX.Element {
 
   async function onPreview(): Promise<void> {
     if (draft.draftId === null || previewBusy) return;
+    // What this Preview reads: the current draft, made for the inputs on
+    // screen now (canPreview holds draftKey === key).
+    const previewed = { draftId: draft.draftId, key: draft.key };
     setPreviewBusy(true);
     setPreviewError(null);
+    setPreview(null);
     try {
-      const result = await previewBroadcast(draft.draftId);
-      setPreview(result);
+      const result = await previewBroadcast(previewed.draftId);
+      setPreview({ ...previewed, result });
     } catch (err) {
-      if (err instanceof ApiError) {
+      if (err instanceof ApiError && err.status === 422 && err.code === 'org_not_on_list') {
+        // Spec D7: the stored filter's housing authority left the list after
+        // the draft was made - the same answer as the create's.
+        rejectAuthorityPick();
+      } else if (err instanceof ApiError) {
         setPreviewError(err.message);
       } else {
         setPreviewError("Couldn't load the recipient list — try again.");
@@ -328,9 +373,33 @@ export function BroadcastComposer(): React.JSX.Element {
 
   // Disable Preview/Send while a recreate is pending OR after one FAILED (stale):
   // the current draft id no longer matches the on-screen audience/message, so we
-  // must not Preview/Send against it. Editing again retries the recreate.
+  // must not Preview/Send against it. Editing again retries the recreate. The
+  // draft must have been made for what is on screen (draftKey === key) from
+  // the very render a change lands in, before its recreate starts (R3-FE-1).
+  // And while the housing authority filter holds typed text (R2-FE-3, above).
   const canPreview =
-    bodyTemplate.trim().length > 0 && draft.draftId !== null && !draft.reachPending && !draft.stale;
+    bodyTemplate.trim().length > 0 &&
+    draft.draftId !== null &&
+    draft.draftKey === draft.key &&
+    !draft.reachPending &&
+    !draft.stale &&
+    !authorityTyped;
+
+  // Code review R3-FE-1: a Preview's candidates belong to the draft it
+  // previewed. They are reviewed - and Send posts them - only while that
+  // draft is still the current one and still made for what is on screen. A
+  // result that lands after the audience or the message changed (a new draft
+  // made or still being made, a property changed) is dropped, and the compose
+  // step says so: Send never posts one draft's candidates to another draft.
+  // The filters are frozen while a Preview is in flight (AudienceFilters
+  // `disabled`), so a filter change cannot even start then.
+  const currentPreview =
+    preview !== null &&
+    preview.draftId === draft.draftId &&
+    preview.key === draft.key &&
+    draft.draftKey === draft.key
+      ? preview
+      : null;
 
   // PROPERTY step - a Matching send ALWAYS carries a property, so until one is
   // attached the only thing on screen is the choice itself: a search field plus
@@ -414,8 +483,8 @@ export function BroadcastComposer(): React.JSX.Element {
     );
   }
 
-  // PREVIEW step — the curated list.
-  if (preview !== null && draft.draftId !== null) {
+  // PREVIEW step - the curated list of the draft it previewed (R3-FE-1).
+  if (currentPreview !== null) {
     return (
       <div className={styles.page}>
         <h1 className={styles.title}>Review recipients</h1>
@@ -424,8 +493,8 @@ export function BroadcastComposer(): React.JSX.Element {
         </button>
         {unavailableNote}
         <RecipientPreview
-          draftId={draft.draftId}
-          preview={preview}
+          draftId={currentPreview.draftId}
+          preview={currentPreview.result}
           tenantCandidates={tenants}
           candidatesLoading={tenantsLoading}
           {...(effectiveUnitId !== undefined && { unitId: effectiveUnitId })}
@@ -462,7 +531,10 @@ export function BroadcastComposer(): React.JSX.Element {
           ) : (
             <AudienceFilters
               filter={filter}
-              onChange={setFilter}
+              onChange={onFilterChange}
+              onAuthorityTextChange={setAuthorityText}
+              authorityError={authorityNotice}
+              disabled={previewBusy}
               {...(typeof unit?.beds === 'number' && { propertyBeds: unit.beds })}
               {...(draft.reachCount !== undefined && { reachCount: draft.reachCount })}
               reachPending={draft.reachPending}
@@ -503,6 +575,11 @@ export function BroadcastComposer(): React.JSX.Element {
           {previewError}
         </p>
       ) : null}
+      {preview !== null && currentPreview === null ? (
+        <p className={styles.error} role="alert">
+          {AUDIENCE_CHANGED}
+        </p>
+      ) : null}
 
       <div className={styles.actions}>
         <button
@@ -514,12 +591,15 @@ export function BroadcastComposer(): React.JSX.Element {
           {previewBusy ? 'Loading…' : 'Preview recipients'}
         </button>
         {draft.reachPending ? <Spinner /> : null}
-        {/* A disabled button must say WHY: the one operator-actionable gate is
-            the empty message; the settling draft/reach is transient (spinner).
-            A stale draft's failure already renders in the error alert above. */}
+        {/* A disabled button must say WHY: the operator-actionable gates are
+            the empty message and text typed in the housing authority filter;
+            the settling draft/reach is transient (spinner). A stale draft's
+            failure already renders in the error alert above. */}
         {!previewBusy && !canPreview ? (
           bodyTemplate.trim().length === 0 ? (
             <span className={styles.previewHint}>Write a message to enable the preview.</span>
+          ) : authorityTyped ? (
+            <span className={styles.previewHint}>{ORG_FILTER_TYPED_HINT}</span>
           ) : draft.reachPending || draft.draftId === null ? (
             <span className={styles.previewHint}>Sizing the audience…</span>
           ) : null

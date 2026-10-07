@@ -14,9 +14,15 @@ import type { ExtractionResult } from '../src/adapters/extraction.js';
 import { createLogger, type Logger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { applyExtraction, type ApplyDeps } from '../src/services/extraction/apply.js';
+import type { OrgEntry } from '../src/lib/orgNames.js';
+import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import { normalizeSuggestionValue } from '../src/services/extraction/schema.js';
 
 const NOW = '2026-07-16T12:00:00.000Z';
 const CONV = 'conv-1';
+/** The organization list every apply call resolves housingAuthority against (spec 2026-10-06 D8). */
+let orgSeq = 0;
+const ORG_ENTRIES: OrgEntry[] = buildStartingEntries(NOW, () => `org-${(orgSeq += 1)}`);
 
 function makeContact(overrides: Partial<ContactItem> = {}): ContactItem {
   return { contactId: 'c1', type: 'tenant', ...overrides };
@@ -103,9 +109,10 @@ function run(
   result: ExtractionResult,
   cursorTsMsgId = 'ts-9',
   runId?: string,
+  orgEntries: readonly OrgEntry[] = ORG_ENTRIES,
 ) {
   return applyExtraction(deps, {
-    contact, conversationId: CONV, cursorTsMsgId, result,
+    contact, conversationId: CONV, cursorTsMsgId, result, orgEntries,
     ...(runId !== undefined && { runId }),
   });
 }
@@ -335,27 +342,30 @@ describe('applyExtraction - coercion/validation (item 2)', () => {
     });
   });
 
-  it('writes a RECOGNISED housingAuthority directly', async () => {
+  it('writes a housingAuthority that is a list name directly', async () => {
+    // Was 'Fulton County' - now a spelling of Fulton County Housing Authority
+    // (spec 2026-10-06 section 13), so it is written as that name (the spelling
+    // case is the next test). This one keeps the exact-name case.
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
-      fields: { housingAuthority: { op: 'write', value: 'Fulton County' } },
+      fields: { housingAuthority: { op: 'write', value: 'Jonesboro Housing Authority' } },
     });
     expect(outcome.wrote).toEqual(['housingAuthority']);
-    expect(records.updates[0]!.patch['housingAuthority']).toBe('Fulton County');
+    expect(records.updates[0]!.patch['housingAuthority']).toBe('Jonesboro Housing Authority');
   });
 
-  it('normalizes a known VARIANT to canonical spelling and writes it', async () => {
+  it('writes a list SPELLING as its entry\'s exact name', async () => {
     // The case the whole normalizer exists for. Broadcast audience resolution is
     // an exact hash match on the byHousingAuthority GSI, so had "Dekalb Housing"
     // been stored verbatim it would have formed a second DeKalb audience
-    // invisible to the imported one. It is also written, not suggested,
-    // BECAUSE it normalizes to something we recognise.
+    // invisible to the others. It is written, not suggested, BECAUSE it is a
+    // spelling of exactly one list entry (spec 2026-10-06 D4/D8).
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact({ type: 'tenant' }), {
       fields: { housingAuthority: { op: 'write', value: 'Dekalb Housing' } },
     });
     expect(outcome.wrote).toEqual(['housingAuthority']);
-    expect(records.updates[0]!.patch['housingAuthority']).toBe('Dekalb County Housing');
+    expect(records.updates[0]!.patch['housingAuthority']).toBe('DeKalb County Housing Authority');
   });
 
   it("coerces porting 'true' to the boolean true", async () => {
@@ -736,6 +746,7 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
     const { deps, records } = makeDeps();
     const contact = makeContact({ type: 'tenant' }); // no pets yet
     const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
       contact,
       conversationId: CONV,
       cursorTsMsgId: 'ts-9',
@@ -778,6 +789,7 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
     const { deps, records } = makeDeps();
     const contact = makeContact({ type: 'tenant', voucherSize: 2 });
     const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
       contact,
       conversationId: CONV,
       cursorTsMsgId: 'ts-9',
@@ -806,6 +818,7 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
   it('with the flag explicitly false, a write on an empty field lands directly (parity)', async () => {
     const { deps, records } = makeDeps();
     const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
       contact: makeContact({ type: 'tenant' }),
       conversationId: CONV,
       cursorTsMsgId: 'ts-9',
@@ -822,6 +835,7 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
   it('demotion audit omits speakerRoles when the result carries none', async () => {
     const { deps, records } = makeDeps();
     const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
       contact: makeContact({ type: 'tenant' }),
       conversationId: CONV,
       cursorTsMsgId: 'ts-9',
@@ -989,6 +1003,7 @@ describe('applyExtraction - address (ninth target)', () => {
     const { deps, records } = makeDeps();
     const contact = makeContact({ type: 'tenant' }); // no address yet
     const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
       contact,
       conversationId: CONV,
       cursorTsMsgId: 'ts-9',
@@ -1166,6 +1181,7 @@ describe('applyExtraction - per-target decisions for the run log', () => {
   it('records demotedFrom write - NOT a drop - for an inferred-role demotion', async () => {
     const { deps } = makeDeps();
     const out = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
       contact: makeContact({ type: 'tenant', pets: 'a dog' }),
       conversationId: CONV,
       hasInferredRoleContent: true,
@@ -1265,5 +1281,253 @@ describe('applyExtraction - per-target decisions for the run log', () => {
     for (const d of out.decisions) {
       if (d.outcome === 'dropped') expect(d.dropReason).toBeDefined();
     }
+  });
+});
+
+describe('applyExtraction - housingAuthority against the organization list (spec 2026-10-06 D8)', () => {
+  it('writes an exact list name the old alias map never knew', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'write', value: 'Marietta Housing Authority', reason: 'said so' } },
+    });
+    expect(outcome.wrote).toEqual(['housingAuthority']);
+    expect(records.updates[0]!.patch['housingAuthority']).toBe('Marietta Housing Authority');
+  });
+
+  it('writes a unique spelling, or the name in another case, as the entry\'s exact name', async () => {
+    for (const said of ['Atlanta (AHA)', 'atlanta housing authority.']) {
+      const { deps, records } = makeDeps();
+      const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+        fields: { housingAuthority: { op: 'write', value: said } },
+      });
+      expect(outcome.wrote).toEqual(['housingAuthority']);
+      expect(records.updates[0]!.patch['housingAuthority']).toBe('Atlanta Housing Authority');
+      expect(outcome.decisions[0]).toMatchObject({
+        target: 'housingAuthority', outcome: 'wrote', proposedValue: said, coercedValue: 'Atlanta Housing Authority',
+      });
+    }
+  });
+
+  it('still lets the model\'s op decide: a write over an occupied field writes the list name', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', housingAuthority: 'Atlanta (AHA)' }), {
+      fields: { housingAuthority: { op: 'write', value: 'Atlanta Housing Authority', reason: 'fuller name' } },
+    });
+    expect(outcome.wrote).toEqual(['housingAuthority']);
+    expect(records.updates[0]!.patch['housingAuthority']).toBe('Atlanta Housing Authority');
+  });
+
+  it('a suggest of a list spelling suggests the entry\'s exact name', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(
+      deps,
+      makeContact({ type: 'tenant', housingAuthority: 'Georgia Department of Community Affairs' }),
+      { fields: { housingAuthority: { op: 'suggest', value: 'Atlanta (AHA)', reason: 'moved to Atlanta' } } },
+    );
+    expect(outcome.suggested).toEqual(['housingAuthority']);
+    expect(records.updates).toHaveLength(0);
+    expect(records.suggestions[0]).toMatchObject({
+      target: 'housingAuthority',
+      currentValue: 'Georgia Department of Community Affairs',
+      suggestedValue: 'Atlanta Housing Authority',
+    });
+  });
+
+  it('drops a suggestion whose RESOLVED name equals the current value', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant', housingAuthority: 'Atlanta Housing Authority' }), {
+      fields: { housingAuthority: { op: 'suggest', value: 'Atlanta (AHA)' } },
+    });
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions[0]).toMatchObject({
+      target: 'housingAuthority', outcome: 'dropped', dropReason: 'equal_to_current',
+    });
+  });
+
+  it('drops an agency name - by name or spelling, on either op - as agency_not_authority', async () => {
+    const cases = [
+      ['write', 'Hope Atlanta'],
+      ['suggest', 'Hope Atlanta'],
+      ['write', 'VASH'],
+    ] as const;
+    for (const [op, said] of cases) {
+      const { deps, records } = makeDeps();
+      const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+        fields: { housingAuthority: { op, value: said, reason: 'her caseworker works there' } },
+      });
+      expect(records.updates).toHaveLength(0);
+      expect(records.suggestions).toHaveLength(0);
+      expect(outcome.wrote).toEqual([]);
+      expect(outcome.suggested).toEqual([]);
+      expect(outcome.decisions).toEqual([{
+        target: 'housingAuthority',
+        outcome: 'dropped',
+        dropReason: 'agency_not_authority',
+        proposedValue: said,
+        reason: 'her caseworker works there',
+      }]);
+    }
+  });
+
+  it('suggests a shared abbreviation as said, demoting a write (PIN)', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'write', value: 'AHA' } },
+    });
+    expect(outcome.wrote).toEqual([]);
+    expect(records.suggestions[0]).toMatchObject({ target: 'housingAuthority', suggestedValue: 'AHA' });
+    expect(outcome.decisions[0]).toMatchObject({ outcome: 'suggested', demotedFrom: 'write', coercedValue: 'AHA' });
+  });
+
+  it('suggests a compound value as said, whitespace collapsed (PIN)', async () => {
+    const { deps, records } = makeDeps();
+    await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'write', value: 'DCA   HUD-VASH' } },
+    });
+    expect(records.suggestions[0]).toMatchObject({ target: 'housingAuthority', suggestedValue: 'DCA HUD-VASH' });
+  });
+
+  it('inferred-role content still demotes a list match - to a suggestion of the exact name', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await applyExtraction(deps, {
+      orgEntries: ORG_ENTRIES,
+      contact: makeContact({ type: 'tenant' }),
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: { fields: { housingAuthority: { op: 'write', value: 'Atlanta (AHA)' } } },
+      hasInferredRoleContent: true,
+    });
+    expect(outcome.wrote).toEqual([]);
+    expect(records.suggestions[0]).toMatchObject({ target: 'housingAuthority', suggestedValue: 'Atlanta Housing Authority' });
+    const demoted = records.audits.find((a) => a.type === 'ai_extraction_demoted');
+    expect(demoted!.payload).toMatchObject({ fields: ['housingAuthority'] });
+  });
+
+  it('resolves against the list the run passed in ctx, not a fixed copy', async () => {
+    const metro: OrgEntry = {
+      orgId: 'metro', kind: 'housing_authority', name: 'Metro Housing Authority', spellings: ['Metro HA'],
+      createdAt: NOW, createdBy: 'test', updatedAt: NOW, updatedBy: 'test',
+    };
+    const { deps, records } = makeDeps();
+    const outcome = await run(
+      deps,
+      makeContact({ type: 'tenant' }),
+      { fields: { housingAuthority: { op: 'write', value: 'Metro HA' } } },
+      'ts-9',
+      undefined,
+      [metro],
+    );
+    expect(outcome.wrote).toEqual(['housingAuthority']);
+    expect(records.updates[0]!.patch['housingAuthority']).toBe('Metro Housing Authority');
+  });
+});
+
+// Worklist ruling RG-2 (2026-10-06): a dismissal tombstone is keyed on the
+// suggestion's TEXT (normalizeSuggestionValue). Before spec 2026-10-06 D8 a
+// known authority was suggested under its old alias spelling ("Atlanta (AHA)",
+// "DCA", "Fulton County", ...) and anything else as the model said it; now a
+// list match is suggested under the entry's full NAME - a different key. So
+// the suggest path also checks the model's own text and every spelling of the
+// matched entry that names it alone (ruling B-3: a spelling shared within the
+// kind, such as AHA, does not count), and a value dismissed before the deploy
+// is still never re-suggested (ruling 2026-07-21). Writes never consult
+// dismissals.
+describe('applyExtraction - a list match honors dismissals of its other spellings (worklist RG-2)', () => {
+  const tombstone = (text: string): string =>
+    `housingAuthority#${normalizeSuggestionValue('housingAuthority', text)}`;
+
+  it('drops the full name when an old spelling of the entry was dismissed', async () => {
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone('Atlanta (AHA)')] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: 'Atlanta Housing Authority', reason: 'said so' } },
+    });
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions).toEqual([{
+      target: 'housingAuthority',
+      outcome: 'dropped',
+      dropReason: 'dismissed_before',
+      proposedValue: 'Atlanta Housing Authority',
+    }]);
+  });
+
+  it('drops the full name when the model\'s own text was dismissed', async () => {
+    const said = 'Housing Authority of the City of Atlanta';
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone(said)] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: said } },
+    });
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions[0]).toMatchObject({
+      target: 'housingAuthority', outcome: 'dropped', dropReason: 'dismissed_before', proposedValue: said,
+    });
+  });
+
+  it('drops it when the dismissed text is no spelling but resolves to the entry', async () => {
+    // D4 reads 'atlanta housing authority.' as the name, but its dismissal key
+    // keeps the period: only the check of the model's own text catches it.
+    const said = 'atlanta housing authority.';
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone(said)] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: said } },
+    });
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions[0]).toMatchObject({ outcome: 'dropped', dropReason: 'dismissed_before' });
+  });
+
+  it('(PIN) a dismissal of ANOTHER entry\'s spelling does not suppress it', async () => {
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone('DCA')] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: 'Atlanta Housing Authority' } },
+    });
+    expect(outcome.suggested).toEqual(['housingAuthority']);
+    expect(records.suggestions[0]).toMatchObject({
+      target: 'housingAuthority', suggestedValue: 'Atlanta Housing Authority',
+    });
+  });
+
+  it('(PIN) a WRITE of a list match never consults dismissals', async () => {
+    // The ruling leaves writes as they were: D8 handles a match exactly as a
+    // known authority always was, and a write never read the tombstones.
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone('Atlanta (AHA)')] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'write', value: 'Atlanta Housing Authority' } },
+    });
+    expect(outcome.wrote).toEqual(['housingAuthority']);
+    expect(records.updates[0]!.patch['housingAuthority']).toBe('Atlanta Housing Authority');
+  });
+
+  // Worklist ruling B-3: only the spellings that resolve to the matched entry
+  // ALONE extend its dismissal keys. AHA is a spelling of both Atlanta and
+  // Augusta, so a dismissed "AHA" (an ambiguous suggestion, suggested as said)
+  // rejected that text - not Augusta's full name.
+  it('a dismissal of a SHARED spelling does not suppress one entry\'s full name (worklist B-3)', async () => {
+    const { deps, records } = makeDeps({
+      dismissedValues: [`housingAuthority#${normalizeSuggestionValue('housingAuthority', 'AHA')}`],
+    });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: 'Augusta Housing Authority' } },
+    });
+    expect(outcome.suggested).toEqual(['housingAuthority']);
+    expect(records.suggestions).toHaveLength(1);
+    expect(records.suggestions[0]).toMatchObject({
+      target: 'housingAuthority', suggestedValue: 'Augusta Housing Authority',
+    });
+  });
+
+  it('(PIN) a dismissal of a spelling unique to the entry still suppresses its full name (worklist B-3)', async () => {
+    // 'Atlanta (AHA)' holds the shared token AHA, but the WHOLE spelling
+    // resolves to Atlanta alone, so it stays one of Atlanta's dismissal keys.
+    const { deps, records } = makeDeps({ dismissedValues: [tombstone('Atlanta (AHA)')] });
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { housingAuthority: { op: 'suggest', value: 'Atlanta Housing Authority' } },
+    });
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+    expect(outcome.decisions[0]).toMatchObject({
+      target: 'housingAuthority', outcome: 'dropped', dropReason: 'dismissed_before',
+    });
   });
 });

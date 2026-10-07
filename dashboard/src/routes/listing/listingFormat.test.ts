@@ -210,6 +210,22 @@ describe('describeUnitActivity', () => {
     ).toEqual({ label: 'Status changed to Available' });
   });
 
+  it('describes the organization-list rewrites with a from -> to line (spec 2026-10-06 D11)', () => {
+    expect(
+      describeUnitActivity(evt({ type: 'org_name_rewrite', from: 'AHA, DCA', to: 'Atlanta Housing Authority, DCA' })),
+    ).toEqual({ label: 'Housing authority updated', sub: 'AHA, DCA -> Atlanta Housing Authority, DCA' });
+    expect(
+      describeUnitActivity(evt({ type: 'org_name_cleanup', from: 'atlanta_housing', to: 'Atlanta Housing Authority' })),
+    ).toEqual({ label: 'Housing authority cleaned up', sub: 'atlanta_housing -> Atlanta Housing Authority' });
+    // A removed value reads as none, never as an empty side.
+    expect(describeUnitActivity(evt({ type: 'org_name_rewrite', from: 'Step Up', to: '' }))).toEqual({
+      label: 'Housing authority updated',
+      sub: 'Step Up -> (none)',
+    });
+    // No recorded values -> no sub-line.
+    expect(describeUnitActivity(evt({ type: 'org_name_cleanup' }))).toEqual({ label: 'Housing authority cleaned up' });
+  });
+
   it('describes broadcast_sent with a recipient count and a broadcast deep-link', () => {
     expect(describeUnitActivity(evt({ type: 'broadcast_sent', broadcastId: 'b1', tenantCount: 5 }))).toEqual({
       label: 'Sent to 5 tenants',

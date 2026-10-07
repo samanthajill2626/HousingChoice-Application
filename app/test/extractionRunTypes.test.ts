@@ -13,8 +13,9 @@ describe('runTypes - the decision vocabulary', () => {
     ]);
   });
 
-  it('carries exactly the twelve drop reasons a run can record', () => {
+  it('carries exactly the thirteen drop reasons a run can record', () => {
     expect([...DROP_REASONS].sort()).toEqual([
+      'agency_not_authority',
       'dismissed_before',
       'empty_value_at_parse',
       'equal_to_current',

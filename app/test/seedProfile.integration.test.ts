@@ -1,9 +1,10 @@
 // Profile contract for seedAll() — Task 1 of the seed clean-slate build.
 //
-// Verifies three things:
+// Verifies four things:
 //   1. lean profile writes exactly the canonical SEED ids (no more, no less).
 //   2. full profile is a superset of lean (full ⊇ lean).
 //   3. The inbound-voice-line holder is stamped after a lean seedAll().
+//   4. The seed's org-list Put wins over an item a reader created first (spec D2).
 //
 // Self-skipping: when DynamoDB Local is unreachable the whole suite is skipped
 // so `npm test` stays green without Docker. Start the container with
@@ -17,6 +18,8 @@ import { TABLES } from '../src/lib/tables.js';
 import { SEED, SEED_INBOUND_VOICE_CELL, seedAll, createTableNamespace } from '../src/lib/seedData.js';
 import { loadConfig } from '../src/lib/config.js';
 import { HOLDER_POINTER_KEY } from '../src/repos/usersRepo.js';
+import { createOrgListRepo } from '../src/repos/orgListRepo.js';
+import { seedOrgListItem } from '../src/lib/seed/orgList.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 
@@ -78,6 +81,21 @@ describe.skipIf(!reachable)('seedAll profile contract (throwaway prefix)', () =>
     client.destroy();
     doc.destroy();
   }, 120_000);
+
+  it('the seed overwrites an org-list item a reader created while the table was empty (spec D2 window)', async () => {
+    // /__dev/reseed clears every table, then seeds (lib/devReset.ts). A reader
+    // in between - a page load, the lane worker's extraction poll - finds no
+    // item and creates the starting list with RUNTIME ids. The seed's
+    // unconditional Put must win, or the reseeded world stops being byte-stable.
+    // Runs first: the tables are still empty here.
+    const orgList = createOrgListRepo({ doc, env: { TABLE_PREFIX: prefix } });
+    const createdByReader = await orgList.get();
+    expect(createdByReader.entries.map((e) => e.orgId)).not.toEqual(
+      seedOrgListItem().entries.map((e) => e.orgId),
+    );
+    await seedAll(endpoint, 'lean', namespace);
+    expect(await orgList.peek()).toEqual(seedOrgListItem());
+  });
 
   it('lean seedAll writes exactly the canonical SEED item count', async () => {
     const count = await seedAll(endpoint, 'lean', namespace);

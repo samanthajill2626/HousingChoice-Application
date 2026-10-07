@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AI_RUN_DROP_REASON_LABELS,
+  aiRunDropReasonLabel,
   MESSAGE_TRANSPORTS,
   REMINDER_SKIP_REASON_LABELS,
   REMINDER_SUPPRESSION_LABELS,
@@ -84,6 +86,11 @@ const SERVER_CODES = [
   'suggestion_field_edited',
   'suggestion_resolution_lost',
   'suggestion_resolution_retry_exhausted',
+  // Spec 2026-10-06 D8: a housing authority accept `value` that is neither the
+  // text's own resolution nor one of its candidates.
+  'value_not_from_suggestion',
+  // Spec D5 runs while the accept is planned: the value is not on the list.
+  'org_not_on_list',
 ];
 
 const GENERIC = suggestionResolutionErrorMessage('a_code_no_server_has_ever_sent');
@@ -314,5 +321,42 @@ describe('suppression copy', () => {
     const note = suppressionNote('superseded', REMINDER_SUPPRESSION_LABELS['superseded']);
     expect(note).toContain('Replaced');
     expect(note.toLowerCase().split('replaced').length - 1).toBe(1);
+  });
+});
+
+// HAND MIRROR of DROP_REASONS in app/src/services/extraction/runTypes.ts
+// (S7 adds agency_not_authority). Listed, not imported - this package cannot
+// import server code - so a server code without a label fails here.
+const SERVER_DROP_REASONS = [
+  'wrong_contact_type',
+  'invalid_value',
+  'equal_to_current',
+  'status_not_onboarding_tenant',
+  'type_already_classified',
+  'type_classification_changed',
+  'phone_not_canonicalizable',
+  'phone_already_owned',
+  'phone_owned_by_other',
+  'dismissed_before',
+  'repo_error',
+  'empty_value_at_parse',
+  'agency_not_authority',
+];
+
+describe('AI run drop-reason labels', () => {
+  it('labels exactly the drop reasons the extraction apply layer records', () => {
+    expect(Object.keys(AI_RUN_DROP_REASON_LABELS).sort()).toEqual([...SERVER_DROP_REASONS].sort());
+  });
+
+  it('never puts a machine token in front of staff', () => {
+    for (const code of SERVER_DROP_REASONS) expect(aiRunDropReasonLabel(code), code).not.toContain('_');
+  });
+
+  it('names an agency dropped from housingAuthority (spec 2026-10-06 D8)', () => {
+    expect(aiRunDropReasonLabel('agency_not_authority')).toBe('Agency, not a housing authority');
+  });
+
+  it('humanizes a code this build has never heard of', () => {
+    expect(aiRunDropReasonLabel('some_future_reason')).toBe('some future reason');
   });
 });

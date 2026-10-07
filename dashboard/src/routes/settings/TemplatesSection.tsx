@@ -213,8 +213,8 @@ export function TemplatesSection(): React.JSX.Element {
             </label>
             <span className={styles.hint}>
               Sent only to a missed caller we hold no details on. If the contact already has a
-              name, voucher size, or housing authority saved - or is saved as a landlord, partner,
-              or team member - no text goes out.
+              name, voucher size, housing authority, or agency saved - or is saved as a landlord,
+              partner, or team member - no text goes out.
             </span>
           </div>
 

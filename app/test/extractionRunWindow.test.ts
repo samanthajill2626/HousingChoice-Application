@@ -13,6 +13,8 @@ import {
   WINDOW_CHAR_BUDGET,
 } from '../src/jobs/extraction.js';
 import { buildExtractionUserContent, renderUtteranceLine } from '../src/services/extraction/prompt.js';
+import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import { renderOrgListBlock } from '../src/services/extraction/orgListBlock.js';
 import {
   buildFullRunWindow,
   buildLightRunWindow,
@@ -22,6 +24,12 @@ import {
 const SMS_ID = '2026-08-06T10:00:00.000Z#s1';
 const CALL_ID = '2026-08-06T10:05:00.000Z#c2';
 const EMAIL_ID = '2026-08-06T10:09:00.000Z#e3';
+let orgSeq = 0;
+/** Spec 2026-10-06 D8: a real list block, so the round trip below proves the
+ *  block never leaks past the TRANSCRIPT header. */
+const ORG_BLOCK = renderOrgListBlock(
+  buildStartingEntries('2026-10-06T00:00:00.000Z', () => `org-${(orgSeq += 1)}`),
+).text;
 
 function utt(
   tsMsgId: string,
@@ -66,6 +74,7 @@ describe('hashRenderedMessage', () => {
     const user = buildExtractionUserContent({
       profile: { contactType: 'tenant', phones: [] },
       transcript,
+      orgListBlock: ORG_BLOCK,
     });
     const body = user.slice(user.indexOf('TRANSCRIPT\n') + 'TRANSCRIPT\n'.length);
     const renderedLines = body.split('\n');

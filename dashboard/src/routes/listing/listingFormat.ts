@@ -210,6 +210,16 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
         ...(from !== undefined && { sub: `from ${from}${auto}` }),
       };
     }
+    case 'org_name_rewrite':
+    case 'org_name_cleanup': {
+      // Spec 2026-10-06 D11 / plan 3.8: a machine rewrite of the property's
+      // housing authorities. `from` and `to` are strings (the list joined with
+      // ', '; '' for a removed value).
+      const label = e.type === 'org_name_rewrite' ? 'Housing authority updated' : 'Housing authority cleaned up';
+      if (e.from === undefined && e.to === undefined) return { label };
+      const side = (v: string | undefined): string => (v === undefined || v === '' ? '(none)' : v);
+      return { label, sub: `${side(e.from)} -> ${side(e.to)}` };
+    }
     case 'unit_deleted':
       return { label: 'Property deleted' };
     case 'unit_restored':

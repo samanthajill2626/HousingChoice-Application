@@ -106,6 +106,7 @@ import {
 } from '../services/extraction/address.js';
 import { isDecisionTarget } from '../services/extraction/runTypes.js';
 import { canonicalSuggestedContactKind } from '../services/extraction/contactKinds.js';
+import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
 
 export interface ContactsRouterDeps {
   logger?: Logger;
@@ -150,6 +151,12 @@ export interface ContactsRouterDeps {
   aiExtractionEnabled?: boolean;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
+  /**
+   * Organization names (spec 2026-10-06 D5): the PATCH checks a CHANGED
+   * housingAuthority / agency against the stored org list. Built ONCE in
+   * createApiRouter and threaded down, like the settings repo there.
+   */
+  orgNamesService?: OrgNamesService;
 }
 
 /**
@@ -967,6 +974,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const aiRuns = deps.aiRunsRepo ?? createAiRunsRepo({ logger: deps.logger });
   const aiExtractionEnabled = deps.aiExtractionEnabled ?? loadConfig().aiExtractionEnabled;
   const events = deps.events ?? appEvents;
+  const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
 
   const router = Router();
 
@@ -1453,7 +1461,14 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // emit diff `status` against its prior value without a second fetch. Snapshot
     // the prior status as a primitive NOW — `contacts.update` may return/mutate the
     // same object graph, so reading `stored.status` after the write is unreliable.
-    const stored = await contacts.getById(contactId);
+    // CONSISTENT when the patch carries an organization field: the D5 check
+    // below decides "unchanged" against this read, and a stale read could
+    // pass an off-list value through as unchanged.
+    const touchesOrgField = 'housingAuthority' in parsed.patch || 'agency' in parsed.patch;
+    const stored = await contacts.getById(
+      contactId,
+      touchesOrgField ? { consistentRead: true } : undefined,
+    );
     const priorStatus = typeof stored?.status === 'string' ? stored.status : undefined;
 
     // The resolved 1:1 type, if triage set type=tenant|landlord this PATCH.
@@ -1528,6 +1543,39 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
                 ? 'interested'
                 : 'active';
         parsed.changedFields.push('status');
+      }
+    }
+
+    // ORGANIZATION NAMES (spec 2026-10-06 D5). A housingAuthority or agency
+    // this PATCH CHANGES must be a name on the stored org list of the field's
+    // kind. Placement is load-bearing: the parser's type 400s ran first, an
+    // unknown contact 404s here before any 422, and a refusal returns BEFORE
+    // the stamps and the provenance clear below, so it writes nothing. An
+    // exact name is kept; a unique spelling (or the name in another case or
+    // punctuation) is stored as the entry's exact name; an UNCHANGED value
+    // passes even when it is not on the list; a clear always passes (the
+    // parser already mapped housingAuthority '' to null = REMOVE, and agency
+    // keeps today's stored ''). housingAuthority is checked first, so a body
+    // failing both names housingAuthority.
+    if (touchesOrgField) {
+      if (!stored) {
+        res.status(404).json({ error: 'contact_not_found' });
+        return;
+      }
+      for (const field of ['housingAuthority', 'agency'] as const) {
+        if (!(field in parsed.patch)) continue;
+        const next = parsed.patch[field];
+        if (typeof next !== 'string' || next.length === 0) continue; // a clear
+        const held = stored[field];
+        const current = typeof held === 'string' ? held : undefined;
+        if (next === current) continue; // unchanged: no check, no list read
+        const check = await orgNames.checkScalar(field, next, current);
+        if (!check.ok) {
+          log.info({ contactId, field }, 'contact patch refused: organization name not on the list');
+          res.status(422).json(check.error);
+          return;
+        }
+        if (check.value !== null) parsed.patch[field] = check.value;
       }
     }
 

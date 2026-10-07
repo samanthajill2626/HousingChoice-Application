@@ -143,6 +143,7 @@ import {
   type ContactVocabulary,
   type ContactVocabularyRepo,
 } from '../../src/repos/contactVocabularyRepo.js';
+import type { OrgListRepo } from '../../src/repos/orgListRepo.js';
 import {
   type BroadcastItem,
   type BroadcastRecipient,
@@ -217,6 +218,7 @@ import {
   type FakeUsersRepo,
 } from './authSession.js';
 import { createLogCapture, type LogCapture } from './logCapture.js';
+import { createOrgListFake } from './orgListFake.js';
 import { createSuggestionResolutionFake } from './suggestionResolutionFake.js';
 import { queryListPhaseFromItems } from './tourListIndexFake.js';
 import { queryUnreadPageFromItems } from './unreadIndexFake.js';
@@ -412,6 +414,13 @@ export interface FakeWorld {
   vocabularyAdds: Partial<Record<'roles' | 'relationshipRoles' | 'fieldLabels', string[]>>[];
   /** Fake vocabulary repo (Task 4): in-memory union of all add() tokens. */
   vocabularyRepo: ContactVocabularyRepo;
+  /**
+   * The housing authority + agency lists (spec 2026-10-06 D1; plan 3.4b): an
+   * in-memory twin of repos/orgListRepo.ts (helpers/orgListFake.ts). EMPTY
+   * until its first read, which serves the starting list, as the real repo
+   * does. Seed a fixture with `putForSeed(...)`; read it back with `peek()`.
+   */
+  orgListRepo: OrgListRepo;
   /** Every pushService.sendToUser call (M1.9b pre-ring/missed-call pushes), in order. */
   pushSends: { userId: string; notification: PushNotification }[];
   /** sendToAll broadcasts (inbound-message pushes) - never used by voice. */
@@ -2480,6 +2489,33 @@ export function createFakeWorld(): FakeWorld {
       if (!target) return;
       target.lastSeenAt = at;
     },
+    // Organization-name rewrite (plan 3.7): mirror the real conditional
+    // UpdateItem - '' refused for the GSI key, both guards checked BEFORE
+    // anything is applied, 'skipped' when either is lost or the contact is
+    // missing, a housingAuthority REMOVE takes housingAuthority_source with it
+    // (code review R1-ADV-BE-2), nothing else touched (no classification fence).
+    async rewriteOrgFields(contactId, expected, next) {
+      if (next.housingAuthority === '') throw new EmptyIndexKeyError('housingAuthority');
+      if (next.housingAuthority === undefined && next.agency === undefined) {
+        throw new Error('rewriteOrgFields: nothing to write');
+      }
+      const contact = contacts.find((c) => c.contactId === contactId);
+      if (!contact) return 'skipped';
+      for (const attr of ['housingAuthority', 'agency'] as const) {
+        const want = expected[attr];
+        if (want === undefined) continue;
+        const have = contact[attr];
+        if (want === null ? have !== undefined : have !== want) return 'skipped';
+      }
+      if (next.housingAuthority === null) {
+        delete contact['housingAuthority'];
+        delete contact['housingAuthority_source'];
+      } else if (next.housingAuthority !== undefined) {
+        contact['housingAuthority'] = next.housingAuthority;
+      }
+      if (next.agency !== undefined) contact['agency'] = next.agency;
+      return 'written';
+    },
   };
 
   const auditRepo: AuditRepo = {
@@ -2665,6 +2701,10 @@ export function createFakeWorld(): FakeWorld {
       };
     },
   };
+
+  // The org list (spec 2026-10-06 D1): starts empty; the first read serves the
+  // starting list (helpers/orgListFake.ts).
+  const orgListRepo = createOrgListFake();
 
   // Fake push service (M1.9b): records every sendToUser so tests can assert the
   // pre-ring / missed-call pushes (kind + payload — and that NO raw phone leaks
@@ -2878,6 +2918,25 @@ export function createFakeWorld(): FakeWorld {
         .filter((u) => (opts.deleted === true ? isUnitDeleted(u) : !isUnitDeleted(u)))
         .slice(0, opts.limit ?? 50);
       return { items };
+    },
+    // Organization-name rewrite (plan 3.7): whole-list equality like the real
+    // ConditionExpression, and NO updated_at stamp - unlike every other unit
+    // write in this fake, because the real one stamps none either.
+    async rewriteAcceptedAuthorities(unitId, expected, next) {
+      const unit = units.get(unitId);
+      if (!unit) return 'skipped';
+      const stored: unknown = unit.accepted_authorities;
+      if (expected === null) {
+        if (stored !== undefined) return 'skipped';
+      } else if (
+        !Array.isArray(stored) ||
+        stored.length !== expected.length ||
+        stored.some((member, i) => member !== expected[i])
+      ) {
+        return 'skipped';
+      }
+      unit.accepted_authorities = [...next];
+      return 'written';
     },
     // Property photos (unit-photos S1): mirror the real repo's atomic append +
     // cap guard, entry-conditioned remove, and move-to-front cover.
@@ -4906,6 +4965,7 @@ export function createFakeWorld(): FakeWorld {
     settingsRepo,
     vocabularyAdds,
     vocabularyRepo,
+    orgListRepo,
     pushSends,
     pushBroadcasts,
     pushService,
@@ -5161,6 +5221,8 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       contactsRepo: world.contactsRepo,
       settingsRepo: world.settingsRepo,
       contactVocabularyRepo: world.vocabularyRepo,
+      // spec 2026-10-06 (plan 3.4b): the org list every org route and writer reads.
+      orgListRepo: world.orgListRepo,
       unitsRepo: world.unitsRepo,
       placementsRepo: world.placementsRepo,
       placementDeadlinesRepo: world.placementDeadlinesRepo,

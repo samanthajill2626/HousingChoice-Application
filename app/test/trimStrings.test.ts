@@ -93,6 +93,8 @@ describe('padded input through the REAL contact routes', () => {
     expect(got.body.contact.firstName).toBe('Cameron');
     expect(got.body.contact.lastName).toBe('Abt');
     expect(got.body.contact.notes).toBe('likes townhomes');
-    expect(got.body.contact.housingAuthority).toBe('atlanta_housing');
+    // Trimmed at the edge, then resolved (spec D5): the unique spelling
+    // "Atlanta Housing" of a listed entry is stored as its exact name.
+    expect(got.body.contact.housingAuthority).toBe('Atlanta Housing Authority');
   });
 });

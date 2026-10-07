@@ -1,0 +1,226 @@
+// org.rewrite (spec 2026-10-06 D11; plan 3.9; planner rulings R4-F3, R4-F4):
+// runs the rewrite that `lastRewrite` defines - rename, merge, or a "Not on
+// the list" action - over every contact and unit, active and deleted, through
+// services/orgRecords.ts: one pass per member of `lastRewrite.fields`, which
+// the service FIXED when the rewrite started (a value action's one field; a
+// rename or merge, every field of its target entry's kind then). The job never
+// looks the target up again.
+//
+// The definition and the lock live on the org-list item; the payload carries
+// only the rewrite id the service minted BEFORE its list write (never the jobs
+// envelope id). The handler STARTS by CLAIMING the rewrite - one list write
+// (OrgRewriteService.claim, code review R2-BE-1) that answers not_current
+// unless `lastRewrite` still names that id and is `running`, so a duplicate
+// SQS delivery or a stale run does nothing; re-validates a lock whose
+// heartbeat LAPSED (a delivery 15 minutes late) exactly as Run again does,
+// recording the rewrite `failed` when the list changed under it; and refreshes
+// the heartbeat (stamped when the claim is computed, so a claim write that
+// lands very late stores an already-stale heartbeat - a residual filed as
+// docs/issues/org-rewrite-pass-start-pacing-gap.md). While it runs, the
+// heartbeat (checked BEFORE each record the pass visits, at most every 20 s
+// counted from the START of each pass, so a stall INSIDE a pass is caught at
+// the next record - code review R3-BE-1 - but a stall before a pass starts is
+// not, the same issue) re-checks the id: once the lock is no longer this run's - a newer
+// rewrite took it over, a duplicate run already finished it, or it lapsed -
+// the pass writes no further record and the job returns WITHOUT finish(),
+// because the lock it would finish is not its own (a lapsed one is left for
+// Run again, which re-validates). A heartbeat that THROWS says nothing about
+// the lock, so the pass goes on through one only inside the job's LOCAL lease
+// (ORG_REWRITE_LEASE_MS: 14 minutes since the claim or the last heartbeat that
+// answered true); past it, one that throws stops the pass the same way, before
+// the lock can lapse. No check covers a record write already sent when the
+// lock lapses - the lease's last minute is its margin. finish() re-checks the
+// id too (services/orgRewrite.ts).
+//
+// It NEVER rethrows: dispatchJob rethrows a handler error and SQS would
+// redeliver it up to 5 times (infra/modules/jobs/main.tf). Every failure is
+// recorded as `failed` with the counts so far; the Settings page offers Run
+// again, which is safe - a record already rewritten no longer holds the
+// from-text. It sends nothing, so it draws no A2P token of its own.
+import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import type { AuditRepo } from '../repos/auditRepo.js';
+import type { ContactsRepo } from '../repos/contactsRepo.js';
+import { createOrgListRepo, type OrgListRepo } from '../repos/orgListRepo.js';
+import type { UnitsRepo } from '../repos/unitsRepo.js';
+import {
+  createOrgRecordsService,
+  OrgRewriteAbortedError,
+  OrgRewriteLockLostError,
+  type OrgRecordsService,
+} from '../services/orgRecords.js';
+import {
+  createOrgRewriteService,
+  ORG_REWRITE_JOB,
+  ORG_REWRITE_LEASE_MS,
+  type OrgRewritePayload,
+  type OrgRewriteService,
+} from '../services/orgRewrite.js';
+import { defineJobHandler } from './jobs.js';
+
+// Declared by services/orgRewrite.ts, which this module imports (the reverse
+// import would be a cycle); this is the job's public name.
+export { ORG_REWRITE_JOB };
+export type { OrgRewritePayload };
+
+export function parseOrgRewritePayload(payload: unknown): OrgRewritePayload {
+  if (typeof payload !== 'object' || payload === null) throw new Error('org.rewrite: payload is not an object');
+  const jobId = (payload as Record<string, unknown>)['jobId'];
+  if (typeof jobId !== 'string' || jobId.length === 0) {
+    throw new Error('org.rewrite: payload.jobId must be a non-empty string');
+  }
+  return { jobId };
+}
+
+export interface RunOrgRewriteDeps {
+  orgRecords: Pick<OrgRecordsService, 'rewrite'>;
+  orgRewrite: Pick<OrgRewriteService, 'claim' | 'heartbeat' | 'finish'>;
+  logger?: Logger;
+}
+
+/** `lock_lost`: the heartbeat found the lock no longer this run's - stopped, NOT finished. */
+export type OrgRewriteJobResult =
+  | { outcome: 'not_current' }
+  | { outcome: 'done' | 'failed' | 'lock_lost'; counts: Record<string, number> };
+
+function errorText(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).slice(0, 300);
+}
+
+/**
+ * The pass's heartbeat under the job's LOCAL lease (code review R3-BE-1). A
+ * heartbeat that throws is rethrown - the pass logs it and goes on - only
+ * while the lease holds: ORG_REWRITE_LEASE_MS since the claim, or since the
+ * last heartbeat that answered true. Past it, one that throws answers false
+ * (the lock lost): the stored lock may lapse before another goes through, and
+ * every guard is off once it has. Each success counts from when it was SENT,
+ * never later than the heartbeat it wrote.
+ */
+function leasedHeartbeat(
+  heartbeat: () => Promise<boolean>,
+  claimSentAt: number,
+  log: Logger,
+  jobId: string,
+): () => Promise<boolean> {
+  let leaseFrom = claimSentAt;
+  return async () => {
+    const sentAt = Date.now();
+    try {
+      const ours = await heartbeat();
+      if (ours) leaseFrom = sentAt;
+      return ours;
+    } catch (err) {
+      if (Date.now() - leaseFrom < ORG_REWRITE_LEASE_MS) throw err;
+      log.warn({ err, jobId }, 'org.rewrite: heartbeat failed past the lease - counting the lock lost');
+      return false;
+    }
+  };
+}
+
+export async function runOrgRewriteJob(
+  payload: OrgRewritePayload,
+  deps: RunOrgRewriteDeps,
+): Promise<OrgRewriteJobResult> {
+  const log = deps.logger ?? defaultLogger;
+  const { jobId } = payload;
+  const counts: Record<string, number> = {};
+  const add = (part: Record<string, number>): void => {
+    for (const [key, n] of Object.entries(part)) counts[key] = (counts[key] ?? 0) + n;
+  };
+  try {
+    // The claim refreshes the heartbeat: the lease starts when it was sent.
+    const claimSentAt = Date.now();
+    const claim = await deps.orgRewrite.claim(jobId);
+    if (claim.outcome === 'not_current') {
+      const current = claim.lastRewrite;
+      log.info({ jobId, current: current?.jobId, status: current?.status }, 'org.rewrite: not the running rewrite - nothing to do');
+      return { outcome: 'not_current' };
+    }
+    if (claim.outcome === 'refused') {
+      // Code review R2-BE-1: delivered after its lock lapsed, and the list
+      // changed under the definition meanwhile - the claim recorded it failed.
+      log.warn(
+        { jobId, action: claim.lastRewrite.action, error: claim.lastRewrite.error },
+        'org.rewrite: delivered after its lock lapsed and the list changed since - recorded failed, nothing rewritten',
+      );
+      return { outcome: 'failed', counts: {} };
+    }
+    const last = claim.lastRewrite;
+    // The passes are the fields FIXED when the rewrite started (spec 5.1).
+    const fields = Array.isArray(last.fields) ? last.fields : [];
+    if (fields.length === 0) throw new Error('the rewrite names no record fields');
+    // ONE lease across every pass of the rewrite.
+    const heartbeat = leasedHeartbeat(() => deps.orgRewrite.heartbeat(jobId), claimSentAt, log, jobId);
+    for (const field of fields) {
+      add(
+        await deps.orgRecords.rewrite(
+          { ...last, field },
+          { auditType: 'org_name_rewrite', actor: last.startedBy, heartbeat },
+        ),
+      );
+    }
+    await deps.orgRewrite.finish(jobId, { status: 'done', counts: { ...counts } });
+    log.info({ jobId, action: last.action, ...counts }, 'org.rewrite finished');
+    return { outcome: 'done', counts: { ...counts } };
+  } catch (err) {
+    if (err instanceof OrgRewriteLockLostError) {
+      // Spec D11: the lock is not this run's any more (past the lease: it may
+      // not be) - no record was written after the heartbeat said so, and
+      // finishing would touch another run's lock. A lapsed one is Run again's.
+      add(err.counts);
+      log.warn({ jobId, ...counts }, 'org.rewrite: lost the lock - stopped without finishing');
+      return { outcome: 'lock_lost', counts: { ...counts } };
+    }
+    if (err instanceof OrgRewriteAbortedError) add(err.counts);
+    log.error({ err, jobId }, 'org.rewrite failed - recording it failed');
+    try {
+      await deps.orgRewrite.finish(jobId, { status: 'failed', counts: { ...counts }, error: errorText(err) });
+    } catch (finishErr) {
+      log.error({ err: finishErr, jobId }, 'org.rewrite: recording the failure failed too');
+    }
+    return { outcome: 'failed', counts: { ...counts } };
+  }
+}
+
+/** Injectable for tests; production passes nothing and every repo is built lazily. */
+export interface OrgRewriteJobDeps {
+  orgListRepo?: OrgListRepo;
+  contactsRepo?: ContactsRepo;
+  unitsRepo?: UnitsRepo;
+  auditRepo?: AuditRepo;
+  logger?: Logger;
+}
+
+function buildRunDeps(deps: OrgRewriteJobDeps): RunOrgRewriteDeps {
+  const orgListRepo = deps.orgListRepo ?? createOrgListRepo({ logger: deps.logger });
+  const orgRecords = createOrgRecordsService({
+    contactsRepo: deps.contactsRepo,
+    unitsRepo: deps.unitsRepo,
+    auditRepo: deps.auditRepo,
+    logger: deps.logger,
+  });
+  return {
+    orgRecords,
+    orgRewrite: createOrgRewriteService({ orgListRepo, orgRecords, logger: deps.logger }),
+    logger: deps.logger,
+  };
+}
+
+/** Consumer side (registerHandlers.ts). */
+export function registerOrgRewriteJobHandler(deps: OrgRewriteJobDeps = {}): void {
+  const log = deps.logger ?? defaultLogger;
+  // Lazy: the repos touch config and AWS only on the first run (the
+  // mediaMirror / relayWarm registrar precedent).
+  let run: RunOrgRewriteDeps | undefined;
+  defineJobHandler(ORG_REWRITE_JOB, async (rawPayload) => {
+    let payload: OrgRewritePayload;
+    try {
+      payload = parseOrgRewritePayload(rawPayload);
+    } catch (err) {
+      // Undeliverable forever: logged and dropped, never rethrown.
+      log.error({ err }, 'org.rewrite: malformed payload - dropped');
+      return;
+    }
+    run ??= buildRunDeps(deps);
+    await runOrgRewriteJob(payload, run);
+  });
+}

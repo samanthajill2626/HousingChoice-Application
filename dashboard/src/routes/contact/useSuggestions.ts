@@ -28,8 +28,13 @@ export interface SuggestionsState {
   suggestions: SuggestionItem[];
   refetch: () => void;
   /** Accept a target; resolves with the updated contact + remaining suggestions
-   *  (applied to this hook's state too). Rejects on a server error. */
-  accept: (target: string) => Promise<{ contact: Contact; suggestions: SuggestionItem[] }>;
+   *  (applied to this hook's state too). Rejects on a server error. `value`
+   *  (housingAuthority only, spec 2026-10-06 D8) is the list name chosen in
+   *  "Is this really new?". */
+  accept: (
+    target: string,
+    value?: string,
+  ) => Promise<{ contact: Contact; suggestions: SuggestionItem[] }>;
   /** Dismiss a target; the remaining suggestions are applied to state. */
   dismiss: (target: string) => Promise<void>;
 }
@@ -76,16 +81,22 @@ export function useSuggestions(contactId: string): SuggestionsState {
   });
 
   const accept = useCallback(
-    async (target: string) => {
+    async (target: string, value?: string) => {
       const suggestion = state.forId === contactId
         ? state.suggestions.find((item) => item.target === target)
         : undefined;
       if (suggestion === undefined) throw new Error(SUGGESTION_NOT_PENDING);
-      const res = await acceptSuggestion(contactId, target, {
+      const identity = {
         revision: suggestion.revision,
         createdAt: suggestion.createdAt,
         runId: suggestion.runId,
-      });
+      };
+      // Without a value the call keeps its three-argument shape (pinned by the
+      // ContactDetail accept tests).
+      const res =
+        value === undefined
+          ? await acceptSuggestion(contactId, target, identity)
+          : await acceptSuggestion(contactId, target, identity, value);
       setState({ suggestions: res.suggestions, forId: contactId });
       return res;
     },

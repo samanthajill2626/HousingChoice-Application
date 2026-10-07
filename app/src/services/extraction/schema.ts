@@ -51,35 +51,6 @@ function isSuggestedContactKind(value: unknown): value is SuggestedContactKind {
     && (SUGGESTED_CONTACT_KINDS as readonly string[]).includes(value);
 }
 
-/**
- * Controlled vocabulary of housing-authority values - EXACT strings as stored
- * in our data. housingAuthority extractions must match one of these or be
- * omitted (enforced by the prompt; apply-layer re-validates).
- */
-export const HOUSING_AUTHORITY_VOCAB: string[] = [
-  'Jonesboro (JHA)',
-  'Fulton County',
-  'Atlanta (AHA)',
-  'Clayton County',
-  'College Park',
-  'Georgia Housing Voucher (GHV)',
-  'Step Up',
-  'Claratel',
-  'Hope Atlanta',
-  'HUD VASH',
-  'DCA',
-  'McDonough',
-  'East Point',
-  // Spelled EXACTLY as the importer's CANONICAL_AUTHORITY normalizes it
-  // (lib/import/apply.ts) - "Dekalb County Housing", not "DeKalb County".
-  // Broadcast audience resolution is an exact hash match on the
-  // byHousingAuthority GSI, so a near-miss here does not degrade gracefully: it
-  // creates a SECOND DeKalb audience invisible to the imported one. Its absence
-  // was a live extraction bug (run 4bf0cf42) - the client said DeKalb County,
-  // the vocabulary had no entry, and the fact was dropped on the floor.
-  'Dekalb County Housing',
-];
-
 const fieldOpSchema = {
   type: 'object',
   additionalProperties: false,

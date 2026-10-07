@@ -27,6 +27,15 @@ export const SETTINGS_TABS: SettingsTab[] = [
   // logged-in user, so the tab is not admin-only. The pool inventory inside the
   // section carries its own role gate (and its route stays guarded server-side).
   { id: 'numbers', label: 'Phone numbers', path: '/settings/numbers', adminOnly: false },
+  // Housing authorities & agencies (spec 2026-10-06 D10): every signed-in user
+  // views the lists, adds names and edits notes; the admin-only actions inside
+  // are gated by role there (and requireRole('admin') on the server).
+  {
+    id: 'organizations',
+    label: 'Housing authorities & agencies',
+    path: '/settings/organizations',
+    adminOnly: false,
+  },
 ];
 
 /** The self cell-verification tab path — the CallMenu deep-links here when the

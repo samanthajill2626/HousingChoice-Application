@@ -103,6 +103,12 @@ export async function resetLocalData(deps: {
     await clearTable(doc, client, namespace.tableNameFor(base));
   }
   const clearMs = Date.now() - clearStarted;
+  // THE ORG-LIST WINDOW (clean-org-names spec D2): between the clear above and
+  // the seed below the settings table is empty, so a reader in this window (a
+  // page load, the lane worker's extraction poll) creates the `org-list` item
+  // from the starting list with runtime ids. seedAll's unconditional Put of
+  // the seeded item (lib/seed/orgList.ts) overwrites it, keeping the reseeded
+  // world byte-stable - no reordering needed (seedProfile.integration pins it).
   const seedStarted = Date.now();
   const count = await seedAll(config.dynamodbEndpoint, profile, namespace);
   const seedMs = Date.now() - seedStarted;

@@ -15,7 +15,7 @@
 // would make "re-runnable after cutover" a claim we could not honour.
 //
 // So each entity declares which fields the IMPORT owns, and apply writes only
-// those. Two extra rules protect live state:
+// those. Three extra rules protect live state:
 //
 //   - Status is only rewritten when WE wrote the one that is stored
 //     (`status_source === 'import'`). A tenant Sam moved to `placed` by hand
@@ -23,6 +23,10 @@
 //     SOURCE_PRECEDENCE.
 //   - `last_activity_at` moves forward only. A conversation that received a real
 //     message after the import keeps the newer timestamp.
+//   - Organization names (spec 2026-10-06 D9) resolve against the org list
+//     (ApplyOptions.orgEntries) and land on a contact FILL-ONLY: a re-run never
+//     replaces a housing authority or agency a person set. What the list cannot
+//     place is not written at all, and the report counts it per value.
 //
 // Messages and calls ARE blind Puts: they are immutable historical records keyed
 // on their own source id, so re-writing one reproduces it byte for byte.
@@ -38,7 +42,8 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../config.js';
 import { normalizeToE164 } from '../phone.js';
-import { housingAuthorityFor, KNOWN_AUTHORITIES } from '../housingAuthority.js';
+import { KINDS_FOR_FIELD, resolveOrgText, type OrgEntry } from '../orgNames.js';
+import { buildStartingEntries } from '../orgStartingList.js';
 import {
   LANDLORD_STATUSES,
   NON_TENANT_STATUSES,
@@ -165,10 +170,24 @@ export interface ApplyOptions {
    * devOutbox.integration suite).
    */
   env?: NodeJS.ProcessEnv;
+  /**
+   * The organization list housing authority and agency values resolve
+   * against (spec D9). The CLI passes the stage's stored `org-list` entries,
+   * read WITHOUT creating the item, or the starting list when none is stored
+   * yet (scripts/import-apply.ts). Omitted -> the starting list (spec
+   * Appendix A) - the same fallback.
+   */
+  orgEntries?: readonly OrgEntry[];
 }
 
 export interface ApplyReport {
-  contacts: { written: number; skippedDropped: number; statusPreserved: number };
+  contacts: {
+    written: number;
+    skippedDropped: number;
+    statusPreserved: number;
+    /** Contacts whose housing authority column named ONE agency: it goes to `agency`, fill-only (D9). */
+    agencyFromHousingAuthority: number;
+  };
   conversations: {
     written: number;
     groups: number;
@@ -195,7 +214,27 @@ export interface ApplyReport {
      */
     humanOwned: number;
   };
+  /**
+   * D9: organization values NOT written, per field and value, most frequent
+   * first. Computed in dry runs too - the dry run is the preview.
+   */
+  orgNotWritten: OrgValueNotWritten[];
   warnings: string[];
+}
+
+/** D9: an organization value the import did not write, and how many rows carried it. */
+export interface OrgValueNotWritten {
+  /** The record field the value was for. */
+  field: 'housingAuthority' | 'accepted_authorities';
+  /** The source cell, trimmed, inner whitespace collapsed. */
+  value: string;
+  /**
+   * Why (spec D4): a spelling more than one listed name shares, an agency
+   * where a housing authority belongs, more than one organization in one
+   * value, or not on the list.
+   */
+  resolution: 'ambiguous' | 'other_kind' | 'compound' | 'unknown';
+  count: number;
 }
 
 /**
@@ -235,7 +274,7 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
   const warnings: string[] = [];
 
   const report: ApplyReport = {
-    contacts: { written: 0, skippedDropped: 0, statusPreserved: 0 },
+    contacts: { written: 0, skippedDropped: 0, statusPreserved: 0, agencyFromHousingAuthority: 0 },
     conversations: {
       written: 0,
       groups: 0,
@@ -246,6 +285,7 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
     messages: { written: 0 },
     calls: { written: 0 },
     units: { written: 0, skippedDropped: 0, humanOwned: 0 },
+    orgNotWritten: [],
     warnings,
   };
 
@@ -264,8 +304,10 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
   let groupRosterIds: Set<string> | undefined;
 
   const people = plan.merge.people;
-  /** Free-field authority values written verbatim (no canonical spelling). */
-  const authorityPassthroughs = new Map<string, number>();
+  /** The org list values resolve against (spec D9). */
+  const orgEntries = options.orgEntries ?? startingEntries(importedAt);
+  /** D9: organization values the run did NOT write, tallied per field and value. */
+  const notWritten = new Map<string, OrgValueNotWritten>();
   let i = 0;
   for (const person of people) {
     options.onProgress?.('contacts', ++i, people.length);
@@ -287,34 +329,22 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
       continue;
     }
 
-    const resolved = resolvePerson(person, row, warnings);
+    const resolved = resolvePerson(person, row, warnings, orgEntries);
     contactIdByPhone.set(person.phone, person.contactId);
+    // D9: counted BEFORE the dry-run gate, so a dry run previews exactly what
+    // a real run will leave unwritten (ruling R4-F5).
+    if (resolved.authorityNotWritten !== undefined) {
+      tallyNotWritten(notWritten, 'housingAuthority', resolved.authorityNotWritten);
+    }
+    if (resolved.agency !== undefined) report.contacts.agencyFromHousingAuthority += 1;
     if (dryRun) {
       report.contacts.written += 1;
       continue;
     }
 
-    if (resolved.housingAuthority && !KNOWN_AUTHORITIES.has(resolved.housingAuthority)) {
-      authorityPassthroughs.set(
-        resolved.housingAuthority,
-        (authorityPassthroughs.get(resolved.housingAuthority) ?? 0) + 1,
-      );
-    }
-
     const preserved = await upsertContact(doc, contactsTable, person, resolved, importedAt);
     if (preserved) report.contacts.statusPreserved += 1;
     report.contacts.written += 1;
-  }
-
-  // Free-field posture (2026-08-09): unknown authority spellings are WRITTEN,
-  // not dropped - but say so once per distinct value, because each new spelling
-  // is its own broadcast audience and a typo here quietly splits one.
-  for (const [value, n] of authorityPassthroughs) {
-    warnings.push(
-      `housingAuthority ${JSON.stringify(value)} (x${n}) has no canonical spelling - written ` +
-        `verbatim. Fine if intentional; a variant spelling of an existing authority would ` +
-        `split the broadcast audience.`,
-    );
   }
 
   // ---------------------------------------------------------------------
@@ -472,22 +502,21 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
       report.units.skippedDropped += 1;
       continue;
     }
+    // D9: resolved BEFORE the dry-run gate - a dry run never calls upsertUnit,
+    // and its report must still list what a real run will not write.
+    const authority = resolveImportedUnitAuthority(row.housing_authority, orgEntries);
+    if (authority.notWritten !== undefined) {
+      tallyNotWritten(notWritten, 'accepted_authorities', authority.notWritten);
+    }
     if (!dryRun) {
-      await upsertUnit(doc, unitsTable, row, importedAt, contactIdByPhone, plan, report);
+      await upsertUnit(doc, unitsTable, row, importedAt, contactIdByPhone, plan, report, authority.name);
     }
     report.units.written += 1;
   }
 
+  report.orgNotWritten.push(...[...notWritten.values()].sort(compareNotWritten));
   return report;
 }
-
-// The authority vocabulary moved to lib/housingAuthority.ts on 2026-08-16 so the
-// AI extractor could share it (extraction is not downstream of this importer).
-// Re-exported so this module's public surface is unchanged for the callers and
-// tests that already import them from here. Imported at the top of the file as
-// well, because `export ... from` re-exports WITHOUT binding the names locally
-// and three call sites below use them.
-export { housingAuthorityFor, KNOWN_AUTHORITIES };
 
 /** Honorifics that must not become someone's first name (spelt with or without a dot). */
 const HONORIFIC_RE = /^(mr|mrs|ms|miss|dr|rev|pastor|sir|madam)\.?$/i;
@@ -835,14 +864,19 @@ interface ResolvedPerson {
   voucherBeds?: number;
   status: string;
   notes?: string;
-  /** Exact HOUSING_AUTHORITY_VOCAB string, when her Airtable program maps to one. */
+  /** Exact housing authority LIST name, when her Airtable program resolves to one (spec D9). */
   housingAuthority?: string;
+  /** Exact agency list name, when the program column named ONE agency instead (D9). */
+  agency?: string;
+  /** The program text the list could not place - never written, reported (D9). */
+  authorityNotWritten?: { value: string; resolution: OrgValueNotWritten['resolution'] };
 }
 
 function resolvePerson(
   person: MergedPerson,
   row: CsvRow | undefined,
   warnings: string[],
+  orgEntries: readonly OrgEntry[],
 ): ResolvedPerson {
   const name = (row?.name ?? '').trim() || person.suggestedName;
 
@@ -911,7 +945,7 @@ function resolvePerson(
   }
   const notes = (row?.notes ?? '').trim();
 
-  const housingAuthority = housingAuthorityFor(person.airtableTenant?.voucherProgram);
+  const authority = resolveImportedAuthority(person.airtableTenant?.voucherProgram, orgEntries);
 
   return {
     name,
@@ -919,8 +953,87 @@ function resolvePerson(
     ...(voucherBeds !== undefined && { voucherBeds }),
     status,
     ...(notes && { notes }),
-    ...(housingAuthority !== undefined && { housingAuthority }),
+    ...(authority.housingAuthority !== undefined && { housingAuthority: authority.housingAuthority }),
+    ...(authority.agency !== undefined && { agency: authority.agency }),
+    ...(authority.notWritten !== undefined && { authorityNotWritten: authority.notWritten }),
   };
+}
+
+/** A source cell trimmed, inner whitespace collapsed; undefined when empty. */
+function cleanOrgCell(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const cleaned = raw.trim().replace(/\s+/g, ' ');
+  return cleaned === '' ? undefined : cleaned;
+}
+
+type NotWrittenResolution = OrgValueNotWritten['resolution'];
+
+/**
+ * D9 contact side: the Airtable program cell against the org list. A housing
+ * authority - its name or a spelling only it carries, in any case or
+ * punctuation - comes back as that entry's exact NAME. A value naming ONE
+ * agency comes back as `agency` (an agency is never a housing authority).
+ * Anything else - a spelling several names share (AHA), two organizations in
+ * one value, an unknown name - comes back as `notWritten`.
+ */
+export function resolveImportedAuthority(
+  raw: string | undefined,
+  entries: readonly OrgEntry[],
+): {
+  housingAuthority?: string;
+  agency?: string;
+  notWritten?: { value: string; resolution: NotWrittenResolution };
+} {
+  const value = cleanOrgCell(raw);
+  if (value === undefined) return {};
+  const r = resolveOrgText(entries, value, KINDS_FOR_FIELD.housingAuthority);
+  if (r.status === 'match') return { housingAuthority: r.entry.name };
+  if (r.status === 'other_kind') {
+    const asAgency = resolveOrgText(entries, value, KINDS_FOR_FIELD.agency);
+    if (asAgency.status === 'match') return { agency: asAgency.entry.name };
+  }
+  return { notWritten: { value, resolution: r.status } };
+}
+
+/**
+ * D9 unit side: the "Voucher Type" cell against the housing authority list.
+ * Only a resolved NAME is ever written to a unit; an agency (the other
+ * kind), a shared spelling, two organizations in one value or an unknown
+ * name comes back as `notWritten`.
+ */
+export function resolveImportedUnitAuthority(
+  raw: string | undefined,
+  entries: readonly OrgEntry[],
+): { name?: string; notWritten?: { value: string; resolution: NotWrittenResolution } } {
+  const value = cleanOrgCell(raw);
+  if (value === undefined) return {};
+  const r = resolveOrgText(entries, value, KINDS_FOR_FIELD.accepted_authorities);
+  if (r.status === 'match') return { name: r.entry.name };
+  return { notWritten: { value, resolution: r.status } };
+}
+
+function tallyNotWritten(
+  tally: Map<string, OrgValueNotWritten>,
+  field: OrgValueNotWritten['field'],
+  item: { value: string; resolution: NotWrittenResolution },
+): void {
+  const key = JSON.stringify([field, item.value]);
+  const found = tally.get(key);
+  if (found !== undefined) found.count += 1;
+  else tally.set(key, { field, value: item.value, resolution: item.resolution, count: 1 });
+}
+
+/** Report order: by field, then most frequent first, then by value. */
+function compareNotWritten(a: OrgValueNotWritten, b: OrgValueNotWritten): number {
+  if (a.field !== b.field) return a.field < b.field ? -1 : 1;
+  if (a.count !== b.count) return b.count - a.count;
+  return a.value < b.value ? -1 : a.value > b.value ? 1 : 0;
+}
+
+/** The starting list (spec Appendix A): the fallback when no entries are passed. */
+function startingEntries(at: string): OrgEntry[] {
+  let n = 0;
+  return buildStartingEntries(at, () => `starting-${(n += 1)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,12 +1126,20 @@ async function upsertContact(
     values[':notes'] = resolved.notes;
   }
   // Contact-side housing authority (the byHousingAuthority GSI that broadcast
-  // audience resolution queries). Without it an imported tenant can never be
-  // reached by an authority-filtered broadcast - see the
-  // housing-authority-free-text-drift issue, consequence 4.
+  // audience resolution queries). FILL-ONLY since the org lists (spec D9): a
+  // re-import never replaces a value staff set or settled, and a staff clear
+  // (a REMOVE) lets a later re-import fill it again - accepted. The value is
+  // always an exact list name (resolveImportedAuthority).
   if (resolved.housingAuthority) {
-    sets.push('housingAuthority = :housingAuthority');
+    sets.push('housingAuthority = if_not_exists(housingAuthority, :housingAuthority)');
     values[':housingAuthority'] = resolved.housingAuthority;
+  }
+  // An agency named in the housing authority column goes to `agency` - and
+  // only when the contact has none (D9). It is never a housing authority.
+  if (resolved.agency) {
+    sets.push('#agency = if_not_exists(#agency, :agency)');
+    names['#agency'] = 'agency';
+    values[':agency'] = resolved.agency;
   }
   if (!preserveStatus) {
     sets.push('#status = :status', 'status_source = :statusSource');
@@ -1276,6 +1397,8 @@ async function upsertUnit(
   contactIdByPhone: ReadonlyMap<string, string>,
   plan: PlanResult,
   report: ApplyReport,
+  /** The cell's resolved housing authority NAME (resolveImportedUnitAuthority); undefined = write none. */
+  authorityName: string | undefined,
 ): Promise<void> {
   const address = (row.address ?? '').trim();
   // IDENTITY STAYS ON THE RAW STRING. The unitId is seeded from the normalized
@@ -1346,16 +1469,15 @@ async function upsertUnit(
       );
     }
   }
-  // The unit's accepted authorities (spec section 8): ONE list field, canonically
-  // spelled through the SAME normalizer the contact side uses. The workbook cell
-  // is the founder's authority-named "Voucher Type", so a raw write would spell
-  // one authority two ways ("Atlanta Housing" here, "Atlanta (AHA)" on her
-  // tenants) and split it into two chips in the properties facet. The retired
-  // `jurisdiction` string is not written; legacy rows are synthesized at read
-  // time (authoritiesOf).
-  const authority = housingAuthorityFor(row.housing_authority);
-  if (authority !== undefined) {
-    fact('accepted_authorities', ':acceptedAuthorities', [authority]);
+  // The unit's accepted authorities (spec section 8): ONE list field, holding
+  // only an exact housing authority LIST name (spec D9), resolved by the caller
+  // (resolveImportedUnitAuthority) so the properties facet and the tenants
+  // facet name one authority one way. An agency, ambiguous or unknown "Voucher
+  // Type" cell arrives here as undefined: nothing is written, and the run
+  // reports it. The retired `jurisdiction` string is not written; legacy rows
+  // are synthesized at read time (authoritiesOf).
+  if (authorityName !== undefined) {
+    fact('accepted_authorities', ':acceptedAuthorities', [authorityName]);
   }
   const notes = (row.notes ?? '').trim();
   if (notes) {

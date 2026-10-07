@@ -17,6 +17,7 @@ import type {
 } from '../../repos/conversationsRepo.js';
 import type { MessageItem } from '../../repos/messagesRepo.js';
 import { withSeedTransport } from './messageTransport.js';
+import { SEED_AUTHORITY } from './orgList.js';
 import type { PlacementItem } from '../../repos/placementsRepo.js';
 import type { TourItem } from '../../repos/toursRepo.js';
 import type { UnitItem } from '../../repos/unitsRepo.js';
@@ -565,7 +566,7 @@ function buildContact(index: number, anchorMs: number, counts: ContactTypeCounts
     lastName: 'Contact',
     created_at: at(anchorMs, -(index + 60) * MINUTE_MS),
     ...(type === 'tenant' && {
-      housingAuthority: ordinal % 2 === 0 ? 'Atlanta Housing Authority' : 'Georgia DCA',
+      housingAuthority: ordinal % 2 === 0 ? SEED_AUTHORITY.atlanta : SEED_AUTHORITY.dca,
       voucherSize: 1 + (ordinal % 4),
       consent_method: 'imported',
       consent_at: at(anchorMs, -(index + 60) * MINUTE_MS),
@@ -588,7 +589,7 @@ function buildUnit(
     unitId: performanceId('unit', index),
     landlordId,
     status: LISTING_STATUSES[index % LISTING_STATUSES.length]!,
-    accepted_authorities: [index % 2 === 0 ? 'Atlanta Housing Authority' : 'Georgia DCA'],
+    accepted_authorities: [index % 2 === 0 ? SEED_AUTHORITY.atlanta : SEED_AUTHORITY.dca],
     address: {
       line1: `${1000 + index} Performance Way`,
       line2: `Unit ${index + 1}`,

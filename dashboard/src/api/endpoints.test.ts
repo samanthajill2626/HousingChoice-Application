@@ -11,6 +11,17 @@ import { request, requestWithStatus } from './client.js';
 import {
   applyTourRosterActionNow,
   acceptSuggestion,
+  addOrg,
+  checkOrgText,
+  deleteOrg,
+  getNotOnList,
+  getNotOnListRecords,
+  getOrgList,
+  getOrgUsage,
+  mergeOrg,
+  patchOrg,
+  resolveNotOnList,
+  runOrgRewriteAgain,
   buildTransitionBody,
   cancelTourRosterAction,
   createContact,
@@ -561,4 +572,101 @@ it('validateLostReason requires a category OR non-empty trimmed text', () => {
   expect(validateLostReason({ text: '   ' })).toBe(false);
   expect(validateLostReason({ category: 'stalled' })).toBe(true);
   expect(validateLostReason({ text: 'gave up' })).toBe(true);
+});
+
+it('organization reads unwrap their envelopes and pass the abort signal', async () => {
+  const signal = new AbortController().signal;
+  vi.mocked(request).mockResolvedValueOnce({ version: 3, entries: [] });
+  await expect(getOrgList(signal)).resolves.toEqual({ version: 3, entries: [] });
+  expect(request).toHaveBeenLastCalledWith('/api/organizations', { signal });
+
+  const counts = { tenants: 1, otherContacts: 0, properties: 2, deleted: 0 };
+  vi.mocked(request).mockResolvedValueOnce({ usage: { o1: counts } });
+  await expect(getOrgUsage()).resolves.toEqual({ o1: counts });
+  expect(request).toHaveBeenLastCalledWith('/api/organizations/usage', {});
+
+  vi.mocked(request).mockResolvedValueOnce({ rows: [] });
+  await expect(getNotOnList()).resolves.toEqual([]);
+  expect(request).toHaveBeenLastCalledWith('/api/organizations/not-on-list', {});
+
+  vi.mocked(request).mockResolvedValueOnce({ records: [] });
+  await expect(getNotOnListRecords('housingAuthority', 'AHA & co')).resolves.toEqual([]);
+  expect(request).toHaveBeenLastCalledWith('/api/organizations/not-on-list/records', {
+    query: { field: 'housingAuthority', value: 'AHA & co' },
+  });
+});
+
+it('organization writes send the exact body to the exact route', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ candidates: [], close: [] });
+  await checkOrgText({ kind: 'housing_authority', text: 'AHA', spellingFor: 'o1' });
+  expect(request).toHaveBeenLastCalledWith('/api/organizations/check', {
+    method: 'POST',
+    body: { kind: 'housing_authority', text: 'AHA', spellingFor: 'o1' },
+  });
+
+  const entry = {
+    orgId: 'o9',
+    kind: 'agency',
+    name: 'New Org',
+    spellings: [],
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'u1',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'u1',
+  };
+  vi.mocked(request).mockResolvedValueOnce({ entry });
+  await expect(addOrg({ kind: 'agency', name: 'New Org', notes: 'n' })).resolves.toEqual(entry);
+  expect(request).toHaveBeenLastCalledWith('/api/organizations', {
+    method: 'POST',
+    body: { kind: 'agency', name: 'New Org', notes: 'n' },
+  });
+
+  vi.mocked(request).mockResolvedValueOnce({ entry });
+  await patchOrg('o 9', { notes: 'x' });
+  expect(request).toHaveBeenLastCalledWith('/api/organizations/o%209', {
+    method: 'PATCH',
+    body: { notes: 'x' },
+  });
+
+  const lastRewrite = {
+    jobId: 'j1',
+    action: 'merge',
+    fromTexts: ['A'],
+    fields: ['housingAuthority', 'accepted_authorities'],
+    toName: 'B',
+    status: 'running',
+    heartbeatAt: '2026-10-06T00:00:00.000Z',
+    startedAt: '2026-10-06T00:00:00.000Z',
+    startedBy: 'u1',
+  };
+  vi.mocked(request).mockResolvedValueOnce({ lastRewrite });
+  await expect(mergeOrg('o1', 'o2')).resolves.toEqual(lastRewrite);
+  expect(request).toHaveBeenLastCalledWith('/api/organizations/o1/merge', {
+    method: 'POST',
+    body: { intoOrgId: 'o2' },
+  });
+
+  vi.mocked(request).mockResolvedValueOnce(undefined);
+  await deleteOrg('o1');
+  expect(request).toHaveBeenLastCalledWith('/api/organizations/o1', { method: 'DELETE' });
+
+  vi.mocked(request).mockResolvedValueOnce({ lastRewrite, skippedSpellings: [] });
+  const body = {
+    field: 'housingAuthority' as const,
+    value: 'AHA',
+    action: 'use' as const,
+    name: 'Atlanta Housing Authority',
+    rememberSpelling: false,
+  };
+  await resolveNotOnList(body);
+  expect(request).toHaveBeenLastCalledWith('/api/organizations/not-on-list/resolve', {
+    method: 'POST',
+    body,
+  });
+
+  vi.mocked(request).mockResolvedValueOnce({ lastRewrite });
+  await expect(runOrgRewriteAgain()).resolves.toEqual(lastRewrite);
+  expect(request).toHaveBeenLastCalledWith('/api/organizations/rewrite/run-again', {
+    method: 'POST',
+  });
 });

@@ -85,6 +85,19 @@ import type {
   UnitItem,
   UnitsPage,
   MmsMediaAttachment,
+  HolderRecord,
+  NotOnListResolveBody,
+  NotOnListRow,
+  OrgCheckResult,
+  OrgEntry,
+  OrgKind,
+  OrgListResponse,
+  OrgPatch,
+  OrgPatchResult,
+  OrgRecordField,
+  OrgRewriteStarted,
+  OrgRewriteState,
+  OrgUsage,
 } from './types.js';
 
 // --- Auth (/auth) -----------------------------------------------------------
@@ -2806,4 +2819,122 @@ export function getAiRun(runId: string, signal?: AbortSignal): Promise<AiRunDeta
   return request<AiRunDetailResponse>(`/api/ai-runs/${encodeURIComponent(runId)}`, {
     ...(signal !== undefined && { signal }),
   });
+}
+
+// --- Organization lists (/api/organizations) --------------------------------
+// Spec 2026-10-06-clean-org-names section 6; plan section 3.6. Every signed-in
+// user may read, check, add and edit notes; spellings, rename, kind, merge,
+// delete, the "Not on the list" actions and Run again are requireRole('admin')
+// on the server (the Settings section also hides them from a VA).
+
+/** GET /api/organizations - both lists plus the latest rewrite. */
+export function getOrgList(signal?: AbortSignal): Promise<OrgListResponse> {
+  return request<OrgListResponse>('/api/organizations', {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/organizations/usage - how many records hold each entry's exact
+ *  name (spec D10), keyed by orgId. Unwrapped from { usage }. */
+export async function getOrgUsage(signal?: AbortSignal): Promise<OrgUsage> {
+  const res = await request<{ usage: OrgUsage }>('/api/organizations/usage', {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.usage;
+}
+
+/** GET /api/organizations/not-on-list - every stored value that is not exactly
+ *  a list name, one row per value and field (spec D10). Unwrapped from { rows }. */
+export async function getNotOnList(signal?: AbortSignal): Promise<NotOnListRow[]> {
+  const res = await request<{ rows: NotOnListRow[] }>('/api/organizations/not-on-list', {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.rows;
+}
+
+/** GET /api/organizations/not-on-list/records?field=&value= - the records,
+ *  deleted included, holding one value. Unwrapped from { records }. */
+export async function getNotOnListRecords(
+  field: OrgRecordField,
+  value: string,
+  signal?: AbortSignal,
+): Promise<HolderRecord[]> {
+  const res = await request<{ records: HolderRecord[] }>('/api/organizations/not-on-list/records', {
+    query: { field, value },
+    ...(signal !== undefined && { signal }),
+  });
+  return res.records;
+}
+
+/** POST /api/organizations/check - the D4 resolution of `text` against `kind`
+ *  (match, ambiguity candidates, close names, the other kind, compound spans),
+ *  whether it could be a NEW name (`nameProblem`) and, with `spellingFor` (the
+ *  TARGET entry's orgId), whether it could be remembered as that entry's
+ *  spelling (`spellingProblem`). No write. */
+export function checkOrgText(
+  body: { kind: OrgKind; text: string; spellingFor?: string },
+  signal?: AbortSignal,
+): Promise<OrgCheckResult> {
+  return request<OrgCheckResult>('/api/organizations/check', {
+    method: 'POST',
+    body,
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** POST /api/organizations { kind, name, notes? } - add an entry (everyone).
+ *  409 org_name_taken (body.entry) / org_name_compound (body.spans) /
+ *  org_list_full; 400 org_name_empty / org_name_too_long / org_name_invalid /
+ *  org_notes_too_long. Unwrapped from { entry }. */
+export async function addOrg(body: { kind: OrgKind; name: string; notes?: string }): Promise<OrgEntry> {
+  const res = await request<{ entry: OrgEntry }>('/api/organizations', { method: 'POST', body });
+  return res.entry;
+}
+
+/** PATCH /api/organizations/:orgId - ONE change per request: { notes }
+ *  (everyone), or admin { spellings, confirmShared? } / { name } (202, starts a
+ *  rename rewrite) / { kind }. 409 org_spelling_shared / org_spelling_refused /
+ *  org_spellings_full / org_name_taken / org_name_compound / org_in_use /
+ *  org_rewrite_running. */
+export function patchOrg(orgId: string, change: OrgPatch): Promise<OrgPatchResult> {
+  return request<OrgPatchResult>(`/api/organizations/${encodeURIComponent(orgId)}`, {
+    method: 'PATCH',
+    body: change,
+  });
+}
+
+/** POST /api/organizations/:orgId/merge { intoOrgId } (admin, 202) - unwrapped
+ *  to the rewrite it started. 409 org_spellings_full / org_rewrite_running. */
+export async function mergeOrg(orgId: string, intoOrgId: string): Promise<OrgRewriteState> {
+  const res = await request<{ lastRewrite: OrgRewriteState }>(
+    `/api/organizations/${encodeURIComponent(orgId)}/merge`,
+    { method: 'POST', body: { intoOrgId } },
+  );
+  return res.lastRewrite;
+}
+
+/** DELETE /api/organizations/:orgId (admin, 204). 409 org_in_use (body.uses). */
+export async function deleteOrg(orgId: string): Promise<void> {
+  await request<void>(`/api/organizations/${encodeURIComponent(orgId)}`, { method: 'DELETE' });
+}
+
+/** POST /api/organizations/not-on-list/resolve (admin, 202) - settle one stored
+ *  value (spec D10): the rewrite it started + any spelling D12 skipped. 409
+ *  org_value_is_name_variant (body.entry: only "Use <entry>" settles it) /
+ *  org_rewrite_running. */
+export function resolveNotOnList(body: NotOnListResolveBody): Promise<OrgRewriteStarted> {
+  return request<OrgRewriteStarted>('/api/organizations/not-on-list/resolve', {
+    method: 'POST',
+    body,
+  });
+}
+
+/** POST /api/organizations/rewrite/run-again (admin, 202) - re-run a failed or
+ *  stalled rewrite, never the cleanup script's. Unwrapped. 409
+ *  org_rewrite_not_rerunnable / org_rewrite_running / org_rewrite_target_gone. */
+export async function runOrgRewriteAgain(): Promise<OrgRewriteState> {
+  const res = await request<{ lastRewrite: OrgRewriteState }>('/api/organizations/rewrite/run-again', {
+    method: 'POST',
+  });
+  return res.lastRewrite;
 }

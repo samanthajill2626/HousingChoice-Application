@@ -6,7 +6,10 @@
 // noteAdded(): a name "Is this really new?" just added - or one it answered
 // with ("Use X", "Put it in Agency": a name added or renamed since this list
 // was read, code review R1-ADV-FE-7) - is counted at once, so its chip never
-// says "Not on the list" while the re-read is in flight.
+// says "Not on the list" while the re-read is in flight. That answer is the
+// server's NEWER word on its entry: it wins over this list's copy of the same
+// orgId (a rename since the read, code review R2-FE-7) until a read returns
+// the name.
 // poll(): a timer's re-read, SKIPPED while a read is in flight - reload()
 // aborts the read in flight to start afresh, which on a timer meant a read
 // slower than the timer never landed (code review R1-ADV-FE-5). Skipped only
@@ -37,8 +40,10 @@ export interface OrgListState {
   poll: () => void;
   /** "Yes, add it" just added `entry` (spec D6), or "Is this really new?"
    *  answered with it (R1-ADV-FE-7: a bare OrgRef): it counts as on the list
-   *  AT ONCE - its chip never flashes "Not on the list" - and stays counted
-   *  until a read returns it; the list is re-read. */
+   *  AT ONCE - its chip never flashes "Not on the list" - and stays counted,
+   *  under its name and kind even where this list read the same orgId under
+   *  another name (R2-FE-7: renamed since), until a read returns that name;
+   *  the list is re-read. */
   noteAdded: (entry: OrgRef) => void;
 }
 
@@ -78,8 +83,9 @@ export function useOrgList(): OrgListState {
       const res = await getOrgList(controller.signal);
       if (controller.signal.aborted) return;
       setData({ entries: res.entries, version: res.version, lastRewrite: res.lastRewrite });
-      // The server's copy of a just-added entry takes over from ours.
-      setAdded((prev) => prev.filter((a) => !res.entries.some((e) => e.orgId === a.orgId)));
+      // The server's copy of a just-added entry takes over from ours - once it
+      // carries that name (a read can predate the answer that named it).
+      setAdded((prev) => prev.filter((a) => !res.entries.some((e) => e.orgId === a.orgId && e.name === a.name)));
       setError(false);
       setLoading(false);
     } catch (err) {
@@ -124,8 +130,17 @@ export function useOrgList(): OrgListState {
     [load],
   );
 
+  // A noted entry overrides the read's copy of its orgId - its name and kind,
+  // keeping the read's spellings (R2-FE-7) - and is appended when the read
+  // has no such orgId (a name added since).
   const entries = useMemo(
-    () => [...data.entries, ...added.filter((a) => !data.entries.some((e) => e.orgId === a.orgId))],
+    () => [
+      ...data.entries.map((e) => {
+        const noted = added.find((a) => a.orgId === e.orgId);
+        return noted === undefined ? e : { ...e, kind: noted.kind, name: noted.name };
+      }),
+      ...added.filter((a) => !data.entries.some((e) => e.orgId === a.orgId)),
+    ],
     [data.entries, added],
   );
 

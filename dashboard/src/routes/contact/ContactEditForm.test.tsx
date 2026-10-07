@@ -774,6 +774,27 @@ describe('ContactEditForm - a name the server confirmed counts as on the list at
     await user.click(await within(dialog).findByRole('button', { name: 'Put it in Agency' }));
     expect(chipOf('Hope Atlanta')).not.toHaveTextContent('Not on the list');
   });
+
+  it('"Use <name>" for an entry RENAMED since the form read its list: not marked either (R2-FE-7)', async () => {
+    const user = userEvent.setup();
+    // The form's list holds o-atl under its OLD name, and the re-read "Use"
+    // starts never lands.
+    getOrgList.mockResolvedValueOnce({
+      version: 1,
+      entries: [{ ...orgEntry('housing_authority', 'Atlanta HA'), orgId: 'o-atl' }],
+    });
+    getOrgList.mockReturnValue(new Promise(() => {}));
+    const renamed = { orgId: 'o-atl', kind: 'housing_authority' as const, name: 'Atlanta Housing Authority' };
+    checkOrgText.mockResolvedValue({ match: renamed, candidates: [], close: [], nameProblem: 'org_name_taken' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(housingAuthority(), 'Atlanta Housing Authority');
+    await user.click(
+      await screen.findByRole('option', { name: 'Add Atlanta Housing Authority as a new housing authority' }),
+    );
+    const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    await user.click(await within(dialog).findByRole('button', { name: 'Use Atlanta Housing Authority' }));
+    expect(chipOf('Atlanta Housing Authority')).not.toHaveTextContent('Not on the list');
+  });
 });
 
 // --- Code review R1-ADV-FE-1: text typed in a picker but never picked --------

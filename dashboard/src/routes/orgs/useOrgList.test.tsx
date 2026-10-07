@@ -142,4 +142,31 @@ describe('useOrgList', () => {
     await waitFor(() => expect(latest!.version).toBe(3));
     expect(latest!.entries).toEqual([ENTRY, added]);
   });
+
+  it('noteAdded: an entry RENAMED since the read counts under its new name at once, until a read returns that name (R2-FE-7)', async () => {
+    const OLD = { ...ENTRY, orgId: 'o-atl', name: 'Atlanta HA' };
+    getOrgList.mockResolvedValueOnce({ version: 1, entries: [OLD] });
+    render(<Probe />);
+    await waitFor(() => expect(latest!.entries).toHaveLength(1));
+    let land: (value: unknown) => void = () => {};
+    getOrgList.mockReturnValueOnce(
+      new Promise((resolve) => {
+        land = resolve;
+      }),
+    );
+    // "Is this really new?" answered with the server's current name for o-atl.
+    act(() => latest!.noteAdded({ orgId: 'o-atl', kind: 'housing_authority', name: 'Atlanta Housing Authority' }));
+    // One entry for the orgId, under the newer name (the read's spellings kept).
+    expect(latest!.entries.map((e) => [e.orgId, e.name])).toEqual([['o-atl', 'Atlanta Housing Authority']]);
+    expect(latest!.entries[0]?.spellings).toEqual(['AHA']);
+    // A read that still holds the old name keeps the new one...
+    await act(async () => land({ version: 1, entries: [OLD] }));
+    expect(latest!.entries.map((e) => e.name)).toEqual(['Atlanta Housing Authority']);
+    // ...and a read that returns the new name takes over.
+    const RENAMED = { ...OLD, name: 'Atlanta Housing Authority', spellings: ['AHA', 'Atlanta HA'] };
+    getOrgList.mockResolvedValueOnce({ version: 2, entries: [RENAMED] });
+    act(() => latest!.reload());
+    await waitFor(() => expect(latest!.version).toBe(2));
+    expect(latest!.entries).toEqual([RENAMED]);
+  });
 });

@@ -9,18 +9,29 @@
 // checks do not carry (names and spellings are rendered one per line into the
 // AI list block, so a newline or other control character is refused - D13),
 // the problem -> refusal mappings, and the rewrite-lock test (D11).
+import type { Logger } from '../lib/logger.js';
 import {
+  checkListWrite,
   checkNewName,
+  checkScalarWrite,
   checkSpelling,
+  resolveOrgText,
+  type ListCheck,
   type NameProblem,
   type OrgEntry,
+  type OrgField,
+  type OrgKind,
   type OrgRef,
+  type ScalarCheck,
   type SpellingProblem,
 } from '../lib/orgNames.js';
 import {
+  createOrgListRepo,
   OrgListBusyError,
   OrgListFullError,
   ORG_REWRITE_STALE_MS,
+  type OrgListItem,
+  type OrgListRepo,
   type OrgRewriteState,
 } from '../repos/orgListRepo.js';
 
@@ -134,4 +145,80 @@ export function asOrgHttpError(err: unknown): OrgHttpError | undefined {
   if (err instanceof OrgListFullError) return new OrgHttpError(409, { error: 'org_list_full' });
   if (err instanceof OrgListBusyError) return new OrgHttpError(503, { error: 'org_list_busy' });
   return undefined;
+}
+
+export interface OrgCheckResult {
+  match?: OrgRef;
+  candidates: OrgRef[];
+  close: OrgRef[];
+  otherKind?: OrgRef[];
+  compound?: OrgRef[][];
+  /** Set when the text is not acceptable as a NEW name (D13). */
+  nameProblem?: NameProblem['code'];
+  /** Set when `spellingFor` was given: null = can be remembered. */
+  spellingProblem?: SpellingProblem['problem'] | null;
+}
+
+/** Plan 3.4 - the reads and checks. Task 3.7 adds the list writes. */
+export interface OrgNamesService {
+  read(): Promise<OrgListItem>;
+  /** D5 helpers bound to the stored list (one read per call). */
+  checkScalar(field: OrgField, next: string, current: string | undefined): Promise<ScalarCheck>;
+  checkList(
+    field: OrgField,
+    next: readonly string[],
+    current: readonly string[] | undefined,
+    legacyJurisdiction: string | undefined,
+  ): Promise<ListCheck>;
+  /** POST /check. */
+  check(input: { kind: OrgKind; text: string; spellingFor?: string }): Promise<OrgCheckResult>;
+}
+
+/**
+ * Plan 3.4b: every dep optional, defaulting to the real repo. Every call
+ * reads the stored list with ONE consistent GetItem (spec D1 - no cache), so a
+ * name added a moment ago is accepted at once.
+ */
+export function createOrgNamesService(deps: { orgListRepo?: OrgListRepo; logger?: Logger } = {}): OrgNamesService {
+  const list = deps.orgListRepo ?? createOrgListRepo({ logger: deps.logger });
+
+  return {
+    async read() {
+      return list.get();
+    },
+
+    async checkScalar(field, next, current) {
+      const { entries } = await list.get();
+      return checkScalarWrite(entries, field, next, current);
+    },
+
+    async checkList(field, next, current, legacyJurisdiction) {
+      // checkListWrite trims held members and the legacy jurisdiction itself.
+      // CALLERS pass legacyJurisdiction only while the unit stores no
+      // accepted_authorities (planner ruling R1-F1).
+      const { entries } = await list.get();
+      return checkListWrite(entries, field, next, current, legacyJurisdiction);
+    },
+
+    async check({ kind, text, spellingFor }) {
+      const { entries } = await list.get();
+      const resolution = resolveOrgText(entries, text, [kind]);
+      const nameProblem = checkNewOrgName(entries, text);
+      let spellingProblem: SpellingProblem['problem'] | null | undefined;
+      if (spellingFor !== undefined) {
+        const target = entries.find((e) => e.orgId === spellingFor);
+        if (target === undefined) throw new OrgHttpError(404, { error: 'org_not_found' });
+        spellingProblem = checkOrgSpelling(entries, target, text)?.problem ?? null;
+      }
+      return {
+        ...(resolution.status === 'match' && { match: toOrgRef(resolution.entry) }),
+        candidates: resolution.status === 'ambiguous' ? resolution.candidates.map(toOrgRef) : [],
+        close: resolution.status === 'unknown' ? resolution.close.map(toOrgRef) : [],
+        ...(resolution.status === 'other_kind' && { otherKind: resolution.entries.map(toOrgRef) }),
+        ...(resolution.status === 'compound' && { compound: resolution.spans.map((span) => span.map(toOrgRef)) }),
+        ...(nameProblem !== null && { nameProblem: nameProblem.code }),
+        ...(spellingProblem !== undefined && { spellingProblem }),
+      };
+    },
+  };
 }

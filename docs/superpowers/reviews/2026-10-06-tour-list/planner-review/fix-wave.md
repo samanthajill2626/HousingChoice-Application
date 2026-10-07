@@ -200,4 +200,35 @@ bytes in added lines.
 
 ## Gates (orchestrator)
 
-(appended by the orchestrator after its verification run)
+Run by the orchestrator (Fable 5.1) on 98376711 (the fix wave's last code
+commit is cab09c9c; 98376711 adds only this report), bare, real exit codes,
+output redirected to files under `.superpowers/sdd/` and read after:
+
+1. `npm run typecheck` - exit 0.
+2. `npm test` - exit 0: app 410 files / 8370 passed + 1 skipped (the by-design
+   built-dashboard diagnostic), dashboard 220 / 3899 (one more than before -
+   the SC-F2 hook case), e2e workspace 22 / 503, fake-twilio 34 / 275,
+   fake-twilio-web 13 / 111; zero `[dynamoAdmin]` lines.
+3. `npm run smoke` - exit 0 ("1556 import specifier(s) across 272 emitted
+   file(s) resolve under plain Node").
+5. eslint over the branch's 53 lintable files (the same list as the synced
+   run) - exit 1 as expected; by baseline comparison on the same paths at the
+   merge base a5eabcb3 (rows keyed file|severity|rule|first message line):
+   13 rows = 13 rows, ZERO new, zero gone.
+4. (affected specs only - the planner reruns the full battery) on a fresh
+   `npm run e2e:session` lane 7 booted at 98376711 (`/__dev/ping` appCommit
+   98376711), reused by the single-hop runs: `tests/dashboard-next/tours-all.spec.ts`
+   exit 0, "5 passed (7.1s)" (its test 3 is the live proof that the memoized
+   row views still anchor the return-to-row focus); `tests/dashboard-next/tours-past.spec.ts`
+   exit 0, "2 passed (6.4s)" (the range read behind the Past tab after the
+   `queryLimit` rename). Lane stopped afterwards: `npm run e2e:stop` exit 0
+   (tables dropped, lease released), `e2e/.artifacts/session.pid` gone, no
+   listener on 9701/9711/9721/9731.
+
+Orchestrator notes on the diff (read in full): `mergeRows` is the one helper
+behind both the first page and `withPage`; the `useMemo` keys exactly on
+`[data.rows, data.contacts, data.units]` and `visible` stays a per-render
+filter; the `queryAll` call now carries `{ logger: log }`; the GLOSSARY
+names "Not booked" in one phrase; the build-research README's E-1 ruling is
+amended in this commit to record the narrowed grep (GLOSSARY.md and
+docs/issues/ excluded). Main unmoved (0 behind); no second sync.

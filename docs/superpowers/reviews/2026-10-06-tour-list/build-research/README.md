@@ -107,6 +107,10 @@ Format: ruling - rationale - where it lands.
   `tours-page.spec.ts:479` ("(requested, needs booking)"), and its final
   check is `git grep -n -i "not booked" -- dashboard/src e2e app/src`
   (expect empty); S14 repeats it over `documentation/`. - S8, S14.
+  AMENDED by the planner review (planner-review/adjudications.md, E-1): the
+  GLOSSARY names the retired label "Not booked" per its own convention for
+  retired terms, so the check EXCLUDES `documentation/GLOSSARY.md` and
+  `docs/issues/` (the issue records keep the old word as history).
 - E-2 (e2e D2 / C19) `routes.test.ts:381` is kept verbatim and a NEW comment
   line + `'/tours/all'` are added below it; `e2e/README.md:83-86` gains an
   appended sentence rather than a rewrite; `routes.ts:616-627` likewise adds

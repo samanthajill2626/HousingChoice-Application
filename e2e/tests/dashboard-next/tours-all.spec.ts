@@ -309,6 +309,9 @@ test.describe('Tours page - All tab', () => {
     await expectParam(page, 'status', 'no_show');
     await expectParam(page, 'q', SEARCH);
     await expect(all.link(noShowId)).toBeFocused();
+    // Spec 9: "the opened row in view and focused" - focus alone does not
+    // prove the row is on screen.
+    await expect(all.link(noShowId)).toBeInViewport();
     await expect(all.chip('No show')).toHaveAttribute('aria-pressed', 'true');
     await expect(all.search).toHaveValue(SEARCH);
   });

@@ -5,7 +5,7 @@
  * the Properties list's (ListingsList.module.css), copied. Tokens only
  * (tokens.css), never hard-coded. */
 
-/* --- Filters (When, From / To, Status chips, Tour type, Sort) -------------- */
+/* --- Filters (When, From / To, Status chips, Tour type, Search, Sort) ------ */
 
 .controls {
   display: flex;
@@ -129,23 +129,14 @@
 
 /* --- Search ---------------------------------------------------------------- */
 
+/* A control of the row, between Tour type and Sort (spec 4.3), with its own
+ * width; at 480px or less it goes full width with the others (below). */
 .search {
-  margin-bottom: var(--sp-4);
-}
-
-.searchLabel {
-  display: block;
-  margin-bottom: var(--sp-1);
-  font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--c-text-muted);
+  width: 360px;
 }
 
 .searchInput {
   width: 100%;
-  max-width: 360px;
   padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-sm);
   color: var(--c-text);

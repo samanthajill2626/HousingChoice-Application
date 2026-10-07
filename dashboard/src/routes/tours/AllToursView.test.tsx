@@ -481,7 +481,8 @@ describe('AllToursView - the filter bar (spec 4.3)', () => {
     pick(screen.getByLabelText('From'), '2026-11-05');
     await settle();
     expect(calls).toHaveLength(before);
-    expect(screen.getByText('From must be on or before To.')).toBeInTheDocument();
+    // Under the inputs and in the list area (the next case pins where).
+    expect(screen.getAllByText('From must be on or before To.')).toHaveLength(2);
     expect(screen.queryByRole('status', { name: 'Loading' })).not.toBeInTheDocument();
     expect(countText()).toBe('');
     expectNoButton('Load more');
@@ -490,6 +491,53 @@ describe('AllToursView - the filter bar (spec 4.3)', () => {
     await settle();
     expect(calls).toHaveLength(before + 1);
     expect(screen.queryByText('From must be on or before To.')).not.toBeInTheDocument();
+  });
+
+  it('From after To: the list area keeps the message until it is fixed - after the count line, outside it - and it stays under the inputs (spec 4.3, SC-4)', async () => {
+    reply('', page([row('a1')], null), page([row('a2')], null));
+    renderAt('/tours/all?when=range&from=2026-10-01&to=2026-10-31');
+    await settle();
+    expect(rowIds()).toEqual(['a1']);
+    const before = calls.length;
+
+    pick(screen.getByLabelText('From'), '2026-11-05');
+    await settle();
+    expect(calls).toHaveLength(before);
+    const messages = screen.getAllByText('From must be on or before To.');
+    expect(messages).toHaveLength(2);
+    const [underInputs, inList] = messages as [HTMLElement, HTMLElement];
+    expect(screen.getByLabelText('To').compareDocumentPosition(underInputs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(countLine().compareDocumentPosition(underInputs) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    expect(countLine().compareDocumentPosition(inList) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(countLine()).not.toContainElement(inList);
+    expect(countText()).toBe('');
+    expect(screen.queryByRole('list', { name: 'All tours list' })).not.toBeInTheDocument();
+
+    pick(screen.getByLabelText('From'), '2026-10-05');
+    await settle();
+    expect(calls).toHaveLength(before + 1);
+    expect(screen.queryByText('From must be on or before To.')).not.toBeInTheDocument();
+    expect(rowIds()).toEqual(['a2']);
+  });
+
+  it('the controls read in the spec order: When, From, To, Status, Tour type, Search, Sort, Clear filters (spec 4.3, SC-3)', async () => {
+    renderAt('/tours/all?when=range');
+    await settle();
+    const controls: Array<[string, HTMLElement]> = [
+      ['When', select('When')],
+      ['From', screen.getByLabelText('From')],
+      ['To', screen.getByLabelText('To')],
+      ['Status', statusGroup()],
+      ['Tour type', select('Tour type')],
+      ['Search', searchBox()],
+      ['Sort', select('Sort')],
+      ['Clear filters', button('Clear filters')],
+    ];
+    for (let i = 1; i < controls.length; i++) {
+      const [prevName, prev] = controls[i - 1]!;
+      const [name, el] = controls[i]!;
+      expect(prev.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING, `${name} after ${prevName}`).toBeTruthy();
+    }
   });
 });
 

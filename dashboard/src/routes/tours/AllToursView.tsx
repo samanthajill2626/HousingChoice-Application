@@ -515,6 +515,22 @@ export function AllToursView(): React.JSX.Element {
           </select>
         </div>
 
+        {/* Between Tour type and Sort: the spec's control order (4.3). */}
+        <div className={`${styles.control} ${styles.search}`}>
+          <label className={styles.controlLabel} htmlFor="tours-all-search">
+            Search
+          </label>
+          <input
+            id="tours-all-search"
+            type="search"
+            className={styles.searchInput}
+            placeholder="Search tenant or property"
+            value={chosen.q}
+            onChange={(e) => search(e.target.value)}
+            onBlur={persistSearch}
+          />
+        </div>
+
         <div className={styles.control}>
           <label className={styles.controlLabel} htmlFor="tours-all-sort">
             Sort
@@ -540,21 +556,6 @@ export function AllToursView(): React.JSX.Element {
         ) : null}
       </div>
 
-      <div className={styles.search}>
-        <label className={styles.searchLabel} htmlFor="tours-all-search">
-          Search
-        </label>
-        <input
-          id="tours-all-search"
-          type="search"
-          className={styles.searchInput}
-          placeholder="Search tenant or property"
-          value={chosen.q}
-          onChange={(e) => search(e.target.value)}
-          onBlur={persistSearch}
-        />
-      </div>
-
       {/* ONE status region: the count, plus the walk-cap sentence and the
           refreshed notice as their own spans (spec 4.5: the count line says
           it). Mounted and EMPTY while nothing is ready (ruling D-6). */}
@@ -567,6 +568,15 @@ export function AllToursView(): React.JSX.Element {
         ) : null}
         {ready && data.refreshed ? <span className={styles.notice}>{' The list was refreshed.'}</span> : null}
       </p>
+
+      {/* From after To: nothing is sent (the hook is idle) and the list area
+          keeps the message until it is fixed (spec 4.3) - outside the count
+          line, as well as under the inputs. */}
+      {data.status === 'idle' && rangeError !== null ? (
+        <div className={rowStyles.empty}>
+          <p className={rowStyles.emptyText}>{rangeError}</p>
+        </div>
+      ) : null}
 
       {data.status === 'loading' ? <Spinner center /> : null}
 

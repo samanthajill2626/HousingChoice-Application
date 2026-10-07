@@ -84,7 +84,10 @@ function daysInMonth(year: number, month: number): number {
  *  ISO 8601 date-time with a zone naming a real calendar time. The instant is
  *  BUILT from the checked fields, the fraction truncated to milliseconds -
  *  never Date.parse, which rolls an impossible day or hour forward
- *  (2026-02-30 is March 2, T24:00 the next day; code review r2 R2-1). */
+ *  (2026-02-30 is March 2, T24:00 the next day; code review r2 R2-1). An
+ *  instant outside years 0000-9999 is refused too: its canonical form has an
+ *  extended year ('+010000-...'), and '+' sorts below every digit, so the
+ *  range would invert under the string comparison (code review r3 R3-1). */
 function boundInstant(raw: string): string | undefined {
   const m = ISO_ZONED_DATE_TIME.exec(raw);
   if (m === null) return undefined;
@@ -106,7 +109,8 @@ function boundInstant(raw: string): string | undefined {
   wall.setUTCFullYear(year, month - 1, day);
   wall.setUTCHours(hour, minute, second, ms);
   const offsetMs = (sign === '-' ? -1 : 1) * (offsetHours * 60 + offsetMinutes) * 60_000;
-  return new Date(wall.getTime() - offsetMs).toISOString();
+  const canonical = new Date(wall.getTime() - offsetMs).toISOString();
+  return /^\d{4}-/.test(canonical) ? canonical : undefined;
 }
 
 const fail = (error: string): TourListParse => ({ ok: false, error });

@@ -5662,6 +5662,9 @@ describe('GET /api/tours/list', () => {
       ['when=range&from=10/06/2026', 'from and to must be valid ISO 8601 datetimes'],
       // Not a real day: a 400, never rolled into March (R2-1).
       ['when=range&from=2026-02-30T00:00:00Z', 'from and to must be valid ISO 8601 datetimes'],
+      // Past year 9999 once canonical ('+010000-...'): a 400, never an
+      // inverted range (R3-1).
+      ['when=range&to=9999-12-31T23:59:59-04:00', 'from and to must be valid ISO 8601 datetimes'],
       ['when=range&from=2026-10-02T00:00:00.000Z&to=2026-10-01T00:00:00.000Z', 'from must be on or before to'],
       ['limit=0', 'limit must be an integer 1..100'],
       ['limit=101', 'limit must be an integer 1..100'],

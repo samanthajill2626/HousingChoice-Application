@@ -91,12 +91,15 @@ export function localDayStartIso(ymd: string): string | undefined {
 }
 
 /** The END of a local calendar day (the next local midnight minus 1 ms) - the
- *  calendar arithmetic pastToursDateRange uses across DST (useTours.ts). */
+ *  calendar arithmetic pastToursDateRange uses across DST (useTours.ts). West
+ *  of UTC the end of 9999-12-31 is already year 10000 in UTC, whose ISO form
+ *  ('+010000-...') the server refuses, so it is clamped to the last instant of
+ *  year 9999 (code review r3 R3-1). */
 export function localDayEndIso(ymd: string): string | undefined {
   const p = ymdParts(ymd);
-  return p === undefined
-    ? undefined
-    : new Date(new Date(p.y, p.m - 1, p.d + 1, 0, 0, 0, 0).getTime() - 1).toISOString();
+  if (p === undefined) return undefined;
+  const end = new Date(new Date(p.y, p.m - 1, p.d + 1, 0, 0, 0, 0).getTime() - 1).toISOString();
+  return end.startsWith('+') ? '9999-12-31T23:59:59.999Z' : end;
 }
 
 export function parseTourListSelection(params: URLSearchParams): TourListSelection {

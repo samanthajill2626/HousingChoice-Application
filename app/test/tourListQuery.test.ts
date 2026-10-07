@@ -157,6 +157,16 @@ describe('parseTourListQuery', () => {
     // that year, never 1900 + it.
     expect(parsed({ when: 'range', from: '2028-02-29T00:00:00Z' }).filters.from).toBe('2028-02-29T00:00:00.000Z');
     expect(parsed({ when: 'range', from: '0050-06-15T00:00:00Z' }).filters.from).toBe('0050-06-15T00:00:00.000Z');
+
+    // The canonical instant keeps a plain four-digit year. Past the last
+    // instant of 9999, toISOString() writes '+010000-...', and '+' sorts
+    // below every digit, so the range would invert; before year 0000 it
+    // writes '-000001-...' (R3-1).
+    expect(parsed({ when: 'range', to: '9999-12-31T23:59:59.999Z' }).filters.to).toBe('9999-12-31T23:59:59.999Z');
+    for (const bad of ['9999-12-31T23:59:59-04:00', '0000-01-01T00:00:00+01:00']) {
+      expect(parseTourListQuery({ when: 'range', from: bad }), `from ${bad}`).toEqual({ ok: false, error: ISO_ERROR });
+      expect(parseTourListQuery({ when: 'range', to: bad }), `to ${bad}`).toEqual({ ok: false, error: ISO_ERROR });
+    }
   });
 });
 

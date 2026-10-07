@@ -240,6 +240,20 @@ describe('local days', () => {
       expect(localDayEndIso(bad)).toBeUndefined();
     }
   });
+
+  it('the furthest pickable day never ends past year 9999 - the server refuses an extended year (R3-1)', () => {
+    // At or west of UTC (Atlanta) the next local midnight after 9999-12-31 is
+    // already year 10000 in UTC, so the day ends at the last instant of 9999;
+    // east of UTC the day's own end stands.
+    const atOrWestOfUtc = new Date(10000, 0, 1).getTimezoneOffset() >= 0;
+    const end = localDayEndIso('9999-12-31');
+    expect(end).toBe(atOrWestOfUtc ? '9999-12-31T23:59:59.999Z' : endOf(9999, 12, 31));
+    // Never '+010000-...', whatever the runner's zone.
+    expect(end).not.toMatch(/^\+/);
+    // The start cannot overflow (local midnight of 9999-12-31 is in year 9999
+    // in every zone): unchanged.
+    expect(localDayStartIso('9999-12-31')).toBe(startOf(9999, 12, 31));
+  });
 });
 
 describe('tourListRangeError', () => {

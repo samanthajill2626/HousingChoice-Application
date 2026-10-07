@@ -6,7 +6,7 @@ severity: low
 status: open
 area: dashboard/tours
 created: 2026-10-06
-refs: dashboard/src/routes/tours/AllToursView.tsx:394, docs/superpowers/specs/2026-10-06-tour-list-design.md, docs/superpowers/reviews/2026-10-06-tour-list/code-review/r1-adversarial.md
+refs: dashboard/src/routes/tours/AllToursView.tsx, docs/superpowers/specs/2026-10-06-tour-list-design.md, docs/superpowers/reviews/2026-10-06-tour-list/code-review/r1-adversarial.md
 ---
 
 **Problem (plausible, not reproduced).** On a return to the Tours page's All
@@ -16,7 +16,8 @@ reloads the list to the recorded depth and focuses the row that was opened
 the return anchor). The anchor is a convenience, never a hijack: any
 user-intent event after the view mounts cancels it - `pointerdown`,
 `keydown`, `wheel` and `touchstart`, listened for on the document in the
-capture phase (`dashboard/src/routes/tours/AllToursView.tsx:394`); a
+capture phase (the `userActed` effect of `AllToursView`,
+`dashboard/src/routes/tours/AllToursView.tsx`); a
 browser-made `scroll` does not.
 
 Chrome on macOS turns a two-finger horizontal trackpad swipe into Back

@@ -67,8 +67,9 @@ when filtered), and NEVER the contact or unit walks - each page carries the
 names its rows need. Registering it needs a row (source `/tours` with a
 `link('/tours/all')` click, modeled on the `/tours/closed` row), a terminal -
 the list "All tours list" | the text "No tours match these filters." | the
-alert (a failed first page renders inside `role="alert"`,
-`dashboard/src/routes/tours/AllToursView.tsx:574`) - and that GET contract;
+alert (a failed first page renders inside `role="alert"`: the first-page
+failure block of `AllToursView`, its `data.status === 'error'` branch, in
+`dashboard/src/routes/tours/AllToursView.tsx`) - and that GET contract;
 then the same steps as the Suggested fix (`EXPECTED_KEYS`, `EXPECTED_WARM`,
 the 31 pins - 32 for one view, 33 for both - the README count, the
 `excluded` entry, the profiler self-QA).

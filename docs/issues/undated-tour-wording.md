@@ -46,7 +46,8 @@ Problem and Suggested fix above are the record, not the design.
   (`dashboard/src/api/types.ts:920`, right after `tourStatusLabel`). Commit
   `68b94b20`.
 - Eight readers call it, never their own string - the spec's six plus two:
-  the All tab's date column (`dashboard/src/routes/tours/AllToursView.tsx:214`),
+  the All tab's date column (`rowView` in
+  `dashboard/src/routes/tours/AllToursView.tsx`),
   the Past rows (`ToursPage.tsx:226`), the tour page's facts line and its
   Schedule card's When row (`TourDetail.tsx:326`, reused at `:797`), the
   tenant file (`TenantFile.tsx:338`), the landlord file

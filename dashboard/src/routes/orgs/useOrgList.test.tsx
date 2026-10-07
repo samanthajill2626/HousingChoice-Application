@@ -100,6 +100,23 @@ describe('useOrgList', () => {
     expect(getOrgList).toHaveBeenCalledTimes(2);
   });
 
+  it('poll() restarts a read still in flight after five ticks - one hung read never stops the polling (R2-FE-5)', async () => {
+    // The mount read never settles (a hung request; it does not even honour abort).
+    getOrgList.mockReturnValueOnce(new Promise(() => {}));
+    render(<Probe />);
+    await waitFor(() => expect(getOrgList).toHaveBeenCalledTimes(1));
+    getOrgList.mockResolvedValue({ version: 2, entries: [ENTRY] });
+    // Younger than five ticks: skipped, never aborted.
+    for (let tick = 0; tick < 4; tick += 1) act(() => latest!.poll());
+    expect(getOrgList).toHaveBeenCalledTimes(1);
+    expect((getOrgList.mock.calls[0]?.[0] as AbortSignal).aborted).toBe(false);
+    // The fifth tick gives up on it: aborted, and a fresh read lands.
+    act(() => latest!.poll());
+    expect(getOrgList).toHaveBeenCalledTimes(2);
+    expect((getOrgList.mock.calls[0]?.[0] as AbortSignal).aborted).toBe(true);
+    await waitFor(() => expect(latest!.version).toBe(2));
+  });
+
   it('noteAdded counts a just-added entry at once, and until a read returns it (spec D6)', async () => {
     getOrgList.mockResolvedValueOnce({ version: 1, entries: [ENTRY] });
     render(<Probe />);

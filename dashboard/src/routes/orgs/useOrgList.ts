@@ -9,9 +9,16 @@
 // says "Not on the list" while the re-read is in flight.
 // poll(): a timer's re-read, SKIPPED while a read is in flight - reload()
 // aborts the read in flight to start afresh, which on a timer meant a read
-// slower than the timer never landed (code review R1-ADV-FE-5).
+// slower than the timer never landed (code review R1-ADV-FE-5). Skipped only
+// for POLL_TICKS_PER_READ ticks: a read still in flight then is given up on -
+// aborted and started afresh - so one read that never settles (a hung request)
+// cannot stop the polling for good (code review R2-FE-5).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getOrgList, type OrgEntry, type OrgRef, type OrgRewriteState } from '../../api/index.js';
+
+/** How many poll ticks a read may stay in flight before a tick restarts it -
+ *  about 5 x the poller's cadence (10 s at the Settings tab's 2 s). */
+export const POLL_TICKS_PER_READ = 5;
 
 export interface OrgListState {
   entries: OrgEntry[];
@@ -25,7 +32,8 @@ export interface OrgListState {
   /** Re-read the list (after an add or an action): a read in flight is aborted. */
   reload: () => void;
   /** A timer's re-read (while a rewrite runs): skipped while a read is in
-   *  flight, so the poll never aborts its own previous read. */
+   *  flight, so the poll never aborts a slow read - unless that read is still
+   *  in flight POLL_TICKS_PER_READ ticks on: then it is aborted and restarted. */
   poll: () => void;
   /** "Yes, add it" just added `entry` (spec D6), or "Is this really new?"
    *  answered with it (R1-ADV-FE-7: a bare OrgRef): it counts as on the list
@@ -57,11 +65,15 @@ export function useOrgList(): OrgListState {
   const [added, setAdded] = useState<OrgEntry[]>([]);
   /** The read in flight, null once it settles. */
   const abortRef = useRef<AbortController | null>(null);
+  /** Poll ticks the read in flight has outlived (a tick, not a clock: the
+   *  cadence is the poller's, and a browser clock can be skewed or frozen). */
+  const ticksRef = useRef(0);
 
   const load = useCallback(async () => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    ticksRef.current = 0;
     try {
       const res = await getOrgList(controller.signal);
       if (controller.signal.aborted) return;
@@ -95,7 +107,12 @@ export function useOrgList(): OrgListState {
   }, [load]);
 
   const poll = useCallback(() => {
-    if (abortRef.current !== null) return; // the previous read has not landed yet
+    if (abortRef.current !== null) {
+      // The previous read has not landed yet: let it, for a while (R1-ADV-FE-5)...
+      ticksRef.current += 1;
+      if (ticksRef.current < POLL_TICKS_PER_READ) return;
+      // ...but not forever: load() aborts it and starts afresh (R2-FE-5).
+    }
     void load();
   }, [load]);
 

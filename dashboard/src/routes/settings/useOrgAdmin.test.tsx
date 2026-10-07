@@ -210,6 +210,42 @@ describe('useOrgAdmin - a list read slower than the poll', () => {
   });
 });
 
+// Code review R2-FE-5: skipping every tick while a read is in flight meant one
+// read that never settles (a hung request) froze the status line and every
+// action until a page reload. A read still in flight five ticks on is given up
+// on: aborted, and a fresh one started.
+describe('useOrgAdmin - a list read that never settles', () => {
+  /** A hung request: it never settles, not even on abort. */
+  const hung = (): Promise<never> => new Promise<never>(() => {});
+
+  it('the first poll read hangs: a later read still lands and the status advances', async () => {
+    getOrgList
+      .mockResolvedValueOnce({ version: 1, entries: [], lastRewrite: RUNNING })
+      .mockReturnValueOnce(hung())
+      .mockResolvedValue({ version: 2, entries: [], lastRewrite: DONE });
+    render(<Probe pollMs={20} />);
+    await waitFor(() => expect(latest!.list.lastRewrite?.status).toBe('done'));
+    expect(latest!.rewriteLive).toBe(false);
+    // The hung read was given up on, not waited for.
+    expect((getOrgList.mock.calls[1]?.[0] as AbortSignal).aborted).toBe(true);
+  });
+
+  it('the same under StrictMode (mount, cleanup, mount)', async () => {
+    getOrgList
+      .mockResolvedValueOnce({ version: 1, entries: [], lastRewrite: RUNNING })
+      .mockResolvedValueOnce({ version: 1, entries: [], lastRewrite: RUNNING })
+      .mockReturnValueOnce(hung())
+      .mockResolvedValue({ version: 2, entries: [], lastRewrite: DONE });
+    render(
+      <StrictMode>
+        <Probe pollMs={20} />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(latest!.list.lastRewrite?.status).toBe('done'));
+    expect(latest!.rewriteLive).toBe(false);
+  });
+});
+
 // Code review R1-ADV-FE-4: the heartbeat is a SERVER stamp and the server's
 // 15-minute lock reads it on the server's clock, so the page must too
 // (api/serverClock.ts). The browser is pinned to 12:00:00Z.

@@ -1698,4 +1698,27 @@ describe('AllToursView - keyboard focus after the action controls (spec 4.5, pla
     expect(rowIds()).toEqual(['t1']);
     expect(document.activeElement).toBe(document.body);
   });
+
+  it('a Load more answered by the first cursor 400 restarts the list: focus waits on the count line while page 1 reloads - never the body - and stays there, unscrolled, when the restarted page lands (round 3)', async () => {
+    reply('', page([row('a1'), row('a2')], 'c1'));
+    renderAt();
+    await settle();
+    const scrolls = scrolled.mock.calls.length;
+    press(button('Load more'));
+    await act(async () => {
+      lastCall().reject(cursor400());
+    });
+    // The automatic restart: page 1 of the same list, held in flight. The
+    // pressed Load more left with the rows, so no row is visible.
+    expect(lastCall().opts).toStrictEqual({ limit: 50 });
+    expectLoading();
+    expect(document.activeElement).toBe(countLine());
+
+    await land(lastCall(), page([row('n1'), row('n2')], 'd1'));
+    expect(rowIds()).toEqual(['n1', 'n2']);
+    expect(countText()).toBe('Showing 2 tours The list was refreshed.');
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(countLine());
+    expect(scrolled).toHaveBeenCalledTimes(scrolls);
+  });
 });

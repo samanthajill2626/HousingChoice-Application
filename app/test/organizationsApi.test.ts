@@ -5,11 +5,12 @@
 // through the REAL in-process queue and the registered org.rewrite job (the
 // broadcastApi.test.ts pattern): a 202, then settle(), then the records.
 import request, { type Test } from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { STARTING_ORG_LIST } from '../src/lib/orgStartingList.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
-import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { OrgListBusyError, OrgListFullError } from '../src/repos/orgListRepo.js';
+import { TEST_ADMIN_COOKIE, TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
 import { ATLANTA, AUGUSTA, DCA, STEP_UP, orgListItem, orgRef, runningRewrite } from './helpers/orgFixtures.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type Harness } from './helpers/twilioWebhookHarness.js';
 
@@ -145,5 +146,116 @@ describe('POST /api/organizations/check - for everyone', () => {
     const va = as(await harness(), TEST_SESSION_COOKIE);
     expect((await va.post('/check', { kind: 'agency', text: 'x'.repeat(201) })).status).toBe(400);
     expect((await va.post('/check', { kind: 'agency', text: 'x'.repeat(200) })).status).toBe(200);
+  });
+});
+
+describe('POST /api/organizations - add, for everyone (spec D6, D10)', () => {
+  it('a VA adds an entry with notes: 201 and the entry', async () => {
+    const h = await harness();
+    const res = await as(h, TEST_SESSION_COOKIE).post('', { kind: 'agency', name: 'Mercy Care', notes: 'Clinic partner' });
+    expect(res.status).toBe(201);
+    expect(res.body.entry).toMatchObject({
+      kind: 'agency',
+      name: 'Mercy Care',
+      notes: 'Clinic partner',
+      spellings: [],
+      createdBy: TEST_SESSION_USER.userId,
+    });
+    const list = await as(h, TEST_SESSION_COOKIE).get();
+    expect(list.body.entries.at(-1)).toEqual(res.body.entry);
+  });
+
+  it('answers each refusal with its plan-3.5 code', async () => {
+    const va = as(await harness(), TEST_SESSION_COOKIE);
+    const taken = await va.post('', { kind: 'housing_authority', name: 'aha' });
+    expect(taken.status).toBe(409);
+    expect(taken.body).toEqual({ error: 'org_name_taken', entry: orgRef(ATLANTA) });
+    const invalid = await va.post('', { kind: 'agency', name: `Mercy${String.fromCharCode(10)}Care` });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body).toEqual({ error: 'org_name_invalid' });
+    const tooLong = await va.post('', { kind: 'agency', name: 'Mercy Care', notes: 'n'.repeat(501) });
+    expect(tooLong.body).toEqual({ error: 'org_notes_too_long' });
+    expect((await va.post('', { kind: 'county', name: 'x' })).status).toBe(400);
+    expect((await va.post('', { kind: 'agency' })).status).toBe(400);
+  });
+
+  it('maps a busy or full list store to 503 org_list_busy and 409 org_list_full', async () => {
+    const h = await harness();
+    vi.spyOn(h.world.orgListRepo, 'mutate')
+      .mockRejectedValueOnce(new OrgListBusyError())
+      .mockRejectedValueOnce(new OrgListFullError());
+    const va = as(h, TEST_SESSION_COOKIE);
+    const busy = await va.post('', { kind: 'agency', name: 'Mercy Care' });
+    expect(busy.status).toBe(503);
+    expect(busy.body).toEqual({ error: 'org_list_busy' });
+    const full = await va.post('', { kind: 'agency', name: 'Mercy Care' });
+    expect(full.status).toBe(409);
+    expect(full.body).toEqual({ error: 'org_list_full' });
+  });
+});
+
+describe('PATCH /api/organizations/:orgId (plan 3.6)', () => {
+  it('notes are open to everyone; exactly one change per request; an unknown id is 404', async () => {
+    const va = as(await harness(), TEST_SESSION_COOKIE);
+    const ok = await va.patch('/org-dca', { notes: 'Statewide vouchers' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.entry).toMatchObject({ orgId: 'org-dca', notes: 'Statewide vouchers', updatedBy: TEST_SESSION_USER.userId });
+    const two = await va.patch('/org-dca', { notes: 'a', name: 'b' });
+    expect(two.status).toBe(400);
+    expect(two.body).toEqual({ error: 'one_change_per_request' });
+    expect((await va.patch('/org-dca', {})).body).toEqual({ error: 'one_change_per_request' });
+    const missing = await va.patch('/org-nope', { notes: 'x' });
+    expect(missing.status).toBe(404);
+    expect(missing.body).toEqual({ error: 'org_not_found' });
+  });
+
+  it('spellings, name and kind are admin-only - the inline check answers 403 forbidden', async () => {
+    const va = as(await harness(), TEST_SESSION_COOKIE);
+    for (const body of [{ spellings: ['DCA'] }, { name: 'Georgia Community Affairs' }, { kind: 'agency' }]) {
+      const res = await va.patch('/org-dca', body);
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: 'forbidden' });
+    }
+  });
+
+  it('an admin edits spellings; a same-kind share needs confirmShared', async () => {
+    const admin = as(await harness(), TEST_ADMIN_COOKIE);
+    const edited = await admin.patch('/org-dca', { spellings: ['DCA', 'Georgia DCA', 'GA DCA'] });
+    expect(edited.status).toBe(200);
+    expect(edited.body.entry.spellings).toEqual(['DCA', 'Georgia DCA', 'GA DCA']);
+    const shared = await admin.patch('/org-dca', { spellings: ['DCA', 'AHA'] });
+    expect(shared.status).toBe(409);
+    expect(shared.body).toEqual({ error: 'org_spelling_shared', spelling: 'AHA', entries: [orgRef(ATLANTA), orgRef(AUGUSTA)] });
+    const confirmed = await admin.patch('/org-dca', { spellings: ['DCA', 'AHA'], confirmShared: true });
+    expect(confirmed.body.entry.spellings).toEqual(['DCA', 'AHA']);
+  });
+
+  it('a kind change is refused while any record - deleted included - uses the entry', async () => {
+    const h = await harness();
+    h.world.contacts.push({ contactId: 'p-1', type: 'partner', status: 'active', agency: STEP_UP.name, deleted_at: DELETED_AT });
+    const admin = as(h, TEST_ADMIN_COOKIE);
+    const used = await admin.patch('/org-stepup', { kind: 'housing_authority' });
+    expect(used.status).toBe(409);
+    expect(used.body).toEqual({ error: 'org_in_use', uses: { active: 0, deleted: 1 } });
+    const free = await admin.patch('/org-vash', { kind: 'housing_authority' });
+    expect(free.status).toBe(200);
+    expect(free.body.entry).toMatchObject({ orgId: 'org-vash', kind: 'housing_authority' });
+  });
+});
+
+describe('DELETE /api/organizations/:orgId (admin)', () => {
+  it('is admin-only, refused while used, 204 when unused, 404 when unknown', async () => {
+    const h = await harness();
+    h.world.contacts.push(tenant('t-1', { housingAuthority: DCA.name }));
+    expect((await as(h, TEST_SESSION_COOKIE).del('/org-stepup')).status).toBe(403);
+    const admin = as(h, TEST_ADMIN_COOKIE);
+    const used = await admin.del('/org-dca');
+    expect(used.status).toBe(409);
+    expect(used.body).toEqual({ error: 'org_in_use', uses: { active: 1, deleted: 0 } });
+    expect((await admin.del('/org-stepup')).status).toBe(204);
+    expect((await as(h, TEST_SESSION_COOKIE).get()).body.entries.map((e: { orgId: string }) => e.orgId)).not.toContain('org-stepup');
+    const missing = await admin.del('/org-stepup');
+    expect(missing.status).toBe(404);
+    expect(missing.body).toEqual({ error: 'org_not_found' });
   });
 });

@@ -29,12 +29,17 @@
 // services log; this router logs nothing of its own.
 import { Router, type Response } from 'express';
 import type { Logger } from '../lib/logger.js';
-import type { OrgKind } from '../lib/orgNames.js';
-import type { AuthedRequest } from '../middleware/auth.js';
+import type { OrgEntry, OrgKind } from '../lib/orgNames.js';
+import { requireRole, type AuthedRequest } from '../middleware/auth.js';
 import type { OrgRecordField } from '../repos/orgListRepo.js';
-import { asOrgHttpError, createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
+import {
+  asOrgHttpError,
+  createOrgNamesService,
+  OrgHttpError,
+  type OrgNamesService,
+} from '../services/orgNames.js';
 import { createOrgRecordsService, type OrgRecordsService } from '../services/orgRecords.js';
-import type { OrgRewriteService } from '../services/orgRewrite.js';
+import { createOrgRewriteService, type OrgRewriteService } from '../services/orgRewrite.js';
 
 /** Plan 3.4b: the instances under these keys; each defaults to a fresh real one. */
 export interface OrganizationsRouterDeps {
@@ -45,6 +50,8 @@ export interface OrganizationsRouterDeps {
 }
 
 const KINDS: readonly OrgKind[] = ['housing_authority', 'agency'];
+/** PATCH /:orgId takes exactly ONE of these per request (plan 3.6). */
+const PATCH_KEYS = ['notes', 'spellings', 'name', 'kind'] as const;
 const RECORD_FIELDS: readonly OrgRecordField[] = ['housingAuthority', 'agency', 'accepted_authorities'];
 /** POST /check refuses a longer text with 400 (spec section 6). */
 const ORG_CHECK_TEXT_MAX = 200;
@@ -81,6 +88,33 @@ function handle(fn: Handler): Handler {
 export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): Router {
   const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
   const orgRecords = deps.orgRecordsService ?? createOrgRecordsService({ logger: deps.logger });
+  const orgRewrite = deps.orgRewriteService ?? createOrgRewriteService({ logger: deps.logger });
+
+  /** The acting user - requireAuth (mounted upstream) guarantees one. */
+  const actorOf = (req: AuthedRequest): string => req.user?.userId ?? 'unknown';
+
+  async function entryOr404(orgId: string): Promise<OrgEntry> {
+    const entry = (await orgNames.read()).entries.find((e) => e.orgId === orgId);
+    if (entry === undefined) throw new OrgHttpError(404, { error: 'org_not_found' });
+    return entry;
+  }
+
+  /**
+   * 409 org_in_use while any record - deleted ones included (D10) - holds the
+   * entry's name in a field of its kind. OrgNamesService has no record access
+   * (plan 3.4b), so the delete and kind-change routes ask here first (plan
+   * 3.5). The count and the list write are two steps: a record written in
+   * between can end up holding the removed name - it then shows in "Not on
+   * the list" (the accepted race, plan watch items).
+   */
+  async function refuseWhileUsed(entry: OrgEntry): Promise<void> {
+    const u = (await orgRecords.usage([entry]))[entry.orgId];
+    const uses = {
+      active: (u?.tenants ?? 0) + (u?.otherContacts ?? 0) + (u?.properties ?? 0),
+      deleted: u?.deleted ?? 0,
+    };
+    if (uses.active + uses.deleted > 0) throw new OrgHttpError(409, { error: 'org_in_use', uses });
+  }
 
   const router = Router();
 
@@ -156,6 +190,111 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
         return;
       }
       res.json(await orgNames.check({ kind, text, ...(spellingFor !== undefined && { spellingFor }) }));
+    }),
+  );
+
+  router.post(
+    '/',
+    handle(async (req, res) => {
+      const body = bodyOf(req) ?? {};
+      const kind = body['kind'];
+      const name = body['name'];
+      const notes = body['notes'];
+      if (!isKind(kind)) {
+        res.status(400).json({ error: 'kind must be housing_authority or agency' });
+        return;
+      }
+      if (typeof name !== 'string') {
+        res.status(400).json({ error: 'name must be a string' });
+        return;
+      }
+      if (notes !== undefined && typeof notes !== 'string') {
+        res.status(400).json({ error: 'notes must be a string' });
+        return;
+      }
+      const entry = await orgNames.add({ kind, name, ...(notes !== undefined && { notes }), actor: actorOf(req) });
+      res.status(201).json({ entry });
+    }),
+  );
+
+  router.patch(
+    '/:orgId',
+    handle(async (req, res) => {
+      const orgId = String(req.params['orgId'] ?? '');
+      const body = bodyOf(req) ?? {};
+      const present = PATCH_KEYS.filter((key) => Object.prototype.hasOwnProperty.call(body, key));
+      const [key] = present;
+      if (key === undefined || present.length !== 1) {
+        res.status(400).json({ error: 'one_change_per_request' });
+        return;
+      }
+      // Notes are everyone's; spellings, name and kind are admin-only (spec
+      // D10). The one route that mixes both, so the role check is inline - the
+      // same 403 body requireRole answers.
+      if (key !== 'notes' && req.user?.role !== 'admin') {
+        res.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      const actor = actorOf(req);
+      switch (key) {
+        case 'notes': {
+          const notes = body['notes'];
+          if (typeof notes !== 'string') {
+            res.status(400).json({ error: 'notes must be a string' });
+            return;
+          }
+          res.json({ entry: await orgNames.updateNotes(orgId, notes, actor) });
+          return;
+        }
+        case 'spellings': {
+          const spellings = body['spellings'];
+          const confirmShared = body['confirmShared'];
+          if (!Array.isArray(spellings) || !spellings.every((s): s is string => typeof s === 'string')) {
+            res.status(400).json({ error: 'spellings must be a list of strings' });
+            return;
+          }
+          if (confirmShared !== undefined && typeof confirmShared !== 'boolean') {
+            res.status(400).json({ error: 'confirmShared must be true or false' });
+            return;
+          }
+          const entry = await orgNames.updateSpellings(orgId, spellings, { confirmShared: confirmShared === true, actor });
+          res.json({ entry });
+          return;
+        }
+        case 'name': {
+          const name = body['name'];
+          if (typeof name !== 'string') {
+            res.status(400).json({ error: 'name must be a string' });
+            return;
+          }
+          // A rename starts a rewrite (D11): 202 with the running (or, when the
+          // job could not be queued, failed) lastRewrite.
+          res.status(202).json(await orgRewrite.rename(orgId, name, actor));
+          return;
+        }
+        case 'kind': {
+          const kind = body['kind'];
+          if (!isKind(kind)) {
+            res.status(400).json({ error: 'kind must be housing_authority or agency' });
+            return;
+          }
+          const entry = await entryOr404(orgId);
+          if (entry.kind !== kind) await refuseWhileUsed(entry);
+          res.json({ entry: await orgNames.changeKind(orgId, kind, actor) });
+          return;
+        }
+      }
+    }),
+  );
+
+  router.delete(
+    '/:orgId',
+    requireRole('admin'),
+    handle(async (req, res) => {
+      const orgId = String(req.params['orgId'] ?? '');
+      await refuseWhileUsed(await entryOr404(orgId));
+      await orgNames.remove(orgId, actorOf(req));
+      res.status(204).end();
     }),
   );
 

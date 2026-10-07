@@ -198,4 +198,60 @@ All in place, each marked "(Wording amended by the planner review, round 3
 
 ## Gates (orchestrator)
 
-(appended by the orchestrator after its verification run)
+Run by the orchestrator (Fable 5.1) on c96f8b46 (the wave's last code commit
+is 27006c28; c96f8b46 adds only this report), bare, real exit codes, output
+redirected to files under `.superpowers/sdd/` and read after:
+
+1. `npm run typecheck` - exit 0.
+2. `npm test` - exit 0: app 410 files / 8370 passed + 1 skipped (the by-design
+   built-dashboard diagnostic), dashboard 220 / 3912 (+3 over wave 2: the two
+   R3-1 cases and the restart pin), e2e workspace 22 / 503, fake-twilio
+   34 / 275, fake-twilio-web 13 / 111; zero `[dynamoAdmin]` lines.
+3. `npm run smoke` - exit 0 ("1556 import specifier(s) across 272 emitted
+   file(s) resolve under plain Node").
+5. eslint over the branch's 54 lintable files (the same list as wave 2) -
+   exit 1 as expected; by baseline comparison on the same paths at the merge
+   base a5eabcb3 (rows keyed file|severity|rule|first message line): 13 rows
+   = 13 rows, ZERO new, zero gone.
+4. (affected specs only - the planner runs the final battery) on a fresh
+   `npm run e2e:session` lane 7 booted at c96f8b46 (`/__dev/ping` appCommit
+   c96f8b46), reused by the single-hop runs: `tests/dashboard-next/tours-all.spec.ts`
+   exit 0, "5 passed (16.6s)"; `tests/dashboard-next/tours-past.spec.ts` exit
+   0, "2 passed (9.5s)".
+
+Live check of R3-1 (Playwright MCP on the same lane, 76 API-seeded tours =
+50 + 26; every fact from `document.activeElement`, `main.scrollTop` sampled
+every 40 ms, and the count line; the cursor page answered by a route so the
+empty-page shapes exist):
+
+- (a) The pressed Load more answered with an EMPTY, complete page (`tours:
+  [], nextCursor: null`, 700 ms): from the search box 52 Tabs reached Load
+  more (pane scrollTop 2425); Enter -> the same button busy (`aria-busy`
+  "true", scrollTop 2425); when the empty page landed, focus was on the row
+  link at index 49 - the LAST visible row - not the count line and not the
+  body, "50 tours", Load more gone; the pane's scrollTop went 2425 -> 2373,
+  the only two values sampled: a 52 px CLAMP from the action area leaving the
+  bottom of the scroller (its scrollHeight shrank), not a scroll call - no
+  jump to the top (which would read 0).
+- (b) The pressed Load more answered with an empty page WITH a cursor (the
+  request's own cursor handed back, 700 ms) so the automatic follow took
+  over (its page passed through after 1200 ms): while the follow ran, focus
+  was already on row 49 ("Checking more tours...", 50 rows, scrollTop 2373);
+  when the follow's 26 rows landed ("81 tours"), focus STAYED on row 49 and
+  the scroll did not move - the automatic page moved nothing, as the rule
+  says. (A first attempt at (b) carried the real second page's `nextCursor`,
+  which is null for a two-page list, so it reproduced (a); it is discarded.)
+- Not exercised live: the Start over / first-page Retry scroll to the new
+  list's top (pinned by the amended view cases) and the cursor-400 restart
+  (pinned by the new test: the count line, never the body).
+
+Lane stopped afterwards: `npm run e2e:stop` exit 0 (tables dropped, lease
+released), `e2e/.artifacts/session.pid` gone, no listener on
+9701/9711/9721/9731. Main unmoved (0 behind); no second sync.
+
+Orchestrator notes on the diff (read in full): the 'more' path's fallback is
+`newRow ?? shown ?? links.at(-1) ?? count` with `links` the VISIBLE row links
+and `scrollIntoView` guarded by `if (!more)`; the rebuild path is unchanged;
+the spec's focus bullet, the de-duplication sentence, the hidden-added-rows
+case and the control list are amended in place and marked; the GLOSSARY
+reads "the tenant and landlord files' tour lists and the property page".

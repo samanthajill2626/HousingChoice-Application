@@ -30,6 +30,7 @@ import { test, expect, type APIRequestContext, type Locator, type Page, type Req
 import { ORG_PICKER, pickOrgName } from '../../scenarios/steps.js';
 import {
   addOrg,
+  getNotOnList,
   getOrgList,
   getOrgUsage,
   requireOrg,
@@ -476,5 +477,163 @@ test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => 
     const activity = page.locator('section', { has: page.getByRole('heading', { name: 'Activity' }) });
     await expect(activity.getByText(UI.activityLabel).first()).toBeVisible();
     await expect(activity).toContainText(newName);
+  });
+});
+
+// ---- "Not on the list" (spec D10, D11) ----
+
+/** A value's row in the "Not on the list" section. `hasText` is a
+ *  case-INSENSITIVE substring match, so no two values in one test may contain
+ *  each other. */
+function notOnListRow(page: Page, value: string): Locator {
+  return region(page, UI.notOnListRegion).getByRole('row').filter({ hasText: value });
+}
+
+test.describe('"Not on the list" (spec D10, D11)', () => {
+  test('everyone sees each value with its records; settling it is admin-only', async ({ page }) => {
+    await devLogin(page); // the seeded VA
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const contactValue = `Linnet Hsg ${stamp}`;
+    const unitValue = `Linnet Old ${stamp}`;
+    const liveFirst = `NotListLive${stamp}`;
+    const goneFirst = `NotListGone${stamp}`;
+    const live = (await createTenant(req, { firstName: liveFirst })).contactId;
+    const gone = (await createTenant(req, { firstName: goneFirst })).contactId;
+    for (const contactId of [live, gone]) {
+      await setOffListValue(req, { contactId, field: 'housingAuthority', value: contactValue });
+    }
+    const removed = await req.delete(`${NEXT}/api/contacts/${gone}`);
+    expect(removed.ok(), await removed.text()).toBeTruthy();
+    const line1 = `${stamp} Linnet Lane`;
+    const unitId = await createUnit(req, { line1, authorities: ['Atlanta Housing Authority'] });
+    await setOffListValue(req, { unitId, field: 'accepted_authorities', value: unitValue });
+
+    // One row per value and field; active and deleted holders counted apart (D10).
+    const rows = await getNotOnList(req);
+    expect(rows.find((r) => r.field === 'housingAuthority' && r.value === contactValue)).toMatchObject({
+      count: 1,
+      deletedCount: 1,
+    });
+    expect(rows.find((r) => r.field === 'accepted_authorities' && r.value === unitValue)).toMatchObject({
+      count: 1,
+      deletedCount: 0,
+    });
+
+    await openOrgSettings(page);
+    const notOnList = region(page, UI.notOnListRegion);
+    const contactRow = notOnListRow(page, contactValue);
+    await expect(contactRow).toBeVisible();
+    // A VA gets no settling action (D10)...
+    await expect(contactRow.getByRole('button', { name: UI.clear, exact: true })).toHaveCount(0);
+    // ...but sees the records, each linked to its own page, the deleted one marked.
+    await contactRow.getByRole('button', { name: UI.showRecords, exact: true }).click();
+    await expect(notOnList.getByRole('link', { name: new RegExp(liveFirst) })).toHaveAttribute(
+      'href',
+      `/contacts/${live}`,
+    );
+    await expect(notOnList.getByRole('link', { name: new RegExp(goneFirst) })).toHaveAttribute(
+      'href',
+      `/contacts/${gone}`,
+    );
+    await expect(notOnList.getByRole('listitem').filter({ hasText: goneFirst })).toContainText(UI.deletedMarker);
+    await expect(notOnList.getByRole('listitem').filter({ hasText: liveFirst })).not.toContainText(
+      UI.deletedMarker,
+    );
+    await notOnListRow(page, unitValue).getByRole('button', { name: UI.showRecords, exact: true }).click();
+    await expect(notOnList.getByRole('link', { name: new RegExp(line1) })).toHaveAttribute(
+      'href',
+      `/listings/${unitId}`,
+    );
+
+    // The server enforces it too (requireRole('admin')).
+    const resolve = await req.post(`${NEXT}/api/organizations/not-on-list/resolve`, {
+      data: { field: 'housingAuthority', value: contactValue, action: 'clear' },
+    });
+    expect(resolve.status()).toBe(403);
+  });
+
+  test('an admin settles values: Use, Move to Agency, Split and Clear each rewrite the records', async ({
+    page,
+  }) => {
+    test.slow(); // four rewrite jobs, strictly one at a time (D11)
+    await devLoginAs(page, 'founder@example.com');
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const merlin = `Merlin Housing Authority ${stamp}`;
+    const kiteAid = `Kite Aid ${stamp}`;
+    const shrike = `Shrike Housing Authority ${stamp}`;
+    const shrikeAid = `Shrike Aid ${stamp}`;
+    await addOrg(req, { kind: 'housing_authority', name: merlin });
+    await addOrg(req, { kind: 'agency', name: kiteAid });
+    await addOrg(req, { kind: 'housing_authority', name: shrike });
+    await addOrg(req, { kind: 'agency', name: shrikeAid });
+    // Five values, none containing another (rows are found by their text).
+    const useValue = merlin.toLowerCase(); // resolves to merlin, but is not its exact text (D3)
+    const moveValue = kiteAid; // an agency's exact name in a housing authority field
+    const splitValue = `${shrike} ${shrikeAid}`; // compound: a name of each kind (D4)
+    const clearValue = `Rook Junk ${stamp}`; // resolves to nothing
+    const keepValue = `Rook Keep ${stamp}`; // never settled: proves the section loaded
+    const holderOf = async (label: string, value: string): Promise<string> => {
+      const { contactId } = await createTenant(req, { firstName: `Settle${label}${stamp}` });
+      await setOffListValue(req, { contactId, field: 'housingAuthority', value });
+      return contactId;
+    };
+    const useHolder = await holderOf('Use', useValue);
+    const moveHolder = await holderOf('Move', moveValue);
+    const splitHolder = await holderOf('Split', splitValue);
+    const clearHolder = await holderOf('Clear', clearValue);
+    await holderOf('Keep', keepValue);
+
+    await openOrgSettings(page);
+    // Each action opens one confirm dialog (selector contract L3-L6).
+    const dialog = page.getByRole('dialog');
+
+    // Use <name>: the value resolves to one entry (D10). "Remember this
+    // spelling" is off - the value IS the name in another case (D12) - and the
+    // action still runs.
+    await notOnListRow(page, useValue).getByRole('button', { name: UI.use(merlin), exact: true }).click();
+    await expect(dialog).toContainText(useValue);
+    await expect(dialog.getByRole('checkbox', { name: UI.rememberSpelling })).not.toBeChecked();
+    await dialog.getByRole('button', { name: UI.use(merlin), exact: true }).click();
+    await waitForRewrite(req, (r) => r.action === 'use' && r.fromTexts.some((t) => sameOrgText(t, useValue)));
+    expect((await getContact(req, useHolder)).housingAuthority).toBe(merlin);
+
+    // Move to Agency as <name>: an agency name out of the housing authority field.
+    await page.reload();
+    await notOnListRow(page, moveValue).getByRole('button', { name: UI.moveToAgency(kiteAid), exact: true }).click();
+    await dialog.getByRole('button', { name: UI.moveToAgency(kiteAid), exact: true }).click();
+    await waitForRewrite(
+      req,
+      (r) => r.action === 'move_to_agency' && r.fromTexts.some((t) => sameOrgText(t, moveValue)),
+    );
+    const moved = await getContact(req, moveHolder);
+    expect(moved.agency).toBe(kiteAid);
+    expect(moved.housingAuthority).toBeUndefined();
+
+    // Split into <housing authority> + <agency>: both halves prefilled (D10).
+    await page.reload();
+    await notOnListRow(page, splitValue)
+      .getByRole('button', { name: UI.split(shrike, shrikeAid), exact: true })
+      .click();
+    await dialog.getByRole('button', { name: UI.splitConfirm, exact: true }).click();
+    await waitForRewrite(req, (r) => r.action === 'split' && r.fromTexts.some((t) => sameOrgText(t, splitValue)));
+    const split = await getContact(req, splitHolder);
+    expect(split.housingAuthority).toBe(shrike);
+    expect(split.agency).toBe(shrikeAid);
+
+    // Clear: the housing authority is REMOVEd, never set to '' (D5, D11).
+    await page.reload();
+    await notOnListRow(page, clearValue).getByRole('button', { name: UI.clear, exact: true }).click();
+    await dialog.getByRole('button', { name: UI.clear, exact: true }).click();
+    await waitForRewrite(req, (r) => r.action === 'clear' && r.fromTexts.some((t) => sameOrgText(t, clearValue)));
+    expect((await getContact(req, clearHolder)).housingAuthority).toBeUndefined();
+
+    // Settled values leave the section; the unsettled one stays.
+    await page.reload();
+    await expect(notOnListRow(page, keepValue)).toBeVisible();
+    for (const value of [useValue, moveValue, splitValue, clearValue]) {
+      await expect(notOnListRow(page, value)).toHaveCount(0);
+    }
   });
 });

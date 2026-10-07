@@ -48,7 +48,26 @@
 //
 // PII: logs counts, record ids and field names, and prints organization
 // values. Never a person's name, phone or email.
+import { randomUUID } from 'node:crypto';
+import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { tableName } from '../src/lib/config.js';
+import { logger as defaultLogger, type Logger } from '../src/lib/logger.js';
 import { isOnListFor, KINDS_FOR_FIELD, resolveOrgText, type OrgEntry } from '../src/lib/orgNames.js';
+import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import { createAuditRepo, type AuditRepo } from '../src/repos/auditRepo.js';
+import {
+  createContactsRepo,
+  EMAIL_REF_PREFIX,
+  isDeleted as isContactDeleted,
+  PHONE_REF_PREFIX,
+  type ContactItem,
+  type ContactsRepo,
+} from '../src/repos/contactsRepo.js';
+import { createOrgListRepo, type OrgListRepo, type OrgRewriteState } from '../src/repos/orgListRepo.js';
+import { createUnitsRepo, isDeleted as isUnitDeleted, type UnitItem, type UnitsRepo } from '../src/repos/unitsRepo.js';
+import { OrgHttpError } from '../src/services/orgNames.js';
+import { createOrgRecordsService } from '../src/services/orgRecords.js';
+import { createOrgRewriteService, type OrgRewriteService } from '../src/services/orgRewrite.js';
 
 // ---------------------------------------------------------------------------
 // Planning (pure): what one record becomes
@@ -270,4 +289,453 @@ export function planUnit(
     plan.audits.push({ field: 'accepted_authorities', from: members.join(', '), to: next.join(', ') });
   }
   return plan;
+}
+
+// ---------------------------------------------------------------------------
+// The run (dry run by default; --apply writes under the rewrite lock)
+// ---------------------------------------------------------------------------
+
+export const SCRIPT_NAME = 'clean-org-names';
+
+/** Heartbeat the lock at most this often while an apply runs. */
+export const HEARTBEAT_EVERY_MS = 20_000;
+
+/**
+ * Another organization-name rewrite holds the lock (spec D11): nothing was
+ * read or written. Exit 1, no PARTIAL banner.
+ */
+export class CleanupRefusedError extends Error {}
+
+/**
+ * The apply's heartbeat found the organization-list rewrite lock no longer
+ * its own (spec D11: another rewrite took it over after this run went 15
+ * minutes without a heartbeat). The run stopped writing at once and does NOT
+ * release a lock that is not its own. Exit 1, with the PARTIAL report.
+ */
+export class CleanupLockLostError extends Error {
+  constructor(jobId: string) {
+    super(
+      `${SCRIPT_NAME}: lost the organization-list rewrite lock (job ${jobId}) to another rewrite; ` +
+        'stopped writing at once. Re-run the apply once that rewrite has finished (idempotent).',
+    );
+    this.name = 'CleanupLockLostError';
+  }
+}
+
+export interface CleanupLeftover {
+  field: CleanupField;
+  value: string;
+  /** Active records holding it. */
+  count: number;
+  /** Deleted records holding it. */
+  deletedCount: number;
+  resolution: LeftoverResolution;
+}
+
+export interface CleanupResult {
+  /** The stored org-list item, or the starting list (no item stored yet). */
+  listSource: 'stored' | 'starting';
+  contactsScanned: number;
+  unitsScanned: number;
+  /** phone/email pointer rows in the contacts table - skipped. */
+  pointerRows: number;
+  /** Records with at least one automatic change (dry run: would change). */
+  recordsPlanned: number;
+  /** Records written (apply only). */
+  recordsWritten: number;
+  /** Writes whose condition failed - the record changed after the run read it; nothing written. Re-run. */
+  skippedOnCondition: number;
+  /** Records the run could not PLAN (a malformed value); stepped over, nothing written. */
+  failed: number;
+  /** Dry run: the changes it would make. Apply: the changes it made. */
+  changes: CleanupChanges;
+  /**
+   * Contacts holding a non-empty housingAuthority or agency but lacking `type`
+   * or `status` - the byTypeStatus keys. Expected 0: this base-table Scan sees
+   * (and plans) them, but the rewrite job, the usage counts and "Not on the
+   * list" read contacts through that index and never do. Counted only.
+   */
+  contactsMissingTypeOrStatus: number;
+  /** Values the plan leaves for the Settings page: by field, most held first. */
+  leftovers: CleanupLeftover[];
+}
+
+export interface CleanupDeps {
+  orgList: Pick<OrgListRepo, 'peek'>;
+  lock: Pick<OrgRewriteService, 'acquireForCleanup' | 'heartbeat' | 'finish'>;
+  contacts: Pick<ContactsRepo, 'rewriteOrgFields'>;
+  units: Pick<UnitsRepo, 'rewriteAcceptedAuthorities'>;
+  audit: Pick<AuditRepo, 'append'>;
+}
+
+export interface CleanupOpts {
+  doc: DynamoDBDocumentClient;
+  env: NodeJS.ProcessEnv;
+  /** Write. Absent/false = dry run (the default). */
+  apply?: boolean;
+  scanLimit?: number;
+  logger?: Logger;
+  /** Test seam: replace any of the deps buildCleanupDeps builds. */
+  deps?: Partial<CleanupDeps>;
+  /** Test seam: the clock (ms) that paces the heartbeat. */
+  now?: () => number;
+}
+
+/** The real deps - every one on the run's doc client and stage env. */
+export function buildCleanupDeps(doc: DynamoDBDocumentClient, env: NodeJS.ProcessEnv, logger: Logger): CleanupDeps {
+  const orgListRepo = createOrgListRepo({ doc, env, logger });
+  const contactsRepo = createContactsRepo({ doc, env, logger });
+  const unitsRepo = createUnitsRepo({ doc, env, logger });
+  const auditRepo = createAuditRepo({ doc, env, logger });
+  return {
+    orgList: orgListRepo,
+    // The plan 3.4b factory, with EVERY repo it could reach built on the
+    // stage's { doc, env } - a default-constructed one would resolve the ambient
+    // TABLE_PREFIX. The three lock methods touch only the org-list item, and
+    // the cleanup never queues a job: a stray enqueue fails loudly.
+    lock: createOrgRewriteService({
+      orgListRepo,
+      orgRecords: createOrgRecordsService({ contactsRepo, unitsRepo, auditRepo, logger }),
+      enqueue: async () => {
+        throw new Error(`${SCRIPT_NAME} never enqueues a job`);
+      },
+      logger,
+    }),
+    contacts: contactsRepo,
+    units: unitsRepo,
+    audit: auditRepo,
+  };
+}
+
+const NO_CHANGES: CleanupChanges = {
+  housingAuthorityRewritten: 0,
+  movedToAgency: 0,
+  agencyConflicts: 0,
+  agencyRewritten: 0,
+  unitMembersRewritten: 0,
+  unitAgencyMembersDropped: 0,
+  unitAgencyMembersKept: 0,
+  unitDuplicatesRemoved: 0,
+  jurisdictionBackfilled: 0,
+};
+
+function emptyResult(): CleanupResult {
+  return {
+    listSource: 'starting',
+    contactsScanned: 0,
+    unitsScanned: 0,
+    pointerRows: 0,
+    recordsPlanned: 0,
+    recordsWritten: 0,
+    skippedOnCondition: 0,
+    failed: 0,
+    changes: { ...NO_CHANGES },
+    contactsMissingTypeOrStatus: 0,
+    leftovers: [],
+  };
+}
+
+/** The counters as one flat record: log fields, and the lock's `counts`. */
+function flatCounts(result: CleanupResult): Record<string, number> {
+  return {
+    contactsScanned: result.contactsScanned,
+    unitsScanned: result.unitsScanned,
+    pointerRows: result.pointerRows,
+    recordsPlanned: result.recordsPlanned,
+    recordsWritten: result.recordsWritten,
+    skippedOnCondition: result.skippedOnCondition,
+    failed: result.failed,
+    ...result.changes,
+  };
+}
+
+/** A byTypeStatus key as DynamoDB indexes it: present, and a non-empty string. */
+const isIndexKey = (v: unknown): boolean => typeof v === 'string' && v !== '';
+
+function addChanges(into: CleanupChanges, add: Partial<CleanupChanges>): void {
+  for (const key of Object.keys(add) as Array<keyof CleanupChanges>) into[key] += add[key] ?? 0;
+}
+
+const FIELD_ORDER: readonly CleanupField[] = ['housingAuthority', 'agency', 'accepted_authorities'];
+
+function tallyLeftovers(tally: Map<string, CleanupLeftover>, plan: RecordPlan<unknown>, deleted: boolean): void {
+  for (const l of plan.leftovers) {
+    const key = JSON.stringify([l.field, l.value]);
+    const row = tally.get(key) ?? { field: l.field, value: l.value, count: 0, deletedCount: 0, resolution: l.resolution };
+    if (deleted) row.deletedCount += 1;
+    else row.count += 1;
+    tally.set(key, row);
+  }
+}
+
+function compareLeftovers(a: CleanupLeftover, b: CleanupLeftover): number {
+  const byField = FIELD_ORDER.indexOf(a.field) - FIELD_ORDER.indexOf(b.field);
+  if (byField !== 0) return byField;
+  const byTotal = b.count + b.deletedCount - (a.count + a.deletedCount);
+  if (byTotal !== 0) return byTotal;
+  return a.value < b.value ? -1 : a.value > b.value ? 1 : 0;
+}
+
+/** Every item of one BASE table (deleted rows included), page by page. */
+async function* scanAll(
+  doc: DynamoDBDocumentClient,
+  table: string,
+  limit: number | undefined,
+): AsyncGenerator<Record<string, unknown>> {
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const page = await doc.send(
+      new ScanCommand({
+        TableName: table,
+        ConsistentRead: true,
+        ...(limit !== undefined && { Limit: limit }),
+        ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
+      }),
+    );
+    for (const item of (page.Items ?? []) as Record<string, unknown>[]) yield item;
+    exclusiveStartKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (exclusiveStartKey !== undefined);
+}
+
+export async function cleanOrgNames(opts: CleanupOpts): Promise<CleanupResult> {
+  const log = opts.logger ?? defaultLogger;
+  const deps: CleanupDeps = { ...buildCleanupDeps(opts.doc, opts.env, log), ...opts.deps };
+  const apply = opts.apply === true;
+  const result = emptyResult();
+
+  // APPLY: the lock FIRST, so a refusal reads and writes nothing (spec D11).
+  let lock: OrgRewriteState | undefined;
+  if (apply) {
+    try {
+      lock = await deps.lock.acquireForCleanup(SCRIPT_NAME);
+    } catch (err) {
+      if (err instanceof OrgHttpError && err.body.error === 'org_rewrite_running') {
+        const held = err.body['lastRewrite'] as Partial<OrgRewriteState> | undefined;
+        throw new CleanupRefusedError(
+          `${SCRIPT_NAME}: REFUSED - another organization-name rewrite is running ` +
+            `(action ${String(held?.action)}, started ${String(held?.startedAt)}, last heartbeat ${String(held?.heartbeatAt)}). ` +
+            'Wait for it to finish (Settings > Housing authorities & agencies shows it); a rewrite whose ' +
+            'process was killed stops blocking 15 minutes after its last heartbeat. Nothing was read or written.',
+        );
+      }
+      log.error({ err }, `${SCRIPT_NAME} - could not take the rewrite lock; nothing was read or written`);
+      throw err;
+    }
+    log.info({ jobId: lock.jobId }, `${SCRIPT_NAME} - took the organization-list rewrite lock (action cleanup)`);
+  }
+
+  try {
+    await run(opts, deps, result, log, lock);
+  } catch (err) {
+    log.error(
+      { ...flatCounts(result), apply },
+      `${SCRIPT_NAME} - PARTIAL result: the run ABORTED and these counters cover only what completed before the failure. Every write is conditional, so re-running after the fix is safe.`,
+    );
+    // A lost lock is another rewrite's now: never finish it (spec D11).
+    if (lock !== undefined && !(err instanceof CleanupLockLostError)) {
+      await releaseAfterAbort(deps, lock.jobId, result, err, log);
+    }
+    throw err;
+  }
+
+  if (lock !== undefined) {
+    const failed = result.failed > 0;
+    try {
+      await deps.lock.finish(
+        lock.jobId,
+        failed
+          ? { status: 'failed', counts: flatCounts(result), error: `${result.failed} record(s) could not be planned` }
+          : { status: 'done', counts: flatCounts(result) },
+      );
+    } catch (err) {
+      // The run itself COMPLETED; only the release failed. Say so here - the
+      // CLI names the error itself, and there is no PARTIAL report to point at.
+      log.error(
+        { err, jobId: lock.jobId, ...flatCounts(result) },
+        `${SCRIPT_NAME} - the run COMPLETED (these counters are what it wrote) but the rewrite lock could not be released; it stops blocking other rewrites 15 minutes after its last heartbeat`,
+      );
+      throw err;
+    }
+    log.info({ jobId: lock.jobId, status: failed ? 'failed' : 'done' }, `${SCRIPT_NAME} - released the rewrite lock`);
+  }
+  return result;
+}
+
+/** The abort path's release: never masks the run's own error. */
+async function releaseAfterAbort(
+  deps: CleanupDeps,
+  jobId: string,
+  result: CleanupResult,
+  err: unknown,
+  log: Logger,
+): Promise<void> {
+  try {
+    await deps.lock.finish(jobId, {
+      status: 'failed',
+      counts: flatCounts(result),
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+    });
+    log.info({ jobId }, `${SCRIPT_NAME} - released the rewrite lock as failed`);
+  } catch (releaseErr) {
+    log.error(
+      { err: releaseErr, jobId },
+      `${SCRIPT_NAME} - could NOT release the rewrite lock; it stops blocking other rewrites 15 minutes after its last heartbeat`,
+    );
+  }
+}
+
+async function run(
+  opts: CleanupOpts,
+  deps: CleanupDeps,
+  result: CleanupResult,
+  log: Logger,
+  lock: OrgRewriteState | undefined,
+): Promise<void> {
+  const { doc, env } = opts;
+  const now = opts.now ?? Date.now;
+
+  // The list, read WITHOUT creating it. An apply created it (create-only) when
+  // it took the lock; a dry run before the deploy finds none and resolves
+  // against the starting list in memory.
+  const stored = await deps.orgList.peek();
+  const entries: readonly OrgEntry[] =
+    stored?.entries ?? buildStartingEntries(new Date().toISOString(), () => randomUUID());
+  result.listSource = stored !== null ? 'stored' : 'starting';
+  log.info(
+    { listSource: result.listSource, entries: entries.length, apply: lock !== undefined },
+    `${SCRIPT_NAME} - resolving against the ${stored !== null ? 'stored organization list' : 'starting list (no org-list item is stored yet)'}`,
+  );
+
+  let lastBeat = now();
+  /**
+   * The lock's heartbeat on ELAPSED time: checked before EVERY row, written or
+   * not, so a long stretch with nothing to write still keeps the lock alive.
+   * A heartbeat that cannot be written (a busy list) is logged and the run
+   * goes on - the lock goes stale only after 15 minutes without one. One that
+   * answers false means another rewrite holds the lock now: stop at once.
+   */
+  const beat = async (): Promise<void> => {
+    if (lock === undefined || now() - lastBeat < HEARTBEAT_EVERY_MS) return;
+    lastBeat = now();
+    let ours: boolean;
+    try {
+      ours = await deps.lock.heartbeat(lock.jobId);
+    } catch (err) {
+      log.warn({ err, jobId: lock.jobId }, `${SCRIPT_NAME} - heartbeat failed; continuing`);
+      return;
+    }
+    if (!ours) throw new CleanupLockLostError(lock.jobId);
+  };
+  const tally = new Map<string, CleanupLeftover>();
+
+  for await (const row of scanAll(doc, tableName('contacts', env), opts.scanLimit)) {
+    await beat();
+    const contactId = String(row['contactId'] ?? '');
+    if (contactId.startsWith(PHONE_REF_PREFIX) || contactId.startsWith(EMAIL_REF_PREFIX)) {
+      result.pointerRows += 1;
+      continue;
+    }
+    result.contactsScanned += 1;
+    // Invisible to every index-based reader (contactsMissingTypeOrStatus):
+    // counted only - it is planned and written like any other contact.
+    if ((isText(row['housingAuthority']) || isText(row['agency'])) && !(isIndexKey(row['type']) && isIndexKey(row['status']))) {
+      result.contactsMissingTypeOrStatus += 1;
+    }
+    let plan: RecordPlan<ContactWrite>;
+    try {
+      plan = planContact(row, entries);
+    } catch (err) {
+      result.failed += 1;
+      log.error({ err, contactId }, `${SCRIPT_NAME} - contact could not be PLANNED; stepped over and counted failed`);
+      continue;
+    }
+    // The repos' own "deleted" rule (a NON-EMPTY deleted_at string), so these
+    // counts match what Settings > "Not on the list" shows; it reads only that attribute.
+    tallyLeftovers(tally, plan, isContactDeleted(row as Pick<ContactItem, 'deleted_at'>));
+    if (plan.write === undefined) {
+      // Nothing to write - but a conflict is still a decision the run counts.
+      addChanges(result.changes, plan.changes);
+      continue;
+    }
+    result.recordsPlanned += 1;
+    const fields = plan.audits.map((a) => a.field);
+    if (lock === undefined) {
+      addChanges(result.changes, plan.changes);
+      log.info({ contactId, fields }, `${SCRIPT_NAME} - DRY RUN: would clean`);
+      continue;
+    }
+    const outcome = await deps.contacts.rewriteOrgFields(contactId, plan.write.expect, plan.write.next);
+    if (outcome === 'skipped') {
+      result.skippedOnCondition += 1;
+      log.info({ contactId }, `${SCRIPT_NAME} - the contact changed under the run; skipped, nothing written`);
+    } else {
+      result.recordsWritten += 1;
+      addChanges(result.changes, plan.changes);
+      for (const a of plan.audits) {
+        await deps.audit.append(`contacts#${contactId}`, 'org_name_cleanup', { field: a.field, from: a.from, to: a.to });
+      }
+      log.info({ contactId, fields }, `${SCRIPT_NAME} - contact cleaned`);
+    }
+  }
+
+  for await (const row of scanAll(doc, tableName('units', env), opts.scanLimit)) {
+    await beat();
+    const unitId = String(row['unitId'] ?? '');
+    result.unitsScanned += 1;
+    let plan: RecordPlan<UnitWrite>;
+    try {
+      plan = planUnit(row, entries);
+    } catch (err) {
+      result.failed += 1;
+      log.error({ err, unitId }, `${SCRIPT_NAME} - unit could not be PLANNED; stepped over and counted failed`);
+      continue;
+    }
+    tallyLeftovers(tally, plan, isUnitDeleted(row as Pick<UnitItem, 'deleted_at'>));
+    if (plan.write === undefined) {
+      // Nothing to write - but an agency kept as a list's only member is still counted.
+      addChanges(result.changes, plan.changes);
+      continue;
+    }
+    result.recordsPlanned += 1;
+    if (lock === undefined) {
+      addChanges(result.changes, plan.changes);
+      log.info({ unitId }, `${SCRIPT_NAME} - DRY RUN: would clean`);
+      continue;
+    }
+    const outcome = await deps.units.rewriteAcceptedAuthorities(unitId, plan.write.expected, plan.write.next);
+    if (outcome === 'skipped') {
+      result.skippedOnCondition += 1;
+      log.info({ unitId }, `${SCRIPT_NAME} - the unit changed under the run; skipped, nothing written`);
+    } else {
+      result.recordsWritten += 1;
+      addChanges(result.changes, plan.changes);
+      for (const a of plan.audits) {
+        await deps.audit.append(`units#${unitId}`, 'org_name_cleanup', { field: a.field, from: a.from, to: a.to });
+      }
+      log.info({ unitId }, `${SCRIPT_NAME} - unit cleaned`);
+    }
+  }
+
+  result.leftovers = [...tally.values()].sort(compareLeftovers);
+}
+
+/** The end-of-run report and the exit code it earns (failed > 0 exits 1). */
+export function reportCleanupRun(result: CleanupResult, apply: boolean, log: Logger = defaultLogger): 0 | 1 {
+  const suffix = apply ? '' : ' (DRY RUN - nothing written)';
+  const fields = {
+    ...flatCounts(result),
+    listSource: result.listSource,
+    leftoverValues: result.leftovers.length,
+    contactsMissingTypeOrStatus: result.contactsMissingTypeOrStatus,
+    apply,
+  };
+  if (result.failed > 0) {
+    log.warn(
+      fields,
+      `${SCRIPT_NAME} - COMPLETED WITH FAILURES${suffix}: ${result.failed} record(s) could not be planned and were stepped over, nothing written for them (see the ERROR lines naming them). Investigate, then re-run (idempotent).`,
+    );
+    return 1;
+  }
+  log.info(fields, `${SCRIPT_NAME} - done${suffix}`);
+  return 0;
 }

@@ -2,10 +2,29 @@
 // automatic mappings only. The PURE planners first: what each record would
 // become, its audit payloads, its change counts and what it leaves for the
 // Settings page's "Not on the list" section.
-import { describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { GetCommand, PutCommand, ScanCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { afterEach, describe, expect, it } from 'vitest';
+import { tableName } from '../src/lib/config.js';
+import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
+import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
+import { createLogger } from '../src/lib/logger.js';
 import type { OrgEntry } from '../src/lib/orgNames.js';
 import { buildStartingEntries } from '../src/lib/orgStartingList.js';
-import { planContact, planUnit } from '../scripts/clean-org-names.js';
+import { getTableSpec } from '../src/lib/tables.js';
+import { createOrgListRepo, type OrgListItem, type OrgRewriteState } from '../src/repos/orgListRepo.js';
+import {
+  buildCleanupDeps,
+  cleanOrgNames,
+  CleanupLockLostError,
+  CleanupRefusedError,
+  planContact,
+  planUnit,
+  reportCleanupRun,
+  type CleanupDeps,
+  type CleanupLeftover,
+} from '../scripts/clean-org-names.js';
+import { createLogCapture } from './helpers/logCapture.js';
 
 const LIST_AT = '2026-10-06T00:00:00.000Z';
 let ids = 0;
@@ -159,4 +178,441 @@ describe('planUnit', () => {
   it('refuses to plan a list holding a non-string member', () => {
     expect(() => planUnit({ accepted_authorities: ['Atlanta Housing Authority', 42] }, ENTRIES)).toThrow();
   });
+});
+
+// ---------------------------------------------------------------------------
+// The run, against DynamoDB Local (self-skipping like the template's tests)
+// ---------------------------------------------------------------------------
+
+const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
+async function endpointReachable(): Promise<boolean> {
+  try {
+    await fetch(endpoint, { signal: AbortSignal.timeout(1_500) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+const reachable = await endpointReachable();
+if (!reachable) console.warn(`[cleanOrgNames] SKIPPED - no DynamoDB Local at ${endpoint}.`);
+
+const NOW = '2026-10-06T12:00:00.000Z';
+const HUMAN_AT = '2026-09-01T09:00:00.000Z';
+const READ_COMMANDS = new Set(['ScanCommand', 'QueryCommand', 'GetCommand']);
+const silent = createLogger({ level: 'silent' });
+
+/** A client that records every command's class name, then sends it for real. */
+function recordingClient(inner: DynamoDBDocumentClient): { doc: DynamoDBDocumentClient; sent: string[] } {
+  const sent: string[] = [];
+  const doc = {
+    send: async (command: { constructor: { name: string } }) => {
+      sent.push(command.constructor.name);
+      return await inner.send(command as never);
+    },
+    destroy: () => {},
+  } as unknown as DynamoDBDocumentClient;
+  return { doc, sent };
+}
+
+/** What the seeded world's run plans (dry run) and writes (apply). */
+const CHANGES = {
+  housingAuthorityRewritten: 1,
+  movedToAgency: 2,
+  agencyConflicts: 1,
+  agencyRewritten: 1,
+  unitMembersRewritten: 2,
+  unitAgencyMembersDropped: 1,
+  unitAgencyMembersKept: 1,
+  unitDuplicatesRemoved: 1,
+  jurisdictionBackfilled: 2,
+};
+
+/** ...and what it leaves for the Settings page (by field, most held first, then by value). */
+const LEFTOVERS: CleanupLeftover[] = [
+  { field: 'housingAuthority', value: 'AHA', count: 1, deletedCount: 1, resolution: 'ambiguous' },
+  { field: 'housingAuthority', value: 'HUD VASH', count: 1, deletedCount: 0, resolution: 'other_kind' },
+  { field: 'housingAuthority', value: 'Smyrna Housing Office', count: 1, deletedCount: 0, resolution: 'unknown' },
+  { field: 'accepted_authorities', value: 'MHA', count: 1, deletedCount: 0, resolution: 'ambiguous' },
+  { field: 'accepted_authorities', value: 'Smyrna Housing Office', count: 0, deletedCount: 1, resolution: 'unknown' },
+  { field: 'accepted_authorities', value: 'Step Up', count: 1, deletedCount: 0, resolution: 'other_kind' },
+];
+
+/** One org_name_cleanup event per changed field: [entityKey, payload] - strings only, '' = absent or removed. */
+const EVENTS: Array<[string, Record<string, unknown>]> = [
+  ['contacts#c-spelling', { field: 'housingAuthority', from: 'Atlanta (AHA)', to: 'Atlanta Housing Authority' }],
+  ['contacts#c-agency-as-ha', { field: 'housingAuthority', from: 'Hope Atlanta', to: '' }],
+  ['contacts#c-agency-as-ha', { field: 'agency', from: '', to: 'HOPE Atlanta' }],
+  ['contacts#c-agency-empty', { field: 'housingAuthority', from: 'Claratel', to: '' }],
+  ['contacts#c-agency-empty', { field: 'agency', from: '', to: 'Claratel Behavioral Health' }],
+  ['contacts#c-agency-spelling', { field: 'agency', from: 'Caring Works', to: 'CaringWorks' }],
+  [
+    'units#u-import-owned',
+    {
+      field: 'accepted_authorities',
+      from: 'Atlanta Housing, Hope Atlanta, Atlanta Housing Authority',
+      to: 'Atlanta Housing Authority',
+    },
+  ],
+  [
+    'units#u-human-owned',
+    { field: 'accepted_authorities', from: 'DCA, MHA', to: 'Georgia Department of Community Affairs, MHA' },
+  ],
+  ['units#u-legacy', { field: 'accepted_authorities', from: '', to: 'East Point Housing Authority' }],
+  ['units#u-legacy-deleted', { field: 'accepted_authorities', from: '', to: 'Smyrna Housing Office' }],
+];
+
+const eventKey = ([entityKey, payload]: [unknown, unknown]): string =>
+  `${String(entityKey)}|${String((payload as { field?: unknown }).field)}`;
+const sortEvents = (list: Array<[unknown, unknown]>): Array<[unknown, unknown]> =>
+  [...list].sort((a, b) => (eventKey(a) < eventKey(b) ? -1 : eventKey(a) > eventKey(b) ? 1 : 0));
+
+describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
+  const client = createDynamoClient({ endpoint });
+  const doc = createDocumentClient({ endpoint });
+  const created: string[] = [];
+
+  afterEach(async () => {
+    for (const table of created.splice(0)) await deleteTableIfExists(client, table);
+  }, 120_000);
+
+  /** A fresh table set under its own prefix, one record per case. */
+  async function seedWorld(opts: { orgList?: OrgListItem } = {}) {
+    const env = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
+    for (const base of ['contacts', 'units', 'settings', 'audit_events'] as const) {
+      await ensureTable(client, getTableSpec(base), tableName(base, env));
+      created.push(tableName(base, env));
+    }
+    const put = (base: 'contacts' | 'units', item: Record<string, unknown>) =>
+      doc.send(new PutCommand({ TableName: tableName(base, env), Item: item }));
+    const contact = (contactId: string, fields: Record<string, unknown>) =>
+      put('contacts', { contactId, type: 'tenant', status: 'searching', created_at: NOW, ...fields });
+    const unit = (unitId: string, fields: Record<string, unknown>) =>
+      put('units', { unitId, landlordId: 'c-landlord', status: 'available', created_at: NOW, ...fields });
+
+    await contact('c-spelling', { housingAuthority: 'Atlanta (AHA)' });
+    await contact('c-agency-as-ha', { type: 'partner', status: 'active', housingAuthority: 'Hope Atlanta' });
+    await contact('c-agency-empty', { housingAuthority: 'Claratel', agency: '' });
+    await contact('c-conflict', { housingAuthority: 'HUD VASH', agency: 'Step Up' });
+    await contact('c-ambiguous', { housingAuthority: 'AHA' });
+    await contact('c-ambiguous-deleted', { housingAuthority: 'AHA', deleted_at: NOW });
+    await contact('c-unknown', { type: 'landlord', status: 'active', housingAuthority: 'Smyrna Housing Office' });
+    await contact('c-on-list', { housingAuthority: 'Atlanta Housing Authority', agency: 'Mercy Care' });
+    await contact('c-agency-spelling', { agency: 'Caring Works' });
+    await put('contacts', { contactId: 'phoneref#+15550000009', phone: '+15550000009', phone_ref: true, phone_ref_owner: 'c-on-list' });
+    await unit('u-import-owned', { accepted_authorities: ['Atlanta Housing', 'Hope Atlanta', 'Atlanta Housing Authority'] });
+    await unit('u-human-owned', { accepted_authorities: ['DCA', 'MHA'], updated_at: HUMAN_AT });
+    await unit('u-only-agency', { accepted_authorities: ['Step Up'] });
+    await unit('u-legacy', { jurisdiction: 'East Point' });
+    await unit('u-legacy-deleted', { status: 'off_market', jurisdiction: 'Smyrna Housing Office', deleted_at: NOW });
+    if (opts.orgList !== undefined) await createOrgListRepo({ doc, env }).putForSeed(opts.orgList);
+
+    const keyName = { contacts: 'contactId', units: 'unitId' } as const;
+    const get = async (base: 'contacts' | 'units', id: string): Promise<Record<string, unknown> | undefined> =>
+      (await doc.send(new GetCommand({ TableName: tableName(base, env), Key: { [keyName[base]]: id } }))).Item;
+    const scanTable = async (base: string): Promise<string[]> =>
+      ((await doc.send(new ScanCommand({ TableName: tableName(base, env) }))).Items ?? [])
+        .map((item) => JSON.stringify(item))
+        .sort();
+    const cleanupEvents = async (): Promise<Record<string, unknown>[]> =>
+      ((await doc.send(new ScanCommand({ TableName: tableName('audit_events', env) }))).Items ?? []).filter(
+        (e) => e['event_type'] === 'org_name_cleanup',
+      );
+    return { env, get, scanTable, cleanupEvents, orgList: createOrgListRepo({ doc, env }) };
+  }
+
+  it('dry run: plans the automatic mappings, lists what it leaves, and writes NOTHING - not even the org-list item', async () => {
+    const w = await seedWorld();
+    const before = {
+      contacts: await w.scanTable('contacts'),
+      units: await w.scanTable('units'),
+      settings: await w.scanTable('settings'),
+      audit: await w.scanTable('audit_events'),
+    };
+    const recorder = recordingClient(doc);
+    const result = await cleanOrgNames({ doc: recorder.doc, env: w.env, logger: silent });
+    expect(result).toEqual({
+      listSource: 'starting', // no item stored yet: the pre-deploy dry run
+      contactsScanned: 9,
+      unitsScanned: 5,
+      pointerRows: 1,
+      recordsPlanned: 8,
+      recordsWritten: 0,
+      skippedOnCondition: 0,
+      failed: 0,
+      changes: CHANGES,
+      contactsMissingTypeOrStatus: 0,
+      leftovers: LEFTOVERS,
+    });
+    // The Scan paging loop: two rows a page reaches the same plan.
+    expect(await cleanOrgNames({ doc: recorder.doc, env: w.env, logger: silent, scanLimit: 2 })).toEqual(result);
+    // WRITES NOTHING, three ways: only reads were sent, not one item changed,
+    // and the org-list item was never created.
+    expect(recorder.sent).toContain('ScanCommand');
+    expect(recorder.sent.filter((name) => !READ_COMMANDS.has(name))).toEqual([]);
+    expect(await w.scanTable('contacts')).toEqual(before.contacts);
+    expect(await w.scanTable('units')).toEqual(before.units);
+    expect(await w.scanTable('settings')).toEqual(before.settings);
+    expect(await w.scanTable('audit_events')).toEqual(before.audit);
+    expect(await w.orgList.peek()).toBeNull();
+    expect(reportCleanupRun(result, false, silent)).toBe(0);
+    expect(reportCleanupRun({ ...result, failed: 1 }, false, silent)).toBe(1);
+  }, 120_000);
+
+  it('counts contacts holding an organization value but lacking type or status (invisible to Settings; expected 0) - and still plans them', async () => {
+    const w = await seedWorld();
+    // Legacy rows with no byTypeStatus key: this base-table Scan sees them, but
+    // the rewrite job, the usage counts and "Not on the list" never do.
+    const put = (item: Record<string, unknown>) =>
+      doc.send(new PutCommand({ TableName: tableName('contacts', w.env), Item: item }));
+    await put({ contactId: 'c-no-type', status: 'active', housingAuthority: 'Atlanta (AHA)' });
+    await put({ contactId: 'c-no-status', type: 'tenant', agency: 'Mercy Care' });
+    // Holding nothing (a blank agency): not counted.
+    await put({ contactId: 'c-no-type-blank', status: 'active', agency: '' });
+    const result = await cleanOrgNames({ doc, env: w.env, logger: silent });
+    // Counted only - the plan is unchanged: c-no-type's spelling is still mapped.
+    expect(result).toMatchObject({ contactsScanned: 12, contactsMissingTypeOrStatus: 2, recordsPlanned: 9 });
+  }, 120_000);
+
+  it('apply: takes the lock, writes each change conditionally with one audit event per field, never stamps updated_at, releases the lock done', async () => {
+    const w = await seedWorld();
+    const result = await cleanOrgNames({ doc, env: w.env, apply: true, logger: silent });
+    expect(result).toEqual({
+      listSource: 'stored', // taking the lock created the item (create-only)
+      contactsScanned: 9,
+      unitsScanned: 5,
+      pointerRows: 1,
+      recordsPlanned: 8,
+      recordsWritten: 8,
+      skippedOnCondition: 0,
+      failed: 0,
+      changes: CHANGES,
+      contactsMissingTypeOrStatus: 0,
+      leftovers: LEFTOVERS,
+    });
+
+    // Contacts: spellings rewritten; agencies moved out of the housing authority.
+    expect(await w.get('contacts', 'c-spelling')).toMatchObject({ housingAuthority: 'Atlanta Housing Authority' });
+    const moved = await w.get('contacts', 'c-agency-as-ha');
+    expect(moved?.['housingAuthority']).toBeUndefined();
+    expect(moved?.['agency']).toBe('HOPE Atlanta');
+    const fromEmpty = await w.get('contacts', 'c-agency-empty');
+    expect(fromEmpty?.['housingAuthority']).toBeUndefined();
+    expect(fromEmpty?.['agency']).toBe('Claratel Behavioral Health');
+    expect(await w.get('contacts', 'c-conflict')).toMatchObject({ housingAuthority: 'HUD VASH', agency: 'Step Up' });
+    expect(await w.get('contacts', 'c-ambiguous')).toMatchObject({ housingAuthority: 'AHA' });
+    expect(await w.get('contacts', 'c-agency-spelling')).toMatchObject({ agency: 'CaringWorks' });
+
+    // Units: rewritten, agency dropped, de-duplicated, backfilled - updated_at NEVER stamped.
+    const imported = await w.get('units', 'u-import-owned');
+    expect(imported?.['accepted_authorities']).toEqual(['Atlanta Housing Authority']);
+    expect(imported?.['updated_at']).toBeUndefined();
+    expect(await w.get('units', 'u-human-owned')).toMatchObject({
+      accepted_authorities: ['Georgia Department of Community Affairs', 'MHA'],
+      updated_at: HUMAN_AT,
+    });
+    expect(await w.get('units', 'u-only-agency')).toMatchObject({ accepted_authorities: ['Step Up'] });
+    const legacy = await w.get('units', 'u-legacy');
+    expect(legacy).toMatchObject({ accepted_authorities: ['East Point Housing Authority'], jurisdiction: 'East Point' });
+    expect(legacy?.['updated_at']).toBeUndefined();
+    expect(await w.get('units', 'u-legacy-deleted')).toMatchObject({ accepted_authorities: ['Smyrna Housing Office'] });
+
+    // Audit: one org_name_cleanup event per changed field - exactly { field, from, to }, no actor.
+    const events = await w.cleanupEvents();
+    expect(sortEvents(events.map((e) => [e['entityKey'], e['payload']]))).toEqual(sortEvents(EVENTS));
+    for (const e of events) {
+      expect(e['actorId']).toBeUndefined();
+      expect(Object.keys(e['payload'] as object).sort()).toEqual(['field', 'from', 'to']);
+    }
+
+    // The lock: taken as `cleanup`, finished `done` with the counts.
+    const lock = (await w.orgList.peek())?.lastRewrite;
+    expect(lock).toMatchObject({ action: 'cleanup', status: 'done', startedBy: 'clean-org-names' });
+    expect(lock?.counts).toMatchObject({ recordsWritten: 8, movedToAgency: 2 });
+
+    // Re-running is safe: nothing left to change, no new event.
+    const again = await cleanOrgNames({ doc, env: w.env, apply: true, logger: silent });
+    expect(again).toMatchObject({ recordsPlanned: 0, recordsWritten: 0, leftovers: LEFTOVERS });
+    expect(await w.cleanupEvents()).toHaveLength(EVENTS.length);
+  }, 120_000);
+
+  it('apply refuses while another rewrite holds the lock (fresh heartbeat): nothing is read or written', async () => {
+    const at = new Date().toISOString();
+    const running: OrgRewriteState = {
+      jobId: 'job-rename',
+      action: 'rename',
+      fromTexts: ['Old Name'],
+      fields: ['housingAuthority', 'accepted_authorities'],
+      toName: 'New Name',
+      status: 'running',
+      heartbeatAt: at,
+      startedAt: at,
+      startedBy: 'user-0001',
+    };
+    const w = await seedWorld({ orgList: { settingId: 'org-list', version: 1, entries: ENTRIES, lastRewrite: running } });
+    const before = await w.scanTable('contacts');
+    await expect(cleanOrgNames({ doc, env: w.env, apply: true, logger: silent })).rejects.toBeInstanceOf(
+      CleanupRefusedError,
+    );
+    expect(await w.scanTable('contacts')).toEqual(before);
+    expect((await w.orgList.peek())?.lastRewrite).toEqual(running);
+  }, 120_000);
+
+  it('apply takes over a STALE lock (no heartbeat for over 15 minutes - a hard-killed run)', async () => {
+    const stale = new Date(Date.now() - 16 * 60_000).toISOString();
+    const killed: OrgRewriteState = {
+      jobId: 'job-killed',
+      action: 'cleanup',
+      fromTexts: [],
+      fields: ['housingAuthority', 'agency', 'accepted_authorities'],
+      status: 'running',
+      heartbeatAt: stale,
+      startedAt: stale,
+      startedBy: 'clean-org-names',
+    };
+    const w = await seedWorld({ orgList: { settingId: 'org-list', version: 1, entries: ENTRIES, lastRewrite: killed } });
+    const result = await cleanOrgNames({ doc, env: w.env, apply: true, logger: silent });
+    expect(result.recordsWritten).toBe(8);
+    const lock = (await w.orgList.peek())?.lastRewrite;
+    expect(lock).toMatchObject({ action: 'cleanup', status: 'done' });
+    expect(lock?.jobId).not.toBe('job-killed');
+  }, 120_000);
+
+  it('an abort logs a PARTIAL report, releases the lock as failed, and rethrows; a re-run finishes the job', async () => {
+    const w = await seedWorld();
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const boom = new Error('units table unavailable');
+    await expect(
+      cleanOrgNames({
+        doc,
+        env: w.env,
+        apply: true,
+        logger: log,
+        deps: {
+          units: {
+            rewriteAcceptedAuthorities: async () => {
+              throw boom;
+            },
+          },
+        },
+      }),
+    ).rejects.toBe(boom);
+    expect(capture.atLevel(50).some((l) => String(l['msg']).includes('PARTIAL result'))).toBe(true);
+    const lock = (await w.orgList.peek())?.lastRewrite;
+    expect(lock).toMatchObject({ action: 'cleanup', status: 'failed' });
+    expect(lock?.error).toContain('units table unavailable');
+    // Contacts are walked first, so theirs landed before the abort...
+    expect(await w.get('contacts', 'c-spelling')).toMatchObject({ housingAuthority: 'Atlanta Housing Authority' });
+    // ...and a re-run (the failed lock does not block) writes the four units.
+    const rerun = await cleanOrgNames({ doc, env: w.env, apply: true, logger: silent });
+    expect(rerun).toMatchObject({ recordsWritten: 4, failed: 0 });
+  }, 120_000);
+
+  it('a record it cannot plan is stepped over and counted failed: COMPLETED WITH FAILURES, lock finished failed', async () => {
+    const w = await seedWorld();
+    await doc.send(
+      new PutCommand({
+        TableName: tableName('units', w.env),
+        Item: { unitId: 'u-broken', landlordId: 'c-landlord', status: 'available', accepted_authorities: ['Atlanta Housing Authority', 42] },
+      }),
+    );
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const result = await cleanOrgNames({ doc, env: w.env, apply: true, logger: log });
+    expect(result).toMatchObject({ failed: 1, recordsWritten: 8 });
+    expect(capture.atLevel(50).some((l) => l['unitId'] === 'u-broken')).toBe(true);
+    expect(reportCleanupRun(result, true, silent)).toBe(1);
+    expect((await w.orgList.peek())?.lastRewrite).toMatchObject({ action: 'cleanup', status: 'failed' });
+  }, 120_000);
+
+  it('a record that changes between the read and the write is skipped (conditional write) - never overwritten', async () => {
+    const w = await seedWorld();
+    const real = buildCleanupDeps(doc, w.env, silent);
+    const racing: CleanupDeps['contacts'] = {
+      async rewriteOrgFields(contactId, expected, next) {
+        if (contactId === 'c-spelling') {
+          // Staff picked another authority after the Scan read the row.
+          await doc.send(
+            new UpdateCommand({
+              TableName: tableName('contacts', w.env),
+              Key: { contactId },
+              UpdateExpression: 'SET housingAuthority = :v',
+              ExpressionAttributeValues: { ':v': 'Decatur Housing Authority' },
+            }),
+          );
+        }
+        return real.contacts.rewriteOrgFields(contactId, expected, next);
+      },
+    };
+    const result = await cleanOrgNames({ doc, env: w.env, apply: true, logger: silent, deps: { contacts: racing } });
+    expect(result).toMatchObject({ skippedOnCondition: 1, recordsWritten: 7 });
+    expect(await w.get('contacts', 'c-spelling')).toMatchObject({ housingAuthority: 'Decatur Housing Authority' });
+    expect((await w.cleanupEvents()).some((e) => e['entityKey'] === 'contacts#c-spelling')).toBe(false);
+  }, 120_000);
+
+  it('heartbeats the lock on elapsed time, before records it does not write too, under its own job id', async () => {
+    const w = await seedWorld();
+    const real = buildCleanupDeps(doc, w.env, silent);
+    const beats: string[] = [];
+    let clock = 0;
+    const result = await cleanOrgNames({
+      doc,
+      env: w.env,
+      apply: true,
+      logger: silent,
+      now: () => (clock += 30_000),
+      deps: {
+        lock: {
+          acquireForCleanup: (actor) => real.lock.acquireForCleanup(actor),
+          heartbeat: async (jobId) => {
+            beats.push(jobId);
+            return real.lock.heartbeat(jobId);
+          },
+          finish: (jobId, outcome) => real.lock.finish(jobId, outcome),
+        },
+      },
+    });
+    expect(result.recordsWritten).toBe(8);
+    // Every row read is 30 s later on this clock, so EVERY row beats first -
+    // the eight it writes and the seven it does not (the pointer row included):
+    // nine contacts, one pointer row, five units.
+    expect(beats).toHaveLength(9 + 1 + 5);
+    expect(new Set(beats)).toEqual(new Set([(await w.orgList.peek())?.lastRewrite?.jobId]));
+  }, 120_000);
+
+  it('stops writing at once when a heartbeat finds the lock gone, and never finishes a lock that is not its own', async () => {
+    const w = await seedWorld();
+    const real = buildCleanupDeps(doc, w.env, silent);
+    const before = { contacts: await w.scanTable('contacts'), units: await w.scanTable('units') };
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const finished: string[] = [];
+    let clock = 0;
+    await expect(
+      cleanOrgNames({
+        doc,
+        env: w.env,
+        apply: true,
+        logger: log,
+        now: () => (clock += 30_000),
+        deps: {
+          lock: {
+            acquireForCleanup: (actor) => real.lock.acquireForCleanup(actor),
+            // Another rewrite took the lock over: the heartbeat says it is not ours.
+            heartbeat: async () => false,
+            finish: async (jobId, outcome) => {
+              finished.push(jobId);
+              await real.lock.finish(jobId, outcome);
+            },
+          },
+        },
+      }),
+    ).rejects.toBeInstanceOf(CleanupLockLostError);
+    // The first row's heartbeat stopped it: nothing written at all.
+    expect(await w.scanTable('contacts')).toEqual(before.contacts);
+    expect(await w.scanTable('units')).toEqual(before.units);
+    expect(capture.atLevel(50).some((l) => String(l['msg']).includes('PARTIAL result'))).toBe(true);
+    expect(finished).toEqual([]);
+    expect((await w.orgList.peek())?.lastRewrite).toMatchObject({ action: 'cleanup', status: 'running' });
+  }, 120_000);
 });

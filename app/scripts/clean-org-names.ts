@@ -68,6 +68,7 @@ import { createUnitsRepo, isDeleted as isUnitDeleted, type UnitItem, type UnitsR
 import { OrgHttpError } from '../src/services/orgNames.js';
 import { createOrgRecordsService } from '../src/services/orgRecords.js';
 import { createOrgRewriteService, type OrgRewriteService } from '../src/services/orgRewrite.js';
+import { parseStageArgs, resolveStageClient, type StageClient } from './lib/stageClient.js';
 
 // ---------------------------------------------------------------------------
 // Planning (pure): what one record becomes
@@ -738,4 +739,109 @@ export function reportCleanupRun(result: CleanupResult, apply: boolean, log: Log
   }
   log.info(fields, `${SCRIPT_NAME} - done${suffix}`);
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// The printed summary and the CLI
+// ---------------------------------------------------------------------------
+
+const CHANGE_LABELS: Readonly<Record<keyof CleanupChanges, string>> = {
+  housingAuthorityRewritten: 'housing authority spelling -> its list name',
+  movedToAgency: 'agency named as housing authority -> moved to Agency',
+  agencyConflicts: 'agency named as housing authority, Agency already set (left)',
+  agencyRewritten: 'agency spelling -> its list name',
+  unitMembersRewritten: 'property authority spelling -> its list name',
+  unitAgencyMembersDropped: 'agency dropped from a property list',
+  unitAgencyMembersKept: 'agency kept on a property (its only entry)',
+  unitDuplicatesRemoved: 'duplicate dropped from a property list',
+  jurisdictionBackfilled: 'property list filled from its legacy jurisdiction',
+};
+
+const LEFTOVER_WHY: Readonly<Record<LeftoverResolution, string>> = {
+  ambiguous: 'a spelling more than one listed name shares',
+  other_kind: 'an agency, not a housing authority',
+  compound: 'names more than one organization',
+  unknown: 'not on the list',
+};
+
+/**
+ * What the CLI prints: the change counts, then every value left for the
+ * Settings page with its record counts and why. Organization values only -
+ * never a person's name.
+ */
+export function formatSummary(result: CleanupResult, apply: boolean): string[] {
+  const lines = [apply ? 'Automatic changes made:' : 'Automatic changes this run WOULD make (dry run):'];
+  for (const key of Object.keys(CHANGE_LABELS) as Array<keyof CleanupChanges>) {
+    lines.push(`  ${String(result.changes[key]).padStart(6)}  ${CHANGE_LABELS[key]}`);
+  }
+  if (result.leftovers.length === 0) {
+    lines.push('Nothing is left for Settings > Housing authorities & agencies: every value is a list name.');
+  } else {
+    lines.push(`Left for Settings > Housing authorities & agencies > Not on the list (${result.leftovers.length} value(s)):`);
+    for (const l of result.leftovers) {
+      const deleted = l.deletedCount > 0 ? ` (+${l.deletedCount} deleted)` : '';
+      const why =
+        l.resolution === 'other_kind' && l.field === 'agency' ? 'a housing authority, not an agency' : LEFTOVER_WHY[l.resolution];
+      lines.push(`  ${l.field}  ${JSON.stringify(l.value)}  x${l.count}${deleted}  - ${why}`);
+    }
+  }
+  // Beside the leftovers: contacts the Settings page cannot see at all (no
+  // byTypeStatus key) - their values above never reach "Not on the list".
+  lines.push(
+    `Contacts missing type or status but holding a housing authority or agency: ${result.contactsMissingTypeOrStatus} (expected 0 - Settings cannot see or rewrite them)`,
+  );
+  return lines;
+}
+
+/** The argument names the CLI accepts beside --env and --lane. */
+export const CLEANUP_ARGS = { values: [] as string[], flags: ['--apply'] };
+
+const invokedDirectly =
+  import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith('clean-org-names.ts');
+if (invokedDirectly) {
+  const parsed = parseStageArgs(process.argv.slice(2), CLEANUP_ARGS);
+  if ('usage' in parsed) {
+    console.error(
+      `Usage: npx tsx app/scripts/${SCRIPT_NAME}.ts --env local|dev|prod [--lane <L>] [--apply]\n` +
+        '  DRY RUN by default; --apply writes (and takes the organization-list rewrite lock). Unknown or\n' +
+        '  repeated arguments are refused. --lane selects a hermetic e2e lane (local only).',
+    );
+    process.exit(2);
+  }
+  const apply = parsed.flags.has('--apply');
+  void (async () => {
+    // STEP 1 - resolve the target on its own: a refusal here (account guard,
+    // STS, an ambient AWS_ENDPOINT_URL*) happens BEFORE any table is read.
+    let stage: StageClient;
+    try {
+      stage = await resolveStageClient(parsed.target, {}, parsed.lane !== undefined ? { lane: parsed.lane } : {});
+    } catch (err) {
+      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED before the run started (no table was read or written)`);
+      process.exitCode = 1;
+      return;
+    }
+    // STEP 2 - the run.
+    try {
+      defaultLogger.info(
+        { target: parsed.target, endpoint: stage.describe, prefix: stage.prefix, apply },
+        `${SCRIPT_NAME} - starting`,
+      );
+      const result = await cleanOrgNames({ doc: stage.doc, env: stage.env, apply });
+      for (const line of formatSummary(result, apply)) console.log(line);
+      process.exitCode = reportCleanupRun(result, apply);
+    } catch (err) {
+      if (err instanceof CleanupRefusedError) {
+        console.error(err.message);
+        process.exitCode = 1;
+        return;
+      }
+      // Name the REAL failure: the run logged a PARTIAL report itself only when
+      // it aborted mid-run (a lost lock included); a lock that could not be
+      // taken or released has none to point at.
+      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    } finally {
+      stage.doc.destroy();
+    }
+  })();
 }

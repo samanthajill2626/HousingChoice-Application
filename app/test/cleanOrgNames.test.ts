@@ -3,6 +3,8 @@
 // become, its audit payloads, its change counts and what it leaves for the
 // Settings page's "Not on the list" section.
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { GetCommand, PutCommand, ScanCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { afterEach, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
@@ -15,15 +17,19 @@ import { getTableSpec } from '../src/lib/tables.js';
 import { createOrgListRepo, type OrgListItem, type OrgRewriteState } from '../src/repos/orgListRepo.js';
 import {
   buildCleanupDeps,
+  CLEANUP_ARGS,
   cleanOrgNames,
   CleanupLockLostError,
   CleanupRefusedError,
+  formatSummary,
   planContact,
   planUnit,
   reportCleanupRun,
   type CleanupDeps,
   type CleanupLeftover,
+  type CleanupResult,
 } from '../scripts/clean-org-names.js';
+import { parseStageArgs } from '../scripts/lib/stageClient.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const LIST_AT = '2026-10-06T00:00:00.000Z';
@@ -615,4 +621,86 @@ describe.skipIf(!reachable)('clean-org-names against DynamoDB Local', () => {
     expect(finished).toEqual([]);
     expect((await w.orgList.peek())?.lastRewrite).toMatchObject({ action: 'cleanup', status: 'running' });
   }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// The CLI and what it prints
+// ---------------------------------------------------------------------------
+
+const SUMMARY_RESULT: CleanupResult = {
+  listSource: 'starting',
+  contactsScanned: 9,
+  unitsScanned: 5,
+  pointerRows: 1,
+  recordsPlanned: 8,
+  recordsWritten: 0,
+  skippedOnCondition: 0,
+  failed: 0,
+  changes: CHANGES,
+  contactsMissingTypeOrStatus: 0,
+  leftovers: [
+    { field: 'housingAuthority', value: 'AHA', count: 1, deletedCount: 1, resolution: 'ambiguous' },
+    { field: 'agency', value: 'Atlanta Housing Authority', count: 1, deletedCount: 0, resolution: 'other_kind' },
+    { field: 'accepted_authorities', value: 'Step Up', count: 1, deletedCount: 0, resolution: 'other_kind' },
+  ],
+};
+
+describe('formatSummary - what the CLI prints (organization values only, never a person)', () => {
+  it('prints every change count, then each value left with its counts and why', () => {
+    const lines = formatSummary(SUMMARY_RESULT, false);
+    expect(lines[0]).toBe('Automatic changes this run WOULD make (dry run):');
+    expect(lines).toContain('       2  agency named as housing authority -> moved to Agency');
+    expect(lines).toContain('Left for Settings > Housing authorities & agencies > Not on the list (3 value(s)):');
+    expect(lines).toContain('  housingAuthority  "AHA"  x1 (+1 deleted)  - a spelling more than one listed name shares');
+    expect(lines).toContain('  agency  "Atlanta Housing Authority"  x1  - a housing authority, not an agency');
+    expect(lines).toContain('  accepted_authorities  "Step Up"  x1  - an agency, not a housing authority');
+    expect(formatSummary(SUMMARY_RESULT, true)[0]).toBe('Automatic changes made:');
+    expect(formatSummary({ ...SUMMARY_RESULT, leftovers: [] }, true)).toContain(
+      'Nothing is left for Settings > Housing authorities & agencies: every value is a list name.',
+    );
+    // Beside the leftovers (worklist RG-5), with or without any: the contacts
+    // the Settings page cannot see. Expected 0.
+    expect(lines.at(-1)).toBe(
+      'Contacts missing type or status but holding a housing authority or agency: 0 (expected 0 - Settings cannot see or rewrite them)',
+    );
+    expect(formatSummary({ ...SUMMARY_RESULT, leftovers: [], contactsMissingTypeOrStatus: 2 }, true).at(-1)).toBe(
+      'Contacts missing type or status but holding a housing authority or agency: 2 (expected 0 - Settings cannot see or rewrite them)',
+    );
+  });
+});
+
+describe('the CLI', () => {
+  it('dry run by default; --apply writes; --lane is local only; anything else is a usage error', () => {
+    const dry = parseStageArgs(['--env', 'prod'], CLEANUP_ARGS);
+    if ('usage' in dry) throw new Error('expected a parse');
+    expect(dry.target).toBe('prod');
+    expect(dry.flags.has('--apply')).toBe(false);
+    const lane = parseStageArgs(['--env', 'local', '--lane', '4', '--apply'], CLEANUP_ARGS);
+    if ('usage' in lane) throw new Error('expected a parse');
+    expect(lane).toMatchObject({ target: 'local', lane: 4 });
+    expect(lane.flags.has('--apply')).toBe(true);
+    for (const argv of [
+      ['--env', 'dev', '--dry-run'],
+      ['--env', 'dev', '--lane', '2'],
+      ['--env', 'dev', '--apply', '--apply'],
+      ['--apply'],
+      ['--env', 'dev', '--merge'],
+    ]) {
+      expect(parseStageArgs(argv, CLEANUP_ARGS)).toEqual({ usage: true });
+    }
+  });
+
+  it('resolves the stage before any read, exits 2 on usage, and maps the lock refusal', () => {
+    const source = readFileSync(join(process.cwd(), 'scripts', 'clean-org-names.ts'), 'utf8');
+    expect(source).toContain('parseStageArgs(process.argv.slice(2), CLEANUP_ARGS)');
+    expect(source).toContain('process.exit(2)');
+    expect(source.indexOf('resolveStageClient(')).toBeGreaterThan(-1);
+    expect(source.indexOf('resolveStageClient(')).toBeLessThan(source.indexOf('await cleanOrgNames('));
+    expect(source).toContain('err instanceof CleanupRefusedError');
+    expect(source).toContain('stage.doc.destroy()');
+    // The CLI names the failure itself; it never claims a PARTIAL report that
+    // only a mid-run abort logs.
+    expect(source).toContain('FAILED: ${err instanceof Error ? err.message : String(err)}');
+    expect(source).not.toContain('see the PARTIAL report above');
+  });
 });

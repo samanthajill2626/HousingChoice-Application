@@ -24,6 +24,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { useContacts } from '../contacts/useContacts.js';
 import {
   ApiError,
+  checkOrgText,
   deleteContact,
   markInboxRead,
   markInboxUnread,
@@ -42,6 +43,7 @@ import {
   type AiRunCompletedEvent,
   type ConversationUpdatedEvent,
   type LandlordStatus,
+  type OrgCheckResult,
   type TenantStatus,
 } from '../../api/index.js';
 import {
@@ -64,6 +66,8 @@ import { PhoneManager } from './PhoneManager.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
+import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
+import { orgErrorCopy } from '../orgs/orgCopy.js';
 import { CallMenu } from './CallMenu.js';
 import { useMe } from '../../app/useMe.js';
 import { VOICE_TAB_PATH } from '../settings/settingsTabs.js';
@@ -199,6 +203,13 @@ export function ContactDetail(): React.JSX.Element {
   const [suggestionError, setSuggestionError] = useState<{ target: string; message: string } | null>(
     null,
   );
+  // Spec 2026-10-06 D8: "Is this really new?" for a housing authority
+  // suggestion whose text is not exactly a list name - the heard text and the
+  // /check answer the click already fetched.
+  const [haReview, setHaReview] = useState<{ text: string; check: OrgCheckResult } | null>(null);
+  // Bumped on a contact change: a check answer for contact A that lands on
+  // contact B's page is dropped (the pressGenerationRef idiom).
+  const reviewGenerationRef = useRef(0);
   // The header's interactive status pill (tenant/landlord lifecycle change).
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -264,6 +275,10 @@ export function ContactDetail(): React.JSX.Element {
     setStatusBusy(false);
     setSuggestionBusy(null);
     setSuggestionError(null);
+    // Spec D8: contact A's "Is this really new?" - and a check still in flight
+    // for it - must not open on contact B.
+    setHaReview(null);
+    reviewGenerationRef.current += 1;
     // Same reason: a manual run pressed on contact A must not appear to be
     // running on contact B. Resetting the state is not enough on its own - A's
     // POST is still in flight and would write B's indicator when it lands - so
@@ -696,12 +711,13 @@ export function ContactDetail(): React.JSX.Element {
   // written + `<field>_source` provenance) plus the remaining suggestions, so we
   // apply the contact in place (setContact) - the badge appears and the chip drops.
   // On failure the chip stays put, carrying the reason.
-  const onAcceptSuggestion = (target: string): void => {
-    if (suggestionBusy !== null) return;
+  // `value` (housingAuthority only, spec 2026-10-06 D8) is the list name
+  // chosen in "Is this really new?"; without it the accept is the plain
+  // three-argument call it always was.
+  const acceptSuggestionValue = (target: string, value?: string): void => {
     setSuggestionBusy(target);
     setSuggestionError(null);
-    void suggestions
-      .accept(target)
+    void (value === undefined ? suggestions.accept(target) : suggestions.accept(target, value))
       .then((res) => {
         setContact(res.contact);
         // Accepting status writes a milestone with no SSE - pull the timeline.
@@ -709,6 +725,68 @@ export function ContactDetail(): React.JSX.Element {
       })
       .catch((err: unknown) => failSuggestion(target, err))
       .finally(() => setSuggestionBusy(null));
+  };
+
+  // Spec D8: a housing authority suggestion is accepted as-is only when its
+  // text is exactly a list name; otherwise "Is this really new?" decides. The
+  // check runs at click time, so the page reads no list on load.
+  const reviewHousingAuthority = (): void => {
+    const pending = suggestionFor(suggestions.suggestions, 'housingAuthority');
+    if (pending === undefined) {
+      failSuggestion('housingAuthority', new Error(SUGGESTION_NOT_PENDING));
+      return;
+    }
+    const text = pending.suggestedValue;
+    const generation = reviewGenerationRef.current;
+    setSuggestionBusy('housingAuthority');
+    setSuggestionError(null);
+    void checkOrgText({ kind: 'housing_authority', text }).then(
+      (check) => {
+        if (generation !== reviewGenerationRef.current) return;
+        if (check.match !== undefined && check.match.name === text) {
+          acceptSuggestionValue('housingAuthority');
+          return;
+        }
+        setSuggestionBusy(null);
+        setHaReview({ text, check });
+      },
+      (err: unknown) => {
+        if (generation !== reviewGenerationRef.current) return;
+        setSuggestionBusy(null);
+        failSuggestion('housingAuthority', err);
+      },
+    );
+  };
+  // The text's own resolution, one of its candidates, or the name just added
+  // from it: an ACCEPT with that value.
+  const acceptHousingAuthorityAs = (name: string): void => {
+    setHaReview(null);
+    acceptSuggestionValue('housingAuthority', name);
+  };
+  // A DIFFERENT (close) name: a normal contact edit - the server supersedes
+  // the suggestion (superseded_by_human_edit), so the list is re-read.
+  const editHousingAuthorityTo = (name: string): void => {
+    setHaReview(null);
+    setSuggestionBusy('housingAuthority');
+    setSuggestionError(null);
+    void updateContact(contact.contactId, { housingAuthority: name })
+      .then((updated) => {
+        setContact(updated);
+        suggestions.refetch();
+      })
+      .catch((err: unknown) => {
+        setSuggestionError({ target: 'housingAuthority', message: orgErrorCopy(err) });
+      })
+      .finally(() => setSuggestionBusy(null));
+  };
+  // Declared after the helpers it calls (never a use before declaration).
+  const onAcceptSuggestion = (target: string): void => {
+    if (suggestionBusy !== null) return;
+    if (target === 'housingAuthority') {
+      reviewHousingAuthority();
+      return;
+    }
+    acceptSuggestionValue(target);
   };
   const onDismissSuggestion = (target: string): void => {
     if (suggestionBusy !== null) return;
@@ -1103,6 +1181,25 @@ export function ContactDetail(): React.JSX.Element {
             setEditing(false);
           }}
           candidates={editCandidates}
+        />
+      ) : null}
+
+      {/* Spec 2026-10-06 D8 - outside every form; its buttons are all typed. */}
+      {haReview !== null ? (
+        <NewOrgDialog
+          kind="housing_authority"
+          text={haReview.text}
+          mode="suggestion"
+          initialCheck={haReview.check}
+          onUse={(ref, via) =>
+            via === 'resolution' ? acceptHousingAuthorityAs(ref.name) : editHousingAuthorityTo(ref.name)
+          }
+          onDismissSuggestion={() => {
+            setHaReview(null);
+            onDismissSuggestion('housingAuthority');
+          }}
+          onAdded={(entry) => acceptHousingAuthorityAs(entry.name)}
+          onClose={() => setHaReview(null)}
         />
       ) : null}
 

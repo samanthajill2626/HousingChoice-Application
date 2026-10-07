@@ -5197,6 +5197,8 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       contactsRepo: world.contactsRepo,
       settingsRepo: world.settingsRepo,
       contactVocabularyRepo: world.vocabularyRepo,
+      // spec 2026-10-06 (plan 3.4b): the org list every org route and writer reads.
+      orgListRepo: world.orgListRepo,
       unitsRepo: world.unitsRepo,
       placementsRepo: world.placementsRepo,
       placementDeadlinesRepo: world.placementDeadlinesRepo,

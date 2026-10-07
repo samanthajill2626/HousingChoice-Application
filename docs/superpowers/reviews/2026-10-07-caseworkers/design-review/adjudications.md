@@ -71,3 +71,24 @@ Caseworker and a Make caseworker action on contact pages; the PATCH refuses
 | 10 PATCH vs route inputs; "already a caseworker" undefined | ACCEPT | One entry point; "a caseworker" defined once: partner + `isCaseworkerRole`. |
 | 11 units scan inside an interactive save | ACCEPT | Stated as accepted on the explicit action; folded into the section 12 cost item. |
 | 12 concessions; name the tour harm | ACCEPT | Section 12 item names it: a reopened tour has no reminder thread. |
+
+## Round 3 (2026-10-07) - revision 11 -> revision 12
+
+Reviewer A continued: `R3-reviewer-a.md`, 6 findings (2 MEDIUM, 4 LOW). It
+verified the PATCH's new 409 `caseworker_use_conversion` breaks no current
+writer (seeds, importer, AI accept path, app/dashboard/e2e tests), conceded
+round-2 ruling 2(c) and contested nothing.
+
+| Finding | Ruling | What changed in revision 12 |
+|---|---|---|
+| 1 dialog's counts and prefill have no read | ACCEPT | New read-only `GET /api/contacts/:contactId/caseworker-review/preview` from the same server code: refusals now, removed values, suggestion count, thread counts, the organization and its source. Advisory; `make` recomputes. |
+| 2 carried prefill hits D5 on send; clear has no wire form | ACCEPT | `organization` omitted = server decides (carry included); non-empty = staff pick, D5-checked; `''` = clear. The dialog sends it only when staff changed the picker. |
+| 3 page action must key on type | ACCEPT | Keyed on `contact.type` (tenant/landlord/partner), live contacts only; the landlord page's usual refusal is shown by the preview. |
+| 4 commit write stale against org edits | ACCEPT | Conditional also on the `housingAuthority`, `agency` and `organization` values read; 409 `contact_changed`. |
+| 5 repair text stale; second conversion; new-contact record | ACCEPT | Old-type phrase dropped; a later conversion replaces the record (the earlier survives in its audit); new-contact caseworkers have none (stated). |
+| 6 cross-section wording | ACCEPT | Section 11 names the RUNBOOK repair entry; D18 counts new-contact Caseworker saves; D16's `accepted` path is the conversion. |
+
+Decision check: finding 1 ADDS a read surface (a decision change by the
+rule), finding 2 fixes a route contract. Both fill gaps in the round-2
+design rather than move it. Round 4 (the cap) is a narrow check of these
+two additions only.

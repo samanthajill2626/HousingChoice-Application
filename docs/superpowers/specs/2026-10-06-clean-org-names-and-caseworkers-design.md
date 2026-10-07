@@ -28,6 +28,8 @@ one caseworker conversion behind every path into the role, the generic type
 change keeping today's thread rule, threads matched by participant, all
 pending suggestions superseded, off-list employer text carried into
 `organization`, the AI's own caseworker line instead of the bare words.
+Revision 12 (2026-10-07) folds in round 3 (terminal: two contract gaps -
+the dialog's preview read and the organization wire - and wording).
 Revision 11 (2026-10-07) folds in round 2: the conversion becomes one
 action with one dialog and one route (the contacts PATCH refuses to make a
 caseworker), the removed values are kept in the commit write
@@ -625,7 +627,8 @@ shared helper:
 - the extraction kind canonicalizer (`canonicalSuggestedContactKind`) treats
   `type: partner` with role EXACTLY `Caseworker` as `partner` - byte-exact,
   as the Property Manager preset is - so accepting an AI "partner" suggestion
-  through the Caseworker choice or the conversion records `accepted`; any other partner role
+  through the conversion records `accepted` (an AI suggestion exists only on
+  an existing contact, which reaches the role only by the conversion); any other partner role
   stays unsupported;
 - the Caseworkers tab (D18) uses `isCaseworkerRole(role)`: the role
   normalizes (D4) to "caseworker" or "case worker";
@@ -638,8 +641,11 @@ Possible caseworkers list (D19), from the Unknown triage card's "Mark as
 Caseworker" (after Partner - the card has four actions today: Mark as
 Tenant, Landlord, Property Manager, Partner; the one-click way to accept the
 AI's `partner` suggestion as a caseworker, planner default; Cameron
-confirms), and from a "Make caseworker" action on the tenant, landlord and
-partner pages of a contact that is not yet a caseworker. "A caseworker"
+confirms), and from a "Make caseworker" action on the contact page of a
+live contact whose `contact.type` is tenant, landlord or partner and that is
+not yet a caseworker (keyed on the type, not the page: the tenant page also
+renders team_member contacts; a deleted contact gets no action; on a
+landlord page the preview usually shows the landlord-of-record refusal). "A caseworker"
 means, everywhere in this design, a `partner` whose role satisfies
 `isCaseworkerRole`. The edit form offers the Caseworker choice only on a new
 contact or one that is already a caseworker; the contacts PATCH refuses
@@ -691,8 +697,8 @@ locked navigation (planner default; Cameron confirms): partner contacts
 whose role satisfies `isCaseworkerRole`, with organization filter chips
 built the way the Tenants page builds its housing authority chips. The route
 joins the page-profiler registry (or is excluded with a filed issue - the
-plan decides). The tab starts empty until a conversion writes a role: no
-path has ever given a partner one.
+plan decides). The tab starts empty until a conversion, or a new contact
+saved as Caseworker, writes a role: no path has ever given a partner one.
 
 D19. **Possible caseworkers, and the caseworker conversion.** The
 Caseworkers tab shows a "Possible caseworkers" list, computed on the server
@@ -736,16 +742,24 @@ tenant, landlord or partner that is not a caseworker converts; `make` on a
 caseworker re-runs steps 2-4 only and answers 200 (the repair path below);
 `dismiss` on a caseworker answers 400.
 
-**The dialog**, the same on every entry point, says what the conversion
-removes (the housing authority and agency values, the pending AI
-suggestions), what stays (past tours, closed placements, listing sends, the
-other tenant facts as data) and how many of the contact's threads it will
-re-type and how many it leaves because another contact shares the phone or
-address; it carries an Organization picker (D6's both-lists picker),
-prefilled with the contact's stored organization, else the derived one
-(below), which staff may change or clear. The route takes the dialog's
-`organization` (D5-checked, either kind); without one in the request it
-keeps a stored organization, else derives one.
+**The dialog**, the same on every entry point, opens on a read-only
+preview, `GET /api/contacts/:contactId/caseworker-review/preview`
+(revision 12), computed by the same server code the conversion runs: any
+refusals that apply now (so staff see them before pressing), what the
+conversion removes (the housing authority and agency values, the count of
+pending AI suggestions), how many of the contact's threads it will re-type
+and how many it leaves because another contact shares the phone or address,
+and the organization it would write with its source (stored, a list match,
+carried not-on-the-list text, or none). The dialog also says what stays
+(past tours, closed placements, listing sends, the other tenant facts as
+data). The preview is advisory: `make` recomputes everything at write time.
+The dialog carries an Organization picker (D6's both-lists picker) showing
+the preview's organization - carried text shown as a not-on-the-list value -
+which staff may change or clear. The wire: `make` WITHOUT `organization`
+lets the server decide (stored, else derived, carry included); a non-empty
+`organization` is a staff pick, D5-checked against either kind; `''`
+clears it (absent). The dialog sends `organization` only when staff changed
+the picker, so an untouched carried value never meets D5.
 
 Refusals, each 409 with its own code and a staff sentence naming what to
 resolve first, checked whatever the contact's stored type:
@@ -764,9 +778,11 @@ filed (section 12); so is the race between the reads and the write.
 
 Writes, in order:
 1. The contact, in one write through the classification fence
-   (`contactsRepo.update`, conditional on the `classification_revision` the
-   route read, so a concurrent classification write makes the route answer
-   409 `contact_changed` and staff retry) - the commit point: type `partner`,
+   (`contactsRepo.update`, conditional on the `classification_revision` AND
+   the `housingAuthority`, `agency` and `organization` values the route
+   read, so a concurrent classification or organization edit makes the route
+   answer 409 `contact_changed` and staff retry - a value staff just set is
+   never removed unrecorded) - the commit point: type `partner`,
    role `Caseworker`, status `active` (the partner default), `type_source:
    manual` (from any type, unknown included: the conversion removes fields
    the importer would otherwise restore, D21); `organization` (above);
@@ -794,7 +810,11 @@ Writes, in order:
    events, and the role-vocabulary write.
 A failure after step 1 leaves the contact converted with its removed values
 safe in `caseworker_conversion`; `make` on that caseworker re-runs steps 2-4
-(the thread rule then reads the old type from `caseworker_conversion`). The
+(D21's thread rule needs no old type: it re-types every own thread not yet
+`partner_1to1`). A later conversion of the same contact (re-typed away and
+converted again) replaces `caseworker_conversion`; the earlier one survives
+in that conversion's audit. A contact created as a Caseworker has no record
+(nothing was removed). The
 repair is by the route (no page button: a converted contact is no longer on
 the Possible list); the failure is logged at error level and RUNBOOK names
 the repair.
@@ -1004,9 +1024,14 @@ Branch B (revisions 9 and 10):
   `caseworker_open_placement`, `caseworker_open_tour`,
   `caseworker_landlord_of_record` or `caseworker_on_roster`, each with a
   staff sentence; on a contact already a caseworker it re-runs steps 2-4
-  and answers 200; `dismiss` writes `caseworker_review:
+  and answers 200; `organization` omitted = the server decides, a non-empty
+  value = a staff pick, `''` = clear; `dismiss` writes `caseworker_review:
   'dismissed'` (400 on a caseworker). 404 for a deleted or missing contact,
   400 for a team_member.
+- `GET /api/contacts/:contactId/caseworker-review/preview` - the dialog's
+  read (D19): refusals, removed values, pending-suggestion count, thread
+  counts (re-type, left alone), the organization and its source. No write;
+  404/400 as `make`.
 - `POST /api/organizations/check` gains optional `kinds` (both lists) for
   the organization picker; `kind` alone keeps today's single-list behavior.
 - `POST /api/organizations/not-on-list/resolve` gains `kind` for
@@ -1231,7 +1256,10 @@ the public intake routes still mint `tenant_1to1` for any phone (tracker
   run before the deploy, apply right after it (section 8). The `org-list` item
   creates itself on first read. RUNBOOK gets a section for the cleanup and
   for the Settings page's rewrite actions ("Run again").
-- Branch B: deploy only. No script.
+- Branch B: deploy only. No script. RUNBOOK gains the caseworker
+  conversion's repair (D19: `make` again on a caseworker whose follow-on
+  writes failed) and how to put a mistaken conversion back from
+  `caseworker_conversion`.
 - Cameron runs everything against dev and prod; agents only on lanes.
 
 ---

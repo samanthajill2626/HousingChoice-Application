@@ -70,6 +70,50 @@ Counts: 3 fixes (F1-F3), 1 filed-issue update (F12), 2 grouped issues filed
 Verdict: MERGE-READY at 2dca0cf3 (+ the records commit after it). Not merged -
 Cameron merges.
 
+## 2026-10-07 midday - Cameron's follow-ups after the verdict
+
+- **Second main sync, on Cameron's ask.** He merged `feat/tour-list` into
+  main (25cfdedd) and asked for it in this branch: merge commit 98971183.
+  Conflicts only where the plan's Task 17.1 predicted: the profiler
+  exclusion list in `e2e/performance/routes.test.ts` (both entries kept) and
+  `e2e/support/selectors.md` (this branch's five picker/Settings rows plus
+  main's Tours page row; main's pre-list property-form row is superseded by
+  this branch's multi-picker row). Typecheck 0; routes pins 26/26, seed pins
+  43/43, dashboard api + mocks 254/254; then the gates again on 98971183.
+- **Bare "Clayton" -> Jonesboro Housing Authority** (handback open question
+  3, closed). Web-verified: Georgia DCA administers vouchers in 149 of 159
+  counties and names Clayton among the ten it does not; the Jonesboro Housing
+  Authority is the only voucher administrator in Clayton County (its waiting
+  list is "Jonesboro and Clayton County"). Cameron reversed the launch-gate
+  default (bare "Clayton" = the Rabun County city, DCA's): that town is not
+  in this caseload, and the old importer's "Clayton County" data already
+  maps to Jonesboro, so old and new data now agree. Change: the spelling
+  moves from DCA to Jonesboro in `app/src/lib/orgStartingList.ts`, the
+  conformance row flips, spec Appendix A / section 13 and RUNBOOK step 2
+  updated.
+- **Gates on the merged tip 98971183:** typecheck 0; `npm test` 0 (app 429
+  files, dashboard 227, e2e 22, fake-twilio 34 + 13; 0 `[dynamoAdmin]`);
+  smoke 0 (1612 specifiers / 281 files); eslint 25 errors = 25 pre-existing
+  at the new merge base, 0 NEW; e2e 328 passed / 1 failed in 23.7 min -
+  `tours.spec.ts:407` failed at its sign-in `page.goto` with
+  `net::ERR_NO_BUFFER_SPACE` (Windows refused the socket). Environmental:
+  the machine's fifth full e2e run of the day beside four full `npm test`
+  runs and the tour-list mission's gates; `Get-NetTCPConnection` showed 3,476
+  TIME_WAIT sockets minutes after the run against a 16,384-port dynamic pool.
+  The morning's blank-page sign-in is the same class (a connection that
+  never opened paints nothing). Recorded in `e2e-blank-first-paint-at-sign-in`;
+  artifacts kept in `.superpowers/sdd/final4-g4-failure/`. Resolution: let
+  the sockets drain, then one full e2e run on the FINAL tip (with the Clayton
+  change), which replaces the planned skip below.
+- **No e2e re-run for the Clayton change alone (Cameron's call, planner's
+  recommendation) - superseded by the line above: the final tip gets a
+  full run because the merged tip's run had the environmental failure.** No e2e spec mentions "Clayton" in any form; the list
+  reaches the test world only through the seed, and no spec reads that
+  spelling; the dashboard holds no copy of the list. The e2e gate on
+  98971183 - one data token away - stands as the e2e evidence; typecheck,
+  `npm test` (the conformance test is the proof), smoke and lint run again
+  on the final tip.
+
 Cameron's open questions from the handback, with the planner's recommendation:
 1. RG-1 (a suggestion accept claimed before the deploy and replayed after it
    writes its old text unchecked): keep as an accepted gap - the replay window

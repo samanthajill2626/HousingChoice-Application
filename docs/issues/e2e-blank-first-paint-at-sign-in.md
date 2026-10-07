@@ -41,7 +41,24 @@ The screenshot (viewed: blank white) and the video were cleared by the isolated 
 before they could be copied - Playwright empties `e2e/.artifacts/test-results` at each
 start, so on a recurrence copy that folder BEFORE any re-run.
 
-**Suggested fix.** Nothing to fix from one sighting. On a recurrence: keep the video (it
+**Second sighting, same day (2026-10-07 ~11:40, merged tip 98971183, lane 13).** Test 324 of
+329, `tours.spec.ts:407` (the page-arc scenario), failed at its sign-in `page.goto` with
+`net::ERR_NO_BUFFER_SPACE` - Windows refused to open the socket (WSAENOBUFS: the system lacked
+buffer space or an ephemeral port). The run was the machine's FIFTH full e2e run of the day
+beside four full `npm test` runs and a parallel mission's gates, each opening tens of
+thousands of short-lived connections. That names the likely cause of the morning's blank
+page too: a navigation whose connection never opened paints nothing, and Playwright reports
+it as "element not found" when the page stays empty. Treat both as one environmental class
+- socket/port exhaustion late in a long run on a heavily used machine - not as a spec or
+branch regression. Artifacts kept this time: `.superpowers/sdd/final4-g4-failure/`.
+
+**Suggested fix.** Nothing to fix in the suite from two sightings; the cure is
+operational: let the sockets drain (Windows holds TIME_WAIT for 120 s) before another full
+run, and avoid stacking several full gate runs back to back on one machine. Check
+`Get-NetTCPConnection | Group-Object State` before a re-run; a TIME_WAIT count in the
+thousands or a dynamic-port pool near exhaustion (`netsh int ipv4 show dynamicport tcp`)
+means wait. If it recurs with a healthy socket table, read the Vite child's stdout with
+`E2E_CHILD_LOG_DIR` set (a content question). On a recurrence: keep the video (it
 shows whether the dev-login click navigated at all), read the Vite child's stdout with
 `E2E_CHILD_LOG_DIR` set (a content question, so the flag is appropriate - AGENTS.md), and
 check whether the blank context coincides with a Vite dependency re-optimization or a

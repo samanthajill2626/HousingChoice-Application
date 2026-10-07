@@ -21,8 +21,11 @@ against A's merged code by two readers
 statements, 47 valid or already done, 20 sharpened: the one-kind-per-field
 shape of A's Settings and rewrite code, exact-match role presets, the
 possible-caseworkers endpoint, the recipients wire row, the thread re-type
-rule; planner defaults marked "(planner default; Cameron confirms)" are open
-until Cameron rules. Revision 10 (2026-10-07) folds in the branch B design
+rule; planner defaults were ruled by Cameron on 2026-10-07 (all eight as
+recommended - Mark as Caseworker, one conversion action, the Caseworkers
+sub-link, open to every user, agency first, Staff notes on partners,
+neutral wording - except A2P coverage, which is unconfirmed: proceed, the
+question is Sam's) and are marked "(Cameron confirmed 2026-10-07)". Revision 10 (2026-10-07) folds in the branch B design
 review round 1 (`docs/superpowers/reviews/2026-10-07-caseworkers/design-review/adjudications.md`):
 one caseworker conversion behind every path into the role, the generic type
 change keeping today's thread rule, threads matched by participant, all
@@ -642,8 +645,8 @@ opens one confirm dialog and calls one route. It is reached from the
 Possible caseworkers list (D19), from the Unknown triage card's "Mark as
 Caseworker" (after Partner - the card has four actions today: Mark as
 Tenant, Landlord, Property Manager, Partner; the one-click way to accept the
-AI's `partner` suggestion as a caseworker, planner default; Cameron
-confirms), and from a "Make caseworker" action on the contact page of a
+AI's `partner` suggestion as a caseworker, Cameron confirmed 2026-10-07), and from a "Make caseworker"
+action on the contact page of a
 live contact whose `contact.type` is tenant, landlord or partner and that is
 not yet a caseworker (keyed on the type, not the page: the tenant page also
 renders team_member contacts; a deleted contact gets no action; on a
@@ -695,7 +698,7 @@ dialog. The dev-only `POST /__dev/org-fixture` accepts `organization`
 D18. **Caseworkers tab.** Contacts gains a Caseworkers tab at
 `/contacts/caseworkers` - a sub-link under Contacts beside Tenants,
 Landlords and Unknown, the one addition this design makes to the otherwise
-locked navigation (planner default; Cameron confirms): partner contacts
+locked navigation (Cameron confirmed 2026-10-07): partner contacts
 whose role satisfies `isCaseworkerRole`, with organization filter chips
 built the way the Tenants page builds its housing authority chips. The route
 joins the page-profiler registry (or is excluded with a filed issue - the
@@ -729,7 +732,7 @@ A partner with a non-caseworker role (for example "Case Manager" set through
 the API) is in neither the tab nor this list (no path writes a partner role
 today; accepted). Each row offers "Make caseworker" (the conversion's
 dialog, below) and "Not a caseworker", open to every signed-in user as the
-edit form's type change is (planner default; Cameron confirms). Dismissal is
+edit form's type change is (Cameron confirmed 2026-10-07). Dismissal is
 stored on the contact (`caseworker_review: 'dismissed'`) and hides the row
 for good.
 
@@ -832,7 +835,7 @@ the repair.
 
 The organization, when the request carries none and none is stored: the
 agency wins whenever the contact has one, because the employer is the
-helper organization (planner default; Cameron confirms). The agency text
+helper organization (Cameron confirmed 2026-10-07). The agency text
 resolves against BOTH lists (D4, `KINDS_FOR_FIELD.organization`) - a match
 gives that entry's name, otherwise the agency text is carried as written;
 only with no agency does the housing authority text get the same treatment
@@ -849,7 +852,7 @@ Past tours, closed placements and listing sends stay as history in the data;
 the partner page does not show tenant history. The partner page gains the
 Staff notes card, so a converted caseworker's notes stay visible (planner
 default - the open issue `staff-notes-on-landlord-partner-files` asked to
-check with Sam; Cameron confirms).
+check with Sam; Cameron confirmed 2026-10-07).
 
 D20. **Direct property shares to partners; no blasts.** A partner's page gets
 the "Properties sent" card and its Send action, as tenants have (the rows
@@ -883,7 +886,8 @@ no type on preview or results rows; the plan lists every unit and e2e pin
 that changes. A2P: the registered campaign describes listing texts to
 voucher holders; a share to a voucher holder's caseworker is treated as
 covered (the same listing content, about a home for that caseworker's
-client, behind every consent gate) - planner default; Cameron confirms.
+client, behind every consent gate). Cameron, 2026-10-07: coverage is NOT
+confirmed; proceed anyway - the campaign question is Sam's (section 12).
 
 D21. **Type changes keep threads and imports consistent.** Two thread rules
 (revision 10):
@@ -1302,6 +1306,9 @@ the public intake routes still mint `tenant_1to1` for any phone (tracker
   surfaces on Today as an unknown contact even when the contact is typed
   tenant or partner (Today keys on the thread type; the importer never
   re-types threads). Verify against the code and file (pre-existing).
+- (B) A2P: confirm the registered campaign covers property shares to a
+  voucher holder's caseworker (not confirmed; Cameron 2026-10-07: B ships
+  partner shares anyway; the question is Sam's).
 - (B) The possible-caseworkers read scans three contact partitions, and the
   conversion's roster refusal scans every unit inside an interactive action,
   both with no index (the `tours-tabs-load-every-contact-for-names` cost

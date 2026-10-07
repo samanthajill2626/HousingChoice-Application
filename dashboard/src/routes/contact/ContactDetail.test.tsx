@@ -43,6 +43,11 @@ const createTour = vi.fn();
 const getSuggestions = vi.fn();
 const acceptSuggestion = vi.fn();
 const dismissSuggestion = vi.fn();
+// The edit form's pickers and "Is this really new?" (spec 2026-10-06 D6, D8):
+// the list, the check and the add.
+const getOrgList = vi.fn();
+const checkOrgText = vi.fn();
+const addOrg = vi.fn();
 // Manual extraction trigger (Task 6): the press endpoint.
 const runExtraction = vi.fn();
 // The contact file's "Relay groups" card slice + the standalone create flow it
@@ -112,6 +117,9 @@ vi.mock('../../api/index.js', async () => {
     getSuggestions: (...a: unknown[]) => getSuggestions(...a),
     acceptSuggestion: (...a: unknown[]) => acceptSuggestion(...a),
     dismissSuggestion: (...a: unknown[]) => dismissSuggestion(...a),
+    getOrgList: (...a: unknown[]) => getOrgList(...a),
+    checkOrgText: (...a: unknown[]) => checkOrgText(...a),
+    addOrg: (...a: unknown[]) => addOrg(...a),
     runExtraction: (...a: unknown[]) => runExtraction(...a),
     getContactRelayGroups: (...a: unknown[]) => getContactRelayGroups(...a),
     previewRelayGroup: (...a: unknown[]) => previewRelayGroup(...a),
@@ -301,6 +309,9 @@ beforeEach(() => {
   getSuggestions.mockResolvedValue([]);
   acceptSuggestion.mockReset();
   dismissSuggestion.mockReset();
+  getOrgList.mockReset().mockResolvedValue({ version: 1, entries: [] });
+  checkOrgText.mockReset().mockResolvedValue({ candidates: [], close: [] });
+  addOrg.mockReset();
   getAllPlacements.mockResolvedValue(CASES);
   getAllUnits.mockResolvedValue(UNITS);
   getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'x'));

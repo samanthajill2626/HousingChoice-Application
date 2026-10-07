@@ -1,16 +1,23 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import type { Contact } from '../../api/index.js';
+import { ApiError, type Contact, type OrgEntry } from '../../api/index.js';
 
 const updateContact = vi.fn();
 const setTenantStatus = vi.fn();
+// The pickers' list and "Is this really new?" (spec 2026-10-06 D6).
+const getOrgList = vi.fn();
+const checkOrgText = vi.fn();
+const addOrg = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     updateContact: (...a: unknown[]) => updateContact(...a),
     setTenantStatus: (...a: unknown[]) => setTenantStatus(...a),
+    getOrgList: (...a: unknown[]) => getOrgList(...a),
+    checkOrgText: (...a: unknown[]) => checkOrgText(...a),
+    addOrg: (...a: unknown[]) => addOrg(...a),
   };
 });
 
@@ -42,6 +49,32 @@ const LANDLORD: Contact = {
 
 beforeEach(() => vi.clearAllMocks());
 
+function orgEntry(kind: OrgEntry['kind'], name: string, spellings: string[] = []): OrgEntry {
+  return {
+    orgId: `id-${name}`,
+    kind,
+    name,
+    spellings,
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  };
+}
+
+const ORG_ENTRIES: OrgEntry[] = [
+  orgEntry('housing_authority', 'Atlanta Housing Authority', ['AHA']),
+  orgEntry('housing_authority', 'DeKalb County Housing Authority', ['HADC']),
+  orgEntry('agency', 'Step Up'),
+];
+
+// clearAllMocks keeps implementations, so every test starts from these.
+beforeEach(() => {
+  getOrgList.mockResolvedValue({ version: 1, entries: ORG_ENTRIES });
+  checkOrgText.mockResolvedValue({ candidates: [], close: [] });
+  addOrg.mockReset();
+});
+
 describe('ContactEditForm', () => {
   it('shows tenant fields (voucher) and hides company for a tenant', () => {
     render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
@@ -69,11 +102,13 @@ describe('ContactEditForm', () => {
 
   it('PATCHes a changed housingAuthority (camelCase — the GSI key)', async () => {
     const user = userEvent.setup();
-    updateContact.mockResolvedValue({ ...TENANT, housingAuthority: 'dekalb_housing' });
+    updateContact.mockResolvedValue({ ...TENANT, housingAuthority: 'DeKalb County Housing Authority' });
     render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
-    await user.type(screen.getByLabelText(/Housing authority/i), 'dekalb_housing');
+    // A pick commits the entry's exact name (spec 2026-10-06 D3/D6); HADC is a spelling.
+    await user.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'HADC');
+    await user.click(await screen.findByRole('option', { name: /^DeKalb County Housing Authority/ }));
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: 'dekalb_housing' });
+    expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: 'DeKalb County Housing Authority' });
   });
 
   it('PATCHes a structured address when any part changes', async () => {
@@ -529,150 +564,172 @@ describe('ContactEditForm', () => {
     expect('customFields' in patch).toBe(false);
   });
 
-  // --- Authority + agency org inputs (tenant-list-visibility Task 11) --------
-  // The suggestion VALUES are spelled out here on purpose: importing the
-  // constant would make the assertion vacuous, and a wrong spelling splits the
-  // byHousingAuthority broadcast audience. Source of truth: ./orgVocabulary.ts,
-  // the dashboard's last hand-kept copy (the app-side alias map it mirrored is
-  // retired; the stored organization list replaces both).
+  // --- Housing authority + agency pickers (spec 2026-10-06 D6) ---------------
+  // Each field is a picker over its own stored list (OrgPicker): a pick or a
+  // removed chip is the only change, an untouched value never reaches the
+  // PATCH (housingAuthority is a PROVENANCE field - including the key at all
+  // supersedes a pending AI suggestion), and a stored value that is not on the
+  // list stays as it is until staff change it.
 
-  /** The <datalist> an input's `list` attribute points at. */
-  function datalistFor(input: HTMLElement): HTMLDataListElement {
-    const id = input.getAttribute('list');
-    expect(id).toBeTruthy();
-    const el = document.getElementById(id as string);
-    expect(el).not.toBeNull();
-    return el as HTMLDataListElement;
-  }
-
-  function optionValues(list: HTMLDataListElement): string[] {
-    return Array.from(list.querySelectorAll('option')).map((o) => o.value);
-  }
-
-  it('authority input suggests the eight canonical spellings via a datalist', () => {
+  it('explains the housing authority field and offers names and spellings, never agencies', async () => {
+    const user = userEvent.setup();
     render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
-    const input = screen.getByLabelText(/Housing authority/i);
-    expect(optionValues(datalistFor(input))).toEqual([
-      'Atlanta (AHA)',
-      'Jonesboro (JHA)',
-      'Dekalb County Housing',
-      'DCA',
-      'Fulton County',
-      'Clayton County',
-      'East Point',
-      'McDonough',
-    ]);
-    // The datalist suggests; it never constrains. No autoComplete attribute
-    // (whether it suppresses list= suggestions is browser-dependent).
-    expect(input).not.toHaveAttribute('autocomplete');
+    const picker = screen.getByRole('combobox', { name: 'Housing authority' });
+    expect(picker).toHaveAccessibleDescription('The organization that runs the voucher');
+    await user.type(picker, 'aha');
+    expect(await screen.findByRole('option', { name: 'Atlanta Housing Authority (AHA)' })).toBeInTheDocument();
+    await user.clear(picker);
+    await user.type(picker, 'Step Up');
+    expect(
+      await screen.findByRole('option', { name: 'Add Step Up as a new housing authority' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /^Step Up/ })).not.toBeInTheDocument();
   });
 
-  it('the authority datalist still accepts brand-new free text', async () => {
+  it('typing alone changes nothing: Save just closes', async () => {
     const user = userEvent.setup();
-    updateContact.mockResolvedValue({ ...TENANT, housingAuthority: 'Brand New Authority' });
-    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
-    await user.type(screen.getByLabelText(/Housing authority/i), 'Brand New Authority');
+    const onClose = vi.fn();
+    render(<ContactEditForm contact={TENANT} onClose={onClose} onSaved={vi.fn()} />);
+    await user.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'Atl');
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    await waitFor(() =>
-      expect(updateContact).toHaveBeenCalledWith(
-        'k1',
-        expect.objectContaining({ housingAuthority: 'Brand New Authority' }),
-      ),
-    );
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('agency input is tenant-only and suggests the four known agencies', () => {
-    const { unmount } = render(
-      <ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />,
-    );
-    const input = screen.getByLabelText(/^Agency$/i);
-    expect(optionValues(datalistFor(input))).toEqual([
-      'HUD VASH',
-      'Claratel',
-      'Hope Atlanta',
-      'Step Up',
-    ]);
-    expect(input).not.toHaveAttribute('autocomplete');
-    unmount();
-
-    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
-    expect(screen.queryByLabelText(/^Agency$/i)).toBeNull();
-  });
-
-  it('PATCHes a changed agency with interior whitespace collapsed', async () => {
+  it('marks stored values that are not on the list and never sends them untouched', async () => {
     const user = userEvent.setup();
-    updateContact.mockResolvedValue({ ...TENANT, agency: 'Hope Atlanta' });
-    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
-    await user.type(screen.getByLabelText(/^Agency$/i), '  Hope   Atlanta ');
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    await waitFor(() =>
-      expect(updateContact).toHaveBeenCalledWith(
-        'k1',
-        expect.objectContaining({ agency: 'Hope Atlanta' }),
-      ),
-    );
-  });
-
-  it('an untouched authority NEVER reaches the PATCH (provenance protection)', async () => {
-    // housingAuthority is a server-side PROVENANCE field: merely INCLUDING the
-    // key nulls its _source, consumes any pending AI suggestion and stamps the
-    // ai_run superseded. Stray whitespace in the STORE must not make an
-    // untouched field look changed. LOCAL fixture - the shared TENANT carries no
-    // housingAuthority and adding one would break the exact-patch test above.
-    const user = userEvent.setup();
-    const stored: Contact = { ...TENANT, housingAuthority: 'Atlanta  (AHA) ' };
+    const stored: Contact = { ...TENANT, housingAuthority: 'Atlanta  (AHA) ', agency: 'Hope  Atlanta' };
     updateContact.mockResolvedValue({ ...stored, firstName: 'TashaX' });
     render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(await screen.findAllByText('Not on the list')).toHaveLength(2);
     await user.type(screen.getByLabelText(/First name/i), 'X'); // dirty something else
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
     await waitFor(() => expect(updateContact).toHaveBeenCalled());
-    const sent = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
-    expect('housingAuthority' in sent).toBe(false); // collapse-one-side would re-send it
-    expect(sent).toMatchObject({ firstName: 'TashaX' });
+    // Neither org key rides the PATCH (D5: an unchanged value is never refused).
+    expect(updateContact.mock.calls[0]?.[1]).toStrictEqual({ firstName: 'TashaX' });
   });
 
-  it('a whitespace-ONLY authority edit is also a no-op (same effective value)', async () => {
+  it('removing the chip clears the field as an empty string', async () => {
+    // The clear-it wire contract: the server turns '' into a REMOVE
+    // (housingAuthority is a GSI key and DynamoDB rejects '' there).
     const user = userEvent.setup();
-    const stored: Contact = { ...TENANT, housingAuthority: 'Atlanta (AHA)' };
-    updateContact.mockResolvedValue({ ...stored, firstName: 'TashaX' });
-    render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
-    await user.type(screen.getByLabelText(/Housing authority/i), ' '); // trailing space only
-    await user.type(screen.getByLabelText(/First name/i), 'X');
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    await waitFor(() => expect(updateContact).toHaveBeenCalled());
-    const sent = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
-    expect('housingAuthority' in sent).toBe(false); // raw-vs-raw would re-send it
-    expect(sent).toMatchObject({ firstName: 'TashaX' });
-  });
-
-  it('emptying a stored authority DOES reach the PATCH as an empty string', async () => {
-    // The clear-it wire contract the server's ''-to-REMOVE translation depends
-    // on: this is a real value change, so unlike the two no-op cases above it
-    // must be sent. The server turns the '' into a REMOVE because
-    // housingAuthority is a GSI key attribute and DynamoDB rejects '' there.
-    const user = userEvent.setup();
-    const stored: Contact = { ...TENANT, housingAuthority: 'Atlanta (AHA)' };
+    const stored: Contact = { ...TENANT, housingAuthority: 'Atlanta Housing Authority' };
     updateContact.mockResolvedValue({ ...TENANT });
     render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
-    await user.clear(screen.getByLabelText(/Housing authority/i));
+    await user.click(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' }));
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    await waitFor(() =>
-      expect(updateContact).toHaveBeenCalledWith(
-        'k1',
-        expect.objectContaining({ housingAuthority: '' }),
-      ),
-    );
+    expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: '' });
   });
 
-  it('an untouched agency does not ride the PATCH either', async () => {
+  it('picks an agency from the agency list', async () => {
     const user = userEvent.setup();
-    const stored: Contact = { ...TENANT, agency: 'Hope  Atlanta' };
-    updateContact.mockResolvedValue({ ...stored, firstName: 'TashaX' });
-    render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
+    updateContact.mockResolvedValue({ ...TENANT, agency: 'Step Up' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByRole('combobox', { name: 'Agency' }), 'step');
+    await user.click(await screen.findByRole('option', { name: 'Step Up' }));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(updateContact).toHaveBeenCalledWith('k1', { agency: 'Step Up' });
+  });
+
+  it('"Is this really new?" opens outside the form; "Yes, add it" fills the field without saving', async () => {
+    const user = userEvent.setup();
+    addOrg.mockResolvedValue(orgEntry('housing_authority', 'Metro Housing Authority'));
+    updateContact.mockResolvedValue({ ...TENANT, housingAuthority: 'Metro Housing Authority' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'Metro Housing Authority');
+    await user.click(
+      await screen.findByRole('option', { name: 'Add Metro Housing Authority as a new housing authority' }),
+    );
+    const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    // Rendered after the </form>: nothing in it can submit the edit form.
+    expect(dialog.closest('form')).toBeNull();
+    const yes = within(dialog).getByRole('button', { name: 'Yes, add it' });
+    await waitFor(() => expect(yes).toBeEnabled());
+    await user.click(yes);
+    expect(addOrg).toHaveBeenCalledWith({ kind: 'housing_authority', name: 'Metro Housing Authority' });
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument(),
+    );
+    const chip = screen.getByRole('button', { name: 'Remove Metro Housing Authority' }).closest('li');
+    // The name just added counts as on the list at once - even though this
+    // test's re-read still answers the old list (useOrgList noteAdded).
+    expect(chip).not.toHaveTextContent('Not on the list');
+    // Adding to the list never saves the contact; Save does.
+    expect(updateContact).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(updateContact).toHaveBeenCalledWith('k1', { housingAuthority: 'Metro Housing Authority' });
+  });
+
+  it('a close name offered by the dialog fills the field instead of adding', async () => {
+    const user = userEvent.setup();
+    checkOrgText.mockResolvedValue({
+      candidates: [],
+      close: [{ orgId: 'id-Atlanta Housing Authority', kind: 'housing_authority', name: 'Atlanta Housing Authority' }],
+    });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'Atlnta Housng');
+    await user.click(await screen.findByRole('option', { name: 'Add Atlnta Housng as a new housing authority' }));
+    const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    await user.click(await within(dialog).findByRole('button', { name: 'Use Atlanta Housing Authority' }));
+    expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
+    expect(addOrg).not.toHaveBeenCalled();
+  });
+
+  it('a housing authority picker given an agency name offers to put it in Agency', async () => {
+    const user = userEvent.setup();
+    checkOrgText.mockResolvedValue({
+      candidates: [],
+      close: [],
+      otherKind: [{ orgId: 'id-Step Up', kind: 'agency', name: 'Step Up' }],
+      nameProblem: 'org_name_taken',
+    });
+    updateContact.mockResolvedValue({ ...TENANT, agency: 'Step Up' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'Step Up');
+    await user.click(await screen.findByRole('option', { name: 'Add Step Up as a new housing authority' }));
+    const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    await user.click(await within(dialog).findByRole('button', { name: 'Put it in Agency' }));
+    expect(screen.getByRole('button', { name: 'Remove Step Up' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(updateContact).toHaveBeenCalledWith('k1', { agency: 'Step Up' });
+  });
+
+  it('a refused save (422 org_not_on_list) shows under its picker, worded from the body', async () => {
+    const user = userEvent.setup();
+    updateContact.mockRejectedValue(
+      new ApiError(422, 'org_not_on_list', 'org_not_on_list', {
+        error: 'org_not_on_list',
+        field: 'housingAuthority',
+        text: 'DeKalb County Housing Authority',
+        candidates: [],
+        close: [],
+      }),
+    );
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'HADC');
+    await user.click(await screen.findByRole('option', { name: /^DeKalb County Housing Authority/ }));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      'DeKalb County Housing Authority is not on the list - pick a name from the list or add it.',
+    );
+    expect(alert.textContent ?? '').not.toContain('org_not_on_list');
+    // Changing the field clears the message.
+    await user.click(screen.getByRole('button', { name: 'Remove DeKalb County Housing Authority' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('a list that fails to load says so and leaves the rest of the form working', async () => {
+    const user = userEvent.setup();
+    getOrgList.mockRejectedValue(new ApiError(503, 'org_list_busy', 'org_list_busy'));
+    updateContact.mockResolvedValue({ ...TENANT, firstName: 'TashaX' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(await screen.findByText("Couldn't load housing authorities")).toBeInTheDocument();
+    expect(screen.getByText("Couldn't load agencies")).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Housing authority' })).toBeDisabled();
     await user.type(screen.getByLabelText(/First name/i), 'X');
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    await waitFor(() => expect(updateContact).toHaveBeenCalled());
-    const sent = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
-    expect('agency' in sent).toBe(false);
+    expect(updateContact).toHaveBeenCalledWith('k1', { firstName: 'TashaX' });
   });
 });

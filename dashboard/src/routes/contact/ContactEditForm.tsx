@@ -7,7 +7,7 @@
 // PATCHed (the server SET-merges, so an untouched field is never blanked) -
 // switching type leaves the other type's old fields on the record (harmless; they
 // just stop showing). On success the parent applies the returned contact in place.
-import { useId, useState } from 'react';
+import { useState } from 'react';
 import {
   TENANT_STATUSES,
   TENANT_STATUS_LABELS,
@@ -22,6 +22,8 @@ import {
   type CustomField,
   type TenantStatus,
   type ContactType,
+  type OrgKind,
+  type OrgRef,
 } from '../../api/index.js';
 
 // The valid status values, per contact type. Tenants use the 7-value tenant
@@ -70,7 +72,16 @@ import { RelationshipsEditor } from './RelationshipsEditor.js';
 import { CustomFieldsEditor } from './CustomFieldsEditor.js';
 import { KindPicker, type KindPickerValue } from './KindPicker.js';
 import { useContactVocabulary } from './useContactVocabulary.js';
-import { AGENCY_SUGGESTIONS, AUTHORITY_SUGGESTIONS, collapseOrgInput } from './orgVocabulary.js';
+import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
+import { OrgPicker } from '../orgs/OrgPicker.js';
+import {
+  AGENCY_KINDS,
+  HOUSING_AUTHORITY_KINDS,
+  notOnListMessage,
+  orgListLoadError,
+  orgNotOnListBody,
+} from '../orgs/orgCopy.js';
+import { useOrgList } from '../orgs/useOrgList.js';
 import {
   CONTACT_TYPE_LABEL,
   normalizeRelationships,
@@ -119,12 +130,17 @@ function str(v: unknown): string {
 export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: ContactEditFormProps): React.JSX.Element {
   const vocab = useContactVocabulary();
 
-  // Instance-unique datalist ids for the two org inputs. NOT module constants:
-  // two mounted copies of the form would then point at the same ids (the
-  // documented bug fixed at CustomFieldsEditor.tsx:22-24).
-  const uid = useId();
-  const authorityListId = `${uid}-authority-suggestions`;
-  const agencyListId = `${uid}-agency-suggestions`;
+  // The stored organization lists behind the two tenant pickers (spec
+  // 2026-10-06 D6), read on every mount (no client cache, spec D1).
+  const orgList = useOrgList();
+  // "Is this really new?" - opened by a picker's add option and rendered after
+  // the </form>, so nothing in it can submit this form (R5 ruling).
+  const [adding, setAdding] = useState<{ kind: OrgKind; text: string } | null>(null);
+  // A refused save's message (422 org_not_on_list), shown under its picker.
+  const [orgFieldError, setOrgFieldError] = useState<{
+    field: 'housingAuthority' | 'agency';
+    message: string;
+  } | null>(null);
 
   // Type + role together - a KindPicker value, kept collapsed behind "Change type"
   // (changingType) since retyping is rare. isTenant/isLandlord derive from the
@@ -174,8 +190,16 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const [parkReason, setParkReason] = useState(str(contact.park_reason));
   const [housingAuthority, setHousingAuthority] = useState(str(contact.housingAuthority));
   // The helper organization a tenant works with - a DIFFERENT dimension from the
-  // authority that issues the voucher (founder taxonomy; see orgVocabulary).
+  // authority that runs the voucher (two lists, spec 2026-10-06 D1).
   const [agency, setAgency] = useState(str(contact.agency));
+
+  /** Put a list name into the field its KIND belongs to: "Is this really
+   *  new?" can answer with the other kind ("Put it in Agency"). */
+  function applyOrg(ref: OrgRef): void {
+    if (ref.kind === 'agency') setAgency(ref.name);
+    else setHousingAuthority(ref.name);
+    setOrgFieldError(null);
+  }
   const [pets, setPets] = useState(str(contact['pets']));
   const [evictions, setEvictions] = useState(str(contact['evictions']));
   const [tenure, setTenure] = useState(str(contact['tenure']));
@@ -305,28 +329,23 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         patch.voucher_expiration_date =
           voucherExpiration.trim() === '' ? null : consentAtFromDate(voucherExpiration.trim());
       }
-      // Housing authority + agency: dirty-tracked on the COLLAPSED value, and the
-      // comparison collapses BOTH SIDES.
+      // Housing authority + agency (spec 2026-10-06 D6): the pickers change a
+      // field only by a pick (an exact list name) or a removed chip (''), so
+      // the comparison is exact - an untouched field still holds the stored
+      // text byte for byte, whatever it is.
       //
       // `housingAuthority` is a server-side PROVENANCE field, and the server
       // builds `changedFields` from key PRESENCE alone: merely INCLUDING the key
       // in the PATCH body nulls `housingAuthority_source`, consumes (deletes) any
       // pending AI suggestion for the field and stamps its ai_run
-      // `superseded_by_human_edit` - whatever the value. So a field whose
-      // EFFECTIVE value did not change must never reach the wire.
-      //
-      // Collapsing one side only breaks that in one direction each: collapsing
-      // just the outgoing value re-sends an untouched field whenever the STORE
-      // holds an interior whitespace run, while comparing raw-to-raw re-sends on a
-      // whitespace-ONLY edit. Collapsing both is a no-op in both cases and sends
-      // only on a real value change.
-      const nextAuthority = collapseOrgInput(housingAuthority);
-      if (nextAuthority !== collapseOrgInput(str(contact.housingAuthority))) {
-        patch.housingAuthority = nextAuthority;
+      // `superseded_by_human_edit` - whatever the value. An untouched field
+      // must never reach the wire, which also means a stored value that is not
+      // on the list is never refused for being unchanged (D5).
+      if (housingAuthority !== str(contact.housingAuthority)) {
+        patch.housingAuthority = housingAuthority;
       }
-      const nextAgency = collapseOrgInput(agency);
-      if (nextAgency !== collapseOrgInput(str(contact.agency))) {
-        patch.agency = nextAgency;
+      if (agency !== str(contact.agency)) {
+        patch.agency = agency;
       }
       if (pets !== str(contact['pets'])) patch.pets = pets;
       if (evictions !== str(contact['evictions'])) patch.evictions = evictions;
@@ -389,8 +408,15 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         });
       }
       onSaved(updated);
-    } catch {
-      setError("Couldn't save - please try again.");
+    } catch (err) {
+      // A refused org value (422 org_not_on_list, spec D5) names its field:
+      // say why under that picker, from the body - never the raw code.
+      const refused = orgNotOnListBody(err);
+      if (refused !== null && (refused.field === 'housingAuthority' || refused.field === 'agency')) {
+        setOrgFieldError({ field: refused.field, message: notOnListMessage(refused) });
+      } else {
+        setError("Couldn't save - please try again.");
+      }
       setSaving(false);
     }
   }
@@ -509,43 +535,58 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
           </label>
         ) : null}
 
-        {/* The two org fields: the authority that ISSUES the voucher, and the
-            agency that HELPS the tenant. Both offer the importer's canonical
-            spellings through a datalist and both still accept free text. No
-            autoComplete attribute - whether it suppresses list= suggestions is
-            browser-dependent, and neither precedent datalist sets one. */}
+        {/* The two org fields (spec 2026-10-06 D1, D6): the authority that RUNS
+            the voucher and the agency that HELPS the tenant, each a picker
+            over its own stored list. A pick or a removed chip is the only
+            change; a stored value that is not on the list stays until staff
+            change it. */}
         {isTenant ? (
           <>
-            <label className={styles.field}>
-              <span className={styles.label}>Housing authority</span>
-              <input
-                className={styles.input}
-                value={housingAuthority}
-                onChange={(e) => setHousingAuthority(e.target.value)}
-                placeholder="e.g. Atlanta (AHA)"
-                list={authorityListId}
-              />
-            </label>
-            <datalist id={authorityListId}>
-              {AUTHORITY_SUGGESTIONS.map((s) => (
-                <option key={s} value={s} />
-              ))}
-            </datalist>
-            <label className={styles.field}>
-              <span className={styles.label}>Agency</span>
-              <input
-                className={styles.input}
-                value={agency}
-                onChange={(e) => setAgency(e.target.value)}
-                placeholder="e.g. Hope Atlanta"
-                list={agencyListId}
-              />
-            </label>
-            <datalist id={agencyListId}>
-              {AGENCY_SUGGESTIONS.map((s) => (
-                <option key={s} value={s} />
-              ))}
-            </datalist>
+            <OrgPicker
+              label="Housing authority"
+              hint="The organization that runs the voucher"
+              kinds={HOUSING_AUTHORITY_KINDS}
+              entries={orgList.entries}
+              loading={orgList.loading}
+              disabled={orgList.error}
+              value={housingAuthority}
+              onChange={(next) => {
+                setHousingAuthority(next);
+                setOrgFieldError(null);
+              }}
+              onRequestAdd={(text) => setAdding({ kind: 'housing_authority', text })}
+              error={
+                orgFieldError?.field === 'housingAuthority'
+                  ? orgFieldError.message
+                  : orgList.error
+                    ? orgListLoadError(HOUSING_AUTHORITY_KINDS)
+                    : null
+              }
+              className={styles.field}
+              labelClassName={styles.label}
+            />
+            <OrgPicker
+              label="Agency"
+              kinds={AGENCY_KINDS}
+              entries={orgList.entries}
+              loading={orgList.loading}
+              disabled={orgList.error}
+              value={agency}
+              onChange={(next) => {
+                setAgency(next);
+                setOrgFieldError(null);
+              }}
+              onRequestAdd={(text) => setAdding({ kind: 'agency', text })}
+              error={
+                orgFieldError?.field === 'agency'
+                  ? orgFieldError.message
+                  : orgList.error
+                    ? orgListLoadError(AGENCY_KINDS)
+                    : null
+              }
+              className={styles.field}
+              labelClassName={styles.label}
+            />
           </>
         ) : null}
 
@@ -827,6 +868,28 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
           </p>
         ) : null}
       </form>
+      {adding !== null ? (
+        <NewOrgDialog
+          kind={adding.kind}
+          text={adding.text}
+          mode="field"
+          onUse={(ref) => {
+            applyOrg(ref);
+            setAdding(null);
+          }}
+          onUseOtherField={(ref) => {
+            applyOrg(ref);
+            setAdding(null);
+          }}
+          onAdded={(entry) => {
+            // Counted as on the list at once: no "Not on the list" flash on its chip.
+            orgList.noteAdded(entry);
+            applyOrg(entry);
+            setAdding(null);
+          }}
+          onClose={() => setAdding(null)}
+        />
+      ) : null}
     </Modal>
   );
 }

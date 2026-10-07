@@ -629,9 +629,15 @@ base64url(JSON) of `{ v: 1, f, n, ph, i?, k? }`:
     phase U is skipped.
   - `k`, when present, has EXACTLY the attribute names of its index plus
     `tourId`, all strings.
-- A DynamoDB ValidationException on a request that CARRIED a cursor is answered
-  400 `invalid cursor`; on a request without one it is a 500 (a defect in the
-  query, not the client's input).
+- A DynamoDB ValidationException is answered 400 `invalid cursor` ONLY when it
+  came from the page's FIRST Query while that Query carried the cursor's own
+  key `k` - the one Query a client's cursor can break. Any other
+  ValidationException - a later Query (which resumes from a server-made key or
+  from none), a k-less `u` cursor, a request without a cursor - is a 500 (a
+  defect in the query, not the client's input), logged by the app's error
+  handler. (Amended at build time from "400 on any request that carried a
+  cursor" - code review r1 AD-1: a server defect in a later Query was being
+  reported as the client's cursor, with no log line.)
 
 ### 5.6 Names
 
@@ -753,8 +759,10 @@ for any other tour without a date.
     transition; the budget ending EXACTLY at the D-to-U boundary and at a U
     status boundary (k-less cursor, next request starts there); every
     illegal (ph, i, k) combination and a wrong-partition `k`; `cursor_mismatch`;
-    the pinned instant; the ValidationException mapping (400 with a cursor,
-    500 without); name maps; `list` never hitting the tour lookup.
+    the pinned instant; the ValidationException mapping (400 only from the
+    first Query carrying the cursor's key; 500 from a later Query, from a
+    k-less cursor, and without a cursor); name maps; `list` never hitting
+    the tour lookup.
   - DynamoDB Local integration tests with tiny `QUERY_PAGE_LIMIT`, budget and
     `limit`: a page that fills mid-batch resumes at the next row; a sparse
     filter returns partial pages and still reaches every match; undated rows

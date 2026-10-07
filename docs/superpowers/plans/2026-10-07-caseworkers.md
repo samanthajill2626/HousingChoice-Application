@@ -16,7 +16,8 @@
   worktree's gitignored `.superpowers/sdd/plan-research/R<n>-reference.md`).
 - Status: PLAN (planner) - assembled from six section drafts; contract
   rulings in `docs/superpowers/reviews/2026-10-07-caseworkers/plan-research/plan-assembly-rulings.md`
-  (folded into section 3; plan review round 1 applied, round 2 pending).
+  (folded into section 3); plan review CLOSED after 2 rounds (round 2
+  terminal) - see plan-review/adjudications.md.
   Cited as "assembly ruling <writer>-<n>": `S1/S2-3`
   is item 3 under "S1/S2 writer" in that file, `S8-4` item 4 under "S8
   writer"; the S10 writer's items are cited by their subject ("S10 row

@@ -409,3 +409,19 @@ So do NOT raise or remove the cap globally. Make it per tab instead:
 4. **`mockups.html` stays** in this folder until the feature is built, as the
    reference to compare the built page against. Remove or stamp it after that
    comparison.
+5. **Scope: every Settings tab goes full width** (Cameron, later the same
+   day). The 880px cap leaves the Settings shell; Templates, Team, Voice and
+   the quiet-hours block get control-level widths so their fields and prose do
+   not stretch.
+6. **Lane: a polish fix, not a feature.** The small-fix lane applies (no
+   brainstorm/spec/plan mission), on this branch and worktree, not on main.
+   It is **secondary to branch B (feat/caseworkers)**: B keeps priority and
+   merges first, and this branch absorbs any file overlap at its main sync.
+   The two share some files (`OrgListSection.tsx`, `NotOnListSection.tsx`,
+   `orgCopy.ts`) but no behavior.
+7. **Option B details** (proposed 2026-10-07, not objected to): three
+   segments with counts (Housing authorities, Agencies, Not on the list); a
+   search over names and spellings; the selected entry in the URL
+   (`/settings/organizations/<id>`); one pane at a time on a phone with a Back
+   link; "Not on the list" settles through one pick-and-confirm step in the
+   panel instead of a row of buttons.

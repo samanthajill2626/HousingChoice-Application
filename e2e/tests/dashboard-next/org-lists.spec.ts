@@ -7,7 +7,9 @@
 //      pickers with "Is this really new?"; a stored value that is not on the
 //      list, kept as a chip through an unrelated save; the property form's
 //      multi-picker; the blast composer's picker (no add step, and the filter
-//      changes only on a pick);
+//      changes only on a pick); text typed but never picked (code review
+//      R1-ADV-FE-1, R2-FE-9): a form's Save commits a list name and refuses
+//      anything else, the composer's Preview waits for a pick;
 //   2. Settings > Housing authorities & agencies (D10-D13): a VA adds an entry
 //      and edits its notes; an admin renames one and the rewrite job finishes;
 //   3. the "Not on the list" section (D10, D11), fed by the dev seam: Show
@@ -352,6 +354,115 @@ test.describe('Org pickers (spec D6, D7)', () => {
     const list = page.getByRole('list', { name: 'Candidate recipients' });
     await expect(list.getByText(first)).toBeVisible();
     await expect(list.getByText(second)).toBeVisible();
+  });
+});
+
+// ---- Text typed in an org picker but never picked (code review R1-ADV-FE-1,
+// R2-FE-3, R2-FE-6, R2-FE-8, R2-FE-9) ----
+// The jsdom units cover the rules; these pin them through real focus and
+// layout: a form's Save commits typed text that names exactly one entry and
+// refuses anything else (never dropping it silently), the note under a field
+// left holding text says what Save will do without moving the controls below,
+// and the composer - whose typed text is never a filter (D7) - holds Preview
+// back until a pick or a clear.
+test.describe('Org pickers: text typed but never picked', () => {
+  const BLOCKED = 'Pick a name from the list, add it as new, or clear the text.';
+  const PREVIEW_HINT = 'Pick the housing authority from the list, or clear the text.';
+
+  test('tenant form: a list name typed in full and saved without a pick is stored as that name', async ({ page }) => {
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const bittern = `Bittern Housing Authority ${stamp}`;
+    await addOrg(req, { kind: 'housing_authority', name: bittern });
+    const { contactId } = await createTenant(req, { firstName: `OrgTyped${stamp}` });
+
+    await page.goto(`${NEXT}/contacts/${contactId}`);
+    await page.getByRole('button', { name: 'Edit contact details' }).click();
+    const dialog = page.getByRole('dialog', { name: /Edit contact/i });
+    const authority = dialog.getByRole('combobox', { name: 'Housing authority', exact: true });
+    const agency = dialog.getByRole('combobox', { name: 'Agency', exact: true });
+    await authority.fill(bittern);
+    await expect(page.getByRole('option', { name: ORG_PICKER.option(bittern) })).toBeVisible();
+
+    // Leaving the field: the note says what Save will do with the text, and
+    // the note's line was already there - the field below does not move
+    // (measured against the field above, so a scroll cannot fake it).
+    const offset = async (): Promise<number> =>
+      ((await agency.boundingBox())?.y ?? Number.NaN) - ((await authority.boundingBox())?.y ?? Number.NaN);
+    const before = await offset();
+    await authority.press('Tab');
+    await expect(agency).toBeFocused();
+    await expect(dialog.getByText(`Save will use ${bittern}.`, { exact: true })).toBeVisible();
+    expect(await offset()).toBe(before);
+
+    // Saved WITHOUT a pick: the typed name is committed as a pick would be.
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+    expect((await getContact(req, contactId)).housingAuthority).toBe(bittern);
+  });
+
+  test('tenant form: typed text that names no entry stops Save with an alert and saves nothing', async ({ page }) => {
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const unlisted = `Zz Unlisted Board ${stamp}`;
+    const { contactId } = await createTenant(req, { firstName: `OrgRefused${stamp}`, voucherSize: 2 });
+
+    await page.goto(`${NEXT}/contacts/${contactId}`);
+    await page.getByRole('button', { name: 'Edit contact details' }).click();
+    const dialog = page.getByRole('dialog', { name: /Edit contact/i });
+    await dialog.getByLabel('Voucher size (bedrooms)').fill('3');
+    const authority = dialog.getByRole('combobox', { name: 'Housing authority', exact: true });
+    await authority.fill(unlisted);
+    await expect(page.getByRole('option', { name: ORG_PICKER.addOption })).toBeVisible();
+
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(dialog.getByRole('alert')).toHaveText(BLOCKED);
+    await expect(authority).toBeFocused();
+    await expect(authority).toHaveValue(unlisted);
+    // Nothing was saved - not the text, and not the other edit either.
+    const unsaved = await getContact(req, contactId);
+    expect(unsaved.voucherSize).toBe(2);
+    expect(unsaved.housingAuthority).toBeUndefined();
+
+    // Clearing the text lets the rest of the edit save.
+    await authority.fill('');
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(dialog).toHaveCount(0, { timeout: 10_000 });
+    const saved = await getContact(req, contactId);
+    expect(saved.voucherSize).toBe(3);
+    expect(saved.housingAuthority).toBeUndefined();
+  });
+
+  test('blast composer: Preview waits while the housing authority filter holds typed text', async ({ page }) => {
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const pipit = `Pipit Housing Authority ${stamp}`;
+    await addOrg(req, { kind: 'housing_authority', name: pipit });
+    await createTenant(req, { firstName: `PipitA${stamp}`, voucherSize: 2, housingAuthority: pipit });
+    const unitId = await createUnit(req, { line1: `${stamp} Pipit Way`, authorities: [pipit], available: true });
+
+    await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
+    await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
+    await page.getByRole('textbox', { name: 'Message' }).fill(`Pipit check ${stamp}`);
+    const previewButton = page.getByRole('button', { name: 'Preview recipients' });
+    await expect(previewButton).toBeEnabled();
+
+    // The exact name typed, its option showing, but not picked: it is no
+    // filter (D7), so Preview waits and says why.
+    const box = page.getByRole('combobox', { name: 'Housing authority', exact: true });
+    await box.fill(pipit);
+    await expect(page.getByRole('option', { name: ORG_PICKER.option(pipit) })).toBeVisible();
+    await expect(previewButton).toBeDisabled();
+    await expect(page.getByText(PREVIEW_HINT, { exact: true })).toBeVisible();
+
+    // A pick makes it the filter: Preview goes, and the reach is the filtered one.
+    await pickOrgName(page, page, 'Housing authority', pipit);
+    await expect(previewButton).toBeEnabled();
+    await expect(page.getByText(PREVIEW_HINT, { exact: true })).toHaveCount(0);
+    await expect(page.getByText('Reaches 1 tenant', { exact: true })).toBeVisible();
   });
 });
 

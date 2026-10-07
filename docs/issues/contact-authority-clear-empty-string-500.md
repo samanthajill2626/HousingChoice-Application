@@ -3,11 +3,19 @@ id: contact-authority-clear-empty-string-500
 title: Clearing a tenant's housing authority writes an empty string to a GSI hash key and fails
 type: bug
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-10
+updated: 2026-10-07
+resolved: 2026-10-07
 refs: dashboard/src/routes/contact/ContactEditForm.tsx:323,app/src/routes/contacts.ts:520,app/src/repos/contactsRepo.ts:906
 ---
+
+**Resolution (2026-10-07).** Fixed by d827bab6 (2026-08-13): the contacts PATCH maps a '' housing
+authority to null and the repo REMOVEs the attribute (app/src/routes/contacts.ts:638-642). Pinned
+by app/test/contactTriage.test.ts:472-508 and, since feat/clean-org-names, by the "(PIN) a clear
+always passes" case in app/test/contactOrgNames.test.ts. The issue stayed open only because its
+frontmatter was never updated.
 
 **Problem.** `contact.housingAuthority` is the hash key of the `byHousingAuthority` GSI, and
 DynamoDB rejects an empty string for an indexed key attribute. The contact edit form sends the

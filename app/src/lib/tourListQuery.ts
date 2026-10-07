@@ -4,6 +4,9 @@
 // fingerprint the filters, and encode / decode / locate the opaque cursor.
 // No AWS and no Express here: toursRepo.queryListPhase runs ONE phase batch
 // and services/tourListPage.ts runs the paging loop.
+// String.prototype.isWellFormed (the cursor key check) is ES2024 - in Node 20+,
+// outside the ES2023 lib this workspace compiles against.
+/// <reference lib="es2024.string" />
 import { createHash } from 'node:crypto';
 import {
   TOUR_STATUSES,
@@ -239,11 +242,28 @@ export function encodeTourListCursor(c: TourListCursor): string {
   return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url');
 }
 
+/** A cursor key value's UTF-8 cap. DynamoDB limits a range key to 1,024 bytes
+ *  (a partition key to 2,048) and requires valid UTF-8; AWS may refuse a larger
+ *  or ill-formed crafted key with an error that is not a ValidationException,
+ *  a 500. Refused here, such a key is a 400 whatever AWS answers (code review
+ *  r1 AD-4). Every real key value - an id, an ISO instant, a status, the
+ *  partition name - is far below it. */
+const MAX_KEY_VALUE_BYTES = 1024;
+
+function isKeyValue(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.isWellFormed() &&
+    Buffer.byteLength(value, 'utf8') <= MAX_KEY_VALUE_BYTES
+  );
+}
+
 function isKey(k: unknown, attrs: readonly string[]): k is Record<string, string> {
   if (typeof k !== 'object' || k === null || Array.isArray(k)) return false;
   const entries = Object.entries(k);
   if (entries.length !== attrs.length) return false;
-  return entries.every(([name, value]) => attrs.includes(name) && typeof value === 'string' && value.length > 0);
+  return entries.every(([name, value]) => attrs.includes(name) && isKeyValue(value));
 }
 
 /** SHAPE validation only; locateTourListCursor checks it against the plan. */

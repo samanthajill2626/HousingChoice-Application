@@ -6060,4 +6060,23 @@ describe('GET /api/tours/list', () => {
     expect(capture.atLevel(50).map((l) => l['msg'])).toEqual(['unhandled error while handling request: GET /list']);
     expect(capture.atLevel(40).filter((l) => l['msg'] === REFUSED)).toEqual([]);
   });
+
+  it('13: a cursor key value over 1,024 bytes or not well-formed is a 400 invalid cursor before any Query (AD-4)', async () => {
+    const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
+    await world.toursRepo.create(tourInput('tl13-p1', 'toured', at(-1)));
+    const query = vi.spyOn(world.toursRepo, 'queryListPhase');
+    const f = fingerprintOf({ when: 'past' });
+    // In range and in the tours partition - only the key VALUE is wrong. No
+    // row holds this scheduledAt, so the fake model would resume from it.
+    const scheduledAt = at(-1.5);
+    const tourIds = ['x'.repeat(1100), `tl13-${String.fromCharCode(0xd800)}`];
+    for (const tourId of tourIds) {
+      const crafted = encodeTourListCursor({ v: 1, f, n: NOW, ph: 'd', k: { tourId, _schedPartition: 'tours', scheduledAt } });
+      const res = await authed(app).get(`/api/tours/list?when=past&cursor=${encodeURIComponent(crafted)}`);
+      expect(res.status, `tourId of length ${tourId.length}`).toBe(400);
+      expect(res.body).toStrictEqual({ error: 'invalid cursor' });
+    }
+    expect(query).not.toHaveBeenCalled();
+    query.mockRestore();
+  });
 });

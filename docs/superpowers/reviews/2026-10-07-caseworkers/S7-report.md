@@ -100,3 +100,20 @@ GREEN: dashboard npx vitest run src/routes/settings exited 0, 23 files /
 327 tests, zero skipped (7.5a-green). Invalid field=nope still rejects.
 Root npm run typecheck exited 0, all five workspaces (7.5a-typecheck).
 No contract deviation beyond the already accepted O1 comment correction.
+
+## Task 7.6 - field-keyed contact form seam
+
+Task 7.5a commit: cff303af. Added OrgFormField, orgPickField,
+newOrgDialogKind and isOrgFormField. ContactEditForm now keys adding/errors
+and applyOrg by field; orgSetters still has only the two tenant arms.
+Actual partner Organization controls, state and patch logic remain S8.
+RED: dashboard npx vitest run src/routes/orgs/orgCopy.test.ts exited 1,
+one failed / 43 passed: orgPickField missing. The later helper assertions
+were not reached in RED. GREEN: dashboard npx vitest run src/routes/orgs/orgCopy.test.ts src/routes/contact/ContactEditForm.test.tsx
+exited 0, two files / 107 tests, zero skipped (7.6-green); all existing
+other-field, 422 and server-confirmed chip pins passed. Existing React act
+warnings remain in ContactEditForm tests. Root npm run typecheck exited 0,
+all five workspaces (7.6-typecheck). No contract deviation or new cycle.
+Final changed-TypeScript lint includes both task paths: npx eslint over all
+20 S7 TS/TSX paths exited 0 with no warnings/errors (exit-lint), so no
+baseline attribution is needed and no narrower duplicate lint run is added.

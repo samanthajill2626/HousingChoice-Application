@@ -42,6 +42,31 @@ export function kindsForField(field: OrgRecordField): readonly OrgKind[] {
   }
 }
 
+/** The org fields a contact FORM edits: the tenant pair and (B) a partner's organization. */
+export type OrgFormField = 'housingAuthority' | 'agency' | 'organization';
+
+/**
+ * Where a form puts an answer from "Is this really new?" opened by `field`'s
+ * picker (R2-F8): an organization takes a name of EITHER kind and keeps it;
+ * a tenant field puts it in the field of its KIND - the dialog may answer
+ * with the other kind ("Put it in Agency", spec D6).
+ */
+export function orgPickField(field: OrgFormField, ref: OrgRef): OrgFormField {
+  if (field === 'organization') return 'organization';
+  return ref.kind === 'agency' ? 'agency' : 'housingAuthority';
+}
+
+/** The NewOrgDialog `kind` a form field's add step opens with. */
+export function newOrgDialogKind(field: OrgFormField): OrgKind | 'organization' {
+  if (field === 'organization') return 'organization';
+  return field === 'agency' ? 'agency' : 'housing_authority';
+}
+
+/** A 422 org_not_on_list a contact form shows under one of its pickers. */
+export function isOrgFormField(field: string): field is OrgFormField {
+  return field === 'housingAuthority' || field === 'agency' || field === 'organization';
+}
+
 /** Lowercase noun per kind. */
 export const KIND_NOUN: Readonly<Record<OrgKind, string>> = {
   housing_authority: 'housing authority',

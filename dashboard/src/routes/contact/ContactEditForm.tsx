@@ -22,7 +22,6 @@ import {
   type CustomField,
   type TenantStatus,
   type ContactType,
-  type OrgKind,
   type OrgRef,
 } from '../../api/index.js';
 
@@ -77,6 +76,10 @@ import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
 import {
   AGENCY_KINDS,
   HOUSING_AUTHORITY_KINDS,
+  isOrgFormField,
+  newOrgDialogKind,
+  orgPickField,
+  type OrgFormField,
   notOnListMessage,
   orgListLoadError,
   orgListUnknown,
@@ -138,10 +141,11 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const orgList = useOrgList();
   // "Is this really new?" - opened by a picker's add option and rendered after
   // the </form>, so nothing in it can submit this form (R5 ruling).
-  const [adding, setAdding] = useState<{ kind: OrgKind; text: string } | null>(null);
+  // Keyed by the FIELD whose picker opened it (R2-F8).
+  const [adding, setAdding] = useState<{ field: OrgFormField; text: string } | null>(null);
   // A refused save's message (422 org_not_on_list), shown under its picker.
   const [orgFieldError, setOrgFieldError] = useState<{
-    field: 'housingAuthority' | 'agency';
+    field: OrgFormField;
     message: string;
   } | null>(null);
   // Text typed in a picker but never picked (code review R1-ADV-FE-1, R2-FE-6):
@@ -205,11 +209,19 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   // authority that runs the voucher (two lists, spec 2026-10-06 D1).
   const [agency, setAgency] = useState(str(contact.agency));
 
-  /** Put a list name into the field its KIND belongs to: "Is this really
-   *  new?" can answer with the other kind ("Put it in Agency"). */
-  function applyOrg(ref: OrgRef): void {
-    if (ref.kind === 'agency') setAgency(ref.name);
-    else setHousingAuthority(ref.name);
+  /** Each org field's setter in this form - a field the form does not
+   *  edit has none (R2-F8). */
+  const orgSetters: Partial<Record<OrgFormField, (name: string) => void>> = {
+    housingAuthority: setHousingAuthority,
+    agency: setAgency,
+  };
+
+  /** Put a list name where an answer for `field`'s picker belongs
+   *  (orgPickField): a tenant field follows the name's KIND - "Is this
+   *  really new?" can answer with the other kind ("Put it in Agency") - and
+   *  an organization keeps a name of either kind. */
+  function applyOrg(field: OrgFormField, ref: OrgRef): void {
+    orgSetters[orgPickField(field, ref)]?.(ref.name);
     setOrgFieldError(null);
   }
   const [pets, setPets] = useState(str(contact['pets']));
@@ -461,7 +473,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       // A refused org value (422 org_not_on_list, spec D5) names its field:
       // say why under that picker, from the body - never the raw code.
       const refused = orgNotOnListBody(err);
-      if (refused !== null && (refused.field === 'housingAuthority' || refused.field === 'agency')) {
+      if (refused !== null && isOrgFormField(refused.field)) {
         setOrgFieldError({ field: refused.field, message: notOnListMessage(refused) });
       } else {
         setError("Couldn't save - please try again.");
@@ -608,7 +620,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               }}
               onPendingTextChange={housingAuthorityText.onPendingTextChange}
               pendingNote={housingAuthorityText.note}
-              onRequestAdd={(text) => setAdding({ kind: 'housing_authority', text })}
+              onRequestAdd={(text) => setAdding({ field: 'housingAuthority', text })}
               error={
                 housingAuthorityText.refusal ??
                 (orgFieldError?.field === 'housingAuthority' ? orgFieldError.message : null) ??
@@ -632,7 +644,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               }}
               onPendingTextChange={agencyText.onPendingTextChange}
               pendingNote={agencyText.note}
-              onRequestAdd={(text) => setAdding({ kind: 'agency', text })}
+              onRequestAdd={(text) => setAdding({ field: 'agency', text })}
               error={
                 agencyText.refusal ??
                 (orgFieldError?.field === 'agency' ? orgFieldError.message : null) ??
@@ -925,7 +937,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       </form>
       {adding !== null ? (
         <NewOrgDialog
-          kind={adding.kind}
+          kind={newOrgDialogKind(adding.field)}
           text={adding.text}
           mode="field"
           onUse={(ref) => {
@@ -933,18 +945,18 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
             // when this form's list was read before the name joined it
             // (code review R1-ADV-FE-7).
             orgList.noteAdded(ref);
-            applyOrg(ref);
+            applyOrg(adding.field, ref);
             setAdding(null);
           }}
           onUseOtherField={(ref) => {
             orgList.noteAdded(ref);
-            applyOrg(ref);
+            applyOrg(adding.field, ref);
             setAdding(null);
           }}
           onAdded={(entry) => {
             // Counted as on the list at once: no "Not on the list" flash on its chip.
             orgList.noteAdded(entry);
-            applyOrg(entry);
+            applyOrg(adding.field, entry);
             setAdding(null);
           }}
           onClose={() => setAdding(null)}

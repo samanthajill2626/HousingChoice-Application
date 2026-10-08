@@ -8,6 +8,9 @@ import {
   FIELD_LABEL,
   ORGANIZATION_KINDS,
   kindsForField,
+  isOrgFormField,
+  newOrgDialogKind,
+  orgPickField,
   rewriteCountsText,
   canRunAgain,
   blockingUses,
@@ -496,6 +499,19 @@ describe('typedOrgNote - the note under a form picker says what Save will do (co
 });
 
 describe('both lists - a contact organization (spec D6, D17; R2-F4)', () => {
+  it('a form routes an org answer by FIELD: organization stays put; a tenant field follows the kind (R2-F8)', () => {
+    expect(orgPickField('organization', STEP)).toBe('organization');
+    expect(orgPickField('organization', ATL)).toBe('organization');
+    expect(orgPickField('housingAuthority', STEP)).toBe('agency'); // "Put it in Agency"
+    expect(orgPickField('agency', ATL)).toBe('housingAuthority');
+    expect(orgPickField('housingAuthority', ATL)).toBe('housingAuthority');
+    expect(newOrgDialogKind('organization')).toBe('organization');
+    expect(newOrgDialogKind('agency')).toBe('agency');
+    expect(newOrgDialogKind('housingAuthority')).toBe('housing_authority');
+    expect(
+      ['housingAuthority', 'agency', 'organization', 'accepted_authorities', 'audience_filter'].map(isOrgFormField),
+    ).toEqual([true, true, true, false, false]);
+  });
   it('Delete waits for every distinct record; Change kind only for holders in a field of the kind (R2-F1)', () => {
     const u = counts({ organization: 2, inUse: { active: 2, deleted: 1 }, kindLocked: { active: 0, deleted: 0 } });
     expect(blockingUses(u, 'delete')).toBe(3);

@@ -9,6 +9,7 @@ import {
   formatRent,
   describeUnitActivity,
   isMediaUrl,
+  sendRowKindLabel,
   shortAddress,
   statusLabel,
 } from './listingFormat.js';
@@ -283,5 +284,23 @@ describe('describeUnitActivity', () => {
 
   it('humanizes an unknown event type (open set — never a blank row)', () => {
     expect(describeUnitActivity(evt({ type: 'unit_frobnicated' }))).toEqual({ label: 'Unit frobnicated' });
+  });
+});
+
+
+describe('sendRowKindLabel (caseworkers D20/D22)', () => {
+  it('labels a resolved non-tenant row by displayKind: the role, else the type label', () => {
+    expect(sendRowKindLabel({ type: 'partner', role: 'Caseworker' })).toBe('Caseworker');
+    expect(sendRowKindLabel({ type: 'partner' })).toBe('Partner');
+    expect(sendRowKindLabel({ type: 'partner', role: '   ' })).toBe('Partner');
+    expect(sendRowKindLabel({ type: 'landlord' })).toBe('Landlord');
+    expect(sendRowKindLabel({ type: 'team_member' })).toBe('Team');
+    expect(sendRowKindLabel({ type: 'unknown' })).toBe('Unknown');
+  });
+
+  it('leaves a tenant row and an unresolved row (no type) unlabelled', () => {
+    expect(sendRowKindLabel({ type: 'tenant' })).toBeUndefined();
+    expect(sendRowKindLabel({ type: 'tenant', role: 'Case worker' })).toBeUndefined();
+    expect(sendRowKindLabel({})).toBeUndefined();
   });
 });

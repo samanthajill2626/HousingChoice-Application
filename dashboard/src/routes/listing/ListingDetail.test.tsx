@@ -529,6 +529,32 @@ describe('ListingDetail', () => {
     expect(screen.queryByText('c-t9')).not.toBeInTheDocument();
   });
 
+  it('caseworkers D20: a resolved non-tenant "Sent to" row shows its displayKind beside the name; tenant and unresolved rows show none', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      recipients: {
+        status: 'ready',
+        rows: [
+          { contactId: 'c-ten', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', tenantName: 'Tia Moss', type: 'tenant' },
+          { contactId: 'c-cw', unitId: 'u1', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tenantName: 'Cora Reyes', type: 'partner', role: 'Caseworker' },
+          { contactId: 'c-pt', unitId: 'u1', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tenantName: 'Pat Lin', type: 'partner' },
+          { contactId: 'c-ll', unitId: 'u1', sentAt: '2026-06-27T10:00:00Z', via: 'broadcast', tenantName: 'Lee Park', type: 'landlord' },
+          { contactId: 'c-gone', unitId: 'u1', sentAt: '2026-06-26T10:00:00Z', via: 'broadcast' },
+        ],
+      },
+    });
+    renderAt();
+    const card = screen.getByRole('heading', { name: /^Sent to\b/ }).closest('section') as HTMLElement;
+    const rowOf = (name: string): HTMLElement =>
+      within(card).getByRole('link', { name }).closest('div') as HTMLElement;
+    // The label is OUTSIDE the link: the link's name stays the person's name.
+    expect(within(rowOf('Cora Reyes')).getByText('Caseworker')).toBeInTheDocument();
+    expect(within(rowOf('Pat Lin')).getByText('Partner')).toBeInTheDocument();
+    expect(within(rowOf('Lee Park')).getByText('Landlord')).toBeInTheDocument();
+    expect(rowOf('Tia Moss').textContent).toBe('Tia Moss');
+    expect(rowOf('c-gone').textContent).toBe('c-gone');
+  });
+
   it('renders each tour-chip state on "Sent to" rows, linking to the tour', () => {
     useListing.mockReturnValue({
       ...READY,

@@ -61,6 +61,7 @@ import {
   formatMoney,
   formatRent,
   isMediaUrl,
+  sendRowKindLabel,
   shortAddress,
   statusLabel,
 } from './listingFormat.js';
@@ -1037,14 +1038,20 @@ export function ListingDetail(): React.JSX.Element {
               recipients.rows.length === 0 ? (
                 <EmptyRow>Not sent to anyone yet.</EmptyRow>
               ) : (
-                recipients.rows.map((row) => (
-                  <SendRosterRow
-                    key={`${row.contactId}:${row.sentAt}`}
-                    to={`/contacts/${row.contactId}`}
-                    identity={row.tenantName ?? row.contactId}
-                    {...(row.tour && { tour: row.tour })}
-                  />
-                ))
+                recipients.rows.map((row) => {
+                  // caseworkers D20/D22: a resolved non-tenant row is labelled by
+                  // its displayKind; tenant and unresolved rows are not.
+                  const kind = sendRowKindLabel(row);
+                  return (
+                    <SendRosterRow
+                      key={`${row.contactId}:${row.sentAt}`}
+                      to={`/contacts/${row.contactId}`}
+                      identity={row.tenantName ?? row.contactId}
+                      {...(kind !== undefined && { kind })}
+                      {...(row.tour && { tour: row.tour })}
+                    />
+                  );
+                })
               )
             ) : recipients.status === 'error' ? (
               <EmptyRow>We couldn&apos;t load recipients.</EmptyRow>

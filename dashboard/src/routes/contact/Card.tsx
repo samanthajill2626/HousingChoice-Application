@@ -218,10 +218,15 @@ export function TourChip({
 export function SendRosterRow({
   to,
   identity,
+  kind,
   tour,
 }: {
   to: string;
   identity: React.ReactNode;
+  /** caseworkers D20: a muted label after the identity link (a non-tenant
+   *  recipient's displayKind on the property "Sent to" card). Outside the
+   *  link, so the link's accessible name stays the identity. */
+  kind?: string;
   tour?: { tourId: string; state: TourSignalState };
 }): React.JSX.Element {
   return (
@@ -230,6 +235,7 @@ export function SendRosterRow({
         <Link className={styles.rowLink ?? ''} to={to}>
           {identity}
         </Link>
+        {kind !== undefined ? <span className={styles.rowKind}>{kind}</span> : null}
       </span>
       {tour ? (
         <span className={styles.liRight}>

@@ -1089,7 +1089,7 @@ export async function getUnitRelated(
   return res.related;
 }
 
-/** GET /api/units/:id/recipients (C4) - the "Sent to tenants" rows (recipients,
+/** GET /api/units/:id/recipients (C4) - the "Sent to" rows (recipients,
  *  each with an optional derived tour signal). 404s until BE4 lands ? the panel
  *  renders a "pending backend" state. */
 export async function getUnitRecipients(

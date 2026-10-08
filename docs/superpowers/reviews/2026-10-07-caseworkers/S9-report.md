@@ -20,3 +20,17 @@ GREEN: dashboard npx vitest run src/routes/listing, exit 0: 267 tests in
 Root npx eslint on broadcasts.spec.ts, e2e/scenarios/steps.ts,
 matching-entry-points.spec.ts and listing-activity.spec.ts exit 0.
 Existing act warnings remain; no failed check excused. No contract deviation.
+
+## Task 9.2 - recipient kind labels
+
+Task 9.1 commit: 58f5886c. Mirrored optional type/role on ListingSendRow,
+added sendRowKindLabel using displayKind, and rendered kind outside the
+identity link. Tenant and unresolved rows remain unlabelled; shared tenant
+file rows stay unchanged. The server continues owning trimmed role metadata.
+RED: dashboard npx vitest run src/routes/listing/listingFormat.test.ts
+src/routes/listing/ListingDetail.test.tsx, exit 1: 3 failed / 100 passed,
+missing helper and missing Caseworker sibling label.
+GREEN: dashboard npx vitest run src/routes/listing
+src/routes/contact/files.test.tsx, exit 0: 311 tests in 13 files.
+Root bare npm run typecheck exit 0, five workspaces (9.2-typecheck).
+Added-line ASCII and git diff --check pass. No contract deviation.

@@ -209,6 +209,13 @@ a.li:focus-visible {
   color: var(--c-text-muted);
 }
 
+/* caseworkers D20: a send-roster row's recipient kind (e.g. "Partner"). */
+.rowKind {
+  margin-left: var(--sp-2);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
 /* --- Status dots (unit availability) ------------------------------------- */
 
 .statusAvailable {

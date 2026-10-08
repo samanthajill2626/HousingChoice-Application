@@ -2,10 +2,12 @@
 // Tested in isolation so the component stays declarative.
 import {
   LISTING_STATUS_LABELS,
+  type ListingSendRow,
   type ListingStatus,
   type UnitActivityEvent,
   type UnitItem,
 } from '../../api/index.js';
+import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
 import { formatAddress, humanize } from '../contact/format.js';
 import { ROLE_LABEL } from './buildListingFile.js';
 
@@ -227,4 +229,16 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
     default:
       return { label: humanize(e.type) };
   }
+}
+
+/**
+ * Spec 2026-10-06 D20/D22 (caseworkers): the label a property "Sent to" row
+ * shows beside the recipient's name - the contact's displayKind (its role,
+ * else the type label, e.g. "Partner") for a RESOLVED non-tenant row. A
+ * tenant row stays unlabelled, and so does a row whose contact did not resolve
+ * (the server omits `type`).
+ */
+export function sendRowKindLabel(row: Pick<ListingSendRow, 'type' | 'role'>): string | undefined {
+  if (row.type === undefined || row.type === 'tenant') return undefined;
+  return displayKind({ type: row.type, role: row.role }, (t) => CONTACT_TYPE_LABEL[t]);
 }

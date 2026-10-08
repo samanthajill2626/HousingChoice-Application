@@ -2952,6 +2952,12 @@ export interface ListingSendRow {
   /** The pairing's most-progressed tour, when one qualifies - powers the roster
    *  tour chip. Absent when no qualifying tour exists (the row renders no chip). */
   tour?: TourSignal;
+  /** caseworkers D20 (plan 3.7): the recipient's contact type - on the property
+   *  "Sent to" rows ONLY (GET /api/units/:id/recipients), absent when the
+   *  contact did not resolve. A non-tenant row is labelled by it. */
+  type?: ContactType;
+  /** caseworkers D20: the recipient's role, when it holds text (same rules). */
+  role?: string;
 }
 
 /** Result of POST /api/conversations/:id/messages (legacy reuse). */

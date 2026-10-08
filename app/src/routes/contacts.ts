@@ -103,6 +103,12 @@ import {
   formatAddressParts,
 } from '../services/extraction/address.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import {
+  createCaseworkerConversionService,
+  type CaseworkerConversionService,
+} from '../services/caseworkerConversion.js';
+import { registerCaseworkerRoutes } from './caseworkerReview.js';
 import {
   displayNameOf,
   drainTypeSuggestion,
@@ -158,6 +164,13 @@ export interface ContactsRouterDeps {
    * createApiRouter and threaded down, like the settings repo there.
    */
   orgNamesService?: OrgNamesService;
+  /**
+   * Caseworkers (spec 2026-10-06 D19, D22): the conversion's landlord-of-record
+   * and roster refusals read units, soft-deleted ones included.
+   */
+  unitsRepo?: UnitsRepo;
+  /** Test seam: the caseworker conversion; built from this router's repos by default. */
+  caseworkerConversion?: CaseworkerConversionService;
 }
 
 /**
@@ -989,6 +1002,26 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const aiExtractionEnabled = deps.aiExtractionEnabled ?? loadConfig().aiExtractionEnabled;
   const events = deps.events ?? appEvents;
   const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  // ONE conversion service over the SAME repos and bus the PATCH uses for the
+  // same effects (spec D19).
+  const caseworkerConversion =
+    deps.caseworkerConversion
+    ?? createCaseworkerConversionService({
+      contacts,
+      conversations,
+      placements,
+      tours,
+      units,
+      extraction,
+      aiRuns,
+      audit,
+      activityEvents,
+      vocabulary,
+      events,
+      orgNames,
+      logger: log,
+    });
 
   const router = Router();
 
@@ -1147,6 +1180,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     const vocab = await vocabulary.get();
     res.json({ vocabulary: vocab });
   });
+
+  // Caseworkers (spec 2026-10-06 D19): GET /possible-caseworkers is a literal
+  // segment, so it MUST be registered before GET /:contactId (as /vocabulary is).
+  registerCaseworkerRoutes(router, { contacts, conversion: caseworkerConversion, logger: log });
 
   // GET /api/contacts/:contactId — the side-panel contact item. The returned
   // shape is a SUPERSET of the legacy one: the scalar `phone` stays intact and

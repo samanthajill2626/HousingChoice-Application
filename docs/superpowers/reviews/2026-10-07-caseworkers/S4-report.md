@@ -56,3 +56,22 @@ npx vitest run test/contactTriage.test.ts test/aiRunVerdicts.test.ts test/contac
 exited 0: 12 files, 273 tests. Root npm run typecheck exited 0.
 All pre-existing cases stayed unchanged, including the resolved-thread pin.
 Logs: 4.3-red, 4.3-green, 4.3-typecheck. No contract deviation.
+
+## Task 4.4 - caseworker-review routes and wiring
+
+Task 4.3 commit: 0192ee86. Step 0 passed again; no local units variable existed.
+Added the literal Possible route ahead of contact-ID routes, preview and strict
+make/dismiss routes. They use the router's existing repo/service/bus instances,
+and api.ts now forwards units. The harness api block remains unchanged.
+The session userId supplies the actor, and service errors retain status/extras.
+No new role restriction or service-to-route import cycle was introduced.
+
+RED: npx vitest run test/caseworkerReviewApi.test.ts exited 1: 16 failed, one
+vocabulary pin passed. Missing handlers returned 404. Nine extra boundary pins
+cover authentication on all four operations, forged actor, null organization
+keys, explicit organization removal and deleted subject refusal.
+GREEN: npx vitest run test/caseworkerReviewApi.test.ts test/contactTriage.test.ts test/contactsCrud.test.ts test/contactOrgNames.test.ts
+exited 0: four files, 130 tests (26 route cases). Root npm run typecheck exited 0.
+Root npx eslint app/src/routes/caseworkerReview.ts app/src/routes/contacts.ts app/src/routes/api.ts app/test/caseworkerReviewApi.test.ts
+exited 0, no errors. Logs: 4.4-red, 4.4-green, 4.4-typecheck, 4.4-lint.
+No contract deviation; the route layer does not duplicate S3 logic.

@@ -460,8 +460,12 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
         phone: c.phone,
         ...(typeof c.firstName === 'string' && { firstName: c.firstName }),
         ...(typeof c.lastName === 'string' && { lastName: c.lastName }),
-        ...(typeof c.voucherSize === 'number' && { voucherSize: c.voucherSize }),
-        ...(typeof c.housingAuthority === 'string' && { housingAuthority: c.housingAuthority }),
+        // Spec 2026-10-06 D20: voucher facts describe a TENANT's voucher. A
+        // partner's leftover housing authority is not one, so a partner seed
+        // carries neither field (the preview candidate copies only what is here).
+        ...(c.type === 'tenant' && typeof c.voucherSize === 'number' && { voucherSize: c.voucherSize }),
+        ...(c.type === 'tenant' &&
+          typeof c.housingAuthority === 'string' && { housingAuthority: c.housingAuthority }),
         has_consent: hasSmsConsent(c),
       });
     }
@@ -642,7 +646,8 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   // POST /api/broadcasts/:id/preview - re-resolve the audience + return the FULL
   // annotated candidate list (bounded by the recipient cap, NOT the old 25-row
   // sample) so the composer can render an editable curated recipient list. Each
-  // candidate carries voucherSize/housingAuthority for the row, plus
+  // candidate carries voucherSize/housingAuthority for the row (tenants only,
+  // spec 2026-10-06 D20), plus
   // `alreadySentThisProperty` (SOFT - an earlier share of this unit MAY have
   // reached the tenant: the SAFE reading of share-sent-outcome D1's recipient
   // state, whatever that share's stored status). `priorRecipientContactIds`

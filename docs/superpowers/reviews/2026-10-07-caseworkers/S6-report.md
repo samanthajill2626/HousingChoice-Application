@@ -25,3 +25,23 @@ npx vitest run test/broadcastApi.test.ts test/contactsBatchReads.test.ts test/au
 Exit 0: three files, 116 tests, zero skipped (6.1-green).
 Root npm run typecheck exited 0 across all five workspaces (6.1-typecheck).
 No contract deviation or unexpected importer/cycle.
+
+## Task 6.2 - tenant-only preview voucher facts
+
+Task 6.1 commit: a667df2b. Dependency proof: partner seeds now resolve; the
+lean Renee Carter fixture is partner-typed with leftover housingAuthority.
+Seed resolution omits voucherSize/housingAuthority unless type is tenant.
+RED: app npx vitest run test/broadcastApi.test.ts -t WITHOUT exited 1,
+one failed / 96 filtered (6.2-red). The first omission assertion observed
+voucherSize 2; the subsequent housingAuthority assertion was not reached.
+GREEN: app npx vitest run test/broadcastApi.test.ts exited 0, 97 tests,
+zero skipped (6.2-green), including the existing tenant facts pin.
+Initial root npm run typecheck exited 2 (6.2-typecheck): the drafted test
+assumed SEED.contacts was required, but SeedDoc declares it optional. The
+fixture access now uses optional chaining; its runtime type/authority pins
+remain. This is a test-typing correction, not a production contract change.
+No contract deviation; no dashboard or seed edits.
+
+After the typing correction, the affected -t WITHOUT case passed (1 passed,
+96 filtered; 6.2-green-final) and root npm run typecheck exited 0 across all
+five workspaces (6.2-typecheck-final).

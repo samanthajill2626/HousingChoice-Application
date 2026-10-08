@@ -37,6 +37,7 @@ import {
   isRetryPromiseLive,
 } from '../src/lib/retrySendWindow.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
+import { SEED } from '../src/lib/seed/lean.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -1163,6 +1164,45 @@ describe('share-broadcast API (M1.8a)', () => {
     // Absent on a contact lacking them (the fields are omitted, not null).
     expect(bare).not.toHaveProperty('voucherSize');
     expect(bare).not.toHaveProperty('housingAuthority');
+  });
+  it('caseworkers D20: a PARTNER seed previews WITHOUT voucher facts (lean Renee Carter is the negative); a tenant seed keeps them', async () => {
+    seedUnit(world);
+    const renee = SEED.contacts?.find((c) => c['contactId'] === 'contact-hastaff-0001') as unknown as ContactItem;
+    // The fixture is what the ruling says it is: a partner holding a housing
+    // authority (a leftover, not a voucher fact).
+    expect(renee.type).toBe('partner');
+    expect(typeof renee.housingAuthority).toBe('string');
+    // A voucher size on the copy too, so BOTH fields are proved stripped.
+    world.contacts.push({ ...renee, voucherSize: 2 });
+    seedTenant(world, {
+      contactId: 'c-voucher',
+      phone: '+15550100071',
+      voucherSize: 3,
+      housingAuthority: 'Atlanta Housing Authority',
+    } as Partial<ContactItem>);
+    const { app } = makeWebhookHarness({ world });
+    const created = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId: 'unit-1', body_template: 'Hi!', seedContactIds: ['contact-hastaff-0001', 'c-voucher'] });
+    expect(created.status).toBe(201);
+    const res = await request(app)
+      .post(`/api/broadcasts/${created.body.broadcastId}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.unresolvedSeedIds).toEqual([]);
+    const rows = res.body.candidates as Array<Record<string, unknown>>;
+    const partnerRow = rows.find((c) => c['contactId'] === 'contact-hastaff-0001');
+    expect(partnerRow).toMatchObject({ firstName: 'Renee', lastName: 'Carter', seeded: true, has_consent: false });
+    expect(partnerRow).not.toHaveProperty('voucherSize');
+    expect(partnerRow).not.toHaveProperty('housingAuthority');
+    expect(rows.find((c) => c['contactId'] === 'c-voucher')).toMatchObject({
+      voucherSize: 3,
+      housingAuthority: 'Atlanta Housing Authority',
+    });
   });
 
   it('alreadySentThisProperty + priorRecipientContactIds reflect a PRIOR sent broadcast of this unit: set by a recipient who REACHED (sent, delivered) and by one still in flight in a sending share', async () => {

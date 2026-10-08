@@ -94,7 +94,7 @@ No extra typed fake, fault, timeout, contract mismatch or scope deviation.
 
 ## Task 2.5 - all deletion scopes and fake unit paging
 
-Commit: the Task 2.5 implementation commit containing this report entry.
+Commit: 7e4dee78.
 ListUnitsOpts.deleted now accepts any. Real index/scan reads omit both the
 soft-delete filter and its otherwise-unused expression name for that scope.
 FakeWorld applies the scope on every unit read; list now follows its unitId
@@ -119,3 +119,38 @@ wording correction, not a contract or implementation deviation.
 No extra typed fake, fault, timeout or scope widening was needed. New and added
 lines are ASCII; git diff --check passed. Each task's real and fake changes were
 committed together only after root typecheck and the prescribed GREEN checks.
+
+## S2 exit and downstream handoff
+
+Completed Tasks 2.1-2.5, with one implementation commit per task:
+5161cf03, 64f9d7ac, a7b7553d, bc870f46, 7e4dee78.
+Each task commit includes its incremental report entry and the requested
+GPT-6 Astra co-author trailer. Every pre-commit read used bare git status
+and checked the resolved worktree MERGE_HEAD path; it was absent every time.
+All staging used explicit owned paths.
+
+After the last implementation commit:
+- W:/tmp/caseworkers/app: npx vitest run test/caseworkerRepoParity.integration.test.ts
+  exited 0, 1 file / 44 tests passed, zero skipped (22 real + 22 fake).
+- W:/tmp/caseworkers: npm run typecheck exited 0 across all five workspaces.
+- git diff --check 8261def2..HEAD and the whole-slice added-line ASCII check
+  passed. The post-implementation git status was clean.
+
+Final logs: exit-parity and exit-typecheck, with verbatim output, command
+metadata and exact exit files under .superpowers/sdd/S2/. All owned process
+sessions completed and no timeout fired. An explicit final scan of every S2 log
+found no DynamoDB control-plane fault. No aggregate test, smoke or e2e suite was
+run; parent checkpoints own them. No live application ports, environment edits,
+infrastructure mutation, deployment, main sync/merge or cleanup occurred.
+
+Ready for S3. Preserve raw classification_revision guards; use the updated row
+from setTypeIfCurrent for events; use deleted:any for both unit refusal reads.
+The fake pointer rows retain their unknown sentinel: S3/S4 pointer refusal tests
+must use pointer ids. The frozen contact-partition fake was not edited. The four
+named full ContactsRepo fakes and three full ConversationsRepo fakes compile;
+no additional compile-forced fake change was needed. OrgRecordField remains
+unchanged for S5; the shared display projection remains unchanged for S6.
+
+Only the documented fixture actor correction and two evidence-description
+corrections differ from plan text. No implementation contract, importer, cycle,
+production behavior outside S2 or unresolved finding was introduced.

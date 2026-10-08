@@ -59,10 +59,16 @@ import {
   type UnitStatus,
   type UnitsRepo,
 } from '../repos/unitsRepo.js';
-import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
+import {
+  createContactsRepo,
+  type ContactItem,
+  type ContactsRepo,
+  type RecipientDisplay,
+} from '../repos/contactsRepo.js';
 import {
   createListingSendsRepo,
   toListingSendRow,
+  type ListingSendRecipientFacts,
   type ListingSendsRepo,
 } from '../repos/listingSendsRepo.js';
 import { createPlacementsRepo, type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
@@ -78,7 +84,7 @@ export interface UnitsRouterDeps {
   auditRepo?: AuditRepo;
   /** BE3/C3: resolve a roster contact's display name/company for denormalization. */
   contactsRepo?: ContactsRepo;
-  /** BE4/C4: the listing-send record (the "Sent to tenants" recipients read). */
+  /** BE4/C4: the listing-send record (the "Sent to" recipients read). */
   listingSendsRepo?: ListingSendsRepo;
   /** FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched). */
   placementsRepo?: PlacementsRepo;
@@ -140,6 +146,19 @@ function displayNameOfContact(contact: {
   const last = typeof contact.lastName === 'string' ? contact.lastName.trim() : '';
   const joined = [first, last].filter((p) => p.length > 0).join(' ');
   return joined.length > 0 ? joined : undefined;
+}
+
+/**
+ * caseworkers D20 (plan 3.7, ruling R3-F3): a recipients row's contact type and
+ * role, from the recipient display projection. `role` only when it holds text;
+ * a contact that did not resolve never reaches here (its row omits both).
+ */
+function recipientFactsOf(contact: RecipientDisplay): ListingSendRecipientFacts {
+  const role = typeof contact.role === 'string' ? contact.role.trim() : '';
+  return {
+    ...(contact.type !== undefined && { type: contact.type }),
+    ...(role.length > 0 && { role }),
+  };
 }
 
 /**
@@ -968,7 +987,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // a draft created with seedContactIds sends through the same fan-out and
   // records listing_sends per recipient. No separate individual-send route.
 
-  // GET /api/units/:unitId/recipients — the "Sent to tenants" list (BE4/C4).
+  // GET /api/units/:unitId/recipients - the property's "Sent to" list (BE4/C4).
   // Returns { recipients: ListingSendRow[] } from listByUnit. Mirrors the units
   // 404 posture: an unknown unit is a 404 (consistent with GET /:unitId); a real
   // unit with zero recipients returns []. (`recipients` is a distinct segment
@@ -1003,10 +1022,14 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // simply absent from the map and a failed batch leaves the map empty, so
     // rows serve nameless (the dashboard falls back to the id) - never a 500.
     const namesByContact = new Map<string, string | undefined>();
+    const factsByContact = new Map<string, ListingSendRecipientFacts>();
     try {
-      const displays = await contacts.getDisplaysByIds(rows.map((row) => row.contactId));
+      // caseworkers D20 (ruling R3-F4): the recipients-only projection also
+      // carries type and role, so the dashboard can label a non-tenant row.
+      const displays = await contacts.getRecipientDisplaysByIds(rows.map((row) => row.contactId));
       for (const [contactId, contact] of displays) {
         namesByContact.set(contactId, displayNameOfContact(contact));
+        factsByContact.set(contactId, recipientFactsOf(contact));
       }
     } catch (err) {
       log.warn({ err, unitId }, 'recipients name hydration failed (best-effort)');
@@ -1015,7 +1038,12 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       recipients: rows.map((row) => {
         const pairing = toursByTenant?.get(row.contactId);
         const signal = pairing !== undefined ? deriveTourSignal(pairing) : undefined;
-        return toListingSendRow(row, signal, namesByContact.get(row.contactId));
+        return toListingSendRow(
+          row,
+          signal,
+          namesByContact.get(row.contactId),
+          factsByContact.get(row.contactId),
+        );
       }),
     });
   });
@@ -1274,7 +1302,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // 404 unknown unit (matches the sibling reads). A finished share of this
   // unit appears as ONE `broadcast_sent` row (finalize's audit), whose
   // tenantCount is recounted from the share at read time (share-sent-outcome
-  // D5); the per-tenant view is the "Sent to tenants" card (GET
+  // D5); the per-recipient view is the "Sent to" card (GET
   // /:unitId/recipients).
   router.get('/:unitId/activity', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');

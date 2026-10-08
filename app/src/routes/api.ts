@@ -961,7 +961,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
       // BE3: POST/DELETE /:id/contacts resolve a roster contact's name/company.
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
-      // BE4: GET /:id/recipients (the "Sent to tenants" recipients read).
+      // BE4: GET /:id/recipients (the "Sent to" recipients read).
       listingSendsRepo: listingSends,
       // listing-response-tour-chip: derive the per-row tour chip (byUnit GSI).
       toursRepo: tours,

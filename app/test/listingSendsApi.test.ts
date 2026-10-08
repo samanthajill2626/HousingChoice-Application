@@ -1,7 +1,7 @@
-// BE4/C4 route tests -- the sent-to-tenants / listings-sent endpoints:
+// BE4/C4 route tests -- the "Sent to" / listings-sent endpoints:
 //   GET /api/units/:unitId/recipients            -> { recipients: ListingSendRow[] }
 //   GET /api/contacts/:contactId/listings-sent   -> { sent: ListingSendRow[] }
-// Both query directions return the SAME row. The former response PATCH route is
+// The units direction adds optional recipient facts. The former response PATCH route is
 // GONE (the `response` label was removed end to end) -- a 404 pin guards its removal.
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
@@ -38,7 +38,7 @@ function seedTenant(world: ReturnType<typeof createFakeWorld>, contactId: string
   return item;
 }
 
-describe('GET /api/units/:unitId/recipients (BE4/C4 — "Sent to tenants")', () => {
+describe('GET /api/units/:unitId/recipients (BE4/C4 - "Sent to")', () => {
   it('returns the unit recipients from listByUnit', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
@@ -143,7 +143,7 @@ describe('GET /api/contacts/:contactId/listings-sent (BE4/C4 — "Listings sent"
   });
 });
 
-describe('the two directions return the SAME row', () => {
+describe('the two directions share row fields; units adds recipient facts', () => {
   it('a single seeded row surfaces in both units/recipients and contacts/listings-sent', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-x');
@@ -159,7 +159,12 @@ describe('the two directions return the SAME row', () => {
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
 
-    expect(byUnit.body.recipients[0]).toEqual(byContact.body.sent[0]);
+    // caseworkers D20 (plan 3.7): the units side ALSO carries the recipient's
+    // type (and role when set); the contact side does not (its contact is the
+    // page owner). Otherwise the two directions return the same row.
+    expect(byUnit.body.recipients[0]).toEqual({ ...byContact.body.sent[0], type: 'tenant' });
+    expect(byContact.body.sent[0]).not.toHaveProperty('type');
+    expect(byContact.body.sent[0]).not.toHaveProperty('role');
   });
 });
 
@@ -369,5 +374,75 @@ describe('listing-send memory writes (no `response` field)', () => {
     expect(resent?.created_at).toBe(first?.created_at); // first-write furniture preserved
     // No `response` label is ever written.
     expect(resent).not.toHaveProperty('response');
+  });
+});
+describe('caseworkers D20: recipients rows carry the contact type and role', () => {
+  it('a resolved row carries type (and role when it holds text); an unresolved row omits both; listings-sent is unchanged', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedTenant(world, 'c-ten1');
+    world.contacts.push({
+      contactId: 'c-pt01',
+      type: 'partner',
+      status: 'active',
+      phone: '+15550109001',
+      firstName: 'Cora',
+      lastName: 'Reyes',
+      role: '  Caseworker  ',
+    });
+    world.contacts.push({ contactId: 'c-pt02', type: 'partner', status: 'active', phone: '+15550109002', role: '   ' });
+    world.contacts.push({ contactId: 'c-ll01', type: 'landlord', status: 'active', phone: '+15550109003' });
+    for (const contactId of ['c-ten1', 'c-pt01', 'c-pt02', 'c-ll01', 'c-gone']) {
+      await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId, sentAt: SENT_AT });
+    }
+
+    const res = await request(app)
+      .get('/api/units/unit-1/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const byId = new Map(
+      (res.body.recipients as Array<Record<string, unknown>>).map((r) => [r['contactId'] as string, r]),
+    );
+    expect(byId.get('c-ten1')).toMatchObject({ type: 'tenant' });
+    expect(byId.get('c-ten1')).not.toHaveProperty('role');
+    expect(byId.get('c-pt01')).toMatchObject({ type: 'partner', role: 'Caseworker', tenantName: 'Cora Reyes' });
+    // A blank role is no role.
+    expect(byId.get('c-pt02')).toMatchObject({ type: 'partner' });
+    expect(byId.get('c-pt02')).not.toHaveProperty('role');
+    expect(byId.get('c-ll01')).toMatchObject({ type: 'landlord' });
+    // No contact row: the fields are OMITTED, never null (ruling R3-F3).
+    expect(byId.get('c-gone')).not.toHaveProperty('type');
+    expect(byId.get('c-gone')).not.toHaveProperty('role');
+
+    const contactSide = await request(app)
+      .get('/api/contacts/c-pt01/listings-sent')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(contactSide.status).toBe(200);
+    expect(contactSide.body.sent[0]).not.toHaveProperty('type');
+    expect(contactSide.body.sent[0]).not.toHaveProperty('role');
+  });
+
+  it('a failed display batch serves the rows with neither names nor type (best-effort, never a 500)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    // Named, so the OLD read path (getDisplaysByIds, not stubbed) would serve a
+    // tenantName - the RED evidence that the route switched methods.
+    const named = seedTenant(world, 'c-ten2');
+    named.firstName = 'Tia';
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-ten2', sentAt: SENT_AT });
+    world.contactsRepo.getRecipientDisplaysByIds = async () => {
+      throw new Error('dynamo down');
+    };
+
+    const res = await request(app)
+      .get('/api/units/unit-1/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.recipients[0]).not.toHaveProperty('tenantName');
+    expect(res.body.recipients[0]).not.toHaveProperty('type');
+    expect(res.body.recipients[0]).not.toHaveProperty('role');
   });
 });

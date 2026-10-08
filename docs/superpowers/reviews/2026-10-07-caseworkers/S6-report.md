@@ -60,3 +60,22 @@ GREEN: app npx vitest run test/broadcastFanOut.test.ts test/sendReconcile.test.t
 exited 0: three files, 378 tests, zero skipped (6.3-green).
 No contract deviation or import cycle. All existing fan-out gates passed.
 Root npm run typecheck exited 0 across all five workspaces (6.3-typecheck).
+
+## Task 6.4 - units recipients display facts
+
+Task 6.3 commit: 94196178. Dependency proof: S2 real/fake recipient projection
+and exported RecipientDisplay are present. Only units recipients switches to
+that projection. The shared display projection and contact listings-sent stay
+unchanged. Wire rows add optional type and nonblank trimmed role, omitting
+both for missing or failed lookups. Persisted tenantName remains unchanged.
+Both planned route pins and the comment-only api/lib seams moved together.
+The role fixture includes spaces to prove trimming, and batch-failure absence
+also explicitly checks role. Test headings/comments now describe the wire split.
+RED: app npx vitest run test/listingSendsApi.test.ts test/contactsBatchReads.test.ts
+exited 1: four failed, 24 passed (6.4-red). Shared-row/type assertions saw no
+type; the new batch spy saw zero calls; the failed new projection stub was
+unused and the old path still returned Tia. Later role checks were not reached.
+GREEN: app npx vitest run test/listingSendsApi.test.ts test/contactsBatchReads.test.ts test/unitsApi.test.ts
+exited 0: three files, 55 tests, zero skipped (6.4-green).
+No production contract deviation, new dependency or shared projection widening.
+Root npm run typecheck exited 0 across all five workspaces (6.4-typecheck).

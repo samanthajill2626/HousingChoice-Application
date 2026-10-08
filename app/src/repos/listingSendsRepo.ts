@@ -1,10 +1,10 @@
-// listing-sends repo (BE4/C4) -- the "Sent to tenants" / "Properties sent" record.
+// listing-sends repo (BE4/C4) -- the "Sent to" / "Properties sent" record.
 //
 // ONE row per unit<->contact pairing captures that a property (a `unit`, the
-// tenant-facing "home") was sent to a tenant. Two read directions share these
+// tenant-facing "home") was sent to a contact (a tenant, or a partner - spec 2026-10-06 D20). Two read directions share these
 // rows:
-//   - listByUnit(unitId)       -> the unit's "Sent to tenants" roster (base table).
-//   - listByContact(contactId) -> the tenant's "Properties sent" (byContact GSI,
+//   - listByUnit(unitId)       -> the unit's "Sent to" roster (base table).
+//   - listByContact(contactId) -> the contact's "Properties sent" (byContact GSI,
 //     newest-first by sentAt).
 //
 // KEY shape (lib/tables.ts): PK unitId, SK contactId -- one row per pairing, so a
@@ -37,6 +37,7 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { TourSignal } from '../lib/listingSendTour.js';
+import type { ContactType } from './contactsRepo.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /** How the property reached the tenant (C4 `ListingSendRow.via`). */
@@ -113,6 +114,18 @@ export interface ListingSendRow {
   via: ListingSendVia;
   broadcastId?: string;
   tour?: TourSignal;
+  /** caseworkers D20 (plan 3.7): the recipient's contact type - on the units
+   *  recipients read ONLY, and only when the contact resolves (absent, never
+   *  null, otherwise). The dashboard labels a non-tenant row by it. */
+  type?: ContactType;
+  /** caseworkers D20: the recipient's role, when it holds text (same rules as `type`). */
+  role?: string;
+}
+
+/** caseworkers D20: the recipient facts the units recipients read attaches to a row. */
+export interface ListingSendRecipientFacts {
+  type?: ContactType;
+  role?: string;
 }
 
 export interface ListingSendsRepo {
@@ -167,6 +180,7 @@ export function toListingSendRow(
   item: ListingSendItem,
   tour?: TourSignal,
   tenantName?: string,
+  recipient?: ListingSendRecipientFacts,
 ): ListingSendRow {
   // share-sent-outcome D7: only a counted row is projected (the readers filter
   // the rest), and a counted row always carries sentAt - the guard documents it.
@@ -181,6 +195,8 @@ export function toListingSendRow(
     via: item.via,
     ...(item.broadcastId !== undefined && { broadcastId: item.broadcastId }),
     ...(tour !== undefined && { tour }),
+    ...(recipient?.type !== undefined && { type: recipient.type }),
+    ...(recipient?.role !== undefined && { role: recipient.role }),
   };
 }
 
@@ -307,7 +323,7 @@ export function createListingSendsRepo(deps: RepoDeps = {}): ListingSendsRepo {
 
     async listByUnit(unitId) {
       // Paged to exhaustion - one Query caps at 1 MB, and a busy property's
-      // older sends would otherwise vanish from the "Sent to tenants" card.
+      // older sends would otherwise vanish from the "Sent to" card.
       // share-sent-outcome D7: the base table holds un-counted rows too - the
       // reader drops them (the GSI drops them by absence).
       const rows = await queryAll<ListingSendItem>(doc, {

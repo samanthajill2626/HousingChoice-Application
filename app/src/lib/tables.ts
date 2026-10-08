@@ -403,7 +403,7 @@ export const TABLES: readonly TableSpec[] = [
     // NEW in BE4/C4 (NOT in the doc §5 9-table model — new-dashboard build): the
     // listing-send record. ONE row per unit<->contact pairing captures that a
     // property (a `unit`, tenant-facing "home") was sent to a tenant. Two read
-    // directions share these rows: GET /api/units/:id/recipients ("Sent to tenants") reads
+    // directions share these rows: GET /api/units/:id/recipients ("Sent to") reads
     // the base table by unitId; GET /api/contacts/:id/listings-sent reads the
     // byContact GSI by contactId.
     //

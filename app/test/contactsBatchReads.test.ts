@@ -8,10 +8,12 @@
 // per-row fan-out is unmistakable (N getById calls) and pins the batched shape
 // (zero getById, one batch call).
 //
-// Two batch primitives are in play, and which one a site uses is a real
+// Three batch primitives are in play, and which one a site uses is a real
 // decision, not an accident:
 //   - getDisplaysByIds  - projects contactId/firstName/lastName/phone. Used
 //     where the route only labels a row. Strictly less data over the wire.
+//   - getRecipientDisplaysByIds - the display projection plus `type` and
+//     `role`. Used ONLY by the units recipients read (the "Sent to" row label).
 //   - getManyByIds      - full items. Used where the route reads attributes
 //     outside that projection (roster reads `company`; the send path re-fences
 //     on `type`/`sms_opt_out`/`sms_unreachable`).
@@ -74,11 +76,12 @@ function ids(prefix: string, n = N): string[] {
   return Array.from({ length: n }, (_, i) => `${prefix}-${i}`);
 }
 
-/** Spy both the per-row read and the two batch primitives on the shared repo. */
+/** Spy both the per-row read and the three batch primitives on the shared repo. */
 function watchReads(world: FakeWorld) {
   return {
     getById: vi.spyOn(world.contactsRepo, 'getById'),
     getDisplaysByIds: vi.spyOn(world.contactsRepo, 'getDisplaysByIds'),
+    getRecipientDisplaysByIds: vi.spyOn(world.contactsRepo, 'getRecipientDisplaysByIds'),
     getManyByIds: vi.spyOn(world.contactsRepo, 'getManyByIds'),
   };
 }
@@ -159,7 +162,10 @@ describe('contact read amplification - property (unit) routes', () => {
     expect(res.status).toBe(200);
     expect(res.body.recipients).toHaveLength(N);
     expect(reads.getById).not.toHaveBeenCalled();
-    expect(reads.getDisplaysByIds).toHaveBeenCalledTimes(1);
+    // caseworkers D20 (ruling R3-F4): the route reads the SECOND projection
+    // (names plus type and role), still ONE batch for the page.
+    expect(reads.getRecipientDisplaysByIds).toHaveBeenCalledTimes(1);
+    expect(reads.getDisplaysByIds).not.toHaveBeenCalled();
     // Pin the RENDERED name too (adversarial review r1 finding 6): a call-count
     // assertion alone would still pass if the enrichment loop were deleted.
     const row = (res.body.recipients as Array<Record<string, unknown>>).find(

@@ -2,7 +2,7 @@
 //
 // PURE - no I/O. Given ALL tours for ONE (unit, tenant) pairing, collapse them
 // into the single most-progressed qualifying chip signal the rosters render
-// ("Sent to tenants" on the property page, "Properties sent" on the tenant
+// ("Sent to" on the property page, "Properties sent" on the contact
 // page). This is the single source of truth for the chip; both GET projections
 // call it after grouping their tours strictly by the pairing.
 //

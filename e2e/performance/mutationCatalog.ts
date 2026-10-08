@@ -137,6 +137,11 @@ export const DASHBOARD_MUTATION_CATALOG: readonly DashboardMutationCatalogEntry[
   entry(ENDPOINTS, 'deleteOrg', 'request:DELETE', '/api/organizations/:orgId'),
   entry(ENDPOINTS, 'resolveNotOnList', 'request:POST', '/api/organizations/not-on-list/resolve'),
   entry(ENDPOINTS, 'runOrgRewriteAgain', 'request:POST', '/api/organizations/rewrite/run-again'),
+  // Caseworkers (spec 2026-10-06 D19): workflow_only - both fire only from a
+  // click (the conversion dialog's "Make caseworker", a Possible row's "Hide").
+  // The preview and the Possible list are GETs and are never catalogued.
+  entry(ENDPOINTS, 'makeCaseworker', 'request:POST', '/api/contacts/:contactId/caseworker-review'),
+  entry(ENDPOINTS, 'dismissPossibleCaseworker', 'request:POST', '/api/contacts/:contactId/caseworker-review'),
   entry(ENDPOINTS, 'subscribePush', 'request:POST', '/api/push/subscriptions'),
   entry(ENDPOINTS, 'unsubscribePush', 'request:DELETE', '/api/push/subscriptions'),
   entry(ENDPOINTS, 'sendPushTest', 'request:POST', '/api/push/test'),

@@ -27,6 +27,8 @@ import type {
   ContactMediaPage,
   ContactPatch,
   ContactsPage,
+  CaseworkerPreview,
+  PossibleCaseworkerRow,
   ContactTimelinePage,
   ContactType,
   ContactVocabulary,
@@ -1461,6 +1463,56 @@ export async function updateContact(contactId: string, patch: ContactPatch): Pro
   const res = await request<{ contact: Contact }>(
     `/api/contacts/${encodeURIComponent(contactId)}`,
     { method: 'PATCH', body: patch },
+  );
+  return res.contact;
+}
+
+// --- Caseworkers (spec 2026-10-06 D19, D22; plan 3.5) ------------------------
+
+/** GET /api/contacts/possible-caseworkers - live contacts that look like
+ *  caseworkers but are not yet, each with the signals that put it there. One
+ *  server read of three partitions: only the Caseworkers page reads it.
+ *  Unwrapped from { rows }. */
+export async function listPossibleCaseworkers(signal?: AbortSignal): Promise<PossibleCaseworkerRow[]> {
+  const res = await request<{ rows: PossibleCaseworkerRow[] }>('/api/contacts/possible-caseworkers', {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.rows;
+}
+
+/** GET /api/contacts/:contactId/caseworker-review/preview - the conversion's
+ *  read-only preview: refusals with their blocking ids, what it removes, the
+ *  threads it re-types and leaves, the organization it would write. Read ONLY
+ *  when the conversion dialog opens. 404 contact_not_found, 400
+ *  caseworker_team_member. */
+export function previewCaseworker(contactId: string, signal?: AbortSignal): Promise<CaseworkerPreview> {
+  return request<CaseworkerPreview>(
+    `/api/contacts/${encodeURIComponent(contactId)}/caseworker-review/preview`,
+    { ...(signal !== undefined && { signal }) },
+  );
+}
+
+/** POST /api/contacts/:contactId/caseworker-review { action: 'make',
+ *  organization? } - the caseworker conversion (D19). `organization` rides
+ *  ONLY when staff changed the dialog's picker ('' clears it). 409 with a
+ *  refusal code + `refusals`, 409 contact_changed, 422 org_not_on_list, 404
+ *  contact_not_found, 400. Unwrapped from { contact }. */
+export async function makeCaseworker(contactId: string, body: { organization?: string }): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/caseworker-review`,
+    { method: 'POST', body: { action: 'make', ...body } },
+  );
+  return res.contact;
+}
+
+/** POST /api/contacts/:contactId/caseworker-review { action: 'dismiss' } -
+ *  "Not a caseworker": hides the contact from Possible caseworkers for good
+ *  (no UI undo). 400 caseworker_dismiss_not_allowed. Unwrapped from
+ *  { contact }. */
+export async function dismissPossibleCaseworker(contactId: string): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/caseworker-review`,
+    { method: 'POST', body: { action: 'dismiss' } },
   );
   return res.contact;
 }

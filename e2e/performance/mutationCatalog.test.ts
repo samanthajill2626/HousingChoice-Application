@@ -364,7 +364,7 @@ describe('dashboard mutation inventory', () => {
   it('matches the complete checked-in catalog in both directions without line fingerprints', () => {
     const discoveredFingerprints = catalogedRaw.map(fingerprint).sort();
     const checkedInFingerprints = DASHBOARD_MUTATION_CATALOG.map((entry) => entry.fingerprint).sort();
-    // 118 = the 102 pre-manual-trigger mutations + runExtraction
+    // 120 = the 102 pre-manual-trigger mutations + runExtraction
     // (manual-extraction-trigger 4.6's POST /api/contacts/:contactId/extraction-run)
     // + the three Mark-unread toggle routes (call-inbox-unread: markInboxUnread x2,
     // markConversationUnread)
@@ -375,7 +375,9 @@ describe('dashboard mutation inventory', () => {
     // + reopenTour (tour auto-close: POST /api/tours/:tourId/reopen).
     // + the seven organization-list writes (clean-org-names: checkOrgText,
     // addOrg, patchOrg, mergeOrg, deleteOrg, resolveNotOnList, runOrgRewriteAgain).
-    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(118);
+    // + makeCaseworker and dismissPossibleCaseworker (caseworkers: POST
+    // /api/contacts/:contactId/caseworker-review, one function per action).
+    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(120);
     expect(new Set(discoveredFingerprints).size).toBe(discoveredFingerprints.length);
     expect(new Set(checkedInFingerprints).size).toBe(checkedInFingerprints.length);
     expect(checkedInFingerprints).toEqual(discoveredFingerprints);

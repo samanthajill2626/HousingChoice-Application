@@ -12,6 +12,10 @@ import {
   applyTourRosterActionNow,
   acceptSuggestion,
   addOrg,
+  dismissPossibleCaseworker,
+  listPossibleCaseworkers,
+  makeCaseworker,
+  previewCaseworker,
   checkOrgText,
   deleteOrg,
   getNotOnList,
@@ -738,5 +742,56 @@ it('a housing authority accept carries the chosen value; without one the body is
   expect(request).toHaveBeenLastCalledWith('/api/contacts/c1/suggestions/housingAuthority/accept', {
     method: 'POST',
     body: { ...identity, value: 'Atlanta Housing Authority' },
+  });
+});
+
+it('caseworker reads unwrap their envelopes and pass the abort signal', async () => {
+  const signal = new AbortController().signal;
+  const row = {
+    contactId: 't9',
+    firstName: 'Dana',
+    type: 'tenant',
+    role: 'Case manager',
+    signals: ['role_mentions'],
+  };
+  vi.mocked(request).mockResolvedValueOnce({ rows: [row] });
+  await expect(listPossibleCaseworkers(signal)).resolves.toEqual([row]);
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/possible-caseworkers', { signal });
+
+  const preview = {
+    contactId: 'c 1',
+    alreadyCaseworker: false,
+    refusals: [],
+    removes: { housingAuthority: 'Atlanta Housing Authority', pendingSuggestions: 2 },
+    threads: { retype: 1, leftShared: 0, leftOther: 0 },
+    organization: { source: 'none' },
+  };
+  vi.mocked(request).mockResolvedValueOnce(preview);
+  await expect(previewCaseworker('c 1', signal)).resolves.toEqual(preview);
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/c%201/caseworker-review/preview', { signal });
+});
+
+it('caseworker writes POST the action body and unwrap { contact }', async () => {
+  const contact = { contactId: 'c1', type: 'partner', role: 'Caseworker' };
+  vi.mocked(request).mockResolvedValueOnce({ contact });
+  await expect(makeCaseworker('c1', {})).resolves.toEqual(contact);
+  // No organization key at all: the server decides (stored, else derived).
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/c1/caseworker-review', {
+    method: 'POST',
+    body: { action: 'make' },
+  });
+
+  vi.mocked(request).mockResolvedValueOnce({ contact });
+  await makeCaseworker('c1', { organization: '' });
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/c1/caseworker-review', {
+    method: 'POST',
+    body: { action: 'make', organization: '' },
+  });
+
+  vi.mocked(request).mockResolvedValueOnce({ contact: { contactId: 'c 1', type: 'tenant' } });
+  await expect(dismissPossibleCaseworker('c 1')).resolves.toEqual({ contactId: 'c 1', type: 'tenant' });
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/c%201/caseworker-review', {
+    method: 'POST',
+    body: { action: 'dismiss' },
   });
 });

@@ -2173,6 +2173,19 @@ export interface Contact {
   /** ISO 8601 - server-stamped on every staff_notes write (a clear included).
    *  Renders as "Last edited <date>" while the box holds text. */
   staff_notes_updated_at?: string;
+  /** The helper organization a PARTNER works for (spec 2026-10-06 D17): one
+   *  list name of either kind; never stored as '' (a clear REMOVEs it).
+   *  MIRRORS ContactItem.organization. */
+  organization?: string;
+  /** Server-owned (D19): 'dismissed' hides the contact from Possible
+   *  caseworkers for good. Never sent by the dashboard (400 if it is). */
+  caseworker_review?: 'dismissed';
+  /** Server-owned (D19): what the caseworker conversion removed, and the old
+   *  type. Never sent by the dashboard. */
+  caseworker_conversion?: CaseworkerConversionRecord;
+  /** Server-owned (D21): staff overrode the type, so a re-import leaves type,
+   *  status, housingAuthority and agency alone. Never sent by the dashboard. */
+  type_source?: 'manual';
   sms_opt_out?: boolean;
   sms_unreachable?: boolean;
   /** Voice Phase 1 (spec §8): staff-set company do-not-call. INDEPENDENT of
@@ -2275,6 +2288,10 @@ export interface ContactPatch {
    *  beat with 409 `staff_notes_stale` + `{ contact }` (the current one).
    *  A guard, never stored. Omit it for last-write-wins. */
   staff_notes_expected_updated_at?: string | null;
+  /** A partner's organization (spec D17): a list name of either kind (422
+   *  org_not_on_list otherwise); '' clears it. Only the partner edit form
+   *  sends it. */
+  organization?: string;
   company?: string;
   housingAuthority?: string;
   /** The tenant's helper organization (see Contact.agency). PATCH-allowlisted
@@ -2318,6 +2335,61 @@ export interface ContactsPage {
   contacts: Contact[];
   /** Opaque cursor to fetch the next page, or null when exhausted. */
   nextCursor: string | null;
+}
+
+// --- Caseworkers (spec 2026-10-06 D16-D22) -----------------------------------
+// MIRRORED field for field from app/src/services/caseworkerConversion.ts,
+// app/src/lib/caseworkers.ts and app/src/repos/contactsRepo.ts (plan 3.2).
+
+/** ContactItem.caseworker_conversion - what the conversion removed. */
+export interface CaseworkerConversionRecord {
+  /** ISO 8601. */
+  at: string;
+  /** The actor's userId (the session's `req.user.userId`, as audit rows record actors) - never an email. */
+  by: string;
+  fromType: ContactType;
+  fromRole?: string;
+  /** The removed housing authority, when there was one. */
+  housingAuthority?: string;
+  /** The cleared agency, when it was non-empty. */
+  agency?: string;
+}
+
+/** Why a contact is on the Possible caseworkers list (D19, D22). */
+export type PossibleSignal = 'role_mentions' | 'ai_note' | 'relationship' | 'partner_no_role';
+
+/** One record that blocks the conversion, with its id so the dialog can link
+ *  to it. Ordered placement, tour, landlord, roster. */
+export type CaseworkerRefusal =
+  | { code: 'caseworker_open_placement'; placementId: string }
+  | { code: 'caseworker_open_tour'; tourId: string }
+  | { code: 'caseworker_landlord_of_record'; unitId: string }
+  | { code: 'caseworker_on_roster'; unitId: string };
+
+export type OrganizationSource = 'request' | 'stored' | 'list_match' | 'carried' | 'none';
+
+/** GET /api/contacts/:contactId/caseworker-review/preview. */
+export interface CaseworkerPreview {
+  contactId: string;
+  alreadyCaseworker: boolean;
+  refusals: CaseworkerRefusal[];
+  removes: { housingAuthority?: string; agency?: string; pendingSuggestions: number };
+  /** leftShared = another live contact holds the phone or address, or the
+   *  participant contactId is another contact; leftOther = type-less rows only. */
+  threads: { retype: number; leftShared: number; leftOther: number };
+  organization: { value?: string; source: Exclude<OrganizationSource, 'request'> };
+}
+
+/** One row of GET /api/contacts/possible-caseworkers ({ rows }). */
+export interface PossibleCaseworkerRow {
+  contactId: string;
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
+  type: 'tenant' | 'landlord' | 'partner';
+  role?: string;
+  /** Non-empty, in PossibleSignal declaration order. */
+  signals: PossibleSignal[];
 }
 
 // --- Units (legacy reuse — verbatim) ----------------------------------------

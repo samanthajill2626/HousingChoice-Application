@@ -198,3 +198,25 @@ issue contact-search-popover-below-viewport after checking for duplicates.
 The mislabeled feature repeat is explicitly excluded from baseline evidence.
 Original clean feat/caseworkers HEAD 5c45536d restored, all owned commands
 ended and lane 13 ports free. Task 10.4 remains baseline-red, not complete.
+
+## Task 10.5 - conversion and read-only refusals
+
+Resumed at clean 2cb94e3b after the C6 proposal record; original shared picker
+source/tests remain untouched and Task 10.4 remains baseline-red. Added the
+planned caseworkers.spec.ts with exact bound selectors, own run-unique data,
+and read-only Tasha/Marcus preview refusals. No selector deviation.
+
+All commands cwd W:/tmp/caseworkers. Browser command: npm run e2e
+-w @housingchoice/e2e -- tests/dashboard-next/caseworkers.spec.ts, hard cap
+2700 seconds. Genuine non-vacuity: final expected thread temporarily tenant_1to1;
+exit 1, 1 failed / 1 passed in 11.4s, exactly at line 244, received partner_1to1.
+Restored the correct assertion; exactly one tenant_1to1 pin remains before
+conversion. Green: exit 0, 2 passed in 10.7s. npm run typecheck
+-w @housingchoice/e2e and npx eslint e2e/tests/dashboard-next/caseworkers.spec.ts
+both exit 0. Whole new-file ASCII and git diff --check pass.
+
+Raw command/log/exit labels: 10.5-nonvacuity, 10.5-green, 10.5-typecheck,
+10.5-lint. Prior artifacts copied to 10.5-before-nonvacuity-2026-10-08T17-58-23-840Z;
+non-vacuity screenshot/video/context copied to
+artifacts/10.5-nonvacuity-proof-2026-10-08T17-59-14-338Z/ before rerun.
+No force click, source fix, seed mutation, or C6 patch. Task 10.5 complete.

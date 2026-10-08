@@ -132,7 +132,7 @@ a different name, not a gap to build** — the audit's job is to find the mappin
   send-listing-to-one-tenant route; the Phase-1 mechanism is the broadcast composer
   (`/listings/:unitId` → kebab "More actions" → menuitem "Broadcast to tenants" → fill
   `Message` → "Preview recipients"
-  → curate → "Send to N tenant(s)"), which sends a templated SMS (`[Address]`, `[Rent]`,
+  -> curate -> "Send to N recipient(s)"), which sends a templated SMS (`[Address]`, `[Rent]`,
   `[FlyerLink]`) and records a `listing_send` row. **Curate to ONE tenant** with
   "Deselect all" → check the tenant's row by their **first name** (preview rows show the
   first name only — so `freshTenant` now mints a unique, space-free `firstName`). Assert

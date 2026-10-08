@@ -320,3 +320,17 @@ Task 10.10 complete; Task 10.4 remains baseline-red pending C6 scope decision.
 
 The Matching entry also names partners in its audience, matching the newly
 proven share flow instead of retaining the adjacent tenant-only description.
+
+## Task 10.11 - operational repair documentation and retired card names
+
+Task 10.9 commit bf9854dc; Task 10.10 commit fb0f6eb0. Added the approved
+Caseworkers section before Tour reminder supersession, covering deploy
+requirements, conversion write order, repeat-make repair, mistaken-conversion
+restoration, the extraction race, and organization cleanup boundaries.
+The four RUNBOOK card-name anchors matched once; only the intended historical
+Sent to tenants parenthesis remains. The sequence-diagram line now uses
+recipient(s) and ASCII arrows. Read exact original lines before replacement.
+
+Documentation only: no described console/API/Dynamo repair, deployment,
+infrastructure action or live data access was executed. Added-line ASCII,
+code-fence check and git diff --check pass. Task 10.11 complete.

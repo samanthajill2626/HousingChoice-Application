@@ -135,7 +135,8 @@ UI code and `org-lists.spec.ts`.
   data.
 - No other worktree's e2e lane was listening when this was checked after the
   run. Whether one was running during the failure window is unknown.
-- Artifacts (screenshot, video, error context and the run log) are preserved
-  in that worktree's gitignored
-  `.superpowers/e2e-fail-r2/`. No trace was captured
+- Artifacts (screenshot, video, error context, the full run log and both
+  pass-alone logs) were copied out, SHA-256 verified, before the worktree was
+  retired:
+  `W:\tmp\_preserved-artifacts\org-settings-layout-20261007\e2e-fail-r2\`. No trace was captured
   (`trace: 'on-first-retry'` with `retries: 0`).

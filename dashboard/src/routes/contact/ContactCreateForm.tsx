@@ -255,7 +255,9 @@ export function ContactCreateForm({
       }
     >
       <form id="contact-create-form" className={styles.form} onSubmit={(e) => void onSubmit(e)}>
-        <KindPicker value={kind} onChange={setKind} roleSuggestions={vocab.roles} />
+        {/* A NEW contact may be created as a Caseworker (spec 2026-10-06 D16):
+            partner + CASEWORKER_ROLE, no organization here. */}
+        <KindPicker value={kind} onChange={setKind} roleSuggestions={vocab.roles} offerCaseworker />
 
         {/* Standard fields — always shown */}
         <div className={styles.row}>

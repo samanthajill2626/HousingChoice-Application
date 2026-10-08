@@ -402,3 +402,20 @@ describe('ContactCreateForm', () => {
     expect(body['consent_method']).toBe('client_inbound');
   });
 });
+
+describe('ContactCreateForm - Caseworker (spec 2026-10-06 D16)', () => {
+  it('offers Caseworker on a new contact and saves partner + Caseworker, with no organization field', async () => {
+    const user = userEvent.setup();
+    createContact.mockResolvedValue({ contactId: 'new-cw', type: 'partner', role: 'Caseworker', firstName: 'Ana' });
+    setup();
+    const kinds = screen.getByRole('group', { name: 'Contact kind' });
+    await user.click(within(kinds).getByRole('button', { name: 'Caseworker' }));
+    // D16: the create form never offers Organization (staff set it on the partner page).
+    expect(screen.queryByRole('combobox', { name: 'Organization' })).toBeNull();
+    await user.type(screen.getByLabelText(/First name/i), 'Ana');
+    await user.click(screen.getByRole('button', { name: /^Create$/i }));
+    await waitFor(() =>
+      expect(createContact).toHaveBeenCalledWith({ type: 'partner', role: 'Caseworker', firstName: 'Ana' }),
+    );
+  });
+});

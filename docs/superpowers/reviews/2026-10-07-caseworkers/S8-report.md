@@ -49,3 +49,12 @@ Scoped root npx eslint on CaseworkerDialog.tsx, CaseworkerDialog.test.tsx
 and caseworkerRole.ts exited 0. Root bare npm run typecheck exited 0 across
 all five workspaces. No contract deviation; picker indentation follows the
 plan's note. No command remains active for this task.
+
+## Task 8.4 - create form
+
+Task 8.3 commit: 3f4530e1. New contacts can select Caseworker and send exactly
+partner + Caseworker through existing creation. No Organization control added.
+RED: dashboard npx vitest run src/routes/contact/ContactCreateForm.test.tsx,
+exit 1: 1 failed / 15 passed, missing Caseworker button. GREEN: same command,
+exit 0, 16 tests. Root npm run typecheck exit 0 across all five workspaces
+(8.4-typecheck). No contract deviation; existing custom roles still pass.

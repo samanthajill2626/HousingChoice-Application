@@ -185,7 +185,7 @@ exited 0, no lint errors (3.7-lint). No contract deviation.
 
 ## Task 3.8 - Possible caseworkers read and correction C3
 
-Commit: this Task 3.8 commit (hash recorded in the final report update).
+Commit: 4bf29043.
 Added the read over tenant, landlord and partner partitions, exhausting their
 cursors and applying exact signal bases/order, exclusions and name/ID ordering.
 Tests use contactsPartitionFake unchanged with an explicit fixture limit of 50,
@@ -206,3 +206,96 @@ the same command exited 0, nine tests passed (3.8-green). Final focused S3
 regressions passed 274 tests in eight files (exit-regression); all seven owned
 TypeScript files lint clean (exit-lint). Root npm run typecheck exited 0
 across all five workspaces (3.8-typecheck). ASCII and whitespace checks passed.
+
+## S3 final verification and handoff
+
+All eight implementation tasks are committed, each with its report entry:
+
+| Task | Commit |
+|---|---|
+| 3.1 | 0525981d |
+| 3.2 | 97a78932 |
+| 3.3 | 32959860 |
+| 3.4 | e2b2ef69 |
+| 3.5 | 1e9f5244 |
+| 3.6 | 15bbeb2a |
+| 3.7 | c92a68e6 |
+| 3.8 | 4bf29043 |
+
+Every task's root npm run typecheck exited 0 before commit. The final root
+check (3.8-typecheck) covers all S3 source/test changes and all five workspaces.
+All implementation commands have completed; no owned command remains running.
+No hard timeout fired. A final scan of every S3 log found no DynamoDB fault.
+Raw command metadata and exit files remain beside the verbatim logs, ignored.
+
+Final focused regression, from W:/tmp/caseworkers/app:
+npx vitest run test/contactClassification.test.ts test/caseworkerConversion.test.ts test/possibleCaseworkers.test.ts test/aiRunVerdicts.test.ts test/contactTriage.test.ts test/contactStaffNotes.test.ts test/suggestions.test.ts test/contactsCrud.test.ts
+Exit 0, eight files, 274 tests passed, zero skipped (exit-regression).
+File counts: classification 14, conversion 78, possible 9, aiRunVerdicts 74,
+contactTriage 34, contactStaffNotes 16, suggestions 20, contactsCrud 29.
+
+Final lint, from W:/tmp/caseworkers:
+npx eslint app/src/routes/contacts.ts app/src/services/contactClassification.ts app/src/services/caseworkerConversion.ts app/src/services/possibleCaseworkers.ts app/test/contactClassification.test.ts app/test/caseworkerConversion.test.ts app/test/possibleCaseworkers.test.ts
+Exit 0, all seven owned TypeScript files, no errors (exit-lint). No baseline
+attribution is needed. The full-slice git diff --check and added-line ASCII
+checks pass. New files are entirely ASCII; existing route glyphs were not
+rewritten. The earlier Task 3.1 moved-body trailing space was removed in 3.6.
+
+Bare git status and the resolved MERGE_HEAD path were read before every commit;
+MERGE_HEAD was absent. All commits stage explicit owned paths and include
+Co-Authored-By: GPT-6 Astra <noreply@openai.com>. The tree was clean after
+4bf29043. This final report closeout is the only following edit and is committed
+immediately; final status is checked again before the handoff.
+
+## Exact downstream contracts for S4
+
+- app/src/services/caseworkerConversion.ts exports
+  createCaseworkerConversionService(deps: CaseworkerConversionDeps = {}):
+  CaseworkerConversionService. Its methods return service values, not route
+  envelopes: preview(contactId: string): Promise<CaseworkerPreview>;
+  make(contactId: string, input: { organization?: string; actor: string }):
+  Promise<ContactItem>; dismiss(contactId: string, actor: string):
+  Promise<ContactItem>. The actor is a userId.
+- Every CaseworkerConversionDeps member is optional, with real defaults:
+  contacts: ContactsRepo, conversations: ConversationsRepo, placements:
+  PlacementsRepo, tours: ToursRepo, units: UnitsRepo, extraction: ExtractionRepo,
+  aiRuns: AiRunsRepo, audit: AuditRepo, activityEvents: ActivityEventsRepo,
+  vocabulary: ContactVocabularyRepo, events: EventBus, orgNames: OrgNamesService,
+  logger: Logger, now: () => Date. Forward the router's existing instances,
+  including units, in S4; no S4 construction/wiring has been added here.
+- CaseworkerReviewError extends Error, carries status: 400 | 404 | 409 | 422,
+  code: string and extras: Record<string, unknown> (default {}). S4 maps that to
+  its documented body. Refusal code is the first stable-ordered entry and
+  extras.refusals carries every blocking record ID. Other codes remain
+  contact_not_found, caseworker_team_member, contact_changed,
+  caseworker_dismiss_not_allowed and D5's org_not_on_list with field organization.
+- The same module exports CaseworkerRefusal, OrganizationSource,
+  CaseworkerPreview, PossibleCaseworkerRow and the two service/dependency
+  interfaces. Preview has contactId, alreadyCaseworker, refusals, removes
+  (housingAuthority?, agency?, pendingSuggestions), threads (retype, leftShared,
+  leftOther), organization (value?, source excluding request).
+- app/src/services/possibleCaseworkers.ts exports
+  listPossibleCaseworkers(deps: { contacts: Pick<ContactsRepo, 'listByType'> }):
+  Promise<PossibleCaseworkerRow[]>; S4 supplies its rows envelope. Row fields:
+  contactId, firstName?, lastName?, phone?, type tenant | landlord | partner,
+  role?, signals (role_mentions, ai_note, relationship, partner_no_role in order).
+- app/src/services/contactClassification.ts exports displayNameOf,
+  supersedePendingSuggestion, drainTypeSuggestion and SuggestionEffectDeps.
+  The optional reportFailure(fields, message) seam receives contactId plus
+  optional err/field. Omit it to retain PATCH warnings. Conversion supplies
+  error reporting; the prewrite identity and raw revision guards are unchanged.
+
+## Deviations and remaining scope
+
+Only accepted corrections C1 (error visibility), C2 (raw carry) and C3 (self-link
+signal) change drafted implementation details. They enforce the existing spec;
+no new product decision or spec rewrite was made. The paging fixture correction
+and RED-description distinctions above are evidence precision only. No unexpected
+importer, cycle or unresolved contract mismatch remains.
+
+S4 routes, generic PATCH guards/manual type stamping, API wiring and importer
+protection remain unimplemented by design. OrgRecordField remains S5 work.
+No repo primitive, shared fake, infrastructure, environment, seed, dependency,
+main checkout or other worktree was edited. Only the Task 3.1 extraction changed
+contacts.ts. Parent owns subsequent slices, aggregate checkpoints and mission
+gates; this report does not claim the feature branch complete.

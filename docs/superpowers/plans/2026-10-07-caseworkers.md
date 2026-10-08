@@ -26,6 +26,14 @@
 - Plan review round 1: rulings in
   `docs/superpowers/reviews/2026-10-07-caseworkers/plan-review/adjudications.md`
   (cited as "plan review R1 ruling A2", "... B10" ...), applied to this text.
+- REBASELINED on 54e7b0d0 (main merged in, carrying `fix/org-settings-layout`:
+  Settings > "Housing authorities & agencies" is a list + detail panel, every
+  Settings tab full width). The spec decisions are unchanged; only where and
+  how the Settings parts land moved. Tasks 7.4, 7.5, 8.13, 10.3, 10.4, 10.8a
+  and 10.11 were re-derived against the merged code, and Task 7.5a is new.
+  Report: `docs/superpowers/reviews/2026-10-07-caseworkers/rebaseline/rebaseline-report.md`.
+  Anchors in the files that branch changed are quoted as they stand at
+  54e7b0d0.
 
 ## 0. Ground rules for this plan
 
@@ -84,7 +92,11 @@
   scripts). Never edit dashboard/app source while this worktree's e2e runs.
   Never touch Cameron's live ports (:5174/:8080).
 - Line numbers in this plan are the branch base's source (`feat/caseworkers`
-  @6ed28bb5, whose source equals main @6e25e58a). They DRIFT once an earlier
+  @6ed28bb5, whose source equals main @6e25e58a), except in the files
+  `fix/org-settings-layout` changed (the `dashboard/src/routes/settings/`
+  org files, `dashboard/src/App.tsx`, `e2e/performance/routes{,.test}.ts`,
+  `e2e/tests/dashboard-next/org-lists.spec.ts`, `RUNBOOK.md`), whose numbers
+  are as of 54e7b0d0. They DRIFT once an earlier
   task inserts lines. Every quoted anchor is unique text in its file - match
   the TEXT, never the number.
 - A typed fake that mirrors a real repo changes in the SAME task as the repo
@@ -133,7 +145,7 @@ plan section 3 is binding for every name that crosses a slice.
 | S5 | organization across A's org-list server: field types, usage totals (`inUse`, `kindLocked`), `refuseWhileUsed` modes, rename/merge rewrite `organization`, the rewrite target kind, Not on the list organization rows, resolve `kind`, `/check` `kinds`, the dev seam | D10, D17, D22, R2 |
 | S6 | shares server: seed and explicit resolution accept partners; both fan-out mint sites; recipients rows `type`/`role`; preview voucher facts tenant-only; landlord-timeline labels; results fallback | D20, D22, R3 |
 | CP | checkpoint: `npm run typecheck`, `npm test` (every workspace) | - |
-| S7 | dashboard org UI for both kinds: OrgPicker, NewOrgDialog organization mode, orgCopy, the Settings usage totals, Not on the list organization rows and the Settle dialog | D6, D10, D17, R2, R4-07 |
+| S7 | dashboard org UI for both kinds: OrgPicker, NewOrgDialog organization mode, orgCopy, the Settings usage totals (list rows, entry panel, Delete / Change kind), Not on the list organization values and their settle confirm (`SettleConfirm` in `NotOnListPanel`), the client URL scheme's record fields (`orgSelection.ts`) | D6, D10, D17, R2, R4-07 |
 | S8 | dashboard contacts: the role mirror module, KindPicker, create/edit forms, UnknownFile, ContactDetail header and More actions, the conversion dialog, PartnerFile (role, organization, Staff notes), the Caseworkers page, nav and tabs, API client | D16-D19, D22, R4 |
 | S9 | dashboard shares: PartnerFile Properties sent card + Send, neutral wording, the "Sent to" list labels | D20, D22, R3 |
 | CP2 | checkpoint after S9: `npm run typecheck`, `npm test` (every workspace) - plan review R1 ruling B10 | - |
@@ -412,8 +424,9 @@ Importer (`lib/import/apply.ts` `upsertContact`): a stored
 - `lastRewrite.counts` gains an `organization` key.
 - `POST /__dev/org-fixture` accepts `organization` (+ its test message, the e2e
   fixture types, README and selectors rows - R5-F13). S5 owns these and the
-  e2e usage pin `org-lists.spec.ts:557-562` (the task that changes a wire
-  changes its pins); S10 Task 10.3 skips what is done.
+  e2e usage pin `org-lists.spec.ts:619-624` at 54e7b0d0 (`:557-562` before
+  the org-settings-layout merge; the text is unchanged) (the task that
+  changes a wire changes its pins); S10 Task 10.3 skips what is done.
 
 ### 3.7 Shares (S6)
 
@@ -463,7 +476,7 @@ only verifies it.
 | other errors | `contact_changed`: "This contact changed while this was open. Review and try again." (reloads the preview); `caseworker_use_conversion` (edit form): "To make this contact a caseworker, use More actions > Make caseworker." |
 | partner header facts | the organization, when set |
 | PartnerFile | Staff notes card (as TenantFile); Properties sent card (no tour chips); its Send action aria-label "Send a property to this partner" |
-| org pickers, both kinds | add option "Add <text> as a new organization"; load error "Couldn't load organizations"; noun "organization" (organization refusals never name a kind); NewOrgDialog intro exactly "Check that this organization is really new."; radio group "Kind" with "Housing authority" / "Agency", no default, add disabled until chosen; `FIELD_LABEL.organization` "Organization"; the Settings Used by cell adds "1 organization field" / "<n> organization fields" only when > 0 |
+| org pickers, both kinds | add option "Add <text> as a new organization"; load error "Couldn't load organizations"; noun "organization" (organization refusals never name a kind); NewOrgDialog intro exactly "Check that this organization is really new."; radio group "Kind" with "Housing authority" / "Agency", no default, add disabled until chosen; `FIELD_LABEL.organization` "Organization" (it names the field in a "Not on the list" value's row description, "Organization - <n> records", and the value panel's Field fact); the Settings "Used by" text (the entry panel's Used by fact, `usageText`) adds "1 organization field" / "<n> organization fields" only when > 0 |
 | composer Send button | "Send to 1 recipient" / "Send to <n> recipients" |
 | unresolved-seed note | "1 added recipient can't receive texts (unknown, opted out, or unreachable) and was left out." / "<n> added recipients can't receive texts (unknown, opted out, or unreachable) and were left out." |
 | `empty_audience` 400 | "Nothing selected - check at least one recipient to send." (the em dash becomes " - ": a touched line is ASCII) |
@@ -9166,11 +9179,29 @@ Run bare from the worktree: `npm run typecheck`, then `npm test` (DynamoDB Local
 Files: `dashboard/src/api/types.ts`, `dashboard/src/api/endpoints.ts`,
 `dashboard/src/routes/orgs/orgCopy.ts`, `OrgPicker.tsx`, `NewOrgDialog.tsx`,
 `OrgKindChoice.tsx` (new), `OrgPicker.module.css`,
-`dashboard/src/routes/settings/OrgEntryDialogs.tsx`, `NotOnListSection.tsx`,
+`dashboard/src/routes/settings/OrgEntryDialogs.tsx`, `OrgListPane.tsx`,
+`OrgDetailPanel.tsx`, `NotOnListSection.tsx`, `orgSelection.ts`,
 `dashboard/src/routes/contact/ContactEditForm.tsx`; tests beside each.
 
 Depends on S5 (the wire). S8 consumes S7's names (assembly ruling S5/S7-1) and builds on Task
 7.6's seam (assembly ruling S5/S7-2).
+
+The Settings tab as merged at 54e7b0d0 (`fix/org-settings-layout`, design
+review 2026-10-07 Option B; read its handback sections 1, 5 and 8 before
+Task 7.4): three segments (Housing authorities / Agencies / Not on the list)
+with a search; each list row is ONE link (`OrgListPane.tsx`: `OrgEntryList`,
+`NotOnListList`) whose use count is its accessible description; the selected
+entry or value shows in a detail panel (`OrgDetailPanel.tsx`
+`OrgEntryPanel`; `NotOnListSection.tsx` `NotOnListPanel`). An entry's
+admin actions are labeled buttons in its panel, still opening the
+`OrgEntryDialogs.tsx` dialogs. A value is settled in its panel: one radio
+group, "Settle this value", of `settleChoices()`, and under the pick an
+inline confirm, `SettleConfirm` (the former Settle dialog's logic, copy and
+button names), whose request goes through the page's `SettleGate` (one
+settle in flight at a time). B adds NO fourth segment: an organization
+value is a "Not on the list" value like any other, and
+`FIELD_LABEL.organization` (Task 7.1) names its field in the row's
+description and the panel's Field fact with no change to either component.
 
 Pins this slice changes:
 
@@ -9180,8 +9211,9 @@ Pins this slice changes:
 | `dashboard/src/api/endpoints.test.ts` `checkOrgText({ kind: 'housing_authority', text: 'AHA', spellingFor: 'o1' })` | 7.1 (PIN; a kinds case added) |
 | `dashboard/src/routes/orgs/OrgPicker.test.tsx` "Add Metro Housing Board as a new housing authority" | 7.2 (PIN) |
 | `dashboard/src/routes/orgs/NewOrgDialog.test.tsx` every single-kind case (`{ kind: 'housing_authority', text: ... }` check bodies, "use Split on Settings") | 7.3 (PIN) |
-| `dashboard/src/routes/settings/OrgListSection.test.tsx` `const USAGE = {` fixture (gains the totals), "3 tenants, 1 other contact, 2 properties (+2 deleted)", "8 records still hold this name (3 tenants, 1 other contact, 2 properties, 2 deleted)." | 7.4 |
-| `dashboard/src/routes/settings/NotOnListSection.test.tsx` "offers each row the actions its resolution allows", "Use another name picks from the field kind list", "Add as new: from the value, ..." (no `kind` in the body) | 7.5 (PIN) |
+| `dashboard/src/routes/settings/OrgListSection.test.tsx` `const USAGE = {` fixture (gains the totals); PIN on the distinct totals: the list-row descriptions `'8 records'` (Atlanta), `'Not used'` (DeKalb), `'1 record'` (Step Up), the panel's "3 tenants, 1 other contact, 2 properties (+2 deleted)", the Delete dialog's "8 records still hold this name (3 tenants, 1 other contact, 2 properties, 2 deleted)." | 7.4 |
+| `dashboard/src/routes/settings/NotOnListSection.test.tsx` "%s offers the choices its resolution allows, one radio each", "Use another name picks from the field kind list", "Add as new: from the value, or a corrected name that remembers the value" (no `kind` in the body), "a refused settle says why in staff words" | 7.5 (PIN) |
+| `dashboard/src/routes/settings/orgSelection.test.ts` "ignores a value outside "Not on the list" and a field that is not a record field" (`field=nope` stays no selection) | 7.5a (PIN) |
 | `dashboard/src/routes/contact/ContactEditForm.test.tsx` "a housing authority picker given an agency name offers to put it in Agency", "a refused save (422 org_not_on_list) shows under its picker, worded from the body", "\"Put it in Agency\": the agency chip is not marked either" | 7.6 (PIN) |
 | `dashboard/src/routes/settings/useOrgAdmin.test.tsx` `const COUNTS`, `dashboard/src/api/endpoints.test.ts` `const counts` | none (pass-through mocks; no reader of the totals) |
 
@@ -9669,9 +9701,9 @@ Implement:
    // OrgKindChoice - which list a NEW organization goes on (spec D6, D17;
    // R2-F3): two radios, Housing authority and Agency, in a group named "Kind",
    // with NO default - a default would silently file a new employer under the
-   // wrong list. NewOrgDialog's organization mode and the Settle dialog's "Add
-   // as new" on an organization row use it; each keeps its add button disabled
-   // until a kind is chosen.
+   // wrong list. NewOrgDialog's organization mode and Settings' settle confirm
+   // ("Add as new" on a "Not on the list" organization value) use it; each
+   // keeps its add button disabled until a kind is chosen.
    import { useId } from 'react';
    import type { OrgKind } from '../../api/index.js';
    import { KIND_FIELD_LABEL } from './orgCopy.js';
@@ -9884,12 +9916,24 @@ the added lines of `e2e/support/selectors.md`.
 Commit: `git status` (read it), then
 `cd "W:/tmp/caseworkers"; git add dashboard/src/routes/orgs/NewOrgDialog.tsx dashboard/src/routes/orgs/NewOrgDialog.test.tsx dashboard/src/routes/orgs/OrgKindChoice.tsx dashboard/src/routes/orgs/OrgKindChoice.test.tsx dashboard/src/routes/orgs/OrgPicker.module.css dashboard/src/routes/orgs/orgCopy.ts e2e/support/selectors.md; git commit -m "feat(caseworkers): Is this really new? gains an organization mode that asks the kind" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
 
-### Task 7.4 - Settings: the Used by cell, and Delete / Change kind read the server totals
+### Task 7.4 - Settings: the use counts (list rows, entry panel), and Delete / Change kind read the server totals
 
 Files: `dashboard/src/routes/orgs/orgCopy.ts`,
-`dashboard/src/routes/settings/OrgEntryDialogs.tsx`; tests
+`dashboard/src/routes/settings/OrgEntryDialogs.tsx`,
+`dashboard/src/routes/settings/OrgListPane.tsx`,
+`dashboard/src/routes/settings/OrgDetailPanel.tsx`; tests
 `dashboard/src/routes/orgs/orgCopy.test.ts`,
 `dashboard/src/routes/settings/OrgListSection.test.tsx`.
+
+(Rebaselined on 54e7b0d0. A's `usageTotal` - a column sum - now has FOUR
+readers: `OrgListPane.tsx` `OrgEntryList` (each row's "N records" / "Not
+used" description), `OrgDetailPanel.tsx` `OrgEntryPanel` (the "Not used"
+check beside `usageText`), and `OrgEntryDialogs.tsx` `inUseText`,
+`KindDialog` and `DeleteDialog`. Every one moves to the server's DISTINCT
+totals, so a record holding the name in two fields counts once, and a name
+held only as a contact's organization reads as used. Ruling A10 stands: the
+"+N deleted" in `usageText` and the Delete sentence's "N deleted" read
+`inUse.deleted`.)
 
 RED 1: `dashboard/src/routes/orgs/orgCopy.test.ts`: add `blockingUses` to the
 `./orgCopy.js` import and, inside `describe('both lists - a contact organization (spec D6, D17; R2-F4)', () => {`, add:
@@ -9946,10 +9990,42 @@ RED 2: `dashboard/src/routes/settings/OrgListSection.test.tsx`:
   };
   ```
 
+  (The current fixture is the three one-line rows
+  `'o-atl': { tenants: 3, otherContacts: 1, properties: 2, deleted: 2 },` ...;
+  replace the whole `const USAGE = {` ... `};` block.)
+- inside `describe('OrgListSection - the detail panel', () => {` (after
+  `it('an unused entry says so; empty spellings and notes say so in words', async () => {`) add:
+
+  ```tsx
+    it('a name held only as a contact organization is used: its list row and its panel say so (spec D17; R2-F1)', async () => {
+      const user = userEvent.setup();
+      getOrgUsage.mockResolvedValue({
+        ...USAGE,
+        'o-dek': {
+          tenants: 0,
+          otherContacts: 0,
+          properties: 0,
+          organization: 1,
+          deleted: 0,
+          inUse: { active: 1, deleted: 0 },
+          kindLocked: { active: 0, deleted: 0 },
+        },
+      });
+      renderSection();
+      const row = await findRow('Housing authorities', 'DeKalb County Housing Authority');
+      await waitFor(() => expect(row).toHaveAccessibleDescription('1 record'));
+      const panel = await openEntry(user, 'Housing authorities', 'DeKalb County Housing Authority');
+      await waitFor(() =>
+        expect(panel).toHaveTextContent('0 tenants, 0 other contacts, 0 properties, 1 organization field'),
+      );
+      expect(panel).not.toHaveTextContent('Not used');
+    });
+  ```
+
 - inside `describe('OrgListSection - admin entry actions', () => {` add:
 
   ```tsx
-    it('organization holders: shown in Used by, they block Delete but never Change kind (spec D10, D17; R2-F1)', async () => {
+    it('organization holders: counted once per record, shown in Used by, they block Delete but never Change kind (spec D10, D17; R2-F1)', async () => {
       const user = userEvent.setup();
       getOrgUsage.mockResolvedValue({
         ...USAGE,
@@ -9965,7 +10041,13 @@ RED 2: `dashboard/src/routes/settings/OrgListSection.test.tsx`:
       });
       patchOrg.mockResolvedValue({ entry: { ...STEP_UP, kind: 'housing_authority' } });
       renderSection();
-      const step = await waitFor(() => entryRow('Agencies', 'Step Up'));
+      const step = await openEntry(user, 'Agencies', 'Step Up');
+      // The list row counts DISTINCT records (2 live + 1 deleted), never a column sum.
+      await waitFor(() =>
+        expect(within(region('Agencies')).getByRole('link', { name: 'Step Up' })).toHaveAccessibleDescription(
+          '3 records',
+        ),
+      );
       await waitFor(() =>
         expect(step).toHaveTextContent('0 tenants, 0 other contacts, 0 properties, 2 organization fields (+1 deleted)'),
       );
@@ -9988,7 +10070,7 @@ RED 2: `dashboard/src/routes/settings/OrgListSection.test.tsx`:
     it('Change kind waits for holders in a field of the entry kind, and says so', async () => {
       const user = userEvent.setup();
       renderSection();
-      const atlanta = await waitFor(() => entryRow('Housing authorities', 'Atlanta Housing Authority'));
+      const atlanta = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
       await waitFor(() => expect(atlanta).toHaveTextContent('3 tenants'));
       await user.click(within(atlanta).getByRole('button', { name: 'Change kind of Atlanta Housing Authority' }));
       const dialog = screen.getByRole('dialog', { name: 'Change kind of Atlanta Housing Authority' });
@@ -9999,13 +10081,18 @@ RED 2: `dashboard/src/routes/settings/OrgListSection.test.tsx`:
     });
   ```
 
-  (The row actions' accessible names are `Change kind of ${entry.name}` and
-  `Delete ${entry.name}` - `OrgListSection.tsx` - for both sections.)
+  (The entry actions are labeled buttons in the entry's detail panel -
+  `OrgDetailPanel.tsx` `OrgEntryPanel` - named `Change kind of ${entry.name}`
+  and `Delete ${entry.name}`, for both kinds; `openEntry`, `findRow` and
+  `region` are the file's existing helpers. The dialogs they open are
+  `OrgEntryDialogs.tsx`'s, unchanged by the layout merge.)
 
 Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/orgs/orgCopy.test.ts src/routes/settings/OrgListSection.test.tsx`.
 Expected RED: `blockingUses` is not exported; the "+1 deleted" case reads
 "(+2 deleted)" and "2 deleted" (Task 7.1's functions still read the
-per-column `deleted`); the Delete dialog counts the
+per-column `deleted`); DeKalb's list row reads "Not used" and its panel says
+"Not used" (the column sum has no organization column: 0); Step Up's list
+row reads "1 record" (0+0+0+1); the Delete dialog counts the
 column sum (0+0+0+1 = 1, and says "1 record still holds"); Change kind of
 Step Up is DISABLED (the column sum counts the deleted organization holder)
 and lacks the organization sentence; the Atlanta Change kind sentence is A's
@@ -10022,7 +10109,9 @@ Implement:
     * distinct records holding it in a field of the entry's kind - an
     * organization accepts either kind, so it never blocks one, spec D17),
     * deleted ones included: the server's totals, never a column sum (R2-F1).
-    * undefined while unknown.
+    * 'delete' is also the record count Settings shows for an entry (its list
+    * row's "N records" / "Not used", the panel's "Not used"): one record
+    * holding the name in two fields is one record. undefined while unknown.
     */
    export function blockingUses(u: OrgUsageCounts | undefined, mode: 'delete' | 'kind'): number | undefined {
      if (u === undefined) return undefined;
@@ -10100,24 +10189,70 @@ Implement:
    - `DeleteDialog`: `const blocked = usage !== undefined && (usageTotal(usage) ?? 0) > 0;` becomes
      `const blocked = (blockingUses(usage, 'delete') ?? 0) > 0;` (its text keeps `inUseText(usage)`).
 
+3. `dashboard/src/routes/settings/OrgListPane.tsx` (the list rows):
+   - `import { FIELD_LABEL, KIND_NOUN, usageTotal } from '../orgs/orgCopy.js';` becomes
+     `import { FIELD_LABEL, KIND_NOUN, blockingUses } from '../orgs/orgCopy.js';`
+   - in `OrgEntryList`, replace
+     `            const used = usage === null ? undefined : usageTotal(usage[entry.orgId]);` with
+
+     ```tsx
+                 // Distinct records holding the name in any field, deleted ones
+                 // included (R2-F1): one record holding it twice counts once, and
+                 // a contact's organization counts (spec D17).
+                 const used = usage === null ? undefined : blockingUses(usage[entry.orgId], 'delete');
+     ```
+
+     (the `meta` line under it - "Not used" / "N records" - is unchanged).
+
+4. `dashboard/src/routes/settings/OrgDetailPanel.tsx` (the entry panel):
+   - `import { KIND_FIELD_LABEL, usageText, usageTotal } from '../orgs/orgCopy.js';` becomes
+     `import { KIND_FIELD_LABEL, blockingUses, usageText } from '../orgs/orgCopy.js';`
+   - in `OrgEntryPanel`, `  const total = usageTotal(usage);` becomes
+
+     ```tsx
+       // "Not used" only when no record holds the name in any field (R2-F1, spec D17).
+       const total = blockingUses(usage, 'delete');
+     ```
+
+     (the Used by fact `{total === 0 ? <span className={styles.quiet}>Not used</span> : usageText(usage)}`
+     is unchanged; `usageText` carries the organization column from Task 7.1).
+
 GREEN: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/orgs src/routes/settings`
-(the A case "delete and kind change wait until no record (deleted ones
-included) uses the entry" stays green: 6+2 = 8 records); typecheck (no
-`usageTotal` caller remains - `grep -rn usageTotal dashboard/src` prints nothing).
+(the A cases stay green on the distinct totals: "delete and kind change wait
+until no record (deleted ones included) uses the entry" - 6+2 = 8 records;
+the list-row descriptions `'8 records'` and `'Not used'` in "shows three
+segments with counts; ..." and `'1 record'` in "a segment switches the list
+on screen and is kept in the URL"); typecheck (no `usageTotal` caller remains -
+`grep -rn usageTotal dashboard/src` prints nothing).
 
 Commit: `git status` (read it), then
-`cd "W:/tmp/caseworkers"; git add dashboard/src/routes/orgs/orgCopy.ts dashboard/src/routes/orgs/orgCopy.test.ts dashboard/src/routes/settings/OrgEntryDialogs.tsx dashboard/src/routes/settings/OrgListSection.test.tsx; git commit -m "feat(caseworkers): Settings shows organization holders; Delete and Change kind read the distinct totals" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
+`cd "W:/tmp/caseworkers"; git add dashboard/src/routes/orgs/orgCopy.ts dashboard/src/routes/orgs/orgCopy.test.ts dashboard/src/routes/settings/OrgEntryDialogs.tsx dashboard/src/routes/settings/OrgListPane.tsx dashboard/src/routes/settings/OrgDetailPanel.tsx dashboard/src/routes/settings/OrgListSection.test.tsx; git commit -m "feat(caseworkers): Settings shows organization holders; Delete and Change kind read the distinct totals" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
 
-### Task 7.5 - "Not on the list": organization rows and the Settle dialog across both kinds
+### Task 7.5 - "Not on the list": organization values and the settle confirm across both kinds
 
 Files: `dashboard/src/routes/settings/NotOnListSection.tsx`,
 `dashboard/src/routes/orgs/orgCopy.ts` (remove `kindForField`); test
 `dashboard/src/routes/settings/NotOnListSection.test.tsx`.
 
-RED: `dashboard/src/routes/settings/NotOnListSection.test.tsx`, after the last describe add:
+(Rebaselined on 54e7b0d0. There is no Settle dialog and no table row any
+more: `NotOnListPanel` shows ONE value, and an admin settles it by picking
+one radio of `settleChoices()` in the fieldset "Settle this value"; under
+the pick, `SettleConfirm` - the former `SettleDialog` body, inline - says
+what changes and its button repeats the choice's name. The request goes
+through the page's `SettleGate`: while any settle is out, the whole fieldset
+is disabled, so the Kind choice below - INSIDE `SettleConfirm`, inside that
+fieldset - waits with it. `kindForField` has three uses in the file now:
+the import, `settleChoices` and `SettleConfirm`. The organization value's
+row description ("Organization - <n> records", `OrgListPane.tsx`
+`NotOnListList`) and the panel's Field fact both come from
+`FIELD_LABEL.organization` (Task 7.1) with no change here; B adds no
+segment.)
+
+RED: `dashboard/src/routes/settings/NotOnListSection.test.tsx`, after the
+last describe (`describe('NotOnListPanel - an in-flight settle (code review r1 F1, M5)', () => {`) add:
 
 ```tsx
-describe('NotOnListSection - organization rows (spec D17; R2-F6, R2-F8)', () => {
+describe('NotOnListPanel - organization values (caseworkers spec D17; R2-F6, R2-F8)', () => {
   const ORG_ROWS: NotOnListRow[] = [
     {
       field: 'organization',
@@ -10134,35 +10269,29 @@ describe('NotOnListSection - organization rows (spec D17; R2-F6, R2-F8)', () => 
       resolution: { status: 'unknown', close: [ref(KITE)] },
     },
   ];
-  const names = (value: string): (string | null)[] =>
-    within(valueRow(value)).getAllByRole('button').map((b) => b.textContent);
 
   it('offers Use of either kind, Add as new and Clear - never Move or Split', () => {
-    renderSection({ rows: ORG_ROWS });
-    expect(valueRow('Kite Ade')).toHaveTextContent('Organization');
-    expect(names('Shrike Housing Authority Kite Aid')).toEqual([
-      'Show records',
-      'Use Shrike Housing Authority',
-      'Use Kite Aid',
-      'Use another name',
-      'Clear',
-    ]);
-    expect(names('Kite Ade')).toEqual(['Show records', 'Use Kite Aid', 'Use another name', 'Add as new', 'Clear']);
+    renderPanel('Kite Ade', { rows: ORG_ROWS });
+    // FIELD_LABEL.organization (Task 7.1) names the field.
+    expect(fact('Kite Ade', 'Field')).toBe('Organization');
+    expect(choices()).toEqual(['Use Kite Aid', 'Use another name', 'Add as new', 'Clear']);
+    cleanup();
+    renderPanel('Shrike Housing Authority Kite Aid', { rows: ORG_ROWS });
+    expect(choices()).toEqual(['Use Shrike Housing Authority', 'Use Kite Aid', 'Use another name', 'Clear']);
   });
 
   it('Use of an agency name keeps "Remember this spelling", checked against that agency', async () => {
     const user = userEvent.setup();
-    renderSection({ rows: ORG_ROWS });
-    await user.click(within(valueRow('Kite Ade')).getByRole('button', { name: 'Use Kite Aid' }));
-    const dialog = screen.getByRole('dialog', { name: 'Settle Kite Ade' });
+    renderPanel('Kite Ade', { rows: ORG_ROWS });
+    const group = await pick(user, 'Use Kite Aid');
     await waitFor(() =>
       expect(checkOrgText).toHaveBeenCalledWith(
         { kind: 'agency', text: 'Kite Ade', spellingFor: 'o-kite' },
         expect.any(AbortSignal),
       ),
     );
-    expect(within(dialog).getByRole('checkbox', { name: 'Remember this spelling' })).toBeChecked();
-    await user.click(within(dialog).getByRole('button', { name: 'Use Kite Aid' }));
+    expect(within(group).getByRole('checkbox', { name: 'Remember this spelling' })).toBeChecked();
+    await user.click(within(group).getByRole('button', { name: 'Use Kite Aid' }));
     expect(resolveNotOnList).toHaveBeenCalledWith({
       field: 'organization',
       value: 'Kite Ade',
@@ -10174,12 +10303,11 @@ describe('NotOnListSection - organization rows (spec D17; R2-F6, R2-F8)', () => 
 
   it('Use another name searches both lists', async () => {
     const user = userEvent.setup();
-    renderSection({ rows: ORG_ROWS });
-    await user.click(within(valueRow('Kite Ade')).getByRole('button', { name: 'Use another name' }));
-    const dialog = screen.getByRole('dialog', { name: 'Settle Kite Ade' });
-    await user.type(within(dialog).getByRole('combobox', { name: 'Name to use' }), 'Shrike Aid');
+    renderPanel('Kite Ade', { rows: ORG_ROWS });
+    const group = await pick(user, 'Use another name');
+    await user.type(within(group).getByRole('combobox', { name: 'Name to use' }), 'Shrike Aid');
     await user.click(await screen.findByRole('option', { name: /^Shrike Aid/ }));
-    await user.click(within(dialog).getByRole('button', { name: 'Use Shrike Aid' }));
+    await user.click(within(group).getByRole('button', { name: 'Use Shrike Aid' }));
     expect(resolveNotOnList).toHaveBeenCalledWith(
       expect.objectContaining({ field: 'organization', action: 'use', name: 'Shrike Aid' }),
     );
@@ -10187,17 +10315,17 @@ describe('NotOnListSection - organization rows (spec D17; R2-F6, R2-F8)', () => 
 
   it('Add as new asks the kind - nothing is sent until one is chosen - and sends it', async () => {
     const user = userEvent.setup();
-    renderSection({ rows: ORG_ROWS });
-    await user.click(within(valueRow('Kite Ade')).getByRole('button', { name: 'Add as new' }));
-    const dialog = screen.getByRole('dialog', { name: 'Settle Kite Ade' });
-    expect(dialog).toHaveTextContent(
+    renderPanel('Kite Ade', { rows: ORG_ROWS });
+    const group = await pick(user, 'Add as new');
+    expect(group).toHaveTextContent(
       'The name below is added to the list you pick, then every record holding this value changes to it (2 records).',
     );
-    const add = within(dialog).getByRole('button', { name: 'Add as new' });
+    const add = within(group).getByRole('button', { name: 'Add as new' });
     expect(add).toBeDisabled();
-    const group = within(dialog).getByRole('group', { name: 'Kind' });
-    expect(within(group).getByRole('radio', { name: 'Agency' })).not.toBeChecked();
-    await user.click(within(group).getByRole('radio', { name: 'Agency' }));
+    const kind = within(group).getByRole('group', { name: 'Kind' });
+    expect(within(kind).getByRole('radio', { name: 'Housing authority' })).not.toBeChecked();
+    expect(within(kind).getByRole('radio', { name: 'Agency' })).not.toBeChecked();
+    await user.click(within(kind).getByRole('radio', { name: 'Agency' }));
     expect(add).toBeEnabled();
     await user.click(add);
     expect(resolveNotOnList).toHaveBeenCalledWith({
@@ -10208,24 +10336,73 @@ describe('NotOnListSection - organization rows (spec D17; R2-F6, R2-F8)', () => 
       kind: 'agency',
     });
   });
+
+  it('while the add is out, the Kind choice cannot change and no second request goes (r1 F1)', async () => {
+    const user = userEvent.setup();
+    const answer = deferred<never>();
+    resolveNotOnList.mockReturnValueOnce(answer.promise);
+    const props = renderPanel('Kite Ade', { rows: ORG_ROWS });
+    const group = await pick(user, 'Add as new');
+    await user.click(within(within(group).getByRole('group', { name: 'Kind' })).getByRole('radio', { name: 'Agency' }));
+    await user.click(within(group).getByRole('button', { name: 'Add as new' }));
+    expect(props.settleGate.begin).toHaveBeenCalledWith(`value:${JSON.stringify(['organization', 'Kite Ade'])}`);
+    for (const radio of within(within(group).getByRole('group', { name: 'Kind' })).getAllByRole('radio')) {
+      expect(radio).toBeDisabled();
+    }
+    expect(within(group).getByRole('button', { name: 'Add as new' })).toBeDisabled();
+    expect(resolveNotOnList).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refused Add as new of a compound name never points to Split (plan review ruling S8, extended)', async () => {
+    const user = userEvent.setup();
+    resolveNotOnList.mockRejectedValue(
+      new ApiError(422, 'org_name_compound', 'org_name_compound', {
+        error: 'org_name_compound',
+        spans: [[ref(SHRIKE)], [ref(KITE)]],
+      }),
+    );
+    renderPanel('Kite Ade', { rows: ORG_ROWS });
+    const group = await pick(user, 'Add as new');
+    await user.click(within(within(group).getByRole('group', { name: 'Kind' })).getByRole('radio', { name: 'Agency' }));
+    await user.click(within(group).getByRole('button', { name: 'Add as new' }));
+    expect(await within(group).findByRole('alert')).toHaveTextContent(
+      'That names more than one organization (Shrike Housing Authority and Kite Aid), so it cannot be one entry. Pick one of them.',
+    );
+    expect(group).not.toHaveTextContent(/Split/);
+  });
 });
 ```
 
+(`renderPanel`, `fact`, `choices`, `pick`, `settleGroup`, `gate`,
+`deferred`, `ref`, `SHRIKE`, `KITE`, `ENTRIES` (which holds `SHRIKE_AID`),
+`ApiError`, `cleanup`, `checkOrgText` and `resolveNotOnList` are already in
+the file. A settle choice's radio and its confirm button share a name -
+"Add as new", "Use Kite Aid" - so each case finds the radio with `pick`
+and the confirm with `getByRole('button', ...)`.)
+
 Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/settings/NotOnListSection.test.tsx`.
-Expected RED: the compound row offers only the housing authority half
+Expected RED: the compound value offers only the housing authority half
 (`kindForField('organization')` is housing authority); the spelling check is
 never sent (no agency target is found - Remember disappears); "Use another
 name" finds no agency; Add as new has no Kind group, is enabled at once and
-sends no `kind`; its sentence names "Housing authorities".
+sends no `kind`; its sentence names "Housing authorities"; the gate case
+finds no Kind group; the refused compound add says "... Use Split instead.".
+(The Field fact already reads "Organization" after Task 7.1: a PIN line.)
 
-Implement (`dashboard/src/routes/settings/NotOnListSection.tsx`):
+Implement (`dashboard/src/routes/settings/NotOnListSection.tsx`, as merged
+at 54e7b0d0):
 
-1. Imports: from `'../../api/index.js'` add `type OrgKind`; in the
-   `'../orgs/orgCopy.js'` import replace `kindForField,` with `kindsForField,`;
-   add `import { OrgKindChoice } from '../orgs/OrgKindChoice.js';`.
-2. `function settleChoices(row: NotOnListRow)`: its `const kind = kindForField(row.field);`
-   (the FIRST of the file's two occurrences - the one inside `settleChoices`)
-   becomes `const kinds = kindsForField(row.field);` and
+1. Imports: in the `'../../api/index.js'` import add `type OrgKind,` after
+   `type OrgEntry,`; in the `'../orgs/orgCopy.js'` import replace
+   `  kindForField,` with `  kindsForField,`; after
+   `import { OrgPicker } from '../orgs/OrgPicker.js';` add
+   `import { OrgKindChoice } from '../orgs/OrgKindChoice.js';`.
+   (`AGENCY_KINDS` and `HOUSING_AUTHORITY_KINDS` stay: the Split pickers use
+   them.)
+2. `function settleChoices(row: NotOnListRow)`: its
+   `const kind = kindForField(row.field);` (the FIRST of the file's two call
+   sites - the one inside `settleChoices`) becomes
+   `const kinds = kindsForField(row.field);` and
    `for (const ref of spans) if (ref.kind === kind) offerUse(ref.name);` becomes
    `for (const ref of spans) if (kinds.includes(ref.kind)) offerUse(ref.name);`.
    Its doc (plan review R1 ruling S6: the phrase "a compound value's halves
@@ -10247,12 +10424,12 @@ Implement (`dashboard/src/routes/settings/NotOnListSection.tsx`):
    ` * server refuses it (409 org_value_is_name_variant).` (unique) with
 
    ```ts
-    * server refuses it (409 org_value_is_name_variant). An organization row is
-    * never offered Move or Split (the field has no other kind).
+    * server refuses it (409 org_value_is_name_variant). An organization value
+    * is never offered Move or Split (the field has no other kind).
    ```
 
-3. `function SettleDialog(`: replace its `const kind = kindForField(row.field);`
-   (the SECOND occurrence - the one inside `SettleDialog`) with:
+3. `function SettleConfirm({`: replace its `const kind = kindForField(row.field);`
+   (the SECOND call site - the line after `const { row } = settle;`) with:
 
    ```ts
      const kinds = kindsForField(row.field);
@@ -10262,6 +10439,8 @@ Implement (`dashboard/src/routes/settings/NotOnListSection.tsx`):
      const [addKind, setAddKind] = useState<OrgKind | null>(organizationRow ? null : (kinds[0] ?? 'housing_authority'));
    ```
 
+   (`SettleConfirm` is keyed by the picked choice, so a new pick starts
+   with no kind again.)
    - the `target` lookup `? entries.find((e) => e.kind === kind && e.name === useName)` becomes
      `? entries.find((e) => kinds.includes(e.kind) && e.name === useName)`.
    - after `const checkForId = target !== undefined && !sameAsName ? target.orgId : undefined;` add
@@ -10272,7 +10451,9 @@ Implement (`dashboard/src/routes/settings/NotOnListSection.tsx`):
      `void checkOrgText({ kind: checkKind, text: row.value, spellingFor: checkForId }, controller.signal).then(`
      and the dependency list `}, [kind, row.value, checkForId]);` with
      `}, [checkKind, row.value, checkForId]);`.
-   - `case 'add':`: replace the `sentence = ...` line with
+   - `case 'add':`: replace the line
+     ``      sentence = `The name below is added to ${KIND_PLURAL_TITLE[kind]}, then every record holding this value changes to it (${records}).`;``
+     with
 
      ```ts
            sentence = organizationRow
@@ -10280,7 +10461,7 @@ Implement (`dashboard/src/routes/settings/NotOnListSection.tsx`):
              : `The name below is added to ${KIND_PLURAL_TITLE[kinds[0] ?? 'housing_authority']}, then every record holding this value changes to it (${records}).`;
      ```
 
-     and its `body =` with
+     and its `body =` (the `addName.trim() === ''` ternary) with
 
      ```ts
            body =
@@ -10296,48 +10477,148 @@ Implement (`dashboard/src/routes/settings/NotOnListSection.tsx`):
                  };
      ```
 
+     (a null body keeps the confirm button disabled: `disabled={busy || request === null}`).
+   - in `confirm()`, `      const message = orgErrorCopy(err);` becomes
+     `      const message = orgErrorCopy(err, { organization: organizationRow });`
+     (Task 7.3's option; ruling S8 extended - an organization value's
+     failure never says "Use Split instead.", whether it shows in the
+     confirm or reaches the page through `onFailedAway`).
    - the "Name to use" picker `kinds={kind === 'agency' ? AGENCY_KINDS : HOUSING_AUTHORITY_KINDS}` becomes `kinds={kinds}`.
    - the Kind choice: ONE placement (plan review R1 ruling S4) - a SIBLING
      right after the Name block's whole `{settle.action === 'add' ? ( ... ) : null}`
      expression, never inside it (two JSX siblings inside that ternary would
-     be a syntax error). Replace (unique: `setAddName(e.target.value)` and
-     `{rememberApplies ? (` each occur once in the file)
+     be a syntax error), so it renders inside `SettleConfirm`, inside the
+     "Settle this value" fieldset. Replace (unique: `setAddName(e.target.value)`
+     and `{rememberApplies ? (` each occur once in the file; the merge kept
+     this JSX's indentation)
 
      ```tsx
-              onChange={(e) => setAddName(e.target.value)}
-            />
-          </div>
-        ) : null}
-        {rememberApplies ? (
+                   onChange={(e) => setAddName(e.target.value)}
+                 />
+               </div>
+             ) : null}
+             {rememberApplies ? (
      ```
 
      with
 
      ```tsx
-              onChange={(e) => setAddName(e.target.value)}
-            />
-          </div>
-        ) : null}
-        {settle.action === 'add' && organizationRow ? (
-          <OrgKindChoice value={addKind} onChange={setAddKind} disabled={busy} />
-        ) : null}
-        {rememberApplies ? (
+                   onChange={(e) => setAddName(e.target.value)}
+                 />
+               </div>
+             ) : null}
+             {settle.action === 'add' && organizationRow ? (
+               <OrgKindChoice value={addKind} onChange={setAddKind} disabled={busy} />
+             ) : null}
+             {rememberApplies ? (
      ```
-4. `dashboard/src/routes/orgs/orgCopy.ts`: delete `kindForField` (doc + body) -
+
+     (read the real lines first: the anchor is the file's text with its own
+     leading spaces - 14, 12, 10, 8 and 8 at 54e7b0d0 - and the inserted
+     lines take the indentation of `{rememberApplies ? (`.)
+4. `dashboard/src/routes/orgs/orgCopy.ts`: delete `kindForField` (doc + body;
+   Task 7.1 already moved `resolutionText` off it) -
    `grep -rn kindForField dashboard/src` must print nothing.
-5. The Settle dialog's failure copy: on an organization row every
-   `orgErrorCopy(...)` call passes `{ organization: true }` (Task 7.3's
-   option), so it never says "Use Split instead." (plan review round 1 fix
-   pass, open question 2 - ruling S8 extended). Add a case to
-   NotOnListSection.test: an organization row's Add as new answered 409/400
-   `org_name_compound` shows the organization sentence and no "Split".
+5. The failure copy (plan review round 1 fix pass, open question 2 - ruling
+   S8 extended) is step 3's `orgErrorCopy(err, { organization: organizationRow })`,
+   pinned by the RED's last case.
 
 GREEN: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/settings src/routes/orgs`
-(every A case in NotOnListSection.test stays green - housing authority,
-agency and property rows behave as before and send no `kind`); typecheck.
+(every A case in NotOnListSection.test and OrgListSection.test stays green -
+housing authority, agency and property values behave as before and send no
+`kind`); typecheck.
 
 Commit: `git status` (read it), then
 `cd "W:/tmp/caseworkers"; git add dashboard/src/routes/settings/NotOnListSection.tsx dashboard/src/routes/settings/NotOnListSection.test.tsx dashboard/src/routes/orgs/orgCopy.ts; git commit -m "feat(caseworkers): settle organization values across both lists; Add as new asks the kind" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
+
+### Task 7.5a - `orgSelection`: an organization value's URL selects it (the client RECORD_FIELDS)
+
+Files: `dashboard/src/routes/settings/orgSelection.ts`; tests
+`dashboard/src/routes/settings/orgSelection.test.ts`,
+`dashboard/src/routes/settings/OrgListSection.test.tsx`.
+
+New with the rebaseline (layout handback section 8, "Merge note for branch
+B (addition)"). A "Not on the list" value has no id: its URL is
+`?view=not-on-list&field=<field>&value=<value>`, and `readOrgLocation`
+accepts `field` only when it is in orgSelection's OWN
+`RECORD_FIELDS = ['housingAuthority', 'agency', 'accepted_authorities']`.
+Without `'organization'` there, an organization value's row link opens
+nothing - the page reads it as no selection and the panel keeps its
+placeholder. (Task 5.5 widens the SERVER's `RECORD_FIELDS` in
+`app/src/services/orgRecords.ts`; this is the client's, a separate list.)
+Depends on Task 7.1 (the dashboard `OrgRecordField` gains `'organization'`).
+
+RED 1: `dashboard/src/routes/settings/orgSelection.test.ts`, inside
+`describe('readOrgLocation', () => {`, after the case
+`it("keeps an entry link's view, so a gone agency stays on its list (r1 M3)", () => {`, add:
+
+```ts
+  it('reads a contact organization value (caseworkers spec D17): its field is a record field too', () => {
+    expect(readOrgLocation(undefined, params('view=not-on-list&field=organization&value=Kite+Ade')).selection).toEqual({
+      type: 'value',
+      field: 'organization',
+      value: 'Kite Ade',
+    });
+    const url = new URL(valueHref('organization', 'Kite Ade'), 'http://x');
+    expect(readOrgLocation(undefined, url.searchParams).selection).toEqual({
+      type: 'value',
+      field: 'organization',
+      value: 'Kite Ade',
+    });
+  });
+```
+
+RED 2: `dashboard/src/routes/settings/OrgListSection.test.tsx`, inside
+`describe('OrgListSection - "Not on the list"', () => {`, after
+`it('a value that is gone from the list says so', async () => {`, add:
+
+```tsx
+  it('an organization value (caseworkers spec D17) lists as "Organization", and its link opens it', async () => {
+    const user = userEvent.setup();
+    getNotOnList.mockResolvedValue([
+      { field: 'organization', value: 'Kite Ade', count: 2, deletedCount: 0, resolution: { status: 'unknown', close: [] } },
+    ]);
+    renderSection();
+    await user.click(await screen.findByRole('button', { name: 'Not on the list 1' }));
+    const row = within(region('Not on the list')).getByRole('link', { name: 'Kite Ade' });
+    // FIELD_LABEL.organization (Task 7.1) names the field; OrgListPane is unchanged.
+    expect(row).toHaveAccessibleDescription('Organization - 2 records');
+    expect(row).toHaveAttribute('href', '/settings/organizations?view=not-on-list&field=organization&value=Kite+Ade');
+    await user.click(row);
+    const panel = await screen.findByRole('region', { name: 'Kite Ade' });
+    expect(within(panel).getByText('Organization', { selector: 'dd' })).toBeInTheDocument();
+    expect(within(region('Not on the list')).getByRole('link', { name: 'Kite Ade' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+  });
+```
+
+Run: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/settings/orgSelection.test.ts src/routes/settings/OrgListSection.test.tsx`.
+Expected RED: both `readOrgLocation` reads give `selection: null` (the
+field is not in the client `RECORD_FIELDS`); in OrgListSection the link's
+description and href already pass (Task 7.1's label; `valueHref` takes any
+field), but after the click no region "Kite Ade" appears - the panel stays
+on "Pick a value to see the records holding it." - and the row is never
+`aria-current`.
+
+Implement: `dashboard/src/routes/settings/orgSelection.ts`, replace
+`const RECORD_FIELDS: readonly OrgRecordField[] = ['housingAuthority', 'agency', 'accepted_authorities'];`
+(unique) with
+
+```ts
+// Every field a "Not on the list" value can sit in - (B) a contact's
+// organization included (caseworkers spec D17), else its URL reads as no
+// selection. The server's list is app/src/services/orgRecords.ts RECORD_FIELDS.
+const RECORD_FIELDS: readonly OrgRecordField[] = ['housingAuthority', 'agency', 'accepted_authorities', 'organization'];
+```
+
+GREEN: `cd "W:/tmp/caseworkers/dashboard"; npx vitest run src/routes/settings`
+(the PIN "ignores a value outside "Not on the list" and a field that is not
+a record field" stays green: `field=nope` is still no selection); typecheck.
+
+Commit: `git status` (read it), then
+`cd "W:/tmp/caseworkers"; git add dashboard/src/routes/settings/orgSelection.ts dashboard/src/routes/settings/orgSelection.test.ts dashboard/src/routes/settings/OrgListSection.test.tsx; git commit -m "feat(caseworkers): an organization value's Settings URL selects it" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
 
 ### Task 7.6 - `ContactEditForm` routes org answers by FIELD and takes an organization 422 (the S8 seam)
 
@@ -14578,6 +14859,15 @@ GREEN (a) - create `dashboard/src/routes/contacts/CaseworkersList.module.css`:
 `--fs-xs` and `--c-surface-2` with a grep; if `--fs-xs` is absent use
 `--fs-sm`.)
 
+Width (Cameron's standing rule, checked at the 54e7b0d0 rebaseline - layout
+handback section 1 "Full width"): NO page-level width cap anywhere. The
+page container is `ContactsList.module.css` `.page`, which has none (its
+comment: the nav page spans the whole window), and the module above
+adds none: never give `.controls`, `.possible` or the page a `max-width`.
+Only a control or a block of prose gets its own width, and this page has
+neither beyond what it reuses (the chips wrap; the one-line notes are
+short).
+
 GREEN (b) - create `dashboard/src/routes/contacts/CaseworkersList.tsx`:
 
 ```tsx
@@ -14962,7 +15252,8 @@ Files: `dashboard/src/app/nav.ts`, `dashboard/src/app/NavContents.tsx`,
 Existing tests this task changes: `AppFrame.test.tsx` "renders the two nav
 groups with every destination as a link" (`:141`) and "Contacts is a parent
 with Tenants/Landlords/Unknown children" (`:153-158`);
-`e2e/performance/routes.test.ts` (the `excluded` set, `:381-388`);
+`e2e/performance/routes.test.ts` (the `excluded` set, `:391-407` at
+54e7b0d0);
 `e2e/tests/dashboard-next/contact-create.spec.ts:201` (R5-F11: an unscoped
 `getByText('Caseworker')` - a case-insensitive SUBSTRING match in Playwright -
 would also match the new "Caseworkers" nav link and fail strict mode).
@@ -15153,26 +15444,33 @@ Replace with:
             <Route path="contacts/caseworkers" element={<CaseworkersList />} />
 ```
 
-GREEN (e) - `e2e/performance/routes.test.ts`. Current (`:385-387`):
+GREEN (e) - `e2e/performance/routes.test.ts`, the `excluded` set. At
+54e7b0d0 the Settings organizations entry is TWO paths (the layout merge
+made the route `organizations/:orgId?` and excluded both forms; its comment
+above them is three lines). Current (`:401-402`, unique as a pair):
 
 ```ts
-      // A new Settings tab, not yet a profiler surface
-      // (issue perf-pages-settings-organizations-surface).
       '/settings/organizations',
+      '/settings/organizations/:orgId?',
 ```
 
 Replace with:
 
 ```ts
-      // A new Settings tab, not yet a profiler surface
-      // (issue perf-pages-settings-organizations-surface).
       '/settings/organizations',
+      '/settings/organizations/:orgId?',
       // Contacts > Caseworkers, not yet a profiler surface
       // (issue perf-pages-contacts-caseworkers-surface).
       '/contacts/caseworkers',
 ```
 
-GREEN (f) - `e2e/performance/routes.ts`. Current (`:658`):
+(The `settingsChildren` list above it, which now holds
+`'/organizations/:orgId?'`, is NOT touched: `contacts/caseworkers` is a
+top-level route, so it maps to `/contacts/caseworkers` as written.)
+
+GREEN (f) - `e2e/performance/routes.ts`. Current (`:663` at 54e7b0d0 - the
+last line of the organizations TODO, which the layout merge rewrote above
+this line; the line itself is unchanged and unique):
 
 ```ts
   // (docs/issues/perf-pages-settings-organizations-surface.md).
@@ -16386,9 +16684,11 @@ const NOTE = 'Flagged recipients you picked stay checked; "Select all" skips the
     await page.getByRole('button', { name: /^Send to 1 recipient\b/ }).click();
 ```
 
-   (d) `e2e/tests/dashboard-next/org-lists.spec.ts`, two edits.
+   (d) `e2e/tests/dashboard-next/org-lists.spec.ts`, two edits (lines as of
+   54e7b0d0: the layout merge moved them 9 lines down; the text is
+   unchanged and unique).
 
-   `:349`. Current:
+   `:358` (was `:349`). Current:
 
 ```ts
     await expect(page.getByText('Reaches 2 tenants', { exact: true })).toBeVisible();
@@ -16400,7 +16700,7 @@ const NOTE = 'Flagged recipients you picked stay checked; "Select all" skips the
     await expect(page.getByText('Reaches 2 recipients', { exact: true })).toBeVisible();
 ```
 
-   `:465`. Current:
+   `:474` (was `:465`). Current:
 
 ```ts
     await expect(page.getByText('Reaches 1 tenant', { exact: true })).toBeVisible();
@@ -17069,8 +17369,8 @@ Task 10.4 only verifies them (skip-if-done) and runs the pinned tests.
 | `e2e/tests/dashboard-next/share-sent-outcome.spec.ts:671` | `{ name: /No tenants reached/ }` | `{ name: /No recipients reached/ }` | 9.3 |
 | `e2e/tests/dashboard-next/share-skip-fix.spec.ts:31` | `'Flagged tenants you picked stay checked; "Select all" skips the others.'` | `'Flagged recipients you picked stay checked; "Select all" skips the others.'` | 9.4 |
 | `share-skip-fix.spec.ts:190` | `{ name: /^Send to 1 tenant\b/ }` | `{ name: /^Send to 1 recipient\b/ }` | 9.4 |
-| `e2e/tests/dashboard-next/org-lists.spec.ts:349` | `getByText('Reaches 2 tenants', { exact: true })` | `getByText('Reaches 2 recipients', { exact: true })` | 9.4 |
-| `org-lists.spec.ts:465` | `getByText('Reaches 1 tenant', { exact: true })` | `getByText('Reaches 1 recipient', { exact: true })` | 9.4 |
+| `e2e/tests/dashboard-next/org-lists.spec.ts:349` (`:358` at 54e7b0d0) | `getByText('Reaches 2 tenants', { exact: true })` | `getByText('Reaches 2 recipients', { exact: true })` | 9.4 |
+| `org-lists.spec.ts:465` (`:474` at 54e7b0d0) | `getByText('Reaches 1 tenant', { exact: true })` | `getByText('Reaches 1 recipient', { exact: true })` | 9.4 |
 
 Comments/titles only (no assertion): `broadcasts.spec.ts:6-7, 140`,
 `steps.ts:1051`, `matching-entry-points.spec.ts:13, 16, 203, 260`,
@@ -17113,7 +17413,7 @@ commit.
 > **Assembly notes (BINDING - they override the task text below where they differ;
 > `plan-research/plan-assembly-rulings.md`):**
 > - Task 10.1's catalog and profiler steps and Task 10.2's `contact-create.spec.ts:201` step were MOVED into S8 (Tasks 8.1, 8.13; S8-2, S8-3). Task 10.1 is now a verification task (greps and the e2e-workspace unit run; no RED, no edit, never re-create the issue file) and Task 10.2 keeps only its two additions (plan review R1 ruling A16).
-> - Task 10.3's e2e fixture types, README dev-seam line and the `org-lists.spec.ts:557-562` usage pin are S5's (S5/S7-5): skip if done.
+> - Task 10.3's e2e fixture types, README dev-seam line and the `org-lists.spec.ts:557-562` usage pin (`:619-624` at 54e7b0d0) are S5's (S5/S7-5): skip if done.
 > - Task 10.4's share-wording pins were MOVED into the tasks that change the copy (Tasks 6.5, 9.1, 9.3, 9.4; plan review R1 ruling A3): Task 10.4 verifies them (skip-if-done) and runs the pinned tests.
 > - Task 10.9's partner "Properties sent" row, "Sent to" card row and line 45 are Task 9.6's (plan review R1 ruling A7): Task 10.9 verifies them and adds only the caseworker rows.
 > - The dismiss confirm is a Modal named by its first sentence (S8 as built); locate it by that sentence (assembly ruling S10 "dismiss confirm container").
@@ -17387,6 +17687,13 @@ Files: `e2e/fixtures/orgFixture.ts`, `e2e/tests/dashboard-next/org-lists.spec.ts
 Made pass by: S5 (usage gains `organization`, `inUse`, `kindLocked`; the dev
 seam accepts `organization`). Planner rulings R5-F12, R5-F13, R2-F1; assembly ruling S5/S7-5.
 
+(Rebaselined on 54e7b0d0. The usage pin is an API assertion
+(`getOrgUsage`), so the layout merge left its text unchanged; it moved from
+`:557-562` to `:619-624`, inside the rename test, which now reads the entry's
+use through its detail panel - `openEntry(page, UI.haRegion, oldName)`, then
+`panel` contains `UI.usedByTenants(2)` / `UI.usedByProperties(1)` - not a
+table row. Nothing in Steps 2-4 touches a selector.)
+
 Step 1 - skip-if-done check FIRST (assembly ruling S5/S7-5: S5 Task 5.3
 step 4 edits `OrgUsageWire` and the `org-lists.spec.ts` usage pin, S5 Task
 5.7 edits `OrgRecordField`, the README dev-seam line and the selectors row;
@@ -17453,7 +17760,7 @@ export type OrgUsageWire = Record<
 (`NotOnListRowWire.field` is typed `OrgRecordField`, so organization rows
 type-check with no further edit.)
 
-Step 3 - `org-lists.spec.ts:556-562`. Current (unique):
+Step 3 - `org-lists.spec.ts:618-624` at 54e7b0d0 (was `:556-562`). Current (unique):
 
 ```ts
     // What uses the entry, counted per kind of record (D3, D10).
@@ -17517,9 +17824,9 @@ Step 5 - GREEN:
 -> no error on an added line.
 
 `cd "W:/tmp/caseworkers"; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/org-lists.spec.ts`
--> `0 failed` (every org-lists test: the usage UI's "Used by" cell still
-contains `2 tenants` / `1 property`, and the "Not on the list" rows are
-filtered by run-unique values).
+-> `0 failed` (every org-lists test: the entry panel's "Used by" fact still
+contains `2 tenants` / `1 property`, and the "Not on the list" values are
+found by their exact run-unique text - `valueLink`).
 
 ASCII check on the three files' added lines.
 
@@ -17552,7 +17859,7 @@ its copy - `landlord-activity.spec.ts:122` in Task 6.5 (step 4);
 `listing-activity.spec.ts:161, 180, 211-216` in Task 9.1 (step 4);
 `listing-activity.spec.ts:143` and `share-sent-outcome.spec.ts:27, 621, 671`
 in Task 9.3; `broadcasts.spec.ts:247`, `matching-entry-points.spec.ts:152,
-235`, `share-skip-fix.spec.ts:31, 190` and `org-lists.spec.ts:349, 465` in
+235`, `share-skip-fix.spec.ts:31, 190` and `org-lists.spec.ts:349, 465` (`:358, 474` at 54e7b0d0) in
 Task 9.4 (step 4). This task proves none was missed and runs the pinned
 tests. No RED claim.
 
@@ -17569,10 +17876,15 @@ pin and its owning task in the commit body (Step 3).
 Step 2 - run the pinned tests, in the BACKGROUND (Bash tool
 `run_in_background: true`; about 15 minutes):
 
-`cd "W:/tmp/caseworkers"; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/broadcasts.spec.ts:96 tests/dashboard-next/broadcasts.spec.ts:231 tests/dashboard-next/landlord-activity.spec.ts:67 tests/dashboard-next/listing-activity.spec.ts:85 tests/dashboard-next/listing-activity.spec.ts:162 tests/dashboard-next/matching-entry-points.spec.ts:103 tests/dashboard-next/matching-entry-points.spec.ts:192 tests/dashboard-next/share-skip-fix.spec.ts:156 tests/dashboard-next/share-sent-outcome.spec.ts:621 tests/dashboard-next/org-lists.spec.ts:309 tests/dashboard-next/org-lists.spec.ts:438 tests/scenarios/sending-unit.spec.ts`
+`cd "W:/tmp/caseworkers"; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/broadcasts.spec.ts:96 tests/dashboard-next/broadcasts.spec.ts:231 tests/dashboard-next/landlord-activity.spec.ts:67 tests/dashboard-next/listing-activity.spec.ts:85 tests/dashboard-next/listing-activity.spec.ts:162 tests/dashboard-next/matching-entry-points.spec.ts:103 tests/dashboard-next/matching-entry-points.spec.ts:192 tests/dashboard-next/share-skip-fix.spec.ts:156 tests/dashboard-next/share-sent-outcome.spec.ts:621 tests/dashboard-next/org-lists.spec.ts:318 tests/dashboard-next/org-lists.spec.ts:447 tests/scenarios/sending-unit.spec.ts`
 
--> `0 failed`. (Line numbers are the base's: every moved edit above a test
-is line-for-line or below it, so each `file:line` still names the same test.
+-> `0 failed`. (Line numbers are the base's, except org-lists, whose two
+test declarations - "blast composer: the picker has no add step and changes
+the filter only on a pick" and "blast composer: Preview waits while the
+housing authority filter holds typed text" - are at `:318` and `:447` as of
+54e7b0d0 (the layout merge moved them from `:309` / `:438`): every moved
+edit above a test is line-for-line or below it, so each `file:line` still
+names the same test.
 If a run reports that no test matched, find the test's current line by its
 title with `git grep -n` and re-run.) A failure: diagnose it against plan
 3.9's share wording - a copy mismatch is an S6/S9 finding (stop and report);
@@ -18488,32 +18800,47 @@ Commit `test(e2e): partner-share spec - a property sent from a partner page mint
 
 ### Task 10.8a - org-lists.spec.ts: an organization value under Settings > "Not on the list" - Add as new asks the Kind, Use takes a list name
 
-Plan review R1 ruling S1: no e2e drove S7's Settings organization rows, and
-S5 Task 5.7's dev-seam extension (`field: 'organization'`) was never called.
-This task adds ONE test to the existing `"Not on the list"` describe of
-`e2e/tests/dashboard-next/org-lists.spec.ts`, reusing its helpers
-(`devLoginAs`, `uniquePhone`, `openOrgSettings`, `notOnListRow`, `UI`) and
-the fixtures it already imports (`addOrg`, `requireOrg`, `sameOrgText`,
-`setOffListValue`, `waitForRewrite`).
+Plan review R1 ruling S1: no e2e drove S7's Settings organization values,
+and S5 Task 5.7's dev-seam extension (`field: 'organization'`) was never
+called. This task adds ONE test to the existing `"Not on the list"` describe
+of `e2e/tests/dashboard-next/org-lists.spec.ts`, reusing the spec's helpers
+as merged at 54e7b0d0 (`devLoginAs`, `uniquePhone`, `openOrgSettings`,
+`showList`, `valueLink`, `openValue`, `pickSettle`, `confirmSettle`, `UI`)
+and the fixtures it already imports (`addOrg`, `requireOrg`, `sameOrgText`,
+`setOffListValue`, `waitForRewrite`; `APIRequestContext` is already a type
+import).
+
+(Rebaselined on 54e7b0d0: the layout merge replaced the table rows and the
+Settle dialog. A value is now a link in the "Not on the list" list - named
+by its exact text, its use count as the link's accessible description - and
+settling it is: open the value (`openValue`), pick one radio in its panel's
+"Settle this value" group (`pickSettle`), then press the confirm under the
+pick, named as the choice (`confirmSettle`, which also waits until the URL
+has left the settled value). `notOnListRow` and its substring match are
+gone.)
 
 Files: `e2e/tests/dashboard-next/org-lists.spec.ts`.
-Made pass by: S5 (organization rows, resolve `kind`, the dev seam) and S7
-(Task 7.5's organization rows and the Settle dialog's Kind choice).
+Made pass by: S5 (organization values, resolve `kind`, the dev seam) and S7
+(Task 7.5's organization values and the settle confirm's Kind choice; Task
+7.5a's URL field).
 
 E2E rules (section 0 and this slice's isolation rules): every value and
-name is RUN-UNIQUE (a stamp per test; no value contains another, because
-`notOnListRow` matches a case-insensitive substring); the holders are
-partners this test creates; the one list entry it adds through the API goes
-through `addOrg`, and the one the UI adds ("Add as new") carries the stamp
-too; NO count is asserted anywhere (no `count` / `deletedCount`, no number
-of rows, no empty state); each rewrite is lane-global, so the test waits for
-each before the next.
+name is RUN-UNIQUE (a stamp per test; the two values differ, and
+`valueLink` matches the exact text); the holders are partners this test
+creates; the one list entry it adds through the API goes through `addOrg`,
+and the one the UI adds ("Add as new") carries the stamp too; NO count is
+asserted anywhere (no `count` / `deletedCount`, no number of rows, no
+segment count, no empty state - the row description is matched by its
+`Organization - ` prefix only); each rewrite is lane-global, so the test
+waits for each before the next.
 
 This task is PIN-only (section 0): it covers behavior S5 and S7 proved with
 unit tests, so it is green on arrival. Its assertions that CAN fail on a
-regression: the row is labelled `Organization`; "Add as new" in the dialog
-stays disabled until a `Kind` radio is chosen; the added entry's kind is the
-one picked; Use writes the list name onto the holder's `organization`.
+regression: the value's field reads `Organization` (row description and
+the panel's Field fact); the value's link opens its panel (Task 7.5a); the
+confirm "Add as new" stays disabled until a `Kind` radio is chosen; the
+added entry's kind is the one picked; Use writes the list name onto the
+holder's `organization`.
 
 Step 1 - helpers. In `e2e/tests/dashboard-next/org-lists.spec.ts`, current
 (unique):
@@ -18551,7 +18878,7 @@ each rewrite the records` test and of the describe):
 
 ```ts
     for (const value of [useValue, moveValue, splitValue, clearValue]) {
-      await expect(notOnListRow(page, value)).toHaveCount(0);
+      await expect(valueLink(page, value)).toHaveCount(0);
     }
   });
 });
@@ -18561,11 +18888,11 @@ Replace with:
 
 ```ts
     for (const value of [useValue, moveValue, splitValue, clearValue]) {
-      await expect(notOnListRow(page, value)).toHaveCount(0);
+      await expect(valueLink(page, value)).toHaveCount(0);
     }
   });
 
-  test('an organization value (caseworkers D17): its own row; Add as new asks the Kind; Use takes a name of either kind', async ({
+  test('an organization value (caseworkers D17): its own field; Add as new asks the Kind; Use takes a name of either kind', async ({
     page,
   }) => {
     test.slow(); // two rewrite jobs, strictly one at a time (D11)
@@ -18584,45 +18911,51 @@ Replace with:
     await setOffListValue(req, { contactId: addHolder, field: 'organization', value: addValue });
 
     await openOrgSettings(page);
-    const dialog = page.getByRole('dialog');
+    await showList(page, UI.notOnListRegion);
 
-    // Each value is an ORGANIZATION row (FIELD_LABEL.organization).
-    await expect(notOnListRow(page, addValue)).toBeVisible();
-    await expect(notOnListRow(page, addValue)).toContainText('Organization');
-    await expect(notOnListRow(page, useValue)).toContainText('Organization');
+    // Each value is an ORGANIZATION value: FIELD_LABEL.organization names its
+    // field in the row's description (matched by prefix - never a count).
+    await expect(valueLink(page, addValue)).toHaveAccessibleDescription(/^Organization - /);
+    await expect(valueLink(page, useValue)).toHaveAccessibleDescription(/^Organization - /);
 
     // Add as new: staff must pick the list - no default kind (D17; R2-F3).
-    await notOnListRow(page, addValue).getByRole('button', { name: 'Add as new', exact: true }).click();
-    const add = dialog.getByRole('button', { name: 'Add as new', exact: true });
+    // The value's link opens its panel (its URL names field=organization).
+    const addPanel = await openValue(page, addValue);
+    await expect(addPanel.getByText('Organization', { exact: true })).toBeVisible(); // the Field fact
+    let settle = await pickSettle(addPanel, 'Add as new');
+    const add = settle.getByRole('button', { name: 'Add as new', exact: true });
     await expect(add).toBeDisabled();
-    const kind = dialog.getByRole('group', { name: 'Kind' });
-    await expect(kind.getByRole('radio', { name: 'Housing authority' })).not.toBeChecked();
-    await expect(kind.getByRole('radio', { name: 'Agency' })).not.toBeChecked();
-    await kind.getByRole('radio', { name: 'Housing authority' }).click();
+    const kind = settle.getByRole('group', { name: 'Kind', exact: true });
+    await expect(kind.getByRole('radio', { name: 'Housing authority', exact: true })).not.toBeChecked();
+    await expect(kind.getByRole('radio', { name: 'Agency', exact: true })).not.toBeChecked();
+    await kind.getByRole('radio', { name: 'Housing authority', exact: true }).check();
     await expect(add).toBeEnabled();
-    await add.click();
+    await confirmSettle(page, settle, 'Add as new');
     await waitForRewrite(req, (r) => r.fromTexts.some((t) => sameOrgText(t, addValue)));
     expect((await requireOrg(req, addValue)).kind).toBe('housing_authority');
     expect(await organizationOf(req, addHolder)).toBe(addValue);
 
     // Use <name>: the value resolves to the AGENCY - an organization takes either kind.
     await page.reload();
-    await notOnListRow(page, useValue).getByRole('button', { name: UI.use(wren), exact: true }).click();
-    await expect(dialog).toContainText(useValue);
-    await dialog.getByRole('button', { name: UI.use(wren), exact: true }).click();
+    settle = await pickSettle(await openValue(page, useValue), UI.use(wren));
+    await confirmSettle(page, settle, UI.use(wren));
     await waitForRewrite(req, (r) => r.action === 'use' && r.fromTexts.some((t) => sameOrgText(t, useValue)));
     expect(await organizationOf(req, useHolder)).toBe(wren);
 
-    // Both settled values leave the section.
+    // Both settled values leave the list.
     await page.reload();
-    await expect(notOnListRow(page, wren)).toHaveCount(0); // the use value, any case
-    await expect(notOnListRow(page, addValue)).toHaveCount(0);
+    await expect(valueLink(page, useValue)).toHaveCount(0);
+    await expect(valueLink(page, addValue)).toHaveCount(0);
   });
 });
 ```
 
-(`UI.use(name)` is `Use <name>`; the Settle dialog's Add button and the
-row's button share the name `Add as new`, hence the dialog scope. If an
+(`UI.use(name)` is `Use <name>`. A settle choice's radio and its confirm
+share a name - "Add as new", "Use <name>" - so the radio is picked through
+`pickSettle` (`getByRole('radio', ...)`) and the confirm found as a
+`button`, both inside the settle group; the Kind radios sit in their own
+nested group, `Kind`. After `confirmSettle` the page is back on the list's
+URL (`?view=not-on-list`), so each `page.reload()` lands on the list. If an
 as-built name differs - the Kind group or its radios, Task 7.3's
 `OrgKindChoice` - it is an S7 defect against plan 3.9: stop and report.)
 
@@ -18679,6 +19012,22 @@ Replace with that same line followed by these rows:
 | Contact page (new contact form) | the Caseworker preset | `getByRole('group', { name: 'Contact kind' }).getByRole('button', { name: 'Caseworker', exact: true })` - saves `{ type: 'partner', role: 'Caseworker' }`; no `Role` input and no Organization picker on the create form (Organization is set on the partner page) |
 | Share composer and its echoes | recipient wording | neutral since caseworkers (D20, D22): Send `getByRole('button', { name: /^Send to 1 recipient\b/ })` / `/^Send to \d+ recipients?$/`; reach line `Reaches <n> recipient(s)`; note `Flagged recipients you picked stay checked; "Select all" skips the others.`; property Activity and landlord timeline rows `Sent to <n> recipient(s)` / `No recipients reached` (every share label keeps the `Sent to ` prefix the landlord timeline's relabel keys on). Tenant-worded ON PURPOSE because the control reaches tenants only: `Add a tenant`, `Add more tenants by filters`, `No candidates - add a tenant below.`, the filter summary `Tenants - ...`. The partner page's Properties sent card and the property's "Sent to" card are Task 9.6's rows above. A share to a partner mints `partner_1to1`: never "prove" it after calling `POST /api/contacts/:id/conversation` BEFORE the share - that route mints the thread by contact type itself; read the type only after the send. Renee Carter has no consent: mint a run-unique consented partner instead |
 ```
+
+Step 2a - rewrite the two Settings rows that still describe the OLD table
+(re-baseline open question 1; the layout branch left them): the row that
+starts `| Settings (Housing authorities & agencies) | the tab and its lists |`
+and the row that starts `| Settings ("Not on the list") | a value's row and
+its records |`. Replace each whole row with one that describes the merged
+list + detail layout, taking every selector from the helpers at the top of
+`e2e/tests/dashboard-next/org-lists.spec.ts` (`showList`, `valueLink`,
+`openValue`, `pickSettle`, `confirmSettle` and the segment/search/panel
+locators): the `Lists` segment group (`aria-pressed` buttons named
+`<list> <count>`), the `Search names and spellings` box, row links named by
+the exact name or value (use count as the accessible description), the
+panel region, and the settle flow - open the value's row link, choose a
+radio in `Settle this value`, press the confirm button. Name the
+organization field's value rows too (description "Organization - N
+records"). Never a count assertion. ASCII only.
 
 Step 3 - check:
 `cd "W:/tmp/caseworkers"; git diff -U0 -- e2e/support/selectors.md | grep '^+' | grep -nP '[^\x00-\x7F]'`
@@ -18767,8 +19116,9 @@ Replace with:
   from EITHER list of the **organization list** (above), checked like the
   housing authority (422 `org_not_on_list`; `''` removes it). Shown on a
   partner's page and in its header, and as the Caseworkers tab's
-  Organization filter; counted in Settings' "Used by" column and rewritten by
-  a rename or merge of either kind. The conversion fills it from the
+  Organization filter; counted in Settings' use counts (an entry's list row
+  and its panel's "Used by") and rewritten by a rename or merge of either
+  kind. The conversion fills it from the
   contact's agency, else its housing authority - the list name when the text
   matches one, else the text as written (then it waits under "Not on the
   list"). Not the **organization list** itself, and not the generic word.
@@ -18802,8 +19152,12 @@ Files: `RUNBOOK.md` (spec section 11; planner rulings R1-F4, R2-F9; plan
 review R1 ruling A12 adds Step 2), `documentation/sequence-diagram-to-test.md`
 (ruling A8, Step 3). The new section goes BEFORE "Tour reminder
 supersession" - not inside the organization-names section, which main's
-`20ccdb12` rewrote (keeping the two edits apart keeps the final main sync
-clean). The inserted block is ASCII.
+`20ccdb12` rewrote, and which the 54e7b0d0 merge rewrote again (its heading
+is now "Organization names cleanup (`feat/clean-org-names`): DONE dev +
+prod 2026-10-07 (release 1.5.0)"; keeping the two edits apart keeps the
+final main sync clean). Every anchor below was re-checked at 54e7b0d0: each
+exists once, on one line (the "Tour reminder supersession" heading is now
+`:450`). The inserted block is ASCII.
 
 Step 1 - Current (unique):
 
@@ -18838,7 +19192,7 @@ await (await fetch('/api/contacts/<contactId>/caseworker-review', { method: 'POS
 
 **What the conversion does not fence: an extraction run already in flight.** A run that read the contact while it was still a tenant or unknown can still write tenant facts (a housing authority included) or new suggestions onto it after the conversion: its writes are not conditional on the contact's type (filed: `extraction-in-flight-writes-onto-converted-caseworker`). `make` again (the repair above) supersedes such suggestions, but it does NOT remove a housing authority the run wrote. Remove that by hand in the console: `await fetch('/api/contacts/<contactId>', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ housingAuthority: '' }) })`.
 
-**The organization-names cleanup ignores `organization`.** `app/scripts/clean-org-names.ts` (section above) reads and writes housing authorities, agencies and property lists only; it never reads or writes a caseworker's `organization`. An organization that is not on the list - text the conversion carried over as written - waits on Settings > Housing authorities & agencies > "Not on the list" as an organization row, settled with Use (a name of either kind), Add as new (pick the kind) or Clear; a re-run of the cleanup leaves it alone.
+**The organization-names cleanup ignores `organization`.** `app/scripts/clean-org-names.ts` (section above) reads and writes housing authorities, agencies and property lists only; it never reads or writes a caseworker's `organization`. An organization that is not on the list - text the conversion carried over as written - waits on Settings > Housing authorities & agencies > "Not on the list" as a value whose field is Organization; open it and settle it in its panel's "Settle this value" choice with Use (a name of either kind), Add as new (pick the kind) or Clear; a re-run of the cleanup leaves it alone.
 
 ### Tour reminder supersession (2026-09-01): NOTHING is owed - no backfill, no Terraform, no sweep
 ````
@@ -18860,7 +19214,8 @@ edits, each anchor unique in the file:
 - `:386` (ASCII) - replace the substring
   `the property's "Sent to tenants"), a created counted row included.`
   with `the property's "Sent to" card), a created counted row included.`.
-- `:415` (ASCII) - replace the substring
+- `:417` at 54e7b0d0 (was `:415`; the layout merge added two lines above
+  it) (ASCII) - replace the substring
   `the tour chip on the "Sent to tenants" / "Properties sent" lists`
   with `the tour chip on the "Sent to" / "Properties sent" lists`.
 
@@ -19191,7 +19546,8 @@ Commit `docs(issues): file the caseworkers follow-ups; staff notes now on the pa
 No file is planned to change; this task catches any pin the research
 missed (the B-sensitive specs it watches hardest: conversation-fact-extraction
 - the Unknown card now has five actions; contact-detail - More actions gains
-an item; org-lists - the usage UI; environment-identity - one more nav tab
+an item; org-lists - the use counts in the list + detail layout (row
+descriptions, the panel's Used by) and the settle confirm; environment-identity - one more nav tab
 stop; every share spec).
 
 Step 1 - run the whole suite once, in the BACKGROUND (Bash tool

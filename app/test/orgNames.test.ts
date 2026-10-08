@@ -112,6 +112,8 @@ describe('isOnListFor (spec D3: exact text, right kind)', () => {
     expect(KINDS_FOR_FIELD.accepted_authorities).toEqual(['housing_authority']);
     expect(KINDS_FOR_FIELD.audience_filter).toEqual(['housing_authority']);
     expect(KINDS_FOR_FIELD.agency).toEqual(['agency']);
+    // Caseworkers (spec D17): a partner's organization is a name of EITHER kind.
+    expect(KINDS_FOR_FIELD.organization).toEqual(['housing_authority', 'agency']);
   });
 });
 
@@ -221,6 +223,33 @@ describe('checkScalarWrite (D5)', () => {
     expect(!comp.ok && comp.error.compound?.length).toBe(2);
     const unk = checkScalarWrite(LIST, 'agency', 'Nowhere Org', undefined);
     expect(!unk.ok && unk.error.close).toEqual([]);
+  });
+});
+
+describe('checkScalarWrite on organization (D17: both kinds)', () => {
+  it('stores a name or unique spelling of EITHER kind', () => {
+    expect(checkScalarWrite(LIST, 'organization', 'Georgia DCA', undefined)).toEqual({
+      ok: true,
+      value: 'Georgia Department of Community Affairs',
+    });
+    expect(checkScalarWrite(LIST, 'organization', 'VASH', undefined)).toEqual({ ok: true, value: VASH.name });
+    expect(checkScalarWrite(LIST, 'organization', 'step up', undefined)).toEqual({ ok: true, value: 'Step Up' });
+  });
+  it('refuses ambiguous and unknown text naming the organization field, and never reports another kind', () => {
+    const amb = checkScalarWrite(LIST, 'organization', 'AHA', undefined);
+    expect(amb.ok).toBe(false);
+    if (!amb.ok) {
+      expect(amb.error.field).toBe('organization');
+      expect(amb.error.candidates.map((c) => c.name)).toEqual([ATLANTA.name, AUGUSTA.name]);
+      expect(amb.error.otherKind).toBeUndefined();
+    }
+    const unk = checkScalarWrite(LIST, 'organization', 'Nowhere Org', undefined);
+    expect(!unk.ok && unk.error.field).toBe('organization');
+    expect(!unk.ok && unk.error.otherKind).toBeUndefined();
+  });
+  it('passes an unchanged value and clears on blank, as every scalar field does', () => {
+    expect(checkScalarWrite(LIST, 'organization', 'Old Text', 'Old Text')).toEqual({ ok: true, value: 'Old Text' });
+    expect(checkScalarWrite(LIST, 'organization', ' ', 'Step Up')).toEqual({ ok: true, value: null });
   });
 });
 

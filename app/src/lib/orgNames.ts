@@ -20,14 +20,20 @@ export interface OrgEntry {
   updatedBy: string;
 }
 
-/** The record fields that hold organization names (branch A). */
-export type OrgField = 'housingAuthority' | 'agency' | 'accepted_authorities' | 'audience_filter';
+/**
+ * The record fields that hold organization names (branch A; `organization`
+ * is branch B's partner field, spec D17).
+ */
+export type OrgField = 'housingAuthority' | 'agency' | 'accepted_authorities' | 'audience_filter' | 'organization';
 
 export const KINDS_FOR_FIELD: Readonly<Record<OrgField, readonly OrgKind[]>> = {
   housingAuthority: ['housing_authority'],
   accepted_authorities: ['housing_authority'],
   audience_filter: ['housing_authority'],
   agency: ['agency'],
+  // D17: a partner's organization accepts EITHER kind, so an "other kind"
+  // result can never occur for it.
+  organization: ['housing_authority', 'agency'],
 };
 
 export const ORG_NAME_MAX = 120;

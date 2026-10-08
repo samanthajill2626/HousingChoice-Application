@@ -924,3 +924,55 @@ describe('conversion follow-on boundaries', () => {
     expect(world.auditEvents.filter((event) => event.event_type === 'contact_updated')).toHaveLength(1);
   });
 });
+
+describe('dismiss (D19, D22)', () => {
+  it('writes caseworker_review dismissed with no revision bump, audits it, returns the contact', async () => {
+    const { world, service } = setup();
+    for (const [id, type, status] of [['c-t', 'tenant', 'onboarding'], ['c-l', 'landlord', 'interested'], ['c-p', 'partner', 'active']] as const) {
+      seed(world, { contactId: id, type, status, classification_revision: 5 });
+      const contact = await service.dismiss(id, ACTOR);
+      expect(contact, id).toMatchObject({ caseworker_review: 'dismissed', classification_revision: 5 });
+    }
+    expect(world.auditEvents.filter((e) => e.event_type === 'contact_updated').map((e) => e.payload)).toEqual([
+      { fields: ['caseworker_review'], actor: ACTOR },
+      { fields: ['caseworker_review'], actor: ACTOR },
+      { fields: ['caseworker_review'], actor: ACTOR },
+    ]);
+  });
+
+  it('refuses an unknown and a caseworker with 400 caseworker_dismiss_not_allowed', async () => {
+    const { world, service } = setup();
+    seed(world, { contactId: 'c-u', type: 'unknown', status: 'needs_review' });
+    seed(world, { contactId: 'c-cw', type: 'partner', status: 'active', role: 'Case worker' });
+    for (const id of ['c-u', 'c-cw']) {
+      const err = await refused(service.dismiss(id, ACTOR));
+      expect([err.status, err.code], id).toEqual([400, 'caseworker_dismiss_not_allowed']);
+      expect(stored(world, id)).not.toHaveProperty('caseworker_review');
+    }
+  });
+
+  it('shares the domain: 404 missing, pointer or deleted; 400 team member', async () => {
+    const { world, service } = setup();
+    seed(world, { contactId: 'c-owner', phone: '+15550107030' });
+    await world.contactsRepo.addPhone('c-owner', { phone: '+15550107031' });
+    seed(world, { contactId: 'c-gone', deleted_at: '2026-10-05T00:00:00.000Z' });
+    seed(world, { contactId: 'c-team', type: 'team_member', status: 'active' });
+    for (const id of ['c-nope', phoneRefId('+15550107031'), 'c-gone']) {
+      expect((await refused(service.dismiss(id, ACTOR))).status, id).toBe(404);
+    }
+    expect((await refused(service.dismiss('c-team', ACTOR))).code).toBe('caseworker_team_member');
+  });
+
+  it('answers 404 when the contact is deleted between the read and the write', async () => {
+    const { world, service } = setup();
+    seed(world);
+    const original = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (id, patch, opts) => {
+      stored(world)!.deleted_at = '2026-10-07T11:59:00.000Z';
+      return original(id, patch, opts);
+    };
+    const err = await refused(service.dismiss(ID, ACTOR));
+    expect([err.status, err.code]).toEqual([404, 'contact_not_found']);
+    expect(stored(world)).not.toHaveProperty('caseworker_review');
+  });
+});

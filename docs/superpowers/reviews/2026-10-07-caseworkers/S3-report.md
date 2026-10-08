@@ -138,7 +138,7 @@ No contract deviation. The suggestion/thread follow-ons remain Task 3.6 work.
 
 ## Task 3.6 - suggestion sweep, thread writes and repair
 
-Commit: this Task 3.6 commit (hash recorded in the next report update).
+Commit: 15bbeb2a.
 The conversion now captures a prewrite type identity, drains it using the shared
 revision/identity semantics, then supersedes other suggestions. Own threads use
 setTypeIfCurrent with the captured type and display name; events use the returned
@@ -167,3 +167,18 @@ fields; null display name; racing replacement at old/current revisions; and
 suggestion-list, thread-plan, milestone and vocabulary failures after commit.
 Root npm run typecheck exited 0 (3.6-typecheck). ASCII and git diff --check passed.
 The production event bus already isolates failing listeners; no event-bus change.
+
+## Task 3.7 - dismissal
+
+Commit: this Task 3.7 commit (hash recorded in the next report update).
+Dismiss shares the consistent-read domain, refuses unknown/already-caseworker,
+and writes only caseworker_review: dismissed under notDeleted. No revision bump.
+It appends one contact_updated audit naming only caseworker_review and the actor.
+A raced deletion answers 404. As prescribed, dismiss audit errors propagate;
+only make's follow-ons have the swallow-and-error contract.
+
+Step 0 passed. RED: npx vitest run test/caseworkerConversion.test.ts exited 1:
+four dismiss cases failed on its stub, 74 passed (3.7-red). GREEN: the same
+command exited 0, 78 passed (3.7-green). Root npm run typecheck exited 0
+(3.7-typecheck). Root npx eslint app/src/services/caseworkerConversion.ts app/test/caseworkerConversion.test.ts
+exited 0, no lint errors (3.7-lint). No contract deviation.

@@ -591,8 +591,24 @@ export function createCaseworkerConversionService(
       return converted;
     },
 
-    async dismiss() {
-      throw new Error('caseworker dismiss: plan Task 3.7');
+    async dismiss(contactId, actor) {
+      const c = await readSubject(contactId);
+      // An unknown is triaged, not dismissed; a caseworker is not "possible".
+      if (c.type === 'unknown' || isCaseworker(c)) {
+        throw new CaseworkerReviewError(400, 'caseworker_dismiss_not_allowed');
+      }
+      // Not a classification: no type/role in the patch, so no revision bump
+      // (a concurrent make does not 409 on it - fine, D22).
+      let updated: ContactItem;
+      try {
+        updated = await contacts.update(contactId, { caseworker_review: 'dismissed' }, { notDeleted: true });
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) throw new CaseworkerReviewError(404, 'contact_not_found');
+        throw err;
+      }
+      await audit.append(`contacts#${contactId}`, 'contact_updated', { fields: ['caseworker_review'], actor });
+      log.info({ contactId, actor }, 'possible caseworker dismissed');
+      return updated;
     },
   };
 }

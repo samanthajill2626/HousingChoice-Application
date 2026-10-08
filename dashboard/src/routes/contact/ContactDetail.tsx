@@ -1130,6 +1130,12 @@ export function ContactDetail(): React.JSX.Element {
             <>
               <PartnerFile
                 contact={contact}
+                units={file.units}
+                listingsSentPending={file.listingsSent.status !== 'ready'}
+                listingsSent={file.listingsSent.status === 'ready' ? file.listingsSent.rows : []}
+                onSendProperty={() =>
+                  navigate(`/broadcasts/new?contactId=${encodeURIComponent(contact.contactId)}`)
+                }
                 phones={phones}
                 media={media}
                 mediaLoading={mediaLoading}

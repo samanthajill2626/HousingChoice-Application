@@ -75,3 +75,36 @@ on old reach/subtitle/fallback copy (empty-state assertion follows subtitle).
 GREEN: dashboard npx vitest run src/routes/broadcasts, exit 0: 222 tests in
 12 files. Root bare npm run typecheck exit 0 across five workspaces.
 Added-line ASCII and git diff --check pass. No contract deviation.
+
+## Task 9.6 - partner Properties sent and seeded composer
+
+Task 9.5 commit: 5531719f. PartnerFile consumes required units/listingsSent
+props from the existing useContactFile slices. Properties sent sits after
+Preferences & notes, before Group threads, and has no tour chips. Send opens
+/broadcasts/new?contactId=<encoded id>. S8 Role/Organization, Staff notes and
+onContactUpdated={setContact} wiring remain intact. No new GET or hook change.
+All four PartnerFile call sites carry the required props. The three selector
+rows are installed once: shared Properties sent, property Sent to, exact Send.
+RED: dashboard npx vitest run src/routes/contact/files.test.tsx
+src/routes/contact/ContactDetail.test.tsx
+src/routes/broadcasts/BroadcastComposer.test.tsx, exit 1: 5 failed / 208 passed.
+The failures are missing Properties sent/card action; the partner seed PIN
+passes on existing composer behavior.
+GREEN: dashboard npx vitest run src/routes/contact src/routes/broadcasts,
+exit 0: 1766 tests in 86 files. This includes S8's PartnerFile notes and
+ContactDetail conversion/mount-boundary regressions. Existing act warnings
+remain; no failing case is excused. Root bare npm run typecheck exit 0 across
+all five workspaces (9.6-typecheck).
+
+Scoped slice lint: root npx eslint over the 31 TS/TSX paths changed since
+S9 start, recorded in 9.6-lint.command.json, exits 1 for four existing
+BroadcastComposer.tsx react-hooks/set-state-in-effect diagnostics:
+setUnit(null) at 204, setMessage at 229 and 248, setFilter at 263.
+Explicit baseline comparison uses git merge-base main HEAD =
+1861e154e5c72ed8a60945ca425d26d35d89149b and ESLint.lintText for every same
+path at that commit and now, with the same cwd, filePath and config. All four
+rule/severity/full-message signatures, including code frames, match exactly;
+no other diagnostic is present. Comparison exit 0, zero new errors. Raw
+reference stays in 9.6-lint-baseline.log and lint-baseline.json (gitignored).
+Added-line ASCII across the whole S9 slice and git diff --check pass.
+No contract deviation and no command remains active for this task.

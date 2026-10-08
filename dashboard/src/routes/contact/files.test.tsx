@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -561,6 +561,9 @@ describe('PartnerFile', () => {
           groupThreadsPending={false}
           groupThreads={groupThreads}
           groupThreadsTruncated={false}
+          units={[]}
+          listingsSentPending={false}
+          listingsSent={[]}
         />
       </MemoryRouter>,
     );
@@ -617,6 +620,9 @@ describe('PartnerFile - role, organization and staff notes', () => {
           groupThreadsPending={false}
           groupThreads={[]}
           groupThreadsTruncated={false}
+          units={[]}
+          listingsSentPending={false}
+          listingsSent={[]}
           {...(onContactUpdated !== undefined && { onContactUpdated })}
         />
       </MemoryRouter>,
@@ -653,5 +659,73 @@ describe('PartnerFile - role, organization and staff notes', () => {
     renderPartner(caseworker);
     expect(screen.getByRole('heading', { name: /Staff notes/ })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit staff notes' })).toBeNull();
+  });
+});
+
+
+describe('PartnerFile - Properties sent (caseworkers D20)', () => {
+  const partner: Contact = {
+    contactId: 'P2',
+    type: 'partner',
+    firstName: 'Cora',
+    lastName: 'Reyes',
+    status: 'active',
+    phone: '+14040100056',
+  };
+
+  function renderSent(
+    opts: { listingsSentPending?: boolean; listingsSent?: ListingSendRow[]; onSendProperty?: () => void } = {},
+  ) {
+    return render(
+      <MemoryRouter>
+        <PartnerFile
+          contact={partner}
+          phones={[{ phone: '+14040100056', primary: true }]}
+          media={[]}
+          groupThreadsPending={false}
+          groupThreads={[]}
+          groupThreadsTruncated={false}
+          units={[UNIT]}
+          listingsSentPending={opts.listingsSentPending ?? false}
+          listingsSent={opts.listingsSent ?? []}
+          {...(opts.onSendProperty !== undefined && { onSendProperty: opts.onSendProperty })}
+        />
+      </MemoryRouter>,
+    );
+  }
+
+  it('shows the card empty when nothing was sent', () => {
+    renderSent();
+    expect(screen.getByRole('heading', { name: /^Properties sent/ })).toBeInTheDocument();
+    expect(screen.getByText('No properties sent yet.')).toBeInTheDocument();
+  });
+
+  it('shows the pending panel while the slice loads', () => {
+    renderSent({ listingsSentPending: true });
+    const card = screen.getByRole('heading', { name: /^Properties sent/ }).closest('section') as HTMLElement;
+    expect(within(card).getByText('Arrives with the backend.')).toBeInTheDocument();
+  });
+
+  it('lists each sent property linking to it, WITHOUT a tour chip even when the row carries one (ruling R3-F5)', () => {
+    renderSent({
+      listingsSent: [
+        { contactId: 'P2', unitId: 'u1', sentAt: '2026-07-01T12:00:00.000Z', via: 'broadcast', tour: { tourId: 't-old', state: 'toured' } },
+        { contactId: 'P2', unitId: 'u-missing', sentAt: '2026-06-30T12:00:00.000Z', via: 'broadcast' },
+      ],
+    });
+    expect(screen.getByRole('link', { name: '1450 Joseph Blvd, Atlanta, GA' })).toHaveAttribute('href', '/listings/u1');
+    // A unit the page did not load falls back to its id.
+    expect(screen.getByRole('link', { name: 'u-missing' })).toHaveAttribute('href', '/listings/u-missing');
+    expect(screen.queryByRole('link', { name: 'Toured' })).not.toBeInTheDocument();
+  });
+
+  it('"+ Send" (aria-label "Send a property to this partner") fires onSendProperty; no action without the handler', async () => {
+    const onSendProperty = vi.fn();
+    const { unmount } = renderSent({ onSendProperty });
+    await userEvent.click(screen.getByRole('button', { name: 'Send a property to this partner' }));
+    expect(onSendProperty).toHaveBeenCalledTimes(1);
+    unmount();
+    renderSent();
+    expect(screen.queryByRole('button', { name: 'Send a property to this partner' })).not.toBeInTheDocument();
   });
 });

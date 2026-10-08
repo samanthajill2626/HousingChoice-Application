@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type {
   Contact,
   PlacementItem,
@@ -2730,5 +2730,55 @@ describe('ContactDetail - caseworkers (spec 2026-10-06 D16, D19, D21, D22)', () 
     expect(previewCaseworker).not.toHaveBeenCalled();
     expect(listPossibleCaseworkers).not.toHaveBeenCalled();
     expect(getOrgList).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('ContactDetail - a partner page sends a property (caseworkers D20)', () => {
+  const PARTNER: Contact = {
+    contactId: 'p-send',
+    type: 'partner',
+    firstName: 'Cora',
+    lastName: 'Reyes',
+    status: 'active',
+    phone: '+14045550199',
+  };
+
+  function PathProbe(): React.JSX.Element {
+    const loc = useLocation();
+    return <span data-testid="path">{`${loc.pathname}${loc.search}`}</span>;
+  }
+
+  it('shows Properties sent (rows, no tour chip) and "+ Send" opens the composer seeded with the partner', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(PARTNER);
+    getContactListingsSent.mockResolvedValue([
+      {
+        contactId: 'p-send',
+        unitId: 'u1',
+        sentAt: '2026-07-01T12:00:00.000Z',
+        via: 'broadcast',
+        tour: { tourId: 't-old', state: 'toured' },
+      },
+    ]);
+    render(
+      <MemoryRouter initialEntries={['/contacts/p-send']}>
+        <ImageViewerProvider>
+          <Routes>
+            <Route path="/contacts/:contactId" element={<ContactDetail />} />
+            <Route path="/broadcasts/new" element={<div>COMPOSER</div>} />
+          </Routes>
+        </ImageViewerProvider>
+        <PathProbe />
+      </MemoryRouter>,
+    );
+    const heading = await screen.findByRole('heading', { name: /^Properties sent/ });
+    const card = heading.closest('section') as HTMLElement;
+    expect(await within(card).findByRole('link', { name: '1450 Joseph Blvd' })).toHaveAttribute('href', '/listings/u1');
+    expect(within(card).queryByRole('link', { name: 'Toured' })).not.toBeInTheDocument();
+    await user.click(within(card).getByRole('button', { name: 'Send a property to this partner' }));
+    expect(await screen.findByText('COMPOSER')).toBeInTheDocument();
+    expect(screen.getByTestId('path')).toHaveTextContent('/broadcasts/new?contactId=p-send');
   });
 });

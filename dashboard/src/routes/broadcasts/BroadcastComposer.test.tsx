@@ -336,6 +336,23 @@ describe('BroadcastComposer - ?contactId= seeding', () => {
     expect(await screen.findByLabelText('Housing authority')).toBeInTheDocument();
   });
 
+  it('(PIN) caseworkers D20: a PARTNER ?contactId= seeds the draft and the banner names the partner (no type gate)', async () => {
+    getContact.mockResolvedValue({
+      contactId: 'c-partner',
+      type: 'partner',
+      firstName: 'Cora',
+      lastName: 'Reyes',
+      phone: '+14040000002',
+    });
+    const u = userEvent.setup();
+    renderComposer('?contactId=c-partner');
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    expect(await screen.findByText(/Sending to/)).toBeInTheDocument();
+    expect(await screen.findByText('Cora Reyes')).toBeInTheDocument();
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
+    expect(createBroadcast.mock.calls.at(-1)?.[0]).toMatchObject({ seedContactIds: ['c-partner'] });
+  });
+
   it('falls back to the raw contactId in the banner when the contact cannot be resolved', async () => {
     getContact.mockRejectedValue(new Error('not found'));
     renderComposer('?contactId=c-seed');

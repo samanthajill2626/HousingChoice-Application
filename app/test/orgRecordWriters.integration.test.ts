@@ -129,6 +129,51 @@ function parity(name: string, run: (w: Writers, id: string) => Promise<void>): v
 }
 
 describe('contactsRepo.rewriteOrgFields (plan 3.7)', () => {
+  // Branch B (spec D17): a contact's organization is rewritten like the other
+  // two fields - conditional on the text read, null REMOVEs (the role
+  // convention: never SET ''), nothing else written.
+  parity('SETs and REMOVEs organization while it still holds the expected text; refuses an empty string', async (w, id) => {
+    await w.putContact({
+      contactId: id,
+      type: 'partner',
+      status: 'active',
+      role: 'Caseworker',
+      organization: 'Steps',
+      classification_revision: 2,
+    });
+    await expect(w.contacts.rewriteOrgFields(id, { organization: 'Steps' }, { organization: '' })).rejects.toThrow(
+      /organization/,
+    );
+    expect(await w.contacts.rewriteOrgFields(id, { organization: 'Edited' }, { organization: 'Step Up' })).toBe('skipped');
+    expect(await w.contacts.rewriteOrgFields(id, { organization: 'Steps' }, { organization: 'Step Up' })).toBe('written');
+    expect(await w.readContact(id)).toEqual({
+      contactId: id,
+      type: 'partner',
+      status: 'active',
+      role: 'Caseworker',
+      organization: 'Step Up',
+      classification_revision: 2,
+    });
+    expect(await w.contacts.rewriteOrgFields(id, { organization: 'Step Up' }, { organization: null })).toBe('written');
+    expect(await w.readContact(id)).toEqual({
+      contactId: id,
+      type: 'partner',
+      status: 'active',
+      role: 'Caseworker',
+      classification_revision: 2,
+    });
+  });
+
+  parity('guards organization - null means absent - together with the other two', async (w, id) => {
+    await w.putContact({ contactId: id, type: 'partner', status: 'active', agency: 'Step Up' });
+    expect(await w.contacts.rewriteOrgFields(id, { organization: 'Step Up' }, { organization: 'X' })).toBe('skipped');
+    expect(
+      await w.contacts.rewriteOrgFields(id, { agency: 'Step Up', organization: null }, { organization: 'Step Up' }),
+    ).toBe('written');
+    expect((await w.readContact(id))?.['organization']).toBe('Step Up');
+    expect((await w.readContact(id))?.['agency']).toBe('Step Up');
+  });
+
   parity('SETs a field while it still holds the expected text, and touches nothing else', async (w, id) => {
     await w.putContact({
       contactId: id,

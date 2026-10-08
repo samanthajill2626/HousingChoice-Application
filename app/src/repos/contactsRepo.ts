@@ -895,20 +895,23 @@ export interface ContactsRepo {
    * Organization-name rewrite (spec 2026-10-06 D11; plan 3.7) for the
    * org.rewrite job and the cleanup script: ONE conditional UpdateItem that
    * lands only while the contact still holds what the caller read. `expect`
-   * checks housingAuthority and/or agency - a string means exactly that text,
+   * checks housingAuthority, agency and/or organization (branch B, spec D17) -
+   * a string means exactly that text,
    * null means the attribute is ABSENT, omitted means not checked.
    * `next.housingAuthority` null REMOVEs it (a byHousingAuthority key is never
    * SET to '' - EmptyIndexKeyError, the update() rule) together with its
    * `housingAuthority_source` provenance stamp, which describes the removed
    * value (code review R1-ADV-BE-2); a value replacement keeps the stamp.
-   * `next.agency` is SET, '' included. Writes nothing else: no classification
+   * `next.agency` is SET, '' included. `next.organization` null REMOVEs it;
+   * '' is refused (the role convention - an organization is never stored empty).
+   * Writes nothing else: no classification
    * fence, no stamp. Answers 'skipped' when the condition is lost (the record
    * changed, or there is no such contact) - never throws for that.
    */
   rewriteOrgFields(
     contactId: string,
-    expect: { housingAuthority?: string | null; agency?: string | null },
-    next: { housingAuthority?: string | null; agency?: string },
+    expect: { housingAuthority?: string | null; agency?: string | null; organization?: string | null },
+    next: { housingAuthority?: string | null; agency?: string; organization?: string | null },
   ): Promise<'written' | 'skipped'>;
 }
 
@@ -1836,12 +1839,14 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       // Refused at the seam, before the round trip - the update() rule: ''
       // on a GSI key is a caller bug; null is the REMOVE.
       if (next.housingAuthority === '') throw new EmptyIndexKeyError('housingAuthority');
+      // Branch B (spec D17): an organization is never stored empty - null is the REMOVE.
+      if (next.organization === '') throw new Error("rewriteOrgFields: organization '' - pass null to REMOVE it");
       const names: Record<string, string> = {};
       const values: Record<string, unknown> = {};
       const conditions = ['attribute_exists(contactId)'];
       const sets: string[] = [];
       const removes: string[] = [];
-      const guard = (attr: 'housingAuthority' | 'agency', alias: string, want: string | null | undefined): void => {
+      const guard = (attr: 'housingAuthority' | 'agency' | 'organization', alias: string, want: string | null | undefined): void => {
         if (want === undefined) return;
         names[alias] = attr;
         if (want === null) {
@@ -1853,6 +1858,7 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       };
       guard('housingAuthority', '#ha', expected.housingAuthority);
       guard('agency', '#ag', expected.agency);
+      guard('organization', '#org', expected.organization);
       if (next.housingAuthority !== undefined) {
         names['#ha'] = 'housingAuthority';
         if (next.housingAuthority === null) {
@@ -1871,6 +1877,14 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         names['#ag'] = 'agency';
         values[':next_agency'] = next.agency;
         sets.push('#ag = :next_agency');
+      }
+      if (next.organization !== undefined) {
+        names['#org'] = 'organization';
+        if (next.organization === null) removes.push('#org');
+        else {
+          values[':next_organization'] = next.organization;
+          sets.push('#org = :next_organization');
+        }
       }
       if (sets.length === 0 && removes.length === 0) {
         throw new Error('rewriteOrgFields: nothing to write');

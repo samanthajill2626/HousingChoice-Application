@@ -2563,18 +2563,19 @@ export function createFakeWorld(): FakeWorld {
       target.lastSeenAt = at;
     },
     // Organization-name rewrite (plan 3.7): mirror the real conditional
-    // UpdateItem - '' refused for the GSI key, both guards checked BEFORE
+    // UpdateItem - '' refused for the GSI key, every guard checked BEFORE
     // anything is applied, 'skipped' when either is lost or the contact is
     // missing, a housingAuthority REMOVE takes housingAuthority_source with it
     // (code review R1-ADV-BE-2), nothing else touched (no classification fence).
     async rewriteOrgFields(contactId, expected, next) {
       if (next.housingAuthority === '') throw new EmptyIndexKeyError('housingAuthority');
-      if (next.housingAuthority === undefined && next.agency === undefined) {
+      if (next.organization === '') throw new Error("rewriteOrgFields: organization '' - pass null to REMOVE it");
+      if (next.housingAuthority === undefined && next.agency === undefined && next.organization === undefined) {
         throw new Error('rewriteOrgFields: nothing to write');
       }
       const contact = contacts.find((c) => c.contactId === contactId);
       if (!contact) return 'skipped';
-      for (const attr of ['housingAuthority', 'agency'] as const) {
+      for (const attr of ['housingAuthority', 'agency', 'organization'] as const) {
         const want = expected[attr];
         if (want === undefined) continue;
         const have = contact[attr];
@@ -2587,6 +2588,8 @@ export function createFakeWorld(): FakeWorld {
         contact['housingAuthority'] = next.housingAuthority;
       }
       if (next.agency !== undefined) contact['agency'] = next.agency;
+      if (next.organization === null) delete contact['organization'];
+      else if (next.organization !== undefined) contact['organization'] = next.organization;
       return 'written';
     },
   };

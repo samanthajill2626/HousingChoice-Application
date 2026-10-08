@@ -586,3 +586,123 @@ describe('NotOnListPanel - an in-flight settle (code review r1 F1, M5)', () => {
     expect(props.onSettled).not.toHaveBeenCalled();
   });
 });
+
+describe('NotOnListPanel - organization values (caseworkers spec D17; R2-F6, R2-F8)', () => {
+  const ORG_ROWS: NotOnListRow[] = [
+    {
+      field: 'organization',
+      value: 'Shrike Housing Authority Kite Aid',
+      count: 1,
+      deletedCount: 0,
+      resolution: { status: 'compound', compound: [[ref(SHRIKE)], [ref(KITE)]] },
+    },
+    {
+      field: 'organization',
+      value: 'Kite Ade',
+      count: 2,
+      deletedCount: 0,
+      resolution: { status: 'unknown', close: [ref(KITE)] },
+    },
+  ];
+
+  it('offers Use of either kind, Add as new and Clear - never Move or Split', () => {
+    renderPanel('Kite Ade', { rows: ORG_ROWS });
+    // FIELD_LABEL.organization (Task 7.1) names the field.
+    expect(fact('Kite Ade', 'Field')).toBe('Organization');
+    expect(choices()).toEqual(['Use Kite Aid', 'Use another name', 'Add as new', 'Clear']);
+    cleanup();
+    renderPanel('Shrike Housing Authority Kite Aid', { rows: ORG_ROWS });
+    expect(choices()).toEqual(['Use Shrike Housing Authority', 'Use Kite Aid', 'Use another name', 'Clear']);
+  });
+
+  it('Use of an agency name keeps "Remember this spelling", checked against that agency', async () => {
+    const user = userEvent.setup();
+    renderPanel('Kite Ade', { rows: ORG_ROWS });
+    const group = await pick(user, 'Use Kite Aid');
+    await waitFor(() =>
+      expect(checkOrgText).toHaveBeenCalledWith(
+        { kind: 'agency', text: 'Kite Ade', spellingFor: 'o-kite' },
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(within(group).getByRole('checkbox', { name: 'Remember this spelling' })).toBeChecked();
+    await user.click(within(group).getByRole('button', { name: 'Use Kite Aid' }));
+    expect(resolveNotOnList).toHaveBeenCalledWith({
+      field: 'organization',
+      value: 'Kite Ade',
+      action: 'use',
+      name: 'Kite Aid',
+      rememberSpelling: true,
+    });
+  });
+
+  it('Use another name searches both lists', async () => {
+    const user = userEvent.setup();
+    renderPanel('Kite Ade', { rows: ORG_ROWS });
+    const group = await pick(user, 'Use another name');
+    await user.type(within(group).getByRole('combobox', { name: 'Name to use' }), 'Shrike Aid');
+    await user.click(await screen.findByRole('option', { name: /^Shrike Aid/ }));
+    await user.click(within(group).getByRole('button', { name: 'Use Shrike Aid' }));
+    expect(resolveNotOnList).toHaveBeenCalledWith(
+      expect.objectContaining({ field: 'organization', action: 'use', name: 'Shrike Aid' }),
+    );
+  });
+
+  it('Add as new asks the kind - nothing is sent until one is chosen - and sends it', async () => {
+    const user = userEvent.setup();
+    renderPanel('Kite Ade', { rows: ORG_ROWS });
+    const group = await pick(user, 'Add as new');
+    expect(group).toHaveTextContent(
+      'The name below is added to the list you pick, then every record holding this value changes to it (2 records).',
+    );
+    const add = within(group).getByRole('button', { name: 'Add as new' });
+    expect(add).toBeDisabled();
+    const kind = within(group).getByRole('group', { name: 'Kind' });
+    expect(within(kind).getByRole('radio', { name: 'Housing authority' })).not.toBeChecked();
+    expect(within(kind).getByRole('radio', { name: 'Agency' })).not.toBeChecked();
+    await user.click(within(kind).getByRole('radio', { name: 'Agency' }));
+    expect(add).toBeEnabled();
+    await user.click(add);
+    expect(resolveNotOnList).toHaveBeenCalledWith({
+      field: 'organization',
+      value: 'Kite Ade',
+      action: 'add',
+      name: 'Kite Ade',
+      kind: 'agency',
+    });
+  });
+
+  it('while the add is out, the Kind choice cannot change and no second request goes (r1 F1)', async () => {
+    const user = userEvent.setup();
+    const answer = deferred<never>();
+    resolveNotOnList.mockReturnValueOnce(answer.promise);
+    const props = renderPanel('Kite Ade', { rows: ORG_ROWS });
+    const group = await pick(user, 'Add as new');
+    await user.click(within(within(group).getByRole('group', { name: 'Kind' })).getByRole('radio', { name: 'Agency' }));
+    await user.click(within(group).getByRole('button', { name: 'Add as new' }));
+    expect(props.settleGate.begin).toHaveBeenCalledWith(`value:${JSON.stringify(['organization', 'Kite Ade'])}`);
+    for (const radio of within(within(group).getByRole('group', { name: 'Kind' })).getAllByRole('radio')) {
+      expect(radio).toBeDisabled();
+    }
+    expect(within(group).getByRole('button', { name: 'Add as new' })).toBeDisabled();
+    expect(resolveNotOnList).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refused Add as new of a compound name never points to Split (plan review ruling S8, extended)', async () => {
+    const user = userEvent.setup();
+    resolveNotOnList.mockRejectedValue(
+      new ApiError(422, 'org_name_compound', 'org_name_compound', {
+        error: 'org_name_compound',
+        spans: [[ref(SHRIKE)], [ref(KITE)]],
+      }),
+    );
+    renderPanel('Kite Ade', { rows: ORG_ROWS });
+    const group = await pick(user, 'Add as new');
+    await user.click(within(within(group).getByRole('group', { name: 'Kind' })).getByRole('radio', { name: 'Agency' }));
+    await user.click(within(group).getByRole('button', { name: 'Add as new' }));
+    expect(await within(group).findByRole('alert')).toHaveTextContent(
+      'That names more than one organization (Shrike Housing Authority and Kite Aid), so it cannot be one entry. Pick one of them.',
+    );
+    expect(group).not.toHaveTextContent(/Split/);
+  });
+});

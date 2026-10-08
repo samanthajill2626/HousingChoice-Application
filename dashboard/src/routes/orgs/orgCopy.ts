@@ -77,11 +77,6 @@ export function otherKindOf(kind: OrgKind): OrgKind {
   return kind === 'agency' ? 'housing_authority' : 'agency';
 }
 
-/** The kind a record field accepts. */
-export function kindForField(field: OrgRecordField): OrgKind {
-  return field === 'agency' ? 'agency' : 'housing_authority';
-}
-
 /**
  * HAND MIRROR of app/src/lib/orgNames.ts `normalizeOrgText` (spec D4). First
  * the typographic forms (review LOW-1: an iPhone's smart punctuation, a pasted

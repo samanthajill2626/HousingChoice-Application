@@ -68,3 +68,21 @@ GREEN: dashboard npx vitest run src/routes/orgs src/routes/settings exited 0,
 Root npm run typecheck exited 0, all five workspaces (7.4-typecheck).
 Only two newly inserted blank lines had trailing spaces; removed. Added-line
 ASCII passes, and no usageTotal or per-column deleted reader remains.
+
+## Task 7.5 - inline settlement across both kinds
+
+Task 7.4 commit: 9873a238. Organization Use searches both lists; Remember
+checks the chosen entry's kind. Add requires a kind and sends it only for
+organization rows. Compound failures use organization guidance. Kind remains
+inside the existing gated fieldset; synchronous SettleGate, late-answer
+navigation/focus guards and role controls are unchanged. kindForField removed.
+RED: dashboard npx vitest run src/routes/settings/NotOnListSection.test.tsx
+exited 1, six failed / 32 passed (7.5-red): compound lacked agency Use,
+agency Remember check absent, agency search absent, Add named Housing
+authorities, and the final two cases stopped at the missing Kind group.
+The refused-add copy was not reached in RED; it passes in GREEN.
+GREEN: dashboard npx vitest run src/routes/settings src/routes/orgs exited 0,
+28 files / 425 tests, zero skipped (7.5-green). Existing single-kind and
+settle-gate/late-answer regressions pass. Root npm run typecheck exited 0,
+all five workspaces (7.5-typecheck). ASCII and git diff --check pass.
+No contract deviation, extra segment or page-level width cap.

@@ -18,12 +18,14 @@ import {
   type NotOnListResolveBody,
   type NotOnListRow,
   type OrgEntry,
+  type OrgKind,
   type OrgRecordField,
   type OrgRewriteStarted,
   type OrgSpellingProblem,
 } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
 import { OrgPicker } from '../orgs/OrgPicker.js';
+import { OrgKindChoice } from '../orgs/OrgKindChoice.js';
 import {
   AGENCY_KINDS,
   FIELD_LABEL,
@@ -32,7 +34,7 @@ import {
   holderHref,
   holderKindLabel,
   holderLabel,
-  kindForField,
+  kindsForField,
   normalizeOrgText,
   orgErrorCopy,
   resolutionText,
@@ -54,7 +56,8 @@ type Settle =
 /**
  * The buttons a row offers an admin, in order: "Use <name>" for each name the
  * value resolves to (its match, its candidates, a compound value's halves of
- * the field's kind, its close names); Split for a compound housing authority
+ * a kind the field accepts - both, for an organization, spec D17 - its close
+ * names); Split for a compound housing authority
  * value on contacts naming one entry of each kind (D10: Split applies only
  * there); Move for the other kind's name (contacts only - a property list
  * takes housing authorities only); "Use another name"; "Add as new" for an
@@ -62,11 +65,12 @@ type Settle =
  * matched entry's NAME, e.g. "atlanta housing authority" - offers ONLY "Use
  * <that entry>" (spec D10): a rewrite matches normalized text, so any other
  * action would also rewrite every record holding the exact name, and the
- * server refuses it (409 org_value_is_name_variant).
+ * server refuses it (409 org_value_is_name_variant). An organization value
+ * is never offered Move or Split (the field has no other kind).
  */
 function settleChoices(row: NotOnListRow): { label: string; settle: Settle }[] {
   const res = row.resolution;
-  const kind = kindForField(row.field);
+  const kinds = kindsForField(row.field);
   if (
     res.status === 'match' &&
     res.match !== undefined &&
@@ -84,7 +88,7 @@ function settleChoices(row: NotOnListRow): { label: string; settle: Settle }[] {
   if (res.match !== undefined) offerUse(res.match.name);
   for (const ref of res.candidates ?? []) offerUse(ref.name);
   const spans = (res.compound ?? []).flat();
-  for (const ref of spans) if (ref.kind === kind) offerUse(ref.name);
+  for (const ref of spans) if (kinds.includes(ref.kind)) offerUse(ref.name);
   const ha = spans.find((r) => r.kind === 'housing_authority');
   const agency = spans.find((r) => r.kind === 'agency');
   if (row.field === 'housingAuthority' && ha !== undefined && agency !== undefined) {
@@ -251,7 +255,11 @@ function SettleConfirm({
   onCancel,
 }: SettleConfirmProps): React.JSX.Element {
   const { row } = settle;
-  const kind = kindForField(row.field);
+  const kinds = kindsForField(row.field);
+  // (B) An organization takes either kind (spec D17): Use looks names up in
+  // both lists, and Add as new asks which list - no default (R2-F3).
+  const organizationRow = row.field === 'organization';
+  const [addKind, setAddKind] = useState<OrgKind | null>(organizationRow ? null : (kinds[0] ?? 'housing_authority'));
   const nameId = useId();
   const rememberId = useId();
   const [useName, setUseName] = useState(settle.action === 'use' ? (settle.name ?? '') : '');
@@ -284,14 +292,15 @@ function SettleConfirm({
   // cannot keep (it never fails the action) and the result names it.
   const target =
     settle.action === 'use' && useName !== ''
-      ? entries.find((e) => e.kind === kind && e.name === useName)
+      ? entries.find((e) => kinds.includes(e.kind) && e.name === useName)
       : undefined;
   const sameAsName = target !== undefined && normalizeOrgText(row.value) === normalizeOrgText(target.name);
   const checkForId = target !== undefined && !sameAsName ? target.orgId : undefined;
+  const checkKind = target?.kind;
   useEffect(() => {
-    if (checkForId === undefined) return undefined;
+    if (checkForId === undefined || checkKind === undefined) return undefined;
     const controller = new AbortController();
-    void checkOrgText({ kind, text: row.value, spellingFor: checkForId }, controller.signal).then(
+    void checkOrgText({ kind: checkKind, text: row.value, spellingFor: checkForId }, controller.signal).then(
       (result) => {
         if (!controller.signal.aborted) {
           setSpellingCheck({ forId: checkForId, problem: result.spellingProblem ?? null });
@@ -302,7 +311,7 @@ function SettleConfirm({
       },
     );
     return () => controller.abort();
-  }, [kind, row.value, checkForId]);
+  }, [checkKind, row.value, checkForId]);
   const checkedProblem =
     spellingCheck !== null && spellingCheck.forId === checkForId ? spellingCheck.problem : null;
   const rememberProblem: string | null = sameAsName
@@ -355,9 +364,11 @@ function SettleConfirm({
       break;
     case 'add':
       confirmLabel = 'Add as new';
-      sentence = `The name below is added to ${KIND_PLURAL_TITLE[kind]}, then every record holding this value changes to it (${records}).`;
+      sentence = organizationRow
+        ? `The name below is added to the list you pick, then every record holding this value changes to it (${records}).`
+        : `The name below is added to ${KIND_PLURAL_TITLE[kinds[0] ?? 'housing_authority']}, then every record holding this value changes to it (${records}).`;
       body =
-        addName.trim() === ''
+        addName.trim() === '' || addKind === null
           ? null
           : {
               field: row.field,
@@ -365,6 +376,7 @@ function SettleConfirm({
               action: 'add',
               name: addName.trim(),
               ...(rememberApplies && { rememberSpelling: rememberOn }),
+              ...(organizationRow && { kind: addKind }),
             };
       break;
     default:
@@ -384,7 +396,7 @@ function SettleConfirm({
       onDone(result);
     } catch (err) {
       gate.end();
-      const message = orgErrorCopy(err);
+      const message = orgErrorCopy(err, { organization: organizationRow });
       if (mounted.current) {
         setError(message);
         setBusy(false);
@@ -401,7 +413,7 @@ function SettleConfirm({
         {settle.action === 'use' && settle.name === undefined ? (
           <OrgPicker
             label="Name to use"
-            kinds={kind === 'agency' ? AGENCY_KINDS : HOUSING_AUTHORITY_KINDS}
+            kinds={kinds}
             entries={entries}
             value={useName}
             onChange={setUseName}
@@ -443,6 +455,9 @@ function SettleConfirm({
               onChange={(e) => setAddName(e.target.value)}
             />
           </div>
+        ) : null}
+        {settle.action === 'add' && organizationRow ? (
+          <OrgKindChoice value={addKind} onChange={setAddKind} disabled={busy} />
         ) : null}
         {rememberApplies ? (
           <div className={styles.checkboxRow}>

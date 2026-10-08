@@ -31,12 +31,16 @@ then reads the two scans once more when it stops.
 **Suggested fix.** Add a `/settings/organizations` row to `ROUTES` in
 `e2e/performance/routes.ts` modeled on the `/settings/numbers` row: source
 `SETTINGS_SOURCE('/settings/organizations', 'Housing authorities & agencies')`;
-terminal = the three regions ("Housing authorities", "Agencies", "Not on the
-list") settled, or the load alert; GET contract = `GET /api/organizations`,
+terminal = the Housing authorities list region and the detail panel's
+placeholder settled, or the load alert (the tab became a list + detail layout
+on 2026-10-07, `fix/org-settings-layout`; it no longer renders three
+regions); GET contract = `GET /api/organizations`,
 `GET /api/organizations/usage`, `GET /api/organizations/not-on-list`, all on
 mount, no polling when no rewrite runs. Then add the key to `EXPECTED_KEYS` /
 `EXPECTED_WARM`, bump the 31 pins to 32, refresh the `routes.ts` citation
-ledgers, update the README count, remove the `excluded` entry, and re-run the
+ledgers, update the README count, remove the two `excluded` entries
+(`/settings/organizations` and, since the route became
+`organizations/:orgId?`, `/settings/organizations/:orgId?`), and re-run the
 profiler self-QA (`npm run perf:pages -- hermetic --self-qa=full`,
 human-owned per `e2e/README.md`). Decide `surfaceScaleBearing` /
 `loadScaleBearing` from the two full scans above.

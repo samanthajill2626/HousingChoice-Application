@@ -1,3 +1,13 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-10-07).** This document describes how
+> this work was *designed at the time of writing*. The work shipped to `main` (fast-forward to
+> 1861e154) and its branch `fix/org-settings-layout` and worktree were deleted during cleanup.
+> **This file is NOT current documentation and the live code may have drifted from it - do not
+> treat it as authoritative guidance on how the system should be built or behaves today.** For
+> current truth read the code (`dashboard/src/routes/settings/`) and the project's living docs
+> (`RUNBOOK.md`, `e2e/README.md`, `documentation/GLOSSARY.md`). Kept only as a point-in-time
+> record of intent; what was actually built is in `handback.md` beside it.
+
 # Settings > "Housing authorities & agencies" - layout design review
 
 Date: 2026-10-07. Branch: `fix/org-settings-layout` (cut from `main` @ 20ccdb12).

@@ -24,7 +24,7 @@ import { dashboardUrl } from '../../support/urls.js';
 //                                       and the hint; not flagged, not listed,
 //                                       "Property text failed";
 //   (c) 30007, a final failure       -> Failed with the hint, Not sent, not
-//                                       flagged, "No tenants reached";
+//                                       flagged, "No recipients reached";
 //   (d) SOR's unresolved close       -> Not confirmed, flagged, not listed, and
 //                                       no last_error alert.
 //
@@ -618,7 +618,7 @@ test.describe('share-sent-outcome - one recipient state behind every surface', (
     await expect(timeline.getByRole('link', { name: /^Property sent/ })).toHaveCount(0);
   });
 
-  test('(c) a final 30007 failure: the row Failed with the hint, the share Not sent, the tenant not flagged, the property Activity "No tenants reached"', async ({
+  test('(c) a final 30007 failure: the row Failed with the hint, the share Not sent, the tenant not flagged, the property Activity "No recipients reached"', async ({
     page,
     request,
   }) => {
@@ -668,7 +668,7 @@ test.describe('share-sent-outcome - one recipient state behind every surface', (
       .toBe(0);
     await page.goto(`${NEXT}/listings/${unitId}`);
     const activity = page.locator('section', { has: page.getByRole('heading', { name: 'Activity' }) });
-    const entry = activity.getByRole('link', { name: /No tenants reached/ });
+    const entry = activity.getByRole('link', { name: /No recipients reached/ });
     await expect(entry).toBeVisible();
     await expect(entry).toHaveAttribute('href', `/broadcasts/${broadcastId}`);
   });

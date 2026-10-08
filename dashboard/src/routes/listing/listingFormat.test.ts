@@ -229,29 +229,29 @@ describe('describeUnitActivity', () => {
 
   it('describes broadcast_sent with a recipient count and a broadcast deep-link', () => {
     expect(describeUnitActivity(evt({ type: 'broadcast_sent', broadcastId: 'b1', tenantCount: 5 }))).toEqual({
-      label: 'Sent to 5 tenants',
+      label: 'Sent to 5 recipients',
       to: '/broadcasts/b1',
     });
   });
 
-  it('pluralizes the recipient count (1 → tenant) and omits the link when no broadcastId', () => {
+  it('pluralizes the recipient count (1 -> recipient) and omits the link when no broadcastId', () => {
     expect(describeUnitActivity(evt({ type: 'broadcast_sent', tenantCount: 1 }))).toEqual({
-      label: 'Sent to 1 tenant',
+      label: 'Sent to 1 recipient',
     });
     expect(describeUnitActivity(evt({ type: 'broadcast_sent', tenantCount: 2 }))).toEqual({
-      label: 'Sent to 2 tenants',
+      label: 'Sent to 2 recipients',
     });
   });
 
   // share-sent-outcome D5: the count is the share's REACHED recipients (the app
   // recounts at read time) - a share that reached nobody says so, and still
   // links to the share, whose page explains why.
-  it('a share that reached nobody reads "No tenants reached" (an absent count too), linking to the share', () => {
+  it('a share that reached nobody reads "No recipients reached" (an absent count too), linking to the share', () => {
     expect(describeUnitActivity(evt({ type: 'broadcast_sent', broadcastId: 'b1', tenantCount: 0 }))).toEqual({
-      label: 'No tenants reached',
+      label: 'No recipients reached',
       to: '/broadcasts/b1',
     });
-    expect(describeUnitActivity(evt({ type: 'broadcast_sent' }))).toEqual({ label: 'No tenants reached' });
+    expect(describeUnitActivity(evt({ type: 'broadcast_sent' }))).toEqual({ label: 'No recipients reached' });
   });
 
   it('describes tour lifecycle rows with tour deep-links', () => {

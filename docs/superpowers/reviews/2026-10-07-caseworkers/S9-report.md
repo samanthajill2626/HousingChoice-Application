@@ -34,3 +34,16 @@ GREEN: dashboard npx vitest run src/routes/listing
 src/routes/contact/files.test.tsx, exit 0: 311 tests in 13 files.
 Root bare npm run typecheck exit 0, five workspaces (9.2-typecheck).
 Added-line ASCII and git diff --check pass. No contract deviation.
+
+## Task 9.3 - property Activity recipient wording
+
+Task 9.2 commit: bb2dc582. Activity says Sent to N recipient(s), and No
+recipients reached for absent/zero count. Stored tenantCount is unchanged.
+Moved listing-activity and share-sent-outcome browser pins with the copy.
+RED: dashboard npx vitest run src/routes/listing/listingFormat.test.ts,
+exit 1: 3 failed / 31 passed, old tenant and zero-reach labels.
+GREEN: dashboard npx vitest run src/routes/listing, exit 0: 270 tests in
+12 files. Root bare npm run typecheck exit 0 across five workspaces.
+Root npx eslint e2e/tests/dashboard-next/listing-activity.spec.ts
+e2e/tests/dashboard-next/share-sent-outcome.spec.ts exit 0.
+Added-line ASCII and git diff --check pass. No contract deviation.

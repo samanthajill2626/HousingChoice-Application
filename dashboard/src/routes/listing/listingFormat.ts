@@ -180,7 +180,9 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
     // share, whose page explains why, stays either way).
     const n = typeof e.tenantCount === 'number' ? e.tenantCount : 0;
     return {
-      label: n === 0 ? 'No tenants reached' : `Sent to ${n} ${n === 1 ? 'tenant' : 'tenants'}`,
+      // Spec 2026-10-06 D20/D22: neutral words - a share may reach partners;
+      // the label keeps its "Sent to " prefix.
+      label: n === 0 ? 'No recipients reached' : `Sent to ${n} ${n === 1 ? 'recipient' : 'recipients'}`,
       ...(e.broadcastId ? { to: `/broadcasts/${e.broadcastId}` } : {}),
     };
   }

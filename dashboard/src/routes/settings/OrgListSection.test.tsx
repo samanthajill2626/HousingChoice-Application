@@ -368,8 +368,10 @@ describe('OrgListSection - Add and notes (everyone)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Yes, add it' }));
     expect(addOrg).toHaveBeenCalledWith({ kind: 'agency', name: 'Finch Mission', notes: 'Added today' });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    // An agency's link keeps its list (r1 M3).
-    expect(currentUrl).toBe('/settings/organizations/o-finch?view=agencies');
+    // An agency's link keeps its list (r1 M3). The navigation follows the
+    // add's answer outside act, so it can commit a render after the dialog
+    // closes: wait for it (fix round 2).
+    await waitFor(() => expect(currentUrl).toBe('/settings/organizations/o-finch?view=agencies'));
     expect(await screen.findByRole('region', { name: 'Finch Mission' })).toHaveTextContent('Added today');
     expect(await findRow('Agencies', 'Finch Mission')).toHaveAttribute('aria-current', 'page');
   });
@@ -651,7 +653,7 @@ describe('OrgListSection - admin entry actions', () => {
     expect(mergeOrg).toHaveBeenCalledWith('o-dek', 'o-atl');
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     // The merged entry leaves the list: focus goes to the list, not to its row.
-    expect(currentUrl).toBe('/settings/organizations');
+    await waitFor(() => expect(currentUrl).toBe('/settings/organizations'));
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Housing authorities' })).toHaveFocus());
   });
 
@@ -932,7 +934,7 @@ describe('OrgListSection - "Not on the list"', () => {
       ),
     ).toBeInTheDocument();
     await waitFor(() => expect(getNotOnList).toHaveBeenCalledTimes(2));
-    expect(currentUrl).toBe('/settings/organizations?view=not-on-list');
+    await waitFor(() => expect(currentUrl).toBe('/settings/organizations?view=not-on-list'));
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Not on the list' })).toHaveFocus());
   });
 });

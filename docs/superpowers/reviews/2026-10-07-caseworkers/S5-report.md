@@ -49,3 +49,15 @@ route case stops there before Delete, so the draft's predicted 204 was not
 observed in this RED run. GREEN: app npx vitest run test/orgRecords.test.ts test/organizationsApi.test.ts test/orgRewriteJob.test.ts
 exited 0, three files / 67 tests (5.3-green). Root npm run typecheck exited 0
 (5.3-typecheck). Existing refusal pins remain unchanged. No contract deviation.
+
+## Task 5.4 - off-list organization values and holders
+
+Task 5.3 commit: a31eeff4. Off-list contact scan includes organization and
+resolves over both kinds. The routes/organizations.ts RECORD_FIELDS allowlist
+now accepts organization (O1: this is S7.5a's server comment reference).
+RED: app npx vitest run test/orgRecords.test.ts test/organizationsApi.test.ts
+exited 1: two failed / 50 passed, both missing organization rows. The route
+case stops before its records request; no 400 observation is claimed. Generic
+holders already passed, as predicted. GREEN: same command exited 0, two files
+/ 52 tests (5.4-green). Root npm run typecheck exited 0 (5.4-typecheck).
+No contract deviation. Existing off-list/holder tests remain unchanged.

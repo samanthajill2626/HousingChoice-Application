@@ -58,7 +58,7 @@ type ResolveAction = (typeof RESOLVE_ACTIONS)[number];
 function isResolveAction(value: unknown): value is ResolveAction {
   return typeof value === 'string' && (RESOLVE_ACTIONS as readonly string[]).includes(value);
 }
-const RECORD_FIELDS: readonly OrgRecordField[] = ['housingAuthority', 'agency', 'accepted_authorities'];
+const RECORD_FIELDS: readonly OrgRecordField[] = ['housingAuthority', 'agency', 'accepted_authorities', 'organization'];
 /** POST /check refuses a longer text with 400 (spec section 6). */
 const ORG_CHECK_TEXT_MAX = 200;
 
@@ -159,7 +159,7 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
       const field = req.query['field'];
       const value = req.query['value'];
       if (!isRecordField(field)) {
-        res.status(400).json({ error: 'field must be housingAuthority, agency or accepted_authorities' });
+        res.status(400).json({ error: 'field must be housingAuthority, agency, accepted_authorities or organization' });
         return;
       }
       if (typeof value !== 'string' || value === '') {
@@ -331,7 +331,7 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
       const agencyName = body['agencyName'];
       const rememberSpelling = body['rememberSpelling'];
       if (!isRecordField(field)) {
-        res.status(400).json({ error: 'field must be housingAuthority, agency or accepted_authorities' });
+        res.status(400).json({ error: 'field must be housingAuthority, agency, accepted_authorities or organization' });
         return;
       }
       if (typeof value !== 'string' || value === '') {

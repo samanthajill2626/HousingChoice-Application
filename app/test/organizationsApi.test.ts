@@ -26,6 +26,7 @@ import {
   AUGUSTA,
   DCA,
   STEP_UP,
+  VASH,
   orgListItem,
   orgRef,
   quietLogger,
@@ -118,6 +119,28 @@ describe('GET /api/organizations/usage', () => {
 });
 
 describe('GET /api/organizations/not-on-list (+ /records) - for everyone', () => {
+  it('lists an organization value and expands it into its holders (spec D17)', async () => {
+    const h = await harness();
+    h.world.contacts.push({
+      contactId: 'p-1',
+      type: 'partner',
+      status: 'active',
+      role: 'Caseworker',
+      firstName: 'Cora',
+      lastName: 'Case',
+      organization: 'VASH',
+    });
+    const va = as(h, TEST_SESSION_COOKIE);
+    expect((await va.get('/not-on-list')).body.rows).toEqual([
+      { field: 'organization', value: 'VASH', count: 1, deletedCount: 0, resolution: { status: 'match', match: orgRef(VASH) } },
+    ]);
+    const records = await va.get('/not-on-list/records').query({ field: 'organization', value: 'VASH' });
+    expect(records.status).toBe(200);
+    expect(records.body.records).toEqual([
+      { kind: 'contact', contactId: 'p-1', name: 'Cora Case', type: 'partner', deleted: false },
+    ]);
+  });
+
   it('lists the off-list values with their resolution and expands one value into its records', async () => {
     const h = await harness();
     h.world.contacts.push(tenant('t-1', { firstName: 'Tia', lastName: 'One', housingAuthority: 'AHA' }));

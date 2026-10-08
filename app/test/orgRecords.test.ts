@@ -128,6 +128,49 @@ describe('OrgRecordsService.usage (spec D3, D10)', () => {
 });
 
 describe('OrgRecordsService.notOnList (spec D10)', () => {
+  it('lists organization values off BOTH lists as their own rows, resolved over both kinds (spec D17)', async () => {
+    const { records } = setup({
+      contacts: [
+        contact('p-1', { type: 'partner', status: 'active', organization: 'VASH' }), // an agency spelling
+        contact('p-2', { type: 'partner', status: 'active', organization: 'AHA' }), // a shared housing authority spelling
+        contact('p-3', { type: 'partner', status: 'active', organization: 'DCA HUD-VASH' }), // one of each kind
+        contact('p-4', { type: 'partner', status: 'active', organization: STEP_UP.name }), // on the list: no row
+        contact('p-5', { type: 'partner', status: 'active', organization: ATLANTA.name }), // either kind is on the list
+        contact('t-1', { organization: 'Nowhere Housing', deleted_at: DELETED_AT }), // any type, deleted counted
+      ],
+    });
+    expect(await records.notOnList(ORG_FIXTURE)).toEqual([
+      {
+        field: 'organization',
+        value: 'AHA',
+        count: 1,
+        deletedCount: 0,
+        resolution: { status: 'ambiguous', candidates: [orgRef(ATLANTA), orgRef(AUGUSTA)] },
+      },
+      {
+        field: 'organization',
+        value: 'DCA HUD-VASH',
+        count: 1,
+        deletedCount: 0,
+        resolution: { status: 'compound', compound: [[orgRef(DCA)], [orgRef(VASH)]] },
+      },
+      {
+        field: 'organization',
+        value: 'Nowhere Housing',
+        count: 0,
+        deletedCount: 1,
+        resolution: { status: 'unknown', close: [] },
+      },
+      {
+        field: 'organization',
+        value: 'VASH',
+        count: 1,
+        deletedCount: 0,
+        resolution: { status: 'match', match: orgRef(VASH) },
+      },
+    ]);
+  });
+
   it('lists every off-list value per field with active and deleted counts and its D4 resolution', async () => {
     const { records } = setup({
       contacts: [
@@ -203,6 +246,20 @@ describe('OrgRecordsService.notOnList (spec D10)', () => {
 });
 
 describe('OrgRecordsService.holders (spec D10 "Show records")', () => {
+  it('expands an organization value into the contacts holding it, of any type', async () => {
+    const { records } = setup({
+      contacts: [
+        contact('p-1', { type: 'partner', status: 'active', firstName: 'Cora', lastName: 'Case', organization: 'VASH' }),
+        contact('t-1', { organization: 'VASH', deleted_at: DELETED_AT }),
+        contact('t-2', { agency: 'VASH' }), // another field: not a holder of the organization row
+      ],
+    });
+    expect(await records.holders('organization', 'VASH')).toEqual([
+      { kind: 'contact', contactId: 't-1', name: null, type: 'tenant', deleted: true },
+      { kind: 'contact', contactId: 'p-1', name: 'Cora Case', type: 'partner', deleted: false },
+    ]);
+  });
+
   it('returns the records holding one EXACT value: contacts by name, type and deleted; properties by address', async () => {
     const { records } = setup({
       contacts: [

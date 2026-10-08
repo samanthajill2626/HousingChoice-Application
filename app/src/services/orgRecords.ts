@@ -533,7 +533,9 @@ export function createOrgRecordsService(deps: OrgRecordsDeps = {}): OrgRecordsSe
       };
       for await (const c of everyContact()) {
         const deleted = isContactDeleted(c);
-        for (const field of ['housingAuthority', 'agency'] as const) {
+        for (const field of ['housingAuthority', 'agency', 'organization'] as const) {
+          // An organization (branch B, spec D17) resolves over BOTH kinds
+          // (KINDS_FOR_FIELD.organization), so its row is never the other kind.
           const value = c[field];
           // '' is a cleared agency, not a value (spec D5) - and so is text that
           // is only whitespace (pre-2026-07-14 data, before trimJsonBody): D5

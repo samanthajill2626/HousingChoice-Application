@@ -379,7 +379,13 @@ export function sharedSpellingCopy(spelling: string, entries: readonly OrgRef[])
 }
 
 /** Staff copy for any /api/organizations failure, using the body when it helps. */
-export function orgErrorCopy(err: unknown): string {
+/**
+ * `organization`: the caller adds or settles a contact's ORGANIZATION
+ * (both lists, spec D17) - a compound name is refused with "Pick one of
+ * them.", never "Use Split instead." (Split rewrites a STORED housing
+ * authority; it is refused for an organization value).
+ */
+export function orgErrorCopy(err: unknown, opts: { organization?: boolean } = {}): string {
   if (!(err instanceof ApiError)) return ORG_GENERIC_ERROR;
   const b = bodyOf(err);
   switch (err.code) {
@@ -395,9 +401,14 @@ export function orgErrorCopy(err: unknown): string {
       const spans = Array.isArray(b['spans'])
         ? (b['spans'] as unknown[]).map(refsOf).filter((span) => span.length > 0)
         : [];
-      if (spans.length === 0) return orgErrorMessage(err.code);
+      if (spans.length === 0) {
+        return opts.organization === true
+          ? 'That names more than one organization, so it cannot be one entry. Pick one of them.'
+          : orgErrorMessage(err.code);
+      }
       const parts = spans.map((span) => span.map((r) => r.name).join(' or ')).join(' and ');
-      return `That names more than one organization (${parts}), so it cannot be one entry. Use Split instead.`;
+      const next = opts.organization === true ? 'Pick one of them.' : 'Use Split instead.';
+      return `That names more than one organization (${parts}), so it cannot be one entry. ${next}`;
     }
     case 'org_in_use': {
       const uses = b['uses'];

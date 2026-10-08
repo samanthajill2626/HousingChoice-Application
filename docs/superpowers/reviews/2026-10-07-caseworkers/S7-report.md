@@ -32,3 +32,20 @@ now says organization. RED: dashboard npx vitest run src/routes/orgs/OrgPicker.t
 exited 1, one failed / 27 passed: the add option used housing authority.
 GREEN: same command exited 0, 28 tests (7.2-green); root npm run typecheck
 exited 0, all five workspaces (7.2-typecheck). No contract deviation.
+
+## Task 7.3 - new organization dialog and kind choice
+
+Task 7.2 commit: 55d05df9. Added reusable OrgKindChoice with neither radio
+selected; organization-mode checks both lists and requires a kind before
+adding. Compound guidance (including a refused add) says Pick one of them.
+The exact selector documentation row moved with this task as authorized.
+RED: dashboard npx vitest run src/routes/orgs/OrgKindChoice.test.tsx src/routes/orgs/NewOrgDialog.test.tsx
+exited 1: missing OrgKindChoice module, four failed / 16 passed collected
+cases. Observed missing intro, missing Kind groups and missing ambiguity copy;
+later add/refusal assertions were not reached. An implementation script's
+ambiguous plan-block selector stopped after creating OrgKindChoice and CSS;
+7.3-green still had four failures / 410 passes. Corrected the selector without
+duplicating either file. Final GREEN: dashboard npx vitest run src/routes/orgs src/routes/settings
+exited 0, 28 files / 414 tests, zero skipped (7.3-green-final). Only intro
+indentation changed afterward. No contract deviation or new dependency.
+Root npm run typecheck exited 0, all five workspaces (7.3-typecheck).

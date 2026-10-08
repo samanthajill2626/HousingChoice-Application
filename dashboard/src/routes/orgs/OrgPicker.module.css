@@ -271,3 +271,27 @@
   font-size: var(--fs-sm);
   color: var(--c-evt-amber-text);
 }
+
+/* OrgKindChoice: a borderless fieldset, its two radios on one wrapping row. */
+.kindChoice {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.kindChoice > legend {
+  padding: 0;
+  width: 100%;
+}
+
+.kindOption {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}

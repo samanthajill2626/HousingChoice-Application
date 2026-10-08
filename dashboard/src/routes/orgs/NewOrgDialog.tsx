@@ -2,6 +2,8 @@
 // a form picker's "Add <text> as a new ..." option, by Accept on an AI housing
 // authority suggestion whose text is not exactly a list name, and by Settings >
 // Housing authorities & agencies "Add housing authority" / "Add agency".
+// (B) Organization mode checks both lists, asks the kind before adding
+// (OrgKindChoice, no default), and never points to Split (spec D17).
 // POST /api/organizations/check runs for the CURRENT name, 250 ms after it last
 // changed (a caller-held answer for the starting text skips the first), and
 // decides what is offered: the name's own match and the closest names first
@@ -22,6 +24,7 @@ import {
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import {
+  ORGANIZATION_KINDS,
   KIND_FIELD_LABEL,
   KIND_NOUN,
   nameProblemCopy,
@@ -29,6 +32,7 @@ import {
   otherKindOf,
   withArticle,
 } from './orgCopy.js';
+import { OrgKindChoice } from './OrgKindChoice.js';
 import styles from './OrgPicker.module.css';
 
 /** How long the dialog waits after the name last changed before checking it. */
@@ -40,7 +44,9 @@ const ORG_NAME_MAX = 120;
 export type NewOrgDialogMode = 'field' | 'suggestion' | 'settings';
 
 export interface NewOrgDialogProps {
-  kind: OrgKind;
+  /** The list the name goes on - or 'organization': both lists, and staff
+   *  pick the kind before adding (spec D6, D17; R2-F3). */
+  kind: OrgKind | 'organization';
   /** The would-be name: what staff typed, what the AI heard, or '' (the
    *  Settings add). Editable (the `Name` textbox) in the 'field' and
    *  'settings' modes; fixed in 'suggestion' - a corrected name is not the
@@ -93,6 +99,9 @@ export function NewOrgDialog({
   const [attempt, setAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Organization mode: no default kind - "Yes, add it" waits for a choice.
+  const [chosenKind, setChosenKind] = useState<OrgKind | null>(kind === 'organization' ? null : kind);
+  const noun = kind === 'organization' ? 'organization' : KIND_NOUN[kind];
 
   useEffect(() => {
     if (trimmed === '' || trimmed.length > ORG_NAME_MAX) return undefined;
@@ -104,7 +113,10 @@ export function NewOrgDialog({
     if (checked?.name === trimmed) return undefined;
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      void checkOrgText({ kind, text: trimmed }, controller.signal).then(
+      void checkOrgText(
+        kind === 'organization' ? { kinds: ORGANIZATION_KINDS, text: trimmed } : { kind, text: trimmed },
+        controller.signal,
+      ).then(
         (result) => {
           if (!controller.signal.aborted) setChecked({ name: trimmed, result });
         },
@@ -129,7 +141,7 @@ export function NewOrgDialog({
   const tooLong = trimmed.length > ORG_NAME_MAX;
   const checking = trimmed !== '' && !tooLong && check === null && !checkFailed;
   const problem = tooLong ? 'org_name_too_long' : check?.nameProblem;
-  const addDisabled = busy || trimmed === '' || checking || problem !== undefined;
+  const addDisabled = busy || trimmed === '' || checking || problem !== undefined || chosenKind === null;
 
   const resolution: OrgRef[] =
     check === null ? [] : [...(check.match !== undefined ? [check.match] : []), ...check.candidates];
@@ -140,14 +152,14 @@ export function NewOrgDialog({
   const useButtons = mode !== 'settings' && onUse !== undefined;
 
   async function add(): Promise<void> {
-    if (addDisabled) return;
+    if (addDisabled || chosenKind === null) return;
     setBusy(true);
     setError(null);
     try {
-      const entry = await addOrg({ kind, name: trimmed, ...(notes.trim() !== '' && { notes: notes.trim() }) });
+      const entry = await addOrg({ kind: chosenKind, name: trimmed, ...(notes.trim() !== '' && { notes: notes.trim() }) });
       onAdded(entry);
     } catch (err) {
-      setError(orgErrorCopy(err));
+      setError(orgErrorCopy(err, { organization: kind === 'organization' }));
       setBusy(false);
     }
   }
@@ -202,7 +214,9 @@ export function NewOrgDialog({
     >
       <div className={styles.dialogBody}>
         <p className={styles.dialogText}>
-          {`Check that this ${KIND_NOUN[kind]} is not already on the list under another name.`}
+          {kind === 'organization'
+            ? 'Check that this organization is really new.'
+            : `Check that this ${KIND_NOUN[kind]} is not already on the list under another name.`}
         </p>
         {nameEditable ? (
           <div className={styles.dialogField}>
@@ -226,10 +240,11 @@ export function NewOrgDialog({
           </div>
         ) : (
           <p className={styles.dialogText}>
-            {`${KIND_FIELD_LABEL[kind]}: `}
+            {`${kind === 'organization' ? 'Organization' : KIND_FIELD_LABEL[kind]}: `}
             <strong>{trimmed}</strong>
           </p>
         )}
+        {kind === 'organization' ? <OrgKindChoice value={chosenKind} onChange={setChosenKind} disabled={busy} /> : null}
         {checking ? <p className={styles.dialogMuted}>Checking the list...</p> : null}
         {checkFailed ? (
           <div role="alert" className={styles.dialogAlert}>
@@ -246,7 +261,7 @@ export function NewOrgDialog({
             <p className={styles.dialogText}>
               {resolution.length === 1 && firstResolution !== undefined
                 ? `It is already on the list as ${firstResolution.name}.`
-                : `It is a spelling of more than one ${KIND_NOUN[kind]}:`}
+                : `It is a spelling of more than one ${noun}:`}
             </p>
             {renderNames(resolution, 'resolution')}
           </div>
@@ -257,7 +272,7 @@ export function NewOrgDialog({
             {renderNames(close, 'close')}
           </div>
         ) : null}
-        {other.length > 0 ? (
+        {kind !== 'organization' && other.length > 0 ? (
           <div className={styles.choiceGroup}>
             <p className={styles.dialogText}>
               {`${trimmed} is ${withArticle(otherKindOf(kind))}, not ${withArticle(kind)}.`}
@@ -293,7 +308,11 @@ export function NewOrgDialog({
           <p className={styles.dialogText}>
             {`${trimmed} names more than one organization (${compound
               .map((span) => span.map((ref) => ref.name).join(' or '))
-              .join(' and ')}). Pick each one in its own field; for a value already stored, use Split on Settings > Housing authorities & agencies.`}
+              .join(' and ')}). ${
+              kind === 'organization'
+                ? 'Pick one of them.'
+                : 'Pick each one in its own field; for a value already stored, use Split on Settings > Housing authorities & agencies.'
+            }`}
           </p>
         ) : null}
         <div className={styles.dialogField}>

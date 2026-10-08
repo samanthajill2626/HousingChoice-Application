@@ -3,7 +3,7 @@
 // the close names as "Use <name>", the other kind, a compound name pointing to
 // Split, "Yes, add it" disabled with the reason, an editable Name (never in
 // the AI-suggestion mode), and every button typed.
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
@@ -253,5 +253,82 @@ describe('NewOrgDialog ("Is this really new?")', () => {
     renderDialog({ text: 'AHA' });
     await screen.findByRole('button', { name: 'Use Atlanta Housing Authority' });
     for (const button of screen.getAllByRole('button')) expect(button).toHaveAttribute('type', 'button');
+  });
+});
+
+describe('NewOrgDialog - organization mode (both lists; spec D6, D17; R2-F3, R2-F4)', () => {
+  const MERCY = {
+    orgId: 'o-mercy',
+    kind: 'agency' as const,
+    name: 'Mercy Care',
+    spellings: [],
+    createdAt: '2026-10-07T00:00:00.000Z',
+    createdBy: 'u1',
+    updatedAt: '2026-10-07T00:00:00.000Z',
+    updatedBy: 'u1',
+  };
+
+  it('checks against both lists, offers a name of either kind, and words itself as an organization', async () => {
+    checkOrgText.mockResolvedValue({ match: STEP, candidates: [], close: [], nameProblem: 'org_name_taken' });
+    const props = renderDialog({ kind: 'organization', text: 'step up' });
+    expect(screen.getByText('Check that this organization is really new.')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Use Step Up' }));
+    expect(checkOrgText).toHaveBeenCalledWith(
+      { kinds: ['housing_authority', 'agency'], text: 'step up' },
+      expect.any(AbortSignal),
+    );
+    expect(props.onUse).toHaveBeenCalledWith(STEP, 'resolution');
+  });
+
+  it('asks the kind before adding: no default, "Yes, add it" stays disabled until one is chosen', async () => {
+    const user = userEvent.setup();
+    checkOrgText.mockResolvedValue({ candidates: [], close: [] });
+    addOrg.mockResolvedValue(MERCY);
+    const props = renderDialog({ kind: 'organization', text: 'Mercy Care' });
+    const group = screen.getByRole('group', { name: 'Kind' });
+    expect(within(group).getByRole('radio', { name: 'Housing authority' })).not.toBeChecked();
+    expect(within(group).getByRole('radio', { name: 'Agency' })).not.toBeChecked();
+    await waitFor(() => expect(screen.queryByText('Checking the list...')).not.toBeInTheDocument());
+    expect(yes()).toBeDisabled();
+    await user.click(within(group).getByRole('radio', { name: 'Agency' }));
+    expect(yes()).toBeEnabled();
+    await user.click(yes());
+    expect(addOrg).toHaveBeenCalledWith({ kind: 'agency', name: 'Mercy Care' });
+    await waitFor(() => expect(props.onAdded).toHaveBeenCalledWith(MERCY));
+  });
+
+  it('a shared spelling and a compound name are worded for both lists - and never point to Split', async () => {
+    checkOrgText.mockResolvedValue({ candidates: [ATL, AUG], close: [], nameProblem: 'org_name_taken' });
+    const { unmount } = render(
+      <NewOrgDialog kind="organization" text="AHA" mode="field" onUse={vi.fn()} onAdded={vi.fn()} onClose={vi.fn()} />,
+    );
+    expect(await screen.findByText('It is a spelling of more than one organization:')).toBeInTheDocument();
+    unmount();
+    checkOrgText.mockResolvedValue({ candidates: [], close: [], compound: [[DCA], [VASH]], nameProblem: 'org_name_compound' });
+    renderDialog({ kind: 'organization', text: 'DCA HUD-VASH' });
+    expect(
+      await screen.findByText(
+        'DCA HUD-VASH names more than one organization (Georgia Department of Community Affairs and HUD-Veterans Affairs Supportive Housing (HUD-VASH)). Pick one of them.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Split/)).not.toBeInTheDocument();
+  });
+
+  it('a REFUSED add of a compound name never points to Split either (plan 3.9; plan review R1 ruling S8)', async () => {
+    const user = userEvent.setup();
+    checkOrgText.mockResolvedValue({ candidates: [], close: [] });
+    addOrg.mockRejectedValue(
+      new ApiError(422, 'org_name_compound', 'org_name_compound', { error: 'org_name_compound', spans: [[DCA], [VASH]] }),
+    );
+    renderDialog({ kind: 'organization', text: 'DCA and VASH' });
+    await waitFor(() => expect(screen.queryByText('Checking the list...')).not.toBeInTheDocument());
+    await user.click(within(screen.getByRole('group', { name: 'Kind' })).getByRole('radio', { name: 'Agency' }));
+    await user.click(yes());
+    expect(
+      await screen.findByText(
+        'That names more than one organization (Georgia Department of Community Affairs and HUD-Veterans Affairs Supportive Housing (HUD-VASH)), so it cannot be one entry. Pick one of them.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Split/)).not.toBeInTheDocument();
   });
 });

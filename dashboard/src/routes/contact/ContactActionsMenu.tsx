@@ -48,6 +48,10 @@ export interface ContactActionsMenuProps {
   onToggleUnread: () => void;
   /** True while that request is in flight (disables the item). */
   unreadBusy?: boolean;
+  /** Open the caseworker conversion dialog (spec 2026-10-06 D16, D22). The
+   *  parent passes it ONLY for a live tenant, landlord or partner that is not
+   *  already a caseworker (keyed on the stored type); absent hides the item. */
+  onMakeCaseworker?: () => void;
 }
 
 export function ContactActionsMenu({
@@ -68,6 +72,7 @@ export function ContactActionsMenu({
   hasUnread,
   onToggleUnread,
   unreadBusy = false,
+  onMakeCaseworker,
 }: ContactActionsMenuProps): React.JSX.Element {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -175,6 +180,19 @@ export function ContactActionsMenu({
           >
             Run AI extraction
           </button>
+          {onMakeCaseworker !== undefined ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.item}
+              onClick={() => {
+                setOpen(false);
+                onMakeCaseworker();
+              }}
+            >
+              Make caseworker
+            </button>
+          ) : null}
           <div className={styles.divider} />
           <button
             type="button"

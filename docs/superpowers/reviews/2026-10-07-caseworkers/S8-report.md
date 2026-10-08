@@ -84,3 +84,13 @@ RED: dashboard npx vitest run src/routes/contact/UnknownFile.test.tsx,
 exit 1, 4 failed / 7 passed: four-action order, missing button and old lede.
 GREEN: same command exit 0, 11 tests. Root bare npm run typecheck exit 0,
 all five workspaces (8.6-typecheck). No contract deviation.
+
+## Task 8.7 - contact actions menu
+
+Task 8.6 commit: ff1cd85a. Added the optional onMakeCaseworker menu handler;
+its presence alone controls the item. Clicking it closes the menu and reports
+to the host. RED: dashboard npx vitest run
+src/routes/contact/ContactActionsMenu.test.tsx, exit 1: 1 failed / 18 passed,
+missing Make caseworker menuitem. GREEN: same command exit 0, 19 tests.
+Root bare npm run typecheck exit 0, five workspaces (8.7-typecheck).
+No contract deviation; host eligibility remains Task 8.8.

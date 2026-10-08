@@ -30,6 +30,7 @@ function setup(props: Partial<React.ComponentProps<typeof ContactActionsMenu>> =
       {...(props.deleteBusy !== undefined && { deleteBusy: props.deleteBusy })}
       {...(props.extractionBusy !== undefined && { extractionBusy: props.extractionBusy })}
       {...(props.unreadBusy !== undefined && { unreadBusy: props.unreadBusy })}
+      {...(props.onMakeCaseworker !== undefined && { onMakeCaseworker: props.onMakeCaseworker })}
     />,
   );
   return {
@@ -202,6 +203,25 @@ describe('ContactActionsMenu', () => {
     await user.click(screen.getByRole('button', { name: /More actions/i }));
     expect(screen.getByRole('menu')).toBeInTheDocument();
     await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+});
+
+describe('ContactActionsMenu - Make caseworker (spec 2026-10-06 D16, D22)', () => {
+  it('offers no Make caseworker item unless the parent passes the handler', async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    expect(screen.queryByRole('menuitem', { name: 'Make caseworker' })).toBeNull();
+  });
+
+  it('Make caseworker fires the handler and closes the menu', async () => {
+    const user = userEvent.setup();
+    const onMakeCaseworker = vi.fn();
+    setup({ onMakeCaseworker });
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    await user.click(screen.getByRole('menuitem', { name: 'Make caseworker' }));
+    expect(onMakeCaseworker).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('menu')).toBeNull();
   });
 });

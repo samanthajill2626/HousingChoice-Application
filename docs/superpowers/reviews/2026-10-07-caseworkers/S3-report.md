@@ -7,7 +7,7 @@ updated and committed as each task is produced. No S4 implementation is included
 
 ## Task 3.1 - shared classification effects
 
-Commit: this Task 3.1 commit (hash recorded in the next report update).
+Commit: 0525981d.
 Moved displayNameOf, the identity-guarded suggestion delete/verdict stamp, and
 the revision-guarded bounded type drain into contactClassification.ts. The
 contacts PATCH calls the shared helpers; its generic thread behavior and all
@@ -56,3 +56,24 @@ No timeout or DynamoDB control-plane fault has occurred. The shared DynamoDB
 container remains running. Aggregate npm test, smoke and e2e are the parent's
 later checkpoints. No live application ports, environment/infra mutations,
 deployment, main sync/merge, cleanup or tracker edits were performed.
+
+## Task 3.2 - domain, refusal reads and preview removals
+
+Commit: this Task 3.2 commit (hash recorded in the next report update).
+Added consistent subject reads and 404 handling for missing, invalid, deleted
+and pointer rows, with team_member refused at 400. Preview collects all four
+refusal kinds whatever the stored type, includes deleted units, gives landlord
+of record precedence over a roster seat and sorts IDs within each kind.
+Already-caseworker preview skips refusals and reports only suggestion removals.
+The organization/thread and make/dismiss stubs remain as the task prescribes.
+
+Step 0 dependency proof passed again after Task 3.1 committed. RED:
+npx vitest run test/caseworkerConversion.test.ts exited 1, one missing-module
+suite failure and no tests collected (3.2-red). The first implementation run
+had 16 passed and one failing added paging assertion (3.2-green): the fixture
+incorrectly assumed an implicit 50-item fake page. S2 intentionally returns
+all units without a limit. Corrected the fixture to force limit 50, preserving
+S2 code; the deleted roster seat beyond the first page is now proved.
+The same command then exited 0, 17 tests passed (3.2-green-corrected).
+Root npm run typecheck exited 0 (3.2-typecheck); a final run covers the corrected
+fixture before commit (3.2-typecheck-final). No production contract deviation.

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { expectTodayReady } from '../../support/today.js';
+import { WIDE_RESTORE } from '../../support/viewport.js';
 
 // Extensible contact creation (:5174) against the real backend. Proves the
 // "New contact" flow end-to-end: the unified Kind picker's Other→base-type
@@ -152,6 +153,94 @@ test.describe('Extensible contact creation', () => {
     // It lives under the Landlords filter (it is landlord-typed).
     await page.goto(`${NEXT}/contacts/landlords`);
     await expect(page.getByText(fullName)).toBeVisible();
+  });
+
+  test('creates a Caseworker via the preset (partner + role, under Caseworkers)', async ({
+    page,
+  }, testInfo) => {
+    const stamp = Date.now();
+    const lastName = `Cwpreset ${stamp}`;
+    const fullName = `Casey ${lastName}`;
+
+    await devLogin(page);
+    await page.goto(`${NEXT}/contacts`);
+
+    await page.getByRole('button', { name: 'New contact' }).click();
+    const dialog = page.getByRole('dialog', { name: /New contact/i });
+    await expect(dialog).toBeVisible();
+
+    // Prove every choice fits and is usable in the six-choice phone layout.
+    // Page overflow is blind to this fixed dialog; measure the group and its
+    // actual segments before Playwright can scroll a clipped choice into view.
+    await page.setViewportSize({ width: 375, height: 800 });
+    const kindGroup = dialog.getByRole('group', { name: 'Contact kind' });
+    const labels = ['Tenant', 'Landlord', 'Partner', 'Caseworker', 'Property Manager', 'Other'];
+    const groupBox = await kindGroup.boundingBox();
+    expect(groupBox).not.toBeNull();
+    const segments = [];
+    for (const label of labels) {
+      const box = await kindGroup.getByRole('button', { name: label, exact: true }).boundingBox();
+      expect(box).not.toBeNull();
+      segments.push({ label, box: box! });
+    }
+    await testInfo.attach('kind-picker-375px-geometry', {
+      body: JSON.stringify({ viewport: page.viewportSize(), groupBox, segments }, null, 2),
+      contentType: 'application/json',
+    });
+    await testInfo.attach('kind-picker-375px', {
+      body: await page.screenshot(),
+      contentType: 'image/png',
+    });
+    expect(groupBox!.x).toBeGreaterThanOrEqual(0);
+    expect(groupBox!.x + groupBox!.width).toBeLessThanOrEqual(375);
+    const clipped = segments.filter(({ box }) =>
+      box.x < groupBox!.x || box.y < groupBox!.y ||
+      box.x + box.width > groupBox!.x + groupBox!.width ||
+      box.y + box.height > groupBox!.y + groupBox!.height,
+    );
+    expect(clipped, 'Every contact-kind choice must fit inside its visible group at 375px').toEqual([]);
+    for (const label of labels) {
+      const choice = kindGroup.getByRole('button', { name: label, exact: true });
+      await choice.click();
+      await expect(choice).toHaveAttribute('aria-pressed', 'true');
+    }
+    await page.setViewportSize(WIDE_RESTORE);
+
+    // The Caseworker preset is the partner base with the exact role
+    // "Caseworker" (caseworkers spec D16) - like Property Manager it opens no
+    // "Other" panel, and the create form offers no Organization (staff set it
+    // on the partner page).
+    await dialog
+      .getByRole('group', { name: 'Contact kind' })
+      .getByRole('button', { name: 'Caseworker', exact: true })
+      .click();
+    await expect(dialog.getByLabel('Role')).toHaveCount(0);
+    await expect(dialog.getByRole('combobox', { name: 'Organization', exact: true })).toHaveCount(0);
+
+    await dialog.getByLabel('First name').fill('Casey');
+    await dialog.getByLabel('Last name').fill(lastName);
+    await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page).toHaveURL(/\/contacts\/[A-Za-z0-9_-]+$/);
+
+    // Stored as a partner with the preset role.
+    const contactId = page.url().split('/').pop()!;
+    const res = await page.request.get(`${NEXT}/api/contacts/${contactId}`);
+    expect(res.ok()).toBeTruthy();
+    const { contact } = (await res.json()) as { contact: { type?: string; role?: string } };
+    expect(contact).toMatchObject({ type: 'partner', role: 'Caseworker' });
+    // Badged "Caseworker" (role ?? type).
+    await expect(page.getByText('Caseworker', { exact: true }).first()).toBeVisible();
+
+    // It lives under Contacts > Caseworkers. Exact: "Possible caseworkers"
+    // contains the same word.
+    await page.goto(`${NEXT}/contacts/caseworkers`);
+    await expect(
+      page
+        .getByRole('list', { name: 'Caseworkers', exact: true })
+        .getByRole('listitem')
+        .filter({ hasText: fullName }),
+    ).toBeVisible();
   });
 
   test('editing a contact can LINK an existing contact as a relationship (not just free text)', async ({

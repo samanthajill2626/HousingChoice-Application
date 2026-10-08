@@ -33,3 +33,19 @@ exit 1, 5 failed / 11 passed: missing Caseworker segment, offered mentions,
 and the old placeholder. GREEN: same command exit 0, 16 tests. Root bare
 npm run typecheck exit 0, all five workspaces (8.2-typecheck).
 No contract deviation. Task 8.1 and 8.2 added-line ASCII and diff checks pass.
+
+## Task 8.3 - conversion dialog
+
+Task 8.2 commit: 2321cf7a. Added CaseworkerDialog with preview/refusal links,
+exact count/error/repair copy, typed organization settlement, carry-preserving
+omission, clears and both-list new-name dialog. Added isCaseworkerContact
+only to the leaf caseworkerRole module, preserving its import boundary.
+RED: dashboard npx vitest run src/routes/contact/CaseworkerDialog.test.tsx,
+exit 1: module import missing, no cases collected (genuine missing-module RED).
+GREEN: dashboard npx vitest run src/routes/contact/CaseworkerDialog.test.tsx
+src/routes/contact/caseworkerRoleMirror.test.ts, exit 0, initially 74 tests;
+added an explicit untouched carried-value PIN, final 75 tests (23 + 52).
+Scoped root npx eslint on CaseworkerDialog.tsx, CaseworkerDialog.test.tsx
+and caseworkerRole.ts exited 0. Root bare npm run typecheck exited 0 across
+all five workspaces. No contract deviation; picker indentation follows the
+plan's note. No command remains active for this task.

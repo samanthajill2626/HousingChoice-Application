@@ -1,0 +1,54 @@
+/* CaseworkerDialog - the caseworker conversion's confirm dialog. Tokens only. */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.lead {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.list {
+  margin: 0;
+  padding-left: var(--sp-5);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.refusals {
+  margin: 0;
+  padding: var(--sp-3) var(--sp-4);
+  list-style: none;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+
+.note {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.error {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+
+.failed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}

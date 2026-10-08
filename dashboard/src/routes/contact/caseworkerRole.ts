@@ -31,3 +31,14 @@ export function mentionsCaseworker(role: unknown): boolean {
   const normalized = normalizeOrgText(role);
   return MENTIONS.some((m) => normalized.includes(m));
 }
+
+/**
+ * "A caseworker", everywhere in this design (spec D16): a partner whose role
+ * satisfies isCaseworkerRole. Hosts pass the STORED contact (ruling R4-15).
+ * Structurally typed, so this module keeps its import rule (the D4
+ * normalizer only); a dashboard `Contact` satisfies it. Every importer
+ * imports it from HERE (assembly ruling S8-7), never from CaseworkerDialog.
+ */
+export function isCaseworkerContact(contact: { type?: unknown; role?: unknown }): boolean {
+  return contact.type === 'partner' && isCaseworkerRole(contact.role);
+}

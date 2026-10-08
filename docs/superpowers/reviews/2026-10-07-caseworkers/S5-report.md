@@ -101,3 +101,68 @@ GREEN: same command exited 0, 15 passed (5.7-green). Root npm run typecheck
 exited 0, all five workspaces (5.7-typecheck). No contract deviation.
 The complete S5 added-line ASCII and git diff --check pass; the cleanup
 script diff is exactly three comment lines. No real DynamoDB fault in logs.
+
+## S5 final verification and handoff
+
+| Task | Commit |
+|---|---|
+| 5.1 | dbc63916 |
+| 5.2 | e89d38d1 |
+| 5.3 | a31eeff4 |
+| 5.4 | 2874276c |
+| 5.5 | 0a93168c |
+| 5.6 | 7a68c883 |
+| 5.7 | 9db84012 |
+
+Each task carries its report entry. The final root npm run typecheck
+(5.7-typecheck) exited 0 across all five workspaces and covers all final
+source/tests. No implementation change followed it.
+
+Final regression from W:/tmp/caseworkers/app:
+npx vitest run test/orgRecordWriters.integration.test.ts test/orgRecords.test.ts test/orgRewriteService.test.ts test/orgRewriteJob.test.ts test/organizationsApi.test.ts test/orgNamesService.test.ts test/devOrgFixture.test.ts test/cleanOrgNames.test.ts test/contactOrgNames.test.ts
+Exit 0: nine files, 241 tests passed, zero skipped (exit-regression).
+Per-file counts in command order: 30, 24, 33, 18, 30, 35, 15, 39, 17.
+Both DynamoDB-backed families ran against their isolated test fixtures.
+
+Final lint from W:/tmp/caseworkers:
+npx eslint app/src/repos/contactsRepo.ts app/src/repos/orgListRepo.ts app/src/services/orgRecords.ts app/src/services/orgRewrite.ts app/src/services/orgNames.ts app/src/routes/organizations.ts app/src/routes/dev.ts app/scripts/clean-org-names.ts app/test/helpers/twilioWebhookHarness.ts app/test/orgRecordWriters.integration.test.ts app/test/orgRecords.test.ts app/test/orgRewriteService.test.ts app/test/orgRewriteJob.test.ts app/test/organizationsApi.test.ts app/test/orgNamesService.test.ts app/test/devOrgFixture.test.ts e2e/fixtures/orgFixture.ts e2e/tests/dashboard-next/org-lists.spec.ts
+Exit 0, all 18 touched TypeScript paths, no errors (exit-lint). No baseline
+attribution needed. Full-slice git diff --check and added-line ASCII checks
+pass; existing source glyphs/encoding are preserved. No real DynamoDB fault
+line or hard timeout occurred. All owned commands finished.
+
+Bare git status and resolved MERGE_HEAD were checked before every commit;
+MERGE_HEAD was absent. Explicit paths only, GPT-6 Astra co-author trailer on
+every commit. This final report-only closeout is committed immediately.
+No main sync, deployment, environment, infrastructure, dependencies, seed,
+cleanup, browser, live-port or aggregate-suite operations were performed.
+E2E pins moved with their wire changes; S10 owns their execution and live QA.
+S6/S7 and later work remain the parent's responsibility.
+
+## Downstream contracts
+
+- OrgRecordField now includes organization in app and e2e fixture types.
+  Contact writer accepts organization expect:string|null and next:string|null;
+  empty next refuses, null removes, classification revision is untouched.
+- recordFieldsForKind appends organization LAST for either kind. Rewrite counts
+  include organization. Clear removes it, and Move/Split cannot target it.
+- OrgUsageCounts: tenants, otherContacts, properties, organization, deleted,
+  inUse:{active,deleted}, kindLocked:{active,deleted}. Legacy deleted counts
+  column hits only. UI Delete and deleted display must use distinct inUse;
+  kind-change refusal/dialog uses kindLocked. Never sum display columns.
+- Off-list organization rows and holder reads include every contact type and
+  deleted records. Resolution accepts both kinds. The server record allowlist
+  lives in routes/organizations.ts (O1 reference for S7.5a).
+- Resolve Add on organization REQUIRES explicit kind; kind on any other action
+  or field returns 400. Use accepts either kind, Clear removes, Move/Split
+  refuse. Run again and lapsed claim revalidate organization against both
+  kinds; rename/merge target kind comes from the first non-organization field.
+- POST /api/organizations/check requires exactly one of kind or kinds; kinds
+  is a nonempty, duplicate-free subset of housing_authority and agency.
+  spellingFor works with either form. Service check exposes the typed union.
+- Dev org fixture accepts organization; its e2e field type and documented
+  seam rows are updated. S5 owns the usage pin and all these e2e changes.
+
+No production plan/spec deviation, unexpected importer, cycle or unresolved
+finding remains. Only RED evidence precision and the logged atomic edit-script
+failure differ from the draft. Existing tests changed only at planned pins.

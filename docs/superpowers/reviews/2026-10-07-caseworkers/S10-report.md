@@ -85,3 +85,18 @@ state stale or absent. Lane 13 ports 10301/10311/10321/10331 were checked after
 stop and have no listener. Every owned runner has an exit marker. No browser,
 interactive lane or command is left active. Source and command ownership are
 released to the parent until Task 10.2 resumes after its C5 fix.
+
+## Task 10.2 closeout - C5 fixed by parent
+
+Resumed at clean 73031298, the parent's minimal responsive fix and tracked
+C5-responsive-fix.md. Parent reran the unchanged strict contact-create/frame
+command: exit 0, 8 passed / 0 failed / 0 skipped in 16.7s. All six normal
+clicks, aria-pressed checks, save, stored partner/Caseworker and tab row pass.
+At 375px the group is x=33,width=309; every button is 153px wide, at x=34 or
+188, with right edge at most 341 inside the group right edge 342.
+Parent also passed 104 picker/create/edit unit tests and bare root typecheck.
+Evidence and screenshot inspection are recorded in C5-responsive-fix.md;
+raw artifacts are .superpowers/sdd/C5/artifacts/green/ and checkpoint C5-*.
+No redundant rerun. Task 10.2 is complete; source test commit eadf5bbc plus
+parent correction 73031298. Ownership resumed after all parent commands and
+lane listeners ended.

@@ -93,3 +93,73 @@ exited 0: two files, 43 tests, zero skipped. This executes the real DynamoDB
 empty-names-map path and proves authority/agency remain absent as requested.
 Root npm run typecheck exited 0. All previous importer cases passed unchanged.
 Logs: 4.5-red, 4.5-green, 4.5-typecheck. No contract deviation.
+
+## S4 final verification and handoff
+
+| Task | Commit |
+|---|---|
+| 4.1 | 4aec86ce |
+| 4.2 | a17a387a |
+| 4.3 | 0192ee86 |
+| 4.4 | a94de995 |
+| 4.5 | f954569f |
+
+Each task committed its evidence after focused RED/GREEN and root typecheck.
+The final 4.5-typecheck covers all final source/tests and all five workspaces;
+no source changed after it, so no redundant typecheck was run for this report.
+
+Final command from W:/tmp/caseworkers/app:
+npx vitest run test/caseworkerConversion.test.ts test/possibleCaseworkers.test.ts test/contactClassification.test.ts test/caseworkerReviewApi.test.ts test/contactTriage.test.ts test/contactsCrud.test.ts test/contactOrgNames.test.ts test/aiRunVerdicts.test.ts test/unitsRepo.integration.test.ts test/importApply.integration.test.ts
+Exit 0: ten files, 350 tests passed, zero skipped (exit-regression).
+Per-file counts: conversion 78, possible 9, classification 14, review API 26,
+triage 51, CRUD 36, organization names 17, AI verdicts 74, units repo 11,
+import apply 34. Both integration suites executed against DynamoDB Local.
+
+Final command from W:/tmp/caseworkers:
+npx eslint app/src/routes/contacts.ts app/src/routes/api.ts app/src/routes/caseworkerReview.ts app/src/lib/import/apply.ts app/test/contactsCrud.test.ts app/test/contactOrgNames.test.ts app/test/contactTriage.test.ts app/test/caseworkerReviewApi.test.ts app/test/importApply.integration.test.ts
+Exit 0: all nine owned TypeScript files, no errors (exit-lint). No baseline
+attribution needed. Whole-slice git diff --check and added-line/new-file ASCII
+checks pass. Existing source encoding and untouched glyphs are preserved.
+
+All commands completed; no owned command is running. No hard timeout fired.
+Every S4 log was scanned: no real DynamoDB control-plane fault. Shared DynamoDB
+was never restarted, stopped or removed. No aggregate test, smoke, e2e, browser,
+live app port, environment, deployment, infrastructure, main-sync or cleanup
+operation was performed. Parent owns remaining slices and mission completion.
+
+Bare git status and the resolved MERGE_HEAD path were checked before every
+commit; MERGE_HEAD was absent. Explicit owned paths were staged and every commit
+has Co-Authored-By: GPT-6 Astra <noreply@openai.com>. This report closeout is the
+only post-implementation edit and is committed immediately; status is checked
+again afterward.
+
+## Downstream contracts and deviations
+
+The new registerCaseworkerRoutes(router, deps) receives contacts, conversion,
+and logger. It is mounted before contact-ID reads. Endpoints are authenticated
+by the existing API router, with no role restriction:
+- GET /api/contacts/possible-caseworkers returns { rows }.
+- GET /api/contacts/:contactId/caseworker-review/preview returns CaseworkerPreview.
+- POST /api/contacts/:contactId/caseworker-review accepts only action make with
+  optional string organization, or action dismiss alone; it returns { contact }.
+  Extra keys and null/non-string organization return 400 invalid_body.
+  Service errors retain { error: code, ...extras } and the service status.
+
+ContactsRouterDeps adds unitsRepo and optional caseworkerConversion test seam.
+api.ts forwards its units repo; makeWebhookHarness was already correctly wired.
+Conversion uses the same contacts/conversations/placements/tours/extraction/
+aiRuns/audit/activity/vocabulary/events/orgNames instances as the contacts router.
+Actor remains the authenticated userId, not a client-supplied value.
+
+Both POST/PATCH refuse all three server-owned keys. PATCH organization accepts
+both kinds, empty removes, POST ignores it. PATCH type/role uses merged-kind
+refusal and consistent reads, stamping manual only on overrides of a previously
+typed tenant/landlord/partner. Generic thread semantics remain unchanged.
+Importer preserves the four guarded fields and still has the accepted
+read/write race. S3 conversion and shared-helper contracts are unchanged.
+
+No production plan/spec discrepancy, unexpected importer, cycle, or unresolved
+finding remains. Only evidence precision (4.1 null RED, 4.5 first-failure scope)
+and stronger targeted boundary assertions differ from the drafted tests.
+S5 and later work remain unimplemented by this slice. No fakes, seeds, org-list
+usage/rewrite types, dependency manifests, tracker, or unrelated source changed.

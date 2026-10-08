@@ -313,4 +313,64 @@ describe('contactsRepo.update guards - expect clauses and notDeleted (plan 3.3)'
   });
 });
 
+const idsOf = (contacts: ContactItem[]): string[] => contacts.map((c) => c.contactId).sort();
+
+describe('contactsRepo.findAllByPhone / findAllByEmail (plan 3.3; D21 "own thread")', () => {
+  parity('returns EVERY live holder of a phone - duplicate primaries and a pointer owner - as whole contacts', async (w, id) => {
+    const phone = nextPhone();
+    await w.putContact({ contactId: `${id}-a`, type: 'tenant', status: 'searching', phone, firstName: 'Ana' });
+    await w.putContact({ contactId: `${id}-b`, type: 'unknown', status: 'needs_review', phone });
+    await w.putContact({ contactId: `${id}-c`, type: 'partner', status: 'active', phone: nextPhone() });
+    await w.putPointer('phone', phone, `${id}-c`);
+    const holders = await w.contacts.findAllByPhone(phone);
+    expect(idsOf(holders)).toEqual([`${id}-a`, `${id}-b`, `${id}-c`]);
+    expect(holders.some((c) => c.phone_ref === true)).toBe(false);
+    expect(holders.find((c) => c.contactId === `${id}-a`)?.firstName).toBe('Ana');
+  });
+
+  parity('lists a holder once when it is reached as a primary AND through a pointer', async (w, id) => {
+    const phone = nextPhone();
+    await w.putContact({ contactId: `${id}-a`, type: 'tenant', status: 'searching', phone });
+    await w.putPointer('phone', phone, `${id}-a`);
+    expect(idsOf(await w.contacts.findAllByPhone(phone))).toEqual([`${id}-a`]);
+  });
+
+  parity('drops soft-deleted holders and dangling pointers; an unknown phone answers []', async (w, id) => {
+    const deletedAt = '2026-10-07T09:00:00.000Z';
+    const phone = nextPhone();
+    await w.putContact({ contactId: `${id}-live`, type: 'tenant', status: 'searching', phone });
+    await w.putContact({ contactId: `${id}-gone`, type: 'tenant', status: 'searching', phone, deleted_at: deletedAt });
+    expect(idsOf(await w.contacts.findAllByPhone(phone))).toEqual([`${id}-live`]);
+
+    const dangling = nextPhone();
+    await w.putPointer('phone', dangling, `${id}-missing`);
+    expect(await w.contacts.findAllByPhone(dangling)).toEqual([]);
+
+    const deletedOwner = nextPhone();
+    await w.putContact({ contactId: `${id}-del-owner`, type: 'partner', status: 'active', phone: nextPhone(), deleted_at: deletedAt });
+    await w.putPointer('phone', deletedOwner, `${id}-del-owner`);
+    expect(await w.contacts.findAllByPhone(deletedOwner)).toEqual([]);
+
+    expect(await w.contacts.findAllByPhone(nextPhone())).toEqual([]);
+  });
+
+  parity('(PIN) findByPhone still answers ONE holder of a shared phone', async (w, id) => {
+    const phone = nextPhone();
+    await w.putContact({ contactId: `${id}-a`, type: 'tenant', status: 'searching', phone });
+    await w.putContact({ contactId: `${id}-b`, type: 'tenant', status: 'searching', phone });
+    const one = await w.contacts.findByPhone(phone);
+    expect([`${id}-a`, `${id}-b`]).toContain(one?.contactId);
+  });
+
+  parity('findAllByEmail: the same contract on the byEmail index', async (w, id) => {
+    const shared = `${id}-shared@example.test`;
+    await w.putContact({ contactId: `${id}-a`, type: 'tenant', status: 'searching', email: shared });
+    await w.putContact({ contactId: `${id}-gone`, type: 'tenant', status: 'searching', email: shared, deleted_at: '2026-10-07T09:00:00.000Z' });
+    await w.putContact({ contactId: `${id}-c`, type: 'landlord', status: 'active', email: `${id}-c@example.test` });
+    await w.putPointer('email', shared, `${id}-c`);
+    expect(idsOf(await w.contacts.findAllByEmail(shared))).toEqual([`${id}-a`, `${id}-c`]);
+    expect(await w.contacts.findAllByEmail(`${id}-nobody@example.test`)).toEqual([]);
+  });
+});
+
 // END OF PARITY CASES - Tasks 2.2-2.5 insert their describe blocks ABOVE this line.

@@ -15,6 +15,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
+import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import { getTableSpec } from '../lib/tables.js';
 import type { ConsentMethod } from '../lib/smsCompliance.js';
@@ -689,6 +690,16 @@ export function expectClausesOf(opts: UpdateContactOptions | undefined): ExpectC
 export interface ContactsRepo {
   /** Phone (E.164) → contact via the byPhone GSI; undefined when unknown. */
   findByPhone(phone: string): Promise<ContactItem | undefined>;
+  /**
+   * Caseworkers (spec 2026-10-06 D21; plan 3.3): EVERY contact the byPhone
+   * index holds for `phone` - the Query walked to exhaustion, pointer rows
+   * resolved to their owning contact (a dangling pointer dropped),
+   * de-duplicated by contactId, soft-deleted contacts EXCLUDED. Order is the
+   * index's (arbitrary). findByPhone stays the one-holder routing read; this
+   * is the read that can tell "no other live contact holds this number". A
+   * stale pointer still names its owner (it errs toward "shared").
+   */
+  findAllByPhone(phone: string): Promise<ContactItem[]>;
   getById(contactId: string, opts?: { consistentRead?: boolean }): Promise<ContactItem | undefined>;
   /** Read only the fields needed for a staff-facing contact label. */
   getDisplayById(contactId: string): Promise<ContactDisplayItem | undefined>;
@@ -809,6 +820,8 @@ export interface ContactsRepo {
    * via its email-pointer item); undefined when unknown or a dangling pointer.
    */
   findByEmail(email: string): Promise<ContactItem | undefined>;
+  /** The byEmail twin of findAllByPhone (plan 3.3) - the same contract. */
+  findAllByEmail(email: string): Promise<ContactItem[]>;
   /**
    * Email-channel A1 (the addPhone analog): attach an address to a contact.
    * `email` MUST already be normalized (the route validates). Loads the contact
@@ -1125,6 +1138,41 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
     return Attributes as ContactItem;
   };
 
+  /**
+   * findAllByPhone / findAllByEmail (plan 3.3): one index Query walked to
+   * exhaustion (queryAll), every pointer row resolved to its owner by id,
+   * de-duplicated by contactId, soft-deleted holders and dangling pointers
+   * dropped. At most one pointer row exists per value (putPointer is
+   * conditional on its id), so the owner reads are few.
+   */
+  const allHolders = async (index: 'byPhone' | 'byEmail', value: string): Promise<ContactItem[]> => {
+    const byPhone = index === 'byPhone';
+    const rows = await queryAll<ContactItem>(
+      doc,
+      {
+        TableName: table,
+        IndexName: index,
+        KeyConditionExpression: byPhone ? 'phone = :v' : 'email = :v',
+        ExpressionAttributeValues: { ':v': value },
+      },
+      { logger: log },
+    );
+    const out: ContactItem[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const isPointer = byPhone ? row.phone_ref === true : row.email_ref === true;
+      let holder: ContactItem | undefined = row;
+      if (isPointer) {
+        const ownerId = byPhone ? row.phone_ref_owner : row.email_ref_owner;
+        holder = typeof ownerId === 'string' ? await getByIdImpl(ownerId) : undefined;
+      }
+      if (holder === undefined || isDeleted(holder) || seen.has(holder.contactId)) continue;
+      seen.add(holder.contactId);
+      out.push(holder);
+    }
+    return out;
+  };
+
   return {
     async findByPhone(phone) {
       // Accepted risk: duplicate phones return the FIRST item the GSI yields
@@ -1179,6 +1227,14 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         return getByIdImpl(owner);
       }
       return hit;
+    },
+
+    async findAllByPhone(phone) {
+      return allHolders('byPhone', phone);
+    },
+
+    async findAllByEmail(email) {
+      return allHolders('byEmail', email);
     },
 
     async getById(contactId, opts) {

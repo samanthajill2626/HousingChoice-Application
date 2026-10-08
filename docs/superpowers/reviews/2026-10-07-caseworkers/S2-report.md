@@ -7,7 +7,7 @@ committed as each task is produced. No S3 implementation is included.
 
 ## Task 2.1 - contact fields and conditional update guards
 
-Commit: the Task 2.1 implementation commit containing this report entry.
+Commit: 5161cf03.
 The real repo and FakeWorld now support every expected clause, numeric values,
 raw absent versus zero revision guards, notDeleted, and guarded no-op reads.
 The contact's caseworker fields have explicit types; conversion.by is a userId.
@@ -43,3 +43,19 @@ left running. Aggregate npm test, smoke and e2e belong to the parent checkpoint.
 
 No unexpected importer, cycle, contract mismatch or additional typed fake has
 been encountered. Existing contact-partition fake semantics remain untouched.
+
+## Task 2.2 - all live phone and email holders
+
+Commit: the Task 2.2 implementation commit containing this report entry.
+Added real and fake findAllByPhone/findAllByEmail, resolving pointers, dropping
+missing/deleted owners, and deduplicating owners. Real reads use the existing
+queryAll cursor helper; the original single-holder methods are unchanged.
+Updated the four plan-named full ContactsRepo test fakes in the same task.
+
+RED: npx vitest run test/caseworkerRepoParity.integration.test.ts exited 1:
+8 missing-method failures, 16 passing cases. GREEN: the same command exited 0,
+24 tests passed, zero skipped. Planned regression command (app workdir):
+npx vitest run test/audienceResolution.test.ts test/contactCapture.test.ts test/sendMessage.test.ts test/scheduledSendSuppression.test.ts test/contactsRepo.integration.test.ts test/contactsRepo.email.test.ts
+exited 0: 6 files, 157 tests passed. Root npm run typecheck exited 0.
+Logs: 2.2-red, 2.2-green, 2.2-regression, 2.2-typecheck under the evidence path.
+No extra typed fake, fault, timeout, contract mismatch or scope deviation.

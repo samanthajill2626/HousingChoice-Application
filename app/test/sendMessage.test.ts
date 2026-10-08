@@ -256,6 +256,12 @@ function makeFakes(
     rewriteOrgFields: async () => {
       throw new Error('rewriteOrgFields: not used in this suite');
     },
+    findAllByPhone: async () => {
+      throw new Error('findAllByPhone: not used in this suite');
+    },
+    findAllByEmail: async () => {
+      throw new Error('findAllByEmail: not used in this suite');
+    },
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {

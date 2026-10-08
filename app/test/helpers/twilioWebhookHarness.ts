@@ -2168,6 +2168,31 @@ export function createFakeWorld(): FakeWorld {
     ...(typeof contact.deleted_at === 'string' && contact.deleted_at.length > 0 && { deleted_at: contact.deleted_at }),
   });
 
+  /**
+   * findAllByPhone / findAllByEmail (plan 3.3): EVERY row holding the value,
+   * pointer rows resolved to their owner, de-duplicated by contactId,
+   * soft-deleted holders and dangling pointers dropped - the real repo's
+   * contract. Array order (the real index order is arbitrary; never rely on
+   * it).
+   */
+  const fakeAllHolders = (kind: 'phone' | 'email', value: string): ContactItem[] => {
+    const out: ContactItem[] = [];
+    const seen = new Set<string>();
+    for (const row of contacts.filter((c) => c[kind] === value)) {
+      const isPointer = kind === 'phone' ? row.phone_ref === true : row.email_ref === true;
+      const ownerId = kind === 'phone' ? row.phone_ref_owner : row.email_ref_owner;
+      const holder = isPointer
+        ? typeof ownerId === 'string'
+          ? contacts.find((c) => c.contactId === ownerId)
+          : undefined
+        : row;
+      if (holder === undefined || isDeleted(holder) || seen.has(holder.contactId)) continue;
+      seen.add(holder.contactId);
+      out.push(holder);
+    }
+    return out;
+  };
+
   const contactsRepo: ContactsRepo = {
     async findByPhone(phone) {
       const hit = contacts.find((c) => c.phone === phone);
@@ -2188,6 +2213,12 @@ export function createFakeWorld(): FakeWorld {
         return contacts.find((c) => c.contactId === owner);
       }
       return hit;
+    },
+    async findAllByPhone(phone) {
+      return fakeAllHolders('phone', phone);
+    },
+    async findAllByEmail(email) {
+      return fakeAllHolders('email', email);
     },
     async getById(contactId) {
       return contacts.find((c) => c.contactId === contactId);

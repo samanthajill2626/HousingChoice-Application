@@ -43,7 +43,10 @@ export function segmentForKind(kind: OrgKind): OrgSegment {
   return kind === 'agency' ? 'agencies' : 'housing-authorities';
 }
 
-const RECORD_FIELDS: readonly OrgRecordField[] = ['housingAuthority', 'agency', 'accepted_authorities'];
+// Every field a "Not on the list" value can sit in - (B) a contact's
+// organization included (caseworkers spec D17), else its URL reads as no
+// selection. The server's list is app/src/routes/organizations.ts RECORD_FIELDS.
+const RECORD_FIELDS: readonly OrgRecordField[] = ['housingAuthority', 'agency', 'accepted_authorities', 'organization'];
 
 /** What the URL selects: an entry by id, a value by field and text, or nothing. */
 export type OrgSelection =

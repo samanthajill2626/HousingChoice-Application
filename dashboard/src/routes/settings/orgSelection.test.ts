@@ -15,6 +15,19 @@ import {
 const params = (query: string): URLSearchParams => new URLSearchParams(query);
 
 describe('readOrgLocation', () => {
+  it('reads a contact organization value (caseworkers spec D17): its field is a record field too', () => {
+    expect(readOrgLocation(undefined, params('view=not-on-list&field=organization&value=Kite+Ade')).selection).toEqual({
+      type: 'value',
+      field: 'organization',
+      value: 'Kite Ade',
+    });
+    const url = new URL(valueHref('organization', 'Kite Ade'), 'http://x');
+    expect(readOrgLocation(undefined, url.searchParams).selection).toEqual({
+      type: 'value',
+      field: 'organization',
+      value: 'Kite Ade',
+    });
+  });
   it('reads the view, defaulting to Housing authorities', () => {
     expect(readOrgLocation(undefined, params(''))).toEqual({ view: 'housing-authorities', selection: null });
     expect(readOrgLocation(undefined, params('view=agencies'))).toEqual({ view: 'agencies', selection: null });

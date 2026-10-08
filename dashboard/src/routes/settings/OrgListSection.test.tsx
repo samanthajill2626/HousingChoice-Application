@@ -953,6 +953,25 @@ describe('OrgListSection - a notice never outlives a later clean action', () => 
 });
 
 describe('OrgListSection - "Not on the list"', () => {
+  it('an organization value (caseworkers spec D17) lists as "Organization", and its link opens it', async () => {
+    const user = userEvent.setup();
+    getNotOnList.mockResolvedValue([
+      { field: 'organization', value: 'Kite Ade', count: 2, deletedCount: 0, resolution: { status: 'unknown', close: [] } },
+    ]);
+    renderSection();
+    await user.click(await screen.findByRole('button', { name: 'Not on the list 1' }));
+    const row = within(region('Not on the list')).getByRole('link', { name: 'Kite Ade' });
+    // FIELD_LABEL.organization (Task 7.1) names the field; OrgListPane is unchanged.
+    expect(row).toHaveAccessibleDescription('Organization - 2 records');
+    expect(row).toHaveAttribute('href', '/settings/organizations?view=not-on-list&field=organization&value=Kite+Ade');
+    await user.click(row);
+    const panel = await screen.findByRole('region', { name: 'Kite Ade' });
+    expect(within(panel).getByText('Organization', { selector: 'dd' })).toBeInTheDocument();
+    expect(within(region('Not on the list')).getByRole('link', { name: 'Kite Ade' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+  });
   const ATL_HA = {
     field: 'housingAuthority' as const,
     value: 'Atl HA',

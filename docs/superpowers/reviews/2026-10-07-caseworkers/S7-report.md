@@ -86,3 +86,17 @@ GREEN: dashboard npx vitest run src/routes/settings src/routes/orgs exited 0,
 settle-gate/late-answer regressions pass. Root npm run typecheck exited 0,
 all five workspaces (7.5-typecheck). ASCII and git diff --check pass.
 No contract deviation, extra segment or page-level width cap.
+
+## Task 7.5a - organization values are URL-addressable
+
+Task 7.5 commit: 509f079b. Added organization to the client's RECORD_FIELDS
+allowlist. O1 applied: the new comment correctly names the server allowlist
+in app/src/routes/organizations.ts (widened by S5.4).
+RED: dashboard npx vitest run src/routes/settings/orgSelection.test.ts src/routes/settings/OrgListSection.test.tsx
+exited 1, two failed / 68 passed: literal URL selection was null, and the
+clicked value's panel never appeared. The row label and href pins passed;
+the round-trip URL and aria-current assertions were not reached in RED.
+GREEN: dashboard npx vitest run src/routes/settings exited 0, 23 files /
+327 tests, zero skipped (7.5a-green). Invalid field=nope still rejects.
+Root npm run typecheck exited 0, all five workspaces (7.5a-typecheck).
+No contract deviation beyond the already accepted O1 comment correction.

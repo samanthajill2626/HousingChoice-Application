@@ -226,6 +226,27 @@ describe('OrgRewriteService.heartbeat / finish (spec D11; planner ruling R4-F4)'
 });
 
 describe('OrgRewriteService.claim (code review R2-BE-1)', () => {
+  it('a LAPSED organization Use of an AGENCY name is claimed - the claim re-checks both kinds, as Run again does (spec D17; R2-F2)', async () => {
+    const late = '2026-10-06T12:15:00.000Z'; // exactly 15 minutes after T1: lapsed
+    const orgUse = runningRewrite({
+      jobId: 'job-1',
+      action: 'use',
+      field: 'organization',
+      fromTexts: ['Steps'],
+      toName: STEP_UP.name,
+      heartbeatAt: T1,
+    });
+    const fits = await rewriteService({ lastRewrite: orgUse, now: () => late });
+    expect(await fits.svc.claim('job-1')).toEqual({ outcome: 'claimed', lastRewrite: { ...orgUse, heartbeatAt: late } });
+    // ...and it is refused once the name left BOTH lists.
+    const gone = await rewriteService({
+      entries: ORG_FIXTURE.filter((e) => e.orgId !== STEP_UP.orgId),
+      lastRewrite: orgUse,
+      now: () => late,
+    });
+    expect(await gone.svc.claim('job-1')).toMatchObject({ outcome: 'refused', lastRewrite: { status: 'failed' } });
+  });
+
   const use = runningRewrite({
     jobId: 'job-1',
     action: 'use',
@@ -370,6 +391,43 @@ describe('OrgRewriteService.merge (spec D11)', () => {
 });
 
 describe('OrgRewriteService.resolveNotOnList (spec D10)', () => {
+  it('an organization row: Use takes a name of EITHER kind, Add as new needs the kind, Move and Split are refused (spec D17; R2-F6)', async () => {
+    const useAgency = await rewriteService();
+    expect(
+      (await useAgency.svc.resolveNotOnList({ field: 'organization', value: 'Steps', action: 'use', name: STEP_UP.name, actor: 'u' }))
+        .lastRewrite,
+    ).toMatchObject({ action: 'use', field: 'organization', fields: ['organization'], fromTexts: ['Steps'], toName: STEP_UP.name });
+    const useHa = await rewriteService();
+    expect(
+      (await useHa.svc.resolveNotOnList({ field: 'organization', value: 'Atl HA', action: 'use', name: ATLANTA.name, actor: 'u' }))
+        .lastRewrite.toName,
+    ).toBe(ATLANTA.name);
+    const add = await rewriteService();
+    const added = await add.svc.resolveNotOnList({
+      field: 'organization',
+      value: 'Mercy Care',
+      action: 'add',
+      kind: 'agency',
+      actor: 'u',
+    });
+    expect(added.lastRewrite).toMatchObject({ action: 'use', field: 'organization', toName: 'Mercy Care' });
+    expect((await add.repo.peek())?.entries.at(-1)).toMatchObject({ kind: 'agency', name: 'Mercy Care' });
+
+    const { repo, svc } = await rewriteService();
+    const refused: Array<Omit<ResolveInput, 'actor'>> = [
+      { field: 'organization', value: 'Mercy Care', action: 'add' }, // no kind
+      { field: 'organization', value: 'HUD VASH Office', action: 'move_to_agency', name: VASH.name },
+      { field: 'organization', value: 'DCA Office', action: 'move_to_housing_authority', name: DCA.name },
+      { field: 'organization', value: 'DCA HUD-VASH', action: 'split', name: DCA.name, agencyName: VASH.name },
+      { field: 'organization', value: 'Junk', action: 'clear', kind: 'agency' }, // kind on another action
+      { field: 'agency', value: 'Mercy Care', action: 'add', kind: 'agency' }, // kind on another field
+    ];
+    for (const input of refused) {
+      await expect(svc.resolveNotOnList({ ...input, actor: 'u' })).rejects.toMatchObject({ status: 400 });
+    }
+    expect((await repo.peek())?.version).toBe(1);
+  });
+
   type ResolveInput = Parameters<OrgRewriteService['resolveNotOnList']>[0];
 
   it('Use with "Remember this spelling" settles the value and remembers it - in one write', async () => {
@@ -655,6 +713,52 @@ describe('OrgRewriteService.runAgain (spec D11)', () => {
     failedRewrite(runningRewrite({ jobId: 'job-old', action: 'clear', field: 'agency', fromTexts: [value] }));
   // Not on the starting list; added after the Clear failed.
   const HOPE_HOUSE = orgEntry({ orgId: 'org-hope', kind: 'agency', name: 'Hope House' });
+
+  it('re-checks an organization Use target against BOTH kinds, and a rename by its first non-organization field (spec D17; R2-F2)', async () => {
+    const gone = { status: 409, body: { error: 'org_rewrite_target_gone' } };
+    const orgUse = failedRewrite(
+      runningRewrite({ jobId: 'job-old', action: 'use', field: 'organization', fromTexts: ['Steps'], toName: STEP_UP.name }),
+    );
+    // An agency target is no "target gone" for an organization value.
+    const live = await rewriteService({ lastRewrite: orgUse });
+    expect((await live.svc.runAgain('a')).lastRewrite).toMatchObject({
+      action: 'use',
+      field: 'organization',
+      fields: ['organization'],
+      status: 'running',
+    });
+    // ...and it still is once the name left both lists.
+    const deleted = await rewriteService({ entries: ORG_FIXTURE.filter((e) => e.orgId !== STEP_UP.orgId), lastRewrite: orgUse });
+    await expect(deleted.svc.runAgain('a')).rejects.toMatchObject(gone);
+    // A rename's kind comes from its first NON-organization field, whatever the order.
+    const NEW = 'Step Up Atlanta';
+    const renamed = await rewriteService({
+      entries: ORG_FIXTURE.map((e) => (e.orgId === STEP_UP.orgId ? { ...e, name: NEW } : e)),
+      lastRewrite: failedRewrite(
+        runningRewrite({ jobId: 'job-old', action: 'rename', fromTexts: [STEP_UP.name], fields: ['organization', 'agency'], toName: NEW }),
+      ),
+    });
+    expect((await renamed.svc.runAgain('a')).lastRewrite).toMatchObject({ action: 'rename', toName: NEW, status: 'running' });
+  });
+
+  it('(PIN) a housing authority rename that also rewrites organization is refused once its old name became an AGENCY name (R2-F2)', async () => {
+    const OLD = 'Old Metro Housing';
+    const { svc, enqueued } = await rewriteService({
+      entries: [...ORG_FIXTURE, orgEntry({ orgId: 'org-old', kind: 'agency', name: OLD })],
+      lastRewrite: failedRewrite(
+        runningRewrite({
+          jobId: 'job-old',
+          action: 'rename',
+          fromTexts: [OLD],
+          fields: ['housingAuthority', 'accepted_authorities', 'organization'],
+          toName: ATLANTA.name,
+        }),
+      ),
+    });
+    await expect(svc.runAgain('a')).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_target_gone' } });
+    expect(enqueued).toEqual([]);
+  });
+
 
   it('refuses (409 org_rewrite_target_gone) once a from-text was added since as an agency name', async () => {
     const failed = failedClear('Hope House');

@@ -61,3 +61,18 @@ case stops before its records request; no 400 observation is claimed. Generic
 holders already passed, as predicted. GREEN: same command exited 0, two files
 / 52 tests (5.4-green). Root npm run typecheck exited 0 (5.4-typecheck).
 No contract deviation. Existing off-list/holder tests remain unchanged.
+
+## Task 5.5 - settling and revalidating organization rewrites
+
+Task 5.4 commit: 2874276c. Organization Use accepts either kind; Add requires
+explicit kind, rejected elsewhere. Existing field guards refuse Move/Split.
+Run again and lapsed claim use both kinds for organization, and the first
+non-organization field for rename/merge. From-text union protection remains.
+RED: app npx vitest run test/orgRewriteService.test.ts test/organizationsApi.test.ts
+exited 1: four failed / 58 passed. Agency Use was refused, lapsed claim was
+refused, Run again returned target-gone; the route accepted invalid county
+kind with 202. Later assertions in those cases were not reached. Widened
+rename from-text union pin passed already, as planned.
+GREEN: app npx vitest run test/orgRewriteService.test.ts test/organizationsApi.test.ts test/orgRewriteJob.test.ts
+exited 0, three files / 80 tests (5.5-green). Root npm run typecheck exited 0
+(5.5-typecheck). No contract deviation or lock behavior change.

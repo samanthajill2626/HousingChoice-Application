@@ -110,6 +110,9 @@ export interface OrgRewriteService {
     name?: string;
     agencyName?: string;
     rememberSpelling?: boolean;
+    /** Add as new on an `organization` row only, where it is REQUIRED: the
+     *  list staff picked (spec D17; R2-F6). Refused (400) anywhere else. */
+    kind?: OrgKind;
     actor: string;
   }): Promise<{ lastRewrite: OrgRewriteState; skippedSpellings: SkippedSpelling[] }>;
   /** Re-queues the stored definition under a new id, after re-checking that
@@ -181,23 +184,27 @@ function replaceEntry(entries: readonly OrgEntry[], entry: OrgEntry): OrgEntry[]
 }
 
 /**
- * The kind of entry `toName` must name for a re-run (spec D11 Run again):
- * Move to Agency writes an agency; Move to Housing authority and Split write a
- * housing authority (Split's agency half is checked on its own); rename, merge
- * and use write the kind of the field(s) they rewrite. Clear names no target.
+ * The kinds an entry `toName` names may be for a re-run (spec D11 Run
+ * again): Move to Agency writes an agency; Move to Housing authority and
+ * Split write a housing authority (Split's agency half is checked on its
+ * own); rename, merge and use write a name their field accepts - a value
+ * action's one field (an organization accepts EITHER kind, spec D17), a
+ * rename's or merge's FIRST NON-organization field, which is of the
+ * entry's own kind (recordFieldsForKind lists organization last, but the
+ * kind never depends on that order - R2-F2). Clear names no target.
  */
-function rewriteTargetKind(def: OrgRewriteState): OrgKind | undefined {
+function rewriteTargetKinds(def: OrgRewriteState): readonly OrgKind[] | undefined {
   switch (def.action) {
     case 'clear':
     case 'cleanup':
       return undefined;
     case 'move_to_agency':
-      return 'agency';
+      return ['agency'];
     case 'move_to_housing_authority':
     case 'split':
-      return 'housing_authority';
+      return ['housing_authority'];
     default: // rename, merge, use
-      return (def.field ?? def.fields[0]) === 'agency' ? 'agency' : 'housing_authority';
+      return KINDS_FOR_FIELD[def.field ?? def.fields.find((f) => f !== 'organization') ?? 'housingAuthority'];
   }
 }
 
@@ -212,12 +219,12 @@ function rewriteTargetKind(def: OrgRewriteState): OrgKind | undefined {
  * re-kinded - and (2) every from-text is still OFF the list for its fields.
  */
 function revalidationProblem(entries: readonly OrgEntry[], def: OrgRewriteState): string | null {
-  const targetGone = (name: string | undefined, kind: OrgKind): boolean =>
-    name === undefined || !entries.some((e) => e.name === name && e.kind === kind);
-  const toKind = rewriteTargetKind(def);
+  const targetGone = (name: string | undefined, kinds: readonly OrgKind[]): boolean =>
+    name === undefined || !entries.some((e) => e.name === name && kinds.includes(e.kind));
+  const toKinds = rewriteTargetKinds(def);
   if (
-    (toKind !== undefined && targetGone(def.toName, toKind)) ||
-    (def.action === 'split' && targetGone(def.agencyName, 'agency'))
+    (toKinds !== undefined && targetGone(def.toName, toKinds)) ||
+    (def.action === 'split' && targetGone(def.agencyName, ['agency']))
   ) {
     return 'a name it writes left the list or changed kind';
   }
@@ -225,7 +232,9 @@ function revalidationProblem(entries: readonly OrgEntry[], def: OrgRewriteState)
   // the NAME of an entry a stored field accepts would rewrite every record
   // holding that now-listed name; a fresh action on the value is refused
   // (D10). The one exception is the rewrite's own target: "Use <that entry>"
-  // settles a name variant and leaves exact holders alone.
+  // settles a name variant and leaves exact holders alone. A rename or merge
+  // listing organization accepts BOTH kinds here: its from-text is checked
+  // against agency names too, whose organization holders would be rewritten (R2-F2).
   const acceptedKinds = new Set(def.fields.flatMap((f) => KINDS_FOR_FIELD[f]));
   const fromTexts = new Set(def.fromTexts.map(normalizeOrgText));
   const fromTextListed = entries.some(
@@ -444,7 +453,15 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
       const { field, value, action, actor } = input;
       if (value.trim() === '') throw new OrgHttpError(400, { error: 'value must not be blank' });
       const kinds = KINDS_FOR_FIELD[field];
-      const kind: OrgKind = field === 'agency' ? 'agency' : 'housing_authority';
+      // `kind` belongs to Add as new on an organization row - required there,
+      // refused anywhere else (spec D17; R2-F6). Every other field adds its own kind.
+      if (input.kind !== undefined && !(field === 'organization' && action === 'add')) {
+        throw new OrgHttpError(400, { error: 'kind is accepted only when adding an organization value' });
+      }
+      if (field === 'organization' && action === 'add' && input.kind === undefined) {
+        throw new OrgHttpError(400, { error: 'kind is required to add an organization value' });
+      }
+      const addKind: OrgKind = input.kind ?? kinds[0] ?? 'housing_authority';
       // Minted outside the (retryable) list change, before start() mints the rewrite id.
       const addedId = action === 'add' ? newId() : undefined;
       return start(actor, (current) => {
@@ -465,12 +482,11 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
         if (variantOf !== undefined && !(action === 'use' && input.name === variantOf.name)) {
           throw new OrgHttpError(409, { error: 'org_value_is_name_variant', entry: toOrgRef(variantOf) });
         }
-        const named = (name: string | undefined, wanted: OrgKind, key: 'name' | 'agencyName'): OrgEntry => {
-          const hit = name === undefined ? undefined : entries.find((e) => e.name === name && e.kind === wanted);
+        const named = (name: string | undefined, wanted: readonly OrgKind[], key: 'name' | 'agencyName'): OrgEntry => {
+          const hit = name === undefined ? undefined : entries.find((e) => e.name === name && wanted.includes(e.kind));
           if (hit === undefined) {
-            throw new OrgHttpError(400, {
-              error: `${key} must be the exact name of ${wanted === 'agency' ? 'an agency' : 'a housing authority'} on the list`,
-            });
+            const what = wanted.length > 1 ? 'an organization' : wanted[0] === 'agency' ? 'an agency' : 'a housing authority';
+            throw new OrgHttpError(400, { error: `${key} must be the exact name of ${what} on the list` });
           }
           return hit;
         };
@@ -488,20 +504,20 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
             if (field !== 'housingAuthority') {
               throw new OrgHttpError(400, { error: 'move_to_agency settles housingAuthority values only' });
             }
-            return settle({ action, toName: named(input.name, 'agency', 'name').name });
+            return settle({ action, toName: named(input.name, ['agency'], 'name').name });
           case 'move_to_housing_authority':
             if (field !== 'agency') {
               throw new OrgHttpError(400, { error: 'move_to_housing_authority settles agency values only' });
             }
-            return settle({ action, toName: named(input.name, 'housing_authority', 'name').name });
+            return settle({ action, toName: named(input.name, ['housing_authority'], 'name').name });
           case 'split':
             if (field !== 'housingAuthority') {
               throw new OrgHttpError(400, { error: 'split settles housingAuthority values on contacts only' });
             }
             return settle({
               action,
-              toName: named(input.name, 'housing_authority', 'name').name,
-              agencyName: named(input.agencyName, 'agency', 'agencyName').name,
+              toName: named(input.name, ['housing_authority'], 'name').name,
+              agencyName: named(input.agencyName, ['agency'], 'agencyName').name,
             });
           case 'use':
           case 'add': {
@@ -513,7 +529,7 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
               const at = now();
               target = {
                 orgId: addedId ?? newId(),
-                kind,
+                kind: addKind,
                 name,
                 spellings: [],
                 createdAt: at,
@@ -523,7 +539,7 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
               };
               entries = [...entries, target];
             } else {
-              target = named(input.name, kind, 'name');
+              target = named(input.name, kinds, 'name');
             }
             // "Remember this spelling" (D10, D12) is an AUTOMATIC addition: a
             // problem is a skip, never a failure; a spelling the entry already

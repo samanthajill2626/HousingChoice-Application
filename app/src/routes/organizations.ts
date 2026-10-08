@@ -17,7 +17,7 @@
 //          exactly ONE of the four keys (400 one_change_per_request)
 //   POST   /:orgId/merge         ADMIN { intoOrgId } -> 202 { lastRewrite }
 //   DELETE /:orgId               ADMIN               -> 204
-//   POST   /not-on-list/resolve  ADMIN { field, value, action, name?, agencyName?, rememberSpelling? }
+//   POST   /not-on-list/resolve  ADMIN { field, value, action, name?, agencyName?, rememberSpelling?, kind? }
 //                                                    -> 202 { lastRewrite, skippedSpellings }
 //   POST   /rewrite/run-again    ADMIN               -> 202 { lastRewrite }
 //
@@ -330,6 +330,7 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
       const name = body['name'];
       const agencyName = body['agencyName'];
       const rememberSpelling = body['rememberSpelling'];
+      const kind = body['kind'];
       if (!isRecordField(field)) {
         res.status(400).json({ error: 'field must be housingAuthority, agency, accepted_authorities or organization' });
         return;
@@ -350,6 +351,10 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
         res.status(400).json({ error: 'rememberSpelling must be true or false' });
         return;
       }
+      if (kind !== undefined && !isKind(kind)) {
+        res.status(400).json({ error: 'kind must be housing_authority or agency' });
+        return;
+      }
       res.status(202).json(
         await orgRewrite.resolveNotOnList({
           field,
@@ -358,6 +363,7 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
           ...(name !== undefined && { name }),
           ...(agencyName !== undefined && { agencyName }),
           ...(rememberSpelling !== undefined && { rememberSpelling }),
+          ...(kind !== undefined && { kind }),
           actor: actorOf(req),
         }),
       );

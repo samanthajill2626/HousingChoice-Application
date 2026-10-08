@@ -336,6 +336,28 @@ describe('DELETE /api/organizations/:orgId (admin)', () => {
 });
 
 describe('rewrites through the real in-process queue and the org.rewrite job (spec D10, D11)', () => {
+  it('settles organization values: Use a name of either kind, Add as new with the kind staff picked (spec D17)', async () => {
+    const h = await harness();
+    wireRewriteJob(h);
+    h.world.contacts.push(
+      { contactId: 'p-1', type: 'partner', status: 'active', role: 'Caseworker', organization: 'Steps' },
+      { contactId: 'p-2', type: 'partner', status: 'active', role: 'Caseworker', organization: 'Mercy Care' },
+    );
+    const admin = as(h, TEST_ADMIN_COOKIE);
+    const bad = { field: 'organization', value: 'Mercy Care', action: 'add' };
+    expect((await admin.post('/not-on-list/resolve', { ...bad, kind: 'county' })).status).toBe(400);
+    expect((await admin.post('/not-on-list/resolve', bad)).status).toBe(400);
+    const used = await admin.post('/not-on-list/resolve', { field: 'organization', value: 'Steps', action: 'use', name: STEP_UP.name });
+    expect(used.status).toBe(202);
+    await queue.settle();
+    const added = await admin.post('/not-on-list/resolve', { ...bad, kind: 'agency' });
+    expect(added.status).toBe(202);
+    await queue.settle();
+    expect(h.world.contacts.map((c) => c['organization'])).toEqual([STEP_UP.name, 'Mercy Care']);
+    expect((await admin.get()).body.entries.at(-1)).toMatchObject({ kind: 'agency', name: 'Mercy Care' });
+    expect((await admin.get('/not-on-list')).body.rows).toEqual([]);
+  });
+
   // The in-process queue DEFERS immediate dispatch (SQS semantics): a 202
   // returns before the job runs, so each case awaits queue.settle(). The reset
   // sits in `finally` so a slow drain can never poison the next test

@@ -51,6 +51,24 @@
   font-weight: var(--fw-semibold);
 }
 
+/* Keep every kind visible inside the phone dialog, including six choices. */
+@media (max-width: 599px) {
+  .segmentBar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--c-border);
+  }
+
+  .segment {
+    min-width: 0;
+    border-right: none;
+  }
+
+  .segment:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+}
 /* --- Other sub-panel ------------------------------------------------------- */
 
 .otherPanel {

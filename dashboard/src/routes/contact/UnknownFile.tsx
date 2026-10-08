@@ -50,6 +50,10 @@ export interface UnknownFileProps {
   /** Triage this untriaged contact to a known kind. In flight,
    *  `triaging` disables the buttons. */
   onTriage?: (kind: SuggestedContactKind) => void;
+  /** "Mark as Caseworker" (spec 2026-10-06 D16): opens the caseworker
+   *  conversion dialog - the one-click way to accept the AI's `partner`
+   *  suggestion as a caseworker. Never the triage PATCH. Absent: disabled. */
+  onMakeCaseworker?: () => void;
   triaging?: boolean;
   /** Pending AI suggestions - a `type` suggestion surfaces a recommendation line
    *  inside the triage card (the Mark-as buttons remain the action). */
@@ -70,6 +74,7 @@ export function UnknownFile({
   onEdit,
   onManagePhones,
   onTriage,
+  onMakeCaseworker,
   triaging = false,
   suggestions = [],
 }: UnknownFileProps): React.JSX.Element {
@@ -86,8 +91,8 @@ export function UnknownFile({
       <Card title="Needs triage">
         <p className={styles.note}>
           This contact hasn&apos;t been classified yet. Classify them as a Tenant,
-          Landlord, Partner, or Property Manager to file them correctly and unlock the
-          matching workspace.
+          Landlord, Partner, Caseworker, or Property Manager to file them correctly and
+          unlock the matching workspace.
         </p>
         {typeSuggestion ? (
           <p className={styles.aiSuggest}>
@@ -119,6 +124,15 @@ export function UnknownFile({
             onClick={() => onTriage?.('partner')}
           >
             Mark as Partner
+          </Button>
+          {/* Fourth, after Partner (spec D22): the KindPicker order. */}
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={triaging || !onMakeCaseworker}
+            onClick={() => onMakeCaseworker?.()}
+          >
+            Mark as Caseworker
           </Button>
           <Button
             variant="secondary"

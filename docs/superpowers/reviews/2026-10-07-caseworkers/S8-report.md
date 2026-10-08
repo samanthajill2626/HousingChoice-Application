@@ -74,3 +74,13 @@ npm run typecheck exited 0 across five workspaces (8.5-typecheck).
 Existing act warnings remain; no failure excused. ASCII/diff checks pass.
 No contract deviation; redundant optional setter call removed once the map
 became complete, and its stale two-field comments updated.
+
+## Task 8.6 - Unknown card
+
+Task 8.5 commit: cfdecbcd. Mark as Caseworker is fourth after Partner, opens
+its dedicated callback, and shares the in-flight disable gate. Existing
+triage PATCH callbacks retain their exact canonical kinds.
+RED: dashboard npx vitest run src/routes/contact/UnknownFile.test.tsx,
+exit 1, 4 failed / 7 passed: four-action order, missing button and old lede.
+GREEN: same command exit 0, 11 tests. Root bare npm run typecheck exit 0,
+all five workspaces (8.6-typecheck). No contract deviation.

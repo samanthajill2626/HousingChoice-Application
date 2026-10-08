@@ -30,6 +30,7 @@ function renderIt(opts: {
   suggestions?: SuggestionItem[];
   groupThreads?: GroupThreadRow[];
   onTriage?: (kind: SuggestedContactKind) => void;
+  onMakeCaseworker?: () => void;
   triaging?: boolean;
   media?: CommsMediaItem[];
 } = {}): void {
@@ -44,6 +45,7 @@ function renderIt(opts: {
           media={opts.media ?? []}
           suggestions={opts.suggestions ?? []}
           onTriage={opts.onTriage ?? vi.fn()}
+          onMakeCaseworker={opts.onMakeCaseworker ?? vi.fn()}
           triaging={opts.triaging}
           groupThreadsPending={false}
           groupThreads={opts.groupThreads ?? []}
@@ -88,13 +90,13 @@ describe('UnknownFile classification actions', () => {
     expect(screen.getByText(`AI suggests: ${label} - stated role`)).toBeInTheDocument();
   });
 
-  it('renders four actions in KindPicker order and reports canonical kinds', async () => {
+  it('renders five actions in KindPicker order and reports canonical kinds', async () => {
     const onTriage = vi.fn();
     const user = userEvent.setup();
     renderIt({ onTriage });
     const buttons = screen.getAllByRole('button').filter((button) => button.textContent?.startsWith('Mark as '));
     expect(buttons.map((button) => button.textContent)).toEqual([
-      'Mark as Tenant', 'Mark as Landlord', 'Mark as Partner', 'Mark as Property Manager',
+      'Mark as Tenant', 'Mark as Landlord', 'Mark as Partner', 'Mark as Caseworker', 'Mark as Property Manager',
     ]);
     await user.click(screen.getByRole('button', { name: 'Mark as Partner' }));
     await user.click(screen.getByRole('button', { name: 'Mark as Property Manager' }));
@@ -102,9 +104,15 @@ describe('UnknownFile classification actions', () => {
     expect(onTriage).toHaveBeenNthCalledWith(2, 'property_manager');
   });
 
-  it('disables all four actions during one in-flight classification', () => {
+  it('disables all five actions during one in-flight classification', () => {
     renderIt({ triaging: true });
-    for (const name of ['Mark as Tenant', 'Mark as Landlord', 'Mark as Partner', 'Mark as Property Manager']) {
+    for (const name of [
+      'Mark as Tenant',
+      'Mark as Landlord',
+      'Mark as Partner',
+      'Mark as Caseworker',
+      'Mark as Property Manager',
+    ]) {
       expect(screen.getByRole('button', { name })).toBeDisabled();
     }
   });
@@ -164,5 +172,22 @@ describe('UnknownFile group threads', () => {
     renderIt();
     expect(screen.getByRole('heading', { name: 'Group threads' })).toBeInTheDocument();
     expect(screen.getByText('No group texts yet.')).toBeInTheDocument();
+  });
+});
+
+describe('UnknownFile - Mark as Caseworker (spec 2026-10-06 D16)', () => {
+  it('opens the conversion, never the triage PATCH', async () => {
+    const onTriage = vi.fn();
+    const onMakeCaseworker = vi.fn();
+    const user = userEvent.setup();
+    renderIt({ onTriage, onMakeCaseworker });
+    await user.click(screen.getByRole('button', { name: 'Mark as Caseworker' }));
+    expect(onMakeCaseworker).toHaveBeenCalledTimes(1);
+    expect(onTriage).not.toHaveBeenCalled();
+  });
+
+  it('the card says Caseworker is one of the kinds', () => {
+    renderIt();
+    expect(screen.getByText(/Tenant, Landlord, Partner, Caseworker, or Property Manager/)).toBeInTheDocument();
   });
 });

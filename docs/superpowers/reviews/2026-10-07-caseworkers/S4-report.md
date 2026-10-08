@@ -26,3 +26,15 @@ Exact command/cwd metadata, verbatim logs and exit files are ignored under
 .superpowers/sdd/S4/, named 4.1-red, 4.1-green and 4.1-typecheck.
 run.mjs preserves real exits and has a 600-second hard owned-child timeout.
 Aggregate npm test, smoke, e2e and live QA remain the parent's later gates.
+
+## Task 4.2 - organization PATCH
+
+Task 4.1 commit: 4aec86ce. Step 0 passed again.
+PATCH parses organization, D5-checks against both kinds with a consistent read,
+and maps empty string to REMOVE. POST still ignores the field.
+RED: npx vitest run test/contactOrgNames.test.ts exited 1, six failed and 11
+passed. Organization-only bodies returned 400; the mixed off-list write returned
+200; the numeric case returned the old no-updatable-fields error. POST pin passed.
+GREEN: npx vitest run test/contactOrgNames.test.ts test/contactTriage.test.ts test/contactIntakeFields.test.ts test/trimStrings.test.ts
+exited 0, four files and 63 tests. Root npm run typecheck exited 0.
+Logs: 4.2-red, 4.2-green, 4.2-typecheck. No contract deviation.

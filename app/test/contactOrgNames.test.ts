@@ -167,11 +167,68 @@ describe('POST /api/contacts - the organization fields stay ignored (spec sectio
         lastName: 'Q',
         housingAuthority: 'Nowhere Housing Authority',
         agency: 'Step Up',
+        organization: 'Nowhere Org', // caseworkers spec D16: POST ignores organization too
       });
     expect(res.status).toBe(201);
     const stored = storedOf(world, res.body.contact.contactId);
     expect(stored).toBeDefined();
     expect(stored !== undefined && 'housingAuthority' in stored).toBe(false);
     expect(stored !== undefined && 'agency' in stored).toBe(false);
+    expect(stored !== undefined && 'organization' in stored).toBe(false);
+  });
+});
+
+describe('PATCH /api/contacts/:id - organization (caseworkers spec D17): D5 against BOTH lists', () => {
+  const partner = { type: 'partner' as const, status: 'active' };
+
+  it('stores an agency name or spelling as the exact entry name', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world, partner);
+    const res = await patchContact(app, ID, { organization: 'hope atlanta' });
+    expect(res.status).toBe(200);
+    expect(storedOf(world, ID)?.['organization']).toBe('HOPE Atlanta');
+  });
+
+  it('accepts a housing authority too (either kind)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world, partner);
+    const res = await patchContact(app, ID, { organization: 'Atlanta Housing' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.organization).toBe('Atlanta Housing Authority');
+  });
+
+  it('refuses text on neither list: 422 org_not_on_list with field organization, nothing written', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world, { ...partner, organization: 'HOPE Atlanta' });
+    const before = structuredClone(storedOf(world, ID));
+    const res = await patchContact(app, ID, { organization: 'Nowhere Org', firstName: 'Pat' });
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ error: 'org_not_on_list', field: 'organization', text: 'Nowhere Org', candidates: [] });
+    expect(res.body.otherKind).toBeUndefined(); // both kinds are accepted: never "other kind"
+    expect(storedOf(world, ID)).toEqual(before);
+  });
+
+  it('refuses an ambiguous spelling naming both candidates', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world, partner);
+    const res = await patchContact(app, ID, { organization: 'AHA' });
+    expect(res.status).toBe(422);
+    expect(names(res.body.candidates)).toEqual(['Atlanta Housing Authority', 'Augusta Housing Authority']);
+  });
+
+  it("(PIN-shaped) an unchanged off-list value passes; '' REMOVEs the attribute", async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world, { ...partner, organization: 'Old Helper Org' });
+    expect((await patchContact(app, ID, { organization: 'Old Helper Org', firstName: 'Pat' })).status).toBe(200);
+    expect((await patchContact(app, ID, { organization: '' })).status).toBe(200);
+    expect('organization' in storedOf(world, ID)!).toBe(false);
+  });
+
+  it('a non-string is a parser 400', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world, partner);
+    const res = await patchContact(app, ID, { organization: 7 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('organization must be a string');
   });
 });

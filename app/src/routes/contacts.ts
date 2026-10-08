@@ -652,6 +652,16 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     patch['agency'] = v;
     changedFields.push('agency');
   }
+  // Organization (caseworkers spec 2026-10-06 D17): a partner's employer,
+  // checked by D5 against BOTH lists in the route. '' clears it - null ->
+  // REMOVE, the `role` convention - so a cleared organization is absent.
+  if ('organization' in b) {
+    const v = b['organization'];
+    if (typeof v !== 'string') return { error: 'organization must be a string' };
+    patch['organization'] = v.length > 0 ? v : null;
+    changedFields.push('organization');
+  }
+
   // Structured postal address (edit form). Every part optional; we store only the
   // non-empty parts (a SET-merge replaces the whole address object).
   if ('address' in b) {
@@ -1467,7 +1477,8 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // CONSISTENT when the patch carries an organization field: the D5 check
     // below decides "unchanged" against this read, and a stale read could
     // pass an off-list value through as unchanged.
-    const touchesOrgField = 'housingAuthority' in parsed.patch || 'agency' in parsed.patch;
+    const touchesOrgField =
+      'housingAuthority' in parsed.patch || 'agency' in parsed.patch || 'organization' in parsed.patch;
     const stored = await contacts.getById(
       contactId,
       touchesOrgField ? { consistentRead: true } : undefined,
@@ -1565,7 +1576,9 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         res.status(404).json({ error: 'contact_not_found' });
         return;
       }
-      for (const field of ['housingAuthority', 'agency'] as const) {
+      // (B) organization: KINDS_FOR_FIELD.organization is both kinds, so its
+      // 422 never carries otherKind (D17).
+      for (const field of ['housingAuthority', 'agency', 'organization'] as const) {
         if (!(field in parsed.patch)) continue;
         const next = parsed.patch[field];
         if (typeof next !== 'string' || next.length === 0) continue; // a clear

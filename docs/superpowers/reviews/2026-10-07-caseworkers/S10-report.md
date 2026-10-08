@@ -165,7 +165,7 @@ at top 722.797px, left 264px, width 992px. Its max-height expression is
 max(9rem, min(-15px, 60vh)). Thus no part of the option can receive a normal
 pointer click. The list resolves immediately; this is layout reachability,
 not slow data. ContactSearchField.tsx:128 anchors only below the input
-(rect.bottom + 4); :136 floors the height at 9rem. Its CSS :64 makes the
+(rect.bottom + 4); :135 floors the height at 9rem. Its CSS :64 makes the
 list fixed under document.body, outside the route scroll owner. AppFrame's
 .main has height 100%; main.content is a separate overflow-y:auto region
 (AppFrame.module.css:331,386). Scrolling the list cannot move that fixed
@@ -187,3 +187,14 @@ exits 0 with no running session. Lane 13 ports 10301/10311/10321/10331 were
 checked after stop and have no listeners. Ownership is released to parent
 for the finding's attribution and disposition. No source files changed in
 this Task 10.4 pass.
+
+### Task 10.4 baseline attribution complete
+
+The separately authorized detached-baseline comparison reproduces the same
+6-pass/1-fail click defect at 1861e154, with identical 1280x720 viewport and
+listbox top 722.797px. Finding, exact commands, both traces and the corrected
+checkout protocol: S10-recipient-picker-baseline.md. Filed the pre-existing
+issue contact-search-popover-below-viewport after checking for duplicates.
+The mislabeled feature repeat is explicitly excluded from baseline evidence.
+Original clean feat/caseworkers HEAD 5c45536d restored, all owned commands
+ended and lane 13 ports free. Task 10.4 remains baseline-red, not complete.

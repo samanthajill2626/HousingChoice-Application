@@ -221,8 +221,14 @@ export interface OrgNamesService {
     current: readonly string[] | undefined,
     legacyJurisdiction: string | undefined,
   ): Promise<ListCheck>;
-  /** POST /check. */
-  check(input: { kind: OrgKind; text: string; spellingFor?: string }): Promise<OrgCheckResult>;
+  /** POST /check: `kind` (one list) or `kinds` (several - the organization
+   *  picker's both lists, spec D6/D17), never both (the route enforces it). */
+  check(
+    input: ({ kind: OrgKind; kinds?: undefined } | { kinds: readonly OrgKind[]; kind?: undefined }) & {
+      text: string;
+      spellingFor?: string;
+    },
+  ): Promise<OrgCheckResult>;
   add(input: { kind: OrgKind; name: string; notes?: string; actor: string }): Promise<OrgEntry>;
   updateNotes(orgId: string, notes: string, actor: string): Promise<OrgEntry>;
   updateSpellings(orgId: string, spellings: string[], opts: { confirmShared: boolean; actor: string }): Promise<OrgEntry>;
@@ -257,9 +263,11 @@ export function createOrgNamesService(deps: { orgListRepo?: OrgListRepo; logger?
       return checkListWrite(entries, field, next, current, legacyJurisdiction);
     },
 
-    async check({ kind, text, spellingFor }) {
+    async check(input) {
+      const { text, spellingFor } = input;
+      const kinds: readonly OrgKind[] = input.kinds ?? (input.kind !== undefined ? [input.kind] : []);
       const { entries } = await list.get();
-      const resolution = resolveOrgText(entries, text, [kind]);
+      const resolution = resolveOrgText(entries, text, kinds);
       const nameProblem = checkNewOrgName(entries, text);
       let spellingProblem: SpellingProblem['problem'] | null | undefined;
       if (spellingFor !== undefined) {

@@ -76,3 +76,15 @@ rename from-text union pin passed already, as planned.
 GREEN: app npx vitest run test/orgRewriteService.test.ts test/organizationsApi.test.ts test/orgRewriteJob.test.ts
 exited 0, three files / 80 tests (5.5-green). Root npm run typecheck exited 0
 (5.5-typecheck). No contract deviation or lock behavior change.
+
+## Task 5.6 - check across both lists
+
+Task 5.5 commit: 0a93168c. check accepts the typed kind/kinds union; the route
+requires exactly one form and validates nonempty, distinct, valid kinds.
+Spelling target semantics and the existing single-kind requests are unchanged.
+RED: app npx vitest run test/orgNamesService.test.ts test/organizationsApi.test.ts
+exited 1: two failed / 63 passed. The service returned otherKind instead of
+match and the route returned 400 for kinds. GREEN: the same command exited 0,
+two files / 65 tests (5.6-green). Root npm run typecheck exited 0
+(5.6-typecheck); afterward only a redundant adjacent comment was removed.
+No contract deviation.

@@ -179,6 +179,27 @@ describe('GET /api/organizations/not-on-list (+ /records) - for everyone', () =>
 });
 
 describe('POST /api/organizations/check - for everyone', () => {
+  it('checks against both lists with kinds - exactly one of kind and kinds (spec D17; R2-F5)', async () => {
+    const va = as(await harness(), TEST_SESSION_COOKIE);
+    const both = await va.post('/check', { kinds: ['housing_authority', 'agency'], text: 'HUD VASH' });
+    expect(both.status).toBe(200);
+    expect(both.body).toEqual({ match: orgRef(VASH), candidates: [], close: [], nameProblem: 'org_name_taken' });
+    // spellingFor is target-based, so it works with either form.
+    const spelled = await va.post('/check', { kinds: ['agency', 'housing_authority'], text: 'Steps', spellingFor: 'org-stepup' });
+    expect(spelled.status).toBe(200);
+    expect(spelled.body).toMatchObject({ spellingProblem: null });
+    for (const body of [
+      { kind: 'agency', kinds: ['agency'], text: 'x' },
+      { text: 'x' },
+      { kinds: [], text: 'x' },
+      { kinds: ['agency', 'agency'], text: 'x' },
+      { kinds: ['county'], text: 'x' },
+      { kinds: 'agency', text: 'x' },
+    ]) {
+      expect((await va.post('/check', body)).status).toBe(400);
+    }
+  });
+
   it('answers the D4 resolution with the new-name and spelling problems', async () => {
     const va = as(await harness(), TEST_SESSION_COOKIE);
     const res = await va.post('/check', { kind: 'housing_authority', text: 'AHA', spellingFor: 'org-dca' });

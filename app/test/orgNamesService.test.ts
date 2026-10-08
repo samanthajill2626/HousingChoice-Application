@@ -200,6 +200,28 @@ async function startingEntry(svc: OrgNamesService, name: string): Promise<OrgEnt
 }
 
 describe('OrgNamesService - read and the checks (plan 3.4)', () => {
+  it('check() with kinds resolves against BOTH lists - never "the other kind" (spec D6, D17)', async () => {
+    const { svc } = await namesService();
+    const both = ['housing_authority', 'agency'] as const;
+    expect(await svc.check({ kinds: both, text: 'HUD VASH' })).toEqual({
+      match: orgRef(VASH),
+      candidates: [],
+      close: [],
+      nameProblem: 'org_name_taken',
+    });
+    expect(await svc.check({ kinds: both, text: 'AHA' })).toEqual({
+      candidates: [orgRef(ATLANTA), orgRef(AUGUSTA)],
+      close: [],
+      nameProblem: 'org_name_taken',
+    });
+    expect(await svc.check({ kinds: both, text: 'DCA HUD-VASH' })).toEqual({
+      candidates: [],
+      close: [],
+      compound: [[orgRef(DCA)], [orgRef(VASH)]],
+      nameProblem: 'org_name_compound',
+    });
+  });
+
   it('read() returns the stored item', async () => {
     const { svc } = await namesService();
     const item = await svc.read();

@@ -8,7 +8,7 @@
 //   GET    /usage                              -> { usage }
 //   GET    /not-on-list                        -> { rows }
 //   GET    /not-on-list/records?field=&value=  -> { records }
-//   POST   /check  { kind, text, spellingFor? }  -> OrgCheckResult (text <= 200 chars, else 400)
+//   POST   /check  { kind | kinds, text, spellingFor? }  -> OrgCheckResult (text <= 200 chars, else 400)
 //   POST   /       { kind, name, notes? }        -> 201 { entry }
 //   PATCH  /:orgId { notes }                     -> { entry }
 //          ADMIN   { spellings, confirmShared? } -> { entry }
@@ -175,10 +175,26 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
     handle(async (req, res) => {
       const body = bodyOf(req) ?? {};
       const kind = body['kind'];
+      const kinds = body['kinds'];
       const text = body['text'];
       const spellingFor = body['spellingFor'];
-      if (!isKind(kind)) {
+      // Exactly one of kind / kinds (R2-F5): kinds is a non-empty set of the two kinds.
+      if ((kind === undefined) === (kinds === undefined)) {
+        res.status(400).json({ error: 'send exactly one of kind or kinds' });
+        return;
+      }
+      if (kind !== undefined && !isKind(kind)) {
         res.status(400).json({ error: 'kind must be housing_authority or agency' });
+        return;
+      }
+      if (
+        kinds !== undefined &&
+        (!Array.isArray(kinds) ||
+          kinds.length === 0 ||
+          !kinds.every(isKind) ||
+          new Set(kinds).size !== kinds.length)
+      ) {
+        res.status(400).json({ error: 'kinds must list housing_authority and/or agency, each once' });
         return;
       }
       if (typeof text !== 'string') {
@@ -196,7 +212,12 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
         res.status(400).json({ error: 'spellingFor must be an entry id' });
         return;
       }
-      res.json(await orgNames.check({ kind, text, ...(spellingFor !== undefined && { spellingFor }) }));
+      const spelling = spellingFor !== undefined ? { spellingFor } : {};
+      res.json(
+        await orgNames.check(
+          Array.isArray(kinds) ? { kinds: kinds as OrgKind[], text, ...spelling } : { kind: kind as OrgKind, text, ...spelling },
+        ),
+      );
     }),
   );
 

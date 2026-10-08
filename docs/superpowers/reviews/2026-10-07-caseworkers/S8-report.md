@@ -117,3 +117,20 @@ ContactDetail command, exit 0, 117 tests (8.8-green2). Root bare npm run
 typecheck exited 0 across five workspaces; scoped eslint on ContactDetail.tsx
 and its test exited 0. Existing act warnings remain; no failure excused.
 No command remains active. Browser proof remains parent-owned.
+
+## Task 8.9 - partner file
+
+Task 8.8 commit: c064760e. Partner Details now show Role and Organization.
+StaffNotesCard sits above Preferences & notes and receives setContact from
+ContactDetail through the optional onContactUpdated prop. The S9 seam after
+Preferences & notes and before Group threads is preserved. The issue retains
+the open landlord half; the existing browser flow scopes its now-ambiguous
+Partner assertion to Details.
+RED: dashboard npx vitest run src/routes/contact/files.test.tsx, exit 1,
+4 failed / 37 passed. GREEN: dashboard npx vitest run
+src/routes/contact/files.test.tsx src/routes/contact/ContactDetail.test.tsx
+src/routes/contact/TenantFile.test.tsx, exit 0, 161 tests across three files.
+Root bare npm run typecheck exited 0 across five workspaces. Root npx eslint
+e2e/tests/flows/conversation-fact-extraction.spec.ts exited 0. npm run issues
+exited 0 (ignored index regenerated). Added-line ASCII/diff checks pass.
+No contract deviation; browser execution remains parent-owned.

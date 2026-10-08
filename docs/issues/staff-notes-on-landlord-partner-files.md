@@ -1,12 +1,12 @@
 ---
 id: staff-notes-on-landlord-partner-files
-title: Staff notes card exists only on the tenant file; landlord and partner files may want it too
+title: Staff notes card exists on the tenant and partner files; the landlord file may want it too
 type: improvement
 severity: low
 status: open
 area: dashboard/contact
 created: 2026-09-26
-refs: dashboard/src/routes/contact/TenantFile.tsx, dashboard/src/routes/contact/LandlordFile.tsx, dashboard/src/routes/contact/PartnerFile.tsx
+refs: dashboard/src/routes/contact/TenantFile.tsx, dashboard/src/routes/contact/LandlordFile.tsx, dashboard/src/routes/contact/PartnerFile.tsx, docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md
 ---
 
 **Problem.** Sam's improvements list item 22 asked for a manual notes box
@@ -33,3 +33,11 @@ who is later retyped to landlord, partner, team member or unknown KEEPS the
 stored `staff_notes` and its stamp, but no file renders them until the contact
 is retyped back to tenant (or this issue is built). Nothing is lost; the box is
 merely invisible on the other kinds.
+
+**Update (2026-10-07, caseworkers branch B).** The PARTNER half is built:
+`PartnerFile` renders `StaffNotesCard` above "Preferences & notes", wired to
+`onContactUpdated` from `ContactDetail` (spec
+`docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md`
+D19 - a converted caseworker's staff notes must stay visible; Cameron
+confirmed 2026-10-07). The LANDLORD half (and the `UnknownFile` question)
+stays open, still a product question for Sam.

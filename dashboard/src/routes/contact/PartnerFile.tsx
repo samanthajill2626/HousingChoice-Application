@@ -1,18 +1,22 @@
 // PartnerFile - the right pane for a PARTNER contact (type 'partner'): a resolved
 // external party (caseworker, agency, inspector, ...) that is NOT a tenant or a
-// landlord, so it shows ONLY the type-agnostic cards - Details (phones, status),
-// Preferences & notes, and Media from comms. Deliberately omits the tenant cards
-// (voucher / housing authority / listings-sent / tours / placements) and the
-// landlord cards (units): a partner has no housing pipeline. Unlike UnknownFile it
-// carries NO "Needs triage" call-to-action and NO Placements card - a partner is
-// already classified (A2, email-channel-v1). Header pill reads "Partner" via
-// CONTACT_TYPE_LABEL in ContactDetail.
+// landlord. Details (phones, Role, Organization, status), the Staff notes card,
+// Preferences & notes, Group threads and Media from comms. Deliberately omits
+// the tenant cards (voucher / housing authority / tours / placements) and the
+// landlord cards (units): a partner has no housing pipeline, and a converted
+// caseworker's old tenant facts stay as data the page does not show (spec
+// 2026-10-06 D19). Role is `displayKind` (a caseworker reads "Caseworker");
+// Organization is `contact.organization` (spec D17, edited in the edit form).
+// Unlike UnknownFile it carries NO "Needs triage" call-to-action - a partner is
+// already classified (A2, email-channel-v1).
 import type { Contact, ContactPhone, GroupThreadRow } from '../../api/index.js';
 import { BLANK, Card, CardAction, CardInlineAction, KV, NotesText, PendingPanel } from './Card.js';
 import { GroupThreadsCard } from './GroupThreadsCard.js';
 import { MediaGallery, type MediaGalleryPaging } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { contactStatusLabel, formatPhone } from './format.js';
+import { CONTACT_TYPE_LABEL, displayKind } from './contactProfile.js';
+import { StaffNotesCard } from './StaffNotesCard.js';
 
 export interface PartnerFileProps {
   contact: Contact;
@@ -33,6 +37,9 @@ export interface PartnerFileProps {
   onEdit?: () => void;
   /** Open the "Manage numbers" dialog (Phone numbers row). */
   onManagePhones?: () => void;
+  /** Receives the contact a Staff notes save returns (applied in place).
+   *  Absent -> the Staff notes card is read-only. */
+  onContactUpdated?: (updated: Contact) => void;
 }
 
 export function PartnerFile({
@@ -46,6 +53,7 @@ export function PartnerFile({
   groupThreadsTruncated,
   onEdit,
   onManagePhones,
+  onContactUpdated,
 }: PartnerFileProps): React.JSX.Element {
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' - ');
   const notes = typeof contact.notes === 'string' ? contact.notes.trim() : '';
@@ -80,8 +88,25 @@ export function PartnerFile({
             </>
           }
         />
+        <KV k="Role" v={displayKind(contact, (t) => CONTACT_TYPE_LABEL[t])} />
+        <KV
+          k="Organization"
+          v={typeof contact.organization === 'string' && contact.organization !== '' ? contact.organization : BLANK}
+        />
         <KV k="Status" v={contact.status ? contactStatusLabel(contact.type, contact.status) : BLANK} />
       </Card>
+
+      {/* Staff notes (spec D19, ruling R4-19): the hand-written box, apart from
+          the AI-appended "Preferences & notes" below - so a converted
+          caseworker's notes stay visible. Keyed by the contact, as on the
+          tenant file. */}
+      <StaffNotesCard
+        key={contact.contactId}
+        contactId={contact.contactId}
+        value={contact.staff_notes}
+        updatedAt={contact.staff_notes_updated_at}
+        {...(onContactUpdated !== undefined && { onContactUpdated })}
+      />
 
       <Card
         title="Preferences & notes"

@@ -1139,6 +1139,7 @@ export function ContactDetail(): React.JSX.Element {
                 groupThreadsTruncated={file.groupThreadsTruncated}
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
+                onContactUpdated={setContact}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />

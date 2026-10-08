@@ -339,7 +339,11 @@ test('type recommendation: an unknown caseworker triages to Partner and clears T
 
   await triage.getByRole('button', { name: 'Mark as Partner' }).click();
   await expect(page.getByRole('button', { name: 'Mark as Partner' })).toHaveCount(0);
-  await expect(page.getByText('Partner', { exact: true })).toBeVisible();
+  // Scoped to the Details card, exact (caseworkers: the partner page shows
+  // "Partner" twice - the header pill and the Details card's Role row, which
+  // reads the type for a role-less partner).
+  const partnerDetails = page.locator('section', { has: page.getByRole('heading', { name: /^Details/ }) });
+  await expect(partnerDetails.getByText('Partner', { exact: true })).toBeVisible();
 
   const contact = await readContact(page.request, contactId);
   expect(contact).toMatchObject({ type: 'partner', status: 'active' });

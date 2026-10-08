@@ -589,3 +589,69 @@ describe('PartnerFile', () => {
     expect(screen.getByText('No group texts yet.')).toBeInTheDocument();
   });
 });
+
+// Spec 2026-10-06 D17, D19 and ruling R4-19: a partner page shows its Role and
+// Organization, and the Staff notes card, so a converted caseworker's notes
+// stay visible.
+describe('PartnerFile - role, organization and staff notes', () => {
+  const caseworker: Contact = {
+    contactId: 'P2',
+    type: 'partner',
+    firstName: 'Ana',
+    lastName: 'Lopez',
+    status: 'active',
+    phone: '+14040100056',
+    role: 'Caseworker',
+    organization: 'Hope Atlanta',
+    staff_notes: 'Prefers email',
+    staff_notes_updated_at: '2026-10-01T12:00:00.000Z',
+  };
+
+  function renderPartner(contact: Contact, onContactUpdated?: (updated: Contact) => void) {
+    return render(
+      <MemoryRouter>
+        <PartnerFile
+          contact={contact}
+          phones={[{ phone: '+14040100056', primary: true }]}
+          media={[]}
+          groupThreadsPending={false}
+          groupThreads={[]}
+          groupThreadsTruncated={false}
+          {...(onContactUpdated !== undefined && { onContactUpdated })}
+        />
+      </MemoryRouter>,
+    );
+  }
+
+  /** A Details row's value, by its key text. */
+  function kv(key: string): string | null {
+    return screen.getByText(key, { selector: 'span' }).nextElementSibling?.textContent ?? null;
+  }
+
+  it('Details shows the Role and the Organization', () => {
+    renderPartner(caseworker);
+    expect(kv('Role')).toBe('Caseworker');
+    expect(kv('Organization')).toBe('Hope Atlanta');
+  });
+
+  it('a partner with no role reads Partner, and no organization reads blank', () => {
+    renderPartner({ ...caseworker, role: undefined, organization: undefined });
+    expect(kv('Role')).toBe('Partner');
+    expect(kv('Organization')).toBe(BLANK);
+  });
+
+  it('shows the Staff notes card above Preferences & notes, editable with a handler', () => {
+    renderPartner(caseworker, vi.fn());
+    const staff = screen.getByRole('heading', { name: /Staff notes/ });
+    const prefs = screen.getByRole('heading', { name: /Preferences & notes/ });
+    expect(staff.compareDocumentPosition(prefs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByText('Prefers email')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit staff notes' })).toBeInTheDocument();
+  });
+
+  it('without a handler the Staff notes card is read-only', () => {
+    renderPartner(caseworker);
+    expect(screen.getByRole('heading', { name: /Staff notes/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Edit staff notes' })).toBeNull();
+  });
+});

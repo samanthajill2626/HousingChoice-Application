@@ -274,3 +274,74 @@ describe('refusal read contracts', () => {
     for (const [options] of scan.mock.calls) expect(options).toMatchObject({ deleted: 'any' });
   });
 });
+
+describe('the organization without a request (rule 4, D19, R2-F7)', () => {
+  async function orgOf(over: Partial<ContactItem>) {
+    const { world, service } = setup();
+    seed(world, over);
+    return (await service.preview(ID)).organization;
+  }
+
+  it('keeps a stored organization, even one not on the list', async () => {
+    expect(await orgOf({ organization: 'Old Helper Org', agency: 'Step Up' })).toEqual({ value: 'Old Helper Org', source: 'stored' });
+  });
+
+  it('the agency wins and resolves against BOTH lists', async () => {
+    expect(await orgOf({ agency: 'Hope Atlanta', housingAuthority: 'Atlanta Housing Authority' }))
+      .toEqual({ value: 'HOPE Atlanta', source: 'list_match' });
+    // A housing authority spelling typed into the agency field still matches.
+    expect(await orgOf({ agency: 'Atlanta Housing' })).toEqual({ value: 'Atlanta Housing Authority', source: 'list_match' });
+  });
+
+  it('carries agency text that is not on the list, compound text included', async () => {
+    expect(await orgOf({ agency: 'Neighborhood Helpers' })).toEqual({ value: 'Neighborhood Helpers', source: 'carried' });
+    expect(await orgOf({ agency: 'DCA HUD-VASH' })).toEqual({ value: 'DCA HUD-VASH', source: 'carried' });
+    expect(await orgOf({ agency: 'AHA' })).toEqual({ value: 'AHA', source: 'carried' }); // ambiguous is not a match
+  });
+
+  it('only with no agency does the housing authority get the same treatment', async () => {
+    expect(await orgOf({ housingAuthority: 'GA DCA' }))
+      .toEqual({ value: 'Georgia Department of Community Affairs', source: 'list_match' });
+    // An agency name sitting in the housing authority field counts.
+    expect(await orgOf({ housingAuthority: 'Step Up', agency: '' })).toEqual({ value: 'Step Up', source: 'list_match' });
+    expect(await orgOf({ housingAuthority: 'Nowhere Housing Authority' }))
+      .toEqual({ value: 'Nowhere Housing Authority', source: 'carried' });
+  });
+
+  it('does not carry text that fails the limits, and then does not fall back to the authority', async () => {
+    const bell = String.fromCharCode(7);
+    expect(await orgOf({ agency: `Helpers${bell}`, housingAuthority: 'Atlanta Housing Authority' })).toEqual({ source: 'none' });
+    expect(await orgOf({ agency: 'x'.repeat(121) })).toEqual({ source: 'none' });
+    expect(await orgOf({ agency: '---' })).toEqual({ source: 'none' });
+  });
+
+  it('none when there is nothing to derive from', async () => {
+    expect(await orgOf({})).toEqual({ source: 'none' });
+  });
+});
+
+// C2: carry uses the raw stored text; D13 failures never fall back to authority.
+describe('raw organization carry (D19, R2-F7)', () => {
+  it.each(['agency', 'housingAuthority'] as const)('preserves padding in carried %s text', async (field) => {
+    const { world, service } = setup();
+    seed(world, { [field]: '  Neighborhood Helpers  ' });
+    expect((await service.preview(ID)).organization).toEqual({ value: '  Neighborhood Helpers  ', source: 'carried' });
+  });
+
+  it.each([
+    ['trailing newline', 'Helpers' + String.fromCharCode(10)],
+    ['trailing invisible', 'Helpers' + String.fromCharCode(0xfeff)],
+    ['raw over limit', '  ' + 'x'.repeat(119)],
+    ['nonempty whitespace', '   '],
+  ])('does not carry or fall back after an agency with %s', async (_label, agency) => {
+    const { world, service } = setup();
+    seed(world, { agency, housingAuthority: 'Atlanta Housing Authority' });
+    expect((await service.preview(ID)).organization).toEqual({ source: 'none' });
+  });
+
+  it('still resolves a canonical list match before considering raw carry eligibility', async () => {
+    const { world, service } = setup();
+    seed(world, { agency: 'Step Up' + String.fromCharCode(10) });
+    expect((await service.preview(ID)).organization).toEqual({ value: 'Step Up', source: 'list_match' });
+  });
+});

@@ -7,6 +7,7 @@
 // owns its whole write: the refusals, the fenced commit, the suggestions, the
 // threads, and the PATCH's side effects. `preview` runs the same reads and
 // writes nothing. Errors are codes; the dashboard owns every sentence (D22).
+import { KINDS_FOR_FIELD, ORG_NAME_MAX, normalizeOrgText, resolveOrgText, type OrgEntry } from '../lib/orgNames.js';
 import { isCaseworker, type PossibleSignal } from '../lib/caseworkers.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -32,7 +33,7 @@ import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRe
 import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
 import { createUnitsRepo, unitContacts, type UnitsRepo } from '../repos/unitsRepo.js';
-import { createOrgNamesService, type OrgNamesService } from './orgNames.js';
+import { createOrgNamesService, hasOrgControlChar, type OrgNamesService } from './orgNames.js';
 
 // --- Wire types (plan 3.2; mirrored field-for-field in dashboard/src/api/types.ts)
 
@@ -116,6 +117,26 @@ const OPEN_TOUR_STATUSES: ReadonlySet<string> = new Set(['requested', 'scheduled
 /** A stored string attribute, or undefined when absent or empty. */
 function held(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * R2-F7: carried text passes D13's limits - no control or invisible
+ * characters, at most ORG_NAME_MAX, not empty after normalization. NOT
+ * checkNewOrgName: a TAKEN or COMPOUND text is carried (settled later with
+ * Use or Clear in Settings' "Not on the list").
+ */
+function carriable(text: string): boolean {
+  return !hasOrgControlChar(text) && text.length <= ORG_NAME_MAX && normalizeOrgText(text) !== '';
+}
+
+/** D19 derivation from one text: a list match over both kinds, else carried, else none. */
+function deriveOrganization(
+  entries: readonly OrgEntry[],
+  text: string,
+): { value?: string; source: 'list_match' | 'carried' | 'none' } {
+  const r = resolveOrgText(entries, text, KINDS_FOR_FIELD.organization);
+  if (r.status === 'match') return { value: r.entry.name, source: 'list_match' };
+  return carriable(text) ? { value: text, source: 'carried' } : { source: 'none' };
 }
 
 /** The step-3 classification of the contact's threads (D21's conversion rule). */
@@ -222,11 +243,24 @@ export function createCaseworkerConversionService(
     ];
   }
 
-  /** Rule 4 without a request: stored, else derived (plan Task 3.3). */
+  /**
+   * Rule 4 without a request: the stored organization; else the agency text
+   * whenever the contact has one (the employer is the helper organization -
+   * Cameron 2026-10-07); only with no agency, the housing authority text.
+   * One list read, only when deriving.
+   */
   async function storedOrDerived(
-    _c: ContactItem,
+    c: ContactItem,
   ): Promise<{ value?: string; source: Exclude<OrganizationSource, 'request'> }> {
-    return { source: 'none' };
+    const stored = held(c['organization']);
+    if (stored !== undefined) return { value: stored, source: 'stored' };
+    // C2: D19 carries raw text as written; invalid nonempty agency never falls back.
+    const agency = held(c['agency']);
+    const authority = held(c['housingAuthority']);
+    const text = agency ?? authority;
+    if (text === undefined || text === '') return { source: 'none' };
+    const { entries } = await orgNames.read();
+    return deriveOrganization(entries, text);
   }
 
   /** Step 3's classification, read-only (plan Task 3.4). */

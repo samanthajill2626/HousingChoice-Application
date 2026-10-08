@@ -59,7 +59,7 @@ deployment, main sync/merge, cleanup or tracker edits were performed.
 
 ## Task 3.2 - domain, refusal reads and preview removals
 
-Commit: this Task 3.2 commit (hash recorded in the next report update).
+Commit: 97a78932.
 Added consistent subject reads and 404 handling for missing, invalid, deleted
 and pointer rows, with team_member refused at 400. Preview collects all four
 refusal kinds whatever the stored type, includes deleted units, gives landlord
@@ -77,3 +77,27 @@ S2 code; the deleted roster seat beyond the first page is now proved.
 The same command then exited 0, 17 tests passed (3.2-green-corrected).
 Root npm run typecheck exited 0 (3.2-typecheck); a final run covers the corrected
 fixture before commit (3.2-typecheck-final). No production contract deviation.
+
+## Task 3.3 - organization derivation and approved correction C2
+
+Commit: this Task 3.3 commit (hash recorded in the next report update).
+Stored organization wins; otherwise agency wins whenever nonempty, then authority.
+Resolve against both kinds first; unmatched or ambiguous text is carried only
+when raw control/invisible-character, length and normalized-nonempty limits pass.
+Compound text remains carriable. No list read when stored or no source text.
+
+C2 ACCEPTED by the parent after checking D19 and R2-F7: the draft trimmed held
+agency/authority before carrying it, contradicting carry 'as written' and the
+raw D13 limits. Keep raw held values instead. Nonempty whitespace-only or invalid
+agency cannot fall through to the authority. List matches still resolve before
+carry eligibility, so canonical names remain safe to write. No spec change.
+
+Step 0 passed again. RED: npx vitest run test/caseworkerConversion.test.ts
+exited 1: four organization cases failed against the stub, 19 passed (3.3-red).
+The limits and no-source cases already passed; this corrects the draft's
+expectation that every case except the last would fail. Against the drafted
+trimming implementation, C2's added tests exited 1: six failed, 24 passed
+(3.3-c2-red): two preserved-padding cases and newline, invisible, raw length
+and whitespace-only agency cases. After the correction, the same command
+exited 0: 30 tests passed (3.3-green). Root npm run typecheck exited 0
+(3.3-typecheck). git diff --check and new-file ASCII checks passed.

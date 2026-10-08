@@ -161,3 +161,19 @@ ESLint lintText at merge base 1861e154e5c72ed8a60945ca425d26d35d89149b
 file/rule/message including code frame; only line positions differ. Current
 and baseline each have that one error; no new diagnostics. Raw comparison is
 8.11-lint-baseline.log, exit 0. Baseline debt preserved, no contract drift.
+
+## Task 8.12 - Caseworkers page
+
+Task 8.11 commit: 8de40dd3. Implemented the page with partner-only exact-role
+filtering, normalized Organization chips and ghost-key pruning, and the Possible
+review list with conversion and named irreversible-dismissal confirmation.
+Both lists use named ul elements and one li per record. Conversion reloads both
+lists; dismissal removes its row locally only after server success. All CSS
+tokens exist; the page and new controls have no width cap.
+RED: dashboard npx vitest run src/routes/contacts/CaseworkersList.test.tsx,
+exit 1, missing module, zero cases collected. GREEN: dashboard npx vitest run
+src/routes/contacts, exit 0, 109 tests in six files (15 new page tests).
+The nav-only new test initially left async reads unsettled; it now awaits both
+lists, and the final same-family run has no act warnings (8.12-green2).
+Root bare npm run typecheck exited 0 across five workspaces. Scoped root eslint
+on CaseworkersList.tsx and its test exited 0. No contract deviation.

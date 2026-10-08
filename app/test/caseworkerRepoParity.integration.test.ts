@@ -30,7 +30,7 @@ import {
   type ConversationItem,
   type ConversationsRepo,
 } from '../src/repos/conversationsRepo.js';
-import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../src/repos/unitsRepo.js';
+import { createUnitsRepo, type UnitItem, type UnitsPage, type UnitsRepo } from '../src/repos/unitsRepo.js';
 import { quietLogger } from './helpers/orgFixtures.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 
@@ -480,6 +480,78 @@ describe('conversationsRepo.setTypeIfCurrent (plan 3.3 as amended; D21)', () => 
       await w.conversations.setTypeIfCurrent(`${id}-missing`, 'unknown_1to1', 'partner_1to1', null),
     ).toEqual({ outcome: 'skipped' });
     expect(await w.readConversation(`${id}-missing`)).toBeUndefined();
+  });
+});
+
+const DELETED_AT = '2026-10-07T09:00:00.000Z';
+
+function unitRow(unitId: string, extra: Partial<UnitItem> = {}): UnitItem {
+  return { unitId, landlordId: 'contact-landlord-parity', status: 'available', ...extra };
+}
+
+/** Walk every page of a unit list - the caller-side cursor loop the roster refusal runs. */
+async function walk(page: (cursor: Record<string, unknown> | undefined) => Promise<UnitsPage>): Promise<UnitItem[]> {
+  const out: UnitItem[] = [];
+  let cursor: Record<string, unknown> | undefined;
+  let pages = 0;
+  do {
+    const p = await page(cursor);
+    out.push(...p.items);
+    cursor = p.lastEvaluatedKey;
+    pages += 1;
+  } while (cursor !== undefined && pages < 1_000);
+  return out;
+}
+
+/** This case's unit ids, sorted (the real table holds every real case's units). */
+const mine = (units: UnitItem[], id: string): string[] =>
+  units.map((u) => u.unitId).filter((unitId) => unitId.startsWith(`${id}-`)).sort();
+
+describe('unit lists - paging and the deleted scope (plan 3.3 as amended)', () => {
+  parity('a no-limit walk of list() returns EVERY live unit - no silent 50 cap', async (w, id) => {
+    const ids = Array.from({ length: 55 }, (_, i) => `${id}-u${String(i).padStart(2, '0')}`);
+    await Promise.all(ids.map((unitId) => w.putUnit(unitRow(unitId))));
+    const seen = await walk((cursor) => w.units.list({ ...(cursor !== undefined && { exclusiveStartKey: cursor }) }));
+    expect(mine(seen, id)).toEqual(ids);
+  });
+
+  parity('a limit-2 walk of list() follows the cursor to every live unit', async (w, id) => {
+    const ids = [`${id}-a`, `${id}-b`, `${id}-c`, `${id}-d`, `${id}-e`];
+    for (const unitId of ids) await w.putUnit(unitRow(unitId));
+    const seen = await walk((cursor) =>
+      w.units.list({ limit: 2, ...(cursor !== undefined && { exclusiveStartKey: cursor }) }),
+    );
+    expect(mine(seen, id)).toEqual(ids);
+  });
+
+  parity("list(): deleted 'any' returns live AND deleted; the default and true scopes are unchanged", async (w, id) => {
+    await w.putUnit(unitRow(`${id}-live`));
+    await w.putUnit(unitRow(`${id}-gone`, { deleted_at: DELETED_AT }));
+    const scope = (deleted: boolean | 'any' | undefined) =>
+      walk((cursor) =>
+        w.units.list({
+          ...(deleted !== undefined && { deleted }),
+          ...(cursor !== undefined && { exclusiveStartKey: cursor }),
+        }),
+      );
+    expect(mine(await scope(undefined), id)).toEqual([`${id}-live`]);
+    expect(mine(await scope(true), id)).toEqual([`${id}-gone`]);
+    expect(mine(await scope('any'), id)).toEqual([`${id}-gone`, `${id}-live`]);
+  });
+
+  parity("listByLandlord: deleted 'any' returns the landlord's live AND deleted units", async (w, id) => {
+    const landlordId = `${id}-landlord`;
+    await w.putUnit(unitRow(`${id}-live`, { landlordId }));
+    await w.putUnit(unitRow(`${id}-gone`, { landlordId, deleted_at: DELETED_AT }));
+    await w.putUnit(unitRow(`${id}-other`, { landlordId: `${id}-someone-else` }));
+    const any = await walk((cursor) =>
+      w.units.listByLandlord(landlordId, { deleted: 'any', ...(cursor !== undefined && { exclusiveStartKey: cursor }) }),
+    );
+    expect(mine(any, id)).toEqual([`${id}-gone`, `${id}-live`]);
+    const live = await walk((cursor) =>
+      w.units.listByLandlord(landlordId, { ...(cursor !== undefined && { exclusiveStartKey: cursor }) }),
+    );
+    expect(mine(live, id)).toEqual([`${id}-live`]);
   });
 });
 

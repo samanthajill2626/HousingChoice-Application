@@ -317,7 +317,24 @@ export interface ListUnitsOpts {
    * list). true → return ONLY soft-deleted properties (the "Deleted" view). Applied
    * as a FilterExpression on `deleted_at`.
    */
-  deleted?: boolean;
+  //
+  // 'any' (caseworkers, plan 3.3 as amended): NO soft-delete filter - live
+  // and deleted units in one read. The caseworker conversion's
+  // landlord-of-record and roster refusals count deleted properties (spec
+  // 2026-10-06 D22: a restored property must not come back with a
+  // caseworker on it).
+  deleted?: boolean | 'any';
+}
+
+/**
+ * The soft-delete FilterExpression (over `#del` = deleted_at) for a
+ * ListUnitsOpts scope: live only (omitted/false), deleted only (true), or none
+ * ('any' - and then the caller must not send the `#del` name either: DynamoDB
+ * rejects an unused ExpressionAttributeNames entry).
+ */
+function deletedScopeFilter(deleted: ListUnitsOpts['deleted']): string | undefined {
+  if (deleted === 'any') return undefined;
+  return deleted === true ? 'attribute_exists(#del)' : 'attribute_not_exists(#del)';
 }
 
 /** The fields a staff-facing property label needs (the All tab's name map). */
@@ -473,14 +490,16 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
     keyValue: string,
     opts: ListUnitsOpts,
   ): Promise<UnitsPage> {
+    const scopeFilter = deletedScopeFilter(opts.deleted);
     const input: QueryCommandInput = {
       TableName: table,
       IndexName: indexName,
       KeyConditionExpression: '#k = :v',
       // Soft-delete scope (FilterExpression — GSIs project ALL, so deleted_at is
       // filterable). Default HIDES deleted; deleted:true shows ONLY deleted.
-      FilterExpression: opts.deleted === true ? 'attribute_exists(#del)' : 'attribute_not_exists(#del)',
-      ExpressionAttributeNames: { '#k': keyName, '#del': 'deleted_at' },
+      // deleted:'any' sends neither the filter nor its #del name.
+      ...(scopeFilter !== undefined && { FilterExpression: scopeFilter }),
+      ExpressionAttributeNames: { '#k': keyName, ...(scopeFilter !== undefined && { '#del': 'deleted_at' }) },
       ExpressionAttributeValues: { ':v': keyValue },
       ...(opts.limit !== undefined && { Limit: opts.limit }),
       ...(opts.exclusiveStartKey !== undefined && {
@@ -1007,11 +1026,15 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
     async list(opts = {}) {
       // Paginated Scan — the no-filter fallback only (see the interface note on
       // why a Scan is acceptable at this scale, doc §5.1).
+      const scopeFilter = deletedScopeFilter(opts.deleted);
       const input: ScanCommandInput = {
         TableName: table,
-        // Soft-delete scope: default excludes deleted; deleted:true shows only them.
-        FilterExpression: opts.deleted === true ? 'attribute_exists(#del)' : 'attribute_not_exists(#del)',
-        ExpressionAttributeNames: { '#del': 'deleted_at' },
+        // Soft-delete scope: default excludes deleted; deleted:true shows only
+        // them; deleted:'any' scans with no filter (and no #del name).
+        ...(scopeFilter !== undefined && {
+          FilterExpression: scopeFilter,
+          ExpressionAttributeNames: { '#del': 'deleted_at' },
+        }),
         ...(opts.limit !== undefined && { Limit: opts.limit }),
         ...(opts.exclusiveStartKey !== undefined && {
           ExclusiveStartKey: opts.exclusiveStartKey as ScanCommandInput['ExclusiveStartKey'],

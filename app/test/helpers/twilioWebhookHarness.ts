@@ -116,6 +116,7 @@ import {
   CannotRemoveLandlordOfRecordError,
   isDeleted as isUnitDeleted,
   LandlordReassignmentRequiredError,
+  type ListUnitsOpts,
   unitContacts,
   type UnitContact,
   type UnitDisplayItem,
@@ -2801,6 +2802,14 @@ export function createFakeWorld(): FakeWorld {
   // conditional 404 on update, GSI-shaped list queries.
   const units = new Map<string, UnitItem>();
   let unitCounter = 0;
+  /**
+   * The ListUnitsOpts soft-delete scope, as the real FilterExpression applies
+   * it: live only (omitted/false), deleted only (true), both ('any').
+   */
+  const inDeletedScope = (u: UnitItem, scope: ListUnitsOpts['deleted']): boolean => {
+    if (scope === 'any') return true;
+    return scope === true ? isUnitDeleted(u) : !isUnitDeleted(u);
+  };
   const unitsRepo: UnitsRepo = {
     async create(input) {
       const now = new Date().toISOString();
@@ -2867,7 +2876,7 @@ export function createFakeWorld(): FakeWorld {
     async listByLandlord(landlordId, opts = {}) {
       const items = [...units.values()]
         .filter((u) => u.landlordId === landlordId)
-        .filter((u) => (opts.deleted === true ? isUnitDeleted(u) : !isUnitDeleted(u)))
+        .filter((u) => inDeletedScope(u, opts.deleted))
         .slice(0, opts.limit ?? 50);
       return { items };
     },
@@ -2878,7 +2887,7 @@ export function createFakeWorld(): FakeWorld {
       // ALL matching units (never a hidden default cap that drops candidates).
       const all = [...units.values()]
         .filter((u) => u.status === status)
-        .filter((u) => (opts.deleted === true ? isUnitDeleted(u) : !isUnitDeleted(u)));
+        .filter((u) => inDeletedScope(u, opts.deleted));
       let start = 0;
       const cursorId = opts.exclusiveStartKey?.['unitId'];
       if (typeof cursorId === 'string') {
@@ -2902,7 +2911,7 @@ export function createFakeWorld(): FakeWorld {
       // Mirror the sparse byProperty GSI: only units carrying propertyId index.
       const items = [...units.values()]
         .filter((u) => typeof u.propertyId === 'string' && u.propertyId === propertyId)
-        .filter((u) => (opts.deleted === true ? isUnitDeleted(u) : !isUnitDeleted(u)))
+        .filter((u) => inDeletedScope(u, opts.deleted))
         .slice(0, opts.limit ?? 50);
       return { items };
     },
@@ -2986,10 +2995,27 @@ export function createFakeWorld(): FakeWorld {
       return unit;
     },
     async list(opts = {}) {
-      const items = [...units.values()]
-        .filter((u) => (opts.deleted === true ? isUnitDeleted(u) : !isUnitDeleted(u)))
-        .slice(0, opts.limit ?? 50);
-      return { items };
+      // The real paginated Scan's contract (plan 3.3; R5-F17): resume after
+      // the cursor's unitId, return at most `limit` items, and emit a
+      // lastEvaluatedKey only when more remain. No limit returns EVERY unit in
+      // scope - the old silent 50 cap stopped a caller's paging loop at 50.
+      const all = [...units.values()].filter((u) => inDeletedScope(u, opts.deleted));
+      let start = 0;
+      const cursorId = opts.exclusiveStartKey?.['unitId'];
+      if (typeof cursorId === 'string') {
+        const idx = all.findIndex((u) => u.unitId === cursorId);
+        if (idx >= 0) start = idx + 1;
+      }
+      const window = opts.limit === undefined ? all.slice(start) : all.slice(start, start + opts.limit);
+      const last = window[window.length - 1];
+      const hasMore = opts.limit !== undefined && start + opts.limit < all.length;
+      return {
+        items: window.map((u) => ({ ...u })),
+        ...(hasMore &&
+          last !== undefined && {
+            lastEvaluatedKey: { unitId: last.unitId } as Record<string, unknown>,
+          }),
+      };
     },
     // Organization-name rewrite (plan 3.7): whole-list equality like the real
     // ConditionExpression, and NO updated_at stamp - unlike every other unit

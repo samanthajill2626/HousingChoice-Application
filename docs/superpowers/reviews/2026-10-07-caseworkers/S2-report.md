@@ -77,7 +77,7 @@ No extra typed fake, fault, timeout, contract mismatch or scope deviation.
 
 ## Task 2.4 - conditional conversation type update
 
-Commit: the Task 2.4 implementation commit containing this report entry.
+Commit: bc870f46.
 Added setTypeIfCurrent and its updated-row/skipped union. It conditionally sets
 type and a supplied name; null preserves the name. Missing, type-less and changed
 types skip without writes. Only conditional-check failures are swallowed; other
@@ -91,3 +91,31 @@ npx vitest run test/contactCapture.test.ts test/sendMessage.test.ts test/schedul
 exited 0: 5 files, 163 tests passed. Root npm run typecheck exited 0.
 Logs: 2.4-red, 2.4-green, 2.4-regression, 2.4-typecheck under the evidence path.
 No extra typed fake, fault, timeout, contract mismatch or scope deviation.
+
+## Task 2.5 - all deletion scopes and fake unit paging
+
+Commit: the Task 2.5 implementation commit containing this report entry.
+ListUnitsOpts.deleted now accepts any. Real index/scan reads omit both the
+soft-delete filter and its otherwise-unused expression name for that scope.
+FakeWorld applies the scope on every unit read; list now follows its unitId
+cursor and no longer silently caps at 50. Existing listByLandlord/listByProperty
+caps remain as the plan requires; S3/S4 cases must stay under 50 per landlord.
+
+RED: npx vitest run test/caseworkerRepoParity.integration.test.ts exited 1:
+6 failed, 38 passed. Fake paging returned 50/55 and 2/5; both real and fake
+excluded deleted units for any. Root npm run typecheck exited 2 because any
+was not assignable to the old boolean option. GREEN: the same parity command
+exited 0, 44 tests passed, zero skipped. Planned regression command (app workdir):
+npx vitest run test/unitsApi.test.ts test/unitsRepo.integration.test.ts test/orgRecords.test.ts test/orgRecordWriters.integration.test.ts
+exited 0: 4 files, 83 tests passed. Root npm run typecheck exited 0.
+Logs: 2.5-red, 2.5-typecheck-red, 2.5-green, 2.5-regression, 2.5-typecheck.
+
+The plan's final grep expectation says no opts.deleted === true remains in
+FakeWorld. One CONTACT filter still uses it (the contact list has no any scope);
+all three remaining UNIT filters changed as specified. The contact filter and
+contactsPartitionFake.ts were correctly left untouched. This is a verification
+wording correction, not a contract or implementation deviation.
+
+No extra typed fake, fault, timeout or scope widening was needed. New and added
+lines are ASCII; git diff --check passed. Each task's real and fake changes were
+committed together only after root typecheck and the prescribed GREEN checks.

@@ -1,9 +1,9 @@
 # MISSION: Caseworkers - branch B (Sam #19; #2 org names was branch A, merged and deployed in release 1.5.0)
 
-Worktree: W:\tmp\caseworkers  Branch: feat/caseworkers  (cut from main @a8b66cd6; main merged in @c1530f9d; main is now 20ccdb12, one RUNBOOK-only commit ahead - synced once at Task 10.14)
+Worktree: W:\tmp\caseworkers  Branch: feat/caseworkers  (cut from main @a8b66cd6; main merged in @c1530f9d and @54e7b0d0 (the Settings layout re-baseline); Task 10.14 syncs again only if main moved)
 Profile: W:\tmp\caseworkers\.claude\feature-mission.profile.md
 Spec: docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md (revision 15). This mission builds BRANCH B only: D16-D22 and every "(B)" line in D6, D10, 5.2, 6, 9, 10, 11, 12. Cameron's eight rulings are recorded in the spec ("Cameron confirmed 2026-10-07").
-Plan: docs/superpowers/plans/2026-10-07-caseworkers.md (74 tasks + 2 checkpoints; sections 0-3 are BINDING; the assembly notes at the top of S8, S9 and S10 override their task text)
+Plan: docs/superpowers/plans/2026-10-07-caseworkers.md (75 tasks + 2 checkpoints; sections 0-3 are BINDING; the assembly notes at the top of S8, S9 and S10 override their task text)
 Design review: spec R4 (closed, round 4 terminal; 49 findings, all accepted in substance, 3 partial rejections) - docs/superpowers/reviews/2026-10-07-caseworkers/design-review/adjudications.md. Plan review: R2 (closed, round 2 terminal; round 1 38 findings across two reviewers and a sub-review, all accepted; round 2 3 findings, applied) - docs/superpowers/reviews/2026-10-07-caseworkers/plan-review/adjudications.md. Plan research rulings: plan-research/planner-rulings.md and plan-assembly-rulings.md.
 Records: docs/superpowers/reviews/2026-10-07-caseworkers/ (commit each record as produced; run state only in .superpowers/)
 
@@ -18,7 +18,7 @@ Work map (plan section 2; ORDER S1 -> S2 -> S3 -> S4 -> S5 -> S6 -> checkpoint -
 - S10 e2e specs and pins, GLOSSARY, RUNBOOK, selectors, issues; Task 10.14 = sync main once + the five gates; then live self-QA (hermetic lane) and the handback
 
 Watch items:
-- PARALLEL BRANCH fix/org-settings-layout (W:\tmp\org-settings-layout, NOT merged) rewrites the Settings org page (OrgListSection, NotOnListSection, new OrgDetailPanel/OrgListPane) and the Settings widths. Cameron's ruling: branch B keeps priority and merges FIRST; that branch absorbs the overlap at its own main sync. Build S7 against main's CURRENT Settings code; never touch that worktree. If it has merged to main before Task 10.14, STOP at the sync and report (do not resolve a page rewrite silently).
+- fix/org-settings-layout MERGED to main before this build (Cameron, 2026-10-07) and is synced in @54e7b0d0: Settings > Housing authorities & agencies is a list + detail panel with an inline settle confirm under a one-settle-at-a-time gate, URL-addressable entries and values (orgSelection.ts), and NO page-level width caps anywhere (Cameron's standing rule - only controls and prose get their own widths; it applies to the Caseworkers page). The plan was re-baselined on that code (docs/superpowers/reviews/2026-10-07-caseworkers/rebaseline/rebaseline-report.md).
 - E2E rules (plan section 0): assert only run-unique rows, never a count or empty state on the Possible list or Caseworkers tab; never convert or dismiss a seeded contact (Tasha and Marcus are read-only preview-refusal fixtures); the share e2e mints its own consented partner and never pre-opens its conversation.
 - Every task ends green: e2e pins move WITH their copy (S6.5, S9.x); perf/mutation pins move with S8.1/S8.13; a typed fake changes in the same task as its repo.
 - Non-ASCII bytes in existing lines: follow plan section 0's glyph legend; never type a `\u` escape through the Edit tool; never PowerShell Get-Content/-replace/Set-Content.
@@ -40,4 +40,3 @@ Post-merge obligations already known (Cameron's, never an agent's):
 - No Terraform, table, index, env var, secret or script. Deploy only.
 - RUNBOOK gains the caseworker conversion's repair and how to put a mistaken conversion back (Task 10.11).
 - A2P coverage of property shares to caseworkers is unconfirmed; Sam owns the question (filed in Task 10.12). Cameron ruled B ships partner shares anyway.
-- fix/org-settings-layout merges after this branch and absorbs the Settings overlap.

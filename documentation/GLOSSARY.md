@@ -114,10 +114,10 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
 
 ## Feature & label notes
 
-- **"Matching"** - the staff dashboard section for sending properties to tenants,
-  one-to-one or one-to-many (nav item, list page). One item is a "send" or
+- **"Matching"** - the staff dashboard section for sending properties to tenants
+  and partners, one-to-one or one-to-many (nav item, list page). One item is a "send" or
   "property send"; the primary action is "Send a property"; a property page
-  offers "Send to tenants". Replaces the earlier on-screen label "Broadcasts"
+  offers "Send this property". Replaces the earlier on-screen label "Broadcasts"
   (and the still-earlier "Share Properties" note that had drifted from the UI).
   Internal identifiers are unchanged: the `broadcast` entity, `/broadcasts`
   routes, jobs, tables, and log fields all keep their names - only displayed
@@ -225,7 +225,9 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   deliberately HEAVIER than the property-manager precedent, which is a CUSTOM-KIND
   (a role layered on the landlord base), NOT its own union member: `partner` is a
   real type end to end (a `partner_1to1` conversation, author `'partner'`). Tenants
-  and landlords never see the word - it is a staff/internal label only.
+  and landlords never see the word - it is a staff/internal label only. A
+  partner whose role is "Caseworker" is a **caseworker** (below, beside the
+  organization entries) - still typed `partner`.
 
 - **unmatched email** (email-channel v1, 2026-07-21) - an inbound email from a sender
   we do NOT recognize (no matching contact, no reply token). It NEVER auto-creates a
@@ -335,7 +337,50 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   record count and how it resolves, until staff settle it (Use <name>, Move to
   Agency or Housing authority, Split, Add as new or Clear - admin actions that
   rewrite the records). On a form it is a removable chip marked "Not on the
-  list", and an unrelated save never fails because of it.
+  list", and an unrelated save never fails because of it. A caseworker's
+  **organization** (below) is listed too, as an organization row: Use (a name
+  of EITHER kind), Add as new (staff pick the kind) or Clear - never Move or
+  Split, since the field takes both kinds.
+
+- **caseworker** (caseworkers, 2026-10-08) - a `partner` contact whose `role`
+  is "Caseworker": the role normalizes (spec D4) to "caseworker" or "case
+  worker" (`isCaseworkerRole`, `app/src/lib/caseworkers.ts`; the preset value
+  is `CASEWORKER_ROLE`). NOT a `ContactType` - the code/data type stays
+  `partner`, the way Property Manager stays `landlord`. Staff meet it as the
+  KindPicker's "Caseworker" choice and the Contacts > Caseworkers tab (with
+  an Organization filter). A NEW contact saved as Caseworker is stored
+  `{ type: 'partner', role: 'Caseworker' }`; an EXISTING contact becomes one
+  only through the **caseworker conversion** ("Make caseworker" - the contact
+  page's More actions, the Unknown card's "Mark as Caseworker", or a Possible
+  caseworkers row; `POST /api/contacts/:contactId/caseworker-review`), which
+  refuses a contact with an open placement, an open tour as the tenant, a
+  property it is landlord of record for, or a seat on a property's contact
+  list; removes the tenant's housing authority and agency (keeping them, with
+  the old type, in `caseworker_conversion`); and re-types the contact's own
+  one-to-one threads to `partner_1to1`. The contacts PATCH refuses to make a
+  caseworker any other way (409 `caseworker_use_conversion`). "Possible
+  caseworkers" are the contacts the tab offers for review: a role that
+  MENTIONS caseworker, case worker or case manager, the AI's
+  "[Auto - <date>] Identified as a caseworker" notes line, a caseworker
+  relationship pointing at a tenant, or a partner with no role; "Not a
+  caseworker" hides one for good (`caseworker_review: 'dismissed'`).
+  DIFFERENT from the tenant's free-text `contact.caseworker` (the NAME of a
+  tenant's own caseworker, e.g. "D. Okafor", shown on placements), which the
+  caseworkers feature neither reads nor writes. Design:
+  `docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md`
+  D16-D22.
+
+- **organization (of a caseworker)** (caseworkers, 2026-10-08) - the housing
+  authority or agency a caseworker works for: `contact.organization`, a NAME
+  from EITHER list of the **organization list** (above), checked like the
+  housing authority (422 `org_not_on_list`; `''` removes it). Shown on a
+  partner's page and in its header, and as the Caseworkers tab's
+  Organization filter; counted in Settings' use counts (an entry's list row
+  and its panel's "Used by") and rewritten by a rename or merge of either
+  kind. The conversion fills it from the
+  contact's agency, else its housing authority - the list name when the text
+  matches one, else the text as written (then it waits under "Not on the
+  list"). Not the **organization list** itself, and not the generic word.
 
 - **accepted authorities** (tenant-list-visibility, 2026-08-10; updated by
   clean-org-names, 2026-10-06) - the authorities whose vouchers a property takes:

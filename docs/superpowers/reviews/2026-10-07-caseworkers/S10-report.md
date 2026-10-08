@@ -307,3 +307,16 @@ Read showList, valueLink, openValue, pickSettle and confirmSettle in
 org-lists.spec.ts and used their exact role/name contract. No count assertions.
 Documentation only: added-line ASCII and git diff --check pass; no redundant
 browser rerun. Task 10.9 complete. Task 10.4 stays baseline-red pending C6.
+
+## Task 10.10 - glossary
+
+Added the approved caseworker and organization (of a caseworker) entries,
+with the actual build date 2026-10-08; cross-referenced partner and Not on
+the list; replaced the share entry's retired label with Send this property.
+The caseworker entry distinguishes the free-text tenant contact.caseworker
+field. All four plan anchors matched exactly. Added-line ASCII and git diff
+--check pass. Documentation only; no runtime change or redundant gate.
+Task 10.10 complete; Task 10.4 remains baseline-red pending C6 scope decision.
+
+The Matching entry also names partners in its audience, matching the newly
+proven share flow instead of retaining the adjacent tenant-only description.

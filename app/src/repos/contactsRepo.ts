@@ -88,6 +88,25 @@ export interface ContactEmail {
   lastSeenAt?: string;
 }
 
+/**
+ * The caseworker conversion's record of what it removed (spec 2026-10-06
+ * D19; plan 3.2), written in the conversion's commit write - so the removed
+ * values survive any later failure and a mistaken conversion can be put back
+ * by hand. Server-owned; a later conversion replaces it.
+ */
+export interface CaseworkerConversionRecord {
+  /** ISO 8601. */
+  at: string;
+  /** The actor's userId (the session's `req.user.userId`, as audit rows record actors) - never an email. */
+  by: string;
+  fromType: ContactType;
+  fromRole?: string;
+  /** The removed housing authority, when there was one. */
+  housingAuthority?: string;
+  /** The cleared agency, when it was non-empty. */
+  agency?: string;
+}
+
 export interface ContactItem {
   contactId: string;
   type: ContactType;
@@ -276,6 +295,23 @@ export interface ContactItem {
    */
   email_ref?: boolean;
   email_ref_owner?: string;
+  /**
+   * Caseworkers (spec 2026-10-06 D17): the helper organization a partner works
+   * for - a list name of EITHER kind (KINDS_FOR_FIELD.organization),
+   * D5-checked on the contacts PATCH; ABSENT when cleared (never ''). Not an
+   * index key.
+   */
+  organization?: string;
+  /** D19: set by caseworker-review `dismiss` only; hides the contact from Possible caseworkers for good. Server-owned. */
+  caseworker_review?: 'dismissed';
+  /** D19: the caseworker conversion's record (CaseworkerConversionRecord). Server-owned. */
+  caseworker_conversion?: CaseworkerConversionRecord;
+  /**
+   * D21: 'manual' once staff override a type (or convert a caseworker); the
+   * importer then writes none of type, status, housingAuthority, agency.
+   * Server-owned; never cleared.
+   */
+  type_source?: 'manual';
   /**
    * Eligibility intake (tenant onboarding). Free-text answers to the narrow LIF
    * questions, plus a boolean LIF-eligibility flag. First-class fields (not
@@ -614,16 +650,40 @@ export interface ListContactsOpts {
 }
 
 /**
- * Options for `update`. `expect` is an optimistic-concurrency guard on ONE
- * attribute, evaluated in the SAME conditional UpdateItem as the write: the
- * write lands only while the stored `attr` equals `value` (or is absent, for
- * `value: null`). A mismatch throws ConditionalCheckFailedException exactly
- * like an unknown contact does - the caller re-reads to tell "gone" from
- * "stale". Used by the Staff notes stale-save guard (PATCH
- * staff_notes_expected_updated_at, spec 3.9).
+ * One `update` guard clause: the stored `attr` equals `value` exactly (a
+ * string or a number - a number clause compares a stored number, so the
+ * classification fence is guarded RAW, never through
+ * contactClassificationRevision's fold of "absent" to 0), or is ABSENT for
+ * `value: null`.
+ */
+export interface ExpectClause {
+  attr: string;
+  value: string | number | null;
+}
+
+/**
+ * Options for `update`: optimistic-concurrency guards evaluated in the SAME
+ * conditional UpdateItem as the write, so nothing can slip between a caller's
+ * read and its write. `expect` is one clause or a list (every clause ANDed);
+ * `notDeleted` adds attribute_not_exists(deleted_at). A lost guard throws
+ * ConditionalCheckFailedException exactly like an unknown contact does - the
+ * caller re-reads to tell "gone" from "stale". A no-op update evaluates every
+ * guard on a consistent read. Users: the Staff notes stale-save guard (PATCH
+ * staff_notes_expected_updated_at, spec 3.9 - one clause) and the caseworker
+ * conversion's commit (spec 2026-10-06 D19/D22 - the raw
+ * classification_revision, housingAuthority, agency and organization as read,
+ * plus notDeleted).
  */
 export interface UpdateContactOptions {
-  expect?: { attr: string; value: string | null };
+  expect?: ExpectClause | ExpectClause[];
+  notDeleted?: true;
+}
+
+/** The `expect` option as a list (the single-object form is one clause). */
+export function expectClausesOf(opts: UpdateContactOptions | undefined): ExpectClause[] {
+  const expected = opts?.expect;
+  if (expected === undefined) return [];
+  return Array.isArray(expected) ? expected : [expected];
 }
 
 export interface ContactsRepo {
@@ -1359,21 +1419,30 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       }
       if (sets.length === 0 && removes.length === 0) {
         // Nothing to change — read the current item back (still 404s if gone).
-        // An `expect` guard still applies: checked on a consistent read, so a
-        // no-op guarded update refuses exactly when a guarded write would.
-        const existing = await this.getById(contactId, { consistentRead: opts?.expect !== undefined });
+        // Every guard still applies (UpdateContactOptions): checked on a
+        // consistent read, so a no-op guarded update refuses exactly when a
+        // guarded write would.
+        const guards = expectClausesOf(opts);
+        const guarded = guards.length > 0 || opts?.notDeleted === true;
+        const existing = await this.getById(contactId, { consistentRead: guarded });
         if (!existing) {
           throw new ConditionalCheckFailedException({
             message: `contact ${contactId} not found`,
             $metadata: {},
           });
         }
-        if (opts?.expect !== undefined) {
-          const current = existing[opts.expect.attr];
-          const matches = opts.expect.value === null ? current === undefined : current === opts.expect.value;
+        if (opts?.notDeleted === true && existing['deleted_at'] !== undefined) {
+          throw new ConditionalCheckFailedException({
+            message: `contact ${contactId}: deleted`,
+            $metadata: {},
+          });
+        }
+        for (const guard of guards) {
+          const current = existing[guard.attr];
+          const matches = guard.value === null ? current === undefined : current === guard.value;
           if (!matches) {
             throw new ConditionalCheckFailedException({
-              message: `contact ${contactId}: expected ${opts.expect.attr} did not match`,
+              message: `contact ${contactId}: expected ${guard.attr} did not match`,
               $metadata: {},
             });
           }
@@ -1383,18 +1452,26 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       const clauses: string[] = [];
       if (sets.length > 0) clauses.push(`SET ${sets.join(', ')}`);
       if (removes.length > 0) clauses.push(`REMOVE ${removes.join(', ')}`);
-      // The optional optimistic-concurrency guard (UpdateContactOptions): one
-      // more clause on the SAME condition, so no write can slip between a
-      // separate read and this one.
+      // The optional optimistic-concurrency guards (UpdateContactOptions):
+      // more clauses on the SAME condition, so no write can slip between a
+      // separate read and this one. Each clause has its own placeholder
+      // (#expect<j>, never the patch's #k<i>), so a clause may guard the very
+      // attribute the patch SETs or REMOVEs - the caseworker conversion guards
+      // housingAuthority and REMOVEs it in one write.
       let condition = 'attribute_exists(contactId)';
-      if (opts?.expect !== undefined) {
-        names['#expectAttr'] = opts.expect.attr;
-        if (opts.expect.value === null) {
-          condition += ' AND attribute_not_exists(#expectAttr)';
+      expectClausesOf(opts).forEach((guard, j) => {
+        const nameKey = `#expect${j}`;
+        names[nameKey] = guard.attr;
+        if (guard.value === null) {
+          condition += ` AND attribute_not_exists(${nameKey})`;
         } else {
-          values[':expectValue'] = opts.expect.value;
-          condition += ' AND #expectAttr = :expectValue';
+          values[`:expect${j}`] = guard.value;
+          condition += ` AND ${nameKey} = :expect${j}`;
         }
+      });
+      if (opts?.notDeleted === true) {
+        names['#expectDeletedAt'] = 'deleted_at';
+        condition += ' AND attribute_not_exists(#expectDeletedAt)';
       }
       const { Attributes } = await doc.send(
         new UpdateCommand({

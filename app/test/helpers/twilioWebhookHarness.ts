@@ -34,6 +34,7 @@ import type { AuditRepo } from '../../src/repos/auditRepo.js';
 import {
   emailRefId,
   EmptyIndexKeyError,
+  expectClausesOf,
   INDEX_KEY_ATTRIBUTES,
   isDeleted,
   contactClassificationRevision,
@@ -2335,13 +2336,18 @@ export function createFakeWorld(): FakeWorld {
       if (!contact) {
         throw conditionalCheckFailed(`update: no contact ${contactId}`);
       }
-      // Mirror the real repo's optional `expect` guard (UpdateContactOptions):
-      // refuse BEFORE any field is applied, as one conditional UpdateItem would.
-      if (opts?.expect !== undefined) {
-        const current = contact[opts.expect.attr];
-        const matches = opts.expect.value === null ? current === undefined : current === opts.expect.value;
+      // Mirror the real repo's optional guards (UpdateContactOptions): every
+      // `expect` clause (string, number or null = absent) and `notDeleted`
+      // (attribute_not_exists(deleted_at)), refused BEFORE any field is
+      // applied, as one conditional UpdateItem would.
+      if (opts?.notDeleted === true && contact['deleted_at'] !== undefined) {
+        throw conditionalCheckFailed(`update: ${contactId} is deleted`);
+      }
+      for (const guard of expectClausesOf(opts)) {
+        const current = contact[guard.attr];
+        const matches = guard.value === null ? current === undefined : current === guard.value;
         if (!matches) {
-          throw conditionalCheckFailed(`update: expected ${opts.expect.attr} did not match on ${contactId}`);
+          throw conditionalCheckFailed(`update: expected ${guard.attr} did not match on ${contactId}`);
         }
       }
       const changesKind = patch.type !== undefined || patch.role !== undefined;

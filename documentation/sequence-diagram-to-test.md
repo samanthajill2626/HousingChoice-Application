@@ -128,17 +128,19 @@ The sending-unit loop (send a listing → optional preferences → next listing 
 surfaced these. They generalize: **a diagram verb often maps to an EXISTING feature wearing
 a different name, not a gap to build** — the audit's job is to find the mapping.
 
-- **"Send a listing" IS the broadcast-to-tenants flow.** There is no individual
-  send-listing-to-one-tenant route; the Phase-1 mechanism is the broadcast composer
-  (`/listings/:unitId` → kebab "More actions" → menuitem "Broadcast to tenants" → fill
-  `Message` → "Preview recipients"
-  -> curate -> "Send to N recipient(s)"), which sends a templated SMS (`[Address]`, `[Rent]`,
-  `[FlyerLink]`) and records a `listing_send` row. **Curate to ONE tenant** with
-  "Deselect all" → check the tenant's row by their **first name** (preview rows show the
-  first name only — so `freshTenant` now mints a unique, space-free `firstName`). Assert
-  delivery three ways: the fake thread (proof-of-send, body contains `/p/<unitId>`),
-  `GET /api/contacts/:id/listings-sent` (`{ sent: [...] }`), and the timeline "Property
-  sent" link (`a[href="/listings/<unitId>"]`).
+- **"Send a listing" uses the property-share composer.** The sending-unit
+  scenario curates that composer down to one tenant:
+  (`/listings/:unitId` -> kebab "More actions" -> menuitem "Send this property" -> fill
+  `Message` -> "Preview recipients" -> curate -> "Send to N recipient(s)").
+  Its custom message includes `[Address]` and `[FlyerLink]`, and the send records
+  a `listing_send` row. **Curate to ONE tenant** with "Deselect all", then check
+  that tenant in `Candidate recipients`. A checkbox's accessible name is the
+  FULL name; `teamSendsListing` matches the run-unique first name followed by
+  a space or the end of the name, so an earlier tenant with a longer prefix
+  cannot match. Assert delivery three ways: the fake thread (proof-of-send,
+  body contains `/p/<unitId>`), `GET /api/contacts/:id/listings-sent`
+  (`{ sent: [...] }`), and the timeline "Property sent" link
+  (`a[href="/listings/<unitId>"]`).
 - **An existing dashboard spec is a live-verified selector source.** `broadcasts.spec.ts`
   already encoded the composer selectors against the live stack — reuse those rather than
   re-deriving from component source (the "don't transcribe blind" warning is about SOURCE,

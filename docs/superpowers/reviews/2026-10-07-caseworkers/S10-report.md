@@ -334,3 +334,16 @@ recipient(s) and ASCII arrows. Read exact original lines before replacement.
 Documentation only: no described console/API/Dynamo repair, deployment,
 infrastructure action or live data access was executed. Added-line ASCII,
 code-fence check and git diff --check pass. Task 10.11 complete.
+
+### Task 10.11 adjacent-flow correction
+
+Parent flagged the stale Broadcast to tenants menu label directly above the
+recipient-label line after commit 15905e1d. Corrected that bounded paragraph
+to Send this property and checked the adjacent flow against
+ListingActionsMenu.tsx:107, RecipientPreview.tsx:358,403,530 and
+scenarios/steps.ts:1051-1074. The latter also disproved the paragraph's old
+first-name-only checkbox claim and unused Rent token: it uses the full-name
+checkbox via a run-unique first-name boundary and a custom Address/FlyerLink
+message. Updated those adjacent claims, preserving the three delivery proofs.
+Added lines are ASCII; git diff --check passes. No unrelated historical docs
+or runtime code changed and no browser rerun was necessary.

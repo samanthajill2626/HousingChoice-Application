@@ -25,8 +25,8 @@ atomic transaction with all already-accepted contact effects, and ordinary later
 field writes are not globally prohibited on partners. Other tenant facts are
 explicitly retained. The current sweep and PATCH fix meet those contracts.
 
-Treat this as a separate low-severity follow-up to decide and test coordination
-of durable accepted operations with reclassification, including existing active
+Treat this as a separate follow-up (P2 review priority; med issue severity) to decide and test coordination
+of durable acceptance intents with reclassification, including existing active
 journals. It can add a hidden authority after cleanup; do not call it harmless,
 fixed, or covered by the extraction-only deferral. Its runtime outcome was not
 observed; no new reproduction ran. It does not create a caseworker outside
@@ -74,3 +74,7 @@ smoke 0 (1649 imports/286 emitted files), scoped lint raw 1 (five baseline error
 zero new by complete-message baseline comparison with diagnostic/code-frame
 line numbers normalized only). Full browser gate and parent live self-QA remain.
 No second main sync. No production source edits after the accepted fix.
+
+## Independent challenge of the new disposition
+
+The original reviewer checked this adjudication separately and agrees with its pending/claimed boundary and scope disposition. The response is code-review-adjudication-response-r2.md. Parent adopts its qualifications: claim means durable intent, not a completed contact effect; retain P2 priority/med issue severity; lack of a runtime run says nothing about likelihood. Handback must identify this as a newly discovered, parent-deferred risk for the human merge decision, not prior human acceptance.

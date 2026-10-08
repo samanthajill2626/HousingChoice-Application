@@ -2,7 +2,7 @@
 id: claimed-suggestion-accept-after-caseworker-conversion
 title: A claimed housing-authority acceptance can commit after caseworker conversion
 type: bug
-severity: low
+severity: med
 status: open
 area: app/extraction
 created: 2026-10-08
@@ -43,3 +43,5 @@ journals and real/fake parity. A fresh pre-commit read alone leaves a race. Do n
 silently cancel unrelated accepted phone/address edits or make a claim of atomic
 coordination across all conversion follow-ons. Until addressed, an affected
 authority must be cleared explicitly; make-again does not clear it.
+
+**Review qualification.** R2 retains P2 priority. Claim records durable intent; it does not mean the contact effect or successful response already happened. Durable recovery may perform the write later. The absence of a runtime reproduction is an evidence limit, not evidence of low likelihood. The independent adjudication response is in code-review-adjudication-response-r2.md in the same mission records directory.

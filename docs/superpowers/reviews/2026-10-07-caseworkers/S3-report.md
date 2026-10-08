@@ -104,7 +104,7 @@ exited 0: 30 tests passed (3.3-green). Root npm run typecheck exited 0
 
 ## Task 3.4 - thread ownership plan
 
-Commit: this Task 3.4 commit (hash recorded in the next report update).
+Commit: e2b2ef69.
 The read-only preview enumerates every phone and email via conversationsForContact.
 It counts own retypable threads, shared holder/participant mismatches, and
 separately type-less rows. Closed, group and existing partner threads are left.
@@ -116,3 +116,22 @@ exited 1: five new thread cases failed against the zero-count stub, 31 passed
 (3.4-red). The existing-partner skip already passed. GREEN: the same command
 exited 0, 36 passed (3.4-green). Root npm run typecheck exited 0
 (3.4-typecheck). ASCII and git diff --check passed. No contract deviation.
+
+## Task 3.5 - conditional commit and step-4 effects
+
+Commit: this Task 3.5 commit (hash recorded in the next report update).
+make now recomputes refusals, checks a requested organization against both kinds,
+and commits one update guarded by raw revision and all three raw org fields plus
+notDeleted. The write changes type/role/status/manual source, bumps the revision,
+removes authority/provenance, sets agency empty, writes/removes organization and
+saves old type/role/org values atomically. A failed condition consistently rereads
+and distinguishes gone/deleted 404 from changed 409. Audit, new-type status
+milestone and role vocabulary run once and catch failures after commit.
+
+Step 0 passed. RED: npx vitest run test/caseworkerConversion.test.ts exited 1,
+12 make cases failed on the intentional stub, 36 passed (3.5-red). GREEN:
+the same command exited 0, 51 passed (3.5-green). Three extra guard boundary
+pins cover stored zero/empty values, absent revision racing stored zero, and a
+missing-row reread. The explicit-clear case starts with a stored organization,
+so it proves removal. Root npm run typecheck exited 0 (3.5-typecheck).
+No contract deviation. The suggestion/thread follow-ons remain Task 3.6 work.

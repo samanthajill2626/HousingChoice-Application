@@ -419,3 +419,218 @@ describe('the thread plan (step 3, D21, R1-F15): what the preview counts', () =>
     expect((await service.preview(ID)).threads).toEqual({ retype: 1, leftShared: 0, leftOther: 0 });
   });
 });
+
+describe('make - the commit write (rules 3-5, step 1, D19, D22)', () => {
+  it('converts in ONE fenced write: partner, Caseworker, active, manual, the organization, agency cleared, authority removed, the record', async () => {
+    const { world, service } = setup();
+    seed(world, {
+      housingAuthority: 'Atlanta Housing Authority',
+      housingAuthority_source: 'ai',
+      agency: 'Hope Atlanta',
+      voucherSize: 2,
+    });
+    const writes: unknown[] = [];
+    const original = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (id, patch, opts) => {
+      writes.push({ id, opts });
+      return original(id, patch, opts);
+    };
+    const contact = await service.make(ID, { actor: ACTOR });
+    expect(writes).toEqual([{
+      id: ID,
+      opts: {
+        expect: [
+          { attr: 'classification_revision', value: null },
+          { attr: 'housingAuthority', value: 'Atlanta Housing Authority' },
+          { attr: 'agency', value: 'Hope Atlanta' },
+          { attr: 'organization', value: null },
+        ],
+        notDeleted: true,
+      },
+    }]);
+    const after = stored(world)!;
+    expect(contact).toBe(after);
+    expect(after).toMatchObject({
+      type: 'partner',
+      role: 'Caseworker',
+      status: 'active',
+      type_source: 'manual',
+      organization: 'HOPE Atlanta',
+      agency: '',
+      voucherSize: 2, // the other tenant facts stay as data
+      classification_revision: 1,
+      caseworker_conversion: {
+        at: NOW,
+        by: ACTOR,
+        fromType: 'tenant',
+        housingAuthority: 'Atlanta Housing Authority',
+        agency: 'Hope Atlanta',
+      },
+    });
+    expect('housingAuthority' in after).toBe(false);
+    expect('housingAuthority_source' in after).toBe(false);
+    expect(after.caseworker_conversion).not.toHaveProperty('fromRole');
+  });
+
+  it('records fromRole, carries not-on-the-list text, and guards the stored revision as a number', async () => {
+    const { world, service } = setup();
+    seed(world, { type: 'unknown', status: 'needs_review', role: 'Case Manager', agency: 'Neighborhood Helpers', classification_revision: 3 });
+    await service.make(ID, { actor: ACTOR });
+    expect(stored(world)).toMatchObject({
+      organization: 'Neighborhood Helpers',
+      classification_revision: 4,
+      caseworker_conversion: { fromType: 'unknown', fromRole: 'Case Manager', agency: 'Neighborhood Helpers' },
+    });
+  });
+
+  it("a request organization wins: D5 over both kinds; '' leaves it absent", async () => {
+    const { world, service } = setup();
+    seed(world, { agency: 'Step Up' });
+    seed(world, { contactId: 'c-two', phone: '+15550107010', agency: 'Step Up', organization: 'Old Stored Org' });
+    await service.make(ID, { actor: ACTOR, organization: 'atlanta housing' });
+    expect(stored(world)?.['organization']).toBe('Atlanta Housing Authority');
+    await service.make('c-two', { actor: ACTOR, organization: '' });
+    expect('organization' in stored(world, 'c-two')!).toBe(false);
+  });
+
+  it('a request organization not on the list: 422 org_not_on_list (field organization), nothing written', async () => {
+    const { world, service } = setup();
+    seed(world, { agency: 'Step Up' });
+    const before = structuredClone(stored(world));
+    const err = await refused(service.make(ID, { actor: ACTOR, organization: 'Nowhere Org' }));
+    expect([err.status, err.code]).toEqual([422, 'org_not_on_list']);
+    expect(err.extras).toMatchObject({ field: 'organization', text: 'Nowhere Org', candidates: [] });
+    expect(stored(world)).toEqual(before);
+  });
+
+  it('a refusal: 409 with the first refusal as the code and every refusal in the body; nothing written', async () => {
+    const { world, service } = setup();
+    seed(world);
+    tour(world, 'tr-1', 'scheduled');
+    unit(world, 'u-1', { landlordId: ID });
+    const before = structuredClone(stored(world));
+    const err = await refused(service.make(ID, { actor: ACTOR }));
+    expect([err.status, err.code]).toEqual([409, 'caseworker_open_tour']);
+    expect(err.extras).toEqual({
+      refusals: [
+        { code: 'caseworker_open_tour', tourId: 'tr-1' },
+        { code: 'caseworker_landlord_of_record', unitId: 'u-1' },
+      ],
+    });
+    expect(stored(world)).toEqual(before);
+    expect(world.auditEvents).toEqual([]);
+  });
+
+  for (const [label, edit] of [
+    ['an agency edit', (c: ContactItem) => { c['agency'] = 'Step Up'; }],
+    ['an organization edit', (c: ContactItem) => { c['organization'] = 'Mercy Care'; }],
+    ['an authority edit', (c: ContactItem) => { c['housingAuthority'] = 'Decatur Housing Authority'; }],
+    ['a concurrent classification', (c: ContactItem) => { c.classification_revision = 1; }],
+  ] as const) {
+    it(`answers 409 contact_changed when ${label} lands between the read and the commit`, async () => {
+      const { world, service } = setup();
+      seed(world, { agency: 'Hope Atlanta' });
+      const original = world.contactsRepo.update.bind(world.contactsRepo);
+      world.contactsRepo.update = async (id, patch, opts) => {
+        edit(stored(world)!);
+        return original(id, patch, opts);
+      };
+      const err = await refused(service.make(ID, { actor: ACTOR }));
+      expect([err.status, err.code]).toEqual([409, 'contact_changed']);
+      expect(stored(world)?.type).toBe('tenant');
+    });
+  }
+
+  it('answers 404 when the contact is deleted between the read and the commit (the fifth clause)', async () => {
+    const { world, service } = setup();
+    seed(world);
+    const original = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (id, patch, opts) => {
+      stored(world)!.deleted_at = '2026-10-07T11:59:00.000Z';
+      return original(id, patch, opts);
+    };
+    const err = await refused(service.make(ID, { actor: ACTOR }));
+    expect([err.status, err.code]).toEqual([404, 'contact_not_found']);
+    expect(stored(world)?.type).toBe('tenant');
+  });
+});
+
+describe('make - step 4: the audit, the milestone, the vocabulary (D19)', () => {
+  it('audits contact_updated naming the conversion, records Status -> Active by the NEW type, adds the role', async () => {
+    const { world, service } = setup();
+    seed(world, { housingAuthority: 'Atlanta Housing Authority' });
+    await service.make(ID, { actor: ACTOR });
+    const audits = world.auditEvents.filter((e) => e.event_type === 'contact_updated');
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      entityKey: `contacts#${ID}`,
+      payload: {
+        actor: ACTOR,
+        conversion: 'caseworker',
+        caseworker_conversion: { fromType: 'tenant', housingAuthority: 'Atlanta Housing Authority' },
+      },
+    });
+    const arrow = String.fromCharCode(0x2192);
+    expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed').map((e) => e.label))
+      .toEqual([`Status ${arrow} Active`]);
+    expect(world.vocabularyAdds).toEqual([{ roles: ['Caseworker'] }]);
+  });
+
+  it('records no milestone when the status was already active (a partner becoming a caseworker)', async () => {
+    const { world, service } = setup();
+    seed(world, { type: 'partner', status: 'active' });
+    await service.make(ID, { actor: ACTOR });
+    expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed')).toEqual([]);
+  });
+});
+
+describe('make raw guard boundaries', () => {
+  it('guards a stored zero revision and empty organization fields as values', async () => {
+    const { world, service } = setup();
+    seed(world, { classification_revision: 0, housingAuthority: '', agency: '', organization: '' });
+    const update = vi.spyOn(world.contactsRepo, 'update');
+    await service.make(ID, { actor: ACTOR });
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(update.mock.calls[0]?.[2]).toEqual({
+      expect: [
+        { attr: 'classification_revision', value: 0 },
+        { attr: 'housingAuthority', value: '' },
+        { attr: 'agency', value: '' },
+        { attr: 'organization', value: '' },
+      ],
+      notDeleted: true,
+    });
+    expect(stored(world)).toMatchObject({ classification_revision: 1, agency: '' });
+    expect(stored(world)?.caseworker_conversion).not.toHaveProperty('agency');
+    expect(stored(world)?.caseworker_conversion).not.toHaveProperty('housingAuthority');
+  });
+
+  it('does not equate an absent revision with a concurrent stored zero', async () => {
+    const { world, service } = setup();
+    seed(world);
+    const original = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (id, patch, opts) => {
+      stored(world)!.classification_revision = 0;
+      return original(id, patch, opts);
+    };
+    const err = await refused(service.make(ID, { actor: ACTOR }));
+    expect([err.status, err.code]).toEqual([409, 'contact_changed']);
+    expect(stored(world)?.type).toBe('tenant');
+  });
+
+  it('consistently re-reads a disappeared contact after a failed condition', async () => {
+    const { world, service } = setup();
+    seed(world);
+    const read = vi.spyOn(world.contactsRepo, 'getById');
+    const original = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (id, patch, opts) => {
+      world.contacts.splice(world.contacts.findIndex((c) => c.contactId === id), 1);
+      return original(id, patch, opts);
+    };
+    const err = await refused(service.make(ID, { actor: ACTOR }));
+    expect([err.status, err.code]).toEqual([404, 'contact_not_found']);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(read.mock.calls.every(([, options]) => options?.consistentRead === true)).toBe(true);
+    expect(world.auditEvents).toEqual([]);
+  });
+});

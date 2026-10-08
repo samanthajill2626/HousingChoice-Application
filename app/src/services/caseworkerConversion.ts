@@ -9,6 +9,8 @@
 // writes nothing. Errors are codes; the dashboard owns every sentence (D22).
 import { KINDS_FOR_FIELD, ORG_NAME_MAX, normalizeOrgText, resolveOrgText, type OrgEntry } from '../lib/orgNames.js';
 import { conversationsForContact } from '../lib/contactThreads.js';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { CASEWORKER_ROLE } from './extraction/contactKinds.js';
 import { isCaseworker, type PossibleSignal } from '../lib/caseworkers.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -20,6 +22,7 @@ import { createContactVocabularyRepo, type ContactVocabularyRepo } from '../repo
 import {
   createContactsRepo,
   isDeleted,
+  type CaseworkerConversionRecord,
   type ContactItem,
   type ContactsRepo,
   type ContactType,
@@ -142,6 +145,20 @@ function deriveOrganization(
   if (r.status === 'match') return { value: r.entry.name, source: 'list_match' };
   return carriable(text) ? { value: text, source: 'carried' } : { source: 'none' };
 }
+
+/**
+ * One clause of the commit guard (D19 step 1, R1-F3): the attribute AS READ -
+ * its raw value (a number for the revision, never the folded 0 of
+ * contactClassificationRevision), or null = attribute_not_exists when absent.
+ * Any other stored shape becomes null, which fails the condition: a loud 409,
+ * never a silent overwrite.
+ */
+function clause(attr: string, raw: unknown): { attr: string; value: string | number | null } {
+  return { attr, value: typeof raw === 'string' || typeof raw === 'number' ? raw : null };
+}
+
+/** The milestone arrow, kept out of the source as a character code (ASCII rule). */
+const ARROW = String.fromCharCode(0x2192);
 
 /** The step-3 classification of the contact's threads (D21's conversion rule). */
 interface ThreadPlan {
@@ -314,6 +331,68 @@ export function createCaseworkerConversionService(
     return false;
   }
 
+  /** Rule 4 with a request: '' = absent; non-empty = D5 against both kinds (422 as A's shape). */
+  async function requestedOrganization(
+    c: ContactItem,
+    requested: string,
+  ): Promise<{ value?: string; source: OrganizationSource }> {
+    const next = requested.trim();
+    if (next === '') return { source: 'request' };
+    const check = await orgNames.checkScalar('organization', next, held(c['organization']));
+    if (!check.ok) {
+      const { error, ...body } = check.error;
+      throw new CaseworkerReviewError(422, error, body);
+    }
+    return check.value === null ? { source: 'request' } : { value: check.value, source: 'request' };
+  }
+
+  /**
+   * Steps 2-4 after the commit (or alone, on the repair path). Every failure is
+   * logged at error level and swallowed: the contact is already converted and
+   * its removed values are safe in caseworker_conversion; `make` again re-runs
+   * these steps (RUNBOOK). Steps 2 and 3 land in Task 3.6.
+   */
+  async function followOn(
+    contactId: string,
+    committed: ContactItem,
+    ctx: {
+      actor: string;
+      repair: boolean;
+      priorStatus: string | undefined;
+      fields: string[];
+      record?: CaseworkerConversionRecord;
+    },
+  ): Promise<void> {
+    const retyped = 0; // step 3 (Task 3.6)
+    try {
+      await audit.append(`contacts#${contactId}`, 'contact_updated', {
+        fields: ctx.fields,
+        actor: ctx.actor,
+        conversion: 'caseworker',
+        ...(ctx.repair && { repair: true }),
+        ...(ctx.record !== undefined && { caseworker_conversion: ctx.record }),
+        ...(retyped > 0 && { propagatedConversations: retyped, conversationType: 'partner_1to1' }),
+      });
+    } catch (err) {
+      log.error({ err, contactId }, 'caseworker conversion: audit failed after the commit (make again repairs)');
+    }
+    // R1-F12: labelled by the NEW type (partner -> "Active"); the PATCH's own
+    // milestone keeps labelling by the stored type.
+    if (!ctx.repair && ctx.priorStatus !== 'active') {
+      try {
+        await activityEvents.record({ contactId, type: 'contact_status_changed', label: `Status ${ARROW} Active` });
+      } catch (err) {
+        log.error({ err, contactId }, 'caseworker conversion: status milestone failed after the commit');
+      }
+    }
+    try {
+      await vocabulary.add({ roles: [CASEWORKER_ROLE] });
+    } catch (err) {
+      log.error({ err, contactId }, 'caseworker conversion: role vocabulary add failed after the commit');
+    }
+    void committed; // read by steps 2-3 (Task 3.6)
+  }
+
   return {
     async preview(contactId) {
       const c = await readSubject(contactId);
@@ -350,8 +429,89 @@ export function createCaseworkerConversionService(
       };
     },
 
-    async make() {
-      throw new Error('caseworker make: plan Task 3.5');
+    async make(contactId, input) {
+      const c = await readSubject(contactId);
+      const actor = input.actor;
+      // The read, as primitives, BEFORE any write: a repo may hand back a live
+      // object the write then mutates (the FakeWorld does).
+      const read = {
+        type: c.type,
+        role: held(c['role']),
+        status: typeof c.status === 'string' ? c.status : undefined,
+        revision: c.classification_revision as unknown,
+        housingAuthority: c['housingAuthority'],
+        agency: c['agency'],
+        organization: c['organization'],
+      };
+
+      if (isCaseworker(c)) {
+        // Rule 2, the repair path: steps 2-4 only. A request organization is
+        // ignored here (no commit runs). readSubject re-checked deletion.
+        await followOn(contactId, c, { actor, repair: true, priorStatus: read.status, fields: [] });
+        return c;
+      }
+
+      const refusals = await collectRefusals(contactId);
+      if (refusals.length > 0) {
+        throw new CaseworkerReviewError(409, refusals[0]!.code, { refusals });
+      }
+
+      const organization = input.organization !== undefined
+        ? await requestedOrganization(c, input.organization)
+        : await storedOrDerived(c);
+
+      const removedAuthority = held(read.housingAuthority);
+      const clearedAgency = held(read.agency);
+      const record: CaseworkerConversionRecord = {
+        at: now().toISOString(),
+        by: actor,
+        fromType: read.type,
+        ...(read.role !== undefined && { fromRole: read.role }),
+        ...(removedAuthority !== undefined && { housingAuthority: removedAuthority }),
+        ...(clearedAgency !== undefined && { agency: clearedAgency }),
+      };
+      // Step 1, the commit point. `role` in the patch bumps
+      // classification_revision through the repo's fence; '' clears agency
+      // (R1-F13, every machine clear); null REMOVEs.
+      const patch: Record<string, unknown> = {
+        type: 'partner',
+        role: CASEWORKER_ROLE,
+        status: 'active',
+        type_source: 'manual',
+        organization: organization.value ?? null,
+        agency: '',
+        housingAuthority: null,
+        housingAuthority_source: null,
+        caseworker_conversion: record,
+      };
+      let converted: ContactItem;
+      try {
+        converted = await contacts.update(contactId, patch, {
+          expect: [
+            clause('classification_revision', read.revision),
+            clause('housingAuthority', read.housingAuthority),
+            clause('agency', read.agency),
+            clause('organization', read.organization),
+          ],
+          notDeleted: true,
+        });
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          const current = await contacts.getById(contactId, { consistentRead: true });
+          if (current === undefined || isDeleted(current)) throw new CaseworkerReviewError(404, 'contact_not_found');
+          log.info({ contactId }, 'caseworker conversion refused: the contact changed since the read');
+          throw new CaseworkerReviewError(409, 'contact_changed');
+        }
+        throw err;
+      }
+      log.info(
+        { contactId, fromType: read.type, organizationSource: organization.source, actor },
+        'caseworker conversion committed',
+      );
+      await followOn(contactId, converted, {
+        actor, repair: false, priorStatus: read.status, fields: Object.keys(patch), record,
+      });
+      return converted;
     },
 
     async dismiss() {

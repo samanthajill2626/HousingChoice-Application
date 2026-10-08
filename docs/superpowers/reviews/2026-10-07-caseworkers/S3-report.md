@@ -80,7 +80,7 @@ fixture before commit (3.2-typecheck-final). No production contract deviation.
 
 ## Task 3.3 - organization derivation and approved correction C2
 
-Commit: this Task 3.3 commit (hash recorded in the next report update).
+Commit: 32959860.
 Stored organization wins; otherwise agency wins whenever nonempty, then authority.
 Resolve against both kinds first; unmatched or ambiguous text is carried only
 when raw control/invisible-character, length and normalized-nonempty limits pass.
@@ -101,3 +101,18 @@ trimming implementation, C2's added tests exited 1: six failed, 24 passed
 and whitespace-only agency cases. After the correction, the same command
 exited 0: 30 tests passed (3.3-green). Root npm run typecheck exited 0
 (3.3-typecheck). git diff --check and new-file ASCII checks passed.
+
+## Task 3.4 - thread ownership plan
+
+Commit: this Task 3.4 commit (hash recorded in the next report update).
+The read-only preview enumerates every phone and email via conversationsForContact.
+It counts own retypable threads, shared holder/participant mismatches, and
+separately type-less rows. Closed, group and existing partner threads are left.
+All-holders reads resolve the pointer fixture correctly; no S2 workaround.
+The first case also pins a second email address, alongside the second phone.
+
+Step 0 passed again. RED: npx vitest run test/caseworkerConversion.test.ts
+exited 1: five new thread cases failed against the zero-count stub, 31 passed
+(3.4-red). The existing-partner skip already passed. GREEN: the same command
+exited 0, 36 passed (3.4-green). Root npm run typecheck exited 0
+(3.4-typecheck). ASCII and git diff --check passed. No contract deviation.

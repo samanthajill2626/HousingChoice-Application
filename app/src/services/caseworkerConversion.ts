@@ -8,6 +8,7 @@
 // threads, and the PATCH's side effects. `preview` runs the same reads and
 // writes nothing. Errors are codes; the dashboard owns every sentence (D22).
 import { KINDS_FOR_FIELD, ORG_NAME_MAX, normalizeOrgText, resolveOrgText, type OrgEntry } from '../lib/orgNames.js';
+import { conversationsForContact } from '../lib/contactThreads.js';
 import { isCaseworker, type PossibleSignal } from '../lib/caseworkers.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
@@ -113,6 +114,9 @@ const CONTACT_TYPES: ReadonlySet<string> = new Set<ContactType>([
 
 /** D19: requested, scheduled, toured or no_show; canceled and closed are resolved. */
 const OPEN_TOUR_STATUSES: ReadonlySet<string> = new Set(['requested', 'scheduled', 'toured', 'no_show']);
+
+/** The one-to-one types the conversion re-types (partner_1to1 is already done; groups never). */
+const RETYPABLE_TYPES: ReadonlySet<string> = new Set(['tenant_1to1', 'landlord_1to1', 'unknown_1to1']);
 
 /** A stored string attribute, or undefined when absent or empty. */
 function held(value: unknown): string | undefined {
@@ -263,9 +267,51 @@ export function createCaseworkerConversionService(
     return deriveOrganization(entries, text);
   }
 
-  /** Step 3's classification, read-only (plan Task 3.4). */
-  async function planThreads(_c: ContactItem): Promise<ThreadPlan> {
-    return { retype: [], leftShared: 0, leftOther: 0 };
+  /**
+   * D21's conversion rule, read-only: the contact's OPEN one-to-one threads on
+   * EVERY phone and email (conversationsForContact) not yet partner_1to1.
+   * A thread is the contact's own only when its participant contactId, when
+   * set, is the contact AND no other live contact holds its phone or address
+   * (findAllByPhone / findAllByEmail: every holder, pointer rows resolved,
+   * deleted excluded - findByPhone returns ONE arbitrary holder and cannot
+   * decide this). A type-less open row is left and counted (R1-F15). The
+   * read type is captured so the write is conditional on it.
+   */
+  async function planThreads(c: ContactItem): Promise<ThreadPlan> {
+    const plan: ThreadPlan = { retype: [], leftShared: 0, leftOther: 0 };
+    for (const conv of await conversationsForContact(c, conversations)) {
+      if (conv.status !== 'open') continue;
+      const readType: unknown = conv.type;
+      if (typeof readType !== 'string' || readType === '') {
+        plan.leftOther += 1;
+        continue;
+      }
+      if (!RETYPABLE_TYPES.has(readType)) continue;
+      const participantId = conv.participants?.[0]?.contactId;
+      if (typeof participantId === 'string' && participantId !== '' && participantId !== c.contactId) {
+        plan.leftShared += 1;
+        continue;
+      }
+      if (await heldByAnother(conv, c.contactId)) {
+        plan.leftShared += 1;
+        continue;
+      }
+      plan.retype.push({ conv, readType: readType as ConversationType });
+    }
+    return plan;
+  }
+
+  /** Another LIVE contact holds the thread's phone or address. */
+  async function heldByAnother(conv: ConversationItem, contactId: string): Promise<boolean> {
+    const phone = conv.participant_phone;
+    if (typeof phone === 'string' && phone !== '') {
+      if ((await contacts.findAllByPhone(phone)).some((h) => h.contactId !== contactId)) return true;
+    }
+    const email = conv.participant_email;
+    if (typeof email === 'string' && email !== '') {
+      if ((await contacts.findAllByEmail(email)).some((h) => h.contactId !== contactId)) return true;
+    }
+    return false;
   }
 
   return {

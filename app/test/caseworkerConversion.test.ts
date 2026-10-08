@@ -345,3 +345,77 @@ describe('raw organization carry (D19, R2-F7)', () => {
     expect((await service.preview(ID)).organization).toEqual({ value: 'Step Up', source: 'list_match' });
   });
 });
+
+describe('the thread plan (step 3, D21, R1-F15): what the preview counts', () => {
+  const OPEN = { status: 'open', ai_mode: 'auto', last_activity_at: NOW, created_at: NOW };
+
+  function thread(world: FakeWorld, conversationId: string, over: Record<string, unknown>): void {
+    world.conversations.set(conversationId, { conversationId, ...OPEN, ...over } as never);
+  }
+
+  it("counts the contact's own open one-to-one threads on every phone and every email", async () => {
+    const { world, service } = setup();
+    seed(world, {
+      phones: [{ phone: PHONE, primary: true }, { phone: '+15550107002', primary: false }],
+      email: 'ana@example.org',
+      emails: [{ email: 'ana@example.org', primary: true }, { email: 'ana.secondary@example.org', primary: false }],
+    });
+    thread(world, 'cv-unknown', { type: 'unknown_1to1', participant_phone: PHONE });
+    thread(world, 'cv-second', { type: 'tenant_1to1', participant_phone: '+15550107002' });
+    thread(world, 'cv-email', { type: 'landlord_1to1', participant_email: 'ana@example.org' });
+    thread(world, 'cv-email-secondary', { type: 'unknown_1to1', participant_email: 'ana.secondary@example.org' });
+    thread(world, 'cv-partner', { type: 'partner_1to1', participant_phone: PHONE, status: 'closed' });
+    thread(world, 'cv-closed', { type: 'tenant_1to1', participant_phone: PHONE, status: 'closed' });
+    thread(world, 'cv-relay', { type: 'relay_group', participant_phone: PHONE });
+    expect((await service.preview(ID)).threads).toEqual({ retype: 4, leftShared: 0, leftOther: 0 });
+  });
+
+  it('an already partner_1to1 thread is neither re-typed nor counted', async () => {
+    const { world, service } = setup();
+    seed(world);
+    thread(world, 'cv-p', { type: 'partner_1to1', participant_phone: PHONE });
+    expect((await service.preview(ID)).threads).toEqual({ retype: 0, leftShared: 0, leftOther: 0 });
+  });
+
+  it('leaves (leftShared) a household phone another live contact holds; a deleted holder does not share', async () => {
+    const { world, service } = setup();
+    seed(world);
+    seed(world, { contactId: 'c-household', phone: PHONE });
+    seed(world, { contactId: 'c-gone', phone: '+15550107003', deleted_at: '2026-10-05T00:00:00.000Z' });
+    world.contacts.find((c) => c.contactId === ID)!.phones = [
+      { phone: PHONE, primary: true },
+      { phone: '+15550107003', primary: false },
+    ];
+    thread(world, 'cv-shared', { type: 'tenant_1to1', participant_phone: PHONE });
+    thread(world, 'cv-own', { type: 'unknown_1to1', participant_phone: '+15550107003' });
+    expect((await service.preview(ID)).threads).toEqual({ retype: 1, leftShared: 1, leftOther: 0 });
+  });
+
+  it("leaves a phone another contact holds through a pointer row, and a shared address", async () => {
+    const { world, service } = setup();
+    seed(world, { phone: '+15550107004', email: 'shared@example.org' });
+    seed(world, { contactId: 'c-other', phone: '+15550107005', email: 'other@example.org' });
+    await world.contactsRepo.addPhone('c-other', { phone: '+15550107004' });
+    seed(world, { contactId: 'c-also', phone: '+15550107006', email: 'shared@example.org' });
+    thread(world, 'cv-ptr', { type: 'unknown_1to1', participant_phone: '+15550107004' });
+    thread(world, 'cv-mail', { type: 'unknown_1to1', participant_email: 'shared@example.org' });
+    expect((await service.preview(ID)).threads).toEqual({ retype: 0, leftShared: 2, leftOther: 0 });
+  });
+
+  it("leaves a thread whose participant contactId is another contact (leftShared) and a type-less row (leftOther)", async () => {
+    const { world, service } = setup();
+    seed(world);
+    thread(world, 'cv-theirs', {
+      type: 'tenant_1to1', participant_phone: PHONE, participants: [{ contactId: 'c-elsewhere', phone: PHONE }],
+    });
+    thread(world, 'cv-legacy', { participant_phone: PHONE });
+    expect((await service.preview(ID)).threads).toEqual({ retype: 0, leftShared: 1, leftOther: 1 });
+  });
+
+  it('a participant contactId equal to the contact is its own thread', async () => {
+    const { world, service } = setup();
+    seed(world);
+    thread(world, 'cv-mine', { type: 'unknown_1to1', participant_phone: PHONE, participants: [{ contactId: ID, phone: PHONE }] });
+    expect((await service.preview(ID)).threads).toEqual({ retype: 1, leftShared: 0, leftOther: 0 });
+  });
+});

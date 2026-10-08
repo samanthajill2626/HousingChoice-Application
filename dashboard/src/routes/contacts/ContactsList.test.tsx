@@ -167,6 +167,16 @@ describe('ContactsList', () => {
     // The active tab reflects the current filter (and only it).
     expect(within(bar).getByRole('link', { name: 'Tenants' })).toHaveAttribute('aria-current', 'page');
     expect(within(bar).getByRole('link', { name: 'All' })).not.toHaveAttribute('aria-current');
+    // Caseworkers (spec 2026-10-06 D18): its own page, in the nav's order.
+    expect(within(bar).getByRole('link', { name: 'Caseworkers' })).toHaveAttribute('href', '/contacts/caseworkers');
+    expect(within(bar).getAllByRole('link').map((a) => a.textContent)).toEqual([
+      'All',
+      'Tenants',
+      'Landlords',
+      'Caseworkers',
+      'Unknown',
+      'Deleted',
+    ]);
   });
 
   it('renders a row per contact with name, phone, type, and a detail link', () => {

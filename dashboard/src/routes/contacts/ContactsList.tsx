@@ -40,17 +40,53 @@ const HEADING: Record<ContactsFilter, string> = {
   deleted: 'Deleted',
 };
 
+/** A tab: one of this page's filters, or the Caseworkers page - its own route
+ *  and component (CaseworkersList, spec 2026-10-06 D18), not a ContactsList
+ *  filter. */
+type FilterTab = ContactsFilter | 'caseworkers';
+
 /** On-page filter tabs. Each is a link to the SAME route the nav uses, so the URL
  *  stays the source of truth: switching here and the nav shortcuts land on the
  *  identical filtered view (and the active tab reflects the current `filter`).
+ *  The order mirrors the nav (Tenants, Landlords, Caseworkers, Unknown).
  *  'Deleted' surfaces soft-deleted contacts (restore from their detail page). */
-const FILTERS: { filter: ContactsFilter; label: string; to: string }[] = [
-  { filter: 'all', label: 'All', to: '/contacts' },
-  { filter: 'tenant', label: 'Tenants', to: '/contacts/tenants' },
-  { filter: 'landlord', label: 'Landlords', to: '/contacts/landlords' },
-  { filter: 'unknown', label: 'Unknown', to: '/contacts/unknown' },
-  { filter: 'deleted', label: 'Deleted', to: '/contacts/deleted' },
+const FILTERS: { tab: FilterTab; label: string; to: string }[] = [
+  { tab: 'all', label: 'All', to: '/contacts' },
+  { tab: 'tenant', label: 'Tenants', to: '/contacts/tenants' },
+  { tab: 'landlord', label: 'Landlords', to: '/contacts/landlords' },
+  { tab: 'caseworkers', label: 'Caseworkers', to: '/contacts/caseworkers' },
+  { tab: 'unknown', label: 'Unknown', to: '/contacts/unknown' },
+  { tab: 'deleted', label: 'Deleted', to: '/contacts/deleted' },
 ];
+
+/** The "Filter contacts" bar, shared by ContactsList and CaseworkersList.
+ *  `tenantSearch` is the query string the Tenants tab carries: ONLY that tab
+ *  carries facet params, and only while the Tenants view is active - so a
+ *  carried param can neither silently filter another audience nor survive as
+ *  invisible state. Re-clicking the active tab preserves the facets; leaving
+ *  the view drops them (the URL is the only state carrier - spec section 10). */
+export function ContactsFilterTabs({
+  active,
+  tenantSearch,
+}: {
+  active: FilterTab;
+  tenantSearch: string;
+}): React.JSX.Element {
+  return (
+    <nav className={styles.filters} aria-label="Filter contacts">
+      {FILTERS.map((f) => (
+        <Link
+          key={f.tab}
+          to={f.tab === 'tenant' ? { pathname: f.to, search: tenantSearch } : f.to}
+          className={`${styles.filter} ${f.tab === active ? styles.filterActive : ''}`}
+          {...(f.tab === active && { 'aria-current': 'page' })}
+        >
+          {f.label}
+        </Link>
+      ))}
+    </nav>
+  );
+}
 
 /** Non-tenant status label (the coarse needs_review|active lifecycle): a naive
  *  capitalize. Tenants render a StatusBadge instead (the F1 tenant-status map). */
@@ -238,27 +274,7 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
         All records{filter === 'all' ? '' : ` filtered to ${heading.toLowerCase()}`}.
       </p>
 
-      <nav className={styles.filters} aria-label="Filter contacts">
-        {FILTERS.map((f) => (
-          <Link
-            key={f.filter}
-            // ONLY the Tenants tab carries facet params, and only while the Tenants
-            // view is active - so a carried param can neither silently filter
-            // another audience nor survive as invisible state. Re-clicking the
-            // active tab preserves the facets; leaving the view drops them (the URL
-            // is the only state carrier - spec section 10).
-            to={
-              f.filter === 'tenant'
-                ? { pathname: f.to, search: isTenantView ? searchParams.toString() : '' }
-                : f.to
-            }
-            className={`${styles.filter} ${f.filter === filter ? styles.filterActive : ''}`}
-            {...(f.filter === filter && { 'aria-current': 'page' })}
-          >
-            {f.label}
-          </Link>
-        ))}
-      </nav>
+      <ContactsFilterTabs active={filter} tenantSearch={isTenantView ? searchParams.toString() : ''} />
 
       {isTenantView && status === 'ready' ? (
         <TenantFilters model={facets} selection={selection} onChange={updateSelection} />

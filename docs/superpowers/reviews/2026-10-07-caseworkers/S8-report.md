@@ -145,3 +145,19 @@ exit 1, missing module with zero cases collected. GREEN: dashboard npx vitest
 run src/routes/contacts, exit 0, 94 tests in five files. Root bare npm run
 typecheck exited 0 across five workspaces. Scoped root eslint on
 FilterChips.tsx and TenantFilters.tsx exited 0. No contract deviation.
+
+## Task 8.11 - shared Contacts filter links
+
+Task 8.10 commit: 465a5dfe. ContactsFilterTabs exports the shared link bar
+in All, Tenants, Landlords, Caseworkers, Unknown, Deleted order. Existing
+Tenants search carrying behavior is unchanged.
+RED: dashboard npx vitest run src/routes/contacts/ContactsList.test.tsx,
+exit 1, 1 failed / 31 passed: missing Caseworkers link. GREEN: same command,
+exit 0, 32 tests. Root bare npm run typecheck exited 0 across five workspaces.
+Scoped root eslint on ContactsList.tsx and its test exits 1 for one
+react-hooks/set-state-in-effect error at setQuery(phoneParam). Same-file
+ESLint lintText at merge base 1861e154e5c72ed8a60945ca425d26d35d89149b
+(using git show content and the original filePath/config) produces the same
+file/rule/message including code frame; only line positions differ. Current
+and baseline each have that one error; no new diagnostics. Raw comparison is
+8.11-lint-baseline.log, exit 0. Baseline debt preserved, no contract drift.

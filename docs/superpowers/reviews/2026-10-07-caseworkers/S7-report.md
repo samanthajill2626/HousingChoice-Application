@@ -49,3 +49,22 @@ duplicating either file. Final GREEN: dashboard npx vitest run src/routes/orgs s
 exited 0, 28 files / 414 tests, zero skipped (7.3-green-final). Only intro
 indentation changed afterward. No contract deviation or new dependency.
 Root npm run typecheck exited 0, all five workspaces (7.3-typecheck).
+
+## Task 7.4 - distinct usage totals in Settings
+
+Task 7.3 commit: b98b6858. Required merged-layout handback sections 1, 5,
+8 read. All usageTotal callers verified: list descriptions, entry panel,
+Delete and Change kind. They now read inUse or kindLocked respectively;
+deleted display reads distinct inUse.deleted. Organization-only holders
+block Delete and keep their value through Change kind. No layout changed.
+RED: dashboard npx vitest run src/routes/orgs/orgCopy.test.ts src/routes/settings/OrgListSection.test.tsx
+exited 1, 5 failed / 94 passed: missing blockingUses, duplicate deleted count,
+DeKalb Not used, Step Up 1 record instead of 3, old Change kind sentence.
+The Step Up case stopped at its description; later Delete/Change checks were
+not reached. One edit-script block lookup was ambiguous for the entry panel;
+corrected before running GREEN. No source contract or anchor drift.
+GREEN: dashboard npx vitest run src/routes/orgs src/routes/settings exited 0,
+28 files / 419 tests, zero skipped (7.4-green). Existing usage pins remain.
+Root npm run typecheck exited 0, all five workspaces (7.4-typecheck).
+Only two newly inserted blank lines had trailing spaces; removed. Added-line
+ASCII passes, and no usageTotal or per-column deleted reader remains.

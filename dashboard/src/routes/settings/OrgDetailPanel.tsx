@@ -13,7 +13,7 @@ import { useId } from 'react';
 import { Link } from 'react-router-dom';
 import type { OrgEntry, OrgUsageCounts } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
-import { KIND_FIELD_LABEL, usageText, usageTotal } from '../orgs/orgCopy.js';
+import { KIND_FIELD_LABEL, blockingUses, usageText } from '../orgs/orgCopy.js';
 import { SEGMENT_LABEL, listHref, type OrgSegment } from './orgSelection.js';
 import listStyles from './OrgListSection.module.css';
 import styles from './OrgSettings.module.css';
@@ -122,7 +122,8 @@ export function OrgEntryPanel({
   const headingId = useId();
   const reasonId = useId();
   const notes = entry.notes ?? '';
-  const total = usageTotal(usage);
+  // "Not used" only when no record holds the name in any field (R2-F1, spec D17).
+  const total = blockingUses(usage, 'delete');
   // Rename and Merge start a rewrite, so they wait while one runs (D11); Change
   // kind and Delete wait too - the server refuses both with 409
   // org_rewrite_running while one runs (plan 3.5), so an enabled button could

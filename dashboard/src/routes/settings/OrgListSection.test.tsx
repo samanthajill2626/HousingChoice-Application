@@ -75,9 +75,33 @@ const ATLANTA = entry('housing_authority', 'Atlanta Housing Authority', {
 const DEKALB = entry('housing_authority', 'DeKalb County Housing Authority', { orgId: 'o-dek', spellings: ['HADC'] });
 const STEP_UP = entry('agency', 'Step Up', { orgId: 'o-step' });
 const USAGE = {
-  'o-atl': { tenants: 3, otherContacts: 1, properties: 2, deleted: 2 },
-  'o-dek': { tenants: 0, otherContacts: 0, properties: 0, deleted: 0 },
-  'o-step': { tenants: 1, otherContacts: 0, properties: 0, deleted: 0 },
+  'o-atl': {
+    tenants: 3,
+    otherContacts: 1,
+    properties: 2,
+    organization: 0,
+    deleted: 2,
+    inUse: { active: 6, deleted: 2 },
+    kindLocked: { active: 6, deleted: 2 },
+  },
+  'o-dek': {
+    tenants: 0,
+    otherContacts: 0,
+    properties: 0,
+    organization: 0,
+    deleted: 0,
+    inUse: { active: 0, deleted: 0 },
+    kindLocked: { active: 0, deleted: 0 },
+  },
+  'o-step': {
+    tenants: 1,
+    otherContacts: 0,
+    properties: 0,
+    organization: 0,
+    deleted: 0,
+    inUse: { active: 1, deleted: 0 },
+    kindLocked: { active: 1, deleted: 0 },
+  },
 };
 // dashboard/src/test/setup.ts pins Date.now() to 2026-07-01T12:00:00Z.
 const FAILED: OrgRewriteState = {
@@ -268,6 +292,29 @@ describe('OrgListSection - the lists', () => {
 });
 
 describe('OrgListSection - the detail panel', () => {
+  it('a name held only as a contact organization is used: its list row and its panel say so (spec D17; R2-F1)', async () => {
+    const user = userEvent.setup();
+    getOrgUsage.mockResolvedValue({
+      ...USAGE,
+      'o-dek': {
+        tenants: 0,
+        otherContacts: 0,
+        properties: 0,
+        organization: 1,
+        deleted: 0,
+        inUse: { active: 1, deleted: 0 },
+        kindLocked: { active: 0, deleted: 0 },
+      },
+    });
+    renderSection();
+    const row = await findRow('Housing authorities', 'DeKalb County Housing Authority');
+    await waitFor(() => expect(row).toHaveAccessibleDescription('1 record'));
+    const panel = await openEntry(user, 'Housing authorities', 'DeKalb County Housing Authority');
+    await waitFor(() =>
+      expect(panel).toHaveTextContent('0 tenants, 0 other contacts, 0 properties, 1 organization field'),
+    );
+    expect(panel).not.toHaveTextContent('Not used');
+  });
   it('shows the spellings as chips, the notes and what uses the entry', async () => {
     const user = userEvent.setup();
     renderSection();
@@ -505,6 +552,60 @@ describe('OrgListSection - the latest rewrite on the server clock', () => {
 });
 
 describe('OrgListSection - admin entry actions', () => {
+  it('organization holders: counted once per record, shown in Used by, they block Delete but never Change kind (spec D10, D17; R2-F1)', async () => {
+    const user = userEvent.setup();
+    getOrgUsage.mockResolvedValue({
+      ...USAGE,
+      'o-step': {
+        tenants: 0,
+        otherContacts: 0,
+        properties: 0,
+        organization: 2,
+        deleted: 1,
+        inUse: { active: 2, deleted: 1 },
+        kindLocked: { active: 0, deleted: 0 },
+      },
+    });
+    patchOrg.mockResolvedValue({ entry: { ...STEP_UP, kind: 'housing_authority' } });
+    renderSection();
+    const step = await openEntry(user, 'Agencies', 'Step Up');
+    // The list row counts DISTINCT records (2 live + 1 deleted), never a column sum.
+    await waitFor(() =>
+      expect(within(region('Agencies')).getByRole('link', { name: 'Step Up' })).toHaveAccessibleDescription(
+        '3 records',
+      ),
+    );
+    await waitFor(() =>
+      expect(step).toHaveTextContent('0 tenants, 0 other contacts, 0 properties, 2 organization fields (+1 deleted)'),
+    );
+    await user.click(within(step).getByRole('button', { name: 'Delete Step Up' }));
+    let dialog = screen.getByRole('dialog', { name: 'Delete Step Up' });
+    expect(dialog).toHaveTextContent(
+      '3 records still hold this name (0 tenants, 0 other contacts, 0 properties, 2 organization fields, 1 deleted).',
+    );
+    expect(within(dialog).getByRole('button', { name: 'Delete' })).toBeDisabled();
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await user.click(within(step).getByRole('button', { name: 'Change kind of Step Up' }));
+    dialog = screen.getByRole('dialog', { name: 'Change kind of Step Up' });
+    expect(dialog).toHaveTextContent(
+      'Step Up moves from Agencies to Housing authorities. No record changes. Contacts holding it as their organization keep it.',
+    );
+    await user.click(within(dialog).getByRole('button', { name: 'Move to Housing authorities' }));
+    expect(patchOrg).toHaveBeenCalledWith('o-step', { kind: 'housing_authority' });
+  });
+
+  it('Change kind waits for holders in a field of the entry kind, and says so', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    const atlanta = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    await waitFor(() => expect(atlanta).toHaveTextContent('3 tenants'));
+    await user.click(within(atlanta).getByRole('button', { name: 'Change kind of Atlanta Housing Authority' }));
+    const dialog = screen.getByRole('dialog', { name: 'Change kind of Atlanta Housing Authority' });
+    expect(dialog).toHaveTextContent(
+      '8 records hold this name as a housing authority (2 deleted). The kind can change only when none does.',
+    );
+    expect(within(dialog).getByRole('button', { name: 'Move to Agencies' })).toBeDisabled();
+  });
   beforeEach(() => {
     viewerIsAdmin = true;
   });

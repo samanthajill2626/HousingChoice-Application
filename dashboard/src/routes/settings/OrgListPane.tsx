@@ -9,7 +9,7 @@ import { useId } from 'react';
 import { Link } from 'react-router-dom';
 import type { NotOnListRow, OrgEntry, OrgKind, OrgUsage } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
-import { FIELD_LABEL, KIND_NOUN, usageTotal } from '../orgs/orgCopy.js';
+import { FIELD_LABEL, KIND_NOUN, blockingUses } from '../orgs/orgCopy.js';
 import {
   ORG_SEGMENTS,
   SEGMENT_LABEL,
@@ -154,7 +154,10 @@ export function OrgEntryList({
         <ul role="list" className={styles.rows}>
           {entries.map((entry) => {
             const key = entryKey(entry.orgId);
-            const used = usage === null ? undefined : usageTotal(usage[entry.orgId]);
+            // Distinct records holding the name in any field, deleted ones
+            // included (R2-F1): one record holding it twice counts once, and
+            // a contact's organization counts (spec D17).
+            const used = usage === null ? undefined : blockingUses(usage[entry.orgId], 'delete');
             return (
               <ListRow
                 key={entry.orgId}

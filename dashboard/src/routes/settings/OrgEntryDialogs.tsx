@@ -21,7 +21,8 @@ import {
   otherKindOf,
   spellingProblemCopy,
   usageBreakdown,
-  usageTotal,
+  blockingUses,
+  withArticle,
 } from '../orgs/orgCopy.js';
 import styles from './OrgListSection.module.css';
 
@@ -106,10 +107,16 @@ export function skippedSpellingsNotice(skipped: readonly SkippedSpelling[]): str
   return `Not kept as a spelling: ${parts.join('; ')}.`;
 }
 
-/** "8 records still hold this name (3 tenants, ..., 2 deleted)." */
+/** "8 records still hold this name (3 tenants, ..., 2 deleted)." - Delete's count: distinct records. */
 function inUseText(usage: OrgUsageCounts): string {
-  const total = usageTotal(usage) ?? 0;
+  const total = blockingUses(usage, 'delete') ?? 0;
   return `${total} ${total === 1 ? 'record still holds' : 'records still hold'} this name (${usageBreakdown(usage)}).`;
+}
+
+/** Change kind's count: distinct records holding it in a field of its kind (spec D17). */
+function kindLockedText(entry: OrgEntry, usage: OrgUsageCounts): string {
+  const total = blockingUses(usage, 'kind') ?? 0;
+  return `${total} ${total === 1 ? 'record holds' : 'records hold'} this name as ${withArticle(entry.kind)} (${usage.kindLocked.deleted} deleted). The kind can change only when none does.`;
 }
 
 function sameSpellings(a: readonly string[], b: readonly string[]): boolean {
@@ -433,8 +440,9 @@ export function MergeDialog({
   );
 }
 
-/** "Change kind of <name>" (admin, spec D10): allowed only when no record -
- *  deleted ones included - holds the name; nothing is rewritten. */
+/** "Change kind of <name>" (admin, spec D10, D17): allowed only when no record -
+ *  deleted ones included - holds the name in a field of its kind; organization
+ *  holders never block it. Nothing is rewritten. */
 export function KindDialog({
   entry,
   usage,
@@ -444,7 +452,9 @@ export function KindDialog({
   const to = otherKindOf(entry.kind);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const blocked = usage !== undefined && (usageTotal(usage) ?? 0) > 0;
+  const blocked = (blockingUses(usage, 'kind') ?? 0) > 0;
+  // Organization-only holders: they keep the name, which stays valid under either kind.
+  const organizationOnly = (blockingUses(usage, 'delete') ?? 0) > (blockingUses(usage, 'kind') ?? 0);
 
   async function move(): Promise<void> {
     if (busy || blocked) return;
@@ -477,8 +487,10 @@ export function KindDialog({
       <div className={styles.dialogBody}>
         <p className={styles.dialogText}>
           {blocked && usage !== undefined
-            ? `${inUseText(usage)} The kind can change only when no record uses it.`
-            : `${entry.name} moves from ${KIND_PLURAL_TITLE[entry.kind]} to ${KIND_PLURAL_TITLE[to]}. No record changes.`}
+            ? kindLockedText(entry, usage)
+            : `${entry.name} moves from ${KIND_PLURAL_TITLE[entry.kind]} to ${KIND_PLURAL_TITLE[to]}. No record changes.${
+                organizationOnly ? ' Contacts holding it as their organization keep it.' : ''
+              }`}
         </p>
         {error !== null ? (
           <p role="alert" className={styles.error}>
@@ -500,7 +512,7 @@ export function DeleteDialog({
 }: EntryDialogProps & { usage: OrgUsageCounts | undefined; onDeleted: () => void }): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const blocked = usage !== undefined && (usageTotal(usage) ?? 0) > 0;
+  const blocked = (blockingUses(usage, 'delete') ?? 0) > 0;
 
   async function remove(): Promise<void> {
     if (busy || blocked) return;

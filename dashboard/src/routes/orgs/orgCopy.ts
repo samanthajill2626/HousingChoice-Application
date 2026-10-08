@@ -624,17 +624,30 @@ function usageColumns(u: OrgUsageCounts): string {
 export function usageText(u: OrgUsageCounts | undefined): string {
   if (u === undefined) return '-';
   const base = usageColumns(u);
-  return u.deleted > 0 ? `${base} (+${u.deleted} deleted)` : base;
+  // Distinct deleted records (R1 ruling A10): one deleted record holding the
+  // name in two fields is ONE record; the per-column `deleted` would say 2.
+  return u.inUse.deleted > 0 ? `${base} (+${u.inUse.deleted} deleted)` : base;
 }
 
 /** "3 tenants, 1 other contact, 2 properties, 2 deleted" - for a confirm sentence. */
 export function usageBreakdown(u: OrgUsageCounts): string {
-  return `${usageColumns(u)}, ${u.deleted} deleted`;
+  return `${usageColumns(u)}, ${u.inUse.deleted} deleted`;
 }
 
-/** Every record holding the name, deleted included; undefined while unknown. */
-export function usageTotal(u: OrgUsageCounts | undefined): number | undefined {
-  return u === undefined ? undefined : u.tenants + u.otherContacts + u.properties + u.deleted;
+/**
+ * The records that block Delete ('delete': distinct records holding the name
+ * in ANY field, a contact's organization included) or Change kind ('kind':
+ * distinct records holding it in a field of the entry's kind - an
+ * organization accepts either kind, so it never blocks one, spec D17),
+ * deleted ones included: the server's totals, never a column sum (R2-F1).
+ * 'delete' is also the record count Settings shows for an entry (its list
+ * row's "N records" / "Not used", the panel's "Not used"): one record
+ * holding the name in two fields is one record. undefined while unknown.
+ */
+export function blockingUses(u: OrgUsageCounts | undefined, mode: 'delete' | 'kind'): number | undefined {
+  if (u === undefined) return undefined;
+  const t = mode === 'delete' ? u.inUse : u.kindLocked;
+  return t.active + t.deleted;
 }
 
 /** What a "Not on the list" value is (its D4 resolution), in staff words. */

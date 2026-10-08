@@ -10,6 +10,7 @@ import {
   kindsForField,
   rewriteCountsText,
   canRunAgain,
+  blockingUses,
   describeRewrite,
   isOnList,
   isRewriteLive,
@@ -495,6 +496,20 @@ describe('typedOrgNote - the note under a form picker says what Save will do (co
 });
 
 describe('both lists - a contact organization (spec D6, D17; R2-F4)', () => {
+  it('Delete waits for every distinct record; Change kind only for holders in a field of the kind (R2-F1)', () => {
+    const u = counts({ organization: 2, inUse: { active: 2, deleted: 1 }, kindLocked: { active: 0, deleted: 0 } });
+    expect(blockingUses(u, 'delete')).toBe(3);
+    expect(blockingUses(u, 'kind')).toBe(0);
+    expect(blockingUses(undefined, 'delete')).toBeUndefined();
+  });
+
+  it('one deleted record holding the name in two fields reads "+1 deleted", never "+2" (plan review R1 ruling A10)', () => {
+    // A deleted tenant holding the name as housingAuthority AND organization:
+    // the per-column wire `deleted` counts 2 hits; the distinct inUse.deleted is 1.
+    const u = counts({ deleted: 2, inUse: { active: 0, deleted: 1 }, kindLocked: { active: 0, deleted: 1 } });
+    expect(usageText(u)).toBe('0 tenants, 0 other contacts, 0 properties (+1 deleted)');
+    expect(usageBreakdown(u)).toBe('0 tenants, 0 other contacts, 0 properties, 1 deleted');
+  });
   it('the organization field accepts both kinds and has its own labels', () => {
     expect(ORGANIZATION_KINDS).toEqual(['housing_authority', 'agency']);
     expect(kindsForField('organization')).toEqual(['housing_authority', 'agency']);

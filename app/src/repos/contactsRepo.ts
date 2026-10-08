@@ -354,6 +354,14 @@ export interface ContactDisplayItem {
 }
 
 /**
+ * A share recipient's label (spec 2026-10-06 D20/D22; plan 3.3): the display
+ * fields plus the contact's `type` and `role`, so the units recipients route
+ * can label a non-tenant row. A SECOND projection on purpose - the shared
+ * display projection is not widened (R3-F4).
+ */
+export type RecipientDisplay = ContactDisplayItem & { type?: ContactType; role?: string };
+
+/**
  * A contact is soft-deleted when it carries a non-empty `deleted_at` stamp.
  * Shared by the repo (query filters) and the inbox/today routes (hydration
  * filters) so "deleted" is defined in exactly one place.
@@ -706,6 +714,11 @@ export interface ContactsRepo {
   /** Batch-read display fields by primary key. Missing ids are absent from the map. */
   getDisplaysByIds(contactIds: string[]): Promise<Map<string, ContactDisplayItem>>;
   /**
+   * getDisplaysByIds plus `type` and `role` (plan 3.3) - for the units
+   * recipients route ONLY (R3-F4). Missing ids are absent from the map.
+   */
+  getRecipientDisplaysByIds(contactIds: string[]): Promise<Map<string, RecipientDisplay>>;
+  /**
    * Batch-read WHOLE contacts by primary key - the `getById` fan-out killer for
    * callers that read attributes outside the display projection (roster
    * `company`; the broadcast send path's `type`/`sms_opt_out`/`sms_unreachable`
@@ -995,6 +1008,19 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
     },
   } as const;
 
+  /**
+   * The recipient projection (plan 3.3; R3-F4): the display fields plus `type`
+   * and `role` - both DynamoDB reserved words, hence placeholders.
+   */
+  const RECIPIENT_PROJECTION = {
+    ProjectionExpression: '#contactId, #firstName, #lastName, #phone, #deletedAt, #type, #role',
+    ExpressionAttributeNames: {
+      ...DISPLAY_PROJECTION.ExpressionAttributeNames,
+      '#type': 'type',
+      '#role': 'role',
+    },
+  } as const;
+
   /** Load a contact or throw the same conditional error update() throws. */
   const requireContact = async (contactId: string): Promise<ContactItem> => {
     const contact = await getByIdImpl(contactId);
@@ -1250,6 +1276,10 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
 
     async getDisplaysByIds(contactIds) {
       return batchGetByIds<ContactDisplayItem>(contactIds, { projection: DISPLAY_PROJECTION });
+    },
+
+    async getRecipientDisplaysByIds(contactIds) {
+      return batchGetByIds<RecipientDisplay>(contactIds, { projection: RECIPIENT_PROJECTION });
     },
 
     async getManyByIds(contactIds, opts) {

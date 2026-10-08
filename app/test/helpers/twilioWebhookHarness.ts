@@ -48,6 +48,7 @@ import {
   type ContactItem,
   type ContactPhone,
   type ContactsRepo,
+  type RecipientDisplay,
 } from '../../src/repos/contactsRepo.js';
 import {
   SuggestionDismissedError,
@@ -2193,6 +2194,22 @@ export function createFakeWorld(): FakeWorld {
     return out;
   };
 
+  /**
+   * MODELS THE REAL RECIPIENT PROJECTION (plan 3.3): projectDisplay plus
+   * `type` and `role` exactly as stored - nothing else, so a recipients caller
+   * reading another attribute fails here as it would against DynamoDB. (A fake
+   * pointer row would show its 'unknown' sentinel; recipients are never
+   * pointer ids.)
+   */
+  const projectRecipient = (contact: ContactItem): RecipientDisplay => {
+    const role = contact['role'];
+    return {
+      ...projectDisplay(contact),
+      ...(typeof contact.type === 'string' && { type: contact.type }),
+      ...(typeof role === 'string' && { role }),
+    };
+  };
+
   const contactsRepo: ContactsRepo = {
     async findByPhone(phone) {
       const hit = contacts.find((c) => c.phone === phone);
@@ -2233,6 +2250,14 @@ export function createFakeWorld(): FakeWorld {
         contacts
           .filter((contact) => wanted.has(contact.contactId))
           .map((contact) => [contact.contactId, projectDisplay(contact)] as const),
+      );
+    },
+    async getRecipientDisplaysByIds(contactIds) {
+      const wanted = new Set(contactIds);
+      return new Map(
+        contacts
+          .filter((contact) => wanted.has(contact.contactId))
+          .map((contact) => [contact.contactId, projectRecipient(contact)] as const),
       );
     },
     async getManyByIds(contactIds) {

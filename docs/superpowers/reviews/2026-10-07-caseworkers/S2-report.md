@@ -46,7 +46,7 @@ been encountered. Existing contact-partition fake semantics remain untouched.
 
 ## Task 2.2 - all live phone and email holders
 
-Commit: the Task 2.2 implementation commit containing this report entry.
+Commit: 64f9d7ac.
 Added real and fake findAllByPhone/findAllByEmail, resolving pointers, dropping
 missing/deleted owners, and deduplicating owners. Real reads use the existing
 queryAll cursor helper; the original single-holder methods are unchanged.
@@ -58,4 +58,19 @@ RED: npx vitest run test/caseworkerRepoParity.integration.test.ts exited 1:
 npx vitest run test/audienceResolution.test.ts test/contactCapture.test.ts test/sendMessage.test.ts test/scheduledSendSuppression.test.ts test/contactsRepo.integration.test.ts test/contactsRepo.email.test.ts
 exited 0: 6 files, 157 tests passed. Root npm run typecheck exited 0.
 Logs: 2.2-red, 2.2-green, 2.2-regression, 2.2-typecheck under the evidence path.
+No extra typed fake, fault, timeout, contract mismatch or scope deviation.
+
+## Task 2.3 - recipient display projection
+
+Commit: the Task 2.3 implementation commit containing this report entry.
+Added RecipientDisplay and getRecipientDisplaysByIds using a separate projection
+with reserved-word aliases for type and role. The shared display projection is
+unchanged. FakeWorld and all four named full ContactsRepo fakes changed together.
+
+RED: npx vitest run test/caseworkerRepoParity.integration.test.ts exited 1:
+2 missing-method failures, 26 passing cases. GREEN: the same command exited 0,
+28 tests passed, zero skipped. Planned regression command (app workdir):
+npx vitest run test/audienceResolution.test.ts test/contactCapture.test.ts test/sendMessage.test.ts test/scheduledSendSuppression.test.ts test/contactsRepo.integration.test.ts test/listingSendsApi.test.ts
+exited 0: 6 files, 166 tests passed. Root npm run typecheck exited 0.
+Logs: 2.3-red, 2.3-green, 2.3-regression, 2.3-typecheck under the evidence path.
 No extra typed fake, fault, timeout, contract mismatch or scope deviation.

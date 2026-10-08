@@ -256,6 +256,9 @@ function makeFakes(
     rewriteOrgFields: async () => {
       throw new Error('rewriteOrgFields: not used in this suite');
     },
+    getRecipientDisplaysByIds: async () => {
+      throw new Error('getRecipientDisplaysByIds: not used in this suite');
+    },
     findAllByPhone: async () => {
       throw new Error('findAllByPhone: not used in this suite');
     },

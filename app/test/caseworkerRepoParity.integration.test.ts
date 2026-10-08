@@ -373,4 +373,51 @@ describe('contactsRepo.findAllByPhone / findAllByEmail (plan 3.3; D21 "own threa
   });
 });
 
+describe('contactsRepo.getRecipientDisplaysByIds (plan 3.3; R3-F4)', () => {
+  parity('projects the display fields plus type and role - nothing else; a missing id is absent', async (w, id) => {
+    const phone = nextPhone();
+    await w.putContact({
+      contactId: `${id}-p`,
+      type: 'partner',
+      status: 'active',
+      firstName: 'Pat',
+      lastName: 'Lee',
+      phone,
+      role: 'Caseworker',
+      organization: 'Step Up',
+      housingAuthority: 'Atlanta Housing Authority',
+      notes: 'not projected',
+    });
+    await w.putContact({
+      contactId: `${id}-t`,
+      type: 'tenant',
+      status: 'searching',
+      firstName: 'Tia',
+      deleted_at: '2026-10-07T09:00:00.000Z',
+    });
+    const map = await w.contacts.getRecipientDisplaysByIds([`${id}-p`, `${id}-t`, `${id}-missing`]);
+    expect(map.get(`${id}-p`)).toEqual({
+      contactId: `${id}-p`,
+      firstName: 'Pat',
+      lastName: 'Lee',
+      phone,
+      type: 'partner',
+      role: 'Caseworker',
+    });
+    expect(map.get(`${id}-t`)).toEqual({
+      contactId: `${id}-t`,
+      firstName: 'Tia',
+      type: 'tenant',
+      deleted_at: '2026-10-07T09:00:00.000Z',
+    });
+    expect(map.has(`${id}-missing`)).toBe(false);
+  });
+
+  parity('(PIN) getDisplaysByIds keeps its narrower projection - no type, no role', async (w, id) => {
+    const phone = nextPhone();
+    await w.putContact({ contactId: id, type: 'partner', status: 'active', firstName: 'Pat', phone, role: 'Caseworker' });
+    expect((await w.contacts.getDisplaysByIds([id])).get(id)).toEqual({ contactId: id, firstName: 'Pat', phone });
+  });
+});
+
 // END OF PARITY CASES - Tasks 2.2-2.5 insert their describe blocks ABOVE this line.

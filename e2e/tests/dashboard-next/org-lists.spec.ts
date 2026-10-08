@@ -693,6 +693,23 @@ async function confirmSettle(page: Page, settle: Locator, confirm: string): Prom
   await page.waitForURL((url) => !url.searchParams.has('value'));
 }
 
+/** A run-unique partner (a caseworker - type partner, role Caseworker)
+ *  through the real POST; its `organization` is planted by the dev seam. */
+async function createPartner(request: APIRequestContext, firstName: string): Promise<string> {
+  const res = await request.post(`${NEXT}/api/contacts`, {
+    data: { type: 'partner', role: 'Caseworker', firstName, lastName: 'Orglist', phone: uniquePhone() },
+  });
+  expect(res.ok(), await res.text()).toBeTruthy();
+  return ((await res.json()) as { contact: { contactId: string } }).contact.contactId;
+}
+
+/** A contact's stored organization (caseworkers spec D17). */
+async function organizationOf(request: APIRequestContext, contactId: string): Promise<string | undefined> {
+  const res = await request.get(`${NEXT}/api/contacts/${contactId}`);
+  expect(res.ok(), await res.text()).toBeTruthy();
+  return ((await res.json()) as { contact: { organization?: string } }).contact.organization;
+}
+
 test.describe('"Not on the list" (spec D10, D11)', () => {
   test('everyone sees each value with its records; settling it is admin-only', async ({ page }) => {
     await devLogin(page); // the seeded VA
@@ -839,6 +856,62 @@ test.describe('"Not on the list" (spec D10, D11)', () => {
     for (const value of [useValue, moveValue, splitValue, clearValue]) {
       await expect(valueLink(page, value)).toHaveCount(0);
     }
+  });
+
+  test('an organization value (caseworkers D17): its own field; Add as new asks the Kind; Use takes a name of either kind', async ({
+    page,
+  }) => {
+    test.slow(); // two rewrite jobs, strictly one at a time (D11)
+    await devLoginAs(page, 'founder@example.com');
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    // An AGENCY on the list: an organization value is settled against BOTH lists.
+    const wren = `Wren Aid ${stamp}`;
+    await addOrg(req, { kind: 'agency', name: wren });
+    // Two values, neither containing the other.
+    const useValue = wren.toLowerCase(); // resolves to the agency, but is not its exact text
+    const addValue = `Starling Partners ${stamp}`; // resolves to nothing
+    const useHolder = await createPartner(req, `OrgUse${stamp}`);
+    const addHolder = await createPartner(req, `OrgAdd${stamp}`);
+    await setOffListValue(req, { contactId: useHolder, field: 'organization', value: useValue });
+    await setOffListValue(req, { contactId: addHolder, field: 'organization', value: addValue });
+
+    await openOrgSettings(page);
+    await showList(page, UI.notOnListRegion);
+
+    // Each value is an ORGANIZATION value: FIELD_LABEL.organization names its
+    // field in the row's description (matched by prefix - never a count).
+    await expect(valueLink(page, addValue)).toHaveAccessibleDescription(/^Organization - /);
+    await expect(valueLink(page, useValue)).toHaveAccessibleDescription(/^Organization - /);
+
+    // Add as new: staff must pick the list - no default kind (D17; R2-F3).
+    // The value's link opens its panel (its URL names field=organization).
+    const addPanel = await openValue(page, addValue);
+    await expect(addPanel.getByText('Organization', { exact: true })).toBeVisible(); // the Field fact
+    let settle = await pickSettle(addPanel, 'Add as new');
+    const add = settle.getByRole('button', { name: 'Add as new', exact: true });
+    await expect(add).toBeDisabled();
+    const kind = settle.getByRole('group', { name: 'Kind', exact: true });
+    await expect(kind.getByRole('radio', { name: 'Housing authority', exact: true })).not.toBeChecked();
+    await expect(kind.getByRole('radio', { name: 'Agency', exact: true })).not.toBeChecked();
+    await kind.getByRole('radio', { name: 'Housing authority', exact: true }).check();
+    await expect(add).toBeEnabled();
+    await confirmSettle(page, settle, 'Add as new');
+    await waitForRewrite(req, (r) => r.fromTexts.some((t) => sameOrgText(t, addValue)));
+    expect((await requireOrg(req, addValue)).kind).toBe('housing_authority');
+    expect(await organizationOf(req, addHolder)).toBe(addValue);
+
+    // Use <name>: the value resolves to the AGENCY - an organization takes either kind.
+    await page.reload();
+    settle = await pickSettle(await openValue(page, useValue), UI.use(wren));
+    await confirmSettle(page, settle, UI.use(wren));
+    await waitForRewrite(req, (r) => r.action === 'use' && r.fromTexts.some((t) => sameOrgText(t, useValue)));
+    expect(await organizationOf(req, useHolder)).toBe(wren);
+
+    // Both settled values leave the list.
+    await page.reload();
+    await expect(valueLink(page, useValue)).toHaveCount(0);
+    await expect(valueLink(page, addValue)).toHaveCount(0);
   });
 });
 

@@ -276,3 +276,20 @@ and git diff --check pass. Raw labels: 10.8-nonvacuity, 10.8-green,
 artifacts/10.8-before-nonvacuity-2026-10-08T18-04-34-390Z/ and
 artifacts/10.8-nonvacuity-proof-2026-10-08T18-05-21-659Z/.
 No selector deviation or product finding. Task 10.8 complete.
+
+## Task 10.8a - organization values in Not on the list
+
+Task 10.8 commit: 3654dd34. Added the exact planned createPartner and
+organizationOf helpers plus the admin organization-value case. It proves
+Organization descriptions and Field fact, no default Kind and disabled Add
+as new until explicit choice, the resulting housing-authority kind, and Use
+of an agency name. Only run-unique partners/values; sequential rewrites.
+No global count or empty-state assertion. This task is PIN-only; no RED claim.
+
+Cwd W:/tmp/caseworkers: npm run typecheck -w @housingchoice/e2e and
+npx eslint e2e/tests/dashboard-next/org-lists.spec.ts both exit 0.
+npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/org-lists.spec.ts
+exits 0, 16 passed in 37.2s, hard cap 2700s. Added-line ASCII and git diff
+--check pass. Raw labels 10.8a-typecheck, 10.8a-lint, 10.8a-green. Previous
+artifacts copied to artifacts/10.8a-before-green-2026-10-08T18-06-29-877Z/.
+Task 10.8a complete with no selector deviation or product finding.

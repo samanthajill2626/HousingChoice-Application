@@ -95,3 +95,35 @@ GREEN: same command exited 0, 65 tests, zero skipped (6.5-green).
 Root changed-TS lint exited 0, all 15 S6 TypeScript files including the e2e
 pin (exit-lint). No baseline attribution needed. No contract deviation.
 Root npm run typecheck exited 0 across all five workspaces (6.5-typecheck).
+
+## Final S6 closeout - parent verified
+
+Task commits: 6.1 a667df2b; 6.2 7dbd4512; 6.3 94196178; 6.4 870036a1;
+6.5 7b74afd8. Source HEAD for the final proof is 7b74afd8.
+
+Final app command:
+npx vitest run test/broadcastApi.test.ts test/broadcastFanOut.test.ts test/listingSendsApi.test.ts test/contactsBatchReads.test.ts test/contactTimeline.test.ts test/audienceResolution.test.ts test/sendReconcile.test.ts test/unitsApi.test.ts
+Exit 0: "Test Files 8 passed (8)"; "Tests 508 passed (508)"; no skipped
+cases. Exact command, log and exit marker are .superpowers/sdd/S6/exit-regression.*.
+Latest root npm run typecheck exited 0 (6.5-typecheck). All 15 touched TS
+paths lint exited 0 (exit-lint). No DynamoDB fault or timeout was reported.
+
+The parent verified the two direct-recipient predicates, tenant-only filter,
+both fan-out mint sites, separate recipient projection and optional wire fields.
+The worker lifecycle was pending_init when progress was checked after work had
+stopped; the parent stopped that lifecycle and adopted this report closeout.
+There were no caseworkers commands running and the source tree was clean.
+This is recorded as one child recovery; no implementation was restarted.
+
+Downstream: partner seeds/explicit selections work; filters/search remain
+tenant-only. Preview voucher facts are tenant-only. Fresh send/adoption threads
+use conversationTypeFor; existing threads retain their type. Units recipient
+rows carry optional type and trimmed role, unresolved fields omitted; contact
+listings-sent and persisted tenantName/tenantCount remain unchanged. Timeline
+copy is neutral; stored zero keeps the Sent to prefix for recount. The changed
+landlord-activity e2e pin is committed; S10 owns browser execution.
+
+No new production contract deviation. The quoted-pattern zero-selection run is
+non-evidence; the corrected RED is documented above. The optional SeedDoc
+fixture typing correction is covered by a rerun and typecheck. Full checkpoint
+npm run typecheck then npm test is next, owned by the parent before S7.

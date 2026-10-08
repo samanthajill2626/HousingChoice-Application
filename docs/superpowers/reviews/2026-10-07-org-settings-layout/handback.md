@@ -369,3 +369,67 @@ keep-focus, M1 replace) makes its tests fail.
 - `SettleConfirm` now takes `gate`, `onFailedAway` and `onCancel`, and calls
   `resolveNotOnList` through the gate. If B's `settleChoices` adds actions,
   they go through the same confirm unchanged.
+
+## 9. Fix round 2
+
+Source: [`live-check-r2.md`](live-check-r2.md), "Gate 2 failures", on top of
+7fbd93d7. Test files only, with no product code change. The one non-test edit
+is the comment in `e2e/performance/routes.ts`.
+
+| Item | Status | Commit | Change |
+|---|---|---|---|
+| `e2e/performance/routes.test.ts` "route registry completeness" | Fixed | `47938a5` | The Settings children list now includes `/organizations/:orgId?`, so the route maps to `/settings/organizations/:orgId?` and no longer appears as a stray top-level `/organizations/:orgId?`. That path is excluded from the profiler next to `/settings/organizations`, under issue `perf-pages-settings-organizations-surface`. The bare `/organizations` entries stay. |
+| `e2e/performance/routes.ts` TODO comment | Updated | `47938a5` | It now names the `organizations/:orgId?` route and both excluded forms. Its suggested terminal is the list + detail layout (the Housing authorities list region and the panel placeholder), replacing the old "three regions". |
+| `e2e/support/viewport.guard.test.ts` | Fixed | `47938a5` | The org-lists phone-width spec used `document.documentElement.scrollWidth - clientWidth`, which can never fail here. It now calls `expectNoHorizontalOverflow(page, 'org settings list at 390px')`, which measures the routed `<main>`. |
+| Dashboard test race (not in the brief) | Fixed | `601a221` | See below. |
+
+### The dashboard test race
+
+The first full `npm test -w @housingchoice/dashboard` of this round failed
+once:
+
+> FAIL src/routes/settings/OrgListSection.test.tsx > OrgListSection - Add
+> and notes (everyone) > Add opens "Is this really new?" ... -
+> expected '/settings/organizations?view=agencies' to be
+> '/settings/organizations/o-finch?view=agencies'
+
+- **Cause.** The test read the URL right after the dialog closed. The
+  navigation that `onAdded` starts follows the add's answer outside `act`, so
+  it can commit one render later; under full-suite load it hadn't yet. The
+  file passed 6 of 6 times run alone.
+- **Same pattern elsewhere.** The same unguarded URL read sat after Merge and
+  after a settle.
+- **Fix.** All three now `waitFor` the URL. It is a test-only change. The
+  product behavior is unchanged: the URL does change, one commit later.
+
+### Fix round 2 gates (at 601a221, origin/main 20ccdb1, no main sync)
+
+- `npm run typecheck`: exit 0.
+- `npm test -w @housingchoice/dashboard`: exit 0, run twice after the race
+  fix. Both runs: 229 files, 4201 passed, 1 skipped.
+- `npm test -w @housingchoice/e2e`: exit 1, 2 failures, both ENVIRONMENTAL.
+  - Before this round it had 4 failures: the two in the brief, plus these
+    two.
+  - Now: 21 of 22 files and 501 of 503 tests pass.
+  - The two failures are both in `support/maintenancePage.test.ts`:
+    - "renders the canonical copy with no executable or app asset dependency"
+    - "escapes copy as text, including template-looking input"
+  - Both quote: "Terraform maintenance renderer failed; Terraform >=1.15 must
+    be on PATH. spawnSync terraform ENOENT".
+  - `terraform` is not installed in this cloud container (`which terraform`
+    finds nothing). This branch does not touch `e2e/support/maintenancePage*`
+    (`git diff origin/main...HEAD -- e2e/support` is empty).
+  - Your local run, which has Terraform, did not report them.
+- Gate 5: `npx eslint` over the branch's changed `.ts`/`.tsx` files against
+  `origin/main` (14 files): exit 0.
+- `npm run smoke`: exit 0.
+- **Not run here:** `npm run e2e`, the app workspace `npm test`, and a live
+  check (no Docker).
+
+### Noticed, not changed
+
+`docs/issues/perf-pages-settings-organizations-surface.md` "Suggested fix"
+still describes the terminal as "the three regions ... settled". With the
+list + detail layout, the page lands on one list region plus the panel
+placeholder. I left the issue file alone because it is outside this round.
+The `routes.ts` TODO now carries the corrected terminal.

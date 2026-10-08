@@ -2268,4 +2268,123 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(res.status).toBe(200);
     });
   });
+
+  // --- caseworkers (spec 2026-10-06 D20, plan 3.7): a seed or an explicit
+  // recipient may be a TENANT or a PARTNER; a filter stays tenant-only -----
+  describe('caseworkers D20: direct shares accept partners', () => {
+    const PARTNER_PHONE = '+15550100081';
+
+    /** A consented partner (seedTenant's defaults, re-typed). */
+    function seedPartner(overrides: Partial<ContactItem> = {}): ContactItem {
+      return seedTenant(world, {
+        contactId: 'c-partner',
+        type: 'partner',
+        status: 'active',
+        phone: PARTNER_PHONE,
+        firstName: 'Cora',
+        lastName: 'Reyes',
+        ...overrides,
+      });
+    }
+
+    function postSeeded(app: import('express').Express, seedContactIds: string[]) {
+      return request(app)
+        .post('/api/broadcasts')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ unitId: 'unit-1', body_template: 'Hi [TenantName]!', seedContactIds });
+    }
+
+    function step(
+      app: import('express').Express,
+      id: string,
+      which: 'preview' | 'send',
+      body: Record<string, unknown> = {},
+    ) {
+      return request(app)
+        .post(`/api/broadcasts/${id}/${which}`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send(body);
+    }
+
+    it('a partner seed counts in the draft estimate and previews as a resolved, seeded row', async () => {
+      seedUnit(world);
+      seedPartner();
+      const { app } = makeWebhookHarness({ world });
+      const created = await postSeeded(app, ['c-partner']);
+      expect(created.status).toBe(201);
+      expect(created.body.estimatedCount).toBe(1);
+      expect(world.broadcasts.get(created.body.broadcastId)?.audience_mode).toBe('seeds_only');
+
+      const preview = await step(app, created.body.broadcastId, 'preview');
+      expect(preview.status).toBe(200);
+      expect(preview.body.candidates).toHaveLength(1);
+      expect(preview.body.candidates[0]).toMatchObject({
+        contactId: 'c-partner',
+        firstName: 'Cora',
+        lastName: 'Reyes',
+        phone: PARTNER_PHONE,
+        seeded: true,
+        has_consent: true,
+      });
+      expect(preview.body.unresolvedSeedIds).toEqual([]);
+    });
+
+    it('a seeds_only no-body send texts the partner seed', async () => {
+      seedUnit(world);
+      seedPartner();
+      const { app } = makeWebhookHarness({ world });
+      const created = await postSeeded(app, ['c-partner']);
+      const send = await step(app, created.body.broadcastId, 'send');
+      expect(send.status).toBe(200);
+      expect(send.body.count).toBe(1);
+      expect(Object.keys(world.broadcasts.get(created.body.broadcastId)!.recipients)).toEqual(['c-partner']);
+      await queueAdapter.settle();
+      expect(world.sent.map((s) => s.to)).toEqual([PARTNER_PHONE]);
+    });
+
+    it('an explicit selection keeps tenants and partners and still drops landlord, team member, unknown-type and unknown-id contacts', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-ok', phone: '+15550100082' });
+      seedPartner();
+      world.contacts.push({ contactId: 'c-ll2', type: 'landlord', status: 'active', phone: '+15550100083' });
+      world.contacts.push({ contactId: 'c-team', type: 'team_member', status: 'active', phone: '+15550100084' });
+      world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'needs_review', phone: '+15550100085' });
+      const { app } = makeWebhookHarness({ world });
+      const id = await createDraft(app);
+      const send = await step(app, id, 'send', {
+        recipientContactIds: ['c-ok', 'c-partner', 'c-ll2', 'c-team', 'c-unk', 'c-missing'],
+      });
+      expect(send.status).toBe(200);
+      expect(send.body.count).toBe(2);
+      expect(Object.keys(world.broadcasts.get(id)!.recipients).sort()).toEqual(['c-ok', 'c-partner']);
+    });
+
+    it('a partner seed meets every other fence: opted-out, unreachable and phone-less partners (and a landlord) stay unresolved', async () => {
+      seedUnit(world);
+      seedPartner();
+      seedPartner({ contactId: 'c-p-stop', phone: '+15550100086', sms_opt_out: true });
+      seedPartner({ contactId: 'c-p-dead', phone: '+15550100087', sms_unreachable: true });
+      seedPartner({ contactId: 'c-p-nophone', phone: undefined });
+      world.contacts.push({ contactId: 'c-ll-seed', type: 'landlord', status: 'active', phone: '+15550100088' });
+      const { app } = makeWebhookHarness({ world });
+      const created = await postSeeded(app, ['c-partner', 'c-p-stop', 'c-p-dead', 'c-p-nophone', 'c-ll-seed']);
+      const preview = await step(app, created.body.broadcastId, 'preview');
+      expect(preview.status).toBe(200);
+      expect(preview.body.candidates.map((c: { contactId: string }) => c.contactId)).toEqual(['c-partner']);
+      expect(preview.body.unresolvedSeedIds).toEqual(['c-p-stop', 'c-p-dead', 'c-p-nophone', 'c-ll-seed']);
+    });
+
+    it('(PIN) a filter-resolved audience stays tenant-only: a partner who is not a seed is never a candidate', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-filter-t', phone: '+15550100089' });
+      seedPartner();
+      const { app } = makeWebhookHarness({ world });
+      const id = await createDraft(app);
+      const preview = await step(app, id, 'preview');
+      expect(preview.status).toBe(200);
+      expect(preview.body.candidates.map((c: { contactId: string }) => c.contactId)).toEqual(['c-filter-t']);
+    });
+  });
 });

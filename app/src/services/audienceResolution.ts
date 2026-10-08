@@ -142,8 +142,10 @@ export function createAudienceResolutionService(
           });
 
       for (const contact of page.items) {
-        // The byHousingAuthority GSI is tenant-sparse, but defend the type
-        // invariant either way (never text a non-tenant; never relay rosters).
+        // The byHousingAuthority GSI holds every contact type, so this fence is
+        // load-bearing: a FILTER-resolved audience is tenants only (spec
+        // 2026-10-06 D20 - partners join a share only as seeds or explicit
+        // recipients; never relay rosters).
         if (contact.type !== 'tenant') continue;
         // Always exclude STOP'd / unreachable contacts (first TCPA fence). A
         // missing phone is unsendable — drop it.

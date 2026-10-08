@@ -10,10 +10,11 @@
 //   GET  /api/broadcasts/:id/results?view=stats                                      -> { broadcastId, status, unitId, stats, created_at }
 //   GET  /api/broadcasts?status=&limit=                                              → { broadcasts:[...], nextCursor }
 //
-// Audience: TENANT 1:1 contacts ONLY (never relay-group rosters), filtered by
-// housing authority and/or exact bedroom size; opted-out + unreachable are
-// ALWAYS excluded. The send fans out through the SHARED A2P throttle (the
-// broadcast.send job + worker a2pBucket).
+// Audience: a FILTER resolves TENANT 1:1 contacts ONLY (never relay-group
+// rosters), by housing authority and/or exact bedroom size; hand-picked seeds
+// and an explicit recipient list may also name PARTNERS (spec 2026-10-06 D20).
+// Opted-out + unreachable are ALWAYS excluded. The send fans out through the
+// SHARED A2P throttle (the broadcast.send job + worker a2pBucket).
 //
 // Organization names (spec 2026-10-06 D5): POST answers 422 org_not_on_list
 // (field `audience_filter`) when audience_filter.housing_authority is not a
@@ -288,7 +289,7 @@ function trimmedField(value: unknown): string | undefined {
  *   this also stops pulling whole contact documents over the wire.
  * - phone#<E164> keys: phone comes from the key (no lookup).
  * - deleted/unresolvable contacts: omit the fields (never leak the raw key);
- *   the dashboard falls back to today's "Tenant" label. A partial batch (keys
+ *   the dashboard falls back to its neutral "Recipient" label. A partial batch (keys
  *   the table never served) degrades the same way - identity is a label here,
  *   so a short map is survivable. There is NO catch: a rejected read still
  *   500s this endpoint, exactly as a rejected getById did.
@@ -331,6 +332,19 @@ async function enrichRecipients(
     };
   }
   return out;
+}
+
+/**
+ * Spec 2026-10-06 D20 (caseworkers): the contact types a share may text BY
+ * NAME - a seed or an explicitly checked recipient. ONE predicate for
+ * resolveSeeds and the explicit-selection send path, so the two cannot drift.
+ * Filter-resolved audiences stay tenant-only (parseAudienceFilter and the
+ * audience resolver), and the dashboard's recipient search stays tenant-only.
+ * Deleted contacts are NOT fenced here (pre-existing; the fan-out skips them
+ * as contact_deleted).
+ */
+function isDirectShareRecipientType(type: unknown): boolean {
+  return type === 'tenant' || type === 'partner';
 }
 
 /**
@@ -418,8 +432,9 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   // (on completion) and the delivery-callback rollup — NOT this router — so the
   // `events` dep is accepted for API symmetry but not used here.
 
-  /** Resolve seed contact ids to sendable tenants using the SAME fences as the
-   *  explicit-selection send path: exists, type 'tenant', has phone, not
+  /** Resolve seed contact ids to sendable recipients using the SAME fences as
+   *  the explicit-selection send path: exists, type tenant OR partner
+   *  (isDirectShareRecipientType - spec 2026-10-06 D20), has phone, not
    *  sms_opt_out, not sms_unreachable. Anything else lands in `unresolved`.
    *  Seeds are few (1..handful), so per-id getById is fine. */
   async function resolveSeeds(
@@ -431,7 +446,7 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       const c = await contacts.getById(id);
       if (
         !c ||
-        c.type !== 'tenant' ||
+        !isDirectShareRecipientType(c.type) ||
         typeof c.phone !== 'string' ||
         c.phone.length === 0 ||
         c.sms_opt_out === true ||
@@ -783,8 +798,9 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     // `recipients` map + count:
     //  (a) explicit selection — the dashboard's curated checked list (a body
     //      `recipientContactIds`): resolve EACH contact + RE-ENFORCE the same
-    //      hard fences the audience resolver applies (drop unknown / non-tenant
-    //      / opted-out / unreachable / phone-less). The already-sent flag is a
+    //      hard fences the audience resolver applies, except that a partner
+    //      passes too (D20) - drop unknown ids, any other type, opted-out,
+    //      unreachable, phone-less. The already-sent flag is a
     //      preview hint only — NEVER excluded here.
     //  (b) seeds_only no-body - a seeded 1:1/1:N draft (the seeded entry): the
     //      draft carries seed_contact_ids and audience_mode 'seeds_only', so
@@ -824,7 +840,7 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       const survivors: Array<{ contactId?: string; phone: string }> = [];
       for (const contact of fetched) {
         if (!contact) continue; // unknown id — drop
-        if (contact.type !== 'tenant') continue; // never text a non-tenant
+        if (!isDirectShareRecipientType(contact.type)) continue; // tenant or partner only (D20)
         if (contact.sms_opt_out === true) continue; // HARD exclusion (re-enforced)
         if (contact.sms_unreachable === true) continue; // HARD exclusion (re-enforced)
         if (typeof contact.phone !== 'string' || contact.phone.length === 0) continue; // unsendable
@@ -859,7 +875,7 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       // otherwise send to every tenant). Reuse the explicit-path recipient build.
       const seeds = await resolveSeeds(broadcast.seed_contact_ids ?? []);
       if (seeds.contacts.length === 0) {
-        // Every seed dropped (unknown / non-tenant / opted-out / unreachable /
+        // Every seed dropped (unknown / not a tenant or partner / opted-out / unreachable /
         // phone-less) - refuse clearly, leave the draft for the operator.
         res.status(400).json({ error: 'empty_audience' });
         return;

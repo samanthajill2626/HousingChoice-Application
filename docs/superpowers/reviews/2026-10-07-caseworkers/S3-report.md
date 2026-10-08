@@ -170,7 +170,7 @@ The production event bus already isolates failing listeners; no event-bus change
 
 ## Task 3.7 - dismissal
 
-Commit: this Task 3.7 commit (hash recorded in the next report update).
+Commit: c92a68e6.
 Dismiss shares the consistent-read domain, refuses unknown/already-caseworker,
 and writes only caseworker_review: dismissed under notDeleted. No revision bump.
 It appends one contact_updated audit naming only caseworker_review and the actor.
@@ -182,3 +182,27 @@ four dismiss cases failed on its stub, 74 passed (3.7-red). GREEN: the same
 command exited 0, 78 passed (3.7-green). Root npm run typecheck exited 0
 (3.7-typecheck). Root npx eslint app/src/services/caseworkerConversion.ts app/test/caseworkerConversion.test.ts
 exited 0, no lint errors (3.7-lint). No contract deviation.
+
+## Task 3.8 - Possible caseworkers read and correction C3
+
+Commit: this Task 3.8 commit (hash recorded in the final report update).
+Added the read over tenant, landlord and partner partitions, exhausting their
+cursors and applying exact signal bases/order, exclusions and name/ID ordering.
+Tests use contactsPartitionFake unchanged with an explicit fixture limit of 50,
+so they do not rely on its synthetic default. Empty deleted pages, full cursor
+shape, exact-limit extra page, sparse/pointer exclusion and all three tenant
+signals are covered. Production list defaults stay unchanged.
+
+C3 ACCEPTED by the parent: D19 requires another contact's relationship, but the
+drafted reader counted a self-link. The current parseRelationships accepts a
+self contactId, making this reachable through PATCH. Exclude only that self
+relationship in the new signal reader; no parser or route change. Other contacts'
+matching links still count.
+
+Step 0 passed. RED: npx vitest run test/possibleCaseworkers.test.ts exited 1,
+one missing-module suite failure and no collected tests (3.8-red). Against the
+draft reader, the new self-link case failed, eight passed (3.8-c3-red). GREEN:
+the same command exited 0, nine tests passed (3.8-green). Final focused S3
+regressions passed 274 tests in eight files (exit-regression); all seven owned
+TypeScript files lint clean (exit-lint). Root npm run typecheck exited 0
+across all five workspaces (3.8-typecheck). ASCII and whitespace checks passed.

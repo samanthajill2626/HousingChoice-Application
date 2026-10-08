@@ -45,3 +45,18 @@ No contract deviation; no dashboard or seed edits.
 After the typing correction, the affected -t WITHOUT case passed (1 passed,
 96 filtered; 6.2-green-final) and root npm run typecheck exited 0 across all
 five workspaces (6.2-typecheck-final).
+
+## Task 6.3 - both fan-out mint sites
+
+Task 6.2 commit: 7dbd4512. Dependency proof: conversationTypeFor is a leaf
+with type-only imports and existing open-thread reuse remains in the repo.
+Send pass and reconcile adoption now mint using the current contact's type.
+No type re-fence or changes to deleted/consent/opt-out/unreachable/kill-switch
+gates; existing open threads are reused without retyping. tenantCount stays.
+RED: app npx vitest run test/broadcastFanOut.test.ts -t caseworkers exited 1:
+two failed, one passed, 111 filtered (6.3-red). Both fresh partner mint sites
+returned tenant_1to1; the existing unknown thread reuse pin passed.
+GREEN: app npx vitest run test/broadcastFanOut.test.ts test/sendReconcile.test.ts test/broadcastApi.test.ts
+exited 0: three files, 378 tests, zero skipped (6.3-green).
+No contract deviation or import cycle. All existing fan-out gates passed.
+Root npm run typecheck exited 0 across all five workspaces (6.3-typecheck).

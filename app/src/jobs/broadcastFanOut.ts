@@ -1,8 +1,11 @@
-// broadcast.send (M1.8a) - fan a filtered share-broadcast ("Share Properties")
-// out to each matching TENANT's 1:1 conversation, throttled and idempotent.
+// broadcast.send (M1.8a) - fan a share-broadcast ("Share Properties") out to
+// each recipient's 1:1 conversation, throttled and idempotent. A recipient is a
+// tenant or (spec 2026-10-06 D20) a partner; a thread minted here takes the
+// contact's own type (conversationTypeFor - never tenant_1to1 for a partner,
+// invariant I2). There is NO type re-fence at fan-out time (ruling R3-F11).
 //
 // Modeled on relayFanOut.ts, but the unit differs: a broadcast sends a 1:1
-// message to EACH tenant (its own conversation) via the sendMessage wrapper -
+// message to EACH recipient (its own conversation) via the sendMessage wrapper -
 // not a relay fan-out from a pool number.
 //
 // Each recipient is ONE unit with three phases (SOR spec D7a), run inside one
@@ -14,14 +17,14 @@
 //     unreachable -> skipped unreachable; soft-deleted -> skipped
 //     contact_deleted; no consent -> skipped no_consent - NO token, NO send),
 //     each behind the D8 gate so a fence never overwrites a recipient another
-//     attempt owns; the tenant's conversation and the rendered body; then the
+//     attempt owns; the recipient's conversation and the rendered body; then the
 //     CLAIM on the recipient's send-attempt record (D8a), immediately before
 //     the send - a fresh foreign attempt defers the recipient, a terminal one
 //     skips it, a stale one is taken over into reconcile. The send wrapper
 //     re-arms the claim as its last step before the provider call (code
 //     review ADV-1): an attempt taken over meanwhile is not sent. A throw here
 //     sent nothing: the recipient is deferred to the continuation.
-//   - SEND: sendMessage into the tenant's 1:1 conversation, STAMPED with
+//   - SEND: sendMessage into the recipient's 1:1 conversation, STAMPED with
 //     broadcast_id so the delivery callback can roll delivered/failed into the
 //     broadcast stats. A share the dashboard created (created_via 'dashboard')
 //     is a PERSON'S send (automated false: the switch and the breaker do not
@@ -108,6 +111,7 @@ import {
   type SendAttemptsRepo,
 } from '../repos/sendAttemptsRepo.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
+import { conversationTypeFor } from '../lib/voiceMasking.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
   createActivityEventsRepo,
@@ -867,8 +871,14 @@ export function registerBroadcastSendJobHandler(deps: BroadcastSendJobDeps = {})
           await declineAtFence(owner, fence);
           return 'other';
         }
-        // Resolve/find the tenant's 1:1 conversation by phone, then send INTO it.
-        const conversation = await conversationStore.createOrGetByParticipantPhone(contact.phone, 'tenant_1to1');
+        // Resolve/find the recipient's 1:1 conversation by phone, then send INTO
+        // it. An existing open thread is used whatever its type; a thread minted
+        // here takes the contact's OWN type (spec 2026-10-06 D20, invariant I2 -
+        // never tenant_1to1 for a partner).
+        const conversation = await conversationStore.createOrGetByParticipantPhone(
+          contact.phone,
+          conversationTypeFor(contact),
+        );
         const body = renderBody(snapshot.body_template, unitContext, firstNameOf(contact));
         // CLAIM (D8a), immediately before the send: the facts a reconcile
         // matches on - the destination sendMessage texts and the sender it pins.
@@ -1231,7 +1241,7 @@ async function recordPropertySent(
   },
 ): Promise<void> {
   // BE2/C2: a delivered property is a `listing_sent` milestone on the
-  // tenant's timeline. Prefer the unit (the thing sent) as the deep-link
+  // recipient's timeline. Prefer the unit (the thing sent) as the deep-link
   // target; fall back to the broadcast when the broadcast has no unitId.
   const unitId = args.unitId;
   const hasUnit = typeof unitId === 'string' && unitId.length > 0;
@@ -1251,7 +1261,7 @@ async function recordPropertySent(
       'broadcastFanOut: recording listing_sent milestone failed (best-effort)',
     );
   }
-  // BE4/C4: the unit<->contact listing-send row lights the "Sent to tenants" /
+  // BE4/C4: the unit<->contact listing-send row lights the "Sent to" /
   // "Properties sent" pages. ONLY when the broadcast targets a unit (a
   // unit-less broadcast records nothing - there is no property to attribute).
   // A redelivery re-applies the same entry, which the order rule refuses.
@@ -1383,7 +1393,11 @@ export async function adoptBroadcastRecipient(
     // cannot exist for one; refuse to guess where the message belongs.
     throw new Error('adoptBroadcastRecipient: the recipient has no resolvable contact phone');
   }
-  const conversation = await deps.conversations.createOrGetByParticipantPhone(contact.phone, 'tenant_1to1');
+  // Spec 2026-10-06 D20 / I2: the same rule as the pass - the contact's own type.
+  const conversation = await deps.conversations.createOrGetByParticipantPhone(
+    contact.phone,
+    conversationTypeFor(contact),
+  );
   const participantPhone = conversation.participant_phone ?? contact.phone;
   const automated = broadcast.created_via !== 'dashboard';
   const rowStatus = mapTwilioStatus(args.providerStatus);

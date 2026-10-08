@@ -23,6 +23,7 @@ import {
   enqueueImmediate,
 } from '../src/jobs/jobs.js';
 import {
+  adoptBroadcastRecipient,
   BROADCAST_SEND_JOB,
   broadcastBackoffMs,
   finalize,
@@ -291,6 +292,81 @@ describe('broadcast.send (M1.8a)', () => {
     await outbound.settle();
 
     expect(world.auditEvents.filter((e) => e.event_type === 'broadcast_sent')).toHaveLength(0);
+  });
+
+  // --- caseworkers (spec 2026-10-06 D20, invariant I2): a share to a PARTNER
+  // never mints a tenant_1to1 thread - both mint sites use the contact's type.
+  it('caseworkers I2: the send pass mints partner_1to1 for a partner with no thread for this phone; a tenant still gets tenant_1to1', async () => {
+    const partner = seedTenant(world, { contactId: 'c-partner', type: 'partner', firstName: 'Pat', phone: '+15550100061' });
+    const tenant = seedTenant(world, { contactId: 'c-tenant', firstName: 'Tia', phone: '+15550100062' });
+    seedUnit(world);
+    seedBroadcast(world, [partner, tenant]);
+    wireHandler(world, logger);
+    const threadsFor = (phone: string) =>
+      [...world.conversations.values()].filter((c) => c.participant_phone === phone);
+    // No thread for either phone before the share.
+    expect(threadsFor('+15550100061')).toHaveLength(0);
+    expect(threadsFor('+15550100062')).toHaveLength(0);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    expect(threadsFor('+15550100061').map((c) => c.type)).toEqual(['partner_1to1']);
+    expect(threadsFor('+15550100062').map((c) => c.type)).toEqual(['tenant_1to1']);
+    expect(world.sent.map((s) => s.to).sort()).toEqual(['+15550100061', '+15550100062']);
+    expect(world.broadcasts.get('bcast-1')!.recipients['c-partner']?.status).toBe('sent');
+  });
+
+  it('(PIN) caseworkers D20: a partner with an existing open thread is texted INTO it whatever its type (no re-type, no second thread)', async () => {
+    const partner = seedTenant(world, { contactId: 'c-partner', type: 'partner', phone: '+15550100063' });
+    seedUnit(world);
+    const existing = await world.conversationsRepo.createOrGetByParticipantPhone('+15550100063', 'unknown_1to1');
+    seedBroadcast(world, [partner]);
+    wireHandler(world, logger);
+
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    const threads = [...world.conversations.values()].filter((c) => c.participant_phone === '+15550100063');
+    expect(threads.map((c) => [c.conversationId, c.type])).toEqual([[existing.conversationId, 'unknown_1to1']]);
+    expect(world.broadcasts.get('bcast-1')!.recipients['c-partner']?.conversationId).toBe(existing.conversationId);
+  });
+
+  it('caseworkers I2: the send.reconcile ADOPTION mints partner_1to1 for a partner whose phone has no thread (adoptBroadcastRecipient called directly)', async () => {
+    const partner = seedTenant(world, { contactId: 'c-partner', type: 'partner', firstName: 'Pat', phone: '+15550100064' });
+    seedUnit(world);
+    seedBroadcast(world, [partner]);
+
+    const result = await adoptBroadcastRecipient(
+      {
+        broadcasts: world.broadcastsRepo,
+        contacts: world.contactsRepo,
+        conversations: world.conversationsRepo,
+        messages: world.messagesRepo,
+        activityEvents: world.activityEventsRepo,
+        listingSends: world.listingSendsRepo,
+        audit: world.auditRepo,
+        events: world.events,
+        log: logger,
+      },
+      {
+        broadcastId: 'bcast-1',
+        contactKey: 'c-partner',
+        providerSid: 'SMadoptpartner0001',
+        providerTs: new Date().toISOString(),
+        providerStatus: 'sent',
+        body: 'Hi Pat',
+        mediaCount: 0,
+      },
+    );
+
+    expect(result).toBe('adopted');
+    const threads = [...world.conversations.values()].filter((c) => c.participant_phone === '+15550100064');
+    expect(threads.map((c) => c.type)).toEqual(['partner_1to1']);
+    expect(world.broadcasts.get('bcast-1')!.recipients['c-partner']).toMatchObject({
+      status: 'sent',
+      conversationId: threads[0]!.conversationId,
+    });
   });
 
   it('skips an opted-out recipient (skipped_opted_out++), NO token spent, NO send', async () => {

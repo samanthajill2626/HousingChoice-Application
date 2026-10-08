@@ -28,7 +28,8 @@
 //
 // A rewrite's `fields` are FIXED when it starts (spec 5.1): a value action's
 // one field; a rename or merge, every field of the target entry's kind at that
-// moment (recordFieldsForKind). The job and Run again use them as stored.
+// moment (recordFieldsForKind). Branch B: that list ends with
+// `organization` (spec D17). The job and Run again use them as stored.
 //
 // ORG_REWRITE_JOB is declared HERE and re-exported by jobs/orgRewrite.ts: the
 // job module builds this service, so this module must not import it.

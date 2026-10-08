@@ -16,6 +16,9 @@
 // name) is LEFT exactly as it is and reported per field with its record
 // count - the preview of Settings > Housing authorities & agencies > "Not on
 // the list", where staff settle it.
+// It never reads or writes a contact's `organization` (branch B, spec D17):
+// those values are settled in Settings only, so a dry run is not a complete
+// preview of "Not on the list".
 //
 // READS every contact (every type, deleted included; phone/email pointer rows
 // skipped) and every unit (deleted included) from the BASE tables. Every

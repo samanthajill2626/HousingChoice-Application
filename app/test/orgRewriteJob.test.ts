@@ -31,7 +31,7 @@ const USE: OrgRewriteState = runningRewrite({
   fromTexts: ['Atlanta Hsg'],
   toName: ATLANTA.name,
 });
-const ZERO = { housingAuthority: 0, agency: 0, accepted_authorities: 0, skipped: 0, conflicts: 0 };
+const ZERO = { housingAuthority: 0, agency: 0, accepted_authorities: 0, organization: 0, skipped: 0, conflicts: 0 };
 
 /**
  * `def` with a heartbeat of NOW on the clock the services use: a job delivered
@@ -104,6 +104,37 @@ describe('runOrgRewriteJob (spec D11; plan 3.9)', () => {
     expect(world.contacts.every((c) => c['housingAuthority'] === ATLANTA.name)).toBe(true);
     expect((await world.orgListRepo.peek())?.lastRewrite).toMatchObject({ jobId: 'job-1', status: 'done', counts });
     expect(rewritesIn(world).map((e) => e.actorId)).toEqual(['usr_admin', 'usr_admin', 'usr_admin']);
+  });
+
+  it('an agency rename runs its organization pass too, and sums the counts (spec D17)', async () => {
+    const NEW = 'Step Up Atlanta';
+    const entries = ORG_FIXTURE.map((e) => (e.orgId === STEP_UP.orgId ? { ...e, name: NEW } : e));
+    const { world, deps } = await jobWorld(
+      fresh(
+        runningRewrite({
+          jobId: 'job-1',
+          action: 'rename',
+          fromTexts: [STEP_UP.name],
+          fields: ['agency', 'organization'],
+          toName: NEW,
+        }),
+      ),
+      {
+        entries,
+        contacts: [
+          { contactId: 't-1', type: 'tenant', status: 'searching', agency: STEP_UP.name },
+          { contactId: 'p-1', type: 'partner', status: 'active', role: 'Caseworker', organization: STEP_UP.name },
+        ],
+      },
+    );
+    expect(await runOrgRewriteJob({ jobId: 'job-1' }, deps)).toEqual({
+      outcome: 'done',
+      counts: { ...ZERO, agency: 1, organization: 1 },
+    });
+    expect(world.contacts.map((c) => [c['agency'], c['organization']])).toEqual([
+      [NEW, undefined],
+      [undefined, NEW],
+    ]);
   });
 
   it('a rename runs one pass per STORED field (fixed when it started) and sums the counts', async () => {

@@ -21,3 +21,17 @@ the unchanged missing organization signature. These logs are preserved.
 GREEN after the corrected exact anchor: same Vitest command exited 0, 30 tests
 passed, zero skipped (5.1-green-final). Root npm run typecheck exited 0
 (5.1-typecheck-final), all five workspaces. No contract deviation.
+
+## Task 5.2 - organization rewrite passes
+
+Task 5.1 commit: dbc63916. OrgRecordField, pass counts, contact plan and audit
+support organization. Rename/merge of either kind append organization last.
+Move/Split remain refused by passField; cleanup script change is comment-only.
+RED: app npx vitest run test/orgRecords.test.ts test/orgRewriteService.test.ts test/orgRewriteJob.test.ts test/organizationsApi.test.ts
+exited 1: 28 failed / 66 passed, precisely missing organization counts,
+organization writes counted skipped, and missing final rename/merge field.
+GREEN: same command exited 0, four files / 94 tests (5.2-green).
+Regression: app npx vitest run test/orgRecordWriters.integration.test.ts test/cleanOrgNames.test.ts
+exited 0, two files / 69 tests, zero skips; the latter exercises only its
+isolated test fixtures (5.2-regression). Root npm run typecheck exited 0
+(5.2-typecheck). No contract deviation, no job implementation change needed.

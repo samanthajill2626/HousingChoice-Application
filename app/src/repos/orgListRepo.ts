@@ -37,15 +37,15 @@ export type OrgRewriteAction =
   | 'rename' | 'merge' | 'use' | 'move_to_agency'
   | 'move_to_housing_authority' | 'split' | 'clear' | 'cleanup';
 
-/** The record fields a rewrite may touch (branch A). */
-export type OrgRecordField = 'housingAuthority' | 'agency' | 'accepted_authorities';
+/** The record fields a rewrite may touch (branch A; branch B adds a contact's organization, spec D17). */
+export type OrgRecordField = 'housingAuthority' | 'agency' | 'accepted_authorities' | 'organization';
 
 export interface OrgRewriteState {
   jobId: string;
   action: OrgRewriteAction;
   /** Stored texts to rewrite, compared NORMALIZED (D4) by the job. */
   fromTexts: string[];
-  /** The one field a value action targets; absent for rename/merge (all fields of the kind). */
+  /** The one field a value action targets; absent for rename/merge (all fields of the kind, organization last). */
   field?: OrgRecordField;
   /** The record fields the rewrite runs one pass over each (spec 5.1), FIXED
    *  when it starts: a value action's `[field]`; a rename/merge, every field
@@ -57,7 +57,7 @@ export interface OrgRewriteState {
   agencyName?: string;
   status: 'running' | 'done' | 'failed';
   heartbeatAt: string;
-  /** Keys: `housingAuthority`, `agency`, `accepted_authorities` (records
+  /** Keys: `housingAuthority`, `agency`, `accepted_authorities`, `organization` (records
    *  rewritten per field), `skipped` (a record changed meanwhile),
    *  `conflicts` (Move/Split blocked by a value already in the target field). */
   counts?: Record<string, number>;

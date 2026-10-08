@@ -358,7 +358,7 @@ describe('rewrites through the real in-process queue and the org.rewrite job (sp
     expect(after.body.lastRewrite).toMatchObject({
       jobId: started.body.lastRewrite.jobId,
       status: 'done',
-      counts: { housingAuthority: 2, agency: 0, accepted_authorities: 1, skipped: 0, conflicts: 0 },
+      counts: { housingAuthority: 2, agency: 0, accepted_authorities: 1, organization: 0, skipped: 0, conflicts: 0 },
     });
     const audits = h.world.auditEvents.filter((e) => e.event_type === 'org_name_rewrite');
     expect(audits).toHaveLength(3);

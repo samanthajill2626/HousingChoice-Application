@@ -184,8 +184,47 @@ describe('OrgRecordsService.holders (spec D10 "Show records")', () => {
 });
 
 describe('OrgRecordsService.rewrite - one conditional pass over one field (spec D11)', () => {
+  it('an organization pass: use, clear REMOVEs, rename - holders of any type, deleted included (spec D17)', async () => {
+    const { world, records } = setup({
+      contacts: [
+        contact('p-1', { type: 'partner', status: 'active', role: 'Caseworker', organization: 'Steps' }),
+        contact('p-2', { type: 'partner', status: 'active', organization: 'Junk Org' }),
+        contact('t-1', { organization: ATLANTA.name, deleted_at: DELETED_AT }),
+        contact('t-2', { housingAuthority: 'Steps' }), // another field: an organization pass never reads it
+      ],
+    });
+    const use = runningRewrite({ action: 'use', field: 'organization', fromTexts: ['Steps'], toName: STEP_UP.name });
+    expect(await records.rewrite(use, OPTS)).toEqual({ ...ZERO, organization: 1 });
+    expect(contactIn(world, 'p-1')?.['organization']).toBe(STEP_UP.name);
+    expect(contactIn(world, 't-2')?.['housingAuthority']).toBe('Steps');
+    const clear = runningRewrite({ action: 'clear', field: 'organization', fromTexts: ['Junk Org'] });
+    expect(await records.rewrite(clear, OPTS)).toEqual({ ...ZERO, organization: 1 });
+    expect(contactIn(world, 'p-2')).not.toHaveProperty('organization'); // REMOVEd, never ''
+    const rename = runningRewrite({ action: 'rename', field: 'organization', fromTexts: [ATLANTA.name], toName: NEW });
+    expect(await records.rewrite(rename, OPTS)).toEqual({ ...ZERO, organization: 1 });
+    expect(contactIn(world, 't-1')?.['organization']).toBe(NEW);
+    expect(rewrites(world).find((e) => e.entityKey === 'contacts#p-2')?.payload).toEqual({
+      field: 'organization',
+      from: 'Junk Org',
+      to: '',
+      action: 'clear',
+      actor: 'usr_admin',
+    });
+  });
+
+  it('(PIN) Move and Split never rewrite organization - the pass stops before any record', async () => {
+    const { world, records } = setup({ contacts: [contact('p-1', { type: 'partner', status: 'active', organization: 'X' })] });
+    for (const def of [
+      runningRewrite({ action: 'move_to_agency', field: 'organization', fromTexts: ['X'], toName: STEP_UP.name }),
+      runningRewrite({ action: 'split', field: 'organization', fromTexts: ['X'], toName: DCA.name, agencyName: VASH.name }),
+    ]) {
+      await expect(records.rewrite(def, OPTS)).rejects.toBeInstanceOf(OrgRewriteAbortedError);
+    }
+    expect(contactIn(world, 'p-1')?.['organization']).toBe('X');
+  });
+
   const OPTS = { auditType: 'org_name_rewrite', actor: 'usr_admin' } as const;
-  const ZERO = { housingAuthority: 0, agency: 0, accepted_authorities: 0, skipped: 0, conflicts: 0 };
+  const ZERO = { housingAuthority: 0, agency: 0, accepted_authorities: 0, organization: 0, skipped: 0, conflicts: 0 };
   const NEW = 'Housing Authority of the City of Atlanta';
   const rewrites = (world: FakeWorld) => world.auditEvents.filter((e) => e.event_type === 'org_name_rewrite');
   const contactIn = (world: FakeWorld, id: string) => world.contacts.find((c) => c.contactId === id);

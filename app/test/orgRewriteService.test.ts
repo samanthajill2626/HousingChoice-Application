@@ -70,6 +70,23 @@ async function rewriteService(
 }
 
 describe('OrgRewriteService.rename (spec D11, D12)', () => {
+  it('a rename or merge of EITHER kind also rewrites organization, listed LAST (spec D17; R2-F2)', async () => {
+    const ha = await rewriteService();
+    expect((await ha.svc.rename('org-dca', 'Georgia Community Affairs', 'u')).lastRewrite.fields).toEqual([
+      'housingAuthority',
+      'accepted_authorities',
+      'organization',
+    ]);
+    const agency = await rewriteService();
+    expect((await agency.svc.rename('org-stepup', 'Step Up Atlanta', 'u')).lastRewrite.fields).toEqual([
+      'agency',
+      'organization',
+    ]);
+    const STEP_TWO = orgEntry({ orgId: 'org-step2', kind: 'agency', name: 'Step Up Two' });
+    const merged = await rewriteService({ entries: [...ORG_FIXTURE, STEP_TWO] });
+    expect((await merged.svc.merge('org-step2', 'org-stepup', 'u')).lastRewrite.fields).toEqual(['agency', 'organization']);
+  });
+
   it('ONE list write renames, keeps the old name as a spelling, and starts a running rewrite under an id minted first', async () => {
     const { repo, svc, enqueued } = await rewriteService();
     const out = await svc.rename('org-atl', ' Housing Authority of the City of Atlanta ', 'usr_admin');
@@ -86,7 +103,7 @@ describe('OrgRewriteService.rename (spec D11, D12)', () => {
       action: 'rename',
       fromTexts: ['Atlanta Housing Authority'],
       // Fixed NOW, from the entry's kind (spec 5.1): the job never looks the target up again.
-      fields: ['housingAuthority', 'accepted_authorities'],
+      fields: ['housingAuthority', 'accepted_authorities', 'organization'],
       toName: 'Housing Authority of the City of Atlanta',
       status: 'running',
       heartbeatAt: T1,
@@ -284,7 +301,7 @@ describe('OrgRewriteService.merge (spec D11)', () => {
       jobId: 'id-1',
       action: 'merge',
       fromTexts: ['Augusta Housing Authority'],
-      fields: ['housingAuthority', 'accepted_authorities'],
+      fields: ['housingAuthority', 'accepted_authorities', 'organization'],
       toName: ATLANTA.name,
       status: 'running',
       heartbeatAt: T1,
@@ -617,7 +634,7 @@ describe('OrgRewriteService.runAgain (spec D11)', () => {
           jobId: 'job-old',
           action: 'rename',
           fromTexts: ['Old Name'],
-          fields: ['housingAuthority', 'accepted_authorities'],
+          fields: ['housingAuthority', 'accepted_authorities', 'organization'],
           toName: 'Renamed Again Since',
         }),
       ),

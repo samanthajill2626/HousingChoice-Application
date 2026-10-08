@@ -20,7 +20,8 @@
 //
 // THE REWRITE PASS. One call is ONE pass over ONE field (`def.field`); the
 // org.rewrite job runs one pass per member of `lastRewrite.fields` (fixed when
-// the rewrite started - recordFieldsForKind for a rename/merge). A record's
+// the rewrite started - recordFieldsForKind for a rename/merge, organization
+// last). A record's
 // value is rewritten when its NORMALIZED text is a from-text (D11) - or, for a
 // value action whose from-text normalizes to '' (a stored "-"), when it is
 // that EXACT text - through contactsRepo.rewriteOrgFields /
@@ -137,7 +138,7 @@ const CONTACT_TYPE_KEYS: Record<ContactType, true> = {
 const CONTACT_TYPES = Object.keys(CONTACT_TYPE_KEYS) as ContactType[];
 
 /** "Not on the list" rows sort by field in this order, then most records first, then value. */
-const FIELD_ORDER: Record<OrgRecordField, number> = { housingAuthority: 0, agency: 1, accepted_authorities: 2 };
+const FIELD_ORDER: Record<OrgRecordField, number> = { housingAuthority: 0, agency: 1, accepted_authorities: 2, organization: 3 };
 
 function resolutionOf(entries: readonly OrgEntry[], field: OrgRecordField, value: string): NotOnListResolution {
   const r = resolveOrgText(entries, value, KINDS_FOR_FIELD[field]);
@@ -169,9 +170,17 @@ function listText(members: readonly unknown[]): string {
   return members.filter((m): m is string => typeof m === 'string').join(', ');
 }
 
-/** The record fields that hold an entry of each kind (branch A): one pass each. */
+/**
+ * The record fields that hold an entry of each kind: one pass each. A
+ * contact's organization accepts EITHER kind (spec D17), so a rename or
+ * merge of either kind rewrites it too - always LAST: Run again and the
+ * job's claim read the rewrite's kind from its first non-organization
+ * field (services/orgRewrite.ts rewriteTargetKinds; R2-F2).
+ */
 export function recordFieldsForKind(kind: OrgKind): OrgRecordField[] {
-  return kind === 'housing_authority' ? ['housingAuthority', 'accepted_authorities'] : ['agency'];
+  return kind === 'housing_authority'
+    ? ['housingAuthority', 'accepted_authorities', 'organization']
+    : ['agency', 'organization'];
 }
 
 /** A pass stopped part-way (a read or a write threw). `counts` are the writes that landed. */
@@ -205,6 +214,7 @@ interface RewriteCounts {
   housingAuthority: number;
   agency: number;
   accepted_authorities: number;
+  organization: number;
   /** The record changed between the read and the conditional write - left as it is. */
   skipped: number;
   /** Move / Split met a value already in the target field (spec D10). */
@@ -250,7 +260,7 @@ function passField(def: OrgRewriteState): OrgRecordField {
 
 /** One audit event: a field the write changes, from what to what ('' = absent or removed). */
 interface FieldAudit {
-  field: 'housingAuthority' | 'agency';
+  field: 'housingAuthority' | 'agency' | 'organization';
   from: string;
   to: string;
 }
@@ -258,8 +268,8 @@ interface FieldAudit {
 type ContactPlan =
   | {
       kind: 'write';
-      expect: { housingAuthority?: string | null; agency?: string | null };
-      next: { housingAuthority?: string | null; agency?: string };
+      expect: { housingAuthority?: string | null; agency?: string | null; organization?: string | null };
+      next: { housingAuthority?: string | null; agency?: string; organization?: string | null };
       /** One event per field the write changes (plan 3.8): the matched field first. */
       audits: FieldAudit[];
       conflict: boolean;
@@ -272,10 +282,12 @@ type ContactPlan =
  * the matched text in `field`; the other field is read from `c` as the pass
  * saw it. An agency that already holds the SAME name is compatible, never a
  * conflict (plan 3.8): Move drops the now-redundant authority and counts it.
+ * An organization value is only ever used, renamed, merged or cleared
+ * (passField refuses Move and Split): SET the name, or REMOVE it (spec D17).
  */
 function planContactRewrite(
   def: OrgRewriteState,
-  field: 'housingAuthority' | 'agency',
+  field: 'housingAuthority' | 'agency' | 'organization',
   value: string,
   c: ContactItem,
 ): ContactPlan {
@@ -287,6 +299,9 @@ function planContactRewrite(
   const matched = (to: string): FieldAudit => ({ field, from: value, to });
   switch (def.action) {
     case 'clear':
+      if (field === 'organization') {
+        return { kind: 'write', expect: { organization: value }, next: { organization: null }, audits: [matched('')], conflict: false };
+      }
       return field === 'housingAuthority'
         ? { kind: 'write', expect: { housingAuthority: value }, next: { housingAuthority: null }, audits: [matched('')], conflict: false }
         : { kind: 'write', expect: { agency: value }, next: { agency: '' }, audits: [matched('')], conflict: false };
@@ -351,6 +366,9 @@ function planContactRewrite(
       };
     }
     default: // rename, merge, use
+      if (field === 'organization') {
+        return { kind: 'write', expect: { organization: value }, next: { organization: toName }, audits: [matched(toName)], conflict: false };
+      }
       return field === 'housingAuthority'
         ? { kind: 'write', expect: { housingAuthority: value }, next: { housingAuthority: toName }, audits: [matched(toName)], conflict: false }
         : { kind: 'write', expect: { agency: value }, next: { agency: toName }, audits: [matched(toName)], conflict: false };
@@ -499,7 +517,7 @@ export function createOrgRecordsService(deps: OrgRecordsDeps = {}): OrgRecordsSe
     },
 
     async rewrite(def, opts) {
-      const counts: RewriteCounts = { housingAuthority: 0, agency: 0, accepted_authorities: 0, skipped: 0, conflicts: 0 };
+      const counts: RewriteCounts = { housingAuthority: 0, agency: 0, accepted_authorities: 0, organization: 0, skipped: 0, conflicts: 0 };
       let lastBeat = Date.now();
       /** At most every 20 s; throws OrgRewriteLockLostError once the lock is not ours (spec D11). */
       const beat = async (): Promise<void> => {

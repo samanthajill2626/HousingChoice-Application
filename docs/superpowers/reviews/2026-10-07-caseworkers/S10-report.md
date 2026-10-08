@@ -238,3 +238,22 @@ Raw labels: 10.6-nonvacuity, 10.6-green, 10.6-typecheck, 10.6-lint.
 Artifacts copied before each run: artifacts/10.6-before-nonvacuity-2026-10-08T18-00-40-105Z/
 and artifacts/10.6-nonvacuity-proof-2026-10-08T18-01-31-902Z/.
 No selector deviation or product finding. Task 10.6 complete.
+
+## Task 10.7 - Unknown-card conversion and AI suggestion acceptance
+
+Task 10.6 commit: e6d2838a. Added the inbound-created run-unique unknown case,
+exact phone lookup, Mark as Caseworker flow, retained extraction note,
+re-typed thread, resolved suggestion and own-row Today absence assertion.
+No source/selector deviation.
+
+Cwd W:/tmp/caseworkers; npm run e2e -w @housingchoice/e2e --
+tests/dashboard-next/caseworkers.spec.ts (2700s cap). Non-vacuity expected
+fromType tenant: exit 1, exactly 1 failed / 3 passed in 13.6s; line 483
+received fromType unknown. Restored the unique unknown pin. Green exit 0,
+4 passed in 13.8s. npm run typecheck -w @housingchoice/e2e and npx eslint
+e2e/tests/dashboard-next/caseworkers.spec.ts both exit 0. Whole-file ASCII
+and git diff --check pass. Raw labels: 10.7-nonvacuity, 10.7-green,
+10.7-typecheck, 10.7-lint. Artifacts copied before both runs:
+artifacts/10.7-before-nonvacuity-2026-10-08T18-02-41-349Z/ and
+artifacts/10.7-nonvacuity-proof-2026-10-08T18-03-28-742Z/.
+Task 10.7 complete. Task 10.4 remains baseline-red.

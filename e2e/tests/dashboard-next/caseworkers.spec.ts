@@ -26,6 +26,7 @@
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { reseed } from '../../fixtures/reseed.js';
 import { addOrg } from '../../fixtures/orgFixture.js';
+import { extractionTick, sendExtractSms } from '../../fixtures/extraction.js';
 import { ORG_PICKER } from '../../scenarios/steps.js';
 import { expectTodayReady } from '../../support/today.js';
 
@@ -81,6 +82,9 @@ const UI = {
     relationship: 'Linked as a caseworker',
     partnerNoRole: 'Partner with no role',
   },
+  triageHeading: 'Needs triage',
+  markAsCaseworker: 'Mark as Caseworker',
+  todayReview: 'AI suggestions to review',
 };
 
 /** Sign in as the seeded VA (the "Continue as dev user" identity). */
@@ -178,6 +182,42 @@ function possibleRow(page: Page, name: string): Locator {
     .getByRole('list', { name: UI.possibleList, exact: true })
     .getByRole('listitem')
     .filter({ hasText: name });
+}
+
+/**
+ * The auto-captured (unknown) contact an inbound created, by phone - through
+ * the EXACT `?phone=` lookup (a byPhone Query answering 0 or 1 contact,
+ * app/src/routes/contacts.ts), never by scanning `?type=unknown`: that list is
+ * one page of 50, unordered within a status, so a lane holding more than 50
+ * unknowns would hide this one (plan review R1 ruling A11).
+ */
+async function findUnknownContactId(request: APIRequestContext, phone: string): Promise<string> {
+  let contactId: string | undefined;
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get(`${NEXT}/api/contacts?phone=${encodeURIComponent(phone)}`);
+        if (!res.ok()) return false;
+        contactId = ((await res.json()) as { contacts: Array<{ contactId: string; type?: string }> }).contacts.find(
+          (c) => c.type === 'unknown',
+        )?.contactId;
+        return contactId !== undefined;
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+  return contactId as string;
+}
+
+/** The targets of the contact's PENDING AI suggestions. */
+async function pendingSuggestionTargets(request: APIRequestContext, contactId: string): Promise<string[]> {
+  const res = await request.get(`${NEXT}/api/contacts/${contactId}/suggestions`);
+  expect(res.ok(), `suggestions ${contactId}`).toBeTruthy();
+  return ((await res.json()) as { suggestions: Array<{ target: string }> }).suggestions.map((s) => s.target);
+}
+
+function formattedPhone(phone: string): string {
+  return `(${phone.slice(2, 5)}) ${phone.slice(5, 8)}-${phone.slice(8)}`;
 }
 
 test.beforeAll(async ({ request }) => {
@@ -404,5 +444,61 @@ test.describe('Caseworkers - the Possible caseworkers list', () => {
     const dismissed = await readContact(req, norole);
     expect(dismissed).toMatchObject({ type: 'partner', caseworker_review: 'dismissed' });
     expect(dismissed['role']).toBeUndefined();
+  });
+});
+
+test.describe('Caseworkers - the Unknown card', () => {
+  test('Mark as Caseworker converts an inbound unknown contact and accepts the AI partner suggestion', async ({
+    page,
+    request,
+  }) => {
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const phone = uniquePhone();
+    const noteLine = `Identified as a caseworker at Quillwort ${stamp}`;
+
+    // A text from a new number creates an unknown contact and its unknown_1to1
+    // thread; the fake driver turns the body into a partner type suggestion and
+    // an AI note line.
+    await sendExtractSms(request, phone, {
+      typeSuggestion: { value: 'partner', reason: `caseworker at Quillwort ${stamp}` },
+      noteLines: [noteLine],
+    });
+    expect((await extractionTick(request)).processed).toBeGreaterThanOrEqual(1);
+    const contactId = await findUnknownContactId(req, phone);
+    expect(await pendingSuggestionTargets(req, contactId)).toContain('type');
+
+    await page.goto(`${NEXT}/contacts/${contactId}`);
+    const triage = page.locator('section').filter({ has: page.getByRole('heading', { name: UI.triageHeading }) });
+    await triage.getByRole('button', { name: UI.markAsCaseworker, exact: true }).click();
+    // The unknown has no name yet, so the dialog is named by its phone.
+    const dialog = page.getByRole('dialog', { name: UI.anyDialog });
+    await expect(dialog.getByText(UI.retypesOne)).toBeVisible();
+    await dialog.getByRole('button', { name: UI.confirm, exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole('button', { name: UI.markAsCaseworker })).toHaveCount(0);
+
+    const contact = await readContact(req, contactId);
+    expect(contact).toMatchObject({
+      type: 'partner',
+      role: 'Caseworker',
+      status: 'active',
+      type_source: 'manual',
+      caseworker_conversion: { fromType: 'unknown' },
+    });
+    expect(String(contact['notes'])).toContain(noteLine);
+    expect(await readConversationType(req, contactId)).toBe('partner_1to1');
+    // The AI's partner suggestion is resolved by the conversion (accepted
+    // through the canonicalizer, D16): nothing pending, Today's review clear.
+    expect(await pendingSuggestionTargets(req, contactId)).not.toContain('type');
+    await page.goto(`${NEXT}/`);
+    await expectTodayReady(page);
+    await expect(
+      page
+        .getByRole('list', { name: UI.todayReview })
+        .getByRole('listitem')
+        .filter({ hasText: formattedPhone(phone) }),
+    ).toHaveCount(0);
   });
 });

@@ -257,3 +257,22 @@ and git diff --check pass. Raw labels: 10.7-nonvacuity, 10.7-green,
 artifacts/10.7-before-nonvacuity-2026-10-08T18-02-41-349Z/ and
 artifacts/10.7-nonvacuity-proof-2026-10-08T18-03-28-742Z/.
 Task 10.7 complete. Task 10.4 remains baseline-red.
+
+## Task 10.8 - property share from a fresh partner page
+
+Task 10.7 commit: ab3ccb9f. Added exact partner-share.spec.ts. A run-unique
+consented Caseworker gets a fresh Available property; no conversation POST
+occurs before the share. The real share sends exactly one flyer message,
+mints partner_1to1, and appears on both cards with the Caseworker role label.
+
+Cwd W:/tmp/caseworkers; npm run e2e -w @housingchoice/e2e --
+tests/dashboard-next/partner-share.spec.ts (2700s cap). Non-vacuity expected
+tenant_1to1: exit 1, 1 failed at line 170, received partner_1to1 (runner
+11.466s). Restored the assertion; no tenant_1to1 remains. Green exit 0,
+1 passed in 11.8s. npm run typecheck -w @housingchoice/e2e and npx eslint
+e2e/tests/dashboard-next/partner-share.spec.ts both exit 0. Whole-file ASCII
+and git diff --check pass. Raw labels: 10.8-nonvacuity, 10.8-green,
+10.8-typecheck, 10.8-lint. Artifacts copied before both runs:
+artifacts/10.8-before-nonvacuity-2026-10-08T18-04-34-390Z/ and
+artifacts/10.8-nonvacuity-proof-2026-10-08T18-05-21-659Z/.
+No selector deviation or product finding. Task 10.8 complete.

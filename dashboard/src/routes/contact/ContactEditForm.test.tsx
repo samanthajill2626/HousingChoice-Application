@@ -1156,3 +1156,157 @@ describe('ContactEditForm - a picker whose list is not there', () => {
     );
   });
 });
+
+describe('ContactEditForm - caseworkers and the partner organization (spec 2026-10-06 D16, D17)', () => {
+  const PARTNER: Contact = {
+    contactId: 'p1',
+    type: 'partner',
+    status: 'active',
+    firstName: 'Renee',
+    lastName: 'Carter',
+    phone: '+14045550123',
+  };
+  const CASEWORKER: Contact = { ...PARTNER, contactId: 'cw1', role: 'Caseworker', organization: 'Hope Atlanta' };
+  const organization = (): HTMLElement => screen.getByRole('combobox', { name: 'Organization' });
+  const save = (): HTMLElement => screen.getByRole('button', { name: /^Save$/i });
+
+  beforeEach(() => {
+    getOrgList.mockResolvedValue({ version: 1, entries: [...ORG_ENTRIES, orgEntry('agency', 'Hope Atlanta')] });
+  });
+
+  it('offers Caseworker in Change type only when the STORED contact is a caseworker (R4-15)', async () => {
+    const user = userEvent.setup();
+    for (const plain of [PARTNER, TENANT, LANDLORD]) {
+      const { unmount } = render(<ContactEditForm contact={plain} onClose={vi.fn()} onSaved={vi.fn()} />);
+      await user.click(screen.getByRole('button', { name: /Change type/i }));
+      expect(screen.queryByRole('button', { name: 'Caseworker' })).toBeNull();
+      unmount();
+    }
+    render(<ContactEditForm contact={CASEWORKER} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByText('Caseworker - Partner')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    expect(screen.getByRole('button', { name: 'Caseworker' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('a 409 caseworker_use_conversion points to the conversion, not a retry (R4-11)', async () => {
+    const user = userEvent.setup();
+    updateContact.mockRejectedValue(
+      new ApiError(409, 'caseworker_use_conversion', 'caseworker_use_conversion', {
+        error: 'caseworker_use_conversion',
+      }),
+    );
+    render(<ContactEditForm contact={PARTNER} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText(/First name/i), 'X');
+    await user.click(save());
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('To make this contact a caseworker, use More actions > Make caseworker.');
+    expect(alert.textContent ?? '').not.toContain('caseworker_use_conversion');
+  });
+
+  it('a partner gets one Organization picker over both lists; a tenant does not', async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.queryByRole('combobox', { name: 'Organization' })).toBeNull();
+    unmount();
+    render(<ContactEditForm contact={PARTNER} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.queryByRole('combobox', { name: 'Housing authority' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Agency' })).toBeNull();
+    await user.type(organization(), 'atl');
+    expect(await screen.findByRole('option', { name: /^Atlanta Housing Authority/ })).toBeInTheDocument();
+    await user.clear(organization());
+    await user.type(organization(), 'step');
+    expect(await screen.findByRole('option', { name: /^Step Up/ })).toBeInTheDocument();
+  });
+
+  it('a pick goes to organization by FIELD - a housing authority name never lands in housingAuthority (R2-F8)', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...PARTNER, organization: 'Atlanta Housing Authority' });
+    render(<ContactEditForm contact={PARTNER} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(organization(), 'atl');
+    await user.click(await screen.findByRole('option', { name: /^Atlanta Housing Authority/ }));
+    await user.click(save());
+    expect(updateContact).toHaveBeenCalledWith('p1', { organization: 'Atlanta Housing Authority' });
+  });
+
+  it('removing the chip clears organization as an empty string', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...CASEWORKER, organization: undefined });
+    render(<ContactEditForm contact={CASEWORKER} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'Remove Hope Atlanta' }));
+    await user.click(save());
+    expect(updateContact).toHaveBeenCalledWith('cw1', { organization: '' });
+  });
+
+  it('an untouched organization never reaches the wire, even when it is not on the list', async () => {
+    const user = userEvent.setup();
+    const carried: Contact = { ...CASEWORKER, organization: 'Hope Atlanta Inc' };
+    updateContact.mockResolvedValue({ ...carried, firstName: 'ReneeX' });
+    render(<ContactEditForm contact={carried} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(await screen.findByText('Not on the list')).toBeInTheDocument();
+    await user.type(screen.getByLabelText(/First name/i), 'X');
+    await user.click(save());
+    await waitFor(() => expect(updateContact).toHaveBeenCalled());
+    expect(updateContact.mock.calls[0]?.[1]).toStrictEqual({ firstName: 'ReneeX' });
+  });
+
+  it('typed text naming one entry is saved as a pick would be; other text stops Save', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...PARTNER, organization: 'Step Up' });
+    render(<ContactEditForm contact={PARTNER} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(organization(), 'Nowhere Partners');
+    await user.click(save());
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Pick a name from the list, add it as new, or clear the text.',
+    );
+    await user.clear(organization());
+    await user.type(organization(), 'Step Up');
+    await user.click(save());
+    expect(updateContact).toHaveBeenCalledWith('p1', { organization: 'Step Up' });
+  });
+
+  it('"Add <text> as a new organization" opens the organization-mode dialog outside the form; the added name fills the field', async () => {
+    const user = userEvent.setup();
+    addOrg.mockResolvedValue(orgEntry('agency', 'Metro Partners'));
+    updateContact.mockResolvedValue({ ...PARTNER, organization: 'Metro Partners' });
+    render(<ContactEditForm contact={PARTNER} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(organization(), 'Metro Partners');
+    await user.click(await screen.findByRole('option', { name: 'Add Metro Partners as a new organization' }));
+    const dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    expect(dialog.closest('form')).toBeNull();
+    await user.click(within(dialog).getByRole('radio', { name: 'Agency' }));
+    const yes = within(dialog).getByRole('button', { name: 'Yes, add it' });
+    await waitFor(() => expect(yes).toBeEnabled());
+    await user.click(yes);
+    expect(addOrg).toHaveBeenCalledWith(expect.objectContaining({ kind: 'agency', name: 'Metro Partners' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument(),
+    );
+    // Written to organization, NOT to agency, although the entry is an agency.
+    expect(updateContact).not.toHaveBeenCalled();
+    await user.click(save());
+    expect(updateContact).toHaveBeenCalledWith('p1', { organization: 'Metro Partners' });
+  });
+
+  it('a refused save (422 org_not_on_list) on organization shows under its picker', async () => {
+    const user = userEvent.setup();
+    updateContact.mockRejectedValue(
+      new ApiError(422, 'org_not_on_list', 'org_not_on_list', {
+        error: 'org_not_on_list',
+        field: 'organization',
+        text: 'Step Up',
+        candidates: [],
+        close: [],
+      }),
+    );
+    render(<ContactEditForm contact={PARTNER} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(organization(), 'step');
+    await user.click(await screen.findByRole('option', { name: /^Step Up/ }));
+    await user.click(save());
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Step Up is not on the list/);
+    // Changing the field clears it.
+    await user.click(screen.getByRole('button', { name: 'Remove Step Up' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});

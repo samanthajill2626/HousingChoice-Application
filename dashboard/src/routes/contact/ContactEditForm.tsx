@@ -9,6 +9,7 @@
 // just stop showing). On success the parent applies the returned contact in place.
 import { useRef, useState } from 'react';
 import {
+  ApiError,
   TENANT_STATUSES,
   TENANT_STATUS_LABELS,
   LANDLORD_STATUSES,
@@ -70,12 +71,14 @@ import { consentAtFromDate } from '../../lib/consentCopy.js';
 import { RelationshipsEditor } from './RelationshipsEditor.js';
 import { CustomFieldsEditor } from './CustomFieldsEditor.js';
 import { KindPicker, type KindPickerValue } from './KindPicker.js';
+import { isCaseworkerContact } from './caseworkerRole.js';
 import { useContactVocabulary } from './useContactVocabulary.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
 import {
   AGENCY_KINDS,
   HOUSING_AUTHORITY_KINDS,
+  ORGANIZATION_KINDS,
   isOrgFormField,
   newOrgDialogKind,
   orgPickField,
@@ -96,6 +99,11 @@ import {
 import { Modal } from './Modal.js';
 import { LANDLORD_ONBOARDING_HINTS } from './landlordOnboarding.js';
 import styles from './ContactEditForm.module.css';
+
+/** The PATCH refuses a save whose result would make this contact a caseworker
+ *  (409 caseworker_use_conversion, spec D16): the conversion is the only way.
+ *  Reachable only from a stale form - the offer gate below hides the choice. */
+export const CASEWORKER_USE_CONVERSION = 'To make this contact a caseworker, use More actions > Make caseworker.';
 
 export interface ContactEditFormProps {
   contact: Contact;
@@ -157,6 +165,8 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const agencyPicker = useRef<OrgPickerHandle>(null);
   const housingAuthorityText = useTypedOrgText(orgList, HOUSING_AUTHORITY_KINDS, housingAuthorityPicker);
   const agencyText = useTypedOrgText(orgList, AGENCY_KINDS, agencyPicker);
+  const organizationPicker = useRef<OrgPickerHandle>(null);
+  const organizationText = useTypedOrgText(orgList, ORGANIZATION_KINDS, organizationPicker);
 
   // Type + role together - a KindPicker value, kept collapsed behind "Change type"
   // (changingType) since retyping is rare. isTenant/isLandlord derive from the
@@ -168,6 +178,8 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const [changingType, setChangingType] = useState(false);
   const isLandlord = kind.type === 'landlord';
   const isTenant = kind.type === 'tenant';
+  // Partners (caseworkers included) edit their organization (spec D17).
+  const isPartner = kind.type === 'partner';
   // The live base type for status scoping (KindPicker may be momentarily null
   // mid-change; fall back to the stored type).
   const liveType: ContactType = kind.type ?? contact.type;
@@ -208,12 +220,14 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   // The helper organization a tenant works with - a DIFFERENT dimension from the
   // authority that runs the voucher (two lists, spec 2026-10-06 D1).
   const [agency, setAgency] = useState(str(contact.agency));
+  // A partner's organization (spec D17) - one list name of either kind.
+  const [organization, setOrganization] = useState(str(contact.organization));
 
-  /** Each org field's setter in this form - a field the form does not
-   *  edit has none (R2-F8). */
-  const orgSetters: Partial<Record<OrgFormField, (name: string) => void>> = {
+  /** Each org field has its own setter (R2-F8). */
+  const orgSetters: Record<OrgFormField, (name: string) => void> = {
     housingAuthority: setHousingAuthority,
     agency: setAgency,
+    organization: setOrganization,
   };
 
   /** Put a list name where an answer for `field`'s picker belongs
@@ -221,7 +235,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
    *  really new?" can answer with the other kind ("Put it in Agency") - and
    *  an organization keeps a name of either kind. */
   function applyOrg(field: OrgFormField, ref: OrgRef): void {
-    orgSetters[orgPickField(field, ref)]?.(ref.name);
+    orgSetters[orgPickField(field, ref)](ref.name);
     setOrgFieldError(null);
   }
   const [pets, setPets] = useState(str(contact['pets']));
@@ -280,8 +294,12 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const [error, setError] = useState<string | null>(null);
 
   // Build the PATCH from only the fields the user actually changed. `org` is
-  // the two org fields as Save settled them (settleTypedText).
-  function buildPatch(org: { housingAuthority: string; agency: string }): ContactPatch | { error: string } {
+  // the org fields as Save settled them (settleTypedText).
+  function buildPatch(org: {
+    housingAuthority: string;
+    agency: string;
+    organization: string;
+  }): ContactPatch | { error: string } {
     const patch: ContactPatch = {};
     // Type + role from the KindPicker (kind.type is non-null whenever Save is
     // enabled). A cleared role sends '' (the server clears it).
@@ -392,6 +410,13 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         patch.address = { line1, line2, city, state: stateField, zip };
       }
     }
+    // A partner's organization (spec D17): changed only by a pick, a removed
+    // chip ('' - the server REMOVEs it) or committed typed text, so the
+    // comparison is exact and an untouched value - on the list or not - never
+    // reaches the wire (D5).
+    if (isPartner && org.organization !== str(contact.organization)) {
+      patch.organization = org.organization;
+    }
     return patch;
   }
 
@@ -401,12 +426,26 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
    * (useTypedOrgText): text naming exactly one entry is committed as a pick
    * would be - even when the other picker refuses; any other text refuses the
    * save, says why under its picker and the first refused picker takes focus.
-   * Returns the two org field values to save, or null when the save is
+   * Returns the org field values to save, or null when the save is
    * refused. (An Enter in a picker with nothing highlighted submits the form,
    * so it lands here too.)
    */
-  function settleTypedText(): { housingAuthority: string; agency: string } | null {
-    const org = { housingAuthority, agency };
+  function settleTypedText(): { housingAuthority: string; agency: string; organization: string } | null {
+    const org = { housingAuthority, agency, organization };
+    if (isPartner) {
+      // The partner's one picker, settled by the same rule (R4-07).
+      const og = organizationText.settle();
+      if (og.status === 'resolved') {
+        org.organization = og.name;
+        setOrganization(og.name);
+        setOrgFieldError(null);
+      }
+      if (refusesSave(og)) {
+        organizationText.focus();
+        return null;
+      }
+      return org;
+    }
     if (!isTenant) return org;
     const ha = housingAuthorityText.settle();
     const ag = agencyText.settle();
@@ -475,6 +514,9 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       const refused = orgNotOnListBody(err);
       if (refused !== null && isOrgFormField(refused.field)) {
         setOrgFieldError({ field: refused.field, message: notOnListMessage(refused) });
+      } else if (err instanceof ApiError && err.status === 409 && err.code === 'caseworker_use_conversion') {
+        // A save never makes a contact a caseworker (spec D16) - say where to go.
+        setError(CASEWORKER_USE_CONVERSION);
       } else {
         setError("Couldn't save - please try again.");
       }
@@ -540,7 +582,15 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         {changingType ? (
           <div className={styles.fieldset}>
             <span className={styles.label}>Type</span>
-            <KindPicker value={kind} onChange={handleKindChange} roleSuggestions={vocab.roles} />
+            {/* Caseworker is offered only when the STORED contact already is
+                one (spec D16, ruling R4-15): an existing contact becomes a
+                caseworker through More actions > Make caseworker. */}
+            <KindPicker
+              value={kind}
+              onChange={handleKindChange}
+              roleSuggestions={vocab.roles}
+              offerCaseworker={isCaseworkerContact(contact)}
+            />
           </div>
         ) : (
           <div className={styles.kindRow}>
@@ -655,6 +705,37 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               labelClassName={styles.label}
             />
           </>
+        ) : null}
+
+        {/* A partner's organization (spec 2026-10-06 D17): ONE picker over
+            BOTH lists. Its answer is written to `organization` by FIELD,
+            whatever the entry's kind (ruling R2-F8); its add step opens the
+            form's one "Is this really new?" in organization mode. */}
+        {isPartner ? (
+          <OrgPicker
+            ref={organizationPicker}
+            label="Organization"
+            kinds={ORGANIZATION_KINDS}
+            entries={orgList.entries}
+            loading={orgListUnknown(orgList)}
+            disabled={organizationText.disabled}
+            value={organization}
+            onChange={(next) => {
+              setOrganization(next);
+              setOrgFieldError(null);
+            }}
+            onPendingTextChange={organizationText.onPendingTextChange}
+            pendingNote={organizationText.note}
+            onRequestAdd={(text) => setAdding({ field: 'organization', text })}
+            error={
+              organizationText.refusal ??
+              (orgFieldError?.field === 'organization' ? orgFieldError.message : null) ??
+              (orgList.error ? orgListLoadError(ORGANIZATION_KINDS) : null)
+            }
+            errorAttempt={organizationText.refusalAttempt}
+            className={styles.field}
+            labelClassName={styles.label}
+          />
         ) : null}
 
         {isTenant ? (

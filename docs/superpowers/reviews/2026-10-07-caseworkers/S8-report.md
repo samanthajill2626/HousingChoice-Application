@@ -58,3 +58,19 @@ RED: dashboard npx vitest run src/routes/contact/ContactCreateForm.test.tsx,
 exit 1: 1 failed / 15 passed, missing Caseworker button. GREEN: same command,
 exit 0, 16 tests. Root npm run typecheck exit 0 across all five workspaces
 (8.4-typecheck). No contract deviation; existing custom roles still pass.
+
+## Task 8.5 - edit form organization and conversion gate
+
+Task 8.4 commit: 37d6913e. Extended S7 orgSetters to a complete field-keyed
+Record with organization, typed settlement and exact dirty comparison. Both
+kinds land in organization, the existing single NewOrgDialog handles adds,
+and 422s stay under their originating field. Stored contact gates the preset;
+409 caseworker_use_conversion points to More actions > Make caseworker.
+RED: dashboard npx vitest run src/routes/contact/ContactEditForm.test.tsx,
+exit 1, 9 failed / 63 passed: no offered preset, no organization control and
+old generic 409 copy. Later wire checks in cases stopped by the missing
+control were not reached. GREEN: same command exit 0, 72 tests. Root bare
+npm run typecheck exited 0 across five workspaces (8.5-typecheck).
+Existing act warnings remain; no failure excused. ASCII/diff checks pass.
+No contract deviation; redundant optional setter call removed once the map
+became complete, and its stale two-field comments updated.

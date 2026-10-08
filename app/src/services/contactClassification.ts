@@ -179,7 +179,7 @@ export async function drainTypeSuggestion(
           ...(actor !== undefined && { by: actor }),
         });
       } catch (err) {
-        reportFailure(deps, 
+        reportFailure(deps,
           { err, contactId, field: 'type' },
           'ai run verdict stamp failed (best-effort)',
         );

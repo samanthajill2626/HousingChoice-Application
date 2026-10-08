@@ -12,7 +12,7 @@ import { conversationsForContact } from '../lib/contactThreads.js';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { CASEWORKER_ROLE } from './extraction/contactKinds.js';
 import { isCaseworker, type PossibleSignal } from '../lib/caseworkers.js';
-import { appEvents, type EventBus } from '../lib/events.js';
+import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { TERMINAL_STAGES } from '../lib/statusModel.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
@@ -33,10 +33,11 @@ import {
   type ConversationType,
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
-import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
+import { createExtractionRepo, type ExtractionRepo, type SuggestionItem } from '../repos/extractionRepo.js';
 import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
 import { createUnitsRepo, unitContacts, type UnitsRepo } from '../repos/unitsRepo.js';
+import { displayNameOf, drainTypeSuggestion, supersedePendingSuggestion, type SuggestionEffectDeps } from './contactClassification.js';
 import { createOrgNamesService, hasOrgControlChar, type OrgNamesService } from './orgNames.js';
 
 // --- Wire types (plan 3.2; mirrored field-for-field in dashboard/src/api/types.ts)
@@ -350,7 +351,7 @@ export function createCaseworkerConversionService(
    * Steps 2-4 after the commit (or alone, on the repair path). Every failure is
    * logged at error level and swallowed: the contact is already converted and
    * its removed values are safe in caseworker_conversion; `make` again re-runs
-   * these steps (RUNBOOK). Steps 2 and 3 land in Task 3.6.
+   * these steps (RUNBOOK).
    */
   async function followOn(
     contactId: string,
@@ -361,9 +362,66 @@ export function createCaseworkerConversionService(
       priorStatus: string | undefined;
       fields: string[];
       record?: CaseworkerConversionRecord;
+      pendingTypeBefore: SuggestionItem | undefined;
     },
   ): Promise<void> {
-    const retyped = 0; // step 3 (Task 3.6)
+    const verdictAt = now().toISOString();
+    const suggestionDeps: SuggestionEffectDeps = {
+      extraction, aiRuns, log,
+      // C1: shared helpers swallow failures, so report them here at error.
+      reportFailure(fields, message) {
+        log.error(
+          { ...fields, conversion: 'caseworker', repair: ctx.repair },
+          'caseworker conversion: ' + message + ' (make again repairs)',
+        );
+      },
+    };
+
+    // Step 2: the type suggestion through the PATCH's revision-guarded drain
+    // (canonicalSuggestedContactKind(converted) is 'partner' for the exact
+    // Caseworker preset, so an AI partner suggestion records accepted, D16),
+    // then every other pending suggestion superseded with the PATCH's stamps
+    // (a partner is never extracted again, so none would ever resolve).
+    let suggestionsChanged = false;
+    try {
+      if (await drainTypeSuggestion(suggestionDeps, {
+        contactId, committed, pendingTypeBefore: ctx.pendingTypeBefore, verdictAt, actor: ctx.actor,
+      })) suggestionsChanged = true;
+      for (const pending of await extraction.listSuggestionsByContact(contactId)) {
+        if (pending.target === 'type') continue;
+        if (await supersedePendingSuggestion(suggestionDeps, {
+          contactId, target: pending.target, pending, verdict: 'superseded_by_human_edit', verdictAt, actor: ctx.actor,
+        })) suggestionsChanged = true;
+      }
+    } catch (err) {
+      log.error({ err, contactId }, 'caseworker conversion: suggestion sweep failed after the commit (make again repairs)');
+    }
+    if (suggestionsChanged) events.emit('suggestion.updated', { contactId });
+
+    // Step 3: re-type the contact's OWN open one-to-one threads (D21), each
+    // conditional on the type the plan read; a lost condition is skipped and
+    // logged, never thrown. The display name rides the same write (R1-F15).
+    let retyped = 0;
+    try {
+      const plan = await planThreads(committed);
+      const displayName = displayNameOf(committed);
+      for (const { conv, readType } of plan.retype) {
+        try {
+          const result = await conversations.setTypeIfCurrent(conv.conversationId, readType, 'partner_1to1', displayName);
+          if (result.outcome === 'skipped') {
+            log.info({ contactId, conversationId: conv.conversationId }, 'caseworker conversion: thread type changed since the read; left as is');
+            continue;
+          }
+          retyped += 1;
+          // Built from the UPDATED row setTypeIfCurrent returns (plan 3.3).
+          events.emit('conversation.updated', toConversationUpdatedEvent(result.conversation));
+        } catch (err) {
+          log.error({ err, contactId, conversationId: conv.conversationId }, 'caseworker conversion: thread re-type failed after the commit (make again repairs)');
+        }
+      }
+    } catch (err) {
+      log.error({ err, contactId }, 'caseworker conversion: thread plan failed after the commit (make again repairs)');
+    }
     try {
       await audit.append(`contacts#${contactId}`, 'contact_updated', {
         fields: ctx.fields,
@@ -390,7 +448,23 @@ export function createCaseworkerConversionService(
     } catch (err) {
       log.error({ err, contactId }, 'caseworker conversion: role vocabulary add failed after the commit');
     }
-    void committed; // read by steps 2-3 (Task 3.6)
+  }
+
+  /** Consistent snapshot before a fresh commit, or within post-commit repair. */
+  async function readTypeSuggestion(contactId: string, repair = false): Promise<SuggestionItem | undefined> {
+    try {
+      return await extraction.getSuggestion(contactId, 'type', { consistentRead: true });
+    } catch (err) {
+      if (repair) {
+        log.error(
+          { err, contactId, conversion: 'caseworker', repair },
+          'caseworker conversion: repair type suggestion read failed (best-effort)',
+        );
+      } else {
+        log.warn({ err, contactId }, 'type suggestion pre-write read failed (best-effort)');
+      }
+      return undefined;
+    }
   }
 
   return {
@@ -447,7 +521,9 @@ export function createCaseworkerConversionService(
       if (isCaseworker(c)) {
         // Rule 2, the repair path: steps 2-4 only. A request organization is
         // ignored here (no commit runs). readSubject re-checked deletion.
-        await followOn(contactId, c, { actor, repair: true, priorStatus: read.status, fields: [] });
+        await followOn(contactId, c, { actor, repair: true, priorStatus: read.status, fields: [],
+          pendingTypeBefore: await readTypeSuggestion(contactId, true),
+        });
         return c;
       }
 
@@ -484,6 +560,7 @@ export function createCaseworkerConversionService(
         housingAuthority_source: null,
         caseworker_conversion: record,
       };
+      const pendingTypeBefore = await readTypeSuggestion(contactId);
       let converted: ContactItem;
       try {
         converted = await contacts.update(contactId, patch, {
@@ -509,7 +586,7 @@ export function createCaseworkerConversionService(
         'caseworker conversion committed',
       );
       await followOn(contactId, converted, {
-        actor, repair: false, priorStatus: read.status, fields: Object.keys(patch), record,
+        actor, repair: false, priorStatus: read.status, fields: Object.keys(patch), record, pendingTypeBefore,
       });
       return converted;
     },

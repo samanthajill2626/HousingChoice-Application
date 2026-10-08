@@ -634,3 +634,293 @@ describe('make raw guard boundaries', () => {
     expect(world.auditEvents).toEqual([]);
   });
 });
+
+describe('make - step 2: the suggestions (D16, D19)', () => {
+  it("drains the type suggestion as accepted (the canonicalizer's partner preset) and supersedes every other one", async () => {
+    const { world, service } = setup();
+    seed(world, { type: 'unknown', status: 'needs_review' });
+    const stamps: Array<[string, string, string, unknown]> = [];
+    world.aiRuns.setVerdict = async (runId, target, verdict, opts) => {
+      stamps.push([runId, target, verdict, opts?.by]);
+      return true;
+    };
+    await world.extractionRepo.putSuggestion({
+      ownerContactId: ID, target: 'type', suggestedValue: 'partner', conversationId: 'cv', runId: 'run-1',
+      contactClassificationRevision: 0,
+    });
+    await world.extractionRepo.putSuggestion({ ownerContactId: ID, target: 'housingAuthority', suggestedValue: 'AHA', conversationId: 'cv', runId: 'run-1' });
+    await world.extractionRepo.putSuggestion({ ownerContactId: ID, target: 'pets', suggestedValue: 'a dog', conversationId: 'cv', runId: 'run-1' });
+    await service.make(ID, { actor: ACTOR });
+    expect(await world.extractionRepo.listSuggestionsByContact(ID)).toEqual([]);
+    expect(stamps.sort()).toEqual([
+      ['run-1', 'housingAuthority', 'superseded_by_human_edit', ACTOR],
+      ['run-1', 'pets', 'superseded_by_human_edit', ACTOR],
+      ['run-1', 'type', 'accepted', ACTOR],
+    ]);
+    expect(world.emitted.filter((e) => e.event === 'suggestion.updated')).toEqual([
+      { event: 'suggestion.updated', payload: { contactId: ID } },
+    ]);
+  });
+
+  it('a tenant type suggestion is superseded, not accepted', async () => {
+    const { world, service } = setup();
+    seed(world, { type: 'unknown', status: 'needs_review' });
+    const verdicts: string[] = [];
+    world.aiRuns.setVerdict = async (_r, _t, verdict) => { verdicts.push(verdict); return true; };
+    await world.extractionRepo.putSuggestion({
+      ownerContactId: ID, target: 'type', suggestedValue: 'tenant', conversationId: 'cv', runId: 'run-1',
+      contactClassificationRevision: 0,
+    });
+    await service.make(ID, { actor: ACTOR });
+    expect(verdicts).toEqual(['superseded_by_human_edit']);
+  });
+});
+
+describe('make - step 3: the threads (D21)', () => {
+  const OPEN = { status: 'open', ai_mode: 'auto', last_activity_at: NOW, created_at: NOW };
+
+  it("re-types the contact's own threads to partner_1to1 with the name, leaves shared ones, emits per thread", async () => {
+    const { world, service } = setup();
+    seed(world, { email: 'ana@example.org' });
+    seed(world, { contactId: 'c-household', phone: '+15550107020' });
+    world.contacts.find((c) => c.contactId === ID)!.phones = [
+      { phone: PHONE, primary: true },
+      { phone: '+15550107020', primary: false },
+    ];
+    world.conversations.set('cv-own', { conversationId: 'cv-own', ...OPEN, type: 'tenant_1to1', participant_phone: PHONE } as never);
+    world.conversations.set('cv-mail', { conversationId: 'cv-mail', ...OPEN, type: 'unknown_1to1', participant_email: 'ana@example.org' } as never);
+    world.conversations.set('cv-shared', { conversationId: 'cv-shared', ...OPEN, type: 'tenant_1to1', participant_phone: '+15550107020' } as never);
+    await service.make(ID, { actor: ACTOR });
+    expect(world.conversations.get('cv-own')).toMatchObject({ type: 'partner_1to1', participant_display_name: 'Ana Ruiz' });
+    expect(world.conversations.get('cv-mail')).toMatchObject({ type: 'partner_1to1', participant_display_name: 'Ana Ruiz' });
+    expect(world.conversations.get('cv-shared')?.type).toBe('tenant_1to1');
+    const updated = world.emitted.filter((e) => e.event === 'conversation.updated');
+    expect(updated.map((e) => (e.payload as { conversationId: string }).conversationId).sort()).toEqual(['cv-mail', 'cv-own']);
+    expect(world.auditEvents.find((e) => e.event_type === 'contact_updated')?.payload).toMatchObject({
+      propagatedConversations: 2, conversationType: 'partner_1to1',
+    });
+  });
+
+  it('skips a thread whose type changed after the plan read it (conditional on the read type)', async () => {
+    const { world, service } = setup();
+    seed(world);
+    world.conversations.set('cv-own', { conversationId: 'cv-own', ...OPEN, type: 'unknown_1to1', participant_phone: PHONE } as never);
+    const original = world.conversationsRepo.setTypeIfCurrent.bind(world.conversationsRepo);
+    world.conversationsRepo.setTypeIfCurrent = async (id, expected, next, name) => {
+      world.conversations.get(id)!.type = 'landlord_1to1'; // a triage landed in between
+      return original(id, expected, next, name);
+    };
+    await service.make(ID, { actor: ACTOR });
+    expect(world.conversations.get('cv-own')?.type).toBe('landlord_1to1');
+    expect(world.emitted.filter((e) => e.event === 'conversation.updated')).toEqual([]);
+  });
+});
+
+describe('make - the repair path (rule 2) and failures after the commit', () => {
+  const OPEN = { status: 'open', ai_mode: 'auto', last_activity_at: NOW, created_at: NOW };
+
+  it('on a caseworker re-runs steps 2-4 only: no refusals, no commit, no new record, no milestone', async () => {
+    const { world, service } = setup();
+    seed(world, {
+      type: 'partner', status: 'active', role: 'Caseworker', type_source: 'manual', classification_revision: 2,
+    });
+    tour(world, 'tr-1', 'scheduled'); // would refuse a conversion; the repair does not check
+    world.conversations.set('cv-own', { conversationId: 'cv-own', ...OPEN, type: 'unknown_1to1', participant_phone: PHONE } as never);
+    await world.extractionRepo.putSuggestion({ ownerContactId: ID, target: 'pets', suggestedValue: 'a dog', conversationId: 'cv' });
+    const contact = await service.make(ID, { actor: ACTOR, organization: 'Nowhere Org' });
+    expect(contact.classification_revision).toBe(2);
+    expect('caseworker_conversion' in contact).toBe(false);
+    expect('organization' in contact).toBe(false);
+    expect(world.conversations.get('cv-own')?.type).toBe('partner_1to1');
+    expect(await world.extractionRepo.listSuggestionsByContact(ID)).toEqual([]);
+    expect(world.auditEvents.find((e) => e.event_type === 'contact_updated')?.payload).toMatchObject({
+      repair: true, conversion: 'caseworker', fields: [],
+    });
+    expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed')).toEqual([]);
+  });
+
+  it('the repair path re-checks deletion first', async () => {
+    const { world, service } = setup();
+    seed(world, { type: 'partner', status: 'active', role: 'Caseworker', deleted_at: '2026-10-05T00:00:00.000Z' });
+    const err = await refused(service.make(ID, { actor: ACTOR }));
+    expect([err.status, err.code]).toEqual([404, 'contact_not_found']);
+  });
+
+  it('a failure after the commit is logged at error level and never thrown', async () => {
+    const { world, service, capture } = setup();
+    seed(world);
+    world.conversations.set('cv-own', { conversationId: 'cv-own', ...OPEN, type: 'unknown_1to1', participant_phone: PHONE } as never);
+    world.failAuditAppendFor.add('contact_updated');
+    world.conversationsRepo.setTypeIfCurrent = async () => {
+      throw new Error('injected thread write failure');
+    };
+    const contact = await service.make(ID, { actor: ACTOR });
+    expect(contact).toMatchObject({ type: 'partner', role: 'Caseworker' });
+    expect(capture.atLevel(50).length).toBeGreaterThanOrEqual(2);
+    expect(capture.atLevel(50).every((l) => String(l['msg']).startsWith('caseworker conversion'))).toBe(true);
+  });
+});
+
+// C1: errors swallowed inside shared helpers must still reach conversion error logs.
+describe('post-commit suggestion failures (C1)', () => {
+  it.each(['type-read', 'type-delete', 'other-delete', 'type-verdict', 'other-verdict', 'exhausted'] as const)(
+    'returns the committed conversion and logs %s at error with context', async (failure) => {
+      const { world, service, capture } = setup();
+      seed(world, { agency: 'Neighborhood Helpers', housingAuthority: 'Atlanta Housing Authority' });
+      const target = failure.startsWith('other') ? 'pets' : 'type';
+      if (failure !== 'type-read') await world.extractionRepo.putSuggestion({
+        ownerContactId: ID, target, suggestedValue: target === 'type' ? 'partner' : 'a dog',
+        conversationId: 'cv', runId: 'run-1', contactClassificationRevision: 0,
+      });
+      const error = new Error('injected ' + failure);
+      if (failure === 'type-read') {
+        const original = world.extractionRepo.getSuggestion.bind(world.extractionRepo);
+        vi.spyOn(world.extractionRepo, 'getSuggestion').mockImplementation((...args) => {
+          if (stored(world)?.type === 'partner') return Promise.reject(error);
+          return original(...args);
+        });
+      }
+      if (failure === 'type-delete') vi.spyOn(world.extractionRepo, 'deleteTypeSuggestionIfCurrentAtContactRevision').mockRejectedValue(error);
+      if (failure === 'other-delete') vi.spyOn(world.extractionRepo, 'deleteSuggestionIfCurrent').mockRejectedValue(error);
+      if (failure.endsWith('verdict')) vi.spyOn(world.aiRuns, 'setVerdict').mockRejectedValue(error);
+      const drain = failure === 'exhausted'
+        ? vi.spyOn(world.extractionRepo, 'deleteTypeSuggestionIfCurrentAtContactRevision').mockResolvedValue('suggestion_changed_or_absent')
+        : undefined;
+      const contact = await service.make(ID, { actor: ACTOR });
+      expect(contact).toMatchObject({
+        type: 'partner', role: 'Caseworker', classification_revision: 1,
+        caseworker_conversion: { agency: 'Neighborhood Helpers', housingAuthority: 'Atlanta Housing Authority' },
+      });
+      expect(capture.atLevel(50)).toEqual([
+        expect.objectContaining({
+          contactId: ID, conversion: 'caseworker', repair: false,
+          msg: expect.stringContaining(failure === 'exhausted' ? 'exhausted bounded retries' : 'failed (best-effort)'),
+        }),
+      ]);
+      expect(capture.atLevel(40)).toEqual([]);
+      expect(world.auditEvents.filter((event) => event.event_type === 'contact_updated')).toHaveLength(1);
+      expect(world.vocabularyAdds).toEqual([{ roles: ['Caseworker'] }]);
+      if (drain) expect(drain).toHaveBeenCalledTimes(4);
+    },
+  );
+
+  it('logs a failed repair read at error even when the drain read then succeeds', async () => {
+    const { world, service, capture } = setup();
+    seed(world, { type: 'partner', role: 'Caseworker', status: 'active', classification_revision: 2 });
+    await world.extractionRepo.putSuggestion({
+      ownerContactId: ID, target: 'type', suggestedValue: 'partner', conversationId: 'cv',
+      runId: 'run-1', contactClassificationRevision: 0,
+    });
+    vi.spyOn(world.extractionRepo, 'getSuggestion').mockRejectedValueOnce(new Error('repair snapshot failed'));
+    await expect(service.make(ID, { actor: ACTOR })).resolves.toMatchObject({ type: 'partner', role: 'Caseworker' });
+    expect(await world.extractionRepo.listSuggestionsByContact(ID)).toEqual([]);
+    expect(capture.atLevel(50)).toEqual([
+      expect.objectContaining({ contactId: ID, conversion: 'caseworker', repair: true }),
+    ]);
+    expect(capture.atLevel(40)).toEqual([]);
+  });
+});
+
+describe('conversion follow-on boundaries', () => {
+  const OPEN = { status: 'open', ai_mode: 'auto', last_activity_at: NOW, created_at: NOW };
+
+  it('repair preserves the existing record and organization, skips commit and refusals, and emits once per effect', async () => {
+    const { world, service } = setup();
+    const record = { at: '2026-10-01T00:00:00.000Z', by: 'original-user', fromType: 'tenant' as const, agency: 'Original Agency' };
+    seed(world, {
+      type: 'partner', role: 'Caseworker', status: 'active', classification_revision: 4,
+      organization: 'Original Org', caseworker_conversion: record,
+    });
+    const before = structuredClone(stored(world));
+    const update = vi.spyOn(world.contactsRepo, 'update');
+    const placements = vi.spyOn(world.placementsRepo, 'listByTenant');
+    const tours = vi.spyOn(world.toursRepo, 'listByTenant');
+    const units = vi.spyOn(world.unitsRepo, 'list');
+    world.conversations.set('repair-own', { conversationId: 'repair-own', ...OPEN, type: 'unknown_1to1', participant_phone: PHONE } as never);
+    await world.extractionRepo.putSuggestion({ ownerContactId: ID, target: 'pets', suggestedValue: 'cat', conversationId: 'cv' });
+    await service.make(ID, { actor: ACTOR, organization: '' });
+    expect(stored(world)).toEqual(before);
+    expect(update).not.toHaveBeenCalled();
+    expect(placements).not.toHaveBeenCalled();
+    expect(tours).not.toHaveBeenCalled();
+    expect(units).not.toHaveBeenCalled();
+    expect(world.auditEvents.filter((event) => event.event_type === 'contact_updated')).toHaveLength(1);
+    expect(world.activityEvents).toEqual([]);
+    expect(world.vocabularyAdds).toEqual([{ roles: ['Caseworker'] }]);
+    expect(world.emitted.filter((event) => event.event === 'suggestion.updated')).toHaveLength(1);
+    expect(world.emitted.filter((event) => event.event === 'conversation.updated')).toHaveLength(1);
+  });
+
+  it('builds the conversation event from the returned updated row', async () => {
+    const { world, service } = setup();
+    seed(world);
+    world.conversations.set('cv-returned', { conversationId: 'cv-returned', ...OPEN, type: 'tenant_1to1', participant_phone: PHONE } as never);
+    const original = world.conversationsRepo.setTypeIfCurrent.bind(world.conversationsRepo);
+    world.conversationsRepo.setTypeIfCurrent = async (...args) => {
+      const result = await original(...args);
+      return result.outcome === 'skipped' ? result : {
+        outcome: 'updated',
+        conversation: { ...result.conversation, unread_count: 37, last_message_preview: 'Returned preview', last_activity_at: '2026-10-07T13:00:00.000Z' },
+      };
+    };
+    await service.make(ID, { actor: ACTOR });
+    expect(world.emitted.filter((event) => event.event === 'conversation.updated')).toEqual([{
+      event: 'conversation.updated',
+      payload: {
+        conversationId: 'cv-returned', type: 'partner_1to1', participant_display_name: 'Ana Ruiz',
+        unread_count: 37, preview: 'Returned preview', last_activity_at: '2026-10-07T13:00:00.000Z',
+      },
+    }]);
+  });
+
+  it('passes null when the contact has no name, preserving the existing thread name', async () => {
+    const { world, service } = setup();
+    seed(world, { firstName: '', lastName: '   ' });
+    world.conversations.set('cv-nameless', { conversationId: 'cv-nameless', ...OPEN, type: 'unknown_1to1', participant_phone: PHONE, participant_display_name: 'Existing name' } as never);
+    const retype = vi.spyOn(world.conversationsRepo, 'setTypeIfCurrent');
+    await service.make(ID, { actor: ACTOR });
+    expect(retype).toHaveBeenCalledExactlyOnceWith('cv-nameless', 'unknown_1to1', 'partner_1to1', null);
+    expect(world.conversations.get('cv-nameless')?.participant_display_name).toBe('Existing name');
+  });
+
+  it.each([0, 1])('preserves revision and identity semantics for a racing type replacement at revision %s', async (revision) => {
+    const { world, service } = setup();
+    seed(world);
+    await world.extractionRepo.putSuggestion({
+      ownerContactId: ID, target: 'type', suggestedValue: 'partner', conversationId: 'cv', runId: 'old-run', contactClassificationRevision: 0,
+    });
+    const verdict = vi.spyOn(world.aiRuns, 'setVerdict');
+    const original = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (...args) => {
+      await world.extractionRepo.putSuggestion({
+        ownerContactId: ID, target: 'type', suggestedValue: 'partner', conversationId: 'cv', runId: 'replacement-run', contactClassificationRevision: revision,
+      });
+      return original(...args);
+    };
+    await service.make(ID, { actor: ACTOR });
+    if (revision === 0) {
+      expect(await world.extractionRepo.getSuggestion(ID, 'type')).toBeUndefined();
+      expect(verdict).toHaveBeenCalledExactlyOnceWith('replacement-run', 'type', 'superseded_by_human_edit', expect.objectContaining({ by: ACTOR }));
+    } else {
+      expect(await world.extractionRepo.getSuggestion(ID, 'type')).toMatchObject({ runId: 'replacement-run', contactClassificationRevision: 1 });
+      expect(verdict).not.toHaveBeenCalled();
+      expect(world.emitted.filter((event) => event.event === 'suggestion.updated')).toEqual([]);
+    }
+  });
+
+  it.each(['suggestion-list', 'thread-plan', 'milestone', 'vocabulary'] as const)('logs %s failure after commit and returns the converted contact', async (failure) => {
+    const { world, service, capture } = setup();
+    seed(world, { agency: 'Neighborhood Helpers' });
+    const error = new Error('injected ' + failure);
+    if (failure === 'suggestion-list') vi.spyOn(world.extractionRepo, 'listSuggestionsByContact').mockRejectedValue(error);
+    if (failure === 'thread-plan') vi.spyOn(world.conversationsRepo, 'findByParticipantPhone').mockRejectedValue(error);
+    if (failure === 'milestone') vi.spyOn(world.activityEventsRepo, 'record').mockRejectedValue(error);
+    if (failure === 'vocabulary') vi.spyOn(world.vocabularyRepo, 'add').mockRejectedValue(error);
+    await expect(service.make(ID, { actor: ACTOR })).resolves.toMatchObject({
+      type: 'partner', role: 'Caseworker', caseworker_conversion: { agency: 'Neighborhood Helpers' },
+    });
+    expect(capture.atLevel(50)).toHaveLength(1);
+    expect(capture.atLevel(50)[0]).toMatchObject({ contactId: ID, msg: expect.stringMatching(/^caseworker conversion:/) });
+    expect(world.auditEvents.filter((event) => event.event_type === 'contact_updated')).toHaveLength(1);
+  });
+});

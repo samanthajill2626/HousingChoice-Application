@@ -119,7 +119,7 @@ exited 0, 36 passed (3.4-green). Root npm run typecheck exited 0
 
 ## Task 3.5 - conditional commit and step-4 effects
 
-Commit: this Task 3.5 commit (hash recorded in the next report update).
+Commit: 1e9f5244.
 make now recomputes refusals, checks a requested organization against both kinds,
 and commits one update guarded by raw revision and all three raw org fields plus
 notDeleted. The write changes type/role/status/manual source, bumps the revision,
@@ -135,3 +135,35 @@ pins cover stored zero/empty values, absent revision racing stored zero, and a
 missing-row reread. The explicit-clear case starts with a stored organization,
 so it proves removal. Root npm run typecheck exited 0 (3.5-typecheck).
 No contract deviation. The suggestion/thread follow-ons remain Task 3.6 work.
+
+## Task 3.6 - suggestion sweep, thread writes and repair
+
+Commit: this Task 3.6 commit (hash recorded in the next report update).
+The conversion now captures a prewrite type identity, drains it using the shared
+revision/identity semantics, then supersedes other suggestions. Own threads use
+setTypeIfCurrent with the captured type and display name; events use the returned
+updated row. A lost thread condition is logged/skipped. Repair repeats follow-ons
+without refusals, a contact write, an organization change or a replacement record.
+
+C1 completed: followOn supplies the optional error reporter with contactId,
+conversion and repair context. Type read/delete, other delete, both verdict paths
+and four-attempt exhaustion all produce error logs while committed make succeeds.
+Parent also approved treating repair's initial type read as post-commit work:
+it logs error even if the subsequent drain read succeeds. Fresh prewrite reads
+retain the prior warning behavior. No rollback, retry or identity redesign.
+The shared helper also had one trailing space removed; no logic changed there.
+
+Step 0 passed. RED: npx vitest run test/caseworkerConversion.test.ts exited 1,
+six missing-follow-on cases failed and 52 passed (3.6-red). After draft wiring,
+seven C1 cases failed because no error log was emitted, 58 passed (3.6-c1-red).
+After the reporter fix, npx vitest run test/caseworkerConversion.test.ts test/contactClassification.test.ts
+exited 0: two files, 79 tests (3.6-c1-green).
+
+Expanded GREEN:
+npx vitest run test/caseworkerConversion.test.ts test/contactClassification.test.ts test/aiRunVerdicts.test.ts test/contactTriage.test.ts
+exited 0: four files, 196 tests (3.6-green), including nine extra boundaries:
+repair preserves saved values and emits each effect once; returned-row event
+fields; null display name; racing replacement at old/current revisions; and
+suggestion-list, thread-plan, milestone and vocabulary failures after commit.
+Root npm run typecheck exited 0 (3.6-typecheck). ASCII and git diff --check passed.
+The production event bus already isolates failing listeners; no event-bus change.

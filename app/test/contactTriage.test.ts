@@ -709,3 +709,122 @@ describe('POST /api/contacts/:contactId/opt-out — manual Do-Not-Contact toggle
     expect(res.status).toBe(404);
   });
 });
+
+describe('PATCH /api/contacts/:id - caseworkers (spec 2026-10-06 D16, D21)', () => {
+  function seed(world: ReturnType<typeof makeWebhookHarness>['world'], over: Record<string, unknown>): void {
+    world.contacts.push({ contactId: 'c-cw', status: 'onboarding', phone: '+15550107401', type: 'tenant', ...over } as never);
+  }
+  function send(app: import('express').Express, body: Record<string, unknown>) {
+    return request(app)
+      .patch('/api/contacts/c-cw')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send(body);
+  }
+  const storedOf = (world: ReturnType<typeof makeWebhookHarness>['world']) =>
+    world.contacts.find((c) => c.contactId === 'c-cw');
+
+  for (const [label, over, body] of [
+    ['partner + Caseworker on a tenant', {}, { type: 'partner', role: 'Caseworker' }],
+    ['a caseworker role on a role-less partner', { type: 'partner', status: 'active' }, { role: 'case worker' }],
+    ['partner on a tenant whose STORED role is Case Worker (merged)', { role: 'Case Worker' }, { type: 'partner' }],
+    ['partner + Caseworker on an unknown', { type: 'unknown', status: 'needs_review' }, { type: 'partner', role: 'Caseworker' }],
+  ] as const) {
+    it(`409 caseworker_use_conversion: ${label}; nothing written`, async () => {
+      const { app, world } = makeWebhookHarness();
+      seed(world, over);
+      const before = structuredClone(storedOf(world));
+      const res = await send(app, body);
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: 'caseworker_use_conversion' });
+      expect(storedOf(world)).toEqual(before);
+      expect(world.auditEvents.filter((e) => e.event_type === 'contact_updated')).toEqual([]);
+    });
+  }
+
+  it("(PIN) not a caseworker result: role '' clears the stored caseworker role", async () => {
+    const { app, world } = makeWebhookHarness();
+    seed(world, { role: 'Case Worker' });
+    const res = await send(app, { type: 'partner', role: '' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({ type: 'partner' });
+  });
+
+  it('(PIN) a contact already a caseworker may edit its role and fields', async () => {
+    const { app, world } = makeWebhookHarness();
+    seed(world, { type: 'partner', status: 'active', role: 'Caseworker' });
+    expect((await send(app, { role: 'case worker', firstName: 'Pat' })).status).toBe(200);
+  });
+
+  it('(PIN) Mark as Partner on an unknown stays the generic type change', async () => {
+    const { app, world } = makeWebhookHarness();
+    seed(world, { type: 'unknown', status: 'needs_review' });
+    expect((await send(app, { type: 'partner' })).status).toBe(200);
+  });
+
+  it('404s a missing contact before the 409', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .patch('/api/contacts/c-none')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'partner', role: 'Caseworker' });
+    expect(res.status).toBe(404);
+  });
+
+  it('reads the stored contact CONSISTENTLY when type or role is in the body', async () => {
+    const { app, world } = makeWebhookHarness();
+    seed(world, {});
+    const seen: unknown[] = [];
+    const original = world.contactsRepo.getById.bind(world.contactsRepo);
+    world.contactsRepo.getById = async (id, opts) => {
+      seen.push(opts);
+      return original(id, opts);
+    };
+    await send(app, { type: 'landlord' }).expect(200);
+    expect(seen[0]).toEqual({ consistentRead: true });
+    seen.length = 0;
+    await send(app, { role: 'Inspector' }).expect(200);
+    expect(seen[0]).toEqual({ consistentRead: true });
+    seen.length = 0;
+    await send(app, { firstName: 'Pat' }).expect(200);
+    // the name-only edit keeps today's eventually consistent read
+    expect(seen[seen.length - 1]).toBeUndefined();
+  });
+
+  for (const [from, to] of [['tenant', 'landlord'], ['landlord', 'partner'], ['partner', 'unknown']] as const) {
+    it(`stamps type_source manual on a staff override ${from} -> ${to}`, async () => {
+      const { app, world } = makeWebhookHarness();
+      seed(world, { type: from, status: from === 'tenant' ? 'onboarding' : 'active' });
+      await send(app, { type: to }).expect(200);
+      expect(storedOf(world)?.['type_source']).toBe('manual');
+    });
+  }
+
+  for (const [label, over, body] of [
+    ['triage of an unknown', { type: 'unknown', status: 'needs_review' }, { type: 'tenant' }],
+    ['the same type re-sent', {}, { type: 'tenant', firstName: 'Pat' }],
+    ['a team member re-typed', { type: 'team_member', status: 'active' }, { type: 'tenant' }],
+    ['no type in the body', {}, { firstName: 'Pat' }],
+  ] as const) {
+    it(`(PIN-shaped) no type_source stamp: ${label}`, async () => {
+      const { app, world } = makeWebhookHarness();
+      seed(world, over);
+      await send(app, body).expect(200);
+      expect(storedOf(world)).not.toHaveProperty('type_source');
+    });
+  }
+
+  it('(PIN) POST may create a new contact saved as Caseworker (D16) - no stamp', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'partner', role: 'Caseworker', firstName: 'Dana' });
+    expect(res.status).toBe(201);
+    const c = world.contacts.find((x) => x.contactId === res.body.contact.contactId);
+    expect(c).toMatchObject({ type: 'partner', role: 'Caseworker' });
+    expect(c).not.toHaveProperty('type_source');
+  });
+});

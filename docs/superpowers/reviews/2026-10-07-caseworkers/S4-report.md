@@ -38,3 +38,21 @@ passed. Organization-only bodies returned 400; the mixed off-list write returned
 GREEN: npx vitest run test/contactOrgNames.test.ts test/contactTriage.test.ts test/contactIntakeFields.test.ts test/trimStrings.test.ts
 exited 0, four files and 63 tests. Root npm run typecheck exited 0.
 Logs: 4.2-red, 4.2-green, 4.2-typecheck. No contract deviation.
+
+## Task 4.3 - merged-kind guard and manual type source
+
+Task 4.2 commit: a17a387a. Step 0 passed again.
+PATCH refuses creating a caseworker from the merged type/role with 409
+caseworker_use_conversion. Type and role edits read consistently. Overrides
+from tenant, landlord or partner to a different type get type_source: manual;
+unknown triage does not. Generic thread behavior and shared helpers are unchanged.
+The consistent-read test checks the first read of both requests separately,
+strengthening the draft's single combined observation without changing scope.
+
+RED: npx vitest run test/contactTriage.test.ts exited 1: eight failed, 43 passed.
+Four guarded writes returned 200; consistentRead and three manual stamps were
+absent. GREEN:
+npx vitest run test/contactTriage.test.ts test/aiRunVerdicts.test.ts test/contactsCrud.test.ts test/contactStaffNotes.test.ts test/contactOrgNames.test.ts test/landlordContactFields.test.ts test/contactIntakeFields.test.ts test/suggestions.test.ts test/contactEmailReaders.test.ts test/contactPhones.test.ts test/contactsEmailCrud.test.ts test/trimStrings.test.ts
+exited 0: 12 files, 273 tests. Root npm run typecheck exited 0.
+All pre-existing cases stayed unchanged, including the resolved-thread pin.
+Logs: 4.3-red, 4.3-green, 4.3-typecheck. No contract deviation.

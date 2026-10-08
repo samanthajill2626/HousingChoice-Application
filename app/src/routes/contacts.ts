@@ -27,6 +27,7 @@ import { normalizeToE164 } from '../lib/phone.js';
 import { groupThreadLabel, relayMemberLabels } from '../lib/groupTitle.js';
 import { resolveRosterNames, withLiveNames } from '../lib/participantNames.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
+import { isCaseworker } from '../lib/caseworkers.js';
 import {
   LANDLORD_STATUS_LABELS,
   LANDLORD_STATUSES,
@@ -1479,9 +1480,12 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // pass an off-list value through as unchanged.
     const touchesOrgField =
       'housingAuthority' in parsed.patch || 'agency' in parsed.patch || 'organization' in parsed.patch;
+    // CONSISTENT too when the patch classifies (type or role): the caseworker
+    // 409 below decides "already a caseworker" from this read (R1-F11).
+    const changesClassification = 'type' in parsed.patch || 'role' in parsed.patch;
     const stored = await contacts.getById(
       contactId,
-      touchesOrgField ? { consistentRead: true } : undefined,
+      touchesOrgField || changesClassification ? { consistentRead: true } : undefined,
     );
     const priorStatus = typeof stored?.status === 'string' ? stored.status : undefined;
 
@@ -1559,6 +1563,38 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         parsed.changedFields.push('status');
       }
     }
+
+    // CASEWORKERS (spec 2026-10-06 D16): the ONLY way an existing contact
+    // becomes a caseworker is the conversion (POST .../caseworker-review), with
+    // its refusals and writes. Refuse a write whose MERGED result - the body's
+    // type/role over the stored ones, role ''/null as absent - is a caseworker
+    // on a contact that is not one. Writes nothing. Any other type change keeps
+    // today's behavior (D21).
+    if (changesClassification) {
+      if (!stored) {
+        res.status(404).json({ error: 'contact_not_found' });
+        return;
+      }
+      const resultType = 'type' in parsed.patch ? parsed.patch['type'] : stored.type;
+      const patchRole = parsed.patch['role'];
+      const resultRole = 'role' in parsed.patch ? (patchRole === null ? undefined : patchRole) : stored['role'];
+      if (isCaseworker({ type: resultType, role: resultRole }) && !isCaseworker(stored)) {
+        log.info({ contactId }, 'contact patch refused: a caseworker is made through the conversion');
+        res.status(409).json({ error: 'caseworker_use_conversion' });
+        return;
+      }
+      // D21: a staff OVERRIDE of a typed contact (tenant, landlord or partner
+      // to a different type) is stamped server-side so a re-import does not
+      // revert it (lib/import/apply.ts). Triage of an unknown is not stamped.
+      if (
+        'type' in parsed.patch
+        && (stored.type === 'tenant' || stored.type === 'landlord' || stored.type === 'partner')
+        && parsed.patch['type'] !== stored.type
+      ) {
+        parsed.patch['type_source'] = 'manual';
+      }
+    }
+
 
     // ORGANIZATION NAMES (spec 2026-10-06 D5). A housingAuthority or agency
     // this PATCH CHANGES must be a name on the stored org list of the field's

@@ -1042,6 +1042,7 @@ function startingEntries(at: string): OrgEntry[] {
 
 /**
  * Upsert one contact, writing ONLY import-owned fields.
+ * A contact whose `type_source` is 'manual' keeps its type, status, housing authority and agency (D21).
  *
  * Returns true when an existing status was PRESERVED because its provenance
  * outranks `import` — i.e. a human or the automation had already decided, and
@@ -1057,7 +1058,19 @@ async function upsertContact(
   const existing = await doc.send(
     new GetCommand({ TableName: table, Key: { contactId: person.contactId } }),
   );
-  const prior = existing.Item as { status_source?: string; status?: string } | undefined;
+  const prior = existing.Item as
+    | { status_source?: string; status?: string; type_source?: string }
+    | undefined;
+  // STAFF OVERRODE THE TYPE (caseworkers spec 2026-10-06 D21): a stamped
+  // `type_source: 'manual'` (a staff re-type or the caseworker conversion)
+  // means the import's type and status were computed for a type staff
+  // replaced, and the conversion removed the authority on purpose - so this
+  // run writes none of type, status, housingAuthority or agency. A
+  // read-then-write like preserveStatus below (R1-F5, accepted): a stamp
+  // landing between the read and the write is not seen, and an import never
+  // bumps classification_revision, so the conversion's guard does not cover
+  // imports either.
+  const manualType = prior?.type_source === 'manual';
 
   // THE IMPORT OWNS A STATUS ONLY UNTIL SOMETHING ELSE TOUCHES IT.
   //
@@ -1072,12 +1085,12 @@ async function upsertContact(
   // decided, and a re-run must defer to them. A stored status with no provenance
   // at all is also left alone — conservative, since we cannot tell who set it.
   const preserveStatus =
-    prior !== undefined &&
-    prior.status !== undefined &&
-    prior.status_source !== IMPORT_STATUS_SOURCE;
+    manualType ||
+    (prior !== undefined &&
+      prior.status !== undefined &&
+      prior.status_source !== IMPORT_STATUS_SOURCE);
 
   const sets: string[] = [
-    '#type = :type',
     'phone = :phone',
     'phones = :phones',
     'created_at = if_not_exists(created_at, :createdAt)',
@@ -1086,7 +1099,6 @@ async function upsertContact(
     'quo_contact_ids = :quoIds',
   ];
   const values: Record<string, unknown> = {
-    ':type': resolved.type,
     ':phone': person.phone,
     ':phones': [{ phone: person.phone, primary: true }],
     ':createdAt': importedAt,
@@ -1094,7 +1106,12 @@ async function upsertContact(
     ':importedAt': importedAt,
     ':quoIds': person.quoContactIds,
   };
-  const names: Record<string, string> = { '#type': 'type' };
+  const names: Record<string, string> = {};
+  if (!manualType) {
+    sets.unshift('#type = :type');
+    values[':type'] = resolved.type;
+    names['#type'] = 'type';
+  }
 
   if (resolved.name) {
     // WRITE THE FIELDS THE APP ACTUALLY READS: firstName + lastName.
@@ -1130,13 +1147,13 @@ async function upsertContact(
   // re-import never replaces a value staff set or settled, and a staff clear
   // (a REMOVE) lets a later re-import fill it again - accepted. The value is
   // always an exact list name (resolveImportedAuthority).
-  if (resolved.housingAuthority) {
+  if (resolved.housingAuthority && !manualType) {
     sets.push('housingAuthority = if_not_exists(housingAuthority, :housingAuthority)');
     values[':housingAuthority'] = resolved.housingAuthority;
   }
   // An agency named in the housing authority column goes to `agency` - and
   // only when the contact has none (D9). It is never a housing authority.
-  if (resolved.agency) {
+  if (resolved.agency && !manualType) {
     sets.push('#agency = if_not_exists(#agency, :agency)');
     names['#agency'] = 'agency';
     values[':agency'] = resolved.agency;
@@ -1166,7 +1183,9 @@ async function upsertContact(
       TableName: table,
       Key: { contactId: person.contactId },
       UpdateExpression: `SET ${sets.join(', ')}`,
-      ExpressionAttributeNames: names,
+      // An empty names map is a ValidationException (a manual-type contact
+      // with no agency clause binds no name at all).
+      ...(Object.keys(names).length > 0 && { ExpressionAttributeNames: names }),
       ExpressionAttributeValues: values,
     }),
   );

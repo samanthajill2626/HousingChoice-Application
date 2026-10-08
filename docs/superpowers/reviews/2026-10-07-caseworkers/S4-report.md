@@ -75,3 +75,21 @@ exited 0: four files, 130 tests (26 route cases). Root npm run typecheck exited 
 Root npx eslint app/src/routes/caseworkerReview.ts app/src/routes/contacts.ts app/src/routes/api.ts app/test/caseworkerReviewApi.test.ts
 exited 0, no errors. Logs: 4.4-red, 4.4-green, 4.4-typecheck, 4.4-lint.
 No contract deviation; the route layer does not duplicate S3 logic.
+
+## Task 4.5 - importer preserves manually typed contacts
+
+Task 4.4 commit: a94de995. Step 0 passed again. Fixture confirmed Vera Cole.
+The importer skips type, status, housingAuthority and agency when its existing
+read sees type_source: manual. It also omits an empty DynamoDB names map.
+The accepted read/write race and lack of an importer revision bump remain.
+Other import-owned fields keep their existing behavior.
+
+RED: npx vitest run test/importApply.integration.test.ts exited 1: one failed,
+33 passed, zero skipped. The new case's first post-import assertion observed
+type tenant and status needs_review instead of partner/active; its later
+organization assertions were not reached on that failing run.
+GREEN: npx vitest run test/importApply.integration.test.ts test/importOrgNames.test.ts
+exited 0: two files, 43 tests, zero skipped. This executes the real DynamoDB
+empty-names-map path and proves authority/agency remain absent as requested.
+Root npm run typecheck exited 0. All previous importer cases passed unchanged.
+Logs: 4.5-red, 4.5-green, 4.5-typecheck. No contract deviation.

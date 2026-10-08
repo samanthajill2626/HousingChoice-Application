@@ -400,6 +400,48 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(after.Item).toMatchObject({ status: 'placed', status_source: 'manual' });
   });
 
+  it('leaves type, status, housing authority and agency alone on a contact whose type_source is manual (caseworkers D21)', async () => {
+    const contactOf = async (phone: string): Promise<Record<string, unknown>> =>
+      (await doc.send(
+        new GetCommand({ TableName: table('contacts'), Key: { contactId: contactIdForPhone(phone) } }),
+      )).Item!;
+    const apply = () =>
+      runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv, orgEntries: ORG_ENTRIES });
+    await apply();
+    expect(await contactOf(PHONES.conflictResolved)).toMatchObject({
+      type: 'tenant', housingAuthority: 'Atlanta Housing Authority',
+    });
+
+    // A caseworker conversion (Vera) and a staff override (Ines), as their
+    // commit writes leave them.
+    const { UpdateCommand } = await import('@aws-sdk/lib-dynamodb');
+    await doc.send(
+      new UpdateCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.conflictResolved) },
+        UpdateExpression: 'SET #t = :partner, #r = :role, #s = :active, type_source = :manual, agency = :empty REMOVE housingAuthority',
+        ExpressionAttributeNames: { '#t': 'type', '#r': 'role', '#s': 'status' },
+        ExpressionAttributeValues: { ':partner': 'partner', ':role': 'Caseworker', ':active': 'active', ':manual': 'manual', ':empty': '' },
+      }),
+    );
+    await doc.send(
+      new UpdateCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.caseworker) },
+        UpdateExpression: 'SET type_source = :manual REMOVE agency',
+        ExpressionAttributeValues: { ':manual': 'manual' },
+      }),
+    );
+
+    await apply();
+    const vera = await contactOf(PHONES.conflictResolved);
+    expect(vera).toMatchObject({ type: 'partner', role: 'Caseworker', status: 'active', type_source: 'manual', agency: '' });
+    expect('housingAuthority' in vera).toBe(false);
+    expect('agency' in (await contactOf(PHONES.caseworker))).toBe(false);
+    // (PIN) the import still owns what it owns: the name and the phone.
+    expect(vera).toMatchObject({ phone: PHONES.conflictResolved, firstName: 'Vera' });
+  });
+
   it("honours the founder's edits over our suggestions", async () => {
     const review = cleanReview();
     const row = [...review.contacts.values()].find((r) => r.phone === PHONES.tenantConflict)!;

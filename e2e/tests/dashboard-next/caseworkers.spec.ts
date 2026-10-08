@@ -70,6 +70,17 @@ const UI = {
   viewPlacement: 'View placement',
   viewProperty: 'View property',
   caseworkerBadge: 'Caseworker',
+  makeRow: (name: string): string => `Make ${name} a caseworker`,
+  dismissRow: (name: string): string => `${name} is not a caseworker`,
+  dismissQuestion: (name: string): string => `Hide ${name} from Possible caseworkers?`,
+  dismissWarning: "This can't be undone in the app.",
+  hide: 'Hide',
+  signal: {
+    roleMentions: 'Role mentions caseworker',
+    aiNote: 'AI noted caseworker',
+    relationship: 'Linked as a caseworker',
+    partnerNoRole: 'Partner with no role',
+  },
 };
 
 /** Sign in as the seeded VA (the "Continue as dev user" identity). */
@@ -299,5 +310,99 @@ test.describe('Caseworkers - the conversion from a contact page', () => {
     // Nothing was written to either seeded contact.
     expect(await readContact(req, TASHA.contactId)).toMatchObject({ type: 'tenant' });
     expect(await readContact(req, MARCUS.contactId)).toMatchObject({ type: 'landlord' });
+  });
+});
+
+test.describe('Caseworkers - the Possible caseworkers list', () => {
+  test('one row per signal; Make caseworker from a row; Not a caseworker hides a row for good', async ({
+    page,
+  }) => {
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const lastName = `Pcw${stamp}`;
+    const full = (first: string): string => `${first} ${lastName}`;
+
+    // One run-unique contact per signal (D19, D22), plus three that must be
+    // on NEITHER list. All through the real POST: no seed, no dev seam.
+    const mentions = await createContact(req, {
+      type: 'tenant',
+      firstName: 'Mentions',
+      lastName,
+      role: `Case Manager ${stamp}`,
+    });
+    await createContact(req, {
+      type: 'tenant',
+      firstName: 'Noted',
+      lastName,
+      // The extraction's own line: the `[Auto - <date>]` prefix is required.
+      notes: `[Auto - Jan 5] Identified as a caseworker at Quillwort ${stamp}`,
+    });
+    const linked = await createContact(req, { type: 'tenant', firstName: 'Linked', lastName });
+    await createContact(req, {
+      type: 'tenant',
+      firstName: 'Holder',
+      lastName,
+      relationships: [{ role: 'Caseworker', name: full('Linked'), contactId: linked }],
+    });
+    const norole = await createContact(req, { type: 'partner', firstName: 'Norole', lastName });
+    // A partner whose role is not a caseworker role is on neither list (D19).
+    await createContact(req, {
+      type: 'partner',
+      firstName: 'Staffer',
+      lastName,
+      role: `Case Manager ${stamp}`,
+    });
+    // The same words WITHOUT the extraction prefix are not the AI's line (D22).
+    await createContact(req, {
+      type: 'tenant',
+      firstName: 'Typed',
+      lastName,
+      notes: 'Identified as a caseworker at the front desk',
+    });
+
+    await openCaseworkersTab(page);
+    await expect(possibleRow(page, full('Mentions'))).toContainText(UI.signal.roleMentions);
+    await expect(possibleRow(page, full('Noted'))).toContainText(UI.signal.aiNote);
+    await expect(possibleRow(page, full('Linked'))).toContainText(UI.signal.relationship);
+    await expect(possibleRow(page, full('Norole'))).toContainText(UI.signal.partnerNoRole);
+    for (const first of ['Holder', 'Staffer', 'Typed']) {
+      await expect(possibleRow(page, full(first))).toHaveCount(0);
+      await expect(caseworkerRow(page, full(first))).toHaveCount(0);
+    }
+
+    // Make caseworker from a row: the same dialog as the contact page (D19).
+    await possibleRow(page, full('Mentions'))
+      .getByRole('button', { name: UI.makeRow(full('Mentions')), exact: true })
+      .click();
+    const dialog = page.getByRole('dialog', { name: UI.dialog(full('Mentions')), exact: true });
+    await expect(dialog).toBeVisible();
+    const confirm = dialog.getByRole('button', { name: UI.confirm, exact: true });
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(possibleRow(page, full('Mentions'))).toHaveCount(0);
+    await expect(caseworkerRow(page, full('Mentions'))).toBeVisible();
+    expect(await readContact(req, mentions)).toMatchObject({
+      type: 'partner',
+      role: 'Caseworker',
+      caseworker_conversion: { fromType: 'tenant', fromRole: `Case Manager ${stamp}` },
+    });
+
+    // Not a caseworker: a one-line confirm, then the row is gone for good.
+    await possibleRow(page, full('Norole'))
+      .getByRole('button', { name: UI.dismissRow(full('Norole')), exact: true })
+      .click();
+    const hide = page.getByRole('dialog').filter({ hasText: UI.dismissQuestion(full('Norole')) });
+    await expect(hide).toContainText(UI.dismissWarning);
+    await hide.getByRole('button', { name: UI.hide, exact: true }).click();
+    await expect(hide).toHaveCount(0);
+    await expect(possibleRow(page, full('Norole'))).toHaveCount(0);
+    await page.reload();
+    await expect(possibleRow(page, full('Noted'))).toBeVisible(); // the list has loaded
+    await expect(possibleRow(page, full('Norole'))).toHaveCount(0);
+    const dismissed = await readContact(req, norole);
+    expect(dismissed).toMatchObject({ type: 'partner', caseworker_review: 'dismissed' });
+    expect(dismissed['role']).toBeUndefined();
   });
 });

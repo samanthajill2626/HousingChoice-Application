@@ -220,3 +220,21 @@ Raw command/log/exit labels: 10.5-nonvacuity, 10.5-green, 10.5-typecheck,
 non-vacuity screenshot/video/context copied to
 artifacts/10.5-nonvacuity-proof-2026-10-08T17-59-14-338Z/ before rerun.
 No force click, source fix, seed mutation, or C6 patch. Task 10.5 complete.
+
+## Task 10.6 - Possible-list signals, conversion and dismissal
+
+Task 10.5 commit: f5b18d2a. Added the exact planned own-row cases for all four
+signals, exclusion of three own non-candidates, row conversion, and permanent
+dismissal. No global list counts and no seeded contact mutation.
+
+All commands cwd W:/tmp/caseworkers. Browser: npm run e2e
+-w @housingchoice/e2e -- tests/dashboard-next/caseworkers.spec.ts (2700s cap).
+Non-vacuity temporarily expected AI noted tenant: exit 1, 1 failed / 2 passed
+in 27.0s, exactly the Noted row at line 366; received AI noted caseworker.
+Restored UI.signal.aiNote. Green: exit 0, 3 passed in 12.0s. npm run typecheck
+-w @housingchoice/e2e and npx eslint e2e/tests/dashboard-next/caseworkers.spec.ts
+both exit 0. Whole-file ASCII and git diff --check pass.
+Raw labels: 10.6-nonvacuity, 10.6-green, 10.6-typecheck, 10.6-lint.
+Artifacts copied before each run: artifacts/10.6-before-nonvacuity-2026-10-08T18-00-40-105Z/
+and artifacts/10.6-nonvacuity-proof-2026-10-08T18-01-31-902Z/.
+No selector deviation or product finding. Task 10.6 complete.

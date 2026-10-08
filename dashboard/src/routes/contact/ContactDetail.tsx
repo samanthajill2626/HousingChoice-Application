@@ -41,6 +41,7 @@ import {
   TENANT_STATUSES,
   TENANT_STATUS_LABELS,
   type AiRunCompletedEvent,
+  type Contact,
   type ConversationUpdatedEvent,
   type LandlordStatus,
   type OrgCheckResult,
@@ -59,6 +60,8 @@ import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
 import { UnknownFile } from './UnknownFile.js';
 import { PartnerFile } from './PartnerFile.js';
+import { CaseworkerDialog } from './CaseworkerDialog.js';
+import { isCaseworkerContact } from './caseworkerRole.js';
 import { ContactActionsMenu } from './ContactActionsMenu.js';
 import { ContactEditForm } from './ContactEditForm.js';
 import { CreateRelayGroupModal } from './CreateRelayGroupModal.js';
@@ -197,6 +200,12 @@ export function ContactDetail(): React.JSX.Element {
   const [optOutBusy, setOptOutBusy] = useState(false);
   const [voiceOptOutBusy, setVoiceOptOutBusy] = useState(false);
   const [triaging, setTriaging] = useState(false);
+  // The caseworker conversion dialog (spec 2026-10-06 D19). MOUNTED only while
+  // open, so its preview is read only then - never at this page's mount
+  // (ruling R4-13).
+  // Bind each open dialog to this contact generation; late results cannot
+  // close a different contact's dialog or start obsolete refetches.
+  const [converting, setConverting] = useState<number | null>(null);
   // Conversation-fact-extraction (T9): which suggestion target is mid-accept/dismiss
   // (disables its chip) + a per-target inline error (e.g. a 409 phone conflict).
   const [suggestionBusy, setSuggestionBusy] = useState<string | null>(null);
@@ -279,6 +288,8 @@ export function ContactDetail(): React.JSX.Element {
     // for it - must not open on contact B.
     setHaReview(null);
     reviewGenerationRef.current += 1;
+    // Same reason: contact A's conversion dialog must not open on contact B.
+    setConverting(null);
     // Same reason: a manual run pressed on contact A must not appear to be
     // running on contact B. Resetting the state is not enough on its own - A's
     // POST is still in flight and would write B's indicator when it lands - so
@@ -664,6 +675,28 @@ export function ContactDetail(): React.JSX.Element {
       .finally(() => setTriaging(false));
   };
 
+  // "Make caseworker" (spec D16, D22): a live tenant, landlord or partner
+  // that is not already a caseworker - keyed on the STORED type, because the
+  // tenant pane also renders team_member contacts. An unknown contact gets the
+  // Unknown card's "Mark as Caseworker" instead.
+  const canMakeCaseworker =
+    !deleted &&
+    (contact.type === 'tenant' || contact.type === 'landlord' || contact.type === 'partner') &&
+    !isCaseworkerContact(contact);
+  // After a conversion: apply the returned contact in place (the file pane
+  // swaps to PartnerFile by its type) and re-read what the conversion changed
+  // OFF the contact record (ruling R4-14): the superseded suggestions, the
+  // timeline (the re-typed 1:1 threads and the status milestone) and the
+  // file's slices (relay and group threads, properties sent).
+  const onConverted = (updated: Contact): void => {
+    if (converting !== reviewGenerationRef.current) return;
+    setConverting(null);
+    setContact(updated);
+    suggestions.refetch();
+    timeline.refetch();
+    file.refetch();
+  };
+
   // Every accept/dismiss failure lands on the chip the navigator clicked. The
   // resolution routes answer with a whole vocabulary of codes across 400/404/409
   // and `ApiError.message` is the RAW code, so the copy always comes from the
@@ -948,6 +981,7 @@ export function ContactDetail(): React.JSX.Element {
             hasUnread={hasUnread}
             onToggleUnread={() => void onToggleUnread()}
             unreadBusy={unreadAction !== 'idle'}
+            {...(canMakeCaseworker && { onMakeCaseworker: () => setConverting(reviewGenerationRef.current) })}
           />
         </div>
       </header>
@@ -1126,6 +1160,8 @@ export function ContactDetail(): React.JSX.Element {
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
                 onTriage={onTriage}
+                // A deleted contact gets no conversion (spec D16): absent = disabled.
+                {...(!deleted && { onMakeCaseworker: () => setConverting(reviewGenerationRef.current) })}
                 triaging={triaging}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
@@ -1181,6 +1217,15 @@ export function ContactDetail(): React.JSX.Element {
             setEditing(false);
           }}
           candidates={editCandidates}
+        />
+      ) : null}
+
+      {converting !== null ? (
+        <CaseworkerDialog
+          contactId={contact.contactId}
+          name={name}
+          onConverted={onConverted}
+          onClose={() => setConverting(null)}
         />
       ) : null}
 
@@ -1325,10 +1370,19 @@ export function ContactDetail(): React.JSX.Element {
       if (typeof contact!['company'] === 'string') parts.push(contact!['company'] as string);
       const owned = landlordUnits(file.units, contactId).length;
       if (owned > 0) parts.push(`${owned} propert${owned === 1 ? 'y' : 'ies'}`);
-    } else {
+    } else if (contact!.type === 'tenant' || contact!.type === 'unknown') {
+      // Spec D21: voucher and authority for tenant and unknown ONLY - keyed on
+      // the TYPE (team_member shares the tenant pane; an unknown's imported
+      // authority is a triage hint). A partner's leftover authority is not a
+      // voucher fact.
       if (typeof contact!.voucherSize === 'number') parts.push(`Voucher ${contact!.voucherSize}BR`);
       if (typeof contact!['housingAuthority'] === 'string') {
         parts.push(contact!['housingAuthority'] as string);
+      }
+    } else if (contact!.type === 'partner') {
+      // Spec D22: a partner's facts line is its organization.
+      if (typeof contact!.organization === 'string' && contact!.organization !== '') {
+        parts.push(contact!.organization);
       }
     }
     return parts.join(' - ');

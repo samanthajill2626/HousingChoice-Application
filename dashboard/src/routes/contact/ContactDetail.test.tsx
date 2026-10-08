@@ -46,6 +46,11 @@ const dismissSuggestion = vi.fn();
 const getOrgList = vi.fn();
 const checkOrgText = vi.fn();
 const addOrg = vi.fn();
+// The caseworker conversion (spec 2026-10-06 D19) - and the Possible list,
+// mocked only to prove the contact page never reads it.
+const previewCaseworker = vi.fn();
+const makeCaseworker = vi.fn();
+const listPossibleCaseworkers = vi.fn();
 // Manual extraction trigger (Task 6): the press endpoint.
 const runExtraction = vi.fn();
 // The contact file's "Relay groups" card slice + the standalone create flow it
@@ -118,6 +123,9 @@ vi.mock('../../api/index.js', async () => {
     getOrgList: (...a: unknown[]) => getOrgList(...a),
     checkOrgText: (...a: unknown[]) => checkOrgText(...a),
     addOrg: (...a: unknown[]) => addOrg(...a),
+    previewCaseworker: (...a: unknown[]) => previewCaseworker(...a),
+    makeCaseworker: (...a: unknown[]) => makeCaseworker(...a),
+    listPossibleCaseworkers: (...a: unknown[]) => listPossibleCaseworkers(...a),
     runExtraction: (...a: unknown[]) => runExtraction(...a),
     getContactRelayGroups: (...a: unknown[]) => getContactRelayGroups(...a),
     previewRelayGroup: (...a: unknown[]) => previewRelayGroup(...a),
@@ -310,6 +318,9 @@ beforeEach(() => {
   getOrgList.mockReset().mockResolvedValue({ version: 1, entries: [] });
   checkOrgText.mockReset().mockResolvedValue({ candidates: [], close: [] });
   addOrg.mockReset();
+  previewCaseworker.mockReset();
+  makeCaseworker.mockReset();
+  listPossibleCaseworkers.mockReset().mockResolvedValue([]);
   getAllPlacements.mockResolvedValue(CASES);
   getAllUnits.mockResolvedValue(UNITS);
   getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
@@ -504,6 +515,7 @@ describe('ContactDetail', () => {
     expect(screen.getByRole('button', { name: /Mark as Landlord/i })).toBeEnabled();
     expect(screen.getByRole('button', { name: /Mark as Partner/i })).toBeEnabled();
     expect(screen.getByRole('button', { name: /Mark as Property Manager/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Mark as Caseworker' })).toBeEnabled();
     // None of the tenant-specific cards/fields leak in.
     expect(screen.queryByText('Voucher size')).not.toBeInTheDocument();
     expect(screen.queryByText('Housing authority')).not.toBeInTheDocument();
@@ -2530,5 +2542,193 @@ describe('ContactDetail - accepting a housing authority suggestion', () => {
     expect(alert).toHaveTextContent('Something went wrong - please try again.');
     expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument();
     expect(acceptSuggestion).not.toHaveBeenCalled();
+  });
+});
+
+describe('ContactDetail - caseworkers (spec 2026-10-06 D16, D19, D21, D22)', () => {
+  const PARTNER: Contact = {
+    contactId: 'p1',
+    type: 'partner',
+    firstName: 'Renee',
+    lastName: 'Carter',
+    status: 'active',
+    phone: '+14045550123',
+    voucherSize: 2,
+    housingAuthority: 'Atlanta Housing Authority',
+    organization: 'Hope Atlanta',
+  };
+  const CASEWORKER: Contact = { ...PARTNER, contactId: 'cw1', role: 'Caseworker' };
+  const PREVIEW = {
+    contactId: 'k1',
+    alreadyCaseworker: false,
+    refusals: [],
+    removes: { pendingSuggestions: 0 },
+    threads: { retype: 1, leftShared: 0, leftOther: 0 },
+    organization: { source: 'none' },
+  };
+
+  async function openMoreActions(): Promise<{ click: (el: Element) => Promise<void> }> {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: /more actions/i }));
+    return { click: (el) => user.click(el) };
+  }
+
+  function header(container: HTMLElement): HTMLElement {
+    const el = container.querySelector('header');
+    if (el === null) throw new Error('no header');
+    return el;
+  }
+
+  it('header facts: a partner shows its organization, never a leftover voucher or authority (D21, D22)', async () => {
+    getContact.mockResolvedValue(PARTNER);
+    const { container } = renderAt('p1');
+    await screen.findByText('Renee Carter');
+    const band = header(container);
+    expect(within(band).getByText('Hope Atlanta')).toBeInTheDocument();
+    expect(within(band).queryByText(/Voucher 2BR/)).toBeNull();
+    expect(within(band).queryByText(/Atlanta Housing Authority/)).toBeNull();
+  });
+
+  it('header facts: a team member shows none; an unknown keeps voucher and authority (D21)', async () => {
+    getContact.mockResolvedValue({ ...TENANT, type: 'team_member', housingAuthority: 'Atlanta Housing Authority' });
+    const first = renderAt('k1');
+    await screen.findByText('Tasha Williams');
+    expect(within(header(first.container)).queryByText(/Voucher 2BR/)).toBeNull();
+    expect(within(header(first.container)).queryByText(/Atlanta Housing Authority/)).toBeNull();
+    first.unmount();
+
+    getContact.mockResolvedValue({ ...UNKNOWN, voucherSize: 1, housingAuthority: 'Atlanta Housing Authority' });
+    const second = renderAt('u9');
+    await screen.findByRole('button', { name: 'Mark as Caseworker' });
+    expect(
+      await within(header(second.container)).findByText('Voucher 1BR - Atlanta Housing Authority'),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    ['tenant', TENANT, 'k1'],
+    ['landlord', LANDLORD, 'L1'],
+    ['partner', PARTNER, 'p1'],
+  ] as const)('More actions offers Make caseworker on a live %s', async (_label, contact, id) => {
+    getContact.mockResolvedValue(contact);
+    renderAt(id);
+    await openMoreActions();
+    expect(screen.getByRole('menuitem', { name: 'Make caseworker' })).toBeInTheDocument();
+  });
+
+  it.each([
+    ['a caseworker', CASEWORKER, 'cw1'],
+    ['a team member', { ...TENANT, type: 'team_member' } as Contact, 'k1'],
+    ['a deleted tenant', { ...TENANT, deleted_at: '2026-10-01T00:00:00.000Z' } as Contact, 'k1'],
+    ['an unknown contact (the card has its own action)', UNKNOWN, 'u9'],
+  ] as const)('More actions offers no Make caseworker on %s', async (_label, contact, id) => {
+    getContact.mockResolvedValue(contact);
+    renderAt(id);
+    await openMoreActions();
+    expect(screen.getByRole('menuitem', { name: /Edit contact details/i })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Make caseworker' })).toBeNull();
+  });
+
+  it('Make caseworker opens the dialog, and only then is the preview read (R4-13)', async () => {
+    getContact.mockResolvedValue(TENANT);
+    previewCaseworker.mockResolvedValue(PREVIEW);
+    renderAt('k1');
+    await screen.findByText('Tasha Williams');
+    expect(previewCaseworker).not.toHaveBeenCalled();
+    const { click } = await openMoreActions();
+    await click(screen.getByRole('menuitem', { name: 'Make caseworker' }));
+    expect(screen.getByRole('dialog', { name: 'Make Tasha Williams a caseworker' })).toBeInTheDocument();
+    expect(previewCaseworker).toHaveBeenCalledWith('k1', expect.any(AbortSignal));
+  });
+
+  it('a conversion applies the returned contact in place and re-reads suggestions, timeline and file (R4-14)', async () => {
+    getContact.mockResolvedValue(TENANT);
+    previewCaseworker.mockResolvedValue(PREVIEW);
+    makeCaseworker.mockResolvedValue({
+      ...TENANT,
+      type: 'partner',
+      role: 'Caseworker',
+      status: 'active',
+      organization: 'Hope Atlanta',
+    });
+    const { container } = renderAt('k1');
+    await screen.findByText('Tasha Williams');
+    const { click } = await openMoreActions();
+    await click(screen.getByRole('menuitem', { name: 'Make caseworker' }));
+    const confirm = screen.getByRole('button', { name: 'Make caseworker' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    const before = {
+      suggestions: getSuggestions.mock.calls.length,
+      timeline: getContactTimeline.mock.calls.length,
+      file: getAllPlacements.mock.calls.length,
+    };
+    await click(confirm);
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Make Tasha Williams a caseworker' })).not.toBeInTheDocument(),
+    );
+    expect(makeCaseworker).toHaveBeenCalledWith('k1', {});
+    // In place: the header now reads the caseworker - its organization, no voucher.
+    expect(await within(header(container)).findByText('Hope Atlanta')).toBeInTheDocument();
+    expect(within(header(container)).queryByText(/Voucher 2BR/)).toBeNull();
+    await waitFor(() => {
+      expect(getSuggestions.mock.calls.length).toBeGreaterThan(before.suggestions);
+      expect(getContactTimeline.mock.calls.length).toBeGreaterThan(before.timeline);
+      expect(getAllPlacements.mock.calls.length).toBeGreaterThan(before.file);
+    });
+  });
+
+  it('a late conversion after navigation leaves the next contact dialog and reads alone', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockImplementation((id: unknown) => Promise.resolve(id === 'p1' ? PARTNER : TENANT));
+    previewCaseworker.mockResolvedValue(PREVIEW);
+    let resolveMake!: (contact: Contact) => void;
+    makeCaseworker.mockImplementation(() => new Promise<Contact>((resolve) => { resolveMake = resolve; }));
+    render(
+      <MemoryRouter initialEntries={['/contacts/k1']}>
+        <ImageViewerProvider>
+          <Link to="/contacts/p1">Next contact</Link>
+          <Routes><Route path="/contacts/:contactId" element={<ContactDetail />} /></Routes>
+        </ImageViewerProvider>
+      </MemoryRouter>,
+    );
+    await openMoreActions();
+    await user.click(screen.getByRole('menuitem', { name: 'Make caseworker' }));
+    const first = screen.getByRole('dialog', { name: 'Make Tasha Williams a caseworker' });
+    await waitFor(() => expect(within(first).getByRole('button', { name: 'Make caseworker' })).toBeEnabled());
+    await user.click(within(first).getByRole('button', { name: 'Make caseworker' }));
+    await user.click(screen.getByRole('link', { name: 'Next contact' }));
+    await screen.findByText('Renee Carter');
+    await openMoreActions();
+    await user.click(screen.getByRole('menuitem', { name: 'Make caseworker' }));
+    const second = screen.getByRole('dialog', { name: 'Make Renee Carter a caseworker' });
+    await waitFor(() => expect(within(second).getByRole('button', { name: 'Make caseworker' })).toBeEnabled());
+    const before = [getSuggestions.mock.calls.length, getContactTimeline.mock.calls.length, getAllPlacements.mock.calls.length];
+    await act(async () => { resolveMake({ ...TENANT, type: 'partner', role: 'Caseworker' }); });
+    expect(screen.getByRole('dialog', { name: 'Make Renee Carter a caseworker' })).toBeInTheDocument();
+    expect([getSuggestions.mock.calls.length, getContactTimeline.mock.calls.length, getAllPlacements.mock.calls.length]).toEqual(before);
+  });
+
+  it("the Unknown card's Mark as Caseworker opens the dialog and never PATCHes", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(UNKNOWN);
+    previewCaseworker.mockResolvedValue({ ...PREVIEW, contactId: 'u9' });
+    renderAt('u9');
+    await user.click(await screen.findByRole('button', { name: 'Mark as Caseworker' }));
+    expect(screen.getByRole('dialog', { name: /^Make .+ a caseworker$/ })).toBeInTheDocument();
+    expect(previewCaseworker).toHaveBeenCalledWith('u9', expect.any(AbortSignal));
+    expect(updateContact).not.toHaveBeenCalled();
+  });
+
+  it('(PIN) a contact page reads nothing new at mount: no preview, no Possible list, no org list (R4-13)', async () => {
+    getContact.mockResolvedValue(TENANT);
+    renderAt('k1');
+    await screen.findByText('Tasha Williams');
+    await waitFor(() => expect(getAllContacts).toHaveBeenCalled());
+    expect(previewCaseworker).not.toHaveBeenCalled();
+    expect(listPossibleCaseworkers).not.toHaveBeenCalled();
+    expect(getOrgList).not.toHaveBeenCalled();
   });
 });

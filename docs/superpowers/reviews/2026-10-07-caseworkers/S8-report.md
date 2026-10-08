@@ -94,3 +94,26 @@ src/routes/contact/ContactActionsMenu.test.tsx, exit 1: 1 failed / 18 passed,
 missing Make caseworker menuitem. GREEN: same command exit 0, 19 tests.
 Root bare npm run typecheck exit 0, five workspaces (8.7-typecheck).
 No contract deviation; host eligibility remains Task 8.8.
+
+## Task 8.8 - contact detail integration
+
+Task 8.7 commit: 8ceedd7f. Added conversion entry points and organization-only
+partner header facts. Preview remains dialog-open-only; Possible and org list
+reads are absent at mount. Returned contact updates in place and refetches the
+suggestions, timeline and file. RED: dashboard npx vitest run
+src/routes/contact/ContactDetail.test.tsx, exit 1: 9 failed / 107 passed.
+A draft assertion queried the second render before load; it now awaits its
+Unknown action before inspecting the header. Initial GREEN: 116 tests.
+
+Adjudication C4 (parent approved): the planned callback could close B's dialog
+when A's pending conversion resolves after navigation, despite useContact
+rejecting the stale data update. An added deferred-response regression failed
+at the missing B dialog (8.8-navigation-red2, -t late.conversion, 1 failed /
+116 skipped). The earlier quoted selector selected zero tests and is excluded
+from evidence. Dialog state now carries the existing contact review generation;
+old success callbacks return before closing or refetching. The regression also
+asserts no stale suggestions/timeline/file reads. Final GREEN: same full
+ContactDetail command, exit 0, 117 tests (8.8-green2). Root bare npm run
+typecheck exited 0 across five workspaces; scoped eslint on ContactDetail.tsx
+and its test exited 0. Existing act warnings remain; no failure excused.
+No command remains active. Browser proof remains parent-owned.

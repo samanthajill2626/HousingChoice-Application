@@ -546,3 +546,50 @@ describe('contact_status_changed milestone on the edit-form status write', () =>
     expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed')).toHaveLength(0);
   });
 });
+
+describe('server-owned contact fields (caseworkers spec D21, D22)', () => {
+  const OWNED = [
+    ['caseworker_review', 'dismissed'],
+    ['caseworker_conversion', { at: '2026-10-07T00:00:00.000Z', by: 'x', fromType: 'tenant' }],
+    ['type_source', 'manual'],
+  ] as const;
+
+  for (const [key, value] of OWNED) {
+    it(`POST refuses a client-sent ${key} with 400 and creates nothing`, async () => {
+      const { app, world } = makeWebhookHarness();
+      const res = await request(app)
+        .post('/api/contacts')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ type: 'partner', firstName: 'Pat', [key]: value });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: `${key} is set by the server, not the client` });
+      expect(world.contacts).toEqual([]);
+    });
+
+    it(`PATCH refuses a client-sent ${key} with 400 and writes nothing`, async () => {
+      const { app, world } = makeWebhookHarness();
+      world.contacts.push({ contactId: 'contact-owned', type: 'tenant', status: 'onboarding', phone: '+15550107301' });
+      const before = structuredClone(world.contacts);
+      const res = await request(app)
+        .patch('/api/contacts/contact-owned')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ firstName: 'Pat', [key]: value });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: `${key} is set by the server, not the client` });
+      expect(world.contacts).toEqual(before);
+    });
+  }
+
+  it('(PIN) a null value is still refused, as consent_captured_by is', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-owned', type: 'tenant', status: 'onboarding', phone: '+15550107302' });
+    const res = await request(app)
+      .patch('/api/contacts/contact-owned')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ firstName: 'Pat', type_source: null });
+    expect(res.status).toBe(400);
+  });
+});

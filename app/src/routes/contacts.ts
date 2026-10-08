@@ -274,6 +274,22 @@ function isContactType(value: unknown): value is ContactType {
 }
 
 /**
+ * Server-owned contact attributes (caseworkers spec 2026-10-06 D21, D22):
+ * `caseworker_review` and `caseworker_conversion` are written only by the
+ * caseworker-review route, `type_source` only by the PATCH's staff-override
+ * stamp and the conversion. A client value is REFUSED, loudly, on both
+ * contact writers (one helper both parsers call), like consent_captured_by.
+ */
+const SERVER_OWNED_CONTACT_FIELDS = ['caseworker_review', 'caseworker_conversion', 'type_source'] as const;
+
+function refuseServerOwnedFields(b: Record<string, unknown>): { error: string } | undefined {
+  for (const key of SERVER_OWNED_CONTACT_FIELDS) {
+    if (key in b && b[key] !== undefined) return { error: `${key} is set by the server, not the client` };
+  }
+  return undefined;
+}
+
+/**
  * A2P/CTIA consent capture (spec §3.3 / §3.4). Validate + extract the
  * client-supplied consent fields from a create/patch body into `out`. Only the
  * four HUMAN consent methods are accepted from these human paths — a client may
@@ -501,6 +517,8 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     return { error: 'body must be a JSON object' };
   }
   const b = body as Record<string, unknown>;
+  const serverOwned = refuseServerOwnedFields(b);
+  if (serverOwned !== undefined) return serverOwned;
   const patch: Record<string, unknown> = {};
   const changedFields: string[] = [];
 
@@ -767,6 +785,8 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     return { error: 'body must be a JSON object' };
   }
   const b = body as Record<string, unknown>;
+  const serverOwned = refuseServerOwnedFields(b);
+  if (serverOwned !== undefined) return serverOwned;
 
   if (!isContactType(b['type'])) {
     return { error: `type is required and must be one of: ${CONTACT_TYPES.join(', ')}` };

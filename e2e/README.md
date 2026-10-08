@@ -92,6 +92,10 @@ Known gap: Settings > Housing authorities & agencies (`/settings/organizations`,
 added 2026-10-06) is not a registered destination either, for the same reason;
 registering it is `docs/issues/perf-pages-settings-organizations-surface.md`.
 
+Known gap: Contacts > Caseworkers (`/contacts/caseworkers`, added 2026-10-08)
+is not a registered destination either; registering it is
+`docs/issues/perf-pages-contacts-caseworkers-surface.md`.
+
 The three target commands are:
 
 ```powershell

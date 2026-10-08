@@ -661,6 +661,17 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   // /api/organizations, /api/organizations/usage and
   // /api/organizations/not-on-list, all three on mount
   // (docs/issues/perf-pages-settings-organizations-surface.md).
+  // TODO(perf-pages-contacts-caseworkers-surface): KNOWN GAP - there is NO
+  // row for /contacts/caseworkers (Contacts > Caseworkers, spec 2026-10-06
+  // D18), so `npm run perf:pages` never measures it. Excluded on purpose (the
+  // route pin in routes.test.ts lists it with the same issue). Registering it
+  // needs: a source (the Contacts > Caseworkers nav link), a terminal (the
+  // Caseworkers list or its empty line, AND the Possible caseworkers list or
+  // its empty line), and its GETs - the partner walk
+  // (GET /api/contacts?type=partner, every page) and
+  // GET /api/contacts/possible-caseworkers (a server read of the tenant,
+  // landlord and partner partitions), both on mount
+  // (docs/issues/perf-pages-contacts-caseworkers-surface.md).
   row({ surfaceId: '/contacts/:contactId', label: 'Contact detail', resolver: 'contact', source: source('/contacts/tenants', locator('heading', 'Tenants'), link(':resolved_cold_target'), CONTACT_LIVE_WALK), terminal: CONTACT_DETAIL_TERMINAL, gets: CONTACT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'contact_detail' }),
   row({ surfaceId: '/listings/:unitId', label: 'Property detail', resolver: 'unit', source: source('/listings', L.properties, link(':resolved_cold_target'), UNIT_LIVE_WALK), terminal: UNIT_DETAIL_TERMINAL, gets: UNIT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
   row({ surfaceId: '/tours/:tourId', label: 'Tour detail', resolver: 'tour', source: source('/tours', L.tours, link(':resolved_cold_target'), TOUR_LIST_ACTIVE_GETS), terminal: TOUR_DETAIL_TERMINAL, gets: TOUR_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),

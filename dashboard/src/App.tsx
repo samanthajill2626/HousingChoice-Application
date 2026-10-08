@@ -17,6 +17,7 @@ import { EventStreamProvider } from './api/index.js';
 import { Placeholder } from './routes/Placeholder.js';
 import { Today } from './routes/today/Today.js';
 import { ContactsList } from './routes/contacts/ContactsList.js';
+import { CaseworkersList } from './routes/contacts/CaseworkersList.js';
 import { ListingsList } from './routes/listings/ListingsList.js';
 import { ContactDetail } from './routes/contact/ContactDetail.js';
 import { ConversationDetail } from './routes/conversation/ConversationDetail.js';
@@ -65,6 +66,8 @@ const IMPLEMENTED = new Set<string>([
   '/contacts/tenants',
   '/contacts/landlords',
   '/contacts/unknown',
+  // Contacts > Caseworkers (spec 2026-10-06 D18) - its own page.
+  '/contacts/caseworkers',
   '/listings',
   '/inbox',
   // Communications > Email (the unmatched-email side-door). /email/quarantine is
@@ -153,6 +156,9 @@ function AuthedApp(): React.JSX.Element {
             <Route path="contacts/tenants" element={<ContactsList filter="tenant" />} />
             <Route path="contacts/landlords" element={<ContactsList filter="landlord" />} />
             <Route path="contacts/unknown" element={<ContactsList filter="unknown" />} />
+            {/* Contacts > Caseworkers (spec 2026-10-06 D18): its own page, not a
+                ContactsList filter. Static - ranks above contacts/:contactId. */}
+            <Route path="contacts/caseworkers" element={<CaseworkersList />} />
             <Route path="contacts/deleted" element={<ContactsList filter="deleted" />} />
 
             {/* Placements page (§F2). Static — ranks above placements/:placementId. */}

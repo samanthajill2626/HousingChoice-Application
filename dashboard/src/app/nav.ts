@@ -6,6 +6,9 @@
 // 2026-07-02: Tours added to Workspace after Placements — founder-approved amendment to the locked nav.
 // 2026-07-04: Workspace reordered → Today - Contacts (+children) - Properties - Tours - Placements.
 //
+// 2026-10-08: Contacts gains a Caseworkers child (after Landlords, partner dot) -
+// founder-approved amendment to the locked nav (spec 2026-10-06 D18).
+//
 // `end` marks an exact-match link (react-router NavLink `end`) so a parent route
 // isn't highlighted while a child route is active.
 
@@ -28,8 +31,8 @@ export interface NavLeaf {
   end?: boolean;
   /** Leading nav icon (top-level items only). */
   icon?: NavIconName;
-  /** Colored filter dot (the Contacts children: tenant/landlord/unknown). */
-  dot?: 'tenant' | 'landlord' | 'unknown';
+  /** Colored filter dot (the Contacts children: tenant/landlord/partner/unknown). */
+  dot?: 'tenant' | 'landlord' | 'partner' | 'unknown';
   /** Marks a leaf that renders a live count badge (resolved from context, not
    *  the static model): the Inbox unread count, or the unmatched-email unread
    *  count (the Email side-door surface). */
@@ -65,6 +68,7 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           { to: '/contacts/tenants', label: 'Tenants', dot: 'tenant' },
           { to: '/contacts/landlords', label: 'Landlords', dot: 'landlord' },
+          { to: '/contacts/caseworkers', label: 'Caseworkers', dot: 'partner' },
           { to: '/contacts/unknown', label: 'Unknown', dot: 'unknown' },
         ],
       },

@@ -198,7 +198,11 @@ test.describe('Extensible contact creation', () => {
     const relLink = page.getByRole('link', { name: 'Marcus Bell' });
     await expect(relLink).toBeVisible();
     await expect(relLink).toHaveAttribute('href', /\/contacts\/contact-landlord-0001$/);
-    await expect(page.getByText('Caseworker')).toBeVisible();
+    // Scoped to the Relationships card and exact: the nav's "Caseworkers" link
+    // (spec 2026-10-06 D18) would otherwise match this case-insensitive
+    // substring too (R5-F11).
+    const relationshipsCard = page.locator('section', { has: page.getByRole('heading', { name: /^Relationships/ }) });
+    await expect(relationshipsCard.getByText('Caseworker', { exact: true })).toBeVisible();
 
     // Persists across a reload.
     await page.reload();

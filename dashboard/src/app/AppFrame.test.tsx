@@ -138,7 +138,7 @@ describe('AppFrame', () => {
     );
 
     const workspace = screen.getByRole('navigation', { name: 'Workspace' });
-    for (const label of ['Today', 'Placements', 'Tours', 'Contacts', 'Tenants', 'Landlords', 'Unknown', 'Properties']) {
+    for (const label of ['Today', 'Placements', 'Tours', 'Contacts', 'Tenants', 'Landlords', 'Caseworkers', 'Unknown', 'Properties']) {
       expect(within(workspace).getByRole('link', { name: label })).toBeInTheDocument();
     }
 
@@ -150,11 +150,23 @@ describe('AppFrame', () => {
     expect(screen.getByRole('link', { name: 'Settings' })).toBeInTheDocument();
   });
 
-  it('Contacts is a parent with Tenants/Landlords/Unknown children', async () => {
+  it('Contacts is a parent with Tenants/Landlords/Caseworkers/Unknown children, in that order', async () => {
     renderAuthedApp();
     const tenants = await screen.findByRole('link', { name: 'Tenants' });
     expect(tenants).toHaveAttribute('href', '/contacts/tenants');
     expect(screen.getByRole('link', { name: 'Contacts' })).toHaveAttribute('href', '/contacts');
+    // Spec 2026-10-06 D18: the one addition to the locked nav.
+    expect(screen.getByRole('link', { name: 'Caseworkers' })).toHaveAttribute('href', '/contacts/caseworkers');
+    // The child links carry NO aria-label (NavContents renders them as
+    // <NavLink> with the label as a child span; only the parent link sets
+    // aria-label), so match them by their ACCESSIBLE NAME - getAllByRole
+    // returns them in document order - and read the visible label
+    // (plan review R1 ruling A13).
+    const workspace = screen.getByRole('navigation', { name: 'Workspace' });
+    const children = within(workspace)
+      .getAllByRole('link', { name: /^(Tenants|Landlords|Caseworkers|Unknown)$/ })
+      .map((a) => a.textContent);
+    expect(children).toEqual(['Tenants', 'Landlords', 'Caseworkers', 'Unknown']);
   });
 
   it('account menu shows the user email and a Sign out action', async () => {

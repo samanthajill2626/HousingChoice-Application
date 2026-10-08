@@ -211,6 +211,9 @@
 .dotUnknown {
   background: var(--c-dot-unknown);
 }
+.dotPartner {
+  background: var(--c-dot-partner);
+}
 
 .footer {
   margin-top: var(--sp-4);

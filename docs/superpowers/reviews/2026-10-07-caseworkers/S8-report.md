@@ -177,3 +177,26 @@ The nav-only new test initially left async reads unsettled; it now awaits both
 lists, and the final same-family run has no act warnings (8.12-green2).
 Root bare npm run typecheck exited 0 across five workspaces. Scoped root eslint
 on CaseworkersList.tsx and its test exited 0. No contract deviation.
+
+## Task 8.13 - navigation, route and profiler pins
+
+Task 8.12 commit: 1478bf27. Added the Caseworkers child after Landlords with
+the partner dot and a static /contacts/caseworkers route. Profiler exclusion,
+registry TODO, route test, new issue and README stay together. The existing
+contact-create browser spec now scopes exact Caseworker to Relationships.
+RED: dashboard npx vitest run src/app/AppFrame.test.tsx, exit 1: 2 failed /
+12 passed, missing Caseworkers nav link. GREEN: dashboard npx vitest run
+src/app src/App.test.tsx, exit 0, 57 tests in seven files. E2e workspace npx
+vitest run performance/routes.test.ts performance/mutationCatalog.test.ts,
+exit 0, 30 tests in two files (26 + 4). Root bare npm run typecheck exited 0
+across five workspaces. npm run issues exited 0.
+
+Scoped slice lint enumerated the 37 TypeScript files changed since S8 start
+(e32fb777); eslint reported only the baseline-attributed ContactsList
+react-hooks/set-state-in-effect diagnostic described in Task 8.11. No new
+lint errors. Added-line ASCII since S8 start and git diff --check pass.
+New issue/README/nav addition dates use 2026-10-08 (actual implementation).
+The new issue follows the current README's hermetic profiler permission,
+rather than repeating the draft's outdated human-only claim. No profiler
+or browser command was run. The dispatch assigns aggregate slice gates to
+the parent; this implementation worker has not run them.

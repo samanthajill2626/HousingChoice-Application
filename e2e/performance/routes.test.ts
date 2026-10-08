@@ -400,6 +400,9 @@ describe('route registry completeness', () => {
       // `organizations/:orgId?` (the optional entry id); both forms are excluded.
       '/settings/organizations',
       '/settings/organizations/:orgId?',
+      // Contacts > Caseworkers, not yet a profiler surface
+      // (issue perf-pages-contacts-caseworkers-surface).
+      '/contacts/caseworkers',
       // The All tours view, not yet a profiler surface either (the same issue).
       '/tours/all',
       '/settings',

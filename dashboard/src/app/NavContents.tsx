@@ -18,6 +18,7 @@ import styles from './AppFrame.module.css';
 const DOT_CLASS: Record<NonNullable<NavLeaf['dot']>, string> = {
   tenant: styles.dotTenant ?? '',
   landlord: styles.dotLandlord ?? '',
+  partner: styles.dotPartner ?? '',
   unknown: styles.dotUnknown ?? '',
 };
 

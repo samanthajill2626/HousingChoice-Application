@@ -141,4 +141,4 @@ npm run e2e:stop returned EXIT0, stopped owned launcher49740 and children,
 dropped only lane13 fixture tables and released its lease. The deliberately
 stopped long-lived launcher session returned EXIT1; it is not a test-gate result.
 Parent confirmed no listeners on10301/10311/10321/10331 and drained the command.
-Shared DynamoDB/MinIO containers and all other worktrees were left running.
+Shared DynamoDB/MinIO containers were not stopped; other worktrees were untouched.

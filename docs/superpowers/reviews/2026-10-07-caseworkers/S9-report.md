@@ -108,3 +108,83 @@ no other diagnostic is present. Comparison exit 0, zero new errors. Raw
 reference stays in 9.6-lint-baseline.log and lint-baseline.json (gitignored).
 Added-line ASCII across the whole S9 slice and git diff --check pass.
 No contract deviation and no command remains active for this task.
+
+## S9 handoff - implementation complete
+
+| Task | Commit |
+| --- | --- |
+| 9.1 | 58f5886c |
+| 9.2 | bb2dc582 |
+| 9.3 | d6cd213d |
+| 9.4 | 5c36155f |
+| 9.5 | 5531719f |
+| 9.6 | cf9fdb5d |
+
+All six root typechecks exited 0. All 24 runner invocations have real exit
+markers; none is pending or timed out. The first 9.1 quoted-filter run selected
+zero cases and is excluded; each task has a separate genuine RED followed by
+GREEN. Final focused proofs: listing family 270 tests, contact and broadcasts
+families 1766 tests. These are separate runs, not a summed unique test total.
+The 31-file scoped lint has zero new errors at the explicit merge base; the
+four BroadcastComposer baseline diagnostics are recorded above.
+
+The final audit byte-compared all six intentionally tenant-worded surfaces
+against a95686e3: Add more tenants by filters, Add a tenant, No candidates,
+the Couldn't add that tenant error sentence, the TenantFile Send action,
+and audienceSummary's function body. All match. useContactFile.ts is
+byte-unchanged. S8 Staff notes,
+organization, and onContactUpdated wiring remain. No source contract drift.
+
+### S10 selectors and wire contract
+
+- Partner card heading: getByRole('heading', { name: /^Properties sent/ }).
+  Its action: getByRole('button', { name: 'Send a property to this partner' }).
+  It opens /broadcasts/new?contactId=<encoded id>; the composer keeps that
+  partner in seedContactIds and names it in the banner. No new contact read
+  was introduced by S9; the existing composer read resolves the banner.
+- Card order: Details, Staff notes, Preferences & notes, Properties sent,
+  Group threads, Media from comms. Partner send rows have property links and
+  no tour chips, including stored tenant-era tour signals. Missing loaded
+  units fall back to unitId; pending/empty slices retain the existing idiom.
+- Property card heading: getByRole('heading', { name: /^Sent to\b/ }); do
+  not require an exact heading because its action is inside the heading.
+  Card action: getByRole('button', { name: 'Send this property', exact: true }).
+  Kebab item: getByRole('menuitem', { name: 'Send this property', exact: true }).
+- Recipient link names contain only the person's name (tenantName fallback
+  contactId). A resolved non-tenant kind is sibling text: role trimmed through
+  displayKind, otherwise Partner/Landlord/Team/Unknown. Tenant and unresolved
+  rows have no kind label. ListingSendRow mirrors optional type?: ContactType
+  and role?: string; S6 omits metadata for unresolved contacts and sends only
+  nonblank trimmed roles. Persisted tenantName/tenantCount remain unchanged.
+- Composer Send: /^Send to 1 recipient\b/ or /^Send to \d+ recipients?$/.
+  Reach: Reaches 1 recipient / Reaches N recipients. Results/list reach:
+  To 1 recipient / To N recipients. Results unresolved fallback: Recipient.
+  Property Activity zero: No recipients reached. S6's stored timeline zero
+  retains Sent to 0 recipients; only its recount uses No recipients reached.
+- Thread Send must remain getByRole('button', { name: 'Send', exact: true });
+  a substring match also finds the new partner Properties sent action.
+  selectors.md now has exactly one Properties sent row, one Sent to row and
+  the updated Thread send row. Task 10.9 verifies, never duplicates them.
+
+### Browser pins already moved; execution remains S10-owned
+
+- 9.1: broadcasts.spec.ts menu; scenarios/steps.ts menu; matching-entry-points
+  card action and Sent to heading; listing-activity Sent to heading.
+- 9.3: listing-activity Sent to 2 recipients; share-sent-outcome No recipients
+  reached (including its title/comment).
+- 9.4: broadcasts Send count; both matching-entry-points Send count locators;
+  share-skip-fix flagged note and Send count; org-lists Reaches 1/2 recipients.
+- S6 already owns landlord-activity's Sent to 2 recipients pin. Tenant-file
+  send action and intentionally broad /^Send to/ pins remain unchanged.
+- New partner-share.spec.ts remains entirely S10's: create a run-unique
+  consented partner and never pre-open its conversation; send from its card,
+  assert outbound share and a partner_1to1 conversation, then its property
+  Sent to row and sibling Partner label. S9 does not create browser specs.
+- S10 still owns GLOSSARY/sequence-diagram/RUNBOOK wording and the stale
+  broadcasts.spec.ts header comment noted by Task 9.5.
+
+This is an implementation handoff, not a mission completion or merge verdict.
+Parent owns CP2 (bare root typecheck and npm test) and all browser/final gates.
+No aggregate npm test, smoke, browser, profiler, seed, dependency, environment,
+infra, deployment, main-sync, merge or cleanup command ran here. No block
+remains; all owned commands are stopped and the source worktree is clean.

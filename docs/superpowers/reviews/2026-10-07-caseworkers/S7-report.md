@@ -117,3 +117,82 @@ all five workspaces (7.6-typecheck). No contract deviation or new cycle.
 Final changed-TypeScript lint includes both task paths: npx eslint over all
 20 S7 TS/TSX paths exited 0 with no warnings/errors (exit-lint), so no
 baseline attribution is needed and no narrower duplicate lint run is added.
+
+## Final S7 closeout
+
+| Task | Commit |
+|---|---|
+| 7.1 | 20b5f771 |
+| 7.2 | 55d05df9 |
+| 7.3 | b98b6858 |
+| 7.4 | 9873a238 |
+| 7.5 | 509f079b |
+| 7.5a | cff303af |
+| 7.6 | 9b29c386 |
+
+Final source HEAD: 9b29c386. Final focused regression from
+W:/tmp/caseworkers/dashboard:
+npx vitest run src/routes/orgs/orgCopy.test.ts src/api/endpoints.test.ts src/routes/orgs/OrgPicker.test.tsx src/routes/orgs/NewOrgDialog.test.tsx src/routes/orgs/OrgKindChoice.test.tsx src/routes/orgs/useOrgList.test.tsx src/routes/settings/OrgListSection.test.tsx src/routes/settings/OrgListPane.test.tsx src/routes/settings/NotOnListSection.test.tsx src/routes/settings/orgSelection.test.ts src/routes/settings/useOrgAdmin.test.tsx src/routes/contact/ContactEditForm.test.tsx
+Exit 0: 12 files, 336 tests passed, zero skipped (exit-regression).
+Per-file counts in command order: 44, 48, 28, 20, 2, 7, 57, 3, 38, 13,
+13, 63. Existing ContactEditForm act warnings were also present in the
+parent's untouched-source CP1 log (lines 2409 and 2419); no failure excused.
+
+The final root npm run typecheck exited 0 across all five workspaces
+(7.6-typecheck); all 20 touched TS/TSX paths lint exited 0 (exit-lint).
+No implementation change followed either check. Full-slice git diff --check
+and added-line ASCII checks pass. Existing source glyphs are preserved.
+All 24 recorded commands have real exit markers; no timeout or real
+[dynamoAdmin] fault occurred. Owned command process check found none running.
+
+Each task committed its report entry. Before every commit bare git status
+was read and the resolved MERGE_HEAD checked absent. Only explicit owned
+paths were staged; every commit has the GPT-6 Astra co-author trailer.
+This final report-only closeout is committed immediately. No source work,
+aggregate suite, smoke, browser/e2e run, live-port access, main sync,
+backend/dependency/seed/script change, infrastructure, environment mutation,
+deployment, cleanup or S8 implementation occurred in this slice. The parent
+reviewed committed organization UI changes without a finding; final mission
+independent review and S10 browser verification remain pending as planned.
+
+## Downstream S8 contracts
+
+- api/types.ts: OrgField and OrgRecordField include organization;
+  OrgUseTotal is { active: number; deleted: number }; OrgUsageCounts has
+  tenants, otherContacts, properties, organization, deleted, inUse and
+  kindLocked. OrgRewriteState counts document organization. Resolve bodies
+  support kind?: OrgKind, sent only for Add on organization rows.
+- checkOrgText body is ({ kind: OrgKind; kinds?: never } | {
+  kinds: readonly OrgKind[]; kind?: never }) & { text: string;
+  spellingFor?: string }; optional AbortSignal remains unchanged.
+- orgCopy exports ORGANIZATION_KINDS (housing_authority then agency),
+  kindsForField(field: OrgRecordField): readonly OrgKind[],
+  OrgFormField = housingAuthority | agency | organization,
+  orgPickField(field: OrgFormField, ref: OrgRef): OrgFormField,
+  newOrgDialogKind(field: OrgFormField): OrgKind | organization,
+  isOrgFormField(field: string): field is OrgFormField, and
+  blockingUses(usage: OrgUsageCounts | undefined, mode: delete | kind):
+  number | undefined. organization remains in its originating field;
+  tenant fields follow the selected name's kind. kindForField and
+  usageTotal are removed. FIELD_LABEL.organization is Organization.
+- orgErrorCopy(err, { organization?: boolean } = {}) has no-Split compound
+  copy for organizations. notOnListMessage uses the organization noun;
+  orgListLoadError over both lists says Couldn't load organizations.
+- OrgKindChoice exports its component and props: value: OrgKind | null,
+  onChange(kind: OrgKind), disabled?: boolean. null selects neither radio;
+  the fieldset is named Kind. NewOrgDialogProps.kind accepts OrgKind |
+  organization; organization checks both lists and Add waits for a choice.
+- ContactEditForm adding is { field: OrgFormField; text: string } | null;
+  orgFieldError.field is OrgFormField. orgSetters has housingAuthority and
+  agency only; applyOrg(field, ref) dispatches through orgPickField.
+  Every NewOrgDialog callback preserves adding.field, and its kind is
+  newOrgDialogKind(adding.field). isOrgFormField narrows 422 fields.
+  S8 still adds organization state/setter, partner picker, typed-text
+  handling, buildPatch/settle arms, and its organization-specific error line.
+- Settings keeps all three segments, list/detail layout, explicit admin
+  actions, distinct record displays and the synchronous SettleGate. The
+  organization URL allowlist is complete. No page-level width cap added.
+
+No unresolved production finding or contract deviation remains. O1 was an
+accepted comment correction. Script-block/anchor selection mistakes and
+honest RED early-stop evidence are recorded under their owning tasks.

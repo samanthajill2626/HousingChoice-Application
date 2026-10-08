@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ContactType } from '../../api/index.js';
@@ -203,5 +203,107 @@ describe('KindPicker', () => {
 
     // onChange should have been called with the same type+role (not null+role)
     expect(onChange).toHaveBeenCalledWith({ type: 'tenant', role: 'Case worker' });
+  });
+});
+
+/** A host that offers the Caseworker segment (a new contact, or a stored caseworker). */
+function OfferedKindPicker({
+  initial,
+  onChange,
+  roleSuggestions,
+}: {
+  initial: KindValue;
+  onChange: (v: KindValue) => void;
+  roleSuggestions?: string[];
+}) {
+  const [value, setValue] = useState<KindValue>(initial);
+  return (
+    <KindPicker
+      value={value}
+      onChange={(v) => {
+        setValue(v);
+        onChange(v);
+      }}
+      roleSuggestions={roleSuggestions}
+      offerCaseworker
+    />
+  );
+}
+
+function segmentLabels(): (string | null)[] {
+  const group = screen.getByRole('group', { name: 'Contact kind' });
+  return within(group).getAllByRole('button').map((b) => b.textContent);
+}
+
+describe('KindPicker - the Caseworker choice (spec 2026-10-06 D16, D22)', () => {
+  it('offers no Caseworker segment unless the host offers it', () => {
+    render(<KindPicker value={{ type: null, role: '' }} onChange={vi.fn()} />);
+    expect(segmentLabels()).toEqual(['Tenant', 'Landlord', 'Partner', 'Property Manager', 'Other']);
+    expect(screen.queryByRole('button', { name: 'Caseworker' })).toBeNull();
+  });
+
+  it('offered, the segments follow the Unknown card order, then Other', () => {
+    render(<OfferedKindPicker initial={{ type: null, role: '' }} onChange={vi.fn()} />);
+    expect(segmentLabels()).toEqual([
+      'Tenant',
+      'Landlord',
+      'Partner',
+      'Caseworker',
+      'Property Manager',
+      'Other',
+    ]);
+  });
+
+  it('Caseworker is a preset: partner + Caseworker, lit, and no Other panel', () => {
+    const onChange = vi.fn();
+    render(<OfferedKindPicker initial={{ type: null, role: '' }} onChange={onChange} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Caseworker' }));
+    expect(onChange).toHaveBeenLastCalledWith({ type: 'partner', role: 'Caseworker' });
+    expect(screen.getByRole('button', { name: 'Caseworker' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Partner' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByLabelText(/^role$/i)).toBeNull();
+  });
+
+  it('Partner after Caseworker clears the role', () => {
+    const onChange = vi.fn();
+    render(<OfferedKindPicker initial={{ type: 'partner', role: 'Caseworker' }} onChange={onChange} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Partner' }));
+    expect(onChange).toHaveBeenLastCalledWith({ type: 'partner', role: '' });
+  });
+
+  it('a stored caseworker lights the preset only on the exact role (R4-15); a variant reads as Other', () => {
+    const { unmount } = render(
+      <KindPicker value={{ type: 'partner', role: 'Caseworker' }} onChange={vi.fn()} offerCaseworker />,
+    );
+    expect(screen.getByRole('button', { name: 'Caseworker' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByLabelText(/^role$/i)).toBeNull();
+    unmount();
+    render(<KindPicker value={{ type: 'partner', role: 'Case worker' }} onChange={vi.fn()} offerCaseworker />);
+    expect(screen.getByRole('button', { name: 'Caseworker' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'Other' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText(/^role$/i)).toHaveValue('Case worker');
+  });
+
+  it('the Other role suggestions leave out every role that mentions a caseworker', () => {
+    const { container } = render(
+      <OfferedKindPicker
+        initial={{ type: null, role: '' }}
+        onChange={vi.fn()}
+        roleSuggestions={['Case manager', 'Caseworker', 'Senior Case Worker', 'Social worker', 'Inspector']}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }));
+    const offered = Array.from(container.querySelectorAll('datalist option')).map((o) =>
+      o.getAttribute('value'),
+    );
+    expect(offered).toEqual(['Social worker', 'Inspector']);
+  });
+
+  it('the role placeholder no longer suggests a caseworker role', () => {
+    render(<KindPicker value={{ type: null, role: '' }} onChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }));
+    const placeholder = screen.getByLabelText(/^role$/i).getAttribute('placeholder') ?? '';
+    expect(placeholder).toBe('e.g. Social worker, Inspector...');
+    expect(placeholder).not.toMatch(/case ?worker/i);
   });
 });

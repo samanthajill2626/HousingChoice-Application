@@ -21,3 +21,15 @@ fingerprint comparison was not reached in RED.
 GREEN: the same commands exit 0: 50 endpoint tests, 4 catalog tests.
 Root npm run typecheck exited 0 across all five workspaces (8.1-typecheck).
 No contract deviation. git diff --check passed.
+
+## Task 8.2 - KindPicker Caseworker preset
+
+Task 8.1 commit: bdd128a4. Added the host-gated Caseworker segment with the
+exact preset role, filtered mentions from Other suggestions, and made its
+placeholder ASCII. Typed custom roles and all existing five-segment hosts
+remain supported. No CSS redesign.
+RED: dashboard npx vitest run src/routes/contact/KindPicker.test.tsx,
+exit 1, 5 failed / 11 passed: missing Caseworker segment, offered mentions,
+and the old placeholder. GREEN: same command exit 0, 16 tests. Root bare
+npm run typecheck exit 0, all five workspaces (8.2-typecheck).
+No contract deviation. Task 8.1 and 8.2 added-line ASCII and diff checks pass.

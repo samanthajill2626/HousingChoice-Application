@@ -229,8 +229,9 @@ function AuthedApp(): React.JSX.Element {
               {/* Housing authorities & agencies (spec 2026-10-06 D10): any
                   signed-in user (NOT admin-guarded); the section gates its
                   admin actions with useAuth().isAdmin and the server with
-                  requireRole('admin'). */}
-              <Route path="organizations" element={<OrgListSection />} />
+                  requireRole('admin'). The optional :orgId is the entry
+                  the detail panel shows (settings/orgSelection.ts). */}
+              <Route path="organizations/:orgId?" element={<OrgListSection />} />
             </Route>
 
             {/* The remaining nav destinations stay placeholders for now. */}

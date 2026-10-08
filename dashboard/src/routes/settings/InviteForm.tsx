@@ -62,7 +62,7 @@ export function InviteForm({ onInvite }: InviteFormProps): React.JSX.Element {
             {...(error !== null && { 'aria-describedby': 'invite-email-error' })}
           />
         </label>
-        <label className={styles.field}>
+        <label className={`${styles.field} ${styles.roleField}`}>
           <span className={styles.fieldLabel}>Role</span>
           <select
             className={styles.select}

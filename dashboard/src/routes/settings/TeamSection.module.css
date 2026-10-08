@@ -246,12 +246,20 @@
   gap: var(--sp-3);
 }
 
+/* Each invite field grows to fit, up to a sensible width - never the page's. */
 .field {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
   flex: 1;
   min-width: 180px;
+  max-width: 24rem;
+}
+
+/* Role picks one of two short words: it needs no more room than that. */
+.roleField {
+  flex: 0 0 auto;
+  min-width: 8rem;
 }
 
 .fieldLabel {

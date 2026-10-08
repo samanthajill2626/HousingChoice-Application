@@ -10,10 +10,12 @@
 //      changes only on a pick); text typed but never picked (code review
 //      R1-ADV-FE-1, R2-FE-9): a form's Save commits a list name and refuses
 //      anything else, the composer's Preview waits for a pick;
-//   2. Settings > Housing authorities & agencies (D10-D13): a VA adds an entry
+//   2. Settings > Housing authorities & agencies (D10-D13), a list beside a
+//      detail panel (design review 2026-10-07 Option B): a VA adds an entry
 //      and edits its notes; an admin renames one and the rewrite job finishes;
-//   3. the "Not on the list" section (D10, D11), fed by the dev seam: Show
-//      records for everyone; Use, Move to Agency, Split and Clear for admins;
+//   3. the "Not on the list" segment (D10, D11), fed by the dev seam: Show
+//      records for everyone; Use, Move to Agency, Split and Clear for admins,
+//      each one pick in the panel's settle group and its confirm;
 //   4. AI suggestions (D8): an ambiguous and an unknown housing authority
 //      accepted through "Is this really new?", and an agency name dropped with
 //      its run-log label.
@@ -42,6 +44,7 @@ import {
   waitForRewrite,
 } from '../../fixtures/orgFixture.js';
 import { expectTodayReady } from '../../support/today.js';
+import { expectNoHorizontalOverflow } from '../../support/viewport.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -59,9 +62,15 @@ const UI = {
   nameBox: 'Name',
   notesBox: 'Notes',
   settingsTab: 'Housing authorities & agencies',
+  // The three lists: each a segment button ("Agencies 7") and, when shown, a
+  // region named by its heading.
+  lists: 'Lists',
+  search: 'Search names and spellings',
+  backTo: (list: string): string => `Back to ${list}`,
   haRegion: 'Housing authorities',
   agencyRegion: 'Agencies',
   notOnListRegion: 'Not on the list',
+  settleGroup: 'Settle this value',
   addAgency: 'Add agency',
   editNotes: (name: string): string => `Edit notes for ${name}`,
   editNotesDialog: 'Edit notes',
@@ -476,16 +485,32 @@ async function devLoginAs(page: Page, email: string): Promise<void> {
   await expectTodayReady(page);
 }
 
-/** A named section of the tab (each <section> is labelled by its heading). */
+/** A named section of the tab (each <section> is labelled by its heading):
+ *  a list, or the detail panel - named by the entry or value it shows. */
 function region(page: Page, name: string): Locator {
   return page.getByRole('region', { name, exact: true });
 }
 
-/** One entry's row in its list section, by its exact name. */
-function entryRow(page: Page, regionName: string, name: string): Locator {
-  return region(page, regionName)
-    .getByRole('row')
-    .filter({ has: page.getByRole('rowheader', { name, exact: true }) });
+/** Show one of the three lists (a segment button named "<list> <count>"). */
+async function showList(page: Page, list: string): Promise<void> {
+  await page
+    .getByRole('group', { name: UI.lists })
+    .getByRole('button', { name: new RegExp(`^${list} \\d+$`) })
+    .click();
+  await expect(region(page, list)).toBeVisible();
+}
+
+/** One entry's row in its list: a link named by the exact name. */
+function entryLink(page: Page, list: string, name: string): Locator {
+  return region(page, list).getByRole('link', { name, exact: true });
+}
+
+/** Pick an entry (its list must be on screen); returns the detail panel. */
+async function openEntry(page: Page, list: string, name: string): Promise<Locator> {
+  await entryLink(page, list, name).click();
+  const panel = region(page, name);
+  await expect(panel.getByRole('heading', { name, exact: true })).toBeFocused();
+  return panel;
 }
 
 /** Settings > Housing authorities & agencies through its tab (visible to every
@@ -493,7 +518,7 @@ function entryRow(page: Page, regionName: string, name: string): Locator {
 async function openOrgSettings(page: Page): Promise<void> {
   await page.goto(`${NEXT}/settings`);
   await page.getByRole('tab', { name: UI.settingsTab }).click();
-  await expect(entryRow(page, UI.haRegion, 'Atlanta Housing Authority')).toBeVisible();
+  await expect(entryLink(page, UI.haRegion, 'Atlanta Housing Authority')).toBeVisible();
 }
 
 test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => {
@@ -505,10 +530,13 @@ test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => 
     const stamp = `${Date.now()}`.slice(-6);
     const finch = `Finch Mission ${stamp}`;
     await openOrgSettings(page);
-    await expect(entryRow(page, UI.agencyRegion, 'Step Up')).toBeVisible();
-    await expect(region(page, UI.notOnListRegion)).toBeVisible();
-    // Admin-only actions are not offered to a VA (D10).
-    await expect(region(page, UI.haRegion).getByRole('button', { name: /^Rename / })).toHaveCount(0);
+    // Admin-only actions are not offered to a VA - absent, not disabled (D10).
+    const atlanta = await openEntry(page, UI.haRegion, 'Atlanta Housing Authority');
+    await expect(atlanta.getByRole('button', { name: UI.editNotes('Atlanta Housing Authority') })).toBeVisible();
+    await expect(atlanta.getByRole('button', { name: /^Rename / })).toHaveCount(0);
+    await showList(page, UI.notOnListRegion);
+    await showList(page, UI.agencyRegion);
+    await expect(entryLink(page, UI.agencyRegion, 'Step Up')).toBeVisible();
 
     // Add: a name and notes, through "Is this really new?" (D10).
     await region(page, UI.agencyRegion).getByRole('button', { name: UI.addAgency, exact: true }).click();
@@ -517,16 +545,18 @@ test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => 
     await isNew.getByRole('textbox', { name: UI.notesBox, exact: true }).fill(`Added by e2e ${stamp}`);
     await isNew.getByRole('button', { name: UI.yesAddIt, exact: true }).click();
     await expect(isNew).toHaveCount(0);
-    const row = entryRow(page, UI.agencyRegion, finch);
-    await expect(row).toContainText(`Added by e2e ${stamp}`);
+    // The new entry opens in the panel, selected in its list.
+    const panel = region(page, finch);
+    await expect(panel).toContainText(`Added by e2e ${stamp}`);
+    await expect(entryLink(page, UI.agencyRegion, finch)).toHaveAttribute('aria-current', 'page');
 
     // Notes: everyone edits them, and they touch no records (D10).
-    await row.getByRole('button', { name: UI.editNotes(finch), exact: true }).click();
+    await panel.getByRole('button', { name: UI.editNotes(finch), exact: true }).click();
     const notes = page.getByRole('dialog', { name: UI.editNotesDialog });
     await notes.getByRole('textbox', { name: UI.notesBox, exact: true }).fill(`Edited by e2e ${stamp}`);
     await notes.getByRole('button', { name: UI.save, exact: true }).click();
     await expect(notes).toHaveCount(0);
-    await expect(row).toContainText(`Edited by e2e ${stamp}`);
+    await expect(panel).toContainText(`Edited by e2e ${stamp}`);
 
     const entry = await requireOrg(req, finch);
     expect(entry).toMatchObject({ kind: 'agency', notes: `Edited by e2e ${stamp}` });
@@ -535,6 +565,38 @@ test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => 
       data: { name: `Finch Renamed ${stamp}` },
     });
     expect(rename.status()).toBe(403);
+  });
+
+  test('at phone width one pane shows at a time: pick a row, the panel alone, Back returns to the list', async ({
+    page,
+  }) => {
+    await devLogin(page); // the seeded VA
+    await page.setViewportSize({ width: 390, height: 844 });
+    // Below the nav breakpoint the Settings tabs are a <select>: go straight in.
+    await page.goto(`${NEXT}/settings/organizations`);
+    const atlanta = entryLink(page, UI.haRegion, 'Atlanta Housing Authority');
+    await expect(atlanta).toBeVisible();
+    await expect(page.getByRole('group', { name: UI.lists })).toBeVisible();
+    await expect(page.getByRole('searchbox', { name: UI.search })).toBeVisible();
+
+    const panel = await openEntry(page, UI.haRegion, 'Atlanta Housing Authority');
+    await expect(page).toHaveURL(/\/settings\/organizations\/[^/?]+$/);
+    // One pane: the panel alone - no list, no segments, no search, no Close.
+    await expect(region(page, UI.haRegion)).toBeHidden();
+    await expect(page.getByRole('group', { name: UI.lists })).toHaveCount(0);
+    await expect(page.getByRole('searchbox', { name: UI.search })).toHaveCount(0);
+    await expect(panel.getByRole('link', { name: 'Close', exact: true })).toHaveCount(0);
+
+    // Back (its name is exactly "Back to <list>"): the list again, focus on
+    // the row it came from.
+    await panel.getByRole('link', { name: UI.backTo(UI.haRegion), exact: true }).click();
+    await expect(page).toHaveURL(/\/settings\/organizations$/);
+    await expect(region(page, 'Atlanta Housing Authority')).toHaveCount(0);
+    await expect(atlanta).toBeVisible();
+    await expect(atlanta).toBeFocused();
+    // No horizontal scroll at phone width - measured on the routed <main>,
+    // which is what scrolls in this app shell (support/viewport.ts).
+    await expectNoHorizontalOverflow(page, 'org settings list at 390px');
   });
 
   test('an admin renames an entry: the rewrite job finishes and every record holds the new name', async ({
@@ -562,10 +624,10 @@ test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => 
     });
 
     await openOrgSettings(page);
-    const row = entryRow(page, UI.haRegion, oldName);
-    await expect(row).toContainText(UI.usedByTenants(2));
-    await expect(row).toContainText(UI.usedByProperties(1));
-    await row.getByRole('button', { name: UI.rename(oldName), exact: true }).click();
+    const panel = await openEntry(page, UI.haRegion, oldName);
+    await expect(panel).toContainText(UI.usedByTenants(2));
+    await expect(panel).toContainText(UI.usedByProperties(1));
+    await panel.getByRole('button', { name: UI.rename(oldName), exact: true }).click();
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('textbox', { name: UI.newNameBox, exact: true }).fill(newName);
     await dialog.getByRole('button', { name: UI.renameConfirm, exact: true }).click();
@@ -579,10 +641,14 @@ test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => 
     }
     expect(await getUnitAuthorities(req, unitId)).toEqual([newName]);
 
-    // The list shows the new name and keeps the old one as a spelling (D11).
+    // The entry stays selected (its URL is its id): the panel shows the new
+    // name and keeps the old one as a spelling chip (D11).
     await page.reload();
-    await expect(entryRow(page, UI.haRegion, newName)).toContainText(oldName);
-    await expect(entryRow(page, UI.haRegion, oldName)).toHaveCount(0);
+    await expect(
+      region(page, newName).getByRole('list', { name: `Spellings of ${newName}` }).getByText(oldName, { exact: true }),
+    ).toBeVisible();
+    await expect(entryLink(page, UI.haRegion, newName)).toBeVisible();
+    await expect(entryLink(page, UI.haRegion, oldName)).toHaveCount(0);
 
     // The property's Activity names the machine rewrite (plan 3.8).
     await page.goto(`${NEXT}/listings/${unitId}`);
@@ -594,11 +660,34 @@ test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => 
 
 // ---- "Not on the list" (spec D10, D11) ----
 
-/** A value's row in the "Not on the list" section. `hasText` is a
- *  case-INSENSITIVE substring match, so no two values in one test may contain
- *  each other. */
-function notOnListRow(page: Page, value: string): Locator {
-  return region(page, UI.notOnListRegion).getByRole('row').filter({ hasText: value });
+/** A value's row in the "Not on the list" list: a link named by the exact
+ *  value (no two values in one test share a text across fields). */
+function valueLink(page: Page, value: string): Locator {
+  return region(page, UI.notOnListRegion).getByRole('link', { name: value, exact: true });
+}
+
+/** Pick a value (the list must be on screen); returns the detail panel. */
+async function openValue(page: Page, value: string): Promise<Locator> {
+  await valueLink(page, value).click();
+  const panel = region(page, value);
+  await expect(panel.getByRole('heading', { name: value, exact: true })).toBeFocused();
+  return panel;
+}
+
+/** Pick a settle choice in the panel; returns the settle group, whose
+ *  confirm (named as the choice) sits under the pick. */
+async function pickSettle(panel: Locator, choice: string): Promise<Locator> {
+  const settle = panel.getByRole('group', { name: UI.settleGroup });
+  await settle.getByRole('radio', { name: choice, exact: true }).check();
+  return settle;
+}
+
+/** Press the confirm, then wait until the page has left the settled value's
+ *  URL (it replaces it with the list's) - so a later reload cannot land on
+ *  the value it just settled (code review r1, e2e race). */
+async function confirmSettle(page: Page, settle: Locator, confirm: string): Promise<void> {
+  await settle.getByRole('button', { name: confirm, exact: true }).click();
+  await page.waitForURL((url) => !url.searchParams.has('value'));
 }
 
 test.describe('"Not on the list" (spec D10, D11)', () => {
@@ -633,27 +722,28 @@ test.describe('"Not on the list" (spec D10, D11)', () => {
     });
 
     await openOrgSettings(page);
-    const notOnList = region(page, UI.notOnListRegion);
-    const contactRow = notOnListRow(page, contactValue);
-    await expect(contactRow).toBeVisible();
-    // A VA gets no settling action (D10)...
-    await expect(contactRow.getByRole('button', { name: UI.clear, exact: true })).toHaveCount(0);
+    await showList(page, UI.notOnListRegion);
+    const contactPanel = await openValue(page, contactValue);
+    // A VA gets no settling at all - the group is absent, not disabled (D10)...
+    await expect(contactPanel.getByRole('group', { name: UI.settleGroup })).toHaveCount(0);
+    await expect(contactPanel.getByRole('radio')).toHaveCount(0);
     // ...but sees the records, each linked to its own page, the deleted one marked.
-    await contactRow.getByRole('button', { name: UI.showRecords, exact: true }).click();
-    await expect(notOnList.getByRole('link', { name: new RegExp(liveFirst) })).toHaveAttribute(
+    await contactPanel.getByRole('button', { name: UI.showRecords, exact: true }).click();
+    await expect(contactPanel.getByRole('link', { name: new RegExp(liveFirst) })).toHaveAttribute(
       'href',
       `/contacts/${live}`,
     );
-    await expect(notOnList.getByRole('link', { name: new RegExp(goneFirst) })).toHaveAttribute(
+    await expect(contactPanel.getByRole('link', { name: new RegExp(goneFirst) })).toHaveAttribute(
       'href',
       `/contacts/${gone}`,
     );
-    await expect(notOnList.getByRole('listitem').filter({ hasText: goneFirst })).toContainText(UI.deletedMarker);
-    await expect(notOnList.getByRole('listitem').filter({ hasText: liveFirst })).not.toContainText(
+    await expect(contactPanel.getByRole('listitem').filter({ hasText: goneFirst })).toContainText(UI.deletedMarker);
+    await expect(contactPanel.getByRole('listitem').filter({ hasText: liveFirst })).not.toContainText(
       UI.deletedMarker,
     );
-    await notOnListRow(page, unitValue).getByRole('button', { name: UI.showRecords, exact: true }).click();
-    await expect(notOnList.getByRole('link', { name: new RegExp(line1) })).toHaveAttribute(
+    const unitPanel = await openValue(page, unitValue);
+    await unitPanel.getByRole('button', { name: UI.showRecords, exact: true }).click();
+    await expect(unitPanel.getByRole('link', { name: new RegExp(line1) })).toHaveAttribute(
       'href',
       `/listings/${unitId}`,
     );
@@ -698,23 +788,24 @@ test.describe('"Not on the list" (spec D10, D11)', () => {
     await holderOf('Keep', keepValue);
 
     await openOrgSettings(page);
-    // Each action opens one confirm dialog (selector contract L3-L6).
-    const dialog = page.getByRole('dialog');
+    await showList(page, UI.notOnListRegion);
+    // Each action is one pick in the panel's settle group, and its confirm
+    // repeats it (selector contract L3-L6). After a settle the page goes back
+    // to the list, and its URL keeps the list on reload.
 
     // Use <name>: the value resolves to one entry (D10). "Remember this
     // spelling" is off - the value IS the name in another case (D12) - and the
     // action still runs.
-    await notOnListRow(page, useValue).getByRole('button', { name: UI.use(merlin), exact: true }).click();
-    await expect(dialog).toContainText(useValue);
-    await expect(dialog.getByRole('checkbox', { name: UI.rememberSpelling })).not.toBeChecked();
-    await dialog.getByRole('button', { name: UI.use(merlin), exact: true }).click();
+    let settle = await pickSettle(await openValue(page, useValue), UI.use(merlin));
+    await expect(settle.getByRole('checkbox', { name: UI.rememberSpelling })).not.toBeChecked();
+    await confirmSettle(page, settle, UI.use(merlin));
     await waitForRewrite(req, (r) => r.action === 'use' && r.fromTexts.some((t) => sameOrgText(t, useValue)));
     expect((await getContact(req, useHolder)).housingAuthority).toBe(merlin);
 
     // Move to Agency as <name>: an agency name out of the housing authority field.
     await page.reload();
-    await notOnListRow(page, moveValue).getByRole('button', { name: UI.moveToAgency(kiteAid), exact: true }).click();
-    await dialog.getByRole('button', { name: UI.moveToAgency(kiteAid), exact: true }).click();
+    settle = await pickSettle(await openValue(page, moveValue), UI.moveToAgency(kiteAid));
+    await confirmSettle(page, settle, UI.moveToAgency(kiteAid));
     await waitForRewrite(
       req,
       (r) => r.action === 'move_to_agency' && r.fromTexts.some((t) => sameOrgText(t, moveValue)),
@@ -725,10 +816,8 @@ test.describe('"Not on the list" (spec D10, D11)', () => {
 
     // Split into <housing authority> + <agency>: both halves prefilled (D10).
     await page.reload();
-    await notOnListRow(page, splitValue)
-      .getByRole('button', { name: UI.split(shrike, shrikeAid), exact: true })
-      .click();
-    await dialog.getByRole('button', { name: UI.splitConfirm, exact: true }).click();
+    settle = await pickSettle(await openValue(page, splitValue), UI.split(shrike, shrikeAid));
+    await confirmSettle(page, settle, UI.splitConfirm);
     await waitForRewrite(req, (r) => r.action === 'split' && r.fromTexts.some((t) => sameOrgText(t, splitValue)));
     const split = await getContact(req, splitHolder);
     expect(split.housingAuthority).toBe(shrike);
@@ -736,16 +825,16 @@ test.describe('"Not on the list" (spec D10, D11)', () => {
 
     // Clear: the housing authority is REMOVEd, never set to '' (D5, D11).
     await page.reload();
-    await notOnListRow(page, clearValue).getByRole('button', { name: UI.clear, exact: true }).click();
-    await dialog.getByRole('button', { name: UI.clear, exact: true }).click();
+    settle = await pickSettle(await openValue(page, clearValue), UI.clear);
+    await confirmSettle(page, settle, UI.clear);
     await waitForRewrite(req, (r) => r.action === 'clear' && r.fromTexts.some((t) => sameOrgText(t, clearValue)));
     expect((await getContact(req, clearHolder)).housingAuthority).toBeUndefined();
 
-    // Settled values leave the section; the unsettled one stays.
+    // Settled values leave the list; the unsettled one stays.
     await page.reload();
-    await expect(notOnListRow(page, keepValue)).toBeVisible();
+    await expect(valueLink(page, keepValue)).toBeVisible();
     for (const value of [useValue, moveValue, splitValue, clearValue]) {
-      await expect(notOnListRow(page, value)).toHaveCount(0);
+      await expect(valueLink(page, value)).toHaveCount(0);
     }
   });
 });

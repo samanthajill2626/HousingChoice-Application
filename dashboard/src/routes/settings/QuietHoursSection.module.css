@@ -16,6 +16,7 @@
 
 .lede {
   margin: 0;
+  max-width: 70ch;
   color: var(--c-text-muted);
   font-size: var(--fs-sm);
 }

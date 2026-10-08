@@ -113,3 +113,29 @@ What this adds:
   [`e2e-outbound-mms-viewer-wheel-scale-full-suite`](e2e-outbound-mms-viewer-wheel-scale-full-suite.md))
   is also full-suite-only. This supports the entry's "contention" reading over
   "cross-spec state", without proving it.
+
+**Sighting 2026-10-07, `fix/org-settings-layout` @ c738055f (main 20ccdb12, no
+sync).** Full `npm run e2e`: 329 passed, 1 failed (19.7m). The failure was
+`scheduled-visibility.spec.ts:226` (c), at `scenarios/steps.ts:1829`:
+"would like to tour" was never visible in the contact timeline. The same file
+passed alone twice (5/5, about 22s each). The branch's previous full run at
+9715c677 passed 329/329; the only change between the two runs is org Settings
+UI code and `org-lists.spec.ts`.
+
+- **New shape: the page never loaded, and auth was fine.** The failure
+  screenshot is a fully blank white page. The app log for the test window
+  shows a normal start: the pre-login `/me` 401, then `/auth/dev-login` 200,
+  `/me` 200, the unit and contact setup, and the inbound `POST /sms` 200
+  ("twilio inbound message processed"). After the test's
+  `page.goto(/contacts/<id>)`, the app received NO request for that page (no
+  contact, timeline or `/me` call) for the whole 10s wait - only the
+  background `/inbox/unread-count` poll continued. The navigation stalled
+  before the dashboard's JS ran, which points at the Vite dev server or the
+  browser side (Vite is not in `[WebServer]` output), not the app or the
+  data.
+- No other worktree's e2e lane was listening when this was checked after the
+  run. Whether one was running during the failure window is unknown.
+- Artifacts (screenshot, video, error context and the run log) are preserved
+  in that worktree's gitignored
+  `.superpowers/e2e-fail-r2/`. No trace was captured
+  (`trace: 'on-first-retry'` with `retries: 0`).

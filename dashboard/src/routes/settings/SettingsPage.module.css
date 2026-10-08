@@ -1,13 +1,18 @@
 /* SettingsPage — the tab shell. Tokens only; mirrors AppFrame's accessibility-
  * first patterns (focus-visible rings, real controls). The desktop tab row
  * WRAPS (flex-wrap) so it never horizontally scrolls as sections grow; below the
- * nav breakpoint a labeled <select> replaces it. */
+ * nav breakpoint a labeled <select> replaces it.
+ *
+ * Full width at every screen size: the shell has no width cap (Cameron's
+ * ruling, 2026-10-07 design review section 7). Each tab gives its own form
+ * fields and prose a sensible width instead, so nothing stretches across a
+ * wide monitor. */
 
 .page {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
-  max-width: 880px;
+  min-width: 0;
 }
 
 .heading {

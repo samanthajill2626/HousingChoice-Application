@@ -1195,7 +1195,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // how a spec puts a run-unique "Not on the list" value in front of the
   // Settings page without seeding junk into the shared lean world (one spec's
   // settle action must never leak into another spec).
-  //   contact: SET `housingAuthority` | `agency` to the value
+  //   contact: SET `housingAuthority` | `agency` | `organization` (branch B) to the value
   //   unit:    APPEND the value to `accepted_authorities` (never twice)
   // The value must be non-empty: `housingAuthority` is the byHousingAuthority
   // GSI key and can never hold ''. Same triple-gate/hermetic-LOCAL-only
@@ -1226,8 +1226,8 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     const { contactsRepo, unitsRepo } = orgFixtureDeps();
     if (contactId !== undefined) {
       const field = body.field;
-      if (field !== 'housingAuthority' && field !== 'agency') {
-        res.status(400).json({ error: 'field must be housingAuthority or agency for a contact' });
+      if (field !== 'housingAuthority' && field !== 'agency' && field !== 'organization') {
+        res.status(400).json({ error: 'field must be housingAuthority, agency or organization for a contact' });
         return;
       }
       if ((await contactsRepo.getById(contactId)) === undefined) {

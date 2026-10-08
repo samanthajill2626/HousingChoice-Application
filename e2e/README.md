@@ -597,7 +597,7 @@ router module is not even imported there.
   `group-send-staleness/check`).
 - `POST /__dev/org-fixture` - plant a RAW organization value on a record the
   spec created, bypassing the org-list check: `{ contactId, field:
-  housingAuthority|agency, value }` SETs it, `{ unitId, field:
+  housingAuthority|agency|organization, value }` SETs it, `{ unitId, field:
   accepted_authorities, value }` appends it. The only way to put a run-unique
   value under Settings > "Not on the list" - nothing off-list is seeded.
 

@@ -2,7 +2,7 @@
 // hermetic e2e seam that plants a RAW organization value on a record a spec
 // created, BYPASSING the org-list write check, so a spec can exercise
 // Settings > "Not on the list" without seeding junk into the shared lean
-// world. contact -> SET housingAuthority | agency; unit -> APPEND to
+// world. contact -> SET housingAuthority | agency | organization; unit -> APPEND to
 // accepted_authorities. Built like devTourAutoCloseTick.test.ts: the dev
 // router gets the world fakes and shares the world with the harness app.
 import { describe, expect, it } from 'vitest';
@@ -56,6 +56,13 @@ function buildHarness(): { app: Express; world: FakeWorld; capture: LogCapture }
 const contactOf = (world: FakeWorld) => world.contacts.find((c) => c.contactId === 'c-fix')!;
 
 describe('POST /__dev/org-fixture', () => {
+  it('SETs a raw organization on a contact (branch B, spec D17)', async () => {
+    const { app, world } = buildHarness();
+    const res = await request(app).post(SEAM).send({ contactId: 'c-fix', field: 'organization', value: OFF_LIST });
+    expect(res.status).toBe(200);
+    expect(contactOf(world)['organization']).toBe(OFF_LIST);
+  });
+
   it('SETs a raw off-list housing authority on a contact - no list check', async () => {
     const { app, world } = buildHarness();
     const res = await request(app).post(SEAM).send({ contactId: 'c-fix', field: 'housingAuthority', value: OFF_LIST });
@@ -101,7 +108,7 @@ describe('POST /__dev/org-fixture', () => {
     [
       'a unit field on a contact',
       { contactId: 'c-fix', field: 'accepted_authorities', value: OFF_LIST },
-      'field must be housingAuthority or agency for a contact',
+      'field must be housingAuthority, agency or organization for a contact',
     ],
     [
       'a contact field on a unit',

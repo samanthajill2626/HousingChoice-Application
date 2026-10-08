@@ -21,7 +21,7 @@ import { normalizeOrgText, type OrgEntry, type OrgKind } from '../../app/src/lib
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 /** The record fields an organization name lives in (plan 3.2 OrgRecordField). */
-export type OrgRecordField = 'housingAuthority' | 'agency' | 'accepted_authorities';
+export type OrgRecordField = 'housingAuthority' | 'agency' | 'accepted_authorities' | 'organization';
 
 /** The latest rewrite as GET /api/organizations returns it (plan 3.2
  *  OrgRewriteState - only the fields specs read). */
@@ -110,7 +110,7 @@ export async function getNotOnList(request: APIRequestContext): Promise<NotOnLis
 
 /**
  * POST /__dev/org-fixture (plan 3.12): write `value` onto a record the spec
- * created, BYPASSING the D5 check - a contact's field is SET, a unit's value is
+ * created, BYPASSING the D5 check - a contact's field (housingAuthority, agency or organization) is SET, a unit's value is
  * APPENDED to `accepted_authorities` (pass that field with a `unitId`).
  * Relative path: the lane's Vite server proxies /__dev to the app (reseed.ts).
  */

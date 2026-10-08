@@ -88,3 +88,16 @@ match and the route returned 400 for kinds. GREEN: the same command exited 0,
 two files / 65 tests (5.6-green). Root npm run typecheck exited 0
 (5.6-typecheck); afterward only a redundant adjacent comment was removed.
 No contract deviation.
+
+## Task 5.7 - dev fixture and e2e contracts
+
+Task 5.6 commit: 7a68c883. The existing hermetic dev fixture accepts raw
+organization on contacts. Its generic writer, deployment gates and logging
+are unchanged. E2E field type and dev-seam README/selectors rows widened in
+the same task; no seeds changed.
+RED: app npx vitest run test/devOrgFixture.test.ts exited 1: two failed /
+13 passed, organization returned 400 and the refusal-message pin differed.
+GREEN: same command exited 0, 15 passed (5.7-green). Root npm run typecheck
+exited 0, all five workspaces (5.7-typecheck). No contract deviation.
+The complete S5 added-line ASCII and git diff --check pass; the cleanup
+script diff is exactly three comment lines. No real DynamoDB fault in logs.

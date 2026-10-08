@@ -1231,7 +1231,7 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
 
   // share-sent-outcome D5: the audit row finalize wrote stays append-only; the
   // landlord's milestone derives its WORDS from the share at read time.
-  it('a landlord\'s broadcast_sent milestone reads "Sent to N tenants" from the share\'s reached count, "No tenants reached" when none, and keeps the stored count for a missing share', async () => {
+  it('a landlord\'s broadcast_sent milestone reads "Sent to N recipients" from the share\'s reached count, "No recipients reached" when none, and keeps the stored count for a missing share', async () => {
     const h = makeWebhookHarness();
     const { app, world } = h;
     world.contacts.push({
@@ -1261,7 +1261,7 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
     const labels = (res.body.items as Array<{ kind: string; refType?: string; label?: string }>)
       .filter((i) => i.kind === 'milestone' && i.refType === 'broadcast')
       .map((m) => m.label);
-    expect(labels).toEqual(['Sent to 2 tenants', 'No tenants reached', 'Sent to 4 tenants', 'Sent to 1 tenant']);
+    expect(labels).toEqual(['Sent to 2 recipients', 'No recipients reached', 'Sent to 4 recipients', 'Sent to 1 recipient']);
     // ONE projected batch read, after the merge and slice.
     expect(reads).toHaveBeenCalledTimes(1);
     expect(reads.mock.calls[0]?.[1]).toEqual({ projection: 'stats' });
@@ -1287,7 +1287,7 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
     const bc = (res.body.items as Array<{ kind: string; refType?: string; label?: string }>).find(
       (i) => i.kind === 'milestone' && i.refType === 'broadcast',
     );
-    expect(bc?.label).toBe('Sent to 4 tenants');
+    expect(bc?.label).toBe('Sent to 4 recipients');
     const errors = capture.atLevel(50);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatchObject({ contactId: 'll-d5f', count: 1 });
@@ -1318,6 +1318,35 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
     );
     expect(pin?.label).toBe('Property sent');
     expect(reads).not.toHaveBeenCalled();
+  });
+
+  it('caseworkers D22: a stored pin keeps the "Sent to " prefix at every count, so an audit row with no count still relabels from its share', async () => {
+    const h = makeWebhookHarness();
+    const { app, world } = h;
+    world.contacts.push({
+      contactId: 'll-d22',
+      type: 'landlord',
+      status: 'active',
+      phone: '+15550100024',
+      phones: [{ phone: '+15550100024', primary: true }],
+    });
+    world.units.set('u-d22', { unitId: 'u-d22', landlordId: 'll-d22', status: 'available' });
+    seedShare(world, 's-nocount', 'u-d22', { 'c-1': { status: 'delivered' } });
+    // A legacy audit row without tenantCount (the stored site folds it to 0),
+    // and one whose share is gone (stored words only).
+    await world.auditRepo.append('units#u-d22', 'broadcast_sent', { broadcastId: 's-nocount' });
+    await world.auditRepo.append('units#u-d22', 'broadcast_sent', { broadcastId: 's-gone', tenantCount: 0 });
+
+    const res = await authedGet(app, '/api/contacts/ll-d22/timeline');
+    expect(res.status).toBe(200);
+    const labels = (res.body.items as Array<{ kind: string; refType?: string; label?: string }>)
+      .filter((i) => i.kind === 'milestone' && i.refType === 'broadcast')
+      .map((m) => m.label);
+    // s-nocount: stored "Sent to 0 recipients", relabeled from its share (1
+    // reached) - only possible because the stored words keep the prefix.
+    // s-gone: no share, so the stored words stand ("Sent to 0 recipients",
+    // never "No recipients reached"). Sorted: the order is not the contract.
+    expect([...labels].sort()).toEqual(['Sent to 0 recipients', 'Sent to 1 recipient']);
   });
 
   it('does NOT interleave property activity for a tenant contact', async () => {

@@ -145,7 +145,7 @@ export interface ContactTimelineRouterDeps {
   /** Per-unit audit trail read (bounded Query per owned unit) — the landlord
    *  property-activity lifecycle source. */
   auditRepo?: AuditRepo;
-  /** share-sent-outcome D5: the landlord's "Sent to N tenants" pins recount
+  /** share-sent-outcome D5: the landlord's "Sent to N recipients" pins recount
    *  from their shares at read time (one projected batch read per page). */
   broadcastsRepo?: BroadcastsRepo;
   /** share-sent-outcome D6: a "Property sent" pin reads its words from the
@@ -693,7 +693,19 @@ function toTimelineMilestone(e: ActivityEventItem): TimelineMilestone {
  * renders a milestone label verbatim) - not catalog copy.
  */
 function sentToLabel(n: number): string {
-  return n === 0 ? 'No tenants reached' : `Sent to ${n} ${n === 1 ? 'tenant' : 'tenants'}`;
+  // Spec 2026-10-06 D20/D22 (caseworkers): neutral words - a share may reach
+  // partners. The zero case is THIS site's only (the read-time recount).
+  return n === 0 ? 'No recipients reached' : sentToCountLabel(n);
+}
+
+/**
+ * The stored-count words (unitAuditToMilestone): "Sent to N recipient(s)" for
+ * EVERY N, 0 included, so the read-time relabel below
+ * (`m.label.startsWith('Sent to ')`) always recognises a share pin - even one
+ * whose audit row lost its count (folded to 0).
+ */
+function sentToCountLabel(n: number): string {
+  return `Sent to ${n} ${n === 1 ? 'recipient' : 'recipients'}`;
 }
 
 /**
@@ -761,7 +773,7 @@ function unitAuditToMilestone(unitId: string, e: AuditEvent): TimelineMilestone 
       return {
         ...base,
         type: 'listing_sent',
-        label: `Sent to ${n} ${n === 1 ? 'tenant' : 'tenants'}`,
+        label: sentToCountLabel(n),
         refType: 'broadcast',
         ...(typeof p['broadcastId'] === 'string' && { refId: p['broadcastId'] }),
       };
@@ -1449,7 +1461,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     const page = candidates.slice(0, limit);
     const hasMore = candidates.length > limit;
 
-    // share-sent-outcome D5: a landlord's "Sent to N tenants" pin (the
+    // share-sent-outcome D5: a landlord's "Sent to N recipients" pin (the
     // append-only audit row finalize wrote, mapped by unitAuditToMilestone -
     // the ONLY producer of a `listing_sent` milestone with refType `broadcast`
     // on a landlord timeline) takes its WORDS from the share at read time: N =

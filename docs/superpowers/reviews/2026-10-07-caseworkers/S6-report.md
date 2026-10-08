@@ -79,3 +79,19 @@ GREEN: app npx vitest run test/listingSendsApi.test.ts test/contactsBatchReads.t
 exited 0: three files, 55 tests, zero skipped (6.4-green).
 No production contract deviation, new dependency or shared projection widening.
 Root npm run typecheck exited 0 across all five workspaces (6.4-typecheck).
+
+## Task 6.5 - neutral landlord timeline copy
+
+Task 6.4 commit: 870036a1. Dependency proof: both label sites and the
+startsWith('Sent to ') recount predicate match the approved D22 ruling.
+Read-time zero says No recipients reached. Stored fallback always says
+Sent to N recipient(s), including zero, preserving recount eligibility.
+Persisted tenantCount is unchanged. The landlord-activity e2e pin moved in
+this task; its execution remains explicitly deferred to S10.
+RED: app npx vitest run test/contactTimeline.test.ts exited 1, three failed
+and 62 passed (6.5-red). All failures observed old tenant(s) wording at the
+recount, read-failure fallback, and missing-count/zero fallback sites.
+GREEN: same command exited 0, 65 tests, zero skipped (6.5-green).
+Root changed-TS lint exited 0, all 15 S6 TypeScript files including the e2e
+pin (exit-lint). No baseline attribution needed. No contract deviation.
+Root npm run typecheck exited 0 across all five workspaces (6.5-typecheck).

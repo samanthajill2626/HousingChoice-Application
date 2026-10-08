@@ -347,3 +347,80 @@ checkbox via a run-unique first-name boundary and a custom Address/FlyerLink
 message. Updated those adjacent claims, preserving the three delivery proofs.
 Added lines are ASCII; git diff --check passes. No unrelated historical docs
 or runtime code changed and no browser rerun was necessary.
+
+## Task 10.12 - follow-up issues
+
+Created the six planned issues dated 2026-10-08 after confirming no duplicate
+file existed. No Tracker write or product/infrastructure action:
+
+- contact-retype-skips-caseworker-refusals
+- tours-placements-no-contact-type-check
+- extraction-in-flight-writes-onto-converted-caseworker
+- imported-unknown-threads-surface-as-unknown-on-today
+- a2p-campaign-covers-caseworker-shares
+- possible-caseworkers-and-roster-refusal-scans
+
+The existing staff-notes-on-landlord-partner-files issue already records the
+partner half built and the landlord/Unknown question open (S8); skipped as
+directed, with no duplicate update. The S8 profiler issue remains open.
+
+### O2 - importer issue wording adjudicated against live source
+
+Mandatory source check confirms the defect: import/apply.ts:1227 mints every
+imported 1:1 as unknown_1to1, with if_not_exists at :1231; Today selects its
+unknown presentation by thread type alone (routes/today.ts:784 and
+buildToday.ts:287). The proposed issue's claim that only a PATCH that CHANGES
+the stored type can re-type the thread was too strong: contacts.ts:1530-1531
+derives convType from any supplied patch.type and :1891-1896 flips unknown
+threads without requiring the stored contact type to differ. The edit form
+only sends type when the kind changes (ContactEditForm.tsx:306). The extra
+applyTriage caller in the contact-conversation route (:2011) and placement
+nudges (:556) changes displayName only; the conversion uses setTypeIfCurrent.
+
+Stopped that draft and reported the discrepancy before filing it. Parent
+approved the precise correction as planned-issue wording adjudication, not a
+product decision or scope expansion. Filed with explicit type-PATCH wording,
+the edit-form trigger, and both source citations. It does not imply that the
+API requires an actual type change. Verification date is 2026-10-08.
+
+Cwd W:/tmp/caseworkers: npm run issues exits 0, 397 open / 199 closed / 596
+total, no warnings (raw 10.12-issues.*). All six ids and the profiler issue
+appear once as open. Six whole-file ASCII checks pass; added report lines
+and git diff --check pass. INDEX.md remains ignored and unstaged.
+Task 10.12 complete.
+
+## Scoped S10 handoff
+
+| Task | Status and evidence commit |
+| --- | --- |
+| 10.1 | complete, verification record a38c5c82 |
+| 10.2 | complete, strict test eadf5bbc; parent C5 fix 73031298; closeout 67fd85f9 |
+| 10.3 | complete, verification record efc839e4 |
+| 10.4 | BASELINE-RED; diagnostic 5c45536d, baseline finding/issue 5985552b; C6 scope decision pending |
+| 10.5 | complete, f5b18d2a |
+| 10.6 | complete, e6d2838a |
+| 10.7 | complete, ab3ccb9f |
+| 10.8 | complete, 3654dd34 |
+| 10.8a | complete, c6d9f805 |
+| 10.9 | complete, bf9854dc |
+| 10.10 | complete, fb0f6eb0 |
+| 10.11 | complete, 15905e1d; adjacent-flow correction c7752503 |
+| 10.12 | complete, this issue/report commit |
+
+Final focused browser proofs: Caseworkers 4/4 in 13.8s, partner share 1/1 in
+11.8s, org-lists 16/16 in 37.2s. Each owning task passed the e2e workspace
+typecheck and scoped eslint. Genuine non-vacuity failures were preserved
+before restoring assertions and rerunning. No unexpected browser failure
+occurred during Tasks 10.5-10.8a. No app/dashboard source or C6 proposed patch
+was changed. Task 10.4 is still red, not excused or silently marked complete.
+
+Final org-lists browser evidence copied to
+.superpowers/sdd/S10/artifacts/final-green-org-lists-2026-10-08T18-13-47-986Z/.
+Caseworkers green was copied in 10.8-before-nonvacuity; partner-share green
+was copied in 10.8a-before-green. Every earlier browser evidence copy remains.
+All 38 S10 runner commands have exit markers. Final npm run e2e:stop exited
+0 with no running session; all lane 13 ports 10301/10311/10321/10331 have no
+listener. No command, interactive lane or browser stack remains owned here.
+
+Parent owns Task 10.13, Task 10.14, final sync/gates, independent review and
+live QA. This is the scoped S10 handoff, not mission completion.

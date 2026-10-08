@@ -244,7 +244,7 @@ test.describe('Broadcasts — compose from a property → curate → send → re
 
     await page.getByLabel('Message').fill(`Warn flow ${stamp} - see [FlyerLink]`);
     await page.getByRole('button', { name: 'Preview recipients' }).click();
-    await page.getByRole('button', { name: /^Send to \d+ tenants?$/ }).click();
+    await page.getByRole('button', { name: /^Send to \d+ recipients?$/ }).click();
 
     // The blocking dialog - nothing sent yet.
     const dialog = page.getByRole('dialog', { name: "Property isn't Available" });

@@ -47,3 +47,18 @@ GREEN: dashboard npx vitest run src/routes/listing, exit 0: 270 tests in
 Root npx eslint e2e/tests/dashboard-next/listing-activity.spec.ts
 e2e/tests/dashboard-next/share-sent-outcome.spec.ts exit 0.
 Added-line ASCII and git diff --check pass. No contract deviation.
+
+## Task 9.4 - composer recipient wording
+
+Task 9.3 commit: d6cd213d. Review Send, empty selection, flagged-recipient
+note, singular/plural unresolved-seed note and reach line use plan 3.9 copy.
+Tenant-only add/search/filter copy is preserved. Four e2e files move with it.
+RED: dashboard npx vitest run src/routes/broadcasts/RecipientPreview.test.tsx
+src/routes/broadcasts/BroadcastComposer.test.tsx
+src/routes/broadcasts/AudienceFilters.test.tsx, exit 1: 24 failed / 80 passed,
+on old tenant wording and the prior empty-selection sentence.
+GREEN: dashboard npx vitest run src/routes/broadcasts, exit 0: 221 tests in
+12 files. Root bare npm run typecheck exit 0 across five workspaces.
+Root npx eslint on broadcasts.spec.ts, matching-entry-points.spec.ts,
+share-skip-fix.spec.ts and org-lists.spec.ts exit 0 (all e2e/tests/dashboard-next).
+Added-line ASCII and git diff --check pass. No contract deviation.

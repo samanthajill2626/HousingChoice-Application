@@ -232,7 +232,7 @@ describe('AudienceFilters — live reach', () => {
   it('shows the reach count when resolved', () => {
     render(<Harness reachCount={7} />);
     const reach = screen.getByRole('status');
-    expect(reach).toHaveTextContent(/Reaches\s*7\s*tenants/);
+    expect(reach).toHaveTextContent(/Reaches\s*7\s*recipients/);
   });
 
   it('shows the truncated/capped warning when truncated', () => {

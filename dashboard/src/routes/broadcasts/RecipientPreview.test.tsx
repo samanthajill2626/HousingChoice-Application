@@ -248,7 +248,7 @@ describe('RecipientPreview — bulk select', () => {
   it('share-skip-fix D5: the note states the seeded-row rule', () => {
     renderPreview({ preview: previewOf({ candidates: [candidate()] }) });
     expect(
-      screen.getByText('Flagged tenants you picked stay checked; "Select all" skips the others.'),
+      screen.getByText('Flagged recipients you picked stay checked; "Select all" skips the others.'),
     ).toBeInTheDocument();
   });
 });
@@ -303,7 +303,7 @@ describe('RecipientPreview — add a tenant', () => {
     const row = within(list).getByText('Prior Sent').closest('li') as HTMLElement;
     expect(within(row).getByRole('checkbox')).toBeChecked();
     expect(within(row).getByText('Already sent')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Send to 2 tenants' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to 2 recipients' })).toBeInTheDocument();
   });
 
   it('share-skip-fix D5: picking a tenant ALREADY listed (unseeded, flagged, unchecked) promotes that row to a seed - checked, still flagged, kept by Select all', async () => {
@@ -341,7 +341,7 @@ describe('RecipientPreview — add a tenant', () => {
     expect(box()).toBeChecked();
     const row = within(list).getByText('Bo Flag').closest('li') as HTMLElement;
     expect(within(row).getByText('Already sent')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Send to 2 tenants' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to 2 recipients' })).toBeInTheDocument();
     // Persisted exactly like a hand-add: appended to the draft's seed list.
     await waitFor(() => expect(updateBroadcastSeeds).toHaveBeenCalledWith('bcast_1', ['c1', 'c2']));
 
@@ -374,7 +374,7 @@ describe('RecipientPreview — add a tenant', () => {
     const note = await screen.findByRole('alert');
     expect(note).toHaveTextContent(/opted out/i);
     // The "Send to N" count was NOT inflated (still 1 — just Tasha).
-    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to 1 recipient' })).toBeInTheDocument();
   });
 
   it('does NOT add an unreachable tenant — surfaces an inline reason', async () => {
@@ -409,7 +409,7 @@ describe('RecipientPreview — add a tenant', () => {
     const note = await screen.findByRole('alert');
     expect(note).toHaveTextContent(/no consent recorded/i);
     // The sendable count is not inflated (still just Tasha).
-    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send to 1 recipient' })).toBeInTheDocument();
   });
 });
 
@@ -516,7 +516,8 @@ describe('RecipientPreview — send errors', () => {
     });
     await u.click(screen.getByRole('button', { name: /^Send to/ }));
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent(/Nothing selected/i);
+    // Spec 2026-10-06 D22: neutral words (a partner seed can be a recipient).
+    expect(alert).toHaveTextContent('Nothing selected - check at least one recipient to send.');
   });
 
   it('surfaces a 400 over-cap (cap) message inline', async () => {
@@ -540,7 +541,7 @@ describe('RecipientPreview — send errors', () => {
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('Sending too fast — wait a moment and try again.');
     // The busy flag reset — the Send control is back and enabled, not stuck on "Sending…".
-    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Send to 1 recipient' })).toBeEnabled();
     // No stray Results link (that's the 409 affordance, not a rate limit).
     expect(within(alert).queryByRole('button', { name: /View results/i })).not.toBeInTheDocument();
   });
@@ -587,7 +588,16 @@ describe('RecipientPreview — seeded recipients', () => {
 
   it('shows a count-based notice when preview reports unresolved seeds', () => {
     renderPreview({ preview: previewOf({ unresolvedSeedIds: ['ghost'] }) });
-    expect(screen.getByText(/1 added tenant can't receive texts/)).toBeInTheDocument();
+    expect(screen.getByText(/1 added recipient can't receive texts/)).toBeInTheDocument();
+  });
+
+  it('caseworkers D22: the plural unresolved-seed note says recipients', () => {
+    renderPreview({ preview: previewOf({ unresolvedSeedIds: ['ghost-1', 'ghost-2'] }) });
+    expect(
+      screen.getByText(
+        "2 added recipients can't receive texts (unknown, opted out, or unreachable) and were left out.",
+      ),
+    ).toBeInTheDocument();
   });
 });
 
@@ -610,7 +620,7 @@ describe('RecipientPreview — resolved 1:1 audience guard', () => {
     expect(screen.queryByRole('combobox', { name: 'Add a tenant' })).not.toBeInTheDocument();
     expect(screen.queryByText('Add a tenant')).not.toBeInTheDocument();
     // Exactly the resolved tenant is checked → Send is enabled, no guard note.
-    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Send to 1 recipient' })).toBeEnabled();
     expect(screen.queryByText(/This message was written for/)).not.toBeInTheDocument();
   });
 
@@ -623,14 +633,14 @@ describe('RecipientPreview — resolved 1:1 audience guard', () => {
       }),
       resolvedFor,
     });
-    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Send to 1 recipient' })).toBeEnabled();
     await u.click(screen.getByRole('checkbox', { name: 'Brianna' }));
     // The selection no longer matches the one tenant the message was written for.
     const note = screen.getByRole('status');
     expect(note).toHaveTextContent(
       'This message was written for Brianna Smith. Head back to edit the audience or message.',
     );
-    expect(screen.getByRole('button', { name: /^Send to 0 tenants/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^Send to 0 recipients/ })).toBeDisabled();
   });
 
   it('an extra checked recipient (not the resolved tenant) blocks Send with the note', () => {
@@ -650,7 +660,7 @@ describe('RecipientPreview — resolved 1:1 audience guard', () => {
         'This message was written for Brianna Smith. Head back to edit the audience or message.',
       ),
     ).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Send to 2 tenants/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /^Send to 2 recipients/ })).toBeDisabled();
   });
 
   it('a NON-resolved preview is unchanged: Add-a-tenant present, no guard note', () => {
@@ -660,7 +670,7 @@ describe('RecipientPreview — resolved 1:1 audience guard', () => {
     });
     expect(screen.getByRole('combobox', { name: 'Add a tenant' })).toBeInTheDocument();
     expect(screen.queryByText(/This message was written for/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Send to 1 tenant' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Send to 1 recipient' })).toBeEnabled();
   });
 });
 
@@ -699,7 +709,7 @@ describe('availability pre-flight on Send (spec 2026-07-10)', () => {
     );
     renderPreview({ preview: PREVIEW, unitId: 'u1' });
 
-    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+    await user.click(screen.getByRole('button', { name: /Send to 1 recipient/ }));
 
     // Mid-pre-flight: the button says why it's busy and can't be re-clicked.
     const busy = screen.getByRole('button', { name: /Checking property/ });
@@ -710,7 +720,7 @@ describe('availability pre-flight on Send (spec 2026-07-10)', () => {
     await screen.findByRole('dialog', { name: "Property isn't Available" });
     // Pre-flight settled: the button is back to its idle label (the dialog now
     // owns the flow; nothing was sent).
-    expect(screen.getByRole('button', { name: /Send to 1 tenant/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Send to 1 recipient/ })).toBeEnabled();
   });
 
   it('non-Available unit: Send opens the dialog and does NOT send', async () => {
@@ -718,7 +728,7 @@ describe('availability pre-flight on Send (spec 2026-07-10)', () => {
     getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'on_hold' });
     renderPreview({ preview: PREVIEW, unitId: 'u1' });
 
-    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+    await user.click(screen.getByRole('button', { name: /Send to 1 recipient/ }));
 
     const dialog = await screen.findByRole('dialog', { name: "Property isn't Available" });
     expect(within(dialog).getByText(/On hold/)).toBeInTheDocument();
@@ -733,7 +743,7 @@ describe('availability pre-flight on Send (spec 2026-07-10)', () => {
     sendBroadcast.mockResolvedValue({ broadcastId: 'bcast_1', status: 'sending', count: 1 });
     renderPreview({ preview: PREVIEW, unitId: 'u1' });
 
-    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+    await user.click(screen.getByRole('button', { name: /Send to 1 recipient/ }));
     await user.click(await screen.findByRole('button', { name: 'Make Available & send' }));
 
     await waitFor(() =>
@@ -753,7 +763,7 @@ describe('availability pre-flight on Send (spec 2026-07-10)', () => {
     getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'occupied' });
     renderPreview({ preview: PREVIEW, unitId: 'u1' });
 
-    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+    await user.click(screen.getByRole('button', { name: /Send to 1 recipient/ }));
     await user.click(await screen.findByRole('button', { name: 'Cancel' }));
 
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -767,7 +777,7 @@ describe('availability pre-flight on Send (spec 2026-07-10)', () => {
     sendBroadcast.mockResolvedValue({ broadcastId: 'bcast_1', status: 'sending', count: 1 });
     renderPreview({ preview: PREVIEW, unitId: 'u1' });
 
-    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+    await user.click(screen.getByRole('button', { name: /Send to 1 recipient/ }));
 
     await waitFor(() => expect(sendBroadcast).toHaveBeenCalled());
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -779,7 +789,7 @@ describe('availability pre-flight on Send (spec 2026-07-10)', () => {
     sendBroadcast.mockResolvedValue({ broadcastId: 'bcast_1', status: 'sending', count: 1 });
     renderPreview({ preview: PREVIEW });
 
-    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+    await user.click(screen.getByRole('button', { name: /Send to 1 recipient/ }));
 
     await waitFor(() => expect(sendBroadcast).toHaveBeenCalled());
     expect(getUnit).not.toHaveBeenCalled();
@@ -791,7 +801,7 @@ describe('availability pre-flight on Send (spec 2026-07-10)', () => {
     sendBroadcast.mockRejectedValue(new ApiError(400, 'unit_not_available', 'unit_not_available'));
     renderPreview({ preview: PREVIEW, unitId: 'u1' });
 
-    await user.click(screen.getByRole('button', { name: /Send to 1 tenant/ }));
+    await user.click(screen.getByRole('button', { name: /Send to 1 recipient/ }));
 
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent(/isn't Available/),

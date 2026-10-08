@@ -186,7 +186,7 @@ describe('BroadcastComposer — reach count + truncated', () => {
     // The property-first prefill gives a non-empty body with zero keystrokes;
     // after the debounce the draft is created and the reach shows.
     await waitFor(() => expect(createBroadcast).toHaveBeenCalled(), { timeout: 4000 });
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/Reaches\s*5\s*tenants/));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/Reaches\s*5\s*recipients/));
   });
 
   it('shows the truncated/capped warning when the estimate is truncated', async () => {
@@ -478,7 +478,7 @@ describe('BroadcastComposer - Property picker (no ?unitId=)', () => {
 
     // Send → the preview's availability pre-flight checks the PICKED unit id.
     getUnit.mockClear();
-    await u.click(screen.getByRole('button', { name: /^Send to 1 tenant/ }));
+    await u.click(screen.getByRole('button', { name: /^Send to 1 recipient/ }));
     await screen.findByRole('dialog', { name: "Property isn't Available" });
     expect(getUnit).toHaveBeenCalledWith('u-1');
   });
@@ -841,7 +841,7 @@ describe('BroadcastComposer - the audience while a preview loads (code review R3
     await held.land(previewOf([DEKALB_TENANT]));
     await outlastDebounce();
     expect(await screen.findByRole('heading', { name: 'Review recipients' })).toBeInTheDocument();
-    await u.click(screen.getByRole('button', { name: 'Send to 1 tenant' }));
+    await u.click(screen.getByRole('button', { name: 'Send to 1 recipient' }));
     // The candidates go to the draft they were previewed from - never to a
     // draft made for another audience.
     await waitFor(() => expect(sendBroadcast).toHaveBeenCalledWith('draft_1', ['c-dekalb']));

@@ -97,8 +97,9 @@ export function AudienceFilters({
       <h2 id={`${uid}-heading`} className={styles.heading}>
         Audience
       </h2>
-      {/* No audience-base line: property sends are ALWAYS tenants (the filter is
-          pinned to contact_type:'tenant'; the backend rejects anything else), so
+      {/* No audience-base line: the FILTER reaches tenants only (pinned to
+          contact_type:'tenant'; the backend rejects anything else) - a partner
+          joins a share only as a hand-picked seed (spec 2026-10-06 D20) - so
           naming it here told the operator nothing they could act on. */}
 
       {/* Voucher size — the prominent criterion. */}
@@ -178,7 +179,7 @@ export function AudienceFilters({
           <span className={styles.reachPending}>Estimating reach…</span>
         ) : reachCount !== undefined ? (
           <span className={styles.reachCount}>
-            Reaches <strong>{reachCount}</strong> tenant{reachCount === 1 ? '' : 's'}
+            Reaches <strong>{reachCount}</strong> recipient{reachCount === 1 ? '' : 's'}
           </span>
         ) : (
           <span className={styles.reachPending}>Reach estimate unavailable</span>

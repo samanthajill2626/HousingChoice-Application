@@ -355,7 +355,7 @@ test.describe('Org pickers (spec D6, D7)', () => {
     const committed = page.waitForRequest((r) => isDraftCreate(r) && draftAuthority(r) === plover);
     await pickOrgName(page, page, 'Housing authority', plover, { query: 'Plover' });
     await committed;
-    await expect(page.getByText('Reaches 2 tenants', { exact: true })).toBeVisible();
+    await expect(page.getByText('Reaches 2 recipients', { exact: true })).toBeVisible();
     expect(sent.filter((a) => a !== undefined).every((a) => a === plover)).toBe(true);
 
     // The server resolves that exact name: Preview lists both tenants.
@@ -471,7 +471,7 @@ test.describe('Org pickers: text typed but never picked', () => {
     await pickOrgName(page, page, 'Housing authority', pipit);
     await expect(previewButton).toBeEnabled();
     await expect(page.getByText(PREVIEW_HINT, { exact: true })).toHaveCount(0);
-    await expect(page.getByText('Reaches 1 tenant', { exact: true })).toBeVisible();
+    await expect(page.getByText('Reaches 1 recipient', { exact: true })).toBeVisible();
   });
 });
 

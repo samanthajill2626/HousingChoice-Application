@@ -11,7 +11,7 @@
 //   2. PREVIEW — RecipientPreview (the editable curated list → Send / Delete).
 //
 // Optional query params: ?unitId= (property fixed by the entry point),
-// ?contactId= (compose to ONE tenant: property step first, then a seeds-only
+// ?contactId= (compose to ONE contact - a tenant or a partner: property step first, then a seeds-only
 // draft with the filters hidden behind an "Add more tenants by filters" opt-in)
 // and ?draftId= (resume an existing draft row from the list).
 import { useEffect, useMemo, useRef, useState } from 'react';

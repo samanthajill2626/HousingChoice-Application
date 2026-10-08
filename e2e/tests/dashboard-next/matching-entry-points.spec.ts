@@ -149,7 +149,7 @@ test.describe('Matching entry points - tenant file + property page', () => {
     await expect(list.getByRole('checkbox')).toHaveCount(1);
     await expect(list.getByRole('checkbox')).toBeChecked();
 
-    await page.getByRole('button', { name: /^Send to 1 tenant\b/ }).click();
+    await page.getByRole('button', { name: /^Send to 1 recipient\b/ }).click();
 
     // Proof of send: the tenant's outbox gained EXACTLY ONE message carrying the
     // property's flyer link.
@@ -232,7 +232,7 @@ test.describe('Matching entry points - tenant file + property page', () => {
     await expect(addedRow.getByRole('checkbox')).toBeChecked();
 
     // Send to the single curated recipient.
-    await page.getByRole('button', { name: /^Send to 1 tenant\b/ }).click();
+    await page.getByRole('button', { name: /^Send to 1 recipient\b/ }).click();
 
     // Proof of send: the hand-picked tenant got exactly one message with our body;
     // nobody else was created for this run, so the outbox is unambiguous.

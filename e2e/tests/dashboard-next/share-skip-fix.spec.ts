@@ -28,7 +28,7 @@ const DARIO = {
   phone: '+15550100004',
   firstName: 'Dario',
 };
-const NOTE = 'Flagged tenants you picked stay checked; "Select all" skips the others.';
+const NOTE = 'Flagged recipients you picked stay checked; "Select all" skips the others.';
 
 // Restore the lean baseline for the specs that run after this file: test 1
 // texts INTO conv-0002, which bumps its last_activity_at to now and makes
@@ -187,7 +187,7 @@ test.describe('share-skip-fix - one-to-one shares', () => {
     await expect(list.getByRole('checkbox')).toHaveCount(1);
     await expect(list.getByRole('checkbox')).toBeChecked();
     await expect(page.getByText(NOTE)).toBeVisible();
-    await page.getByRole('button', { name: /^Send to 1 tenant\b/ }).click();
+    await page.getByRole('button', { name: /^Send to 1 recipient\b/ }).click();
 
     // D4: the conversation is switched OFF (lean seed) and the text lands anyway;
     // the results row reaches Delivered (the fake auto-delivers).

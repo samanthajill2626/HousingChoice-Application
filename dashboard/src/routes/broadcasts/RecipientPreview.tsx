@@ -11,7 +11,7 @@
 // (the one-to-one tenant, a preview-returned hand-pick, or a tenant added right
 // here) is a deliberate choice and stays checked, through "Select all" too
 // (share-skip-fix D5 / I4). "Select all" skips UNSEEDED already-sent rows.
-// A live selected count drives "Send to N tenants", which posts the EXACT
+// A live selected count drives "Send to N recipients", which posts the EXACT
 // checked contactIds.
 // 400/409 are surfaced inline. A "Delete draft" button removes the unsent draft.
 import { useMemo, useRef, useState } from 'react';
@@ -291,7 +291,7 @@ export function RecipientPreview({
           setError('This send already went out (or is sending).');
           setRacedToResults(true);
         } else if (err.status === 400 && err.code === 'empty_audience') {
-          setError('Nothing selected — check at least one tenant to send.');
+          setError('Nothing selected - check at least one recipient to send.');
         } else if (err.status === 400 && err.code === 'unit_not_available') {
           // Race: the property left Available between our pre-flight and the
           // server's own guard (or another session flipped it back).
@@ -361,7 +361,7 @@ export function RecipientPreview({
       </div>
 
       <p className={styles.note}>
-        Flagged tenants you picked stay checked; &quot;Select all&quot; skips the others.
+        Flagged recipients you picked stay checked; &quot;Select all&quot; skips the others.
       </p>
 
       {/* A2P/CTIA: surface no-consent recipients (fenced out of the send) with a
@@ -390,8 +390,8 @@ export function RecipientPreview({
       {preview.unresolvedSeedIds.length > 0 ? (
         <p className={styles.seedNotice} role="status">
           {preview.unresolvedSeedIds.length === 1
-            ? "1 added tenant can't receive texts (unknown, opted out, or unreachable) and was left out."
-            : `${preview.unresolvedSeedIds.length} added tenants can't receive texts (unknown, opted out, or unreachable) and were left out.`}
+            ? "1 added recipient can't receive texts (unknown, opted out, or unreachable) and was left out."
+            : `${preview.unresolvedSeedIds.length} added recipients can't receive texts (unknown, opted out, or unreachable) and were left out.`}
         </p>
       ) : null}
 
@@ -527,7 +527,7 @@ export function RecipientPreview({
             ? 'Checking property…'
             : sending
               ? 'Sending…'
-              : `Send to ${checkedCount} tenant${checkedCount === 1 ? '' : 's'}`}
+              : `Send to ${checkedCount} recipient${checkedCount === 1 ? '' : 's'}`}
         </button>
         <button
           type="button"

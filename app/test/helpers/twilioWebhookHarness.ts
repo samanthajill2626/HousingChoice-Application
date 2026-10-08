@@ -831,6 +831,16 @@ export function createFakeWorld(): FakeWorld {
       }
       return conv;
     },
+    // Caseworkers (plan 3.3): mirror the real ConditionExpression
+    // `#t = :expected` - a missing row or a type-less one skips, never throws -
+    // then SET type and, when a string, the display name.
+    async setTypeIfCurrent(conversationId, expected, next, displayName) {
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.type !== expected) return { outcome: 'skipped' };
+      conv.type = next;
+      if (displayName !== null) conv.participant_display_name = displayName;
+      return { outcome: 'updated', conversation: conv };
+    },
     async setMode(conversationId, mode) {
       const conv = conversations.get(conversationId);
       if (conv) conv.ai_mode = mode;

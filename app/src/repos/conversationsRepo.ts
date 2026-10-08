@@ -535,6 +535,15 @@ export interface RepoDeps {
   logger?: Logger;
 }
 
+/**
+ * setTypeIfCurrent's answer (plan 3.3, as amended): the post-update row
+ * (ALL_NEW - the conversation.updated event is built from it, as the PATCH
+ * builds it from applyTriage's), or skipped.
+ */
+export type SetTypeIfCurrentResult =
+  | { outcome: 'updated'; conversation: ConversationItem }
+  | { outcome: 'skipped' };
+
 export interface ConversationsRepo {
   /**
    * The one active 1:1 conversation for an external phone — found via the
@@ -628,6 +637,20 @@ export interface ConversationsRepo {
     conversationId: string,
     fields: { type?: ConversationType; displayName?: string | null },
   ): Promise<ConversationItem>;
+  /**
+   * Caseworkers (spec 2026-10-06 D21; plan 3.3): SET `type` to `next` - and
+   * `participant_display_name` when `displayName` is a string (null leaves the
+   * name untouched) - in ONE UpdateItem conditional on the stored type being
+   * `expected`. A lost condition (the type changed since the caller's read, a
+   * type-less legacy row, no such conversation) answers `{ outcome:
+   * 'skipped' }` and never throws; success answers the ALL_NEW row.
+   */
+  setTypeIfCurrent(
+    conversationId: string,
+    expected: ConversationType,
+    next: ConversationType,
+    displayName: string | null,
+  ): Promise<SetTypeIfCurrentResult>;
   /**
    * Stamp the byLastActivity GSI attrs (status + last_activity_at) + preview.
    * Returns the post-update item (ALL_NEW) — the fresh inbox row the M1.2
@@ -1558,6 +1581,44 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         'conversation triage applied',
       );
       return Attributes as ConversationItem;
+    },
+
+    async setTypeIfCurrent(conversationId, expected, next, displayName) {
+      const names: Record<string, string> = { '#t': 'type' };
+      const values: Record<string, unknown> = { ':expected': expected, ':next': next };
+      const sets = ['#t = :next'];
+      if (displayName !== null) {
+        names['#dn'] = 'participant_display_name';
+        values[':dn'] = displayName;
+        sets.push('#dn = :dn');
+      }
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: `SET ${sets.join(', ')}`,
+            // `#t = :expected` also fails for a missing row and a type-less one,
+            // so neither is ever created or typed here.
+            ConditionExpression: '#t = :expected',
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        // PII (doc section 9): the FACT of a name write, never the name.
+        log.info(
+          { conversationId, from: expected, to: next, nameSet: displayName !== null },
+          'conversation type set (conditional)',
+        );
+        return { outcome: 'updated', conversation: Attributes as ConversationItem };
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.info({ conversationId, expected }, 'conversation type not set: stored type is not the expected one');
+          return { outcome: 'skipped' };
+        }
+        throw err;
+      }
     },
 
     async touchLastActivity(conversationId, previewText, ts) {

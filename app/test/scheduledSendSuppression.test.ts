@@ -166,6 +166,9 @@ function makeSendFakes(
       return conversation;
     },
     applyTriage: async () => conversation,
+    setTypeIfCurrent: async () => {
+      throw new Error('setTypeIfCurrent: not used in this suite');
+    },
     touchLastActivity: async (_id, previewText, ts) => {
       conversation.last_activity_at = ts;
       if (previewText !== undefined) conversation.last_message_preview = previewText;

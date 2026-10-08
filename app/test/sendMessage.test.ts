@@ -140,6 +140,9 @@ function makeFakes(
       }
       return conversation;
     },
+    setTypeIfCurrent: async () => {
+      throw new Error('setTypeIfCurrent: not used in this suite');
+    },
     touchLastActivity: async (_id, previewText, ts) => {
       if (overrides.touchError !== undefined) throw overrides.touchError;
       fakes.touched.push({ previewText, ts });

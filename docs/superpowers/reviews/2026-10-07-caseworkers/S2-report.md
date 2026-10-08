@@ -62,7 +62,7 @@ No extra typed fake, fault, timeout, contract mismatch or scope deviation.
 
 ## Task 2.3 - recipient display projection
 
-Commit: the Task 2.3 implementation commit containing this report entry.
+Commit: a7b7553d.
 Added RecipientDisplay and getRecipientDisplaysByIds using a separate projection
 with reserved-word aliases for type and role. The shared display projection is
 unchanged. FakeWorld and all four named full ContactsRepo fakes changed together.
@@ -73,4 +73,21 @@ RED: npx vitest run test/caseworkerRepoParity.integration.test.ts exited 1:
 npx vitest run test/audienceResolution.test.ts test/contactCapture.test.ts test/sendMessage.test.ts test/scheduledSendSuppression.test.ts test/contactsRepo.integration.test.ts test/listingSendsApi.test.ts
 exited 0: 6 files, 166 tests passed. Root npm run typecheck exited 0.
 Logs: 2.3-red, 2.3-green, 2.3-regression, 2.3-typecheck under the evidence path.
+No extra typed fake, fault, timeout, contract mismatch or scope deviation.
+
+## Task 2.4 - conditional conversation type update
+
+Commit: the Task 2.4 implementation commit containing this report entry.
+Added setTypeIfCurrent and its updated-row/skipped union. It conditionally sets
+type and a supplied name; null preserves the name. Missing, type-less and changed
+types skip without writes. Only conditional-check failures are swallowed; other
+errors propagate. FakeWorld and the three named full conversation fakes changed
+in the same task. Downstream events must use the returned ALL_NEW conversation.
+
+RED: npx vitest run test/caseworkerRepoParity.integration.test.ts exited 1:
+8 missing-method failures, 28 passing cases. GREEN: the same command exited 0,
+36 tests passed, zero skipped. Planned regression command (app workdir):
+npx vitest run test/contactCapture.test.ts test/sendMessage.test.ts test/scheduledSendSuppression.test.ts test/m14.integration.test.ts test/contactTriage.test.ts
+exited 0: 5 files, 163 tests passed. Root npm run typecheck exited 0.
+Logs: 2.4-red, 2.4-green, 2.4-regression, 2.4-typecheck under the evidence path.
 No extra typed fake, fault, timeout, contract mismatch or scope deviation.

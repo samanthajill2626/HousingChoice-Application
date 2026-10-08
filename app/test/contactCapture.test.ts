@@ -186,6 +186,9 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     async applyTriage() {
       return conversation;
     },
+    async setTypeIfCurrent() {
+      throw new Error('setTypeIfCurrent: not used in this suite');
+    },
     async setParticipantsIfAbsent(conversationId, participants) {
       fakes.claimAttempts += 1;
       if (conversationId !== conversation.conversationId) {

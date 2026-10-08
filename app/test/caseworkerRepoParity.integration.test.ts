@@ -420,4 +420,67 @@ describe('contactsRepo.getRecipientDisplaysByIds (plan 3.3; R3-F4)', () => {
   });
 });
 
+describe('conversationsRepo.setTypeIfCurrent (plan 3.3 as amended; D21)', () => {
+  parity('re-types while the stored type is the expected one, writes the display name, and answers the fresh row', async (w) => {
+    const phone = nextPhone();
+    const conv = await w.conversations.createOrGetByParticipantPhone(phone, 'unknown_1to1');
+    const result = await w.conversations.setTypeIfCurrent(conv.conversationId, 'unknown_1to1', 'partner_1to1', 'Pat Lee');
+    expect(result.outcome).toBe('updated');
+    if (result.outcome === 'updated') {
+      expect(result.conversation).toMatchObject({
+        conversationId: conv.conversationId,
+        type: 'partner_1to1',
+        participant_display_name: 'Pat Lee',
+        participant_phone: phone,
+      });
+    }
+    expect(await w.readConversation(conv.conversationId)).toMatchObject({
+      type: 'partner_1to1',
+      participant_display_name: 'Pat Lee',
+      participant_phone: phone,
+      status: 'open',
+    });
+  });
+
+  parity('skips - writing nothing, never throwing - when the stored type is no longer the expected one', async (w) => {
+    const conv = await w.conversations.createOrGetByParticipantPhone(nextPhone(), 'tenant_1to1');
+    expect(
+      await w.conversations.setTypeIfCurrent(conv.conversationId, 'unknown_1to1', 'partner_1to1', 'Pat Lee'),
+    ).toEqual({ outcome: 'skipped' });
+    const stored = await w.readConversation(conv.conversationId);
+    expect(stored?.type).toBe('tenant_1to1');
+    expect(stored).not.toHaveProperty('participant_display_name');
+  });
+
+  parity('a null displayName leaves the stored name untouched', async (w) => {
+    const conv = await w.conversations.createOrGetByParticipantPhone(nextPhone(), 'unknown_1to1');
+    await w.conversations.applyTriage(conv.conversationId, { displayName: 'Old Name' });
+    const result = await w.conversations.setTypeIfCurrent(conv.conversationId, 'unknown_1to1', 'partner_1to1', null);
+    expect(result.outcome).toBe('updated');
+    expect(await w.readConversation(conv.conversationId)).toMatchObject({
+      type: 'partner_1to1',
+      participant_display_name: 'Old Name',
+    });
+  });
+
+  parity('a type-less legacy row and a missing conversation both skip', async (w, id) => {
+    await w.putConversation({
+      conversationId: `${id}-legacy`,
+      participant_phone: nextPhone(),
+      status: 'open',
+      last_activity_at: '2026-10-07T09:00:00.000Z',
+      ai_mode: 'auto',
+      created_at: '2026-10-07T09:00:00.000Z',
+    });
+    expect(
+      await w.conversations.setTypeIfCurrent(`${id}-legacy`, 'unknown_1to1', 'partner_1to1', null),
+    ).toEqual({ outcome: 'skipped' });
+    expect(await w.readConversation(`${id}-legacy`)).not.toHaveProperty('type');
+    expect(
+      await w.conversations.setTypeIfCurrent(`${id}-missing`, 'unknown_1to1', 'partner_1to1', null),
+    ).toEqual({ outcome: 'skipped' });
+    expect(await w.readConversation(`${id}-missing`)).toBeUndefined();
+  });
+});
+
 // END OF PARITY CASES - Tasks 2.2-2.5 insert their describe blocks ABOVE this line.

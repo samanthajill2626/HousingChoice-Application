@@ -62,3 +62,16 @@ GREEN: dashboard npx vitest run src/routes/broadcasts, exit 0: 221 tests in
 Root npx eslint on broadcasts.spec.ts, matching-entry-points.spec.ts,
 share-skip-fix.spec.ts and org-lists.spec.ts exit 0 (all e2e/tests/dashboard-next).
 Added-line ASCII and git diff --check pass. No contract deviation.
+
+## Task 9.5 - Matching list and results
+
+Task 9.4 commit: 5c36155f. Matching reach/subtitle/empty state use recipients,
+and unresolved results use Recipient. The audienceSummary tenant-only filter
+wording is unchanged. Related comments reflect partner seeds.
+RED: dashboard npx vitest run src/routes/broadcasts/broadcastFormat.test.ts
+src/routes/broadcasts/BroadcastsList.test.tsx
+src/routes/broadcasts/BroadcastResults.test.tsx, exit 1: 3 failed / 68 passed,
+on old reach/subtitle/fallback copy (empty-state assertion follows subtitle).
+GREEN: dashboard npx vitest run src/routes/broadcasts, exit 0: 222 tests in
+12 files. Root bare npm run typecheck exit 0 across five workspaces.
+Added-line ASCII and git diff --check pass. No contract deviation.

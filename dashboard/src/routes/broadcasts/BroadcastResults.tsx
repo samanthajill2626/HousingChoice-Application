@@ -4,7 +4,7 @@
 // DeliveryBadge. Live via onBroadcastUpdated (the hook overlays status+stats and
 // refetches for per-recipient detail); a manual Refresh button too.
 //
-// Each recipient row links to the tenant's contact/comms page (/contacts/:id);
+// Each recipient row links to the recipient's contact/comms page (/contacts/:id);
 // a phone-only recipient (no contactId) renders WITHOUT a link (graceful). A
 // FAILED row carries the error class AND, when the conversation would offer
 // Retry, an explicit "open conversation to retry" affordance - disposition is
@@ -42,10 +42,10 @@ import styles from './BroadcastResults.module.css';
  *  retry_pending) once a minute. It fetches NOTHING - the cost is one render. */
 const RESULTS_TICK_MS = 60 * 1000;
 
-/** A recipient row's identity block: the tenant NAME (primary) + formatted phone
+/** A recipient row's identity block: the recipient NAME (primary) + formatted phone
  *  (secondary), mirroring the composer's review rows. When no name resolved the
  *  formatted phone is the primary label (no duplicate secondary line); with
- *  neither a name nor a phone (a deleted contact) the neutral "Tenant" fallback
+ *  neither a name nor a phone (a deleted contact) the neutral "Recipient" fallback
  *  stands in - never leak a raw id / `phone#...` key into the UI. */
 function recipientIdentity(row: BroadcastRecipientView): { primary: string; secondary?: string } {
   const formattedPhone = row.phone !== undefined ? formatPhone(row.phone) : '';
@@ -55,10 +55,10 @@ function recipientIdentity(row: BroadcastRecipientView): { primary: string; seco
       : { primary: row.name };
   }
   if (formattedPhone.length > 0) return { primary: formattedPhone };
-  return { primary: 'Tenant' };
+  return { primary: 'Recipient' };
 }
 
-/** One recipient row. A contactId row is a link to the tenant's comms; a failed
+/** One recipient row. A contactId row is a link to the recipient's comms; a failed
  *  row the conversation would offer Retry on appends the "open conversation to
  *  retry" affordance (same link target - the contact page hosts the in-thread
  *  Retry). A phone-only row renders link-less. `serverNow` is the page's

@@ -136,13 +136,14 @@ describe('BroadcastResults — render', () => {
     expect(within(list).getAllByText('(404) 000-0007')).toHaveLength(1);
   });
 
-  it('falls back to "Tenant" when neither name nor phone resolves (deleted contact)', async () => {
+  it('falls back to "Recipient" when neither name nor phone resolves (deleted contact; D22)', async () => {
     getBroadcastResults.mockResolvedValue(
       results({ recipients: { c1: { status: 'queued' } } }),
     );
     renderResults();
     const list = await screen.findByRole('list', { name: 'Recipients' });
-    expect(within(list).getByText('Tenant')).toBeInTheDocument();
+    expect(within(list).getByText('Recipient')).toBeInTheDocument();
+    expect(within(list).queryByText('Tenant')).not.toBeInTheDocument();
     // Still a link to the contact page (contactId key).
     expect(within(list).getByRole('link')).toHaveAttribute('href', '/contacts/c1');
   });

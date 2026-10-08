@@ -88,7 +88,7 @@ export function BroadcastsList(): React.JSX.Element {
       <div className={styles.header}>
         <div>
           <h1 className={styles.title}>Matching</h1>
-          <p className={styles.sub}>Share a property with a curated set of tenants.</p>
+          <p className={styles.sub}>Share a property with a curated set of recipients.</p>
         </div>
         <button
           type="button"
@@ -129,8 +129,8 @@ export function BroadcastsList(): React.JSX.Element {
         <div className={styles.empty}>
           <p className={styles.emptyTitle}>No sends yet</p>
           <p className={styles.emptyBody}>
-            Start one from a property&apos;s “Send to tenants”, from a tenant&apos;s “Properties
-            sent”, or with “Send a property”.
+            Start one from a property&apos;s &ldquo;Send this property&rdquo;, from a contact&apos;s
+            &ldquo;Properties sent&rdquo;, or with &ldquo;Send a property&rdquo;.
           </p>
         </div>
       ) : null}

@@ -82,6 +82,19 @@ describe('BroadcastsList — rows', () => {
     expect(within(list).getByText('3/4 delivered')).toBeInTheDocument();
   });
 
+  it('caseworkers D22: the subtitle and the empty state use the neutral share wording', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([]));
+    renderList();
+    expect(await screen.findByText('No sends yet')).toBeInTheDocument();
+    expect(screen.getByText('Share a property with a curated set of recipients.')).toBeInTheDocument();
+    // The curly quotes render from entities; `.` matches each one.
+    expect(
+      screen.getByText(
+        /^Start one from a property's .Send this property., from a contact's .Properties sent., or with .Send a property.\.$/,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('shows the empty state when there are no broadcasts', async () => {
     listBroadcasts.mockResolvedValue(pageOf([]));
     renderList();

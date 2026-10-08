@@ -34,10 +34,10 @@ describe('audienceSummary', () => {
 });
 
 describe('sendReachLabel', () => {
-  it('pluralizes tenant/tenants by count', () => {
-    expect(sendReachLabel(1)).toBe('To 1 tenant');
-    expect(sendReachLabel(0)).toBe('To 0 tenants');
-    expect(sendReachLabel(5)).toBe('To 5 tenants');
+  it('pluralizes recipient/recipients by count (spec 2026-10-06 D20: a seed may be a partner)', () => {
+    expect(sendReachLabel(1)).toBe('To 1 recipient');
+    expect(sendReachLabel(0)).toBe('To 0 recipients');
+    expect(sendReachLabel(5)).toBe('To 5 recipients');
   });
 });
 

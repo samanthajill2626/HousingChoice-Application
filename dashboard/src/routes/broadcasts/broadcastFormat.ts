@@ -55,8 +55,9 @@ export function bedroomPhrase(beds: number): string {
 }
 
 /** A human audience summary for a list row / results header, e.g.
- *  "Tenants - 2-BR - Atlanta Housing". Always leads with "Tenants" (the only
- *  audience M1.8 targets); appends the size + authority narrowers when set. */
+ *  "Tenants - 2-BR - Atlanta Housing". Always leads with "Tenants": it
+ *  summarizes the FILTER, which reaches tenants only (hand-picked partner
+ *  seeds are not summarized here - D22); appends the size + authority narrowers when set. */
 export function audienceSummary(filter: AudienceFilter): string {
   const parts: string[] = ['Tenants'];
   if (filter.bedroomSize !== undefined) parts.push(voucherSizeLabel(filter.bedroomSize));
@@ -66,9 +67,10 @@ export function audienceSummary(filter: AudienceFilter): string {
   return parts.join(' - ');
 }
 
-/** Reach line for a seeds-only send, where the audience filter says nothing. */
+/** Reach line for a seeds-only send, where the audience filter says nothing.
+ *  Neutral (spec 2026-10-06 D20): a seed may be a tenant or a partner. */
 export function sendReachLabel(count: number): string {
-  return `To ${count} ${count === 1 ? 'tenant' : 'tenants'}`;
+  return `To ${count} ${count === 1 ? 'recipient' : 'recipients'}`;
 }
 
 /** Broadcast status → a human label. */
@@ -220,7 +222,7 @@ export function splitContactKey(key: string): { contactId?: string; phone?: stri
  *  name is composed with contactDisplayName over the server-projected first/last
  *  name (the SAME helper the composer's review rows use); the phone prefers the
  *  server projection and falls back to the `phone#<E164>` key. A row with neither
- *  a name nor a phone carries neither field (the view renders the "Tenant"
+ *  a name nor a phone carries neither field (the view renders the "Recipient"
  *  fallback). share-sent-outcome D3: the message ids and the promise facts ride
  *  through (only when present) - the row's hint and badge judge them. */
 export function toRecipientViews(
@@ -232,7 +234,7 @@ export function toRecipientViews(
     const phone = slot.phone ?? split.phone;
     // Compose the name only when the server actually resolved one - an empty
     // first+last must NOT collapse to contactDisplayName's phone/"Unknown"
-    // fallbacks (the row handles those itself, incl. the "Tenant" label).
+    // fallbacks (the row handles those itself, incl. the "Recipient" label).
     const hasName = Boolean((slot.firstName ?? '').trim() || (slot.lastName ?? '').trim());
     const name = hasName ? contactDisplayName(slot.firstName, slot.lastName, phone) : undefined;
     return {

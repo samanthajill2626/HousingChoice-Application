@@ -1525,6 +1525,12 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       touchesOrgField || changesClassification ? { consistentRead: true } : undefined,
     );
     const priorStatus = typeof stored?.status === 'string' ? stored.status : undefined;
+    // Fence the merged-kind validation against the exact revision read here.
+    // Capture it before another write can mutate a repository's live object;
+    // absent and numeric zero are distinct DynamoDB conditions.
+    const classificationGuard = changesClassification
+      ? { attr: 'classification_revision', value: stored?.classification_revision ?? null }
+      : undefined;
 
     // The resolved 1:1 type, if triage set type=tenant|landlord this PATCH.
     const newType = parsed.patch['type'];
@@ -1737,24 +1743,34 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       'staff_notes' in parsed.patch && parsed.staffNotesExpected !== undefined
         ? { attr: 'staff_notes_updated_at', value: parsed.staffNotesExpected }
         : undefined;
+    const guards = [
+      ...(classificationGuard !== undefined ? [classificationGuard] : []),
+      ...(staffNotesGuard !== undefined ? [staffNotesGuard] : []),
+    ];
 
     let updated;
     try {
       updated = await contacts.update(
         contactId,
         parsed.patch,
-        staffNotesGuard !== undefined ? { expect: staffNotesGuard } : undefined,
+        guards.length > 0 ? { expect: guards } : undefined,
       );
     } catch (err) {
       if (err instanceof ConditionalCheckFailedException) {
         // A guarded write fails the same way for "gone" and "stale": re-read
-        // (consistent) to tell them apart, and hand a stale caller the CURRENT
-        // contact so its editor can show the newer note.
-        if (staffNotesGuard !== undefined) {
+        // (consistent) to tell them apart and return the CURRENT contact.
+        // A classification conflict must not claim that an unchanged note is
+        // stale merely because this request also supplied a note expectation.
+        if (guards.length > 0) {
           const current = await contacts.getById(contactId, { consistentRead: true });
           if (current) {
-            log.info({ contactId }, 'staff notes save refused: stale (a newer save landed first)');
-            res.status(409).json({ error: 'staff_notes_stale', contact: current });
+            const notesStale = staffNotesGuard !== undefined && (
+              classificationGuard === undefined
+              || (current.staff_notes_updated_at ?? null) !== staffNotesGuard.value
+            );
+            const error = notesStale ? 'staff_notes_stale' : 'contact_changed';
+            log.info({ contactId, error }, 'contact patch refused: a guarded value changed');
+            res.status(409).json({ error, contact: current });
             return;
           }
         }

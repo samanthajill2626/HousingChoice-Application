@@ -6,7 +6,8 @@
 // the contact_updated audit, validation, the "First Last - N Bed" parse, and
 // the no-overwrite-of-an-unset-field merge.
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 
@@ -723,6 +724,161 @@ describe('PATCH /api/contacts/:id - caseworkers (spec 2026-10-06 D16, D21)', () 
   }
   const storedOf = (world: ReturnType<typeof makeWebhookHarness>['world']) =>
     world.contacts.find((c) => c.contactId === 'c-cw');
+
+  function snapshotReads(world: ReturnType<typeof makeWebhookHarness>['world']) {
+    const get = world.contactsRepo.getById.bind(world.contactsRepo);
+    return vi.spyOn(world.contactsRepo, 'getById').mockImplementation(async (id, opts) =>
+      structuredClone(await get(id, opts)));
+  }
+
+  function signal() {
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { release = resolve; });
+    return { ready, release };
+  }
+
+  for (const revision of [undefined, 0] as const) {
+    for (const first of ['type', 'role'] as const) {
+      it(`concurrent partial edits cannot bypass conversion: ${first} first, revision ${revision ?? 'absent'}`, async () => {
+        const { app, world } = makeWebhookHarness();
+        seed(world, {
+          housingAuthority: 'Atlanta Housing Authority', agency: 'HOPE Atlanta',
+          ...(revision !== undefined && { classification_revision: revision }),
+        });
+        world.placements.set('p-cw-race', {
+          placementId: 'p-cw-race', tenantId: 'c-cw', unitId: 'u-cw-race',
+          stage: 'send_application', created_at: '2026-10-08T10:00:00.000Z',
+          updated_at: '2026-10-08T10:00:00.000Z',
+        });
+        const conversion = await request(app).post('/api/contacts/c-cw/caseworker-review')
+          .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE).send({ action: 'make' });
+        expect(conversion.status).toBe(409);
+        expect(conversion.body.error).toBe('caseworker_open_placement');
+
+        const reads = snapshotReads(world);
+        const arrived = { type: signal(), role: signal() };
+        const release = { type: signal(), role: signal() };
+        const update = world.contactsRepo.update.bind(world.contactsRepo);
+        world.contactsRepo.update = async (id, patch, opts) => {
+          const kind = 'type' in patch ? 'type' : 'role';
+          arrived[kind].release();
+          await release[kind].ready;
+          return update(id, patch, opts);
+        };
+        const responses = {
+          type: send(app, { type: 'partner', firstName: 'Type edit' }).then((r) => r),
+          role: send(app, { role: 'Caseworker', firstName: 'Role edit' }).then((r) => r),
+        };
+        const second = first === 'type' ? 'role' : 'type';
+        try {
+          await Promise.all([arrived.type.ready, arrived.role.ready]);
+          // Both route reads finish before either commit; neither is the fake's live object.
+          const snapshots = await Promise.all(reads.mock.results.map((r) => r.value as Promise<ContactItem>));
+          expect(snapshots).toHaveLength(2);
+          expect(snapshots[0]).not.toBe(snapshots[1]);
+          expect(snapshots[0]).not.toBe(storedOf(world));
+          expect(snapshots.map((c) => [c.type, c.role, c.classification_revision]))
+            .toEqual([['tenant', undefined, revision], ['tenant', undefined, revision]]);
+
+          release[first].release();
+          expect((await responses[first]).status).toBe(200);
+          const afterWinner = structuredClone(storedOf(world));
+          const auditCount = world.auditEvents.length;
+          const emittedCount = world.emitted.length;
+          const conversationEffects = vi.spyOn(world.conversationsRepo, 'findByParticipantPhone');
+          const typeDrain = vi.spyOn(world.extractionRepo, 'deleteTypeSuggestionIfCurrentAtContactRevision');
+          const suggestionDelete = vi.spyOn(world.extractionRepo, 'deleteSuggestionIfCurrent');
+          const verdicts = vi.spyOn(world.aiRuns, 'setVerdict');
+          await world.extractionRepo.putSuggestion({
+            ownerContactId: 'c-cw', target: 'type', suggestedValue: 'landlord',
+            conversationId: 'conv-cw-race', reason: 'pending after the winning edit',
+          });
+          const pending = structuredClone(world.suggestions);
+
+          release[second].release();
+          const rejected = await responses[second];
+          expect(rejected.status).toBe(409);
+          expect(rejected.body).toEqual({ error: 'contact_changed', contact: afterWinner });
+          expect(storedOf(world)).toEqual(afterWinner);
+          expect(storedOf(world)?.classification_revision).toBe(1);
+          expect(storedOf(world)?.caseworker_conversion).toBeUndefined();
+          expect(world.auditEvents).toHaveLength(auditCount);
+          expect(world.emitted).toHaveLength(emittedCount);
+          expect(world.suggestions).toEqual(pending);
+          expect(conversationEffects).not.toHaveBeenCalled();
+          expect(typeDrain).not.toHaveBeenCalled();
+          expect(suggestionDelete).not.toHaveBeenCalled();
+          expect(verdicts).not.toHaveBeenCalled();
+          // Retrying from the winning classification now reaches the merged-kind refusal.
+          const retry = await send(app, second === 'type' ? { type: 'partner' } : { role: 'Caseworker' });
+          expect([retry.status, retry.body.error]).toEqual([409, 'caseworker_use_conversion']);
+        } finally {
+          release.type.release();
+          release.role.release();
+          await Promise.all(Object.values(responses));
+        }
+      });
+    }
+  }
+
+  for (const revision of [undefined, 0] as const) {
+    it(`compares the raw revision ${revision ?? 'absent'} instead of normalizing absent and zero`, async () => {
+      const { app, world } = makeWebhookHarness();
+      seed(world, revision === undefined ? {} : { classification_revision: revision });
+      snapshotReads(world);
+      const update = world.contactsRepo.update.bind(world.contactsRepo);
+      world.contactsRepo.update = async (id, patch, opts) => {
+        const current = storedOf(world)!;
+        if (revision === undefined) current.classification_revision = 0;
+        else delete current.classification_revision;
+        return update(id, patch, opts);
+      };
+      const res = await send(app, { role: 'Inspector' });
+      expect([res.status, res.body.error]).toEqual([409, 'contact_changed']);
+      expect(storedOf(world)?.role).toBeUndefined();
+      expect(res.body.contact).toEqual(storedOf(world));
+      expect(world.auditEvents).toEqual([]);
+    });
+  }
+
+  it('returns the current classification on conflict, even when another writer made a caseworker', async () => {
+    const { app, world } = makeWebhookHarness();
+    seed(world, {});
+    const reads = snapshotReads(world);
+    const update = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (id, patch, opts) => {
+      await update(id, { type: 'partner', role: 'Caseworker' });
+      return update(id, patch, opts);
+    };
+    const res = await send(app, { type: 'landlord' });
+    expect([res.status, res.body.error]).toEqual([409, 'contact_changed']);
+    expect(res.body.contact).toMatchObject({ type: 'partner', role: 'Caseworker', classification_revision: 1 });
+    expect(reads).toHaveBeenLastCalledWith('c-cw', { consistentRead: true });
+    expect(world.auditEvents).toEqual([]);
+  });
+
+  it('404s a contact removed between the classification read and write', async () => {
+    const { app, world } = makeWebhookHarness();
+    seed(world, {});
+    const reads = snapshotReads(world);
+    const update = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (id, patch, opts) => {
+      world.contacts.splice(world.contacts.findIndex((c) => c.contactId === id), 1);
+      return update(id, patch, opts);
+    };
+    const res = await send(app, { type: 'partner' });
+    expect([res.status, res.body]).toEqual([404, { error: 'contact_not_found' }]);
+    expect(reads).toHaveBeenLastCalledWith('c-cw', { consistentRead: true });
+    expect(world.auditEvents).toEqual([]);
+  });
+
+  it('preserves ordinary classification edits on a soft-deleted contact', async () => {
+    const { app, world } = makeWebhookHarness();
+    seed(world, { deleted_at: '2026-10-08T10:00:00.000Z' });
+    const res = await send(app, { role: 'Inspector' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({ role: 'Inspector', deleted_at: '2026-10-08T10:00:00.000Z' });
+  });
 
   for (const [label, over, body] of [
     ['partner + Caseworker on a tenant', {}, { type: 'partner', role: 'Caseworker' }],

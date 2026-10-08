@@ -127,6 +127,96 @@ describe('PATCH /api/contacts/:id - staff_notes (spec 3.1, 3.2)', () => {
 describe('PATCH /api/contacts/:id - the Staff notes stale-save guard (spec 3.9)', () => {
   const STAMP = '2026-09-27T10:00:00.000Z';
 
+  for (const expected of [null, STAMP]) {
+    for (const [label, classificationChanged, noteChanged, error] of [
+      ['both current', false, false, undefined],
+      ['classification alone changed', true, false, 'contact_changed'],
+      ['note alone changed', false, true, 'staff_notes_stale'],
+      ['both changed', true, true, 'staff_notes_stale'],
+    ] as const) {
+      it(`composes classification and staff-note guards: ${label}, expected ${expected ?? 'absent'}`, async () => {
+        const { app, world } = makeWebhookHarness();
+        seedTenant(world, {
+          classification_revision: 3, staff_notes: 'original',
+          ...(expected !== null && { staff_notes_updated_at: expected }),
+        });
+        await world.extractionRepo.putSuggestion({
+          ownerContactId: 'c-sn-1', target: 'pets', suggestedValue: 'a dog',
+          conversationId: 'conv-sn-1', reason: 'pending human review',
+        });
+        const pending = structuredClone(world.suggestions);
+        const get = world.contactsRepo.getById.bind(world.contactsRepo);
+        const reads = vi.spyOn(world.contactsRepo, 'getById').mockImplementation(async (id, opts) =>
+          structuredClone(await get(id, opts)));
+        const update = world.contactsRepo.update.bind(world.contactsRepo);
+        world.contactsRepo.update = async (id, patch, opts) => {
+          if (classificationChanged) await update(id, { type: 'partner', status: 'active' });
+          if (noteChanged) await update(id, {
+            staff_notes: 'newer note', staff_notes_updated_at: '2026-09-27T11:00:00.000Z',
+          });
+          return update(id, patch, opts);
+        };
+
+        const res = await auth(request(app).patch('/api/contacts/c-sn-1')).send({
+          role: 'Inspector', staff_notes: 'my note', staff_notes_expected_updated_at: expected,
+          firstName: 'My edit', pets: 'a cat',
+        });
+        if (error === undefined) {
+          expect(res.status).toBe(200);
+          expect(stored(world)).toMatchObject({
+            role: 'Inspector', staff_notes: 'my note', classification_revision: 4, firstName: 'My edit', pets: 'a cat',
+          });
+          expect(stored(world).staff_notes_updated_at).toMatch(ISO);
+          expect(world.auditEvents.filter((e) => e.event_type === 'contact_updated')).toHaveLength(1);
+        } else {
+          expect([res.status, res.body.error]).toEqual([409, error]);
+          expect(res.body.contact).toEqual(stored(world));
+          expect(stored(world)).toMatchObject({
+            type: classificationChanged ? 'partner' : 'tenant',
+            classification_revision: classificationChanged ? 4 : 3,
+            staff_notes: noteChanged ? 'newer note' : 'original', firstName: 'Tasha',
+          });
+          expect(stored(world).role).toBeUndefined();
+          expect(stored(world).pets).toBeUndefined();
+          expect(reads).toHaveBeenLastCalledWith('c-sn-1', { consistentRead: true });
+          expect(world.auditEvents).toEqual([]);
+          expect(world.emitted).toEqual([]);
+          expect(world.suggestions).toEqual(pending);
+        }
+      });
+    }
+  }
+
+  it('404s disappearance during a combined classification and note save', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world);
+    const update = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (id, patch, opts) => {
+      world.contacts.splice(world.contacts.findIndex((c) => c.contactId === id), 1);
+      return update(id, patch, opts);
+    };
+    const res = await auth(request(app).patch('/api/contacts/c-sn-1')).send({
+      role: 'Inspector', staff_notes: 'my note', staff_notes_expected_updated_at: null,
+    });
+    expect([res.status, res.body]).toEqual([404, { error: 'contact_not_found' }]);
+    expect(world.auditEvents).toEqual([]);
+  });
+
+  it('a note-only save is unaffected by a concurrent classification change', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world, { staff_notes_updated_at: STAMP });
+    const update = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (id, patch, opts) => {
+      await update(id, { type: 'partner', status: 'active' });
+      return update(id, patch, opts);
+    };
+    const res = await auth(request(app).patch('/api/contacts/c-sn-1')).send({
+      staff_notes: 'my note', staff_notes_expected_updated_at: STAMP,
+    });
+    expect(res.status).toBe(200);
+    expect(stored(world)).toMatchObject({ type: 'partner', staff_notes: 'my note', classification_revision: 1 });
+  });
+
   it('with the stamp the editor opened with, the save lands and re-stamps', async () => {
     const { app, world } = makeWebhookHarness();
     seedTenant(world, { staff_notes: 'theirs', staff_notes_updated_at: STAMP });

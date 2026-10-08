@@ -293,3 +293,17 @@ exits 0, 16 passed in 37.2s, hard cap 2700s. Added-line ASCII and git diff
 --check pass. Raw labels 10.8a-typecheck, 10.8a-lint, 10.8a-green. Previous
 artifacts copied to artifacts/10.8a-before-green-2026-10-08T18-06-29-877Z/.
 Task 10.8a complete with no selector deviation or product finding.
+
+## Task 10.9 - selector reference
+
+Task 10.8a commit: c6d9f805. Verified S9's Thread send and Properties sent
+rows contain the partner action exactly twice together, and its Sent to card
+row exists exactly once; no duplicate card rows. Added the five planned
+Caseworkers/conversion/preset/share-wording rows. The preview sentence spells
+out the proven singular form; the Sent to prefix note refers to stored share
+labels. Updated both stale Settings table rows to the merged list/detail
+helpers, exact value links, field descriptions, Kind and settle flow.
+Read showList, valueLink, openValue, pickSettle and confirmSettle in
+org-lists.spec.ts and used their exact role/name contract. No count assertions.
+Documentation only: added-line ASCII and git diff --check pass; no redundant
+browser rerun. Task 10.9 complete. Task 10.4 stays baseline-red pending C6.

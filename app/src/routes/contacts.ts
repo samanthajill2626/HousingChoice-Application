@@ -47,7 +47,6 @@ import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   contactEmails,
   contactPhones,
-  contactClassificationRevision,
   createContactsRepo,
   isDeleted,
   PHONE_REF_PREFIX,
@@ -93,8 +92,6 @@ import {
 } from '../repos/contactVocabularyRepo.js';
 import {
   createExtractionRepo,
-  sameSuggestionIdentity,
-  type GuardedTypeDeleteResult,
   type ExtractionRepo,
   type SuggestionItem,
 } from '../repos/extractionRepo.js';
@@ -104,9 +101,12 @@ import {
   contactAddressToParts,
   formatAddressParts,
 } from '../services/extraction/address.js';
-import { isDecisionTarget } from '../services/extraction/runTypes.js';
-import { canonicalSuggestedContactKind } from '../services/extraction/contactKinds.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
+import {
+  displayNameOf,
+  drainTypeSuggestion,
+  supersedePendingSuggestion,
+} from '../services/contactClassification.js';
 
 export interface ContactsRouterDeps {
   logger?: Logger;
@@ -472,23 +472,6 @@ function conversationTypeFor(contactType: ContactType): ConversationType | undef
   if (contactType === 'partner') return 'partner_1to1';
   // team_member/unknown have no 1:1 conversation type to propagate.
   return undefined;
-}
-
-/**
- * The denormalized inbox display name from a contact's resolved fields:
- * `firstName`/`lastName` joined and trimmed → a non-empty string, else null.
- * HONEST: returns null when no name is known — the inbox falls back to the
- * phone; a name is NEVER invented. PII (doc §9): the name is data, never
- * logged here.
- */
-function displayNameOf(contact: ContactItem): string | null {
-  // Part-wise trim BEFORE the join: a legacy padded part ("Cameron   ") must
-  // never render an interior gap ("Cameron   Abt"). New writes arrive trimmed
-  // (trimJsonBody), but stored data predating it may not be.
-  const first = typeof contact.firstName === 'string' ? contact.firstName.trim() : '';
-  const last = typeof contact.lastName === 'string' ? contact.lastName.trim() : '';
-  const joined = [first, last].filter((p) => p.length > 0).join(' ');
-  return joined.length > 0 ? joined : null;
 }
 
 interface TriagePatch {
@@ -1677,17 +1660,13 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
 
     // Resolve only identities retained before contacts.update. A suggestion
     // created or replaced during the update remains pending and unstamped.
+    // The delete + verdict stamp is shared with the caseworker conversion
+    // (services/contactClassification.ts).
     const verdictAt = new Date().toISOString();
+    const suggestionDeps = { extraction, aiRuns, log };
+    const actor = req.user?.userId;
     let suggestionStateChanged = false;
     for (const [f, pending] of pendingByField) {
-      let deleted = false;
-      try {
-        deleted = await extraction.deleteSuggestionIfCurrent(contactId, f, pending.createdAt, pending.runId, pending.revision);
-      } catch (err) {
-        log.warn({ err, contactId, field: f }, 'extraction conditional delete (human edit) failed (best-effort)');
-      }
-      if (deleted) suggestionStateChanged = true;
-      if (!deleted || pending.runId === undefined || !isDecisionTarget(f)) continue;
       // The value comparison is CONFINED to `type` (frozen design 7.3): a human
       // triaging a contact to `landlord` after the model suggested `tenant` has
       // REJECTED that suggestion, so `type` must be judged on VALUE. For the
@@ -1698,15 +1677,11 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       const verdict = f === 'type' && suggestionMatchesAppliedValue(pending, parsed.patch[f])
         ? 'accepted'
         : 'superseded_by_human_edit';
-      try {
-        await aiRuns.setVerdict(pending.runId, f, verdict, {
-          at: verdictAt, expectedVerdict: 'pending',
-          freshSuggestionCreatedAt: pending.createdAt,
-          ...(req.user?.userId !== undefined && { by: req.user.userId }),
-        });
-      } catch (err) {
-        log.warn({ err, contactId, field: f }, 'ai run verdict stamp failed (best-effort)');
-      }
+      const deleted = await supersedePendingSuggestion(suggestionDeps, {
+        contactId, target: f, pending, verdict, verdictAt,
+        ...(actor !== undefined && { actor }),
+      });
+      if (deleted) suggestionStateChanged = true;
     }
 
     // A type suggestion is judged against the COMPLETE persisted kind, not
@@ -1715,83 +1690,13 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // number of older rows so a replacement racing the contact write cannot
     // remain actionable for an already-committed classification.
     if (changesKind) {
-      const committedRevision = contactClassificationRevision(updated);
-      const appliedKind = canonicalSuggestedContactKind(updated);
-      let candidate = pendingTypeBefore;
-      let exhausted = true;
-      for (let attempt = 0; attempt < 4; attempt += 1) {
-        if (candidate === undefined) {
-          try {
-            candidate = await extraction.getSuggestion(contactId, 'type', {
-              consistentRead: true,
-            });
-          } catch (err) {
-            log.warn({ err, contactId }, 'type suggestion drain read failed (best-effort)');
-            exhausted = false;
-            break;
-          }
-          if (candidate === undefined) {
-            exhausted = false;
-            break;
-          }
-        }
-
-        const candidateContactRevision = candidate.contactClassificationRevision ?? 0;
-        if (candidateContactRevision >= committedRevision) {
-          exhausted = false;
-          break;
-        }
-
-        let result: GuardedTypeDeleteResult;
-        try {
-          result = await extraction.deleteTypeSuggestionIfCurrentAtContactRevision(
-            candidate,
-            committedRevision,
-          );
-        } catch (err) {
-          log.warn({ err, contactId }, 'type suggestion drain failed (best-effort)');
-          exhausted = false;
-          break;
-        }
-        if (result === 'contact_revision_changed') {
-          exhausted = false;
-          break;
-        }
-        if (result === 'suggestion_changed_or_absent') {
-          candidate = undefined;
-          continue;
-        }
-
-        suggestionStateChanged = true;
-        const wasPrewriteIdentity = pendingTypeBefore !== undefined
-          && sameSuggestionIdentity(candidate, pendingTypeBefore);
-        const verdict = wasPrewriteIdentity
-          && appliedKind !== undefined
-          && normalizeSuggestionValue('type', candidate.suggestedValue)
-            === normalizeSuggestionValue('type', appliedKind)
-          ? 'accepted'
-          : 'superseded_by_human_edit';
-        if (candidate.runId !== undefined) {
-          try {
-            await aiRuns.setVerdict(candidate.runId, 'type', verdict, {
-              at: verdictAt,
-              expectedVerdict: 'pending',
-              freshSuggestionCreatedAt: candidate.createdAt,
-              ...(req.user?.userId !== undefined && { by: req.user.userId }),
-            });
-          } catch (err) {
-            log.warn(
-              { err, contactId, field: 'type' },
-              'ai run verdict stamp failed (best-effort)',
-            );
-          }
-        }
-        candidate = undefined;
-      }
-      if (exhausted) {
-        log.warn({ contactId }, 'type suggestion drain exhausted bounded retries');
-      }
+      const drained = await drainTypeSuggestion(suggestionDeps, {
+        contactId, committed: updated, pendingTypeBefore, verdictAt,
+        ...(actor !== undefined && { actor }),
+      });
+      if (drained) suggestionStateChanged = true;
     }
+
 
     if (suggestionStateChanged) {
       events.emit('suggestion.updated', { contactId });

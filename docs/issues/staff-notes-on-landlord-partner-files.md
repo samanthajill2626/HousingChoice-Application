@@ -6,6 +6,7 @@ severity: low
 status: open
 area: dashboard/contact
 created: 2026-09-26
+updated: 2026-10-08
 refs: dashboard/src/routes/contact/TenantFile.tsx, dashboard/src/routes/contact/LandlordFile.tsx, dashboard/src/routes/contact/PartnerFile.tsx, docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md
 ---
 
@@ -34,7 +35,7 @@ stored `staff_notes` and its stamp, but no file renders them until the contact
 is retyped back to tenant (or this issue is built). Nothing is lost; the box is
 merely invisible on the other kinds.
 
-**Update (2026-10-07, caseworkers branch B).** The PARTNER half is built:
+**Update (2026-10-08, caseworkers branch B).** The PARTNER half is built:
 `PartnerFile` renders `StaffNotesCard` above "Preferences & notes", wired to
 `onContactUpdated` from `ContactDetail` (spec
 `docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md`

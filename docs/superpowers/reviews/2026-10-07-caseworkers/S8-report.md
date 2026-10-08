@@ -200,3 +200,96 @@ The new issue follows the current README's hermetic profiler permission,
 rather than repeating the draft's outdated human-only claim. No profiler
 or browser command was run. The dispatch assigns aggregate slice gates to
 the parent; this implementation worker has not run them.
+
+## S8 handoff - implementation complete
+
+| Task | Commit |
+| --- | --- |
+| 8.1 | bdd128a4 |
+| 8.2 | 2321cf7a |
+| 8.3 | 3f4530e1 |
+| 8.4 | 37d6913e |
+| 8.5 | cfdecbcd |
+| 8.6 | ff1cd85a |
+| 8.7 | 8ceedd7f |
+| 8.8 | c064760e |
+| 8.9 | b0fc5518 |
+| 8.10 | 465a5dfe |
+| 8.11 | 8de40dd3 |
+| 8.12 | 1478bf27 |
+| 8.13 | b1e10303 |
+
+All 13 task root typechecks exited 0. All 55 owned runner invocations have
+completion exit markers; none is pending or timed out. Genuine RED outcomes
+and the excluded zero-selection attempt are documented above. Final focused
+proofs: app 57, profiler routes/catalog 30, contacts 109, contact file/detail
+families 161; these are separate runs, not a combined unique test count.
+Scoped lint covered 37 S8 TypeScript paths and has no new error versus the
+explicit merge base; the sole preserved diagnostic is ContactsList.tsx's
+react-hooks/set-state-in-effect at setQuery(phoneParam). No aggregate,
+smoke, e2e browser, profiler, live lane, infra or dependency command ran here.
+Parent explicitly owns CP2 after S9 and the final mission gates.
+
+C4 is the only implementation correction beyond draft assertion settling and
+current-date/documentation adjustments: conversion success is fenced by the
+contact review generation so late A callbacks cannot close B's dialog or
+refetch B. It was proved RED, approved by the parent, fixed and reverified.
+The deferred staff-notes issue update date now reads 2026-10-08 and its updated
+frontmatter matches; the genuine Cameron confirmation stays 2026-10-07.
+
+### Downstream S9 seam
+
+- PartnerFileProps (dashboard/src/routes/contact/PartnerFile.tsx:21) ends with
+  optional onContactUpdated: (updated: Contact) => void, and the destructuring
+  includes it last. ContactDetail's partner branch passes setContact at
+  dashboard/src/routes/contact/ContactDetail.tsx:1142. Preserve that wiring.
+- StaffNotesCard is keyed by contact.contactId above Preferences & notes.
+  The S9 Properties sent insertion seam is AFTER that Preferences & notes
+  Card and BEFORE the PLACEMENT RULING (C13) Group threads comment at
+  dashboard/src/routes/contact/PartnerFile.tsx:130. No S9 props or card were
+  added by S8; the partner branch currently receives no listingsSent props.
+- useContactFile was not changed. ContactFileState.listingsSent is
+  Slice<ListingSendRow> (useContactFile.ts:39); ready carries rows, other states
+  are loading/pending/error. The hook already reads getContactListingsSent
+  for every contact kind at useContactFile.ts:146. ContactFile.refetch is a
+  stable callback and keeps committed same-contact state during reload.
+  S9 should consume this existing slice, not introduce a new mount read.
+- Conversion success already applies returned Contact and refreshes suggestions,
+  timeline and file. The predicate lives in contact/caseworkerRole.ts;
+  import isCaseworkerContact from that leaf, never from CaseworkerDialog.
+
+### API and S10 contracts
+
+- No new contact type: partner plus normalized exact caseworker role.
+  KindPicker offerCaseworker yields exact { type: 'partner', role: 'Caseworker' }.
+  Other suggestions filter role mentions; arbitrary typed custom roles survive.
+- API exports: CaseworkerPreview, CaseworkerRefusal, OrganizationSource,
+  PossibleSignal, PossibleCaseworkerRow. The API types file remains type-only.
+  Endpoints: listPossibleCaseworkers(signal?) -> rows; previewCaseworker(id,
+  signal?) -> preview; makeCaseworker(id, { organization? }) -> Contact;
+  dismissPossibleCaseworker(id) -> Contact. IDs are encoded. Make/dismiss POST
+  to /api/contacts/:contactId/caseworker-review with their own action values.
+  Untouched organization is omitted; changed empty string clears.
+- Preview is dialog-open-only. Possible list is Caseworkers-page-only.
+  ContactDetail mount boundary PIN proves no preview, Possible or org-list read.
+  Caseworkers page reads all live partners plus Possible, then re-reads both
+  after make. Successful dismissal drops only its row without a re-read.
+- Route /contacts/caseworkers; Workspace order Tenants, Landlords, Caseworkers,
+  Unknown. Filter contacts order All, Tenants, Landlords, Caseworkers, Unknown,
+  Deleted. Lists are ul named Caseworkers and Possible caseworkers, one li per
+  row. Organization uses aria-pressed chips and repeated normalized org params.
+- Entry names: More actions > Make caseworker; Unknown Mark as Caseworker;
+  Possible row Make <name> a caseworker. Conversion dialog is Make <name> a
+  caseworker with Make caseworker confirm. Dismiss action is <name> is not a
+  caseworker; dialog Hide <name> from Possible caseworkers?; Hide / Cancel.
+- Task 8.1 mutation catalog contains both POST functions with raw count 120;
+  no profiler surface was added. Task 8.13 excludes /contacts/caseworkers,
+  with matching registry TODO, issue and README. Routes/catalog tests pass.
+- Browser pins already adjusted in their owning commits: contact-create uses
+  exact Caseworker inside Relationships; conversation-fact-extraction uses
+  exact Partner inside Details. Parent/S10 must execute browser proof, including
+  six KindPicker segments at 375px and the new Caseworkers flows. Settings
+  segments and Email triage entry points remain unchanged.
+
+This is an implementation slice handoff, not a completed mission or merge
+verdict. No block remains; all owned commands are stopped before handoff.

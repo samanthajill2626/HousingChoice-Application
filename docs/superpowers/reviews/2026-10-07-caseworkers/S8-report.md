@@ -134,3 +134,14 @@ Root bare npm run typecheck exited 0 across five workspaces. Root npx eslint
 e2e/tests/flows/conversation-fact-extraction.spec.ts exited 0. npm run issues
 exited 0 (ignored index regenerated). Added-line ASCII/diff checks pass.
 No contract deviation; browser execution remains parent-owned.
+
+## Task 8.10 - shared filter chips
+
+Task 8.9 commit: b0fc5518. Extracted Chip and ChipGroup to FilterChips,
+keeping TenantFilters.module.css and TenantFilters' Porting useId. Scripted
+comparison proved both function bodies unchanged apart from export.
+RED: dashboard npx vitest run src/routes/contacts/FilterChips.test.tsx,
+exit 1, missing module with zero cases collected. GREEN: dashboard npx vitest
+run src/routes/contacts, exit 0, 94 tests in five files. Root bare npm run
+typecheck exited 0 across five workspaces. Scoped root eslint on
+FilterChips.tsx and TenantFilters.tsx exited 0. No contract deviation.

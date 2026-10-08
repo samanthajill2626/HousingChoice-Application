@@ -620,7 +620,10 @@ test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => 
       tenants: 2,
       otherContacts: 0,
       properties: 1,
+      organization: 0,
       deleted: 0,
+      inUse: { active: 3, deleted: 0 },
+      kindLocked: { active: 3, deleted: 0 },
     });
 
     await openOrgSettings(page);

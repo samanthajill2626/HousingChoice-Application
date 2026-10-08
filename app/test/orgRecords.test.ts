@@ -47,7 +47,44 @@ function setup(seed: { contacts?: ContactItem[]; units?: UnitItem[] } = {}) {
   return { world, records };
 }
 
+/** One entry's usage with nothing holding it (plan 3.6). */
+const NO_USE = {
+  tenants: 0,
+  otherContacts: 0,
+  properties: 0,
+  organization: 0,
+  deleted: 0,
+  inUse: { active: 0, deleted: 0 },
+  kindLocked: { active: 0, deleted: 0 },
+};
+
 describe('OrgRecordsService.usage (spec D3, D10)', () => {
+  it('counts organization holders of either kind in their own column, and DISTINCT records in two totals (spec D10, D17; R2-F1)', async () => {
+    const { records } = setup({
+      contacts: [
+        contact('p-1', { type: 'partner', status: 'active', role: 'Caseworker', organization: STEP_UP.name }),
+        contact('p-2', { type: 'partner', status: 'active', organization: ATLANTA.name }),
+        contact('t-1', { housingAuthority: ATLANTA.name, organization: ATLANTA.name }), // one record, two columns
+        contact('p-3', { type: 'partner', status: 'active', organization: DCA.name, deleted_at: DELETED_AT }),
+        contact('p-4', { type: 'partner', status: 'active', organization: 'Steps' }), // off the list: no use
+      ],
+      units: [unit('u-1', { accepted_authorities: [ATLANTA.name] })],
+    });
+    const usage = await records.usage(ORG_FIXTURE);
+    expect(usage['org-atl']).toEqual({
+      ...NO_USE,
+      tenants: 1,
+      properties: 1,
+      organization: 2,
+      // t-1 once, p-2, u-1 - Delete waits for all of them.
+      inUse: { active: 3, deleted: 0 },
+      // p-2 holds it only as its organization, which accepts either kind: no kind lock.
+      kindLocked: { active: 2, deleted: 0 },
+    });
+    expect(usage['org-stepup']).toEqual({ ...NO_USE, organization: 1, inUse: { active: 1, deleted: 0 } });
+    expect(usage['org-dca']).toEqual({ ...NO_USE, deleted: 1, inUse: { active: 0, deleted: 1 } });
+  });
+
   it('counts the exact name in a field of the entry kind - active per column, deleted beside them', async () => {
     const { records } = setup({
       contacts: [
@@ -67,11 +104,19 @@ describe('OrgRecordsService.usage (spec D3, D10)', () => {
       ],
     });
     expect(await records.usage(ORG_FIXTURE)).toEqual({
-      'org-atl': { tenants: 1, otherContacts: 1, properties: 2, deleted: 1 },
-      'org-aug': { tenants: 0, otherContacts: 0, properties: 0, deleted: 0 },
-      'org-dca': { tenants: 0, otherContacts: 0, properties: 0, deleted: 1 },
-      'org-vash': { tenants: 0, otherContacts: 0, properties: 0, deleted: 0 },
-      'org-stepup': { tenants: 0, otherContacts: 1, properties: 0, deleted: 0 },
+      'org-atl': {
+        ...NO_USE,
+        tenants: 1,
+        otherContacts: 1,
+        properties: 2,
+        deleted: 1,
+        inUse: { active: 4, deleted: 1 },
+        kindLocked: { active: 4, deleted: 1 },
+      },
+      'org-aug': NO_USE,
+      'org-dca': { ...NO_USE, deleted: 1, inUse: { active: 0, deleted: 1 }, kindLocked: { active: 0, deleted: 1 } },
+      'org-vash': NO_USE,
+      'org-stepup': { ...NO_USE, otherContacts: 1, inUse: { active: 1, deleted: 0 }, kindLocked: { active: 1, deleted: 0 } },
     });
   });
 

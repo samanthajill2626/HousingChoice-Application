@@ -53,7 +53,15 @@ export interface NotOnListRowWire {
 /** Use counts per entry (plan 3.4 OrgUsage), keyed by orgId. */
 export type OrgUsageWire = Record<
   string,
-  { tenants: number; otherContacts: number; properties: number; deleted: number }
+  {
+    tenants: number;
+    otherContacts: number;
+    properties: number;
+    organization: number;
+    deleted: number;
+    inUse: { active: number; deleted: number };
+    kindLocked: { active: number; deleted: number };
+  }
 >;
 
 /** Two texts are the same organization text under spec D4 (case, punctuation

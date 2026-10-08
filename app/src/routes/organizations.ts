@@ -106,19 +106,20 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
   }
 
   /**
-   * 409 org_in_use while any record - deleted ones included (D10) - holds the
-   * entry's name in a field of its kind. OrgNamesService has no record access
-   * (plan 3.4b), so the delete and kind-change routes ask here first (plan
-   * 3.5). The count and the list write are two steps: a record written in
-   * between can end up holding the removed name - it then shows in "Not on
+   * 409 org_in_use while a record - deleted ones included (D10) - holds the
+   * entry's name. 'delete': DISTINCT records in any field, a contact's
+   * organization included; 'kind': DISTINCT records in a field of the entry's
+   * kind - an organization holder stays valid under either kind, so it never
+   * blocks a kind change (spec D17; R2-F1). OrgNamesService has no record
+   * access (plan 3.4b), so the delete and kind-change routes ask here first
+   * (plan 3.5). The count and the list write are two steps: a record written
+   * in between can end up holding the removed name - it then shows in "Not on
    * the list" (the accepted race, plan watch items).
    */
-  async function refuseWhileUsed(entry: OrgEntry): Promise<void> {
+  async function refuseWhileUsed(entry: OrgEntry, mode: 'delete' | 'kind'): Promise<void> {
     const u = (await orgRecords.usage([entry]))[entry.orgId];
-    const uses = {
-      active: (u?.tenants ?? 0) + (u?.otherContacts ?? 0) + (u?.properties ?? 0),
-      deleted: u?.deleted ?? 0,
-    };
+    const total = mode === 'delete' ? u?.inUse : u?.kindLocked;
+    const uses = { active: total?.active ?? 0, deleted: total?.deleted ?? 0 };
     if (uses.active + uses.deleted > 0) throw new OrgHttpError(409, { error: 'org_in_use', uses });
   }
 
@@ -285,7 +286,7 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
             return;
           }
           const entry = await entryOr404(orgId);
-          if (entry.kind !== kind) await refuseWhileUsed(entry);
+          if (entry.kind !== kind) await refuseWhileUsed(entry, 'kind');
           res.json({ entry: await orgNames.changeKind(orgId, kind, actor) });
           return;
         }
@@ -298,7 +299,7 @@ export function createOrganizationsRouter(deps: OrganizationsRouterDeps = {}): R
     requireRole('admin'),
     handle(async (req, res) => {
       const orgId = String(req.params['orgId'] ?? '');
-      await refuseWhileUsed(await entryOr404(orgId));
+      await refuseWhileUsed(await entryOr404(orgId), 'delete');
       await orgNames.remove(orgId, actorOf(req));
       res.status(204).end();
     }),

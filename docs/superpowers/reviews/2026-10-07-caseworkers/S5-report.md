@@ -35,3 +35,17 @@ Regression: app npx vitest run test/orgRecordWriters.integration.test.ts test/cl
 exited 0, two files / 69 tests, zero skips; the latter exercises only its
 isolated test fixtures (5.2-regression). Root npm run typecheck exited 0
 (5.2-typecheck). No contract deviation, no job implementation change needed.
+
+## Task 5.3 - distinct usage totals and refusal modes
+
+Task 5.2 commit: e89d38d1. Added the organization display column, preserved
+legacy per-column deleted, and computed distinct inUse/kindLocked totals.
+Delete reads inUse; kind change reads kindLocked, excluding organization-only
+holders. E2E usage wire and existing usage pin changed in this task; their
+execution remains S10 as planned.
+RED: app npx vitest run test/orgRecords.test.ts test/organizationsApi.test.ts
+exited 1: four failed / 45 passed, all at missing usage fields/totals. The
+route case stops there before Delete, so the draft's predicted 204 was not
+observed in this RED run. GREEN: app npx vitest run test/orgRecords.test.ts test/organizationsApi.test.ts test/orgRewriteJob.test.ts
+exited 0, three files / 67 tests (5.3-green). Root npm run typecheck exited 0
+(5.3-typecheck). Existing refusal pins remain unchanged. No contract deviation.

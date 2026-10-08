@@ -14,7 +14,10 @@
 // out - a page can come back short or EMPTY with a cursor (the deleted filter
 // applies after Limit), so the loops follow the cursor, never the item count.
 //
-// USES (D3) count only a field of the entry's kind holding the exact name. A
+// USES (D3) count a field of the entry's kind holding the exact name.
+// Branch B: a contact's organization holding an entry of EITHER kind is a use
+// in its own column. The distinct-record totals decide Delete (inUse) and
+// a kind change (kindLocked, which organization never joins - spec D17). A
 // unit that stores only the legacy `jurisdiction` holds no list: it is neither
 // a use nor a "Not on the list" row (the cleanup script backfills it).
 //
@@ -95,9 +98,36 @@ export interface NotOnListRow {
   resolution: NotOnListResolution;
 }
 
+/** A count of DISTINCT records, active and deleted (spec D10; R2-F1). */
+export interface OrgUseTotal {
+  active: number;
+  deleted: number;
+}
+
+/**
+ * One entry's uses (plan 3.6). The columns are for DISPLAY: each counts the
+ * active records holding the exact name in its fields (a field of the
+ * entry's kind; `organization` - a contact's organization, any type, either
+ * kind), so one record can count in two columns; `deleted` counts deleted
+ * holders the same way, once per column hit - kept on the wire for
+ * compatibility only: the dashboard shows the distinct `inUse.deleted`
+ * (plan review R1 ruling A10). The two totals count DISTINCT
+ * records and are what the refusals read: `inUse` - any field, organization
+ * included (Delete); `kindLocked` - a field of the entry's kind only, so an
+ * organization holder never blocks a kind change (spec D17).
+ */
+export interface OrgUsageCounts {
+  tenants: number;
+  otherContacts: number;
+  properties: number;
+  organization: number;
+  deleted: number;
+  inUse: OrgUseTotal;
+  kindLocked: OrgUseTotal;
+}
+
 export interface OrgUsage {
-  /** orgId -> counts of records whose field of the entry's kind holds the exact name. */
-  [orgId: string]: { tenants: number; otherContacts: number; properties: number; deleted: number };
+  [orgId: string]: OrgUsageCounts;
 }
 
 export interface OrgRecordsService {
@@ -420,32 +450,71 @@ export function createOrgRecordsService(deps: OrgRecordsDeps = {}): OrgRecordsSe
   return {
     async usage(entries) {
       const out: OrgUsage = {};
-      for (const e of entries) out[e.orgId] = { tenants: 0, otherContacts: 0, properties: 0, deleted: 0 };
+      for (const e of entries) {
+        out[e.orgId] = {
+          tenants: 0,
+          otherContacts: 0,
+          properties: 0,
+          organization: 0,
+          deleted: 0,
+          inUse: { active: 0, deleted: 0 },
+          kindLocked: { active: 0, deleted: 0 },
+        };
+      }
       const haIds = new Map(entries.filter((e) => e.kind === 'housing_authority').map((e) => [e.name, e.orgId] as const));
       const agencyIds = new Map(entries.filter((e) => e.kind === 'agency').map((e) => [e.name, e.orgId] as const));
-      const count = (
-        orgId: string | undefined,
-        column: 'tenants' | 'otherContacts' | 'properties',
+      // Names are unique across BOTH kinds (D4): one map serves the organization field.
+      const anyIds = new Map(entries.map((e) => [e.name, e.orgId] as const));
+      type Column = 'tenants' | 'otherContacts' | 'properties' | 'organization';
+      /** One record's hits: a column per hit, and each DISTINCT entry once per total. */
+      const tally = (
+        hits: ReadonlyArray<{ orgId: string | undefined; column: Column; locksKind: boolean }>,
         deleted: boolean,
       ): void => {
-        const row = orgId === undefined ? undefined : out[orgId];
-        if (row === undefined) return;
-        if (deleted) row.deleted += 1;
-        else row[column] += 1;
+        const used = new Set<OrgUsageCounts>();
+        const locked = new Set<OrgUsageCounts>();
+        for (const hit of hits) {
+          const row = hit.orgId === undefined ? undefined : out[hit.orgId];
+          if (row === undefined) continue;
+          if (deleted) row.deleted += 1;
+          else row[hit.column] += 1;
+          used.add(row);
+          if (hit.locksKind) locked.add(row);
+        }
+        const bump = (t: OrgUseTotal): void => {
+          if (deleted) t.deleted += 1;
+          else t.active += 1;
+        };
+        for (const row of used) bump(row.inUse);
+        for (const row of locked) bump(row.kindLocked);
       };
+      const text = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
       for await (const c of everyContact()) {
-        const deleted = isContactDeleted(c);
         const column = c.type === 'tenant' ? 'tenants' : 'otherContacts';
-        const ha = c['housingAuthority'];
-        if (typeof ha === 'string') count(haIds.get(ha), column, deleted);
-        const agency = c['agency'];
-        if (typeof agency === 'string') count(agencyIds.get(agency), column, deleted);
+        const ha = text(c['housingAuthority']);
+        const agency = text(c['agency']);
+        const organization = text(c.organization);
+        tally(
+          [
+            { orgId: ha === undefined ? undefined : haIds.get(ha), column, locksKind: true },
+            { orgId: agency === undefined ? undefined : agencyIds.get(agency), column, locksKind: true },
+            // Spec D17: the organization field accepts either kind - it never locks one.
+            {
+              orgId: organization === undefined ? undefined : anyIds.get(organization),
+              column: 'organization',
+              locksKind: false,
+            },
+          ],
+          isContactDeleted(c),
+        );
       }
       for await (const u of everyUnit()) {
-        const deleted = isUnitDeleted(u);
         // One property is one use, however often its list repeats the name.
         const members = new Set((storedAuthorities(u) ?? []).filter((m): m is string => typeof m === 'string'));
-        for (const m of members) count(haIds.get(m), 'properties', deleted);
+        tally(
+          [...members].map((m) => ({ orgId: haIds.get(m), column: 'properties' as const, locksKind: true })),
+          isUnitDeleted(u),
+        );
       }
       return out;
     },

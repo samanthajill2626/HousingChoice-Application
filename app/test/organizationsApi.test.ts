@@ -96,8 +96,24 @@ describe('GET /api/organizations/usage', () => {
     h.world.units.set('u-1', property('u-1', { accepted_authorities: [ATLANTA.name] }));
     const res = await as(h, TEST_SESSION_COOKIE).get('/usage');
     expect(res.status).toBe(200);
-    expect(res.body.usage['org-atl']).toEqual({ tenants: 1, otherContacts: 0, properties: 1, deleted: 1 });
-    expect(res.body.usage['org-stepup']).toEqual({ tenants: 0, otherContacts: 1, properties: 0, deleted: 0 });
+    expect(res.body.usage['org-atl']).toEqual({
+      tenants: 1,
+      otherContacts: 0,
+      properties: 1,
+      organization: 0,
+      deleted: 1,
+      inUse: { active: 2, deleted: 1 },
+      kindLocked: { active: 2, deleted: 1 },
+    });
+    expect(res.body.usage['org-stepup']).toEqual({
+      tenants: 0,
+      otherContacts: 1,
+      properties: 0,
+      organization: 0,
+      deleted: 0,
+      inUse: { active: 1, deleted: 0 },
+      kindLocked: { active: 1, deleted: 0 },
+    });
   });
 });
 
@@ -483,5 +499,32 @@ describe('rewrites through the real in-process queue and the org.rewrite job (sp
     const res = await admin.post('/rewrite/run-again');
     expect(res.status).toBe(409);
     expect(res.body).toEqual({ error: 'org_rewrite_not_rerunnable' });
+  });
+});
+
+describe('organization holders and the two refusals (spec D10, D17; R2-F1)', () => {
+  it('Delete counts DISTINCT records in any field, organization included; a kind change ignores organization-only holders', async () => {
+    const h = await harness();
+    h.world.contacts.push(
+      tenant('t-1', { housingAuthority: DCA.name, organization: DCA.name }), // two columns, ONE record
+      { contactId: 'p-1', type: 'partner', status: 'active', role: 'Caseworker', organization: STEP_UP.name },
+      { contactId: 'p-2', type: 'partner', status: 'active', organization: STEP_UP.name, deleted_at: DELETED_AT },
+    );
+    const admin = as(h, TEST_ADMIN_COOKIE);
+    const { usage } = (await admin.get('/usage')).body;
+    expect(usage['org-dca']).toMatchObject({ tenants: 1, organization: 1, inUse: { active: 1, deleted: 0 } });
+    expect(usage['org-stepup']).toMatchObject({ organization: 1, deleted: 1, kindLocked: { active: 0, deleted: 0 } });
+    const delDca = await admin.del('/org-dca');
+    expect(delDca.status).toBe(409);
+    expect(delDca.body).toEqual({ error: 'org_in_use', uses: { active: 1, deleted: 0 } });
+    const delStep = await admin.del('/org-stepup');
+    expect(delStep.status).toBe(409);
+    expect(delStep.body).toEqual({ error: 'org_in_use', uses: { active: 1, deleted: 1 } });
+    const rekindDca = await admin.patch('/org-dca', { kind: 'agency' });
+    expect(rekindDca.status).toBe(409);
+    expect(rekindDca.body).toEqual({ error: 'org_in_use', uses: { active: 1, deleted: 0 } });
+    const rekindStep = await admin.patch('/org-stepup', { kind: 'housing_authority' });
+    expect(rekindStep.status).toBe(200);
+    expect(rekindStep.body.entry).toMatchObject({ orgId: 'org-stepup', kind: 'housing_authority' });
   });
 });

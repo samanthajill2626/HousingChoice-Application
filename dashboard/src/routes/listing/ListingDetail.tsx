@@ -1,14 +1,15 @@
 // ListingDetail - the Listing detail page (B4), the locked v4 mockup. A
-// near-black header band (address - status badge - facts - "?? Send to
-// tenants" + Edit + ?) over a two-column body and a full-width Photos gallery:
+// near-black header band (address - status badge - facts - Edit + the More
+// actions kebab, which holds "Send this property") over a two-column body and
+// a full-width Photos gallery:
 //   LEFT  - a small hero image - a flyer line (View flyer ? + Copy public link)
 //           - Property details (incl. the Housing authorities row) - Tour
 //           & application process - Activity.
-//   RIGHT - Contacts roster - Sent to tenants - Placements on this property - Related
+//   RIGHT - Contacts roster - Sent to - Placements on this property - Related
 //           properties - Similar properties.
 //   BOTTOM (full width) - Photos.
 // Real panels come from existing endpoints (unit, placements, units, the landlord
-// contact); the C4 "Sent to tenants" + C6 "Similar properties" panels show an
+// contact); the C4 "Sent to" + C6 "Similar properties" panels show an
 // honest "Arrives with the backend" pending state, and "Activity" serves the unit
 // audit trail (pending only on an older backend). Nothing is fabricated.
 import { useMemo, useRef, useState } from 'react';
@@ -325,7 +326,7 @@ export function ListingDetail(): React.JSX.Element {
   // applies the returned unit in place so the Deleted banner clears.
   const deleted = typeof unit.deleted_at === 'string' && unit.deleted_at.length > 0;
   // Shared by both entry points to the send composer (the kebab item and the
-  // "Sent to tenants" card's "+ Send" action) - one URL, one place it's built.
+  // "Sent to" card's "+ Send" action) - one URL, one place it's built.
   const goToSend = (): void => void navigate(`/broadcasts/new?unitId=${encodeURIComponent(unit.unitId)}`);
   const onConfirmDelete = (): void => {
     if (deleteBusy) return;
@@ -1021,10 +1022,10 @@ export function ListingDetail(): React.JSX.Element {
           </Card>
 
           <Card
-            title="Sent to tenants"
+            title="Sent to"
             aside={
               !deleted ? (
-                <CardAction onClick={goToSend} label="Send this property to tenants">
+                <CardAction onClick={goToSend} label="Send this property">
                   + Send
                 </CardAction>
               ) : (
@@ -1052,7 +1053,7 @@ export function ListingDetail(): React.JSX.Element {
             )}
           </Card>
 
-          {/* Tours sit between Sent-to-tenants and Placements — the flow order
+          {/* Tours sit between Sent-to and Placements - the flow order
               (send -> tour -> placement). Rows: tenant + date, right = status. */}
           <Card
             title="Tours on this property"

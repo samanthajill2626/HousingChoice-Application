@@ -13,7 +13,7 @@ export interface ListingActionsMenuProps {
   /** Start a placement on this property (opens the create dialog). Omitted on a
    *  deleted property → no item. */
   onStartPlacement?: () => void;
-  /** Send this property to tenants. Omitted on a deleted property → no item. */
+  /** "Send this property" (opens the share composer). Omitted on a deleted property -> no item. */
   onBroadcast?: () => void;
   /** Current soft-delete state (drives Delete vs Restore). */
   deleted: boolean;
@@ -104,7 +104,7 @@ export function ListingActionsMenu({
                 onBroadcast();
               }}
             >
-              Send to tenants
+              Send this property
             </button>
           ) : null}
           {onEdit ? (

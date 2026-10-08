@@ -495,7 +495,7 @@ describe('ListingDetail', () => {
     expect(screen.getAllByText('Arrives with the backend.').length).toBeGreaterThanOrEqual(2);
   });
 
-  it('renders "Sent to tenants" rows: identity links to the contact, no chip without a tour', () => {
+  it('renders "Sent to" rows: identity links to the contact, no chip without a tour', () => {
     useListing.mockReturnValue({
       ...READY,
       recipients: {
@@ -512,7 +512,7 @@ describe('ListingDetail', () => {
     expect(screen.queryByRole('link', { name: /^Tour|^Toured$/ })).not.toBeInTheDocument();
   });
 
-  it('identifies a "Sent to tenants" row by the tenant NAME when the wire provides one', () => {
+  it('identifies a "Sent to" row by the recipient NAME when the wire provides one', () => {
     useListing.mockReturnValue({
       ...READY,
       recipients: {
@@ -529,7 +529,7 @@ describe('ListingDetail', () => {
     expect(screen.queryByText('c-t9')).not.toBeInTheDocument();
   });
 
-  it('renders each tour-chip state on "Sent to tenants" rows, linking to the tour', () => {
+  it('renders each tour-chip state on "Sent to" rows, linking to the tour', () => {
     useListing.mockReturnValue({
       ...READY,
       recipients: {
@@ -977,24 +977,28 @@ describe('ListingDetail', () => {
     );
   });
 
-  it('the ⋯ menu holds Start placement + Send to tenants (moved off the hero)', async () => {
+  it('the More actions menu holds Start placement + Send this property (moved off the hero)', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue(READY);
     renderAt();
-    // Neither is a standalone hero button anymore.
+    // Neither is a standalone hero button: the ONLY button named "Send this
+    // property" before the menu opens is the "Sent to" card's "+ Send".
     expect(screen.queryByRole('button', { name: 'Start placement' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Send to tenants/ })).not.toBeInTheDocument();
-    // Both live in the ⋯ menu.
+    expect(screen.getAllByRole('button', { name: 'Send this property' })).toHaveLength(1);
+    // Both live in the More actions menu (spec 2026-10-06 D22: neutral words).
     await user.click(screen.getByRole('button', { name: /More actions/ }));
     expect(screen.getByRole('menuitem', { name: 'Start placement' })).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: 'Send to tenants' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Send this property' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /tenants/ })).not.toBeInTheDocument();
   });
 
-  it('Sent to tenants card has a "+ Send" action that opens the composer for this property', async () => {
+  it('the "Sent to" card (D20: titled "Sent to") has a "+ Send" action that opens the composer for this property', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue(READY);
     renderAt();
-    await user.click(screen.getByRole('button', { name: 'Send this property to tenants' }));
+    expect(screen.getByRole('heading', { name: /^Sent to\b/ })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: /Sent to tenants/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Send this property' }));
     expect(screen.getByTestId('path')).toHaveTextContent('/broadcasts/new?unitId=u1');
   });
 

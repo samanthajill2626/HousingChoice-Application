@@ -137,10 +137,10 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     });
     expect(sentRes.ok()).toBeTruthy();
 
-    // --- Compose from the property: "Send to tenants" in the kebab menu. ---
+    // --- Compose from the property: "Send this property" in the kebab menu. ---
     await page.goto(`${NEXT}/listings/${unitId}`);
     await page.getByRole('button', { name: 'More actions' }).click();
-    await page.getByRole('menuitem', { name: 'Send to tenants' }).click();
+    await page.getByRole('menuitem', { name: 'Send this property', exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${unitId}`));
     await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
 

@@ -158,7 +158,7 @@ test.describe('Property detail — broadcast + tour Activity rows (activity cove
   });
 });
 
-test.describe('Property detail - "Sent to tenants" tour chip (listing-response-tour-chip)', () => {
+test.describe('Property detail - "Sent to" tour chip (listing-response-tour-chip)', () => {
   test('sent rows carry no response chip until a tour lights exactly the toured recipient', async ({
     page,
   }) => {
@@ -177,7 +177,7 @@ test.describe('Property detail - "Sent to tenants" tour chip (listing-response-t
     const t2 = await createConsentedTenant(req, `Chiptwo${stamp}`);
 
     // Send the property to both tenants via a broadcast -> each fan-out leg
-    // records a listing_sends row (the "Sent to tenants" ledger).
+    // records a listing_sends row (the "Sent to" ledger).
     const draft = await req.post(`${NEXT}/api/broadcasts`, {
       data: {
         unitId,
@@ -208,11 +208,12 @@ test.describe('Property detail - "Sent to tenants" tour chip (listing-response-t
       )
       .toBe(true);
 
-    // The "Sent to tenants" card shows both recipients with NO tour chip, and
-    // the dead "No reply" label appears nowhere on the page.
+    // The "Sent to" card shows both recipients with NO tour chip, and the dead
+    // "No reply" label appears nowhere on the page. The heading's name carries
+    // its "Send this property" action too: match the prefix.
     await page.goto(`${NEXT}/listings/${unitId}`);
     const card = page.locator('section', {
-      has: page.getByRole('heading', { name: 'Sent to tenants' }),
+      has: page.getByRole('heading', { name: /^Sent to\b/ }),
     });
     await expect(card).toBeVisible();
     // Each row's identity link's accessible name is the recipient's DISPLAY

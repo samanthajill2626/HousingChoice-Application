@@ -1048,10 +1048,10 @@ export class Scenario {
     const firstName = this.requireActiveFirstName();
     return step(`Team sends a listing (${unit.unitId}) to the tenant`, async () => {
       await this.page.goto(`${NEXT}/listings/${unit.unitId}`);
-      // "Send to tenants" lives in the header kebab (More actions) menu now,
-      // not as a standalone hero button.
+      // "Send this property" lives in the header kebab (More actions) menu,
+      // not as a standalone hero button (neutral since caseworkers, D22).
       await this.page.getByRole('button', { name: 'More actions' }).click();
-      await this.page.getByRole('menuitem', { name: 'Send to tenants' }).click();
+      await this.page.getByRole('menuitem', { name: 'Send this property', exact: true }).click();
       await expect(this.page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${unit.unitId}`));
       await expect(this.page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
       await this.page

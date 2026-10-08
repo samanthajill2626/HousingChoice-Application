@@ -10,10 +10,10 @@ import { expectTodayReady } from '../../support/today.js';
 //      property's one-line address + the flyer link, share-skip-fix D8), Preview
 //      shows exactly one pre-checked row, Send lands it in the tenant's outbox and
 //      on the "Properties sent" card.
-//   2. From a PROPERTY detail page ("Sent to tenants" card -> "+ Send"): the
+//   2. From a PROPERTY detail page ("Sent to" card -> "+ Send"): the
 //      audience-filtered composer with the unit pre-filled, curated down to one
 //      hand-picked tenant (Deselect all -> add one via search) -> Send -> the
-//      "Sent to tenants" card lists them.
+//      "Sent to" card lists them.
 //
 // Sends are asserted via the fake-twilio thread store (never real SMS), exactly
 // as broadcasts.spec.ts does. Fresh, uniquely-phoned tenants AND a fresh Available
@@ -200,10 +200,10 @@ test.describe('Matching entry points - tenant file + property page', () => {
     // and the availability guard would refuse the send).
     const { unitId } = await createUnitViaApi(page.request, stamp);
 
-    // From the property page, the "Sent to tenants" card "+ Send" action opens the
+    // From the property page, the "Sent to" card "+ Send" action opens the
     // audience-filtered composer with the unit pre-filled (?unitId=).
     await page.goto(`${NEXT}/listings/${unitId}`);
-    await page.getByRole('button', { name: 'Send this property to tenants' }).click();
+    await page.getByRole('button', { name: 'Send this property', exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/broadcasts/new\\?unitId=${unitId}`));
     await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
 
@@ -257,10 +257,12 @@ test.describe('Matching entry points - tenant file + property page', () => {
       )
       .toBe(true);
 
-    // The property page's "Sent to tenants" card now lists the hand-picked tenant.
+    // The property page's "Sent to" card now lists the hand-picked tenant. The
+    // heading's name is "Sent to" PLUS its "Send this property" action (Card
+    // renders the aside inside the <h3>), so match the prefix, never exact.
     await page.goto(`${NEXT}/listings/${unitId}`);
     const sentCard = page.locator('section', {
-      has: page.getByRole('heading', { name: 'Sent to tenants' }),
+      has: page.getByRole('heading', { name: /^Sent to\b/ }),
     });
     await expect(
       sentCard.locator(`a[href="/contacts/${added.contactId}"]`),

@@ -191,8 +191,8 @@ const TOUR_CHIP_META: Record<TourSignalState, { label: string; cls: string }> = 
   toured: { label: 'Toured', cls: styles.yes ?? '' },
 };
 
-/** The ONE shared tour-state chip both send-roster cards render ("Sent to
- *  tenants" on the property page + "Properties sent" on the tenant file). It is a
+/** The ONE shared tour-state chip both send-roster cards render ("Sent to"
+ *  on the property page + "Properties sent" on a contact's file). It is a
  *  link to the tour detail page; the chip text is its accessible name. */
 export function TourChip({
   tourId,

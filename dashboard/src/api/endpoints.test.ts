@@ -657,6 +657,13 @@ it('organization writes send the exact body to the exact route', async () => {
     body: { kind: 'housing_authority', text: 'AHA', spellingFor: 'o1' },
   });
 
+  vi.mocked(request).mockResolvedValueOnce({ candidates: [], close: [] });
+  await checkOrgText({ kinds: ['housing_authority', 'agency'], text: 'Step Up' });
+  expect(request).toHaveBeenLastCalledWith('/api/organizations/check', {
+    method: 'POST',
+    body: { kinds: ['housing_authority', 'agency'], text: 'Step Up' },
+  });
+
   const entry = {
     orgId: 'o9',
     kind: 'agency',

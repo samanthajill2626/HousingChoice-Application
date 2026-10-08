@@ -23,9 +23,24 @@ import {
 } from '../../api/index.js';
 import { CONTACT_TYPE_LABEL } from '../contact/contactProfile.js';
 
-/** The kinds each field offers (plan 3.2 KINDS_FOR_FIELD, branch A). */
+/** The kinds each field offers (plan 3.2 KINDS_FOR_FIELD). */
 export const HOUSING_AUTHORITY_KINDS: readonly OrgKind[] = ['housing_authority'];
 export const AGENCY_KINDS: readonly OrgKind[] = ['agency'];
+
+/** (B) A contact's organization takes a name from EITHER list (spec D17). */
+export const ORGANIZATION_KINDS: readonly OrgKind[] = ['housing_authority', 'agency'];
+
+/** The kinds a record field accepts - the client mirror of KINDS_FOR_FIELD. */
+export function kindsForField(field: OrgRecordField): readonly OrgKind[] {
+  switch (field) {
+    case 'agency':
+      return AGENCY_KINDS;
+    case 'organization':
+      return ORGANIZATION_KINDS;
+    default:
+      return HOUSING_AUTHORITY_KINDS;
+  }
+}
 
 /** Lowercase noun per kind. */
 export const KIND_NOUN: Readonly<Record<OrgKind, string>> = {
@@ -50,6 +65,7 @@ export const FIELD_LABEL: Readonly<Record<OrgRecordField, string>> = {
   housingAuthority: 'Housing authority',
   agency: 'Agency',
   accepted_authorities: 'Property housing authorities',
+  organization: 'Organization',
 };
 
 /** "a housing authority" / "an agency". */
@@ -102,6 +118,7 @@ export function isOnList(
 
 /** The inline message when a picker's list failed to load (R2 ruling 6). */
 export function orgListLoadError(kinds: readonly OrgKind[]): string {
+  if (kinds.includes('housing_authority') && kinds.includes('agency')) return "Couldn't load organizations";
   return kinds.includes('housing_authority') ? "Couldn't load housing authorities" : "Couldn't load agencies";
 }
 
@@ -336,15 +353,21 @@ export function orgNotOnListBody(err: unknown): OrgNotOnListBody | null {
 
 /** A form's sentence for a refused value - never the raw code. */
 export function notOnListMessage(body: OrgNotOnListBody): string {
+  // (B) An organization takes either kind (spec D17): its noun is
+  // "organization", and "the other kind" never happens for it.
+  const organization = body.field === 'organization';
   const kind: OrgKind = body.field === 'agency' ? 'agency' : 'housing_authority';
+  const noun = organization ? 'organization' : KIND_NOUN[kind];
   if (body.candidates.length > 0) {
-    return `${body.text} is a spelling of more than one ${KIND_NOUN[kind]} (${names(body.candidates)}) - pick one.`;
+    return `${body.text} is a spelling of more than one ${noun} (${names(body.candidates)}) - pick one.`;
   }
-  if (body.otherKind !== undefined && body.otherKind.length > 0) {
+  if (!organization && body.otherKind !== undefined && body.otherKind.length > 0) {
     return `${body.text} is ${withArticle(otherKindOf(kind))}, not ${withArticle(kind)}.`;
   }
   if (body.compound !== undefined && body.compound.length > 0) {
-    return `${body.text} names more than one organization - pick each one in its own field.`;
+    return organization
+      ? `${body.text} names more than one organization - pick one of them.`
+      : `${body.text} names more than one organization - pick each one in its own field.`;
   }
   if (body.close.length > 0) return `${body.text} is not on the list. Did you mean ${names(body.close)}?`;
   return `${body.text} is not on the list - pick a name from the list or add it.`;
@@ -536,6 +559,7 @@ const COUNT_LABEL: Readonly<Record<string, string>> = {
   housingAuthority: 'Housing authority fields',
   agency: 'Agency fields',
   accepted_authorities: 'Property lists',
+  organization: 'Organization fields',
   skipped: 'Skipped (changed meanwhile)',
   conflicts: 'Conflicts left as they were',
 };
@@ -574,16 +598,27 @@ export function rewriteStatusText(lr: OrgRewriteState, nowMs: number = Date.now(
 
 // --- Settings counts, resolutions, holders (spec D10) ------------------------
 
+/** The column part both texts share; organization only when some contact holds it (spec D17). */
+function usageColumns(u: OrgUsageCounts): string {
+  const parts = [
+    plural(u.tenants, 'tenant', 'tenants'),
+    plural(u.otherContacts, 'other contact', 'other contacts'),
+    plural(u.properties, 'property', 'properties'),
+    ...(u.organization > 0 ? [plural(u.organization, 'organization field', 'organization fields')] : []),
+  ];
+  return parts.join(', ');
+}
+
 /** "3 tenants, 1 other contact, 2 properties (+2 deleted)"; '-' while unknown. */
 export function usageText(u: OrgUsageCounts | undefined): string {
   if (u === undefined) return '-';
-  const base = `${plural(u.tenants, 'tenant', 'tenants')}, ${plural(u.otherContacts, 'other contact', 'other contacts')}, ${plural(u.properties, 'property', 'properties')}`;
+  const base = usageColumns(u);
   return u.deleted > 0 ? `${base} (+${u.deleted} deleted)` : base;
 }
 
 /** "3 tenants, 1 other contact, 2 properties, 2 deleted" - for a confirm sentence. */
 export function usageBreakdown(u: OrgUsageCounts): string {
-  return `${plural(u.tenants, 'tenant', 'tenants')}, ${plural(u.otherContacts, 'other contact', 'other contacts')}, ${plural(u.properties, 'property', 'properties')}, ${u.deleted} deleted`;
+  return `${usageColumns(u)}, ${u.deleted} deleted`;
 }
 
 /** Every record holding the name, deleted included; undefined while unknown. */
@@ -593,7 +628,7 @@ export function usageTotal(u: OrgUsageCounts | undefined): number | undefined {
 
 /** What a "Not on the list" value is (its D4 resolution), in staff words. */
 export function resolutionText(res: NotOnListResolution, field: OrgRecordField): string {
-  const kind = kindForField(field);
+  const kind: OrgKind = kindsForField(field)[0] ?? 'housing_authority';
   switch (res.status) {
     case 'match':
       return res.match !== undefined ? `Matches ${res.match.name}` : 'Matches one name';

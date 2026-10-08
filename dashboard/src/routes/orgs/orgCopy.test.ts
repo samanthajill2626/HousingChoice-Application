@@ -2,9 +2,13 @@
 // 2026-10-06 D3-D13): the code -> copy map and its parity list, the body-aware
 // refusal copy, the normalization mirror, and the rewrite-status helpers.
 import { describe, expect, it } from 'vitest';
-import { ApiError, type OrgEntry, type OrgKind, type OrgRewriteState } from '../../api/index.js';
+import { ApiError, type OrgEntry, type OrgKind, type OrgRewriteState, type OrgUsageCounts } from '../../api/index.js';
 import {
   ORG_GENERIC_ERROR,
+  FIELD_LABEL,
+  ORGANIZATION_KINDS,
+  kindsForField,
+  rewriteCountsText,
   canRunAgain,
   describeRewrite,
   isOnList,
@@ -27,6 +31,20 @@ import {
   usageBreakdown,
   usageText,
 } from './orgCopy.js';
+
+/** A usage row with nothing in it, overridden per case (plan 3.6). */
+function counts(over: Partial<OrgUsageCounts> = {}): OrgUsageCounts {
+  return {
+    tenants: 0,
+    otherContacts: 0,
+    properties: 0,
+    organization: 0,
+    deleted: 0,
+    inUse: { active: 0, deleted: 0 },
+    kindLocked: { active: 0, deleted: 0 },
+    ...over,
+  };
+}
 
 // Every { error } code /api/organizations and the D5 writers can answer with
 // (plan sections 3.5 and 3.6). Listed, not imported, so DELETING an entry from
@@ -318,10 +336,10 @@ describe('rewrite status', () => {
 describe('Settings counts and resolutions', () => {
   it('counts active records and shows deleted ones beside them', () => {
     expect(usageText(undefined)).toBe('-');
-    expect(usageText({ tenants: 3, otherContacts: 1, properties: 0, deleted: 2 })).toBe(
+    expect(usageText(counts({ tenants: 3, otherContacts: 1, deleted: 2, inUse: { active: 4, deleted: 2 } }))).toBe(
       '3 tenants, 1 other contact, 0 properties (+2 deleted)',
     );
-    expect(usageBreakdown({ tenants: 1, otherContacts: 0, properties: 1, deleted: 0 })).toBe(
+    expect(usageBreakdown(counts({ tenants: 1, properties: 1, inUse: { active: 2, deleted: 0 } }))).toBe(
       '1 tenant, 0 other contacts, 1 property, 0 deleted',
     );
   });
@@ -473,5 +491,50 @@ describe('typedOrgNote - the note under a form picker says what Save will do (co
   it('a list that failed to load says the text is not saved; one still loading says nothing yet (R2-FE-1)', () => {
     expect(typedOrgNote({ status: 'unavailable' })).toBe('Not saved - the list did not load.');
     expect(typedOrgNote({ status: 'loading' })).toBeNull();
+  });
+});
+
+describe('both lists - a contact organization (spec D6, D17; R2-F4)', () => {
+  it('the organization field accepts both kinds and has its own labels', () => {
+    expect(ORGANIZATION_KINDS).toEqual(['housing_authority', 'agency']);
+    expect(kindsForField('organization')).toEqual(['housing_authority', 'agency']);
+    expect(kindsForField('housingAuthority')).toEqual(['housing_authority']);
+    expect(kindsForField('accepted_authorities')).toEqual(['housing_authority']);
+    expect(kindsForField('agency')).toEqual(['agency']);
+    expect(FIELD_LABEL.organization).toBe('Organization');
+    expect(orgListLoadError(ORGANIZATION_KINDS)).toBe("Couldn't load organizations");
+    expect(rewriteCountsText({ organization: 2, skipped: 0 })).toBe('Organization fields: 2');
+  });
+
+  it('an organization refusal says "organization", never a kind', () => {
+    const say = (extra: Record<string, unknown>): string => {
+      const body = orgNotOnListBody(
+        new ApiError(422, 'org_not_on_list', 'org_not_on_list', {
+          error: 'org_not_on_list',
+          field: 'organization',
+          candidates: [],
+          close: [],
+          ...extra,
+        }),
+      );
+      if (body === null) throw new Error('not narrowed');
+      return notOnListMessage(body);
+    };
+    expect(say({ text: 'AHA', candidates: [ATL, AUG] })).toBe(
+      'AHA is a spelling of more than one organization (Atlanta Housing Authority, Augusta Housing Authority) - pick one.',
+    );
+    expect(say({ text: 'DCA HUD-VASH', compound: [[ATL], [STEP]] })).toBe(
+      'DCA HUD-VASH names more than one organization - pick one of them.',
+    );
+  });
+
+  it('the usage text shows organization holders only when there are some', () => {
+    expect(usageText(counts({ tenants: 1, organization: 2, deleted: 1, inUse: { active: 3, deleted: 1 } }))).toBe(
+      '1 tenant, 0 other contacts, 0 properties, 2 organization fields (+1 deleted)',
+    );
+    expect(usageBreakdown(counts({ organization: 1 }))).toBe(
+      '0 tenants, 0 other contacts, 0 properties, 1 organization field, 0 deleted',
+    );
+    expect(usageText(counts({ tenants: 2 }))).toBe('2 tenants, 0 other contacts, 0 properties');
   });
 });

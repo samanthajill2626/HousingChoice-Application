@@ -3432,11 +3432,11 @@ export interface OrgRef {
   name: string;
 }
 
-/** The fields a D5 refusal can name (`audience_filter` = a blast filter). */
-export type OrgField = 'housingAuthority' | 'agency' | 'accepted_authorities' | 'audience_filter';
+/** The fields a D5 refusal can name (`audience_filter` = a blast filter); organization accepts either kind (D17). */
+export type OrgField = 'housingAuthority' | 'agency' | 'accepted_authorities' | 'audience_filter' | 'organization';
 
-/** The record fields a rewrite touches (branch A). */
-export type OrgRecordField = 'housingAuthority' | 'agency' | 'accepted_authorities';
+/** The record fields a rewrite touches (branch B adds a contact's organization). */
+export type OrgRecordField = 'housingAuthority' | 'agency' | 'accepted_authorities' | 'organization';
 
 export type OrgRewriteAction =
   | 'rename'
@@ -3461,7 +3461,7 @@ export interface OrgRewriteState {
   agencyName?: string;
   status: 'running' | 'done' | 'failed';
   heartbeatAt: string;
-  /** Keys: housingAuthority, agency, accepted_authorities, skipped, conflicts. */
+  /** Keys: housingAuthority, agency, accepted_authorities, organization, skipped, conflicts. */
   counts?: Record<string, number>;
   error?: string;
   startedAt: string;
@@ -3476,12 +3476,32 @@ export interface OrgListResponse {
   lastRewrite?: OrgRewriteState;
 }
 
-/** Records holding an entry's exact name (spec D10), active by group plus deleted. */
+/** DISTINCT records, active and deleted (spec D10; R2-F1). */
+export interface OrgUseTotal {
+  active: number;
+  deleted: number;
+}
+
+/**
+ * Records holding an entry's exact name (spec D10, D17; mirrors app
+ * services/orgRecords.ts OrgUsageCounts). The columns are for display - one
+ * record can count in two. `deleted` counts deleted holders per column hit
+ * and stays on the wire for compatibility ONLY: the dashboard shows
+ * `inUse.deleted` (distinct records) for "+N deleted" and in every confirm
+ * sentence, so one deleted record holding the name in two fields reads
+ * "+1 deleted" (Task 7.4). Delete waits for `inUse` (any field,
+ * organization included) and Change kind for `kindLocked` (a field of the
+ * entry's kind only): both are distinct-record totals the server computes.
+ */
 export interface OrgUsageCounts {
   tenants: number;
   otherContacts: number;
   properties: number;
+  /** Contacts holding the name as their organization, whatever their type. */
+  organization: number;
   deleted: number;
+  inUse: OrgUseTotal;
+  kindLocked: OrgUseTotal;
 }
 
 /** GET /api/organizations/usage -> { usage }: orgId -> counts. */
@@ -3604,6 +3624,9 @@ export interface NotOnListResolveBody {
   /** Split only: the agency half. */
   agencyName?: string;
   rememberSpelling?: boolean;
+  /** Add as new on an organization row only - required there: the list
+   *  staff picked (spec D17). Never sent for another field or action. */
+  kind?: OrgKind;
 }
 
 /** A resolve's 202: the rewrite it started + any spelling D12 skipped. */

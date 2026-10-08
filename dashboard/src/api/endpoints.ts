@@ -2898,13 +2898,17 @@ export async function getNotOnListRecords(
   return res.records;
 }
 
-/** POST /api/organizations/check - the D4 resolution of `text` against `kind`
+/** POST /api/organizations/check - the D4 resolution of `text` against `kind`, or
+ *  against several lists with `kinds` (the organization picker, spec D17)
  *  (match, ambiguity candidates, close names, the other kind, compound spans),
  *  whether it could be a NEW name (`nameProblem`) and, with `spellingFor` (the
  *  TARGET entry's orgId), whether it could be remembered as that entry's
  *  spelling (`spellingProblem`). No write. */
 export function checkOrgText(
-  body: { kind: OrgKind; text: string; spellingFor?: string },
+  body: ({ kind: OrgKind; kinds?: never } | { kinds: readonly OrgKind[]; kind?: never }) & {
+    text: string;
+    spellingFor?: string;
+  },
   signal?: AbortSignal,
 ): Promise<OrgCheckResult> {
   return request<OrgCheckResult>('/api/organizations/check', {

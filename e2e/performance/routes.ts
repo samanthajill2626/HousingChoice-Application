@@ -650,9 +650,14 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   // TODO(perf-pages-settings-organizations-surface): KNOWN GAP - there is NO
   // row for /settings/organizations (Settings > Housing authorities &
   // agencies, spec 2026-10-06 D10), so `npm run perf:pages` never measures it.
-  // It is excluded on purpose (the route pin in routes.test.ts lists it with
-  // the same issue), not forgotten. Registering it needs: a source (the
-  // Settings tab link), a terminal (the three regions settled), and its GETs -
+  // Its route is `organizations/:orgId?` (App.tsx): the optional segment is the
+  // entry the list + detail layout shows, so the tab also answers at
+  // /settings/organizations/<orgId>. It is excluded on purpose (the route pin
+  // in routes.test.ts lists /settings/organizations and
+  // /settings/organizations/:orgId? with the same issue), not forgotten.
+  // Registering it needs: a source (the Settings tab link), a terminal (the
+  // Housing authorities list region and the detail panel's placeholder
+  // settled, since the 2026-10-07 list + detail layout), and its GETs -
   // /api/organizations, /api/organizations/usage and
   // /api/organizations/not-on-list, all three on mount
   // (docs/issues/perf-pages-settings-organizations-surface.md).

@@ -44,6 +44,7 @@ import {
   waitForRewrite,
 } from '../../fixtures/orgFixture.js';
 import { expectTodayReady } from '../../support/today.js';
+import { expectNoHorizontalOverflow } from '../../support/viewport.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -593,9 +594,9 @@ test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => 
     await expect(region(page, 'Atlanta Housing Authority')).toHaveCount(0);
     await expect(atlanta).toBeVisible();
     await expect(atlanta).toBeFocused();
-    // No horizontal scroll at phone width.
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-    expect(overflow).toBeLessThanOrEqual(0);
+    // No horizontal scroll at phone width - measured on the routed <main>,
+    // which is what scrolls in this app shell (support/viewport.ts).
+    await expectNoHorizontalOverflow(page, 'org settings list at 390px');
   });
 
   test('an admin renames an entry: the rewrite job finishes and every record holds the new name', async ({

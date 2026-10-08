@@ -365,9 +365,22 @@ describe('route registry completeness', () => {
       .filter((path) => path !== '/*')
       .map((path) => path.startsWith('/') || path === '*' ? path : `/${path}`);
     const indexPath = appSource.includes('<Route index element={<Today />} />') ? ['/'] : [];
+    // `/organizations/:orgId?` is the Housing authorities & agencies tab: its
+    // optional segment is the entry the detail panel shows (dashboard
+    // settings/orgSelection.ts). The bare `/organizations` stays listed too.
     const settingsChildren = relative
       .filter((path) =>
-        ['/team', '/templates', '/notifications', '/voice', '/system', '/ai-runs', '/numbers', '/organizations'].includes(path),
+        [
+          '/team',
+          '/templates',
+          '/notifications',
+          '/voice',
+          '/system',
+          '/ai-runs',
+          '/numbers',
+          '/organizations',
+          '/organizations/:orgId?',
+        ].includes(path),
       )
       .map((path) => `/settings${path}`);
     const rawPaths = [...relative.filter((path) => !settingsChildren.some((child) => child.endsWith(path))), ...settingsChildren, ...indexPath];
@@ -383,8 +396,10 @@ describe('route registry completeness', () => {
       // A new list view, not yet a profiler surface (issue perf-pages-tours-past-surface).
       '/tours/past',
       // A new Settings tab, not yet a profiler surface
-      // (issue perf-pages-settings-organizations-surface).
+      // (issue perf-pages-settings-organizations-surface). Its route is
+      // `organizations/:orgId?` (the optional entry id); both forms are excluded.
       '/settings/organizations',
+      '/settings/organizations/:orgId?',
       // The All tours view, not yet a profiler surface either (the same issue).
       '/tours/all',
       '/settings',

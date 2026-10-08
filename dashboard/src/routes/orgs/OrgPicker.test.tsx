@@ -233,6 +233,27 @@ describe('OrgPicker - multi', () => {
 });
 
 describe('OrgPicker - the add step', () => {
+  it('over both lists, finds a name of either kind, and the add option says "organization" (spec D6, D17)', () => {
+    const onRequestAdd = vi.fn();
+    render(
+      <OrgPicker
+        label="Organization"
+        kinds={['housing_authority', 'agency']}
+        entries={ENTRIES}
+        value=""
+        onChange={vi.fn()}
+        onRequestAdd={onRequestAdd}
+      />,
+    );
+    fireEvent.change(combobox('Organization'), { target: { value: 'Step' } });
+    expect(optionNames()).toEqual(['Step Up']);
+    fireEvent.change(combobox('Organization'), { target: { value: 'HADC' } });
+    expect(optionNames()).toEqual(['DeKalb County Housing Authority (HADC)']);
+    fireEvent.change(combobox('Organization'), { target: { value: 'Metro Aid' } });
+    expect(optionNames()).toEqual(['Add Metro Aid as a new organization']);
+    fireEvent.click(screen.getByRole('option', { name: 'Add Metro Aid as a new organization' }));
+    expect(onRequestAdd).toHaveBeenCalledWith('Metro Aid');
+  });
   it('when nothing matches, the one option adds the typed text through the host - without committing it', () => {
     const onChangeSpy = vi.fn();
     const onRequestAdd = vi.fn();

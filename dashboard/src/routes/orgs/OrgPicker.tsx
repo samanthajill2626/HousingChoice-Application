@@ -35,7 +35,8 @@
 // remove it (an unchanged value never fails a save, D6).
 // The add step is optional: with `onRequestAdd`, when NOTHING of the offered
 // kinds matches, the one option is "Add <text> as a new housing authority" (or
-// agency). The HOST renders "Is this really new?" (NewOrgDialog) outside its
+// agency; over both lists - a contact's organization, spec D17 - organization).
+// The HOST renders "Is this really new?" (NewOrgDialog) outside its
 // <form>; this component never does.
 import { useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -60,7 +61,7 @@ interface OrgPickerBaseProps {
    *  field's established label ("Housing authority", "Housing authorities",
    *  "Agency"): unit tests and e2e select by it. */
   label: string;
-  /** The entry kinds offered (branch A: one kind per field). */
+  /** The entry kinds offered: one per field, or both (a contact's organization, spec D17). */
   kinds: readonly OrgKind[];
   entries: readonly OrgEntry[];
   /** True while nothing is known about the list - it is still loading, or
@@ -239,7 +240,10 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
         (m): Option => ({ type: 'entry', ...m }),
       );
   const isListShown = !disabled && !dismissed && options.length > 0;
-  const addNoun = KIND_NOUN[kinds[0] ?? 'housing_authority'];
+  // One kind: "a new housing authority" / "a new agency"; both lists (a
+  // contact's organization, spec D17): "a new organization" - the add dialog
+  // then asks which list.
+  const addNoun = kinds.length > 1 ? 'organization' : KIND_NOUN[kinds[0] ?? 'housing_authority'];
 
   // Measure while the list is shown - ContactSearchField's layout effect, shape
   // for shape (it lints clean): the list never paints at a stale position.

@@ -24,3 +24,11 @@ GREEN: dashboard npx vitest run src/routes/orgs src/routes/settings src/api/endp
 exited 0: 28 files / 455 tests, zero skipped (7.1-green). Existing Settings
 React act warnings remain. Root npm run typecheck exited 0 across all five
 workspaces (7.1-typecheck). git diff --check passes.
+
+## Task 7.2 - both-list picker add option
+
+Task 7.1 commit: 20b5f771. Both-kind matching already worked; the add noun
+now says organization. RED: dashboard npx vitest run src/routes/orgs/OrgPicker.test.tsx
+exited 1, one failed / 27 passed: the add option used housing authority.
+GREEN: same command exited 0, 28 tests (7.2-green); root npm run typecheck
+exited 0, all five workspaces (7.2-typecheck). No contract deviation.

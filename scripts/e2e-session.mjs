@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
 import { ensureS3Started, LOCAL_S3_ENDPOINT } from './s3.mjs';
 import { killTree, isAlive, killPort } from './lib/killTree.mjs';
+import { resolveNpmCli } from './lib/npmCli.mjs';
 import { defaultProbe } from '../e2e/support/lane.mjs';
 import { claimLane, holdsLane, releaseLane } from '../e2e/support/laneLease.mjs';
 import {
@@ -507,9 +508,9 @@ async function buildFakeUi() {
   // cheap after the first build. Must finish BEFORE startFakeTwilio() so dist/ exists.
   const started = Date.now();
   log('building fake-phones UI (npm run build -w @housingchoice/fake-twilio-web)…');
-  // npm-cli.js ships alongside the node binary (…/node_modules/npm/bin/npm-cli.js),
-  // so we run it through process.execPath rather than relying on a PATH lookup.
-  const npmCli = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  // Run npm-cli.js through process.execPath rather than relying on a PATH
+  // lookup; resolveNpmCli knows both the Windows and the POSIX install layout.
+  const npmCli = resolveNpmCli();
   await runOnce('fake-ui-build', [npmCli, 'run', 'build', '-w', '@housingchoice/fake-twilio-web']);
   log(`fake-phones UI built in ${((Date.now() - started) / 1000).toFixed(1)}s → ${fakeUiDistDir}`);
 }

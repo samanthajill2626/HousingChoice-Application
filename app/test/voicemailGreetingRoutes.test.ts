@@ -196,19 +196,27 @@ async function rawPut(
  * passed and only this reuse check went red. `maxSockets: 1` queues the GET
  * until the PUT's socket is freed, which happens only once its body was fully
  * sent AND read.
+ *
+ * Reuse is observed as socket IDENTITY, never `req.reusedSocket`: Node sets
+ * that flag only when a free socket is already waiting at request time, not
+ * when a QUEUED request is handed the socket as it frees. A refusal sent before
+ * the client finished uploading (the early Content-Length 413) queues the GET
+ * whenever the upload is still flushing - 20 of 20 rounds on Linux, Node 24 -
+ * so the flag read false on the very same connection (one server connection,
+ * same local port, the whole body read).
  */
 async function refuseThenReuse(
   app: Parameters<typeof request>[0],
   put: { body: Buffer | Buffer[]; contentType: string },
-): Promise<{ putStatus: number; getStatus: number; reusedSocket: boolean }> {
+): Promise<{ putStatus: number; getStatus: number; sameSocket: boolean }> {
   const server = (app as unknown as { listen: (port: number) => http.Server }).listen(0);
   const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
   const port = (server.address() as AddressInfo).port;
   const exchange = (method: string, path: string, headers: http.OutgoingHttpHeaders, body: Buffer[]) =>
-    new Promise<{ status: number; reusedSocket: boolean }>((resolve, reject) => {
+    new Promise<{ status: number; socket: unknown }>((resolve, reject) => {
       const req = http.request({ host: '127.0.0.1', port, method, path, agent, headers }, (res) => {
         res.resume();
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, reusedSocket: req.reusedSocket }));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, socket: req.socket }));
       });
       req.on('error', reject);
       for (const part of body.slice(0, -1)) req.write(part);
@@ -228,7 +236,7 @@ async function refuseThenReuse(
       chunked ? (put.body as Buffer[]) : [put.body as Buffer],
     );
     const next = await exchange('GET', '/api/settings', { 'x-origin-verify': ORIGIN_SECRET, cookie: TEST_ADMIN_COOKIE }, []);
-    return { putStatus: first.status, getStatus: next.status, reusedSocket: next.reusedSocket };
+    return { putStatus: first.status, getStatus: next.status, sameSocket: next.socket === first.socket };
   } finally {
     agent.destroy();
     server.closeAllConnections();
@@ -246,7 +254,7 @@ describe('PUT /api/settings/voicemail-greeting - the sniff and the cap (bodies b
       { body: [big.subarray(0, 2 * 1024 * 1024), big.subarray(2 * 1024 * 1024)], contentType: 'audio/mpeg', status: 413 }, // chunked (gate)
     ];
     for (const put of cases) {
-      expect(await refuseThenReuse(app, put)).toEqual({ putStatus: put.status, getStatus: 200, reusedSocket: true });
+      expect(await refuseThenReuse(app, put)).toEqual({ putStatus: put.status, getStatus: 200, sameSocket: true });
     }
   });
 

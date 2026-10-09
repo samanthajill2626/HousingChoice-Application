@@ -8,14 +8,31 @@ Design & rationale: [`docs/superpowers/specs/2026-06-14-ui-e2e-testing-harness-d
 
 Run these once from the repo root:
 
-1. **Docker** must be running (DynamoDB Local is a container).
-2. **Install deps:** `npm ci` (or `npm install`) — pulls in `@playwright/test`.
-3. **Terraform >=1.15** must be on `PATH` for maintenance template tests.
-4. **Install the bundled browser** the suite uses (no admin needed):
+1. **Node 24** (`node --version`); the root `package.json` requires `>=24`.
+2. **Docker** must be running (DynamoDB Local and MinIO are containers). On
+   Linux that means Docker Engine running as a service, and your user able to
+   run `docker` WITHOUT `sudo` (for example via the `docker` group): the
+   launchers call `docker` directly and cannot answer a password prompt.
+3. **Load the MinIO image** - `minio/minio` can no longer be pulled
+   ([`minio-image-no-longer-public`](../docs/issues/minio-image-no-longer-public.md)).
+   Skip this if `docker image inspect minio/minio` already succeeds; otherwise:
+   ```
+   docker load -i e2e/support/minio-image.tar
+   ```
+   The tar is a Git LFS file. If it is ~130 bytes you have only the LFS
+   pointer: install Git LFS (bundled with Git for Windows, usually a separate
+   `git-lfs` package on Linux), run `git lfs install`, then
+   `git lfs pull --include e2e/support/minio-image.tar`.
+4. **Install deps:** `npm ci` (or `npm install`) - pulls in `@playwright/test`.
+5. **Terraform >=1.15** must be on `PATH` for maintenance template tests.
+6. **Install the bundled browser** the suite uses (no admin needed on Windows):
    ```
    npx playwright install chromium
    ```
-5. **Verify:** `npm run e2e` - should boot the stack and pass. You're set for the
+   On Linux use `npx playwright install --with-deps chromium` instead: Chromium
+   also needs system libraries there, and `--with-deps` installs them (it asks
+   for `sudo`).
+7. **Verify:** `npm run e2e` - should boot the stack and pass. You're set for the
    suite and for headed/UI runs (`npm run e2e -- --headed`, `npx playwright test --ui`).
 
 ### Interactive driving via the Playwright MCP (optional)
@@ -23,7 +40,7 @@ Run these once from the repo root:
 Driving the live UI through an MCP server has a browser-channel wrinkle on Windows:
 
 - **This project's MCP** ([`.mcp.json`](../.mcp.json)) is configured with
-  `--browser chromium`, so it reuses the bundled build from step 3 — **no admin
+  `--browser chromium`, so it reuses the bundled build from step 6 - **no admin
   needed**. Prefer this if your client surfaces it.
 - **A Claude-client *plugin* Playwright MCP** (the `mcp__plugin_playwright_*`
   tools) defaults to the **`chrome` channel** (real Google Chrome), NOT bundled
@@ -626,11 +643,30 @@ time - it was describing a shape the harness never grew.)
 
 ## CI readiness (documented, not yet wired)
 
-CI is intentionally **not built** (project decision D4) — but the harness is
-CI-ready and `npm run e2e` already honors CI semantics via `playwright.config.ts`:
+CI is intentionally **not built** (project decision D4). `npm run e2e` already
+honors CI semantics via `playwright.config.ts`:
 - `reuseExistingServer: !process.env.CI` — CI always boots a fresh stack (never
   reuses a stale/leaked one); locally a running `e2e:session` is reused.
 - `forbidOnly: !!process.env.CI` — a stray `test.only` fails the CI run.
+
+**Linux status (2026-10-09).** This section used to call the harness CI-ready
+on `ubuntu-latest`, but until 2026-10-09 `npm run e2e` could not even boot on
+Linux. The run-as-CLI guards in `support/lane.mjs`, `app/scripts/db-create.ts`
+and `app/scripts/db-update-gsis.ts` built `file:///${argv[1]}`, which on a POSIX
+path gives four slashes and never matches. So `lane.mjs` printed nothing and the
+config died on `Unexpected end of JSON input`, and the two db scripts silently
+did nothing. Separately, `scripts/e2e-session.mjs` looked for npm only in the
+Windows install layout, so the fake-phones UI build failed. Both are fixed
+(`scripts/lib/cliEntry.mjs`, `scripts/lib/npmCli.mjs`, unit-tested for both
+path flavours). With those fixes a full `npm run e2e` on a Linux container
+(Node 24, Docker 29, one worker, 43 min) booted its whole stack and passed
+322 of 330. The other 8 are the maintenance-page specs, which need Terraform on
+`PATH` (Setup step 5); with it installed they passed on a re-run. Playwright's
+teardown left no listener or stack process behind. One caveat on that
+evidence: the container did not have Playwright 1.61's pinned Chromium, so its
+preinstalled Chromium 141 stood in. The harness has still never run on a
+GitHub runner, so treat the list below as a checklist to prove, not a proven
+recipe.
 
 To wire it later, a GitHub Actions job needs all of the following:
 
@@ -641,6 +677,9 @@ To wire it later, a GitHub Actions job needs all of the following:
    without it the integration suites silently **self-skip** (zero coverage) and the
    launcher's DB step fails. Start + create + seed it before the unit/integration
    run: `npm run db:start && npm run db:create && npm run db:seed`.
+   The launcher also starts MinIO (`scripts/s3.mjs`), whose image cannot be
+   pulled: a runner needs the LFS checkout (`actions/checkout` with
+   `lfs: true`) and the `docker load` from Setup step 3.
 3. **Bundled Chromium with caching** — `npx playwright install --with-deps
    chromium` (cache `~/.cache/ms-playwright`). Do NOT use the `chrome` channel.
 4. **Run with `CI=1`** so the semantics above engage.

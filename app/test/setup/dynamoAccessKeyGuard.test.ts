@@ -232,10 +232,27 @@ describe('per-file DynamoDB Local access keys', () => {
     expect(fileAccessKeyId('app/test/messaging.integration.test.ts')).toBe('hcfm0zwlz');
   });
 
-  it('gives the same file the same id regardless of path casing', () => {
+  it('lower-cases the repo-relative id, so two casings of one in-repo path share a key', () => {
     const f = fileURLToPath(import.meta.url);
-    expect(testFileId(f.toUpperCase())).toBe(testFileId(f.toLowerCase()));
+    const repoRoot = path.dirname(APP_DIR);
+    const recased = path.join(repoRoot, path.relative(repoRoot, f).toUpperCase());
+    expect(testFileId(recased)).toBe(testFileId(f));
+    expect(testFileId(f)).toBe('app/test/setup/dynamoaccesskeyguard.test.ts');
   });
+
+  // Windows only, by construction rather than to dodge a red: the casing this
+  // normalizes is Windows handing one file back with a different DRIVE-LETTER
+  // (or segment) case, and only path.win32.relative compares case-
+  // insensitively. On a POSIX path an upper-cased absolute path names a
+  // DIFFERENT directory, so relative() correctly walks out of the repo
+  // (../../../HOME/...) and there is no single id to agree on.
+  it.runIf(process.platform === 'win32')(
+    'gives the same file the same id regardless of drive-letter and path casing (Windows)',
+    () => {
+      const f = fileURLToPath(import.meta.url);
+      expect(testFileId(f.toUpperCase())).toBe(testFileId(f.toLowerCase()));
+    },
+  );
 
   describe('the shared-tables opt-in', () => {
     it('routes a marked file to the WORKTREE key and an unmarked file to its own', () => {

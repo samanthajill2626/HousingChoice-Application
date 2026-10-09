@@ -1,8 +1,8 @@
 # Caseworkers branch B handback
 
-STATUS: DONE.
+STATUS: DONE (builder delivery and build reviews). Planner final independent handback review remains.
 
-MERGE-READY @98870155c65eae7d0a28980c47da0396ccc2c98b on feat/caseworkers (W:/tmp/caseworkers), 0 behind main, UNMERGED (human gate). This is the assessed tip before committing this handback record; that final documentation-only commit advances the same branch without changing the reviewed implementation. The final response reports its exact hash.
+Builder verdict: QUALIFIED MERGE-READY @caeaa7680cd7ebffe7ddd09ff3414067c8419126 on feat/caseworkers (W:/tmp/caseworkers), 0 behind main d874915873a61864f6d051a0a9af3f0bb8e7e6e2, UNMERGED (human gate). This is the assessed tip before this documentation-only handback reconciliation; the final response identifies its resulting commit. The planner must still perform the separate final independent handback review. The qualifications below remain open.
 
 Implementation source: e0da8da38313e9f494d56bbbc96b8a3def720015.
 Branch: feat/caseworkers. Worktree: W:/tmp/caseworkers. UNMERGED.
@@ -11,7 +11,7 @@ Branch: feat/caseworkers. Worktree: W:/tmp/caseworkers. UNMERGED.
 
 Caseworkers are partner contacts with the normalized Caseworker role. The branch adds their creation, guarded conversion and refusal preview, Possible caseworkers review, organization fields across both organization lists, the Caseworkers page and partner property shares. Existing recipient filters remain tenant-only. No seed contact was converted or dismissed by mission tests.
 
-The approved 75-task plan is accounted for below. Source/evidence references are in code-review-conformance-r1.md and S1-report.md through S10-report.md; they are not duplicated as code quotations. Task 4.3 was closed by the atomic PATCH classification fix and independent rereview. Task 10.4 is an explicit deviation: the populated shared-picker batch remains 12 passed / 1 baseline failure. Its optional C6 fix is proven and saved, but unapplied pending the user's scope answer. No task is silently skipped. Both checkpoints passed.
+The approved 75-task plan is accounted for below. The completed independent conformance review at caeaa768 reports 74 CONFORMS, Task 10.4 PARTIAL, and both checkpoints CONFORM. Source/evidence references are in code-review-conformance-r2.md and S1-report.md through S10-report.md; they are not duplicated as code quotations. Task 4.3 was closed by the atomic PATCH classification fix and independent rereview. Task 10.4 is an explicit deviation: the populated shared-picker batch remains 12 passed / 1 baseline failure. Its optional C6 fix is proven and saved, but unapplied pending the user's scope answer. No task is silently skipped. Both checkpoints passed.
 
 | Task | Final disposition |
 | --- | --- |
@@ -95,7 +95,20 @@ The approved 75-task plan is accounted for below. Source/evidence references are
 
 Two independent R1 written reviews are preserved. The conformance report maps all 75 tasks and both checkpoints; the adversarial review traced consumers and mutators outside the diff. Both found CF-1 / R1-ADV-1: overlapping individually permissible PATCH edits could combine into Caseworker and bypass conversion refusals. Source e0da8da3 now atomically guards the raw classification revision on every type/role PATCH and composes staff-note expectations. Both orderings and absent-versus-zero are pinned. Exact-fixture RED was9 failures/77 passes; GREEN was230 passes in5files, including44 real/fake parity cases. The independent original adversarial reviewer completed broad R2 review, cold fix review and a separate challenge of the new adjudication, and closed CF-1.
 
-The conformance reviewer's R2 continuation was immediately platform-blocked. It did not execute and is not counted as complete. Its completed R1 written report remains available; parent checks are not presented as an independent replacement. No altered-language retry or substitute child bypassed the platform result. The human excluded those review platform errors from the local recovery budget; the S6 lifecycle takeover remains recorded.
+The original conformance R1 agent wrote its 75-task report but failed before closing validation and final response. Its R2 continuation was immediately platform-flagged and executed no review. Cameron subsequently started a fresh GPT-6 Astra reviewer with the complete conformance handoff. That independent review completed and was committed as caeaa768: [code-review-conformance-r2.md](code-review-conformance-r2.md). It reviewed HEAD 2113c281 against main d8749158, verified unchanged source e0da8da3, independently closed CF-1, reassessed adjudications and saved proof, and mapped all 75 tasks and both checkpoints. Its verdict is QUALIFIED PASS, with no new in-scope must-fix. The former missing-conformance-review qualification is now CLOSED.
+
+The adversarial R1 agent also encountered a platform flag, then completed a bounded static/report continuation using existing evidence; its R2 and separate adjudication challenge completed. These interrupted attempts are preserved as history, not counted as successful executions. The builder previously characterized any fresh review as prohibited; that blanket conclusion was unsupported and is not a constraint on the planner. No particular flag trigger was established. The S6 report-closeout takeover is a separate completed build lifecycle recovery.
+
+| Review | Final recorded status |
+| --- | --- |
+| Design | Closed at R4; design-review/adjudications.md |
+| Plan | Closed at R2; plan-review/adjudications.md |
+| Adversarial R1 | Completed after bounded continuation; code-review-adversarial-r1.md |
+| Adversarial R2 | Completed; CF-1 closed; code-review-adversarial-r2.md |
+| R2 adjudication challenge | Completed; journal-risk qualification retained; code-review-adjudication-response-r2.md |
+| Original conformance R1 / attempted R2 | Interrupted R1 / unexecuted R2; retained as history |
+| Fresh conformance R2 | Completed, qualified pass; caeaa768; code-review-conformance-r2.md |
+| Planner final independent handback review | Still owed by planner; not claimed by this builder handback |
 
 R2-ADV-1 is a NEW parent-deferred P2/med risk for the human merge decision, supported by a source-derived schedule without an executed reproduction. A previously claimed housing-authority acceptance, or its durable recovery, can add hidden authority after conversion. Claim means durable intent, not a contact write already completed. The conversion's pending-suggestion sweep does not see an already-claimed journal; make-again repair does not clear the restored authority. The reviewer agreed this falls outside this branch's pending-cleanup/PATCH fix contract but retained P2 priority. This risk is neither fixed nor previously human-approved, and is separate from the approved extraction deferral. See docs/issues/claimed-suggestion-accept-after-caseworker-conversion.md.
 
@@ -105,7 +118,7 @@ C1-C5 are documented implementation corrections, including raw organization deri
 
 ## Final verification
 
-The complete evidence is [completion-gates-r2.md](completion-gates-r2.md) and [self-QA.md](self-QA.md). All gates name unchanged implementation e0da8da3; later commits add findings and reports only. The one main sync was5272f85e; main remainsd8749158. No second sync.
+The complete evidence is [completion-gates-r2.md](completion-gates-r2.md) and [self-QA.md](self-QA.md). All gates name unchanged implementation e0da8da3; later commits add findings and reports only. A fresh Git comparison at this reconciliation confirms every changed path from e0da8da3 through caeaa768 is Markdown under docs/issues or docs/superpowers/reviews. This handback update changes records only; no suites were rerun for this documentation closeout. The one main sync was5272f85e; main remainsd8749158. No second sync.
 
 Exact final results, quoted:
 
@@ -138,7 +151,7 @@ The session was stopped with e2e:stop EXIT0 and all four owned ports were free. 
 
 ## Scope, files and commits
 
-Against main d8749158, including this handback: 220 files changed, 40140 insertions, 852 deletions (net+39288). The large documentation delta includes the19,662-line approved implementation plan and preserved design/plan/code-review reasoning; it is not all application code.
+Against main d8749158, including this handback: 221 files changed, 40618 insertions, 852 deletions (net+39766). The large documentation delta includes the19,662-line approved implementation plan and preserved design/plan/code-review reasoning; it is not all application code.
 
 The change spans150 paths under app/dashboard/e2e (including their local documentation), plus shared documentation, issues and version-controlled mission reasoning. Main implementation areas:
 
@@ -177,6 +190,8 @@ Delivery anchors (individual task commit/evidence mapping remains in the linked 
 | ba7492f2 / 31ed2fee | Blank-navigation diagnosis and open issue |
 | b762dadd | Final five gates and both browser runs |
 | 98870155 | Parent live QA and verified teardown |
+| 3c084a85 / 2113c281 | Original handback and preserved browser evidence qualification |
+| caeaa768 | Fresh independent conformance review complete; 74/75 conform, two checkpoints conform |
 
 ## Open issues and merge-decision qualifications
 
@@ -185,9 +200,26 @@ Delivery anchors (individual task commit/evidence mapping remains in the linked 
 - [Existing picker below viewport](../../../issues/contact-search-popover-below-viewport.md): Task 10.4 baseline-red; C6 proposal remains unapplied, scope answer pending.
 - [Unexplained blank-document navigation](../../../issues/e2e-blank-document-after-contact-navigation.md): both failing and passing runs retained.
 - [Generic retypes and refusals](../../../issues/contact-retype-skips-caseworker-refusals.md), [tour/placement writers](../../../issues/tours-placements-no-contact-type-check.md), [imported unknown thread history](../../../issues/imported-unknown-threads-surface-as-unknown-on-today.md), [scan costs](../../../issues/possible-caseworkers-and-roster-refusal-scans.md), and [A2P coverage question](../../../issues/a2p-campaign-covers-caseworker-shares.md) remain scoped follow-ups.
-- Conformance R2 platform limitation is explicit above; both complete R1 written reviews and the independent adversarial fix rereview exist. No blocked task was disguised or routed to another agent.
+- The earlier conformance execution gap is closed by caeaa768. Historical stop/adjudication records describe their then-current state; this handback and code-review-conformance-r2.md supply the current status. The planner final independent handback review remains a separate stage.
 
 No issue above is silently described as fixed. No merge, push, deployment, infrastructure action or cleanup was performed. Cameron retains the merge decision with these disclosures.
+
+## Planner handoff
+
+Resume as the planner for the final independent handback review. The builder and build-review assignments are finished; do not treat the earlier platform-stop records as the current review status. This handback does not substitute for the planner's own review under AGENTS.md, the active client overlay/profile, and documentation/FEATURE-DEVELOPMENT-WORKFLOW.md. Verify live ownership, branch status, main drift and evidence applicability before proceeding. The single main sync is already recorded; report later drift and follow the workflow rather than silently repeating it.
+
+Read the approved spec revision 15 and plan (75 tasks plus two checkpoints) named in mission-block.md, then the following current records:
+
+- [Completed conformance review](code-review-conformance-r2.md): full task map, evidence applicability, CF-1 closure, Task 10.4 and risk qualifications.
+- [Adversarial R2](code-review-adversarial-r2.md), [parent adjudication](code-review-adjudications-r2.md), and [independent adjudication response](code-review-adjudication-response-r2.md): distinguish the fixed PATCH race, approved extraction limit, and new parent-deferred journal risk. The adjudication's older conformance-unavailable paragraph is superseded by caeaa768.
+- [Fix wave proof](fix-wave-1.md): final exact-fixture RED/GREEN and conditional-write behavior.
+- [Final gates](completion-gates-r2.md) and [live self-QA](self-QA.md): quoted counts, both browser runs, screenshots, raw proof locations and teardown.
+- [C6 proposal](C6-picker-proposal.md), [picker baseline](S10-recipient-picker-baseline.md), and [blank-navigation diagnosis](landlord-gate-diagnosis.md): unapplied scope option and unresolved diagnostic.
+- S1-report.md through S10-report.md, checkpoint-S6.md and checkpoint-S9.md: slice delivery and checkpoint provenance.
+
+Preserve three active qualifications in the final planner verdict: Task 10.4 is baseline-red and C6 needs a separate scope decision; R2-ADV-1 is a new parent-deferred P2/med risk without executed reproduction or prior human acceptance; the first final browser failure remains unexplained despite subsequent passes. No new in-scope must-fix was substantiated by the completed conformance review. Approved extraction/importer/generic-retype/writer limitations remain exactly scoped.
+
+Raw logs, exits, experiments, the unapplied C6 patch and browser artifacts remain under .superpowers/ and .playwright-mcp/ in this worktree. Retain them for review; no cleanup is authorized. No builder-owned command or test session remains running. Merge, deployment, infrastructure changes and worktree retirement remain human decisions; this handoff authorizes none of them.
 
 ## Operational obligations
 

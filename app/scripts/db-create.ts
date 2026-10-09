@@ -11,6 +11,7 @@
 //          to run against anything else. Used by `npm run dev -- --local`
 //          (without --seeded) to start from zero.
 import { waitUntilTableNotExists } from '@aws-sdk/client-dynamodb';
+import { isMainModule } from '../../scripts/lib/cliEntry.mjs';
 import { createDynamoClient } from '../src/lib/dynamo.js';
 import { tableName } from '../src/lib/config.js';
 import { ensureTable, deleteTableIfExists } from '../src/lib/dynamoAdmin.js';
@@ -81,24 +82,11 @@ export async function dropAllTables(endpoint: string): Promise<void> {
 }
 
 // CLI guard: only run as a script when invoked directly (not when imported as a
-// module by globalSetup or other importers). Mirrors the pattern used in lane.mjs.
+// module by globalSetup or other importers). Shared with lane.mjs and
+// db-update-gsis.ts; correct for Windows and POSIX argv alike.
 // This preserves the existing CLI behavior while making the exports importable
 // without side effects.
-const moduleUrl = import.meta.url;
-let argvUrl: string | undefined;
-try {
-  argvUrl = process.argv[1]
-    ? new URL(
-        process.argv[1].startsWith('file:')
-          ? process.argv[1]
-          : `file:///${process.argv[1].replace(/\\/g, '/')}`,
-      ).href
-    : undefined;
-} catch {
-  argvUrl = undefined;
-}
-
-if (argvUrl && moduleUrl === argvUrl) {
+if (isMainModule(import.meta.url)) {
   const endpoint = process.env.DYNAMODB_ENDPOINT ?? LOCAL_DEFAULT_ENDPOINT;
   const reset = process.argv.includes('--reset');
   // --drop: drop WITHOUT recreating. The teardown counterpart to the implicit

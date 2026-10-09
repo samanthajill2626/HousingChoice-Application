@@ -30,6 +30,7 @@ import {
   type AttributeDefinition,
   type DynamoDBClient,
 } from '@aws-sdk/client-dynamodb';
+import { isMainModule } from '../../scripts/lib/cliEntry.mjs';
 import { tableName } from '../src/lib/config.js';
 import { createDynamoClient } from '../src/lib/dynamo.js';
 import {
@@ -221,23 +222,9 @@ export async function ensureGsis(
 }
 
 // CLI guard: only run as a script when invoked directly (not when imported by a
-// test). The URL-normalizing form, copied from db-create.ts - it handles the
-// Windows backslash argv this repo's dev loop produces.
-const moduleUrl = import.meta.url;
-let argvUrl: string | undefined;
-try {
-  argvUrl = process.argv[1]
-    ? new URL(
-        process.argv[1].startsWith('file:')
-          ? process.argv[1]
-          : `file:///${process.argv[1].replace(/\\/g, '/')}`,
-      ).href
-    : undefined;
-} catch {
-  argvUrl = undefined;
-}
-
-if (argvUrl && moduleUrl === argvUrl) {
+// test). Shared with db-create.ts and lane.mjs; correct for the Windows
+// backslash argv this repo's dev loop produces AND a POSIX absolute argv.
+if (isMainModule(import.meta.url)) {
   const endpoint = process.env.DYNAMODB_ENDPOINT ?? LOCAL_DEFAULT_ENDPOINT;
   if (!isLocalEndpoint(endpoint)) {
     console.error(

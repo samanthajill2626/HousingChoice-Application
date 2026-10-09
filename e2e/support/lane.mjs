@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import { holdsLane, reserveLane } from './laneLease.mjs';
+import { isMainModule } from '../../scripts/lib/cliEntry.mjs';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -410,24 +411,8 @@ export { BLOCK_BASE, STRIDE, MAX_LANES, portsForLane, hashToLane, djb2 };
 // CLI mode — `node e2e/support/lane.mjs` prints JSON to stdout
 // ---------------------------------------------------------------------------
 
-// Detect direct invocation: compare the resolved URL of this module against
-// process.argv[1] (normalized to a file URL for cross-platform safety).
-const moduleUrl = import.meta.url;
-let argvUrl;
-try {
-  // argv[1] may be a path or already a URL; normalize to a file URL string.
-  argvUrl = process.argv[1]
-    ? new URL(
-        process.argv[1].startsWith('file:')
-          ? process.argv[1]
-          : `file:///${process.argv[1].replace(/\\/g, '/')}`,
-      ).href
-    : undefined;
-} catch {
-  argvUrl = undefined;
-}
-
-if (argvUrl && moduleUrl === argvUrl) {
+// Detect direct invocation (Windows and POSIX argv alike - see cliEntry.mjs).
+if (isMainModule(import.meta.url)) {
   resolveLane()
     .then((result) => {
       process.stdout.write(JSON.stringify(result) + '\n');

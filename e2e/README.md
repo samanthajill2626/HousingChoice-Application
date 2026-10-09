@@ -6,13 +6,13 @@ Design & rationale: [`docs/superpowers/specs/2026-06-14-ui-e2e-testing-harness-d
 
 ## Setup (first time)
 
-Run these once from the repo root:
+Run these once from the repo root. In a Claude Code cloud session (the only
+Linux this repo runs on) follow
+[Claude Code cloud container (Linux)](#claude-code-cloud-container-linux)
+instead: it covers each step below for that container.
 
 1. **Node 24** (`node --version`); the root `package.json` requires `>=24`.
-2. **Docker** must be running (DynamoDB Local and MinIO are containers). On
-   Linux that means Docker Engine running as a service, and your user able to
-   run `docker` WITHOUT `sudo` (for example via the `docker` group): the
-   launchers call `docker` directly and cannot answer a password prompt.
+2. **Docker** must be running (DynamoDB Local and MinIO are containers).
 3. **Load the MinIO image** - `minio/minio` can no longer be pulled
    ([`minio-image-no-longer-public`](../docs/issues/minio-image-no-longer-public.md)).
    Skip this if `docker image inspect minio/minio` already succeeds; otherwise:
@@ -20,18 +20,14 @@ Run these once from the repo root:
    docker load -i e2e/support/minio-image.tar
    ```
    The tar is a Git LFS file. If it is ~130 bytes you have only the LFS
-   pointer: install Git LFS (bundled with Git for Windows, usually a separate
-   `git-lfs` package on Linux), run `git lfs install`, then
+   pointer: run `git lfs install` (Git LFS ships with Git for Windows), then
    `git lfs pull --include e2e/support/minio-image.tar`.
 4. **Install deps:** `npm ci` (or `npm install`) - pulls in `@playwright/test`.
 5. **Terraform >=1.15** must be on `PATH` for maintenance template tests.
-6. **Install the bundled browser** the suite uses (no admin needed on Windows):
+6. **Install the bundled browser** the suite uses (no admin needed):
    ```
    npx playwright install chromium
    ```
-   On Linux use `npx playwright install --with-deps chromium` instead: Chromium
-   also needs system libraries there, and `--with-deps` installs them (it asks
-   for `sudo`).
 7. **Verify:** `npm run e2e` - should boot the stack and pass. You're set for the
    suite and for headed/UI runs (`npm run e2e -- --headed`, `npx playwright test --ui`).
 
@@ -57,6 +53,101 @@ Driving the live UI through an MCP server has a browser-channel wrinkle on Windo
 - **No admin / don't want the MCP?** You don't need it. The written suite and
   `--headed`/`--ui` runs use bundled chromium and need no elevation; the MCP is
   only for free-form interactive exploration.
+
+## Claude Code cloud container (Linux)
+
+The only Linux this repo runs on is a Claude Code cloud session: an ephemeral
+container that starts from a fresh clone. It lacks several things the gates
+need, and it loses everything below when it is reclaimed, so EVERY new session
+repeats these steps. All of it lives under `/opt`, outside the repo. Recorded
+2026-10-09 from a 4-core container in which all five completion gates passed
+this way (see [CI readiness](#ci-readiness-documented-not-yet-wired)).
+
+Shell state does not survive between an agent's Bash calls, so start EVERY
+command with:
+
+```bash
+export PATH=/opt/node24/bin:/opt/terraform:$PATH
+```
+
+1. **Node 24.** The image ships Node 22 (`/opt/node22`). Install 24 beside it:
+   ```bash
+   V=$(curl -sS https://nodejs.org/dist/index.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).find((r) => r.version.startsWith('v24.')).version")
+   curl -sS -o /opt/node24.tar.xz "https://nodejs.org/dist/$V/node-$V-linux-x64.tar.xz"
+   mkdir -p /opt/node24 && tar -xJf /opt/node24.tar.xz -C /opt/node24 --strip-components=1 && rm /opt/node24.tar.xz
+   ```
+   npm then resolves to Node 24's own npm, which is what `scripts/e2e-session.mjs`
+   uses to build the fake-phones UI.
+2. **Start the Docker daemon.** `dockerd` is installed but nothing starts it
+   (there is no service manager). Start it in the background and wait:
+   ```bash
+   nohup dockerd > /opt/dockerd.log 2>&1 &
+   until docker ps > /dev/null 2>&1; do sleep 1; done
+   ```
+   The container runs as root, so there is no `docker` group to join.
+   `amazon/dynamodb-local` pulls from Docker Hub normally.
+3. **MinIO image.** The clone holds only the LFS pointer (`git-lfs` itself is
+   installed), so fetch the real file, then load it:
+   ```bash
+   git lfs pull --include e2e/support/minio-image.tar
+   docker load -i e2e/support/minio-image.tar
+   ```
+4. **Dependencies:** `npm ci` (about 30 s). npm 11 warns that the `esbuild` and
+   `protobufjs` install scripts are "not yet covered by allowScripts" and skips
+   them. That is harmless here: every gate passed without them.
+5. **Terraform** (the maintenance-page specs fail without it):
+   ```bash
+   TV=$(curl -sS https://releases.hashicorp.com/terraform/ | grep -oE 'terraform_1\.[0-9]+\.[0-9]+<' | tr -d '<' | sed 's/terraform_//' | sort -V | tail -1)
+   curl -sS -o /opt/terraform.zip "https://releases.hashicorp.com/terraform/$TV/terraform_${TV}_linux_amd64.zip"
+   mkdir -p /opt/terraform && unzip -o -q /opt/terraform.zip terraform -d /opt/terraform && rm /opt/terraform.zip
+   ```
+6. **Chromium: an alias, not an install.** The environment sets
+   `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers` and
+   `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`, and its standing rule is: do NOT run
+   `playwright install` (so not Setup step 6 either). Its preinstalled
+   Chromium is OLDER than the build this repo's Playwright pins - on 2026-10-09
+   build 1194 (Chromium 141) against Playwright 1.61's 1228 (Chromium 149) - so
+   Playwright stops with `Executable doesn't exist`. Alias the preinstalled
+   build under the pinned build's paths (run from the repo root, after
+   `npm ci`):
+   ```bash
+   B=/opt/pw-browsers
+   REV=$(node -p "require('./node_modules/playwright-core/browsers.json').browsers.find((b) => b.name === 'chromium').revision")
+   HAVE=$(readlink -f $B/chromium | sed -E 's#.*/chromium-([0-9]+)/.*#\1#')
+   mkdir -p $B/chromium-$REV $B/chromium_headless_shell-$REV/chrome-headless-shell-linux64
+   ln -sfn $B/chromium-$HAVE/chrome-linux $B/chromium-$REV/chrome-linux64
+   ln -sfn $B/chromium_headless_shell-$HAVE/chrome-linux/headless_shell $B/chromium_headless_shell-$REV/chrome-headless-shell-linux64/chrome-headless-shell
+   for d in $B/chromium-$REV $B/chromium_headless_shell-$REV; do touch $d/INSTALLATION_COMPLETE $d/DEPENDENCIES_VALIDATED; done
+   ```
+   The two target paths are Playwright 1.61's layout. If a later Playwright
+   reports `Executable doesn't exist at <path>`, alias that path instead.
+   **Caveat:** the suite then runs on the older Chromium, not the pinned one.
+   That is enough to prove the harness and the flows, but say so whenever you
+   report an e2e result from this container. Do not trust the user agent to
+   tell you which build ran: Playwright writes the PINNED version into it.
+7. **`npm test`: drop the proxy's AWS key.** The container exports
+   `AWS_ACCESS_KEY_ID=proxy-injected` (and a secret) for its egress proxy. The
+   test setup deliberately lets an exported key win
+   (`app/test/setup/dynamoAccessKey.ts`), and DynamoDB Local rejects a key
+   containing `-`, so the app workspace's globalSetup dies on `CreateTable`
+   with `UnrecognizedClientException` and vitest exits 1 with "No test files
+   found". Run it as:
+   ```bash
+   env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY npm test
+   ```
+   `npm run e2e` passed WITHOUT this (each lane injects its own key).
+
+Running the gates there:
+
+- Run the long gates in the background, each with a hard timeout and its
+  output redirected to a file - never piped (see the gate rules in
+  `AGENTS.md`). Measured there: `npm test` about 3 min each for the app and
+  dashboard workspaces; a full `npm run e2e` 43 min on its one worker.
+- `ss` and `netstat` are absent, but `lsof` is present (the launcher's port
+  reaping uses it). After aborting a run, confirm the lane's four ports (in
+  `e2e/.artifacts/lane.json`) are free before the next one:
+  `lsof -iTCP:<port> -sTCP:LISTEN`.
+- The session has a fixed disk allowance; the two images take about 1 GB.
 
 ## Two modes
 
@@ -660,7 +751,9 @@ path flavours). With those fixes a full `npm run e2e` on a Linux container
 `PATH` (Setup step 5); with it installed they passed on a re-run. Playwright's
 teardown left no listener or stack process behind. One caveat on that
 evidence: the container did not have Playwright 1.61's pinned Chromium, so its
-preinstalled Chromium 141 stood in. The harness has still never run on a
+preinstalled Chromium 141 stood in (the container setup, that alias included,
+is under [Claude Code cloud container (Linux)](#claude-code-cloud-container-linux)).
+The harness has still never run on a
 GitHub runner, so treat the list below as a checklist to prove, not a proven
 recipe.
 

@@ -75,6 +75,15 @@ Claude shell calls can lose the intended working directory between calls. Use an
 explicit worktree path for commands and verify the current directory before trusting
 surprising Git or test output.
 
+## Claude Code cloud sessions (Linux)
+
+A Claude Code cloud session is the only Linux this repo runs on. Its container
+starts without Node 24, a running Docker daemon, the MinIO image, Terraform or
+the Chromium build Playwright pins, and it exports an AWS key that breaks
+`npm test`. Before running any completion gate there, follow
+`../e2e/README.md` "Claude Code cloud container (Linux)". Its setup lives under
+`/opt` and is lost with the container, so every new session repeats it.
+
 ## Claude feature missions
 
 Claude feature missions use

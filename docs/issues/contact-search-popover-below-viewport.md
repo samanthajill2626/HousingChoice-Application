@@ -42,3 +42,10 @@ This is separate from the resolved
 [property-first overlay](./matching-entry-points-property-first-e2e-flake.md)
 (UnitSearchField intercepted another control's click). No source fix has been
 approved or implemented in this issue record.
+
+**Planner review data point (2026-10-09).** The same seven-case batch fails
+6 passed / 1 failed with the identical "element is outside of the viewport"
+signature at `matching-entry-points.spec.ts:228` on both feature HEAD 51a4868c
+and the final merge base d8749158 (Linux, Chromium 141 substituted; see
+`docs/superpowers/reviews/2026-10-07-caseworkers/planner-final-review.md`
+section 5). Still pre-existing; no fix applied.

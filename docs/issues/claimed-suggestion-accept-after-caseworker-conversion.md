@@ -45,3 +45,15 @@ coordination across all conversion follow-ons. Until addressed, an affected
 authority must be cleared explicitly; make-again does not clear it.
 
 **Review qualification.** R2 retains P2 priority. Claim records durable intent; it does not mean the contact effect or successful response already happened. Durable recovery may perform the write later. The absence of a runtime reproduction is an evidence limit, not evidence of low likelihood. The independent adjudication response is in code-review-adjudication-response-r2.md in the same mission records directory.
+
+**Planner review update (2026-10-09): reproduced.** The schedule above has now
+been executed, in both forms, against the FakeWorld routes and against the real
+repositories on DynamoDB Local: a claim paused at the `claimed` boundary that
+resumes after the conversion, and a claim that crashes there and is recovered
+by an ordinary suggestions read (`recoverAbandoned`). Every run ends with the
+converted partner/Caseworker holding "Atlanta Housing Authority" plus AI
+provenance; a second `make` leaves it. Filter-resolved blasts still exclude the
+contact (they fence `type === 'tenant'`). Exact results and limits are in
+`docs/superpowers/reviews/2026-10-07-caseworkers/planner-final-review.md`
+section 4. The "no runtime reproduction" limit above is superseded; severity,
+priority and the scope decision are unchanged and remain Cameron's call.

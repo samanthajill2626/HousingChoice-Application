@@ -22,3 +22,10 @@ refs: e2e/scenarios/steps.ts:1411, e2e/tests/scenarios/landlord-onboarding.spec.
 - `.superpowers/sdd/checkpoints/FINAL2-landlord-baseline.{log,exit,command.json}`; preserved traces under `.superpowers/sdd/gates/artifacts/FINAL2-landlord-baseline-green-2026-10-08T21-39-05-154Z/`.
 
 **Next discriminator.** Retain a trace on a recurrence (`E2E_TRACE=1`), inspect the final document URL/status/body, main module and dependency outcomes, console errors, and whether /auth/me was attempted. Do not add child-log piping to this timing investigation or raise the test budget without evidence. Do not conflate this signature with placement-detail-bundle-fetch-stall. No production patch is justified by the current evidence alone.
+
+**Planner review data point (2026-10-09).** Not recurred: a supplementary full
+browser run on Linux (Chromium 141 substituted for the pinned build, local
+harness patches; not a gate run) passed 337/337 and this scenario in 18.7s.
+Non-reproduction only; the cause stays unresolved. See
+`docs/superpowers/reviews/2026-10-07-caseworkers/planner-final-review.md`
+section 3.3.

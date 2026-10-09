@@ -637,9 +637,15 @@ config died on `Unexpected end of JSON input`, and the two db scripts silently
 did nothing. Separately, `scripts/e2e-session.mjs` looked for npm only in the
 Windows install layout, so the fake-phones UI build failed. Both are fixed
 (`scripts/lib/cliEntry.mjs`, `scripts/lib/npmCli.mjs`, unit-tested for both
-path flavours). With those fixes `npm run e2e` boots its whole stack on a Linux
-container (Node 24, Docker 29) and runs the suite. The harness has still never run on a GitHub runner, so treat the list below as
-a checklist to prove, not a proven recipe.
+path flavours). With those fixes a full `npm run e2e` on a Linux container
+(Node 24, Docker 29, one worker, 43 min) booted its whole stack and passed
+322 of 330. The other 8 are the maintenance-page specs, which need Terraform on
+`PATH` (setup item 3); with it installed they passed on a re-run. Playwright's
+teardown left no listener or stack process behind. One caveat on that
+evidence: the container did not have Playwright 1.61's pinned Chromium, so its
+preinstalled Chromium 141 stood in. The harness has still never run on a
+GitHub runner, so treat the list below as a checklist to prove, not a proven
+recipe.
 
 To wire it later, a GitHub Actions job needs all of the following:
 

@@ -342,3 +342,90 @@ he decides to merge; main has not moved since the branch's one sync):
 ```powershell
 git fetch origin; git switch main; git merge --ff-only origin/main; git merge --no-ff origin/feat/caseworkers -m "Merge feat/caseworkers: caseworkers (branch B)"
 ```
+
+## Addendum (2026-10-09, later): Linux harness fixes merged, gates re-run
+
+At Cameron's request I merged `claude/ecstatic-edison-1r1s10` (another
+agent's Linux harness work, cut from the same base d8749158) into this branch:
+merge `9481ecf5` (seven commits) and merge `e156aafb` (one later docs commit,
+`5e71cb3f`). Sections 1-9 above stay as written; they describe HEAD 51a4868c.
+This addendum supersedes their gate-2 and gate-4 outcomes for the merged branch.
+
+### What the merge brings (reviewed before merging)
+
+- One shared run-as-CLI check (`scripts/lib/cliEntry.mjs`, `pathToFileURL`,
+  as `scripts/db.mjs` already did) for `e2e/support/lane.mjs`,
+  `app/scripts/db-create.ts` and `app/scripts/db-update-gsis.ts`, with
+  `app/test/cliEntry.test.ts` pinning both path flavours.
+- `scripts/lib/npmCli.mjs`: `npm_execpath` first, then both Node layouts,
+  with `app/test/npmCli.test.ts`. Used by `scripts/e2e-session.mjs`.
+- `dynamoAccessKeyGuard.test.ts`: the casing test now pins the repo-relative
+  id portably; the whole-path case is kept but runs only on win32, with the
+  reason stated. `voicemailGreetingRoutes.test.ts`: keep-alive reuse is now
+  checked by socket identity, not `req.reusedSocket`.
+- e2e README Linux status, setup prerequisites, and a "Claude Code cloud
+  container (Linux)" section; `.claude/CLAUDE.md` points cloud sessions at it.
+- No caseworkers source change; nothing in `app/src` imports the new modules.
+  These fixes are now part of this branch's diff against main.
+
+### Gates on merged head 9481ecf5 (no repo patch)
+
+Before any run I removed the npm-layout symlink I had made in my own Node
+install, so the npm-locator fix was tested on the real POSIX layout. The
+Docker daemon had died while the session idled; I restarted it and the two
+containers. AWS keys were unset for `npm test` as before.
+
+| # | Command | Exit | Result |
+| --- | --- | --- | --- |
+| 1 | `npm run typecheck` | **0** | All workspaces. |
+| 2 | `npm test` | **0** | 740 files, all passed. app 437 files, 9130 passed / 2 skipped; dashboard 234, 4370 / 1 skipped; e2e unit 22, 503; fake-twilio 34, 275; fake-twilio-web 13, 111. No `[dynamoAdmin]` line. Skips: built-dashboard diagnostic, the new win32-only casing case, `inboxTime` on a UTC runner. |
+| 3 | `npm run smoke` | **0** | 1649 specifiers / 286 files. |
+| 4 | `timeout 2700 npm run e2e` | **0** | **337 passed (33.1m)**; results.json expected 337, unexpected 0, flaky 0, skipped 0. The bare command booted on its own: `db:create` ensured 22 tables, the fake-phones UI built through the real npm location. Lane 5 ports free afterwards, no stack process left. |
+| 5 | scoped `npx eslint` (152 paths vs d8749158) | raw **1**; ratchet **PASS** | The same 5 pre-existing `react-hooks/set-state-in-effect` errors; 0 new. The 6 merged `.ts` files lint clean; the 4 merged `.mjs` files fall in the documented no-JS-rules hole and were not linted by any rule. |
+
+Gate 4 now ran as the command is written. The one remaining deviation is the
+browser: Chromium 141 stood in for Playwright 1.61's pinned Chrome 149 through
+a scratchpad `PLAYWRIGHT_BROWSERS_PATH` alias, because this environment forbids
+and blocks the browser download. **So the planner validation exception in the
+verdict narrows to "the e2e gate has not run on the pinned browser build."**
+
+Also validated on the merged head: a standalone `npm run e2e:session` started
+with the container's AWS key still exported (it logged `accessKeyId=hclane5`,
+`/__dev/ping` answered `appCommit 9481ecf5`), then `npm run e2e:stop` exited 0,
+stopped the launcher and children, dropped the lane tables and left all four
+ports free with no stack process.
+
+### Correction to section 2
+
+Section 2 says an exported key overrides the per-file keys. That holds, but the
+log of my killed first `npm test` attempt shows what this particular value
+does: DynamoDB Local rejects `proxy-injected`, the app workspace's globalSetup
+failed with `UnrecognizedClientException`, and vitest reported "No test files
+found" (exit 1). A key DynamoDB Local accepts would instead collapse every file
+onto one database silently. Both cases are now written into AGENTS.md (the
+`npm test` gate) and the e2e README cloud section.
+
+### Environment findings now in the docs
+
+Already in the merged branch: Node 24 beside the image's Node 22; starting
+`dockerd` by hand; the LFS MinIO image; Terraform; npm 11 skipping the esbuild
+and protobufjs install scripts; aliasing the preinstalled Chromium under the
+pinned build's paths; running `npm test` without the proxy's AWS key; `lsof`
+instead of `ss`.
+
+Added by me in this change: the ambient-AWS-key warning in AGENTS.md beside the
+`npm test` gate (loud and silent cases); in the README cloud section, the
+daemon dying on idle/resume and the restart steps, the 403 on
+`cdn.playwright.dev`, the Playwright MCP's own browser revision and its alias
+(verified: the MCP launched through the README's directory-level alias),
+gate durations against the 45-minute cap, the by-design skips, and the
+standalone teardown validation; and the stale "not yet validated on Linux"
+and MCP-pinning bullets under CI readiness.
+
+### Unchanged
+
+The verdict stays QUALIFIED PASS for Cameron's merge decision, with the same
+three qualifications: Task 10.4 baseline-red with C6 unapplied, R2-ADV-1
+reproduced and parent-deferred, and the unexplained first FINAL2 blank-document
+failure. No merge to main, deployment, infrastructure action or cleanup was
+performed. The PowerShell command in section 9 still applies.

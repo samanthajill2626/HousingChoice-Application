@@ -85,7 +85,10 @@ export PATH=/opt/node24/bin:/opt/terraform:$PATH
    until docker ps > /dev/null 2>&1; do sleep 1; done
    ```
    The container runs as root, so there is no `docker` group to join.
-   `amazon/dynamodb-local` pulls from Docker Hub normally.
+   `amazon/dynamodb-local` pulls from Docker Hub normally. The daemon does not
+   survive the session idling and resuming: on 2026-10-09 `docker ps` failed
+   after a pause and both containers showed `Exited (255)`. Re-run this step,
+   then `npm run db:start` and `npm run s3:start` (the images stay loaded).
 3. **MinIO image.** The clone holds only the LFS pointer (`git-lfs` itself is
    installed), so fetch the real file, then load it:
    ```bash
@@ -104,7 +107,9 @@ export PATH=/opt/node24/bin:/opt/terraform:$PATH
 6. **Chromium: an alias, not an install.** The environment sets
    `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers` and
    `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`, and its standing rule is: do NOT run
-   `playwright install` (so not Setup step 6 either). Its preinstalled
+   `playwright install` (so not Setup step 6 either). Its egress policy also
+   answers 403 for the download host (`cdn.playwright.dev`), so an install
+   could not succeed anyway; do not route around that. Its preinstalled
    Chromium is OLDER than the build this repo's Playwright pins - on 2026-10-09
    build 1194 (Chromium 141) against Playwright 1.61's 1228 (Chromium 149) - so
    Playwright stops with `Executable doesn't exist`. Alias the preinstalled
@@ -125,6 +130,12 @@ export PATH=/opt/node24/bin:/opt/terraform:$PATH
    That is enough to prove the harness and the flows, but say so whenever you
    report an e2e result from this container. Do not trust the user agent to
    tell you which build ran: Playwright writes the PINNED version into it.
+   The project Playwright MCP (`.mcp.json`, `@playwright/mcp@latest`) pins its
+   OWN build, separate from the suite's: on 2026-10-09 it resolved to 0.0.83 and
+   failed with `Browser "chrome-for-testing" is not installed; expected
+   executable at /opt/pw-browsers/chromium-1247/chrome-linux64/chrome`. Alias
+   that revision the same way (only the `chromium-$REV` lines, with
+   `REV=1247` or whatever the error names); the MCP then launched Chromium 141.
 7. **`npm test`: drop the proxy's AWS key.** The container exports
    `AWS_ACCESS_KEY_ID=proxy-injected` (and a secret) for its egress proxy. The
    test setup deliberately lets an exported key win
@@ -135,14 +146,31 @@ export PATH=/opt/node24/bin:/opt/terraform:$PATH
    ```bash
    env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY npm test
    ```
-   `npm run e2e` passed WITHOUT this (each lane injects its own key).
+   `npm run e2e` passed WITHOUT this (each lane injects its own key), and so
+   did a standalone `npm run e2e:session` (it logged `accessKeyId=hclane<L>`).
+   This particular value fails loudly; a key DynamoDB Local accepted would fail
+   SILENTLY instead - every app test file sharing one database - so drop any
+   exported key, not just this one (`AGENTS.md`, completion gates).
 
 Running the gates there:
 
 - Run the long gates in the background, each with a hard timeout and its
   output redirected to a file - never piped (see the gate rules in
   `AGENTS.md`). Measured there: `npm test` about 3 min each for the app and
-  dashboard workspaces; a full `npm run e2e` 43 min on its one worker.
+  dashboard workspaces; a full `npm run e2e` 43 min on its one worker (330
+  specs, main), and on feat/caseworkers' 337 specs 33.1 min bare and 38.5 min
+  with `E2E_TRACE=1`. The `timeout 2700` (45 min) cap missions use therefore
+  leaves only a few minutes of headroom here: do not shorten it, and treat a
+  timeout as a gate failure to report, not a pass.
+- Expected skips, all by design: the app's built-dashboard diagnostic (no
+  `dashboard/dist`), the Windows-only path-casing case in
+  `app/test/setup/dynamoAccessKeyGuard.test.ts`, and
+  `dashboard/src/routes/inbox/inboxTime.test.ts`, which skips itself on a UTC
+  runner.
+- The standalone `npm run e2e:session` / `npm run e2e:stop` pair tears down
+  cleanly here (validated twice on 2026-10-09: `e2e:stop` exit 0, launcher and
+  children stopped, lane tables dropped, all four ports free, no stack process
+  left).
 - `ss` and `netstat` are absent, but `lsof` is present (the launcher's port
   reaping uses it). After aborting a run, confirm the lane's four ports (in
   `e2e/.artifacts/lane.json`) are free before the next one:
@@ -816,8 +844,13 @@ jobs:
 - CI uses the Playwright-managed `webServer` (it starts/stops
   `scripts/e2e-session.mjs`); on Linux, Playwright tears the webServer down via its
   own process-group kill, so suite teardown is clean. The **standalone**
-  `e2e:session`/`e2e:stop` teardown is verified on Windows but **not yet validated
-  on Linux** (children aren't reaped via process groups since they aren't spawned
-  detached) — only relevant for interactive Linux use, not the CI suite.
+  `e2e:session`/`e2e:stop` teardown is verified on Windows and, since
+  2026-10-09, in the Linux cloud container (two runs; see
+  [Claude Code cloud container (Linux)](#claude-code-cloud-container-linux)).
+  Children are still not spawned detached, so that is evidence from one
+  environment, not a process-group guarantee - only relevant for interactive
+  Linux use, not the CI suite.
 - Consider pinning `@playwright/mcp` to the installed Playwright version in
-  `.mcp.json` (the MCP is interactive-only; CI never uses it).
+  `.mcp.json` (the MCP is interactive-only; CI never uses it). Unpinned it
+  drifts: on 2026-10-09 `@latest` (0.0.83) wanted browser build chromium-1247
+  while the suite's Playwright 1.61 wants chromium-1228.

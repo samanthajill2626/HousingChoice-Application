@@ -291,6 +291,20 @@ Docker-less run used to omit ~631 tests and still exit 0. Use
 `ALLOW_SKIP_DYNAMO_TESTS=1` only for a deliberate unit-only pass - it is not a
 completion gate.
 
+**Check for AWS credentials your environment exported for you.** Some cloud
+containers inject them for an egress proxy (seen 2026-10-09:
+`AWS_ACCESS_KEY_ID=proxy-injected` plus a secret). `npm test` treats ANY
+exported `AWS_ACCESS_KEY_ID` as the explicit override above
+(`app/vitest.config.ts` hands it to every file). That particular value fails
+loudly - DynamoDB Local rejects it, globalSetup dies on
+`UnrecognizedClientException` and the app workspace reports "No test files
+found" - but a key DynamoDB Local accepts would fail SILENTLY: every app test
+file shares one database and the per-file key assertions stand down. Either
+way, check `env | grep '^AWS_'` and run the gate as
+`env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY npm test`. `npm run e2e` is
+not affected: the launcher forces each lane's own key. The Claude Code cloud
+container setup is in `e2e/README.md` "Claude Code cloud container (Linux)".
+
 If `main` has advanced and syncing could conflict with active work, ask before doing
 the sync. Never merge a feature branch into `main` without explicit human approval.
 

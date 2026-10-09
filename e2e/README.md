@@ -622,11 +622,24 @@ time - it was describing a shape the harness never grew.)
 
 ## CI readiness (documented, not yet wired)
 
-CI is intentionally **not built** (project decision D4) — but the harness is
-CI-ready and `npm run e2e` already honors CI semantics via `playwright.config.ts`:
+CI is intentionally **not built** (project decision D4). `npm run e2e` already
+honors CI semantics via `playwright.config.ts`:
 - `reuseExistingServer: !process.env.CI` — CI always boots a fresh stack (never
   reuses a stale/leaked one); locally a running `e2e:session` is reused.
 - `forbidOnly: !!process.env.CI` — a stray `test.only` fails the CI run.
+
+**Linux status (2026-10-09).** This section used to call the harness CI-ready
+on `ubuntu-latest`, but until 2026-10-09 `npm run e2e` could not even boot on
+Linux. The run-as-CLI guards in `support/lane.mjs`, `app/scripts/db-create.ts`
+and `app/scripts/db-update-gsis.ts` built `file:///${argv[1]}`, which on a POSIX
+path gives four slashes and never matches. So `lane.mjs` printed nothing and the
+config died on `Unexpected end of JSON input`, and the two db scripts silently
+did nothing. Separately, `scripts/e2e-session.mjs` looked for npm only in the
+Windows install layout, so the fake-phones UI build failed. Both are fixed
+(`scripts/lib/cliEntry.mjs`, `scripts/lib/npmCli.mjs`, unit-tested for both
+path flavours). With those fixes `npm run e2e` boots its whole stack on a Linux
+container (Node 24, Docker 29) and runs the suite. The harness has still never run on a GitHub runner, so treat the list below as
+a checklist to prove, not a proven recipe.
 
 To wire it later, a GitHub Actions job needs all of the following:
 
@@ -637,6 +650,12 @@ To wire it later, a GitHub Actions job needs all of the following:
    without it the integration suites silently **self-skip** (zero coverage) and the
    launcher's DB step fails. Start + create + seed it before the unit/integration
    run: `npm run db:start && npm run db:create && npm run db:seed`.
+   The launcher also starts MinIO (`scripts/s3.mjs`), and `minio/minio` can no
+   longer be pulled anonymously
+   ([`minio-image-no-longer-public`](../docs/issues/minio-image-no-longer-public.md)),
+   so a fresh runner has no image until that issue is resolved. The 2026-10-09
+   Linux run loaded the Git LFS copy instead: `git lfs pull --include
+   e2e/support/minio-image.tar`, then `docker load -i e2e/support/minio-image.tar`.
 3. **Bundled Chromium with caching** — `npx playwright install --with-deps
    chromium` (cache `~/.cache/ms-playwright`). Do NOT use the `chrome` channel.
 4. **Run with `CI=1`** so the semantics above engage.

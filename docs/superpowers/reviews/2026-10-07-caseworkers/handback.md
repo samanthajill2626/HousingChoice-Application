@@ -2,10 +2,80 @@
 
 STATUS: DONE (builder delivery and build reviews). Planner final independent handback review remains.
 
-Builder verdict: QUALIFIED MERGE-READY @caeaa7680cd7ebffe7ddd09ff3414067c8419126 on feat/caseworkers (W:/tmp/caseworkers), 0 behind main d874915873a61864f6d051a0a9af3f0bb8e7e6e2, UNMERGED (human gate). This is the assessed tip before this documentation-only handback reconciliation; the final response identifies its resulting commit. The planner must still perform the separate final independent handback review. The qualifications below remain open.
+Builder verdict: QUALIFIED MERGE-READY @7287e62834024ed93cf5fd7ba46fb097c8ace8c9 on feat/caseworkers, 0 behind the recorded main/base d874915873a61864f6d051a0a9af3f0bb8e7e6e2, UNMERGED (human gate). This is the assessed tip before the documentation-only cloud adaptation dated 2026-10-09. Use the GitHub feature branch tip containing this handback; verify its exact HEAD and remote main again at review start. The planner must still perform the separate final independent handback review. The qualifications below remain open.
 
 Implementation source: e0da8da38313e9f494d56bbbc96b8a3def720015.
-Branch: feat/caseworkers. Worktree: W:/tmp/caseworkers. UNMERGED.
+Branch: feat/caseworkers. Repository: [samanthajill2626/HousingChoice-Application](https://github.com/samanthajill2626/HousingChoice-Application). Checkout: the cloud agent's isolated clone of this branch. UNMERGED.
+
+## Cloud entry point
+
+Cameron requested this cloud handoff on 2026-10-09. Select the GitHub repository above and branch `feat/caseworkers` in the cloud agent. Work from that checkout's repository root; obtain it with `git rev-parse --show-toplevel`. All root-relative paths below resolve there. The requested cloud checkout replaces the workstation-specific worktree location in older instructions; preserve the same isolation, review, evidence and human-merge requirements.
+
+The GitHub feature branch and main were checked directly before this update: feature 7287e628 and main d8749158. Remote names vary between hosts; identify the GitHub remote with `git remote -v` rather than assuming the original workstation's names. Ensure sufficient Git history to resolve the pinned review base and implementation commit. If the cloud checkout is shallow, fetch the necessary history from its configured GitHub remote. Do not silently substitute a different comparison base.
+
+```bash
+git status
+git rev-parse HEAD
+git cat-file -e d874915873a61864f6d051a0a9af3f0bb8e7e6e2^{commit}
+git merge-base --is-ancestor d874915873a61864f6d051a0a9af3f0bb8e7e6e2 HEAD
+git diff --stat d874915873a61864f6d051a0a9af3f0bb8e7e6e2...HEAD
+git diff --name-only e0da8da38313e9f494d56bbbc96b8a3def720015..HEAD
+```
+
+Run commands individually and inspect their exits. At handoff, the last comparison contains review/issue Markdown only. If that changes, reassess whether the historical evidence still applies. Inspect current remote-main drift; the one builder main sync is already complete. Do not move a shared main checkout or merge new main commits merely to reconstruct the historical comparison.
+
+Read these tracked, portable contracts from the checkout:
+
+- [AGENTS.md](../../../../AGENTS.md), [feature workflow](../../../../documentation/FEATURE-DEVELOPMENT-WORKFLOW.md), [glossary](../../../../documentation/GLOSSARY.md), and [e2e guide](../../../../e2e/README.md).
+- The active client's tracked overlay/profile: [Codex](../../../../.codex/feature-mission.profile.md) or [Claude](../../../../.claude/feature-mission.profile.md), as appropriate. Use the tools actually available in the cloud runtime; workstation executables, local plugin caches and local memory are not cloud prerequisites.
+- [Approved spec revision 15](../../specs/2026-10-06-clean-org-names-and-caseworkers-design.md), branch B only; [75-task plan](../../plans/2026-10-07-caseworkers.md), including sections 0-3 and S8/S9/S10 assembly notes.
+- This handback and its linked review, gate, issue and slice records. These files are tracked and travel with the feature branch.
+
+### Evidence available after a GitHub checkout
+
+| Material | Available in Git | How the cloud reviewer should use it |
+| --- | --- | --- |
+| Product source, automated tests, lockfile, spec, plan, findings, adjudications, gate summaries and live-QA narrative | Yes | Inspect source/assertions and independently assess the committed reports. |
+| Raw builder logs, command/exit files, experiment scripts and traces under `.superpowers/` | No; gitignored | Treat report quotations as historical reported evidence. Regenerate supported checks; do not claim to have inspected missing raw files. |
+| Builder screenshots under `.playwright-mcp/` and browser artifacts under `e2e/.artifacts/` | No; gitignored | The QA narrative and measurements are tracked. Fresh browser inspection requires a new hermetic run. |
+| Unapplied C6 patch under `.superpowers/sdd/C6/` | No; gitignored | The tracked C6 proposal and baseline diagnosis describe it. Do not assume the patch is present or apply a replacement without the separate scope decision. |
+| Workstation environments, credentials, plugin caches, local memory and dependencies | No | Use cloud tool setup and hermetic fixtures. No real environment files or production credentials are required for these tests. |
+
+Older reports retain original Windows paths and references to ignored artifacts as provenance. For a tracked file, resolve its repository-relative suffix in this checkout. An ignored-artifact reference cannot be made available by changing its path. No raw-evidence bundle is included in this branch push. Preserve existing reports; put the cloud reviewer's new findings and exact validation results in a new tracked record under `docs/superpowers/reviews/2026-10-07-caseworkers/`.
+
+### Cloud runtime and independent validation
+
+The source can be reviewed from any checkout. Full execution needs Node 24, npm, a reachable Docker daemon with local container support, Terraform >=1.15 on PATH, bundled Playwright Chromium and its Linux system libraries, and network access during dependency/browser/container setup. Confirm these capabilities in the chosen cloud environment rather than assuming they are supplied. The full browser gate previously took about 23 minutes; the runner must support the complete gate budget.
+
+From the isolated cloud repository root, check and prepare the environment using the repository's existing scripts:
+
+```bash
+node --version
+npm --version
+docker info
+terraform version
+npm ci
+npx playwright install --with-deps chromium
+npm run db:start
+npm run s3:start
+```
+
+These container commands prepare cloud-local DynamoDB Local and MinIO for the hermetic test environment. The current unit globalSetup creates its own tables, and the e2e launcher creates/seeds its lane; a separate manual `db:create`/`db:seed` is not needed for this review. Do not export a shared AWS_ACCESS_KEY_ID: preserve the per-file/per-lane fake-key isolation. Do not import real credentials or real environment files. Terraform is needed for local template evaluation, not an infrastructure apply.
+
+Use `CI=1` in the cloud test environment so Playwright boots a fresh stack. Perform the planner's required validation with the bare repository commands, one at a time, recording real exits:
+
+```bash
+export CI=1
+npm run typecheck
+npm test
+npm run smoke
+```
+
+Run `npm run e2e` separately under a hard outer timeout (the mission used `timeout 2700 npm run e2e`). Run scoped ESLint on the nonempty changed JS/TS file list against the pinned base; follow AGENTS.md's baseline-comparison ratchet and JS-coverage caveat. Do not turn the five known baseline lint errors into new findings or credit an empty scope. Never pipe a gate command or substitute a unit-only/skip-enabled run for the integration gate.
+
+For the planner's live browser pass, use a separate hermetic session and the available cloud browser tools; never overlap that session with the full suite. Read the e2e guide's Linux standalone-session teardown limitation, own the processes you start and verify cleanup. Preserve failure artifacts before reruns. Do not infer a known flake or an environment cause from the earlier blank-document failure.
+
+If Docker, browser/system dependencies, Terraform, runtime budget or interactive browser tooling is unavailable, complete the independent source review and every supported check, then report the exact unrun gate/QA step and prerequisite. Do not label the full planner validation complete, weaken tests, use deployed endpoints, or present builder evidence as a new cloud execution. This handoff has been checked for tracked-file portability; no cloud execution has been performed by the builder.
 
 ## Delivery
 
@@ -118,7 +188,7 @@ C1-C5 are documented implementation corrections, including raw organization deri
 
 ## Final verification
 
-The complete evidence is [completion-gates-r2.md](completion-gates-r2.md) and [self-QA.md](self-QA.md). All gates name unchanged implementation e0da8da3; later commits add findings and reports only. A fresh Git comparison at this reconciliation confirms every changed path from e0da8da3 through caeaa768 is Markdown under docs/issues or docs/superpowers/reviews. This handback update changes records only; no suites were rerun for this documentation closeout. The one main sync was5272f85e; main remainsd8749158. No second sync.
+The complete evidence is [completion-gates-r2.md](completion-gates-r2.md) and [self-QA.md](self-QA.md). All gates name unchanged implementation e0da8da3; later commits add findings and reports only. Git comparisons for the planner reconciliation and cloud adaptation confirm every changed path from e0da8da3 through 7287e628 is Markdown under docs/issues or docs/superpowers/reviews. The cloud adaptation changes this tracked handback only; no suites were rerun for these documentation closeouts. The results below are the original builder runs, not cloud reruns. The one main sync was5272f85e; main remainsd8749158. No second sync.
 
 Exact final results, quoted:
 
@@ -151,7 +221,7 @@ The session was stopped with e2e:stop EXIT0 and all four owned ports were free. 
 
 ## Scope, files and commits
 
-Against main d8749158, including this handback: 221 files changed, 40618 insertions, 852 deletions (net+39766). The large documentation delta includes the19,662-line approved implementation plan and preserved design/plan/code-review reasoning; it is not all application code.
+Against main d8749158, including this handback: 221 files changed, 40689 insertions, 852 deletions (net+39837). The large documentation delta includes the19,662-line approved implementation plan and preserved design/plan/code-review reasoning; it is not all application code.
 
 The change spans150 paths under app/dashboard/e2e (including their local documentation), plus shared documentation, issues and version-controlled mission reasoning. Main implementation areas:
 
@@ -192,6 +262,7 @@ Delivery anchors (individual task commit/evidence mapping remains in the linked 
 | 98870155 | Parent live QA and verified teardown |
 | 3c084a85 / 2113c281 | Original handback and preserved browser evidence qualification |
 | caeaa768 | Fresh independent conformance review complete; 74/75 conform, two checkpoints conform |
+| 7287e628 | Reconciled planner handback after independent conformance completion |
 
 ## Open issues and merge-decision qualifications
 
@@ -202,7 +273,7 @@ Delivery anchors (individual task commit/evidence mapping remains in the linked 
 - [Generic retypes and refusals](../../../issues/contact-retype-skips-caseworker-refusals.md), [tour/placement writers](../../../issues/tours-placements-no-contact-type-check.md), [imported unknown thread history](../../../issues/imported-unknown-threads-surface-as-unknown-on-today.md), [scan costs](../../../issues/possible-caseworkers-and-roster-refusal-scans.md), and [A2P coverage question](../../../issues/a2p-campaign-covers-caseworker-shares.md) remain scoped follow-ups.
 - The earlier conformance execution gap is closed by caeaa768. Historical stop/adjudication records describe their then-current state; this handback and code-review-conformance-r2.md supply the current status. The planner final independent handback review remains a separate stage.
 
-No issue above is silently described as fixed. No merge, push, deployment, infrastructure action or cleanup was performed. Cameron retains the merge decision with these disclosures.
+No issue above is silently described as fixed. The original build performed no push; the feature branch was subsequently published, and the 2026-10-09 request authorizes publishing this cloud handback update to that same GitHub branch. No merge, deployment, infrastructure action or cleanup was performed. Cameron retains the merge decision with these disclosures.
 
 ## Planner handoff
 
@@ -219,7 +290,7 @@ Read the approved spec revision 15 and plan (75 tasks plus two checkpoints) name
 
 Preserve three active qualifications in the final planner verdict: Task 10.4 is baseline-red and C6 needs a separate scope decision; R2-ADV-1 is a new parent-deferred P2/med risk without executed reproduction or prior human acceptance; the first final browser failure remains unexplained despite subsequent passes. No new in-scope must-fix was substantiated by the completed conformance review. Approved extraction/importer/generic-retype/writer limitations remain exactly scoped.
 
-Raw logs, exits, experiments, the unapplied C6 patch and browser artifacts remain under .superpowers/ and .playwright-mcp/ in this worktree. Retain them for review; no cleanup is authorized. No builder-owned command or test session remains running. Merge, deployment, infrastructure changes and worktree retirement remain human decisions; this handoff authorizes none of them.
+Raw builder logs, exits, experiments, the unapplied C6 patch and browser artifacts remain only in the original workstation checkout's ignored directories; they are unavailable in a fresh GitHub checkout. The cloud-entry section defines the available evidence and fresh-validation path. No builder-owned command or test session remains running. The user authorized publishing this feature branch for cloud review; merge, deployment, infrastructure changes and worktree retirement remain separate human decisions.
 
 ## Operational obligations
 

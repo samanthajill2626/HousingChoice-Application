@@ -36,6 +36,7 @@ Read these tracked, portable contracts from the checkout:
 | Material | Available in Git | How the cloud reviewer should use it |
 | --- | --- | --- |
 | Product source, automated tests, lockfile, spec, plan, findings, adjudications, gate summaries and live-QA narrative | Yes | Inspect source/assertions and independently assess the committed reports. |
+| `e2e/support/minio-image.tar` | Tracked through Git LFS; a pointer-only checkout is insufficient | Fetch its LFS content and load the saved Docker image before starting MinIO; see setup below. |
 | Raw builder logs, command/exit files, experiment scripts and traces under `.superpowers/` | No; gitignored | Treat report quotations as historical reported evidence. Regenerate supported checks; do not claim to have inspected missing raw files. |
 | Builder screenshots under `.playwright-mcp/` and browser artifacts under `e2e/.artifacts/` | No; gitignored | The QA narrative and measurements are tracked. Fresh browser inspection requires a new hermetic run. |
 | Unapplied C6 patch under `.superpowers/sdd/C6/` | No; gitignored | The tracked C6 proposal and baseline diagnosis describe it. Do not assume the patch is present or apply a replacement without the separate scope decision. |
@@ -45,7 +46,7 @@ Older reports retain original Windows paths and references to ignored artifacts 
 
 ### Cloud runtime and independent validation
 
-The source can be reviewed from any checkout. Full execution needs Node 24, npm, a reachable Docker daemon with local container support, Terraform >=1.15 on PATH, bundled Playwright Chromium and its Linux system libraries, and network access during dependency/browser/container setup. Confirm these capabilities in the chosen cloud environment rather than assuming they are supplied. The full browser gate previously took about 23 minutes; the runner must support the complete gate budget.
+The source can be reviewed from any checkout. Full execution needs Node 24, npm, Git LFS with repository-object download access, a reachable Docker daemon with local container support, Terraform >=1.15 on PATH, bundled Playwright Chromium and its Linux system libraries, and network access during dependency/browser/container setup. Confirm these capabilities in the chosen cloud environment rather than assuming they are supplied. The full browser gate previously took about 23 minutes; the runner must support the complete gate budget.
 
 From the isolated cloud repository root, check and prepare the environment using the repository's existing scripts:
 
@@ -53,12 +54,17 @@ From the isolated cloud repository root, check and prepare the environment using
 node --version
 npm --version
 docker info
+git lfs version
 terraform version
 npm ci
 npx playwright install --with-deps chromium
+git lfs pull --include="e2e/support/minio-image.tar"
+docker load -i e2e/support/minio-image.tar
 npm run db:start
 npm run s3:start
 ```
+
+The repository records a [MinIO image availability problem](../../../issues/minio-image-no-longer-public.md): the service script expects `minio/minio:latest` but does not load the saved archive. Load the tracked LFS archive before `s3:start`; do not assume a fresh runner can pull that image anonymously. The current pointer names SHA-256 `ff5c117e1c9bb62adb75c040abdcaa7501f0810c3ec4f18098501ba669516ace`, 62259712 bytes. A tiny text pointer is not the Docker archive. If its LFS object cannot be downloaded or the image cannot run on the cloud host architecture, report that prerequisite explicitly; replacing the S3 image is a separate change.
 
 These container commands prepare cloud-local DynamoDB Local and MinIO for the hermetic test environment. The current unit globalSetup creates its own tables, and the e2e launcher creates/seeds its lane; a separate manual `db:create`/`db:seed` is not needed for this review. Do not export a shared AWS_ACCESS_KEY_ID: preserve the per-file/per-lane fake-key isolation. Do not import real credentials or real environment files. Terraform is needed for local template evaluation, not an infrastructure apply.
 
@@ -75,7 +81,7 @@ Run `npm run e2e` separately under a hard outer timeout (the mission used `timeo
 
 For the planner's live browser pass, use a separate hermetic session and the available cloud browser tools; never overlap that session with the full suite. Read the e2e guide's Linux standalone-session teardown limitation, own the processes you start and verify cleanup. Preserve failure artifacts before reruns. Do not infer a known flake or an environment cause from the earlier blank-document failure.
 
-If Docker, browser/system dependencies, Terraform, runtime budget or interactive browser tooling is unavailable, complete the independent source review and every supported check, then report the exact unrun gate/QA step and prerequisite. Do not label the full planner validation complete, weaken tests, use deployed endpoints, or present builder evidence as a new cloud execution. This handoff has been checked for tracked-file portability; no cloud execution has been performed by the builder.
+If Docker, the MinIO LFS image, browser/system dependencies, Terraform, runtime budget or interactive browser tooling is unavailable, complete the independent source review and every supported check, then report the exact unrun gate/QA step and prerequisite. Do not label the full planner validation complete, weaken tests, use deployed endpoints, or present builder evidence as a new cloud execution. This handoff has been checked for tracked-file portability; no cloud execution has been performed by the builder.
 
 ## Delivery
 
@@ -221,7 +227,7 @@ The session was stopped with e2e:stop EXIT0 and all four owned ports were free. 
 
 ## Scope, files and commits
 
-Against main d8749158, including this handback: 221 files changed, 40689 insertions, 852 deletions (net+39837). The large documentation delta includes the19,662-line approved implementation plan and preserved design/plan/code-review reasoning; it is not all application code.
+Against main d8749158, including this handback: 221 files changed, 40695 insertions, 852 deletions (net+39843). The large documentation delta includes the19,662-line approved implementation plan and preserved design/plan/code-review reasoning; it is not all application code.
 
 The change spans150 paths under app/dashboard/e2e (including their local documentation), plus shared documentation, issues and version-controlled mission reasoning. Main implementation areas:
 

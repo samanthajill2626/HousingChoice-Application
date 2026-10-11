@@ -20,6 +20,16 @@
   color: var(--c-text);
 }
 
+/* Stacked (the list's 560px container query): the organization has its own
+   line, so it wraps in full - a touch device never shows the title. */
+@container (max-width: 560px) {
+  .org {
+    white-space: normal;
+    overflow: visible;
+    overflow-wrap: anywhere;
+  }
+}
+
 .possible {
   margin-top: var(--sp-6);
 }

@@ -356,10 +356,24 @@ describe('CaseworkerDialog', () => {
   it('a contact gone before the preview (404) says so for good: no Try again, and the host reads again', async () => {
     previewCaseworker.mockRejectedValue(GONE);
     const { onStale } = renderDialog();
-    expect(await within(dialog()).findByRole('alert')).toHaveTextContent('This contact no longer exists.');
+    expect(await within(dialog()).findByRole('alert')).toHaveTextContent('This contact was deleted.');
     expect(within(dialog()).queryByRole('button', { name: 'Try again' })).toBeNull();
     expect(confirm()).toBeDisabled();
     expect(onStale).toHaveBeenCalledTimes(1);
+  });
+
+  it('a final preview after contact_changed shows only the final line', async () => {
+    const user = userEvent.setup();
+    previewCaseworker.mockResolvedValueOnce(CLEAN).mockRejectedValueOnce(GONE);
+    makeCaseworker.mockRejectedValue(
+      new ApiError(409, 'contact_changed', 'contact_changed', { error: 'contact_changed' }),
+    );
+    renderDialog();
+    await ready();
+    await user.click(confirm());
+    await within(dialog()).findByText('This contact was deleted.');
+    expect(within(dialog()).getAllByRole('alert')).toHaveLength(1);
+    expect(within(dialog()).queryByText('This contact changed while this was open. Review and try again.')).toBeNull();
   });
 
   it('a team member (400) cannot be made a caseworker: final copy, no Try again', async () => {
@@ -376,7 +390,7 @@ describe('CaseworkerDialog', () => {
     const { onConverted, onStale } = renderDialog();
     await ready();
     await user.click(confirm());
-    expect(await within(dialog()).findByRole('alert')).toHaveTextContent('This contact no longer exists.');
+    expect(await within(dialog()).findByRole('alert')).toHaveTextContent('This contact was deleted.');
     expect(confirm()).toBeDisabled();
     expect(onStale).toHaveBeenCalledTimes(1);
     expect(onConverted).not.toHaveBeenCalled();

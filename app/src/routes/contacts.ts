@@ -1524,9 +1524,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       contactId,
       touchesOrgField || changesClassification ? { consistentRead: true } : undefined,
     );
-    // A phone or email pointer is an INTERNAL routing record, not a contact
-    // (the GET 404s it too): never write one, or a typed pointer surfaces on
-    // lists like Possible caseworkers that cannot act on it.
+    // A phone or email pointer is an INTERNAL routing record, not a contact:
+    // never write one, or a typed pointer surfaces on lists like Possible
+    // caseworkers that cannot act on it. (The GET guards phone pointers only -
+    // TODO(contact-routes-email-pointer-guard).)
     if (stored?.phone_ref === true || stored?.email_ref === true) {
       res.status(404).json({ error: 'contact_not_found' });
       return;

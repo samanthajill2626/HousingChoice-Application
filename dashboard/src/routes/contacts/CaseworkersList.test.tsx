@@ -252,13 +252,18 @@ describe('CaseworkersList - Possible caseworkers (spec 2026-10-06 D19, D22)', ()
     [
       'deleted elsewhere (404)',
       new ApiError(404, 'contact_not_found', 'contact_not_found', { error: 'contact_not_found' }),
-      'This contact no longer exists.',
+      'This contact was deleted.',
     ],
     [
       'no longer possible (400)',
       new ApiError(400, 'caseworker_dismiss_not_allowed', 'caseworker_dismiss_not_allowed', {
         error: 'caseworker_dismiss_not_allowed',
       }),
+      'This contact is no longer a possible caseworker.',
+    ],
+    [
+      'made a team member elsewhere (400)',
+      new ApiError(400, 'caseworker_team_member', 'caseworker_team_member', { error: 'caseworker_team_member' }),
       'This contact is no longer a possible caseworker.',
     ],
   ] as const) {
@@ -285,7 +290,7 @@ describe('CaseworkersList - Possible caseworkers (spec 2026-10-06 D19, D22)', ()
     renderAt();
     await user.click(within(await possibleList()).getByRole('button', { name: 'Make Dana Reyes a caseworker' }));
     const dialog = screen.getByRole('dialog', { name: 'Make Dana Reyes a caseworker' });
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('This contact no longer exists.');
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('This contact was deleted.');
     await waitFor(() => expect(listPossibleCaseworkers).toHaveBeenCalledTimes(2));
   });
 

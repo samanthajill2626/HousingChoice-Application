@@ -46,7 +46,7 @@ export const CASEWORKER_STAYS =
 export const CONTACT_CHANGED_COPY = 'This contact changed while this was open. Review and try again.';
 export const MAKE_CASEWORKER_FAILED = "Couldn't make this contact a caseworker - please try again.";
 export const PREVIEW_FAILED = "Couldn't check this contact - please try again.";
-export const CONTACT_GONE = 'This contact no longer exists.';
+export const CONTACT_GONE = 'This contact was deleted.';
 export const TEAM_MEMBER_NOT_CASEWORKER = "A team member can't be made a caseworker.";
 
 /** The staff line for an answer that no retry can change (the contact was
@@ -232,6 +232,8 @@ export function CaseworkerDialog({
           setLoaded({ attempt, failed: true });
           return;
         }
+        // The final line replaces any earlier one (a contact_changed re-read).
+        setError(null);
         setLoaded({ attempt, final });
         onStaleRef.current?.();
       },

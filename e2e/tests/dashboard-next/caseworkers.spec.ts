@@ -393,6 +393,14 @@ test.describe('Caseworkers - the Caseworkers tab rows', () => {
       await expect(org).toBeVisible();
       await expect(org).toHaveAttribute('title', agency);
     }
+    // Stacked (a pane at or under 560px, a phone): the organization wraps in
+    // full, since a touch device never shows the title.
+    await page.setViewportSize({ width: 375, height: 800 });
+    await expectNoHorizontalOverflowIn(row.getByRole('link'), 'caseworker row at 375px');
+    const orgOverflow = await row
+      .getByText(agency, { exact: true })
+      .evaluate((el) => el.scrollWidth - el.clientWidth);
+    expect(orgOverflow, 'the organization is not truncated at 375px').toBeLessThanOrEqual(1);
     await page.setViewportSize(WIDE_RESTORE);
   });
 });

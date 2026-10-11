@@ -991,7 +991,7 @@ describe('PATCH /api/contacts/:id - caseworkers (spec 2026-10-06 D16, D21)', () 
 });
 
 describe('PATCH /api/contacts/:id - pointer rows are not contacts', () => {
-  // A phone or email pointer is an INTERNAL routing record (the GET 404s it).
+  // A phone or email pointer is an INTERNAL routing record, not a contact.
   // Typing one through the PATCH would surface it on Possible caseworkers,
   // where Make and Not a caseworker both 404 it, so it could never be cleared.
   for (const [label, pointer] of [

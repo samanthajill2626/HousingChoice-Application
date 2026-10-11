@@ -55,7 +55,13 @@ export const DISMISS_NOT_POSSIBLE = 'This contact is no longer a possible casewo
 function finalDismissError(err: unknown): string | null {
   if (!(err instanceof ApiError)) return null;
   if (err.status === 404 && err.code === 'contact_not_found') return CONTACT_GONE;
-  if (err.status === 400 && err.code === 'caseworker_dismiss_not_allowed') return DISMISS_NOT_POSSIBLE;
+  // Made a caseworker, re-typed unknown, or made a team member elsewhere.
+  if (
+    err.status === 400 &&
+    (err.code === 'caseworker_dismiss_not_allowed' || err.code === 'caseworker_team_member')
+  ) {
+    return DISMISS_NOT_POSSIBLE;
+  }
   return null;
 }
 

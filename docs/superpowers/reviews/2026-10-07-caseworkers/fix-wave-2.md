@@ -11,6 +11,7 @@ review, then the full re-verification.
 | Start | `e6447786` (clean, = origin) |
 | Commits | `70cbfe8e` code + tests; `10de23e7` docs; `2f875cea` review response (FW2-1..FW2-6) |
 | Gated HEAD | `2f875cea` (this record is committed after it; records only) |
+| Verdict | All five gates pass on `2f875cea`. The planner's QUALIFIED PASS stands, with the standing qualifications below and P3-9 open by decision |
 | Base / main | `d874915873a61864f6d051a0a9af3f0bb8e7e6e2`, unchanged, so no sync was needed |
 | Findings answered | `planner-spec-conformance-review.md` P3-1..P3-8, T-1, T-2, D-1, D-2 |
 | Review | `fix-wave-2-review.md` (one independent opus reviewer, read-only) |
@@ -76,7 +77,7 @@ the review fixes) passed before the gates.
 | 1 | `npm run typecheck` | exit 0 |
 | 2 | `env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY npm test` | exit 0; 740 files (app 437 / 9136 tests + 2 skipped, dashboard 234 / 4379 + 1 skipped, 22, 34, 13); no `[dynamoAdmin]` line |
 | 3 | `npm run smoke` | exit 0; 1649 specifiers across 286 files |
-| 4 | `CI=1 npm run e2e` (Chromium 141 shim, 2700s outer timeout) | PENDING - filled in below when the run completes |
+| 4 | `CI=1 npm run e2e` (Chromium 141 shim, 2700s outer timeout) | exit 0; 338 passed in 36.9m, 1 worker, no failure, flaky or skip (337 before this wave + the new long-organization row test); no `[dynamoAdmin]` line |
 | 5 | `npx eslint $(git diff --name-only --diff-filter=d origin/main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')` | 152 files; exactly the 5 known base errors (`BroadcastComposer.tsx:204,229,248,263`, `ContactsList.tsx:184`, both untouched by this wave); no new error - ratchet PASS |
 
 Gate 5 note: this clone has no local `main`, so the literal `main...HEAD`

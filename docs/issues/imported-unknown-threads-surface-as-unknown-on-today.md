@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app/today
 created: 2026-10-08
-refs: app/src/lib/import/apply.ts:1227, app/src/routes/today.ts:784, dashboard/src/routes/today/buildToday.ts:287, app/src/routes/contacts.ts:1530, app/src/routes/contacts.ts:1891, dashboard/src/routes/contact/ContactEditForm.tsx:306
+refs: app/src/lib/import/apply.ts:1227, app/src/routes/today.ts:784, dashboard/src/routes/today/buildToday.ts:287, app/src/routes/contacts.ts:1543, app/src/routes/contacts.ts:1916, dashboard/src/routes/contact/ContactEditForm.tsx:306
 ---
 
 **Problem.** The importer mints every imported one-to-one thread as
@@ -14,7 +14,7 @@ refs: app/src/lib/import/apply.ts:1227, app/src/routes/today.ts:784, dashboard/s
 `if_not_exists`), even for a contact it typed tenant, landlord or partner,
 and never re-types a thread. An explicit contacts PATCH `type` re-types an
 `unknown_1to1` thread (the triage flip), even when the supplied type equals
-the stored type (`contacts.ts:1530-1531,1891-1896`). The edit form only sends
+the stored type (`contacts.ts:1543-1544,1911-1919`). The edit form only sends
 `type` on a kind change (`ContactEditForm.tsx:306`), so an imported contact
 the importer already typed keeps its unknown thread through ordinary edits
 that leave its kind unchanged. Today

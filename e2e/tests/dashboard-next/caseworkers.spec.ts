@@ -29,6 +29,7 @@ import { addOrg } from '../../fixtures/orgFixture.js';
 import { extractionTick, sendExtractSms } from '../../fixtures/extraction.js';
 import { ORG_PICKER } from '../../scenarios/steps.js';
 import { expectTodayReady } from '../../support/today.js';
+import { WIDE_RESTORE, expectNoHorizontalOverflowIn } from '../../support/viewport.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 /** Lean seed: a tenant with an OPEN placement (placement-0001). Read-only. */
@@ -350,6 +351,49 @@ test.describe('Caseworkers - the conversion from a contact page', () => {
     // Nothing was written to either seeded contact.
     expect(await readContact(req, TASHA.contactId)).toMatchObject({ type: 'tenant' });
     expect(await readContact(req, MARCUS.contactId)).toMatchObject({ type: 'landlord' });
+  });
+});
+
+test.describe('Caseworkers - the Caseworkers tab rows', () => {
+  test('a long organization gives way on the row: the name stays whole at mid widths', async ({ page }) => {
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    // Organization names may run to 120 characters; this one is ~100.
+    const agency = `Longorg ${stamp} Metropolitan Community Behavioral Health and Supportive Housing Collaborative`;
+    const lastName = `Cwklong${stamp}`;
+    const name = `Wide ${lastName}`;
+    await addOrg(req, { kind: 'agency', name: agency });
+    const contactId = await createContact(req, {
+      type: 'partner',
+      role: 'Caseworker',
+      firstName: 'Wide',
+      lastName,
+      phone: uniquePhone(),
+    });
+    await patchContact(req, contactId, { organization: agency });
+
+    await openCaseworkersTab(page);
+    const row = caseworkerRow(page, name);
+    await expect(row).toBeVisible();
+    // 1024 and 900 are the widths that once crushed the name to 0px: the pane
+    // is above the 560px stacking query, so the row stays on one line and the
+    // organization, not the name, must absorb the deficit.
+    for (const width of [1024, 900]) {
+      await page.setViewportSize({ width, height: 900 });
+      const link = row.getByRole('link');
+      await expectNoHorizontalOverflowIn(link, `caseworker row at ${width}px`);
+      const nameBox = await row.getByText(name, { exact: true }).evaluate((el) => ({
+        width: el.clientWidth,
+        overflow: el.scrollWidth - el.clientWidth,
+      }));
+      expect(nameBox.width, `the name is visible at ${width}px`).toBeGreaterThan(0);
+      expect(nameBox.overflow, `the name is not truncated at ${width}px`).toBeLessThanOrEqual(1);
+      const org = row.getByText(agency, { exact: true });
+      await expect(org).toBeVisible();
+      await expect(org).toHaveAttribute('title', agency);
+    }
+    await page.setViewportSize(WIDE_RESTORE);
   });
 });
 

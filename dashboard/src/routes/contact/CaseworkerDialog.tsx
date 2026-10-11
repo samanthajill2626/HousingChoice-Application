@@ -46,6 +46,17 @@ export const CASEWORKER_STAYS =
 export const CONTACT_CHANGED_COPY = 'This contact changed while this was open. Review and try again.';
 export const MAKE_CASEWORKER_FAILED = "Couldn't make this contact a caseworker - please try again.";
 export const PREVIEW_FAILED = "Couldn't check this contact - please try again.";
+export const CONTACT_GONE = 'This contact no longer exists.';
+export const TEAM_MEMBER_NOT_CASEWORKER = "A team member can't be made a caseworker.";
+
+/** The staff line for an answer that no retry can change (the contact was
+ *  deleted, or is a team member), or null for any other failure. */
+export function finalCaseworkerError(err: unknown): string | null {
+  if (!(err instanceof ApiError)) return null;
+  if (err.status === 404 && err.code === 'contact_not_found') return CONTACT_GONE;
+  if (err.status === 400 && err.code === 'caseworker_team_member') return TEAM_MEMBER_NOT_CASEWORKER;
+  return null;
+}
 
 /** One refusal's staff sentence and the link to the record that blocks it (plan 3.9). */
 export function refusalCopy(refusal: CaseworkerRefusal): { sentence: string; linkText: string; to: string } {
@@ -157,13 +168,31 @@ export interface CaseworkerDialogProps {
   /** The converted contact the server answered with ({ contact }). */
   onConverted: (contact: Contact) => void;
   onClose: () => void;
+  /** The server gave a final answer (the contact is gone, or cannot be a
+   *  caseworker): a host showing a list of contacts reads it again. */
+  onStale?: () => void;
 }
 
 /** One preview read's outcome, tagged with the attempt it answers. */
-type Loaded = { attempt: number; preview: CaseworkerPreview } | { attempt: number; failed: true };
+type Loaded =
+  | { attempt: number; preview: CaseworkerPreview }
+  | { attempt: number; failed: true }
+  | { attempt: number; final: string };
 
-export function CaseworkerDialog({ contactId, name, onConverted, onClose }: CaseworkerDialogProps): React.JSX.Element {
+export function CaseworkerDialog({
+  contactId,
+  name,
+  onConverted,
+  onClose,
+  onStale,
+}: CaseworkerDialogProps): React.JSX.Element {
   const refusalsId = useId();
+  // The preview read calls the latest onStale without re-running when a host
+  // passes a new function each render.
+  const onStaleRef = useRef(onStale);
+  useEffect(() => {
+    onStaleRef.current = onStale;
+  }, [onStale]);
   // The two lists behind the Organization picker (spec D17: either kind).
   const orgList = useOrgList();
   const organizationPicker = useRef<OrgPickerHandle>(null);
@@ -180,6 +209,8 @@ export function CaseworkerDialog({ contactId, name, onConverted, onClose }: Case
   // "Is this really new?" (organization mode), opened by the picker's add option.
   const [adding, setAdding] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // A make answered with a final error: Confirm stays off for good.
+  const [gone, setGone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [orgError, setOrgError] = useState<string | null>(null);
 
@@ -194,8 +225,15 @@ export function CaseworkerDialog({ contactId, name, onConverted, onClose }: Case
         setServerRefusals(null);
         setLoaded({ attempt, preview });
       },
-      () => {
-        if (!controller.signal.aborted) setLoaded({ attempt, failed: true });
+      (err: unknown) => {
+        if (controller.signal.aborted) return;
+        const final = finalCaseworkerError(err);
+        if (final === null) {
+          setLoaded({ attempt, failed: true });
+          return;
+        }
+        setLoaded({ attempt, final });
+        onStaleRef.current?.();
       },
     );
     return () => controller.abort();
@@ -205,8 +243,9 @@ export function CaseworkerDialog({ contactId, name, onConverted, onClose }: Case
   const current = loaded !== null && loaded.attempt === attempt ? loaded : null;
   const preview = current !== null && 'preview' in current ? current.preview : null;
   const failed = current !== null && 'failed' in current;
+  const finalRead = current !== null && 'final' in current ? current.final : null;
   const refusals = serverRefusals ?? preview?.refusals ?? [];
-  const canConfirm = preview !== null && refusals.length === 0 && !busy;
+  const canConfirm = preview !== null && refusals.length === 0 && !busy && !gone;
 
   // Not `use*`: the React Compiler lint would read that name as a hook.
   function applyOrg(ref: OrgRef): void {
@@ -243,7 +282,12 @@ export function CaseworkerDialog({ contactId, name, onConverted, onClose }: Case
     } catch (err) {
       const refused = refusalsFrom(err);
       const notOnList = orgNotOnListBody(err);
-      if (refused !== null) {
+      const final = finalCaseworkerError(err);
+      if (final !== null) {
+        setGone(true);
+        setError(final);
+        onStale?.();
+      } else if (refused !== null) {
         setServerRefusals(refused);
       } else if (err instanceof ApiError && err.status === 409 && err.code === 'contact_changed') {
         setError(CONTACT_CHANGED_COPY);
@@ -292,6 +336,10 @@ export function CaseworkerDialog({ contactId, name, onConverted, onClose }: Case
               Try again
             </Button>
           </div>
+        ) : finalRead !== null ? (
+          <p className={styles.error} role="alert">
+            {finalRead}
+          </p>
         ) : preview === null ? (
           <Spinner center />
         ) : (

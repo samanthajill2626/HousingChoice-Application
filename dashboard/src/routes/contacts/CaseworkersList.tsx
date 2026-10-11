@@ -13,6 +13,7 @@
 import { useEffect, useId, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
+  ApiError,
   dismissPossibleCaseworker,
   getAllContacts,
   listPossibleCaseworkers,
@@ -21,7 +22,7 @@ import {
   type PossibleSignal,
 } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
-import { CaseworkerDialog } from '../contact/CaseworkerDialog.js';
+import { CaseworkerDialog, CONTACT_GONE } from '../contact/CaseworkerDialog.js';
 import { isCaseworkerContact } from '../contact/caseworkerRole.js';
 import { Modal } from '../contact/Modal.js';
 import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
@@ -48,6 +49,15 @@ export const SIGNAL_LABEL: Readonly<Record<PossibleSignal, string>> = {
 
 export const NO_CASEWORKERS = 'No caseworkers yet.';
 export const DISMISS_FAILED = "Couldn't hide this contact - please try again.";
+export const DISMISS_NOT_POSSIBLE = 'This contact is no longer a possible caseworker.';
+
+/** The staff line for a dismissal no retry can change, or null. */
+function finalDismissError(err: unknown): string | null {
+  if (!(err instanceof ApiError)) return null;
+  if (err.status === 404 && err.code === 'contact_not_found') return CONTACT_GONE;
+  if (err.status === 400 && err.code === 'caseworker_dismiss_not_allowed') return DISMISS_NOT_POSSIBLE;
+  return null;
+}
 
 /** One read's outcome, tagged with the generation it answers. */
 type Loaded<T> = { status: 'loading' } | { status: 'error' } | { status: 'ready'; value: T };
@@ -141,6 +151,8 @@ export function CaseworkersList(): React.JSX.Element {
   const [dismissing, setDismissing] = useState<PossibleCaseworkerRow | null>(null);
   const [dismissBusy, setDismissBusy] = useState(false);
   const [dismissError, setDismissError] = useState<string | null>(null);
+  // A dismissal answered with a final error: Hide stays off for that row.
+  const [dismissFinal, setDismissFinal] = useState(false);
   const possibleHeadingId = useId();
 
   const all = caseworkers.status === 'ready' ? caseworkers.value : NO_CONTACTS;
@@ -170,7 +182,7 @@ export function CaseworkersList(): React.JSX.Element {
   }
 
   async function onHide(): Promise<void> {
-    if (dismissing === null || dismissBusy) return;
+    if (dismissing === null || dismissBusy || dismissFinal) return;
     const id = dismissing.contactId;
     setDismissBusy(true);
     setDismissError(null);
@@ -178,8 +190,17 @@ export function CaseworkersList(): React.JSX.Element {
       await dismissPossibleCaseworker(id);
       setHidden((prev) => new Set([...prev, id]));
       setDismissing(null);
-    } catch {
-      setDismissError(DISMISS_FAILED);
+    } catch (err) {
+      const final = finalDismissError(err);
+      if (final === null) {
+        setDismissError(DISMISS_FAILED);
+      } else {
+        // The row is stale (deleted, converted or re-typed elsewhere): say so
+        // without a retry, and read both lists again.
+        setDismissError(final);
+        setDismissFinal(true);
+        setGeneration((n) => n + 1);
+      }
     } finally {
       setDismissBusy(false);
     }
@@ -224,10 +245,20 @@ export function CaseworkersList(): React.JSX.Element {
               const org = organizationOf(c);
               return (
                 <li key={c.contactId} className={listStyles.rowItem}>
-                  <Link to={`/contacts/${c.contactId}`} className={listStyles.row}>
+                  {/* .factsRow: the list's wide-pane sacrifice order, with the
+                      organization as the one compressible chip, so a long
+                      organization never crushes the name. */}
+                  <Link
+                    to={`/contacts/${c.contactId}`}
+                    className={`${listStyles.row} ${org !== null ? listStyles.factsRow : ''}`}
+                  >
                     <span className={listStyles.name}>{contactDisplayName(c.firstName, c.lastName, c.phone)}</span>
                     <span className={listStyles.meta}>
-                      {org !== null ? <span className={styles.org}>{org}</span> : null}
+                      {org !== null ? (
+                        <span className={styles.org} title={org}>
+                          {org}
+                        </span>
+                      ) : null}
                       <span className={listStyles.phone}>{formatPhone(c.phone)}</span>
                     </span>
                   </Link>
@@ -288,6 +319,7 @@ export function CaseworkersList(): React.JSX.Element {
                       aria-label={`${name} is not a caseworker`}
                       onClick={() => {
                         setDismissError(null);
+                        setDismissFinal(false);
                         setDismissing(row);
                       }}
                     >
@@ -310,6 +342,7 @@ export function CaseworkersList(): React.JSX.Element {
             setGeneration((n) => n + 1);
           }}
           onClose={() => setConverting(null)}
+          onStale={() => setGeneration((n) => n + 1)}
         />
       ) : null}
 
@@ -330,7 +363,13 @@ export function CaseworkersList(): React.JSX.Element {
               >
                 Cancel
               </Button>
-              <Button variant="primary" size="sm" type="button" onClick={() => void onHide()} disabled={dismissBusy}>
+              <Button
+                variant="primary"
+                size="sm"
+                type="button"
+                onClick={() => void onHide()}
+                disabled={dismissBusy || dismissFinal}
+              >
                 Hide
               </Button>
             </>

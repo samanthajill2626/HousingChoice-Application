@@ -193,6 +193,26 @@ describe('the refusals (rule 3, D19, D22), checked whatever the stored type', ()
     ]);
   });
 
+  it('reads the landlord-of-record index past its first page', async () => {
+    const { world, service } = setup();
+    seed(world, { type: 'landlord', status: 'active' });
+    unit(world, 'u-ll-a', { landlordId: ID });
+    unit(world, 'u-ll-b', { landlordId: ID });
+    // One unit per page: the 1 MB page boundary a real index can hit.
+    const original = world.unitsRepo.listByLandlord.bind(world.unitsRepo);
+    const cursors: unknown[] = [];
+    world.unitsRepo.listByLandlord = async (landlordId, opts = {}) => {
+      cursors.push(opts.exclusiveStartKey);
+      return original(landlordId, { ...opts, limit: 1 });
+    };
+    const p = await service.preview(ID);
+    expect(p.refusals).toEqual([
+      { code: 'caseworker_landlord_of_record', unitId: 'u-ll-a' },
+      { code: 'caseworker_landlord_of_record', unitId: 'u-ll-b' },
+    ]);
+    expect(cursors).toEqual([undefined, { unitId: 'u-ll-a' }]);
+  });
+
   it('checks a partner too (an open tour as the tenant), and lists every kind in order', async () => {
     const { world, service } = setup();
     seed(world, { type: 'partner', status: 'active' });
@@ -736,6 +756,8 @@ describe('make - the repair path (rule 2) and failures after the commit', () => 
     expect(world.auditEvents.find((e) => e.event_type === 'contact_updated')?.payload).toMatchObject({
       repair: true, conversion: 'caseworker', fields: [],
     });
+    // No stored record (a caseworker typed by hand): the audit invents none.
+    expect('caseworker_conversion' in (world.auditEvents.find((e) => e.event_type === 'contact_updated')?.payload ?? {})).toBe(false);
     expect(world.activityEvents.filter((e) => e.type === 'contact_status_changed')).toEqual([]);
   });
 
@@ -845,6 +867,11 @@ describe('conversion follow-on boundaries', () => {
     expect(tours).not.toHaveBeenCalled();
     expect(units).not.toHaveBeenCalled();
     expect(world.auditEvents.filter((event) => event.event_type === 'contact_updated')).toHaveLength(1);
+    // D19 step 4: the repair's audit carries the stored record, so a failed
+    // first audit loses no removed value (RUNBOOK restores from it).
+    expect(world.auditEvents.find((event) => event.event_type === 'contact_updated')?.payload).toMatchObject({
+      repair: true, caseworker_conversion: record,
+    });
     expect(world.activityEvents).toEqual([]);
     expect(world.vocabularyAdds).toEqual([{ roles: ['Caseworker'] }]);
     expect(world.emitted.filter((event) => event.event === 'suggestion.updated')).toHaveLength(1);

@@ -31,7 +31,9 @@ async function readPartition(
     const page = await contacts.listByType(type, {
       ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
     });
-    out.push(...page.items);
+    // A pointer row is a routing record, never a contact (orgRecords skips
+    // them the same way); a typed one would answer Make with a 404.
+    out.push(...page.items.filter((item) => item.phone_ref !== true && item.email_ref !== true));
     exclusiveStartKey = page.lastEvaluatedKey;
   } while (exclusiveStartKey !== undefined);
   return out;

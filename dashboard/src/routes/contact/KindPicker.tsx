@@ -145,7 +145,10 @@ export function KindPicker({
         onChange({ type: value.type, role: value.role });
       } else {
         setOtherSelected(true);
-        onChange({ type: null, role: value.role });
+        // Leaving the Caseworker preset drops its role: Other offers tenant
+        // and landlord bases, and a caseworker role there is exactly the
+        // record Possible caseworkers exists to clean up (spec D16, D22).
+        onChange({ type: null, role: isCaseworkerPreset ? '' : value.role });
       }
     } else if (seg === 'caseworker') {
       // A preset, like Property Manager - but not a SuggestedContactKind: the
@@ -171,7 +174,11 @@ export function KindPicker({
   return (
     <div className={styles.picker}>
       {/* Primary segment bar */}
-      <div className={styles.segmentBar} role="group" aria-label="Contact kind">
+      <div
+        className={`${styles.segmentBar} ${offerCaseworker ? styles.segmentBarSix : ''}`}
+        role="group"
+        aria-label="Contact kind"
+      >
         {(offerCaseworker ? SEGMENTS_WITH_CASEWORKER : SEGMENTS).map((seg) => {
           const label = SEGMENT_LABEL[seg];
           return (

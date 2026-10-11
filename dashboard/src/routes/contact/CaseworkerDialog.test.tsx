@@ -61,16 +61,32 @@ const CONVERTED: Contact = {
   organization: 'Hope Atlanta',
 };
 
-function renderDialog(): { onConverted: ReturnType<typeof vi.fn>; onClose: ReturnType<typeof vi.fn> } {
+function renderDialog(): {
+  onConverted: ReturnType<typeof vi.fn>;
+  onClose: ReturnType<typeof vi.fn>;
+  onStale: ReturnType<typeof vi.fn>;
+} {
   const onConverted = vi.fn();
   const onClose = vi.fn();
+  const onStale = vi.fn();
   render(
     <MemoryRouter>
-      <CaseworkerDialog contactId="c1" name="Dana Reyes" onConverted={onConverted} onClose={onClose} />
+      <CaseworkerDialog
+        contactId="c1"
+        name="Dana Reyes"
+        onConverted={onConverted}
+        onClose={onClose}
+        onStale={onStale}
+      />
     </MemoryRouter>,
   );
-  return { onConverted, onClose };
+  return { onConverted, onClose, onStale };
 }
+
+const GONE = new ApiError(404, 'contact_not_found', 'contact_not_found', { error: 'contact_not_found' });
+const TEAM_MEMBER = new ApiError(400, 'caseworker_team_member', 'caseworker_team_member', {
+  error: 'caseworker_team_member',
+});
 
 const dialog = (): HTMLElement => screen.getByRole('dialog', { name: 'Make Dana Reyes a caseworker' });
 const confirm = (): HTMLElement => screen.getByRole('button', { name: 'Make caseworker' });
@@ -335,6 +351,35 @@ describe('CaseworkerDialog', () => {
     await user.click(within(dialog()).getByRole('button', { name: 'Try again' }));
     await ready();
     expect(previewCaseworker).toHaveBeenCalledTimes(2);
+  });
+
+  it('a contact gone before the preview (404) says so for good: no Try again, and the host reads again', async () => {
+    previewCaseworker.mockRejectedValue(GONE);
+    const { onStale } = renderDialog();
+    expect(await within(dialog()).findByRole('alert')).toHaveTextContent('This contact no longer exists.');
+    expect(within(dialog()).queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(confirm()).toBeDisabled();
+    expect(onStale).toHaveBeenCalledTimes(1);
+  });
+
+  it('a team member (400) cannot be made a caseworker: final copy, no Try again', async () => {
+    previewCaseworker.mockRejectedValue(TEAM_MEMBER);
+    renderDialog();
+    expect(await within(dialog()).findByRole('alert')).toHaveTextContent("A team member can't be made a caseworker.");
+    expect(within(dialog()).queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(confirm()).toBeDisabled();
+  });
+
+  it('make answering 404 says the contact no longer exists, keeps Confirm disabled, and tells the host', async () => {
+    const user = userEvent.setup();
+    makeCaseworker.mockRejectedValue(GONE);
+    const { onConverted, onStale } = renderDialog();
+    await ready();
+    await user.click(confirm());
+    expect(await within(dialog()).findByRole('alert')).toHaveTextContent('This contact no longer exists.');
+    expect(confirm()).toBeDisabled();
+    expect(onStale).toHaveBeenCalledTimes(1);
+    expect(onConverted).not.toHaveBeenCalled();
   });
 
   it('"Add <text> as a new organization" asks for the kind; the added name fills the picker (R2-F3)', async () => {

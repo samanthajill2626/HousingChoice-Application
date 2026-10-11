@@ -954,6 +954,11 @@ describe('PATCH /api/contacts/:id - caseworkers (spec 2026-10-06 D16, D21)', () 
       seed(world, { type: from, status: from === 'tenant' ? 'onboarding' : 'active' });
       await send(app, { type: to }).expect(200);
       expect(storedOf(world)?.['type_source']).toBe('manual');
+      // The audit names every field the write changed, the stamp included.
+      const audit = world.auditEvents.find((e) => e.event_type === 'contact_updated');
+      expect((audit?.payload as { fields?: string[] } | undefined)?.fields).toEqual(
+        expect.arrayContaining(['type', 'type_source']),
+      );
     });
   }
 
@@ -983,4 +988,27 @@ describe('PATCH /api/contacts/:id - caseworkers (spec 2026-10-06 D16, D21)', () 
     expect(c).toMatchObject({ type: 'partner', role: 'Caseworker' });
     expect(c).not.toHaveProperty('type_source');
   });
+});
+
+describe('PATCH /api/contacts/:id - pointer rows are not contacts', () => {
+  // A phone or email pointer is an INTERNAL routing record (the GET 404s it).
+  // Typing one through the PATCH would surface it on Possible caseworkers,
+  // where Make and Not a caseworker both 404 it, so it could never be cleared.
+  for (const [label, pointer] of [
+    ['phone', { contactId: 'phoneref#+15550107499', phone: '+15550107499', phone_ref: true, phone_ref_owner: 'c-owner' }],
+    ['email', { contactId: 'emailref#pat@example.com', email: 'pat@example.com', email_ref: true, email_ref_owner: 'c-owner' }],
+  ] as const) {
+    it(`404s a ${label} pointer id and writes nothing`, async () => {
+      const { app, world } = makeWebhookHarness();
+      world.contacts.push(structuredClone(pointer) as never);
+      const res = await request(app)
+        .patch(`/api/contacts/${encodeURIComponent(pointer.contactId)}`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ type: 'partner', firstName: 'Pat' });
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: 'contact_not_found' });
+      expect(world.contacts.find((c) => c.contactId === pointer.contactId)).toEqual(pointer);
+    });
+  }
 });

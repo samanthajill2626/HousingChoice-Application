@@ -2877,11 +2877,30 @@ export function createFakeWorld(): FakeWorld {
       return unit;
     },
     async listByLandlord(landlordId, opts = {}) {
-      const items = [...units.values()]
+      // The listByStatus paging contract (the real repo queries an index the
+      // same way): resume after the cursor's unitId, at most `limit` items, a
+      // lastEvaluatedKey only when more remain, and ALL matches when no limit
+      // is passed - never a hidden cap that drops units with no cursor.
+      const all = [...units.values()]
         .filter((u) => u.landlordId === landlordId)
-        .filter((u) => inDeletedScope(u, opts.deleted))
-        .slice(0, opts.limit ?? 50);
-      return { items };
+        .filter((u) => inDeletedScope(u, opts.deleted));
+      let start = 0;
+      const cursorId = opts.exclusiveStartKey?.['unitId'];
+      if (typeof cursorId === 'string') {
+        const idx = all.findIndex((u) => u.unitId === cursorId);
+        if (idx >= 0) start = idx + 1;
+      }
+      const window =
+        opts.limit === undefined ? all.slice(start) : all.slice(start, start + opts.limit);
+      const last = window[window.length - 1];
+      const hasMore = opts.limit !== undefined && start + opts.limit < all.length;
+      return {
+        items: window,
+        ...(hasMore &&
+          last !== undefined && {
+            lastEvaluatedKey: { unitId: last.unitId } as Record<string, unknown>,
+          }),
+      };
     },
     async listByStatus(status, opts = {}) {
       // Honor the same paging contract as the real repo (BE5/C6 parity): resume

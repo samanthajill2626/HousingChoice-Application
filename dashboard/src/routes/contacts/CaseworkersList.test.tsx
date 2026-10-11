@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Contact, PossibleCaseworkerRow } from '../../api/index.js';
+import { ApiError, type Contact, type PossibleCaseworkerRow } from '../../api/index.js';
 import { formatPhone } from '../contact/format.js';
 
 const getAllContacts = vi.fn();
@@ -246,6 +246,47 @@ describe('CaseworkersList - Possible caseworkers (spec 2026-10-06 D19, D22)', ()
       "Couldn't hide this contact - please try again.",
     );
     expect(within(await possibleList()).getByText('Dana Reyes')).toBeInTheDocument();
+  });
+
+  for (const [label, err, copy] of [
+    [
+      'deleted elsewhere (404)',
+      new ApiError(404, 'contact_not_found', 'contact_not_found', { error: 'contact_not_found' }),
+      'This contact no longer exists.',
+    ],
+    [
+      'no longer possible (400)',
+      new ApiError(400, 'caseworker_dismiss_not_allowed', 'caseworker_dismiss_not_allowed', {
+        error: 'caseworker_dismiss_not_allowed',
+      }),
+      'This contact is no longer a possible caseworker.',
+    ],
+  ] as const) {
+    it(`a Hide that cannot succeed - ${label} - says so for good and reads both lists again`, async () => {
+      const user = userEvent.setup();
+      dismissPossibleCaseworker.mockRejectedValue(err);
+      renderAt();
+      await user.click(within(await possibleList()).getByRole('button', { name: 'Dana Reyes is not a caseworker' }));
+      const confirm = screen.getByRole('dialog', { name: 'Hide Dana Reyes from Possible caseworkers?' });
+      await user.click(within(confirm).getByRole('button', { name: 'Hide' }));
+      expect(await within(confirm).findByRole('alert')).toHaveTextContent(copy);
+      expect(within(confirm).getByRole('alert')).not.toHaveTextContent(/try again/i);
+      expect(within(confirm).getByRole('button', { name: 'Hide' })).toBeDisabled();
+      await waitFor(() => expect(listPossibleCaseworkers).toHaveBeenCalledTimes(2));
+      expect(getAllContacts).toHaveBeenCalledTimes(2);
+    });
+  }
+
+  it('a Make caseworker that finds the contact gone reads both lists again', async () => {
+    previewCaseworker.mockRejectedValue(
+      new ApiError(404, 'contact_not_found', 'contact_not_found', { error: 'contact_not_found' }),
+    );
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(within(await possibleList()).getByRole('button', { name: 'Make Dana Reyes a caseworker' }));
+    const dialog = screen.getByRole('dialog', { name: 'Make Dana Reyes a caseworker' });
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('This contact no longer exists.');
+    await waitFor(() => expect(listPossibleCaseworkers).toHaveBeenCalledTimes(2));
   });
 
   it('a failed Possible read says so and leaves the caseworkers list working', async () => {

@@ -8,7 +8,14 @@
   margin: var(--sp-3) 0;
 }
 
+/* The row's ONLY compressible chip (ContactsList.module.css .facts explains the
+   .factsRow sacrifice order): a long organization ellipsizes, the name stays. */
 .org {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--fs-sm);
   color: var(--c-text);
 }

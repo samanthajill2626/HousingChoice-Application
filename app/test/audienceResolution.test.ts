@@ -150,6 +150,20 @@ describe('audience resolution (M1.8a)', () => {
     expect(contacts.haQueries).toEqual(['HA-A']);
   });
 
+  it('housing_authority path: the index holds every type, so a partner or landlord there is never in the audience (D20)', async () => {
+    const items = [
+      tenant({ contactId: 'c-1', housingAuthority: 'HA-A' }),
+      { ...tenant({ contactId: 'c-partner', housingAuthority: 'HA-A' }), type: 'partner' as const, role: 'Caseworker' },
+      { ...tenant({ contactId: 'c-landlord', housingAuthority: 'HA-A' }), type: 'landlord' as const },
+    ];
+    const contacts = fakeContacts(items);
+    const resolve = createAudienceResolutionService({ contactsRepo: contacts, logger });
+    const out = await resolve({ contact_type: 'tenant', housing_authority: 'HA-A', ...ALWAYS_EXCLUDE });
+    expect(out.contactIds).toEqual(['c-1']);
+    expect(out.count).toBe(1);
+    expect(contacts.haQueries).toEqual(['HA-A']);
+  });
+
   it('no housing_authority → Queries byTypeStatus (type=tenant)', async () => {
     const items = [
       tenant({ contactId: 'c-1', firstName: 'Ann' }),

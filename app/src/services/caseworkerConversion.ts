@@ -521,8 +521,11 @@ export function createCaseworkerConversionService(
       if (isCaseworker(c)) {
         // Rule 2, the repair path: steps 2-4 only. A request organization is
         // ignored here (no commit runs). readSubject re-checked deletion.
+        // The audit carries the STORED record (D19 step 4), so a failed first
+        // audit never loses the removed values; a hand-typed caseworker has none.
         await followOn(contactId, c, { actor, repair: true, priorStatus: read.status, fields: [],
           pendingTypeBefore: await readTypeSuggestion(contactId, true),
+          ...(c.caseworker_conversion !== undefined && { record: c.caseworker_conversion }),
         });
         return c;
       }

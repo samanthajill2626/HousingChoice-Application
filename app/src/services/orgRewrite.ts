@@ -461,6 +461,17 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
       if (field === 'organization' && action === 'add' && input.kind === undefined) {
         throw new OrgHttpError(400, { error: 'kind is required to add an organization value' });
       }
+      // Move and Split each settle ONE field: a request shape fault, refused
+      // with 400 before the lock or the list can answer 409 (spec 5.1).
+      if (action === 'move_to_agency' && field !== 'housingAuthority') {
+        throw new OrgHttpError(400, { error: 'move_to_agency settles housingAuthority values only' });
+      }
+      if (action === 'move_to_housing_authority' && field !== 'agency') {
+        throw new OrgHttpError(400, { error: 'move_to_housing_authority settles agency values only' });
+      }
+      if (action === 'split' && field !== 'housingAuthority') {
+        throw new OrgHttpError(400, { error: 'split settles housingAuthority values on contacts only' });
+      }
       const addKind: OrgKind = input.kind ?? kinds[0] ?? 'housing_authority';
       // Minted outside the (retryable) list change, before start() mints the rewrite id.
       const addedId = action === 'add' ? newId() : undefined;
@@ -501,19 +512,10 @@ export function createOrgRewriteService(deps: OrgRewriteDeps = {}): OrgRewriteSe
           case 'clear':
             return settle({ action: 'clear' });
           case 'move_to_agency':
-            if (field !== 'housingAuthority') {
-              throw new OrgHttpError(400, { error: 'move_to_agency settles housingAuthority values only' });
-            }
             return settle({ action, toName: named(input.name, ['agency'], 'name').name });
           case 'move_to_housing_authority':
-            if (field !== 'agency') {
-              throw new OrgHttpError(400, { error: 'move_to_housing_authority settles agency values only' });
-            }
             return settle({ action, toName: named(input.name, ['housing_authority'], 'name').name });
           case 'split':
-            if (field !== 'housingAuthority') {
-              throw new OrgHttpError(400, { error: 'split settles housingAuthority values on contacts only' });
-            }
             return settle({
               action,
               toName: named(input.name, ['housing_authority'], 'name').name,

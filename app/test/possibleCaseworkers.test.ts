@@ -164,3 +164,20 @@ describe('relationship holder identity', () => {
     ]);
   });
 });
+
+describe('pointer rows', () => {
+  it('skips a pointer row the type index returns (one typed before the PATCH refused pointers)', async () => {
+    // The partition fake hides pointers by construction; DynamoDB returns any
+    // row holding type and status, so this read hands one back directly.
+    const pointer = { contactId: 'phoneref#+15550107498', type: 'partner', status: 'active', phone_ref: true } as ContactItem;
+    const emailPointer = { contactId: 'emailref#pat@example.com', type: 'partner', status: 'active', email_ref: true } as ContactItem;
+    const deps = {
+      contacts: {
+        async listByType(type: ContactType) {
+          return { items: type === 'partner' ? [pointer, emailPointer, c('p-real', 'partner')] : [] };
+        },
+      },
+    };
+    expect((await listPossibleCaseworkers(deps)).map((row) => row.contactId)).toEqual(['p-real']);
+  });
+});

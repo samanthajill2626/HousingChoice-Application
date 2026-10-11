@@ -602,6 +602,27 @@ describe('OrgRewriteService.resolveNotOnList (spec D10)', () => {
       svc.resolveNotOnList({ field: 'agency', value: 'Steps', action: 'clear', actor: 'u' }),
     ).rejects.toMatchObject({ status: 409, body: { error: 'org_rewrite_running' } });
   });
+
+  it('refuses Move or Split on the wrong field with 400 ahead of the lock and the name-variant 409', async () => {
+    const wrongField: Array<Omit<ResolveInput, 'actor'>> = [
+      { field: 'agency', value: 'Steps', action: 'move_to_agency', name: VASH.name },
+      { field: 'housingAuthority', value: 'Junk', action: 'move_to_housing_authority', name: ATLANTA.name },
+      { field: 'organization', value: 'DCA HUD-VASH', action: 'split', name: DCA.name, agencyName: VASH.name },
+    ];
+    const running = await rewriteService({
+      lastRewrite: runningRewrite({ action: 'clear', field: 'agency', fromTexts: ['x'], heartbeatAt: T1 }),
+    });
+    for (const input of wrongField) {
+      await expect(running.svc.resolveNotOnList({ ...input, actor: 'u' })).rejects.toMatchObject({ status: 400 });
+    }
+    // A name variant of Atlanta on an organization row: still the field's 400.
+    const { svc } = await rewriteService();
+    await expect(
+      svc.resolveNotOnList({
+        field: 'organization', value: 'atlanta housing authority', action: 'move_to_agency', name: VASH.name, actor: 'u',
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
 });
 
 describe('OrgRewriteService.runAgain (spec D11)', () => {

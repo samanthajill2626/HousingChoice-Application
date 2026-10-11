@@ -271,6 +271,17 @@ describe('KindPicker - the Caseworker choice (spec 2026-10-06 D16, D22)', () => 
     expect(onChange).toHaveBeenLastCalledWith({ type: 'partner', role: '' });
   });
 
+  it('Other after Caseworker clears the role, so no base can keep "Caseworker"', () => {
+    const onChange = vi.fn();
+    render(<OfferedKindPicker initial={{ type: null, role: '' }} onChange={onChange} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Caseworker' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Other' }));
+    expect(onChange).toHaveBeenLastCalledWith({ type: null, role: '' });
+    expect(screen.getByLabelText(/^role$/i)).toHaveValue('');
+    fireEvent.click(screen.getByRole('radio', { name: /Tenant/i }));
+    expect(onChange).toHaveBeenLastCalledWith({ type: 'tenant', role: '' });
+  });
+
   it('a stored caseworker lights the preset only on the exact role (R4-15); a variant reads as Other', () => {
     const { unmount } = render(
       <KindPicker value={{ type: 'partner', role: 'Caseworker' }} onChange={vi.fn()} offerCaseworker />,

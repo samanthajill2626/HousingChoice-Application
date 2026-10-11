@@ -169,36 +169,44 @@ test.describe('Extensible contact creation', () => {
     const dialog = page.getByRole('dialog', { name: /New contact/i });
     await expect(dialog).toBeVisible();
 
-    // Prove every choice fits and is usable in the six-choice phone layout.
-    // Page overflow is blind to this fixed dialog; measure the group and its
-    // actual segments before Playwright can scroll a clipped choice into view.
-    await page.setViewportSize({ width: 375, height: 800 });
+    // Prove every choice fits inside its visible group: at desktop width (the
+    // dialog's fixed width, where six choices once outran one row and cut
+    // "Other" off), just above the phone breakpoint, and in the six-choice
+    // phone layout. Page overflow is blind to this fixed dialog; measure the
+    // group and its actual segments before Playwright can scroll a clipped
+    // choice into view.
     const kindGroup = dialog.getByRole('group', { name: 'Contact kind' });
     const labels = ['Tenant', 'Landlord', 'Partner', 'Caseworker', 'Property Manager', 'Other'];
-    const groupBox = await kindGroup.boundingBox();
-    expect(groupBox).not.toBeNull();
-    const segments = [];
-    for (const label of labels) {
-      const box = await kindGroup.getByRole('button', { name: label, exact: true }).boundingBox();
-      expect(box).not.toBeNull();
-      segments.push({ label, box: box! });
+    for (const width of [1280, 600, 375]) {
+      await page.setViewportSize({ width, height: 800 });
+      const groupBox = await kindGroup.boundingBox();
+      expect(groupBox).not.toBeNull();
+      const segments = [];
+      for (const label of labels) {
+        const box = await kindGroup.getByRole('button', { name: label, exact: true }).boundingBox();
+        expect(box).not.toBeNull();
+        segments.push({ label, box: box! });
+      }
+      await testInfo.attach(`kind-picker-${width}px-geometry`, {
+        body: JSON.stringify({ viewport: page.viewportSize(), groupBox, segments }, null, 2),
+        contentType: 'application/json',
+      });
+      await testInfo.attach(`kind-picker-${width}px`, {
+        body: await page.screenshot(),
+        contentType: 'image/png',
+      });
+      expect(groupBox!.x).toBeGreaterThanOrEqual(0);
+      expect(groupBox!.x + groupBox!.width).toBeLessThanOrEqual(width);
+      const clipped = segments.filter(({ box }) =>
+        box.x < groupBox!.x || box.y < groupBox!.y ||
+        box.x + box.width > groupBox!.x + groupBox!.width ||
+        box.y + box.height > groupBox!.y + groupBox!.height,
+      );
+      expect(
+        clipped,
+        `Every contact-kind choice must fit inside its visible group at ${width}px`,
+      ).toEqual([]);
     }
-    await testInfo.attach('kind-picker-375px-geometry', {
-      body: JSON.stringify({ viewport: page.viewportSize(), groupBox, segments }, null, 2),
-      contentType: 'application/json',
-    });
-    await testInfo.attach('kind-picker-375px', {
-      body: await page.screenshot(),
-      contentType: 'image/png',
-    });
-    expect(groupBox!.x).toBeGreaterThanOrEqual(0);
-    expect(groupBox!.x + groupBox!.width).toBeLessThanOrEqual(375);
-    const clipped = segments.filter(({ box }) =>
-      box.x < groupBox!.x || box.y < groupBox!.y ||
-      box.x + box.width > groupBox!.x + groupBox!.width ||
-      box.y + box.height > groupBox!.y + groupBox!.height,
-    );
-    expect(clipped, 'Every contact-kind choice must fit inside its visible group at 375px').toEqual([]);
     for (const label of labels) {
       const choice = kindGroup.getByRole('button', { name: label, exact: true });
       await choice.click();

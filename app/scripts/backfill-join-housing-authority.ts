@@ -137,3 +137,116 @@ export function leftOutReasonFromAudit(events: readonly AuditEvent[]): Exclude<L
   if (signedUpAgain) return 'signed_up_again';
   return events.some(touchesHousingAuthority) ? 'authority_history' : null;
 }
+
+// ---------------------------------------------------------------------------
+// The report (pure): what a run returns, and what the operator reads
+// ---------------------------------------------------------------------------
+
+/** One candidate as the report shows it. Names reach the PRINTED report only, never a log line. */
+export interface BackfillLead {
+  contactId: string;
+  /** '' when the record has none. */
+  firstName: string;
+  /** '' when the record has none. */
+  lastName: string;
+  /** captured_at, else created_at (ISO 8601); '' when it has neither. The sort key. */
+  signedUpAt: string;
+  /** As stored (needs_review, on_hold, ...); '' when absent. */
+  status: string;
+}
+
+/**
+ * What became of one target: would_write (dry run); written; skipped (its
+ * write lost its condition - the lead changed after the read, nothing
+ * written); failed (its history read or its write threw - nothing written;
+ * the run exits 1).
+ */
+export type TargetOutcome = 'would_write' | 'written' | 'skipped' | 'failed';
+
+export interface BackfillTarget extends BackfillLead {
+  outcome: TargetOutcome;
+}
+
+export interface LeftOutLead extends BackfillLead {
+  reason: LeftOutReason;
+}
+
+export interface BackfillReport {
+  /** Every lead the run set, would set, or failed on - oldest sign-up first. */
+  targets: BackfillTarget[];
+  /** Candidates left out, with the reason - oldest sign-up first. */
+  leftOut: LeftOutLead[];
+  /** --skip ids that named no candidate, sorted: reported, otherwise ignored. */
+  unknownSkips: string[];
+  /** Apply: targets written. */
+  written: number;
+  /** Apply: targets whose write lost its condition (changed after the read). */
+  skipped: number;
+  /** Targets whose history read or write failed: nothing written for them. */
+  failed: number;
+  /** Printed as WARNING lines: the post-apply list check, a missing audit event. */
+  warnings: string[];
+}
+
+const REASON_TEXT: Readonly<Record<LeftOutReason, string>> = {
+  skipped: 'named in --skip',
+  signed_up_again: 'signed up again after the change',
+  authority_history: 'its housing authority was set or removed before - left empty on purpose',
+};
+
+const OUTCOME_SUFFIX: Readonly<Record<TargetOutcome, string>> = {
+  would_write: '',
+  written: '',
+  skipped: '  - SKIPPED: it changed after the run read it (nothing written)',
+  failed: '  - FAILED: nothing written (an ERROR line names this contactId); re-run',
+};
+
+/** "2026-06-20" from an ISO stamp (UTC); "unknown" when there is none. */
+function signUpDate(signedUpAt: string): string {
+  return /^\d{4}-\d{2}-\d{2}/.test(signedUpAt) ? signedUpAt.slice(0, 10) : 'unknown';
+}
+
+function leadLine(lead: BackfillLead): string {
+  const name = `${lead.firstName} ${lead.lastName}`.trim();
+  return (
+    `  ${name === '' ? '(no name)' : name}  signed up ${signUpDate(lead.signedUpAt)}` +
+    `  status ${lead.status === '' ? '(none)' : lead.status}  contactId ${lead.contactId}`
+  );
+}
+
+/**
+ * Spec D10: what the CLI prints - each target on its own line (name, sign-up
+ * date, status, contactId), oldest first, then the count; then the left-out
+ * leads the same way with the reason; then unknown --skip ids and warnings.
+ */
+export function formatBackfillReport(report: BackfillReport, apply: boolean): string[] {
+  const lines: string[] = [
+    apply
+      ? `Leads given "${BACKFILL_AUTHORITY}" (oldest sign-up first; dates are UTC):`
+      : `DRY RUN - nothing written. Leads that WOULD get "${BACKFILL_AUTHORITY}" (oldest sign-up first; dates are UTC):`,
+  ];
+  if (report.targets.length === 0) lines.push('  (none)');
+  for (const t of report.targets) lines.push(`${leadLine(t)}${OUTCOME_SUFFIX[t.outcome]}`);
+  const wouldWrite = report.targets.filter((t) => t.outcome === 'would_write').length;
+  lines.push(
+    apply
+      ? `Written: ${report.written}. Skipped (changed after the read): ${report.skipped}. Failed: ${report.failed}.`
+      : `Would update: ${wouldWrite} lead(s). Failed: ${report.failed}.`,
+  );
+  if (report.leftOut.length === 0) {
+    lines.push('Left out: none.');
+  } else {
+    lines.push(`Left out (${report.leftOut.length} lead(s), oldest sign-up first):`);
+    for (const l of report.leftOut) lines.push(`${leadLine(l)}  - ${REASON_TEXT[l.reason]}`);
+  }
+  if (report.unknownSkips.length > 0) {
+    lines.push(`--skip ids that are not candidates (ignored): ${report.unknownSkips.join(', ')}`);
+  }
+  for (const w of report.warnings) lines.push(`WARNING: ${w}`);
+  return lines;
+}
+
+/** Spec D10: 0 completed clean (warnings included); 1 completed with failures. Refusals and usage are the CLI's. */
+export function backfillExitCode(report: BackfillReport): 0 | 1 {
+  return report.failed > 0 ? 1 : 0;
+}

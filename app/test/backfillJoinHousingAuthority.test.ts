@@ -8,9 +8,13 @@ import type { ContactItem } from '../src/repos/contactsRepo.js';
 import {
   BACKFILL_AUDIT_TYPE,
   BACKFILL_AUTHORITY,
+  backfillExitCode,
+  formatBackfillReport,
   isCandidate,
   leftOutReasonFromAudit,
   touchesHousingAuthority,
+  type BackfillLead,
+  type BackfillReport,
 } from '../scripts/backfill-join-housing-authority.js';
 
 /** A /join lead from before the change, as the sign-up created it: no authority, no marker. */
@@ -205,5 +209,110 @@ describe('leftOutReasonFromAudit (spec D10: the WHOLE history, any order)', () =
         event('org_name_rewrite', { field: ['housingAuthority'] }),
       ]),
     ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The report the operator reads (pure). Names go to the PRINTED report only.
+// ---------------------------------------------------------------------------
+
+const lead = (contactId: string, firstName: string, lastName: string, signedUpAt: string, status: string): BackfillLead => ({
+  contactId,
+  firstName,
+  lastName,
+  signedUpAt,
+  status,
+});
+
+const DRY_REPORT: BackfillReport = {
+  targets: [
+    { ...lead('c-1', 'Avery', 'Fairlead', '2026-06-20T14:00:00.000Z', 'needs_review'), outcome: 'would_write' },
+    { ...lead('c-2', 'Blake', '', '2026-08-15T23:30:00.000Z', 'on_hold'), outcome: 'would_write' },
+  ],
+  leftOut: [
+    { ...lead('c-3', 'Drew', 'Dekalbson', '2026-06-01T09:00:00.000Z', 'needs_review'), reason: 'skipped' },
+    { ...lead('c-4', 'Emery', 'Again', '2026-06-10T09:00:00.000Z', 'onboarding'), reason: 'signed_up_again' },
+    { ...lead('c-5', '', '', '', ''), reason: 'authority_history' },
+  ],
+  unknownSkips: [],
+  written: 0,
+  skipped: 0,
+  failed: 0,
+  warnings: [],
+};
+
+describe('formatBackfillReport (spec D10: name, sign-up date, status, contactId - oldest first)', () => {
+  it('dry run: each target on its own line, then the count; then the left-out leads with the reason', () => {
+    expect(formatBackfillReport(DRY_REPORT, false)).toEqual([
+      'DRY RUN - nothing written. Leads that WOULD get "Atlanta Housing Authority" (oldest sign-up first; dates are UTC):',
+      '  Avery Fairlead  signed up 2026-06-20  status needs_review  contactId c-1',
+      '  Blake  signed up 2026-08-15  status on_hold  contactId c-2',
+      'Would update: 2 lead(s). Failed: 0.',
+      'Left out (3 lead(s), oldest sign-up first):',
+      '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-3  - named in --skip',
+      '  Emery Again  signed up 2026-06-10  status onboarding  contactId c-4  - signed up again after the change',
+      '  (no name)  signed up unknown  status (none)  contactId c-5  - its housing authority was set or removed before - left empty on purpose',
+    ]);
+  });
+
+  it('apply: each outcome, the counts, the unknown --skip ids and every warning', () => {
+    const applied: BackfillReport = {
+      ...DRY_REPORT,
+      targets: [
+        { ...lead('c-1', 'Avery', 'Fairlead', '2026-06-20T14:00:00.000Z', 'needs_review'), outcome: 'written' },
+        { ...lead('c-2', 'Blake', '', '2026-08-15T23:30:00.000Z', 'on_hold'), outcome: 'skipped' },
+        { ...lead('c-6', 'Gray', 'Failson', '2026-09-01T12:00:00.000Z', 'needs_review'), outcome: 'failed' },
+      ],
+      leftOut: [],
+      unknownSkips: ['contact-typo', 'contact-xyz'],
+      written: 1,
+      skipped: 1,
+      failed: 1,
+      warnings: ['first warning', 'second warning'],
+    };
+    expect(formatBackfillReport(applied, true)).toEqual([
+      'Leads given "Atlanta Housing Authority" (oldest sign-up first; dates are UTC):',
+      '  Avery Fairlead  signed up 2026-06-20  status needs_review  contactId c-1',
+      '  Blake  signed up 2026-08-15  status on_hold  contactId c-2  - SKIPPED: it changed after the run read it (nothing written)',
+      '  Gray Failson  signed up 2026-09-01  status needs_review  contactId c-6  - FAILED: nothing written (an ERROR line names this contactId); re-run',
+      'Written: 1. Skipped (changed after the read): 1. Failed: 1.',
+      'Left out: none.',
+      '--skip ids that are not candidates (ignored): contact-typo, contact-xyz',
+      'WARNING: first warning',
+      'WARNING: second warning',
+    ]);
+  });
+
+  it('a dry run counts only the leads it would write; a failed lead is listed and counted apart', () => {
+    const dryFailed: BackfillReport = {
+      ...DRY_REPORT,
+      targets: [
+        { ...lead('c-1', 'Avery', 'Fairlead', '2026-06-20T14:00:00.000Z', 'needs_review'), outcome: 'would_write' },
+        { ...lead('c-6', 'Gray', 'Failson', '2026-09-01T12:00:00.000Z', 'needs_review'), outcome: 'failed' },
+      ],
+      failed: 1,
+    };
+    const lines = formatBackfillReport(dryFailed, false);
+    expect(lines).toContain(
+      '  Gray Failson  signed up 2026-09-01  status needs_review  contactId c-6  - FAILED: nothing written (an ERROR line names this contactId); re-run',
+    );
+    expect(lines).toContain('Would update: 1 lead(s). Failed: 1.');
+  });
+
+  it('no target and nothing left out', () => {
+    expect(formatBackfillReport({ ...DRY_REPORT, targets: [], leftOut: [] }, false)).toEqual([
+      'DRY RUN - nothing written. Leads that WOULD get "Atlanta Housing Authority" (oldest sign-up first; dates are UTC):',
+      '  (none)',
+      'Would update: 0 lead(s). Failed: 0.',
+      'Left out: none.',
+    ]);
+  });
+});
+
+describe('backfillExitCode (spec D10: 0 clean, 1 with failures)', () => {
+  it('a completed run exits 0 - warnings included - and 1 once any lead failed', () => {
+    expect(backfillExitCode(DRY_REPORT)).toBe(0);
+    expect(backfillExitCode({ ...DRY_REPORT, warnings: ['a warning'] })).toBe(0);
+    expect(backfillExitCode({ ...DRY_REPORT, failed: 1 })).toBe(1);
   });
 });

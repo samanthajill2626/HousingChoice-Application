@@ -44,3 +44,30 @@ Result: 24 ACCEPT (some with a different mechanism than proposed, noted),
 | J22 | A9 | ACCEPT | yes | The heir function is PURE and shared by the real repo and the API-test fake (`twilioWebhookHarness.ts`), which is listed as a surface. |
 | J23 | A16b | ACCEPT | no | The property facts subline (`ListingDetail.tsx:291`) skips deleted rows. |
 | J24 | A18 | ACCEPT | no | 5.1 wording fixed (owner/unit read failure leaves nothing else decidable); the script takes no lock (every write is conditional); the Activity projection whitelist gains `reason` and the renderer a line; the delete Scan's cost is stated. |
+
+## Round 2 (spec rev 2 @8c2c727e)
+
+Report: `spec-R2-reviewer-b.md` (reviewer B continued, 11 findings + one
+section-10 addition). Re-checked: `unitsRepo.list` Scan has no ConsistentRead
+(`unitsRepo.ts:1026-1043`); the batch read has none either
+(`contactsRepo.ts:979`); `requireComplete` throws `IncompleteBatchReadError`
+with no partial map (`contactsRepo.ts:996`).
+
+Result: 11 ACCEPT (R2-9's tenant-typed sub-point accepted as a STATED known gap
+rather than fixed), 0 REJECT. Reviewer conceded J6 and did not contest the
+other mechanisms. Decisions changed: YES (K1, K2) -> round 3 required.
+
+| id | finding | verdict | decision changed? | resolution in rev 3 |
+|---|---|---|---|---|
+| K1 | R2-1 HIGH | ACCEPT | yes | P2 triggers on "no LIVE flagged primary" (none flagged OR the flagged contact deleted/missing); every add does the liveness read. "Delete Mark then add a replacement" now promotes, same as the other order. |
+| K2 | R2-2 | ACCEPT | yes | The excluded contact counts as not live at EVERY heir step (landlord included); the delete fan-out excludes the just-deleted contact instead of reading it; its Scan is strongly consistent; a conditional-write failure re-reads the unit consistently and re-decides with bounded retries. |
+| K3 | R2-3 | ACCEPT | no | The 7.5 read (and every 4.2 read) includes `landlordId`. |
+| K4 | R2-4 | ACCEPT | no | P1's tenant test is an id comparison BEFORE the read, as today. |
+| K5 | R2-5 | ACCEPT | no | Diagnostics keep their codes AND their texts for the state each describes today; per-reason mapping stated; placement keeps its single code; the plan pins strings against the verbatim tests. |
+| K6 | R2-6 | ACCEPT | no | Incomplete 7.5 read falls back to today's best-effort read for names. |
+| K7 | R2-7 | ACCEPT | no | The post-restore refetch replaces `rosterUnit` and becomes the roster source. |
+| K8 | R2-8 | ACCEPT | small | P4 reworded; the script also aligns a disagreeing scalar on units with a live stored primary (`scalarAligned`, no audit event). |
+| K9 | R2-9 | ACCEPT (partly as known gap) | no | 7.4 deleted lead says "This property's contact was deleted."; the 7.5 heir carries a name (off-roster landlord included); 7.6 says "the landlord or another contact"; the tenant-typed-primary dialog case is stated as an accepted gap. |
+| K10 | R2-10 | ACCEPT | no | The e2e seam creates its OWN unit + contact, never rewrites a shared lean unit. |
+| K11 | R2-11 (contests J24) | ACCEPT - reviewer right | no | A UNIT read failure keeps the decidable tour reasons beside `lookup_failed`; only an OWNER read failure stands alone. |
+| K12 | section-10 note | ACCEPT | no | The 503 / unknown paths are tested with an injected contacts repo (the fake ignores `requireComplete`). |

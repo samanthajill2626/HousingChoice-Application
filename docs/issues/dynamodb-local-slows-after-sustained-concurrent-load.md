@@ -85,3 +85,19 @@ of ~40s.
    `docker stats` and `jcmd 1 VM.native_memory` (needs
    `-XX:NativeMemoryTracking=summary`, which changes the container args and so
    recreates - wipes - it).
+
+**Sighting 2026-10-11 (Windows, feat/caseworkers gates @e77fc543).** A
+container up five days (since 2026-10-06; 100 databases, 564 MB on tmpfs,
+JVM 724 MB of a 2 GB heap, 0 full GCs) made the full `npm run e2e` run about
+2.1-2.5x slower than the 2026-10-08 run on the same machine, evenly across
+the whole suite; the 45-minute gate cap fired at test 320 of 338. Fresh
+client probes stayed fast (ListTables 13 ms, DescribeTable/Scan/PutItem/
+UpdateItem 1-41 ms), while the app's write-heavy endpoints were slow
+(`POST /status` average 1.3 s over 484 calls, `POST /__dev/reseed` 3.8 s,
+max 20.5 s). After `docker restart hc-dynamodb-local hc-s3-local` (Cameron's
+call; the tmpfs data was wiped), the next run ran at 1.18x and finished in
+27.7 min. So the slow state reaches e2e too, and a raw latency probe does not
+detect it. Record:
+`docs/superpowers/reviews/2026-10-07-caseworkers/windows-gates-2026-10-11.md`.
+Operational note until fixed: before a full e2e gate on a long-lived
+container, a restart is the known remedy (it wipes local dev data).

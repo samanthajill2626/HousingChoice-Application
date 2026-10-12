@@ -94,3 +94,13 @@ screenshot, video, results.json), `iso1-3.log`.
    about 2.5x before the restart. Worth a line in the e2e README or an issue
    (restart wipes tmpfs data, so it stays Cameron's call).
 3. Not done: the optional visual check (handback section 4.3).
+
+## Addendum (2026-10-11, Cameron's decisions)
+
+- The failing test alone: `npm run e2e -w e2e -- tests/scenarios/post-tour-application.spec.ts:249`
+  -> exit 0, 1 passed (13.2 s).
+- Item 1: filed for later review - the second sighting is appended to
+  `docs/issues/e2e-blank-document-after-contact-navigation.md`.
+- Item 2: filed - the sighting is appended to the existing
+  `docs/issues/dynamodb-local-slows-after-sustained-concurrent-load.md`
+  (the same never-released-databases problem; no duplicate issue).

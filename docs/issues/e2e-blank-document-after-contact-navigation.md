@@ -29,3 +29,14 @@ harness patches; not a gate run) passed 337/337 and this scenario in 18.7s.
 Non-reproduction only; the cause stays unresolved. See
 `docs/superpowers/reviews/2026-10-07-caseworkers/planner-final-review.md`
 section 3.3.
+
+**Second sighting (2026-10-11, Windows, pinned Chromium 149, @e77fc543).** A
+full gate run on a freshly restarted stack finished 337 passed / 1 failed:
+`tests/scenarios/post-tour-application.spec.ts:249` waited 15 s for the
+contact Details section's "Searching"; the screenshot is an entirely white
+document and the page snapshot is empty. The same scenario passed in an
+earlier full run that day; its file passed alone 3/3 (5/5 each) and the test
+alone 1/1 (13.2 s). No trace (the gate does not set `E2E_TRACE=1`);
+screenshot and video kept on Cameron's machine. Different scenario from the
+first sighting, same signature: a blank document after contact navigation.
+Record: `docs/superpowers/reviews/2026-10-07-caseworkers/windows-gates-2026-10-11.md`.

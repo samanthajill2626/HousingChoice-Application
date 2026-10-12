@@ -40,6 +40,12 @@
   color: var(--c-danger);
 }
 
+/* A field's help line or note (the /join "Housing authority" select). */
+.help {
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
 /* A2P/CTIA consent gate — a required checkbox with the filed disclosure text. */
 .consentField {
   display: flex;

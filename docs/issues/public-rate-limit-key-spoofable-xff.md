@@ -6,7 +6,7 @@ severity: high
 status: open
 area: app/middleware
 created: 2026-10-12
-refs: app/src/middleware/rateLimit.ts:28-34, app/src/middleware/rateLimit.ts:67-74, app/src/app.ts, app/src/routes/public.ts, infra/modules/cloudfront/main.tf:22, app/src/middleware/requestLogger.ts:41
+refs: app/src/middleware/rateLimit.ts:28-34, app/src/middleware/rateLimit.ts:67-74, app/src/app.ts:161, app/src/app.ts:172, app/src/routes/public.ts:31, app/src/routes/public.ts:480, app/src/services/publicOrgList.ts:17, infra/modules/cloudfront/main.tf:22, app/src/middleware/requestLogger.ts:41
 ---
 
 **Problem.** `clientIpOf` (`app/src/middleware/rateLimit.ts:67-74`) keys every per-IP
@@ -38,3 +38,8 @@ found in infra/), then key on the LAST `X-Forwarded-For` entry (the one CloudFro
 appended; the origin is reachable only through CloudFront because of the origin-secret
 check), or add `CloudFront-Viewer-Address` to the origin request policy and key on it.
 Add a `clientIpOf` test with a multi-entry header, and correct the "per-IP" comments.
+
+When this lands, also correct the "per-IP" comments that describe the limits as if the key
+were trustworthy, including those added by join-housing-authority for the list read:
+`app/src/routes/public.ts:31` and `:480`, `app/src/app.ts:161` and `:172`,
+`app/src/services/publicOrgList.ts:17` (join-housing-authority R2-N3, 2026-10-12).

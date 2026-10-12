@@ -1620,7 +1620,28 @@ describe('ListingDetail - Contacts card edit mode', () => {
     const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
     expect(
       within(dialog).getByText(
-        'This property will have no primary contact - tours fall back to the landlord of record.',
+        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until a contact is added.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('an OWNERLESS property (no landlordId at all, e.g. restored without a landlord) names the NO-primary outcome without crashing', async () => {
+    const user = userEvent.setup();
+    const { landlordId: _dropped, ...ownerless } = ROSTER_UNIT;
+    useListing.mockReturnValue({
+      ...ROSTER_READY,
+      unit: { ...ownerless, contacts: [ROSTER_UNIT.contacts![0]!] } as NonNullable<ListingState['unit']>,
+      roster: [ROSTER_READY.roster[0]!],
+    });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Remove Alicia Grant from this property' }));
+
+    const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
+    expect(
+      within(dialog).getByText(
+        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until a contact is added.',
       ),
     ).toBeInTheDocument();
   });

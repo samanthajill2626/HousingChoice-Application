@@ -301,7 +301,11 @@ export function ListingDetail(): React.JSX.Element {
     contactsUnit !== null ? listingRoster(contactsUnit, state.landlord) : roster;
   /** Who OWNS the property (`unit.landlordId`) - never removable from the roster,
    *  and whoever inherits the primary-contact routing when the primary leaves. */
-  const landlordOfRecord = contactsUnit?.landlordId ?? unit.landlordId;
+  // An ownerless property (legacy, or restored without a landlord -
+  // caseworker-integrity section 4) has NO landlordId (UnitItem.landlordId is
+  // optional); read it as '' (the "no landlord" branch) so nothing below
+  // touches undefined.
+  const landlordOfRecord: string = contactsUnit?.landlordId ?? unit.landlordId ?? '';
   const landlordName = contactRows.find((r) => r.primaryContact)?.company ?? contactRows[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
   // The authorities whose vouchers this property accepts - ONE synthesized list
@@ -501,8 +505,11 @@ export function ListingDetail(): React.JSX.Element {
 
   /** Who the primary-contact routing lands on once `row` is gone: the landlord
    *  of record (the repo promotes them), or nobody when the property has no
-   *  landlordId - in which case tour/placement resolution falls back to the
-   *  landlord of record anyway (spec D3). */
+   *  landlordId. There is no further fallback: with no primary contact and no
+   *  landlord of record, the server's property-contact resolvers (the primary
+   *  row, else the landlord of record) find no one, so calls and new relay
+   *  groups for the property reach no one until a contact is added
+   *  (caseworker-integrity, planner ruling Q2 / research RF2-N1). */
   const promotionNotice = (): string => {
     const promoted =
       landlordOfRecord.length > 0
@@ -510,7 +517,7 @@ export function ListingDetail(): React.JSX.Element {
         : undefined;
     return promoted !== undefined
       ? `${promoted} becomes the primary contact - calls and new relay groups for this property will go to them.`
-      : 'This property will have no primary contact - tours fall back to the landlord of record.';
+      : 'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until a contact is added.';
   };
 
   const onAddContact = (): void => {

@@ -2441,7 +2441,10 @@ export interface PhotoPresignGrant {
  *  Flexible document; the landlord file reads landlordId/status/address/beds. */
 export interface UnitItem {
   unitId: string;
-  landlordId: string;
+  /** The landlord of record's contactId. ABSENT on an ownerless property - a
+   *  legacy one, or one restored without a landlord (caseworker-integrity spec
+   *  section 4 "Restore") - so every read must handle "no landlord". */
+  landlordId?: string;
   status: UnitStatus;
   /** Provenance of the last property-status write. */
   status_source?: TransitionSource;

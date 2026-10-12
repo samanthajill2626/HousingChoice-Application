@@ -1,6 +1,6 @@
 # /join housing authority dropdown, Onboarding start, and lead backfill - design
 
-Status: DRAFT (revision 3, 2026-10-12 - spec review rounds 1-2 folded in; see
+Status: DRAFT (revision 4, 2026-10-12 - spec review rounds 1-3 folded in, review closed; see
 `docs/superpowers/reviews/2026-10-12-join-housing-authority/design-review/adjudications.md`)
 Branch: `feat/join-housing-authority` (worktree `W:\tmp\join-housing-authority`, cut from main @19607658)
 Tracker: Improvements Tracker item #14 "Housing authority form default" (Before WP1, item 3)
@@ -196,7 +196,9 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
     - a candidate named in `--skip`;
     - a candidate with a `housing_fair_signup` audit event carrying
       `signupVersion: 2` - a lead from before the change who signed up again
-      after it, and whose answer (D7) must not be overridden;
+      after it, on `/join` (whose answer, D7, must not be overridden) or on a
+      flyer (left out too, erring safe; the printed reason is "signed up again
+      after the change");
     - a candidate whose audit trail shows `housingAuthority` was ever SET OR
       REMOVED - its authority was removed on purpose, so it stays empty. The
       event types, as of main @19607658: `contact_updated` (when its
@@ -207,6 +209,9 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
       `housing_authority_backfill`. The plan verifies the list against the
       code. Those audit appends are best-effort, so a write whose append
       failed is invisible here; that gap is accepted.
+    Both audit rules read a candidate's WHOLE history: `auditRepo.listByEntity`
+    is one newest-first Query with no cursor, so the script pages backward
+    with `before` (the oldest `ts` seen) until a page comes back empty.
     A `--skip` id that is not a candidate is reported and otherwise ignored.
   - Dry run: writes nothing. Prints each target on its own line - first and
     last name, sign-up date (`captured_at`, else `created_at`, as a date),
@@ -239,7 +244,10 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
   - Exit codes: 0 completed clean; 1 refused, completed with failures, or the
     target could not be resolved; 2 usage.
   - No agent runs it against dev or prod. An agent rehearses it only with
-    `--env local --lane <L>` on a hermetic lane it started.
+    `--env local --lane <L>` on a hermetic lane it started. After this change
+    no app path creates a candidate (every new contact gets the marker, and no
+    seed writes `capture_source: 'housing_fair'`), so the rehearsal and the
+    script test write pre-change-shaped leads directly.
 - **D11 RUNBOOK.** A new entry: owed on dev and prod once this branch deploys
   there. Steps: dry run, read the target list (leave out anyone known not to
   hold an Atlanta voucher with `--skip`), apply, dev before prod. No

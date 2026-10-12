@@ -180,6 +180,19 @@ async function sweepADayLater(world: FakeWorld) {
   );
 }
 
+/** Turn an active journal into one claimed before the deploy: no classification_revision in its guard. */
+function stripRevisionFromJournal(world: FakeWorld, contactId: string, target: string): void {
+  for (const [key, item] of world.suggestionResolutions) {
+    if (item.state === 'active' && item.contactId === contactId && item.target === target) {
+      if (item.plan.kind !== 'contact' && item.plan.kind !== 'status') throw new Error('expected a contact plan');
+      const { classification_revision: _dropped, ...legacyGuard } = item.plan.guard;
+      world.suggestionResolutions.set(key, { ...item, plan: { ...item.plan, guard: legacyGuard } });
+      return;
+    }
+  }
+  throw new Error('expected an active resolution');
+}
+
 // D1 cases. Later tasks insert their helpers ABOVE this line.
 
 describe('D1 change 1: the accept plan reads the contact consistently', () => {
@@ -396,5 +409,45 @@ describe('D1 change 3: a tenant-only accept is fenced on the classification it r
     expect(contactOf(world, 'c1')).toMatchObject({ type: 'landlord' });
     expect(contactOf(world, 'c1')?.['voucherSize']).toBeUndefined();
     expect(journalFor(world, 'c1', 'voucherSize')?.state).toBe('completed');
+  });
+});
+
+describe('D1 change 4: a journal claimed before the deploy (no revision in its guard)', () => {
+  it('recovered by a read onto a converted contact ends superseded and writes no authority', async () => {
+    const { app, world } = makeWebhookHarness();
+    await world.orgListRepo.putForSeed(startingOrgList());
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'housingAuthority', suggestedValue: 'Atlanta Housing Authority',
+      conversationId: 'conv-1', runId: 'run-ha',
+    });
+    await accept(crashingApp(world), 'c1', 'housingAuthority').expect(500);
+    stripRevisionFromJournal(world, 'c1', 'housingAuthority');
+    await convert(app, 'c1').expect(200);
+    expireActiveResolution(world, 'c1', 'housingAuthority');
+
+    await list(app, 'c1').expect(200);
+
+    expect(contactOf(world, 'c1')?.['housingAuthority']).toBeUndefined();
+    expect(contactOf(world, 'c1')?.['housingAuthority_source']).toBeUndefined();
+    expect(journalFor(world, 'c1', 'housingAuthority')?.state).toBe('completed');
+  });
+
+  it('recovered by a read onto an unconverted tenant still commits (PIN)', async () => {
+    const { app, world } = makeWebhookHarness();
+    await world.orgListRepo.putForSeed(startingOrgList());
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'housingAuthority', suggestedValue: 'Atlanta Housing Authority',
+      conversationId: 'conv-1', runId: 'run-ha',
+    });
+    await accept(crashingApp(world), 'c1', 'housingAuthority').expect(500);
+    stripRevisionFromJournal(world, 'c1', 'housingAuthority');
+    expireActiveResolution(world, 'c1', 'housingAuthority');
+
+    await list(app, 'c1').expect(200);
+
+    expect(contactOf(world, 'c1')?.['housingAuthority']).toBe('Atlanta Housing Authority');
+    expect(journalFor(world, 'c1', 'housingAuthority')?.state).toBe('completed');
   });
 });

@@ -49,6 +49,7 @@ import { isCaseworkerContact } from '../contact/caseworkerRole.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { useListing } from './useListing.js';
+import { ROSTER_RETRY_COPY } from './rosterCopy.js';
 import { listingRoster, ROLE_LABEL, type RosterRow } from './buildListingFile.js';
 import { useContacts } from '../contacts/useContacts.js';
 import { tenantName } from '../placements/placementsFormat.js';
@@ -121,8 +122,6 @@ const ROSTER_CONFLICT_COPY =
  *  actual landlordId. Point the operator to the explicit reassignment flow. */
 const LANDLORD_REASSIGNMENT_COPY =
   'This property already has a landlord of record - reassign it before choosing Landlord.';
-
-const ROSTER_RETRY_COPY = 'The property contacts changed - try that change again.';
 
 // Mirror of app/src/lib/unitMedia.ts UNIT_MEDIA_MAX (the dashboard has no import
 // path into the app lib). An abuse/runaway BACKSTOP, not a product limit; keep in

@@ -3,9 +3,10 @@ id: join-backfill-ignores-pending-authority-suggestion
 title: The /join lead backfill gives Atlanta Housing Authority to a lead with a pending AI housing authority suggestion, and the report does not say so
 type: improvement
 severity: low
-status: open
+status: resolved
 area: app/scripts
 created: 2026-10-12
+resolved: 2026-10-12
 refs: app/scripts/backfill-join-housing-authority.ts, app/src/services/extraction/apply.ts:256-282, app/src/services/extraction/apply.ts:290-327, app/src/repos/extractionRepo.ts:234-240
 ---
 
@@ -27,3 +28,15 @@ pending and its value is not exactly "Atlanta Housing Authority", either leave t
 with that reason or print the suggested value on its target line so the operator decides.
 A product call for Cameron before the first dev run (raised as an open question in the
 mission handback).
+
+**Resolution (2026-10-12, planner fix wave FW-2, commit `37d02e42`).** Cameron ruled:
+leave such a lead out (spec revision 5, D10). For a candidate no earlier reason leaves
+out, the backfill now reads `getSuggestion(contactId, 'housingAuthority', { consistentRead:
+true })` - one GetItem per would-be target. A suggestion row exists only while it is
+pending (accept and dismiss delete it), so any row leaves the lead out with the reason
+"has a pending housing authority suggestion (<value>) - accept or dismiss it first", the
+value escaped like a report name; nothing is written to it. The rule is "any pending
+suggestion", whatever its value (one naming Atlanta Housing Authority included): simpler
+than the not-exactly-Atlanta variant above, and staff settle it on the contact page. A
+failed suggestion read is a FAILED lead ("nothing written"). The RUNBOOK section lists it
+as the fifth left-out reason.

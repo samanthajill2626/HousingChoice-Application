@@ -1688,6 +1688,16 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       res.status(409).json({ error: decision.error });
       return;
     }
+    // Caseworker integrity I2 (spec 2026-10-12 section 4): every reopen target
+    // (scheduled / toured / no_show) is an OPEN status, so the tenant must be a
+    // contact typed `tenant`. After the reopen decision (a tour that cannot
+    // reopen answers that first), before the conditional write.
+    try {
+      await requireTenantContact(contacts, current.tenantId);
+    } catch (err) {
+      if (sendContactTypeError(err, res)) return;
+      throw err;
+    }
     const reopened = await tours.reopenIf(current, decision.target, getNow());
     if (reopened === undefined) {
       res.status(409).json({ error: 'tour_changed' });

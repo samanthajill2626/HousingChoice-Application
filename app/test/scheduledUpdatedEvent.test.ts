@@ -54,6 +54,8 @@ function scheduledEmits(world: ReturnType<typeof makeWebhookHarness>['world']): 
 describe('scheduled.updated — tours', () => {
   it('emits { contactId: tenantId } when a tour is booked with a time', async () => {
     const { app, world } = makeWebhookHarness();
+    // Caseworker integrity I2: POST /api/tours needs a contact typed tenant.
+    world.contacts.push({ contactId: 'contact-tenant-1', type: 'tenant' });
     const res = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     expect(res.status).toBe(201);
 
@@ -63,6 +65,8 @@ describe('scheduled.updated — tours', () => {
 
   it('does NOT emit on a timeless (requested) create', async () => {
     const { app, world } = makeWebhookHarness();
+    // Caseworker integrity I2: POST /api/tours needs a contact typed tenant.
+    world.contacts.push({ contactId: 'contact-tenant-1', type: 'tenant' });
     const res = await authed(app)
       .post('/api/tours')
       .send({ tenantId: 'contact-tenant-1', unitId: 'unit-abc', tourType: 'self_guided' });
@@ -72,6 +76,8 @@ describe('scheduled.updated — tours', () => {
 
   it('emits on reschedule (PATCH scheduledAt)', async () => {
     const { app, world } = makeWebhookHarness();
+    // Caseworker integrity I2: POST /api/tours needs a contact typed tenant.
+    world.contacts.push({ contactId: 'contact-tenant-1', type: 'tenant' });
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
 
@@ -87,6 +93,8 @@ describe('scheduled.updated — tours', () => {
 
   it('emits on cancel (PATCH status=canceled)', async () => {
     const { app, world } = makeWebhookHarness();
+    // Caseworker integrity I2: POST /api/tours needs a contact typed tenant.
+    world.contacts.push({ contactId: 'contact-tenant-1', type: 'tenant' });
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
 

@@ -3015,15 +3015,16 @@ Step 4 - Run GREEN:
      (all their pre-existing cases, unchanged) are the flyer's regression pins.
 3. `cd W:/tmp/join-housing-authority/dashboard; npm run typecheck` - expect exit 0.
 4. `cd W:/tmp/join-housing-authority; npx eslint dashboard/src/routes/public/IntakeForm.tsx dashboard/src/routes/public/IntakeForm.props.test.tsx dashboard/src/routes/public/FlyerPage.test.tsx`
-   - expect exit 0. If an error is reported, attribute it by BASELINE at the
-     MERGE BASE (AGENTS.md gate 5), never against the shared main checkout
-     (plan review R1 B-F5): `git -C W:/tmp/join-housing-authority merge-base main HEAD`,
-     then `git -C W:/tmp/join-housing-authority worktree add --detach W:/tmp/join-ha-lintbase <that sha>`,
-     run the same `npx eslint <paths>` from `W:/tmp/join-ha-lintbase` (a path
-     that does not exist there is a new file - every error in it is yours),
-     diff the two outputs, then remove the throwaway with
-     `git -C W:/tmp/join-housing-authority worktree remove W:/tmp/join-ha-lintbase`.
-     An identical error at the base is pre-existing (name it in the
+   - expect exit 0. If an error is reported, attribute it by BASELINE at the merge base WITHOUT a second worktree
+     (a throwaway worktree has no node_modules, so its eslint cannot load
+     `eslint.config.mjs`; plan review R2 B-4). From the feature worktree,
+     for each reported path that exists at the merge base:
+     `cd "W:/tmp/join-housing-authority" && git show "$(git merge-base main HEAD):<path>" | npx eslint --stdin --stdin-filename <path>`
+     (eslint is the last command in the pipe, so the exit code is its own;
+     the config is unchanged by this branch, so the rules are the same). A
+     path that does not exist at the merge base is a new file - every error
+     in it is yours. Never compare against the shared main checkout (plan
+     review R1 B-F5). An identical error at the base is pre-existing (name it in the
      handback); anything else is yours and blocking.
 5. ASCII:
    - `tr -d '\11\12\15\40-\176' < W:/tmp/join-housing-authority/dashboard/src/routes/public/IntakeForm.props.test.tsx | wc -c` prints 0.
@@ -8195,9 +8196,12 @@ the source live).
    On Windows `timeout` (and a stopped background task) kills only the npm
    process, NOT the e2e stack under it (plan review R1 B-F6). After gate 4
    ends for ANY reason other than a clean exit 0 - a timeout, an abort, a
-   stopped task - tree-kill the launcher and its children by PID (find the
-   processes whose command line contains `W:\tmp\join-housing-authority`;
-   `taskkill /PID <pid> /T /F` from PowerShell), then confirm no listener
+   stopped task - first `cd "W:/tmp/join-housing-authority" && npm run e2e:stop`;
+   then, if `e2e/.artifacts/lane.json` still exists, tree-kill its
+   `launcherPid` (`taskkill /PID <launcherPid> /T /F` from PowerShell). Do
+   NOT search by command line: the launcher, app and worker run with
+   relative command lines, so only Vite would match (plan review R2 B-1).
+   Then confirm no listener
    survives on this lane's ports (`e2e/README.md`) BEFORE the self-QA
    session or any re-run. The harness adopts a same-commit orphaned stack
    unchallenged (AGENTS.md), so a survivor would silently contaminate the
@@ -8207,9 +8211,16 @@ the source live).
    - If the list is EMPTY, SKIP the gate (never run `npx eslint` with no
      paths - that lints the whole repo).
    - Else run `npx eslint <those paths>` from the worktree root. Exit 0 =
-     done. On errors, attribute them by BASELINE: run the same command on
-     the same paths at the merge base (`git merge-base main HEAD`, in a
-     throwaway detached worktree under `W:\tmp\`) and diff the outputs;
+     done. On errors, attribute them by BASELINE at the merge base WITHOUT a second worktree
+     (a throwaway worktree has no node_modules, so its eslint cannot load
+     `eslint.config.mjs`; plan review R2 B-4). From the feature worktree,
+     for each reported path that exists at the merge base:
+     `cd "W:/tmp/join-housing-authority" && git show "$(git merge-base main HEAD):<path>" | npx eslint --stdin --stdin-filename <path>`
+     (eslint is the last command in the pipe, so the exit code is its own;
+     the config is unchanged by this branch, so the rules are the same). A
+     path that does not exist at the merge base is a new file - every error
+     in it is yours.
+     Diff the two outputs;
      anything new is BLOCKING and is fixed; pre-existing errors are left
      and NAMED in the handback. A `.mjs`/`.js` path lints NOTHING (the
      config covers `.ts`/`.tsx` only) - do not read its green as a pass.
@@ -8228,7 +8239,7 @@ Step 1 - the live session and its lane.
 1. If no session is live (no `e2e/.artifacts/session.pid`), start one exactly as S5's "Lane rules" do, logging to `.superpowers/sdd/e2e-session-6.3a.log`: in the BACKGROUND (Bash tool `run_in_background: true`) `cd "W:/tmp/join-housing-authority" && npm run e2e:session > .superpowers/sdd/e2e-session-6.3a.log 2>&1`, then wait (up to 3 minutes) until `grep -nE '\[e2e-session\] ready .*app :[0-9]+ ' W:/tmp/join-housing-authority/.superpowers/sdd/e2e-session-6.3a.log` prints one line (the ready line, `scripts/e2e-session.mjs:766`, written only after the clean-slate reseed at `:763-764`). The session must be started at the current HEAD (AR-6).
 2. `cat W:/tmp/join-housing-authority/e2e/.artifacts/lane.json` - note `lane` (call it `<L>`, an integer 1-16), `urls.app` and `urls.dashboard`. They must be `127.0.0.1` ports `9001 + <L>*100` (app) and `+10` (dashboard) - never `:8080` or `:5174`. Copy `lane`, `urls`, `tablePrefix` and `accessKeyId` (NOT `ownerToken`) into the handback.
 
-Step 2 - a post-change sign-up through the lane's `/join` (it must NOT be a target). With the project Playwright MCP (bundled Chromium, isolated profile): navigate to `<urls.dashboard>/join`; wait until the "Housing authority" select no longer shows "Loading..."; fill "First name" `Rehearsal`, "Last name" `Notsure`, "Phone number" `555-010-9010`; choose `Not sure` in "Housing authority"; check the consent box ("I agree to receive ..."); click "Sign me up"; the thank-you screen shows. Screenshot it as `.playwright-mcp/6.3a-join-not-sure.png`. This contact holds NO authority and status Onboarding - only the `housing_fair_signup_v2` marker keeps it out of the backfill (spec D5, D10). If the MCP is unavailable, the same request from Git Bash: `curl -s -w "\nHTTP %{http_code}\n" -X POST "<urls.app>/public/housing-fair" -H "content-type: application/json" -d '{"firstName":"Rehearsal","lastName":"Notsure","phone":"+15550109010","smsConsent":true}'` - prints `{"ok":true}` and `HTTP 200`.
+Step 2 - a post-change sign-up through the lane's `/join` (it must NOT be a target). With the project Playwright MCP (bundled Chromium, isolated profile): navigate to `<urls.dashboard>/join`; wait until the "Housing authority" select no longer shows "Loading..."; fill "First name" `Rehearsal`, "Last name" `Notsure`, "Phone number" `555-010-9010`; choose `Not sure` in "Housing authority"; check the consent box ("I agree to receive ..."); click "Sign me up"; the thank-you screen shows. Screenshot it as `.playwright-mcp/6.3a-join-not-sure.png`. This contact holds NO authority and status Onboarding - only the `housing_fair_signup_v2` marker keeps it out of the backfill (spec D5, D10). If the MCP is unavailable, the same request from Git Bash: `curl -s -w "\nHTTP %{http_code}\n" -X POST "<urls.dashboard>/public/housing-fair" -H "content-type: application/json" -d '{"firstName":"Rehearsal","lastName":"Notsure","phone":"+15550109010","smsConsent":true}'` - prints `{"ok":true}` and `HTTP 200`. Post through `<urls.dashboard>` (the Vite proxy adds the origin-secret header); a POST straight to `<urls.app>` is refused 403 (`app/src/middleware/originSecret.ts:49-52`; plan review R2 B-2).
 
 Step 3 - write the seeding script. Create `W:\tmp\join-housing-authority\.superpowers\sdd\rehearsal\seed-pre-change-leads.ts` with exactly:
 
@@ -8460,7 +8471,9 @@ org-list item: stored
 
 A `REFUSED - ...` line (exit 1) means a guard failed and nothing was written: fix the cause (usually the session is not live or not ready) and re-run. `org-list item: MISSING` must not happen on a reseeded lane (the lean seed writes the item - `app/src/lib/seed/lean.ts:536`); if it does, stop and report.
 
-Step 5 - the dry run: `cd "W:/tmp/join-housing-authority" && npx tsx app/scripts/backfill-join-housing-authority.ts --env local --lane <L>; echo "exit=$?"`
+Every backfill command below reads the lane from `lane.json` in the SAME Bash call and refuses an empty or non-positive lane, so a dropped `--lane` can never turn into a bare `--env local` against the live local stack (plan review R2 B-3).
+
+Step 5 - the dry run: `cd "W:/tmp/join-housing-authority" && L=$(node -p "require('./e2e/.artifacts/lane.json').lane") && [ "$L" -ge 1 ] && npx tsx app/scripts/backfill-join-housing-authority.ts --env local --lane "$L"; echo "exit=$?"`
 Expected: JSON log lines (counts and contactIds only), then exactly this report, then `exit=0`:
 
 ```text
@@ -8475,7 +8488,7 @@ Left out (1 lead(s), oldest sign-up first):
 
 `Rehearsal Notsure` (Step 2's marker-holding sign-up), `Rehearsal Deletedlead` and the self-QA's `/join` sign-ups appear in NEITHER list. Any lead whose contactId does not start `rehearsal-lead-` is a candidate this plan did not expect: STOP and report it (do not apply).
 
-Step 6 - the apply, with `--skip` (a candidate and an unknown id): `cd "W:/tmp/join-housing-authority" && npx tsx app/scripts/backfill-join-housing-authority.ts --env local --lane <L> --apply --skip "rehearsal-lead-skipme,rehearsal-no-such-lead"; echo "exit=$?"`
+Step 6 - the apply, with `--skip` (a candidate and an unknown id): `cd "W:/tmp/join-housing-authority" && L=$(node -p "require('./e2e/.artifacts/lane.json').lane") && [ "$L" -ge 1 ] && npx tsx app/scripts/backfill-join-housing-authority.ts --env local --lane "$L" --apply --skip "rehearsal-lead-skipme,rehearsal-no-such-lead"; echo "exit=$?"`
 Expected report, then `exit=0`:
 
 ```text
@@ -8491,7 +8504,7 @@ Left out (2 lead(s), oldest sign-up first):
 
 No `WARNING:` line.
 
-Step 7 - re-run the dry run with the same `--skip` (it must write nothing new): `cd "W:/tmp/join-housing-authority" && npx tsx app/scripts/backfill-join-housing-authority.ts --env local --lane <L> --skip "rehearsal-lead-skipme,rehearsal-no-such-lead"; echo "exit=$?"`
+Step 7 - re-run the dry run with the same `--skip` (it must write nothing new): `cd "W:/tmp/join-housing-authority" && L=$(node -p "require('./e2e/.artifacts/lane.json').lane") && [ "$L" -ge 1 ] && npx tsx app/scripts/backfill-join-housing-authority.ts --env local --lane "$L" --skip "rehearsal-lead-skipme,rehearsal-no-such-lead"; echo "exit=$?"`
 Expected: the header, `  (none)`, `Would update: 0 lead(s). Failed: 0.`, the same two left-out lines and the same `--skip` line; `exit=0`. Then one usage error, observed for the record (nothing is resolved or read): `cd "W:/tmp/join-housing-authority" && npx tsx app/scripts/backfill-join-housing-authority.ts --env local --lane 0; echo "exit=$?"` - prints the usage text and `exit=2`.
 
 Step 8 - read back: `cd "W:/tmp/join-housing-authority" && npx tsx .superpowers/sdd/rehearsal/seed-pre-change-leads.ts --verify; echo "exit=$?"`

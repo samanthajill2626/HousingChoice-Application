@@ -23,7 +23,8 @@ type FieldKind =
   | 'string[]'
   | 'pets'
   | 'address'
-  | 'tour_type';
+  | 'tour_type'
+  | 'clearable_number';
 
 /**
  * The writable unit fields and their kinds. `accepted_authorities` is the
@@ -92,7 +93,9 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   // number (>= 0), DISTINCT from `beds` (a 3bd unit may accept a 2BR voucher).
   // Read it through `acceptedVoucherSizes`, which falls back to `beds`. The KEY
   // never reaches the flyer; its VALUE drives the flyer's derived `voucher_size`.
-  voucher_size_accepted: 'number',
+  // CLEARABLE (2026-10-12): null REMOVEs it, so a wrong recorded size can be
+  // taken off and the unit falls back to its beds again.
+  voucher_size_accepted: 'clearable_number',
   tour_process: 'string',
   // Structured tour type (self_guided / landlord_led / pm_team). A DEDICATED
   // kind (not plain 'string') because it must clear to ABSENT: ''/null map to
@@ -163,6 +166,17 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
         if (typeof value !== 'string') return { ok: false, error: `${key} must be a string` };
         break;
       case 'number':
+        if (!isFiniteNumber(value)) return { ok: false, error: `${key} must be a number` };
+        if (value < 0) return { ok: false, error: `${key} must be >= 0` };
+        break;
+      case 'clearable_number':
+        // CLEAR-to-absent: null -> a null patch value, so update REMOVEs the
+        // attribute and create drops it (the tour_type precedent). Otherwise the
+        // plain 'number' rules apply.
+        if (value === null) {
+          fields[key] = null;
+          continue;
+        }
         if (!isFiniteNumber(value)) return { ok: false, error: `${key} must be a number` };
         if (value < 0) return { ok: false, error: `${key} must be >= 0` };
         break;

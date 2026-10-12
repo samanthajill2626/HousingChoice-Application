@@ -224,6 +224,44 @@ describe('ListingEditForm', () => {
     expect(updateUnit).toHaveBeenCalledWith('u1', { voucher_size_accepted: 3 });
   });
 
+  it('clearing a recorded "Voucher size accepted" PATCHes null (backend removes it)', async () => {
+    // 2026-10-12: a wrong recorded size must be removable, so the property falls
+    // back to its bedroom count again.
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    const withVoucher: UnitItem = { ...UNIT, voucher_size_accepted: 2 };
+    render(<ListingEditForm unit={withVoucher} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText('Voucher size accepted'), { target: { value: '' } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).toHaveBeenCalledWith('u1', { voucher_size_accepted: null });
+  });
+
+  it('an empty "Voucher size accepted" that was never recorded sends nothing', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ListingEditForm unit={UNIT} onClose={onClose} onSaved={vi.fn()} />);
+
+    expect(screen.getByLabelText('Voucher size accepted')).toHaveValue(null);
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled(); // nothing changed
+  });
+
+  it('clearing another number field still leaves it untouched (only the voucher size clears)', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ListingEditForm unit={{ ...UNIT, deposit: 1200 }} onClose={onClose} onSaved={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText('Deposit'), { target: { value: '' } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it('sets the Tour type from Not set and PATCHes the chosen value', async () => {
     const user = userEvent.setup();
     updateUnit.mockResolvedValue({ ...UNIT });

@@ -90,6 +90,25 @@ describe('validateUnitBody — voucher_size_accepted (landlord-onboarding)', () 
       error: 'voucher_size_accepted must be >= 0',
     });
   });
+
+  it('null CLEARS voucher_size_accepted (a null patch value -> REMOVE), so beds decide again', () => {
+    expect(validateUnitBody({ voucher_size_accepted: null }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: null },
+    });
+    // An empty string is not a clear - only null is.
+    expect(validateUnitBody({ voucher_size_accepted: '' }, 'update')).toEqual({
+      ok: false,
+      error: 'voucher_size_accepted must be a number',
+    });
+  });
+
+  it('other number fields still reject null (only the voucher size is clearable)', () => {
+    expect(validateUnitBody({ beds: null }, 'update')).toEqual({
+      ok: false,
+      error: 'beds must be a number',
+    });
+  });
 });
 
 describe('validateUnitBody — property notes (internal)', () => {

@@ -94,8 +94,8 @@ export function authoritiesOf(unit: {
  * the HAND MIRROR of `acceptedVoucherSizes` in app/src/lib/unitFields.ts - the
  * source of truth, which the public flyer reads - exactly as `authoritiesOf`
  * does. Keep the two in step by hand; both suites carry the same test cases.
- * Matching's pre-fill still derives its own size from `beds`
- * (docs/issues/unit-voucher-size-readers-diverge.md).
+ * Dashboard readers: the Properties list's filter and summary, and Matching's
+ * voucher-size pre-fill (BroadcastComposer).
  *
  * Typed with `unknown` fields for the same reason as `authoritiesOf`: the wire
  * document is flexible, so a stored value can be any shape.

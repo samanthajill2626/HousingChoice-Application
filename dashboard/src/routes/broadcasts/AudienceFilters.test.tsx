@@ -1,6 +1,6 @@
 // AudienceFilters tests (§8) — the extensible audience-filter framework: the
-// voucher-size chips (with the "matches property" tag pre-filled from the unit's
-// beds), the housing-authority input, the disabled "+ Add filter" seam, the
+// voucher-size chips (with the "matches property" tag pre-filled from the voucher
+// size the unit takes), the housing-authority input, the disabled "+ Add filter" seam, the
 // always-excluded note, and the live reach count + truncated warning.
 import { useState } from 'react';
 import { render, screen } from '@testing-library/react';
@@ -42,7 +42,7 @@ beforeEach(() => {
  *  toggles round-trip through onChange. */
 function Harness({
   authorityError,
-  propertyBeds,
+  propertyVoucherSize,
   reachCount,
   reachPending = false,
   truncated = false,
@@ -51,7 +51,7 @@ function Harness({
   initialFilter = { contact_type: 'tenant' },
   disabled,
 }: {
-  propertyBeds?: number;
+  propertyVoucherSize?: number;
   reachCount?: number;
   reachPending?: boolean;
   truncated?: boolean;
@@ -70,7 +70,7 @@ function Harness({
         setFilter(next);
       }}
       {...(disabled !== undefined && { disabled })}
-      {...(propertyBeds !== undefined && { propertyBeds })}
+      {...(propertyVoucherSize !== undefined && { propertyVoucherSize })}
       {...(reachCount !== undefined && { reachCount })}
       reachPending={reachPending}
       truncated={truncated}
@@ -81,19 +81,21 @@ function Harness({
 }
 
 describe('AudienceFilters — voucher size pre-fill + override', () => {
-  it('shows the "matches property" tag + note on the chip matching the unit beds', () => {
-    render(<Harness propertyBeds={2} />);
+  it('shows the "matches property" tag + note on the chip matching the voucher size the unit takes', () => {
+    render(<Harness propertyVoucherSize={2} />);
     const chips = screen.getByRole('group', { name: 'Voucher size' });
     const twoBr = within2(chips, '2-BR');
     expect(twoBr).toHaveTextContent(/matches property/i);
-    // The note explains the pre-fill is overridable.
-    expect(screen.getByText(/Pre-filled to match this 2-bedroom property/i)).toBeInTheDocument();
+    // The note names the voucher size (not the bedrooms) and says it is overridable.
+    expect(
+      screen.getByText(/Pre-filled to the 2-bedroom voucher this property takes - change it/i),
+    ).toBeInTheDocument();
   });
 
   it('lets the operator override the voucher size (pick a different chip)', async () => {
     const u = userEvent.setup();
     const onChangeSpy = vi.fn();
-    render(<Harness propertyBeds={2} onChangeSpy={onChangeSpy} />);
+    render(<Harness propertyVoucherSize={2} onChangeSpy={onChangeSpy} />);
     await u.click(screen.getByRole('button', { name: /^3-BR/ }));
     expect(onChangeSpy).toHaveBeenCalledWith({ contact_type: 'tenant', bedroomSize: 3 });
     // The 3-BR chip is now pressed.

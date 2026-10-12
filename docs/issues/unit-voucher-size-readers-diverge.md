@@ -1,24 +1,39 @@
 ---
 id: unit-voucher-size-readers-diverge
-title: Matching's pre-fill reads a property's voucher size from beds instead of acceptedVoucherSizes (the flyer is fixed)
+title: The property page and New/Edit forms cannot show or edit a recorded voucher-size LIST (#12); every reader now uses acceptedVoucherSizes
 type: debt
 severity: med
 status: open
 area: dashboard
 created: 2026-10-01
-refs: dashboard/src/routes/listing/listingFormat.ts, dashboard/src/routes/listings/unitListFacets.ts, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:256-263, dashboard/src/routes/broadcasts/AudienceFilters.tsx:91, app/src/lib/unitFields.ts, dashboard/src/routes/listing/ListingDetail.tsx:755-756, dashboard/src/routes/listing/ListingEditForm.tsx:105, dashboard/src/routes/listing/ListingEditForm.tsx:188
+refs: dashboard/src/routes/listing/listingFormat.ts, app/src/lib/unitFields.ts, dashboard/src/routes/broadcasts/BroadcastComposer.tsx, dashboard/src/routes/listing/ListingDetail.tsx:755-756, dashboard/src/routes/listing/ListingEditForm.tsx:105, dashboard/src/routes/listing/UnitCreateForm.tsx:114
 ---
 
-**Update (2026-10-12) - the flyer half is FIXED** (branch `fix/flyer-voucher-size`),
-after a prod report that a property with its own voucher size showed its bedroom count on
-the public flyer. `acceptedVoucherSizes` now has its server twin in
-`app/src/lib/unitFields.ts` (the source of truth; the dashboard copy is its hand mirror,
-same test cases in both suites), and `toUnitFlyer` reads it. The flyer still states ONE
-size: for a recorded list (only the demo seed holds one until #12) it shows the first, and
-#12 decides how the flyer words several sizes.
+**Update (2026-10-12) - both readers are FIXED and a recorded size can be cleared**, after a
+prod report that a property with its own voucher size showed its bedroom count on the public
+flyer:
 
-Still open: **Matching's pre-fill** (below) - Cameron asked for it next, single-size
-only (no multi-select until #12). The #12 items further down are unchanged.
+- **The flyer** (branch `fix/flyer-voucher-size`): `acceptedVoucherSizes` now has its server
+  twin in `app/src/lib/unitFields.ts` (the source of truth; the dashboard copy is its hand
+  mirror, same test cases in both suites), and `toUnitFlyer` reads it.
+- **Matching's pre-fill** (branch `fix/matching-voucher-prefill`): `BroadcastComposer`
+  pre-fills and tags the chip from `acceptedVoucherSizes`, and the note names the voucher
+  size the property takes instead of "this N-bedroom property".
+- **Clearing** (same branch): `voucher_size_accepted` is a `clearable_number` field - a PATCH
+  of null REMOVEs it - and emptying it in the edit form sends that null, so a wrong recorded
+  size can be taken off and the property falls back to its bedrooms. Other number fields
+  still cannot be cleared.
+
+Both readers state ONE size; for a recorded list (only the demo seed holds one until #12)
+they take the first, and #12 decides how several sizes are worded and matched.
+
+**DECIDED (Cameron, 2026-10-12): the property page's "Voucher size accepted" row stays EMPTY
+when nothing is recorded.** It shows the separate, editable field, and an empty row is how
+staff see that it is empty - do NOT show the bedrooms fallback there (no "3 (from
+bedrooms)"); that would conflate the two. This settles the last bullet below.
+
+What remains is the #12 list shape: the property page row and the New/Edit forms take ONE
+number today (below).
 
 **Update (2026-10-04).** The rule is now settled and lives in ONE place: a property's voucher
 size is its recorded `voucher_size_accepted` when there is one (one number, or a list after
@@ -47,14 +62,10 @@ replaces the list with one number. These two show and edit the RECORDED field, s
 keep reading it directly - but they must take the list shape. Two more for #12, from the review
 of the bedrooms fallback (2026-10-04):
 
-- **A recorded size cannot be cleared.** The edit form skips an emptied number
-  (`ListingEditForm.tsx:101`, "clearing a number isn't supported") and the unit PATCH rejects
-  null for a number field (`app/src/lib/unitFields.ts:165-167`). A wrong recorded size can be
-  corrected to another number, but never removed to fall back to the bedrooms again. The
-  multi-select needs an explicit empty state that removes the field.
-- **The property page shows nothing for a beds-only property**, while the Properties list
-  files it under its bedroom chip. Decide whether the page shows the effective size (for
-  example "3 (from bedrooms)") beside or instead of the recorded row.
+- ~~**A recorded size cannot be cleared.**~~ FIXED 2026-10-12 (see the update above). The
+  multi-select must keep that: its empty state sends null.
+- ~~**The property page shows nothing for a beds-only property.**~~ DECIDED 2026-10-12: that
+  is correct - the row shows the recorded field only (see the decision above).
 
 **Failure scenario.** A property with `beds: 3` and `voucher_size_accepted: 2` (the case the
 field exists for): the Properties list files it under 2-BR, but its "Send to tenants" composer

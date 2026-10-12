@@ -425,11 +425,12 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   `app/src/lib/unitFields.ts` (the public flyer reads it, 2026-10-12); the
   dashboard copy in `dashboard/src/routes/listing/listingFormat.ts` is its hand
   mirror, like `authoritiesOf`, with the same test cases in both suites.
-  Matching's pre-fill still derives its own size from `beds`
-  (`docs/issues/unit-voucher-size-readers-diverge.md`).
+  Matching's voucher-size pre-fill reads it too (2026-10-12).
   Distinct from a tenant's `voucherSize` (the voucher the tenant holds) and from
   the stored field itself, which the property page and the New/Edit forms show
-  and edit as entered.
+  and edit as entered: the page's "Voucher size accepted" row stays EMPTY when
+  nothing is recorded (never the bedrooms fallback - Cameron, 2026-10-12), and
+  emptying the field in the edit form removes it.
   
 - **Tour auto-close / "No outcome recorded" / Reopen** (tour auto-close,
   2026-10-01, Sam's item 18) - a tour still undecided two weeks after its

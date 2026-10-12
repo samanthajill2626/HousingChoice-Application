@@ -34,7 +34,7 @@ import { Spinner } from '../../ui/index.js';
 import { contactDisplayName } from '../contact/format.js';
 import { ORG_FILTER_TYPED_HINT } from '../orgs/orgCopy.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
-import { shortAddress } from '../listing/listingFormat.js';
+import { acceptedVoucherSizes, shortAddress } from '../listing/listingFormat.js';
 import { AudienceFilters } from './AudienceFilters.js';
 import { MessageEditor } from './MessageEditor.js';
 import { RecipientPreview } from './RecipientPreview.js';
@@ -198,7 +198,8 @@ export function BroadcastComposer(): React.JSX.Element {
     return () => controller.abort();
   }, [unitId]);
 
-  // Load the property (address -> property label; beds feed the pre-fill below).
+  // Load the property (address -> property label; its voucher size feeds the
+  // pre-fill below).
   useEffect(() => {
     if (effectiveUnitId === undefined) {
       setUnit(null); // picker cleared - drop the stale property context
@@ -253,14 +254,21 @@ export function BroadcastComposer(): React.JSX.Element {
     );
   }, [resolvedMode, unit, bodyEdited, resumeDraftId, draft.flyerUrl, effectiveUnitId]);
 
-  // Pre-fill the voucher size from the property's beds (overridable), only while
-  // the filters are ACTIVE (hidden filters have no state to pre-fill) and only
-  // when the operator hasn't already set a size. Enabling the filters with a
+  // The voucher size the property takes - its recorded size, else its beds
+  // (acceptedVoucherSizes, the one reader). The audience filter holds ONE size;
+  // only the demo seed can record a list until tracker #12, so take the first,
+  // as the public flyer does.
+  const propertyVoucherSize = unit === null ? undefined : acceptedVoucherSizes(unit)[0];
+
+  // Pre-fill the voucher size the property takes (overridable), only while the
+  // filters are ACTIVE (hidden filters have no state to pre-fill) and only when
+  // the operator hasn't already set a size. Enabling the filters with a
   // property attached applies the pre-fill at that moment.
   useEffect(() => {
-    if (!audienceEnabled || unit === null || typeof unit.beds !== 'number') return;
-    const beds = unit.beds;
-    setFilter((prev) => (prev.bedroomSize === undefined ? { ...prev, bedroomSize: beds } : prev));
+    if (!audienceEnabled || unit === null) return;
+    const size = acceptedVoucherSizes(unit)[0];
+    if (size === undefined) return;
+    setFilter((prev) => (prev.bedroomSize === undefined ? { ...prev, bedroomSize: size } : prev));
   }, [audienceEnabled, unit]);
 
   // Load tenant candidates once. EVERY page, for the same reason the property
@@ -535,7 +543,7 @@ export function BroadcastComposer(): React.JSX.Element {
               onAuthorityTextChange={setAuthorityText}
               authorityError={authorityNotice}
               disabled={previewBusy}
-              {...(typeof unit?.beds === 'number' && { propertyBeds: unit.beds })}
+              {...(propertyVoucherSize !== undefined && { propertyVoucherSize })}
               {...(draft.reachCount !== undefined && { reachCount: draft.reachCount })}
               reachPending={draft.reachPending}
               truncated={draft.truncated}

@@ -334,7 +334,6 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
       },
     });
     expect(patchRes.ok()).toBeTruthy();
-    await staff.close();
 
     // The bare public page (a FRESH context - no prior visit, so sessionStorage is
     // clean) shows the EDITED values immediately, with no funnel/reveal steps.
@@ -353,6 +352,20 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     await expect(page.getByText(`Fits a ${editedVoucherSize}-bedroom voucher`)).toBeVisible();
     await expect(page.getByText(`Fits a ${unit.beds}-bedroom voucher`)).toHaveCount(0);
     await expect(page.getByText(new RegExp(`${unit.beds}\\s*beds`))).toBeVisible();
+
+    // Staff CLEARS the recorded size (null - what ListingEditForm sends when the
+    // field is emptied): the stored field is removed, so the flyer falls back to
+    // the bedroom count on the next load.
+    const clearRes = await staff.request.patch(`${NEXT}/api/units/${unit.unitId}`, {
+      data: { voucher_size_accepted: null },
+    });
+    expect(clearRes.ok()).toBeTruthy();
+    expect('voucher_size_accepted' in (await clearRes.json()).unit).toBe(false);
+    await staff.close();
+
+    await page.reload();
+    await expect(page.getByText(`Fits a ${unit.beds}-bedroom voucher`)).toBeVisible();
+    await expect(page.getByText(`Fits a ${editedVoucherSize}-bedroom voucher`)).toHaveCount(0);
   });
 
   test('/join: standalone intake with no session -> thank-you (no reveal)', async ({ page }) => {

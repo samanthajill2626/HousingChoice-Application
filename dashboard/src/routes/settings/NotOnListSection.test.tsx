@@ -587,6 +587,69 @@ describe('NotOnListPanel - an in-flight settle (code review r1 F1, M5)', () => {
   });
 });
 
+// join-housing-authority spec D12: "Add as new" puts a name on the list, and
+// every housing authority on the list is on the public /join form - so the add
+// says so when the new entry is a housing authority. An agency shows nothing.
+describe('NotOnListPanel - the public sign-up note on Add as new (join-housing-authority spec D12)', () => {
+  const PUBLIC_NOTE = 'Housing authority names appear on the public sign-up form.';
+  const WREN: NotOnListRow = {
+    field: 'agency',
+    value: 'Wren Helpers',
+    count: 1,
+    deletedCount: 0,
+    resolution: { status: 'unknown', close: [] },
+  };
+
+  it('a housing authority value and a property value: Add as new says so under the Name field', async () => {
+    const user = userEvent.setup();
+    renderPanel('Merln Housng');
+    let group = await pick(user, 'Add as new');
+    expect(within(group).getByText(PUBLIC_NOTE)).toBeVisible();
+    expect(within(group).getByRole('textbox', { name: 'Name' })).toHaveAccessibleDescription(PUBLIC_NOTE);
+    cleanup();
+    renderPanel('Rook Junk');
+    group = await pick(user, 'Add as new');
+    expect(within(group).getByRole('textbox', { name: 'Name' })).toHaveAccessibleDescription(PUBLIC_NOTE);
+  });
+
+  it('an agency value: Add as new shows nothing new', async () => {
+    const user = userEvent.setup();
+    renderPanel('Wren Helpers', { rows: [...ROWS, WREN] });
+    const group = await pick(user, 'Add as new');
+    expect(within(group).queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
+    expect(within(group).getByRole('textbox', { name: 'Name' })).not.toHaveAccessibleDescription();
+  });
+
+  it('a settle that adds no entry shows nothing new (Move to Housing authority uses a name already listed)', async () => {
+    const user = userEvent.setup();
+    renderPanel('Shrike Housing');
+    const group = await pick(user, 'Move to Housing authority as Shrike Housing Authority');
+    expect(within(group).queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
+  });
+
+  it('an organization value: Add as new says so only once Housing authority is the chosen kind', async () => {
+    const user = userEvent.setup();
+    renderPanel('Kite Ade', {
+      rows: [
+        {
+          field: 'organization',
+          value: 'Kite Ade',
+          count: 2,
+          deletedCount: 0,
+          resolution: { status: 'unknown', close: [ref(KITE)] },
+        },
+      ],
+    });
+    const group = await pick(user, 'Add as new');
+    const kind = within(group).getByRole('group', { name: 'Kind' });
+    expect(within(group).queryByText(PUBLIC_NOTE)).not.toBeInTheDocument(); // no kind yet
+    await user.click(within(kind).getByRole('radio', { name: 'Agency' }));
+    expect(within(group).queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
+    await user.click(within(kind).getByRole('radio', { name: 'Housing authority' }));
+    expect(within(group).getByRole('textbox', { name: 'Name' })).toHaveAccessibleDescription(PUBLIC_NOTE);
+  });
+});
+
 describe('NotOnListPanel - organization values (caseworkers spec D17; R2-F6, R2-F8)', () => {
   const ORG_ROWS: NotOnListRow[] = [
     {

@@ -85,6 +85,16 @@ export const KIND_FIELD_LABEL: Readonly<Record<OrgKind, string>> = {
   agency: 'Agency',
 };
 
+/**
+ * The help line on every surface that puts a name on the list as a housing
+ * authority - an add (Settings, "Not on the list" > Add as new, and every
+ * record form's "Is this really new?"), a rename of one, a kind change into
+ * one - shown only while the entry is or will become a housing authority. The
+ * public /join form lists every housing authority name
+ * (docs/superpowers/specs/2026-10-12-join-housing-authority-design.md D1, D12).
+ */
+export const HOUSING_AUTHORITY_PUBLIC_NOTE = 'Housing authority names appear on the public sign-up form.';
+
 /** Staff label per record field. */
 export const FIELD_LABEL: Readonly<Record<OrgRecordField, string>> = {
   housingAuthority: 'Housing authority',

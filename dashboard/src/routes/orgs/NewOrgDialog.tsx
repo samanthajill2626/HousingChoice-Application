@@ -24,6 +24,7 @@ import {
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import {
+  HOUSING_AUTHORITY_PUBLIC_NOTE,
   ORGANIZATION_KINDS,
   KIND_FIELD_LABEL,
   KIND_NOUN,
@@ -86,6 +87,7 @@ export function NewOrgDialog({
   const nameId = useId();
   const notesId = useId();
   const problemId = useId();
+  const publicNoteId = useId();
   const nameEditable = mode !== 'suggestion';
   const [name, setName] = useState(text);
   const [notes, setNotes] = useState('');
@@ -142,6 +144,17 @@ export function NewOrgDialog({
   const checking = trimmed !== '' && !tooLong && check === null && !checkFailed;
   const problem = tooLong ? 'org_name_too_long' : check?.nameProblem;
   const addDisabled = busy || trimmed === '' || checking || problem !== undefined || chosenKind === null;
+  // Join spec D12: a housing authority added here is on the public /join form
+  // - in every mode, Settings and the record forms alike (orchestrator
+  // decision 6). The note describes the Name field; the AI suggestion mode has
+  // none, so there it describes "Yes, add it".
+  const publicNote = chosenKind === 'housing_authority';
+  const addDescribedBy = [
+    problem !== undefined ? problemId : '',
+    publicNote && !nameEditable ? publicNoteId : '',
+  ]
+    .filter((id) => id !== '')
+    .join(' ');
 
   const resolution: OrgRef[] =
     check === null ? [] : [...(check.match !== undefined ? [check.match] : []), ...check.candidates];
@@ -205,7 +218,7 @@ export function NewOrgDialog({
             type="button"
             onClick={() => void add()}
             disabled={addDisabled}
-            {...(problem !== undefined && { 'aria-describedby': problemId })}
+            {...(addDescribedBy !== '' && { 'aria-describedby': addDescribedBy })}
           >
             {busy ? 'Adding...' : 'Yes, add it'}
           </Button>
@@ -232,6 +245,7 @@ export function NewOrgDialog({
               autoComplete="off"
               disabled={busy}
               autoFocus={mode === 'settings'}
+              {...(publicNote && { 'aria-describedby': publicNoteId })}
               onChange={(e) => {
                 setName(e.target.value);
                 setError(null);
@@ -245,6 +259,11 @@ export function NewOrgDialog({
           </p>
         )}
         {kind === 'organization' ? <OrgKindChoice value={chosenKind} onChange={setChosenKind} disabled={busy} /> : null}
+        {publicNote ? (
+          <p id={publicNoteId} className={styles.dialogMuted}>
+            {HOUSING_AUTHORITY_PUBLIC_NOTE}
+          </p>
+        ) : null}
         {checking ? <p className={styles.dialogMuted}>Checking the list...</p> : null}
         {checkFailed ? (
           <div role="alert" className={styles.dialogAlert}>

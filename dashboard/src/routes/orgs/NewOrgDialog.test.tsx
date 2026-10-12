@@ -256,6 +256,55 @@ describe('NewOrgDialog ("Is this really new?")', () => {
   });
 });
 
+// join-housing-authority spec D12 (orchestrator fix-wave decision 6): every
+// housing authority on the list is on the public /join form, so the add says
+// so wherever this dialog adds one - Settings and every record form's "Add as
+// new" alike. An agency add shows nothing new.
+describe('NewOrgDialog - the public sign-up note (join-housing-authority spec D12)', () => {
+  const PUBLIC_NOTE = 'Housing authority names appear on the public sign-up form.';
+
+  it('a housing authority add says so, as the Name field description - in Settings and on a record form', () => {
+    const { unmount } = render(
+      <NewOrgDialog kind="housing_authority" text="" mode="settings" onAdded={vi.fn()} onClose={vi.fn()} />,
+    );
+    expect(screen.getByText(PUBLIC_NOTE)).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'Name' })).toHaveAccessibleDescription(PUBLIC_NOTE);
+    unmount();
+    renderDialog({ initialCheck: { candidates: [], close: [] } });
+    expect(screen.getByRole('textbox', { name: 'Name' })).toHaveAccessibleDescription(PUBLIC_NOTE);
+  });
+
+  it('an agency add shows nothing new - in Settings and on a record form', () => {
+    const { unmount } = render(
+      <NewOrgDialog kind="agency" text="" mode="settings" onAdded={vi.fn()} onClose={vi.fn()} />,
+    );
+    expect(screen.queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Name' })).not.toHaveAccessibleDescription();
+    unmount();
+    renderDialog({ kind: 'agency', text: 'Finch Mission', initialCheck: { candidates: [], close: [] } });
+    expect(screen.queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Name' })).not.toHaveAccessibleDescription();
+  });
+
+  it('an AI suggestion add has no Name field: the note describes "Yes, add it"', () => {
+    renderDialog({ text: 'Metro Housing Authority', mode: 'suggestion', initialCheck: { candidates: [], close: [] } });
+    expect(screen.getByText(PUBLIC_NOTE)).toBeVisible();
+    expect(yes()).toHaveAccessibleDescription(PUBLIC_NOTE);
+  });
+
+  it('an organization add says it only once Housing authority is the chosen kind', async () => {
+    const user = userEvent.setup();
+    renderDialog({ kind: 'organization', text: 'Mercy Care', initialCheck: { candidates: [], close: [] } });
+    const group = screen.getByRole('group', { name: 'Kind' });
+    expect(screen.queryByText(PUBLIC_NOTE)).not.toBeInTheDocument(); // no kind yet
+    await user.click(within(group).getByRole('radio', { name: 'Agency' }));
+    expect(screen.queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Name' })).not.toHaveAccessibleDescription();
+    await user.click(within(group).getByRole('radio', { name: 'Housing authority' }));
+    expect(screen.getByRole('textbox', { name: 'Name' })).toHaveAccessibleDescription(PUBLIC_NOTE);
+  });
+});
+
 describe('NewOrgDialog - organization mode (both lists; spec D6, D17; R2-F3, R2-F4)', () => {
   const MERCY = {
     orgId: 'o-mercy',

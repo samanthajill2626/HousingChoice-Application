@@ -1,9 +1,12 @@
 # Caseworker integrity - design
 
-Status: DRAFT revision 2 (2026-10-12). Branch `fix/caseworker-integrity`,
+Status: APPROVED revision 3 (2026-10-12). Branch `fix/caseworker-integrity`,
 worktree `W:\tmp\caseworker-integrity`, cut from `main` @19607658.
 Revision 2 folds in design review round 1
 (`docs/superpowers/reviews/2026-10-12-caseworker-integrity/design-review/adjudications.md`).
+Revision 3 (Cameron's spec gate): restore never dead-ends - it offers a
+landlord picker or a restore without a landlord (section 4, Restore);
+existing data is not swept or repaired (L2).
 
 Closes three filed issues that share one theme: a contact converted to a
 caseworker (or re-typed by hand) can still end up holding tenant-only data or
@@ -266,7 +269,53 @@ The server refuses a team member under I2 like every other non-tenant.
 | `POST /api/units` (`app/src/routes/units.ts:464-514`; `landlordId` required) | 404 `landlord_not_found` when the contact is missing; 409 `landlord_not_landlord` when not typed `landlord` |
 | `PATCH /api/units/:id` with a CHANGED `landlordId` (`units.ts:1376-1491`; writable per `app/src/lib/unitFields.ts:46`) | same |
 | `POST /api/units/:id/contacts` with role `landlord` that CLAIMS a vacant landlord slot (`app/src/repos/unitsRepo.ts:773-823`, `claimsVacantLandlord`) | 409 `landlord_not_landlord` when the contact is not typed `landlord`. Re-asserting the unit's existing owner (Make primary on the owner's row) is not checked. |
-| `POST /api/units/:id/restore` (`units.ts:1517`) | 409 `landlord_not_landlord` when the unit's `landlordId` names a contact that is no longer typed `landlord` (remedy: change that contact back to Landlord, then restore) |
+| `POST /api/units/:id/restore` (`units.ts:1517`; repo `restore`, `unitsRepo.ts:726`) | see "Restore" below - restore never dead-ends on this rule |
+
+### Restore (I3, Cameron 2026-10-12)
+
+A property with no landlord of record is already a supported state (legacy
+"ownerless" units: `unitsRepo.ts:396,766`; placement nudges report
+`no_landlord`, `jobs/placementNudges.ts:439`), and adding a contact with role
+`landlord` to an ownerless property's contact list already claims the slot.
+Restore builds on that instead of refusing:
+
+- **Plain restore** (no body, today's call): when the unit is ownerless or its
+  `landlordId` names a contact typed `landlord`, restore exactly as today.
+  Otherwise (the contact is missing, or no longer typed `landlord`) refuse
+  with 409 `restore_needs_landlord` and `{ landlordName? }` (the stored
+  contact's display name when it exists). Nothing is written.
+- **Restore with a landlord**: body `{ landlordId: <id> }`. The contact must
+  exist and be typed `landlord` (404 `landlord_not_found` / 409
+  `landlord_not_landlord`). Restores the unit and makes that contact its
+  landlord of record in ONE conditional write on the unit: `landlordId` set,
+  the old landlord's contact-list row removed, a `landlord` row for the new
+  one (kept if already seated, role pinned to `landlord`), and
+  `primary_contact` kept consistent the way the roster writes already do.
+- **Restore without a landlord**: body `{ landlordId: null }`. Restores the
+  unit and REMOVES `landlordId` in the same single write, removing the old
+  landlord's contact-list row and clearing a `primary_contact` that pointed
+  at them (the existing "no landlord remains" handling,
+  `unitsRepo.ts:665,907`). Staff can add a landlord later from the contact
+  list (Add contact, role Landlord), which already claims an empty slot.
+- A body is honored only when the plain restore would have refused; when the
+  stored landlord is still valid, a body is ignored and the restore is plain.
+  Each write conditions on the `landlordId` it read, so a concurrent change
+  answers 409 `unit_roster_conflict` (the roster's existing code) and the
+  dashboard re-reads.
+- Audit: the existing `unit_restored` entry gains `landlordReplaced`
+  (`{ from, to }`) or `landlordCleared` (`{ from }`) when one applied.
+
+Dashboard (`ListingDetail.tsx:349`, the only Restore button): on 409
+`restore_needs_landlord`, open a dialog:
+
+> <landlordName or "This property's landlord"> is no longer a landlord, so
+> they can't stay this property's landlord. Choose its landlord:
+> [landlord picker - landlords only, the same source as Add property's]
+> **Restore with this landlord** (disabled until one is picked) -
+> **Restore without a landlord** - Cancel
+
+In the normal case (the landlord is still a landlord) Restore behaves exactly
+as today, with no dialog.
 
 ### Contact list (I4)
 
@@ -288,8 +337,7 @@ site below (several show raw codes or fixed copy today):
   Landlord, Partner, Team member, Unknown);
 - `tenant_not_found`: "That contact no longer exists.";
 - `landlord_not_landlord`: "Only a landlord can be a property's landlord of
-  record." (on restore: "This property's landlord is no longer a landlord.
-  Change that contact back to Landlord first.");
+  record." (restore's own refusal opens the dialog above instead);
 - `landlord_not_found`: "That landlord no longer exists.";
 - `contact_list_caseworker`: "Caseworkers can't be on a property's contact
   list."
@@ -355,7 +403,8 @@ caseworkers list.
   succession, can both pass. No cross-record lock is built (Cameron,
   2026-10-12). Contrast D1, whose window is durable (crash recovery can run
   hours later) and is therefore fenced atomically.
-- **L2 - existing data.** No backfill. Records created before this branch
+- **L2 - existing data.** No backfill, sweep or audit of existing data
+  (Cameron, 2026-10-12: not worth it). Records created before this branch
   that violate I2-I4 stay as they are. Caseworkers can already exist without
   the conversion (created directly as a partner with the Caseworker role);
   whether production holds any such contact on a contact list or with a tour
@@ -420,7 +469,11 @@ caseworkers list.
 - **D3:** each surface in section 4 refuses as specified and still accepts the
   valid case, including tour PATCH `canceled` -> `toured` / `no_show` /
   `scheduled`, and roster re-assert / existing-seat edits staying allowed;
-  restore refused and allowed; `deriveTenantStatus` skips a non-tenant;
+  restore: plain (valid landlord, ownerless), 409 `restore_needs_landlord`
+  (non-landlord, missing contact), with a landlord (row swap, primary kept
+  consistent), without a landlord (ownerless after, row removed), a body
+  ignored when not needed, and the restore dialog's three actions;
+  `deriveTenantStatus` skips a non-tenant;
   TenantFile hides both buttons for a team member; the Add contact picker
   hides caseworkers; each dashboard copy site in section 4 shows its sentence.
 - **Seeds:** the invariant test in section 5.

@@ -1293,6 +1293,111 @@ describe('ListingDetail', () => {
     expect(await screen.findByText('Nora Lane')).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Restore property' })).toBeInTheDocument();
   });
+
+  // Gap pins from the S4b mutant check (extra mutants X1, X2, X5): behavior the
+  // restore wiring promises (plan Task 4.11 Goal, CONTRACT ISSUE 9, watch item
+  // W7) that no case above pinned.
+  it('(PIN) restoring through the landlord dialog puts the restored roster on the Contacts card, not just the page unit', async () => {
+    const user = userEvent.setup();
+    const setUnit = vi.fn();
+    // The body-path answer carries the ENRICHED roster (CONTRACT ISSUE 9): the
+    // chosen landlord's row, which only applyRosterUnit puts on the card.
+    const restored = {
+      ...READY.unit!,
+      landlordId: 'll9',
+      contacts: [{ contactId: 'll9', role: 'landlord' as const, primaryContact: true, name: 'Nora Lane' }],
+    };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', { error: 'restore_needs_landlord' }),
+      )
+      .mockResolvedValueOnce(restored);
+    getAllContacts
+      .mockReset()
+      .mockResolvedValue([{ contactId: 'll9', type: 'landlord', firstName: 'Nora', lastName: 'Lane' }]);
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit,
+    });
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await waitFor(() => expect(getAllContacts).toHaveBeenCalled());
+    await user.type(within(dialog).getByRole('combobox', { name: 'Landlord' }), 'Nora');
+    await user.click(await screen.findByRole('option', { name: /Nora Lane/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Restore with this landlord' }));
+
+    expect(restoreUnit).toHaveBeenLastCalledWith('u1', { landlordId: 'll9' });
+    await waitFor(() => expect(setUnit).toHaveBeenCalledWith(restored));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+    // applyRosterUnit, not setUnit alone: useListing is mocked, so only the
+    // card's own roster state can show the restored landlord row.
+    expect(screen.getByRole('link', { name: /Nora Lane/ })).toBeInTheDocument();
+  });
+
+  it('(PIN) a conflict whose re-read shows the property already restored closes the landlord dialog', async () => {
+    const user = userEvent.setup();
+    const setUnit = vi.fn();
+    // Someone else restored the property meanwhile: the re-read is live.
+    const fresh = { ...READY.unit!, landlordId: 'll2' };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', { error: 'restore_needs_landlord' }),
+      )
+      .mockRejectedValueOnce(
+        new ApiError(409, 'unit_roster_conflict', 'unit_roster_conflict', { error: 'unit_roster_conflict' }),
+      );
+    getUnit.mockReset().mockResolvedValue(fresh);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit,
+    });
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+    await waitFor(() => expect(setUnit).toHaveBeenCalledWith(fresh));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+  });
+
+  it.each([
+    [404, 'unit_not_found'],
+    [409, 'unit_roster_conflict'],
+    [500, 'http_500'],
+  ] as const)(
+    '(PIN, W7) a plain restore refused %i %s opens no landlord dialog; the property stays deleted and Restore re-enables',
+    async (status, code) => {
+      const user = userEvent.setup();
+      const setUnit = vi.fn();
+      restoreUnit.mockReset().mockRejectedValue(new ApiError(status, code, code, { error: code }));
+      useListing.mockReturnValue({
+        ...READY,
+        unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+        setUnit,
+      });
+      renderAt();
+
+      await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+      expect(restoreUnit).toHaveBeenCalledWith('u1');
+      await waitFor(() => expect(screen.getAllByRole('button', { name: /^Restore$/i })[0]).toBeEnabled());
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+      expect(setUnit).not.toHaveBeenCalled();
+      expect(screen.getByRole('status')).toHaveTextContent(/deleted/i);
+    },
+  );
 });
 
 // --- Contacts card EDIT MODE (contact-rosters Task 9, spec 6.1 / D9) --------

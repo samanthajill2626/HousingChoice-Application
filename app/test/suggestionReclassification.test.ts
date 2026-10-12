@@ -193,6 +193,33 @@ function stripRevisionFromJournal(world: FakeWorld, contactId: string, target: s
   throw new Error('expected an active resolution');
 }
 
+/**
+ * An app whose accept pauses right after its claim until `release()` - the
+ * R2-ADV-1 schedule A window, deterministic.
+ */
+function pausedAtClaim(world: FakeWorld): {
+  app: import('express').Express;
+  atClaim: Promise<void>;
+  release: () => void;
+} {
+  let releaseHold!: () => void;
+  const held = new Promise<void>((resolve) => { releaseHold = resolve; });
+  let reached!: () => void;
+  const atClaim = new Promise<void>((resolve) => { reached = resolve; });
+  const { app } = makeWebhookHarness({
+    world,
+    suggestionResolutionHooks: {
+      afterBoundary: async (boundary) => {
+        if (boundary === 'claimed') {
+          reached();
+          await held;
+        }
+      },
+    },
+  });
+  return { app, atClaim, release: () => releaseHold() };
+}
+
 // D1 cases. Later tasks insert their helpers ABOVE this line.
 
 describe('D1 change 1: the accept plan reads the contact consistently', () => {
@@ -449,5 +476,140 @@ describe('D1 change 4: a journal claimed before the deploy (no revision in its g
 
     expect(contactOf(world, 'c1')?.['housingAuthority']).toBe('Atlanta Housing Authority');
     expect(journalFor(world, 'c1', 'housingAuthority')?.state).toBe('completed');
+  });
+});
+
+describe('D1 change 5: the requester of a refused accept hears 409 suggestion_contact_reclassified', () => {
+  it('A: an authority accept paused at claimed, then a conversion, answers 409 and writes no authority', async () => {
+    const { app, world } = makeWebhookHarness();
+    await world.orgListRepo.putForSeed(startingOrgList());
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'housingAuthority', suggestedValue: 'Atlanta Housing Authority',
+      conversationId: 'conv-1', runId: 'run-ha',
+    });
+    const setVerdict = vi.spyOn(world.aiRuns, 'setVerdict');
+    const paused = pausedAtClaim(world);
+    const pending = accept(paused.app, 'c1', 'housingAuthority').then((res) => res);
+    await paused.atClaim;
+    await convert(app, 'c1').expect(200);
+
+    paused.release();
+    const res = await pending;
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'suggestion_contact_reclassified' });
+    const contact = contactOf(world, 'c1');
+    expect(contact).toMatchObject({ type: 'partner', role: 'Caseworker' });
+    expect(contact?.['housingAuthority']).toBeUndefined();
+    expect(contact?.['housingAuthority_source']).toBeUndefined();
+    expect(journalFor(world, 'c1', 'housingAuthority')?.state).toBe('completed');
+    // The run log records it exactly as a human-edit refusal (spec D1 change 5).
+    expect(setVerdict).toHaveBeenCalledWith(
+      'run-ha', 'housingAuthority', 'superseded_by_human_edit', expect.anything(),
+    );
+  });
+
+  it('A: a voucherSize accept spanning a generic tenant -> landlord re-type answers 409 reclassified', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'voucherSize', suggestedValue: '3', conversationId: 'conv-1', runId: 'run-voucher',
+    });
+    const paused = pausedAtClaim(world);
+    const pending = accept(paused.app, 'c1', 'voucherSize').then((res) => res);
+    await paused.atClaim;
+    await patch(app, 'c1', { type: 'landlord' }).expect(200);
+
+    paused.release();
+    const res = await pending;
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'suggestion_contact_reclassified' });
+    expect(contactOf(world, 'c1')).toMatchObject({ type: 'landlord' });
+    expect(contactOf(world, 'c1')?.['voucherSize']).toBeUndefined();
+    expect(journalFor(world, 'c1', 'voucherSize')?.state).toBe('completed');
+  });
+
+  it('A: a status accept spanning a conversion answers reclassified - classification wins the tie with status', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'status', suggestedValue: 'searching', conversationId: 'conv-1', runId: 'run-status',
+    });
+    const paused = pausedAtClaim(world);
+    const pending = accept(paused.app, 'c1', 'status').then((res) => res);
+    await paused.atClaim;
+    await convert(app, 'c1').expect(200);
+
+    paused.release();
+    const res = await pending;
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'suggestion_contact_reclassified' });
+    // The conversion's own status stands; the accepted one was never written.
+    expect(contactOf(world, 'c1')).toMatchObject({ type: 'partner', status: 'active' });
+  });
+
+  it('A: an accept over a prior authority spanning a conversion answers reclassified - classification wins the tie with the field', async () => {
+    const { app, world } = makeWebhookHarness();
+    await world.orgListRepo.putForSeed(startingOrgList());
+    seedContact(world, {
+      housingAuthority: 'DeKalb County Housing Authority',
+      housingAuthority_source: { source: 'manual', at: '2026-09-01T00:00:00.000Z' },
+    });
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'housingAuthority', suggestedValue: 'Atlanta Housing Authority',
+      conversationId: 'conv-1', runId: 'run-ha',
+    });
+    const paused = pausedAtClaim(world);
+    const pending = accept(paused.app, 'c1', 'housingAuthority').then((res) => res);
+    await paused.atClaim;
+    await convert(app, 'c1').expect(200);
+
+    paused.release();
+    const res = await pending;
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'suggestion_contact_reclassified' });
+    expect(contactOf(world, 'c1')?.['housingAuthority']).toBeUndefined();
+  });
+
+  it('A: an address accept claimed before the conversion still commits onto the caseworker (PIN)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'address', suggestedValue: '1 Main St',
+      suggestedAddress: { line1: '1 Main St' }, conversationId: 'conv-1', runId: 'run-address',
+    });
+    const paused = pausedAtClaim(world);
+    const pending = accept(paused.app, 'c1', 'address').then((res) => res);
+    await paused.atClaim;
+    await convert(app, 'c1').expect(200);
+
+    paused.release();
+    const res = await pending;
+
+    expect(res.status).toBe(200);
+    expect(contactOf(world, 'c1')).toMatchObject({ type: 'partner', address: { line1: '1 Main St' } });
+  });
+
+  it('A: a phone accept claimed before the conversion still commits (PIN)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550102020', conversationId: 'conv-1', runId: 'run-phone',
+    });
+    const paused = pausedAtClaim(world);
+    const pending = accept(paused.app, 'c1', 'phone').then((res) => res);
+    await paused.atClaim;
+    await convert(app, 'c1').expect(200);
+
+    paused.release();
+    const res = await pending;
+
+    expect(res.status).toBe(200);
+    const phones = (contactOf(world, 'c1')?.['phones'] as Array<{ phone: string }> | undefined) ?? [];
+    expect(phones.map((entry) => entry.phone)).toContain('+15550102020');
   });
 });

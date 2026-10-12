@@ -491,13 +491,16 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
   async function applyJournal(
     initial: ActiveSuggestionResolution,
     opts: { helping: boolean },
-  ): Promise<{ stateChanged: boolean; refusedByHumanEdit: boolean }> {
+  ): Promise<{ stateChanged: boolean; refusedByHumanEdit: boolean; refusedByReclassification: boolean }> {
     let journal = initial;
     // Entering above `claimed` means the domain effect is already durable (a
     // previous process committed it), so carrying the journal forward is still
     // a state change the dashboard has never been told about.
     let stateChanged = initial.phase !== 'claimed';
     let refusedByHumanEdit = false;
+    // Spec 2026-10-12 D1 change 5: the fenced write was refused because the
+    // contact's classification (type or role) changed after the plan read it.
+    let refusedByReclassification = false;
     for (let attempt = 0; attempt < MAX_RESOLUTION_LOOPS; attempt += 1) {
       const token = tokenFor(journal);
       if (journal.phase === 'claimed') {
@@ -593,7 +596,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           // gives the requester an answer about their OWN chip (adv P2-5).
           // 'stale' alone still throws: nothing is settled and the caller
           // should retry.
-          if (opts.helping && released !== 'stale') return { stateChanged, refusedByHumanEdit };
+          if (opts.helping && released !== 'stale') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
           throw new SuggestionResolutionError(409, 'phone_in_use');
         }
         // `stale` means this token can no longer prove its domain transaction
@@ -610,10 +613,11 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         // journal still runs to completion below (verdict + scrub); this flag is
         // what lets `resolve()` answer the REQUESTER honestly (H1 / item 1).
         if (result === 'superseded_by_human_edit') refusedByHumanEdit = true;
+        if (result === 'superseded_by_reclassification') refusedByReclassification = true;
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
         // Post-commit: the effect + audit + phase advance landed atomically and
         // somebody else now owns the journal. The human's action took effect.
-        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit };
+        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
         // FENCE NOTE (item 12): this re-ADOPTS whatever token the journal now
         // carries instead of enforcing our own - a helper that took over mid
         // flight is followed, not refused. Benign ONLY because every effect
@@ -660,9 +664,9 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         }
         // Post-commit from here on: the domain effect and its audit are durable,
         // so losing the journal to another helper is not the human's problem.
-        if (result === 'stale') return { stateChanged, refusedByHumanEdit };
+        if (result === 'stale') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
-        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit };
+        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
         // Same fence re-adoption as the post-commit read above - see FENCE NOTE.
         journal = refreshed;
         await boundary('activity_applied', journal);
@@ -678,9 +682,9 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           expectedPhase: journal.phase,
           nextPhase: 'verdict_attempted',
         });
-        if (result === 'stale') return { stateChanged, refusedByHumanEdit };
+        if (result === 'stale') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
-        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit };
+        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
         // Same fence re-adoption as the post-commit read above - see FENCE NOTE.
         journal = refreshed;
         await boundary('verdict_attempted', journal);
@@ -694,7 +698,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         expectedPhase: 'verdict_attempted',
         completedAt: now(),
       });
-      return { stateChanged, refusedByHumanEdit };
+      return { stateChanged, refusedByHumanEdit, refusedByReclassification };
     }
     throw new SuggestionResolutionError(409, 'suggestion_resolution_retry_exhausted', true);
   }
@@ -881,6 +885,15 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           // the operator their action applied when nothing of it did. Same
           // shape as the `released_unsafe` refusal above: throw AFTER the
           // durable work, never instead of it.
+          // Spec 2026-10-12 D1 change 5: the same shape for a refusal caused by
+          // a reclassification (the caseworker conversion, or a type or role
+          // change) after the plan read the contact. The repository decides
+          // classification first, so a tie answers this code. Only THIS
+          // request's own claim answers it; a helped journal keeps today's
+          // answers (applyJournal's flags are ignored on the help path).
+          if (applied.refusedByReclassification) {
+            throw new SuggestionResolutionError(409, 'suggestion_contact_reclassified');
+          }
           if (applied.refusedByHumanEdit) {
             throw new SuggestionResolutionError(409, 'suggestion_field_edited');
           }

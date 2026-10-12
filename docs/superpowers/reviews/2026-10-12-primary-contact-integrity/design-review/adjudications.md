@@ -90,3 +90,33 @@ never an automatic heir) -> round 4, the last allowed.
 | L3 | R3-3 | ACCEPT | no | 4.4 text: a re-sent true on a deleted already-primary row triggers the handoff; "flagged primary AND live" untouched; P2's no-heir branch leaves a deleted flagged primary's flag AND scalar (as the fan-out does) and removes the scalar only when no row is flagged. |
 | L4 | R3-4 | ACCEPT | no | Placement diagnostic keeps today's code per state (`relay_member_unresolvable` for is_tenant). |
 | L5 | R3-5 | ACCEPT | no | The 4.2 batch includes the ADDED contact; the fan-out's re-read re-checks the deleted contact is still the primary before re-deciding; the 7.4 no-live-contact line says the add promotes automatically. |
+
+## Round 4 (spec rev 4 @8b7208fe) - TERMINAL
+
+Report: `spec-R4-reviewer-b.md` (reviewer B continued, 3 findings; reviewer
+states nothing should change a decision; no adjudication contested).
+
+Result: 3 ACCEPT, 0 REJECT. Decisions changed: NO (precision only - M1 applies
+L2 to the box, M2 narrows L2 to step 2, M3 names the function's inputs and
+result). Per the stop rule this is the terminal round: folded into rev 5 and
+the review CLOSES.
+
+| id | finding | verdict | decision changed? | resolution in rev 5 |
+|---|---|---|---|---|
+| M1 | R4-1 | ACCEPT | no | 7.5 rows carry `caseworker: true`; the 7.4 box counts ELIGIBLE rows (live, not a caseworker); a caseworker-only property shows the "Add a contact - they become the primary automatically" line. |
+| M2 | R4-2 | ACCEPT (reviewer's first option) | no | The caseworker exclusion applies at heir step 2 only; the landlord of record (step 1, also P1's fallback) is the owner by definition, and caseworker-integrity refuses a caseworker as a NEW landlord. Removes the P1 / notice / script disagreement. |
+| M3 | R4-3 | ACCEPT | no | 4.3 names its input as the contact records (or a failed read) and its no-heir result carries WHY (`no_live_candidate` / `only_caseworkers`), which the script and the box read. |
+
+## Totals (rounds 1-4)
+
+77 findings (38 + 11 + 5 + 3 numbered, plus one section-10 note), all
+ACCEPTED - several with a different mechanism than proposed (J6) or partly as
+a stated known gap (K9: the Delete dialog cannot tell a tenant-typed primary).
+0 REJECT, 0 DEFER. One out-of-scope defect FILED from the surface sweep:
+`docs/issues/relay-provision-includes-deleted-contacts.md`.
+
+Planner's own calls beyond Cameron's rulings, for the spec gate: the
+caseworker exclusion (L2/M2); `primary_contact` no longer client-writable
+(P2b); 409 `primary_contact_deleted`; 503 `roster_read_failed`; the Delete
+dialog sentence (7.6); the dev-only e2e seam; the `unit_primary_contact_assigned`
+audit event.

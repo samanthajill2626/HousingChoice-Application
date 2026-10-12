@@ -1,6 +1,6 @@
 # Primary contact integrity and the intro fallback explanation - design
 
-Date: 2026-10-12. Status: DRAFT rev 3 (design review rounds 1-2 folded in;
+Date: 2026-10-12. Status: DRAFT rev 4 (design review rounds 1-3 folded in;
 adjudications at
 `docs/superpowers/reviews/2026-10-12-primary-contact-integrity/design-review/adjudications.md`).
 Branch: `feat/primary-contact-integrity` (worktree `W:\tmp\primary-contact-integrity`).
@@ -152,8 +152,10 @@ reason `none` -> today's "no landlord" text; reason `deleted` -> today's
 "contact not found" text (a deleted contact now reads like a missing one);
 reason `is_tenant` -> whatever today's code yields when the candidate is the
 tenant; a read failure -> today's thrown-read behavior. The placement
-diagnostic has a single unreachable code (`landlord_unreachable`) and keeps it
-for every nobody outcome. The plan pins each string against the tests.
+diagnostic (`rosterProvision.ts:515-544`) likewise keeps today's code per
+state: `landlord_unreachable` for none / deleted, and today's
+`relay_member_unresolvable` answer for is_tenant. The plan pins each string
+against the tests.
 
 Behavior change, stated: a DELETED primary or landlord of record is no longer
 put on a default people list (so no longer provisioned and texted), named in an
@@ -165,10 +167,17 @@ resolves past it to the next live candidate.
 Every write that picks an heir (P2, P3, the script, the 7.5 heir field) needs
 the liveness of the landlord of record and of every roster contact. Contract:
 
-- ONE batch read of those ids (the roster's contact ids AND `landlordId`) with
+- ONE batch read of those ids (the roster's contact ids, `landlordId`, and on
+  an add the ADDED contact, which is not on the pre-write roster) with
   `requireComplete` (`contactsRepo.getManyByIds`, `contactsRepo.ts:940-997`);
   its default is best-effort and silently drops unprocessed keys, which would
   read as "missing" - not allowed here.
+- With `requireComplete` the read fails in TWO shapes: a thrown chunk rethrows
+  the raw error (`contactsRepo.ts:986-990`) and unprocessed keys throw
+  `IncompleteBatchReadError` (`:994-996`). ANY throw from this read means
+  liveness unknown. Catching only the error class would turn a throttled read
+  into a failed add (500), a 500 on the unit GET (which never 500s today,
+  `units.ts:391-396`) and a 500 instead of the 503 on remove.
 - The read happens BEFORE the conditional roster write, and is REFRESHED on
   every retry of that write (the retry re-reads the unit, whose roster may have
   gained rows). Unit reads on these paths are strongly consistent.
@@ -191,11 +200,21 @@ ONE pure function (no I/O; inputs: the unit's `unitContacts()` roster, its
 real repo AND by the API-test fake (`app/test/helpers/twilioWebhookHarness.ts`
 `addContact` / `removeContact`, `:2940-3017`), so the two cannot drift:
 
-1. the landlord of record, if live and not the excluded contact. If the
-   landlord has no roster row, the result says so and the write ADDS their row
-   (`role: 'landlord'`) as primary;
-2. else the earliest-added LIVE roster contact that is not the excluded one;
+1. the landlord of record, if live, not the excluded contact, and not a
+   caseworker. If the landlord has no roster row, the result says so and the
+   write ADDS their row (`role: 'landlord'`) as primary;
+2. else the earliest-added LIVE roster contact that is not the excluded one and
+   not a caseworker;
 3. else no heir.
+
+Caseworkers are never picked AUTOMATICALLY (`isCaseworker`,
+`lib/caseworkers.ts:86-88`: a `partner` with a caseworker role). A caseworker
+is the tenant's agency contact, not the property side; caseworker-integrity
+refuses NEW caseworker roster seats but leaves existing ones in place, so
+without this rule P2, P3 or the script could make one primary - named as the
+landlord in the tour intro and put on every new tour's default list. The
+liveness read already returns whole contacts, so this needs no extra read. An
+explicit "Make primary" is not an automatic pick and is not affected here.
 
 The excluded contact counts as not live at EVERY step, whatever the liveness
 map says - so `heirIfPrimaryRemoved` (7.5) on a unit whose landlord is the
@@ -219,23 +238,28 @@ as "add the replacement, then delete Mark" does.
 
 - heir -> that contact is flagged primary and the scalar set, in the same
   conditional write;
-- no heir -> the scalar is REMOVEd if present (today `addContact` can leave a
-  stale scalar after a demotion, `unitsRepo.ts:815-824`);
+- no heir -> flags are left as they are. If NO row is flagged, the scalar is
+  REMOVEd if present (today `addContact` can leave a stale scalar after a
+  demotion, `unitsRepo.ts:815-824`). If a DELETED contact is still flagged, it
+  keeps both its flag and the scalar - the same state the delete fan-out
+  leaves (4.6), so flag and scalar never split;
 - unknown -> the add still succeeds without a promotion, with a WARN log; the
   property box (7.4) and the script (section 8) are the backstop.
 
 In the 470 Bolton case (no landlord, Mark the only contact) the heir is Mark.
-Properties whose landlord-of-record row is flagged primary are untouched. The
-re-add of the CURRENT primary without `primaryContact` (an API-only demotion to
-zero, `unitsRepo.ts:794,800`) now ends with the heir primary again.
+Properties whose landlord-of-record row is flagged primary AND live are
+untouched. The re-add of the CURRENT primary without `primaryContact` (an
+API-only demotion to zero, `unitsRepo.ts:794,800`) now ends with the heir
+primary again.
 
 Making a contact primary that is NOT already primary, when that contact is
 soft-deleted, is refused with 409 `primary_contact_deleted`. A missing contact
 cannot reach this: the route answers 404 `contact_not_found` first
 (`routes/units.ts:1097-1100`). Re-sending `primaryContact: true` for a row that
 is ALREADY primary (the dashboard's re-role sends the row's current flag,
-`ListingDetail.tsx:425-433`) is allowed even if that contact is deleted - it
-changes nothing. Order: after the 404 and after caseworker-integrity's type
+`ListingDetail.tsx:425-433`) is never refused, even if that contact is deleted;
+for a deleted one the write's P2 check then hands the primary off as above
+(heir, or no change when there is none). Order: after the 404 and after caseworker-integrity's type
 checks on this route (the plan pins it against the merged code). Adding a
 deleted contact as a NON-primary row stays allowed (caseworker-integrity
 deliberately dropped a deleted-contact refusal here; not reopened).
@@ -270,7 +294,9 @@ Paths (all through the heir function, 4.3):
   NOTHING changes (the deleted contact stays flagged; P1 skips it, the property
   box says so, and the next add promotes, 4.4); unknown -> that unit is skipped
   with a WARN log. A conditional-write failure (the unit changed since the
-  Scan) re-reads that unit consistently and re-decides, with the same bounded
+  Scan) re-reads that unit consistently, first re-checks that the deleted
+  contact is STILL its flagged primary (if not, someone already moved it: done),
+  and otherwise re-decides, with the same bounded
   retries as the roster writes; only exhausting them logs and skips. The
   deleted contact stays on the roster as a row. Best-effort and in-request,
   after the delete is saved -
@@ -463,8 +489,8 @@ least one row. Amber box, same style as 7.1. Mockup:
     `ListingDetail.tsx:437`).
   - two or more live roster contacts: button "Choose a primary" - enters the
     card's edit mode.
-  - no live roster contact: no button; the line reads "Add a contact and make
-    them primary."
+  - no live roster contact: no button; the line reads "Add a contact - they
+    become the primary automatically."
 - Not shown on a soft-deleted property (the card is read-only there), and not
   shown when the block is absent (could not tell).
 - Zero roster rows: no box. The existing empty state "No contacts on this
@@ -483,9 +509,10 @@ least one row. Amber box, same style as 7.1. Mockup:
 
 `enrichRoster` (`routes/units.ts:384-411`) reads the roster's contact ids AND
 `landlordId` (an off-roster landlord must not read as missing) with
-`requireComplete`. If that read is incomplete (`IncompleteBatchReadError`,
-which carries no partial map), it falls back to today's best-effort read for
-the names, so the rows degrade exactly as they do today. The unit responses
+`requireComplete`. If that read throws in EITHER shape (4.2 - a raw chunk
+error or `IncompleteBatchReadError`, neither of which carries a partial map),
+it falls back to today's best-effort read for the names, so the rows degrade
+exactly as they do today and the GET never 500s. The unit responses
 that carry the enriched roster (GET `/api/units/:id`, `units.ts:531`, and the
 two roster writes, `:1136`, `:1171`) gain:
 
@@ -557,6 +584,8 @@ every write is conditional, so concurrent runs cannot double-write.
   the landlord row when the heir is an off-roster landlord) and sets the
   scalar.
 - Counted, not written: `noHeir` (no live contact and no live landlord),
+  `caseworkerOnly` (the only live candidates are caseworkers, whom the heir
+  function never picks - 4.3; listed by unit id so Sam can choose by hand),
   `unknown` (a liveness read failed).
 - Also aligned, with the same conditional write and no audit event (it is not
   a primary change): a unit whose flagged primary is live but whose scalar is
@@ -681,7 +710,9 @@ P1 removes the property-contact route into this; the rest is filed as
 - Parity: the real repo and the API-test fake give the same results for the
   heir cases (they share the function; a test pins it through both). The fake
   ignores `requireComplete`, so the 503 / unknown paths are tested with an
-  injected contacts repo whose batch read throws `IncompleteBatchReadError`.
+  injected contacts repo whose batch read throws - in BOTH shapes (a raw error
+  and `IncompleteBatchReadError`), on add, remove, the unit GET and the delete
+  fan-out. The heir function's caseworker exclusion is pinned at both steps.
 - App API tests: the 7.5 block (complete read, incomplete read -> absent,
   deleted rows), the preview `introFallback`, the contact DELETE handoff, P2b's
   refusal, the Activity projection's `reason`.

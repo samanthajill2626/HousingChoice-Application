@@ -107,7 +107,11 @@ These cost real debugging time on tenant onboarding; the next diagram should exp
   Order the by-phone path: call → auto-reply → text → relay → triage.
 - **The self-serve portal is an API, not a UI page** — the public
   `POST :5174/public/housing-fair` (driven via the `:5174` proxy, which injects the origin
-  secret) creates a `type:tenant, status:needs_review` contact + fires the welcome text.
+  secret) creates a `type:tenant, status:onboarding` contact holding the `housingAuthority`
+  it is sent (an exact organization-list name; the `/join` form sends its select's choice,
+  Atlanta Housing Authority by default) + fires the welcome text. A flyer sign-up (a body
+  with a `unitId`) still creates a `needs_review` contact and may not carry a housing
+  authority (400). Until 2026-10-12 every sign-up was `needs_review` with no authority.
 - **The Unknown list shows a FORMATTED phone** (`(555) 123-4567`), not E.164 — locate the
   UI row by the formatted number; resolve the contactId via the API (`?type=unknown`).
 - **The missed-call auto-text requests the onboarding details** (full name, voucher

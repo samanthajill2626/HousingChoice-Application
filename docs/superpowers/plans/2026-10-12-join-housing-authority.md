@@ -4,14 +4,18 @@
   `docs/superpowers/specs/2026-10-12-join-housing-authority-design.md`
   (revision 4, APPROVED by Cameron 2026-10-12). Decisions are cited as D1-D11.
 - Branch `feat/join-housing-authority`, worktree `W:\tmp\join-housing-authority`,
-  cut from main @19607658. Mission records:
+  cut from main @19607658; the planner merged main in BEFORE the build
+  (@469241f7, the branch then held only docs), and every anchor below was
+  re-verified against that tree. Mission records:
   `docs/superpowers/reviews/2026-10-12-join-housing-authority/`.
 - Spec review: 3 rounds, CLOSED (round 3 terminal) -
   `docs/superpowers/reviews/2026-10-12-join-housing-authority/design-review/adjudications.md`.
 - Status: PLAN (assembled 2026-10-12 from four opus section drafts + the
   planner's S6). Sections 0-4 are BINDING; section 4 (assembly rulings)
   wins over any slice text it contradicts. The section drafts themselves are
-  gitignored and are never the authority.
+  gitignored and are never the authority. Plan review round 1 adjudicated
+  in `docs/superpowers/reviews/2026-10-12-join-housing-authority/plan-review/adjudications.md`
+  (P1-P8, applied to this text).
 
 ## 0. Ground rules for this plan
 
@@ -795,7 +799,7 @@ Step 4 - run it GREEN:
 Expected: 1 file passed, 5 tests passed, 0 failed.
 Then the regression file, unchanged so far:
 `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/publicIntake.test.ts`
-Expected: 29 tests passed, 0 failed (the router is not mounted yet).
+Expected: 30 tests passed, 0 failed (the router is not mounted yet).
 
 Step 5 - commit.
 1. `cd "W:/tmp/join-housing-authority" && git status` - only
@@ -999,7 +1003,7 @@ describe('GET /public/housing-authorities - its own limit, independent of the sh
 
 Step 2 - run it RED:
 `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/publicIntake.test.ts`
-Expected: the 29 existing tests pass; of the 7 new tests, 5 FAIL and 2 pass:
+Expected: the 30 existing tests pass; of the 7 new tests, 5 FAIL and 2 pass:
 - "serves the starting list ..." - `expected 404 to be 200` (no route
   mounted; the request falls through the shared limiter to a 404);
 - "serves the STORED list ..." - `expected 404 to be 200`;
@@ -1097,7 +1101,7 @@ with:
 
 Step 4 - run GREEN:
 1. `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/publicIntake.test.ts`
-   Expected: 36 tests passed, 0 failed.
+   Expected: 37 tests passed, 0 failed.
 2. The edge guard still passes (D2: no new prefix; the second
    `app.use('/public'` is the already-classified `/public`):
    `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/cloudfrontBehaviors.test.ts`
@@ -1222,7 +1226,7 @@ describe('POST /public/housing-fair - housingAuthority shape and the flyer refus
 
 Step 2 - run it RED:
 `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/publicIntake.test.ts`
-Expected: the 36 earlier tests pass; both new tests FAIL - the first with
+Expected: the 37 earlier tests pass; both new tests FAIL - the first with
 `42: expected 200 to be 400` (the field is ignored today), the second with
 `unit-flyer: expected 200 to be 400`. Exit code 1.
 
@@ -1320,7 +1324,7 @@ with:
 
 Step 4 - run it GREEN:
 `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/publicIntake.test.ts`
-Expected: 38 tests passed, 0 failed.
+Expected: 39 tests passed, 0 failed.
 
 Step 5 - commit.
 1. `cd "W:/tmp/join-housing-authority" && git status` - only
@@ -1497,7 +1501,7 @@ describe('POST /public/housing-fair - the housing authority must be on the list 
 
 Step 2 - run it RED:
 `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/publicIntake.test.ts`
-Expected: the 38 earlier tests pass; of the 6 new tests, 5 FAIL and 1
+Expected: the 39 earlier tests pass; of the 6 new tests, 5 FAIL and 1
 passes:
 - "refuses an unlisted name ..." - `Springfield Housing Authority: expected 200 to be 400`;
 - "refuses an unlisted name for an EXISTING phone ..." - `expected 200 to be 400`;
@@ -1580,7 +1584,7 @@ with:
 
 Step 4 - run it GREEN:
 `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/publicIntake.test.ts`
-Expected: 44 tests passed, 0 failed.
+Expected: 45 tests passed, 0 failed.
 
 Step 5 - commit.
 1. `cd "W:/tmp/join-housing-authority" && git status` - only
@@ -1952,7 +1956,7 @@ none says a NEW /join sign-up is `needs_review` or goes to the triage queue.
 
 Step 5 - run it GREEN:
 `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/publicIntake.test.ts`
-Expected: 53 tests passed, 0 failed.
+Expected: 54 tests passed, 0 failed.
 
 Step 6 - commit.
 1. `cd "W:/tmp/join-housing-authority" && git status` - only
@@ -2110,7 +2114,7 @@ describe('POST /public/housing-fair - audit and log (D7)', () => {
 
 Step 2 - run it RED:
 `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/publicIntake.test.ts`
-Expected: the 53 earlier tests pass; all 4 new tests FAIL - the audit
+Expected: the 54 earlier tests pass; all 4 new tests FAIL - the audit
 `toEqual` reports the payload is missing `signupVersion` and
 `housingAuthority` (the first assertion to run in each). Exit code 1.
 
@@ -2168,7 +2172,7 @@ with:
 
 Step 4 - run GREEN:
 1. `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/publicIntake.test.ts`
-   Expected: 57 tests passed, 0 failed.
+   Expected: 58 tests passed, 0 failed.
 2. `cd "W:/tmp/join-housing-authority/app" && npx vitest run test/cloudfrontBehaviors.test.ts`
    Expected: 9 passed.
 3. Typecheck:
@@ -2225,7 +2229,7 @@ stored list governs over the starting list (2.2), D7 log key without the name
   launcher cannot raise it (unlike `PUBLIC_RATE_LIMIT_MAX`,
   `scripts/e2e-session.mjs:142`). The e2e suite runs one worker
   (`e2e/playwright.config.ts:141`) and loads `/join` only a handful of times
-  (`public-pages.spec.ts:345`, `a2p-compliance.spec.ts:107`,
+  (`public-pages.spec.ts:373`, `a2p-compliance.spec.ts:107`,
   `environment-identity.spec.ts:101`), so it is far below 60 per minute; a
   perf run that loads `/join` more than 60 times in a minute would see the
   failed-list state, not a failure.
@@ -2344,8 +2348,10 @@ Notes for S5 (not tasks; S5 owns e2e and docs):
 Worktree `W:\tmp\join-housing-authority`. Dashboard tests run from
 `W:/tmp/join-housing-authority/dashboard` with `npx vitest run src/routes/public/<file>`
 (never piped). The unit tests mock `./publicApi.js`; nothing here needs S1's
-route to be built. Commands below are written so they work in PowerShell and
-in Git Bash (forward slashes, `;` between `cd` and the command).
+route to be built. Run every command below from Git Bash (the Bash tool):
+the ASCII checks (`tr ... | wc -c`) and the `test -e ... && ... ||` MERGE_HEAD
+check are bash-only (plan review R1 B-F4). The `PowerShell:` alternatives
+printed beside a few of them are equivalents, not the primary form.
 
 Files this slice touches (and nothing else):
 
@@ -3009,11 +3015,16 @@ Step 4 - Run GREEN:
      (all their pre-existing cases, unchanged) are the flyer's regression pins.
 3. `cd W:/tmp/join-housing-authority/dashboard; npm run typecheck` - expect exit 0.
 4. `cd W:/tmp/join-housing-authority; npx eslint dashboard/src/routes/public/IntakeForm.tsx dashboard/src/routes/public/IntakeForm.props.test.tsx dashboard/src/routes/public/FlyerPage.test.tsx`
-   - expect exit 0. If an error is reported on a line this task did not
-     write, run the same `npx eslint <that path>` read-only in the main
-     checkout (`W:\AI Projects\Housing Choice\HC Application`); an identical
-     error there is pre-existing (name it in the handback), anything else is
-     yours and blocking.
+   - expect exit 0. If an error is reported, attribute it by BASELINE at the
+     MERGE BASE (AGENTS.md gate 5), never against the shared main checkout
+     (plan review R1 B-F5): `git -C W:/tmp/join-housing-authority merge-base main HEAD`,
+     then `git -C W:/tmp/join-housing-authority worktree add --detach W:/tmp/join-ha-lintbase <that sha>`,
+     run the same `npx eslint <paths>` from `W:/tmp/join-ha-lintbase` (a path
+     that does not exist there is a new file - every error in it is yours),
+     diff the two outputs, then remove the throwaway with
+     `git -C W:/tmp/join-housing-authority worktree remove W:/tmp/join-ha-lintbase`.
+     An identical error at the base is pre-existing (name it in the
+     handback); anything else is yours and blocking.
 5. ASCII:
    - `tr -d '\11\12\15\40-\176' < W:/tmp/join-housing-authority/dashboard/src/routes/public/IntakeForm.props.test.tsx | wc -c` prints 0.
    - `tr -d '\11\12\15\40-\176' < W:/tmp/join-housing-authority/dashboard/src/routes/public/FlyerPage.test.tsx | wc -c` prints 0.
@@ -4794,7 +4805,7 @@ the S6 gates, not by this slice.
 CONTRACT ISSUES: none. Sections 0-3 work against the code as written. Notes (no change to the binding text):
 - 2.5 `BackfillReport`: the draft keeps exactly the listed fields (targets, leftOut, unknownSkips, written, skipped, failed, warnings). `skipped` is the count of LOST CONDITIONS (spec D10 "counted as skipped"); the `--skip` reason is `LeftOutReason` 'skipped' on a left-out lead. A missing audit event after a landed write is a `warnings` entry (no extra field).
 - 2.5 `BackfillDeps` (the writer's to define) carries `doc` and `env` beside the repos, because the candidate read is a base-table Scan (the clean-org-names shape) and no repo method scans the contacts base table.
-- Extra exports beyond 2.5 (all additive): `SCRIPT_NAME`, `touchesHousingAuthority`, the report types and `formatBackfillReport` / `backfillExitCode`, `BackfillRefusedError`, `AUDIT_PAGE_SIZE`, `buildBackfillDeps`, `checkBackfillList`, `scanCandidates`, `readWholeHistory`, `leftOutReasonFor`, `BACKFILL_ARGS`, `parseSkipList`.
+- Extra exports beyond 2.5 (all additive): `SCRIPT_NAME`, `touchesHousingAuthority`, the report types and `formatBackfillReport` / `backfillExitCode`, `BackfillRefusedError`, `AUDIT_PAGE_SIZE`, `buildBackfillDeps`, `checkBackfillList`, `scanCandidates`, `readWholeHistory`, `leftOutReasonFor`, `BACKFILL_ARGS`, `parseSkipList`, `USAGE`, `CliDeps` and `main` (the CLI seam whose exit codes the tests execute - plan review P3).
 
 ### 7. S4 - Backfill script, its test, and the RUNBOOK entry
 
@@ -6743,18 +6754,21 @@ Step 5 - commit: the ASCII check (bash, as in 4.1) prints 0 twice; `git -C W:\tm
 
 ---
 
-#### Task 4.5 - The CLI: `--env` / `--lane` / `--apply` / `--skip`, exit codes 0/1/2
+#### Task 4.5 - The CLI: `main` with every exit code executed (0/1/2), `--env` / `--lane` / `--apply` / `--skip`
 
 Files: `app/scripts/backfill-join-housing-authority.ts`, `app/test/backfillJoinHousingAuthority.test.ts`.
+
+Plan review P3 (A-F3): the exit codes are EXECUTED, not searched for in the source. The CLI lives in an exported `main(argv, cli?)` that resolves to the exit code, with its outside world (`resolveStage`, `run`, `printError`, `logger`) injectable; the direct-invocation block only sets `process.exitCode` from it. The tests call `main` for every exit path (fakes for the stage, plus two cases with the REAL run against DynamoDB Local), and one test runs the real entry point in a child process for exit 2 (no database, no network). The child is spawned as `node --import tsx <script>`, the `app/test/otel.test.ts:276-283` precedent (a `.bin/tsx.cmd` shim is EINVAL under spawnSync on Windows).
 
 Step 1 - the failing test.
 
 (a) Replace the test file's import block with:
 
 ```ts
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { GetCommand, PutCommand, ScanCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { afterEach, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
@@ -6779,16 +6793,19 @@ import {
   isCandidate,
   leftOutReasonFor,
   leftOutReasonFromAudit,
+  main,
   parseSkipList,
   readWholeHistory,
   runJoinAuthorityBackfill,
   scanCandidates,
   touchesHousingAuthority,
+  USAGE,
   type BackfillDeps,
   type BackfillLead,
+  type BackfillOptions,
   type BackfillReport,
 } from '../scripts/backfill-join-housing-authority.js';
-import { parseStageArgs } from '../scripts/lib/stageClient.js';
+import { parseStageArgs, type StageClient } from '../scripts/lib/stageClient.js';
 import { createLogCapture } from './helpers/logCapture.js';
 ```
 
@@ -6797,10 +6814,48 @@ import { createLogCapture } from './helpers/logCapture.js';
 ```ts
 // ---------------------------------------------------------------------------
 // The CLI (spec D10: --env local|dev|prod, --lane with local only, dry run by
-// default, --apply, --skip; unknown or repeated arguments are usage, exit 2)
+// default, --apply, --skip; exit 0 completed clean, 1 refused / a failed lead /
+// the run stopped / the target unresolved, 2 usage). `main` is the CLI with
+// its outside world injected, so every exit code is EXECUTED here; the last
+// test runs the real entry point in a child process.
 // ---------------------------------------------------------------------------
 
-describe('the CLI', () => {
+const SCRIPT_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'scripts',
+  'backfill-join-housing-authority.ts',
+);
+
+const CLEAN_REPORT: BackfillReport = {
+  targets: [],
+  leftOut: [],
+  unknownSkips: [],
+  written: 0,
+  skipped: 0,
+  failed: 0,
+  warnings: [],
+};
+
+/** A stage whose client is never sent a command; destroy() is counted. */
+function fakeStage(): { stage: StageClient; destroyed: () => number } {
+  let destroyed = 0;
+  const stage: StageClient = {
+    doc: {
+      destroy: () => {
+        destroyed += 1;
+      },
+    } as unknown as DynamoDBDocumentClient,
+    env: { TABLE_PREFIX: 'hc-local-4-' },
+    endpoint: 'http://localhost:8000',
+    prefix: 'hc-local-4-',
+    accessKeyId: 'hclane4',
+    describe: 'a fake stage',
+  };
+  return { stage, destroyed: () => destroyed };
+}
+
+describe('the CLI arguments', () => {
   it('dry run by default; --apply writes; --skip takes ONE comma-separated value; anything else is a usage error', () => {
     const dry = parseStageArgs(['--env', 'prod'], BACKFILL_ARGS);
     if ('usage' in dry) throw new Error('expected a parse');
@@ -6833,23 +6888,208 @@ describe('the CLI', () => {
       expect(parseSkipList(raw)).toBeUndefined();
     }
   });
+});
 
-  it('resolves the stage before any read, exits 2 on usage, maps a refusal and the exit code, and destroys the client', () => {
-    const source = readFileSync(join(process.cwd(), 'scripts', 'backfill-join-housing-authority.ts'), 'utf8');
-    expect(source).toContain('parseStageArgs(process.argv.slice(2), BACKFILL_ARGS)');
-    expect(source).toContain('process.exit(2)');
-    expect(source.indexOf('resolveStageClient(')).toBeGreaterThan(-1);
-    expect(source.indexOf('resolveStageClient(')).toBeLessThan(source.indexOf('await runJoinAuthorityBackfill('));
-    expect(source).toContain('err instanceof BackfillRefusedError');
-    expect(source).toContain('process.exitCode = backfillExitCode(report)');
-    expect(source).toContain('stage.doc.destroy()');
-    expect(source).toContain('FAILED: ${err instanceof Error ? err.message : String(err)}');
+describe('main - every exit code, executed (spec D10)', () => {
+  it('exits 2 on a usage error and prints the usage text, before any target is resolved', async () => {
+    const errors: string[] = [];
+    let resolved = 0;
+    const usageErrors = [
+      [],
+      ['--env', 'dev', '--dry-run'],
+      ['--env', 'prod', '--lane', '3'],
+      ['--env', 'dev', '--skip', ''],
+      ['--env', 'dev', '--skip', 'contact-a,,contact-b'],
+    ];
+    for (const argv of usageErrors) {
+      const exit = await main(argv, {
+        printError: (text) => errors.push(text),
+        resolveStage: async () => {
+          resolved += 1;
+          return fakeStage().stage;
+        },
+        logger: silent,
+      });
+      expect([argv, exit]).toEqual([argv, 2]);
+    }
+    expect(resolved).toBe(0);
+    expect(errors).toEqual(usageErrors.map(() => USAGE));
   });
+
+  it('hands --env, --lane, --apply and --skip on; exits 0 on a clean report (warnings included) and 1 on a failed lead; the client is destroyed each time', async () => {
+    const resolveCalls: unknown[] = [];
+    const runCalls: BackfillOptions[] = [];
+    const cases: Array<[BackfillReport, 0 | 1]> = [
+      [CLEAN_REPORT, 0],
+      [{ ...CLEAN_REPORT, warnings: ['a warning'] }, 0],
+      [{ ...CLEAN_REPORT, failed: 1 }, 1],
+    ];
+    for (const [report, code] of cases) {
+      const fake = fakeStage();
+      const stagesRun: StageClient[] = [];
+      const exit = await main(['--env', 'local', '--lane', '4', '--apply', '--skip', ' contact-a , contact-b '], {
+        resolveStage: async (target, opts) => {
+          resolveCalls.push([target, opts]);
+          return fake.stage;
+        },
+        run: async (stage, opts) => {
+          stagesRun.push(stage);
+          runCalls.push(opts);
+          return report;
+        },
+        logger: silent,
+      });
+      expect(exit).toBe(code);
+      expect(stagesRun).toEqual([fake.stage]);
+      expect(fake.destroyed()).toBe(1);
+    }
+    expect(resolveCalls).toEqual(cases.map(() => ['local', { lane: 4 }]));
+    expect(runCalls).toEqual(cases.map(() => ({ apply: true, skip: new Set(['contact-a', 'contact-b']) })));
+
+    // No --apply, no --lane, no --skip: a dry run with nothing skipped and no lane option.
+    const plain = fakeStage();
+    const seen: unknown[] = [];
+    const exit = await main(['--env', 'dev'], {
+      resolveStage: async (target, opts) => {
+        seen.push([target, opts]);
+        return plain.stage;
+      },
+      run: async (_stage, opts) => {
+        seen.push(opts);
+        return CLEAN_REPORT;
+      },
+      logger: silent,
+    });
+    expect(exit).toBe(0);
+    expect(seen).toEqual([['dev', {}], { apply: false, skip: new Set() }]);
+    expect(plain.destroyed()).toBe(1);
+  });
+
+  it('exits 1 when the target cannot be resolved - nothing is run', async () => {
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    let ran = 0;
+    const exit = await main(['--env', 'prod'], {
+      resolveStage: async () => {
+        throw new Error('ACCOUNT GUARD: wrong account');
+      },
+      run: async () => {
+        ran += 1;
+        return CLEAN_REPORT;
+      },
+      logger: log,
+    });
+    expect(exit).toBe(1);
+    expect(ran).toBe(0);
+    expect(capture.atLevel(50).some((l) => String(l['msg']).includes('FAILED before the run started'))).toBe(true);
+  });
+
+  it('exits 1 on a refusal (its message printed) and on a run that stopped (logged FAILED) - the client destroyed either way', async () => {
+    const errors: string[] = [];
+    const refused = fakeStage();
+    const refusedExit = await main(['--env', 'dev', '--apply'], {
+      resolveStage: async () => refused.stage,
+      run: async () => {
+        throw new BackfillRefusedError('REFUSED - a test refusal');
+      },
+      printError: (text) => errors.push(text),
+      logger: silent,
+    });
+    expect(refusedExit).toBe(1);
+    expect(errors).toEqual(['REFUSED - a test refusal']);
+    expect(refused.destroyed()).toBe(1);
+
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const stopped = fakeStage();
+    const stoppedExit = await main(['--env', 'dev'], {
+      resolveStage: async () => stopped.stage,
+      run: async () => {
+        throw new Error('contacts table unavailable');
+      },
+      printError: (text) => errors.push(text),
+      logger: log,
+    });
+    expect(stoppedExit).toBe(1);
+    expect(capture.atLevel(50).some((l) => l['msg'] === 'backfill-join-housing-authority - FAILED: contacts table unavailable')).toBe(
+      true,
+    );
+    expect(errors).toEqual(['REFUSED - a test refusal']);
+    expect(stopped.destroyed()).toBe(1);
+  });
+});
+
+describe.skipIf(!reachable)('main against DynamoDB Local - the real run behind the CLI', () => {
+  afterEach(dropCreatedTables, 120_000);
+
+  /** The world's own tables on the shared client (the recorder's destroy() is a no-op, so the shared client survives). */
+  const stageOf = (w: World): StageClient => ({
+    doc: recordingClient(doc).doc,
+    env: w.env,
+    endpoint,
+    prefix: String(w.env['TABLE_PREFIX']),
+    accessKeyId: undefined,
+    describe: 'a test world',
+  });
+  const realRun =
+    (printed: string[]) =>
+    (stage: StageClient, opts: BackfillOptions): Promise<BackfillReport> =>
+      runJoinAuthorityBackfill(buildBackfillDeps(stage, { logger: silent, print: (line) => printed.push(line) }), opts);
+
+  it('a dry run of the seeded world exits 0 and prints the report - nothing written', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const printed: string[] = [];
+    const exit = await main(['--env', 'local', '--lane', '7', '--skip', 'c-skip'], {
+      resolveStage: async () => stageOf(w),
+      run: realRun(printed),
+      logger: silent,
+    });
+    expect(exit).toBe(0);
+    expect(printed[0]).toBe(
+      'DRY RUN - nothing written. Leads that WOULD get "Atlanta Housing Authority" (oldest sign-up first; dates are UTC):',
+    );
+    expect(printed).toContain('Would update: 3 lead(s). Failed: 0.');
+    expect(await w.backfillEvents()).toEqual([]);
+  }, 120_000);
+
+  it('an apply on an environment with no organization list exits 1 with the refusal printed - nothing read, nothing written', async () => {
+    const w = await newWorld(null);
+    await seedLeads(w);
+    const before = await w.scanTable('contacts');
+    const errors: string[] = [];
+    const printed: string[] = [];
+    const exit = await main(['--env', 'local', '--lane', '7', '--apply'], {
+      resolveStage: async () => stageOf(w),
+      run: realRun(printed),
+      printError: (text) => errors.push(text),
+      logger: silent,
+    });
+    expect(exit).toBe(1);
+    expect(errors).toEqual([NO_LIST_REFUSAL]);
+    expect(printed).toEqual([]);
+    expect(await w.scanTable('contacts')).toEqual(before);
+  }, 120_000);
+});
+
+describe('the entry point, in a child process', () => {
+  it('a usage error exits 2 with the usage text - no client is ever built', () => {
+    // `node --import tsx <script>`: the app/test/otel.test.ts precedent (a
+    // .bin/tsx.cmd shim is EINVAL under spawnSync on Windows). The arguments
+    // fail to parse before any target is resolved: no database, no network.
+    const child = spawnSync(process.execPath, ['--import', 'tsx', SCRIPT_PATH, '--env', 'dev', '--bogus'], {
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    const seen = JSON.stringify({ status: child.status, signal: child.signal, error: child.error?.message, stderr: child.stderr });
+    expect(child.status, seen).toBe(2);
+    expect(child.stderr, seen).toContain('Usage: npx tsx app/scripts/backfill-join-housing-authority.ts --env local|dev|prod');
+  }, 90_000);
 });
 ```
 
-Step 2 - RED: `cd W:\tmp\join-housing-authority\app; npx vitest run test/backfillJoinHousingAuthority.test.ts`
-Expected: earlier cases pass; the three CLI cases fail - `BACKFILL_ARGS` / `parseSkipList` are not exported yet (`TypeError: parseSkipList is not a function`; `parseStageArgs` throws reading `values` of undefined), and the source has no `parseStageArgs(process.argv.slice(2), BACKFILL_ARGS)`.
+Step 2 - RED: DynamoDB Local up (`docker ps` shows it - AR-5), then `cd W:\tmp\join-housing-authority\app; npx vitest run test/backfillJoinHousingAuthority.test.ts`
+Expected: every earlier case passes; the new cases fail - `parseSkipList`, `main` and `USAGE` are not exported yet (`TypeError: ... is not a function`, or an import error naming the missing export; `parseStageArgs` throws reading `values` of undefined `BACKFILL_ARGS`), and the child process exits `0` with no usage text (the script has no entry point yet), not `2`.
 
 Step 3 - implementation.
 
@@ -6872,7 +7112,13 @@ import {
 } from '../src/repos/contactsRepo.js';
 import { createOrgListRepo, type OrgListItem, type OrgListRepo } from '../src/repos/orgListRepo.js';
 import { isOrgRewriteRunning } from '../src/services/orgNames.js';
-import { parseStageArgs, resolveStageClient, type StageClient } from './lib/stageClient.js';
+import {
+  parseStageArgs,
+  resolveStageClient,
+  type StageClient,
+  type StageClientOpts,
+  type StageTarget,
+} from './lib/stageClient.js';
 ```
 
 (b) Append at the end of the script:
@@ -6895,60 +7141,95 @@ export function parseSkipList(raw: string | undefined): ReadonlySet<string> | un
   return ids.some((id) => id === '') ? undefined : new Set(ids);
 }
 
+/** What a usage error prints (exit 2). */
+export const USAGE =
+  `Usage: npx tsx app/scripts/${SCRIPT_NAME}.ts --env local|dev|prod [--lane <L>] [--apply] [--skip "<contactId>[,<contactId>...]"]\n` +
+  '  DRY RUN by default; --apply writes. --skip leaves the named leads out (ONE comma-separated value - quote it).\n' +
+  '  Unknown or repeated arguments and an empty --skip id are refused. --lane selects a hermetic e2e lane (local only).';
+
+/** The CLI's outside world - each member injectable, so the tests execute every exit code. */
+export interface CliDeps {
+  /** --env/--lane -> the stage client (default: resolveStageClient; for dev/prod the account guard runs first). */
+  resolveStage: (target: StageTarget, opts: StageClientOpts) => Promise<StageClient>;
+  /** The run on that client (default: runJoinAuthorityBackfill on buildBackfillDeps(stage)). */
+  run: (stage: StageClient, opts: BackfillOptions) => Promise<BackfillReport>;
+  /** The usage text and a refusal's message (default: console.error). */
+  printError: (text: string) => void;
+  logger: Logger;
+}
+
+/**
+ * The CLI (spec D10). Resolves to the exit code: 2 a usage error (nothing
+ * resolved, nothing read); 1 the target could not be resolved (nothing read),
+ * the run was refused (no contact read), it stopped before any write (the list
+ * read or the contacts Scan failed), or it completed with a failed lead; 0 it
+ * completed clean, warnings included. Once resolved, the stage client is
+ * destroyed whatever happens.
+ */
+export async function main(argv: readonly string[], cli: Partial<CliDeps> = {}): Promise<0 | 1 | 2> {
+  const printError = cli.printError ?? ((text: string) => console.error(text));
+  const log = cli.logger ?? defaultLogger;
+  const resolveStage: CliDeps['resolveStage'] =
+    cli.resolveStage ?? ((target, opts) => resolveStageClient(target, {}, opts));
+  const run: CliDeps['run'] = cli.run ?? ((stage, opts) => runJoinAuthorityBackfill(buildBackfillDeps(stage), opts));
+
+  const parsed = parseStageArgs([...argv], BACKFILL_ARGS);
+  const skip = 'usage' in parsed ? undefined : parseSkipList(parsed.values.get('--skip'));
+  if ('usage' in parsed || skip === undefined) {
+    printError(USAGE);
+    return 2;
+  }
+  const apply = parsed.flags.has('--apply');
+
+  // STEP 1 - resolve the target on its own: a refusal here (account guard,
+  // STS, an ambient AWS_ENDPOINT_URL*) happens BEFORE any table is read.
+  let stage: StageClient;
+  try {
+    stage = await resolveStage(parsed.target, parsed.lane !== undefined ? { lane: parsed.lane } : {});
+  } catch (err) {
+    log.error({ err }, `${SCRIPT_NAME} - FAILED before the run started (no table was read or written)`);
+    return 1;
+  }
+  // STEP 2 - the run. It prints its own report.
+  try {
+    log.info(
+      { target: parsed.target, endpoint: stage.describe, prefix: stage.prefix, apply, skip: skip.size },
+      `${SCRIPT_NAME} - starting`,
+    );
+    return backfillExitCode(await run(stage, { apply, skip }));
+  } catch (err) {
+    if (err instanceof BackfillRefusedError) {
+      printError(err.message);
+      return 1;
+    }
+    // The list read or the contacts Scan failed: the run stopped before any write.
+    log.error({ err }, `${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  } finally {
+    stage.doc.destroy();
+  }
+}
+
 const invokedDirectly =
   import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith(`${SCRIPT_NAME}.ts`);
 if (invokedDirectly) {
-  const parsed = parseStageArgs(process.argv.slice(2), BACKFILL_ARGS);
-  const skip = 'usage' in parsed ? undefined : parseSkipList(parsed.values.get('--skip'));
-  if ('usage' in parsed || skip === undefined) {
-    console.error(
-      `Usage: npx tsx app/scripts/${SCRIPT_NAME}.ts --env local|dev|prod [--lane <L>] [--apply] [--skip "<contactId>[,<contactId>...]"]\n` +
-        '  DRY RUN by default; --apply writes. --skip leaves the named leads out (ONE comma-separated value - quote it).\n' +
-        '  Unknown or repeated arguments and an empty --skip id are refused. --lane selects a hermetic e2e lane (local only).',
-    );
-    process.exit(2);
-  }
-  const apply = parsed.flags.has('--apply');
-  void (async () => {
-    // STEP 1 - resolve the target on its own: a refusal here (account guard,
-    // STS, an ambient AWS_ENDPOINT_URL*) happens BEFORE any table is read.
-    let stage: StageClient;
-    try {
-      stage = await resolveStageClient(parsed.target, {}, parsed.lane !== undefined ? { lane: parsed.lane } : {});
-    } catch (err) {
-      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED before the run started (no table was read or written)`);
-      process.exitCode = 1;
-      return;
-    }
-    // STEP 2 - the run. It prints its own report.
-    try {
-      defaultLogger.info(
-        { target: parsed.target, endpoint: stage.describe, prefix: stage.prefix, apply, skip: skip.size },
-        `${SCRIPT_NAME} - starting`,
-      );
-      const report = await runJoinAuthorityBackfill(buildBackfillDeps(stage), { apply, skip });
-      process.exitCode = backfillExitCode(report);
-    } catch (err) {
-      if (err instanceof BackfillRefusedError) {
-        console.error(err.message);
-        process.exitCode = 1;
-        return;
-      }
-      // The list read or the contacts Scan failed: the run stopped before any write.
+  void main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err: unknown) => {
       defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
       process.exitCode = 1;
-    } finally {
-      stage.doc.destroy();
-    }
-  })();
+    },
+  );
 }
 ```
 
-Step 4 - GREEN: `cd W:\tmp\join-housing-authority\app; npx vitest run test/backfillJoinHousingAuthority.test.ts` - all pass, no `SKIPPED` line. `cd W:\tmp\join-housing-authority\app; npm run typecheck` - exit 0. Lint the two files (from the worktree root): `cd W:\tmp\join-housing-authority; npx eslint app/scripts/backfill-join-housing-authority.ts app/test/backfillJoinHousingAuthority.test.ts` - exit 0.
+Step 4 - GREEN: `cd W:\tmp\join-housing-authority\app; npx vitest run test/backfillJoinHousingAuthority.test.ts` - all pass, and no `SKIPPED - no DynamoDB Local` line (the child-process case needs the workspace's `tsx`, installed with the repo's dev dependencies). `cd W:\tmp\join-housing-authority\app; npm run typecheck` - exit 0. Lint the two files (from the worktree root): `cd W:\tmp\join-housing-authority; npx eslint app/scripts/backfill-join-housing-authority.ts app/test/backfillJoinHousingAuthority.test.ts` - exit 0.
 
 Step 5 - commit: the ASCII check (bash, as in 4.1) prints 0 twice; `git -C W:\tmp\join-housing-authority status` read on its own; `Test-Path "W:\AI Projects\Housing Choice\HC Application\.git\worktrees\join-housing-authority\MERGE_HEAD"` prints False;
 `git -C W:\tmp\join-housing-authority add app/scripts/backfill-join-housing-authority.ts app/test/backfillJoinHousingAuthority.test.ts`;
-`git -C W:\tmp\join-housing-authority commit -m "feat(backfill): /join housing authority backfill CLI - --apply, --skip, stage resolution, exit codes (spec D10)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
+`git -C W:\tmp\join-housing-authority commit -m "feat(backfill): /join housing authority backfill CLI - main with executed exit codes, --apply, --skip, stage resolution (spec D10)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
 
 ---
 
@@ -6958,13 +7239,19 @@ Files: `RUNBOOK.md`.
 
 A docs task: no RED/GREEN test; the verification steps below replace them.
 
-Step 1 - with the Edit tool, in `RUNBOOK.md`, replace the exact line
+Step 1 - confirm the anchor, then insert. Main rewrote the Caseworkers heading in 794de277 and added a paragraph under it; the branch carries main's text since the planner's pre-build merge (@469241f7). Keep main's heading and paragraph EXACTLY as they are.
+
+1. From Git Bash: `cd /w/tmp/join-housing-authority && grep -c '^### Caseworkers (.feat/caseworkers.): DEPLOYED dev + prod 2026-10-12 (release 1.5.1) - nothing was owed' RUNBOOK.md` - prints `1`. If it prints `0`, main changed that heading again after the sync: STOP and report QUESTION in the ledger (never re-word main's line to fit this task).
+2. With the Edit tool, in `RUNBOOK.md`, replace the exact line
 
 ```markdown
-### Caseworkers (`feat/caseworkers`): NOTHING is owed at deploy - the conversion's repair, and putting a mistaken conversion back
+### Caseworkers (`feat/caseworkers`): DEPLOYED dev + prod 2026-10-12 (release 1.5.1) - nothing was owed; the conversion's repair, and putting a mistaken conversion back
 ```
 
-with the new section, a blank line, and that same line again - i.e. the new section sits right AFTER "Organization names cleanup" and BEFORE "Caseworkers". The new section, exactly:
+with the new section, a blank line, and that same line again, character for character - i.e. the new section sits right AFTER "Organization names cleanup" and BEFORE main's "Caseworkers" heading; main's heading and the paragraph under it (`**DEPLOYED 2026-10-12: dev and prod run release ...`) stay exactly as they are, and no other line changes.
+3. `cd /w/tmp/join-housing-authority && git diff --numstat RUNBOOK.md` - prints `<added>  0  RUNBOOK.md`: the second number (lines removed) is 0, so the edit only ADDED lines and nothing of main's was removed or changed.
+
+The new section, exactly:
 
 ```markdown
 ### /join leads: the housing authority backfill (`feat/join-housing-authority`): owed on dev AND prod after this branch deploys - dry run, read the list, then `--apply`
@@ -7100,7 +7387,7 @@ section 2.1) is safe for the whole e2e suite (counted below).
   `workers: 1`, `fullyParallel: false`), and all lane traffic shares one key
   (127.0.0.1; `app/src/middleware/rateLimit.ts:67-74`). Page loads of `/join`
   in the whole suite after this change: `a2p-compliance.spec.ts:107` (1),
-  `environment-identity.spec.ts:40` via `:101` (1), `public-pages.spec.ts:345`
+  `environment-identity.spec.ts:40` via `:101` (1), `public-pages.spec.ts:373`
   (1) and the new 5.1 test (1, plus one raw API read). Each load reads the
   list once, twice at most under React StrictMode (`dashboard/src/main.tsx:15`)
   and "Sign up another person" adds no read (D9). Worst case 9 reads per suite
@@ -7119,11 +7406,16 @@ section 2.1) is safe for the whole e2e suite (counted below).
     `networkidle` waits for it.
   - `settings.spec.ts:107-127`, `flows/proof-of-send.spec.ts:19-37`: direct
     POSTs without an authority; assert only the welcome text.
-  - `public-pages.spec.ts:228-288` (flyer submit): the flyer shows no select
+  - `public-pages.spec.ts:230-289` (flyer submit): the flyer shows no select
     and keeps `capture_source: 'flyer'` + `unit_of_interest` (D5);
-    `:343-358` (`/join`): the Atlanta default is sent and the thank-you
+    `:371-386` (`/join`): the Atlanta default is sent and the thank-you
     assertions still hold (the new button text contains neither
-    "Application fee" nor "Address"). Kept unchanged.
+    "Application fee" nor "Address"). Kept unchanged. Main's e27868bc (merged
+    at 469241f7) only extends the flyer cases at `:159` and `:317` with
+    "Fits a N-bedroom voucher" checks and a voucher-size set/clear on the
+    flyer page: no new test, no `/join` load, no list read, no new contact.
+    5c0d3f6a's new broadcasts test asserts the pre-filled 3-BR chip only, no
+    recipient count.
   - `scenarios/tenant-onboarding.spec.ts:179-197` + `e2e/scenarios/steps.ts`:
     the self-served contact now starts `onboarding`; the shared tail moves it
     to Searching through the edit form's Status select (no enforced transition
@@ -7162,8 +7454,15 @@ Prerequisite: S1-S4 are committed. S5 tasks run in the order 5.1, 5.2, 5.3.
   2. Start the session in the BACKGROUND (Bash tool `run_in_background: true`):
      `cd "W:/tmp/join-housing-authority" && npm run e2e:session > .superpowers/sdd/e2e-session-s5.log 2>&1`
   3. Wait (up to 3 minutes) until
-     `grep -n "web :" W:/tmp/join-housing-authority/.superpowers/sdd/e2e-session-s5.log`
-     prints the launcher's readiness line.
+     `grep -nE '\[e2e-session\] ready .*app :[0-9]+ ' W:/tmp/join-housing-authority/.superpowers/sdd/e2e-session-s5.log`
+     prints one line: the launcher's ready line (`scripts/e2e-session.mjs:766`,
+     `[e2e-session] ready <dash> app :<port> (...), web :<port> ...`; the dash
+     is non-ASCII, so the pattern spans it with `.*`). The launcher writes it
+     only after app health, the child-identity check and the clean-slate
+     reseed (`:758-764`). Never wait on `web :` alone: the earlier
+     `[e2e-session] starting app, worker, web :<port>` line (`:750`) carries it
+     before anything is healthy. If the background task exits first, or 3
+     minutes pass with no match, read the log and stop - do not run a spec.
 - The preflight refuses a session booted at a different commit
   (`e2e/support/preflight.ts:87-128`), and it reseeds the lean world before
   every run. So: stop the session (`npm run e2e:stop`, exit 0) BEFORE each
@@ -7190,7 +7489,7 @@ choice survives the reset, which is what tells "kept" apart from "reset to the
 default"); "Sign up another person" does not read the list again; each new
 contact is an `onboarding` tenant holding its authority and the
 `housing_fair_signup_v2` marker, read through the authenticated API. The
-existing `/join` test (`public-pages.spec.ts:343-358`) is kept unchanged.
+existing `/join` test (`public-pages.spec.ts:371-386`) is kept unchanged.
 
 Step 1 - boot the lane (see "Lane rules").
 
@@ -7416,13 +7715,15 @@ new_string (the `success` row was stale - that copy is not on either page):
 ```
 
 Step 4 - RED, for the stated reason. Show the test fails on the pre-change
-`/join` page (no select). Swap ONLY the page component back to the branch's
-cut point (19607658 = `git -C W:/tmp/join-housing-authority merge-base main HEAD`
-until S6's sync); it renders the unchanged IntakeForm, whose new props are all
-optional:
+`/join` page (no select). Swap ONLY the page component back to 469241f7, the
+pre-build merge of main into this branch (the whole
+`dashboard/src/routes/public/` directory there is byte-identical to the cut
+point 19607658). Do NOT derive it from `git merge-base main HEAD`: since that
+merge it prints main's tip, and every later sync moves it again. The old page
+renders the unchanged IntakeForm, whose new props are all optional:
 
 ```
-git -C W:/tmp/join-housing-authority restore --source=19607658 --worktree -- dashboard/src/routes/public/HousingFairIntake.tsx
+git -C W:/tmp/join-housing-authority restore --source=469241f7 --worktree -- dashboard/src/routes/public/HousingFairIntake.tsx
 cd "W:/tmp/join-housing-authority" && npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/public-pages.spec.ts --grep "housing authority defaults to Atlanta"
 ```
 
@@ -7820,7 +8121,7 @@ Step 7 - commit.
 git -C W:/tmp/join-housing-authority commit -m "docs: a /join sign-up starts at Onboarding - STATUS-MODEL, sequence-diagram note, e2e list-read limit" -m "STATUS-MODEL's Needs review bullet no longer says every new contact lands there (staff-created tenants and /join sign-ups start at Onboarding); the self-serve portal note in sequence-diagram-to-test.md states the Onboarding start and the housingAuthority field; the e2e launcher records that the /join list read has its own hard-coded 60 per minute limit that PUBLIC_RATE_LIMIT_MAX does not raise (join-housing-authority D2, D5)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-## 9. S6 - Completion (Tasks 6.1-6.3)
+## 9. S6 - Completion (Tasks 6.1-6.3, with 6.3a before 6.3)
 
 CONTRACT ISSUES: none (written by the planner).
 
@@ -7842,19 +8143,25 @@ Files: none (a merge commit).
    then append the trailer by amending ONLY if the merge needed no
    conflict resolution and the message lacks it:
    `git -C W:\tmp\join-housing-authority commit --amend --no-edit -m "Merge main into feat/join-housing-authority" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`.
-4. On a conflict: preserve BOTH sides' intent. The likely overlaps are
-   `app/src/routes/public.ts`, `app/src/app.ts`, `RUNBOOK.md`,
-   `documentation/STATUS-MODEL.md` and `e2e/tests/dashboard-next/public-pages.spec.ts`
-   (two other branches are active: fix/caseworker-integrity and the #3/#27
-   work). Resolve with the Edit tool, `git add <explicit paths>`, check
+4. On a conflict: preserve BOTH sides' intent. The planner already merged
+   main into the branch once BEFORE the build (@469241f7, while the branch
+   held only docs), so this sync carries only what main gained during the
+   build. Any file this plan edits can overlap (two other branches are
+   active: fix/caseworker-integrity and the #3/#27 work); the most likely
+   are `RUNBOOK.md` (keep main's entries and headings EXACTLY as main has
+   them, and keep this branch's new backfill entry in its place),
+   `app/test/publicIntake.test.ts`, `e2e/tests/dashboard-next/public-pages.spec.ts`,
+   `app/src/routes/public.ts` and `documentation/STATUS-MODEL.md`. Resolve
+   with the Edit tool, `git add <explicit paths>`, check
    `.git/worktrees/join-housing-authority/MERGE_HEAD` exists, then
    `git commit` with the trailer. If a conflict touches a file this plan
    never edits, STOP and report QUESTION in the ledger.
 5. If the merge brought dependency changes (`git diff HEAD~1 HEAD --name-only`
    lists a `package.json` or `package-lock.json`), run `npm install` from
    the worktree root before the gates.
-6. This is the ONLY main sync. Later drift is reported in the handback, not
-   chased.
+6. This is the builder's ONLY main sync (the planner's pre-build sync in
+   step 4 does not count against it). Later drift is reported in the
+   handback, not chased.
 
 #### Task 6.2 - The five completion gates (AGENTS.md), bare, from the worktree
 
@@ -7885,6 +8192,16 @@ the source live).
    it). AGENTS.md has NO named-flake list: a failing spec is a regression
    to diagnose; re-run a single failing spec alone only to classify it, and
    report both runs.
+   On Windows `timeout` (and a stopped background task) kills only the npm
+   process, NOT the e2e stack under it (plan review R1 B-F6). After gate 4
+   ends for ANY reason other than a clean exit 0 - a timeout, an abort, a
+   stopped task - tree-kill the launcher and its children by PID (find the
+   processes whose command line contains `W:\tmp\join-housing-authority`;
+   `taskkill /PID <pid> /T /F` from PowerShell), then confirm no listener
+   survives on this lane's ports (`e2e/README.md`) BEFORE the self-QA
+   session or any re-run. The harness adopts a same-commit orphaned stack
+   unchallenged (AGENTS.md), so a survivor would silently contaminate the
+   next run. Never kill a process that does not belong to this worktree.
 5. Lint, scoped to the branch's own files:
    `git -C W:\tmp\join-housing-authority diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs'`
    - If the list is EMPTY, SKIP the gate (never run `npx eslint` with no
@@ -7896,6 +8213,306 @@ the source live).
      anything new is BLOCKING and is fixed; pre-existing errors are left
      and NAMED in the handback. A `.mjs`/`.js` path lints NOTHING (the
      config covers `.ts`/`.tsx` only) - do not read its green as a pass.
+
+#### Task 6.3a - Backfill rehearsal on a hermetic lane (spec D10, last bullet)
+
+Files: one THROWAWAY script, `.superpowers/sdd/rehearsal/seed-pre-change-leads.ts` (gitignored by `.gitignore:52`; never committed). No repository file changes. The output goes verbatim into the handback (Task 6.3).
+
+Why it exists (plan review P1): spec D10 lets an agent run the backfill ONLY with `--env local --lane <L>` on a hermetic lane it started, and no app path creates a candidate any more (every new sign-up carries the marker - Task 2.3; no seed writes `capture_source: 'housing_fair'` - `app/src/lib/seed/cast.ts:159` is the only seed capture_source). So the rehearsal writes PRE-CHANGE-shaped leads into that lane's own tables. Written under the wrong key or prefix they either land in the human's LIVE local stack (`hc-local-` tables, key `local` - forbidden) or are invisible to the script (a vacuous pass). The seeding script below therefore takes the lane from the session's own state file and builds its client with the SAME resolver the backfill uses, so the prefix (`hc-local-<L>-`) and the DynamoDB Local database (access key `hclane<L>`) cannot diverge (`app/scripts/lib/stageClient.ts:122-141`).
+
+How the lane is found (verified): `npm run e2e:session` (`scripts/e2e-session.mjs`) writes `e2e/.artifacts/lane.json` at boot (`:45`, `:71-89`, `:92-96`, called at `:705`) with `launcherPid`, `lane`, `ports`, `urls.app`, `urls.dashboard`, `tablePrefix` (`hc-local-<L>-`), `accessKeyId` (`hclane<L>`) and `ownerToken`; `npm run e2e:stop` reads the same file (`scripts/e2e-stop.mjs:18-33`). A lane.json is LIVE only while its launcher pid is alive and still holds the lane's lease - the rule `e2e/playwright.config.ts:26-42` (`liveSessionLane`) applies, via `holdsLane` (`e2e/support/laneLease.mjs:301-305`). The lane's app also reports itself: `GET /__dev/ping` returns `lane`, `tablePrefix` and `twilioApiBaseUrlSet` (`app/src/routes/dev.ts:208-231`; dev-only, hermetic lanes only). Do NOT run `node e2e/support/lane.mjs` to learn the lane: its CLI block (`e2e/support/lane.mjs:415`) runs `resolveLane`, which RESERVES a lane (`:378`, `:389`).
+
+Order: after Task 6.2 (all five gates green) and Task 6.3's live self-QA bullet, on that SAME live session; then write the handback (the rest of Task 6.3). Never while `npm run e2e` (gate 4) runs. Between Step 3 (seed) and Step 8 (verify) run NO Playwright spec and no `npm run e2e:reseed`: the e2e preflight reseeds the lean world before every run and would wipe the leads. Driving the browser with the Playwright MCP does not reseed. Run every command from Git Bash (the Bash tool), bare - never piped.
+
+Step 1 - the live session and its lane.
+1. If no session is live (no `e2e/.artifacts/session.pid`), start one exactly as S5's "Lane rules" do, logging to `.superpowers/sdd/e2e-session-6.3a.log`: in the BACKGROUND (Bash tool `run_in_background: true`) `cd "W:/tmp/join-housing-authority" && npm run e2e:session > .superpowers/sdd/e2e-session-6.3a.log 2>&1`, then wait (up to 3 minutes) until `grep -nE '\[e2e-session\] ready .*app :[0-9]+ ' W:/tmp/join-housing-authority/.superpowers/sdd/e2e-session-6.3a.log` prints one line (the ready line, `scripts/e2e-session.mjs:766`, written only after the clean-slate reseed at `:763-764`). The session must be started at the current HEAD (AR-6).
+2. `cat W:/tmp/join-housing-authority/e2e/.artifacts/lane.json` - note `lane` (call it `<L>`, an integer 1-16), `urls.app` and `urls.dashboard`. They must be `127.0.0.1` ports `9001 + <L>*100` (app) and `+10` (dashboard) - never `:8080` or `:5174`. Copy `lane`, `urls`, `tablePrefix` and `accessKeyId` (NOT `ownerToken`) into the handback.
+
+Step 2 - a post-change sign-up through the lane's `/join` (it must NOT be a target). With the project Playwright MCP (bundled Chromium, isolated profile): navigate to `<urls.dashboard>/join`; wait until the "Housing authority" select no longer shows "Loading..."; fill "First name" `Rehearsal`, "Last name" `Notsure`, "Phone number" `555-010-9010`; choose `Not sure` in "Housing authority"; check the consent box ("I agree to receive ..."); click "Sign me up"; the thank-you screen shows. Screenshot it as `.playwright-mcp/6.3a-join-not-sure.png`. This contact holds NO authority and status Onboarding - only the `housing_fair_signup_v2` marker keeps it out of the backfill (spec D5, D10). If the MCP is unavailable, the same request from Git Bash: `curl -s -w "\nHTTP %{http_code}\n" -X POST "<urls.app>/public/housing-fair" -H "content-type: application/json" -d '{"firstName":"Rehearsal","lastName":"Notsure","phone":"+15550109010","smsConsent":true}'` - prints `{"ok":true}` and `HTTP 200`.
+
+Step 3 - write the seeding script. Create `W:\tmp\join-housing-authority\.superpowers\sdd\rehearsal\seed-pre-change-leads.ts` with exactly:
+
+```ts
+// THROWAWAY rehearsal seed for the /join housing authority backfill (plan
+// Task 6.3a). Gitignored (.superpowers/); never committed. From the worktree
+// root:
+//   npx tsx .superpowers/sdd/rehearsal/seed-pre-change-leads.ts            seed
+//   npx tsx .superpowers/sdd/rehearsal/seed-pre-change-leads.ts --verify   read back
+//
+// It writes PRE-CHANGE-shaped /join leads - the shape POST /public/housing-fair
+// created before this branch: capture_source 'housing_fair', type tenant,
+// status needs_review, no housingAuthority, no housing_fair_signup_v2 marker -
+// into THIS worktree's LIVE e2e:session lane and nowhere else. Every guard
+// runs before the first write; any mismatch exits 1 with nothing written:
+//   1. the lane comes from e2e/.artifacts/lane.json (scripts/e2e-session.mjs
+//      writes it at boot), used only while its launcher pid is alive and still
+//      holds the lane's lease (the e2e/playwright.config.ts liveSessionLane rule);
+//   2. lane.json's tablePrefix and accessKeyId must be hc-local-<L>- and hclane<L>;
+//   3. that lane's own app must answer GET /__dev/ping with lane L, prefix
+//      hc-local-<L>- and the fake Twilio host set (a hermetic stack);
+//   4. the client is resolveStageClient('local', {}, { lane: L }) - the resolver
+//      the backfill itself uses - and its prefix and key are checked again.
+// The live local stack (prefix hc-local-, key local) is unreachable: L must be
+// an integer >= 1, and the prefix and the key are both derived from it.
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { laneAccessKeyId, resolveStageClient } from '../../../app/scripts/lib/stageClient.js';
+import { createLogger } from '../../../app/src/lib/logger.js';
+import { CONSENT_VERSION } from '../../../app/src/lib/smsCompliance.js';
+import { createAuditRepo } from '../../../app/src/repos/auditRepo.js';
+import { createContactsRepo } from '../../../app/src/repos/contactsRepo.js';
+import { createOrgListRepo } from '../../../app/src/repos/orgListRepo.js';
+import { holdsLane } from '../../../e2e/support/laneLease.mjs';
+
+const verify = process.argv.includes('--verify');
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+const laneFile = path.join(repoRoot, 'e2e', '.artifacts', 'lane.json');
+
+function refuse(why: string): never {
+  console.error(`REFUSED - ${why}. Nothing was written.`);
+  process.exit(1);
+}
+
+// 1. The live session's lane.
+if (!existsSync(laneFile)) refuse(`${laneFile} does not exist: start this worktree's e2e:session first`);
+const state = JSON.parse(readFileSync(laneFile, 'utf8')) as {
+  lane?: unknown;
+  launcherPid?: unknown;
+  ownerToken?: unknown;
+  tablePrefix?: unknown;
+  accessKeyId?: unknown;
+  urls?: { app?: unknown };
+};
+const lane = state.lane;
+if (typeof lane !== 'number' || !Number.isInteger(lane) || lane < 1) {
+  refuse(`lane.json names no e2e lane (lane = ${String(lane)})`);
+}
+const launcherPid = state.launcherPid;
+if (typeof launcherPid !== 'number') refuse('lane.json has no launcherPid');
+try {
+  process.kill(launcherPid, 0);
+} catch (err) {
+  if ((err as NodeJS.ErrnoException).code !== 'EPERM') {
+    refuse(`the session launcher (pid ${launcherPid}) is not running: lane.json is stale`);
+  }
+}
+if (typeof state.ownerToken !== 'string' || !holdsLane(lane, state.ownerToken)) {
+  refuse(`this session no longer holds lane ${lane}'s lease`);
+}
+
+// 2. The lane's own prefix and key.
+const prefix = `hc-local-${lane}-`;
+if (state.tablePrefix !== prefix || state.accessKeyId !== laneAccessKeyId(lane)) {
+  refuse(`lane.json's tablePrefix / accessKeyId (${String(state.tablePrefix)} / ${String(state.accessKeyId)}) are not lane ${lane}'s`);
+}
+
+// 3. The lane's app is up and hermetic.
+const appUrl = typeof state.urls?.app === 'string' ? state.urls.app : refuse('lane.json has no app url');
+let ping: { lane?: unknown; tablePrefix?: unknown; twilioApiBaseUrlSet?: unknown } = {};
+try {
+  ping = (await (await fetch(`${appUrl}/__dev/ping`)).json()) as typeof ping;
+} catch (err) {
+  refuse(`${appUrl}/__dev/ping did not answer (${String(err)}): is the session ready?`);
+}
+if (ping.lane !== lane || ping.tablePrefix !== prefix || ping.twilioApiBaseUrlSet !== true) {
+  refuse(`${appUrl} is not lane ${lane}'s hermetic app (ping ${JSON.stringify(ping)})`);
+}
+
+// 4. The resolver the backfill itself uses.
+const stage = await resolveStageClient('local', {}, { lane });
+if (stage.prefix !== prefix || stage.accessKeyId !== laneAccessKeyId(lane)) {
+  refuse('the stage client does not target the lane');
+}
+console.log(`lane ${lane}: ${stage.describe}; app ${appUrl}`);
+
+const repoDeps = { doc: stage.doc, env: stage.env, logger: createLogger({ level: 'warn' }) };
+const contacts = createContactsRepo(repoDeps);
+const audit = createAuditRepo(repoDeps);
+
+interface RehearsalLead {
+  contactId: string;
+  lastName: string;
+  phone: string;
+  capturedAt: string;
+  status: string;
+  /** An authority-history audit event (a staff edit that cleared it). */
+  history?: true;
+  extra?: Record<string, unknown>;
+  expect: string;
+}
+
+const LEADS: RehearsalLead[] = [
+  {
+    contactId: 'rehearsal-lead-target-1',
+    lastName: 'Targetone',
+    phone: '+15550109001',
+    capturedAt: '2026-06-14T15:00:00.000Z',
+    status: 'needs_review',
+    expect: 'TARGET',
+  },
+  {
+    contactId: 'rehearsal-lead-skipme',
+    lastName: 'Skipme',
+    phone: '+15550109002',
+    capturedAt: '2026-06-21T15:00:00.000Z',
+    status: 'needs_review',
+    expect: 'TARGET in the plain dry run; LEFT OUT (named in --skip) in the apply',
+  },
+  {
+    contactId: 'rehearsal-lead-history',
+    lastName: 'Clearedonce',
+    phone: '+15550109003',
+    capturedAt: '2026-06-28T15:00:00.000Z',
+    status: 'needs_review',
+    history: true,
+    expect: 'LEFT OUT (its housing authority was set or removed before)',
+  },
+  {
+    contactId: 'rehearsal-lead-target-2',
+    lastName: 'Targettwo',
+    phone: '+15550109004',
+    capturedAt: '2026-07-19T16:30:00.000Z',
+    status: 'on_hold',
+    expect: 'TARGET (status is not a condition; it stays on_hold)',
+  },
+  {
+    contactId: 'rehearsal-lead-deleted',
+    lastName: 'Deletedlead',
+    phone: '+15550109005',
+    capturedAt: '2026-07-02T15:00:00.000Z',
+    status: 'needs_review',
+    extra: { deleted_at: '2026-09-01T12:00:00.000Z' },
+    expect: 'NOT A CANDIDATE (deleted): in neither list',
+  },
+];
+/** The /join sign-up made through the lane's page in Step 2. */
+const JOIN_PHONE = '+15550109010';
+
+if (!verify) {
+  for (const lead of LEADS) {
+    try {
+      await contacts.create({
+        contactId: lead.contactId,
+        type: 'tenant',
+        status: lead.status,
+        phone: lead.phone,
+        firstName: 'Rehearsal',
+        lastName: lead.lastName,
+        capture_source: 'housing_fair',
+        captured_at: lead.capturedAt,
+        created_at: lead.capturedAt,
+        housing_fair_welcomed: true,
+        consent_method: 'web_form',
+        consent_at: lead.capturedAt,
+        consent_version: CONSENT_VERSION,
+        ...lead.extra,
+      });
+    } catch (err) {
+      if ((err as { name?: unknown }).name === 'ConditionalCheckFailedException') {
+        console.log(`exists   ${lead.contactId} (left as it is)`);
+        continue;
+      }
+      throw err;
+    }
+    if (lead.history === true) {
+      await audit.append(`contacts#${lead.contactId}`, 'contact_updated', { fields: ['housingAuthority'], actor: 'rehearsal' });
+    }
+    console.log(`created  ${lead.contactId} - expect ${lead.expect}`);
+  }
+  const list = await createOrgListRepo(repoDeps).peek();
+  console.log(`org-list item: ${list === null ? 'MISSING - the backfill will refuse' : 'stored'}`);
+} else {
+  for (const lead of LEADS) {
+    const c = await contacts.getById(lead.contactId, { consistentRead: true });
+    const events = (await audit.listByEntity(`contacts#${lead.contactId}`)).filter(
+      (e) => e.event_type === 'housing_authority_backfill',
+    );
+    console.log(
+      `${lead.contactId}  housingAuthority=${String(c?.['housingAuthority'] ?? '(none)')}  ` +
+        `status=${String(c?.status ?? '(missing)')}  backfillEvents=${events.length}`,
+    );
+  }
+  const joined = await contacts.findByPhone(JOIN_PHONE);
+  console.log(
+    joined === undefined
+      ? `/join sign-up ${JOIN_PHONE}: NOT FOUND - do Step 2 first`
+      : `/join sign-up ${JOIN_PHONE}  contactId=${joined.contactId}  housing_fair_signup_v2=${String(joined['housing_fair_signup_v2'])}  ` +
+          `housingAuthority=${String(joined['housingAuthority'] ?? '(none)')}  status=${String(joined.status)}  ` +
+          `capture_source=${String(joined.capture_source)}`,
+  );
+}
+stage.doc.destroy();
+```
+
+Step 4 - seed: `cd "W:/tmp/join-housing-authority" && npx tsx .superpowers/sdd/rehearsal/seed-pre-change-leads.ts; echo "exit=$?"`
+Expected (exit 0):
+
+```text
+lane <L>: DynamoDB Local http://localhost:8000 database hclane<L> (e2e lane <L>); app http://127.0.0.1:<app port>
+created  rehearsal-lead-target-1 - expect TARGET
+created  rehearsal-lead-skipme - expect TARGET in the plain dry run; LEFT OUT (named in --skip) in the apply
+created  rehearsal-lead-history - expect LEFT OUT (its housing authority was set or removed before)
+created  rehearsal-lead-target-2 - expect TARGET (status is not a condition; it stays on_hold)
+created  rehearsal-lead-deleted - expect NOT A CANDIDATE (deleted): in neither list
+org-list item: stored
+```
+
+A `REFUSED - ...` line (exit 1) means a guard failed and nothing was written: fix the cause (usually the session is not live or not ready) and re-run. `org-list item: MISSING` must not happen on a reseeded lane (the lean seed writes the item - `app/src/lib/seed/lean.ts:536`); if it does, stop and report.
+
+Step 5 - the dry run: `cd "W:/tmp/join-housing-authority" && npx tsx app/scripts/backfill-join-housing-authority.ts --env local --lane <L>; echo "exit=$?"`
+Expected: JSON log lines (counts and contactIds only), then exactly this report, then `exit=0`:
+
+```text
+DRY RUN - nothing written. Leads that WOULD get "Atlanta Housing Authority" (oldest sign-up first; dates are UTC):
+  Rehearsal Targetone  signed up 2026-06-14  status needs_review  contactId rehearsal-lead-target-1
+  Rehearsal Skipme  signed up 2026-06-21  status needs_review  contactId rehearsal-lead-skipme
+  Rehearsal Targettwo  signed up 2026-07-19  status on_hold  contactId rehearsal-lead-target-2
+Would update: 3 lead(s). Failed: 0.
+Left out (1 lead(s), oldest sign-up first):
+  Rehearsal Clearedonce  signed up 2026-06-28  status needs_review  contactId rehearsal-lead-history  - its housing authority was set or removed before - left empty on purpose
+```
+
+`Rehearsal Notsure` (Step 2's marker-holding sign-up), `Rehearsal Deletedlead` and the self-QA's `/join` sign-ups appear in NEITHER list. Any lead whose contactId does not start `rehearsal-lead-` is a candidate this plan did not expect: STOP and report it (do not apply).
+
+Step 6 - the apply, with `--skip` (a candidate and an unknown id): `cd "W:/tmp/join-housing-authority" && npx tsx app/scripts/backfill-join-housing-authority.ts --env local --lane <L> --apply --skip "rehearsal-lead-skipme,rehearsal-no-such-lead"; echo "exit=$?"`
+Expected report, then `exit=0`:
+
+```text
+Leads given "Atlanta Housing Authority" (oldest sign-up first; dates are UTC):
+  Rehearsal Targetone  signed up 2026-06-14  status needs_review  contactId rehearsal-lead-target-1
+  Rehearsal Targettwo  signed up 2026-07-19  status on_hold  contactId rehearsal-lead-target-2
+Written: 2. Skipped (changed after the read): 0. Failed: 0.
+Left out (2 lead(s), oldest sign-up first):
+  Rehearsal Skipme  signed up 2026-06-21  status needs_review  contactId rehearsal-lead-skipme  - named in --skip
+  Rehearsal Clearedonce  signed up 2026-06-28  status needs_review  contactId rehearsal-lead-history  - its housing authority was set or removed before - left empty on purpose
+--skip ids that are not candidates (ignored): rehearsal-no-such-lead
+```
+
+No `WARNING:` line.
+
+Step 7 - re-run the dry run with the same `--skip` (it must write nothing new): `cd "W:/tmp/join-housing-authority" && npx tsx app/scripts/backfill-join-housing-authority.ts --env local --lane <L> --skip "rehearsal-lead-skipme,rehearsal-no-such-lead"; echo "exit=$?"`
+Expected: the header, `  (none)`, `Would update: 0 lead(s). Failed: 0.`, the same two left-out lines and the same `--skip` line; `exit=0`. Then one usage error, observed for the record (nothing is resolved or read): `cd "W:/tmp/join-housing-authority" && npx tsx app/scripts/backfill-join-housing-authority.ts --env local --lane 0; echo "exit=$?"` - prints the usage text and `exit=2`.
+
+Step 8 - read back: `cd "W:/tmp/join-housing-authority" && npx tsx .superpowers/sdd/rehearsal/seed-pre-change-leads.ts --verify; echo "exit=$?"`
+Expected (after the `lane <L>: ...` line), `exit=0`:
+
+```text
+rehearsal-lead-target-1  housingAuthority=Atlanta Housing Authority  status=needs_review  backfillEvents=1
+rehearsal-lead-skipme  housingAuthority=(none)  status=needs_review  backfillEvents=0
+rehearsal-lead-history  housingAuthority=(none)  status=needs_review  backfillEvents=0
+rehearsal-lead-target-2  housingAuthority=Atlanta Housing Authority  status=on_hold  backfillEvents=1
+rehearsal-lead-deleted  housingAuthority=(none)  status=needs_review  backfillEvents=0
+/join sign-up +15550109010  contactId=contact-<uuid>  housing_fair_signup_v2=true  housingAuthority=(none)  status=onboarding  capture_source=housing_fair
+```
+
+The last line is the marker check: a post-change `/join` lead with no authority holds the marker, starts Onboarding, and was in neither report list.
+
+Step 9 - record and clean up.
+1. Paste into the handback, verbatim and in order: the lane.json excerpt (Step 1.2), each command of Steps 4-8 with its full output and its `exit=` line, and the Step 2 screenshot path.
+2. Any output that differs from the expected text above is a finding: record it in the handback, do not "fix" the expectation.
+3. `git -C W:/tmp/join-housing-authority status --short` shows nothing from this task (the script is gitignored; the lane's tables are not in the repo). The rehearsal rows live only in lane `<L>`'s database until its next reseed; leave them.
+4. Keep the session only as long as Task 6.3 needs it, then `cd "W:/tmp/join-housing-authority" && npm run e2e:stop` (exit 0).
 
 #### Task 6.3 - Handback
 
@@ -7913,9 +8530,10 @@ Write `docs/superpowers/reviews/2026-10-12-join-housing-authority/handback.md`
   sign-ups in a row via "Sign up another person"; each contact is
   Onboarding with the authority on the dashboard; the flyer page `/p/<id>`
   shows no select); screenshots under `.playwright-mcp/`;
-- the backfill rehearsal on that lane (`--env local --lane <L>`, dry run
-  then `--apply`, with pre-change-shaped leads written directly), its
-  output verbatim;
+- the backfill rehearsal (Task 6.3a) on the self-QA lane: the lane.json
+  excerpt, each Step 4-8 command with its full output and its `exit=`
+  line, verbatim, and the `/join` "Not sure" screenshot path - plus, as a
+  finding, any output that differed from Task 6.3a's expected text;
 - main drift since the sync (`git rev-list --count HEAD..main`);
 - owed operator actions: the RUNBOOK backfill entry (dev then prod, after
   the deploy); nothing else (no Terraform, secrets, schema or env change);

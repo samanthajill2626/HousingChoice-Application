@@ -211,7 +211,13 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
       `org_name_cleanup` (by `field`), and this script's own
       `housing_authority_backfill`. The plan verifies the list against the
       code. Those audit appends are best-effort, so a write whose append
-      failed is invisible here; that gap is accepted.
+      failed is invisible here; that gap is accepted. Two more accepted
+      edges (plan review 2026-10-12): a re-sign-up that lands in the
+      milliseconds between a lead's history read and its write is not seen
+      (D6 writes nothing to the contact the guards could check); and a
+      contact whose `deleted_at` is `''` reads as not deleted but fails the
+      `notDeleted` guard, so it would list as a target and skip on every
+      apply (restore removes the attribute, so none exists today).
     Both audit rules read a candidate's WHOLE history: `auditRepo.listByEntity`
     is one newest-first Query with no cursor, so the script pages backward
     with `before` (the oldest `ts` seen) until a page comes back empty.

@@ -366,6 +366,29 @@ describe('PATCH /api/units/:unitId', () => {
     expect(bad.status).toBe(400);
   });
 
+  it('PATCH null CLEARS a recorded voucher_size_accepted (GET shows the key ABSENT)', async () => {
+    // 2026-10-12: a wrong recorded size must be removable so the unit falls back
+    // to its beds again (acceptedVoucherSizes).
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-vsc', { beds: 3, voucher_size_accepted: 2 });
+
+    const clear = await request(app)
+      .patch('/api/units/unit-vsc')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ voucher_size_accepted: null });
+    expect(clear.status).toBe(200);
+    expect('voucher_size_accepted' in clear.body.unit).toBe(false);
+    expect(clear.body.unit.beds).toBe(3); // untouched
+
+    const got = await request(app)
+      .get('/api/units/unit-vsc')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect('voucher_size_accepted' in got.body.unit).toBe(false); // ABSENT, not null
+    expect(world.units.get('unit-vsc')).not.toHaveProperty('voucher_size_accepted');
+  });
+
   it('PATCH sets tour_type, then a "" clear REMOVEs it (GET shows the key ABSENT)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-tt', { beds: 2 });

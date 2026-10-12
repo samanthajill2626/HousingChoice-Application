@@ -6,9 +6,10 @@
 // as informational text (the server enforces them — never sent by the client).
 // A live reach count + truncated warning surface the resolved audience size.
 //
-// The voucher-size control pre-fills from the property's beds when composing from
-// a unit, shown with a "matches this N-bedroom property" tag (overridable — a
-// 2-BR home may suit other sizes).
+// The voucher-size control pre-fills with the voucher size the property takes
+// (its recorded size, else its beds - acceptedVoucherSizes) when composing from
+// a unit, shown with a "matches property" tag (overridable - a home may suit
+// other sizes).
 import { useId, useState } from 'react';
 import type { AudienceFilter } from '../../api/index.js';
 import { OrgPicker } from '../orgs/OrgPicker.js';
@@ -24,9 +25,10 @@ export interface AudienceFiltersProps {
   /** The current client-shape filter (contact_type fixed 'tenant'). */
   filter: AudienceFilter;
   onChange: (next: AudienceFilter) => void;
-  /** The composed-from property's beds (drives the "matches this N-bedroom
-   *  property" tag on the matching chip), or undefined when not unit-scoped. */
-  propertyBeds?: number;
+  /** The voucher size the composed-from property takes (its recorded size, else
+   *  its beds - acceptedVoucherSizes); drives the "matches property" tag on the
+   *  matching chip. Undefined when not unit-scoped or nothing is recorded. */
+  propertyVoucherSize?: number;
   /** The live reach estimate (resolved audience size), or undefined while the
    *  debounced estimate is pending / not yet computed. */
   reachCount?: number;
@@ -51,7 +53,7 @@ export interface AudienceFiltersProps {
 export function AudienceFilters({
   filter,
   onChange,
-  propertyBeds,
+  propertyVoucherSize,
   reachCount,
   reachPending,
   truncated,
@@ -88,9 +90,9 @@ export function AudienceFilters({
     onChange(next);
   }
 
-  // The chip that matches the property's beds (capped at the top "4+" chip).
+  // The chip that matches the property's voucher size (capped at the top "4+" chip).
   const matchedChipValue =
-    propertyBeds !== undefined ? Math.max(0, Math.min(4, propertyBeds)) : undefined;
+    propertyVoucherSize !== undefined ? Math.max(0, Math.min(4, propertyVoucherSize)) : undefined;
 
   return (
     <section className={styles.filters} aria-labelledby={`${uid}-heading`}>
@@ -124,10 +126,10 @@ export function AudienceFilters({
             );
           })}
         </div>
-        {matchedChipValue !== undefined && propertyBeds !== undefined ? (
+        {matchedChipValue !== undefined && propertyVoucherSize !== undefined ? (
           <p className={styles.matchNote}>
-            Pre-filled to match this {bedroomPhrase(propertyBeds)} property — change it to reach
-            other sizes.
+            Pre-filled to the {bedroomPhrase(propertyVoucherSize)} voucher this property takes -
+            change it to reach other sizes.
           </p>
         ) : null}
       </div>

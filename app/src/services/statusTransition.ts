@@ -337,6 +337,18 @@ export function createStatusTransitionService(
     try {
       const contact = await contactsRepo.getById(tenantId);
       if (!contact) return;
+      // Caseworker integrity (spec 2026-10-12 section 4, "Derived tenant
+      // status"): the derived lifecycle is a TENANT's. A placement whose
+      // contact is not typed tenant (a record from before the I2 checks, or a
+      // contact re-typed since) writes nothing here - no status, no audit, no
+      // milestone. The listing-status derivation is separate and unchanged.
+      if (contact.type !== 'tenant') {
+        log.info(
+          { tenantId, contactType: contact.type },
+          'derivation: contact is not a tenant - tenant status left unchanged',
+        );
+        return;
+      }
       const current = contact.status as TenantStatus | undefined;
       if (isTenantOverrideStatus(current)) return; // override-pinned → no write/no audit
       if (current === toStatus) return; // no-op → idempotent, no provenance rewrite

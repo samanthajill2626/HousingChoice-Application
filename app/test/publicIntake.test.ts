@@ -4,7 +4,8 @@
 // Plus the abuse fence: the per-IP rate limiter trips with 429, and NO PII
 // (name/phone) ever appears in a log line.
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { OrgEntry, OrgKind } from '../src/lib/orgNames.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { WELCOME_TEXT_TEMPLATE } from '../src/routes/public.js';
@@ -635,5 +636,149 @@ describe('GET /public/units/:unitId/flyer - photo resolution + E1 gate', () => {
       '/unit-media/unit-photo/stored',
       'https://legacy.example/p.jpg',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// join-housing-authority D1/D2: GET /public/housing-authorities through the
+// FULL app - its mount ahead of the shared /public limiter, the origin-secret
+// chain, the generic 500, and the two independent limits.
+// ---------------------------------------------------------------------------
+
+const LIST = '/public/housing-authorities';
+
+describe('GET /public/housing-authorities - the public list read (D1)', () => {
+  /** The starting list's housing authority names in D1 order. */
+  const STARTING_AUTHORITY_NAMES = [
+    'Atlanta Housing Authority',
+    'Augusta Housing Authority',
+    'College Park Housing Authority',
+    'Decatur Housing Authority',
+    'DeKalb County Housing Authority',
+    'East Point Housing Authority',
+    'Fulton County Housing Authority',
+    'Georgia Department of Community Affairs',
+    'Georgia Housing Voucher Program (DBHDD)',
+    'Jonesboro Housing Authority',
+    'Macon-Bibb County Housing Authority',
+    'Marietta Housing Authority',
+  ];
+
+  function listEntry(kind: OrgKind, name: string): OrgEntry {
+    return {
+      orgId: `org-${name}`,
+      kind,
+      name,
+      spellings: [`${name} spelling`],
+      notes: 'internal note',
+      createdAt: '2026-10-12T00:00:00.000Z',
+      createdBy: 'test',
+      updatedAt: '2026-10-12T00:00:00.000Z',
+      updatedBy: 'test',
+    };
+  }
+
+  it('serves the starting list from memory on an empty store: authority names only, sorted, no-store, nothing written', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app).get(LIST).set('x-origin-verify', SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ names: STARTING_AUTHORITY_NAMES });
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(await world.orgListRepo.peek()).toBeNull();
+  });
+
+  it('serves the STORED list: housing_authority names only, case-insensitive order, no ids/spellings/notes/agencies', async () => {
+    const { app, world } = makeWebhookHarness();
+    await world.orgListRepo.putForSeed({
+      settingId: 'org-list',
+      version: 7,
+      entries: [
+        listEntry('housing_authority', 'zeta Housing Authority'),
+        listEntry('agency', 'Alpha Agency'),
+        listEntry('housing_authority', 'Banana Housing Authority'),
+        listEntry('housing_authority', 'apple Housing Authority'),
+      ],
+    });
+    const get = vi.spyOn(world.orgListRepo, 'get');
+    const mutate = vi.spyOn(world.orgListRepo, 'mutate');
+    const putForSeed = vi.spyOn(world.orgListRepo, 'putForSeed');
+
+    const res = await request(app).get(LIST).set('x-origin-verify', SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      names: ['apple Housing Authority', 'Banana Housing Authority', 'zeta Housing Authority'],
+    });
+    const serialized = JSON.stringify(res.body);
+    for (const leaked of ['org-', 'spelling', 'internal note', 'Alpha Agency', 'createdBy']) {
+      expect(serialized, leaked).not.toContain(leaked);
+    }
+    expect(get).not.toHaveBeenCalled();
+    expect(mutate).not.toHaveBeenCalled();
+    expect(putForSeed).not.toHaveBeenCalled();
+  });
+
+  it('a list read failure is the generic 500', async () => {
+    const { app, world } = makeWebhookHarness();
+    vi.spyOn(world.orgListRepo, 'peek').mockRejectedValue(new Error('settings table unavailable'));
+    const res = await request(app).get(LIST).set('x-origin-verify', SECRET);
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'internal server error' });
+  });
+
+  it('sits behind the origin-secret validator like every /public route', async () => {
+    const { app } = makeWebhookHarness();
+    expect((await request(app).get(LIST)).status).toBe(403);
+  });
+});
+
+describe('GET /public/housing-authorities - its own limit, independent of the shared /public limit (D2)', () => {
+  it('stays readable after the shared /public limit is exhausted, and does not touch that window', async () => {
+    const { app } = makeWebhookHarness({
+      env: { PUBLIC_RATE_LIMIT_MAX: '2', PUBLIC_RATE_LIMIT_WINDOW_MS: '60000' },
+    });
+    const bad = { firstName: 'A', lastName: 'B' }; // 400 at the handler
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(400);
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(400);
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(429);
+
+    for (let i = 0; i < 3; i += 1) {
+      const res = await request(app).get(LIST).set('x-origin-verify', SECRET);
+      expect(res.status, `list read ${i + 1}`).toBe(200);
+    }
+    // The shared window is still exhausted: the list reads neither reset nor used it.
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(429);
+  });
+
+  it('allows 60 reads per minute per IP, refuses the 61st, and never consumes or is blocked by the shared limit', async () => {
+    const { app } = makeWebhookHarness({
+      env: { PUBLIC_RATE_LIMIT_MAX: '2', PUBLIC_RATE_LIMIT_WINDOW_MS: '60000' },
+    });
+    for (let i = 0; i < 60; i += 1) {
+      const res = await request(app).get(LIST).set('x-origin-verify', SECRET);
+      expect(res.status, `list read ${i + 1}`).toBe(200);
+    }
+    const limited = await request(app).get(LIST).set('x-origin-verify', SECRET);
+    expect(limited.status).toBe(429);
+    expect(limited.body).toEqual({ error: 'rate_limited' });
+    expect(limited.headers['retry-after']).toBeDefined();
+
+    // The shared limit still has BOTH of its 2 slots: 61 list reads consumed
+    // none, and the exhausted list limit does not block the other routes.
+    const bad = { firstName: 'A', lastName: 'B' };
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(400);
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(400);
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(429);
+  });
+
+  it('(PIN) another method on the list path falls through to the shared /public mount and its limiter', async () => {
+    const { app } = makeWebhookHarness({
+      env: { PUBLIC_RATE_LIMIT_MAX: '1', PUBLIC_RATE_LIMIT_WINDOW_MS: '60000' },
+    });
+    // Not the list route: it passes the shared limiter (its single slot) and matches nothing.
+    const post = await request(app).post(LIST).set('x-origin-verify', SECRET).send({});
+    expect(post.status).toBe(404);
+    // Proof it went through the shared limiter: the flyer route is now limited.
+    const flyer = await request(app).get('/public/units/nope/flyer').set('x-origin-verify', SECRET);
+    expect(flyer.status).toBe(429);
   });
 });

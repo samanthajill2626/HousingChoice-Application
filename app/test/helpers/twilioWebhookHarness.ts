@@ -5433,6 +5433,11 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       conversationsRepo: world.conversationsRepo,
       unitsRepo: world.unitsRepo,
       auditRepo: world.auditRepo,
+      // join-housing-authority: the org list the public list read
+      // (GET /public/housing-authorities) and the sign-up's housing authority
+      // check read - the SAME fake the /api org routes use. app.ts hands it to
+      // both /public mounts.
+      orgListRepo: world.orgListRepo,
       // The housing-fair welcome reads the operator's welcomeText override (with
       // a constant fallback) — share the world's fake settings repo so a
       // welcomeText edit is reflected without touching DynamoDB.

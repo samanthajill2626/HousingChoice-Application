@@ -169,6 +169,13 @@ export interface PublicRouterDeps {
   settingsRepo?: SettingsRepo;
   sendMessageService?: SendMessageService;
   /**
+   * join-housing-authority D1/D3: the organization list. The sign-up's housing
+   * authority check reads it (peek only - the public surface never creates
+   * it), and app.ts hands the SAME repo to createPublicHousingAuthoritiesRouter.
+   * Default createOrgListRepo().
+   */
+  orgListRepo?: OrgListRepo;
+  /**
    * flyer-full-info: the public-facing texting number shown on the flyer (the
    * "I'm interested - text us" CTA) - config.businessPhoneNumber, the SAME main
    * number all 1:1 Twilio traffic uses. Absent -> the page degrades to

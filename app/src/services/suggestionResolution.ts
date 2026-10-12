@@ -212,6 +212,28 @@ function guardForPatch(
 }
 
 /**
+ * Spec 2026-10-12 D1 change 3 (I1): a tenant-only ACCEPT is fenced on the
+ * contact's classification as the plan read it. The caseworker conversion and
+ * every contacts-PATCH type/role change bump classification_revision in the
+ * same write (contactsRepo update), so the guard transaction refuses an accept
+ * that spans any reclassification. Neutral targets are never fenced.
+ */
+function withClassificationFence(
+  contact: ContactItem,
+  target: string,
+  guard: ResolutionAttributeGuard,
+): ResolutionAttributeGuard {
+  if (!TENANT_ONLY_TARGETS.has(target)) return guard;
+  const revision = contact.classification_revision;
+  return {
+    ...guard,
+    classification_revision: revision === undefined
+      ? { exists: false }
+      : { exists: true, value: revision },
+  };
+}
+
+/**
  * Spec 2026-10-06 D8 + D5: the name an accepted housingAuthority suggestion
  * writes, decided against the CURRENT list inside buildPlan - before the
  * claim, so a refusal never consumes the suggestion.
@@ -284,7 +306,7 @@ function buildPlan(
     return {
       kind: 'status',
       patch: status.patch,
-      guard: guardForPatch(contact, status.patch),
+      guard: withClassificationFence(contact, target, guardForPatch(contact, status.patch)),
       audit: status.audit,
       ...(status.activity !== undefined && { activity: status.activity }),
     };
@@ -343,7 +365,7 @@ function buildPlan(
     return {
       kind: 'contact',
       patch,
-      guard: guardForPatch(contact, patch),
+      guard: withClassificationFence(contact, target, guardForPatch(contact, patch)),
       audit: {
         eventType: 'ai_suggestion_accepted',
         payload: {
@@ -366,7 +388,7 @@ function buildPlan(
     return {
       kind: 'contact',
       patch,
-      guard: guardForPatch(contact, patch),
+      guard: withClassificationFence(contact, target, guardForPatch(contact, patch)),
       audit: {
         eventType: 'ai_suggestion_accepted',
         payload: {

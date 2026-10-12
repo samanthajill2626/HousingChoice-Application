@@ -11,7 +11,19 @@ import { describe, expect, it, vi } from 'vitest';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import type { SuggestionItem } from '../src/repos/extractionRepo.js';
-import { TENANT_ONLY_TARGETS } from '../src/services/suggestionResolution.js';
+import { runJournalSweep } from '../src/jobs/journalSweep.js';
+import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import type { OrgListItem } from '../src/repos/orgListRepo.js';
+import type {
+  ResolutionAttributeGuard,
+  ResolutionReplayPlan,
+} from '../src/repos/suggestionResolutionRepo.js';
+import { createOrgNamesService } from '../src/services/orgNames.js';
+import {
+  createSuggestionResolutionService,
+  TENANT_ONLY_TARGETS,
+} from '../src/services/suggestionResolution.js';
+import { quietLogger } from './helpers/orgFixtures.js';
 
 const suggestionIdentities = new Map<string, { revision?: string; createdAt: string; runId?: string }>();
 
@@ -70,6 +82,102 @@ function journalsFor(world: FakeWorld, contactId: string) {
 
 function suggestionEmits(world: FakeWorld): number {
   return world.emitted.filter((event) => event.event === 'suggestion.updated').length;
+}
+
+/** The starting organization list (spec 2026-10-06 Appendix A) as a stored item. */
+function startingOrgList(): OrgListItem {
+  let n = 0;
+  return {
+    settingId: 'org-list',
+    version: 1,
+    entries: buildStartingEntries('2026-10-06T00:00:00.000Z', () => `org-${(n += 1)}`),
+  };
+}
+
+function list(app: import('express').Express, contactId: string) {
+  return request(app)
+    .get(`/api/contacts/${contactId}/suggestions`)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('cookie', TEST_SESSION_COOKIE);
+}
+
+function patch(app: import('express').Express, contactId: string, body: Record<string, unknown>) {
+  return request(app)
+    .patch(`/api/contacts/${contactId}`)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('cookie', TEST_SESSION_COOKIE)
+    .send(body);
+}
+
+/** The real caseworker conversion, through its one route. */
+function convert(app: import('express').Express, contactId: string) {
+  return request(app)
+    .post(`/api/contacts/${contactId}/caseworker-review`)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('cookie', TEST_SESSION_COOKIE)
+    .send({ action: 'make' });
+}
+
+/** An app whose accept dies right after its claim (process termination). */
+function crashingApp(world: FakeWorld): import('express').Express {
+  return makeWebhookHarness({
+    world,
+    suggestionResolutionHooks: {
+      afterBoundary: (boundary) => {
+        if (boundary === 'claimed') throw new Error('simulated termination after claim');
+      },
+    },
+  }).app;
+}
+
+function expireActiveResolution(world: FakeWorld, contactId: string, target: string): void {
+  for (const [key, item] of world.suggestionResolutions) {
+    if (item.state === 'active' && item.contactId === contactId && item.target === target) {
+      world.suggestionResolutions.set(key, { ...item, leaseExpiresAt: '2000-01-01T00:00:00.000Z' });
+      return;
+    }
+  }
+  throw new Error('expected an active resolution');
+}
+
+function journalFor(world: FakeWorld, contactId: string, target: string) {
+  return [...world.suggestionResolutions.values()].find(
+    (item) => item.contactId === contactId && item.target === target,
+  );
+}
+
+function guardOf(plan: ResolutionReplayPlan | undefined): ResolutionAttributeGuard {
+  if (plan === undefined || (plan.kind !== 'contact' && plan.kind !== 'status')) {
+    throw new Error('expected a contact or status plan');
+  }
+  return plan.guard;
+}
+
+/** The daily abandoned-journal sweep, run a day later over the world's repos. */
+async function sweepADayLater(world: FakeWorld) {
+  const service = createSuggestionResolutionService({
+    contactsRepo: world.contactsRepo,
+    extractionRepo: world.extractionRepo,
+    aiRunsRepo: world.aiRuns,
+    resolutionRepo: world.suggestionResolutionRepo,
+    orgNamesService: createOrgNamesService({ orgListRepo: world.orgListRepo, logger: quietLogger() }),
+    logger: quietLogger(),
+  });
+  return runJournalSweep(
+    new Date(Date.now() + 25 * 3_600_000).toISOString(),
+    {
+      settingsRepo: {
+        claimGroupPeriod: async () => true,
+        getJournalSweepCursor: async () => undefined,
+        putJournalSweepCursor: async () => {},
+      },
+      resolutionRepo: world.suggestionResolutionRepo,
+      resolutionService: service,
+      events: world.events,
+      logger: quietLogger(),
+    },
+    { force: true },
+  );
 }
 
 // D1 cases. Later tasks insert their helpers ABOVE this line.
@@ -167,5 +275,126 @@ describe('D1 change 2: a tenant-only accept on a contact not typed tenant is ref
     await accept(app, 'c-ll', 'lastName').expect(200);
 
     expect(contactOf(world, 'c-ll')?.['lastName']).toBe('Okafor');
+  });
+});
+
+describe('D1 change 3: a tenant-only accept is fenced on the classification it read', () => {
+  it.each([
+    ['housingAuthority', 'Atlanta Housing Authority'],
+    ['voucherSize', '3'],
+    ['pets', 'two cats'],
+    ['evictions', 'none'],
+    ['tenure', '2 years'],
+    ['porting', 'true'],
+    ['status', 'searching'],
+  ])('a %s accept guards classification_revision as absent when the contact has none', async (target, suggestedValue) => {
+    const { app, world } = makeWebhookHarness();
+    await world.orgListRepo.putForSeed(startingOrgList());
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target, suggestedValue, conversationId: 'conv-1', runId: `run-${target}`,
+    });
+    const claim = vi.spyOn(world.suggestionResolutionRepo, 'claim');
+
+    await accept(app, 'c1', target).expect(200);
+
+    expect(guardOf(claim.mock.calls[0]?.[0].plan)['classification_revision']).toEqual({ exists: false });
+  });
+
+  it('guards the stored revision value when the contact has one', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { classification_revision: 3 });
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
+    });
+    const claim = vi.spyOn(world.suggestionResolutionRepo, 'claim');
+
+    await accept(app, 'c1', 'pets').expect(200);
+
+    expect(guardOf(claim.mock.calls[0]?.[0].plan)['classification_revision']).toEqual({ exists: true, value: 3 });
+  });
+
+  it.each([
+    ['firstName', 'Tasha'],
+    ['lastName', 'Williams'],
+    ['address', '1 Main St'],
+  ])('never fences the neutral %s target (PIN)', async (target, suggestedValue) => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target, suggestedValue, conversationId: 'conv-1', runId: `run-${target}`,
+      ...(target === 'address' && { suggestedAddress: { line1: '1 Main St' } }),
+    });
+    const claim = vi.spyOn(world.suggestionResolutionRepo, 'claim');
+
+    await accept(app, 'c1', target).expect(200);
+
+    expect(Object.keys(guardOf(claim.mock.calls[0]?.[0].plan))).not.toContain('classification_revision');
+  });
+
+  // R2-ADV-1 schedule B: the claim lands, the process dies before the commit,
+  // the contact is converted, and recovery later finishes the journal.
+  it('B (read): an authority claim that crashed, recovered by a suggestions read after a conversion, writes no authority', async () => {
+    const { app, world } = makeWebhookHarness();
+    await world.orgListRepo.putForSeed(startingOrgList());
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'housingAuthority', suggestedValue: 'Atlanta Housing Authority',
+      conversationId: 'conv-1', runId: 'run-ha',
+    });
+    await accept(crashingApp(world), 'c1', 'housingAuthority').expect(500);
+    expect(journalFor(world, 'c1', 'housingAuthority')?.state).toBe('active');
+    await convert(app, 'c1').expect(200);
+    expireActiveResolution(world, 'c1', 'housingAuthority');
+    const emitsBefore = suggestionEmits(world);
+
+    await list(app, 'c1').expect(200);
+
+    const contact = contactOf(world, 'c1');
+    expect(contact).toMatchObject({ type: 'partner', role: 'Caseworker' });
+    expect(contact?.['housingAuthority']).toBeUndefined();
+    expect(contact?.['housingAuthority_source']).toBeUndefined();
+    expect(journalFor(world, 'c1', 'housingAuthority')?.state).toBe('completed');
+    // The journal consumed the chip, so the read still notifies every dashboard.
+    expect(suggestionEmits(world)).toBe(emitsBefore + 1);
+  });
+
+  it('B (sweep): the same claim, recovered by the daily journal sweep after a conversion, writes no authority', async () => {
+    const { app, world } = makeWebhookHarness();
+    await world.orgListRepo.putForSeed(startingOrgList());
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'housingAuthority', suggestedValue: 'Atlanta Housing Authority',
+      conversationId: 'conv-1', runId: 'run-ha',
+    });
+    await accept(crashingApp(world), 'c1', 'housingAuthority').expect(500);
+    await convert(app, 'c1').expect(200);
+    expireActiveResolution(world, 'c1', 'housingAuthority');
+
+    const outcome = await sweepADayLater(world);
+
+    expect(outcome.recovered).toBe(1);
+    const contact = contactOf(world, 'c1');
+    expect(contact).toMatchObject({ type: 'partner', role: 'Caseworker' });
+    expect(contact?.['housingAuthority']).toBeUndefined();
+    expect(contact?.['housingAuthority_source']).toBeUndefined();
+    expect(journalFor(world, 'c1', 'housingAuthority')?.state).toBe('completed');
+  });
+
+  it('a voucherSize claim that crashed, then a generic tenant -> landlord re-type, recovers without writing voucherSize', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'voucherSize', suggestedValue: '3', conversationId: 'conv-1', runId: 'run-voucher',
+    });
+    await accept(crashingApp(world), 'c1', 'voucherSize').expect(500);
+    await patch(app, 'c1', { type: 'landlord' }).expect(200);
+    expireActiveResolution(world, 'c1', 'voucherSize');
+
+    await list(app, 'c1').expect(200);
+
+    expect(contactOf(world, 'c1')).toMatchObject({ type: 'landlord' });
+    expect(contactOf(world, 'c1')?.['voucherSize']).toBeUndefined();
+    expect(journalFor(world, 'c1', 'voucherSize')?.state).toBe('completed');
   });
 });

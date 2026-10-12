@@ -371,6 +371,50 @@ describe('formatBackfillReport (spec D10: name, sign-up date, status, contactId 
       expect([...line].some((c) => isControl(c.charCodeAt(0))), line).toBe(false);
     }
   });
+
+  it('a name never reorders or breaks a report line: every Cc, Cf, Zl and Zp character (bidi override and isolate, zero-width, line and paragraph separator, BOM, soft hyphen, astral tag) shows escaped; CJK, emoji, accents and quotes print as they are', () => {
+    // Every character built from its code (code review R2-F1): an RLO that
+    // would visually reverse the rest of the line - the contactId the operator
+    // copies into --skip included - isolates, a zero-width space, U+2028 and
+    // U+2029 that some viewers break a line at, a BOM at the very end (trim()
+    // would eat it raw), a soft hyphen (the one Cf at or below 0xFF) and an
+    // astral language tag (the braced form).
+    const cp = (code: number): string => String.fromCodePoint(code);
+    const BS = cp(92);
+    const U = `${BS}u`;
+    const report: BackfillReport = {
+      ...DRY_REPORT,
+      targets: [
+        {
+          ...lead('c-bidi', `${cp(0x200b)}Ann${cp(0x202e)}eva`, `Lee${cp(0x2066)}x${cp(0x2069)}`, '2026-06-01T09:00:00.000Z', 'needs_review'),
+          outcome: 'would_write',
+        },
+        {
+          ...lead('c-sep', `Line${cp(0x2028)}Para${cp(0x2029)}Soft${cp(0xad)}Hy`, `Tag${cp(0xe0001)}${cp(0xfeff)}`, '2026-06-03T09:00:00.000Z', 'needs_review'),
+          outcome: 'would_write',
+        },
+      ],
+      leftOut: [
+        {
+          ...lead('c-keep', `${cp(0x4e2d)}${cp(0x6587)} "Mei"`, `Smile${cp(0x1f600)}${cp(0xe9)}`, '2026-06-04T09:00:00.000Z', 'on_hold'),
+          reason: 'skipped',
+        },
+      ],
+    };
+    const lines = formatBackfillReport(report, false);
+    expect(lines).toEqual([
+      'DRY RUN - nothing written. Leads that WOULD get "Atlanta Housing Authority" (oldest sign-up first; dates are UTC):',
+      `  ${U}200bAnn${U}202eeva Lee${U}2066x${U}2069  signed up 2026-06-01  status needs_review  contactId c-bidi`,
+      `  Line${U}2028Para${U}2029Soft${BS}xadHy Tag${U}{e0001}${U}feff  signed up 2026-06-03  status needs_review  contactId c-sep`,
+      'Would update: 2 lead(s). Failed: 0.',
+      'Left out (1 lead(s), oldest sign-up first):',
+      `  ${cp(0x4e2d)}${cp(0x6587)} "Mei" Smile${cp(0x1f600)}${cp(0xe9)}  signed up 2026-06-04  status on_hold  contactId c-keep  - named in --skip`,
+    ]);
+    const unsafe = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+    for (const line of lines) {
+      expect(unsafe.test(line), line).toBe(false);
+    }
+  });
 });
 
 describe('backfillExitCode (spec D10: 0 clean, 1 with failures)', () => {

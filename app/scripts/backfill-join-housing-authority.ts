@@ -227,21 +227,37 @@ function signUpDate(signedUpAt: string): string {
   return /^\d{4}-\d{2}-\d{2}/.test(signedUpAt) ? signedUpAt.slice(0, 10) : 'unknown';
 }
 
+/** Unicode categories Cc (control), Cf (format), Zl and Zp (line, paragraph separator). */
+const UNSAFE_IN_REPORT = /^[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]$/u;
+const BACKSLASH = String.fromCharCode(92);
+
 /**
  * A name as the report prints it. Names come from the public sign-up form,
- * which stores them as typed, so every control character (code points 0-31
- * and 127-159) is shown as a visible escape (a newline prints as backslash,
- * x, 0a): a name can never start a new report line - forging a contactId the
- * operator would copy into --skip - or move the terminal cursor. Every other
- * character (quotes, accented letters) prints as it is.
+ * which stores them as typed, so every character in Unicode categories Cc,
+ * Cf, Zl and Zp - controls, bidi overrides and isolates, zero-width
+ * characters, the line and paragraph separators, the BOM, the soft hyphen -
+ * is shown as a visible escape: a code point up to 0xFF as backslash, x and
+ * two hex digits (a newline prints as backslash, x, 0a); a higher one as
+ * backslash, u and four hex digits (U+202E as backslash, u, 202e), or, above
+ * 0xFFFF, backslash, u and the hex digits in braces. A name can then never
+ * start a new report line or visually reorder one - forging or reversing a
+ * contactId the operator would copy into --skip - nor move the terminal
+ * cursor. Every other character (quotes, accented letters, CJK, emoji)
+ * prints as it is.
  */
 function visibleName(text: string): string {
   let out = '';
   for (const c of text) {
-    const code = c.charCodeAt(0);
-    out += code <= 31 || (code >= 127 && code <= 159) ? `\\x${code.toString(16).padStart(2, '0')}` : c;
+    out += UNSAFE_IN_REPORT.test(c) ? escapedCodePoint(c.codePointAt(0) ?? 0) : c;
   }
   return out;
+}
+
+function escapedCodePoint(code: number): string {
+  const hex = code.toString(16);
+  if (code <= 0xff) return `${BACKSLASH}x${hex.padStart(2, '0')}`;
+  const escapeU = `${BACKSLASH}u`;
+  return code <= 0xffff ? `${escapeU}${hex.padStart(4, '0')}` : `${escapeU}{${hex}}`;
 }
 
 function leadLine(lead: BackfillLead): string {

@@ -335,6 +335,42 @@ describe('formatBackfillReport (spec D10: name, sign-up date, status, contactId 
       'Left out: none.',
     ]);
   });
+
+  it('a name from the public form never starts a report line or reaches the terminal raw: control characters (0-31, 127-159) show escaped, every other character as it is', () => {
+    // Every character built from its code (code review R1-ADV-4): a newline
+    // that would forge a report line, an ESC line-erase, the C1 range's ends,
+    // and the neighbors that stay as they are (a quote, an accented letter,
+    // a no-break space).
+    const ch = (code: number): string => String.fromCharCode(code);
+    const BS = ch(92);
+    const forged = `Mallory${ch(10)}  Forged Line  signed up 2026-06-02  status needs_review  contactId c-forged`;
+    const report: BackfillReport = {
+      ...DRY_REPORT,
+      targets: [
+        { ...lead('c-nl', forged, 'X', '2026-06-01T09:00:00.000Z', 'needs_review'), outcome: 'would_write' },
+        { ...lead('c-esc', `${ch(27)}[2K${ch(13)}Eve`, 'Y', '2026-06-03T09:00:00.000Z', 'needs_review'), outcome: 'would_write' },
+      ],
+      leftOut: [
+        {
+          ...lead('c-plain', `Ren${ch(233)}e "Bo"`, `O'Brien${ch(9)}${ch(127)}${ch(155)}${ch(159)}${ch(160)}~`, '2026-06-04T09:00:00.000Z', 'on_hold'),
+          reason: 'skipped',
+        },
+      ],
+    };
+    const lines = formatBackfillReport(report, false);
+    expect(lines).toEqual([
+      'DRY RUN - nothing written. Leads that WOULD get "Atlanta Housing Authority" (oldest sign-up first; dates are UTC):',
+      `  Mallory${BS}x0a  Forged Line  signed up 2026-06-02  status needs_review  contactId c-forged X  signed up 2026-06-01  status needs_review  contactId c-nl`,
+      `  ${BS}x1b[2K${BS}x0dEve Y  signed up 2026-06-03  status needs_review  contactId c-esc`,
+      'Would update: 2 lead(s). Failed: 0.',
+      'Left out (1 lead(s), oldest sign-up first):',
+      `  Ren${ch(233)}e "Bo" O'Brien${BS}x09${BS}x7f${BS}x9b${BS}x9f${ch(160)}~  signed up 2026-06-04  status on_hold  contactId c-plain  - named in --skip`,
+    ]);
+    const isControl = (code: number): boolean => code <= 31 || (code >= 127 && code <= 159);
+    for (const line of lines) {
+      expect([...line].some((c) => isControl(c.charCodeAt(0))), line).toBe(false);
+    }
+  });
 });
 
 describe('backfillExitCode (spec D10: 0 clean, 1 with failures)', () => {

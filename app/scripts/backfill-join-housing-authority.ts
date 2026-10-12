@@ -227,8 +227,25 @@ function signUpDate(signedUpAt: string): string {
   return /^\d{4}-\d{2}-\d{2}/.test(signedUpAt) ? signedUpAt.slice(0, 10) : 'unknown';
 }
 
+/**
+ * A name as the report prints it. Names come from the public sign-up form,
+ * which stores them as typed, so every control character (code points 0-31
+ * and 127-159) is shown as a visible escape (a newline prints as backslash,
+ * x, 0a): a name can never start a new report line - forging a contactId the
+ * operator would copy into --skip - or move the terminal cursor. Every other
+ * character (quotes, accented letters) prints as it is.
+ */
+function visibleName(text: string): string {
+  let out = '';
+  for (const c of text) {
+    const code = c.charCodeAt(0);
+    out += code <= 31 || (code >= 127 && code <= 159) ? `\\x${code.toString(16).padStart(2, '0')}` : c;
+  }
+  return out;
+}
+
 function leadLine(lead: BackfillLead): string {
-  const name = `${lead.firstName} ${lead.lastName}`.trim();
+  const name = visibleName(`${lead.firstName} ${lead.lastName}`).trim();
   return (
     `  ${name === '' ? '(no name)' : name}  signed up ${signUpDate(lead.signedUpAt)}` +
     `  status ${lead.status === '' ? '(none)' : lead.status}  contactId ${lead.contactId}`

@@ -3,7 +3,7 @@
 // no optional prop: no extra field, the submit enabled, nothing focused, and
 // today's error copy for ANY thrown error. The second block drives each new
 // prop: extraField placement, submitBlocked, errorMessage, autoFocusFirstName.
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/client.js';
@@ -106,6 +106,29 @@ describe('IntakeForm optional props (/join)', () => {
     rerender(<IntakeForm onSubmit={onSubmit} submitBlocked={false} />);
     expect(sendButton()).toBeEnabled();
     await user.click(sendButton());
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  });
+
+  it('submitBlocked ignores a submit that reaches the form itself, not only the disabled button', async () => {
+    // A browser never submits a form whose default button is disabled, so the
+    // Enter case above proves only the button. This submits the FORM directly,
+    // so only the submit handler's own submitBlocked check can stop the send.
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(<IntakeForm onSubmit={onSubmit} submitBlocked />);
+    await fillRequiredFields(user);
+    await user.click(consentBox());
+    const form = sendButton().closest('form');
+    if (form === null) throw new Error('expected the send button inside a form');
+
+    fireEvent.submit(form);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(sendButton()).toBeDisabled();
+
+    // The same direct submit sends once the block lifts: the check above is not vacuous.
+    rerender(<IntakeForm onSubmit={onSubmit} submitBlocked={false} />);
+    fireEvent.submit(form);
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
   });
 

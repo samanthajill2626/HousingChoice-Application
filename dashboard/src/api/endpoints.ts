@@ -1027,11 +1027,20 @@ export async function deleteUnit(unitId: string): Promise<UnitItem> {
 }
 
 /** POST /api/units/:id/restore - clear deleted_at, bringing a soft-deleted property
- *  back into the normal views. Returns the updated unit. */
-export async function restoreUnit(unitId: string): Promise<UnitItem> {
+ *  back into the normal views. Returns the updated unit.
+ *  caseworker-integrity (spec section 4 "Restore"): with no `opts` this is the
+ *  plain restore (no body). 409 restore_needs_landlord { landlordName? } means
+ *  the stored landlord can't stay the property's landlord; call again with
+ *  `{ landlordId: <a landlord's contactId> }` to restore with that landlord, or
+ *  `{ landlordId: null }` to restore without one (404 landlord_not_found /
+ *  409 landlord_not_landlord / 409 unit_roster_conflict). */
+export async function restoreUnit(
+  unitId: string,
+  opts?: { landlordId: string | null },
+): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>(
     `/api/units/${encodeURIComponent(unitId)}/restore`,
-    { method: 'POST' },
+    { method: 'POST', ...(opts !== undefined && { body: { landlordId: opts.landlordId } }) },
   );
   return res.unit;
 }

@@ -135,6 +135,25 @@ describe('RestoreLandlordDialog', () => {
     expect(onRestored).not.toHaveBeenCalled();
   });
 
+  // R1 code review, dashboard finding 5: a failed landlords read is said, not
+  // swallowed - the picker cannot offer anyone, so staff learn why and keep
+  // the two actions that still work.
+  it("says Couldn't load the landlords. when the landlord list fails to load; Restore without a landlord and Cancel stay live", async () => {
+    const user = userEvent.setup();
+    getAllContacts.mockReset().mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));
+    restoreUnit.mockResolvedValue({ ...RESTORED, landlordId: undefined });
+    const { onRestored } = setup();
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe("Couldn't load the landlords.");
+    expect(screen.getByRole('button', { name: 'Restore with this landlord' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    const without = screen.getByRole('button', { name: 'Restore without a landlord' });
+    expect(without).toBeEnabled();
+    await user.click(without);
+    expect(restoreUnit).toHaveBeenCalledWith('u1', { landlordId: null });
+    await waitFor(() => expect(onRestored).toHaveBeenCalled());
+  });
+
   it('any other failure says the restore did not happen', async () => {
     const user = userEvent.setup();
     restoreUnit.mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));

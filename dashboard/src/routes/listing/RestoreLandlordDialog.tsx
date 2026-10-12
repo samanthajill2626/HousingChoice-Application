@@ -21,6 +21,10 @@ import styles from './ListingDetail.module.css';
 /** Any other failure: nothing was restored. */
 const RESTORE_FAILED_COPY = "Couldn't restore - please try again.";
 
+/** The landlords read failed: the picker can offer no one (R1 code review,
+ *  dashboard finding 5; the house "Couldn't load <thing>" copy). */
+const LANDLORDS_LOAD_FAILED_COPY = "Couldn't load the landlords.";
+
 export interface RestoreLandlordDialogProps {
   unitId: string;
   /** The stored landlord's display name from the 409 body, when it exists. */
@@ -40,6 +44,7 @@ export function RestoreLandlordDialog({
   onClose,
 }: RestoreLandlordDialogProps): React.JSX.Element {
   const [landlords, setLandlords] = useState<Contact[]>([]);
+  const [landlordsFailed, setLandlordsFailed] = useState(false);
   const [pick, setPick] = useState<ContactSearchValue>({ name: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,7 +57,11 @@ export function RestoreLandlordDialog({
         const items = await getAllContacts({ type: 'landlord' }, ac.signal);
         if (!ac.signal.aborted) setLandlords(items);
       } catch {
-        // Non-fatal: the picker stays empty; "Restore without a landlord" still works.
+        // The picker can offer no one, so say so (an aborted read is the
+        // dialog closing, not a failure). "Restore without a landlord" and
+        // Cancel still work; "Restore with this landlord" stays disabled
+        // because nothing can be picked.
+        if (!ac.signal.aborted) setLandlordsFailed(true);
       }
     })();
     return () => ac.abort();
@@ -118,6 +127,11 @@ export function RestoreLandlordDialog({
         inputLabel="Landlord"
         disabled={busy}
       />
+      {landlordsFailed ? (
+        <p role="alert" className={styles.error}>
+          {LANDLORDS_LOAD_FAILED_COPY}
+        </p>
+      ) : null}
       {error !== null ? (
         <p role="alert" className={styles.error}>
           {error}

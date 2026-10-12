@@ -19,22 +19,29 @@
 //        -> 200 { flyer }   (the FULL public payload upfront + contact_number)
 //        -> 404 { error, contact_number }   (missing/deleted/not-shareable;
 //           flyer-full-info: the teaser/reveal split + the /details route are gone)
+//   GET  /public/housing-authorities   (join-housing-authority D1/D2; built by
+//        createPublicHousingAuthoritiesRouter below and mounted in app.ts AHEAD
+//        of this router, with its own 60-per-minute per-IP limit)
+//        -> 200 { names: string[] }   (the housing authority names on the org
+//           list, sorted; Cache-Control: no-store; never writes the list)
 //
 // Money note: housing-fair sends an SMS (real cost in prod). Idempotency +
 // rate limiting are what keep this from being an SMS-spend abuse vector.
 import { createHash } from 'node:crypto';
-import { Router, type Response } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { CONSENT_VERSION, WELCOME_SMS } from '../lib/smsCompliance.js';
 import { resolveWithSettings } from '../messages/index.js';
+import { createRateLimit } from '../middleware/rateLimit.js';
 import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer } from '../lib/unitFields.js';
 import { resolveUnitMedia } from '../lib/unitMedia.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
+import { createOrgListRepo, type OrgListRepo } from '../repos/orgListRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
@@ -42,6 +49,11 @@ import {
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
+import {
+  PUBLIC_LIST_RATE_LIMIT,
+  housingAuthorityNames,
+  loadPublicOrgEntries,
+} from '../services/publicOrgList.js';
 
 /**
  * The housing-fair "auto welcome text" DEFAULT copy — the FILED A2P welcome
@@ -356,5 +368,43 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     res.json({ flyer: { ...toUnitFlyer(unit), media, contact_number: contactNumber } });
   });
 
+  return router;
+}
+
+export interface PublicHousingAuthoritiesDeps {
+  logger?: Logger;
+  orgListRepo?: OrgListRepo;
+  /** Test seam: the limiter's client-key resolver. */
+  rateLimitKeyOf?: (req: Request) => string;
+}
+
+/**
+ * GET /public/housing-authorities (join-housing-authority D1, D2) - the /join
+ * form's housing authority dropdown. Its OWN router so app.ts can mount it
+ * IMMEDIATELY BEFORE the shared /public mount: it defines this one GET route,
+ * with a hard-coded 60-per-minute per-IP limiter on the route alone, so the
+ * read never consumes - and is never blocked by - the shared limiter in front
+ * of createPublicRouter. Every other request matches nothing here and falls
+ * through to that mount unchanged.
+ *
+ * 200 { names }: the exact stored names of the housing authority entries,
+ * sorted (services/publicOrgList.ts). Nothing else leaves: no ids, spellings,
+ * notes, audit fields or agencies. It never writes the list item (peek, else
+ * the starting list in memory). A read failure propagates to the app's error
+ * handler: the generic 500. no-store: nothing may cache a stale list.
+ */
+export function createPublicHousingAuthoritiesRouter(deps: PublicHousingAuthoritiesDeps = {}): Router {
+  const log = deps.logger ?? defaultLogger;
+  const orgList = deps.orgListRepo ?? createOrgListRepo({ logger: deps.logger });
+  const router = Router();
+  router.get(
+    '/housing-authorities',
+    createRateLimit({ ...PUBLIC_LIST_RATE_LIMIT, logger: log, keyOf: deps.rateLimitKeyOf }),
+    async (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const entries = await loadPublicOrgEntries(orgList);
+      res.json({ names: housingAuthorityNames(entries) });
+    },
+  );
   return router;
 }

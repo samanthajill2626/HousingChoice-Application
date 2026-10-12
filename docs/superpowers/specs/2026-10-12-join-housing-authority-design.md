@@ -96,7 +96,10 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
   applied to that route alone. Every other request falls through to the
   existing mount and its shared 5-per-minute limiter, exactly as today; the
   list read never consumes or is blocked by that shared limit. No new path
-  prefix, so the edge guard and CloudFront need no change.
+  prefix, so the edge guard and CloudFront need no change. (Precision,
+  plan research 2026-10-12: Express itself answers an `OPTIONS` request to
+  that path with `200 Allow: GET, HEAD`; it reads nothing and passes neither
+  limiter.)
 - **D3 Sign-up field.** `POST /public/housing-fair` accepts an optional
   `housingAuthority`. Absent or `null` means none.
   - Shape (checked while parsing, with the other fields): it must be a string

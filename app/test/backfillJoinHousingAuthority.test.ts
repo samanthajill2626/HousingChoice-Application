@@ -17,6 +17,7 @@ import { buildStartingEntries } from '../src/lib/orgStartingList.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import type { AuditEvent } from '../src/repos/auditRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { createExtractionRepo } from '../src/repos/extractionRepo.js';
 import { createOrgListRepo, type OrgListItem, type OrgListRepo, type OrgRewriteState } from '../src/repos/orgListRepo.js';
 import {
   BACKFILL_ARGS,
@@ -548,18 +549,34 @@ function listItem(entries: OrgEntry[], lastRewrite?: OrgRewriteState): OrgListIt
   return { settingId: 'org-list', version: 1, entries, ...(lastRewrite !== undefined && { lastRewrite }) };
 }
 
-/** A client that records every command's class name, then sends it for real. */
-function recordingClient(inner: DynamoDBDocumentClient): { doc: DynamoDBDocumentClient; sent: string[] } {
+/** A client that records every command's class name (and its input), then sends it for real. */
+function recordingClient(inner: DynamoDBDocumentClient): {
+  doc: DynamoDBDocumentClient;
+  sent: string[];
+  inputs: Array<{ name: string; input: Record<string, unknown> }>;
+} {
   const sent: string[] = [];
+  const inputs: Array<{ name: string; input: Record<string, unknown> }> = [];
   const recording = {
-    send: async (command: { constructor: { name: string } }) => {
+    send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
       sent.push(command.constructor.name);
+      inputs.push({ name: command.constructor.name, input: command.input });
       return await inner.send(command as never);
     },
     destroy: () => {},
   } as unknown as DynamoDBDocumentClient;
-  return { doc: recording, sent };
+  return { doc: recording, sent, inputs };
 }
+
+/** The GetItem inputs a recorder sent to one base table of a world. */
+const getsOn = (
+  recorder: ReturnType<typeof recordingClient>,
+  w: World,
+  base: 'settings' | 'ai_extraction',
+): Array<Record<string, unknown>> =>
+  recorder.inputs
+    .filter((c) => c.name === 'GetCommand' && c.input['TableName'] === tableName(base, w.env))
+    .map((c) => c.input);
 
 interface World {
   env: NodeJS.ProcessEnv;
@@ -570,6 +587,10 @@ interface World {
   lead(contactId: string, fields?: Record<string, unknown>): Promise<void>;
   /** One audit event with an explicit sort key, so the paging order is fixed. */
   audit(contactId: string, ts: string, eventType: string, payload: Record<string, unknown>): Promise<void>;
+  /** A PENDING housingAuthority suggestion, through the real extraction repo. */
+  suggest(contactId: string, suggestedValue: string): Promise<void>;
+  /** Dismiss it the way the app does: the suggestion row deleted, a dismissal tombstone written. */
+  dismiss(contactId: string, normalizedValue: string): Promise<void>;
   get(contactId: string): Promise<Record<string, unknown> | undefined>;
   scanTable(base: 'contacts' | 'settings' | 'audit_events'): Promise<string[]>;
   backfillEvents(): Promise<Record<string, unknown>[]>;
@@ -582,14 +603,15 @@ interface World {
   };
 }
 
-/** Fresh contacts, settings and audit tables under their own prefix; the list stored as given (null = none). */
+/** Fresh contacts, settings, audit and extraction tables under their own prefix; the list stored as given (null = none). */
 async function newWorld(orgList: OrgListItem | null = listItem(startingEntries())): Promise<World> {
   const env: NodeJS.ProcessEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
-  for (const base of ['contacts', 'settings', 'audit_events'] as const) {
+  for (const base of ['contacts', 'settings', 'audit_events', 'ai_extraction'] as const) {
     await ensureTable(client, getTableSpec(base), tableName(base, env));
     created.push(tableName(base, env));
   }
   const orgListRepo = createOrgListRepo({ doc, env, logger: silent });
+  const extraction = createExtractionRepo({ doc, env, logger: silent });
   if (orgList !== null) await orgListRepo.putForSeed(orgList);
   const put = async (item: Record<string, unknown>): Promise<void> => {
     await doc.send(new PutCommand({ TableName: tableName('contacts', env), Item: item }));
@@ -621,6 +643,18 @@ async function newWorld(orgList: OrgListItem | null = listItem(startingEntries()
           Item: { entityKey: `contacts#${contactId}`, ts, event_type: eventType, payload },
         }),
       );
+    },
+    suggest: async (contactId, suggestedValue) => {
+      await extraction.putSuggestion({
+        ownerContactId: contactId,
+        target: 'housingAuthority',
+        suggestedValue,
+        conversationId: `conv-${contactId}`,
+      });
+    },
+    dismiss: async (contactId, normalizedValue) => {
+      await extraction.deleteSuggestion(contactId, 'housingAuthority');
+      await extraction.putDismissal(contactId, 'housingAuthority', normalizedValue);
     },
     get: async (contactId) =>
       (await doc.send(new GetCommand({ TableName: tableName('contacts', env), Key: { contactId } }))).Item,
@@ -732,16 +766,24 @@ describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
         return opts?.before === undefined ? (histories[entityKey] ?? []) : [];
       },
     };
+    const suggestions: BackfillDeps['suggestions'] = {
+      getSuggestion: async (contactId) => {
+        reads.push(`suggestion ${contactId}`);
+        return undefined;
+      },
+    };
+    const deps = { audit, suggestions };
     const skip = new Set(['c-skip', 'c-excluded']);
-    expect(await leftOutReasonFor({ audit }, 'c-skip', skip)).toEqual({ reason: 'skipped', exclusionRecorded: false });
-    expect(await leftOutReasonFor({ audit }, 'c-excluded', skip)).toEqual({ reason: 'skipped', exclusionRecorded: true });
+    expect(await leftOutReasonFor(deps, 'c-skip', skip)).toEqual({ reason: 'skipped', exclusionRecorded: false });
+    expect(await leftOutReasonFor(deps, 'c-excluded', skip)).toEqual({ reason: 'skipped', exclusionRecorded: true });
     // Without --skip on this run, the recorded exclusion leaves it out by itself.
-    expect(await leftOutReasonFor({ audit }, 'c-excluded', new Set())).toEqual({
+    expect(await leftOutReasonFor(deps, 'c-excluded', new Set())).toEqual({
       reason: 'excluded_earlier',
       exclusionRecorded: true,
     });
-    expect(await leftOutReasonFor({ audit }, 'c-other', skip)).toEqual({ reason: null, exclusionRecorded: false });
-    // Every lead's history read to its end (a page, then the empty page) - the --skip ones included.
+    expect(await leftOutReasonFor(deps, 'c-other', skip)).toEqual({ reason: null, exclusionRecorded: false });
+    // Every lead's history read to its end (a page, then the empty page) - the --skip ones included;
+    // the pending suggestion only for the lead no earlier reason leaves out.
     expect(reads).toEqual([
       'contacts#c-skip',
       'contacts#c-excluded',
@@ -749,7 +791,43 @@ describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
       'contacts#c-excluded',
       'contacts#c-excluded',
       'contacts#c-other',
+      'suggestion c-other',
     ]);
+  });
+
+  it('a pending housingAuthority suggestion is read last - consistently, for the housingAuthority target - and leaves the lead out with its value', async () => {
+    const calls: unknown[] = [];
+    const deps: Pick<BackfillDeps, 'audit' | 'suggestions'> = {
+      audit: { append: async () => {}, listByEntity: async () => [] },
+      suggestions: {
+        getSuggestion: async (contactId, target, opts) => {
+          calls.push([contactId, target, opts]);
+          return contactId === 'c-pending'
+            ? {
+                itemId: 'sugg#c-pending#housingAuthority',
+                ownerContactId: 'c-pending',
+                target: 'housingAuthority',
+                suggestedValue: 'Cobb County Housing Authority',
+                conversationId: 'conv-1',
+                createdAt: '2026-09-01T00:00:00.000Z',
+              }
+            : undefined;
+        },
+      },
+    };
+    expect(await leftOutReasonFor(deps, 'c-pending', NO_SKIP)).toEqual({
+      reason: 'pending_suggestion',
+      exclusionRecorded: false,
+      suggestedValue: 'Cobb County Housing Authority',
+    });
+    expect(await leftOutReasonFor(deps, 'c-none', NO_SKIP)).toEqual({ reason: null, exclusionRecorded: false });
+    expect(calls).toEqual([
+      ['c-pending', 'housingAuthority', { consistentRead: true }],
+      ['c-none', 'housingAuthority', { consistentRead: true }],
+    ]);
+    // Named in --skip: left out as skipped, the suggestion never read.
+    expect(await leftOutReasonFor(deps, 'c-pending', new Set(['c-pending']))).toEqual({ reason: 'skipped', exclusionRecorded: false });
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -859,6 +937,36 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
     expect(await leftOutReasonFor(deps, 'c-both', NO_SKIP)).toEqual({ reason: 'excluded_earlier', exclusionRecorded: true });
   }, 120_000);
 
+  it('a PENDING suggestion through the store: it leaves a lead out only when nothing earlier does - and it is read only then; a dismissed one is not pending', async () => {
+    const w = await newWorld();
+    const ts = '2026-08-01T12:00:00.000Z#aaaa0001';
+    for (const id of ['c-sugg', 'c-hist', 'c-again', 'c-excl', 'c-skip', 'c-dismissed']) {
+      await w.suggest(id, 'Cobb County Housing Authority');
+    }
+    await w.audit('c-hist', ts, 'contact_updated', { fields: ['housingAuthority'], actor: 'user-0001' });
+    await w.audit('c-again', ts, 'housing_fair_signup', RESIGNUP_PAYLOAD);
+    await w.audit('c-excl', ts, BACKFILL_EXCLUDED_AUDIT_TYPE, { field: 'housingAuthority' });
+    await w.dismiss('c-dismissed', 'cobb county housing authority');
+    const recorder = recordingClient(doc);
+    const { deps } = w.deps({ onDoc: recorder.doc });
+    const skip = new Set(['c-skip']);
+    expect(await leftOutReasonFor(deps, 'c-sugg', skip)).toEqual({
+      reason: 'pending_suggestion',
+      exclusionRecorded: false,
+      suggestedValue: 'Cobb County Housing Authority',
+    });
+    expect((await leftOutReasonFor(deps, 'c-hist', skip)).reason).toBe('authority_history');
+    expect((await leftOutReasonFor(deps, 'c-again', skip)).reason).toBe('signed_up_again');
+    expect((await leftOutReasonFor(deps, 'c-excl', skip)).reason).toBe('excluded_earlier');
+    expect((await leftOutReasonFor(deps, 'c-skip', skip)).reason).toBe('skipped');
+    expect(await leftOutReasonFor(deps, 'c-dismissed', skip)).toEqual({ reason: null, exclusionRecorded: false });
+    // One consistent GetItem each - for c-sugg and c-dismissed only.
+    expect(getsOn(recorder, w, 'ai_extraction')).toEqual([
+      { TableName: tableName('ai_extraction', w.env), Key: { itemId: 'sugg#c-sugg#housingAuthority' }, ConsistentRead: true },
+      { TableName: tableName('ai_extraction', w.env), Key: { itemId: 'sugg#c-dismissed#housingAuthority' }, ConsistentRead: true },
+    ]);
+  }, 120_000);
+
   it('leftOutReasonFor pages backward past one page until a page comes back empty: an event on the OLDEST page still counts', async () => {
     const w = await newWorld();
     // Oldest first: the staff edit that cleared the authority, then four unrelated edits.
@@ -881,7 +989,8 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
         return deps.audit.listByEntity(entityKey, opts);
       },
     };
-    expect((await leftOutReasonFor({ audit, auditPageSize: 2 }, 'c-deep', NO_SKIP)).reason).toBe('authority_history');
+    const paged = { audit, auditPageSize: 2, suggestions: deps.suggestions };
+    expect((await leftOutReasonFor(paged, 'c-deep', NO_SKIP)).reason).toBe('authority_history');
     // Pages of two, newest first: [07-05, 07-04], [07-03, 07-02], [07-01], then the empty page that ends it.
     expect(befores).toEqual([
       undefined,
@@ -890,7 +999,7 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
       '2026-07-01T10:00:00.000Z#aaaa0001',
     ]);
     // A long history with nothing in it is read to its end too.
-    expect((await leftOutReasonFor({ audit, auditPageSize: 2 }, 'c-clean', NO_SKIP)).reason).toBeNull();
+    expect((await leftOutReasonFor(paged, 'c-clean', NO_SKIP)).reason).toBeNull();
   }, 120_000);
 });
 
@@ -1035,7 +1144,13 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     // WRITES NOTHING, three ways: only reads were sent, the list was read once, no item changed.
     expect(recorder.sent).toContain('ScanCommand');
     expect(recorder.sent.filter((name) => !READ_COMMANDS.has(name))).toEqual([]);
-    expect(recorder.sent.filter((name) => name === 'GetCommand')).toHaveLength(1);
+    expect(getsOn(recorder, w, 'settings')).toHaveLength(1);
+    // The pending-suggestion read: one consistent GetItem per would-be target, none for a lead left out earlier.
+    expect(getsOn(recorder, w, 'ai_extraction').map((input) => [input['Key'], input['ConsistentRead']])).toEqual([
+      [{ itemId: 'sugg#c-old#housingAuthority' }, true],
+      [{ itemId: 'sugg#c-mid#housingAuthority' }, true],
+      [{ itemId: 'sugg#c-new#housingAuthority' }, true],
+    ]);
     expect(await w.scanTable('contacts')).toEqual(before.contacts);
     expect(await w.scanTable('settings')).toEqual(before.settings);
     expect(await w.scanTable('audit_events')).toEqual(before.audit);
@@ -1091,7 +1206,7 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
       expect(e['actorId']).toBeUndefined();
     }
     // Two list reads: the check before, the re-read after (still listed: no warning).
-    expect(recorder.sent.filter((name) => name === 'GetCommand')).toHaveLength(2);
+    expect(getsOn(recorder, w, 'settings')).toHaveLength(2);
     // The --skip lead's exclusion is recorded: ONE event { field } with no actor - and nothing on any other lead.
     const excluded = await w.excludedEvents();
     expect(excluded.map((e) => [e['entityKey'], e['payload'], e['actorId']])).toEqual([
@@ -1159,6 +1274,77 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     const again = await runJoinAuthorityBackfill(w.deps().deps, { apply: true, skip: SKIP });
     expect(again).toMatchObject({ written: 0, failed: 0 });
     expect((await w.excludedEvents()).map((e) => e['entityKey'])).toEqual(['contacts#c-skip']);
+  }, 120_000);
+
+  it('a lead with a PENDING housing authority suggestion is left out - its value shown, escaped like a name - by the dry run and the apply; nothing written for it', async () => {
+    const ch = (code: number): string => String.fromCharCode(code);
+    const BS = ch(92);
+    const w = await newWorld();
+    await seedLeads(w);
+    await w.lead('c-sugg', { firstName: 'Ira', lastName: 'Pending', captured_at: '2026-06-15T09:00:00.000Z' });
+    // A value as an AI run heard it: a newline and a bidi override must not reach the terminal raw.
+    await w.suggest('c-sugg', `Cobb${ch(10)}County${ch(0x202e)} HA`);
+    const expectedLine =
+      `  Ira Pending  signed up 2026-06-15  status needs_review  contactId c-sugg` +
+      `  - has a pending housing authority suggestion (Cobb${BS}x0aCounty${BS}u202e HA) - accept or dismiss it first`;
+    const pendingLead = {
+      contactId: 'c-sugg',
+      firstName: 'Ira',
+      lastName: 'Pending',
+      signedUpAt: '2026-06-15T09:00:00.000Z',
+      status: 'needs_review',
+      reason: 'pending_suggestion',
+      suggestedValue: `Cobb${ch(10)}County${ch(0x202e)} HA`,
+    };
+
+    const dry = w.deps();
+    const dryReport = await runJoinAuthorityBackfill(dry.deps, { apply: false, skip: SKIP });
+    expect(dryReport.targets.map((t) => t.contactId)).toEqual(['c-old', 'c-mid', 'c-new']);
+    expect(dryReport.leftOut).toEqual([LEFT_OUT[0], LEFT_OUT[1], pendingLead, LEFT_OUT[2]]);
+    expect(dry.printed).toContain(expectedLine);
+
+    const applied = w.deps();
+    const report = await runJoinAuthorityBackfill(applied.deps, { apply: true, skip: SKIP });
+    expect(report).toMatchObject({ written: 3, failed: 0 });
+    expect(report.leftOut).toContainEqual(pendingLead);
+    expect(applied.printed).toContain(expectedLine);
+    expect((await w.get('c-sugg'))?.['housingAuthority']).toBeUndefined();
+    expect((await w.backfillEvents()).map((e) => e['entityKey'])).not.toContain('contacts#c-sugg');
+    // Only a --skip lead's exclusion is recorded - never a pending-suggestion lead's.
+    expect((await w.excludedEvents()).map((e) => e['entityKey'])).toEqual(['contacts#c-skip']);
+    expect(backfillExitCode(report)).toBe(0);
+  }, 120_000);
+
+  it('a lead whose pending-suggestion read fails is a read failure - nothing written for it - and the run goes on: exit 1', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const base = w.deps({ logger: log });
+    const deps: BackfillDeps = {
+      ...base.deps,
+      suggestions: {
+        getSuggestion: async (contactId, target, opts) => {
+          if (contactId === 'c-mid') throw new Error('ThrottlingException');
+          return base.deps.suggestions.getSuggestion(contactId, target, opts);
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report.targets.map((t) => [t.contactId, t.outcome])).toEqual([
+      ['c-old', 'written'],
+      ['c-mid', 'read_failed'],
+      ['c-new', 'written'],
+    ]);
+    expect(report).toMatchObject({ written: 2, failed: 1 });
+    expect((await w.get('c-mid'))?.['housingAuthority']).toBeUndefined();
+    expect(base.printed).toContain(
+      '  Blake Boothwick  signed up 2026-07-04  status on_hold  contactId c-mid  - FAILED: nothing written (an ERROR line names this contactId); re-run',
+    );
+    expect(capture.atLevel(50).map((l) => [l['contactId'], l['msg']])).toEqual([
+      ['c-mid', 'backfill-join-housing-authority - could not read the audit history or the pending suggestion; nothing written for this contact'],
+    ]);
+    expect(backfillExitCode(report)).toBe(1);
   }, 120_000);
 
   it('an exclusion recorded by an earlier --apply is not recorded twice when the lead is named in --skip again', async () => {

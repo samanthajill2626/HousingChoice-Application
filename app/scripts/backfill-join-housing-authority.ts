@@ -14,10 +14,12 @@
 // event - spec D10 revision 5); one with a post-change sign-up (a
 // housing_fair_signup event carrying signupVersion 2, spec D7); one whose
 // audit trail shows housingAuthority was ever SET OR REMOVED
-// (touchesHousingAuthority). Every candidate's WHOLE history is read, --skip
-// ones included: auditRepo.listByEntity is one newest-first Query with no
-// cursor, so the run pages backward with `before` until a page comes back
-// empty.
+// (touchesHousingAuthority); one with a PENDING housingAuthority AI suggestion
+// (extractionRepo.getSuggestion, one consistent GetItem, read only for a
+// candidate nothing earlier leaves out - spec D10 revision 5; the report shows
+// the suggested value). Every candidate's WHOLE history is read, --skip ones
+// included: auditRepo.listByEntity is one newest-first Query with no cursor,
+// so the run pages backward with `before` until a page comes back empty.
 //
 // EXCLUSIONS: an --apply appends ONE housing_authority_backfill_excluded event
 // { field: 'housingAuthority' }, no actor, to each candidate it leaves out
@@ -75,6 +77,7 @@ import {
   type ContactItem,
   type ContactsRepo,
 } from '../src/repos/contactsRepo.js';
+import { createExtractionRepo, type ExtractionRepo } from '../src/repos/extractionRepo.js';
 import { createOrgListRepo, type OrgListItem, type OrgListRepo } from '../src/repos/orgListRepo.js';
 import { isOrgRewriteRunning } from '../src/services/orgNames.js';
 import {
@@ -110,9 +113,10 @@ export const BACKFILL_EXCLUDED_AUDIT_TYPE = 'housing_authority_backfill_excluded
  * Why a candidate is left out: listed with the reason, never written. Several
  * can hold at once; the ONE printed follows this order (spec D10 revision 5):
  * skipped (named in --skip on this run), excluded_earlier, signed_up_again,
- * authority_history.
+ * authority_history, pending_suggestion (a pending housingAuthority AI
+ * suggestion - read only for a candidate nothing earlier leaves out).
  */
-export type LeftOutReason = 'skipped' | 'excluded_earlier' | 'signed_up_again' | 'authority_history';
+export type LeftOutReason = 'skipped' | 'excluded_earlier' | 'signed_up_again' | 'authority_history' | 'pending_suggestion';
 
 /** The capture_source only the sign-up route writes (a /join sign-up, or a flyer one for an unshareable unit). */
 const JOIN_CAPTURE_SOURCE = 'housing_fair';
@@ -185,7 +189,9 @@ const isExclusion = (event: AuditEvent): boolean => event.event_type === BACKFIL
  * flyer, erring safe), which wins over an authority history: both leave the
  * lead out, and it is the reason the operator most needs to see.
  */
-export function leftOutReasonFromAudit(events: readonly AuditEvent[]): Exclude<LeftOutReason, 'skipped'> | null {
+export function leftOutReasonFromAudit(
+  events: readonly AuditEvent[],
+): Exclude<LeftOutReason, 'skipped' | 'pending_suggestion'> | null {
   if (events.some(isExclusion)) return 'excluded_earlier';
   const signedUpAgain = events.some(
     (e) => e.event_type === 'housing_fair_signup' && isRecord(e.payload) && e.payload['signupVersion'] === 2,
@@ -214,8 +220,8 @@ export interface BackfillLead {
 /**
  * What became of one target: would_write (dry run); written; skipped (its
  * write lost its condition - the lead changed after the read, nothing
- * written); read_failed (its history read threw - no write was attempted, so
- * nothing written); write_failed (its write threw any error but a lost
+ * written); read_failed (its history or pending-suggestion read threw - no
+ * write was attempted, so nothing written); write_failed (its write threw any error but a lost
  * condition - a timeout can follow a write that landed, so it may or may not
  * have landed). Both failures count in `failed`; the run exits 1.
  */
@@ -227,6 +233,8 @@ export interface BackfillTarget extends BackfillLead {
 
 export interface LeftOutLead extends BackfillLead {
   reason: LeftOutReason;
+  /** `pending_suggestion` only: the pending suggestion's value as stored (the report prints it escaped like a name). */
+  suggestedValue?: string;
   /** --apply, `skipped` only: its housing_authority_backfill_excluded event could not be appended - counted in `failed`. */
   exclusionFailed?: true;
 }
@@ -254,12 +262,18 @@ export interface BackfillReport {
   warnings: string[];
 }
 
-const REASON_TEXT: Readonly<Record<LeftOutReason, string>> = {
+const REASON_TEXT: Readonly<Record<Exclude<LeftOutReason, 'pending_suggestion'>, string>> = {
   skipped: 'named in --skip',
   excluded_earlier: 'excluded on an earlier run',
   signed_up_again: 'signed up again after the change',
   authority_history: 'its housing authority was set or removed before - left empty on purpose',
 };
+
+/** A left-out lead's reason as printed; a suggested value is AI-heard text, escaped like a name. */
+function reasonText(lead: LeftOutLead): string {
+  if (lead.reason !== 'pending_suggestion') return REASON_TEXT[lead.reason];
+  return `has a pending housing authority suggestion (${visibleName(lead.suggestedValue ?? '')}) - accept or dismiss it first`;
+}
 
 const OUTCOME_SUFFIX: Readonly<Record<TargetOutcome, string>> = {
   would_write: '',
@@ -283,7 +297,8 @@ const UNSAFE_IN_REPORT = /^[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]$/u;
 const BACKSLASH = String.fromCharCode(92);
 
 /**
- * A name as the report prints it. Names come from the public sign-up form,
+ * A name - or a pending suggestion's value, text an AI run heard - as the
+ * report prints it. Names come from the public sign-up form,
  * which stores them as typed, so every character in Unicode categories Cc,
  * Cf, Zl and Zp - controls, bidi overrides and isolates, zero-width
  * characters, the line and paragraph separators, the BOM, the soft hyphen -
@@ -344,7 +359,7 @@ export function formatBackfillReport(report: BackfillReport, apply: boolean): st
   } else {
     lines.push(`Left out (${report.leftOut.length} lead(s), oldest sign-up first):`);
     for (const l of report.leftOut) {
-      lines.push(`${leadLine(l)}  - ${REASON_TEXT[l.reason]}${l.exclusionFailed === true ? EXCLUSION_FAILED_SUFFIX : ''}`);
+      lines.push(`${leadLine(l)}  - ${reasonText(l)}${l.exclusionFailed === true ? EXCLUSION_FAILED_SUFFIX : ''}`);
     }
   }
   for (const id of report.missingSkips) {
@@ -386,6 +401,8 @@ export interface BackfillDeps {
   orgList: Pick<OrgListRepo, 'peek'>;
   contacts: Pick<ContactsRepo, 'update'>;
   audit: Pick<AuditRepo, 'append' | 'listByEntity'>;
+  /** The extraction repo's pending-suggestion read (spec D10 revision 5: a pending housingAuthority suggestion leaves a lead out). */
+  suggestions: Pick<ExtractionRepo, 'getSuggestion'>;
   /** One line of the operator report (the CLI prints it). Names go here, never to the logger. */
   print: (line: string) => void;
   /** Wall clock in ms: the rewrite lock's staleness test (isOrgRewriteRunning). */
@@ -410,6 +427,7 @@ export function buildBackfillDeps(
     orgList: createOrgListRepo({ doc, env, logger }),
     contacts: createContactsRepo({ doc, env, logger }),
     audit: createAuditRepo({ doc, env, logger }),
+    suggestions: createExtractionRepo({ doc, env, logger }),
     print: opts.print ?? ((line: string) => console.log(line)),
     now: opts.now ?? Date.now,
     logger,
@@ -553,23 +571,33 @@ export interface CandidateVerdict {
   reason: LeftOutReason | null;
   /** Its history already holds a housing_authority_backfill_excluded event: an --apply appends no second one. */
   exclusionRecorded: boolean;
+  /** `pending_suggestion` only: the pending suggestion's suggestedValue. */
+  suggestedValue?: string;
 }
 
 /**
  * Why one candidate is left out, or null when it is a target. Its WHOLE
  * history is read first - a --skip lead's too, so an --apply knows whether
  * its exclusion is already recorded - then --skip on this run, then the
- * history (leftOutReasonFromAudit). Throws when the read fails.
+ * history (leftOutReasonFromAudit), and only when none of those leaves it
+ * out, its pending housingAuthority suggestion: ONE consistent GetItem
+ * (spec D10 revision 5). A suggestion row exists only while it is pending
+ * (accept and dismiss delete it; a dismissal is a separate tombstone row), so
+ * any row leaves the lead out - whatever its value. Throws when a read fails.
  */
 export async function leftOutReasonFor(
-  deps: Pick<BackfillDeps, 'audit' | 'auditPageSize'>,
+  deps: Pick<BackfillDeps, 'audit' | 'auditPageSize' | 'suggestions'>,
   contactId: string,
   skip: ReadonlySet<string>,
 ): Promise<CandidateVerdict> {
   const events = await readWholeHistory(deps.audit, `contacts#${contactId}`, deps.auditPageSize ?? AUDIT_PAGE_SIZE);
   const exclusionRecorded = events.some(isExclusion);
   if (skip.has(contactId)) return { reason: 'skipped', exclusionRecorded };
-  return { reason: leftOutReasonFromAudit(events), exclusionRecorded };
+  const fromAudit = leftOutReasonFromAudit(events);
+  if (fromAudit !== null) return { reason: fromAudit, exclusionRecorded };
+  const pending = await deps.suggestions.getSuggestion(contactId, FIELD, { consistentRead: true });
+  if (pending === undefined) return { reason: null, exclusionRecorded };
+  return { reason: 'pending_suggestion', exclusionRecorded, suggestedValue: text(pending.suggestedValue) };
 }
 
 // ---------------------------------------------------------------------------
@@ -730,12 +758,19 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
     } catch (err) {
       report.failed += 1;
       report.targets.push({ ...lead, outcome: 'read_failed' });
-      log.error({ err, contactId: lead.contactId }, `${SCRIPT_NAME} - could not read the audit history; nothing written for this contact`);
+      log.error(
+        { err, contactId: lead.contactId },
+        `${SCRIPT_NAME} - could not read the audit history or the pending suggestion; nothing written for this contact`,
+      );
       continue;
     }
     const { reason } = verdict;
     if (reason !== null) {
-      const left: LeftOutLead = { ...lead, reason };
+      const left: LeftOutLead = {
+        ...lead,
+        reason,
+        ...(verdict.suggestedValue !== undefined && { suggestedValue: verdict.suggestedValue }),
+      };
       // Spec D10 revision 5: an --apply remembers the operator's --skip.
       if (opts.apply && reason === 'skipped' && !verdict.exclusionRecorded) {
         if (await recordExclusion(deps, lead.contactId)) {

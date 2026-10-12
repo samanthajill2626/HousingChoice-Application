@@ -45,6 +45,7 @@
 // operator's recognition aid (Cameron 2026-10-12, a deliberate departure from
 // clean-org-names). Structured log lines carry counts and contactIds only,
 // never a name or phone.
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { logger as defaultLogger, type Logger } from '../src/lib/logger.js';
@@ -58,7 +59,7 @@ import {
   type ContactItem,
   type ContactsRepo,
 } from '../src/repos/contactsRepo.js';
-import { createOrgListRepo, type OrgListRepo } from '../src/repos/orgListRepo.js';
+import { createOrgListRepo, type OrgListItem, type OrgListRepo } from '../src/repos/orgListRepo.js';
 import { isOrgRewriteRunning } from '../src/services/orgNames.js';
 
 // ---------------------------------------------------------------------------
@@ -457,4 +458,163 @@ export async function leftOutReasonFor(
   if (skip.has(contactId)) return 'skipped';
   const events = await readWholeHistory(deps.audit, `contacts#${contactId}`, deps.auditPageSize ?? AUDIT_PAGE_SIZE);
   return leftOutReasonFromAudit(events);
+}
+
+// ---------------------------------------------------------------------------
+// The run (dry run by default; --apply writes)
+// ---------------------------------------------------------------------------
+
+export interface BackfillOptions {
+  /** Write. false = the dry run: nothing is written at all. */
+  apply: boolean;
+  /** --skip: contactIds to leave out. An id that names no candidate is reported, otherwise ignored. */
+  skip: ReadonlySet<string>;
+}
+
+/**
+ * One target's write (spec D10): ONE conditional update that sets the
+ * authority only while the contact still has none, is still a tenant and is
+ * still not deleted - a lost condition is `skipped` - then its
+ * housing_authority_backfill event. The event follows the landed write, so a
+ * failed append is a warning, never a failure (a re-run finds the lead
+ * holding an authority and cannot write it). Never throws.
+ */
+async function writeOne(deps: BackfillDeps, contactId: string, report: BackfillReport): Promise<TargetOutcome> {
+  try {
+    await deps.contacts.update(
+      contactId,
+      { [FIELD]: BACKFILL_AUTHORITY },
+      {
+        expect: [
+          { attr: FIELD, value: null },
+          { attr: 'type', value: 'tenant' },
+        ],
+        notDeleted: true,
+      },
+    );
+  } catch (err) {
+    if (err instanceof ConditionalCheckFailedException) {
+      report.skipped += 1;
+      deps.logger.info({ contactId }, `${SCRIPT_NAME} - the contact changed after the run read it; skipped, nothing written`);
+      return 'skipped';
+    }
+    report.failed += 1;
+    deps.logger.error({ err, contactId }, `${SCRIPT_NAME} - the write FAILED; nothing written for this contact`);
+    return 'failed';
+  }
+  report.written += 1;
+  try {
+    await deps.audit.append(`contacts#${contactId}`, BACKFILL_AUDIT_TYPE, { field: FIELD, from: '', to: BACKFILL_AUTHORITY });
+  } catch (err) {
+    report.warnings.push(
+      `the ${BACKFILL_AUDIT_TYPE} audit event for contactId ${contactId} could not be written (its housing authority was set).`,
+    );
+    deps.logger.warn({ err, contactId }, `${SCRIPT_NAME} - audit event could NOT be written (the write landed); continuing`);
+  }
+  deps.logger.info({ contactId }, `${SCRIPT_NAME} - housing authority set`);
+  return 'written';
+}
+
+/**
+ * Spec D10: after an apply that wrote, the name must still be an exact
+ * housing_authority name. The run never takes the rewrite lock, so a rename,
+ * merge, delete or kind change during the run is caught here - a warning.
+ */
+async function warnIfNameLeftList(deps: BackfillDeps, report: BackfillReport): Promise<void> {
+  let item: OrgListItem | null;
+  try {
+    item = await deps.orgList.peek();
+  } catch (err) {
+    report.warnings.push(
+      `the organization list could not be read again after the apply, so the run could not confirm "${BACKFILL_AUTHORITY}" ` +
+        'is still on it - check Settings > Housing authorities & agencies > "Not on the list".',
+    );
+    deps.logger.warn({ err }, `${SCRIPT_NAME} - could not read the organization list again after the apply`);
+    return;
+  }
+  if (item !== null && isOnListFor(item.entries, BACKFILL_AUTHORITY, KINDS_FOR_FIELD.housingAuthority)) return;
+  report.warnings.push(
+    `"${BACKFILL_AUTHORITY}" is no longer the exact name of a housing authority on the organization list (renamed, ` +
+      `merged away, deleted or made an agency during the run): the ${report.written} record(s) written show under Settings > ` +
+      'Housing authorities & agencies > "Not on the list" - settle them there.',
+  );
+  deps.logger.warn({ written: report.written }, `${SCRIPT_NAME} - the backfilled name left the organization list during the run`);
+}
+
+/**
+ * Spec D10: the backfill. Refuses (BackfillRefusedError) before any contact
+ * is read; then reads the candidates, and for each - oldest first - reads its
+ * whole history right before its write; then (apply) re-checks the list,
+ * prints the report through deps.print and returns it. A failed history read
+ * or write is counted `failed` (exit 1) and the run goes on; only the list
+ * read and the contacts Scan abort it, both before any write.
+ */
+export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: BackfillOptions): Promise<BackfillReport> {
+  const log = deps.logger;
+  await checkBackfillList(deps, opts.apply);
+  const scan = await scanCandidates(deps);
+  log.info(
+    { contactsScanned: scan.contactsScanned, pointerRows: scan.pointerRows, candidates: scan.leads.length, apply: opts.apply },
+    `${SCRIPT_NAME} - candidates read`,
+  );
+  const candidateIds = new Set(scan.leads.map((l) => l.contactId));
+  const report: BackfillReport = {
+    targets: [],
+    leftOut: [],
+    unknownSkips: [...opts.skip].filter((id) => !candidateIds.has(id)).sort(),
+    written: 0,
+    skipped: 0,
+    failed: 0,
+    warnings: [],
+  };
+
+  for (const lead of scan.leads) {
+    let reason: LeftOutReason | null;
+    try {
+      reason = await leftOutReasonFor(deps, lead.contactId, opts.skip);
+    } catch (err) {
+      report.failed += 1;
+      report.targets.push({ ...lead, outcome: 'failed' });
+      log.error({ err, contactId: lead.contactId }, `${SCRIPT_NAME} - could not read the audit history; nothing written for this contact`);
+      continue;
+    }
+    if (reason !== null) {
+      report.leftOut.push({ ...lead, reason });
+      log.info({ contactId: lead.contactId, reason }, `${SCRIPT_NAME} - left out`);
+      continue;
+    }
+    if (!opts.apply) {
+      report.targets.push({ ...lead, outcome: 'would_write' });
+      log.info({ contactId: lead.contactId }, `${SCRIPT_NAME} - DRY RUN: would set the housing authority`);
+      continue;
+    }
+    report.targets.push({ ...lead, outcome: await writeOne(deps, lead.contactId, report) });
+  }
+
+  if (opts.apply && report.written > 0) await warnIfNameLeftList(deps, report);
+
+  const counts = {
+    candidates: scan.leads.length,
+    targets: report.targets.length,
+    leftOut: report.leftOut.length,
+    unknownSkips: report.unknownSkips.length,
+    written: report.written,
+    skipped: report.skipped,
+    failed: report.failed,
+    warnings: report.warnings.length,
+    apply: opts.apply,
+  };
+  const suffix = opts.apply ? '' : ' (DRY RUN - nothing written)';
+  if (report.failed > 0) {
+    log.warn(
+      counts,
+      `${SCRIPT_NAME} - COMPLETED WITH FAILURES${suffix}: ${report.failed} lead(s) FAILED and were left as they were (see the ERROR lines naming them). Re-run (idempotent).`,
+    );
+  } else if (report.warnings.length > 0) {
+    log.warn(counts, `${SCRIPT_NAME} - done${suffix}, with ${report.warnings.length} warning(s): read the WARNING lines of the report`);
+  } else {
+    log.info(counts, `${SCRIPT_NAME} - done${suffix}`);
+  }
+  for (const line of formatBackfillReport(report, opts.apply)) deps.print(line);
+  return report;
 }

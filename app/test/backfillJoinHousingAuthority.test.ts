@@ -3,7 +3,7 @@
 // and D11). The PURE rules first: who is a candidate, and which audit history
 // leaves one out - each writer's payload exactly as it appends it today.
 import { randomUUID } from 'node:crypto';
-import { GetCommand, PutCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, ScanCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { afterEach, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -27,12 +27,14 @@ import {
   leftOutReasonFor,
   leftOutReasonFromAudit,
   readWholeHistory,
+  runJoinAuthorityBackfill,
   scanCandidates,
   touchesHousingAuthority,
   type BackfillDeps,
   type BackfillLead,
   type BackfillReport,
 } from '../scripts/backfill-join-housing-authority.js';
+import { createLogCapture } from './helpers/logCapture.js';
 
 /** A /join lead from before the change, as the sign-up created it: no authority, no marker. */
 const LEAD: ContactItem = {
@@ -687,5 +689,416 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
     ]);
     // A long history with nothing in it is read to its end too.
     expect(await leftOutReasonFor({ audit, auditPageSize: 2 }, 'c-clean', NO_SKIP)).toBeNull();
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// The run (spec D10): dry run by default, --apply writes
+// ---------------------------------------------------------------------------
+
+const RENAMED_WARNING = (written: number): string =>
+  '"Atlanta Housing Authority" is no longer the exact name of a housing authority on the organization list (renamed, ' +
+  `merged away, deleted or made an agency during the run): the ${written} record(s) written show under Settings > ` +
+  'Housing authorities & agencies > "Not on the list" - settle them there.';
+const REREAD_WARNING =
+  'the organization list could not be read again after the apply, so the run could not confirm "Atlanta Housing ' +
+  'Authority" is still on it - check Settings > Housing authorities & agencies > "Not on the list".';
+const AUDIT_WARNING = (contactId: string): string =>
+  `the housing_authority_backfill audit event for contactId ${contactId} could not be written (its housing authority was set).`;
+
+/**
+ * The world the run tests share. Targets: c-old, c-mid, c-new. Left out:
+ * c-skip (the tests name it in --skip), c-again (signed up again after the
+ * change), c-cleared (staff cleared its authority once). Not candidates:
+ * c-marker, c-held, c-flyer.
+ */
+async function seedLeads(w: World): Promise<void> {
+  await w.lead('c-old', { firstName: 'Avery', lastName: 'Fairlead', captured_at: '2026-06-20T14:00:00.000Z' });
+  // A sign-up from BEFORE the change leaves no one out.
+  await w.audit('c-old', '2026-06-20T14:00:01.000Z#aaaa0001', 'housing_fair_signup', {
+    marker: 'mk',
+    isNew: true,
+    welcomeSent: true,
+    viaFlyer: false,
+  });
+  await w.lead('c-mid', {
+    firstName: 'Blake',
+    lastName: 'Boothwick',
+    captured_at: undefined,
+    created_at: '2026-07-04T10:00:00.000Z',
+    status: 'on_hold',
+  });
+  await w.lead('c-new', {
+    firstName: 'Casey',
+    lastName: 'Quillfeather',
+    captured_at: '2026-08-15T23:30:00.000Z',
+    status: 'onboarding',
+  });
+  await w.lead('c-skip', { firstName: 'Drew', lastName: 'Dekalbson', captured_at: '2026-06-01T09:00:00.000Z' });
+  await w.lead('c-again', { firstName: 'Emery', lastName: 'Again', captured_at: '2026-06-10T09:00:00.000Z' });
+  await w.audit('c-again', '2026-10-13T15:00:00.000Z#aaaa0001', 'housing_fair_signup', RESIGNUP_PAYLOAD);
+  await w.lead('c-cleared', { firstName: 'Finley', lastName: 'Cleared', captured_at: '2026-07-10T09:00:00.000Z' });
+  await w.audit('c-cleared', '2026-07-20T15:00:00.000Z#aaaa0001', 'contact_updated', {
+    fields: ['housingAuthority'],
+    actor: 'user-0001',
+  });
+  await w.lead('c-marker', { housing_fair_signup_v2: true, status: 'onboarding' });
+  await w.lead('c-held', { housingAuthority: 'DeKalb County Housing Authority' });
+  await w.lead('c-flyer', { capture_source: 'flyer' });
+}
+
+const TARGET_LEADS: BackfillLead[] = [
+  { contactId: 'c-old', firstName: 'Avery', lastName: 'Fairlead', signedUpAt: '2026-06-20T14:00:00.000Z', status: 'needs_review' },
+  { contactId: 'c-mid', firstName: 'Blake', lastName: 'Boothwick', signedUpAt: '2026-07-04T10:00:00.000Z', status: 'on_hold' },
+  { contactId: 'c-new', firstName: 'Casey', lastName: 'Quillfeather', signedUpAt: '2026-08-15T23:30:00.000Z', status: 'onboarding' },
+];
+const LEFT_OUT = [
+  {
+    contactId: 'c-skip',
+    firstName: 'Drew',
+    lastName: 'Dekalbson',
+    signedUpAt: '2026-06-01T09:00:00.000Z',
+    status: 'needs_review',
+    reason: 'skipped',
+  },
+  {
+    contactId: 'c-again',
+    firstName: 'Emery',
+    lastName: 'Again',
+    signedUpAt: '2026-06-10T09:00:00.000Z',
+    status: 'needs_review',
+    reason: 'signed_up_again',
+  },
+  {
+    contactId: 'c-cleared',
+    firstName: 'Finley',
+    lastName: 'Cleared',
+    signedUpAt: '2026-07-10T09:00:00.000Z',
+    status: 'needs_review',
+    reason: 'authority_history',
+  },
+];
+const SKIP: ReadonlySet<string> = new Set(['c-skip']);
+const GUARDED_WRITE = {
+  expect: [
+    { attr: 'housingAuthority', value: null },
+    { attr: 'type', value: 'tenant' },
+  ],
+  notDeleted: true,
+};
+
+const freshRewrite = (): OrgRewriteState => {
+  const at = new Date().toISOString();
+  return {
+    jobId: 'job-rename',
+    action: 'rename',
+    fromTexts: ['Old Name'],
+    fields: ['housingAuthority', 'accepted_authorities'],
+    toName: 'New Name',
+    status: 'running',
+    heartbeatAt: at,
+    startedAt: at,
+    startedBy: 'user-0001',
+  };
+};
+
+describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (spec D10)', () => {
+  afterEach(dropCreatedTables, 120_000);
+
+  it('dry run: the targets and the left-out leads oldest first, the unknown --skip ids and the printed report - and NOTHING written, not even the list item', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const before = {
+      contacts: await w.scanTable('contacts'),
+      settings: await w.scanTable('settings'),
+      audit: await w.scanTable('audit_events'),
+    };
+    const recorder = recordingClient(doc);
+    const { deps, printed } = w.deps({ onDoc: recorder.doc });
+    const report = await runJoinAuthorityBackfill(deps, { apply: false, skip: new Set(['c-skip', 'c-flyer', 'c-nobody']) });
+    expect(report).toEqual({
+      targets: TARGET_LEADS.map((l) => ({ ...l, outcome: 'would_write' })),
+      leftOut: LEFT_OUT,
+      unknownSkips: ['c-flyer', 'c-nobody'],
+      written: 0,
+      skipped: 0,
+      failed: 0,
+      warnings: [],
+    });
+    expect(printed).toEqual(formatBackfillReport(report, false));
+    expect(printed[1]).toBe('  Avery Fairlead  signed up 2026-06-20  status needs_review  contactId c-old');
+    // WRITES NOTHING, three ways: only reads were sent, the list was read once, no item changed.
+    expect(recorder.sent).toContain('ScanCommand');
+    expect(recorder.sent.filter((name) => !READ_COMMANDS.has(name))).toEqual([]);
+    expect(recorder.sent.filter((name) => name === 'GetCommand')).toHaveLength(1);
+    expect(await w.scanTable('contacts')).toEqual(before.contacts);
+    expect(await w.scanTable('settings')).toEqual(before.settings);
+    expect(await w.scanTable('audit_events')).toEqual(before.audit);
+    expect(backfillExitCode(report)).toBe(0);
+  }, 120_000);
+
+  it('apply: one guarded write and one audit event per target, nothing else changed; a re-run writes nothing new', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const leftAlone = ['c-skip', 'c-again', 'c-cleared', 'c-marker', 'c-held', 'c-flyer'];
+    const before = new Map(await Promise.all(leftAlone.map(async (id) => [id, await w.get(id)] as const)));
+    const oldBefore = await w.get('c-old');
+    const recorder = recordingClient(doc);
+    const base = w.deps({ onDoc: recorder.doc });
+    const updates: unknown[] = [];
+    const deps: BackfillDeps = {
+      ...base.deps,
+      contacts: {
+        update: async (contactId, patch, opts) => {
+          updates.push([contactId, patch, opts]);
+          return base.deps.contacts.update(contactId, patch, opts);
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report).toEqual({
+      targets: TARGET_LEADS.map((l) => ({ ...l, outcome: 'written' })),
+      leftOut: LEFT_OUT,
+      unknownSkips: [],
+      written: 3,
+      skipped: 0,
+      failed: 0,
+      warnings: [],
+    });
+    expect(base.printed).toEqual(formatBackfillReport(report, true));
+    // The binding write (plan section 1): contactsRepo.update with the three guards.
+    expect(updates).toEqual([
+      ['c-old', { housingAuthority: 'Atlanta Housing Authority' }, GUARDED_WRITE],
+      ['c-mid', { housingAuthority: 'Atlanta Housing Authority' }, GUARDED_WRITE],
+      ['c-new', { housingAuthority: 'Atlanta Housing Authority' }, GUARDED_WRITE],
+    ]);
+    // The ONE change is the authority: status and every other attribute exactly as before.
+    expect(await w.get('c-old')).toEqual({ ...oldBefore, housingAuthority: 'Atlanta Housing Authority' });
+    expect(await w.get('c-mid')).toMatchObject({ housingAuthority: 'Atlanta Housing Authority', status: 'on_hold' });
+    expect(await w.get('c-new')).toMatchObject({ housingAuthority: 'Atlanta Housing Authority', status: 'onboarding' });
+    for (const id of leftAlone) expect(await w.get(id)).toEqual(before.get(id));
+    // One housing_authority_backfill event per target: exactly { field, from: '', to }, no actor.
+    const events = await w.backfillEvents();
+    expect(events.map((e) => e['entityKey']).sort()).toEqual(['contacts#c-mid', 'contacts#c-new', 'contacts#c-old']);
+    for (const e of events) {
+      expect(e['payload']).toEqual({ field: 'housingAuthority', from: '', to: 'Atlanta Housing Authority' });
+      expect(e['actorId']).toBeUndefined();
+    }
+    // Two list reads: the check before, the re-read after (still listed: no warning).
+    expect(recorder.sent.filter((name) => name === 'GetCommand')).toHaveLength(2);
+    expect(backfillExitCode(report)).toBe(0);
+
+    // A re-run with the same --skip writes nothing new.
+    const again = await runJoinAuthorityBackfill(w.deps().deps, { apply: true, skip: SKIP });
+    expect(again).toMatchObject({ targets: [], written: 0, skipped: 0, failed: 0, warnings: [] });
+    expect(again.leftOut.map((l) => l.contactId)).toEqual(['c-skip', 'c-again', 'c-cleared']);
+    expect(await w.backfillEvents()).toHaveLength(3);
+    // A skipped lead stays a candidate: a run WITHOUT the --skip would write it (the RUNBOOK says keep the list).
+    const noSkip = await runJoinAuthorityBackfill(w.deps().deps, { apply: false, skip: new Set() });
+    expect(noSkip.targets.map((t) => t.contactId)).toEqual(['c-skip']);
+  }, 120_000);
+
+  it('a lead that changed between the read and the write is skipped, never overwritten - each guard: authority, type, deleted', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const base = w.deps();
+    const key = (contactId: string) => ({ TableName: tableName('contacts', w.env), Key: { contactId } });
+    const deps: BackfillDeps = {
+      ...base.deps,
+      contacts: {
+        update: async (contactId, patch, opts) => {
+          // Staff acted after the run read the lead.
+          if (contactId === 'c-old') {
+            await doc.send(
+              new UpdateCommand({
+                ...key(contactId),
+                UpdateExpression: 'SET housingAuthority = :v',
+                ExpressionAttributeValues: { ':v': 'DeKalb County Housing Authority' },
+              }),
+            );
+          }
+          if (contactId === 'c-mid') {
+            await doc.send(
+              new UpdateCommand({
+                ...key(contactId),
+                UpdateExpression: 'SET #t = :v',
+                ExpressionAttributeNames: { '#t': 'type' },
+                ExpressionAttributeValues: { ':v': 'landlord' },
+              }),
+            );
+          }
+          if (contactId === 'c-new') {
+            await doc.send(
+              new UpdateCommand({
+                ...key(contactId),
+                UpdateExpression: 'SET deleted_at = :v',
+                ExpressionAttributeValues: { ':v': '2026-10-13T00:00:00.000Z' },
+              }),
+            );
+          }
+          return base.deps.contacts.update(contactId, patch, opts);
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report.targets.map((t) => [t.contactId, t.outcome])).toEqual([
+      ['c-old', 'skipped'],
+      ['c-mid', 'skipped'],
+      ['c-new', 'skipped'],
+    ]);
+    expect(report).toMatchObject({ written: 0, skipped: 3, failed: 0, warnings: [] });
+    expect(await w.get('c-old')).toMatchObject({ housingAuthority: 'DeKalb County Housing Authority' });
+    expect((await w.get('c-mid'))?.['housingAuthority']).toBeUndefined();
+    expect((await w.get('c-new'))?.['housingAuthority']).toBeUndefined();
+    expect(await w.backfillEvents()).toEqual([]);
+    expect(backfillExitCode(report)).toBe(0);
+  }, 120_000);
+
+  it('a lead whose history read or write fails is counted failed - nothing written for it - and the run goes on: exit 1, no name in any log line', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const base = w.deps({ logger: log });
+    const deps: BackfillDeps = {
+      ...base.deps,
+      contacts: {
+        update: async (contactId, patch, opts) => {
+          if (contactId === 'c-mid') throw new Error('ProvisionedThroughputExceededException');
+          return base.deps.contacts.update(contactId, patch, opts);
+        },
+      },
+      audit: {
+        append: (entityKey, eventType, payload) => base.deps.audit.append(entityKey, eventType, payload),
+        listByEntity: async (entityKey, opts) => {
+          if (entityKey === 'contacts#c-new') throw new Error('ThrottlingException');
+          return base.deps.audit.listByEntity(entityKey, opts);
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report.targets.map((t) => [t.contactId, t.outcome])).toEqual([
+      ['c-old', 'written'],
+      ['c-mid', 'failed'],
+      ['c-new', 'failed'],
+    ]);
+    expect(report).toMatchObject({ written: 1, skipped: 0, failed: 2 });
+    expect((await w.get('c-mid'))?.['housingAuthority']).toBeUndefined();
+    expect((await w.get('c-new'))?.['housingAuthority']).toBeUndefined();
+    expect(capture.atLevel(50).map((l) => l['contactId']).sort()).toEqual(['c-mid', 'c-new']);
+    expect(capture.atLevel(40).some((l) => String(l['msg']).includes('COMPLETED WITH FAILURES'))).toBe(true);
+    // Names reach the printed report only - never a structured log line.
+    expect(base.printed.some((l) => l.includes('Avery Fairlead'))).toBe(true);
+    for (const name of ['Fairlead', 'Boothwick', 'Quillfeather']) {
+      expect(capture.lines.some((l) => JSON.stringify(l).includes(name))).toBe(false);
+    }
+    expect(backfillExitCode(report)).toBe(1);
+  }, 120_000);
+
+  it('an audit event that cannot be written after its write landed is a WARNING, not a failure: exit 0', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const base = w.deps();
+    const deps: BackfillDeps = {
+      ...base.deps,
+      audit: {
+        listByEntity: (entityKey, opts) => base.deps.audit.listByEntity(entityKey, opts),
+        append: async (entityKey, eventType, payload) => {
+          if (entityKey === 'contacts#c-mid') throw new Error('Rate exceeded');
+          await base.deps.audit.append(entityKey, eventType, payload);
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report).toMatchObject({ written: 3, failed: 0, warnings: [AUDIT_WARNING('c-mid')] });
+    expect(await w.get('c-mid')).toMatchObject({ housingAuthority: 'Atlanta Housing Authority' });
+    expect((await w.backfillEvents()).map((e) => e['entityKey']).sort()).toEqual(['contacts#c-new', 'contacts#c-old']);
+    expect(base.printed).toContain(`WARNING: ${AUDIT_WARNING('c-mid')}`);
+    expect(backfillExitCode(report)).toBe(0);
+  }, 120_000);
+
+  it('warns after an apply when Atlanta Housing Authority left the list during the run (renamed) - the writes stand, exit 0', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const base = w.deps();
+    let renamed = false;
+    const deps: BackfillDeps = {
+      ...base.deps,
+      contacts: {
+        update: async (contactId, patch, opts) => {
+          if (!renamed) {
+            renamed = true;
+            await w.orgList.putForSeed(listItem(withAtlanta((e) => ({ ...e, name: 'Atlanta Housing Authority (AHA)' }))));
+          }
+          return base.deps.contacts.update(contactId, patch, opts);
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report.written).toBe(3);
+    expect(report.warnings).toEqual([RENAMED_WARNING(3)]);
+    expect(base.printed.at(-1)).toBe(`WARNING: ${RENAMED_WARNING(3)}`);
+    expect(await w.get('c-old')).toMatchObject({ housingAuthority: 'Atlanta Housing Authority' });
+    expect(backfillExitCode(report)).toBe(0);
+  }, 120_000);
+
+  it('warns when the list cannot be read again after the apply - the writes stand, exit 0', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const base = w.deps();
+    let peeks = 0;
+    const deps: BackfillDeps = {
+      ...base.deps,
+      orgList: {
+        peek: async () => {
+          peeks += 1;
+          if (peeks > 1) throw new Error('settings table unavailable');
+          return base.deps.orgList.peek();
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report).toMatchObject({ written: 3, failed: 0, warnings: [REREAD_WARNING] });
+    expect(backfillExitCode(report)).toBe(0);
+  }, 120_000);
+
+  it.each([
+    { what: 'no organization list is stored (a dry run)', list: (): OrgListItem | null => null, apply: false },
+    {
+      what: 'Atlanta Housing Authority was renamed (a dry run)',
+      list: (): OrgListItem | null => listItem(withAtlanta((e) => ({ ...e, name: 'Atlanta Housing Authority (AHA)' }))),
+      apply: false,
+    },
+    {
+      what: 'a rewrite is running (an apply)',
+      list: (): OrgListItem | null => listItem(startingEntries(), freshRewrite()),
+      apply: true,
+    },
+  ])('refuses before reading any contact when $what: one list read, nothing written, nothing printed', async ({ list, apply }) => {
+    const w = await newWorld(list());
+    await seedLeads(w);
+    const before = {
+      contacts: await w.scanTable('contacts'),
+      settings: await w.scanTable('settings'),
+      audit: await w.scanTable('audit_events'),
+    };
+    const recorder = recordingClient(doc);
+    const { deps, printed } = w.deps({ onDoc: recorder.doc });
+    await expect(runJoinAuthorityBackfill(deps, { apply, skip: NO_SKIP })).rejects.toBeInstanceOf(BackfillRefusedError);
+    expect(recorder.sent).toEqual(['GetCommand']);
+    expect(printed).toEqual([]);
+    expect(await w.scanTable('contacts')).toEqual(before.contacts);
+    expect(await w.scanTable('settings')).toEqual(before.settings);
+    expect(await w.scanTable('audit_events')).toEqual(before.audit);
+  }, 120_000);
+
+  it('an apply goes ahead over a STALE running rewrite (no heartbeat for 15 minutes) - and never touches the lock', async () => {
+    const stale = new Date(Date.now() - 16 * 60_000).toISOString();
+    const killed: OrgRewriteState = { ...freshRewrite(), jobId: 'job-killed', heartbeatAt: stale, startedAt: stale };
+    const w = await newWorld(listItem(startingEntries(), killed));
+    await seedLeads(w);
+    const report = await runJoinAuthorityBackfill(w.deps().deps, { apply: true, skip: SKIP });
+    expect(report).toMatchObject({ written: 3, failed: 0 });
+    expect((await w.orgList.peek())?.lastRewrite).toEqual(killed);
   }, 120_000);
 });

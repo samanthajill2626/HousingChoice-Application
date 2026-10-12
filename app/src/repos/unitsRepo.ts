@@ -476,6 +476,30 @@ export interface UnitsRepo {
     expected: string[] | null,
     next: string[],
   ): Promise<'written' | 'skipped'>;
+  /**
+   * caseworker-integrity (spec 2026-10-12 section 4 "Restore"): restore a
+   * soft-deleted property AND change its landlord of record in one
+   * conditional write. Reads the unit (consistent). When its landlordId is no
+   * longer `expectLandlordId` (undefined = ownerless) throws
+   * RosterWriteConflictError and writes nothing. Otherwise REMOVEs deleted_at,
+   * sets landlordId to `next.contactId` (or REMOVEs it for `next` null), drops
+   * the old landlord's contact-list row, upserts `next` with role pinned
+   * 'landlord' (kept when already seated; name/company updated when supplied),
+   * and keeps `primary_contact` consistent: when the old landlord was the
+   * primary (roster flag or scalar), `next` becomes the sole primary, or with
+   * no landlord the scalar is REMOVEd and no row stays primary (removeContact's
+   * rule). The write is conditioned on the landlordId AND contacts[] it read
+   * (updateRosterIfCurrent); a contacts-only race re-reads and retries up to
+   * ROSTER_WRITE_MAX_ATTEMPTS, then RosterWriteConflictError. A missing unit
+   * throws ConditionalCheckFailedException (route 404). Returns ALL_NEW.
+   */
+  restoreWithLandlord(
+    unitId: string,
+    input: {
+      expectLandlordId: string | undefined;
+      next: { contactId: string; name?: string; company?: string } | null;
+    },
+  ): Promise<UnitItem>;
 }
 
 export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
@@ -1074,6 +1098,84 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       }
       log.info({ unitId, members: next.length }, 'unit accepted authorities rewritten');
       return 'written';
+    },
+
+    async restoreWithLandlord(unitId, input) {
+      let attempts = 0;
+      const write = async (): Promise<UnitItem> => {
+        attempts += 1;
+        const unit = await this.getById(unitId, { consistentRead: true });
+        if (!unit) {
+          throw new ConditionalCheckFailedException({
+            message: `unit ${unitId} not found`,
+            $metadata: {},
+          });
+        }
+        const current =
+          typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
+        // The caller decided from THIS landlordId; any other owner now is a
+        // concurrent change the caller must re-read (route 409 unit_roster_conflict).
+        if (current !== input.expectLandlordId) throw new RosterWriteConflictError();
+        const old = input.expectLandlordId;
+        const next = input.next;
+        // `next` naming the old landlord (only reachable when they became a
+        // landlord again under a race) keeps their row instead of re-adding it.
+        const keepsOld = next !== null && next.contactId === old;
+        const roster = unitContacts(unit).map((c) => ({ ...c }));
+        const oldRow = old !== undefined && !keepsOld ? roster.find((c) => c.contactId === old) : undefined;
+        const oldWasPrimary =
+          old !== undefined && !keepsOld && (oldRow?.primaryContact === true || unit.primary_contact === old);
+        const nextRoster: UnitContact[] =
+          old !== undefined && !keepsOld ? roster.filter((c) => c.contactId !== old) : roster;
+        if (next !== null) {
+          const seated = nextRoster.find((c) => c.contactId === next.contactId);
+          if (seated) {
+            seated.role = 'landlord'; // the landlord of record's role is structural
+            if (next.name !== undefined) seated.name = next.name;
+            if (next.company !== undefined) seated.company = next.company;
+          } else {
+            nextRoster.push({
+              contactId: next.contactId,
+              role: 'landlord',
+              primaryContact: false,
+              ...(next.name !== undefined ? { name: next.name } : {}),
+              ...(next.company !== undefined ? { company: next.company } : {}),
+            });
+          }
+        }
+        const patch: Record<string, unknown> = {
+          contacts: nextRoster,
+          landlordId: next !== null ? next.contactId : null, // null -> REMOVE
+          deleted_at: null, // null -> REMOVE: the restore itself
+        };
+        if (oldWasPrimary) {
+          if (next !== null) {
+            for (const c of nextRoster) c.primaryContact = c.contactId === next.contactId;
+            patch['primary_contact'] = next.contactId;
+          } else {
+            // No landlord to fall back to (removeContact's rule): clear the
+            // scalar, never leave it dangling at the removed landlord.
+            for (const c of nextRoster) c.primaryContact = false;
+            patch['primary_contact'] = null;
+          }
+        }
+        let updated: UnitItem;
+        try {
+          updated = await updateRosterIfCurrent(unit, patch);
+        } catch (err) {
+          if (!(err instanceof ConditionalCheckFailedException)) throw err;
+          if (attempts >= ROSTER_WRITE_MAX_ATTEMPTS) throw new RosterWriteConflictError();
+          // Re-read: a vanished unit throws (route 404), a changed landlordId
+          // throws RosterWriteConflictError, a contacts-only race retries.
+          return write();
+        }
+        log.info(
+          { unitId, attempts, landlordCleared: next === null, rosterSize: nextRoster.length },
+          'unit restored with a landlord change',
+        );
+        return updated;
+      };
+      return write();
     },
   };
 }

@@ -117,6 +117,7 @@ import {
   isDeleted as isUnitDeleted,
   LandlordReassignmentRequiredError,
   type ListUnitsOpts,
+  RosterWriteConflictError,
   unitContacts,
   type UnitContact,
   type UnitDisplayItem,
@@ -3087,6 +3088,58 @@ export function createFakeWorld(): FakeWorld {
       if (!media.includes(entry)) throw conditionalCheckFailed(`makeCover: unit ${unitId} has no media entry`);
       if (media[0] === entry) return unit; // already the cover -> no-op success
       unit.media = [entry, ...media.filter((e) => e !== entry)];
+      unit.updated_at = new Date().toISOString();
+      return unit;
+    },
+    // caseworker-integrity (spec 2026-10-12 section 4 "Restore"): mirror the
+    // real repo - the stored landlordId must still be the caller's expectation
+    // (RosterWriteConflictError otherwise); restore (drop deleted_at), swap or
+    // clear the landlord of record, drop the old landlord's row, upsert the new
+    // one with role pinned 'landlord', and keep primary_contact consistent.
+    async restoreWithLandlord(unitId, input) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`restoreWithLandlord: no unit ${unitId}`);
+      const current =
+        typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
+      if (current !== input.expectLandlordId) throw new RosterWriteConflictError();
+      const old = input.expectLandlordId;
+      const next = input.next;
+      const keepsOld = next !== null && next.contactId === old;
+      const roster = unitContacts(unit).map((c) => ({ ...c }));
+      const oldRow = old !== undefined && !keepsOld ? roster.find((c) => c.contactId === old) : undefined;
+      const oldWasPrimary =
+        old !== undefined && !keepsOld && (oldRow?.primaryContact === true || unit.primary_contact === old);
+      const nextRoster: UnitContact[] =
+        old !== undefined && !keepsOld ? roster.filter((c) => c.contactId !== old) : roster;
+      if (next !== null) {
+        const seated = nextRoster.find((c) => c.contactId === next.contactId);
+        if (seated) {
+          seated.role = 'landlord';
+          if (next.name !== undefined) seated.name = next.name;
+          if (next.company !== undefined) seated.company = next.company;
+        } else {
+          nextRoster.push({
+            contactId: next.contactId,
+            role: 'landlord',
+            primaryContact: false,
+            ...(next.name !== undefined ? { name: next.name } : {}),
+            ...(next.company !== undefined ? { company: next.company } : {}),
+          });
+        }
+      }
+      if (oldWasPrimary) {
+        if (next !== null) {
+          for (const c of nextRoster) c.primaryContact = c.contactId === next.contactId;
+          unit.primary_contact = next.contactId;
+        } else {
+          for (const c of nextRoster) c.primaryContact = false;
+          delete unit.primary_contact; // null -> REMOVE; never dangling
+        }
+      }
+      unit.contacts = nextRoster;
+      if (next !== null) unit.landlordId = next.contactId;
+      else delete (unit as Partial<UnitItem>).landlordId;
+      delete unit.deleted_at;
       unit.updated_at = new Date().toISOString();
       return unit;
     },

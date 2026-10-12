@@ -55,6 +55,7 @@ import { useContacts } from '../contacts/useContacts.js';
 import { tenantName } from '../placements/placementsFormat.js';
 import { ListingActionsMenu } from './ListingActionsMenu.js';
 import { ListingEditForm } from './ListingEditForm.js';
+import { RestoreLandlordDialog } from './RestoreLandlordDialog.js';
 import {
   authoritiesOf,
   buildListingFacts,
@@ -182,6 +183,15 @@ function photoUploadMessage(err: unknown): string {
   }
 }
 
+/** The stored landlord's name a 409 restore_needs_landlord carries, when it
+ *  names one (caseworker-integrity spec section 4 "Restore"). */
+function restoreLandlordName(err: ApiError): string | undefined {
+  const body = err.body;
+  if (body === null || typeof body !== 'object') return undefined;
+  const name = (body as Record<string, unknown>)['landlordName'];
+  return typeof name === 'string' && name.length > 0 ? name : undefined;
+}
+
 export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();
   const navigate = useNavigate();
@@ -203,6 +213,9 @@ export function ListingDetail(): React.JSX.Element {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // caseworker-integrity (spec section 4 "Restore"): set when a plain restore
+  // answered 409 restore_needs_landlord - opens the landlord dialog.
+  const [restoreNeeds, setRestoreNeeds] = useState<{ landlordName?: string } | null>(null);
   const [editing, setEditing] = useState(false);
   // The "Start placement" dialog, pre-filled+locked to this property's unit.
   const [startingPlacement, setStartingPlacement] = useState(false);
@@ -349,8 +362,16 @@ export function ListingDetail(): React.JSX.Element {
     setDeleteBusy(true);
     void restoreUnit(unit.unitId)
       .then((updated) => setUnit(updated))
-      .catch(() => {
-        /* leave it deleted; the action re-enables for a retry */
+      .catch((err: unknown) => {
+        // The stored landlord can't stay this property's landlord (gone, or no
+        // longer a landlord): choose one - or none - in the dialog instead of
+        // a dead click (caseworker-integrity spec section 4 "Restore").
+        if (err instanceof ApiError && err.status === 409 && err.code === 'restore_needs_landlord') {
+          const landlordName = restoreLandlordName(err);
+          setRestoreNeeds(landlordName !== undefined ? { landlordName } : {});
+          return;
+        }
+        /* any other failure: leave it deleted; the action re-enables for a retry */
       })
       .finally(() => setDeleteBusy(false));
   };
@@ -1362,6 +1383,37 @@ export function ListingDetail(): React.JSX.Element {
             </p>
           ) : null}
         </Modal>
+      ) : null}
+
+      {/* caseworker-integrity (spec section 4 "Restore"): the stored landlord
+          can't stay this property's landlord - choose one, or restore
+          without. The restored unit carries its enriched roster, so it is
+          applied to the Contacts card too. */}
+      {restoreNeeds !== null ? (
+        <RestoreLandlordDialog
+          unitId={unit.unitId}
+          {...(restoreNeeds.landlordName !== undefined && { landlordName: restoreNeeds.landlordName })}
+          onRestored={(updated) => {
+            setRestoreNeeds(null);
+            applyRosterUnit(updated);
+          }}
+          onConflict={() => {
+            void getUnit(unit.unitId)
+              .then((fresh) => {
+                // The re-read is the new truth for the page AND the Contacts
+                // card (its landlord row may have changed) - the same settle
+                // runRosterWrite's 409 path uses (plan review R1 row 5).
+                applyRosterUnit(fresh);
+                if (!(typeof fresh.deleted_at === 'string' && fresh.deleted_at.length > 0)) {
+                  setRestoreNeeds(null);
+                }
+              })
+              .catch(() => {
+                /* best-effort re-read; the dialog's retry message stands */
+              });
+          }}
+          onClose={() => setRestoreNeeds(null)}
+        />
       ) : null}
 
       {/* Removing the primary contact re-points live routing, so it NAMES the

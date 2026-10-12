@@ -1203,6 +1203,95 @@ describe('ListingDetail', () => {
     await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
     expect(restoreUnit).toHaveBeenCalledWith('u1');
     await waitFor(() => expect(setUnit).toHaveBeenCalled());
+    // The normal case: no landlord dialog.
+    expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+  });
+
+  it('a restore that needs a landlord opens the landlord dialog; restoring through it applies the unit and closes it', async () => {
+    const user = userEvent.setup();
+    const setUnit = vi.fn();
+    const restored = { ...READY.unit!, landlordId: 'll9' };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+          error: 'restore_needs_landlord',
+          landlordName: 'James Porter',
+        }),
+      )
+      .mockResolvedValueOnce(restored);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit,
+    });
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    expect(
+      within(dialog).getByText(
+        "James Porter is no longer a landlord, so they can't stay this property's landlord. Choose its landlord:",
+      ),
+    ).toBeInTheDocument();
+    expect(restoreUnit).toHaveBeenCalledWith('u1');
+    expect(setUnit).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+    expect(restoreUnit).toHaveBeenLastCalledWith('u1', { landlordId: null });
+    await waitFor(() => expect(setUnit).toHaveBeenCalledWith(restored));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('a conflict inside the landlord dialog re-reads the property into the page AND the Contacts card, and keeps the dialog while it is still deleted', async () => {
+    const user = userEvent.setup();
+    const setUnit = vi.fn();
+    // The concurrent change put a new landlord of record on the property: the
+    // re-read carries its enriched contact row, which the Contacts card must show.
+    const fresh = {
+      ...READY.unit!,
+      landlordId: 'll2',
+      deleted_at: '2026-06-19T00:00:00.000Z',
+      contacts: [{ contactId: 'll2', role: 'landlord' as const, primaryContact: true, name: 'Nora Lane' }],
+    };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', { error: 'restore_needs_landlord' }),
+      )
+      .mockRejectedValueOnce(
+        new ApiError(409, 'unit_roster_conflict', 'unit_roster_conflict', { error: 'unit_roster_conflict' }),
+      );
+    getUnit.mockReset().mockResolvedValue(fresh);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit,
+    });
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    expect(
+      within(dialog).getByText(
+        "This property's landlord is no longer a landlord, so they can't stay this property's landlord. Choose its landlord:",
+      ),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'The property contacts changed - try that change again.',
+    );
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+    await waitFor(() => expect(setUnit).toHaveBeenCalledWith(fresh));
+    // applyRosterUnit, not setUnit alone: the Contacts card renders the
+    // re-read's landlord row (useListing is mocked, so only the card's own
+    // roster state can show it).
+    expect(await screen.findByText('Nora Lane')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Restore property' })).toBeInTheDocument();
   });
 });
 

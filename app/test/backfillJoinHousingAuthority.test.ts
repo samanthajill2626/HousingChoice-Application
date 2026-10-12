@@ -263,6 +263,7 @@ const DRY_REPORT: BackfillReport = {
     { ...lead('c-5', '', '', '', ''), reason: 'authority_history' },
   ],
   unknownSkips: [],
+  missingSkips: [],
   written: 0,
   skipped: 0,
   failed: 0,
@@ -325,6 +326,18 @@ describe('formatBackfillReport (spec D10: name, sign-up date, status, contactId 
       '  Gray Failson  signed up 2026-09-01  status needs_review  contactId c-6  - FAILED: nothing written (an ERROR line names this contactId); re-run',
     );
     expect(lines).toContain('Would update: 1 lead(s). Failed: 1.');
+  });
+
+  it('a dry run lists each --skip id that names no contact on its own line - apart from the ids that name a non-candidate', () => {
+    const lines = formatBackfillReport(
+      { ...DRY_REPORT, unknownSkips: ['c-flyer'], missingSkips: ['c-nobody', 'c-typo'] },
+      false,
+    );
+    expect(lines.slice(-3)).toEqual([
+      '--skip id that names no contact (a typo?) - an --apply refuses to run with it: c-nobody',
+      '--skip id that names no contact (a typo?) - an --apply refuses to run with it: c-typo',
+      '--skip ids that are not candidates (ignored): c-flyer',
+    ]);
   });
 
   it('no target and nothing left out', () => {
@@ -459,6 +472,9 @@ const NOT_LISTED_REFUSAL =
   'backfill-join-housing-authority: REFUSED - "Atlanta Housing Authority" is not the exact name of a housing authority on this ' +
   "environment's organization list (renamed, merged, deleted or made an agency). Check Settings > Housing authorities & agencies " +
   'before going on. No contact was read and nothing was written.';
+const SKIP_REFUSAL = (ids: string): string =>
+  `backfill-join-housing-authority: REFUSED - these --skip ids name no contact on this environment (a typo?): ${ids}. ` +
+  "Correct or remove each one (a lead's contactId is the last item on its dry-run line), then re-run. Nothing was written.";
 const RUNNING_REFUSAL =
   'backfill-join-housing-authority: REFUSED - an organization-name rewrite is running (action rename, started ' +
   '2026-10-12T12:00:00.000Z, last heartbeat 2026-10-12T12:00:00.000Z). Wait for it to finish (Settings > Housing ' +
@@ -725,6 +741,24 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
     expect(scan.leads[2]).toMatchObject({ signedUpAt: '2026-08-15T23:30:00.000Z', status: 'on_hold' });
     expect(scan.leads[3]).toMatchObject({ signedUpAt: '' });
     expect(scan).toMatchObject({ contactsScanned: 13, pointerRows: 2 });
+    // Every contact's id - deleted ones included, pointer rows not: the --skip check's set.
+    expect([...scan.contactIds].sort()).toEqual(
+      [
+        'c-new',
+        'c-old',
+        'c-created-only',
+        'c-undated',
+        'c-flyer',
+        'c-inbound',
+        'c-no-source',
+        'c-landlord',
+        'c-partner',
+        'c-deleted',
+        'c-has-authority',
+        'c-has-atlanta',
+        'c-marker',
+      ].sort(),
+    );
     // The Scan paging loop: two rows a page finds the same leads.
     expect(await scanCandidates({ ...deps, scanLimit: 2 })).toEqual(scan);
   }, 120_000);
@@ -908,7 +942,9 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect(report).toEqual({
       targets: TARGET_LEADS.map((l) => ({ ...l, outcome: 'would_write' })),
       leftOut: LEFT_OUT,
-      unknownSkips: ['c-flyer', 'c-nobody'],
+      // c-flyer is a contact but no candidate (ignored); c-nobody names no contact (an --apply would refuse).
+      unknownSkips: ['c-flyer'],
+      missingSkips: ['c-nobody'],
       written: 0,
       skipped: 0,
       failed: 0,
@@ -916,6 +952,7 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     });
     expect(printed).toEqual(formatBackfillReport(report, false));
     expect(printed[1]).toBe('  Avery Fairlead  signed up 2026-06-20  status needs_review  contactId c-old');
+    expect(printed).toContain('--skip id that names no contact (a typo?) - an --apply refuses to run with it: c-nobody');
     // WRITES NOTHING, three ways: only reads were sent, the list was read once, no item changed.
     expect(recorder.sent).toContain('ScanCommand');
     expect(recorder.sent.filter((name) => !READ_COMMANDS.has(name))).toEqual([]);
@@ -949,6 +986,7 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
       targets: TARGET_LEADS.map((l) => ({ ...l, outcome: 'written' })),
       leftOut: LEFT_OUT,
       unknownSkips: [],
+      missingSkips: [],
       written: 3,
       skipped: 0,
       failed: 0,
@@ -1226,6 +1264,51 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect(await w.scanTable('audit_events')).toEqual(before.audit);
   }, 120_000);
 
+  it('an apply REFUSES when a --skip id names no contact at all - after the Scan, before any history read or write: nothing written, nothing printed', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    // A pointer row is not a contact: its id names no contact either.
+    await w.put({ contactId: 'phoneref#+15550001001', phone: '+15550001001', phone_ref: true, phone_ref_owner: 'c-old' });
+    const before = {
+      contacts: await w.scanTable('contacts'),
+      settings: await w.scanTable('settings'),
+      audit: await w.scanTable('audit_events'),
+    };
+    const recorder = recordingClient(doc);
+    const { deps, printed } = w.deps({ onDoc: recorder.doc });
+    const skip = new Set(['c-skip', 'c-typo', 'phoneref#+15550001001', 'c-nobody', 'c-flyer']);
+    const outcome = await runJoinAuthorityBackfill(deps, { apply: true, skip }).then(
+      () => 'ran',
+      (err: unknown) => err,
+    );
+    expect(outcome).toBeInstanceOf(BackfillRefusedError);
+    expect((outcome as Error).message).toBe(SKIP_REFUSAL('c-nobody, c-typo, phoneref#+15550001001'));
+    expect(recorder.sent).toEqual(['GetCommand', 'ScanCommand']);
+    expect(printed).toEqual([]);
+    expect(await w.scanTable('contacts')).toEqual(before.contacts);
+    expect(await w.scanTable('settings')).toEqual(before.settings);
+    expect(await w.scanTable('audit_events')).toEqual(before.audit);
+  }, 120_000);
+
+  it('an apply goes ahead when every --skip id names an existing contact - a non-candidate one (a flyer lead, one holding an authority, one with the marker, a DELETED one) is reported and ignored', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    await w.lead('c-gone', { deleted_at: '2026-09-01T00:00:00.000Z' });
+    const { deps, printed } = w.deps();
+    const report = await runJoinAuthorityBackfill(deps, {
+      apply: true,
+      skip: new Set(['c-skip', 'c-marker', 'c-held', 'c-gone', 'c-flyer']),
+    });
+    expect(report).toMatchObject({
+      unknownSkips: ['c-flyer', 'c-gone', 'c-held', 'c-marker'],
+      missingSkips: [],
+      written: 3,
+      failed: 0,
+    });
+    expect(printed).toContain('--skip ids that are not candidates (ignored): c-flyer, c-gone, c-held, c-marker');
+    expect(backfillExitCode(report)).toBe(0);
+  }, 120_000);
+
   it('an apply goes ahead over a STALE running rewrite (no heartbeat for 15 minutes) - and never touches the lock', async () => {
     const stale = new Date(Date.now() - 16 * 60_000).toISOString();
     const killed: OrgRewriteState = { ...freshRewrite(), jobId: 'job-killed', heartbeatAt: stale, startedAt: stale };
@@ -1256,6 +1339,7 @@ const CLEAN_REPORT: BackfillReport = {
   targets: [],
   leftOut: [],
   unknownSkips: [],
+  missingSkips: [],
   written: 0,
   skipped: 0,
   failed: 0,
@@ -1476,6 +1560,33 @@ describe.skipIf(!reachable)('main against DynamoDB Local - the real run behind t
     );
     expect(printed).toContain('Would update: 3 lead(s). Failed: 0.');
     expect(await w.backfillEvents()).toEqual([]);
+  }, 120_000);
+
+  it('a --skip id that names no contact: the dry run exits 0 and reports it; the apply exits 1 with the refusal printed - nothing written', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const before = { contacts: await w.scanTable('contacts'), audit: await w.scanTable('audit_events') };
+    const dryPrinted: string[] = [];
+    const dryExit = await main(['--env', 'local', '--lane', '7', '--skip', 'c-skip,c-nobody'], {
+      resolveStage: async () => stageOf(w),
+      run: realRun(dryPrinted),
+      logger: silent,
+    });
+    expect(dryExit).toBe(0);
+    expect(dryPrinted).toContain('--skip id that names no contact (a typo?) - an --apply refuses to run with it: c-nobody');
+    const errors: string[] = [];
+    const printed: string[] = [];
+    const exit = await main(['--env', 'local', '--lane', '7', '--apply', '--skip', 'c-skip,c-nobody'], {
+      resolveStage: async () => stageOf(w),
+      run: realRun(printed),
+      printError: (text) => errors.push(text),
+      logger: silent,
+    });
+    expect(exit).toBe(1);
+    expect(errors).toEqual([SKIP_REFUSAL('c-nobody')]);
+    expect(printed).toEqual([]);
+    expect(await w.scanTable('contacts')).toEqual(before.contacts);
+    expect(await w.scanTable('audit_events')).toEqual(before.audit);
   }, 120_000);
 
   it('an apply on an environment with no organization list exits 1 with the refusal printed - nothing read, nothing written', async () => {

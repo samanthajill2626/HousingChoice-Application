@@ -26,6 +26,12 @@
 // left the list during the run (the written records then show under Settings >
 // Housing authorities & agencies > "Not on the list").
 //
+// --skip IDS: a --skip id that names an existing contact that is not a
+// candidate (deleted, holding an authority, not a /join lead) is reported and
+// ignored. One that names NO contact at all (a typo; the Scan's own rows are
+// the check) is reported by a dry run and REFUSES an --apply right after the
+// Scan, before any write (exit 1).
+//
 // DRY RUN (the default) writes nothing at all - not even the list item.
 // --apply writes, per target, ONE conditional contactsRepo.update - the
 // authority is set only while the contact still has none, is still a tenant
@@ -199,8 +205,10 @@ export interface BackfillReport {
   targets: BackfillTarget[];
   /** Candidates left out, with the reason - oldest sign-up first. */
   leftOut: LeftOutLead[];
-  /** --skip ids that named no candidate, sorted: reported, otherwise ignored. */
+  /** --skip ids that name an existing contact (a deleted one included) that is not a candidate, sorted: reported, otherwise ignored. */
   unknownSkips: string[];
+  /** --skip ids that name NO contact at all (a typo), sorted: a dry run reports them; an --apply refuses (BackfillRefusedError). */
+  missingSkips: string[];
   /** Apply: targets written. */
   written: number;
   /** Apply: targets whose write lost its condition (changed after the read). */
@@ -275,7 +283,8 @@ function leadLine(lead: BackfillLead): string {
 /**
  * Spec D10: what the CLI prints - each target on its own line (name, sign-up
  * date, status, contactId), oldest first, then the count; then the left-out
- * leads the same way with the reason; then unknown --skip ids and warnings.
+ * leads the same way with the reason; then each --skip id that names no
+ * contact on its own line, the ids that name a non-candidate, and warnings.
  */
 export function formatBackfillReport(report: BackfillReport, apply: boolean): string[] {
   const lines: string[] = [
@@ -297,6 +306,9 @@ export function formatBackfillReport(report: BackfillReport, apply: boolean): st
     lines.push(`Left out (${report.leftOut.length} lead(s), oldest sign-up first):`);
     for (const l of report.leftOut) lines.push(`${leadLine(l)}  - ${REASON_TEXT[l.reason]}`);
   }
+  for (const id of report.missingSkips) {
+    lines.push(`--skip id that names no contact (a typo?) - an --apply refuses to run with it: ${id}`);
+  }
   if (report.unknownSkips.length > 0) {
     lines.push(`--skip ids that are not candidates (ignored): ${report.unknownSkips.join(', ')}`);
   }
@@ -314,10 +326,11 @@ export function backfillExitCode(report: BackfillReport): 0 | 1 {
 // ---------------------------------------------------------------------------
 
 /**
- * The run refused before it read any contact (spec D10): no organization list
- * is stored, "Atlanta Housing Authority" is not an exact housing_authority
- * name on it, or - for --apply - an organization-name rewrite is running.
- * Nothing was written. Exit 1.
+ * The run refused (spec D10). Before it read any contact: no organization
+ * list is stored, "Atlanta Housing Authority" is not an exact
+ * housing_authority name on it, or - for --apply - an organization-name
+ * rewrite is running. Right after the contacts Scan, for --apply only: a
+ * --skip id names no contact at all (a typo). Nothing was written. Exit 1.
  */
 export class BackfillRefusedError extends Error {}
 
@@ -442,6 +455,8 @@ function compareLeads(a: BackfillLead, b: BackfillLead): number {
 export interface CandidateScan {
   /** The candidates (spec D10), oldest sign-up first. */
   leads: BackfillLead[];
+  /** Every contact's id - deleted ones included, pointer rows not: a --skip id in none names no contact. */
+  contactIds: Set<string>;
   /** Contacts read (pointer rows not counted). */
   contactsScanned: number;
   /** phone/email pointer rows - skipped. */
@@ -450,7 +465,7 @@ export interface CandidateScan {
 
 /** Spec D10: one consistent Scan of the contacts BASE table (pointer rows skipped, as the cleanup does). */
 export async function scanCandidates(deps: Pick<BackfillDeps, 'doc' | 'env' | 'scanLimit'>): Promise<CandidateScan> {
-  const scan: CandidateScan = { leads: [], contactsScanned: 0, pointerRows: 0 };
+  const scan: CandidateScan = { leads: [], contactIds: new Set(), contactsScanned: 0, pointerRows: 0 };
   for await (const row of scanAll(deps.doc, tableName('contacts', deps.env), deps.scanLimit)) {
     const contactId = String(row['contactId'] ?? '');
     if (contactId.startsWith(PHONE_REF_PREFIX) || contactId.startsWith(EMAIL_REF_PREFIX)) {
@@ -458,6 +473,7 @@ export async function scanCandidates(deps: Pick<BackfillDeps, 'doc' | 'env' | 's
       continue;
     }
     scan.contactsScanned += 1;
+    scan.contactIds.add(contactId);
     const contact = row as ContactItem;
     if (isCandidate(contact)) scan.leads.push(toLead(contact));
   }
@@ -511,7 +527,11 @@ export async function leftOutReasonFor(
 export interface BackfillOptions {
   /** Write. false = the dry run: nothing is written at all. */
   apply: boolean;
-  /** --skip: contactIds to leave out. An id that names no candidate is reported, otherwise ignored. */
+  /**
+   * --skip: contactIds to leave out. An id that names an existing contact that
+   * is not a candidate is reported, otherwise ignored; an id that names NO
+   * contact is reported by a dry run and refuses an --apply.
+   */
   skip: ReadonlySet<string>;
 }
 
@@ -589,8 +609,9 @@ async function warnIfNameLeftList(deps: BackfillDeps, report: BackfillReport): P
 
 /**
  * Spec D10: the backfill. Refuses (BackfillRefusedError) before any contact
- * is read; then reads the candidates, and for each - oldest first - reads its
- * whole history right before its write; then (apply) re-checks the list,
+ * is read; then reads the candidates - an --apply refuses right after that
+ * Scan, before any write, when a --skip id names no contact - and for each -
+ * oldest first - reads its whole history right before its write; then (apply) re-checks the list,
  * prints the report through deps.print and returns it. A failed history read
  * or write is counted `failed` (exit 1) and the run goes on; only the list
  * read and the contacts Scan abort it, both before any write.
@@ -603,11 +624,22 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
     { contactsScanned: scan.contactsScanned, pointerRows: scan.pointerRows, candidates: scan.leads.length, apply: opts.apply },
     `${SCRIPT_NAME} - candidates read`,
   );
+  // A --skip id that names no contact at all is a typo the operator meant to
+  // protect someone with: an --apply refuses here, before any history read or
+  // write; a dry run reports it.
+  const missingSkips = [...opts.skip].filter((id) => !scan.contactIds.has(id)).sort();
+  if (opts.apply && missingSkips.length > 0) {
+    throw new BackfillRefusedError(
+      `${SCRIPT_NAME}: REFUSED - these --skip ids name no contact on this environment (a typo?): ${missingSkips.join(', ')}. ` +
+        "Correct or remove each one (a lead's contactId is the last item on its dry-run line), then re-run. Nothing was written.",
+    );
+  }
   const candidateIds = new Set(scan.leads.map((l) => l.contactId));
   const report: BackfillReport = {
     targets: [],
     leftOut: [],
-    unknownSkips: [...opts.skip].filter((id) => !candidateIds.has(id)).sort(),
+    unknownSkips: [...opts.skip].filter((id) => scan.contactIds.has(id) && !candidateIds.has(id)).sort(),
+    missingSkips,
     written: 0,
     skipped: 0,
     failed: 0,
@@ -644,6 +676,7 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
     targets: report.targets.length,
     leftOut: report.leftOut.length,
     unknownSkips: report.unknownSkips.length,
+    missingSkips: report.missingSkips.length,
     written: report.written,
     skipped: report.skipped,
     failed: report.failed,
@@ -703,7 +736,7 @@ export interface CliDeps {
 /**
  * The CLI (spec D10). Resolves to the exit code: 2 a usage error (nothing
  * resolved, nothing read); 1 the target could not be resolved (nothing read),
- * the run was refused (no contact read), it stopped before any write (the list
+ * the run was refused (nothing written), it stopped before any write (the list
  * read or the contacts Scan failed), or it completed with a failed lead; 0 it
  * completed clean, warnings included. Once resolved, the stage client is
  * destroyed whatever happens.

@@ -1377,7 +1377,9 @@ describe('the entry point, in a child process', () => {
     // `node --import tsx <script>`: the app/test/otel.test.ts precedent (a
     // .bin/tsx.cmd shim is EINVAL under spawnSync on Windows). The arguments
     // fail to parse before any target is resolved: no database, no network.
-    const child = spawnSync(process.execPath, ['--import', 'tsx', SCRIPT_PATH, '--env', 'dev', '--bogus'], {
+    // They name NO --env at all (a usage error by itself), so even a parser
+    // that tolerated the unknown flag could never reach a deployed target.
+    const child = spawnSync(process.execPath, ['--import', 'tsx', SCRIPT_PATH, '--bogus'], {
       encoding: 'utf8',
       timeout: 60_000,
     });

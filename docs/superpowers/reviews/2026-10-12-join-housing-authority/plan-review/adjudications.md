@@ -29,3 +29,30 @@ Result: 7 accepted, 1 accepted in a different form. Decisions changed: yes
 | P6 | S3's header says its commands work in PowerShell and Git Bash; its ASCII and MERGE_HEAD checks are bash-only (B-F4) | ACCEPT | S3 header: run from Git Bash. |
 | P7 | Task 3.2 attributes lint errors against the shared main checkout, not the merge base (B-F5) | ACCEPT | Task 3.2 uses a throwaway detached worktree at the merge base, as gate 5 and S6 do. |
 | P8 | Gate 4's `timeout` on Windows kills only npm; an orphaned stack would be adopted by the next run (B-F6) | ACCEPT | Task 6.2 gate 4: on any non-clean end, tree-kill this worktree's processes by PID and confirm the lane's ports are free before self-QA or a re-run. |
+
+---
+
+# Plan review round 2 - adjudications (TERMINAL)
+
+Round 2 reviewed the plan @1da54a3c on the merged tree (@469241f7).
+Reviewer B continued (`R2-reviewer-b.md`, 4 LOW + 1 concession). It found
+that main's three commits break nothing the plan assumes, that every anchor
+and the re-counted totals (30 -> 58) hold, and that the new Task 4.5 `main`,
+its child-process test, Task 6.3a's lane guards and expected outputs, the
+S5 ready-line grep and the 469241f7 RED source check out against the code.
+It conceded P5 (the two D10 edges are one-shot or unreachable; the spec is
+the right home).
+
+Result: 4 accepted as precision edits to run instructions. Decisions
+changed: NONE - the plan review is CLOSED at round 2.
+
+| # | Finding | Ruling | Effect |
+|---|---|---|---|
+| Q1 | R2-1 [LOW] P8's tree-kill searched by command line; the launcher, app and worker run with relative command lines, so only Vite would match | ACCEPT | Task 6.2 gate 4: `npm run e2e:stop`, then `taskkill /T` on `lane.json`'s `launcherPid`, then the port check. |
+| Q2 | R2-2 [LOW] Task 6.3a's curl fallback posts to the app port without the origin-secret header -> 403 | ACCEPT | Post through `<urls.dashboard>` (the Vite proxy adds the header). |
+| Q3 | R2-3 [LOW] Task 6.3a's backfill commands had the builder type `<L>`; a dropped `--lane` becomes a bare `--env local` at the live local stack | ACCEPT | Every backfill command reads the lane from `lane.json` in the same Bash call and refuses an empty or non-positive lane. |
+| Q4 | R2-4 [LOW] The lint baseline in a throwaway worktree has no node_modules, so its eslint cannot load the config | ACCEPT | Task 3.2 and gate 5: lint the merge-base content from the feature worktree with `git show <base>:<path> | npx eslint --stdin --stdin-filename <path>`. |
+
+Plan review totals: 2 rounds, 16 findings (11 in round 1, merged to P1-P8;
+5 in round 2 incl. 1 concession), 0 rejected, 1 accepted in another form
+(P5).

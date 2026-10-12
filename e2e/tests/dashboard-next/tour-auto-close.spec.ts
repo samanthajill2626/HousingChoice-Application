@@ -312,3 +312,131 @@ test.describe('Tour auto-close and reopen', () => {
     expect(reopened.outcome).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Caseworker integrity (spec docs/superpowers/specs/2026-10-12-caseworker-
+// integrity-design.md D3 and section 8 "a refused tour action shows its
+// sentence"): reopening a closed tour and reviving a canceled one check that
+// the tenant is still typed tenant. The dashboard reaches the reopen refusal
+// like this: a tour closed as not a fit, its tenant re-typed to landlord
+// while the tour was closed (allowed - a closed tour is not open), then
+// Reopen tour on the tour page. The Reopen dialog shows the refusal's own
+// sentence (TourDetail confirmReopen lets the rejection reach ReopenTourModal,
+// whose failureCopy asks contactTypeErrorMessage before its 409 rule) and the
+// tour stays closed. The revive (the Reschedule dialog on a canceled tour runs
+// the same failureCopy, unit-tested in TourModals.test.tsx) and the reopen are
+// also asserted on the wire. The tour create pickers list tenants only, so a
+// create refusal is not reachable from the dashboard. Each test makes its own
+// tenant (a fresh contact, never the lean Tasha) and leaves its tours closed or
+// canceled, so no later spec meets them on the Past tab or Today.
+// ---------------------------------------------------------------------------
+test.describe('Tour reopen and revive check the tenant (caseworker integrity)', () => {
+  /** The refusal sentence for a landlord (dashboard src/lib/contactTypeErrors.ts). */
+  const NOT_A_TENANT_LANDLORD = 'Tours and placements are for tenants. This contact is a landlord.';
+
+  /** A fresh contact typed tenant, run-unique. */
+  async function createTenant(page: Page, firstName: string): Promise<string> {
+    const stamp = `${Date.now()}`.slice(-6);
+    const res = await page.request.post(`${NEXT}/api/contacts`, {
+      data: {
+        type: 'tenant',
+        firstName,
+        lastName: `Tac${stamp}`,
+        phone: `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`,
+      },
+    });
+    expect(res.ok(), await res.text()).toBeTruthy();
+    return ((await res.json()) as { contact: { contactId: string } }).contact.contactId;
+  }
+
+  /** A past-dated tour for `tenantId` at UNIT_B - the create texts nobody (its rungs are born skipped). */
+  async function pastTourFor(page: Page, tenantId: string): Promise<string> {
+    const res = await page.request.post(`${NEXT}/api/tours`, {
+      data: { tenantId, unitId: UNIT_B, scheduledAt: pastAt(3, 10), tourType: 'self_guided' },
+    });
+    expect(res.ok(), await res.text()).toBeTruthy();
+    return ((await res.json()) as { tour: { tourId: string } }).tour.tourId;
+  }
+
+  /** Toured, then closed as not a fit - Reopen then targets Toured (REOPEN_TO_TOURED). */
+  async function closeNotAFit(page: Page, tourId: string): Promise<void> {
+    await patchTour(page, tourId, { status: 'toured' });
+    await patchTour(page, tourId, { outcome: 'not_a_fit', moveForward: false, status: 'closed' });
+  }
+
+  /** Re-type the contact to landlord. Its tours are all closed or canceled, so
+   *  the PATCH is allowed - retried while the tours index catches up with the
+   *  closes (spec L1); a refused PATCH writes nothing. */
+  async function retypeToLandlord(page: Page, contactId: string): Promise<void> {
+    await expect
+      .poll(
+        async () =>
+          (await page.request.patch(`${NEXT}/api/contacts/${contactId}`, { data: { type: 'landlord' } })).ok(),
+        { timeout: 10_000 },
+      )
+      .toBe(true);
+  }
+
+  test('the Reopen dialog says why a closed tour whose tenant is now a landlord cannot reopen', async ({ page }) => {
+    test.slow(); // a fresh contact and tour, a polled re-type, then the tour page and its dialog
+    await devLogin(page); // page.request carries the session cookie for /api writes
+    const tenantId = await createTenant(page, 'Reopenui');
+    const tourId = await pastTourFor(page, tenantId);
+    await closeNotAFit(page, tourId);
+    await retypeToLandlord(page, tenantId);
+
+    await page.goto(`${NEXT}/tours/${tourId}`);
+    await expect(tourHeader(page).getByText('Closed', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Reopen tour' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Reopen tour' });
+    await expect(dialog.getByText(REOPEN_TO_TOURED, { exact: true })).toBeVisible();
+    // The dialog's own reopen request, read off the network: the server's refusal.
+    const reopenAnswer = page.waitForResponse(
+      (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/tours/${tourId}/reopen`,
+    );
+    await dialog.getByRole('button', { name: 'Yes, reopen' }).click();
+    const answer = await reopenAnswer;
+    expect(answer.status()).toBe(409);
+    expect(await answer.json()).toMatchObject({ error: 'contact_not_tenant', contactKind: 'landlord' });
+
+    // The refusal's own sentence inside the dialog - not "This tour changed
+    // since the page loaded", which every other 409 there reads.
+    await expect(dialog.getByRole('alert')).toHaveText(NOT_A_TENANT_LANDLORD);
+    // Refused, so the dialog stays (its confirm live again) and no Record
+    // outcome dialog follows.
+    await expect(dialog.getByRole('button', { name: 'Yes, reopen' })).toBeEnabled();
+    await expect(page.getByRole('dialog', { name: 'Record outcome' })).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(tourHeader(page).getByText('Closed', { exact: true })).toBeVisible();
+
+    // On the wire: still closed with its outcome; nothing was written.
+    expect(await getTour(page, tourId)).toMatchObject({ status: 'closed', outcome: 'not_a_fit' });
+  });
+
+  test('a closed or canceled tour whose tenant was re-typed stays as it is', async ({ page }) => {
+    await devLogin(page);
+    const req = page.request;
+    const tenantId = await createTenant(page, 'Reopenten');
+    const closedTourId = await pastTourFor(page, tenantId);
+    await closeNotAFit(page, closedTourId);
+    const canceledTourId = await pastTourFor(page, tenantId);
+    await patchTour(page, canceledTourId, { status: 'canceled' });
+
+    // Neither tour is open, so the re-type is allowed.
+    await retypeToLandlord(page, tenantId);
+
+    const reopen = await req.post(`${NEXT}/api/tours/${closedTourId}/reopen`, { data: {} });
+    expect(reopen.status()).toBe(409);
+    expect(await reopen.json()).toMatchObject({ error: 'contact_not_tenant', contactKind: 'landlord' });
+    // The revive the Reschedule dialog sends (TourDetail confirmReschedule).
+    const revive = await req.patch(`${NEXT}/api/tours/${canceledTourId}`, {
+      data: { scheduledAt: daysFromNow(30), status: 'scheduled' },
+    });
+    expect(revive.status()).toBe(409);
+    expect(await revive.json()).toMatchObject({ error: 'contact_not_tenant', contactKind: 'landlord' });
+
+    expect(await getTour(page, closedTourId)).toMatchObject({ status: 'closed', outcome: 'not_a_fit' });
+    expect(await getTour(page, canceledTourId)).toMatchObject({ status: 'canceled' });
+  });
+});

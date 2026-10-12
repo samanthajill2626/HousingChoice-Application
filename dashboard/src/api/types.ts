@@ -1691,6 +1691,15 @@ const SUGGESTION_RESOLUTION_ERROR_COPY: Readonly<Record<string, string>> = {
   // moved to the other kind) after this page loaded it.
   org_not_on_list:
     'That housing authority is not on the list any more, so nothing changed - pick it from the list instead.',
+  // Spec 2026-10-12 D1: the accept spanned a reclassification (the caseworker
+  // conversion, or a type or role change), so the fence refused it. The chip is
+  // gone; nothing was written.
+  suggestion_contact_reclassified:
+    "This contact's type or role changed after the AI suggested it, so nothing was applied.",
+  // Spec 2026-10-12 D1: a tenant fact offered for a contact not typed tenant.
+  // Refused before anything was consumed - the chip stays so it can be dismissed.
+  suggestion_contact_not_tenant:
+    "This contact isn't a tenant, so this can't be applied. Dismiss it instead.",
 };
 
 /** Staff-facing copy for a failed suggestion accept/dismiss, given its code. */

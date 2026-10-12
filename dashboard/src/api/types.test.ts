@@ -91,6 +91,12 @@ const SERVER_CODES = [
   'value_not_from_suggestion',
   // Spec D5 runs while the accept is planned: the value is not on the list.
   'org_not_on_list',
+  // Spec 2026-10-12 D1: the fence refused an accept that spanned a type or
+  // role change (the chip is gone).
+  'suggestion_contact_reclassified',
+  // Spec 2026-10-12 D1: a tenant fact on a contact not typed tenant, refused
+  // before anything was consumed (the chip stays).
+  'suggestion_contact_not_tenant',
 ];
 
 const GENERIC = suggestionResolutionErrorMessage('a_code_no_server_has_ever_sent');
@@ -121,6 +127,15 @@ describe('suggestionResolutionErrorMessage', () => {
   it('keeps the established phone-conflict sentence', () => {
     expect(suggestionResolutionErrorMessage('phone_in_use')).toBe(
       'That number already belongs to another contact.',
+    );
+  });
+
+  it('says what happened for the two D1 refusals (spec 2026-10-12)', () => {
+    expect(suggestionResolutionErrorMessage('suggestion_contact_reclassified')).toBe(
+      "This contact's type or role changed after the AI suggested it, so nothing was applied.",
+    );
+    expect(suggestionResolutionErrorMessage('suggestion_contact_not_tenant')).toBe(
+      "This contact isn't a tenant, so this can't be applied. Dismiss it instead.",
     );
   });
 

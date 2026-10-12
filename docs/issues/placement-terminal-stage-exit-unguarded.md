@@ -6,7 +6,8 @@ severity: low
 status: open
 area: app/placements
 created: 2026-10-12
-refs: app/src/lib/statusModel.ts:118, app/src/services/statusTransition.ts, app/src/routes/statusTransition.ts, dashboard/src/routes/placements/PlacementDetail.tsx, dashboard/src/routes/placements/StageMenu.tsx:155, e2e/tests/dashboard-next/lost-modal.spec.ts:27, e2e/tests/dashboard-next/placement-history.spec.ts:16
+updated: 2026-10-12
+refs: app/src/lib/statusModel.ts:118, app/src/services/statusTransition.ts, app/src/routes/statusTransition.ts, dashboard/src/routes/placements/PlacementDetail.tsx, dashboard/src/routes/placements/StageMenu.tsx:155, e2e/tests/dashboard-next/lost-modal.spec.ts:27, e2e/tests/dashboard-next/placement-history.spec.ts:16, app/src/repos/placementsRepo.ts:347, app/src/routes/tours.ts:1421
 ---
 
 **Problem.** `lost` and `moved_in` are the placement ladder's terminal stages
@@ -41,3 +42,19 @@ only (a mistaken Lost) and make `moved_in` final; or (c) route any exit from a
 terminal stage through a confirm that names what it re-derives. Whatever is
 chosen belongs in the transition service, so every caller is covered, and the
 two e2e resets above must move to whatever path stays legal.
+
+**The tenant check's write is not conditioned on the stage it read
+(2026-10-12, R1 code review of `fix/caseworker-integrity`).** The
+terminal-exit tenant check decides on the placement read at
+`app/src/services/statusTransition.ts:408` (the check at `:420-421`), but the
+stage write at `:477` goes through `placementsRepo.update`, whose only
+condition is `attribute_exists(placementId)`
+(`app/src/repos/placementsRepo.ts:347`). So a concurrent move landing between
+that read and that write defeats the check, and a consistent read would not
+help: a move that read the placement open (no check) writes its new stage
+after someone else moved it to Lost and re-typed its tenant, leaving an open
+placement on a contact that is not a tenant. The fix, when this issue is
+decided, is a `stage = :from` condition on the stage write, a lost condition
+answering 409 like the tours PATCH's `expectedStatus`
+(`app/src/routes/tours.ts:1421`) - a change to every transition's
+concurrency semantics, so it was not made in that branch.

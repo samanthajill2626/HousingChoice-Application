@@ -14,7 +14,6 @@ import { CASEWORKER_ROLE } from './extraction/contactKinds.js';
 import { isCaseworker, type PossibleSignal } from '../lib/caseworkers.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import { TERMINAL_STAGES } from '../lib/statusModel.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createAiRunsRepo, type AiRunsRepo } from '../repos/aiRunsRepo.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
@@ -36,7 +35,14 @@ import {
 import { createExtractionRepo, type ExtractionRepo, type SuggestionItem } from '../repos/extractionRepo.js';
 import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
-import { createUnitsRepo, unitContacts, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import {
+  landlordUnitIds,
+  openPlacementIds,
+  openTourIds,
+  rosterUnitIds,
+  type ContactHoldingsDeps,
+} from './contactHoldings.js';
 import { displayNameOf, drainTypeSuggestion, supersedePendingSuggestion, type SuggestionEffectDeps } from './contactClassification.js';
 import { createOrgNamesService, hasOrgControlChar, type OrgNamesService } from './orgNames.js';
 
@@ -116,9 +122,6 @@ const CONTACT_TYPES: ReadonlySet<string> = new Set<ContactType>([
   'tenant', 'landlord', 'partner', 'team_member', 'unknown',
 ]);
 
-/** D19: requested, scheduled, toured or no_show; canceled and closed are resolved. */
-const OPEN_TOUR_STATUSES: ReadonlySet<string> = new Set(['requested', 'scheduled', 'toured', 'no_show']);
-
 /** The one-to-one types the conversion re-types (partner_1to1 is already done; groups never). */
 const RETYPABLE_TYPES: ReadonlySet<string> = new Set(['tenant_1to1', 'landlord_1to1', 'unknown_1to1']);
 
@@ -185,6 +188,10 @@ export function createCaseworkerConversionService(
   const events = deps.events ?? appEvents;
   const orgNames = deps.orgNames ?? createOrgNamesService({ logger: deps.logger });
   const now = deps.now ?? (() => new Date());
+  // Rule 3's reads live in services/contactHoldings.ts, shared with the
+  // contacts PATCH type-change refusal (spec 2026-10-12 D2). The repo objects
+  // themselves, so a test that swaps a repo method still reaches it.
+  const holdings: ContactHoldingsDeps = { placements, tours, units };
 
   /**
    * Rule 1: a CONSISTENT read. Missing, a phone/email pointer row (R1-F1: a
@@ -215,53 +222,19 @@ export function createCaseworkerConversionService(
    * seat (unitContacts derives a landlord row from landlordId).
    */
   async function collectRefusals(contactId: string): Promise<CaseworkerRefusal[]> {
-    const placementIds: string[] = [];
-    let placementKey: Record<string, unknown> | undefined;
-    do {
-      const page = await placements.listByTenant(contactId, {
-        ...(placementKey !== undefined && { exclusiveStartKey: placementKey }),
-      });
-      for (const p of page.items) if (!TERMINAL_STAGES.has(p.stage)) placementIds.push(p.placementId);
-      placementKey = page.lastEvaluatedKey;
-    } while (placementKey !== undefined);
-
-    const tourIds = (await tours.listByTenant(contactId))
-      .filter((t) => OPEN_TOUR_STATUSES.has(t.status))
-      .map((t) => t.tourId);
-
-    const landlordUnitIds = new Set<string>();
-    let landlordKey: Record<string, unknown> | undefined;
-    do {
-      const page = await units.listByLandlord(contactId, {
-        deleted: 'any',
-        ...(landlordKey !== undefined && { exclusiveStartKey: landlordKey }),
-      });
-      for (const u of page.items) landlordUnitIds.add(u.unitId);
-      landlordKey = page.lastEvaluatedKey;
-    } while (landlordKey !== undefined);
-
+    // The same four reads in the same order as before the extraction, each
+    // id-sorted by the same comparator (W2).
+    const placementIds = await openPlacementIds(holdings, contactId);
+    const tourIds = await openTourIds(holdings, contactId);
+    const landlordIds = await landlordUnitIds(holdings, contactId, { deleted: 'any' });
     // One Scan of every unit, live and deleted (no roster index; D19 accepts
     // the cost at today's unit count, filed in section 12).
-    const rosterUnitIds: string[] = [];
-    let scanKey: Record<string, unknown> | undefined;
-    do {
-      const page = await units.list({
-        deleted: 'any',
-        ...(scanKey !== undefined && { exclusiveStartKey: scanKey }),
-      });
-      for (const u of page.items) {
-        if (landlordUnitIds.has(u.unitId)) continue;
-        if (unitContacts(u).some((seat) => seat.contactId === contactId)) rosterUnitIds.push(u.unitId);
-      }
-      scanKey = page.lastEvaluatedKey;
-    } while (scanKey !== undefined);
-
-    const byId = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+    const rosterIds = await rosterUnitIds(holdings, contactId, new Set(landlordIds));
     return [
-      ...placementIds.sort(byId).map((placementId) => ({ code: 'caseworker_open_placement' as const, placementId })),
-      ...tourIds.sort(byId).map((tourId) => ({ code: 'caseworker_open_tour' as const, tourId })),
-      ...[...landlordUnitIds].sort(byId).map((unitId) => ({ code: 'caseworker_landlord_of_record' as const, unitId })),
-      ...rosterUnitIds.sort(byId).map((unitId) => ({ code: 'caseworker_on_roster' as const, unitId })),
+      ...placementIds.map((placementId) => ({ code: 'caseworker_open_placement' as const, placementId })),
+      ...tourIds.map((tourId) => ({ code: 'caseworker_open_tour' as const, tourId })),
+      ...landlordIds.map((unitId) => ({ code: 'caseworker_landlord_of_record' as const, unitId })),
+      ...rosterIds.map((unitId) => ({ code: 'caseworker_on_roster' as const, unitId })),
     ];
   }
 

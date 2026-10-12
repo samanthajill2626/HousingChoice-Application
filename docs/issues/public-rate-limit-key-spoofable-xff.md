@@ -43,3 +43,10 @@ When this lands, also correct the "per-IP" comments that describe the limits as 
 were trustworthy, including those added by join-housing-authority for the list read:
 `app/src/routes/public.ts:31` and `:480`, `app/src/app.ts:161` and `:172`,
 `app/src/services/publicOrgList.ts:17` (join-housing-authority R2-N3, 2026-10-12).
+
+**Added 2026-10-12 (join-housing-authority planner review, adversarial A3/A7).** With
+that branch, a `/join` sign-up starts as Onboarding with Atlanta Housing Authority
+preselected, so a client rotating a fake first hop can also inject arbitrary phone
+numbers into Atlanta-filtered property blasts (each number already gets the welcome
+text today), and can drive unbounded consistent reads of the org-list item through
+`GET /public/housing-authorities`. Both ride on this key; fixing the key closes both.

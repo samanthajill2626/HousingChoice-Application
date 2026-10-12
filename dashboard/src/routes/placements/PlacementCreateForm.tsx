@@ -35,6 +35,7 @@ import {
 } from '../contact/ContactSearchField.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
+import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import styles from './PlacementCreateForm.module.css';
 
 export interface PlacementCreateFormProps {
@@ -245,7 +246,15 @@ export function PlacementCreateForm({
       const placement = await createPlacement(body);
       setBusy(false);
       onCreated(placement);
-    } catch {
+    } catch (err) {
+      // Caseworker integrity: a contact-type refusal has its own sentence;
+      // any other failure keeps the fixed copy below.
+      const typeCopy = contactTypeErrorMessage(err);
+      if (typeCopy !== null) {
+        setError(typeCopy);
+        setBusy(false);
+        return;
+      }
       setError("Couldn't create the placement — please try again.");
       setBusy(false);
     }

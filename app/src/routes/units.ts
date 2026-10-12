@@ -77,6 +77,7 @@ import { deriveTourSignal } from '../lib/listingSendTour.js';
 import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { reachedCount } from '../services/shareRecipientState.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
+import { requireLandlordContact, sendContactTypeError } from '../services/contactTypeGuards.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -486,6 +487,21 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         return;
       }
       validation.fields['accepted_authorities'] = check.value;
+    }
+    // caseworker-integrity I3 (spec 2026-10-12 section 4): the owning
+    // landlordId must name a contact typed `landlord` (a property manager is a
+    // landlord with a role) - 404 landlord_not_found when no such contact
+    // exists, 409 landlord_not_landlord otherwise. A consistent read. It runs
+    // after the validator's 400s and the org-list 422, and nothing is created
+    // on a refusal. landlordId is guaranteed by validation.
+    try {
+      await requireLandlordContact(contacts, validation.fields['landlordId'] as string);
+    } catch (err) {
+      if (sendContactTypeError(err, res)) {
+        log.info({ actor: req.user?.userId }, 'unit create refused: landlordId is not a landlord');
+        return;
+      }
+      throw err;
     }
     // status is NOT a writable CRUD field (§8: property-status changes route
     // through PATCH /api/units/:unitId/listing-status). Create is not a

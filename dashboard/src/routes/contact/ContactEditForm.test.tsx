@@ -1386,6 +1386,29 @@ describe('ContactEditForm - a refused type change (spec 2026-10-12 D2)', () => {
     ).toBeNull();
   });
 
+  // R1 code review, dashboard finding 7: every save starts clean - a second
+  // save that fails for another reason shows the save sentence, never the
+  // first save's refusal list beside it.
+  it("a second save that fails for another reason no longer shows the first save's refusals", async () => {
+    const user = userEvent.setup();
+    updateContact
+      .mockRejectedValueOnce(typeChangeRefused([{ code: 'landlord_of_record', unitId: 'u1' }]))
+      .mockRejectedValueOnce(new ApiError(500, 'http_500', 'Request failed (500)'));
+    const { onSaved } = renderForm(LANDLORD);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Partner' }));
+    await user.click(save());
+    expect(await screen.findByText(TYPE_CHANGE_LANDLORD_SENTENCE)).toBeInTheDocument();
+
+    // Save again with the kind untouched (picking a kind clears the list on
+    // its own), and fail for another reason.
+    await user.click(save());
+    expect(await screen.findByText("Couldn't save - please try again.")).toBeInTheDocument();
+    expect(screen.queryByText(TYPE_CHANGE_LANDLORD_SENTENCE)).toBeNull();
+    expect(updateContact).toHaveBeenCalledTimes(2);
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
   it('picking another kind clears the refusals, and the next save asks the server again', async () => {
     const user = userEvent.setup();
     updateContact

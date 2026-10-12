@@ -209,8 +209,11 @@ export interface PublicRouterDeps {
   /**
    * join-housing-authority D1/D3: the organization list. The sign-up's housing
    * authority check reads it (peek only - the public surface never creates
-   * it), and app.ts hands the SAME repo to createPublicHousingAuthoritiesRouter.
-   * Default createOrgListRepo().
+   * it). Default createOrgListRepo(). When one is injected (deps.public in
+   * app.ts - the tests), app.ts hands that same repo to
+   * createPublicHousingAuthoritiesRouter too; otherwise each router builds its
+   * own default, which reads the same stored item the same way (one
+   * consistent read per call, nothing cached).
    */
   orgListRepo?: OrgListRepo;
   /**

@@ -4,7 +4,7 @@
 // role) - 404 landlord_not_found when the contact is missing, 409
 // landlord_not_landlord otherwise. Runs on the shared in-memory world.
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -156,6 +156,16 @@ describe('PATCH /api/units/:id - a CHANGED landlordId must name a landlord (I3)'
     const res = await patchUnit(app, 'u-1', { beds: 4 });
     expect(res.status).toBe(200);
     expect(world.units.get('u-1')?.beds).toBe(4);
+  });
+
+  it('(PIN) decides "changed" from a CONSISTENT unit read', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-1');
+    seedContact(world, 'c-ll-2', { type: 'landlord' });
+    const unitRead = vi.spyOn(world.unitsRepo, 'getById');
+    const res = await patchUnit(app, 'u-1', { landlordId: 'c-ll-2' });
+    expect(res.status).toBe(200);
+    expect(unitRead).toHaveBeenCalledWith('u-1', { consistentRead: true });
   });
 
   it('(PIN) an unknown unit still 404s unit_not_found', async () => {

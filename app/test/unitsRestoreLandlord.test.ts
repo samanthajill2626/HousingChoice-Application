@@ -8,7 +8,7 @@
 //     restore would refuse - swap or clear the landlord in one write;
 //   - the unit_restored audit gains landlordReplaced / landlordCleared.
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import { RosterWriteConflictError, type UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -65,6 +65,18 @@ describe('POST /api/units/:id/restore - plain restore (I3)', () => {
     expect(restoredEvents(world)).toHaveLength(1);
     expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('landlordReplaced');
     expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('landlordCleared');
+  });
+
+  it('(PIN) reads the unit and its landlord of record CONSISTENTLY', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-c');
+    seedContact(world, 'c-old', { type: 'landlord' });
+    const unitRead = vi.spyOn(world.unitsRepo, 'getById');
+    const contactRead = vi.spyOn(world.contactsRepo, 'getById');
+    const res = await restore(app, 'u-c');
+    expect(res.status).toBe(200);
+    expect(unitRead).toHaveBeenCalledWith('u-c', { consistentRead: true });
+    expect(contactRead).toHaveBeenCalledWith('c-old', { consistentRead: true });
   });
 
   it('(PIN) restores an ownerless property as before', async () => {

@@ -6,7 +6,7 @@
 // call; the repo's own 409 landlord_reassignment_required follows. Existing
 // seats, re-asserting the owner, and other contact types stay allowed.
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -106,6 +106,19 @@ describe('contact list - a caseworker never takes a NEW seat (I4)', () => {
     expect(world.units.get('u-seated')?.contacts).toContainEqual(
       expect.objectContaining({ contactId: 'c-cw', role: 'pm', primaryContact: true }),
     );
+  });
+
+  it('(PIN) decides from CONSISTENT reads of the unit and the contact', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-1');
+    seedContact(world, 'c-owner', { type: 'landlord' });
+    seedContact(world, 'c-ten', { type: 'tenant' });
+    const unitRead = vi.spyOn(world.unitsRepo, 'getById');
+    const contactRead = vi.spyOn(world.contactsRepo, 'getById');
+    const res = await addContact(app, 'u-1', { contactId: 'c-ten', role: 'other' });
+    expect(res.status).toBe(200);
+    expect(unitRead).toHaveBeenCalledWith('u-1', { consistentRead: true });
+    expect(contactRead).toHaveBeenCalledWith('c-ten', { consistentRead: true });
   });
 
   it('(PIN) other non-landlord types still take a new seat', async () => {

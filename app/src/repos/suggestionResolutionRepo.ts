@@ -26,7 +26,7 @@ import {
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
-import { DECISION_TARGETS } from '../services/extraction/runTypes.js';
+import { DECISION_TARGETS, TENANT_ONLY_TARGETS } from '../services/extraction/runTypes.js';
 import type { ContactItem, ContactPhone } from './contactsRepo.js';
 import { phoneRefId, seedPhonesForWrite } from './contactsRepo.js';
 import type { RepoDeps } from './conversationsRepo.js';
@@ -431,16 +431,71 @@ function contactGuardCondition(
   };
 }
 
+/** One guard clause against a contact read - the in-memory twin of contactGuardCondition. */
+function attributeMatches(
+  contact: ContactItem,
+  key: string,
+  expected: ResolutionAttributeGuard[string],
+): boolean {
+  const exists = Object.prototype.hasOwnProperty.call(contact, key) && contact[key] !== undefined;
+  return expected.exists
+    ? exists && isDeepStrictEqual(contact[key], expected.value)
+    : !exists;
+}
+
 function contactMatchesGuard(
   contact: ContactItem | undefined,
   guard: ResolutionAttributeGuard,
 ): boolean {
   if (contact === undefined) return false;
-  return Object.entries(guard).every(([key, expected]) => {
-    const exists = Object.prototype.hasOwnProperty.call(contact, key) && contact[key] !== undefined;
-    return expected.exists
-      ? exists && isDeepStrictEqual(contact[key], expected.value)
-      : !exists;
+  return Object.entries(guard).every(([key, expected]) => attributeMatches(contact, key, expected));
+}
+
+/**
+ * Spec 2026-10-12 D1: the guard keys that describe the contact's
+ * CLASSIFICATION rather than a field the plan writes. classification_revision
+ * is fenced by every tenant-only accept planned after the deploy;
+ * caseworker_conversion is the legacy fallback effectiveGuard adds for a
+ * journal claimed before it.
+ */
+export const CLASSIFICATION_GUARD_KEYS: readonly string[] = ['classification_revision', 'caseworker_conversion'];
+
+/**
+ * Spec 2026-10-12 D1 change 4: the ONE guard commitContactEffect evaluates -
+ * at its commit condition, at the consistent re-read that tells `stale` from a
+ * mismatch, and at the mismatch ConditionCheck - and the one the test fake
+ * evaluates, so the two cannot drift. It is the plan's guard, EXTENDED for a
+ * tenant-only journal claimed before classification_revision joined the guard:
+ * such a journal also requires caseworker_conversion to be absent (the
+ * conversion writes that attribute in the same write as the type change), so a
+ * legacy journal recovered onto a converted contact ends superseded instead of
+ * writing tenant facts onto a caseworker or looping on `stale`. Known limit: a
+ * legacy journal is not fenced against a GENERIC re-type. Phone and dismiss
+ * plans carry no guard and answer {}. Never mutates the stored plan.
+ */
+export function effectiveGuard(journal: ActiveSuggestionResolution): ResolutionAttributeGuard {
+  const plan = journal.plan;
+  if (plan.kind !== 'contact' && plan.kind !== 'status') return {};
+  const guard = plan.guard;
+  if (!TENANT_ONLY_TARGETS.has(journal.target)) return guard;
+  if (Object.prototype.hasOwnProperty.call(guard, 'classification_revision')) return guard;
+  return { ...guard, caseworker_conversion: { exists: false } };
+}
+
+/**
+ * Spec 2026-10-12 D1 change 5: true when `contact` fails `guard` on a
+ * CLASSIFICATION key, so the refusal is a reclassification - and that answer
+ * wins when a written field ALSO changed. A contact that no longer exists is
+ * not a reclassification (it stays a human-edit refusal, as before).
+ */
+export function guardMismatchIsClassification(
+  guard: ResolutionAttributeGuard,
+  contact: ContactItem | undefined,
+): boolean {
+  if (contact === undefined) return false;
+  return CLASSIFICATION_GUARD_KEYS.some((key) => {
+    const expected = guard[key];
+    return expected !== undefined && !attributeMatches(contact, key, expected);
   });
 }
 

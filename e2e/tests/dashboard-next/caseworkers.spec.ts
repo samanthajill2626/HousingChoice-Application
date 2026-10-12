@@ -554,3 +554,166 @@ test.describe('Caseworkers - the Unknown card', () => {
     ).toHaveCount(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Caseworker integrity (spec docs/superpowers/specs/2026-10-12-caseworker-
+// integrity-design.md D2): the GENERIC type change - the edit form's kind
+// picker - is refused while the contact is the tenant of an open placement or
+// the landlord of record of a live property. The placement refusal reuses the
+// conversion's sentence and link; the landlord one is D2's own, because no
+// dashboard path reassigns a property's landlord. Self-contained: every
+// contact, property and placement is run-unique (the reseed above is not
+// relied on), and the holdings reads are polled through the read-only
+// conversion preview, which runs the same index reads, before the UI acts.
+// ---------------------------------------------------------------------------
+
+/** The edit form and the type-change refusals' copy (dashboard
+ *  src/lib/holdingRefusals.ts; the placement sentence is UI.refusalPlacement). */
+const RETYPE = {
+  editDetails: 'Edit contact details',
+  editDialog: /Edit contact/i,
+  changeType: 'Change type',
+  kindGroup: 'Contact kind',
+  save: 'Save',
+  cancel: 'Cancel',
+  openPlacement: "Finish or close this contact's placement first.",
+  viewPlacement: 'View placement',
+  landlordOfRecord:
+    "This contact is the landlord of record for a property, so they must stay a landlord. Changing a property's landlord isn't available in the dashboard yet.",
+  viewProperty: 'View property',
+};
+
+/** POST /api/units - a live property owned by `landlordId` (it starts in Setup). */
+async function createOwnedUnit(request: APIRequestContext, landlordId: string, line1: string): Promise<string> {
+  const res = await request.post(`${NEXT}/api/units`, {
+    data: {
+      landlordId,
+      beds: 2,
+      rent_min: 1500,
+      rent_max: 1600,
+      address: { line1, city: 'Atlanta', state: 'GA', zip: '30314' },
+    },
+  });
+  expect(res.ok(), `create property ${line1}: ${await res.text()}`).toBeTruthy();
+  return ((await res.json()) as { unit: { unitId: string } }).unit.unitId;
+}
+
+/** POST /api/placements - an OPEN placement at the ladder's first rung. */
+async function createOpenPlacement(request: APIRequestContext, tenantId: string, unitId: string): Promise<string> {
+  const res = await request.post(`${NEXT}/api/placements`, {
+    data: { tenantId, unitId, stage: 'send_application' },
+  });
+  expect(res.ok(), `create placement: ${await res.text()}`).toBeTruthy();
+  return ((await res.json()) as { placement: { placementId: string } }).placement.placementId;
+}
+
+/** Open the contact page's Edit contact details dialog with its kind picker expanded. */
+async function openKindChange(page: Page, contactId: string): Promise<Locator> {
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  await page.getByRole('button', { name: RETYPE.editDetails }).click();
+  const dialog = page.getByRole('dialog', { name: RETYPE.editDialog });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: RETYPE.changeType, exact: true }).click();
+  return dialog;
+}
+
+/** Press the edit form's Save and read the answer to the PATCH it sends - the
+ *  server's own refusal, beside the sentence the dialog shows for it. */
+async function saveAndReadAnswer(
+  page: Page,
+  dialog: Locator,
+  contactId: string,
+): Promise<{ status: number; body: unknown }> {
+  const answer = page.waitForResponse(
+    (r) => r.request().method() === 'PATCH' && new URL(r.url()).pathname === `/api/contacts/${contactId}`,
+  );
+  await dialog.getByRole('button', { name: RETYPE.save, exact: true }).click();
+  const res = await answer;
+  return { status: res.status(), body: await res.json() };
+}
+
+test.describe('Caseworker integrity - the edit form refuses a type change that would break a record', () => {
+  test('an open placement keeps a tenant a tenant; a live property keeps its landlord a landlord', async ({
+    page,
+  }) => {
+    test.slow(); // two contacts, a property and a placement, then two edit-form round trips.
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const lastName = `Cwkret${stamp}`;
+    const tenantId = await createContact(req, { type: 'tenant', firstName: 'Retyped', lastName, phone: uniquePhone() });
+    const ownerId = await createContact(req, { type: 'landlord', firstName: 'Owner', lastName, phone: uniquePhone() });
+    const unitId = await createOwnedUnit(req, ownerId, `${stamp} Retype Refusal Way NW`);
+    const placementId = await createOpenPlacement(req, tenantId, unitId);
+    // The holdings reads are index queries (spec L1): wait until they see both
+    // records, read-only, so the PATCH below cannot slip through the lag.
+    await expect
+      .poll(
+        async () =>
+          (await readPreview(req, tenantId)).refusals.some(
+            (r) => r['code'] === 'caseworker_open_placement' && r['placementId'] === placementId,
+          ),
+        { timeout: 10_000 },
+      )
+      .toBe(true);
+    await expect
+      .poll(
+        async () =>
+          (await readPreview(req, ownerId)).refusals.some(
+            (r) => r['code'] === 'caseworker_landlord_of_record' && r['unitId'] === unitId,
+          ),
+        { timeout: 10_000 },
+      )
+      .toBe(true);
+
+    // 1. Tenant -> Landlord with an open placement: refused, the draft kept.
+    let dialog = await openKindChange(page, tenantId);
+    const kinds = dialog.getByRole('group', { name: RETYPE.kindGroup });
+    await kinds.getByRole('button', { name: 'Landlord', exact: true }).click();
+    const tenantAnswer = await saveAndReadAnswer(page, dialog, tenantId);
+    expect(tenantAnswer.status).toBe(409);
+    expect(tenantAnswer.body).toMatchObject({
+      error: 'type_change_refused',
+      refusals: [{ code: 'open_placement', placementId }],
+    });
+    await expect(dialog.getByText(RETYPE.openPlacement)).toBeVisible();
+    await expect(dialog.getByRole('link', { name: RETYPE.viewPlacement })).toHaveAttribute(
+      'href',
+      `/placements/${placementId}`,
+    );
+    await expect(kinds.getByRole('button', { name: 'Landlord', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await dialog.getByRole('button', { name: RETYPE.cancel, exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(await readContact(req, tenantId)).toMatchObject({ type: 'tenant' });
+
+    // 2. Landlord -> Tenant while the landlord of record of a live property.
+    dialog = await openKindChange(page, ownerId);
+    await dialog
+      .getByRole('group', { name: RETYPE.kindGroup })
+      .getByRole('button', { name: 'Tenant', exact: true })
+      .click();
+    const ownerAnswer = await saveAndReadAnswer(page, dialog, ownerId);
+    expect(ownerAnswer.status).toBe(409);
+    expect(ownerAnswer.body).toMatchObject({
+      error: 'type_change_refused',
+      refusals: [{ code: 'landlord_of_record', unitId }],
+    });
+    await expect(dialog.getByText(RETYPE.landlordOfRecord)).toBeVisible();
+    await expect(dialog.getByRole('link', { name: RETYPE.viewProperty })).toHaveAttribute(
+      'href',
+      `/listings/${unitId}`,
+    );
+    await dialog.getByRole('button', { name: RETYPE.cancel, exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(await readContact(req, ownerId)).toMatchObject({ type: 'landlord' });
+
+    // On the wire: one refusal per blocking record, nothing written.
+    const refused = await req.patch(`${NEXT}/api/contacts/${tenantId}`, { data: { type: 'partner' } });
+    expect(refused.status()).toBe(409);
+    expect(await refused.json()).toMatchObject({
+      error: 'type_change_refused',
+      refusals: [{ code: 'open_placement', placementId }],
+    });
+    expect(await readContact(req, tenantId)).toMatchObject({ type: 'tenant' });
+  });
+});

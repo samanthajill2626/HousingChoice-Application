@@ -554,6 +554,47 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
     });
   });
 
+  // R1 code review, backend finding 5: the LOST-ACKNOWLEDGEMENT path. The
+  // supersede transaction commits but its answer is lost (the client throws
+  // after the commit); the consistent journal read that follows shows our own
+  // supersede, so the repo returns the refusal it decided - on a
+  // reclassification that is superseded_by_reclassification, never the
+  // human-edit answer.
+  it('answers superseded_by_reclassification when the supersede committed but its acknowledgement was lost', async () => {
+    const contactId = 'reclass-lost-ack';
+    await putContact(contactId);
+    const phase = await claimFor(contactId, 'housingAuthority', 'Atlanta Housing Authority', authorityPlan({
+      housingAuthority: { exists: false },
+      housingAuthority_source: { exists: false },
+      classification_revision: { exists: false },
+    }));
+    await putContact(contactId, CONVERTED);
+    let lostAcks = 0;
+    const lossyDoc = {
+      send: async (command: unknown) => {
+        const result = await doc.send(command as never);
+        // Only the mismatch transaction carries a ConditionCheck: it commits,
+        // then its answer is lost.
+        const items = command instanceof TransactWriteCommand ? (command.input.TransactItems ?? []) : [];
+        if (items.some((item) => item.ConditionCheck !== undefined)) {
+          lostAcks += 1;
+          throw new Error('connection dropped after commit');
+        }
+        return result;
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const lossy = createSuggestionResolutionRepo({ doc: lossyDoc, env: testEnv, logger });
+
+    expect(await lossy.commitContactEffect(phase)).toBe('superseded_by_reclassification');
+
+    expect(lostAcks).toBe(1);
+    expect((await readContact(contactId))?.['housingAuthority']).toBeUndefined();
+    expect(await auditRows(contactId)).toEqual([]);
+    expect(await resolutions.get(contactId, 'housingAuthority')).toMatchObject({
+      state: 'active', phase: 'domain_applied', outcome: 'superseded_by_human_edit',
+    });
+  });
+
   it('answers superseded_by_reclassification when the field ALSO changed - classification wins the tie', async () => {
     const contactId = 'reclass-tie';
     await putContact(contactId, { housingAuthority: 'DeKalb County Housing Authority' });

@@ -817,9 +817,16 @@ export function ContactDetail(): React.JSX.Element {
       .finally(() => setSuggestionBusy(null));
   };
   // Declared after the helpers it calls (never a use before declaration).
+  // Spec 2026-10-12 D1 (planner-ruled, build research RF1-F1): a housing
+  // authority is a tenant fact, and a team member's page shows the tenant file
+  // and its chips. On a contact not typed tenant the "Is this really new?"
+  // review is skipped - its close-name path writes the authority by a plain
+  // contact edit that never meets the server's tenant-only rule - and the
+  // plain accept is sent, so the server refuses it before anything is consumed
+  // (409 suggestion_contact_not_tenant) and the chip says why.
   const onAcceptSuggestion = (target: string): void => {
     if (suggestionBusy !== null) return;
-    if (target === 'housingAuthority') {
+    if (target === 'housingAuthority' && contact.type === 'tenant') {
       reviewHousingAuthority();
       return;
     }

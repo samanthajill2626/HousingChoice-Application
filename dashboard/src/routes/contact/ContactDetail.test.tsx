@@ -2529,6 +2529,46 @@ describe('ContactDetail - accepting a housing authority suggestion', () => {
     await waitFor(() => expect(getSuggestions).toHaveBeenCalledTimes(2));
   });
 
+  // Spec 2026-10-12 D1, planner-ruled addition (build research RF1-F1 / Q1): a
+  // team member's page renders the tenant file and its chips, but a housing
+  // authority is a tenant fact. The review's close-name path would write it by
+  // a plain contact edit that never meets the server's tenant-only rule, so a
+  // non-tenant's chip skips the review and sends the plain accept, which the
+  // server refuses before anything is consumed.
+  it('a TEAM MEMBER chip skips the review and sends the plain accept, refused as not a tenant', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    // What the review would offer this text: a close name, i.e. a plain edit.
+    checkOrgText.mockResolvedValue({ candidates: [], close: [ATL] });
+    acceptSuggestion.mockRejectedValue(
+      new ApiError(409, 'suggestion_contact_not_tenant', 'suggestion_contact_not_tenant'),
+    );
+    getContact.mockResolvedValue({ ...TENANT, type: 'team_member' });
+    getSuggestions.mockResolvedValue([haSuggestion('Atlnta Housing')]);
+    renderAt('k1');
+    const chip = await screen.findByRole('group', { name: 'AI suggestion for housing authority' });
+    await user.click(within(chip).getByRole('button', { name: 'Accept' }));
+
+    // The plain accept: the identity only, never a chosen value.
+    await waitFor(() => expect(acceptSuggestion).toHaveBeenCalledTimes(1));
+    expect(acceptSuggestion.mock.calls[0]).toStrictEqual(['k1', 'housingAuthority', IDENTITY]);
+    const alert = await within(chip).findByRole('alert');
+    expect(alert).toHaveTextContent("This contact isn't a tenant, so this can't be applied. Dismiss it instead.");
+    expect(checkOrgText).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument();
+    expect(updateContact).not.toHaveBeenCalled();
+    // Refused before anything was consumed: the chip stays and offers Dismiss.
+    expect(within(chip).getByRole('button', { name: 'Dismiss' })).toBeEnabled();
+  });
+
+  it('a TENANT chip with the same non-list text still opens the review (PIN)', async () => {
+    checkOrgText.mockResolvedValue({ candidates: [], close: [ATL] });
+    await pressAccept('Atlnta Housing');
+    expect(await screen.findByRole('dialog', { name: 'Is this really new?' })).toBeInTheDocument();
+    expect(checkOrgText).toHaveBeenCalledWith({ kind: 'housing_authority', text: 'Atlnta Housing' });
+    expect(acceptSuggestion).not.toHaveBeenCalled();
+  });
+
   it('an agency name says so and offers Dismiss', async () => {
     checkOrgText.mockResolvedValue({ candidates: [], close: [], otherKind: [STEP], nameProblem: 'org_name_taken' });
     dismissSuggestion.mockResolvedValue([]);

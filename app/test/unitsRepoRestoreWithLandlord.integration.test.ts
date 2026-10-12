@@ -147,6 +147,31 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
     expect(updated.contacts).toEqual([{ contactId: 'c-pm', role: 'landlord', primaryContact: true }]);
   });
 
+  // R1 code review, backend finding 4: the old landlord was the primary by the
+  // primary_contact SCALAR alone (no roster row flagged - the scalar is
+  // PATCH-writable). The new landlord still takes the primary, so the scalar
+  // never dangles at a contact who is off the list and no longer the landlord.
+  it('moves the primary to the new landlord when only the primary_contact scalar named the old one', async () => {
+    const unitId = await deletedUnit(
+      [
+        { contactId: 'c-old', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      ],
+      'c-old',
+    );
+    const updated = await units.restoreWithLandlord(unitId, {
+      expectLandlordId: 'c-old',
+      next: { contactId: 'c-new' },
+    });
+    expect(updated.primary_contact).toBe('c-new');
+    expect(updated.contacts).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-new', role: 'landlord', primaryContact: true },
+    ]);
+    const stored = await units.getById(unitId, { consistentRead: true });
+    expect(stored?.primary_contact).toBe('c-new');
+  });
+
   it('clears the landlord: restored ownerless, old row gone, primary_contact removed', async () => {
     const unitId = await deletedUnit(
       [

@@ -138,6 +138,7 @@ import { armRelayCloseNagIfOpen, clearRelayCloseNagOnReopen } from '../services/
 import { normalizeToE164 } from '../lib/phone.js';
 import { recordTourEvent as recordTourEventShared } from '../lib/tourEvents.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
+import { OPEN_TOUR_STATUSES } from '../services/contactHoldings.js';
 import { requireTenantContact, sendContactTypeError } from '../services/contactTypeGuards.js';
 
 /**
@@ -1393,6 +1394,21 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // never by clearing, because an ABSENT pointer means pre-migration).
     const rotation = randomUUID();
     if ((armable && rearmTrigger) || terminal) patch['currentLadderId'] = rotation;
+
+    // Caseworker integrity I2 (spec 2026-10-12 section 4): REVIVING a canceled
+    // tour - into scheduled (a new time alone auto-advances, or an explicit
+    // status), toured or no_show - needs a contact typed `tenant`. A move
+    // between open statuses, or into a closed one, is not checked. The
+    // transition guards above have already answered; no write or side effect
+    // has run yet.
+    if (currentStatus === 'canceled' && OPEN_TOUR_STATUSES.has(effectiveStatus)) {
+      try {
+        await requireTenantContact(contacts, current.tenantId);
+      } catch (err) {
+        if (sendContactTypeError(err, res)) return;
+        throw err;
+      }
+    }
 
     let tour: TourItem;
     try {

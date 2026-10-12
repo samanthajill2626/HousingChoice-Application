@@ -59,21 +59,40 @@ than theoretical. Recorded for the handback.
 | RE-5 | `landlord-of-record-no-reassign-ui` calls UnitCreateForm "the only dashboard writer of landlordId" | NOTE | ACCEPT - RE-5 wording | U7 |
 | RE-6 | stale "title is S4's choice" comment | NOTE | ACCEPT - comment fix; the selectors row names `getByRole('dialog', { name: 'Restore property' })` | U7 |
 | RE-7 | refresh the `deriveTenantStatus` ref; cross-link `reimport-reverts-unknown-triage` | NOTE | ACCEPT | U7 |
-| RF1-F1 | the housing-authority "Is this really new?" dialog lets Accept on a TEAM MEMBER's chip write the authority by contacts PATCH (`ContactDetail.tsx:766-823`), never reaching D1's 409 | CORRECTION - plan-unlisted surface | QUESTION Q1 (mission rule: unlisted surface -> STOP for a ruling) | pending |
+| RF1-F1 | the housing-authority "Is this really new?" dialog lets Accept on a TEAM MEMBER's chip write the authority by contacts PATCH (`ContactDetail.tsx:766-823`), never reaching D1's 409 | CORRECTION - plan-unlisted surface | QUESTION Q1 -> PLANNER RULED 2026-10-12: FIX IN THIS BRANCH (Task 1.11, beside Task 1.10) | U1 |
 | RF1-F2 | non-accept writers of tenant-only fields (Settings move, direct PATCH/POST edits, tenant-status `porting`, importer) | NOTE | I1 is scoped to accepts - record; ACCEPT F2d as one bullet in `import-bypasses-contact-type-rules` (the importer writes voucherSize and notes on converted caseworkers) | U7 |
 | RF1-F3 | `transitionPlacement` decides "leaving a terminal stage" from an eventually consistent placement read | NOTE | L1 class - ACCEPT one clause in the RUNBOOK L1 paragraph | U7 |
 | RF1-F4 | inventory completeness | NOTE | record only | - |
-| RF2-N1 | the ownerless "Remove the primary contact?" notice says "tours fall back to the landlord of record" - false whenever it renders (no landlord of record exists); Task 4.13's new test pins it for a state this branch makes routine | NOTE - reader disagrees | QUESTION Q2 (copy) | pending |
+| RF2-N1 | the ownerless "Remove the primary contact?" notice says "tours fall back to the landlord of record" - false whenever it renders (no landlord of record exists); Task 4.13's new test pins it for a state this branch makes routine | NOTE - reader disagrees | QUESTION Q2 -> PLANNER RULED 2026-10-12: CHANGE THE COPY in Task 4.13 (exact sentence below) | U6 |
 | RF2-N2 | an API-only PATCH of `landlordId` leaves the contact list's landlord row behind | NOTE | ACCEPT - one sentence in `landlord-of-record-no-reassign-ui` (reuse restoreWithLandlord's row swap) | U7 |
 | RF2-N3 | spec section 5 names one seat writer; restore-with-landlord adds a second (landlord-typed) | NOTE | record only (I4 holds) | - |
 
-## Open questions sent to the planner (2026-10-12)
+## Questions sent to the planner, and the planner's rulings (2026-10-12)
 
 - Q1 (RF1-F1): fix in this branch - in `onAcceptSuggestion`, a
   `housingAuthority` chip on a contact not typed `tenant` skips the "Is this
   really new?" review and sends the plain accept, so the server answers 409
   `suggestion_contact_not_tenant` and the chip shows the D1 sentence (about 5
   lines + one ContactDetail test, beside Task 1.10)? Or file it as a low issue?
+  - RULED (planner, 2026-10-12): FIX IN THIS BRANCH, beside Task 1.10 - the
+    same invariant Cameron already ruled (a tenant-only accept on a non-tenant
+    is refused). In `onAcceptSuggestion`, a `housingAuthority` chip on a
+    contact not typed `tenant` skips the "Is this really new?" review and
+    sends the plain accept, so the server answers 409
+    `suggestion_contact_not_tenant` and the chip shows the D1 sentence. Test:
+    a team member's housing-authority chip -> no review dialog, the plain
+    accept is sent, the D1 sentence is shown, nothing is written by PATCH.
+    Recorded as a planner-ruled addition (Task 1.11) in the S1 slice report.
 - Q2 (RF2-N1): change the ownerless notice copy in Task 4.13 (string, its two
   test pins and the selectors row) to a true sentence, or keep it and file a
   low copy issue?
+  - RULED (planner, 2026-10-12): CHANGE THE COPY in Task 4.13 - the string,
+    its two test pins and the `e2e/support/selectors.md` row. New sentence,
+    exact: "This property will have no primary contact and has no landlord of
+    record, so calls and new relay groups for it will reach no one until a
+    contact is added." The other branch of `promotionNotice` is unchanged.
+    The stale code comment above `promotionNotice` (it claims tour/placement
+    resolution falls back to the landlord of record) is fixed to match.
+
+Both are planner rulings (code-level, within Cameron's approved scope); the
+planner informs Cameron.

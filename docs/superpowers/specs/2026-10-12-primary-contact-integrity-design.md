@@ -1,6 +1,7 @@
 # Primary contact integrity and the intro fallback explanation - design
 
-Date: 2026-10-12. Status: DRAFT rev 4 (design review rounds 1-3 folded in;
+Date: 2026-10-12. Status: rev 5 - design review CLOSED after round 4
+(terminal, precision only); awaiting Cameron's spec gate (rounds 1-4 folded in;
 adjudications at
 `docs/superpowers/reviews/2026-10-12-primary-contact-integrity/design-review/adjudications.md`).
 Branch: `feat/primary-contact-integrity` (worktree `W:\tmp\primary-contact-integrity`).
@@ -196,25 +197,32 @@ the liveness of the landlord of record and of every roster contact. Contract:
 ### 4.3 The heir function
 
 ONE pure function (no I/O; inputs: the unit's `unitContacts()` roster, its
-`landlordId`, an optional contact to exclude, and the liveness map) used by the
-real repo AND by the API-test fake (`app/test/helpers/twilioWebhookHarness.ts`
-`addContact` / `removeContact`, `:2940-3017`), so the two cannot drift:
+`landlordId`, an optional contact to exclude, and the CONTACT RECORDS from the
+4.2 read - liveness, type and role all come from them - or the fact that the
+read failed) used by the real repo AND by the API-test fake
+(`app/test/helpers/twilioWebhookHarness.ts` `addContact` / `removeContact`,
+`:2940-3017`), so the two cannot drift:
 
-1. the landlord of record, if live, not the excluded contact, and not a
-   caseworker. If the landlord has no roster row, the result says so and the
-   write ADDS their row (`role: 'landlord'`) as primary;
+1. the landlord of record, if live and not the excluded contact. If the
+   landlord has no roster row, the result says so and the write ADDS their row
+   (`role: 'landlord'`) as primary;
 2. else the earliest-added LIVE roster contact that is not the excluded one and
    not a caseworker;
-3. else no heir.
+3. else no heir, with WHY: `no_live_candidate` or `only_caseworkers` (at least
+   one live non-excluded roster contact existed, and every one was a
+   caseworker). The script's `noHeir` / `caseworkerOnly` counts and the 7.4 box
+   read this result; nothing re-derives the rule.
 
-Caseworkers are never picked AUTOMATICALLY (`isCaseworker`,
+Caseworkers are never picked AUTOMATICALLY at step 2 (`isCaseworker`,
 `lib/caseworkers.ts:86-88`: a `partner` with a caseworker role). A caseworker
 is the tenant's agency contact, not the property side; caseworker-integrity
 refuses NEW caseworker roster seats but leaves existing ones in place, so
 without this rule P2, P3 or the script could make one primary - named as the
-landlord in the tour intro and put on every new tour's default list. The
-liveness read already returns whole contacts, so this needs no extra read. An
-explicit "Make primary" is not an automatic pick and is not affected here.
+landlord in the tour intro and put on every new tour's default list. Step 1 is
+NOT filtered: the landlord of record is the property's owner by definition (it
+is also P1's own fallback, which has no type test), and caseworker-integrity
+refuses a caseworker as a NEW landlord of record. An explicit "Make primary" is
+not an automatic pick and is not affected here.
 
 The excluded contact counts as not live at EVERY step, whatever the liveness
 map says - so `heirIfPrimaryRemoved` (7.5) on a unit whose landlord is the
@@ -483,14 +491,15 @@ least one row. Amber box, same style as 7.1. Mockup:
   `deleted`, "This property's contact was deleted." (it may have been the
   primary or the landlord of record) - followed by "New tours won't include
   the landlord, and tour group texts use the general intro."
-- Action:
-  - exactly ONE live roster contact: button "Make <Name> primary" - the same
-    write as the edit-mode "Make primary" (`onMakePrimaryContact`,
+- Action, counting ELIGIBLE rows only (live and not a caseworker - the same
+  test as heir step 2; 7.5 marks both):
+  - exactly ONE eligible row: button "Make <Name> primary" - the same write as
+    the edit-mode "Make primary" (`onMakePrimaryContact`,
     `ListingDetail.tsx:437`).
-  - two or more live roster contacts: button "Choose a primary" - enters the
-    card's edit mode.
-  - no live roster contact: no button; the line reads "Add a contact - they
-    become the primary automatically."
+  - two or more eligible rows: button "Choose a primary" - enters the card's
+    edit mode.
+  - no eligible row (no live contact, or only caseworkers): no button; the
+    line reads "Add a contact - they become the primary automatically."
 - Not shown on a soft-deleted property (the card is read-only there), and not
   shown when the block is absent (could not tell).
 - Zero roster rows: no box. The existing empty state "No contacts on this
@@ -516,8 +525,9 @@ exactly as they do today and the GET never 500s. The unit responses
 that carry the enriched roster (GET `/api/units/:id`, `units.ts:531`, and the
 two roster writes, `:1136`, `:1171`) gain:
 
-- per row: `deleted: true` when the row's contact is soft-deleted or missing
-  (absent otherwise) - ONLY when the read was complete;
+- per row: `deleted: true` when the row's contact is soft-deleted or missing,
+  and `caseworker: true` when it is a caseworker (`isCaseworker`) - each absent
+  otherwise, and both ONLY when the read was complete;
 - on the unit, ONLY when the read was complete (absent = could not tell):
 
 ```
@@ -712,7 +722,9 @@ P1 removes the property-contact route into this; the rest is filed as
   ignores `requireComplete`, so the 503 / unknown paths are tested with an
   injected contacts repo whose batch read throws - in BOTH shapes (a raw error
   and `IncompleteBatchReadError`), on add, remove, the unit GET and the delete
-  fan-out. The heir function's caseworker exclusion is pinned at both steps.
+  fan-out. The heir function's caseworker exclusion is pinned at step 2, and a
+caseworker landlord of record is pinned as still picked at step 1; the
+`only_caseworkers` result and the 7.4 box's eligible-row count are pinned.
 - App API tests: the 7.5 block (complete read, incomplete read -> absent,
   deleted rows), the preview `introFallback`, the contact DELETE handoff, P2b's
   refusal, the Activity projection's `reason`.

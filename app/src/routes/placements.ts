@@ -670,9 +670,15 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     }
     // Referential integrity (same posture as POST /): the tenant + unit must
     // still exist. IDs only in the response codes.
-    if (!(await contacts.getById(tour.tenantId))) {
-      res.status(404).json({ error: 'tenant_not_found' });
-      return;
+    // Caseworker integrity I2 (spec 2026-10-12 section 4): the tour's tenant
+    // must still exist (404 tenant_not_found, as before) AND be a contact typed
+    // `tenant` (409 contact_not_tenant) - one CONSISTENT read, BEFORE the
+    // conversion claim, so a refusal writes nothing.
+    try {
+      await requireTenantContact(contacts, tour.tenantId);
+    } catch (err) {
+      if (sendContactTypeError(err, res)) return;
+      throw err;
     }
     if (!(await units.getById(tour.unitId))) {
       res.status(404).json({ error: 'unit_not_found' });

@@ -191,8 +191,10 @@ Needs review -> Interested -> Onboarding -> Active
    terminal branch: Parked (reachable from ANY state, park_reason required)
 ```
 
-- **`Needs review`** - the auto-capture/triage front door (same front door tenants and
-  untriaged contacts land at). A contact whose type is not yet resolved sits here.
+- **`Needs review`** - the auto-capture/triage front door (the same front door
+  auto-captured and untriaged contacts land at, flyer sign-ups included; a tenant from a
+  `/join` sign-up starts at `Onboarding` instead). A contact whose type is not yet
+  resolved sits here.
 - **`Interested`** - a landlord lead worth pursuing. Tagging/triaging a contact as a
   landlord (inbox triage, a plain re-type, or a manual create with no explicit status)
   lands them HERE, not `Active` - a freshly identified landlord is a LEAD, not an

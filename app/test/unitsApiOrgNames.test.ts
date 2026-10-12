@@ -8,6 +8,7 @@
 // first read.
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -25,9 +26,18 @@ function names(refs: Array<{ name: string }>): string[] {
   return refs.map((r) => r.name).sort();
 }
 
+/**
+ * caseworker-integrity I3 (spec 2026-10-12 section 4): a created unit's
+ * landlordId must name a contact typed `landlord`.
+ */
+function seedLandlord(world: FakeWorld, contactId = 'contact-ll-1'): void {
+  world.contacts.push({ contactId, type: 'landlord' } as ContactItem);
+}
+
 describe('POST /api/units - accepted_authorities (spec D5)', () => {
   it('(PIN) stores exact list names as is', async () => {
-    const { app } = makeWebhookHarness();
+    const { app, world } = makeWebhookHarness();
+    seedLandlord(world);
     const res = await postUnit(app, {
       landlordId: 'contact-ll-1',
       accepted_authorities: ['Atlanta Housing Authority', 'Decatur Housing Authority'],
@@ -38,6 +48,7 @@ describe('POST /api/units - accepted_authorities (spec D5)', () => {
 
   it('resolves a unique spelling to the exact name and de-duplicates the result', async () => {
     const { app, world } = makeWebhookHarness();
+    seedLandlord(world);
     const res = await postUnit(app, {
       landlordId: 'contact-ll-1',
       accepted_authorities: ['Atlanta Housing Authority', 'Georgia DCA', 'Georgia Department of Community Affairs'],

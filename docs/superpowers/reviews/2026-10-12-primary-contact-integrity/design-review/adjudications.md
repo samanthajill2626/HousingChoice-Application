@@ -71,3 +71,22 @@ other mechanisms. Decisions changed: YES (K1, K2) -> round 3 required.
 | K10 | R2-10 | ACCEPT | no | The e2e seam creates its OWN unit + contact, never rewrites a shared lean unit. |
 | K11 | R2-11 (contests J24) | ACCEPT - reviewer right | no | A UNIT read failure keeps the decidable tour reasons beside `lookup_failed`; only an OWNER read failure stands alone. |
 | K12 | section-10 note | ACCEPT | no | The 503 / unknown paths are tested with an injected contacts repo (the fake ignores `requireComplete`). |
+
+## Round 3 (spec rev 3 @1f546052)
+
+Report: `spec-R3-reviewer-b.md` (reviewer B continued, 5 findings; no
+adjudication contested). Re-checked: the requireComplete batch read rethrows a
+raw chunk error (`contactsRepo.ts:986-990`) as well as throwing
+`IncompleteBatchReadError` (`:994-996`); `isCaseworker` exists
+(`lib/caseworkers.ts:86-88`).
+
+Result: 5 ACCEPT, 0 REJECT. Decisions changed: YES, one (L2: caseworkers are
+never an automatic heir) -> round 4, the last allowed.
+
+| id | finding | verdict | decision changed? | resolution in rev 4 |
+|---|---|---|---|---|
+| L1 | R3-1 | ACCEPT | no | 4.2 / 7.5: ANY throw from the requireComplete read (raw chunk error or IncompleteBatchReadError) means unknown; tests cover both shapes on add, remove, GET and the fan-out. |
+| L2 | R3-2 | ACCEPT | yes | The heir function never picks a caseworker (`isCaseworker`), at either step. Planner's call, flagged to Cameron at the spec gate: a caseworker is the tenant's agency contact, not the property side, and caseworker-integrity leaves existing caseworker seats in place. Explicit Make primary is untouched. The script counts `caseworkerOnly` units instead of promoting. |
+| L3 | R3-3 | ACCEPT | no | 4.4 text: a re-sent true on a deleted already-primary row triggers the handoff; "flagged primary AND live" untouched; P2's no-heir branch leaves a deleted flagged primary's flag AND scalar (as the fan-out does) and removes the scalar only when no row is flagged. |
+| L4 | R3-4 | ACCEPT | no | Placement diagnostic keeps today's code per state (`relay_member_unresolvable` for is_tenant). |
+| L5 | R3-5 | ACCEPT | no | The 4.2 batch includes the ADDED contact; the fan-out's re-read re-checks the deleted contact is still the primary before re-deciding; the 7.4 no-live-contact line says the add promotes automatically. |

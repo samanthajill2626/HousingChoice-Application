@@ -45,6 +45,7 @@ import {
 import { BLANK, Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterRow, responseClass } from '../contact/Card.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { Modal } from '../contact/Modal.js';
+import { isCaseworkerContact } from '../contact/caseworkerRole.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { useListing } from './useListing.js';
@@ -363,8 +364,12 @@ export function ListingDetail(): React.JSX.Element {
   const rosteredIds = new Set(contactRows.map((r) => r.contactId));
   /** Search candidates for "+ Add contact": every live contact NOT already on
    *  the roster (re-adding a rostered contact is a re-role, which the row's own
-   *  selector does). */
-  const addContactCandidates = contactsList.filter((c) => !rosteredIds.has(c.contactId));
+   *  selector does). Never a caseworker: a caseworker can't take a NEW seat on
+   *  a property's contact list (caseworker-integrity I4; the server refuses
+   *  with 409 contact_list_caseworker). */
+  const addContactCandidates = contactsList.filter(
+    (c) => !rosteredIds.has(c.contactId) && !isCaseworkerContact(c),
+  );
 
   /** The server's answer IS the new truth - apply it to the card AND the page. */
   const applyRosterUnit = (updated: UnitItem): void => {

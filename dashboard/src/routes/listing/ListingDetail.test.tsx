@@ -1366,6 +1366,32 @@ describe('ListingDetail - Contacts card edit mode', () => {
     expect(screen.getByRole('combobox', { name: 'Add contact' })).toHaveValue('Renata Vale');
   });
 
+  it('the Add contact picker never offers a caseworker (I4) - other kinds still show', async () => {
+    const user = userEvent.setup();
+    useContacts.mockImplementation((filter: string) =>
+      filter === 'deleted'
+        ? { status: 'ready', contacts: [] }
+        : {
+            status: 'ready',
+            contacts: [
+              { contactId: 'pm9', type: 'landlord', status: 'active', firstName: 'Renata', lastName: 'Vale', phone: '+14045550188' },
+              { contactId: 'cw1', type: 'partner', role: 'Caseworker', status: 'active', firstName: 'Renee', lastName: 'Casey', phone: '+14045550199' },
+              { contactId: 'pt1', type: 'partner', role: 'Navigator', status: 'active', firstName: 'Renaldo', lastName: 'Park', phone: '+14045550177' },
+            ],
+          },
+    );
+    useListing.mockReturnValue(ROSTER_READY);
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: '+ Add contact' }));
+    await user.type(screen.getByRole('combobox', { name: 'Add contact' }), 'Ren');
+
+    expect(screen.getByRole('option', { name: /Renata Vale/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Renaldo Park/ })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /Renee Casey/ })).not.toBeInTheDocument();
+  });
+
   it('make primary contact re-POSTs the row with primaryContact: true, role preserved', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue(ROSTER_READY);

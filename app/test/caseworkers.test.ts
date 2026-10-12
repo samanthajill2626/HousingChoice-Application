@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CASEWORKER_ROLE,
+  contactKind,
   hasAiCaseworkerNote,
   isCaseworker,
   isCaseworkerRole,
@@ -155,5 +156,20 @@ describe('PossibleSignal (plan 3.2 wire names)', () => {
   it('names the four signals in declaration order', () => {
     const order: PossibleSignal[] = ['role_mentions', 'ai_note', 'relationship', 'partner_no_role'];
     expect(order).toHaveLength(4);
+  });
+});
+
+describe('contactKind (spec 2026-10-12 section 4: the kind a refusal names)', () => {
+  it.each([
+    [{ type: 'partner', role: 'Caseworker' }, 'caseworker'],
+    [{ type: 'partner', role: 'case worker' }, 'caseworker'],
+    [{ type: 'partner', role: 'Case Manager' }, 'partner'],
+    [{ type: 'partner' }, 'partner'],
+    [{ type: 'tenant', role: 'Caseworker' }, 'tenant'],
+    [{ type: 'landlord', role: 'Property Manager' }, 'landlord'],
+    [{ type: 'unknown' }, 'unknown'],
+    [{ type: 'team_member', role: 'Caseworker' }, 'team_member'],
+  ] as const)('%o -> %s', (contact, expected) => {
+    expect(contactKind(contact)).toBe(expected);
   });
 });

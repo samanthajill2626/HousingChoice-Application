@@ -86,3 +86,13 @@ export function hasAiCaseworkerNote(notes: unknown): boolean {
 export function isCaseworker(c: { type?: unknown; role?: unknown }): boolean {
   return c.type === 'partner' && isCaseworkerRole(c.role);
 }
+
+/**
+ * The kind a refusal names (spec
+ * docs/superpowers/specs/2026-10-12-caseworker-integrity-design.md section 4:
+ * 409 contact_not_tenant's `contactKind`): 'caseworker' when isCaseworker
+ * holds, else the stored type as text. PURE, like the rest of this module.
+ */
+export function contactKind(c: { type?: unknown; role?: unknown }): string {
+  return isCaseworker(c) ? 'caseworker' : String(c.type);
+}

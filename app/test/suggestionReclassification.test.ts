@@ -613,3 +613,42 @@ describe('D1 change 5: the requester of a refused accept hears 409 suggestion_co
     expect(phones.map((entry) => entry.phone)).toContain('+15550102020');
   });
 });
+
+describe('D1 change 6: the suggestions route notifies dashboards of a reclassification refusal', () => {
+  it('emits suggestion.updated once for 409 suggestion_contact_reclassified - claim() consumed the chip', async () => {
+    const { app, world } = makeWebhookHarness();
+    await world.orgListRepo.putForSeed(startingOrgList());
+    seedContact(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'housingAuthority', suggestedValue: 'Atlanta Housing Authority',
+      conversationId: 'conv-1', runId: 'run-ha',
+    });
+    const paused = pausedAtClaim(world);
+    const pending = accept(paused.app, 'c1', 'housingAuthority').then((res) => res);
+    await paused.atClaim;
+    await convert(app, 'c1').expect(200);
+    // Counted AFTER the conversion, so only the accept's own answer is measured.
+    const emitsBefore = suggestionEmits(world);
+
+    paused.release();
+    const res = await pending;
+
+    expect(res.body).toEqual({ error: 'suggestion_contact_reclassified' });
+    expect(await world.extractionRepo.getSuggestion('c1', 'housingAuthority')).toBeUndefined();
+    expect(suggestionEmits(world)).toBe(emitsBefore + 1);
+  });
+
+  it('emits nothing for 409 suggestion_contact_not_tenant - nothing was consumed (PIN)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-ll', type: 'landlord', status: 'active' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c-ll', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-ll', runId: 'run-pets',
+    });
+    const emitsBefore = suggestionEmits(world);
+
+    const res = await accept(app, 'c-ll', 'pets');
+
+    expect(res.body).toEqual({ error: 'suggestion_contact_not_tenant' });
+    expect(suggestionEmits(world)).toBe(emitsBefore);
+  });
+});

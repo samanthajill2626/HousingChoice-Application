@@ -216,13 +216,16 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
       //    pending list really changed (adv P3-25). Read BEFORE the instanceof
       //    branch: a raw repo/SDK throw strands the flag otherwise, and that
       //    failure is not less of a state change (item 28);
-      //  - `suggestion_field_edited`: the request's own accept was refused, yet
-      //    claim() had already consumed the `sugg#` row and the journal was
-      //    scrubbed, so every open dashboard is showing a chip that no longer
-      //    exists (H1).
+      //  - `suggestion_field_edited` / `suggestion_contact_reclassified`: the
+      //    request's own accept was refused (a human edit, or a type/role change
+      //    after the plan read the contact - spec 2026-10-12 D1), yet claim()
+      //    had already consumed the `sugg#` row and the journal was scrubbed,
+      //    so every open dashboard is showing a chip that no longer exists (H1).
+      //    `suggestion_contact_not_tenant` is refused BEFORE the claim,
+      //    consumes nothing and emits nothing.
       const helped = (error as { helpedCommitted?: boolean } | null)?.helpedCommitted === true;
       const refused = error instanceof SuggestionResolutionError
-        && error.code === 'suggestion_field_edited';
+        && (error.code === 'suggestion_field_edited' || error.code === 'suggestion_contact_reclassified');
       if (helped || refused) events.emit('suggestion.updated', { contactId });
       if (error instanceof SuggestionResolutionError) {
         res.status(error.status).json({

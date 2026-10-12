@@ -775,7 +775,10 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           if (!matchesIdentity(suggestion, input.identity)) {
             throw new SuggestionResolutionError(409, 'suggestion_replaced');
           }
-          const contact = await deps.contactsRepo.getById(input.contactId);
+          // Spec 2026-10-12 D1 change 1: CONSISTENT. This read drives the
+          // tenant-only type rule and the classification_revision fence; a stale
+          // read would refuse spuriously and, for the fence, consume the chip.
+          const contact = await deps.contactsRepo.getById(input.contactId, { consistentRead: true });
           if (!contact) throw new SuggestionResolutionError(404, 'contact_not_found');
           // Spec 2026-10-06 D8: a housingAuthority accept is checked against the
           // CURRENT organization list while the plan is built - before the claim

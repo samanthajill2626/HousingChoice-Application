@@ -99,3 +99,49 @@ describe('TenantFile - Staff notes card placement', () => {
     expect(screen.getByRole('button', { name: 'Edit staff notes' })).toBeInTheDocument();
   });
 });
+
+// Caseworker integrity I2 (spec 2026-10-12 section 4, "Team members"): tours
+// and placements are for tenants. TenantFile also serves team_member
+// contacts, who get neither action (Cameron 2026-10-12: tours are never booked
+// on team members; the server refuses them too).
+describe('TenantFile - tours and placements are for tenants (caseworker integrity)', () => {
+  function renderWithActions(contact: Contact): void {
+    render(
+      <MemoryRouter>
+        <TenantFile
+          contact={contact}
+          phones={[{ phone: '+14045550111', primary: true }]}
+          placements={[]}
+          tours={[]}
+          units={[]}
+          listingsSentPending={false}
+          listingsSent={[]}
+          relayGroupsPending={false}
+          relayGroups={[]}
+          groupThreadsPending={false}
+          groupThreads={[]}
+          groupThreadsTruncated={false}
+          media={[]}
+          onEdit={vi.fn()}
+          onContactUpdated={vi.fn()}
+          onScheduleTour={vi.fn()}
+          onStartPlacement={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+  }
+
+  it('(PIN) a tenant gets "+ Schedule" and "+ Start placement"', () => {
+    renderWithActions(CONTACT);
+    expect(screen.getByRole('button', { name: 'Schedule a tour' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start a placement' })).toBeInTheDocument();
+  });
+
+  it('a team member gets neither action, while both cards still render', () => {
+    renderWithActions({ ...CONTACT, type: 'team_member', status: 'active' });
+    expect(screen.queryByRole('button', { name: 'Schedule a tour' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start a placement' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /^Tours/ })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /^Placements/ })).toBeInTheDocument();
+  });
+});

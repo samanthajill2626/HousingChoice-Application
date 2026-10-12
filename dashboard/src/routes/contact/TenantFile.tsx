@@ -162,6 +162,11 @@ export function TenantFile({
     const src = aiSourceOf(contact, field);
     return src ? <AutoBadge {...(src.at !== undefined && { at: src.at })} /> : null;
   };
+  // Tours and placements are for TENANTS (caseworker integrity I2, spec
+  // 2026-10-12 section 4): this file also serves team_member contacts, who
+  // get neither "+ Schedule" nor "+ Start placement" - the server refuses
+  // them too.
+  const isTenant = contact.type === 'tenant';
   const myPlacements = tenantPlacements(placements, contact.contactId);
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' - ');
   const voucher = typeof contact.voucherSize === 'number' ? `${contact.voucherSize} BR` : '—';
@@ -317,7 +322,7 @@ export function TenantFile({
       <Card
         title="Tours"
         aside={
-          onScheduleTour ? (
+          onScheduleTour && isTenant ? (
             <CardAction onClick={onScheduleTour} label="Schedule a tour">
               + Schedule
             </CardAction>
@@ -345,7 +350,7 @@ export function TenantFile({
       <Card
         title="Placements"
         aside={
-          onStartPlacement ? (
+          onStartPlacement && isTenant ? (
             <CardAction onClick={onStartPlacement} label="Start a placement">
               + Start placement
             </CardAction>

@@ -17,7 +17,9 @@ old 9rem floor no longer places a list entirely offscreen. Normal below-input
 placement, portal ownership, keyboard selection, committed values, disabled
 state and moved-anchor scroll dismissal remain covered by the existing tests.
 
-The exact apply-ready patch is .superpowers/sdd/C6/proposed-fix.patch.
+The exact apply-ready patch is .superpowers/sdd/C6/proposed-fix.patch
+(preserved at worktree cleanup, 2026-10-11, as C6-proposed-fix.patch in this
+folder; it applies cleanly to main at 6fbd16b6).
 It passes git apply --check against the clean source at 5985552b. Raw patches
 and byte backups are ignored references, not duplicated in this record.
 The baseline diagnosis is S10-recipient-picker-baseline.md; the open issue is

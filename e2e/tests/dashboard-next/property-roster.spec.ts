@@ -292,7 +292,8 @@ async function createPartnerContact(
 interface UnitWire {
   landlordId?: string;
   deleted_at?: string;
-  contacts?: Array<{ contactId: string; role: string }>;
+  primary_contact?: string;
+  contacts?: Array<{ contactId: string; role: string; primaryContact?: boolean }>;
 }
 
 async function readUnit(request: APIRequestContext, unitId: string): Promise<UnitWire> {
@@ -375,6 +376,9 @@ test.describe('Property contact list and restore - caseworker integrity', () => 
     const req = page.request;
     const stamp = `${Date.now()}`.slice(-6);
     const oldOwner = await createContact(req, 'landlord', `Rsgone${stamp}`);
+    // Added once the property is ownerless (the last step); minted before the
+    // page loads so the Add contact search offers them.
+    const pm = await createContact(req, 'landlord', `Rspm${stamp}`);
     const unitId = await deletedWithRetypedOwner(req, oldOwner);
 
     await page.goto(`${NEXT}/listings/${unitId}`);
@@ -404,6 +408,30 @@ test.describe('Property contact list and restore - caseworker integrity', () => 
     expect(unit.deleted_at).toBeUndefined();
     expect(unit.landlordId).toBeUndefined();
     expect((unit.contacts ?? []).map((c) => c.contactId)).not.toContain(oldOwner.contactId);
+
+    // Auto-primary (spec revision 4 section 4, Cameron 2026-10-12): the property
+    // now has no primary contact and no landlord of record, so the contact added
+    // next becomes its primary contact - no separate Make primary.
+    await page.getByRole('button', { name: 'Edit contacts' }).click();
+    await page.getByRole('button', { name: '+ Add contact' }).click();
+    await page.getByRole('combobox', { name: 'Add contact' }).fill(pm.firstName);
+    await page.getByRole('option', { name: pm.name }).click();
+    await page.getByRole('combobox', { name: 'Role for the new contact' }).selectOption('pm');
+    await page.getByRole('button', { name: 'Add contact to this property' }).click();
+    await expect(page.getByRole('button', { name: `Remove ${pm.name} from this property` })).toBeVisible({
+      timeout: 20_000,
+    });
+    // The primary contact is the one row without a Make primary action...
+    await expect(page.getByRole('button', { name: `Make ${pm.name} the primary contact` })).toHaveCount(0);
+    // ...and, out of edit mode, its row carries the card's primary marker.
+    await page.getByRole('button', { name: 'Done editing contacts' }).click();
+    await expect(page.getByRole('link', { name: new RegExp(`^${pm.name} \\(primary\\)`) })).toBeVisible();
+    unit = await readUnit(req, unitId);
+    expect(unit.primary_contact).toBe(pm.contactId);
+    expect(unit.contacts ?? []).toContainEqual(
+      expect.objectContaining({ contactId: pm.contactId, role: 'pm', primaryContact: true }),
+    );
+    expect(unit.landlordId).toBeUndefined();
   });
 
   test('Restore with this landlord: the property comes back owned by the landlord picked', async ({ page }) => {

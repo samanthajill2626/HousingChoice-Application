@@ -1171,3 +1171,129 @@ describe('POST /public/housing-fair - new contacts start Onboarding with the mar
     expect(world.contacts).toEqual([{ ...neverWelcomed, housing_fair_welcomed: true }]);
   });
 });
+
+describe('POST /public/housing-fair - audit and log (D7)', () => {
+  function harness() {
+    return makeWebhookHarness({ env: { PUBLIC_RATE_LIMIT_MAX: '100' } });
+  }
+
+  it('a new /join contact with an authority: the audit records signupVersion 2 and the name; the log carries withAuthority only', async () => {
+    const { app, world, capture } = harness();
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'Atlanta Housing Authority' }));
+    expect(res.status).toBe(200);
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+
+    expect(world.auditEvents.filter((e) => e.event_type === 'housing_fair_signup')).toEqual([
+      {
+        entityKey: `contacts#${contact?.contactId}`,
+        event_type: 'housing_fair_signup',
+        payload: {
+          marker: expect.any(String),
+          isNew: true,
+          welcomeSent: true,
+          viaFlyer: false,
+          signupVersion: 2,
+          housingAuthority: 'Atlanta Housing Authority',
+        },
+      },
+    ]);
+
+    const lines = capture.lines.filter((l) => l['msg'] === 'housing-fair signup captured');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ isNew: true, welcomeSent: true, viaFlyer: false, withAuthority: true });
+    expect(JSON.stringify(lines[0])).not.toContain('Atlanta Housing Authority');
+  });
+
+  it('no authority (absent or null): housingAuthority null in the audit, withAuthority false in the log', async () => {
+    const { app, world, capture } = harness();
+    await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
+    await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ phone: '(555) 010-2001', housingAuthority: null }));
+
+    const payloads = world.auditEvents
+      .filter((e) => e.event_type === 'housing_fair_signup')
+      .map((e) => e.payload);
+    expect(payloads).toEqual([
+      {
+        marker: expect.any(String),
+        isNew: true,
+        welcomeSent: true,
+        viaFlyer: false,
+        signupVersion: 2,
+        housingAuthority: null,
+      },
+      {
+        marker: expect.any(String),
+        isNew: true,
+        welcomeSent: true,
+        viaFlyer: false,
+        signupVersion: 2,
+        housingAuthority: null,
+      },
+    ]);
+    const lines = capture.lines.filter((l) => l['msg'] === 'housing-fair signup captured');
+    expect(lines.map((l) => l['withAuthority'])).toEqual([false, false]);
+  });
+
+  it('a flyer sign-up: viaFlyer true, signupVersion 2, housingAuthority null', async () => {
+    const { app, world, capture } = harness();
+    world.units.set('unit-flyer', { unitId: 'unit-flyer', landlordId: 'll-1', status: 'available', beds: 2 });
+    await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 'unit-flyer' }));
+    expect(world.auditEvents.filter((e) => e.event_type === 'housing_fair_signup').map((e) => e.payload)).toEqual([
+      {
+        marker: expect.any(String),
+        isNew: true,
+        welcomeSent: true,
+        viaFlyer: true,
+        signupVersion: 2,
+        housingAuthority: null,
+      },
+    ]);
+    const lines = capture.lines.filter((l) => l['msg'] === 'housing-fair signup captured');
+    expect(lines[0]).toMatchObject({ viaFlyer: true, withAuthority: false });
+  });
+
+  it('an existing phone: the audit records the answer it was sent, though nothing is written to the contact', async () => {
+    const { app, world, capture } = harness();
+    world.contacts.push({
+      contactId: 'c-existing',
+      type: 'tenant',
+      status: 'searching',
+      phone: '+15550102000',
+      firstName: 'Keisha',
+      lastName: 'Jones',
+      housing_fair_welcomed: true,
+    } as ContactItem);
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'Atlanta Housing Authority' }));
+    expect(res.status).toBe(200);
+    expect(world.contacts[0]?.housingAuthority).toBeUndefined();
+    expect(world.auditEvents.filter((e) => e.event_type === 'housing_fair_signup')).toEqual([
+      {
+        entityKey: 'contacts#c-existing',
+        event_type: 'housing_fair_signup',
+        payload: {
+          marker: expect.any(String),
+          isNew: false,
+          welcomeSent: false,
+          viaFlyer: false,
+          signupVersion: 2,
+          housingAuthority: 'Atlanta Housing Authority',
+        },
+      },
+    ]);
+    const lines = capture.lines.filter((l) => l['msg'] === 'housing-fair signup captured');
+    expect(lines[0]).toMatchObject({ isNew: false, withAuthority: true });
+  });
+});

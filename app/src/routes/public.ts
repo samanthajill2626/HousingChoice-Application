@@ -409,16 +409,30 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
 
     // (4) Audit (no PII in the payload beyond the marker — the contactId is an
     // internal id, fine for the audit trail but NOT returned to the public).
+    // join-housing-authority D7: every event from now on carries
+    // signupVersion 2 (the lead backfill reads it: a pre-change lead who
+    // signed up again after the change is left alone) and the authority the
+    // REQUEST carried, else null - an organization name, not PII - recorded
+    // for an existing contact too, though D6 writes nothing to it.
     await audit.append(`contacts#${contactId}`, 'housing_fair_signup', {
       marker,
       isNew: existing === undefined,
       welcomeSent,
       viaFlyer,
+      signupVersion: 2,
+      housingAuthority: housingAuthority ?? null,
     });
     // Log a hashed marker only — NEVER the name or phone (doc §9 / kickoff).
-    // viaFlyer is a non-PII boolean (whether a shareable unit was attributed).
+    // viaFlyer is a non-PII boolean (whether a shareable unit was attributed);
+    // withAuthority (D7) is a boolean too - the name itself stays out of logs.
     log.info(
-      { marker, isNew: existing === undefined, welcomeSent, viaFlyer },
+      {
+        marker,
+        isNew: existing === undefined,
+        welcomeSent,
+        viaFlyer,
+        withAuthority: housingAuthority !== undefined,
+      },
       'housing-fair signup captured',
     );
 

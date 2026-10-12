@@ -22,6 +22,7 @@ import {
   type OrgRef,
 } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
+import { refusalCopyByKind } from '../../lib/holdingRefusals.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
 import {
@@ -58,33 +59,20 @@ export function finalCaseworkerError(err: unknown): string | null {
   return null;
 }
 
-/** One refusal's staff sentence and the link to the record that blocks it (plan 3.9). */
+/** One refusal's staff sentence and the link to the record that blocks it
+ *  (plan 3.9). The sentences live in lib/holdingRefusals.ts keyed by refusal
+ *  KIND, shared with the generic type change (spec 2026-10-12 D2); each
+ *  caseworker_* code maps onto its kind, so the output is unchanged. */
 export function refusalCopy(refusal: CaseworkerRefusal): { sentence: string; linkText: string; to: string } {
   switch (refusal.code) {
     case 'caseworker_open_placement':
-      return {
-        sentence: "Finish or close this contact's placement first.",
-        linkText: 'View placement',
-        to: `/placements/${encodeURIComponent(refusal.placementId)}`,
-      };
+      return refusalCopyByKind({ code: 'open_placement', placementId: refusal.placementId });
     case 'caseworker_open_tour':
-      return {
-        sentence: "Cancel or close this contact's open tour first.",
-        linkText: 'View tour',
-        to: `/tours/${encodeURIComponent(refusal.tourId)}`,
-      };
+      return refusalCopyByKind({ code: 'open_tour', tourId: refusal.tourId });
     case 'caseworker_landlord_of_record':
-      return {
-        sentence: "This contact is the landlord of record for a property. Change that property's landlord first.",
-        linkText: 'View property',
-        to: `/listings/${encodeURIComponent(refusal.unitId)}`,
-      };
+      return refusalCopyByKind({ code: 'landlord_of_record', unitId: refusal.unitId });
     case 'caseworker_on_roster':
-      return {
-        sentence: "This contact is on a property's contact list. Remove them from it first.",
-        linkText: 'View property',
-        to: `/listings/${encodeURIComponent(refusal.unitId)}`,
-      };
+      return refusalCopyByKind({ code: 'on_roster', unitId: refusal.unitId });
   }
 }
 

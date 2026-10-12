@@ -1453,6 +1453,34 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
       validation.fields['accepted_authorities'] = check.value;
     }
+    // caseworker-integrity I3 (spec 2026-10-12 section 4): a CHANGED landlordId
+    // must name a contact typed `landlord` (404 landlord_not_found / 409
+    // landlord_not_landlord). "Changed" is decided on a CONSISTENT unit read; an
+    // unchanged landlordId is not checked (re-saving the stored owner, L2). An
+    // empty id names no contact, so it is a 404 without a contact read.
+    const landlordPatch = validation.fields['landlordId'];
+    if (typeof landlordPatch === 'string') {
+      const current = await units.getById(unitId, { consistentRead: true });
+      if (current === undefined) {
+        res.status(404).json({ error: 'unit_not_found' });
+        return;
+      }
+      if (current.landlordId !== landlordPatch) {
+        if (landlordPatch.length === 0) {
+          res.status(404).json({ error: 'landlord_not_found' });
+          return;
+        }
+        try {
+          await requireLandlordContact(contacts, landlordPatch);
+        } catch (err) {
+          if (sendContactTypeError(err, res)) {
+            log.info({ unitId, actor: req.user?.userId }, 'unit patch refused: landlordId is not a landlord');
+            return;
+          }
+          throw err;
+        }
+      }
+    }
     // D1 delete-on-removal (the raw E5 seam): `media` is PATCH-writable and a
     // wholesale replace can drop stored keys. Snapshot the PRIOR list BEFORE the
     // write - as a COPY, because a read-modify-write repo can return the SAME

@@ -6,6 +6,7 @@
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
+import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
@@ -71,5 +72,97 @@ describe('POST /api/units - the landlordId must name a landlord (I3)', () => {
     const offList = await postUnit(app, { landlordId: 'c-ghost', accepted_authorities: ['Step Up'] });
     expect(offList.status).toBe(422);
     expect(offList.body.error).toBe('org_not_on_list');
+  });
+});
+
+const STAMP = '2026-10-12T09:00:00.000Z';
+
+function seedUnit(world: FakeWorld, unitId: string, overrides: Partial<UnitItem> = {}): void {
+  world.units.set(unitId, {
+    unitId,
+    landlordId: 'c-ll',
+    status: 'available',
+    created_at: STAMP,
+    updated_at: STAMP,
+    ...overrides,
+  });
+}
+
+function patchUnit(app: import('express').Express, unitId: string, body: Record<string, unknown>) {
+  return request(app)
+    .patch(`/api/units/${unitId}`)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('cookie', TEST_SESSION_COOKIE)
+    .send(body);
+}
+
+describe('PATCH /api/units/:id - a CHANGED landlordId must name a landlord (I3)', () => {
+  it('(PIN) moves the property to another landlord', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-1');
+    seedContact(world, 'c-ll', { type: 'landlord' });
+    seedContact(world, 'c-ll-2', { type: 'landlord' });
+    const res = await patchUnit(app, 'u-1', { landlordId: 'c-ll-2' });
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-1')?.landlordId).toBe('c-ll-2');
+  });
+
+  it('404s landlord_not_found for a missing contact - unit unchanged, no audit row', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-1');
+    const res = await patchUnit(app, 'u-1', { landlordId: 'c-ghost' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'landlord_not_found' });
+    expect(world.units.get('u-1')?.landlordId).toBe('c-ll');
+    expect(world.auditEvents).toHaveLength(0);
+  });
+
+  it.each(NON_LANDLORDS)(
+    '409s landlord_not_landlord for a %s - unit unchanged, no audit row',
+    async (_kind, fields) => {
+      const { app, world } = makeWebhookHarness();
+      seedUnit(world, 'u-1');
+      seedContact(world, 'c-other', fields);
+      const res = await patchUnit(app, 'u-1', { landlordId: 'c-other', beds: 3 });
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: 'landlord_not_landlord' });
+      expect(world.units.get('u-1')?.landlordId).toBe('c-ll');
+      expect(world.units.get('u-1')?.beds).toBeUndefined();
+      expect(world.auditEvents).toHaveLength(0);
+    },
+  );
+
+  it('404s landlord_not_found for an empty landlordId', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-1');
+    const res = await patchUnit(app, 'u-1', { landlordId: '' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'landlord_not_found' });
+    expect(world.units.get('u-1')?.landlordId).toBe('c-ll');
+  });
+
+  it('(PIN) an UNCHANGED landlordId is not checked, even when the stored landlord is no longer a landlord (L2)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-1');
+    seedContact(world, 'c-ll', { type: 'tenant' });
+    const res = await patchUnit(app, 'u-1', { landlordId: 'c-ll', beds: 3 });
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-1')?.beds).toBe(3);
+  });
+
+  it('(PIN) a PATCH without landlordId never looks at the landlord', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-1');
+    const res = await patchUnit(app, 'u-1', { beds: 4 });
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-1')?.beds).toBe(4);
+  });
+
+  it('(PIN) an unknown unit still 404s unit_not_found', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, 'c-ll', { type: 'landlord' });
+    const res = await patchUnit(app, 'nope', { landlordId: 'c-ll' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'unit_not_found' });
   });
 });

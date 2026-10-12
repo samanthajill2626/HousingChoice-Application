@@ -512,11 +512,14 @@ export function ListingDetail(): React.JSX.Element {
 
   /** Who the primary-contact routing lands on once `row` is gone: the landlord
    *  of record (the repo promotes them), or nobody when the property has no
-   *  landlordId. There is no further fallback: with no primary contact and no
-   *  landlord of record, the server's property-contact resolvers (the primary
-   *  row, else the landlord of record) find no one, so calls and new relay
-   *  groups for the property reach no one until a contact is added
-   *  (caseworker-integrity, planner ruling Q2 / research RF2-N1). */
+   *  landlordId. There is no further fallback: the server's property-contact
+   *  resolvers take the primary row, else the landlord of record, so with
+   *  neither they find no one and calls and new relay groups for the property
+   *  reach no one. "+ Add contact" adds a NON-primary row, so adding a contact
+   *  does not end that: only making someone on the contact list the primary
+   *  contact, or adding a Landlord (which claims the vacant landlord-of-record
+   *  slot), restores the routing (caseworker-integrity, planner rulings Q2 and
+   *  Q3; R1 code review, dashboard finding 1). */
   const promotionNotice = (): string => {
     const promoted =
       landlordOfRecord.length > 0
@@ -524,7 +527,7 @@ export function ListingDetail(): React.JSX.Element {
         : undefined;
     return promoted !== undefined
       ? `${promoted} becomes the primary contact - calls and new relay groups for this property will go to them.`
-      : 'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until a contact is added.';
+      : 'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a landlord is added.';
   };
 
   const onAddContact = (): void => {

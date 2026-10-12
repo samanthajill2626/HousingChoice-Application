@@ -1783,7 +1783,7 @@ describe('ListingDetail - Contacts card edit mode', () => {
     const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
     expect(
       within(dialog).getByText(
-        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until a contact is added.',
+        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a landlord is added.',
       ),
     ).toBeInTheDocument();
   });
@@ -1804,7 +1804,7 @@ describe('ListingDetail - Contacts card edit mode', () => {
     const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
     expect(
       within(dialog).getByText(
-        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until a contact is added.',
+        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a landlord is added.',
       ),
     ).toBeInTheDocument();
   });

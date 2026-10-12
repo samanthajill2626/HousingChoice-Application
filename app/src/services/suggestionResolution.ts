@@ -21,12 +21,17 @@ import {
   contactAddressToParts,
   formatAddressParts,
 } from './extraction/address.js';
-import { isDecisionTarget } from './extraction/runTypes.js';
+import { isDecisionTarget, TENANT_ONLY_TARGETS } from './extraction/runTypes.js';
 import { buildContactStatusTransitionPlan } from './statusTransition.js';
 import type { TenantStatus } from '../lib/statusModel.js';
 import { statusAllowlistFor } from '../lib/statusModel.js';
 import { checkScalarWrite, KINDS_FOR_FIELD, resolveOrgText, type OrgEntry } from '../lib/orgNames.js';
 import type { OrgNamesService } from './orgNames.js';
+
+// Spec 2026-10-12 D1: the seven tenant-only targets, exported here under the
+// plan's binding name. Defined in extraction/runTypes.ts (a leaf module) so the
+// resolution repository can read it without importing this service.
+export { TENANT_ONLY_TARGETS };
 
 const EXTRACTABLE = new Set<string>(EXTRACTABLE_FIELDS);
 const MAX_RESOLUTION_LOOPS = 6;
@@ -780,6 +785,19 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           // read would refuse spuriously and, for the fence, consume the chip.
           const contact = await deps.contactsRepo.getById(input.contactId, { consistentRead: true });
           if (!contact) throw new SuggestionResolutionError(404, 'contact_not_found');
+          // Spec 2026-10-12 D1 change 2: tenant facts are accepted only onto a
+          // contact typed tenant - the rule extraction proposes them by
+          // (extraction/apply.ts fieldApplies). Refused BEFORE the claim, so the
+          // chip is not consumed and staff can still dismiss it; a dismiss is
+          // never refused. It runs before buildPlan, so a status accept meets
+          // it before the type-scoped allowlist check.
+          if (
+            input.action === 'accept'
+            && TENANT_ONLY_TARGETS.has(input.target)
+            && contact.type !== 'tenant'
+          ) {
+            throw new SuggestionResolutionError(409, 'suggestion_contact_not_tenant');
+          }
           // Spec 2026-10-06 D8: a housingAuthority accept is checked against the
           // CURRENT organization list while the plan is built - before the claim
           // below, so a refusal never consumes the suggestion. Nothing else

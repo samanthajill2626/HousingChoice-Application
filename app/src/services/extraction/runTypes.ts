@@ -15,6 +15,20 @@ export function isDecisionTarget(value: unknown): value is DecisionTarget {
   return typeof value === 'string' && (DECISION_TARGETS as readonly string[]).includes(value);
 }
 
+/**
+ * Spec 2026-10-12 D1 (I1): the targets whose facts belong to a tenant only. An
+ * accept of one is refused on a contact not typed tenant (409
+ * suggestion_contact_not_tenant, before the claim) and is fenced on the
+ * contact's classification_revision. The neutral targets (firstName, lastName,
+ * phone, address) are never refused or fenced; `type` cannot be accepted at
+ * all. Defined in this leaf module so the resolution service AND the resolution
+ * repository (effectiveGuard) share one definition without an import cycle;
+ * services/suggestionResolution.ts re-exports it.
+ */
+export const TENANT_ONLY_TARGETS: ReadonlySet<string> = new Set<string>([
+  'housingAuthority', 'voucherSize', 'pets', 'evictions', 'tenure', 'porting', 'status',
+]);
+
 /** What the model said for a target before folding or downgrading. */
 export type ProposedOp = 'write' | 'suggest' | 'none' | 'absent';
 

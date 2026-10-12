@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import type { SuggestionItem } from '../src/repos/extractionRepo.js';
+import { TENANT_ONLY_TARGETS } from '../src/services/suggestionResolution.js';
 
 const suggestionIdentities = new Map<string, { revision?: string; createdAt: string; runId?: string }>();
 
@@ -51,6 +52,26 @@ function accept(app: import('express').Express, contactId: string, target: strin
     .send(suggestionIdentities.get(`${contactId}#${target}`));
 }
 
+function dismiss(app: import('express').Express, contactId: string, target: string) {
+  return request(app)
+    .post(`/api/contacts/${contactId}/suggestions/${target}/dismiss`)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('cookie', TEST_SESSION_COOKIE)
+    .send(suggestionIdentities.get(`${contactId}#${target}`));
+}
+
+function contactOf(world: FakeWorld, contactId: string) {
+  return world.contacts.find((contact) => contact.contactId === contactId);
+}
+
+function journalsFor(world: FakeWorld, contactId: string) {
+  return [...world.suggestionResolutions.values()].filter((item) => item.contactId === contactId);
+}
+
+function suggestionEmits(world: FakeWorld): number {
+  return world.emitted.filter((event) => event.event === 'suggestion.updated').length;
+}
+
 // D1 cases. Later tasks insert their helpers ABOVE this line.
 
 describe('D1 change 1: the accept plan reads the contact consistently', () => {
@@ -67,5 +88,84 @@ describe('D1 change 1: the accept plan reads the contact consistently', () => {
     // The FIRST contact read of the request is the plan read: resolve() reads
     // the journal and the suggestion first, neither through contactsRepo.
     expect(getById.mock.calls[0]).toEqual(['c1', { consistentRead: true }]);
+  });
+});
+
+describe('D1 change 2: a tenant-only accept on a contact not typed tenant is refused before the claim', () => {
+  it('names exactly the seven tenant-only targets', () => {
+    expect([...TENANT_ONLY_TARGETS].sort()).toEqual([
+      'evictions', 'housingAuthority', 'pets', 'porting', 'status', 'tenure', 'voucherSize',
+    ]);
+  });
+
+  it.each([
+    ['housingAuthority', 'Atlanta Housing Authority'],
+    ['voucherSize', '3'],
+    ['pets', 'two cats'],
+    ['evictions', 'none'],
+    ['tenure', '2 years'],
+    ['porting', 'true'],
+    ['status', 'searching'],
+  ])('refuses a %s accept on a landlord with 409 suggestion_contact_not_tenant and keeps the chip', async (target, suggestedValue) => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-ll', type: 'landlord', status: 'active' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c-ll', target, suggestedValue, conversationId: 'conv-ll', runId: `run-${target}`,
+    });
+    const emitsBefore = suggestionEmits(world);
+
+    const res = await accept(app, 'c-ll', target);
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'suggestion_contact_not_tenant' });
+    // Refused before the claim: the chip is still pending, no journal exists,
+    // the contact is untouched and no dashboard is told anything changed.
+    expect(await world.extractionRepo.getSuggestion('c-ll', target)).toBeDefined();
+    expect(journalsFor(world, 'c-ll')).toEqual([]);
+    expect(contactOf(world, 'c-ll')?.[target]).toEqual(target === 'status' ? 'active' : undefined);
+    expect(suggestionEmits(world)).toBe(emitsBefore);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['an unknown contact', { type: 'unknown', status: 'needs_review' }],
+    ['a caseworker', { type: 'partner', role: 'Caseworker', status: 'active' }],
+    ['a team member', { type: 'team_member', status: 'active' }],
+  ])('refuses a voucherSize accept on %s too', async (_label, kind) => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-kind', ...kind });
+    await seedSuggestion(world, {
+      ownerContactId: 'c-kind', target: 'voucherSize', suggestedValue: '3', conversationId: 'conv-k', runId: 'run-k',
+    });
+
+    const res = await accept(app, 'c-kind', 'voucherSize');
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'suggestion_contact_not_tenant' });
+    expect(await world.extractionRepo.getSuggestion('c-kind', 'voucherSize')).toBeDefined();
+    expect(contactOf(world, 'c-kind')?.['voucherSize']).toBeUndefined();
+  });
+
+  it('never refuses a dismiss - staff clear the kept chip this way (PIN)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-ll', type: 'landlord', status: 'active' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c-ll', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-ll', runId: 'run-pets',
+    });
+
+    await dismiss(app, 'c-ll', 'pets').expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c-ll', 'pets')).toBeUndefined();
+  });
+
+  it('leaves a neutral target alone: a lastName accept on a landlord still commits (PIN)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, { contactId: 'c-ll', type: 'landlord', status: 'active' });
+    await seedSuggestion(world, {
+      ownerContactId: 'c-ll', target: 'lastName', suggestedValue: 'Okafor', conversationId: 'conv-ll', runId: 'run-last',
+    });
+
+    await accept(app, 'c-ll', 'lastName').expect(200);
+
+    expect(contactOf(world, 'c-ll')?.['lastName']).toBe('Okafor');
   });
 });

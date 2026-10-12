@@ -192,3 +192,33 @@ adjudication).
 Round 2 result: decisions CHANGED (D11's comparison input, D14 added, the
 preview's degraded state, the card grouping rule). Round 3 proceeds with the
 same reviewer under the re-review charge.
+
+## Round 3 (2026-10-12) - spec 37bd970b (revision 3) -> revision 4
+
+Reviewer A continued (`spec-r3-reviewer-a.md`, 6 findings, no BLOCKING or
+HIGH, no contested adjudications).
+
+1. R3-1 - the `lastMarkedAt ?? updatedAt` fallback lets an automated tour
+   write (relay group open, conversion claim) undo a decline. ACCEPT.
+   Verified (`toursRepo.ts:559` stamps `updatedAt` on every write). The
+   input is `max(createdAt, lastMarkedAt)`; a fresh tour is carried by
+   `createdAt`.
+2. R3-2 - D14's form path needs host changes the spec did not list. ACCEPT.
+   The contact host gains a per-click `initialUnitId`; the property host
+   gains a per-click `tenantId` and the `?tour=new&tenantId=` entry; the
+   waiting list navigates there; every row carries `interestedMode`; the
+   hosts' navigation to the new tour page is accepted as is.
+3. R3-3 - `recipientMissing` rows cannot be "interested by the tour alone"
+   and had no card group. ACCEPT. Decline-by-share or `no_reply`, NOT
+   ELIGIBLE group.
+4. R3-4 - `isEligibleRecipient` omitted the phone check. ACCEPT.
+5. R3-5 - in the degraded preview a declined, not-already-sent tenant starts
+   checked and the warning did not say so. ACCEPT; the line says it.
+6. R3-6 - `?status=none` nearly spells the module's `NONE_KEY`; the
+   sentinel-plus-values case was undefined. ACCEPT. Sentinel `_empty`;
+   values win over the sentinel.
+
+Round 3 result: NO decision changed - every accepted item is a precision
+edit to a mechanism already decided. Per the stop rule this is the terminal
+round; the design review is CLOSED at round 3 of a 4-round cap. Rejections
+across all rounds: one (B14), later reversed on contest; see round 2.

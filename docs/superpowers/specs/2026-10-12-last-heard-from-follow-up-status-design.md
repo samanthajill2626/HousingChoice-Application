@@ -1,9 +1,9 @@
 # Last heard from, follow-up status for shared properties, and the off-screen contact search
 
 Date: 2026-10-12
-Status: DRAFT revision 3 (after design review rounds 1 and 2) - round 3
-pending, then Cameron's spec gate, then Sam's mockup feedback (section 9)
-before the build launches
+Status: DRAFT revision 4 - design review CLOSED after round 3 (a
+precision-only round); Cameron's spec gate next, then Sam's mockup feedback
+(section 9) before the build launches
 Branch: feat/last-heard-from (worktree W:\tmp\last-heard-from, cut from main
 @19607658)
 Tracker: Sam's improvements #3 ("Most interested tenants" view, 5-8 hrs) and
@@ -172,9 +172,10 @@ Added after design review round 1 (adjudications file, section 1):
   qualifying tour for the pair was created, rescheduled or reopened
   (`max(createdAt, lastMarkedAt)` over every qualifying tour, not the chip
   winner's `createdAt`: the chip winner is the most PROGRESSED tour, and a
-  revived tour keeps its original `createdAt`, `toursModel.ts:214-218`). A
-  tour created or revived after a decline means the tenant changed their
-  mind, from any tour-creating path.
+  revived tour keeps its original `createdAt`, `toursModel.ts:214-218`;
+  never `updatedAt`, which any automated write bumps, `toursRepo.ts:559`).
+  A tour created or revived by a PERSON after a decline means the tenant
+  changed their mind, from any tour-creating path.
 - D12. The joins that feed an outcome are REQUIRED on the endpoints that
   serve outcomes, read with `requireComplete` so a partial batch is
   detected. A failed join is an error response, never a wrong outcome with
@@ -430,7 +431,9 @@ draft has no unit. These reads serve labels, not outcomes with buttons, so
 D12's 503 does not apply: when any of them fails, the preview still serves
 its candidates with NO decline labels and `declineLabelsUnavailable: true`,
 and the review step shows one line above the list ("Couldn't load
-not-interested labels - sends still work") rather than hiding the failure.
+not-interested labels - a tenant who said no may be checked; sends still
+work") rather than hiding the failure. The wording is honest: in this state
+a declined tenant who is not also already sent starts CHECKED.
 
 The dashboard row (`RecipientPreview.tsx`) renders, in this order: checkbox;
 name (link, new tab as today); phone; status badge (`StatusBadge
@@ -524,8 +527,12 @@ arrived) and needs no handling.
 
 `deriveTourSignal` (`lib/listingSendTour.ts`) gains `latestActivityAt` on
 its result: the max over EVERY qualifying tour for the pair of
-`max(createdAt, lastMarkedAt ?? updatedAt)` (the model's own "last time a
-person marked / rescheduled / reopened it", `toursModel.ts:214-218`). It is
+`max(createdAt, lastMarkedAt)` (the model's own "last time a person marked
+/ rescheduled / reopened it", `toursModel.ts:214-218`; `lastMarkedAt` is
+absent until a person acts, so `createdAt` carries a fresh tour). NOT
+`updatedAt`: that is last-touched-by-anything (`toursRepo.ts:559`) - opening
+a relay group or a conversion claim bumps it - and would let an automated
+write undo a decline. It is
 deliberately not the chip winner's own timestamp: the winner is the most
 PROGRESSED tour (`listingSendTour.ts:41-45`), so a months-old toured tour
 would otherwise hide a request made after the decline. A `requested`,
@@ -642,10 +649,24 @@ POST /api/units/:unitId/recipients/:contactId/outcome
   `requested` tour when the date is left empty, `ScheduleTourForm.tsx:3`,
   `:310-318`) with the tenant and property pre-committed, the guessed type
   shown with its existing "check it" caption, and no time; submitting it
-  creates the tour through `POST /api/tours` as today, and the row reads
-  Interested on its next load through D11 (the new tour's activity
-  supersedes any decline). `deriveTourType` stays where it is; nothing moves
-  to the app.
+  creates the tour through `POST /api/tours` as today (and navigates to the
+  new tour's page, as both existing hosts do - acceptable: the tour exists,
+  and Back returns to the card, which reads Interested on load through
+  D11). `deriveTourType` stays where it is; nothing moves to the app. The
+  hosts need these changes, which the plan carries as tasks:
+  - the contact page's host pre-commits the LATEST sent property
+    (`ContactDetail.tsx:1306-1313`); it gains a per-click `initialUnitId`
+    override so the clicked row's property is the one pre-committed;
+  - the property page's host passes no `tenantId`
+    (`ListingDetail.tsx:1304-1312`); it gains a per-click `tenantId` from
+    the clicked row, and the `?tour=new` entry (partner link, section 5.4)
+    opens it with no tenant, while `?tour=new&tenantId=<id>` opens it with
+    one;
+  - the waiting list has no form host: its Interested action on a
+    no-tour-type property navigates to the property page with
+    `?tour=new&tenantId=<id>`. Every outcome-serving row therefore carries
+    `interestedMode: 'route' | 'form'` (from the unit's `tour_type`), so no
+    surface guesses.
 - The `by: 'engine'` value is reserved for Work Package 3. This route always
   writes `staff`.
 
@@ -666,9 +687,11 @@ and a to-do list, so on these endpoints:
   outcome.
 - a contact that is genuinely MISSING (a hard-deleted contact behind a
   listed row) is not "incomplete": the row is served with the id as its
-  name, `recipientMissing: true`, its outcome derived with no contact facts
-  (so `no_reply` or `interested` by the tour alone), `interestedSupported:
-  false` and no actions.
+  name, `recipientMissing: true`, its outcome `not_interested` when the row
+  carries a decline not superseded by a later share, else `no_reply` (no
+  type means no tour signal is read and no reply can be known),
+  `interestedSupported: false`, no actions, and it falls in the property
+  card's NOT ELIGIBLE group.
 - the error surface per endpoint: the property card shows its error row
   ("We couldn't load recipients.", `ListingDetail.tsx:1057-1058`); the
   contact cards today render ANY non-ready slice as the pending panel
@@ -763,9 +786,9 @@ Mechanism, independent of where it lives:
    card grouping); the last two are the list's own thresholds:
    - outcome is `no_reply` or `replied` (not `interested`, not
      `not_interested`);
-   - the contact is not deleted, not opted out, not unreachable (the
-     resolver's own hard exclusions, `audienceResolution.ts:146-148`), so
-     every row's Text action can work;
+   - the contact is not deleted, not opted out, not unreachable, and has a
+     phone (the resolver's own hard exclusions,
+     `audienceResolution.ts:146-154`), so every row's Text action can work;
    - the contact is not a tenant in `inactive` or `placed` (D1);
    - `sentAt` is within the LOOKBACK window;
    - the contact has been quiet for at least the QUIET threshold, measured
@@ -813,13 +836,16 @@ change):
   unconstrained" convention (`tenantFacets.ts:57-62`) and says so in code:
   - URL state: repeated `?status=<value>`; NO `status` param = the DEFAULT
     set (every status except `inactive` and `placed`); the sentinel
-    `?status=none` = the EMPTY selection (zero rows, the ordinary "no
+    `?status=_empty` = the EMPTY selection (zero rows, the ordinary "no
     tenants match" line), so deselection never locks - the chip contract at
-    `ContactsList.tsx:216-218` holds for the last lit chip too. "All seven
-    on" is the way to see everyone.
+    `ContactsList.tsx:216-218` holds for the last lit chip too. The
+    sentinel is spelled unlike the module's existing `NONE_KEY`
+    (`__none__`, "no voucher size", a different concept) on purpose. A URL
+    carrying the sentinel AND status values reads as the values; the
+    sentinel is dropped. "All seven on" is the way to see everyone.
   - Only a selection that differs from the default is written to the URL;
     selecting exactly the default set removes the param. A URL whose
-    `status` values are all invalid prunes to the default, not to `none`.
+    `status` values are all invalid prunes to the default, not to empty.
   - "Clear" for this facet returns to the DEFAULT set and is shown only
     while the selection differs from the default (`ChipGroup` gains a
     `baseline` prop so Clear is never a dead control; the other facets keep

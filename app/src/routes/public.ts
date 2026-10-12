@@ -31,7 +31,7 @@ import { createHash } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import { ORG_NAME_MAX } from '../lib/orgNames.js';
+import { KINDS_FOR_FIELD, ORG_NAME_MAX, isOnListFor } from '../lib/orgNames.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { CONSENT_VERSION, WELCOME_SMS } from '../lib/smsCompliance.js';
 import { resolveWithSettings } from '../messages/index.js';
@@ -51,6 +51,7 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import {
+  HOUSING_AUTHORITY_NOT_LISTED,
   PUBLIC_LIST_RATE_LIMIT,
   housingAuthorityNames,
   loadPublicOrgEntries,
@@ -221,6 +222,9 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
+  // join-housing-authority D3: the list a sign-up's housing authority is checked
+  // against (read with peek() only - the public surface never creates it).
+  const orgList = deps.orgListRepo ?? createOrgListRepo({ logger: deps.logger });
   // flyer-full-info: config.businessPhoneNumber (or null when unconfigured). Rides
   // on the flyer payload AND every opaque 404 so the page's unavailable state can
   // still offer the text-us CTA (there is no flyer payload to read it from there).
@@ -267,9 +271,25 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
         .json({ error: parsed.error === 'consent_required' ? 'consent_required' : 'invalid request' });
       return;
     }
-    const { firstName, lastName, phone, voucherSize, unitId } = parsed;
+    const { firstName, lastName, phone, voucherSize, unitId, housingAuthority } = parsed;
     const marker = phoneMarker(phone);
     mergeContext({}); // keep this request's log lines correlated (no PII added)
+
+    // join-housing-authority D3: the list check, BEFORE the unit or contact
+    // reads and before any write, for a new and an existing phone alike. The
+    // list is read ONLY when an authority was sent, from the source the public
+    // list read serves (peek, else the starting list in memory - never a
+    // write). The value must be character-for-character the name of a
+    // housing_authority entry: no case, spelling or agency resolution. The
+    // distinct code lets the /join form recover; the list is public, so the
+    // code reveals nothing. A read failure propagates: the generic 500.
+    if (housingAuthority !== undefined) {
+      const entries = await loadPublicOrgEntries(orgList);
+      if (!isOnListFor(entries, housingAuthority, KINDS_FOR_FIELD.housingAuthority)) {
+        res.status(400).json({ error: HOUSING_AUTHORITY_NOT_LISTED });
+        return;
+      }
+    }
 
     // Flyer attribution: when the signup carries a unitId for a SHAREABLE unit,
     // stamp the created contact with capture_source:'flyer' + unit_of_interest so

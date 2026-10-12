@@ -699,17 +699,21 @@ describe('ContactDetail', () => {
       await waitFor(() => expect(getSuggestions).toHaveBeenCalledTimes(2));
     });
 
-    // The SERVER answers these three with a list that has genuinely moved on:
+    // The SERVER answers these four with a list that has genuinely moved on:
     // two of them PROMISE "the list now shows its real state", and a refused
     // accept has already deleted the row. The server does emit
-    // `suggestion.updated` for a helped commit and for the refused accept (the
-    // helped-or-refused emit in the suggestions router's shared error path),
-    // but an SSE is asynchronous and not guaranteed to reach THIS tab before
-    // the operator looks - the refetch is what makes the answer true here.
+    // `suggestion.updated` for a helped commit and for both refused accepts (a
+    // field edit or a reclassification) (the helped-or-refused emit in the
+    // suggestions router's shared error path), but an SSE is asynchronous and
+    // not guaranteed to reach THIS tab before the operator looks - the refetch
+    // is what makes the answer true here.
     it.each([
       ['no_pending_suggestion', 404],
       ['suggestion_already_resolved', 409],
       ['suggestion_field_edited', 409],
+      // Spec 2026-10-12 D1: refused by the classification fence after claim()
+      // consumed the row - the list has moved on exactly like a field edit.
+      ['suggestion_contact_reclassified', 409],
     ])('refetches on a SERVER %s so the list really does show its real state', async (code, httpStatus) => {
       acceptSuggestion.mockRejectedValue(new ApiError(httpStatus, code, code));
       const chip = await clickChip('Accept');
@@ -731,6 +735,20 @@ describe('ContactDetail', () => {
 
       const alert = await within(chip).findByRole('alert');
       expect(alert).toHaveTextContent('try again in a moment');
+      expect(getSuggestions).toHaveBeenCalledTimes(1);
+    });
+
+    // Spec 2026-10-12 D1: refused BEFORE the claim, so the chip is still
+    // pending server-side - it stays, says why, and offers Dismiss.
+    it('keeps the chip and does NOT refetch on suggestion_contact_not_tenant (PIN)', async () => {
+      acceptSuggestion.mockRejectedValue(
+        new ApiError(409, 'suggestion_contact_not_tenant', 'suggestion_contact_not_tenant'),
+      );
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent("This contact isn't a tenant, so this can't be applied. Dismiss it instead.");
+      expect(within(chip).getByRole('button', { name: 'Dismiss' })).toBeEnabled();
       expect(getSuggestions).toHaveBeenCalledTimes(1);
     });
   });

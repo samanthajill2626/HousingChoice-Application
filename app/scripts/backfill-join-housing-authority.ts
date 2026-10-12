@@ -179,10 +179,12 @@ export interface BackfillLead {
 /**
  * What became of one target: would_write (dry run); written; skipped (its
  * write lost its condition - the lead changed after the read, nothing
- * written); failed (its history read or its write threw - nothing written;
- * the run exits 1).
+ * written); read_failed (its history read threw - no write was attempted, so
+ * nothing written); write_failed (its write threw any error but a lost
+ * condition - a timeout can follow a write that landed, so it may or may not
+ * have landed). Both failures count in `failed`; the run exits 1.
  */
-export type TargetOutcome = 'would_write' | 'written' | 'skipped' | 'failed';
+export type TargetOutcome = 'would_write' | 'written' | 'skipped' | 'read_failed' | 'write_failed';
 
 export interface BackfillTarget extends BackfillLead {
   outcome: TargetOutcome;
@@ -203,7 +205,7 @@ export interface BackfillReport {
   written: number;
   /** Apply: targets whose write lost its condition (changed after the read). */
   skipped: number;
-  /** Targets whose history read or write failed: nothing written for them. */
+  /** Targets whose history read failed (nothing written) or whose write failed (it may or may not have landed). */
   failed: number;
   /** Printed as WARNING lines: the post-apply list check, a missing audit event. */
   warnings: string[];
@@ -219,7 +221,9 @@ const OUTCOME_SUFFIX: Readonly<Record<TargetOutcome, string>> = {
   would_write: '',
   written: '',
   skipped: '  - SKIPPED: it changed after the run read it (nothing written)',
-  failed: '  - FAILED: nothing written (an ERROR line names this contactId); re-run',
+  read_failed: '  - FAILED: nothing written (an ERROR line names this contactId); re-run',
+  write_failed:
+    '  - FAILED: the write may or may not have landed (an ERROR line names this contactId) - re-run the dry run to see',
 };
 
 /** "2026-06-20" from an ISO stamp (UTC); "unknown" when there is none. */
@@ -514,7 +518,9 @@ export interface BackfillOptions {
 /**
  * One target's write (spec D10): ONE conditional update that sets the
  * authority only while the contact still has none, is still a tenant and is
- * still not deleted - a lost condition is `skipped` - then its
+ * still not deleted - a lost condition is `skipped`, any other error is
+ * `write_failed` (an error such as a timeout can follow a write that landed,
+ * so it is never reported as "nothing written") - then its
  * housing_authority_backfill event. The event follows the landed write, so a
  * failed append is a warning, never a failure (a re-run finds the lead
  * holding an authority and cannot write it). Never throws.
@@ -539,8 +545,8 @@ async function writeOne(deps: BackfillDeps, contactId: string, report: BackfillR
       return 'skipped';
     }
     report.failed += 1;
-    deps.logger.error({ err, contactId }, `${SCRIPT_NAME} - the write FAILED; nothing written for this contact`);
-    return 'failed';
+    deps.logger.error({ err, contactId }, `${SCRIPT_NAME} - the write FAILED; it may or may not have landed - re-run the dry run to see`);
+    return 'write_failed';
   }
   report.written += 1;
   try {
@@ -614,7 +620,7 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
       reason = await leftOutReasonFor(deps, lead.contactId, opts.skip);
     } catch (err) {
       report.failed += 1;
-      report.targets.push({ ...lead, outcome: 'failed' });
+      report.targets.push({ ...lead, outcome: 'read_failed' });
       log.error({ err, contactId: lead.contactId }, `${SCRIPT_NAME} - could not read the audit history; nothing written for this contact`);
       continue;
     }
@@ -648,7 +654,8 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
   if (report.failed > 0) {
     log.warn(
       counts,
-      `${SCRIPT_NAME} - COMPLETED WITH FAILURES${suffix}: ${report.failed} lead(s) FAILED and were left as they were (see the ERROR lines naming them). Re-run (idempotent).`,
+      `${SCRIPT_NAME} - COMPLETED WITH FAILURES${suffix}: ${report.failed} lead(s) FAILED (see the ERROR lines naming them and the report's FAILED lines). ` +
+        'Re-run the dry run to see where they stand, then re-run (idempotent).',
     );
   } else if (report.warnings.length > 0) {
     log.warn(counts, `${SCRIPT_NAME} - done${suffix}, with ${report.warnings.length} warning(s): read the WARNING lines of the report`);

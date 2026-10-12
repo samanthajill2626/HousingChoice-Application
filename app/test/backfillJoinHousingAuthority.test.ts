@@ -289,7 +289,7 @@ describe('formatBackfillReport (spec D10: name, sign-up date, status, contactId 
       targets: [
         { ...lead('c-1', 'Avery', 'Fairlead', '2026-06-20T14:00:00.000Z', 'needs_review'), outcome: 'written' },
         { ...lead('c-2', 'Blake', '', '2026-08-15T23:30:00.000Z', 'on_hold'), outcome: 'skipped' },
-        { ...lead('c-6', 'Gray', 'Failson', '2026-09-01T12:00:00.000Z', 'needs_review'), outcome: 'failed' },
+        { ...lead('c-6', 'Gray', 'Failson', '2026-09-01T12:00:00.000Z', 'needs_review'), outcome: 'write_failed' },
       ],
       leftOut: [],
       unknownSkips: ['contact-typo', 'contact-xyz'],
@@ -302,7 +302,7 @@ describe('formatBackfillReport (spec D10: name, sign-up date, status, contactId 
       'Leads given "Atlanta Housing Authority" (oldest sign-up first; dates are UTC):',
       '  Avery Fairlead  signed up 2026-06-20  status needs_review  contactId c-1',
       '  Blake  signed up 2026-08-15  status on_hold  contactId c-2  - SKIPPED: it changed after the run read it (nothing written)',
-      '  Gray Failson  signed up 2026-09-01  status needs_review  contactId c-6  - FAILED: nothing written (an ERROR line names this contactId); re-run',
+      '  Gray Failson  signed up 2026-09-01  status needs_review  contactId c-6  - FAILED: the write may or may not have landed (an ERROR line names this contactId) - re-run the dry run to see',
       'Written: 1. Skipped (changed after the read): 1. Failed: 1.',
       'Left out: none.',
       '--skip ids that are not candidates (ignored): contact-typo, contact-xyz',
@@ -316,7 +316,7 @@ describe('formatBackfillReport (spec D10: name, sign-up date, status, contactId 
       ...DRY_REPORT,
       targets: [
         { ...lead('c-1', 'Avery', 'Fairlead', '2026-06-20T14:00:00.000Z', 'needs_review'), outcome: 'would_write' },
-        { ...lead('c-6', 'Gray', 'Failson', '2026-09-01T12:00:00.000Z', 'needs_review'), outcome: 'failed' },
+        { ...lead('c-6', 'Gray', 'Failson', '2026-09-01T12:00:00.000Z', 'needs_review'), outcome: 'read_failed' },
       ],
       failed: 1,
     };
@@ -1043,7 +1043,7 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect(backfillExitCode(report)).toBe(0);
   }, 120_000);
 
-  it('a lead whose history read or write fails is counted failed - nothing written for it - and the run goes on: exit 1, no name in any log line', async () => {
+  it('a lead whose history read or write fails is counted failed and the run goes on: exit 1, no name in any log line - a failed READ says nothing was written, a failed WRITE never does', async () => {
     const w = await newWorld();
     await seedLeads(w);
     const capture = createLogCapture();
@@ -1068,19 +1068,64 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
     expect(report.targets.map((t) => [t.contactId, t.outcome])).toEqual([
       ['c-old', 'written'],
-      ['c-mid', 'failed'],
-      ['c-new', 'failed'],
+      ['c-mid', 'write_failed'],
+      ['c-new', 'read_failed'],
     ]);
     expect(report).toMatchObject({ written: 1, skipped: 0, failed: 2 });
     expect((await w.get('c-mid'))?.['housingAuthority']).toBeUndefined();
     expect((await w.get('c-new'))?.['housingAuthority']).toBeUndefined();
-    expect(capture.atLevel(50).map((l) => l['contactId']).sort()).toEqual(['c-mid', 'c-new']);
-    expect(capture.atLevel(40).some((l) => String(l['msg']).includes('COMPLETED WITH FAILURES'))).toBe(true);
+    expect(base.printed).toContain(
+      '  Blake Boothwick  signed up 2026-07-04  status on_hold  contactId c-mid  - FAILED: the write may or may not have landed (an ERROR line names this contactId) - re-run the dry run to see',
+    );
+    expect(base.printed).toContain(
+      '  Casey Quillfeather  signed up 2026-08-15  status onboarding  contactId c-new  - FAILED: nothing written (an ERROR line names this contactId); re-run',
+    );
+    const errors = capture.atLevel(50);
+    expect(errors.map((l) => l['contactId']).sort()).toEqual(['c-mid', 'c-new']);
+    const errorMsg = (contactId: string): string => String(errors.find((l) => l['contactId'] === contactId)?.['msg']);
+    expect(errorMsg('c-mid')).toBe('backfill-join-housing-authority - the write FAILED; it may or may not have landed - re-run the dry run to see');
+    expect(errorMsg('c-new')).toContain('nothing written for this contact');
+    const done = capture.atLevel(40).find((l) => String(l['msg']).includes('COMPLETED WITH FAILURES'));
+    expect(done).toBeDefined();
+    // The run-level line covers a write that may have landed: it never says nothing was written.
+    for (const line of [errorMsg('c-mid'), String(done?.['msg'])]) {
+      expect(line).not.toContain('nothing written');
+      expect(line).not.toContain('left as they were');
+    }
     // Names reach the printed report only - never a structured log line.
     expect(base.printed.some((l) => l.includes('Avery Fairlead'))).toBe(true);
     for (const name of ['Fairlead', 'Boothwick', 'Quillfeather']) {
       expect(capture.lines.some((l) => JSON.stringify(l).includes(name))).toBe(false);
     }
+    expect(backfillExitCode(report)).toBe(1);
+  }, 120_000);
+
+  it('a write error AFTER the write landed (an ambiguous error such as a timeout) is a write_failed line, and the dry run shows where the lead stands', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const base = w.deps();
+    const deps: BackfillDeps = {
+      ...base.deps,
+      contacts: {
+        update: async (contactId, patch, opts) => {
+          const landed = await base.deps.contacts.update(contactId, patch, opts);
+          if (contactId === 'c-mid') throw new Error('TimeoutError: socket hang up');
+          return landed;
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report.targets.map((t) => [t.contactId, t.outcome])).toEqual([
+      ['c-old', 'written'],
+      ['c-mid', 'write_failed'],
+      ['c-new', 'written'],
+    ]);
+    expect(report).toMatchObject({ written: 2, failed: 1 });
+    expect(base.printed.join('\n')).not.toContain('nothing written (an ERROR');
+    // It DID land: the lead holds the authority, and the next dry run no longer lists it.
+    expect(await w.get('c-mid')).toMatchObject({ housingAuthority: 'Atlanta Housing Authority' });
+    const dry = await runJoinAuthorityBackfill(w.deps().deps, { apply: false, skip: SKIP });
+    expect(dry.targets).toEqual([]);
     expect(backfillExitCode(report)).toBe(1);
   }, 120_000);
 

@@ -49,6 +49,7 @@ import {
 } from '../contact/ContactSearchField.js';
 import { UnitSearchField, unitLabel, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { contactDisplayName } from '../contact/format.js';
+import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import { tourTimeWarning } from './tourTime.js';
 import styles from './ScheduleTourForm.module.css';
 
@@ -323,7 +324,15 @@ export function ScheduleTourForm({
       const tour = await createTour(body);
       setBusy(false);
       onCreated(tour);
-    } catch {
+    } catch (err) {
+      // Caseworker integrity: a contact-type refusal has its own sentence;
+      // any other failure keeps the fixed copy below.
+      const typeCopy = contactTypeErrorMessage(err);
+      if (typeCopy !== null) {
+        setError(typeCopy);
+        setBusy(false);
+        return;
+      }
       setError("Couldn't schedule the tour — please try again.");
       setBusy(false);
     }

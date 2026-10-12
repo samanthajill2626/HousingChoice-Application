@@ -67,3 +67,41 @@ and one appended paragraph on `placement-terminal-stage-exit-unguarded` (B3).
     the comment above `promotionNotice` (fix wave item FW-13).
 - FW-8's copy "Couldn't load the landlords." (the restore dialog's failed
   landlord-list load) - confirmed fine by the planner, 2026-10-12.
+
+## Human-ruled scope addition SA-1 - auto-primary (Cameron via the planner, 2026-10-12)
+
+Received after fix wave 1 had committed (FW-1..FW-13, @e24e2822), so it is
+built by a small follow-on child (SA-1) and covered by the R2 re-review and
+the final gates.
+
+- RULE: when `POST /api/units/:id/contacts` adds a contact to a property with
+  NO primary contact (no roster row with `primaryContact`) AND NO landlord of
+  record (`landlordId` absent), the added contact becomes the primary contact,
+  any role (pm, owner, other, and a Landlord who claims the vacant slot). Every
+  other add behaves as today. Rationale (Cameron): on a property with nobody
+  reachable - e.g. after "Restore without a landlord" - staff add a PM and
+  expect them to be the primary contact without a separate Make primary.
+- Implementation: decided INSIDE `unitsRepo.addContact`'s read-modify-write
+  from the unit it read (not in the route), so two concurrent adds cannot both
+  become primary; effective primary = request `primaryContact === true` OR the
+  rule; the `primary_contact` scalar kept consistent exactly as the existing
+  primary path does; mirrored in every typed `UnitsRepo` fake that implements
+  `addContact`. The dashboard keeps posting `primaryContact: false`.
+- Orchestrator interpretation (recorded, challengeable in R2): "adds a
+  contact" means a NEW seat - an upsert of a contact already on the list (a
+  role edit) is not an add and keeps today's behavior (the literal rule, and
+  the new copy's "a new contact is added").
+- Copy: the ownerless "Remove the primary contact?" notice becomes, exactly:
+  "This property will have no primary contact and has no landlord of record,
+  so calls and new relay groups for it will reach no one until someone on its
+  contact list is made the primary contact or a new contact is added."
+  (supersedes the Q3 sentence; string, test pins, selectors row, comment).
+- Spec: revision 4 - section 4 "Contact list (I4)" gains the paragraph
+  "Auto-primary (Cameron, 2026-10-12)" (orchestrator commit, before the build).
+- Tests owed: DynamoDB Local AND fake - (a) ownerless, no primary, add PM ->
+  PM primary, `primary_contact` = PM; (b) landlord of record, no primary, add
+  PM -> not primary; (c) ownerless WITH a primary -> unchanged; (d) ownerless,
+  no primary, add Landlord -> claims `landlordId` AND primary; (e) two
+  concurrent adds on an ownerless no-primary property -> exactly one primary;
+  dashboard: the added contact renders as primary; e2e: after "Restore without
+  a landlord", + Add contact with a PM -> that row is the primary contact.

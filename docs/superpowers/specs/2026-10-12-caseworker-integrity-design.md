@@ -1,12 +1,15 @@
 # Caseworker integrity - design
 
-Status: APPROVED revision 3 (2026-10-12). Branch `fix/caseworker-integrity`,
+Status: APPROVED revision 4 (2026-10-12). Branch `fix/caseworker-integrity`,
 worktree `W:\tmp\caseworker-integrity`, cut from `main` @19607658.
 Revision 2 folds in design review round 1
 (`docs/superpowers/reviews/2026-10-12-caseworker-integrity/design-review/adjudications.md`).
 Revision 3 (Cameron's spec gate): restore never dead-ends - it offers a
 landlord picker or a restore without a landlord (section 4, Restore);
 existing data is not swept or repaired (L2).
+Revision 4 (Cameron, during the build): auto-primary - a contact added to a
+property with no primary contact and no landlord of record becomes its
+primary contact (section 4, Contact list).
 
 Closes three filed issues that share one theme: a contact converted to a
 caseworker (or re-typed by hand) can still end up holding tenant-only data or
@@ -326,6 +329,16 @@ route: `contact_list_caseworker`, then `landlord_not_landlord`, both before
 the repo call; the repo's own 409 `landlord_reassignment_required` follows.
 The property Add contact picker (`dashboard/src/routes/listing/ListingDetail.tsx:194,367,967-986`,
 fed by `useContacts('all')`) hides caseworkers.
+
+**Auto-primary (Cameron, 2026-10-12).** When `POST /api/units/:id/contacts`
+adds a contact (a new seat - editing a contact already on the list is not an
+add) to a property that has no primary contact (no contact-list row marked
+primary) and no landlord of record (`landlordId` absent), the added contact
+becomes the property's primary contact, whatever its role - a Landlord-role
+add that claims the vacant slot included. It is decided inside the
+repository's conditional roster write from the unit it read, so two
+concurrent adds cannot both become primary; every other add behaves as
+before (primary only when the request asks for it).
 
 ### Dashboard copy for section 4
 

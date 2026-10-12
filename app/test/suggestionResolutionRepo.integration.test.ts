@@ -20,6 +20,7 @@ import {
   resolutionValueKey,
   tokenFor,
   type ClaimResolutionInput,
+  type ResolutionAttributeGuard,
   type ResolutionReplayPlan,
 } from '../src/repos/suggestionResolutionRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -480,6 +481,152 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
     expect(await resolutions.get(contactId, 'pets')).toMatchObject({
       state: 'active', phase: 'domain_applied', outcome: 'superseded_by_human_edit',
     });
+  });
+
+  // Spec 2026-10-12 D1 changes 4-5. commitContactEffect consults ONE guard -
+  // effectiveGuard - at its commit condition, at the consistent re-read that
+  // tells `stale` from a mismatch, and at the mismatch ConditionCheck. Only a
+  // real cancellation reaches the last two, so the legacy case is proved HERE
+  // (plan watch item W4): a site left on the raw plan guard turns it into
+  // 'committed' (the commit condition) or 'stale' (either later site).
+  const authorityPlan = (guard: ResolutionAttributeGuard): ResolutionReplayPlan => ({
+    kind: 'contact',
+    patch: {
+      housingAuthority: 'Atlanta Housing Authority',
+      housingAuthority_source: { source: 'ai', at: '2026-08-08T12:01:00.000Z' },
+    },
+    guard,
+    audit: { eventType: 'ai_suggestion_accepted', payload: { target: 'housingAuthority' } },
+  });
+  const CONVERTED = {
+    type: 'partner',
+    role: 'Caseworker',
+    status: 'active',
+    classification_revision: 1,
+    caseworker_conversion: { at: '2026-08-08T12:00:30.000Z', by: 'user-2', fromType: 'tenant' },
+  };
+
+  async function claimFor(contactId: string, target: string, value: string, plan: ResolutionReplayPlan) {
+    const suggestion = await putSuggestion(contactId, target, value);
+    const claimed = await resolutions.claim(claimInput(suggestion, { plan }));
+    if (claimed.status !== 'claimed') throw new Error('claim failed');
+    return {
+      token: tokenFor(claimed.journal),
+      expectedPhase: 'claimed' as const,
+      nextPhase: 'domain_applied' as const,
+    };
+  }
+
+  async function readContact(contactId: string): Promise<Record<string, unknown> | undefined> {
+    const { Item } = await doc.send(new GetCommand({
+      TableName: contactsTable, Key: { contactId }, ConsistentRead: true,
+    }));
+    return Item;
+  }
+
+  async function auditRows(contactId: string): Promise<unknown[]> {
+    const audit = await doc.send(new QueryCommand({
+      TableName: auditTable,
+      KeyConditionExpression: 'entityKey = :entity',
+      ExpressionAttributeValues: { ':entity': `contacts#${contactId}` },
+    }));
+    return audit.Items ?? [];
+  }
+
+  it('answers superseded_by_reclassification when classification_revision moved on, writing nothing', async () => {
+    const contactId = 'reclass-revision';
+    await putContact(contactId);
+    const phase = await claimFor(contactId, 'housingAuthority', 'Atlanta Housing Authority', authorityPlan({
+      housingAuthority: { exists: false },
+      housingAuthority_source: { exists: false },
+      classification_revision: { exists: false },
+    }));
+    await putContact(contactId, CONVERTED);
+
+    expect(await resolutions.commitContactEffect(phase)).toBe('superseded_by_reclassification');
+
+    expect((await readContact(contactId))?.['housingAuthority']).toBeUndefined();
+    expect(await auditRows(contactId)).toEqual([]);
+    // Stored exactly like a human-edit refusal - same outcome, so the run-log
+    // verdict the service stamps from it is the same too.
+    expect(await resolutions.get(contactId, 'housingAuthority')).toMatchObject({
+      state: 'active', phase: 'domain_applied', outcome: 'superseded_by_human_edit',
+    });
+  });
+
+  it('answers superseded_by_reclassification when the field ALSO changed - classification wins the tie', async () => {
+    const contactId = 'reclass-tie';
+    await putContact(contactId, { housingAuthority: 'DeKalb County Housing Authority' });
+    const phase = await claimFor(contactId, 'housingAuthority', 'Atlanta Housing Authority', authorityPlan({
+      housingAuthority: { exists: true, value: 'DeKalb County Housing Authority' },
+      housingAuthority_source: { exists: false },
+      classification_revision: { exists: false },
+    }));
+    // The conversion REMOVES the authority and bumps the revision in one write.
+    await putContact(contactId, CONVERTED);
+
+    expect(await resolutions.commitContactEffect(phase)).toBe('superseded_by_reclassification');
+    expect((await readContact(contactId))?.['housingAuthority']).toBeUndefined();
+  });
+
+  it('ends a pre-deploy journal (no classification_revision in its guard) on a converted contact as superseded, never committed or stale', async () => {
+    const contactId = 'reclass-legacy-converted';
+    await putContact(contactId);
+    const phase = await claimFor(contactId, 'housingAuthority', 'Atlanta Housing Authority', authorityPlan({
+      housingAuthority: { exists: false },
+      housingAuthority_source: { exists: false },
+    }));
+    await putContact(contactId, CONVERTED);
+
+    expect(await resolutions.commitContactEffect(phase)).toBe('superseded_by_reclassification');
+
+    expect((await readContact(contactId))?.['housingAuthority']).toBeUndefined();
+    expect(await auditRows(contactId)).toEqual([]);
+    expect(await resolutions.get(contactId, 'housingAuthority')).toMatchObject({
+      state: 'active', phase: 'domain_applied', outcome: 'superseded_by_human_edit',
+    });
+  });
+
+  it('still commits that pre-deploy journal onto an unconverted tenant (PIN)', async () => {
+    const contactId = 'reclass-legacy-tenant';
+    await putContact(contactId);
+    const phase = await claimFor(contactId, 'housingAuthority', 'Atlanta Housing Authority', authorityPlan({
+      housingAuthority: { exists: false },
+      housingAuthority_source: { exists: false },
+    }));
+
+    expect(await resolutions.commitContactEffect(phase)).toBe('committed');
+    expect((await readContact(contactId))?.['housingAuthority']).toBe('Atlanta Housing Authority');
+  });
+
+  it('keeps a field-only change a human edit when the revision is unchanged (PIN)', async () => {
+    const contactId = 'reclass-field-only';
+    await putContact(contactId, { classification_revision: 2 });
+    const phase = await claimFor(contactId, 'pets', 'two cats', {
+      kind: 'contact',
+      patch: { pets: 'two cats' },
+      guard: { pets: { exists: false }, classification_revision: { exists: true, value: 2 } },
+      audit: { eventType: 'ai_suggestion_accepted', payload: { target: 'pets' } },
+    });
+    await putContact(contactId, { classification_revision: 2, pets: 'one dog' });
+
+    expect(await resolutions.commitContactEffect(phase)).toBe('superseded_by_human_edit');
+    expect((await readContact(contactId))?.['pets']).toBe('one dog');
+  });
+
+  it('never extends a neutral guard: an address journal still commits onto a converted contact (PIN)', async () => {
+    const contactId = 'reclass-neutral';
+    await putContact(contactId);
+    const phase = await claimFor(contactId, 'address', '1 Main St', {
+      kind: 'contact',
+      patch: { address: { line1: '1 Main St' } },
+      guard: { address: { exists: false } },
+      audit: { eventType: 'ai_suggestion_accepted', payload: { target: 'address' } },
+    });
+    await putContact(contactId, CONVERTED);
+
+    expect(await resolutions.commitContactEffect(phase)).toBe('committed');
+    expect((await readContact(contactId))?.['address']).toEqual({ line1: '1 Main St' });
   });
 
   // The two rules the crash-suite fake mirrors but nothing pinned on the real

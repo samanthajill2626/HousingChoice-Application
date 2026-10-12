@@ -161,7 +161,11 @@ export type ResolutionEffectResult =
   | 'already_committed'
   | 'stale'
   | 'phone_conflict'
-  | 'superseded_by_human_edit';
+  | 'superseded_by_human_edit'
+  // Spec 2026-10-12 D1 change 5: refused because the contact's classification
+  // changed after the plan read it. Stored exactly like a human-edit refusal
+  // (journal outcome superseded_by_human_edit); only the caller's answer differs.
+  | 'superseded_by_reclassification';
 
 export interface ClaimResolutionInput {
   suggestion: SuggestionItem;
@@ -850,7 +854,13 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
         ...(removes.length > 0 ? [`REMOVE ${removes.join(', ')}`] : []),
       ];
       const audit = auditItem(journal);
-      const contactGuard = contactGuardCondition(journal.plan.guard, true);
+      // Spec 2026-10-12 D1: ONE guard for the commit condition, the
+      // stale-versus-mismatch re-read and the mismatch ConditionCheck below -
+      // the plan's guard as effectiveGuard extends it for a pre-deploy
+      // tenant-only journal. A site that read the plan's guard directly would
+      // turn a legacy journal on a converted contact into a `stale` loop.
+      const guard = effectiveGuard(journal);
+      const contactGuard = contactGuardCondition(guard, true);
       const result = await transactPhase(input, [
         {
           Update: {
@@ -879,11 +889,22 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
         Key: { contactId: journal.contactId },
         ConsistentRead: true,
       }));
-      if (contactMatchesGuard(Item as ContactItem | undefined, journal.plan.guard)) {
+      const contact = Item as ContactItem | undefined;
+      if (contactMatchesGuard(contact, guard)) {
         return 'stale';
       }
+      // Spec 2026-10-12 D1 change 5: a mismatch in a CLASSIFICATION key
+      // (classification_revision, or the legacy caseworker_conversion) is a
+      // reclassification, and it wins when a written field ALSO changed. It is
+      // decided from this consistent read; a classification change landing
+      // between this read and the ConditionCheck below answers as a human edit.
+      // The stored outcome and the run-log verdict are the same either way.
+      const refusal: 'superseded_by_human_edit' | 'superseded_by_reclassification' =
+        guardMismatchIsClassification(guard, contact)
+          ? 'superseded_by_reclassification'
+          : 'superseded_by_human_edit';
 
-      const mismatchGuard = contactGuardCondition(journal.plan.guard, false);
+      const mismatchGuard = contactGuardCondition(guard, false);
       try {
         await doc.send(new TransactWriteCommand({
           TransactItems: [
@@ -903,7 +924,7 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
             { Update: journalSuperseded(extractionTable, input) },
           ],
         }));
-        return 'superseded_by_human_edit';
+        return refusal;
       } catch (error) {
         if (isValidationFailure(error)) throw error;
         const after = await getJournal(input.token.contactId, input.token.target);
@@ -912,7 +933,7 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
           && after.phase === input.nextPhase
           && after.outcome === 'superseded_by_human_edit'
         ) {
-          return 'superseded_by_human_edit';
+          return refusal;
         }
         return 'stale';
       }

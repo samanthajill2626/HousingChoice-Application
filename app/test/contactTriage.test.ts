@@ -745,15 +745,20 @@ describe('PATCH /api/contacts/:id - caseworkers (spec 2026-10-06 D16, D21)', () 
           housingAuthority: 'Atlanta Housing Authority', agency: 'HOPE Atlanta',
           ...(revision !== undefined && { classification_revision: revision }),
         });
-        world.placements.set('p-cw-race', {
-          placementId: 'p-cw-race', tenantId: 'c-cw', unitId: 'u-cw-race',
-          stage: 'send_application', created_at: '2026-10-08T10:00:00.000Z',
-          updated_at: '2026-10-08T10:00:00.000Z',
+        // A contact-list seat: the conversion refuses it (caseworker_on_roster)
+        // while a generic type change never does (spec 2026-10-12 D2). An open
+        // placement here would refuse the type edit before its write.
+        world.units.set('u-cw-race', {
+          unitId: 'u-cw-race', status: 'available', landlordId: 'c-cw-owner',
+          contacts: [
+            { contactId: 'c-cw-owner', role: 'landlord', primaryContact: true },
+            { contactId: 'c-cw', role: 'other', primaryContact: false },
+          ],
         });
         const conversion = await request(app).post('/api/contacts/c-cw/caseworker-review')
           .set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE).send({ action: 'make' });
         expect(conversion.status).toBe(409);
-        expect(conversion.body.error).toBe('caseworker_open_placement');
+        expect(conversion.body.error).toBe('caseworker_on_roster');
 
         const reads = snapshotReads(world);
         const arrived = { type: signal(), role: signal() };

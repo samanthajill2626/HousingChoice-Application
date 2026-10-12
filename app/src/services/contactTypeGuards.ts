@@ -12,11 +12,15 @@
 //
 // Every read here is CONSISTENT, so a type change that just committed is seen.
 // "Exists" keeps getById's meaning: a soft-deleted contact still exists (this
-// branch adds no deleted-contact refusal, spec section 10). The checks are
+// branch adds no deleted-contact refusal, spec section 10). A phone or email
+// ROUTING POINTER row (contactsRepo.ts `phone_ref` / `email_ref`: a routing
+// record, never a contact) does not exist as a contact here, exactly as the
+// conversion's readSubject and the contacts PATCH treat it. The checks are
 // reads before writes, not atomic with them (spec section 6, L1).
 //
 // PII (doc section 9): the errors carry no ids and no names. contactKind is a
-// type word: `caseworker` when isCaseworker holds, else the stored type.
+// type word: `caseworker` when isCaseworker holds, else the stored type
+// (`unknown` when none is stored).
 import type { Response } from 'express';
 import { contactKind as kindOf } from '../lib/caseworkers.js';
 import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
@@ -55,31 +59,35 @@ export class LandlordNotLandlordError extends Error {
 
 /**
  * I2: the contact a tour or placement names as its tenant, read CONSISTENTLY.
- * Throws TenantNotFoundError when it does not exist and ContactNotTenantError
- * (carrying contactKind) when it is not typed `tenant`. `unknown` is NOT a
- * tenant (Cameron, 2026-10-12).
+ * Throws TenantNotFoundError when it does not exist (a routing pointer row
+ * included) and ContactNotTenantError (carrying contactKind) when it is not
+ * typed `tenant`. `unknown` is NOT a tenant (Cameron, 2026-10-12).
  */
 export async function requireTenantContact(
   contacts: Pick<ContactsRepo, 'getById'>,
   contactId: string,
 ): Promise<ContactItem> {
   const contact = await contacts.getById(contactId, { consistentRead: true });
-  if (contact === undefined) throw new TenantNotFoundError();
+  if (contact === undefined || contact.phone_ref === true || contact.email_ref === true) {
+    throw new TenantNotFoundError();
+  }
   if (contact.type !== 'tenant') throw new ContactNotTenantError(kindOf(contact));
   return contact;
 }
 
 /**
  * I3: the contact a unit names as its landlord of record, read CONSISTENTLY.
- * Throws LandlordNotFoundError when it does not exist and
- * LandlordNotLandlordError when it is not typed `landlord`.
+ * Throws LandlordNotFoundError when it does not exist (a routing pointer row
+ * included) and LandlordNotLandlordError when it is not typed `landlord`.
  */
 export async function requireLandlordContact(
   contacts: Pick<ContactsRepo, 'getById'>,
   contactId: string,
 ): Promise<ContactItem> {
   const contact = await contacts.getById(contactId, { consistentRead: true });
-  if (contact === undefined) throw new LandlordNotFoundError();
+  if (contact === undefined || contact.phone_ref === true || contact.email_ref === true) {
+    throw new LandlordNotFoundError();
+  }
   if (contact.type !== 'landlord') throw new LandlordNotLandlordError();
   return contact;
 }

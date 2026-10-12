@@ -5,7 +5,7 @@
 // landlord_not_landlord otherwise. Runs on the shared in-memory world.
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { phoneRefId, type ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -64,6 +64,26 @@ describe('POST /api/units - the landlordId must name a landlord (I3)', () => {
       expect(world.auditEvents).toHaveLength(0);
     },
   );
+
+  // R1 code review, backend finding 6: a contacts ROUTING POINTER row (here a
+  // phone pointer, stored with no type) is a routing record, never a contact -
+  // naming one as the landlord is not found, not landlord_not_landlord.
+  it('404s landlord_not_found for a phone pointer row - nothing created, no audit row', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, 'c-ll', { type: 'landlord', phone: '+15550001111' });
+    const pointerId = phoneRefId('+15550001111');
+    world.contacts.push({
+      contactId: pointerId,
+      phone: '+15550001111',
+      phone_ref: true,
+      phone_ref_owner: 'c-ll',
+    } as unknown as ContactItem);
+    const res = await postUnit(app, { landlordId: pointerId });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'landlord_not_found' });
+    expect(world.units.size).toBe(0);
+    expect(world.auditEvents).toHaveLength(0);
+  });
 
   it('(PIN) the validator 400 and the org-list 422 still come first', async () => {
     const { app } = makeWebhookHarness();

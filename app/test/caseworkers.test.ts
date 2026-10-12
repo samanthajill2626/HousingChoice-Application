@@ -169,6 +169,12 @@ describe('contactKind (spec 2026-10-12 section 4: the kind a refusal names)', ()
     [{ type: 'landlord', role: 'Property Manager' }, 'landlord'],
     [{ type: 'unknown' }, 'unknown'],
     [{ type: 'team_member', role: 'Caseworker' }, 'team_member'],
+    // R1 code review, backend finding 6: an absent or non-text type is never
+    // stringified (no "undefined") - it reads as not classified.
+    [{}, 'unknown'],
+    [{ role: 'Caseworker' }, 'unknown'],
+    [{ type: '' }, 'unknown'],
+    [{ type: 42 }, 'unknown'],
   ] as const)('%o -> %s', (contact, expected) => {
     expect(contactKind(contact)).toBe(expected);
   });

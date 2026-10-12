@@ -6,7 +6,7 @@
 // that file seeds a typed tenant for every tour it posts.
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { emailRefId, phoneRefId, type ContactItem } from '../src/repos/contactsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
@@ -84,6 +84,37 @@ describe('POST /api/tours - the tenant must be a tenant (I2)', () => {
 
     expect(res.status).toBe(409);
     expect(res.body).toEqual({ error: 'contact_not_tenant', contactKind: kind });
+    expectNothingWritten(world);
+  });
+
+  // R1 code review, backend finding 6: a contacts ROUTING POINTER row
+  // (phone_ref / email_ref, stored with no type - "a routing record, never a
+  // contact") named as the tenant is not found, never 409 contactKind
+  // "undefined".
+  const POINTERS: Array<[string, Record<string, unknown>]> = [
+    [
+      'phone',
+      { contactId: phoneRefId('+15550001111'), phone: '+15550001111', phone_ref: true, phone_ref_owner: 'c-owner' },
+    ],
+    [
+      'email',
+      {
+        contactId: emailRefId('owner@example.com'),
+        email: 'owner@example.com',
+        email_ref: true,
+        email_ref_owner: 'c-owner',
+      },
+    ],
+  ];
+  it.each(POINTERS)('404 tenant_not_found for a %s pointer row - nothing written', async (_label, pointer) => {
+    const { app, world } = harness();
+    world.contacts.push({ contactId: 'c-owner', type: 'tenant', phone: '+15550001111' } as ContactItem);
+    world.contacts.push(pointer as unknown as ContactItem);
+
+    const res = await createTour(app, { ...BODY, tenantId: pointer['contactId'] });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'tenant_not_found' });
     expectNothingWritten(world);
   });
 

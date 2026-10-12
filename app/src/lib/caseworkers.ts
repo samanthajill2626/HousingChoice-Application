@@ -91,8 +91,11 @@ export function isCaseworker(c: { type?: unknown; role?: unknown }): boolean {
  * The kind a refusal names (spec
  * docs/superpowers/specs/2026-10-12-caseworker-integrity-design.md section 4:
  * 409 contact_not_tenant's `contactKind`): 'caseworker' when isCaseworker
- * holds, else the stored type as text. PURE, like the rest of this module.
+ * holds, else the stored type when it is a non-empty string, else 'unknown' -
+ * an absent or non-text type is never stringified into "undefined" (R1 code
+ * review, backend finding 6). PURE, like the rest of this module.
  */
 export function contactKind(c: { type?: unknown; role?: unknown }): string {
-  return isCaseworker(c) ? 'caseworker' : String(c.type);
+  if (isCaseworker(c)) return 'caseworker';
+  return typeof c.type === 'string' && c.type.length > 0 ? c.type : 'unknown';
 }

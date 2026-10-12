@@ -4,7 +4,7 @@
 // recording response - no harness, no DynamoDB.
 import type { Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { emailRefId, phoneRefId, type ContactItem } from '../src/repos/contactsRepo.js';
 import {
   ContactNotTenantError,
   LandlordNotFoundError,
@@ -21,6 +21,37 @@ function repoAnswering(contact: ContactItem | undefined) {
     getById: vi.fn(async (_contactId: string, _opts?: { consistentRead?: boolean }) => contact),
   };
 }
+
+/**
+ * Contacts-table ROUTING POINTER rows (contactsRepo.ts phone_ref / email_ref:
+ * "a routing record, never a contact"). The real repo stores a pointer with no
+ * type; the FakeWorld's carries the 'unknown' sentinel type.
+ */
+const POINTER_ROWS: Array<[string, ContactItem]> = [
+  [
+    'phone pointer row',
+    { contactId: phoneRefId('+15550001111'), phone: '+15550001111', phone_ref: true, phone_ref_owner: 'c-owner' } as ContactItem,
+  ],
+  [
+    'email pointer row',
+    {
+      contactId: emailRefId('owner@example.com'),
+      email: 'owner@example.com',
+      email_ref: true,
+      email_ref_owner: 'c-owner',
+    } as ContactItem,
+  ],
+  [
+    'phone pointer row carrying the FakeWorld sentinel type',
+    {
+      contactId: phoneRefId('+15550002222'),
+      type: 'unknown',
+      phone: '+15550002222',
+      phone_ref: true,
+      phone_ref_owner: 'c-owner',
+    } as ContactItem,
+  ],
+];
 
 interface FakeResponse {
   status(code: number): FakeResponse;
@@ -77,6 +108,21 @@ describe('requireTenantContact (I2)', () => {
     expect(err).toBeInstanceOf(ContactNotTenantError);
     expect((err as ContactNotTenantError).contactKind).toBe(kind);
   });
+
+  // R1 code review, backend finding 6: a routing pointer is not a contact, so
+  // naming one is "not found" - never a 409 naming its absent type.
+  it.each(POINTER_ROWS)('throws TenantNotFoundError for a %s', async (_label, row) => {
+    await expect(requireTenantContact(repoAnswering(row), row.contactId)).rejects.toBeInstanceOf(
+      TenantNotFoundError,
+    );
+  });
+
+  it('a contact with no stored type is refused as unknown, never as "undefined"', async () => {
+    const typeless = { contactId: 'c-1' } as ContactItem;
+    const err = await requireTenantContact(repoAnswering(typeless), 'c-1').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ContactNotTenantError);
+    expect((err as ContactNotTenantError).contactKind).toBe('unknown');
+  });
 });
 
 describe('requireLandlordContact (I3)', () => {
@@ -108,6 +154,13 @@ describe('requireLandlordContact (I3)', () => {
     const contact = { contactId: 'l-1', ...fields } as ContactItem;
     await expect(requireLandlordContact(repoAnswering(contact), 'l-1')).rejects.toBeInstanceOf(
       LandlordNotLandlordError,
+    );
+  });
+
+  // R1 code review, backend finding 6: a routing pointer is not a contact.
+  it.each(POINTER_ROWS)('throws LandlordNotFoundError for a %s', async (_label, row) => {
+    await expect(requireLandlordContact(repoAnswering(row), row.contactId)).rejects.toBeInstanceOf(
+      LandlordNotFoundError,
     );
   });
 });

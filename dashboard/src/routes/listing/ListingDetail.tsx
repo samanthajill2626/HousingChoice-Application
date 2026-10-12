@@ -68,6 +68,7 @@ import {
 } from './listingFormat.js';
 import { formatDayDivider, formatTime } from '../contact/format.js';
 import { safeHttpUrl } from '../../lib/safeUrl.js';
+import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import styles from './ListingDetail.module.css';
 
 // Property-status -> the interactive status pill's tone. `available` is the one
@@ -404,6 +405,15 @@ export function ListingDetail(): React.JSX.Element {
         onSuccess?.();
       })
       .catch(async (err: unknown) => {
+        // caseworker-integrity (spec section 4): a contact-type refusal
+        // (contact_list_caseworker, landlord_not_landlord) names its own reason.
+        // Mapped BEFORE the 409 catch-all below, whose copy would otherwise
+        // claim "landlord of record". Nothing was written, so nothing to settle.
+        const typed = contactTypeErrorMessage(err);
+        if (typed !== null) {
+          setRosterError({ key, message: typed });
+          return;
+        }
         const conflict = err instanceof ApiError && err.status === 409;
         setRosterError({
           key,

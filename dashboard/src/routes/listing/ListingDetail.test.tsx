@@ -1347,6 +1347,32 @@ describe('ListingDetail - Contacts card edit mode', () => {
     expect(screen.getByRole('combobox', { name: 'Add contact' })).toHaveValue('Renata Vale');
   });
 
+  it.each([
+    ['contact_list_caseworker', "Caseworkers can't be on a property's contact list."],
+    ['landlord_not_landlord', "Only a landlord can be a property's landlord of record."],
+  ] as const)(
+    'a %s refusal names its own reason - not the landlord-of-record catch-all - and does not refetch',
+    async (code, sentence) => {
+      const user = userEvent.setup();
+      useListing.mockReturnValue(ROSTER_READY);
+      getUnit.mockReset();
+      addUnitContact.mockReset().mockRejectedValue(new ApiError(409, code, code, { error: code }));
+      renderAt();
+
+      await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+      await user.click(screen.getByRole('button', { name: '+ Add contact' }));
+      await user.type(screen.getByRole('combobox', { name: 'Add contact' }), 'Renata');
+      await user.click(screen.getByRole('option', { name: /Renata Vale/ }));
+      await user.click(screen.getByRole('button', { name: 'Add contact to this property' }));
+
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent(sentence);
+      expect(alert).not.toHaveTextContent(/landlord of record now/);
+      expect(getUnit).not.toHaveBeenCalled();
+      expect(screen.getByRole('combobox', { name: 'Add contact' })).toHaveValue('Renata Vale');
+    },
+  );
+
   it('asks the operator to retry when repeated concurrent roster writes exhaust retries', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue(ROSTER_READY);

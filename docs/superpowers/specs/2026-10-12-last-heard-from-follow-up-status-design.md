@@ -1,9 +1,9 @@
 # Last heard from, follow-up status for shared properties, and the off-screen contact search
 
 Date: 2026-10-12
-Status: DRAFT revision 2 (after design review round 1) - round 2 pending, then
-Cameron's spec gate, then Sam's mockup feedback (section 9) before the build
-launches
+Status: DRAFT revision 3 (after design review rounds 1 and 2) - round 3
+pending, then Cameron's spec gate, then Sam's mockup feedback (section 9)
+before the build launches
 Branch: feat/last-heard-from (worktree W:\tmp\last-heard-from, cut from main
 @19607658)
 Tracker: Sam's improvements #3 ("Most interested tenants" view, 5-8 hrs) and
@@ -168,14 +168,35 @@ Answers Cameron gave on 2026-10-12, recorded as the design's fixed points:
 Added after design review round 1 (adjudications file, section 1):
 
 - D11. A decline is superseded by whichever comes LATER: a counted share
-  (`sentAt`) or a qualifying tour (`createdAt`). A tour created after a
-  decline means the tenant changed their mind, from any tour-creating path.
+  (`sentAt`) or tour ACTIVITY on the pair - the latest instant any
+  qualifying tour for the pair was created, rescheduled or reopened
+  (`max(createdAt, lastMarkedAt)` over every qualifying tour, not the chip
+  winner's `createdAt`: the chip winner is the most PROGRESSED tour, and a
+  revived tour keeps its original `createdAt`, `toursModel.ts:214-218`). A
+  tour created or revived after a decline means the tenant changed their
+  mind, from any tour-creating path.
 - D12. The joins that feed an outcome are REQUIRED on the endpoints that
-  serve outcomes. A failed join is an error response, never a wrong outcome
-  with live buttons.
+  serve outcomes, read with `requireComplete` so a partial batch is
+  detected. A failed join is an error response, never a wrong outcome with
+  live buttons; the surface that shows the error is named per endpoint.
 - D13. The lean seed changes deliberately: seeded contacts get
   `last_heard_from_at` derived from their seeded inbound rows by the same
-  pure rule the backfill uses, so every seeded world is self-consistent.
+  rule the backfill uses, so every seeded demo world (lean, full) is
+  self-consistent. The performance world (`/__dev/performance/reseed`) is a
+  load fixture, not a demo world, and is excluded on purpose.
+
+Added after round 2 (adjudications file, section 2):
+
+- D14. The Interested button commits a tour type only when the property
+  carries a STRUCTURED `unit.tour_type`. `tourType` cannot be edited after
+  creation (`routes/tours.ts:157`, the PATCH allowlist) and routes every
+  reminder (`tourReminders.ts:1062-1068`: non-self-guided tours remind in
+  the landlord group thread, self-guided in the tenant 1:1), so an unseen
+  keyword guess over free-text `tour_process` is not acceptable. When
+  `tour_type` is absent, the button opens the Schedule tour form prefilled
+  (tenant, property, no time) so the guess is seen and correctable before
+  the tour exists. This amends D6's "picks the tour type itself" to "picks it
+  when the property says what it is".
 
 ## 5. Design
 
@@ -227,8 +248,14 @@ clock at FIRST arrival (`twilio.ts:906`, `:2469`; `voice.ts:777`), not a
 carrier timestamp; the point is that a redelivery must not move the value
 past the first delivery, which the stored prefix guarantees.
 
-Dedupe: the touch runs on BOTH the fresh and the deduped branch of every
-inbound path, the way the 1:1 webhook deliberately re-runs its idempotent
+The value is normalized INSIDE `touchLastHeardFrom` (`Date.parse` to a
+canonical ISO string, refusing an unparseable input with a logged no-op)
+because the DynamoDB condition compares stored strings lexically and the
+importer stores the export's raw `createdAt` (`apply.ts:448-449`). The one
+writer normalizes; no caller has to.
+
+Dedupe: on the SMS and voice paths the touch runs on BOTH the fresh and the
+deduped branch, the way the 1:1 webhook deliberately re-runs its idempotent
 side effects on a redelivery (`twilio.ts:2501-2545`, "Dedupe must NOT skip
 the side effects below") and the native group path states for its own
 ("DELIBERATELY NOT GATED ON `appended.deduped`", `twilio.ts:2190-2200`). A
@@ -236,33 +263,43 @@ crash between the append and the touch is then repaired by the redelivery.
 On the deduped branch the instant comes from the persisted row's key
 (`appended.tsMsgId` is the first delivery's key), and the touch is skipped
 when the persisted row is not inbound (the echo-of-our-own-send dedupe).
+The email path is different by design: its deduped branch returns early
+because "the winner runs the side effects" (`inboundEmail.ts:735-742`), so
+the touch sits with the winner's side effects and is not re-run.
 
-ONE ATTRIBUTION RULE. A pure function in `app/src/lib/heardFrom.ts`,
-`attributeInbound(row, thread): contactId | undefined`, is the single
-definition of "which contact this inbound row is FROM". The live paths, the
-backfill planner, the importer stamp and the seed stamp all call it (the
-live paths may pass the contact they already resolved, but the plan's tests
-prove each live path's answer equals the function's answer on the row it
-wrote). The rule:
+ONE ATTRIBUTION RULE. `attributeInbound(row, thread, lookup)` in
+`app/src/lib/heardFrom.ts` is the single definition of "which contact this
+inbound row is FROM". It is deterministic over its inputs but NOT pure: the
+rule needs phone and email lookups, so it takes an injected
+`lookup: { byPhone(e164), byEmail(address) }` - async over `contactsRepo`
+for the live paths, the backfill and the importer; synchronous over the
+seed's own contact items for the seed derivation. The live paths may pass
+the contact they already resolved, but the plan's conformance tests prove
+each live path's answer equals the function's answer on the row it wrote.
+The rule, discriminated by THREAD TYPE (never by which fields a row
+happens to carry):
 
 - A `relay_retry_of` row is never attributed (a retry copies the original's
   `direction`, `twilio.ts:2953-2989`).
-- Thread type `relay_group` or native group (`relay_sender_key` present):
-  the key `team` is never attributed; a bare contactId key is that contact;
-  a `phone#<E164>` key resolves through the thread's `participants[]` by
-  phone, then `contacts.findByPhone` (deleted contacts included -
-  `findByPhone` ignores deletion, and a restored contact keeps its value).
-  This covers a member, a non-member texting an open relay, and a refused
-  masked call from a member or a non-member alike.
+- Thread type `relay_group` or a native group thread: a `relay_sender_key`
+  of `team` is never attributed; a bare contactId key is that contact; a
+  `phone#<E164>` key resolves through the thread's `participants[]` by
+  phone, then `lookup.byPhone` (deleted contacts included - `findByPhone`
+  ignores deletion, and a restored contact keeps its value). A row with NO
+  sender key on such a thread (a refused masked call from a non-member,
+  which carries `relay_external_caller_contact_id` /
+  `relay_external_caller_phone` instead, `voice.ts:1048-1054`) resolves by
+  `relay_external_caller_contact_id`, else `relay_external_caller_phone ->
+  lookup.byPhone`; any other keyless inbound row on a group thread (an
+  imported group call) is not attributed and is counted in the backfill
+  report. A group thread's roster member is never the fallback.
 - Any other thread (1:1 of any type): the thread's participant contact
   (`participants[0].contactId`), else `participant_phone -> findByPhone`,
   else `participant_email -> findByEmail` (the `unreadFeed.ts:534-546`
-  precedent) - EXCEPT an email row with `author: 'unknown'`
-  (`inboundEmail.ts:861-873`), which is not attributed until staff link the
-  address. Imported call rows in a 1:1 carry no sender fields and are
-  attributed by this branch like any other row; imported call rows in a
-  group thread carry no `relay_sender_key` and are not attributed (noted in
-  the backfill report counts).
+  precedent, through `lookup`) - EXCEPT an email row with `author:
+  'unknown'` (`inboundEmail.ts:861-873`), which is not attributed until
+  staff link the address. Imported call rows in a 1:1 carry no sender fields
+  and are attributed by this branch like any other row.
 
 Call sites - every live inbound write. The touch follows the `append` on
 each path with the contactId the path resolved, which the rule above must
@@ -297,16 +334,17 @@ Rules the plan carries as explicit checks:
 - Historical writers go through the same rule: the import tool
   (`lib/import/apply.ts:436-484`) stamps each contact after its message pass
   from the latest attributed inbound row it wrote, through
-  `touchLastHeardFrom`. Seeds: a pure `deriveSeedHeardFrom(messages,
-  conversations)` in the seed package runs in `seed/index.ts` over the MERGED
-  message items of whichever profile is loading (lean, or lean + cast) and
-  stamps the contact items before the Put loop, so the value always matches
-  the seeded threads. This changes the lean world's contact items
-  deliberately (D13); the lean message rows are untouched. `/__dev/reseed`
-  re-Puts those items, which restores the derived value, not an absent one.
-  Seed rows carry `ts` rather than `provider_ts`; the derivation and the
-  backfill both read the instant from the `tsMsgId` prefix, which every row
-  has.
+  `touchLastHeardFrom`. Seeds: `deriveSeedHeardFrom(messages, conversations,
+  contacts)` in the seed package runs in `seed/index.ts` over the MERGED
+  items of whichever profile is loading (lean, or lean + cast), calling
+  `attributeInbound` with a synchronous lookup over the seed's own contact
+  items, and stamps the contact items before the Put loop, so the value
+  always matches the seeded threads. This changes the lean world's contact
+  items deliberately (D13); the lean message rows are untouched.
+  `/__dev/reseed` re-Puts those items, which restores the derived value, not
+  an absent one. The performance world is excluded (D13). Seed rows carry
+  `ts` rather than `provider_ts`; the derivation and the backfill both read
+  the instant from the `tsMsgId` prefix, which every row has.
 
 Readers (every place that renders or sorts on the value): the contacts list
 endpoint already returns raw items (`routes/contacts.ts:1098-1099`), so the
@@ -344,9 +382,8 @@ Algorithm (no GSI exists on messages, `tables.ts:208`):
    is skipped, not stopped on); a group thread pages until every roster
    member has a value or the partition is exhausted.
 4. The instant is the `tsMsgId` prefix (`splitTsMsgId`), normalized through
-   `Date.parse` to a canonical ISO string before comparison, because the
-   importer stores the export's raw `createdAt` there (`apply.ts:448-449`)
-   and lexical comparison of mixed ISO forms mis-orders. Keep the max per
+   `Date.parse` before the planner compares instants across threads (the
+   writer normalizes again on its own, section 5.1). Keep the max per
    contact across threads, then one `touchLastHeardFrom` per contact.
    Idempotent: a second run writes nothing.
 5. Report: conversations walked, messages read, contacts planned / written /
@@ -383,9 +420,17 @@ The preview response (`POST /api/broadcasts/:id/preview`,
 `lastHeardFromAt?` and `declinedThisProperty: boolean`, AND a top-level
 `declinedContactIds: string[]` - the analog of `priorRecipientContactIds`,
 which exists precisely so a hand-added row outside the audience can be
-annotated client-side (`RecipientPreview.tsx:110-113`, `:225`). Both come
-from ONE `listingSends.listByUnit(unitId)` read in the handler (rows whose
-decline is effective, section 5.4), empty when the draft has no unit.
+annotated client-side (`RecipientPreview.tsx:110-113`, `:225`). An id is in
+the list only when its decline is EFFECTIVE under D11, so the handler reads,
+when the draft has a unit: `listingSends.listByUnit(unitId)`, then for the
+rows that carry a `declined` record only, `tours.listByUnit(unitId)` and
+`contacts.getManyByIds(declinedRowIds, { requireComplete: true })` for
+their types, and runs `deriveSendOutcome`. Both lists are empty when the
+draft has no unit. These reads serve labels, not outcomes with buttons, so
+D12's 503 does not apply: when any of them fails, the preview still serves
+its candidates with NO decline labels and `declineLabelsUnavailable: true`,
+and the review step shows one line above the list ("Couldn't load
+not-interested labels - sends still work") rather than hiding the failure.
 
 The dashboard row (`RecipientPreview.tsx`) renders, in this order: checkbox;
 name (link, new tab as today); phone; status badge (`StatusBadge
@@ -410,13 +455,14 @@ Declined rows: a row whose contactId is in `declinedContactIds` (audience or
 added) starts UNCHECKED unless it was hand-picked, carries a "Not
 interested" tag in the same tone as "Already sent", and "Select all" skips
 it exactly as it skips unpicked already-sent rows (`:79-93, 165-169`). Its
-checkbox stays enabled. Every declined row is necessarily also already sent
-(a decline exists only on a listed send), so the unchecked default is
-already true today through "Already sent"; the new tag is the LABEL D4
-asks for, which is the whole point. Accessible name: `<name> - already
-sent, not interested` when both tags apply, `<name> - not interested` is
-never produced alone. The e2e specs that select by `already sent` are
-updated knowingly.
+checkbox stays enabled. A declined row is USUALLY also already sent, but
+not necessarily: "Already sent" is derived best-effort from broadcast
+records (`shareRecipientState.ts:249-268`) while a listed send can be legacy
+or individual with no broadcast behind it (`listingSendsRepo.ts:51`), so the
+declined-unchecked rule stands on its own. Accessible name: `<name> -
+already sent, not interested` when both tags apply, `<name> - not
+interested` when only the decline applies. The e2e specs that select by
+`already sent` are updated knowingly.
 
 "Add a tenant": `ContactSearchField` gains an optional `annotate?: (c:
 Contact) => string | undefined` prop that renders a muted suffix inside the
@@ -462,24 +508,30 @@ Effective decline (pure, `app/src/lib/sendOutcome.ts`), D11:
 effectiveDecline(row, tour) =
      row.declined !== undefined
   && (row.sentAt === undefined || row.declined.at >= row.sentAt)
-  && (tour === undefined || row.declined.at >= tour.createdAt)
+  && (tour === undefined || row.declined.at >= tour.latestActivityAt)
 ```
 
 A decline is superseded by whatever comes later: a counted share (the row's
-`sentAt` follows the latest counted share, `shareLedger.ts:112-120`) or a
-qualifying tour created after it, from ANY tour-creating path (the Schedule
-tour form, the Tours page, the contact page, the Interested action). Either
-means the tenant changed their mind. A superseded `declined` record stays on
-the row and is simply ineffective. Note: an acceptance-counted share that
-later fails moves `sentAt` back (`listingSendsRepo.ts:56`), which can make
-a share-superseded decline effective again; that is the honest reading
-(the superseding send never arrived) and needs no handling.
+`sentAt` follows the latest counted share, `shareLedger.ts:112-120`) or tour
+activity after it - a qualifying tour created, rescheduled or reopened, from
+ANY tour-creating path (the Schedule tour form, the Tours page, the contact
+page, the Interested action). Either means the tenant changed their mind. A
+superseded `declined` record stays on the row and is simply ineffective.
+Note: an acceptance-counted share that later fails moves `sentAt` back
+(`listingSendsRepo.ts:56`), which can make a share-superseded decline
+effective again; that is the honest reading (the superseding send never
+arrived) and needs no handling.
 
-`deriveTourSignal` (`lib/listingSendTour.ts`) gains `createdAt` on its
-result (it already compares `createdAt` for ties) so the comparison above
-has its input. A `requested`, `scheduled`, `toured`, converted or
-auto-closed-from-toured tour qualifies, exactly as for the chip; a canceled,
-no-show or not-a-fit tour yields no signal.
+`deriveTourSignal` (`lib/listingSendTour.ts`) gains `latestActivityAt` on
+its result: the max over EVERY qualifying tour for the pair of
+`max(createdAt, lastMarkedAt ?? updatedAt)` (the model's own "last time a
+person marked / rescheduled / reopened it", `toursModel.ts:214-218`). It is
+deliberately not the chip winner's own timestamp: the winner is the most
+PROGRESSED tour (`listingSendTour.ts:41-45`), so a months-old toured tour
+would otherwise hide a request made after the decline. A `requested`,
+`scheduled`, `toured`, converted or auto-closed-from-toured tour qualifies,
+exactly as for the chip; a canceled, no-show or not-a-fit tour yields no
+signal and contributes no activity.
 
 Derived outcome (same module, pure, every outcome-serving endpoint calls it):
 
@@ -566,19 +618,34 @@ POST /api/units/:unitId/recipients/:contactId/outcome
   (`tours.listByTenant(contactId)` filtered to `unitId`) and run
   `deriveTourSignal`; if ANY qualifying tour exists (the same set the chip
   uses - requested, scheduled, toured, converted, auto-closed-from-toured),
-  no tour is created; (2) if an effective decline exists, `clearDeclined`
-  (the record is REMOVED; the `listing_decline_cleared` event is its
-  history); (3) if no qualifying tour existed, create a `requested` tour
-  through `toursRepo.create` with `tourType = unit.tour_type ??
-  deriveTourType(unit.tour_process)`, where `deriveTourType` moves from
-  `ScheduleTourForm.tsx:84-114` into a shared pure module
-  (`app/src/lib/tourType.ts`, the dashboard imports the same code - the plan
-  decides the import path) and never returns undefined (so there is no
-  further fallback); (4) write `listing_interested` to both audit surfaces;
-  (5) return the re-projected row. A failure after step 2 leaves the row at
-  Replied / No reply yet with its buttons back, which is recoverable by a
-  second click. The guessed tour type is accepted for a one-click create by
-  D6; it is the same guess the Schedule tour form pre-fills.
+  no tour is created; (2) if no qualifying tour exists and the unit has no
+  structured `tour_type`, refuse with 409 `tour_type_required` (D14: the
+  dashboard never sends this request in that case - see the button rule
+  below - so the refusal is a guard, not a flow); (3) if an effective
+  decline exists, `clearDeclined` (the record is REMOVED; the
+  `listing_decline_cleared` event is its history); (4) if no qualifying tour
+  existed, create a `requested` tour through `toursRepo.create` with
+  `tourType = unit.tour_type`, and ONLY then write `listing_interested` to
+  both audit surfaces (a click that found an existing tour writes no event,
+  and a retry after a failure is therefore not double-recorded); (5) return
+  the re-projected row. A failure after step 3 leaves the row at Replied /
+  No reply yet with its buttons back, which is recoverable by a second
+  click. A failure in step 5 (the re-projection's join) after a successful
+  write returns 503 with `saved: true`, and the row shows "Saved - reload to
+  see the change" rather than claiming nothing changed.
+- Audit writes (activity event + unit audit) are best-effort through the
+  same shared writer tours use (`tours.ts:298-307`): a failed audit write is
+  logged and never fails the route.
+- The Interested BUTTON (D14): when the property has a structured
+  `tour_type`, one click calls the route. When it does not, the click opens
+  the Schedule tour form (`ScheduleTourForm`, which creates a timeless
+  `requested` tour when the date is left empty, `ScheduleTourForm.tsx:3`,
+  `:310-318`) with the tenant and property pre-committed, the guessed type
+  shown with its existing "check it" caption, and no time; submitting it
+  creates the tour through `POST /api/tours` as today, and the row reads
+  Interested on its next load through D11 (the new tour's activity
+  supersedes any decline). `deriveTourType` stays where it is; nothing moves
+  to the app.
 - The `by: 'engine'` value is reserved for Work Package 3. This route always
   writes `staff`.
 
@@ -587,10 +654,30 @@ Outcome-serving endpoints and their joins (D12): `GET
 waiting list, and the outcome route all need the tours join and the
 contacts join to derive a truthful outcome. Today both GET projections treat
 those joins as best-effort (`units.ts:1002-1034`, `contacts.ts:1229-1248`)
-because a missing chip or name was harmless. An outcome drives buttons and a
-to-do list, so on these endpoints a failed join is a 503
-`outcome_unavailable` and the card shows its error row ("We couldn't load
-recipients."); no row is ever served with a guessed outcome.
+because a missing chip or name was harmless, and the display batch read
+silently DROPS keys it could not fetch (`contactsRepo.ts:943-951`,
+`:986-998`) unless `requireComplete` is passed. An outcome drives buttons
+and a to-do list, so on these endpoints:
+
+- the contacts join is read with `requireComplete: true` (the display
+  projection gains a `requireComplete` option, or the route uses
+  `getManyByIds` with it), and a thrown tours query or an incomplete batch
+  is a 503 `outcome_unavailable`; no row is ever served with a guessed
+  outcome.
+- a contact that is genuinely MISSING (a hard-deleted contact behind a
+  listed row) is not "incomplete": the row is served with the id as its
+  name, `recipientMissing: true`, its outcome derived with no contact facts
+  (so `no_reply` or `interested` by the tour alone), `interestedSupported:
+  false` and no actions.
+- the error surface per endpoint: the property card shows its error row
+  ("We couldn't load recipients.", `ListingDetail.tsx:1057-1058`); the
+  contact cards today render ANY non-ready slice as the pending panel
+  ("Arrives with the backend.", `useContactFile.ts:51-61`,
+  `ContactDetail.tsx:1134`, `Card.tsx:79-82`), so `listingsSent` gains an
+  `error` rendering ("We couldn't load properties sent.") distinct from
+  pending; the waiting list shows an error line in place of its rows; under
+  option B the Today section degrades on its own (an error line in that
+  section, the rest of Today served), never the whole Today payload.
 
 Each listed GET projection gains, per row:
 
@@ -639,14 +726,19 @@ Both cards (`ListingDetail.tsx` "Sent to", `TenantFile.tsx` and
   <name> interested in <address>", "Mark <name> not interested in
   <address>", "Undo not interested for <name>"; the contact page's card uses
   the same shape with the property's short address.
-- The property card's rows sort into groups: WAITING (`no_reply` or
-  `replied`, on a recipient the waiting list would consider - section 5.6's
-  recipient rule), newest `sentAt` first; then `interested`; then
-  `not_interested`; then NOT ELIGIBLE (a waiting outcome on an inactive or
-  placed tenant, or a deleted, opted-out or unreachable contact), each with
-  its outcome chip but no Text action. Under section 9's option C this card
-  IS the list, so the grouping honors D1 here too. The contact card keeps
-  its newest-first order and shows the outcome on each row.
+- The property card's rows sort into four groups that together cover every
+  row: WAITING (`no_reply` or `replied` on an ELIGIBLE recipient - section
+  5.6's eligibility half only: not deleted, opted out or unreachable, not an
+  inactive or placed tenant; the LOOKBACK and QUIET thresholds do not apply
+  to the card), newest `sentAt` first; then `interested`; then
+  `not_interested`; then NOT ELIGIBLE (a waiting outcome on a recipient who
+  fails the eligibility half), each with its outcome chip and the same
+  actions as its outcome (staff may still record Not interested on an
+  inactive tenant). The units recipients projection therefore carries
+  `deleted_at`, `sms_opt_out` and `sms_unreachable` as well as `status`,
+  and the wire row carries `eligible: boolean`. Under section 9's option C
+  this card IS the list, so the grouping honors D1 here too. The contact
+  card keeps its newest-first order and shows the outcome on each row.
 - Partner rows on the property card keep their kind label; partner pages'
   "Properties sent" rows now show the outcome chip and actions. A partner
   row never renders a tour chip (`deriveSendOutcome` ignores tours for it),
@@ -666,8 +758,9 @@ Mechanism, independent of where it lives:
    type, name, `deleted_at`, `sms_opt_out`, `sms_unreachable`,
    `last_heard_from_at`), one `tours.listByUnit` per unit for the tour
    signal.
-3. Keep a row when ALL hold (the RECIPIENT RULE, shared with 5.5's card
-   grouping):
+3. Keep a row when ALL hold. The first three are the ELIGIBILITY half
+   (`isEligibleRecipient(contact)` in `sendOutcome.ts`, shared with 5.5's
+   card grouping); the last two are the list's own thresholds:
    - outcome is `no_reply` or `replied` (not `interested`, not
      `not_interested`);
    - the contact is not deleted, not opted out, not unreachable (the
@@ -719,12 +812,18 @@ change):
   `StatusBadge` labels. This facet inverts the others' "empty =
   unconstrained" convention (`tenantFacets.ts:57-62`) and says so in code:
   - URL state: repeated `?status=<value>`; NO `status` param = the DEFAULT
-    set (every status except `inactive` and `placed`). An empty selection
-    is not representable and not needed: the chip group's "Clear" returns to
-    the default set, and "all seven on" is the way to see everyone. Turning
-    off the last lit chip is a no-op (the chip stays lit).
+    set (every status except `inactive` and `placed`); the sentinel
+    `?status=none` = the EMPTY selection (zero rows, the ordinary "no
+    tenants match" line), so deselection never locks - the chip contract at
+    `ContactsList.tsx:216-218` holds for the last lit chip too. "All seven
+    on" is the way to see everyone.
   - Only a selection that differs from the default is written to the URL;
-    selecting exactly the default set removes the param.
+    selecting exactly the default set removes the param. A URL whose
+    `status` values are all invalid prunes to the default, not to `none`.
+  - "Clear" for this facet returns to the DEFAULT set and is shown only
+    while the selection differs from the default (`ChipGroup` gains a
+    `baseline` prop so Clear is never a dead control; the other facets keep
+    their empty baseline).
   - Status enters `buildFacets` like the other facets: voucher and authority
     chip counts reflect the status selection, and each status chip's count
     reflects the voucher and authority selection, so "a chip's number always
@@ -815,25 +914,30 @@ through the fake carrier.
 
 ## 8. Verification
 
-Unit (app): `touchLastHeardFrom` guard + forward-only + swallow; each of the
-eight inbound paths touches on both the fresh and the deduped branch (route
-tests with the fake repos) and the dev fixture seams touch; retry rows, the
-echo dedupe and an unknown-author email do not; `attributeInbound` branch
-table, and a conformance test that each live path's touched id equals
-`attributeInbound` on the row it wrote; `deriveSendOutcome` precedence table
-including the partner-ignores-tour case; `effectiveDecline` supersession by
-share and by tour; the outcome route's branches, the no-second-tour check
-over the full qualifying set, and the 503 on a failed join; the backfill
-planner's attribution branches and ISO normalization; the seed derivation;
-the follow-ups builder's recipient rule and ordering; preview
-`declinedContactIds`; `POST /api/tours` `tenant_required`.
+Unit (app): `touchLastHeardFrom` guard + forward-only + normalization +
+swallow; each of the eight inbound paths touches (SMS and voice on both the
+fresh and the deduped branch; email with the winner) and the dev fixture
+seams touch; retry rows, the echo dedupe and an unknown-author email do
+not; `attributeInbound` branch table including the keyless non-member
+refused call and the never-a-roster-member fallback, and a conformance test
+that each live path's touched id equals `attributeInbound` on the row it
+wrote; `deriveSendOutcome` precedence table including the
+partner-ignores-tour case; `effectiveDecline` supersession by share, by a
+NEW tour behind an older toured tour, and by a rescheduled or reopened
+tour; the outcome route's branches (existing tour, `tour_type_required`,
+create, `listing_interested` written only on create, 503 with `saved`), and
+the 503 on an incomplete batch; the backfill planner's attribution branches;
+the seed derivation; the follow-ups builder's eligibility and thresholds and
+ordering; preview `declinedContactIds` under D11 and its degraded flag;
+`POST /api/tours` `tenant_required`.
 
 Unit (dashboard): `sortByHeardFrom` and the name comparator; Tenants tab
 default status set, Clear, counts, the hidden-match hint, sort and URL round
 trip; `RecipientPreview` declined-row defaults, "Select all", the combined
 accessible name and the added-row annotation; `ContactSearchField`
-`annotate`; `SendRosterRow` outcome rendering, grouping and action
-callbacks; the C6 tests; `formatHeardFrom`.
+`annotate`; `SendRosterRow` outcome rendering, the four-group cover, and action
+callbacks including the no-tour-type path opening the form; the contact
+card's error rendering; the C6 tests; `formatHeardFrom`.
 
 E2E (new or extended specs, accessibility-first selectors): (1) an inbound
 text, a relay-group text, a call and an email each move last heard from on

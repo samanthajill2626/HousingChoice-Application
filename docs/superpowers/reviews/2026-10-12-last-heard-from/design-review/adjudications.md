@@ -120,3 +120,75 @@ Round 1 result: decisions CHANGED (D11, D12, D13 added; the precedence rule,
 the attribution rule, the preview payload, the audit surfaces and the seed
 posture all moved). Round 2 proceeds with reviewer A continued (18 findings,
 more accepted), carrying reviewer B's report.
+
+## Round 2 (2026-10-12) - spec d8bd07e3 (revision 2) -> revision 3
+
+Reviewer A continued (`spec-r2-reviewer-a.md`, 11 findings + one contested
+adjudication).
+
+1. R2-1 - D11 compares against the chip winner's `createdAt`, which is the
+   most PROGRESSED tour, and revived tours keep their `createdAt`. ACCEPT.
+   Verified (`listingSendTour.ts:41-45`; `toursModel.ts:214-218` has
+   `lastMarkedAt`). `deriveTourSignal` now also returns `latestActivityAt` =
+   max over every qualifying tour of `max(createdAt, lastMarkedAt ??
+   updatedAt)`, and `effectiveDecline` compares against that. D11 reworded.
+2. R2-2 - the non-member refused call has no `relay_sender_key`; a
+   key-presence discriminator would credit roster member #1. ACCEPT. Verified
+   (`voice.ts:1048-1054`). The rule discriminates by thread type; keyless
+   relay rows resolve by the external-caller fields; a roster member is never
+   the fallback; other keyless group rows are unattributed and counted.
+3. R2-3 - "pure" functions that do lookups. ACCEPT. `attributeInbound` takes
+   an injected `lookup`; the seed derivation passes a synchronous lookup over
+   the seed's own contact items; "pure" is gone from both.
+4. R2-4 - the preview computes `declinedContactIds` with no tour join or
+   types, so it cannot apply D11. ACCEPT. The preview joins tours and the
+   declined rows' contact types (requireComplete) and runs
+   `deriveSendOutcome`. D12's 503 is NOT extended to the preview (it serves
+   labels, not outcomes with buttons): on a failed read it serves candidates
+   with no decline labels and a visible `declineLabelsUnavailable` line.
+5. R2-5 - card rows fall into no group; the projection lacks opt-out /
+   unreachable. ACCEPT. The card uses the eligibility half only (a shared
+   `isEligibleRecipient`); four groups cover every row; the units projection
+   gains `deleted_at`, `sms_opt_out`, `sms_unreachable`; the row carries
+   `eligible`. NOT ELIGIBLE rows keep their outcome's actions.
+6. R2-6 - `getRecipientDisplaysByIds` drops keys silently; the contact cards
+   render a 503 as "Arrives with the backend."; Today's failure mode is
+   undefined. ACCEPT. Verified (`contactsRepo.ts:943-951`, `:986-998`;
+   `useContactFile.ts:51-61`). `requireComplete` on the outcome joins; a
+   genuinely missing contact is served as `recipientMissing` with no
+   actions; the contact cards get a distinct error rendering; the Today
+   section degrades on its own.
+7. R2-7 - the status facet's no-op last chip breaks the deselection
+   contract; Clear is a dead control at the default; invalid-only URLs are
+   undefined. ACCEPT. `?status=none` is the explicit empty selection; Clear
+   returns to the default and shows only when the selection differs from it
+   (`ChipGroup` gains a `baseline`); invalid-only prunes to the default.
+8. R2-8 - "every declined row is already sent" is not guaranteed. ACCEPT.
+   Verified (`shareRecipientState.ts:249-268` is best-effort;
+   `listingSendsRepo.ts:51` legacy / individual entries). The declined-only
+   accessible name is allowed; the unchecked rule stands on its own.
+9. R2-9 - `listing_interested` written without a create and on retry; the
+   post-write 503 claims nothing changed; audit best-effort unstated.
+   ACCEPT. Written only on create; 503 carries `saved: true` and the row
+   says "Saved - reload to see the change"; audit writes are best-effort via
+   the tours writer.
+10. R2-10 - normalize at the single writer, not in the backfill. ACCEPT.
+    `touchLastHeardFrom` normalizes; the backfill's own normalization is for
+    its cross-thread max only.
+11. R2-11 - email dedupe returns early by design; the performance world is
+    outside D13; NOT ELIGIBLE actions unspecified. ACCEPT all three (email is
+    covered by the winner; the performance world is excluded explicitly;
+    NOT ELIGIBLE rows keep their outcome's actions).
+12. Contest of round-1 rejection B14 (the guessed tour type). The contest
+    WINS: `tourType` is not in the PATCH allowlist (`tours.ts:157`) so the
+    guess is permanent, and it routes reminders (`tourReminders.ts:1062-1068`).
+    The round-1 rejection rested on "editable afterwards", which was false.
+    New D14: the button commits a type only from the structured
+    `unit.tour_type`; with none, it opens the Schedule tour form prefilled
+    (tenant, property, no time) so the guess is seen; the route refuses
+    `tour_type_required` as a guard; `deriveTourType` stays in the form.
+    This is a Cameron-level amendment to D6 and is flagged for the spec gate.
+
+Round 2 result: decisions CHANGED (D11's comparison input, D14 added, the
+preview's degraded state, the card grouping rule). Round 3 proceeds with the
+same reviewer under the re-review charge.

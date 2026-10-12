@@ -24,7 +24,13 @@ import { tenantPlacements } from './buildContactFile.js';
 import { suggestionFor } from './suggestionTargets.js';
 import { contactStatusLabel, formatAddress, formatPhone } from './format.js';
 import { suggestedContactKindLabel, type SuggestedContactKind } from './contactProfile.js';
+import type { TypeChangeRefusal } from '../../lib/holdingRefusals.js';
+import { TypeChangeRefusalList } from './TypeChangeRefusalList.js';
 import styles from './UnknownFile.module.css';
+
+/** The Unknown card's last Mark as failure (spec 2026-10-12 D2): a refused
+ *  type change's blocking records, or a sentence for any other failure. */
+export type TriageError = { refusals: TypeChangeRefusal[] } | { message: string };
 
 export interface UnknownFileProps {
   contact: Contact;
@@ -55,6 +61,8 @@ export interface UnknownFileProps {
    *  suggestion as a caseworker. Never the triage PATCH. Absent: disabled. */
   onMakeCaseworker?: () => void;
   triaging?: boolean;
+  /** The last Mark as failure, shown on the Needs triage card (null: none). */
+  triageError?: TriageError | null;
   /** Pending AI suggestions - a `type` suggestion surfaces a recommendation line
    *  inside the triage card (the Mark-as buttons remain the action). */
   suggestions?: SuggestionItem[];
@@ -76,6 +84,7 @@ export function UnknownFile({
   onTriage,
   onMakeCaseworker,
   triaging = false,
+  triageError = null,
   suggestions = [],
 }: UnknownFileProps): React.JSX.Element {
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
@@ -143,6 +152,17 @@ export function UnknownFile({
             Mark as Property Manager
           </Button>
         </div>
+        {triageError !== null ? (
+          <div className={styles.triageError}>
+            {'refusals' in triageError ? (
+              <TypeChangeRefusalList refusals={triageError.refusals} />
+            ) : (
+              <p role="alert" className={styles.error}>
+                {triageError.message}
+              </p>
+            )}
+          </div>
+        ) : null}
       </Card>
 
       <Card

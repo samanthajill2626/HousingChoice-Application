@@ -1,0 +1,229 @@
+// caseworker-integrity (spec 2026-10-12 section 4 "Restore", Cameron
+// 2026-10-12): POST /api/units/:id/restore never brings a property back with a
+// landlord of record that is not typed `landlord`, and never dead-ends.
+//   - plain (no landlordId in the body): ownerless or a valid landlord ->
+//     restore as before; otherwise 409 restore_needs_landlord { landlordName? }
+//     and nothing is written;
+//   - { landlordId: <id> } / { landlordId: null }: honored only when the plain
+//     restore would refuse - swap or clear the landlord in one write;
+//   - the unit_restored audit gains landlordReplaced / landlordCleared.
+import request from 'supertest';
+import { describe, expect, it } from 'vitest';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { RosterWriteConflictError, type UnitItem } from '../src/repos/unitsRepo.js';
+import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+
+const DELETED_AT = '2026-10-01T09:00:00.000Z';
+
+/** A SOFT-DELETED unit owned by c-old: c-old is the primary, c-pm a second row. */
+function seedDeletedUnit(world: FakeWorld, unitId: string, overrides: Partial<UnitItem> = {}): UnitItem {
+  const item: UnitItem = {
+    unitId,
+    landlordId: 'c-old',
+    status: 'available',
+    primary_contact: 'c-old',
+    contacts: [
+      { contactId: 'c-old', role: 'landlord', primaryContact: true },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+    ],
+    deleted_at: DELETED_AT,
+    created_at: DELETED_AT,
+    updated_at: DELETED_AT,
+    ...overrides,
+  };
+  world.units.set(unitId, item);
+  return item;
+}
+
+function seedContact(world: FakeWorld, contactId: string, fields: Partial<ContactItem>): void {
+  world.contacts.push({ contactId, ...fields } as ContactItem);
+}
+
+function restore(app: import('express').Express, unitId: string, body?: Record<string, unknown>) {
+  const req = request(app)
+    .post(`/api/units/${unitId}/restore`)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('cookie', TEST_SESSION_COOKIE);
+  return body === undefined ? req : req.send(body);
+}
+
+const restoredEvents = (world: FakeWorld) => world.auditEvents.filter((e) => e.event_type === 'unit_restored');
+
+const hasLandlordId = (unit: UnitItem | undefined): boolean =>
+  unit !== undefined && Object.prototype.hasOwnProperty.call(unit, 'landlordId');
+
+describe('POST /api/units/:id/restore - plain restore (I3)', () => {
+  it('(PIN) restores as before when the landlord of record is still a landlord', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-1');
+    seedContact(world, 'c-old', { type: 'landlord', firstName: 'Lee', lastName: 'Lord' });
+    const res = await restore(app, 'u-1');
+    expect(res.status).toBe(200);
+    expect(res.body.unit.deleted_at).toBeUndefined();
+    expect(world.units.get('u-1')?.landlordId).toBe('c-old');
+    expect(restoredEvents(world)).toHaveLength(1);
+    expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('landlordReplaced');
+    expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('landlordCleared');
+  });
+
+  it('(PIN) restores an ownerless property as before', async () => {
+    const { app, world } = makeWebhookHarness();
+    const unit = seedDeletedUnit(world, 'u-2', {
+      contacts: [{ contactId: 'c-pm', role: 'pm', primaryContact: false }],
+    });
+    delete (unit as Partial<UnitItem>).landlordId;
+    delete unit.primary_contact;
+    const res = await restore(app, 'u-2');
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-2')?.deleted_at).toBeUndefined();
+  });
+
+  it('409s restore_needs_landlord with the stored name when the landlord is no longer a landlord - nothing written', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-3');
+    seedContact(world, 'c-old', { type: 'partner', role: 'Caseworker', firstName: 'Lee', lastName: 'Lord' });
+    const res = await restore(app, 'u-3');
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'restore_needs_landlord', landlordName: 'Lee Lord' });
+    expect(world.units.get('u-3')?.deleted_at).toBe(DELETED_AT);
+    expect(world.units.get('u-3')?.landlordId).toBe('c-old');
+    expect(restoredEvents(world)).toHaveLength(0);
+  });
+
+  it('409s restore_needs_landlord without a name when the landlord contact no longer exists', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-4');
+    const res = await restore(app, 'u-4');
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'restore_needs_landlord' });
+    expect(world.units.get('u-4')?.deleted_at).toBe(DELETED_AT);
+    expect(restoredEvents(world)).toHaveLength(0);
+  });
+
+  it('(PIN) 404s an unknown unit', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await restore(app, 'nope');
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'unit_not_found' });
+  });
+
+  it('(PIN) a property that is not deleted restores as before with no landlord check', async () => {
+    const { app, world } = makeWebhookHarness();
+    const unit = seedDeletedUnit(world, 'u-live');
+    delete unit.deleted_at;
+    seedContact(world, 'c-old', { type: 'tenant' });
+    const res = await restore(app, 'u-live', { landlordId: null });
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-live')?.landlordId).toBe('c-old');
+  });
+
+  it('400s a landlordId that is neither a contact id nor null - nothing written', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-bad');
+    for (const landlordId of [42, '', true, { id: 'c-new' }]) {
+      const res = await restore(app, 'u-bad', { landlordId });
+      expect(res.status, JSON.stringify(landlordId)).toBe(400);
+      expect(res.body).toEqual({ error: 'landlordId must be a contact id or null' });
+    }
+    expect(world.units.get('u-bad')?.deleted_at).toBe(DELETED_AT);
+  });
+});
+
+describe('POST /api/units/:id/restore - with a landlord (I3)', () => {
+  it('restores with the chosen landlord: old row out, new row pinned landlord, primary moved, audit landlordReplaced', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-5');
+    seedContact(world, 'c-old', { type: 'tenant' });
+    seedContact(world, 'c-new', { type: 'landlord', firstName: 'Nora', lastName: 'Lane', company: 'Lane Homes' });
+    const res = await restore(app, 'u-5', { landlordId: 'c-new' });
+    expect(res.status).toBe(200);
+    const stored = world.units.get('u-5')!;
+    expect(stored.deleted_at).toBeUndefined();
+    expect(stored.landlordId).toBe('c-new');
+    expect(stored.primary_contact).toBe('c-new');
+    expect(stored.contacts).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-new', role: 'landlord', primaryContact: true, name: 'Nora Lane', company: 'Lane Homes' },
+    ]);
+    // The response carries the enriched roster (the Contacts card applies it).
+    expect(res.body.unit.contacts).toContainEqual(
+      expect.objectContaining({ contactId: 'c-new', role: 'landlord', name: 'Nora Lane' }),
+    );
+    expect(restoredEvents(world)).toHaveLength(1);
+    expect(restoredEvents(world)[0]?.payload).toMatchObject({
+      landlordReplaced: { from: 'c-old', to: 'c-new' },
+    });
+    expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('landlordCleared');
+  });
+
+  it('409s landlord_not_landlord when the chosen contact is not a landlord - nothing written', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-6');
+    seedContact(world, 'c-old', { type: 'tenant' });
+    seedContact(world, 'c-cw', { type: 'partner', role: 'Caseworker' });
+    const res = await restore(app, 'u-6', { landlordId: 'c-cw' });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'landlord_not_landlord' });
+    expect(world.units.get('u-6')?.deleted_at).toBe(DELETED_AT);
+    expect(world.units.get('u-6')?.landlordId).toBe('c-old');
+    expect(restoredEvents(world)).toHaveLength(0);
+  });
+
+  it('404s landlord_not_found when the chosen contact does not exist - nothing written', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-7');
+    seedContact(world, 'c-old', { type: 'tenant' });
+    const res = await restore(app, 'u-7', { landlordId: 'c-ghost' });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'landlord_not_found' });
+    expect(world.units.get('u-7')?.deleted_at).toBe(DELETED_AT);
+    expect(restoredEvents(world)).toHaveLength(0);
+  });
+
+  it('(PIN) a body is ignored when the stored landlord is still valid - the restore is plain', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-8a');
+    seedDeletedUnit(world, 'u-8b');
+    seedContact(world, 'c-old', { type: 'landlord' });
+    seedContact(world, 'c-new', { type: 'landlord' });
+    expect((await restore(app, 'u-8a', { landlordId: 'c-new' })).status).toBe(200);
+    expect((await restore(app, 'u-8b', { landlordId: null })).status).toBe(200);
+    expect(world.units.get('u-8a')?.landlordId).toBe('c-old');
+    expect(world.units.get('u-8b')?.landlordId).toBe('c-old');
+    for (const event of restoredEvents(world)) {
+      expect(event.payload).not.toHaveProperty('landlordReplaced');
+      expect(event.payload).not.toHaveProperty('landlordCleared');
+    }
+  });
+
+  it('409s unit_roster_conflict when the landlord changed under the request - no audit row', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-9');
+    seedContact(world, 'c-old', { type: 'tenant' });
+    seedContact(world, 'c-new', { type: 'landlord' });
+    world.unitsRepo.restoreWithLandlord = async () => {
+      throw new RosterWriteConflictError();
+    };
+    const res = await restore(app, 'u-9', { landlordId: 'c-new' });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'unit_roster_conflict' });
+    expect(restoredEvents(world)).toHaveLength(0);
+  });
+});
+
+describe('POST /api/units/:id/restore - without a landlord (I3)', () => {
+  it('restores ownerless: landlordId and the old row removed, primary cleared, audit landlordCleared', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-10');
+    const res = await restore(app, 'u-10', { landlordId: null });
+    expect(res.status).toBe(200);
+    const stored = world.units.get('u-10');
+    expect(stored?.deleted_at).toBeUndefined();
+    expect(hasLandlordId(stored)).toBe(false);
+    expect(stored?.primary_contact).toBeUndefined();
+    expect(stored?.contacts).toEqual([{ contactId: 'c-pm', role: 'pm', primaryContact: false }]);
+    expect(restoredEvents(world)[0]?.payload).toMatchObject({ landlordCleared: { from: 'c-old' } });
+    expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('landlordReplaced');
+  });
+});

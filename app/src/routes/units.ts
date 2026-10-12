@@ -1586,19 +1586,120 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // soft-deleted property back into the normal views. Audited; 404 when missing.
   router.post('/:unitId/restore', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
-    let unit;
+    // caseworker-integrity I3 (spec 2026-10-12 section 4 "Restore", Cameron
+    // 2026-10-12): a property comes back live only with a landlord of record
+    // typed `landlord`, or with none - and restore never dead-ends.
+    //   - Plain restore (no `landlordId` key in the body): when the unit is
+    //     ownerless or its landlordId names a contact typed `landlord`, restore
+    //     exactly as before. Otherwise 409 restore_needs_landlord
+    //     { landlordName? } and nothing is written.
+    //   - { landlordId: <id> } restores AND makes that contact (404
+    //     landlord_not_found / 409 landlord_not_landlord) the landlord of record;
+    //     { landlordId: null } restores ownerless. Honored ONLY when the plain
+    //     restore would refuse (otherwise ignored), in ONE conditional write
+    //     (unitsRepo.restoreWithLandlord) on the landlordId read here - a
+    //     concurrent change answers 409 unit_roster_conflict.
+    //   - A unit that is NOT soft-deleted restores exactly as before with no
+    //     check: nothing comes back to life, and restore must never become a
+    //     way to reassign a live property's landlord.
+    const raw: unknown = req.body;
+    const body =
+      typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    const choosesLandlord = Object.prototype.hasOwnProperty.call(body, 'landlordId');
+    const choice = body['landlordId'];
+    if (choosesLandlord && choice !== null && (typeof choice !== 'string' || choice.length === 0)) {
+      res.status(400).json({ error: 'landlordId must be a contact id or null' });
+      return;
+    }
+
+    const stored = await units.getById(unitId, { consistentRead: true });
+    if (stored === undefined) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    const storedLandlordId =
+      typeof stored.landlordId === 'string' && stored.landlordId.length > 0 ? stored.landlordId : undefined;
+    let needsLandlord = false;
+    let landlordName: string | undefined;
+    if (isDeleted(stored) && storedLandlordId !== undefined) {
+      const current = await contacts.getById(storedLandlordId, { consistentRead: true });
+      if (current === undefined || current.type !== 'landlord') {
+        needsLandlord = true;
+        landlordName = current === undefined ? undefined : displayNameOfContact(current);
+      }
+    }
+
+    if (!needsLandlord) {
+      let unit;
+      try {
+        unit = await units.restore(unitId);
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          res.status(404).json({ error: 'unit_not_found' });
+          return;
+        }
+        throw err;
+      }
+      await audit.append(`units#${unitId}`, 'unit_restored', { actor: req.user?.userId });
+      log.info({ unitId, actor: req.user?.userId }, 'unit restored via api');
+      res.json({ unit });
+      return;
+    }
+
+    if (!choosesLandlord) {
+      log.info({ unitId, actor: req.user?.userId }, 'unit restore refused: the landlord of record is not a landlord');
+      res.status(409).json({
+        error: 'restore_needs_landlord',
+        ...(landlordName !== undefined && { landlordName }),
+      });
+      return;
+    }
+
+    let next: { contactId: string; name?: string; company?: string } | null = null;
+    if (typeof choice === 'string') {
+      let landlord: ContactItem;
+      try {
+        landlord = await requireLandlordContact(contacts, choice);
+      } catch (err) {
+        if (sendContactTypeError(err, res)) return;
+        throw err;
+      }
+      const name = displayNameOfContact(landlord);
+      const company = typeof landlord['company'] === 'string' ? (landlord['company'] as string) : undefined;
+      next = {
+        contactId: choice,
+        ...(name !== undefined && { name }),
+        ...(company !== undefined && { company }),
+      };
+    }
+
+    let restored: UnitItem;
     try {
-      unit = await units.restore(unitId);
+      restored = await units.restoreWithLandlord(unitId, { expectLandlordId: storedLandlordId, next });
     } catch (err) {
+      if (err instanceof RosterWriteConflictError) {
+        res.status(409).json({ error: 'unit_roster_conflict' });
+        return;
+      }
       if (err instanceof ConditionalCheckFailedException) {
         res.status(404).json({ error: 'unit_not_found' });
         return;
       }
       throw err;
     }
-    await audit.append(`units#${unitId}`, 'unit_restored', { actor: req.user?.userId });
-    log.info({ unitId, actor: req.user?.userId }, 'unit restored via api');
-    res.json({ unit });
+    await audit.append(`units#${unitId}`, 'unit_restored', {
+      actor: req.user?.userId,
+      ...(next !== null
+        ? { landlordReplaced: { from: storedLandlordId, to: next.contactId } }
+        : { landlordCleared: { from: storedLandlordId } }),
+    });
+    log.info(
+      { unitId, actor: req.user?.userId, landlordCleared: next === null },
+      'unit restored via api with a landlord change',
+    );
+    // The enriched roster (the roster routes' shape) so the Contacts card can
+    // apply the new landlord of record in place.
+    res.json({ unit: { ...restored, contacts: await enrichRoster(restored) } });
   });
 
   return router;

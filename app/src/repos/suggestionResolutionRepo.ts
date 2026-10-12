@@ -473,9 +473,14 @@ export const CLASSIFICATION_GUARD_KEYS: readonly string[] = ['classification_rev
  * such a journal also requires caseworker_conversion to be absent (the
  * conversion writes that attribute in the same write as the type change), so a
  * legacy journal recovered onto a converted contact ends superseded instead of
- * writing tenant facts onto a caseworker or looping on `stale`. Known limit: a
- * legacy journal is not fenced against a GENERIC re-type. Phone and dismiss
- * plans carry no guard and answer {}. Never mutates the stored plan.
+ * writing tenant facts onto a caseworker or looping on `stale`. Known limits:
+ * (1) a legacy journal is not fenced against a GENERIC re-type; (2) a legacy
+ * journal recovered onto a contact that was converted and later re-typed back
+ * to tenant ends superseded, because the contact still carries
+ * caseworker_conversion (nothing clears it on a re-type) although it is a
+ * tenant again - this fails safe, and the population (pre-deploy journals
+ * still in flight on caseworkers re-typed back) is about zero. Phone and
+ * dismiss plans carry no guard and answer {}. Never mutates the stored plan.
  */
 export function effectiveGuard(journal: ActiveSuggestionResolution): ResolutionAttributeGuard {
   const plan = journal.plan;

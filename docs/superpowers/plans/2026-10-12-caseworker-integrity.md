@@ -6,11 +6,13 @@
 - Branch `fix/caseworker-integrity`, worktree `W:\tmp\caseworker-integrity`,
   cut from main @19607658. Mission records:
   `docs/superpowers/reviews/2026-10-12-caseworker-integrity/`.
-- Status: PLAN v1 ASSEMBLED (planner, 2026-10-12). Sections 0-3 are
-  BINDING; slices S1-S5 follow (drafted by five section writers; each
-  slice's CONTRACT ISSUES block is kept for context and is overridden by the
-  assembly rulings linked in section 1). Execute slices in order S1, S2, CK,
-  S3, S4, CK, S5.
+- Status: PLAN v2 (planner, 2026-10-12) - plan review round 1 (terminal)
+  folded in: `docs/superpowers/reviews/2026-10-12-caseworker-integrity/plan-review/adjudications.md`.
+  (v1 ASSEMBLED @771edb52.) Sections 0-3 are BINDING; slices S1-S5 follow
+  (drafted by five section writers; each slice's CONTRACT ISSUES block is
+  kept for context and is overridden by the assembly rulings linked in
+  section 1 and by the plan-review adjudications above). Execute slices in
+  order S1, S2, CK, S3, S4, CK, S5.
 
 ## 0. Ground rules for this plan
 
@@ -50,6 +52,42 @@
   Matching page, property-send records). Do not touch their files; keep edits
   to shared files (`dashboard/src/api/types.ts`, `endpoints.ts`,
   `app/src/repos/unitsRepo.ts`, seeds) minimal, local and additive.
+- Lint at every slice gate (plan review R1 row 3; AGENTS.md gate 5 - NO NEW
+  LINT ERRORS IN THE FILES YOU TOUCHED). Each slice gate runs `npx eslint`
+  BARE on the exact list of `.ts`/`.tsx` files that slice touches (the
+  config lints nothing else). Then:
+  1. Coverage check - every `.ts`/`.tsx` file the branch has touched so far
+     must be in this slice's list or an earlier slice's list:
+     ```
+     cd "W:/tmp/caseworker-integrity"; git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx'
+     ```
+     A printed path in no slice's list is a STOP-and-record (W1); lint it
+     with this slice before going on.
+  2. If eslint reports ANY error, attribute it by BASELINE COMPARISON, never
+     by line number (an unused import fires on the import line your diff
+     never touched). Lint each listed file's MERGE-BASE content in place
+     (bash; read-only; a diagnostic, not a gate, so its pipe is allowed;
+     replace `<files>` with the slice gate's list):
+     ```
+     cd "W:/tmp/caseworker-integrity"; B=$(git merge-base main HEAD); for f in <files>; do if git cat-file -e "$B:$f" 2>/dev/null; then echo "== base: $f"; git show "$B:$f" | npx eslint --stdin --stdin-filename "$f"; else echo "== base: $f is new on this branch - no baseline, must be clean"; fi; done
+     ```
+     Compare the two outputs by file + rule + the flagged source text (line
+     numbers shift with the slice's own edits). An error present on the
+     branch and absent at base is the SLICE's and BLOCKING - fix it and
+     re-run. One present at base is pre-existing - leave it (never fix it in
+     this branch) and name it in the slice report and the handback.
+  3. Known baseline, measured by the planner on the base tree 2026-10-12
+     (`npx eslint` on every existing file this plan touches - 58 files -
+     reports exactly these two, in files S3 edits; everything else lints
+     clean at base):
+     - `dashboard/src/routes/tours/TourDetail.tsx:341` - `react-hooks/purity`
+       ("Cannot call impure function during render"): `Date.now()` in the
+       `startPassed` computation (Task 3.12 edits this file, not that line).
+     - `dashboard/src/routes/tours/ScheduleTourForm.tsx:241` -
+       `react-hooks/set-state-in-effect`: `setTourType(DEFAULT_TOUR_TYPE);`
+       in the unit-picked effect (Task 3.14 edits this file, not that line).
+     Both are pre-existing debt (`docs/issues/lint-backlog-repo-wide.md`):
+     NOT to be fixed here; the S3 gate expects exactly these two.
 
 ## 1. Global constraints (verbatim from the spec)
 
@@ -81,21 +119,27 @@ Dashboard copy (exact strings, ASCII apostrophes):
 
 | code | sentence |
 |---|---|
-| `contact_not_tenant` | "Tours and placements are for tenants, and this contact is <phrase>." with phrase by contactKind: tenant "a tenant", landlord "a landlord", partner "a partner", caseworker "a caseworker", team_member "a team member", unknown "not classified yet" |
+| `contact_not_tenant` | "Tours and placements are for tenants. This contact is <phrase>." (the spec's two sentences) with phrase by contactKind: tenant "a tenant", landlord "a landlord", partner "a partner", caseworker "a caseworker", team_member "a team member", unknown "not classified yet"; a missing or unrecognized contactKind "not a tenant" |
 | `tenant_not_found` | "That contact no longer exists." |
 | `landlord_not_landlord` | "Only a landlord can be a property's landlord of record." |
 | `landlord_not_found` | "That landlord no longer exists." |
 | `contact_list_caseworker` | "Caseworkers can't be on a property's contact list." |
 | restore dialog | title "Restore property" (the dialog's accessible name); body "<landlordName or This property's landlord> is no longer a landlord, so they can't stay this property's landlord. Choose its landlord:"; picker label "Landlord" (landlords only); buttons "Restore with this landlord" (disabled until picked), "Restore without a landlord", "Cancel"; in-dialog 409 `unit_roster_conflict` -> the existing `ROSTER_RETRY_COPY`; any other failure "Couldn't restore - please try again." |
 
-(Planner ruling P-1: the spec's "This contact is a <kind label>." is rendered
-as the phrase table above so `unknown` reads naturally; the meaning is
-unchanged. A missing or unrecognized `contactKind` uses the phrase "not a
-tenant".)
+(Planner ruling P-1, as amended by plan review R1 row 2: the sentence is the
+spec's own two-sentence form, "Tours and placements are for tenants. This
+contact is <phrase>." - first sentence and wording unchanged from the spec.
+The only handling added is the phrase: the spec's kind label is lower-cased
+and given its article ("a landlord", "a team member"), and `unknown` reads
+"not classified yet" so the sentence stays natural English instead of "This
+contact is a Unknown". A missing or unrecognized `contactKind` uses the
+phrase "not a tenant".)
 
 Assembly rulings on the section writers' contract issues are binding and
 override a slice where they differ:
-`docs/superpowers/reviews/2026-10-12-caseworker-integrity/plan-research/plan-assembly-rulings.md`.
+`docs/superpowers/reviews/2026-10-12-caseworker-integrity/plan-research/plan-assembly-rulings.md`
+(rulings S2-1, S5-1 and P-1 there are amended by plan review R1 rows 4, 1 and
+2; the plan text below already carries the amendments).
 
 ## 2. Binding interfaces (every slice codes against these names)
 
@@ -161,13 +205,20 @@ override a slice where they differ:
 
 ### Dashboard
 
-- `dashboard/src/lib/holdingRefusals.ts` (NEW): `refusalCopyByKind(r)` for
-  kinds `open_placement`, `open_tour`, `landlord_of_record` (conversion
-  wording/links), plus `typeChangeRefusalCopy`, `TYPE_CHANGE_LANDLORD_SENTENCE`,
-  `typeChangeRefusalsFrom` and one shared `TypeChangeRefusalList` component
-  (ruling S2-1; exact shapes in S2); the conversion's `refusalCopy` in
+- `dashboard/src/lib/holdingRefusals.ts` (NEW, a `.ts` module - no JSX):
+  `refusalCopyByKind(r)` for kinds `open_placement`, `open_tour`,
+  `landlord_of_record` (conversion wording/links), plus
+  `typeChangeRefusalCopy`, `TYPE_CHANGE_LANDLORD_SENTENCE`,
+  `typeChangeRefusalsFrom` and the wire type `TypeChangeRefusal` (ruling
+  S2-1; exact shapes in S2); the conversion's `refusalCopy` in
   `CaseworkerDialog.tsx` delegates to it (output byte-identical for its four
   codes).
+- `dashboard/src/routes/contact/TypeChangeRefusalList.tsx` (NEW, S2 Task
+  2.6): `export function TypeChangeRefusalList({ refusals })` - the ONE shared
+  component that renders a refused type change's sentences and View links,
+  used by the edit form (Task 2.6) and the Unknown card (Task 2.7), which
+  import it from `./TypeChangeRefusalList.js`. It is NOT exported from
+  `holdingRefusals.ts` (corrected by plan review R1 row 4).
 - `dashboard/src/lib/contactTypeErrors.ts` (NEW):
   `contactTypeErrorMessage(err: unknown): string | null` - the section-1
   dashboard copy table for `contact_not_tenant` (with `contactKind`),
@@ -187,7 +238,7 @@ override a slice where they differ:
 | S2 | `contactHoldings.ts` extraction (conversion unchanged), `contactKind`, contacts PATCH `type_change_refused`, edit form + Unknown card | - |
 | S3 | `contactTypeGuards.ts`; tours create / PATCH revive / reopen; placements create / from-tour; transition service + `handleTransitionError`; `deriveTenantStatus` skip; TenantFile team-member buttons; `contactTypeErrors.ts` + the tour/placement dashboard copy sites | S2 (`contactKind`) |
 | S4 | units create / PATCH landlordId; contact-list caseworker + landlord-claim checks (order); `restoreWithLandlord` + restore route + dialog; Add contact picker hides caseworkers; `runRosterWrite` mapping | S3 (`contactTypeGuards.ts`, `contactTypeErrors.ts`) |
-| S5 | seed invariant test (every profile); e2e sweep + new specs; RUNBOOK; resolve 3 issues + correct the third; file 3 issues | S1-S4 |
+| S5 | seed invariant test (every profile); e2e sweep + new specs; RUNBOOK; resolve 3 issues + correct the third; file 4 issues (spec section 7's three + `unit-primary-contact-unchecked`, plan review R1 row 7) | S1-S4 |
 | CK | Checkpoint: typecheck + `npm test` + `npm run smoke` after S2 and after S4 | - |
 
 Watch items:
@@ -2146,7 +2197,13 @@ Goal: spec 2 change 5, service half. `applyJournal` carries
 `suggestion_contact_reclassified` for its OWN claim (classification first); a
 journal reached by helping keeps today's answers. Schedule A on the FakeWorld
 routes and on the real repos (DynamoDB Local), plus the real-repo schedule B
-(read + sweep) and the real-repo legacy recovery.
+(read + sweep) and the real-repo legacy recovery. Plan review R1 row 8: the
+`voucherSize` accept spanning a GENERIC tenant -> landlord re-type (through
+the real `contactsRepo.update`, which bumps `classification_revision`) and
+the `status` accept spanning a conversion (the classification-vs-field tie)
+also run on the real repos, not only on the FakeWorld. The phone accept stays
+FakeWorld-only: phone is a neutral target, never fenced, and commits through
+`commitPhoneEffect`, which D1 does not touch.
 
 Files:
 - modify `app/src/services/suggestionResolution.ts`
@@ -2480,6 +2537,22 @@ describe.skipIf(!reachable)('D1 schedules on the real repositories (DynamoDB Loc
     return { createdAt: item.createdAt, ...(item.revision !== undefined && { revision: item.revision }) };
   }
 
+  /** A pending suggestion for any other target (the voucherSize and status cases). */
+  async function seedTargetSuggestion(
+    contactId: string,
+    target: string,
+    suggestedValue: string,
+  ): Promise<SuggestionRequestIdentity> {
+    const { item } = await extraction.putSuggestion({
+      ownerContactId: contactId,
+      target,
+      suggestedValue,
+      conversationId: `conv-${contactId}`,
+      createdAt: '2026-10-12T11:00:00.000Z',
+    });
+    return { createdAt: item.createdAt, ...(item.revision !== undefined && { revision: item.revision }) };
+  }
+
   async function readContact(contactId: string): Promise<ContactItem | undefined> {
     const { Item } = await doc.send(new GetCommand({
       TableName: contactsTable, Key: { contactId }, ConsistentRead: true,
@@ -2546,6 +2619,55 @@ describe.skipIf(!reachable)('D1 schedules on the real repositories (DynamoDB Loc
     })).rejects.toMatchObject({ status: 409, code: 'suggestion_contact_reclassified' });
 
     await expectNoAuthority(contactId);
+  });
+
+  // Plan review R1 row 8 (spec 8 "D1, real AND fake": the generic re-type and
+  // the status tie also run on DynamoDB Local, not only on the FakeWorld).
+  it('A: a voucherSize accept spanning a generic tenant -> landlord re-type answers 409 suggestion_contact_reclassified and writes no voucher size', async () => {
+    const contactId = `reclass-v-${randomUUID().slice(0, 8)}`;
+    await seedTenant(contactId);
+    const identity = await seedTargetSuggestion(contactId, 'voucherSize', '3');
+    // Not the conversion: an ordinary type change through the REAL
+    // contactsRepo.update, whose UpdateExpression bumps classification_revision
+    // in the same write (what the contacts PATCH calls) - the fence must see it.
+    const paused = resolutionService(T0, {
+      afterBoundary: async (boundary) => {
+        if (boundary === 'claimed') await contacts.update(contactId, { type: 'landlord' });
+      },
+    });
+
+    await expect(paused.resolve({
+      contactId, target: 'voucherSize', action: 'accept', identity, actorId: ACTOR,
+    })).rejects.toMatchObject({ status: 409, code: 'suggestion_contact_reclassified' });
+
+    const contact = await readContact(contactId);
+    // Seeded with no revision, so the re-type's bump made it 1.
+    expect(contact).toMatchObject({ type: 'landlord', classification_revision: 1 });
+    expect(contact?.['voucherSize']).toBeUndefined();
+    expect(contact?.['voucherSize_source']).toBeUndefined();
+    expect((await resolutions.get(contactId, 'voucherSize'))?.state).toBe('completed');
+  });
+
+  it('A: a status accept spanning a conversion answers 409 suggestion_contact_reclassified - classification wins the tie with status', async () => {
+    const contactId = `reclass-st-${randomUUID().slice(0, 8)}`;
+    await seedTenant(contactId); // status 'onboarding'
+    const identity = await seedTargetSuggestion(contactId, 'status', 'searching');
+    // The conversion changes BOTH the guarded status (to 'active') and the
+    // classification, so the commit's mismatch is a tie the repository must
+    // answer as a reclassification.
+    const paused = resolutionService(T0, {
+      afterBoundary: async (boundary) => {
+        if (boundary === 'claimed') await conversion.make(contactId, { actor: ACTOR });
+      },
+    });
+
+    await expect(paused.resolve({
+      contactId, target: 'status', action: 'accept', identity, actorId: ACTOR,
+    })).rejects.toMatchObject({ status: 409, code: 'suggestion_contact_reclassified' });
+
+    // The conversion's own status stands; the accepted 'searching' was never written.
+    expect(await readContact(contactId)).toMatchObject({ type: 'partner', role: 'Caseworker', status: 'active' });
+    expect((await resolutions.get(contactId, 'status'))?.state).toBe('completed');
   });
 
   it('B (read): a crashed claim recovered after a conversion writes no authority (PIN)', async () => {
@@ -2637,8 +2759,11 @@ RED, and why:
   `superseded_by_reclassification`, but `applyJournal` only flags
   `superseded_by_human_edit` (`suggestionResolution.ts:585`), so the journal
   completes as superseded and `resolve()` returns `completedNow: true`.
-- Real `A: ...`: `promise resolved "{ completedNow: true, ... }" instead of
-  rejecting` - same cause.
+- Real `A: ...` (all three: the authority accept, the voucherSize accept
+  across a generic re-type, and the status accept across a conversion):
+  `promise resolved "{ completedNow: true, ... }" instead of rejecting` - same
+  cause (Tasks 1.3 and 1.5 already make the real repository answer
+  `superseded_by_reclassification`; only the service's answer is missing).
 - The `(PIN)` cases (FakeWorld address/phone, real B read, B sweep, both
   legacy cases) pass already (Tasks 1.3 and 1.5).
 
@@ -2729,7 +2854,7 @@ All pass. `cd "W:/tmp/caseworker-integrity"; npm run typecheck` passes.
 ```
 cd "W:/tmp/caseworker-integrity"; git status
 cd "W:/tmp/caseworker-integrity"; git add app/src/services/suggestionResolution.ts app/test/suggestionReclassification.test.ts app/test/suggestionReclassification.integration.test.ts
-cd "W:/tmp/caseworker-integrity"; git commit -m "fix(suggestions): answer 409 suggestion_contact_reclassified for an accept refused by a reclassification" -m "Spec 2026-10-12 D1 change 5. The R2-ADV-1 schedules (A paused, B via read and via the sweep, and a pre-deploy journal) now run on the FakeWorld routes and on the real repositories with the real conversion on DynamoDB Local." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+cd "W:/tmp/caseworker-integrity"; git commit -m "fix(suggestions): answer 409 suggestion_contact_reclassified for an accept refused by a reclassification" -m "Spec 2026-10-12 D1 change 5. The R2-ADV-1 schedules (A paused, B via read and via the sweep, and a pre-deploy journal), a voucherSize accept across a generic re-type and a status accept across a conversion now run on the FakeWorld routes and on the real repositories with the real conversion on DynamoDB Local." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -3121,6 +3246,16 @@ DynamoDB Local must be up (`cd "W:/tmp/caseworker-integrity"; npm run db:start`)
    `app/test/suggestionReclassificationGuard.test.ts`,
    `app/test/suggestionReclassification.integration.test.ts`:
    `tr -d '\11\12\15\40-\176' < FILE | wc -c` prints 0.
+6. Lint - AGENTS.md gate 5 scoped to S1's touched `.ts`/`.tsx` files (plan
+   review R1 row 3; the procedure is "Lint at every slice gate" in section
+   0), bare:
+   ```
+   cd "W:/tmp/caseworker-integrity"; npx eslint app/src/services/extraction/runTypes.ts app/src/services/suggestionResolution.ts app/src/repos/suggestionResolutionRepo.ts app/src/routes/suggestions.ts app/test/suggestionReclassification.test.ts app/test/suggestionReclassificationGuard.test.ts app/test/suggestionReclassification.integration.test.ts app/test/suggestionResolutionRepo.integration.test.ts app/test/helpers/suggestionResolutionFake.ts dashboard/src/api/types.ts dashboard/src/api/types.test.ts dashboard/src/routes/contact/ContactDetail.tsx dashboard/src/routes/contact/ContactDetail.test.tsx
+   ```
+   Expected: exit 0 - every one of these files that exists at the merge base
+   lints clean there (planner, 2026-10-12), so ANY error is S1's and
+   BLOCKING. If one is reported, confirm the attribution with the baseline
+   run (section 0) on the same paths, fix it, and re-run until exit 0.
 
 ## Surfaces covered
 
@@ -3146,10 +3281,10 @@ DynamoDB Local must be up (`cd "W:/tmp/caseworker-integrity"; npm run db:start`)
 | Change 7: no repair step | nothing to build (no task) |
 | Spec 8 (A) schedule A: 409, no authority, emit, journal completed - FakeWorld + real | 1.7 (FakeWorld + real), 1.8 (emit) |
 | Spec 8 (B) schedule B via ordinary read and via the journal sweep - FakeWorld + real | 1.3 (FakeWorld), 1.7 (real) |
-| Spec 8: address and phone accepts claimed before the conversion still commit | 1.7 |
-| Spec 8: voucherSize accept spanning a generic tenant -> landlord re-type refused as reclassified | 1.7 (schedule A), 1.3 (recovery variant) |
+| Spec 8: address and phone accepts claimed before the conversion still commit | 1.7 (FakeWorld; neutral targets - the phone commits through `commitPhoneEffect`, untouched by D1, so it stays fake-only, plan review R1 row 8) |
+| Spec 8: voucherSize accept spanning a generic tenant -> landlord re-type refused as reclassified | 1.7 (schedule A, FakeWorld + real - the real case re-types through the real `contactsRepo.update`, plan review R1 row 8), 1.3 (recovery variant) |
 | Spec 8: each tenant-only target on a non-tenant refused, chip survives; dismiss not refused | 1.2 |
-| Spec 8: status accept and prior-authority accept spanning a conversion answer reclassified | 1.7 (FakeWorld), 1.5 + 1.6 (tie at repo level) |
+| Spec 8: status accept and prior-authority accept spanning a conversion answer reclassified | 1.7 (FakeWorld both; real status accept, plan review R1 row 8), 1.5 + 1.6 (tie at repo level) |
 | Spec 8: `effectiveGuard` is the one function the three sites and the fake call | 1.6 (source pin) + 1.5 (behavior) |
 | Spec 8 D1 dashboard: both copy entries; refetch on reclassified | 1.9, 1.10 |
 | Spec 5: `resolve` and both recovery paths commit through `commitContactEffect` | 1.3, 1.6, 1.7 (read path + sweep, FakeWorld and real) |
@@ -5423,8 +5558,12 @@ git -C "W:/tmp/caseworker-integrity" diff --exit-code 19607658 -- app/test/casew
 cd "W:/tmp/caseworker-integrity"; npx eslint app/src/lib/caseworkers.ts app/src/services/contactHoldings.ts app/src/services/caseworkerConversion.ts app/src/routes/contacts.ts app/test/caseworkers.test.ts app/test/contactHoldings.test.ts app/test/contactTriage.test.ts app/test/contactTypeChangeRefusals.test.ts dashboard/src/lib/holdingRefusals.ts dashboard/src/lib/holdingRefusals.test.ts dashboard/src/routes/contact/CaseworkerDialog.tsx dashboard/src/routes/contact/TypeChangeRefusalList.tsx dashboard/src/routes/contact/ContactEditForm.tsx dashboard/src/routes/contact/ContactEditForm.test.tsx dashboard/src/routes/contact/UnknownFile.tsx dashboard/src/routes/contact/UnknownFile.test.tsx dashboard/src/routes/contact/ContactDetail.tsx dashboard/src/routes/contact/ContactDetail.test.tsx
 ```
 All of the S2 source files above lint clean at the base commit (checked 2026-10-12), so any
-error is S2's. The CK checkpoint after S2 (plan section 3: typecheck + `npm test` + `npm run
-smoke`) follows this gate. e2e is not run here (CONTRACT ISSUE 4: S5's sweep).
+error is S2's and BLOCKING: expected eslint exit 0. Follow section 0 "Lint at every slice
+gate": run its coverage check (every path it prints must be in the S1 or S2 list), and if
+eslint reports anything, confirm the attribution with its merge-base baseline run on the
+same S2 list before fixing (plan review R1 row 3). The CK checkpoint after S2 (plan section
+3: typecheck + `npm test` + `npm run smoke`) follows this gate. e2e is not run here
+(CONTRACT ISSUE 4: S5's sweep).
 
 ### Surfaces covered
 
@@ -5492,7 +5631,7 @@ existing suites go red); 3.8 before 3.9; 3.11 before 3.12-3.17.
    server sends one of the six today (`contactKind` = `caseworker` or the
    stored ContactType), but the body is untyped on the wire.
    **Resolution:** `contactTypeErrorMessage` falls back to the phrase
-   "not a tenant" ("Tours and placements are for tenants, and this contact
+   "not a tenant" ("Tours and placements are for tenants. This contact
    is not a tenant.") for a missing or unrecognized `contactKind`
    (Task 3.11 pins it).
 3. **W3 scale: `app/test/toursApi.test.ts` posts tours for tenants it never
@@ -5865,8 +6004,19 @@ made via `POST /api/contacts` with `type: 'tenant'`),
 `transitionRoutes.test.ts` / `statusTransition.test.ts` (`tenant-1`; no move
 out of a terminal stage anywhere; the landlord fixtures only use
 `setTenantStatus`), `statusTransition.integration.test.ts` and
-`seedHistory.test.ts` (typed tenant). No other app test posts `/api/tours`,
-`/api/placements`, `/from-tour`, `/reopen` or `/transition`.
+`seedHistory.test.ts` (typed tenant), and `contactVoucherSync.test.ts` (its
+one `POST /api/placements`, `:82`, is for `tn-3`, created `type: 'tenant'` at
+`:74-79` - added by plan review R1 row 9; the v1 record missed it). No other
+app test posts `/api/tours`, `/api/placements`, `/from-tour`, `/reopen` or
+`/transition`. Re-checked 2026-10-12 (bash, from the worktree root):
+
+```
+cd "W:/tmp/caseworker-integrity"; grep -rnE "['\`]/api/(tours|placements)['\`]|/from-tour|/reopen['\`]|/transition['\`]" app/test
+```
+
+Every hit is in a file named in this sweep (the three to fix, or one of the
+checked files above) or is a comment (`seedMatrixCoherence.test.ts:574`,
+`toursRepo.integration.test.ts:993`, `toursRepoFakeConditions.test.ts:342`).
 
 e2e - no change: every API-created tour/placement uses
 `createContact(req, 'tenant', ...)`, a `createConsentedTenant` helper
@@ -6978,10 +7128,11 @@ new_string:
 ### Step 4 - GREEN
 
 ```
-cd "W:/tmp/caseworker-integrity/app"; npx vitest run test/placementsCreateContactType.test.ts test/placementsApi.test.ts test/sse.test.ts test/unitsApi.test.ts
+cd "W:/tmp/caseworker-integrity/app"; npx vitest run test/placementsCreateContactType.test.ts test/placementsApi.test.ts test/sse.test.ts test/unitsApi.test.ts test/contactVoucherSync.test.ts
 ```
 
-All pass.
+All pass (`contactVoucherSync.test.ts` posts `/api/placements` for a typed
+tenant - Task 3.2's sweep, plan review R1 row 9).
 
 ### Step 5 - ASCII + commit
 
@@ -7793,18 +7944,18 @@ function refusal(status: number, code: string, extra: Record<string, unknown> = 
 
 describe('contactTypeErrorMessage', () => {
   it.each([
-    ['tenant', 'Tours and placements are for tenants, and this contact is a tenant.'],
-    ['landlord', 'Tours and placements are for tenants, and this contact is a landlord.'],
-    ['partner', 'Tours and placements are for tenants, and this contact is a partner.'],
-    ['caseworker', 'Tours and placements are for tenants, and this contact is a caseworker.'],
-    ['team_member', 'Tours and placements are for tenants, and this contact is a team member.'],
-    ['unknown', 'Tours and placements are for tenants, and this contact is not classified yet.'],
+    ['tenant', 'Tours and placements are for tenants. This contact is a tenant.'],
+    ['landlord', 'Tours and placements are for tenants. This contact is a landlord.'],
+    ['partner', 'Tours and placements are for tenants. This contact is a partner.'],
+    ['caseworker', 'Tours and placements are for tenants. This contact is a caseworker.'],
+    ['team_member', 'Tours and placements are for tenants. This contact is a team member.'],
+    ['unknown', 'Tours and placements are for tenants. This contact is not classified yet.'],
   ])('contact_not_tenant with contactKind %s', (kind, sentence) => {
     expect(contactTypeErrorMessage(refusal(409, 'contact_not_tenant', { contactKind: kind }))).toBe(sentence);
   });
 
   it('contact_not_tenant with a missing or unrecognized contactKind still reads as a sentence', () => {
-    const other = 'Tours and placements are for tenants, and this contact is not a tenant.';
+    const other = 'Tours and placements are for tenants. This contact is not a tenant.';
     expect(contactTypeErrorMessage(refusal(409, 'contact_not_tenant'))).toBe(other);
     expect(contactTypeErrorMessage(refusal(409, 'contact_not_tenant', { contactKind: 'robot' }))).toBe(other);
     expect(contactTypeErrorMessage(refusal(409, 'contact_not_tenant', { contactKind: 'toString' }))).toBe(other);
@@ -7882,7 +8033,7 @@ export function contactTypeErrorMessage(err: unknown): string | null {
       const kind =
         body !== null && typeof body === 'object' ? (body as Record<string, unknown>)['contactKind'] : undefined;
       const phrase = (typeof kind === 'string' ? KIND_PHRASE.get(kind) : undefined) ?? OTHER_KIND_PHRASE;
-      return `Tours and placements are for tenants, and this contact is ${phrase}.`;
+      return `Tours and placements are for tenants. This contact is ${phrase}.`;
     }
     case 'tenant_not_found':
       return 'That contact no longer exists.';
@@ -7931,6 +8082,12 @@ Files:
 - `dashboard/src/routes/tours/TourDetail.tsx`
 - `dashboard/src/routes/tours/TourDetail.test.tsx`
 
+Lint baseline (plan review R1 row 3): `TourDetail.tsx` already carries ONE
+pre-existing error at the merge base - `react-hooks/purity` on the
+`Date.now()` in the `startPassed` computation (:341). It is baseline debt:
+do NOT fix it in this task; this task's edits must add no other error
+(section 0 "Lint at every slice gate"; checked at the S3 slice gate).
+
 ### Step 1 - failing test
 
 Edit `dashboard/src/routes/tours/TourDetail.test.tsx` - old_string (the file's last lines):
@@ -7969,7 +8126,7 @@ describe('TourDetail - contact-type refusals (caseworker integrity)', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Mark toured' }));
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent(
-        'Tours and placements are for tenants, and this contact is a team member.',
+        'Tours and placements are for tenants. This contact is a team member.',
       ),
     );
     expect(screen.getByRole('alert')).not.toHaveTextContent('contact_not_tenant');
@@ -7986,7 +8143,7 @@ describe('TourDetail - contact-type refusals (caseworker integrity)', () => {
     await userEvent.click(screen.getAllByRole('button', { name: 'Start placement' })[0]!);
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent(
-        'Tours and placements are for tenants, and this contact is a caseworker.',
+        'Tours and placements are for tenants. This contact is a caseworker.',
       ),
     );
     expect(navigateSpy).not.toHaveBeenCalled();
@@ -8155,7 +8312,7 @@ new_string:
 // only way out of closed - both refused with contact_not_tenant when the
 // tour's contact is not a tenant. That refusal is not "the tour changed".
 describe('Tour dialogs - contact-type refusals (caseworker integrity)', () => {
-  const NOT_TENANT = 'Tours and placements are for tenants, and this contact is a caseworker.';
+  const NOT_TENANT = 'Tours and placements are for tenants. This contact is a caseworker.';
 
   function notTenant(): ApiError {
     return new ApiError(409, 'contact_not_tenant', 'contact_not_tenant', {
@@ -8310,6 +8467,13 @@ Files:
 - `dashboard/src/routes/tours/ScheduleTourForm.tsx`
 - `dashboard/src/routes/tours/ScheduleTourForm.test.tsx`
 
+Lint baseline (plan review R1 row 3): `ScheduleTourForm.tsx` already carries
+ONE pre-existing error at the merge base - `react-hooks/set-state-in-effect`
+on `setTourType(DEFAULT_TOUR_TYPE);` in the unit-picked effect (:241). It is
+baseline debt: do NOT fix it in this task; this task's edits must add no
+other error (section 0 "Lint at every slice gate"; checked at the S3 slice
+gate).
+
 ### Step 1 - failing test
 
 Edit `dashboard/src/routes/tours/ScheduleTourForm.test.tsx` - old_string (the file's last lines):
@@ -8348,7 +8512,7 @@ describe('ScheduleTourForm - contact-type refusals (caseworker integrity)', () =
 
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent(
-        'Tours and placements are for tenants, and this contact is a landlord.',
+        'Tours and placements are for tenants. This contact is a landlord.',
       ),
     );
     expect(screen.getByRole('alert')).not.toHaveTextContent(/Couldn't schedule the tour/);
@@ -8488,7 +8652,7 @@ describe('PlacementCreateForm - contact-type refusals (caseworker integrity)', (
 
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent(
-        'Tours and placements are for tenants, and this contact is a caseworker.',
+        'Tours and placements are for tenants. This contact is a caseworker.',
       ),
     );
     expect(screen.getByRole('alert')).not.toHaveTextContent(/Couldn't create the placement/);
@@ -8635,7 +8799,7 @@ describe('PlacementsPage - contact-type refusals (caseworker integrity)', () => 
     await user.click(screen.getByRole('menuitem', { name: 'Review RTA' }));
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent(
-        'Tours and placements are for tenants, and this contact is a landlord.',
+        'Tours and placements are for tenants. This contact is a landlord.',
       ),
     );
     expect(screen.getByRole('link', { name: 'Tasha Nguyen - Collect RTA' })).toBeInTheDocument();
@@ -8773,7 +8937,7 @@ describe('PlacementDetail - contact-type refusals (caseworker integrity)', () =>
     await waitLoaded();
     await chooseStage(user, 'send_application');
     expect(
-      await screen.findByText('Tours and placements are for tenants, and this contact is a caseworker.'),
+      await screen.findByText('Tours and placements are for tenants. This contact is a caseworker.'),
     ).toBeInTheDocument();
     expect(transitionPlacement).toHaveBeenCalledWith('c1', { toStage: 'send_application', source: 'manual' });
     expect(screen.queryByText(/That move was rejected/)).not.toBeInTheDocument();
@@ -9010,12 +9174,29 @@ git -C "W:/tmp/caseworker-integrity" commit -m "feat(dashboard): no Schedule / S
 ## Slice gate
 
 ```
-cd "W:/tmp/caseworker-integrity/app"; npx vitest run test/contactTypeGuards.test.ts test/toursApi.test.ts test/toursReopenApi.test.ts test/scheduledUpdatedEvent.test.ts test/toursCreateContactType.test.ts test/toursReviveContactType.test.ts test/toursReopenContactType.test.ts test/placementsCreateContactType.test.ts test/placementsFromTourContactType.test.ts test/statusTransitionContactType.test.ts test/transitionRoutesContactType.test.ts test/deriveTenantStatusSkip.test.ts test/placementsApi.test.ts test/placementConvert.test.ts test/transitionRoutes.test.ts test/statusTransition.test.ts test/sse.test.ts test/devGating.test.ts test/unitsApi.test.ts
+cd "W:/tmp/caseworker-integrity/app"; npx vitest run test/contactTypeGuards.test.ts test/toursApi.test.ts test/toursReopenApi.test.ts test/scheduledUpdatedEvent.test.ts test/toursCreateContactType.test.ts test/toursReviveContactType.test.ts test/toursReopenContactType.test.ts test/placementsCreateContactType.test.ts test/placementsFromTourContactType.test.ts test/statusTransitionContactType.test.ts test/transitionRoutesContactType.test.ts test/deriveTenantStatusSkip.test.ts test/placementsApi.test.ts test/placementConvert.test.ts test/transitionRoutes.test.ts test/statusTransition.test.ts test/sse.test.ts test/devGating.test.ts test/unitsApi.test.ts test/contactVoucherSync.test.ts
 cd "W:/tmp/caseworker-integrity/dashboard"; npx vitest run src/lib/contactTypeErrors.test.ts src/routes/tours/TourDetail.test.tsx src/routes/tours/TourModals.test.tsx src/routes/tours/ScheduleTourForm.test.tsx src/routes/placements/PlacementCreateForm.test.tsx src/routes/placements/PlacementsPage.test.tsx src/routes/placements/PlacementDetail.test.tsx src/routes/contact/TenantFile.test.tsx src/routes/contact/ContactDetail.test.tsx src/routes/contact/files.test.tsx
 cd "W:/tmp/caseworker-integrity"; npm run typecheck
 ```
 
 All green, typecheck exit 0. (The CK checkpoint after S4 runs the full `npm test` + `npm run smoke`.)
+
+Lint - AGENTS.md gate 5 scoped to S3's touched `.ts`/`.tsx` files (plan review R1 row 3;
+procedure: section 0 "Lint at every slice gate"), bare:
+
+```
+cd "W:/tmp/caseworker-integrity"; npx eslint app/src/services/contactTypeGuards.ts app/src/routes/tours.ts app/src/routes/placements.ts app/src/routes/statusTransition.ts app/src/services/statusTransition.ts app/test/contactTypeGuards.test.ts app/test/toursApi.test.ts app/test/toursReopenApi.test.ts app/test/scheduledUpdatedEvent.test.ts app/test/toursCreateContactType.test.ts app/test/toursReviveContactType.test.ts app/test/toursReopenContactType.test.ts app/test/placementsCreateContactType.test.ts app/test/placementsFromTourContactType.test.ts app/test/statusTransitionContactType.test.ts app/test/transitionRoutesContactType.test.ts app/test/deriveTenantStatusSkip.test.ts dashboard/src/lib/contactTypeErrors.ts dashboard/src/lib/contactTypeErrors.test.ts dashboard/src/routes/tours/TourDetail.tsx dashboard/src/routes/tours/TourDetail.test.tsx dashboard/src/routes/tours/TourModals.tsx dashboard/src/routes/tours/TourModals.test.tsx dashboard/src/routes/tours/ScheduleTourForm.tsx dashboard/src/routes/tours/ScheduleTourForm.test.tsx dashboard/src/routes/placements/PlacementCreateForm.tsx dashboard/src/routes/placements/PlacementCreateForm.test.tsx dashboard/src/routes/placements/PlacementsPage.tsx dashboard/src/routes/placements/PlacementsPage.test.tsx dashboard/src/routes/placements/PlacementDetail.tsx dashboard/src/routes/placements/PlacementDetail.test.tsx dashboard/src/routes/contact/TenantFile.tsx dashboard/src/routes/contact/TenantFile.test.tsx
+```
+
+Expected: exit 1 with EXACTLY the two pre-existing baseline errors named in section 0 -
+`TourDetail.tsx` `react-hooks/purity` on the `Date.now()` in `startPassed`, and
+`ScheduleTourForm.tsx` `react-hooks/set-state-in-effect` on `setTourType(DEFAULT_TOUR_TYPE);`
+(their line numbers may have moved from :341 / :241 with Tasks 3.12 / 3.14) - and nothing
+else. Do NOT fix those two (pre-existing; out of scope); name them in the slice report as
+baseline. Any OTHER error is S3's and BLOCKING: confirm it with the section-0 merge-base
+baseline run on the same list (base `TourDetail.tsx` and `ScheduleTourForm.tsx` each print
+exactly their one error there), fix it, and re-run. Then run the section-0 coverage check
+(every path it prints must be in the S1, S2 or S3 list).
 
 ## Surfaces covered
 
@@ -9155,7 +9336,9 @@ touches it even for FakeWorld-only files.
    again." (`ListingDetail.tsx:123`, ROSTER_RETRY_COPY); any other dialog
    failure "Couldn't restore - please try again." (mirrors
    "Couldn't delete - please try again.", `ListingDetail.tsx:342`). Planner
-   to confirm or replace.
+   to confirm or replace. (Ruled S4-8; plan review R1 row 6: the dialog
+   imports that same constant - Task 4.10 moves it to
+   `dashboard/src/routes/listing/rosterCopy.ts` - never a second literal.)
 
 9. **The restore-with-landlord response carries the enriched roster.** The
    plain restore keeps today's raw `{ unit }`. The body path answers
@@ -9173,7 +9356,10 @@ touches it even for FakeWorld-only files.
     `dashboard/src/api/types.ts:2435`) crashes the "Remove the primary
     contact?" dialog. Pre-existing for legacy ownerless units; newly reachable
     via restore-without-landlord + Make primary + Remove. Resolution: Task
-    4.13 (one-line guard + test). Planner may drop it.
+    4.13 (one-line guard + test), kept in scope by ruling S4-10; plan review
+    R1 row 11 widened it: `UnitItem.landlordId` becomes optional in the
+    dashboard type and every compile error that causes is fixed (one site
+    today, the same `:473` read).
 
 11. **Ground-rule exception: Task 4.1 has no RED case.** It is the W3 fixture
     prep (tests that will break under Tasks 4.2 / 4.6 because their fixtures
@@ -11424,12 +11610,24 @@ the New property picker (`getAllContacts({ type: 'landlord' }, signal)`,
 pick) -> `restoreUnit(unitId, { landlordId })`; "Restore without a landlord"
 -> `restoreUnit(unitId, { landlordId: null })`; "Cancel". Errors: the
 `contactTypeErrorMessage` sentence (landlord_not_landlord /
-landlord_not_found); 409 `unit_roster_conflict` -> retry copy + `onConflict`
-(the caller re-reads); anything else -> "Couldn't restore - please try
-again." (CONTRACT ISSUE 8).
+landlord_not_found); 409 `unit_roster_conflict` -> the EXISTING
+`ROSTER_RETRY_COPY` + `onConflict` (the caller re-reads); anything else ->
+"Couldn't restore - please try again." (CONTRACT ISSUE 8).
+
+One literal for the retry sentence (plan review R1 row 6): `ROSTER_RETRY_COPY`
+is today a module-private `const` in `ListingDetail.tsx` (:123). This task
+MOVES it, unchanged, into a new two-line shared module
+`dashboard/src/routes/listing/rosterCopy.ts`, and both `ListingDetail.tsx`
+(`runRosterWrite`, unchanged) and the dialog import it from there. (Not
+exported from `ListingDetail.tsx` itself: Task 4.11 makes `ListingDetail.tsx`
+import the dialog, so the dialog importing back from `ListingDetail.tsx`
+would be an import cycle.) No second literal of the sentence exists in source;
+the tests keep pinning the sentence verbatim, as every copy test here does.
 
 **Files:** NEW `dashboard/src/routes/listing/RestoreLandlordDialog.tsx`;
-NEW `dashboard/src/routes/listing/RestoreLandlordDialog.test.tsx`.
+NEW `dashboard/src/routes/listing/RestoreLandlordDialog.test.tsx`;
+NEW `dashboard/src/routes/listing/rosterCopy.ts`;
+`dashboard/src/routes/listing/ListingDetail.tsx` (the constant moves out).
 
 **Step 1 - failing test.** Create
 `dashboard/src/routes/listing/RestoreLandlordDialog.test.tsx`:
@@ -11591,8 +11789,53 @@ cd "W:/tmp/caseworker-integrity/dashboard"; npx vitest run src/routes/listing/Re
 Expected RED: the file fails to load - `Failed to resolve import
 "./RestoreLandlordDialog.js"` (the component does not exist yet).
 
-**Step 3 - implementation.** Create
-`dashboard/src/routes/listing/RestoreLandlordDialog.tsx`:
+**Step 3 - implementation.**
+
+(a) Create `dashboard/src/routes/listing/rosterCopy.ts` with exactly:
+
+```ts
+// Staff copy shared by the property page's contact-list writes (ListingDetail
+// runRosterWrite) and the restore landlord dialog (RestoreLandlordDialog), so
+// the two sites show ONE sentence for the same 409 and cannot drift apart.
+
+/** A 409 unit_roster_conflict: the property's contacts or its landlord of
+ *  record changed under the request - nothing was written; try again. */
+export const ROSTER_RETRY_COPY = 'The property contacts changed - try that change again.';
+```
+
+(b) Edit `dashboard/src/routes/listing/ListingDetail.tsx` - move the constant
+out. old_string:
+
+```tsx
+  'This property already has a landlord of record - reassign it before choosing Landlord.';
+
+const ROSTER_RETRY_COPY = 'The property contacts changed - try that change again.';
+```
+
+new_string:
+
+```tsx
+  'This property already has a landlord of record - reassign it before choosing Landlord.';
+```
+
+(c) Edit `dashboard/src/routes/listing/ListingDetail.tsx` - import it.
+old_string:
+
+```tsx
+import { useListing } from './useListing.js';
+```
+
+new_string:
+
+```tsx
+import { useListing } from './useListing.js';
+import { ROSTER_RETRY_COPY } from './rosterCopy.js';
+```
+
+(`runRosterWrite`'s `? ROSTER_RETRY_COPY` is unchanged and now reads the
+import.)
+
+(d) Create `dashboard/src/routes/listing/RestoreLandlordDialog.tsx`:
 
 ```tsx
 // RestoreLandlordDialog - Restore for a property whose stored landlord can't
@@ -11610,11 +11853,10 @@ import { Button } from '../../ui/index.js';
 import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { Modal } from '../contact/Modal.js';
+// The roster's own sentence for the same 409 unit_roster_conflict (the
+// landlord changed under the request) - one shared literal, never a copy.
+import { ROSTER_RETRY_COPY } from './rosterCopy.js';
 import styles from './ListingDetail.module.css';
-
-/** The roster's own sentence for the same 409 unit_roster_conflict
- *  (ListingDetail ROSTER_RETRY_COPY): the landlord changed under the request. */
-const RESTORE_CONFLICT_COPY = 'The property contacts changed - try that change again.';
 
 /** Any other failure: nothing was restored. */
 const RESTORE_FAILED_COPY = "Couldn't restore - please try again.";
@@ -11669,7 +11911,7 @@ export function RestoreLandlordDialog({
           return;
         }
         if (err instanceof ApiError && err.status === 409 && err.code === 'unit_roster_conflict') {
-          setError(RESTORE_CONFLICT_COPY);
+          setError(ROSTER_RETRY_COPY);
           onConflict();
           return;
         }
@@ -11729,16 +11971,24 @@ export function RestoreLandlordDialog({
 **Step 4 - GREEN.**
 
 ```
-cd "W:/tmp/caseworker-integrity/dashboard"; npx vitest run src/routes/listing/RestoreLandlordDialog.test.tsx
+cd "W:/tmp/caseworker-integrity/dashboard"; npx vitest run src/routes/listing/RestoreLandlordDialog.test.tsx src/routes/listing/ListingDetail.test.tsx
 cd "W:/tmp/caseworker-integrity"; npm run typecheck
+cd "W:/tmp/caseworker-integrity"; git grep --untracked -n "The property contacts changed - try that change again." -- dashboard/src ':!*.test.tsx'
 ```
+
+Expected: both files pass (ListingDetail's existing `unit_roster_conflict`
+case still reads the moved constant); typecheck exit 0; the `git grep` prints
+exactly ONE line, in `dashboard/src/routes/listing/rosterCopy.ts` - the only
+source literal of the sentence (`--untracked`: the new file is not committed
+yet).
 
 **Step 5 - commit.**
 
 ```
+cd "W:/tmp/caseworker-integrity"; tr -d '\11\12\15\40-\176' < dashboard/src/routes/listing/rosterCopy.ts | wc -c
 cd "W:/tmp/caseworker-integrity"; git status
-cd "W:/tmp/caseworker-integrity"; git add dashboard/src/routes/listing/RestoreLandlordDialog.tsx dashboard/src/routes/listing/RestoreLandlordDialog.test.tsx
-cd "W:/tmp/caseworker-integrity"; git commit -m "feat(dashboard): restore dialog - choose a landlord or restore without one" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+cd "W:/tmp/caseworker-integrity"; git add dashboard/src/routes/listing/RestoreLandlordDialog.tsx dashboard/src/routes/listing/RestoreLandlordDialog.test.tsx dashboard/src/routes/listing/rosterCopy.ts dashboard/src/routes/listing/ListingDetail.tsx
+cd "W:/tmp/caseworker-integrity"; git commit -m "feat(dashboard): restore dialog - choose a landlord or restore without one" -m "The in-dialog unit_roster_conflict reads the roster's existing ROSTER_RETRY_COPY, moved unchanged from ListingDetail.tsx into the shared rosterCopy.ts so both sites import one literal." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -11750,9 +12000,11 @@ from the plain Restore (`onRestore`, `ListingDetail.tsx:346-355`, shared by
 all three entry points - CONTRACT ISSUE 12), open `RestoreLandlordDialog`
 with the body's `landlordName`. A successful dialog restore closes it and
 applies the returned unit with `applyRosterUnit` (unit + Contacts card,
-CONTRACT ISSUE 9). A dialog conflict re-reads the property (`getUnit`) and
-closes the dialog if the re-read shows the property already restored. In the
-normal case Restore behaves exactly as today (no dialog).
+CONTRACT ISSUE 9). A dialog conflict re-reads the property (`getUnit`),
+applies the re-read with `applyRosterUnit` too (page AND Contacts card - the
+pattern `runRosterWrite`'s 409 path uses, `ListingDetail.tsx:415`; plan review
+R1 row 5), and closes the dialog if the re-read shows the property already
+restored. In the normal case Restore behaves exactly as today (no dialog).
 
 **Files:** `dashboard/src/routes/listing/ListingDetail.tsx`;
 `dashboard/src/routes/listing/ListingDetail.test.tsx`.
@@ -11815,10 +12067,17 @@ After:
     );
   });
 
-  it('a conflict inside the landlord dialog re-reads the property and keeps the dialog while it is still deleted', async () => {
+  it('a conflict inside the landlord dialog re-reads the property into the page AND the Contacts card, and keeps the dialog while it is still deleted', async () => {
     const user = userEvent.setup();
     const setUnit = vi.fn();
-    const fresh = { ...READY.unit!, landlordId: 'll2', deleted_at: '2026-06-19T00:00:00.000Z' };
+    // The concurrent change put a new landlord of record on the property: the
+    // re-read carries its enriched contact row, which the Contacts card must show.
+    const fresh = {
+      ...READY.unit!,
+      landlordId: 'll2',
+      deleted_at: '2026-06-19T00:00:00.000Z',
+      contacts: [{ contactId: 'll2', role: 'landlord' as const, primaryContact: true, name: 'Nora Lane' }],
+    };
     restoreUnit.mockReset();
     restoreUnit
       .mockRejectedValueOnce(
@@ -11849,6 +12108,10 @@ After:
     );
     await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
     await waitFor(() => expect(setUnit).toHaveBeenCalledWith(fresh));
+    // applyRosterUnit, not setUnit alone: the Contacts card renders the
+    // re-read's landlord row (useListing is mocked, so only the card's own
+    // roster state can show it).
+    expect(await screen.findByText('Nora Lane')).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Restore property' })).toBeInTheDocument();
   });
 });
@@ -11998,7 +12261,10 @@ After:
           onConflict={() => {
             void getUnit(unit.unitId)
               .then((fresh) => {
-                setUnit(fresh);
+                // The re-read is the new truth for the page AND the Contacts
+                // card (its landlord row may have changed) - the same settle
+                // runRosterWrite's 409 path uses (plan review R1 row 5).
+                applyRosterUnit(fresh);
                 if (!(typeof fresh.deleted_at === 'string' && fresh.deleted_at.length > 0)) {
                   setRestoreNeeds(null);
                 }
@@ -12151,15 +12417,38 @@ cd "W:/tmp/caseworker-integrity"; git commit -m "fix(dashboard): New property na
 
 ---
 
-## Task 4.13 - ListingDetail tolerates an ownerless property in the primary-removal notice
+## Task 4.13 - Ownerless properties: the dashboard type says `landlordId` is optional, and ListingDetail's primary-removal notice tolerates one
 
-**Goal.** CONTRACT ISSUE 10. "Restore without a landlord" produces ownerless
-properties (no `landlordId` on the wire). `ListingDetail.tsx:290` +
-`:473` (`landlordOfRecord.length`) crash the "Remove the primary contact?"
-dialog for such a property. Read a missing landlordId as `''` (the existing
-"no landlord" branch). Planner may drop this task.
+**Goal.** CONTRACT ISSUE 10 + plan review R1 row 11. "Restore without a
+landlord" makes an ownerless property (no `landlordId` on the wire) a routine
+outcome, but the dashboard's `UnitItem` (`dashboard/src/api/types.ts:2435`)
+still declares `landlordId: string` (required), so TypeScript cannot flag an
+unguarded read. Make it `landlordId?: string` - the wire truth - and fix every
+compile error that causes. `ListingDetail.tsx:290` + `:473`
+(`landlordOfRecord.length`) is the one such read today: it crashes the
+"Remove the primary contact?" dialog for an ownerless property. Read a
+missing landlordId as `''` (the existing "no landlord" branch). Kept in scope
+(ruling S4-10).
 
-**Files:** `dashboard/src/routes/listing/ListingDetail.tsx`;
+Breaking sites, measured by the planner on 2026-10-12 (type-probe of
+`landlordId?: string` on the base tree, `npx tsc -p tsconfig.json --noEmit`
+in `dashboard/`, then reverted): exactly ONE -
+`src/routes/listing/ListingDetail.tsx(473,7): error TS18048: 'landlordOfRecord' is possibly 'undefined'.`
+(the `landlordOfRecord.length > 0` read in `promotionNotice`, fed by the
+`landlordOfRecord` assignment at :290). Every other dashboard read of a
+unit's `landlordId` already guards a missing value
+(`buildListingFile.ts:64-65,97-98` `if (!landlordId) return []`;
+`buildContactFile.ts:19` and `useContactFile.ts:168` compare with `===`;
+`useListing.ts:119` already takes `string | undefined`), and no S1-S4 task
+adds a new read. Step 3 fixes the one site; if the Step 3b typecheck reports
+ANY other site (for example one added by a parallel branch synced in later),
+fix it the same way - read a missing `landlordId` as "no landlord", never
+with a non-null assertion - and list it in the slice report; if more than
+five sites break, STOP and record them in the slice report instead of fixing
+them in this task (ruling row 11).
+
+**Files:** `dashboard/src/api/types.ts`;
+`dashboard/src/routes/listing/ListingDetail.tsx`;
 `dashboard/src/routes/listing/ListingDetail.test.tsx`.
 
 **Step 1 - failing test.** In `ListingDetail.test.tsx`, inside the Contacts
@@ -12216,35 +12505,76 @@ Expected RED: the new case fails with
 `TypeError: Cannot read properties of undefined (reading 'length')` from
 `promotionNotice` while rendering the confirm dialog.
 
-**Step 3 - implementation, `dashboard/src/routes/listing/ListingDetail.tsx`.**
-Before:
+**Step 3 - implementation.**
+
+(a) Edit `dashboard/src/api/types.ts` (inside `export interface UnitItem`).
+old_string:
+
+```ts
+export interface UnitItem {
+  unitId: string;
+  landlordId: string;
+```
+
+new_string:
+
+```ts
+export interface UnitItem {
+  unitId: string;
+  /** The landlord of record's contactId. ABSENT on an ownerless property - a
+   *  legacy one, or one restored without a landlord (caseworker-integrity spec
+   *  section 4 "Restore") - so every read must handle "no landlord". */
+  landlordId?: string;
+```
+
+(b) Prove the type now flags the unguarded read (a deliberate compile RED):
+
+```
+cd "W:/tmp/caseworker-integrity/dashboard"; npx tsc -p tsconfig.json --noEmit
+```
+
+Expected: exit 2 with exactly one error,
+`src/routes/listing/ListingDetail.tsx(<line>,7): error TS18048: 'landlordOfRecord' is possibly 'undefined'.`
+- the `landlordOfRecord.length > 0` read in `promotionNotice` (line 473 on
+the base tree; Tasks 4.9-4.11 shift it). Any OTHER error: handle it as the
+Goal says (fix and list, or STOP past five).
+
+(c) Edit `dashboard/src/routes/listing/ListingDetail.tsx`. old_string:
 
 ```tsx
   const landlordOfRecord = contactsUnit?.landlordId ?? unit.landlordId;
 ```
 
-After:
+new_string:
 
 ```tsx
   // An ownerless property (legacy, or restored without a landlord -
-  // caseworker-integrity section 4) has NO landlordId on the wire despite the
-  // type; read it as '' (the "no landlord" branch) so nothing below touches
-  // undefined.
+  // caseworker-integrity section 4) has NO landlordId (UnitItem.landlordId is
+  // optional); read it as '' (the "no landlord" branch) so nothing below
+  // touches undefined.
   const landlordOfRecord: string = contactsUnit?.landlordId ?? unit.landlordId ?? '';
 ```
+
+(`promotionNotice`'s `landlordOfRecord.length > 0` and the row loop's
+`r.contactId === landlordOfRecord` then read a `string` and need no change.)
 
 **Step 4 - GREEN.**
 
 ```
-cd "W:/tmp/caseworker-integrity/dashboard"; npx vitest run src/routes/listing/ListingDetail.test.tsx
+cd "W:/tmp/caseworker-integrity/dashboard"; npx vitest run src/routes/listing/ListingDetail.test.tsx src/routes/listing/buildListingFile.test.ts src/routes/listing/RestoreLandlordDialog.test.tsx
+cd "W:/tmp/caseworker-integrity"; npm run typecheck
 ```
+
+Expected: all pass; typecheck exit 0 (the dashboard compiles with
+`landlordId` optional).
 
 **Step 5 - commit.**
 
 ```
+cd "W:/tmp/caseworker-integrity"; git diff -U0 -- dashboard/src/api/types.ts dashboard/src/routes/listing/ListingDetail.tsx dashboard/src/routes/listing/ListingDetail.test.tsx | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c
 cd "W:/tmp/caseworker-integrity"; git status
-cd "W:/tmp/caseworker-integrity"; git add dashboard/src/routes/listing/ListingDetail.tsx dashboard/src/routes/listing/ListingDetail.test.tsx
-cd "W:/tmp/caseworker-integrity"; git commit -m "fix(dashboard): the primary-removal notice tolerates an ownerless property" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+cd "W:/tmp/caseworker-integrity"; git add dashboard/src/api/types.ts dashboard/src/routes/listing/ListingDetail.tsx dashboard/src/routes/listing/ListingDetail.test.tsx
+cd "W:/tmp/caseworker-integrity"; git commit -m "fix(dashboard): a property's landlordId is optional in the dashboard type; the primary-removal notice tolerates an ownerless property" -m "Restore without a landlord makes ownerless properties routine, so UnitItem.landlordId is now optional - the wire truth - and the one unguarded read (ListingDetail promotionNotice) reads a missing landlord as none." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -12272,10 +12602,23 @@ cd "W:/tmp/caseworker-integrity"; npm run typecheck
 ASCII check on the new files (each prints 0):
 
 ```
-cd "W:/tmp/caseworker-integrity"; for f in app/test/unitsLandlordOfRecord.test.ts app/test/unitsApiRosterTypeChecks.test.ts app/test/unitsRestoreLandlord.test.ts app/test/unitsRepoRestoreWithLandlord.integration.test.ts dashboard/src/routes/listing/RestoreLandlordDialog.tsx dashboard/src/routes/listing/RestoreLandlordDialog.test.tsx; do tr -d '\11\12\15\40-\176' < "$f" | wc -c; done
+cd "W:/tmp/caseworker-integrity"; for f in app/test/unitsLandlordOfRecord.test.ts app/test/unitsApiRosterTypeChecks.test.ts app/test/unitsRestoreLandlord.test.ts app/test/unitsRepoRestoreWithLandlord.integration.test.ts dashboard/src/routes/listing/RestoreLandlordDialog.tsx dashboard/src/routes/listing/RestoreLandlordDialog.test.tsx dashboard/src/routes/listing/rosterCopy.ts; do tr -d '\11\12\15\40-\176' < "$f" | wc -c; done
 ```
 
 (bash; for edited files check the added lines of `git diff`.)
+
+Lint - AGENTS.md gate 5 scoped to S4's touched `.ts`/`.tsx` files (plan review R1 row 3;
+procedure: section 0 "Lint at every slice gate"), bare:
+
+```
+cd "W:/tmp/caseworker-integrity"; npx eslint app/src/routes/units.ts app/src/repos/unitsRepo.ts app/test/helpers/twilioWebhookHarness.ts app/test/unitsApi.test.ts app/test/unitsApiOrgNames.test.ts app/test/unitsApiRoster.test.ts app/test/unitsSoftDelete.test.ts app/test/unitsLandlordOfRecord.test.ts app/test/unitsApiRosterTypeChecks.test.ts app/test/unitsRepoRestoreWithLandlord.integration.test.ts app/test/unitsRestoreLandlord.test.ts dashboard/src/api/types.ts dashboard/src/api/endpoints.ts dashboard/src/api/endpoints.test.ts dashboard/src/routes/listing/ListingDetail.tsx dashboard/src/routes/listing/ListingDetail.test.tsx dashboard/src/routes/listing/RestoreLandlordDialog.tsx dashboard/src/routes/listing/RestoreLandlordDialog.test.tsx dashboard/src/routes/listing/rosterCopy.ts dashboard/src/routes/listing/UnitCreateForm.tsx dashboard/src/routes/listing/UnitCreateForm.test.tsx
+```
+
+Expected: exit 0 - every one of these files that exists at the merge base lints clean there
+(planner, 2026-10-12), so ANY error is S4's and BLOCKING. If one is reported, confirm the
+attribution with the section-0 merge-base baseline run on the same list, fix it, and re-run
+until exit 0. Then run the section-0 coverage check (every path it prints must be in the
+S1-S4 lists; Task 4.13's typecheck may have named an extra file to fix - lint it here too).
 
 ---
 
@@ -12300,7 +12643,7 @@ cd "W:/tmp/caseworker-integrity"; for f in app/test/unitsLandlordOfRecord.test.t
 | Dashboard copy site: the restore action | 4.10, 4.11 |
 | Dashboard copy site: `UnitCreateForm` | 4.12 |
 | W3: tests/fixtures that create units with a non-landlord landlordId, restore such a unit, or seat a caseworker | 4.1 (sweep table: app fixes listed; e2e clean) |
-| Ownerless properties in ListingDetail (enabling fix, CONTRACT ISSUE 10) | 4.13 |
+| Ownerless properties in the dashboard: `UnitItem.landlordId` optional (plan review R1 row 11) and ListingDetail's one unguarded read fixed (enabling fix, CONTRACT ISSUE 10) | 4.13 |
 | Not in S4 (by the slice map): `contactTypeGuards.ts` / `contactTypeErrors.ts` (S3); seed invariant + e2e specs "Add contact hides a caseworker" (S5) | - |
 
 
@@ -12313,8 +12656,9 @@ cd "W:/tmp/caseworker-integrity"; for f in app/test/unitsLandlordOfRecord.test.t
 Slice S5 runs AFTER S1-S4 are built and committed. It adds no product code. It
 adds: a seed invariant test over every seed world (5.1), an e2e fixture sweep
 (5.2), four extended e2e specs (5.3-5.5), selector-registry rows (5.6), the
-RUNBOOK edit (5.7), the three issue resolutions (5.8) and three new issues
-(5.9).
+RUNBOOK edit (5.7), the three issue resolutions (5.8) and four new issues
+(5.9: spec section 7's three, plus `unit-primary-contact-unchecked` from
+plan review R1 row 7).
 
 Researched against the tree at @54f9e6ed (main @19607658 + spec + plan
 skeleton). Line numbers cited below are from that tree; S1-S4 shift some of
@@ -12322,7 +12666,12 @@ them - anchor on the quoted text, never on a line number.
 
 ## CONTRACT ISSUES
 
-1. **No dashboard path reaches a TOUR I2 refusal at a site the spec lists;
+1. **(AMENDED by plan review R1 row 1 - the premise below is FALSE once S3
+   Task 3.13 lands: after it, the Reopen and Reschedule dialogs show the
+   contact-type sentence. Task 5.5 therefore drives the Reopen dialog in the
+   UI and asserts its sentence; resolution (b) below is superseded where it
+   says the tour refusals are proved at the API only.)**
+   **No dashboard path reaches a TOUR I2 refusal at a site the spec lists;
    the tour dialogs answer every 409 with "This tour changed".** Spec section
    8 asks the e2e for "a refused tour action shows its sentence". Create is
    unreachable (pickers load tenants only, `ScheduleTourForm.tsx:179`).
@@ -12686,8 +13035,11 @@ cd "W:/tmp/caseworker-integrity" && git add app/test/seedContactTypeInvariants.t
 
 ### Task 5.2 - e2e fixture sweep (W3): nothing the new rules refuse
 
-**Goal.** Confirm no existing e2e spec or fixture now trips an S2-S4 refusal:
-a tour or placement for a non-tenant, a unit whose `landlordId` is not a
+**Goal.** Confirm no existing e2e spec or fixture now trips an S1-S4 refusal:
+an Accept of a tenant-only AI suggestion on a contact not typed tenant, or
+one spanning a type/role change (S1: 409 `suggestion_contact_not_tenant` /
+`suggestion_contact_reclassified`; scope added by plan review R1 row 10), a
+tour or placement for a non-tenant, a unit whose `landlordId` is not a
 landlord, a caseworker seated on a contact list, a type change of a contact
 that holds an open tour/placement or a live property, a reopen/revive/terminal
 exit for a non-tenant, or a restore of a property whose landlord is no longer
@@ -12705,6 +13057,7 @@ cd "W:/tmp/caseworker-integrity/e2e"; grep -rn "post(\`\${[A-Za-z_]*}/api/tours\
 cd "W:/tmp/caseworker-integrity/e2e"; grep -rn "landlordId" --include=*.ts tests scenarios fixtures
 cd "W:/tmp/caseworker-integrity/e2e"; grep -rn "/api/units/\${[A-Za-z_.]*}/contacts\`\|Add contact to this property\|/restore\`" --include=*.ts tests scenarios fixtures
 cd "W:/tmp/caseworker-integrity/e2e"; grep -rn "patch(\`\${[A-Za-z_]*}/api/contacts/" --include=*.ts tests scenarios fixtures
+cd "W:/tmp/caseworker-integrity/e2e"; grep -rn "/suggestions/[A-Za-z\${}]*/accept\|name: 'Accept' })" --include=*.ts tests scenarios fixtures
 ```
 
 2. Compare with the planner's reading on @54f9e6ed (all CLEAN):
@@ -12719,6 +13072,7 @@ cd "W:/tmp/caseworker-integrity/e2e"; grep -rn "patch(\`\${[A-Za-z_]*}/api/conta
 | contacts PATCH `type` | ai-run-log:338 and :492 (fresh unknowns, no records), caseworkers:252 (refused by `caseworker_use_conversion`, which still wins, W6) | no holdings |
 | unit restore | none | - |
 | tour create in scenarios | through `ScheduleTourForm` (tenants only) | tenants |
+| suggestion Accept (S1; added by plan review R1 row 10, re-verified 2026-10-12) | ai-run-log:439 (API `suggestions/pets/accept`), org-lists:957 and :989 (housing authority chips), conversation-fact-extraction:152 (voucher size), :217 (address - neutral, never refused) and :281 (status) | every one on a contact created `type: 'tenant'` (each spec's `createTenant` helper), and none re-types the contact between the extraction and the Accept - clean |
 
 3. If anything new appears (a site added since @54f9e6ed), check its contact
    type the same way. A site that DOES break a rule: change that fixture to a
@@ -12730,8 +13084,10 @@ cd "W:/tmp/caseworker-integrity/e2e"; grep -rn "patch(\`\${[A-Za-z_]*}/api/conta
    line naming the spec and the fixture, and the trailer
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 4. The completion gate's full `npm run e2e` is the final word: if any spec
-   fails with `contact_not_tenant`, `tenant_not_found`, `landlord_not_landlord`,
-   `landlord_not_found`, `contact_list_caseworker`, `type_change_refused` or
+   fails with `suggestion_contact_not_tenant`,
+   `suggestion_contact_reclassified`, `contact_not_tenant`,
+   `tenant_not_found`, `landlord_not_landlord`, `landlord_not_found`,
+   `contact_list_caseworker`, `type_change_refused` or
    `restore_needs_landlord` in its error or trace, treat it as step 3.
 
 **Commit.** None when the sweep is clean (expected). Record "W3 sweep: clean"
@@ -13160,17 +13516,32 @@ cd "W:/tmp/caseworker-integrity" && git add e2e/tests/dashboard-next/property-ro
 
 ---
 
-### Task 5.5 - e2e: a refused placement move shows its sentence; tour reopen and revive are refused (placements-page.spec.ts, tour-auto-close.spec.ts)
+### Task 5.5 - e2e: a refused tour reopen and a refused placement move show their sentence; tour reopen and revive are refused (placements-page.spec.ts, tour-auto-close.spec.ts)
 
-**Goal.** Spec section 8 "a refused tour action shows its sentence", on the
-path the UI can reach (CONTRACT ISSUE 1): a Lost placement whose tenant was
-re-typed while it was closed, moved back from the placement page -> the
-`role="alert"` bar shows "Tours and placements are for tenants, and this
-contact is a landlord." and the placement stays Lost. Plus the tour I2
-refusals at the API: reopen of a closed tour and revive of a canceled one,
-both after their tenant was re-typed. Reuses `devLoginAndReset` /
-`placementBanner` and `devLogin` / `pastAt` / `daysFromNow` / `patchTour` /
-`getTour` / `UNIT_B`.
+**Goal.** Spec section 8 "a refused tour action shows its sentence"
+(CONTRACT ISSUE 1 as amended by plan review R1 row 1; ruling S5-1):
+
+- ON THE TOUR PAGE: a CLOSED (not a fit) tour whose tenant was re-typed to
+  landlord through the API while the tour was closed (allowed - a closed tour
+  is not open, so the contacts PATCH has nothing to refuse), then staff click
+  `Reopen tour` -> `Yes, reopen`: the `Reopen tour` dialog's `role="alert"`
+  reads "Tours and placements are for tenants. This contact is a landlord."
+  (the end-to-end wiring TourDetail `confirmReopen` -> `ReopenTourModal`
+  `failureCopy` -> `contactTypeErrorMessage`, S3 Task 3.13), the dialog stays
+  open (no Record outcome dialog follows), and the tour stays closed.
+- ON THE PLACEMENT PAGE: a Lost placement whose tenant was re-typed while it
+  was closed, moved back from the placement page -> the `role="alert"` bar
+  shows "Tours and placements are for tenants. This contact is a landlord."
+  and the placement stays Lost.
+- AT THE API: reopen of a closed tour and revive of a canceled one, both
+  after their tenant was re-typed, answer 409 `contact_not_tenant` with
+  `contactKind: 'landlord'` and change nothing.
+
+Reuses `devLoginAndReset` / `placementBanner` (placements-page) and
+`devLogin` / `pastAt` / `daysFromNow` / `patchTour` / `getTour` /
+`tourHeader` / `REOPEN_TO_TOURED` / `UNIT_B` (tour-auto-close; the Reopen
+dialog drive is modeled on that file's existing "a not-a-fit tour reopens
+straight into Record outcome" test).
 
 **Files.** Modify
 `W:/tmp/caseworker-integrity/e2e/tests/dashboard-next/placements-page.spec.ts`
@@ -13214,7 +13585,7 @@ with
 // ---------------------------------------------------------------------------
 
 /** The refusal sentence for a landlord (dashboard src/lib/contactTypeErrors.ts). */
-const NOT_A_TENANT_LANDLORD = 'Tours and placements are for tenants, and this contact is a landlord.';
+const NOT_A_TENANT_LANDLORD = 'Tours and placements are for tenants. This contact is a landlord.';
 
 async function createTypedContact(
   request: APIRequestContext,
@@ -13309,50 +13680,109 @@ with
 
 // ---------------------------------------------------------------------------
 // Caseworker integrity (spec docs/superpowers/specs/2026-10-12-caseworker-
-// integrity-design.md D3): reopening a closed tour and reviving a canceled one
-// check that the tenant is still typed tenant. API-level on purpose: the tour
-// page reaches these refusals only through the Reopen and Reschedule dialogs,
-// whose own copy answers every 409 (TourModals.tsx failureCopy), and the tour
-// create pickers list tenants only. The dashboard SENTENCE for a tour or
-// placement refusal is proven in placements-page.spec.ts.
+// integrity-design.md D3 and section 8 "a refused tour action shows its
+// sentence"): reopening a closed tour and reviving a canceled one check that
+// the tenant is still typed tenant. The dashboard reaches the reopen refusal
+// like this: a tour closed as not a fit, its tenant re-typed to landlord
+// while the tour was closed (allowed - a closed tour is not open), then
+// Reopen tour on the tour page. The Reopen dialog shows the refusal's own
+// sentence (TourDetail confirmReopen lets the rejection reach ReopenTourModal,
+// whose failureCopy asks contactTypeErrorMessage before its 409 rule) and the
+// tour stays closed. The revive (the Reschedule dialog on a canceled tour runs
+// the same failureCopy, unit-tested in TourModals.test.tsx) and the reopen are
+// also asserted on the wire. The tour create pickers list tenants only, so a
+// create refusal is not reachable from the dashboard. Each test makes its own
+// tenant (a fresh contact, never the lean Tasha) and leaves its tours closed or
+// canceled, so no later spec meets them on the Past tab or Today.
 // ---------------------------------------------------------------------------
 test.describe('Tour reopen and revive check the tenant (caseworker integrity)', () => {
-  test('a closed or canceled tour whose tenant was re-typed stays as it is', async ({ page }) => {
-    await devLogin(page);
-    const req = page.request;
+  /** The refusal sentence for a landlord (dashboard src/lib/contactTypeErrors.ts). */
+  const NOT_A_TENANT_LANDLORD = 'Tours and placements are for tenants. This contact is a landlord.';
+
+  /** A fresh contact typed tenant, run-unique. */
+  async function createTenant(page: Page, firstName: string): Promise<string> {
     const stamp = `${Date.now()}`.slice(-6);
-    const madeTenant = await req.post(`${NEXT}/api/contacts`, {
+    const res = await page.request.post(`${NEXT}/api/contacts`, {
       data: {
         type: 'tenant',
-        firstName: 'Reopenten',
+        firstName,
         lastName: `Tac${stamp}`,
         phone: `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`,
       },
     });
-    expect(madeTenant.ok(), await madeTenant.text()).toBeTruthy();
-    const tenantId = ((await madeTenant.json()) as { contact: { contactId: string } }).contact.contactId;
-    // Past-dated, so the create texts nobody (its rungs are born skipped).
-    const newTour = async (): Promise<string> => {
-      const res = await req.post(`${NEXT}/api/tours`, {
-        data: { tenantId, unitId: UNIT_B, scheduledAt: pastAt(3, 10), tourType: 'self_guided' },
-      });
-      expect(res.ok(), await res.text()).toBeTruthy();
-      return ((await res.json()) as { tour: { tourId: string } }).tour.tourId;
-    };
-    const closedTourId = await newTour();
-    await patchTour(page, closedTourId, { status: 'toured' });
-    await patchTour(page, closedTourId, { outcome: 'not_a_fit', moveForward: false, status: 'closed' });
-    const canceledTourId = await newTour();
-    await patchTour(page, canceledTourId, { status: 'canceled' });
+    expect(res.ok(), await res.text()).toBeTruthy();
+    return ((await res.json()) as { contact: { contactId: string } }).contact.contactId;
+  }
 
-    // Neither tour is open, so the re-type is allowed - retried while the
-    // tours index catches up (spec L1); a refused PATCH writes nothing.
+  /** A past-dated tour for `tenantId` at UNIT_B - the create texts nobody (its rungs are born skipped). */
+  async function pastTourFor(page: Page, tenantId: string): Promise<string> {
+    const res = await page.request.post(`${NEXT}/api/tours`, {
+      data: { tenantId, unitId: UNIT_B, scheduledAt: pastAt(3, 10), tourType: 'self_guided' },
+    });
+    expect(res.ok(), await res.text()).toBeTruthy();
+    return ((await res.json()) as { tour: { tourId: string } }).tour.tourId;
+  }
+
+  /** Toured, then closed as not a fit - Reopen then targets Toured (REOPEN_TO_TOURED). */
+  async function closeNotAFit(page: Page, tourId: string): Promise<void> {
+    await patchTour(page, tourId, { status: 'toured' });
+    await patchTour(page, tourId, { outcome: 'not_a_fit', moveForward: false, status: 'closed' });
+  }
+
+  /** Re-type the contact to landlord. Its tours are all closed or canceled, so
+   *  the PATCH is allowed - retried while the tours index catches up with the
+   *  closes (spec L1); a refused PATCH writes nothing. */
+  async function retypeToLandlord(page: Page, contactId: string): Promise<void> {
     await expect
       .poll(
-        async () => (await req.patch(`${NEXT}/api/contacts/${tenantId}`, { data: { type: 'landlord' } })).ok(),
+        async () =>
+          (await page.request.patch(`${NEXT}/api/contacts/${contactId}`, { data: { type: 'landlord' } })).ok(),
         { timeout: 10_000 },
       )
       .toBe(true);
+  }
+
+  test('the Reopen dialog says why a closed tour whose tenant is now a landlord cannot reopen', async ({ page }) => {
+    test.slow(); // a fresh contact and tour, a polled re-type, then the tour page and its dialog
+    await devLogin(page); // page.request carries the session cookie for /api writes
+    const tenantId = await createTenant(page, 'Reopenui');
+    const tourId = await pastTourFor(page, tenantId);
+    await closeNotAFit(page, tourId);
+    await retypeToLandlord(page, tenantId);
+
+    await page.goto(`${NEXT}/tours/${tourId}`);
+    await expect(tourHeader(page).getByText('Closed', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Reopen tour' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Reopen tour' });
+    await expect(dialog.getByText(REOPEN_TO_TOURED, { exact: true })).toBeVisible();
+    await dialog.getByRole('button', { name: 'Yes, reopen' }).click();
+
+    // The refusal's own sentence inside the dialog - not "This tour changed
+    // since the page loaded", which every other 409 there reads.
+    await expect(dialog.getByRole('alert')).toHaveText(NOT_A_TENANT_LANDLORD);
+    // Refused, so the dialog stays (its confirm live again) and no Record
+    // outcome dialog follows.
+    await expect(dialog.getByRole('button', { name: 'Yes, reopen' })).toBeEnabled();
+    await expect(page.getByRole('dialog', { name: 'Record outcome' })).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(tourHeader(page).getByText('Closed', { exact: true })).toBeVisible();
+
+    // On the wire: still closed with its outcome; nothing was written.
+    expect(await getTour(page, tourId)).toMatchObject({ status: 'closed', outcome: 'not_a_fit' });
+  });
+
+  test('a closed or canceled tour whose tenant was re-typed stays as it is', async ({ page }) => {
+    await devLogin(page);
+    const req = page.request;
+    const tenantId = await createTenant(page, 'Reopenten');
+    const closedTourId = await pastTourFor(page, tenantId);
+    await closeNotAFit(page, closedTourId);
+    const canceledTourId = await pastTourFor(page, tenantId);
+    await patchTour(page, canceledTourId, { status: 'canceled' });
+
+    // Neither tour is open, so the re-type is allowed.
+    await retypeToLandlord(page, tenantId);
 
     const reopen = await req.post(`${NEXT}/api/tours/${closedTourId}/reopen`, { data: {} });
     expect(reopen.status()).toBe(409);
@@ -13378,13 +13808,19 @@ cd "W:/tmp/caseworker-integrity"; npm run e2e -w @housingchoice/e2e -- tests/das
 cd "W:/tmp/caseworker-integrity"; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/placements-page.spec.ts tests/dashboard-next/tour-auto-close.spec.ts
 ```
 
-Expected: 1 passed; 1 passed; then every test in both files passed (the
-existing tests move `placement-0001` - Tasha, a tenant - out of `lost`, which
-stays allowed). If the alert shows "That move was rejected" instead of the
-sentence, S3's `PlacementDetail` mapping is missing (CONTRACT ISSUE 5b): stop
-and report. If a revive answers 200, S3's PATCH check does not see the
-explicit `status: 'scheduled'` from `canceled`: stop and report (do not
-change the test).
+Expected: 1 passed; 2 passed (the describe's two tests: the Reopen dialog
+drive and the API reopen/revive); then every test in both files passed
+(placements-page: every existing test + 1; tour-auto-close: 3 existing + 2 =
+5). The existing tests move `placement-0001` - Tasha, a tenant - out of
+`lost`, which stays allowed. If the placement alert shows "That move was
+rejected" instead of the sentence, S3's `PlacementDetail` mapping is missing
+(CONTRACT ISSUE 5b): stop and report. If the Reopen dialog's alert reads
+"This tour changed since the page loaded - reload and try again.", S3 Task
+3.13's `failureCopy` change is missing; if a Record outcome dialog opens
+instead (the reopen succeeded), S3 Task 3.5's reopen check is missing;
+either way stop and report (do not change the test). If a revive answers
+200, S3's PATCH check does not see the explicit `status: 'scheduled'` from
+`canceled`: stop and report (do not change the test).
 
 **Step 5 - checks.**
 
@@ -13399,7 +13835,7 @@ cd "W:/tmp/caseworker-integrity"; npx eslint e2e/tests/dashboard-next/placements
 ```
 cd "W:/tmp/caseworker-integrity"; git status
 cd "W:/tmp/caseworker-integrity"; git rev-parse -q --verify MERGE_HEAD || echo "no merge in progress"
-cd "W:/tmp/caseworker-integrity" && git add e2e/tests/dashboard-next/placements-page.spec.ts e2e/tests/dashboard-next/tour-auto-close.spec.ts && git commit -m "test(e2e): a refused placement move shows its sentence; tour reopen and revive check the tenant" -m "Caseworker integrity D3 end to end: a Lost placement whose tenant was re-typed cannot move back and the placement page says why; a closed tour cannot reopen and a canceled one cannot revive for a non-tenant (409 contact_not_tenant at the API - the tour dialogs' copy is S3's)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+cd "W:/tmp/caseworker-integrity" && git add e2e/tests/dashboard-next/placements-page.spec.ts e2e/tests/dashboard-next/tour-auto-close.spec.ts && git commit -m "test(e2e): a refused tour reopen and a refused placement move show their sentence; tour reopen and revive check the tenant" -m "Caseworker integrity D3 end to end: a closed tour whose tenant was re-typed to landlord cannot reopen and the Reopen dialog says why; a Lost placement whose tenant was re-typed cannot move back and the placement page says why; a closed tour cannot reopen and a canceled one cannot revive for a non-tenant (409 contact_not_tenant at the API)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -13425,10 +13861,11 @@ as `share-skip-fix.spec.ts` does |
 | Contact page (edit form) | a REFUSED type change | `getByRole('button', { name: 'Edit contact details' })` opens `getByRole('dialog', { name: /Edit contact/i })`; `getByRole('button', { name: 'Change type', exact: true })` expands `getByRole('group', { name: 'Contact kind' })`; then `Save`. A change the contact's own records forbid (409 `type_change_refused`, caseworker-integrity spec D2: an open placement or tour keeps a tenant a tenant, a live property keeps its landlord of record a landlord) KEEPS the dialog and the draft (the picked segment stays `aria-pressed="true"`) and shows, inside the dialog, one sentence per blocking record with its link: `Finish or close this contact's placement first.` + `View placement`, `Cancel or close this contact's open tour first.` + `View tour`, or `This contact is the landlord of record for a property, so they must stay a landlord. Changing a property's landlord isn't available in the dashboard yet.` + `View property`. Match a sentence by SUBSTRING (`getByText(sentence)` without `exact`): its link may share the element. The Unknown card's `Mark as ...` buttons show the same sentences on the card |
 | Property page (Contacts card) | Add contact never offers a caseworker | the `Add contact` combobox's options leave out every caseworker (a `partner` whose role is Caseworker or Case worker; caseworker-integrity spec I4), and `POST /api/units/:id/contacts` refuses one a new seat with 409 `contact_list_caseworker`. Prove the absence only beside a POSITIVE control that shares the typed text - a plain partner IS offered - because an option list that never rendered has no caseworker option either |
 | Property page (deleted) | Restore, and the restore dialog | the deleted banner `getByRole('status').filter({ hasText: 'This property is deleted' })` holds `getByRole('button', { name: 'Restore', exact: true })` - scope to it: the header carries a second `Restore` and the kebab a `Restore property`. When the landlord of record is missing or no longer typed landlord the restore answers 409 `restore_needs_landlord` and opens a dialog found by its sentence, `getByRole('dialog').filter({ hasText: 'is no longer a landlord' })`: `<landlord name, or This property's landlord> is no longer a landlord, so they can't stay this property's landlord.` and `Choose its landlord:`, a landlords-only committed-pick `combobox` (fill it, then click `page.getByRole('option', { name })` - the options are portaled), `Restore with this landlord` (DISABLED until a pick), `Restore without a landlord`, and `Cancel` (writes nothing). A property whose landlord is still a landlord restores with no dialog, as before |
-| Placement hub | a REFUSED move out of Lost / Moved in | `getByRole('button', { name: 'More actions' })` -> `getByRole('button', { name: /^Placement stage/ })` -> `getByRole('menuitemradio', { name: <stage label>, exact: true })`. A placement leaving a terminal stage whose tenant is no longer typed tenant is refused (409 `contact_not_tenant`, caseworker-integrity spec D3): the page's `role="alert"` bar reads `Tours and placements are for tenants, and this contact is <a landlord / a partner / a caseworker / a team member / not classified yet>.` and the header's stage pill keeps its label. Read it with `getByRole('alert').filter({ hasText: <sentence> })` |
+| Tour page (closed tour) | a REFUSED reopen | `getByRole('button', { name: 'Reopen tour' })` opens `getByRole('dialog', { name: 'Reopen tour' })`; confirm with the dialog's `getByRole('button', { name: 'Yes, reopen' })` (never named "Reopen tour" - it would collide with the header CTA). A closed tour whose tenant is no longer typed tenant is refused (409 `contact_not_tenant`, caseworker-integrity spec D3): the dialog STAYS, its `getByRole('alert')` reads `Tours and placements are for tenants. This contact is <a landlord / a partner / a caseworker / a team member / not classified yet>.` (any other 409 there reads `This tour changed since the page loaded - reload and try again.`), no Record outcome dialog follows, and its `Cancel` leaves the tour Closed. The Reschedule dialog shows the same sentence for a refused revive of a canceled tour |
+| Placement hub | a REFUSED move out of Lost / Moved in | `getByRole('button', { name: 'More actions' })` -> `getByRole('button', { name: /^Placement stage/ })` -> `getByRole('menuitemradio', { name: <stage label>, exact: true })`. A placement leaving a terminal stage whose tenant is no longer typed tenant is refused (409 `contact_not_tenant`, caseworker-integrity spec D3): the page's `role="alert"` bar reads `Tours and placements are for tenants. This contact is <a landlord / a partner / a caseworker / a team member / not classified yet>.` and the header's stage pill keeps its label. Read it with `getByRole('alert').filter({ hasText: <sentence> })` |
 ```
 
-(The four new rows follow the last row directly, with no blank line between,
+(The five new rows follow the last row directly, with no blank line between,
 so the table stays one table; the blank line and the `## Narrow viewport`
 heading after it are untouched.)
 
@@ -13450,7 +13887,7 @@ and the line before THAT is the new "Placement hub" row.
 ```
 cd "W:/tmp/caseworker-integrity"; git status
 cd "W:/tmp/caseworker-integrity"; git rev-parse -q --verify MERGE_HEAD || echo "no merge in progress"
-cd "W:/tmp/caseworker-integrity" && git add e2e/support/selectors.md && git commit -m "docs(e2e): selector rows for the type-change, contact-list, restore and terminal-move refusals" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+cd "W:/tmp/caseworker-integrity" && git add e2e/support/selectors.md && git commit -m "docs(e2e): selector rows for the type-change, contact-list, restore, tour-reopen and terminal-move refusals" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -13662,7 +14099,7 @@ Cameron's rulings 2026-10-12), with the shared checks in
   service, so every caller is covered) answer 404 `tenant_not_found` for a
   missing contact and 409 `{ error: 'contact_not_tenant', contactKind }` for
   one not typed `tenant`; the dashboard says "Tours and placements are for
-  tenants, and this contact is a landlord." (or a partner, a caseworker, a
+  tenants. This contact is a landlord." (or a partner, a caseworker, a
   team member, not classified yet). `deriveTenantStatus` writes nothing onto a
   non-tenant. A team member's page no longer offers "+ Schedule" or "+ Start
   placement".
@@ -13710,18 +14147,21 @@ cd "W:/tmp/caseworker-integrity" && git add docs/issues/claimed-suggestion-accep
 
 ---
 
-### Task 5.9 - File the three follow-up issues; regenerate the index
+### Task 5.9 - File the four follow-up issues; regenerate the index
 
 **Goal.** Spec section 7: file `placement-terminal-stage-exit-unguarded`,
-`import-bypasses-contact-type-rules`, `landlord-of-record-no-reassign-ui` from
-`_TEMPLATE.md` (frontmatter schema, docs/issues/README.md), then
-`npm run issues`. `docs/issues/INDEX.md` is gitignored - never stage it.
-Apply 5.8's date rule to the three `created:` lines.
+`import-bypasses-contact-type-rules`, `landlord-of-record-no-reassign-ui`;
+plus the plan review's deferral (R1 row 7, DEFER -> filed):
+`unit-primary-contact-unchecked` (low). All four from `_TEMPLATE.md`
+(frontmatter schema, docs/issues/README.md), then `npm run issues`.
+`docs/issues/INDEX.md` is gitignored - never stage it. Apply 5.8's date rule
+to the four `created:` lines.
 
 **Files.** Create, in `W:/tmp/caseworker-integrity/docs/issues/`:
 `placement-terminal-stage-exit-unguarded.md`,
 `import-bypasses-contact-type-rules.md`,
-`landlord-of-record-no-reassign-ui.md`.
+`landlord-of-record-no-reassign-ui.md`,
+`unit-primary-contact-unchecked.md`.
 
 **Step 1 - `placement-terminal-stage-exit-unguarded.md`** (exact content):
 
@@ -13869,27 +14309,88 @@ naming both. Then the edit form's landlord-of-record refusal can drop "isn't
 available in the dashboard yet" and link straight to that action.
 ```
 
+**Step 3b - `unit-primary-contact-unchecked.md`** (exact content; plan review
+R1 row 7, reviewer A F7 - DEFERRED by the planner and filed here, not built):
+
+```
+---
+id: unit-primary-contact-unchecked
+title: A property's primary_contact is writable on unit create and PATCH with any contactId - no existence, type, caseworker or contact-list check
+type: debt
+severity: low
+status: open
+area: app/units
+created: 2026-10-12
+refs: app/src/lib/unitFields.ts:104, app/src/routes/units.ts:1055, app/src/repos/unitsRepo.ts:815, app/src/routes/webhooks/voice.ts:627, app/src/repos/conversationsRepo.ts:207, app/src/services/rosterProvision.ts:233
+---
+
+**Problem.** `primary_contact` is a property's scalar "default contact"
+(relay groups and masked calls - the comment on `POST /api/units/:id/contacts`,
+`app/src/routes/units.ts:1055-1058`). It is a plain writable string on BOTH
+`POST /api/units` and `PATCH /api/units/:id` (`app/src/lib/unitFields.ts:104`,
+validated by `validateUnitBody` in both modes), and any contactId is
+accepted: nothing checks that the contact exists, what it is typed, whether
+it is a caseworker, or whether it holds a seat on the property's contact
+list. The contact-list writer (`POST /api/units/:id/contacts`, repo
+`addContact`) keeps the scalar consistent with the list's `primaryContact`
+flag (`app/src/repos/unitsRepo.ts:815-824`); a direct write bypasses that, so
+the scalar can name a contact who is not on the list at all. No dashboard
+screen writes it directly today.
+
+Since `fix/caseworker-integrity` (spec
+`docs/superpowers/specs/2026-10-12-caseworker-integrity-design.md`, I4) a
+caseworker cannot take a NEW contact-list seat (409
+`contact_list_caseworker`), but a direct `primary_contact` write can still
+name one as the property's default contact without ever taking a seat. Found
+by that branch's plan review (round 1, reviewer A, F7) and deferred: it is
+not a contact-list seat by the spec's definition, and nothing routes on the
+SCALAR today - the readers that pick a property's contact use the contact
+list's `primaryContact` flag with the landlord-of-record fallback
+(`app/src/services/rosterProvision.ts:233` and `:525`,
+`app/src/lib/tourContacts.ts:124`, `app/src/lib/rosterResolution.ts:293`).
+The scalar's only other mentions are comments naming it as the future
+landlord-leg target of the main-number masked call
+(`app/src/routes/webhooks/voice.ts:627`, which says that path "stays M1.10";
+`app/src/repos/conversationsRepo.ts:207`), and the comment at
+`app/src/repos/unitsRepo.ts:816-817` that says the masked-call landlord leg
+dials it today, which the voice route does not bear out. When that M1.10
+path is built on the scalar, the gap becomes live: a caseworker, a deleted
+contact, or a contact unrelated to the property could become the callee.
+
+**Suggested fix.** Before anything routes on `primary_contact`: either stop
+accepting it on the unit create / PATCH body (the contact list's Make primary
+already sets it, and the repo keeps it consistent), or validate it on write -
+the contact exists, is not a caseworker (`isCaseworker`,
+`app/src/lib/caseworkers.ts`) and holds a seat on the property's contact
+list - with the consistent contact read the contact-list checks use
+(`app/src/services/contactTypeGuards.ts`). The voice route's own NOTE says
+the M1.10 path must consult the THREAD roster, not the unit scalar
+(`voice-business-number-roster`); if it does, the scalar's write path can be
+removed outright. Correct the stale `unitsRepo.ts:816-817` comment either way.
+```
+
 **Step 4 - regenerate the index and check.**
 
 ```
 cd "W:/tmp/caseworker-integrity"; tr -d '\11\12\15\40-\176' < docs/issues/placement-terminal-stage-exit-unguarded.md | wc -c
 cd "W:/tmp/caseworker-integrity"; tr -d '\11\12\15\40-\176' < docs/issues/import-bypasses-contact-type-rules.md | wc -c
 cd "W:/tmp/caseworker-integrity"; tr -d '\11\12\15\40-\176' < docs/issues/landlord-of-record-no-reassign-ui.md | wc -c
+cd "W:/tmp/caseworker-integrity"; tr -d '\11\12\15\40-\176' < docs/issues/unit-primary-contact-unchecked.md | wc -c
 cd "W:/tmp/caseworker-integrity"; npm run issues
 cd "W:/tmp/caseworker-integrity"; git status --short docs/issues
 ```
 
-Expected: `0` three times; `npm run issues` exits 0 with no warning naming
-any of the six files this slice touched (the three new ones appear as open,
+Expected: `0` four times; `npm run issues` exits 0 with no warning naming
+any of the seven files this slice touched (the four new ones appear as open,
 the three resolved ones as closed); `git status --short docs/issues` lists
-the three new files as untracked and does NOT list `INDEX.md` (gitignored).
+the four new files as untracked and does NOT list `INDEX.md` (gitignored).
 
 **Commit.**
 
 ```
 cd "W:/tmp/caseworker-integrity"; git status
 cd "W:/tmp/caseworker-integrity"; git rev-parse -q --verify MERGE_HEAD || echo "no merge in progress"
-cd "W:/tmp/caseworker-integrity" && git add docs/issues/placement-terminal-stage-exit-unguarded.md docs/issues/import-bypasses-contact-type-rules.md docs/issues/landlord-of-record-no-reassign-ui.md && git commit -m "docs(issues): file the three caseworker-integrity follow-ups" -m "placement-terminal-stage-exit-unguarded (decision), import-bypasses-contact-type-rules (debt), landlord-of-record-no-reassign-ui (improvement) - spec section 7." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+cd "W:/tmp/caseworker-integrity" && git add docs/issues/placement-terminal-stage-exit-unguarded.md docs/issues/import-bypasses-contact-type-rules.md docs/issues/landlord-of-record-no-reassign-ui.md docs/issues/unit-primary-contact-unchecked.md && git commit -m "docs(issues): file the four caseworker-integrity follow-ups" -m "placement-terminal-stage-exit-unguarded (decision), import-bypasses-contact-type-rules (debt), landlord-of-record-no-reassign-ui (improvement) - spec section 7; unit-primary-contact-unchecked (debt, low) - the plan review's deferral." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -13903,10 +14404,17 @@ must pass before S5 is reported done:
    -> 6 passed.
 2. `cd "W:/tmp/caseworker-integrity"; npm run typecheck` -> exit 0 (covers
    `app/test` and `e2e/`).
-3. `cd "W:/tmp/caseworker-integrity"; npx eslint app/test/seedContactTypeInvariants.test.ts e2e/tests/dashboard-next/caseworkers.spec.ts e2e/tests/dashboard-next/property-roster.spec.ts e2e/tests/dashboard-next/placements-page.spec.ts e2e/tests/dashboard-next/tour-auto-close.spec.ts`
-   -> no errors (any error is attributed by baseline per AGENTS.md gate 5).
+3. Lint - AGENTS.md gate 5 scoped to S5's touched `.ts` files (procedure:
+   section 0 "Lint at every slice gate"; plan review R1 row 3), bare:
+   `cd "W:/tmp/caseworker-integrity"; npx eslint app/test/seedContactTypeInvariants.test.ts e2e/tests/dashboard-next/caseworkers.spec.ts e2e/tests/dashboard-next/property-roster.spec.ts e2e/tests/dashboard-next/placements-page.spec.ts e2e/tests/dashboard-next/tour-auto-close.spec.ts`
+   -> exit 0: the four e2e specs lint clean at the merge base (planner,
+   2026-10-12) and the seed test is new, so ANY error is S5's and BLOCKING;
+   confirm it with the section-0 merge-base baseline run on the same five
+   paths, fix it, and re-run. Then the section-0 coverage check: every path
+   it prints must be in one of the S1-S5 lists.
 4. `cd "W:/tmp/caseworker-integrity"; npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/caseworkers.spec.ts tests/dashboard-next/property-roster.spec.ts tests/dashboard-next/placements-page.spec.ts tests/dashboard-next/tour-auto-close.spec.ts`
-   -> every test passed (6 + 4 + every placements-page test + 4).
+   -> every test passed (6 + 4 + every placements-page test + 5; tour-auto-close
+   is its 3 existing tests + Task 5.5's 2).
 5. ASCII: `0` from every check in 5.1-5.9.
 6. `cd "W:/tmp/caseworker-integrity"; npm run issues` -> exit 0; `git status`
    shows a clean tree with `docs/issues/INDEX.md` untracked-and-ignored (not
@@ -13916,7 +14424,11 @@ must pass before S5 is reported done:
    5.8/5.9.
 
 Then the mission's five completion gates (spec section 9) run on the branch
-tip; the full `npm run e2e` is the final W3 check (5.2 step 4).
+tip; the full `npm run e2e` is the final W3 check (5.2 step 4). Gate 5 (eslint
+on every `.ts`/`.tsx` file in `main...HEAD`) is expected to report exactly the
+two pre-existing baseline errors named in section 0 ("Lint at every slice
+gate", item 3) and nothing else; attribute them by the merge-base baseline
+run and name them in the handback as pre-existing (not fixed).
 
 ## Surfaces covered
 
@@ -13925,8 +14437,9 @@ tip; the full `npm run e2e` is the final W3 check (5.2 step 4).
   on lean with no generated contacts (the lean fallbacks). Rules: every tour
   and placement -> tenant; every live `landlordId` -> landlord; no contact
   list seats a caseworker; every seat names a seeded contact. (5.1)
-- e2e fixtures (W3): every tour/placement create, terminal exit, unit create,
-  contact-list add, contacts PATCH type, restore - swept clean. (5.2)
+- e2e fixtures (W3): every suggestion Accept (S1), tour/placement create,
+  terminal exit, unit create, contact-list add, contacts PATCH type, restore -
+  swept clean. (5.2)
 - D2 contacts PATCH via the edit form: `open_placement` and
   `landlord_of_record` refusals with sentences, View links, draft kept,
   nothing written, `type_change_refused` on the wire. (5.3)
@@ -13940,17 +14453,24 @@ tip; the full `npm run e2e` is the final W3 check (5.2 step 4).
   does not hold its landlord (the setup re-type). (5.4)
 - I2 placement terminal exit: the dashboard sentence on the placement page's
   alert bar, stage kept, 409 `contact_not_tenant` with `contactKind`. (5.5)
+- I2 tour reopen from the tour page (spec 8 "a refused tour action shows
+  its sentence"): a closed tour whose tenant was re-typed to landlord ->
+  Reopen tour -> Yes, reopen -> the Reopen dialog's alert reads the
+  `contact_not_tenant` sentence, no Record outcome dialog, the tour stays
+  closed. (5.5)
 - I2 tour reopen and tour revive (canceled -> scheduled): 409
   `contact_not_tenant` at the API, tours unchanged. (5.5)
 - Docs: selector rows (5.6); RUNBOOK accept fence + importer + L1 (5.7);
-  three issues resolved, the third corrected (5.8); three follow-ups filed and
-  the index regenerated (5.9).
+  three issues resolved, the third corrected (5.8); four follow-ups filed -
+  spec section 7's three plus `unit-primary-contact-unchecked` (plan review
+  R1 row 7, deferred) - and the index regenerated (5.9).
 - NOT covered by S5 e2e (unit-tested in S1-S4, listed so nothing is assumed):
   D1 accept refusals and the fence; the Unknown card's Mark as refusals; the
   team-member button hiding; tour/placement create and from-tour refusals;
   unit create / PATCH `landlordId` and the vacant-slot landlord claim;
-  `deriveTenantStatus` skipping a non-tenant; the tour dialogs' copy
-  (CONTRACT ISSUE 1).
+  `deriveTenantStatus` skipping a non-tenant; the Reschedule dialog's copy
+  for a refused revive (the same `failureCopy` the Reopen dialog runs, which
+  5.5 drives end to end; unit-tested in S3 Task 3.13).
 
 
 ---

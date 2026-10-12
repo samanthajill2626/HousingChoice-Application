@@ -10,8 +10,21 @@ Totals: 33 issues (S1 6, S2 5, S3 5, S4 12, S5 5) plus findings F1/F2,
 which S3-1 and S5-1 carry. ACCEPT 31, ACCEPT-AMENDED 1, noted 1 (line
 drift), REJECT 0. Decision-level changes: the tour Reopen /
 Reschedule dialogs join the copy sites (F1); the e2e proves the tour
-refusals at the API and the on-screen sentence on the placement path (F2);
+refusals at the API and the on-screen sentence on the placement path (F2;
+since plan review R1 row 1, also the on-screen sentence in the tour page's
+Reopen dialog);
 a ListingDetail crash on ownerless properties is fixed in scope (S4-10).
+
+Amended 2026-10-12 by plan review round 1
+(`plan-review/adjudications.md`): P-1 (row 2), S2-1 (row 4) and S5-1 / F2
+(row 1). Each amended row says so and keeps its original wording where it
+changed a decision.
+
+## Planner rulings in the plan itself (section 1)
+
+| # | Issue | Ruling |
+|---|---|---|
+| P-1 | The spec's `contact_not_tenant` copy, "Tours and placements are for tenants. This contact is a <kind label>." (labels Caseworker, Landlord, Partner, Team member, Unknown), reads "This contact is a Unknown" for an unclassified contact | AMENDED by plan review R1 row 2 (2026-10-12) - the plan v1 reworded it to one sentence ("Tours and placements are for tenants, and this contact is <phrase>.") without Cameron's sign-off; reverted. The sentence is the spec's two-sentence form, "Tours and placements are for tenants. This contact is <phrase>.", with only the phrase handled so it reads naturally: tenant "a tenant", landlord "a landlord", partner "a partner", caseworker "a caseworker", team_member "a team member", unknown "not classified yet"; a missing or unrecognized `contactKind` "not a tenant". Every pinned occurrence in the plan (Tasks 3.11-3.17, 5.5, 5.6, 5.8) carries this form |
 
 ## S1 (accept fence)
 
@@ -28,7 +41,7 @@ a ListingDetail crash on ownerless properties is fixed in scope (S4-10).
 
 | # | Issue | Ruling |
 |---|---|---|
-| 1 | `refusalCopyByKind` cannot choose between two landlord sentences | ACCEPT: `holdingRefusals.ts` exports `typeChangeRefusalCopy`, `TYPE_CHANGE_LANDLORD_SENTENCE`, `typeChangeRefusalsFrom` and one shared `TypeChangeRefusalList` component (binding names amended) |
+| 1 | `refusalCopyByKind` cannot choose between two landlord sentences | ACCEPT: `holdingRefusals.ts` exports `typeChangeRefusalCopy`, `TYPE_CHANGE_LANDLORD_SENTENCE`, `typeChangeRefusalsFrom` (and the wire type `TypeChangeRefusal`); the one shared `TypeChangeRefusalList` component lives in `dashboard/src/routes/contact/TypeChangeRefusalList.tsx`, as S2 Task 2.6 builds it - a `.ts` module cannot hold JSX (binding names amended). AMENDED by plan review R1 row 4 (2026-10-12): this ruling first said the component was exported from `holdingRefusals.ts` |
 | 2 | Conversion importing `OPEN_TOUR_STATUSES` would leave unused imports (lint gate 5) | ACCEPT: the set moves to `contactHoldings.ts`; the conversion drops the now-unused imports |
 | 3 | `contactTriage.test.ts:740-822` retypes a tenant with an open placement and is now refused | ACCEPT: the test's precondition becomes a contact-list seat (the conversion then answers `caseworker_on_roster`); the conversion's own test files stay unchanged (W2 holds) |
 | 4 | W3 should include fixtures that retype contacts | ACCEPT: S5's sweep already covered type changes (none breaks) |
@@ -65,7 +78,7 @@ a ListingDetail crash on ownerless properties is fixed in scope (S4-10).
 
 | # | Issue | Ruling |
 |---|---|---|
-| 1 / F2 | No listed dashboard site reaches a tour I2 refusal | ACCEPT: e2e proves tour refusals at the API, and the on-screen sentence on the placement path (a Lost placement moved back); Task 3.13 unit tests cover the dialogs |
+| 1 / F2 | No listed dashboard site reaches a tour I2 refusal | ACCEPT, AMENDED by plan review R1 row 1 (2026-10-12): the premise is false once S3 Task 3.13 lands (the Reopen and Reschedule dialogs then show the contact-type sentence). Task 5.5 now drives the tour page in the e2e: a CLOSED (not a fit) tour whose tenant was re-typed to landlord through the API while the tour was closed, then Reopen tour -> Yes, reopen -> the Reopen dialog's alert reads "Tours and placements are for tenants. This contact is a landlord.", no Record outcome dialog, the tour stays closed. It keeps the API asserts (reopen + revive -> 409 `contact_not_tenant`) and the placement-path sentence (a Lost placement moved back); Task 3.13's unit tests still cover both dialogs (the Reschedule revive is unit-tested only). The wrong comment in the tour-auto-close block is replaced. Originally: "e2e proves tour refusals at the API, and the on-screen sentence on the placement path; Task 3.13 unit tests cover the dialogs" |
 | 2 | Restore dialog name / picker label unbound | ACCEPT: bound by S4-8 ("Restore property", "Landlord") |
 | 3 | RED exception for e2e / doc tasks | ACCEPT (only 5.1 has a RED via negative controls) |
 | 4 | Seed rule stricter than I2 (every seeded tour/placement names a tenant, open or closed) | ACCEPT (no seed needs otherwise; verified clean today) |

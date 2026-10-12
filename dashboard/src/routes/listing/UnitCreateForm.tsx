@@ -23,6 +23,7 @@ import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { contactDisplayName } from '../contact/format.js';
+import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
 import {
@@ -251,6 +252,15 @@ export function UnitCreateForm({
       const refused = orgNotOnListBody(err);
       if (refused !== null) {
         setAuthoritiesError(notOnListMessage(refused));
+        setBusy(false);
+        return;
+      }
+      // caseworker-integrity I3 (spec section 4): the owning landlord was
+      // refused - gone (404 landlord_not_found) or no longer a landlord (409
+      // landlord_not_landlord). Say which, never the raw code.
+      const typed = contactTypeErrorMessage(err);
+      if (typed !== null) {
+        setError(typed);
         setBusy(false);
         return;
       }

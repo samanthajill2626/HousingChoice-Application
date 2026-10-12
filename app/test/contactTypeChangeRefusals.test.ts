@@ -239,6 +239,28 @@ describe('what is not checked', () => {
     expect((await send(landlord.app, { type: 'landlord', role: 'Property Manager' })).status).toBe(200);
   });
 
+  it('(PIN) the stored type re-sent over records the rule would refuse (data from before it, spec L2) is neither read nor refused', async () => {
+    // The case above cannot tell "type re-sent" from "type changed": a tenant
+    // may hold placements and a landlord may hold units, so a check run on a
+    // re-sent type refuses nothing there either. A partner left holding all
+    // three kinds (no sweep, spec L2) is refused by any check that runs, so
+    // this is the case that pins "only a real type change is checked".
+    const { app, world } = makeWebhookHarness();
+    seed(world, 'partner');
+    placement(world, 'pl-open', 'send_application');
+    tour(world, 'tr-open', 'scheduled');
+    unit(world, 'u-live', { landlordId: ID });
+    const placementsRead = vi.spyOn(world.placementsRepo, 'listByTenant');
+    const toursRead = vi.spyOn(world.toursRepo, 'listByTenant');
+    const landlordRead = vi.spyOn(world.unitsRepo, 'listByLandlord');
+    const res = await send(app, { type: 'partner', firstName: 'Pat' });
+    expect(res.status).toBe(200);
+    expect(stored(world)?.firstName).toBe('Pat');
+    expect(placementsRead).not.toHaveBeenCalled();
+    expect(toursRead).not.toHaveBeenCalled();
+    expect(landlordRead).not.toHaveBeenCalled();
+  });
+
   it('(PIN) the caseworker 409 still wins over the type-change refusal (W6)', async () => {
     const { app, world } = makeWebhookHarness();
     seed(world, 'tenant');

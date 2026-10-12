@@ -32,7 +32,7 @@ non-primary row, so the resolvers' `primary ?? landlordId` rule stays empty).
 | B8 | The legacy fallback also refuses a pre-deploy journal on a contact converted and later re-typed back to tenant (it keeps `caseworker_conversion`) | INFO | FIX (comment only): name it in `effectiveGuard`'s known limits (fails safe; population about zero) | FW-7 |
 | B9 | `services/contactTypeGuards.ts` imports Express's `Response` type and writes HTTP answers | INFO | REJECT: plan section 2 binds `sendContactTypeError` to this module; the import is type-only. Noted for the handback | - |
 | B10 | Restore answers two shapes, and a landlord choice the server ignores (the plain restore applies) is not flagged in the 200 | INFO | REJECT the wire change (spec section 4: a body is ignored when the plain restore applies; the dashboard applies both shapes); the dashboard-side visibility is filed with D3 | issue |
-| D1 | The ownerless "Remove the primary contact?" sentence (planner ruling Q2) names the wrong remedy: "+ Add contact" always posts `primaryContact: false`, so adding anyone but a Landlord leaves no primary and no landlordId - nobody becomes reachable | MEDIUM | QUESTION Q3 to the planner - the sentence is a planner ruling ("exact"); recommend the reviewer's wording | pending |
+| D1 | The ownerless "Remove the primary contact?" sentence (planner ruling Q2) names the wrong remedy: "+ Add contact" always posts `primaryContact: false`, so adding anyone but a Landlord leaves no primary and no landlordId - nobody becomes reachable | MEDIUM | QUESTION Q3 -> PLANNER RULED 2026-10-12: adopt the reviewer's wording exactly (below) | FW-13 |
 | D2 | "so they must stay a landlord" (spec section 3's sentence) is shown when the landlord of record is typed unknown / tenant / partner (pre-branch or importer data only) | LOW | REJECT for this branch: spec-approved copy; reachable only on data that already violates I3 (L2). FILE in `contact-type-refusal-copy-edge-cases` | issue |
 | D3 | The restore dialog closes as a success when the server ignored the choice (the old landlord became a landlord again between the 409 and the click) | LOW | FILE in `contact-type-refusal-copy-edge-cases` (rare race; the page then shows the real landlord; telling staff needs new copy) | issue |
 | D4 | Any other plain-restore failure (404, 500) is still a dead click on the banner Restore | LOW | FILE in `contact-type-refusal-copy-edge-cases` as pre-existing (spec section 4 / W7: "any other failure keeps each site's current copy") | issue |
@@ -50,7 +50,7 @@ Issues the fix wave files: `contact-list-checks-outside-roster-write-loop`
 `listing-detail-dialogs-survive-property-navigation` (D8's pre-existing twin);
 and one appended paragraph on `placement-terminal-stage-exit-unguarded` (B3).
 
-## Question sent to the planner (2026-10-12)
+## Question sent to the planner, and the planner's ruling (2026-10-12)
 
 - Q3 (D1): the Q2 sentence "This property will have no primary contact and
   has no landlord of record, so calls and new relay groups for it will reach
@@ -59,3 +59,11 @@ and one appended paragraph on `placement-terminal-stage-exit-unguarded` (B3).
   is made the primary contact or a landlord is added." Recommendation: adopt
   it (or a wording the planner prefers) in the fix wave - the string, its two
   test pins, the selectors row and the comment above `promotionNotice`.
+  - RULED (planner, 2026-10-12): adopt the reviewer's wording EXACTLY - "This
+    property will have no primary contact and has no landlord of record, so
+    calls and new relay groups for it will reach no one until someone on its
+    contact list is made the primary contact or a landlord is added." Applied
+    to the string, its two test pins, the `e2e/support/selectors.md` row and
+    the comment above `promotionNotice` (fix wave item FW-13).
+- FW-8's copy "Couldn't load the landlords." (the restore dialog's failed
+  landlord-list load) - confirmed fine by the planner, 2026-10-12.

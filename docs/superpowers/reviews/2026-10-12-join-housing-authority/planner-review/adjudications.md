@@ -42,3 +42,30 @@ reveals nothing).
 | A10 | [LOW] Staff-added authority names are published on /join with no notice | OFFER to Cameron | A one-line note on the Settings add/rename forms; not in this branch unless he asks. |
 | A11 | [LOW] The batch flow meets the shared 5/min limit at a venue | REJECT | Cameron accepted the limit (2026-10-12). |
 | A12 | [LOW] The audit-history rule hard-codes each writer's payload shape | ACCEPT as known | Verified no live gap against the in-flight caseworker-integrity diff; the function's comment names its sources. |
+
+## Cameron's rulings (2026-10-12, after the review)
+
+- A5 (pending suggestion): LEAVE THEM OUT, as recommended -> FW-2. Spec
+  revision 5, D10.
+- A1 (a repeat sign-up's answer): IGNORE. "This backfill is only a temporary
+  solution" - do not file an issue; the orchestrator's
+  `docs/issues/join-repeat-signup-answer-unreachable.md` is DELETED in the
+  fix wave and every reference to it removed (RUNBOOK included).
+- A10 (Settings note): ADD IT -> FW-4. Spec revision 5, D12.
+- The pre-existing X-Forwarded-For rate-limit bug: a separate prompt for a
+  separate agent (handed to Cameron; not this branch).
+
+## Fix wave 1 (planner) - the complete list sent to the orchestrator
+
+- FW-1 (A4): persist `--skip` on `--apply` (`housing_authority_backfill_excluded`
+  audit event; later runs leave such a lead out, reason "excluded on an
+  earlier run"); `--apply` refuses a `--skip` id that names no contact at all.
+- FW-2 (A5): leave out a candidate with a pending `housingAuthority`
+  suggestion, the reason showing its value.
+- FW-3 (A9): a non-conditional write error reads "may or may not have
+  landed - re-run the dry run to see", never "nothing written".
+- FW-4 (A10): the D12 Settings help line.
+- FW-5: delete `join-repeat-signup-answer-unreachable` and its references;
+  resolve `join-backfill-ignores-pending-authority-suggestion` (FW-2 fixes it).
+- RUNBOOK and the backfill rehearsal's expected output updated to match;
+  tests for each.

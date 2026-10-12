@@ -1,7 +1,7 @@
 # /join housing authority dropdown, Onboarding start, and lead backfill - design
 
-Status: DRAFT (revision 4, 2026-10-12 - spec review rounds 1-3 folded in, review closed; see
-`docs/superpowers/reviews/2026-10-12-join-housing-authority/design-review/adjudications.md`)
+Status: APPROVED revision 4 (2026-10-12); revision 5 adds Cameron's post-build rulings (D10 earlier-run exclusions, pending-suggestion leads, honest failure wording; D12 Settings note). Review history:
+`docs/superpowers/reviews/2026-10-12-join-housing-authority/design-review/adjudications.md`.
 Branch: `feat/join-housing-authority` (worktree `W:\tmp\join-housing-authority`, cut from main @19607658)
 Tracker: Improvements Tracker item #14 "Housing authority form default" (Before WP1, item 3)
 
@@ -197,6 +197,19 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
     authority only, status left alone).
   - Left out, and listed separately with the reason:
     - a candidate named in `--skip`;
+    - a candidate named in `--skip` on an EARLIER `--apply` (revision 5,
+      Cameron 2026-10-12): every `--apply` appends a
+      `housing_authority_backfill_excluded` audit event (no actor) to each
+      candidate it leaves out because of `--skip`, and every later run, dry
+      run included, leaves a candidate holding such an event out with the
+      reason "excluded on an earlier run" - so a later run without the same
+      `--skip` value cannot give that lead Atlanta Housing Authority;
+    - a candidate with a PENDING `housingAuthority` suggestion (revision 5,
+      Cameron 2026-10-12), read with
+      `getSuggestion(contactId, 'housingAuthority')`
+      (`app/src/repos/extractionRepo.ts`): the reason shows the suggested
+      value - "has a pending housing authority suggestion (<value>) - accept
+      or dismiss it first";
     - a candidate with a `housing_fair_signup` audit event carrying
       `signupVersion: 2` - a lead from before the change who signed up again
       after it, on `/join` (whose answer, D7, must not be overridden) or on a
@@ -221,7 +234,10 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
     Both audit rules read a candidate's WHOLE history: `auditRepo.listByEntity`
     is one newest-first Query with no cursor, so the script pages backward
     with `before` (the oldest `ts` seen) until a page comes back empty.
-    A `--skip` id that is not a candidate is reported and otherwise ignored.
+    A `--skip` id that names an existing contact that is not a candidate is
+    reported and otherwise ignored. On `--apply`, a `--skip` id that names NO
+    contact at all (a typo) refuses the run (exit 1, nothing written); a dry
+    run reports it.
   - Dry run: writes nothing. Prints each target on its own line - first and
     last name, sign-up date (`captured_at`, else `created_at`, as a date),
     current status, contactId - oldest first, then the count; then the
@@ -238,8 +254,10 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
     `{ attr: 'type', value: 'tenant' }` plus `notDeleted`;
     `rewriteOrgFields` cannot express the type and deleted guards); plus one `housing_authority_backfill` audit event
     `{ field: 'housingAuthority', from: '', to: 'Atlanta Housing Authority' }`
-    with no actor. A lost condition is counted as skipped, not failed. Status
-    and every other field are left alone.
+    with no actor. A lost condition is counted as skipped, not failed. Any
+    other write error is a failure whose report line says the write "may or
+    may not have landed - re-run the dry run to see" (never "nothing
+    written"). Status and every other field are left alone.
   - After an apply, the run reads the list again; if "Atlanta Housing
     Authority" is no longer an exact `housing_authority` name (renamed,
     merged away, deleted or re-kinded during the run), it prints a warning
@@ -249,7 +267,8 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
     the one-time cleanup.
   - Safe to re-run at any time and in either order around the deploy: it
     never touches a contact holding an authority, the marker, a post-change
-    sign-up, or a history of an authority.
+    sign-up, a history of an authority, an earlier-run exclusion, or a
+    pending housing authority suggestion.
   - Exit codes: 0 completed clean; 1 refused, completed with failures, or the
     target could not be resolved; 2 usage.
   - No agent runs it against dev or prod. An agent rehearses it only with
@@ -261,6 +280,12 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
   there. Steps: dry run, read the target list (leave out anyone known not to
   hold an Atlanta voucher with `--skip`), apply, dev before prod. No
   Terraform, no secrets, no schema or index change.
+- **D12 Settings note (revision 5, Cameron 2026-10-12).** Every Settings >
+  Housing authorities & agencies surface where staff ADD a housing authority,
+  RENAME one, or turn an agency INTO one (including "Not on the list" > Add
+  as new, and a kind change) shows the help line "Housing authority names
+  appear on the public sign-up form." when the entry is (or will become) a
+  housing authority. Agencies show nothing new. Copy only; no behavior change.
 
 ## 4. Consequences to know
 

@@ -65,6 +65,7 @@ import {
 } from '../repos/placementsRepo.js';
 import { isInspectionOutcome, isPlacementStage, STAGE_LABELS, type PlacementStage } from '../lib/statusModel.js';
 import { recordPersonMilestone } from '../lib/personEvents.js';
+import { requireTenantContact, sendContactTypeError } from '../services/contactTypeGuards.js';
 import {
   describeRoster,
   type RosterOwner,
@@ -573,9 +574,15 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     // entities, but a stale picker (an entity deleted between fetch and submit) or a
     // direct API caller could reference a ghost — refuse rather than persist a
     // dangling placement. 404 + a typed code, mirroring placement_not_found. (IDs only.)
-    if (!(await contacts.getById(validation.fields.tenantId))) {
-      res.status(404).json({ error: 'tenant_not_found' });
-      return;
+    // Caseworker integrity I2 (spec 2026-10-12 section 4): the tenant must
+    // exist (404 tenant_not_found, as before) AND be a contact typed `tenant`
+    // (409 { error: 'contact_not_tenant', contactKind }), whatever the starting
+    // stage. One CONSISTENT read, before the unit check and any write.
+    try {
+      await requireTenantContact(contacts, validation.fields.tenantId);
+    } catch (err) {
+      if (sendContactTypeError(err, res)) return;
+      throw err;
     }
     if (!(await units.getById(validation.fields.unitId))) {
       res.status(404).json({ error: 'unit_not_found' });

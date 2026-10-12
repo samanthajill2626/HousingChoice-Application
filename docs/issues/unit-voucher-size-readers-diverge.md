@@ -1,13 +1,24 @@
 ---
 id: unit-voucher-size-readers-diverge
-title: Matching's pre-fill and the flyer read a property's voucher size from beds instead of acceptedVoucherSizes
+title: Matching's pre-fill reads a property's voucher size from beds instead of acceptedVoucherSizes (the flyer is fixed)
 type: debt
 severity: med
 status: open
 area: dashboard
 created: 2026-10-01
-refs: dashboard/src/routes/listing/listingFormat.ts, dashboard/src/routes/listings/unitListFacets.ts, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:219-227, dashboard/src/routes/broadcasts/AudienceFilters.tsx, app/src/lib/unitFields.ts:294-306, dashboard/src/routes/listing/ListingDetail.tsx:752-754, dashboard/src/routes/listing/ListingEditForm.tsx:30-32, dashboard/src/routes/listing/ListingEditForm.tsx:68
+refs: dashboard/src/routes/listing/listingFormat.ts, dashboard/src/routes/listings/unitListFacets.ts, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:256-263, dashboard/src/routes/broadcasts/AudienceFilters.tsx:91, app/src/lib/unitFields.ts, dashboard/src/routes/listing/ListingDetail.tsx:755-756, dashboard/src/routes/listing/ListingEditForm.tsx:105, dashboard/src/routes/listing/ListingEditForm.tsx:188
 ---
+
+**Update (2026-10-12) - the flyer half is FIXED** (branch `fix/flyer-voucher-size`),
+after a prod report that a property with its own voucher size showed its bedroom count on
+the public flyer. `acceptedVoucherSizes` now has its server twin in
+`app/src/lib/unitFields.ts` (the source of truth; the dashboard copy is its hand mirror,
+same test cases in both suites), and `toUnitFlyer` reads it. The flyer still states ONE
+size: for a recorded list (only the demo seed holds one until #12) it shows the first, and
+#12 decides how the flyer words several sizes.
+
+Still open: **Matching's pre-fill** (below) - Cameron asked for it next, single-size
+only (no multi-select until #12). The #12 items further down are unchanged.
 
 **Update (2026-10-04).** The rule is now settled and lives in ONE place: a property's voucher
 size is its recorded `voucher_size_accepted` when there is one (one number, or a list after

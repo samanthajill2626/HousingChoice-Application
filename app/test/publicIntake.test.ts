@@ -296,7 +296,8 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     expect(res.status).toBe(200);
     const { flyer } = res.body;
 
-    // The shareable set is present and correct (voucher_size derived from beds).
+    // The shareable set is present and correct (voucher_size falls back to beds:
+    // the fixture records no voucher size).
     // unit-photos: media is now the RESOLVED same-origin URL list (each stored
     // key becomes its stable /unit-media path), not a raw key pass-through.
     expect(flyer).toMatchObject({
@@ -363,6 +364,19 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     ]) {
       expect(serialized, secret).not.toContain(secret);
     }
+  });
+
+  it('states the RECORDED voucher size, not the bedroom count; the internal key stays off', async () => {
+    // The 2026-10-12 prod report: a property with its own voucher size showed
+    // the bedroom count on its public flyer.
+    const { app, world } = makeWebhookHarness();
+    seedFullUnit(world, { beds: 2, voucher_size_accepted: 3 });
+
+    const res = await request(app).get('/public/units/unit-1/flyer').set('x-origin-verify', SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body.flyer.voucher_size).toBe(3);
+    expect(res.body.flyer.beds).toBe(2);
+    expect(JSON.stringify(res.body)).not.toContain('voucher_size_accepted');
   });
 
   it('review F2: a foreign media key never reaches the PUBLIC flyer (omitted, no URL)', async () => {

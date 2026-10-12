@@ -227,9 +227,10 @@ export interface UnitItem {
   same_day_rta?: boolean;
   /**
    * Landlord-onboarding: the voucher size (bedroom size) this unit ACCEPTS —
-   * a stored, writable number (>= 0), DISTINCT from `beds` and from the DERIVED
-   * read-only `voucher_size` flyer projection (a 3bd unit may accept a 2BR
-   * voucher). Feeds matching. INTERNAL — NOT exposed on the public flyer.
+   * a stored, writable number (>= 0), DISTINCT from `beds` (a 3bd unit may
+   * accept a 2BR voucher). Read it through `acceptedVoucherSizes`
+   * (lib/unitFields.ts), which falls back to `beds`. The key is never on the
+   * public flyer; its value drives the flyer's derived `voucher_size`.
    */
   voucher_size_accepted?: number;
   /** The never-standardized per-unit tour process (free text). INTERNAL. */

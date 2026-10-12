@@ -246,8 +246,8 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
 - An Onboarding tenant is eligible for the existing AI suggestion to move to
   Searching (`app/src/services/extraction/apply.ts:533-536`); a Needs review
   one was not.
-- The texting-consent record for staff-entered sign-ups is unchanged
-  (`web_form`); see `docs/issues/join-staff-entered-consent-method.md`.
+- The texting-consent record is unchanged (`web_form`), for staff-entered
+  sign-ups too (Cameron 2026-10-12: not an issue).
 - The 5-per-minute sign-up limit is unchanged (Cameron, 2026-10-12). Several
   staff on one venue network share it.
 
@@ -257,7 +257,7 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
 - A soft-deleted person signing up again
   (`docs/issues/deleted-contact-web-signup-silent.md`).
 - Raising or re-keying the shared `/public` limit.
-- How staff-entered consent is recorded (the issue above).
+- How staff-entered consent is recorded.
 - Showing the chosen authority on the thank-you screen.
 - Changing an existing contact from a repeat sign-up.
 

@@ -12,9 +12,9 @@ links "See other homes" to /join).
 
 Result: 17 accepted, 3 partial, 1 deferred, 0 rejected outright (two
 sub-proposals rejected, below). Decisions changed: yes (J1, J2, J7, J9, J10,
-J12, J15, J17, J18). The lane is the short pipeline (one round on the
-spec), so revision 2 goes to Cameron's spec gate with the option of one
-continued round.
+J12, J15, J17, J18), so revision 2 goes to round 2 (Cameron 2026-10-12:
+the normal review loop applies - continue until a round changes no
+decision, cap 4).
 
 | # | Finding (sources) | Ruling | Effect on rev 2 |
 |---|---|---|---|
@@ -30,7 +30,7 @@ continued round.
 | J10 | Failed list never recovers across Sign up another person (A-F13) | ACCEPT | D9: "Sign up another person" re-reads the list when the last read failed. |
 | J11 | "Spot the flyer leads and --skip them" cannot be done from data (A-F7, B-F9) | PARTIAL | Fact accepted and stated in D10/D11. Names + sign-up dates in the dry run stay (Cameron's decision 2026-10-12, a recognition aid; a deliberate departure from the cleanup script's no-names rule, terminal only). `--skip` stays as the general way to leave a lead out. |
 | J12 | Lock check ignores staleness; never takes the lock (A-F8, B-F10) | PARTIAL | ACCEPT staleness: refuse via `isOrgRewriteRunning`. REJECT taking the lock: the apply runs for seconds at today's volume; taking the `cleanup` lock would label it "the one-time cleanup" on Settings with the hint "Re-run the cleanup script" on a failure; the post-apply re-read catches any rename/delete/merge/re-kind, and the records then surface under "Not on the list". Window accepted explicitly in D10. |
-| J13 | Staff-entered consent recorded as web_form (A-F9, B-F11) | DEFER | Existing behavior, unchanged by this branch. Filed `docs/issues/join-staff-entered-consent-method.md`. D9 slogan replaced with the mechanism (the box starts unchecked for each person). |
+| J13 | Staff-entered consent recorded as web_form (A-F9, B-F11) | DEFER, then CLOSED | Existing behavior, unchanged by this branch. Briefly filed as `docs/issues/join-staff-entered-consent-method.md`; Cameron ruled it a non-issue at the spec gate (2026-10-12) and the issue was deleted. D9 slogan replaced with the mechanism (the box starts unchecked for each person). |
 | J14 | Mount unspecified; the obvious mount trips the edge guard (A-F10, B-F7) | ACCEPT | D2 names it: a router mounted at the already-classified `/public` prefix ahead of the existing mount, its limiter applied to its own route only. XFF spoofability: out of scope (the existing limiter's property). |
 | J15 | Anonymous GET uses the creating read (A-F11, B-F16) | ACCEPT | D1/D3: `peek()`, falling back to the starting list in memory; the public surface never writes the list item. |
 | J16 | Existing-phone path misstated (A-F12, B-F14) | ACCEPT | Section 2 corrected (a never-welcomed existing contact IS welcomed and flagged). |

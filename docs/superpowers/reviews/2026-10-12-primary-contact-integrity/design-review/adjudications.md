@@ -109,7 +109,7 @@ the review CLOSES.
 
 ## Totals (rounds 1-4)
 
-77 findings (38 + 11 + 5 + 3 numbered, plus one section-10 note), all
+57 numbered findings (38 + 11 + 5 + 3) plus one section-10 note, all
 ACCEPTED - several with a different mechanism than proposed (J6) or partly as
 a stated known gap (K9: the Delete dialog cannot tell a tenant-typed primary).
 0 REJECT, 0 DEFER. One out-of-scope defect FILED from the surface sweep:

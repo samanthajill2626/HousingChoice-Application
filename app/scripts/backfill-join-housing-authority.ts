@@ -9,12 +9,21 @@
 // housingAuthority attribute and no housing_fair_signup_v2 marker (every
 // contact the sign-up creates after the change carries it - spec D5).
 //
-// LEFT OUT, and listed with the reason: a candidate named in --skip; one with
-// a post-change sign-up (a housing_fair_signup event carrying signupVersion 2,
-// spec D7); one whose audit trail shows housingAuthority was ever SET OR
-// REMOVED (touchesHousingAuthority). Both audit rules read the WHOLE history:
-// auditRepo.listByEntity is one newest-first Query with no cursor, so the run
-// pages backward with `before` until a page comes back empty.
+// LEFT OUT, and listed with ONE reason, in this order: a candidate named in
+// --skip; one an earlier --apply excluded (a housing_authority_backfill_excluded
+// event - spec D10 revision 5); one with a post-change sign-up (a
+// housing_fair_signup event carrying signupVersion 2, spec D7); one whose
+// audit trail shows housingAuthority was ever SET OR REMOVED
+// (touchesHousingAuthority). Every candidate's WHOLE history is read, --skip
+// ones included: auditRepo.listByEntity is one newest-first Query with no
+// cursor, so the run pages backward with `before` until a page comes back
+// empty.
+//
+// EXCLUSIONS: an --apply appends ONE housing_authority_backfill_excluded event
+// { field: 'housingAuthority' }, no actor, to each candidate it leaves out
+// because of --skip, unless its history already holds one - so a later run
+// without the same --skip leaves that lead out too. A failed append counts the
+// lead failed (exit 1). A dry run records nothing.
 //
 // THE LIST: the stored org-list item, read with peek() - never created. The
 // run REFUSES (exit 1, no contact read, nothing written) when no item is
@@ -35,7 +44,8 @@
 // DRY RUN (the default) writes nothing at all - not even the list item.
 // --apply writes, per target, ONE conditional contactsRepo.update - the
 // authority is set only while the contact still has none, is still a tenant
-// and is still not deleted; a lost condition is counted `skipped` - then one
+// and is still not deleted; a lost condition is counted `skipped`, any other
+// error `write_failed` (it may or may not have landed) - then one
 // housing_authority_backfill audit event { field, from: '', to }, no actor.
 // Each candidate's history is read right before its write.
 //
@@ -87,8 +97,22 @@ export const BACKFILL_AUTHORITY = 'Atlanta Housing Authority';
 /** Spec D10: the audit event each backfill write appends. */
 export const BACKFILL_AUDIT_TYPE = 'housing_authority_backfill';
 
-/** Why a candidate is left out: listed with the reason, never written. */
-export type LeftOutReason = 'skipped' | 'signed_up_again' | 'authority_history';
+/**
+ * Spec D10 (revision 5): the audit event an --apply appends - payload
+ * { field: 'housingAuthority' }, no actor - to each candidate it leaves out
+ * because of --skip, unless its history already holds one. Every later run
+ * leaves a candidate holding it out ("excluded on an earlier run"). Not
+ * authority history: it records a decision, not a value.
+ */
+export const BACKFILL_EXCLUDED_AUDIT_TYPE = 'housing_authority_backfill_excluded';
+
+/**
+ * Why a candidate is left out: listed with the reason, never written. Several
+ * can hold at once; the ONE printed follows this order (spec D10 revision 5):
+ * skipped (named in --skip on this run), excluded_earlier, signed_up_again,
+ * authority_history.
+ */
+export type LeftOutReason = 'skipped' | 'excluded_earlier' | 'signed_up_again' | 'authority_history';
 
 /** The capture_source only the sign-up route writes (a /join sign-up, or a flyer one for an unshareable unit). */
 const JOIN_CAPTURE_SOURCE = 'housing_fair';
@@ -150,14 +174,19 @@ export function touchesHousingAuthority(event: AuditEvent): boolean {
   }
 }
 
+/** An exclusion an earlier --apply recorded (whatever its payload: the type alone is the decision). */
+const isExclusion = (event: AuditEvent): boolean => event.event_type === BACKFILL_EXCLUDED_AUDIT_TYPE;
+
 /**
  * Spec D10: why a candidate's WHOLE audit history (any order) leaves it out,
- * or null. A post-change sign-up (housing_fair_signup carrying the number
- * signupVersion 2 - on /join or a flyer, erring safe) wins over an authority
- * history: both leave the lead out, and it is the reason the operator most
- * needs to see.
+ * or null - in precedence order. An exclusion an earlier --apply recorded
+ * comes first (the operator's own decision). Then a post-change sign-up
+ * (housing_fair_signup carrying the number signupVersion 2 - on /join or a
+ * flyer, erring safe), which wins over an authority history: both leave the
+ * lead out, and it is the reason the operator most needs to see.
  */
 export function leftOutReasonFromAudit(events: readonly AuditEvent[]): Exclude<LeftOutReason, 'skipped'> | null {
+  if (events.some(isExclusion)) return 'excluded_earlier';
   const signedUpAgain = events.some(
     (e) => e.event_type === 'housing_fair_signup' && isRecord(e.payload) && e.payload['signupVersion'] === 2,
   );
@@ -198,6 +227,8 @@ export interface BackfillTarget extends BackfillLead {
 
 export interface LeftOutLead extends BackfillLead {
   reason: LeftOutReason;
+  /** --apply, `skipped` only: its housing_authority_backfill_excluded event could not be appended - counted in `failed`. */
+  exclusionFailed?: true;
 }
 
 export interface BackfillReport {
@@ -213,7 +244,11 @@ export interface BackfillReport {
   written: number;
   /** Apply: targets whose write lost its condition (changed after the read). */
   skipped: number;
-  /** Targets whose history read failed (nothing written) or whose write failed (it may or may not have landed). */
+  /**
+   * Leads that FAILED: a target whose history read failed (nothing written)
+   * or whose write failed (it may or may not have landed), and - apply - a
+   * --skip lead whose exclusion could not be recorded.
+   */
   failed: number;
   /** Printed as WARNING lines: the post-apply list check, a missing audit event. */
   warnings: string[];
@@ -221,6 +256,7 @@ export interface BackfillReport {
 
 const REASON_TEXT: Readonly<Record<LeftOutReason, string>> = {
   skipped: 'named in --skip',
+  excluded_earlier: 'excluded on an earlier run',
   signed_up_again: 'signed up again after the change',
   authority_history: 'its housing authority was set or removed before - left empty on purpose',
 };
@@ -233,6 +269,9 @@ const OUTCOME_SUFFIX: Readonly<Record<TargetOutcome, string>> = {
   write_failed:
     '  - FAILED: the write may or may not have landed (an ERROR line names this contactId) - re-run the dry run to see',
 };
+
+const EXCLUSION_FAILED_SUFFIX =
+  ' - FAILED: its exclusion could not be recorded (an ERROR line names this contactId) - keep it in --skip and re-run the apply';
 
 /** "2026-06-20" from an ISO stamp (UTC); "unknown" when there is none. */
 function signUpDate(signedUpAt: string): string {
@@ -304,7 +343,9 @@ export function formatBackfillReport(report: BackfillReport, apply: boolean): st
     lines.push('Left out: none.');
   } else {
     lines.push(`Left out (${report.leftOut.length} lead(s), oldest sign-up first):`);
-    for (const l of report.leftOut) lines.push(`${leadLine(l)}  - ${REASON_TEXT[l.reason]}`);
+    for (const l of report.leftOut) {
+      lines.push(`${leadLine(l)}  - ${REASON_TEXT[l.reason]}${l.exclusionFailed === true ? EXCLUSION_FAILED_SUFFIX : ''}`);
+    }
   }
   for (const id of report.missingSkips) {
     lines.push(`--skip id that names no contact (a typo?) - an --apply refuses to run with it: ${id}`);
@@ -506,18 +547,29 @@ export async function readWholeHistory(
   }
 }
 
+/** What one candidate's reads decide (leftOutReasonFor). */
+export interface CandidateVerdict {
+  /** The ONE reason printed (the LeftOutReason order), or null: a target. */
+  reason: LeftOutReason | null;
+  /** Its history already holds a housing_authority_backfill_excluded event: an --apply appends no second one. */
+  exclusionRecorded: boolean;
+}
+
 /**
- * Why one candidate is left out, or null when it is a target: --skip first
- * (no history read), then its whole history (leftOutReasonFromAudit).
+ * Why one candidate is left out, or null when it is a target. Its WHOLE
+ * history is read first - a --skip lead's too, so an --apply knows whether
+ * its exclusion is already recorded - then --skip on this run, then the
+ * history (leftOutReasonFromAudit). Throws when the read fails.
  */
 export async function leftOutReasonFor(
   deps: Pick<BackfillDeps, 'audit' | 'auditPageSize'>,
   contactId: string,
   skip: ReadonlySet<string>,
-): Promise<LeftOutReason | null> {
-  if (skip.has(contactId)) return 'skipped';
+): Promise<CandidateVerdict> {
   const events = await readWholeHistory(deps.audit, `contacts#${contactId}`, deps.auditPageSize ?? AUDIT_PAGE_SIZE);
-  return leftOutReasonFromAudit(events);
+  const exclusionRecorded = events.some(isExclusion);
+  if (skip.has(contactId)) return { reason: 'skipped', exclusionRecorded };
+  return { reason: leftOutReasonFromAudit(events), exclusionRecorded };
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +634,28 @@ async function writeOne(deps: BackfillDeps, contactId: string, report: BackfillR
 }
 
 /**
+ * Spec D10 (revision 5): an --apply records that the operator left this
+ * candidate out with --skip - ONE housing_authority_backfill_excluded event
+ * { field }, no actor - so a later run without the same --skip leaves it out
+ * too. False when the append failed: the caller counts the lead failed (an
+ * unrecorded exclusion is exactly what a later run would overwrite). Never
+ * throws.
+ */
+async function recordExclusion(deps: BackfillDeps, contactId: string): Promise<boolean> {
+  try {
+    await deps.audit.append(`contacts#${contactId}`, BACKFILL_EXCLUDED_AUDIT_TYPE, { field: FIELD });
+  } catch (err) {
+    deps.logger.error(
+      { err, contactId },
+      `${SCRIPT_NAME} - the exclusion could NOT be recorded (named in --skip; its housing authority was not written) - keep it in --skip and re-run the apply`,
+    );
+    return false;
+  }
+  deps.logger.info({ contactId }, `${SCRIPT_NAME} - exclusion recorded (named in --skip): later runs leave it out`);
+  return true;
+}
+
+/**
  * Spec D10: after an apply that wrote, the name must still be an exact
  * housing_authority name. The run never takes the rewrite lock, so a rename,
  * merge, delete or kind change during the run is caught here - a warning.
@@ -611,10 +685,12 @@ async function warnIfNameLeftList(deps: BackfillDeps, report: BackfillReport): P
  * Spec D10: the backfill. Refuses (BackfillRefusedError) before any contact
  * is read; then reads the candidates - an --apply refuses right after that
  * Scan, before any write, when a --skip id names no contact - and for each -
- * oldest first - reads its whole history right before its write; then (apply) re-checks the list,
- * prints the report through deps.print and returns it. A failed history read
- * or write is counted `failed` (exit 1) and the run goes on; only the list
- * read and the contacts Scan abort it, both before any write.
+ * oldest first - reads its whole history right before its write (or, for a
+ * --skip lead on an apply, before its exclusion is recorded); then (apply)
+ * re-checks the list, prints the report through deps.print and returns it. A
+ * failed history read, write or exclusion append is counted `failed` (exit 1)
+ * and the run goes on; only the list read and the contacts Scan abort it,
+ * both before any write.
  */
 export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: BackfillOptions): Promise<BackfillReport> {
   const log = deps.logger;
@@ -646,18 +722,30 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
     warnings: [],
   };
 
+  let exclusionsRecorded = 0;
   for (const lead of scan.leads) {
-    let reason: LeftOutReason | null;
+    let verdict: CandidateVerdict;
     try {
-      reason = await leftOutReasonFor(deps, lead.contactId, opts.skip);
+      verdict = await leftOutReasonFor(deps, lead.contactId, opts.skip);
     } catch (err) {
       report.failed += 1;
       report.targets.push({ ...lead, outcome: 'read_failed' });
       log.error({ err, contactId: lead.contactId }, `${SCRIPT_NAME} - could not read the audit history; nothing written for this contact`);
       continue;
     }
+    const { reason } = verdict;
     if (reason !== null) {
-      report.leftOut.push({ ...lead, reason });
+      const left: LeftOutLead = { ...lead, reason };
+      // Spec D10 revision 5: an --apply remembers the operator's --skip.
+      if (opts.apply && reason === 'skipped' && !verdict.exclusionRecorded) {
+        if (await recordExclusion(deps, lead.contactId)) {
+          exclusionsRecorded += 1;
+        } else {
+          report.failed += 1;
+          left.exclusionFailed = true;
+        }
+      }
+      report.leftOut.push(left);
       log.info({ contactId: lead.contactId, reason }, `${SCRIPT_NAME} - left out`);
       continue;
     }
@@ -677,6 +765,7 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
     leftOut: report.leftOut.length,
     unknownSkips: report.unknownSkips.length,
     missingSkips: report.missingSkips.length,
+    exclusionsRecorded,
     written: report.written,
     skipped: report.skipped,
     failed: report.failed,
@@ -719,7 +808,8 @@ export function parseSkipList(raw: string | undefined): ReadonlySet<string> | un
 /** What a usage error prints (exit 2). */
 export const USAGE =
   `Usage: npx tsx app/scripts/${SCRIPT_NAME}.ts --env local|dev|prod [--lane <L>] [--apply] [--skip "<contactId>[,<contactId>...]"]\n` +
-  '  DRY RUN by default; --apply writes. --skip leaves the named leads out (ONE comma-separated value - quote it).\n' +
+  '  DRY RUN by default; --apply writes. --skip leaves the named leads out (ONE comma-separated value - quote it);\n' +
+  '  an --apply records each exclusion, so later runs leave those leads out too.\n' +
   '  Unknown or repeated arguments and an empty --skip id are refused. --lane selects a hermetic e2e lane (local only).';
 
 /** The CLI's outside world - each member injectable, so the tests execute every exit code. */

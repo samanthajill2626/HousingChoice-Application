@@ -66,3 +66,28 @@ Result: 7 accepted. Decisions changed: yes (K1, K2, K3) - round 3 follows.
 | K6 | R2-6 [LOW] No status condition: On hold / Inactive leads get Atlanta and join Atlanta blasts | ACCEPT (document) | Section 4 states it. No status condition added: Cameron set the target rule (authority only, status left alone), and it matches every parked tenant holding an authority while blasts have no status filter. |
 | K7 | R2-7 [LOW] sequence-diagram-to-test.md:110 still says needs_review | ACCEPT | Added to section 7. |
 | K8 | (Part 3) The write method was unnamed; rewriteOrgFields cannot carry the type/deleted guards | ACCEPT | D10 names `contactsRepo.update` with the two `expect` clauses plus `notDeleted`. |
+
+---
+
+# Spec review round 3 - adjudications (TERMINAL)
+
+Round 3 reviewed revision 3 (@0174f240). Reviewer B continued
+(`R3-reviewer-b.md`, 3 findings, all LOW). It conceded K6 (blasts read no
+status anywhere, so a status condition has no code to defend it) and judged
+every round-2 fix correct, including that the broadened marker breaks no
+reader, test or snapshot, and that `contactsRepo.update` with the guards has
+no hidden side effect (no `updated_at`, no revision bump without a type/role
+patch, `notDeleted` matches how restore removes `deleted_at`).
+
+Result: 3 accepted as precision edits. Decisions changed: NONE - the review
+is CLOSED at round 3 (revision 4).
+
+| # | Finding | Ruling | Effect on rev 4 |
+|---|---|---|---|
+| L1 | R3-1 [LOW] `auditRepo.listByEntity` is one newest-first Query with no cursor; a long history drops the OLDEST events, where pre-change writes live | ACCEPT | D10: page backward with `before` until a page comes back empty (verified auditRepo.ts:122-141). |
+| L2 | R3-2 [LOW] The re-sign-up exclusion also catches a pre-change lead's post-change FLYER sign-up | ACCEPT (no new field) | Errs safe and is rare; D10 says so and the printed reason is "signed up again after the change". The optional D7 `unitId`-sent field was not taken. |
+| L3 | R3-3 [LOW] No app path creates a backfill candidate after the change, so a rehearsal through /join finds none | ACCEPT | D10: the rehearsal and the script test write pre-change-shaped leads directly. |
+
+Spec review totals: 3 rounds, 41 findings (31 in round 1, merged to 21;
+7; 3), 0 rejected outright, 2 proposed fixes rejected and conceded, 1
+deferral closed by Cameron (consent method: non-issue).

@@ -615,6 +615,92 @@ describe('ContactDetail', () => {
     expect(within(card).getByRole('link', { name: 'View property' })).toHaveAttribute('href', '/listings/u1');
   });
 
+  // R1 code review, dashboard finding 6: the Unknown card's two
+  // contact-isolation guards. The renderWithNavToOther pattern (the kebab
+  // unread toggle describe, below) with an UNKNOWN second contact:
+  // ContactDetail is re-rendered, not remounted, on the param change, so both
+  // contacts share one Needs triage card.
+  const UNKNOWN_OTHER: Contact = {
+    contactId: 'u10',
+    type: 'unknown',
+    status: 'needs_review',
+    firstName: 'Una',
+    lastName: 'Second',
+    phone: '+15550100002',
+  };
+
+  function renderUnknownWithNavToOther() {
+    getContact.mockImplementation((id: unknown) =>
+      id === 'u10' ? Promise.resolve(UNKNOWN_OTHER) : Promise.resolve(UNKNOWN),
+    );
+    return render(
+      <MemoryRouter initialEntries={['/contacts/u9']}>
+        <ImageViewerProvider>
+          <Routes>
+            <Route
+              path="/contacts/:contactId"
+              element={
+                <>
+                  <Link to="/contacts/u10">NAV-TO-OTHER</Link>
+                  <ContactDetail />
+                </>
+              }
+            />
+          </Routes>
+        </ImageViewerProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  const refusedOpenPlacement = (): ApiError =>
+    new ApiError(409, 'type_change_refused', 'type_change_refused', {
+      error: 'type_change_refused',
+      refusals: [{ code: 'open_placement', placementId: 'p7' }],
+    });
+
+  it("contact A's Mark as refusal that lands AFTER the move to contact B never renders on B's card", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    let rejectA: ((err: unknown) => void) | undefined;
+    updateContact.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectA = reject;
+        }),
+    );
+    renderUnknownWithNavToOther();
+    await user.click(await screen.findByRole('button', { name: 'Mark as Landlord' }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('u9', expect.anything()));
+
+    await user.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByText('Una Second');
+    await act(async () => {
+      rejectA?.(refusedOpenPlacement());
+      await Promise.resolve();
+    });
+    // A's request has settled (its finally re-enabled the shared buttons)...
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as Landlord' })).toBeEnabled());
+    // ...and B's card says nothing about A's placement.
+    const card = screen.getByRole('heading', { name: 'Needs triage' }).closest('section') as HTMLElement;
+    expect(within(card).queryByRole('alert')).toBeNull();
+    expect(screen.queryByText("Finish or close this contact's placement first.")).toBeNull();
+  });
+
+  it("contact A's Mark as refusal does not survive the move to contact B", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    updateContact.mockRejectedValue(refusedOpenPlacement());
+    renderUnknownWithNavToOther();
+    await user.click(await screen.findByRole('button', { name: 'Mark as Landlord' }));
+    expect(await screen.findByText("Finish or close this contact's placement first.")).toBeInTheDocument();
+
+    await user.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByText('Una Second');
+    const card = screen.getByRole('heading', { name: 'Needs triage' }).closest('section') as HTMLElement;
+    expect(within(card).queryByRole('alert')).toBeNull();
+    expect(screen.queryByText("Finish or close this contact's placement first.")).toBeNull();
+  });
+
   it('accepts a voucher-size AI suggestion: applies the returned contact in place (value + Auto badge, chip gone)', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();

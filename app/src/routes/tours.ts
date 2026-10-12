@@ -138,6 +138,7 @@ import { armRelayCloseNagIfOpen, clearRelayCloseNagOnReopen } from '../services/
 import { normalizeToE164 } from '../lib/phone.js';
 import { recordTourEvent as recordTourEventShared } from '../lib/tourEvents.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
+import { requireTenantContact, sendContactTypeError } from '../services/contactTypeGuards.js';
 
 /**
  * Validate that a string is a parseable ISO 8601 datetime.
@@ -343,6 +344,17 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     if (!isTourType(b['tourType'])) {
       res.status(400).json({ error: `tourType must be one of: ${TOUR_TYPES.join(', ')}` });
       return;
+    }
+
+    // Caseworker integrity I2 (spec 2026-10-12 section 4): a tour's tenant is a
+    // contact typed `tenant`. One CONSISTENT read after the body validation and
+    // before any write: 404 tenant_not_found when the contact is gone, 409
+    // { error: 'contact_not_tenant', contactKind } when it is not a tenant.
+    try {
+      await requireTenantContact(contacts, b['tenantId'] as string);
+    } catch (err) {
+      if (sendContactTypeError(err, res)) return;
+      throw err;
     }
 
     // Timeless create: OMIT scheduledAt entirely (never undefined/null) so the

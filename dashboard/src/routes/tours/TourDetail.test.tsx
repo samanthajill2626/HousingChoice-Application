@@ -2336,3 +2336,64 @@ describe('TourDetail - ?outcome=1 deep link and the back arrow (spec 4.6)', () =
     },
   );
 });
+
+// Caseworker integrity (spec 2026-10-12 section 4, "Dashboard copy"): a
+// contact-type refusal reads as a sentence at the page's three header-alert
+// sites, never as the raw code err.message carries.
+describe('TourDetail - contact-type refusals (caseworker integrity)', () => {
+  function notTenant(contactKind: string): ApiError {
+    return new ApiError(409, 'contact_not_tenant', 'contact_not_tenant', {
+      error: 'contact_not_tenant',
+      contactKind,
+    });
+  }
+
+  it('a status change refused as contact_not_tenant shows the sentence in the header alert', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    patchTour.mockRejectedValue(notTenant('team_member'));
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Mark toured' }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'Tours and placements are for tenants. This contact is a team member.',
+      ),
+    );
+    expect(screen.getByRole('alert')).not.toHaveTextContent('contact_not_tenant');
+    expect(screen.queryByRole('form', { name: 'Record outcome form' })).not.toBeInTheDocument();
+  });
+
+  it('Start placement refused as contact_not_tenant shows the sentence and does not navigate', async () => {
+    getTour.mockResolvedValue(
+      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
+    createPlacementFromTour.mockRejectedValue(notTenant('caseworker'));
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getAllByRole('button', { name: 'Start placement' })[0]!);
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'Tours and placements are for tenants. This contact is a caseworker.',
+      ),
+    );
+    expect(navigateSpy).not.toHaveBeenCalled();
+  });
+
+  it('move-forward whose conversion finds the contact gone says so (outcome saved, no navigation)', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured' }));
+    patchTour.mockResolvedValue(
+      makeTour({ status: 'toured', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
+    createPlacementFromTour.mockRejectedValue(
+      new ApiError(404, 'tenant_not_found', 'tenant_not_found', { error: 'tenant_not_found' }),
+    );
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Record outcome' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Yes - move forward' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('That contact no longer exists.'));
+    expect(navigateSpy).not.toHaveBeenCalled();
+  });
+});

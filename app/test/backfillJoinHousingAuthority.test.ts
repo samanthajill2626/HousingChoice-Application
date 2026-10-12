@@ -2,17 +2,34 @@
 // docs/superpowers/specs/2026-10-12-join-housing-authority-design.md, D10
 // and D11). The PURE rules first: who is a candidate, and which audit history
 // leaves one out - each writer's payload exactly as it appends it today.
-import { describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { GetCommand, PutCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { afterEach, describe, expect, it } from 'vitest';
+import { tableName } from '../src/lib/config.js';
+import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
+import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
+import { createLogger, type Logger } from '../src/lib/logger.js';
+import type { OrgEntry } from '../src/lib/orgNames.js';
+import { buildStartingEntries } from '../src/lib/orgStartingList.js';
+import { getTableSpec } from '../src/lib/tables.js';
 import type { AuditEvent } from '../src/repos/auditRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { createOrgListRepo, type OrgListItem, type OrgListRepo, type OrgRewriteState } from '../src/repos/orgListRepo.js';
 import {
   BACKFILL_AUDIT_TYPE,
   BACKFILL_AUTHORITY,
+  BackfillRefusedError,
   backfillExitCode,
+  buildBackfillDeps,
+  checkBackfillList,
   formatBackfillReport,
   isCandidate,
+  leftOutReasonFor,
   leftOutReasonFromAudit,
+  readWholeHistory,
+  scanCandidates,
   touchesHousingAuthority,
+  type BackfillDeps,
   type BackfillLead,
   type BackfillReport,
 } from '../scripts/backfill-join-housing-authority.js';
@@ -315,4 +332,360 @@ describe('backfillExitCode (spec D10: 0 clean, 1 with failures)', () => {
     expect(backfillExitCode({ ...DRY_REPORT, warnings: ['a warning'] })).toBe(0);
     expect(backfillExitCode({ ...DRY_REPORT, failed: 1 })).toBe(1);
   });
+});
+
+// ---------------------------------------------------------------------------
+// The reads (spec D10). The DynamoDB Local part self-skips like
+// cleanOrgNames.test.ts. No app path creates a candidate any more (every new
+// sign-up carries the marker; no seed writes capture_source 'housing_fair'),
+// so these tests write pre-change-shaped leads directly.
+// ---------------------------------------------------------------------------
+
+const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
+async function endpointReachable(): Promise<boolean> {
+  try {
+    await fetch(endpoint, { signal: AbortSignal.timeout(1_500) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+const reachable = await endpointReachable();
+if (!reachable) console.warn(`[backfillJoinHousingAuthority] SKIPPED - no DynamoDB Local at ${endpoint}.`);
+
+const client = createDynamoClient({ endpoint });
+const doc = createDocumentClient({ endpoint });
+const created: string[] = [];
+const silent = createLogger({ level: 'silent' });
+const READ_COMMANDS = new Set(['ScanCommand', 'QueryCommand', 'GetCommand']);
+const NO_SKIP: ReadonlySet<string> = new Set();
+const LIST_AT = '2026-10-06T00:00:00.000Z';
+
+const NO_LIST_REFUSAL =
+  'backfill-join-housing-authority: REFUSED - this environment has no organization list yet: the deployed app creates it on its first read. ' +
+  'Open Settings > Housing authorities & agencies once, then re-run. No contact was read and nothing was written.';
+const NOT_LISTED_REFUSAL =
+  'backfill-join-housing-authority: REFUSED - "Atlanta Housing Authority" is not the exact name of a housing authority on this ' +
+  "environment's organization list (renamed, merged, deleted or made an agency). Check Settings > Housing authorities & agencies " +
+  'before going on. No contact was read and nothing was written.';
+const RUNNING_REFUSAL =
+  'backfill-join-housing-authority: REFUSED - an organization-name rewrite is running (action rename, started ' +
+  '2026-10-12T12:00:00.000Z, last heartbeat 2026-10-12T12:00:00.000Z). Wait for it to finish (Settings > Housing ' +
+  'authorities & agencies shows it); a rewrite whose process was killed stops blocking 15 minutes after its last ' +
+  'heartbeat. No contact was read and nothing was written.';
+
+async function dropCreatedTables(): Promise<void> {
+  for (const table of created.splice(0)) await deleteTableIfExists(client, table);
+}
+
+/** The starting list with fixed ids: Atlanta Housing Authority is a housing_authority entry (lib/orgStartingList.ts). */
+function startingEntries(): OrgEntry[] {
+  let n = 0;
+  return buildStartingEntries(LIST_AT, () => `org-${(n += 1)}`);
+}
+
+/** The starting list with its Atlanta Housing Authority entry changed - or removed (null). */
+function withAtlanta(change: (entry: OrgEntry) => OrgEntry | null): OrgEntry[] {
+  return startingEntries().flatMap((entry) => {
+    if (entry.name !== 'Atlanta Housing Authority') return [entry];
+    const next = change(entry);
+    return next === null ? [] : [next];
+  });
+}
+
+function listItem(entries: OrgEntry[], lastRewrite?: OrgRewriteState): OrgListItem {
+  return { settingId: 'org-list', version: 1, entries, ...(lastRewrite !== undefined && { lastRewrite }) };
+}
+
+/** A client that records every command's class name, then sends it for real. */
+function recordingClient(inner: DynamoDBDocumentClient): { doc: DynamoDBDocumentClient; sent: string[] } {
+  const sent: string[] = [];
+  const recording = {
+    send: async (command: { constructor: { name: string } }) => {
+      sent.push(command.constructor.name);
+      return await inner.send(command as never);
+    },
+    destroy: () => {},
+  } as unknown as DynamoDBDocumentClient;
+  return { doc: recording, sent };
+}
+
+interface World {
+  env: NodeJS.ProcessEnv;
+  orgList: OrgListRepo;
+  /** A contacts row exactly as given. */
+  put(item: Record<string, unknown>): Promise<void>;
+  /** A pre-change /join lead - the shape the sign-up created before this change - with changes (undefined drops a field). */
+  lead(contactId: string, fields?: Record<string, unknown>): Promise<void>;
+  /** One audit event with an explicit sort key, so the paging order is fixed. */
+  audit(contactId: string, ts: string, eventType: string, payload: Record<string, unknown>): Promise<void>;
+  get(contactId: string): Promise<Record<string, unknown> | undefined>;
+  scanTable(base: 'contacts' | 'settings' | 'audit_events'): Promise<string[]>;
+  backfillEvents(): Promise<Record<string, unknown>[]>;
+  /** The real deps on this world (overridable); `printed` collects the report lines. */
+  deps(opts?: { overrides?: Partial<BackfillDeps>; onDoc?: DynamoDBDocumentClient; logger?: Logger }): {
+    deps: BackfillDeps;
+    printed: string[];
+  };
+}
+
+/** Fresh contacts, settings and audit tables under their own prefix; the list stored as given (null = none). */
+async function newWorld(orgList: OrgListItem | null = listItem(startingEntries())): Promise<World> {
+  const env: NodeJS.ProcessEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
+  for (const base of ['contacts', 'settings', 'audit_events'] as const) {
+    await ensureTable(client, getTableSpec(base), tableName(base, env));
+    created.push(tableName(base, env));
+  }
+  const orgListRepo = createOrgListRepo({ doc, env, logger: silent });
+  if (orgList !== null) await orgListRepo.putForSeed(orgList);
+  const put = async (item: Record<string, unknown>): Promise<void> => {
+    await doc.send(new PutCommand({ TableName: tableName('contacts', env), Item: item }));
+  };
+  const scanItems = async (base: string): Promise<Record<string, unknown>[]> =>
+    (await doc.send(new ScanCommand({ TableName: tableName(base, env) }))).Items ?? [];
+  return {
+    env,
+    orgList: orgListRepo,
+    put,
+    lead: (contactId, fields = {}) =>
+      put({
+        contactId,
+        type: 'tenant',
+        status: 'needs_review',
+        firstName: 'Lead',
+        lastName: contactId,
+        capture_source: 'housing_fair',
+        captured_at: '2026-07-01T15:00:00.000Z',
+        created_at: '2026-07-01T15:00:00.000Z',
+        housing_fair_welcomed: true,
+        consent_method: 'web_form',
+        ...fields,
+      }),
+    audit: async (contactId, ts, eventType, payload) => {
+      await doc.send(
+        new PutCommand({
+          TableName: tableName('audit_events', env),
+          Item: { entityKey: `contacts#${contactId}`, ts, event_type: eventType, payload },
+        }),
+      );
+    },
+    get: async (contactId) =>
+      (await doc.send(new GetCommand({ TableName: tableName('contacts', env), Key: { contactId } }))).Item,
+    scanTable: async (base) => (await scanItems(base)).map((item) => JSON.stringify(item)).sort(),
+    backfillEvents: async () => (await scanItems('audit_events')).filter((e) => e['event_type'] === BACKFILL_AUDIT_TYPE),
+    deps: (opts = {}) => {
+      const printed: string[] = [];
+      const deps: BackfillDeps = {
+        ...buildBackfillDeps(
+          { doc: opts.onDoc ?? doc, env },
+          { logger: opts.logger ?? silent, print: (line) => printed.push(line) },
+        ),
+        ...opts.overrides,
+      };
+      return { deps, printed };
+    },
+  };
+}
+
+describe('checkBackfillList - the refusals, before any contact is read (spec D10)', () => {
+  const AT = '2026-10-12T12:00:00.000Z';
+  const running: OrgRewriteState = {
+    jobId: 'job-rename',
+    action: 'rename',
+    fromTexts: ['Old Name'],
+    fields: ['housingAuthority', 'accepted_authorities'],
+    toName: 'New Name',
+    status: 'running',
+    heartbeatAt: AT,
+    startedAt: AT,
+    startedBy: 'user-0001',
+  };
+  const on = (item: OrgListItem | null, nowIso = AT): Pick<BackfillDeps, 'orgList' | 'now'> => ({
+    orgList: { peek: async () => item },
+    now: () => Date.parse(nowIso),
+  });
+  const outcomeOf = (deps: Pick<BackfillDeps, 'orgList' | 'now'>, apply: boolean): Promise<unknown> =>
+    checkBackfillList(deps, apply).then(
+      () => 'passed',
+      (err: unknown) => err,
+    );
+
+  it('passes a stored list that names Atlanta Housing Authority exactly - for a dry run and an apply', async () => {
+    expect(await outcomeOf(on(listItem(startingEntries())), false)).toBe('passed');
+    expect(await outcomeOf(on(listItem(startingEntries())), true)).toBe('passed');
+  });
+
+  it('refuses when no list is stored - a dry run too: it never falls back to the starting list', async () => {
+    for (const apply of [false, true]) {
+      const outcome = await outcomeOf(on(null), apply);
+      expect(outcome).toBeInstanceOf(BackfillRefusedError);
+      expect((outcome as Error).message).toBe(NO_LIST_REFUSAL);
+    }
+  });
+
+  const notExact: Array<[string, OrgEntry[]]> = [
+    ['renamed', withAtlanta((e) => ({ ...e, name: 'Atlanta Housing Authority (AHA)' }))],
+    ['in another case', withAtlanta((e) => ({ ...e, name: 'atlanta housing authority' }))],
+    ['made an agency', withAtlanta((e) => ({ ...e, kind: 'agency' }))],
+    [
+      'only a spelling of another name',
+      withAtlanta((e) => ({ ...e, name: 'Housing Authority of the City of Atlanta', spellings: ['Atlanta Housing Authority'] })),
+    ],
+    ['deleted', withAtlanta(() => null)],
+  ];
+  it.each(notExact)('refuses when Atlanta Housing Authority is not an exact housing authority name: %s', async (_what, entries) => {
+    for (const apply of [false, true]) {
+      const outcome = await outcomeOf(on(listItem(entries)), apply);
+      expect(outcome).toBeInstanceOf(BackfillRefusedError);
+      expect((outcome as Error).message).toBe(NOT_LISTED_REFUSAL);
+    }
+  });
+
+  it('refuses an apply while a rewrite is running (heartbeat 5 minutes old); a dry run goes ahead', async () => {
+    const deps = on(listItem(startingEntries(), running), '2026-10-12T12:05:00.000Z');
+    const outcome = await outcomeOf(deps, true);
+    expect(outcome).toBeInstanceOf(BackfillRefusedError);
+    expect((outcome as Error).message).toBe(RUNNING_REFUSAL);
+    expect(await outcomeOf(deps, false)).toBe('passed');
+  });
+
+  it('a STALE running rewrite (no heartbeat for over 15 minutes) does not refuse an apply; nor does a finished one', async () => {
+    expect(await outcomeOf(on(listItem(startingEntries(), running), '2026-10-12T12:16:00.000Z'), true)).toBe('passed');
+    for (const status of ['done', 'failed'] as const) {
+      expect(await outcomeOf(on(listItem(startingEntries(), { ...running, status }), '2026-10-12T12:01:00.000Z'), true)).toBe(
+        'passed',
+      );
+    }
+  });
+});
+
+describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
+  it('stops with an error rather than loop forever on a store whose pages do not move back', async () => {
+    const stuck = { listByEntity: async () => [event('contact_updated', { fields: ['status'] })] };
+    await expect(readWholeHistory(stuck, 'contacts#c-lead', 2)).rejects.toThrow('audit history paging did not advance');
+  });
+
+  it('a lead named in --skip is left out before its history is read', async () => {
+    let reads = 0;
+    const audit: BackfillDeps['audit'] = {
+      append: async () => {},
+      listByEntity: async () => {
+        reads += 1;
+        return [];
+      },
+    };
+    expect(await leftOutReasonFor({ audit }, 'c-skip', new Set(['c-skip']))).toBe('skipped');
+    expect(reads).toBe(0);
+    expect(await leftOutReasonFor({ audit }, 'c-other', new Set(['c-skip']))).toBeNull();
+    expect(reads).toBe(1);
+  });
+});
+
+describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () => {
+  afterEach(dropCreatedTables, 120_000);
+
+  it('scanCandidates selects exactly the pre-change /join leads - each condition, pointer rows skipped - oldest sign-up first', async () => {
+    const w = await newWorld();
+    await w.lead('c-new', { captured_at: '2026-08-15T23:30:00.000Z', status: 'on_hold' });
+    await w.lead('c-old', { captured_at: '2026-06-20T14:00:00.000Z' });
+    // No captured_at: the sign-up date is created_at.
+    await w.lead('c-created-only', { captured_at: undefined, created_at: '2026-07-04T10:00:00.000Z', status: 'inactive' });
+    // No date at all: listed last.
+    await w.lead('c-undated', { captured_at: undefined, created_at: undefined });
+    // Not candidates - one condition each.
+    await w.lead('c-flyer', { capture_source: 'flyer', unit_of_interest: 'u-1' });
+    await w.lead('c-inbound', { capture_source: 'inbound_sms' });
+    await w.lead('c-no-source', { capture_source: undefined });
+    await w.lead('c-landlord', { type: 'landlord', status: 'active' });
+    await w.lead('c-partner', { type: 'partner', status: 'active', role: 'Caseworker' });
+    await w.lead('c-deleted', { deleted_at: '2026-09-01T00:00:00.000Z' });
+    await w.lead('c-has-authority', { housingAuthority: 'DeKalb County Housing Authority' });
+    await w.lead('c-has-atlanta', { housingAuthority: 'Atlanta Housing Authority' });
+    await w.lead('c-marker', { housing_fair_signup_v2: true, status: 'onboarding' });
+    // Pointer rows are skipped by their id prefix, whatever they carry.
+    await w.put({
+      contactId: 'phoneref#+15550001001',
+      phone: '+15550001001',
+      phone_ref: true,
+      phone_ref_owner: 'c-old',
+      capture_source: 'housing_fair',
+      type: 'tenant',
+    });
+    await w.put({
+      contactId: 'emailref#lead@example.com',
+      email: 'lead@example.com',
+      email_ref: true,
+      email_ref_owner: 'c-old',
+      capture_source: 'housing_fair',
+      type: 'tenant',
+    });
+
+    const { deps } = w.deps();
+    const scan = await scanCandidates(deps);
+    expect(scan.leads.map((l) => l.contactId)).toEqual(['c-old', 'c-created-only', 'c-new', 'c-undated']);
+    expect(scan.leads[0]).toEqual({
+      contactId: 'c-old',
+      firstName: 'Lead',
+      lastName: 'c-old',
+      signedUpAt: '2026-06-20T14:00:00.000Z',
+      status: 'needs_review',
+    });
+    expect(scan.leads[1]).toMatchObject({ signedUpAt: '2026-07-04T10:00:00.000Z', status: 'inactive' });
+    expect(scan.leads[2]).toMatchObject({ signedUpAt: '2026-08-15T23:30:00.000Z', status: 'on_hold' });
+    expect(scan.leads[3]).toMatchObject({ signedUpAt: '' });
+    expect(scan).toMatchObject({ contactsScanned: 13, pointerRows: 2 });
+    // The Scan paging loop: two rows a page finds the same leads.
+    expect(await scanCandidates({ ...deps, scanLimit: 2 })).toEqual(scan);
+  }, 120_000);
+
+  it('leftOutReasonFor reads every recorded shape through the store: a set or removed authority and a post-change sign-up leave a lead out; nothing else does', async () => {
+    const w = await newWorld();
+    const ts = '2026-08-01T12:00:00.000Z#aaaa0001';
+    for (const [i, [, type, payload]] of AUTHORITY_EVENTS.entries()) await w.audit(`c-auth-${i}`, ts, type, payload);
+    for (const [i, [, type, payload]] of UNRELATED_EVENTS.entries()) await w.audit(`c-other-${i}`, ts, type, payload);
+    await w.audit('c-again', ts, 'housing_fair_signup', RESIGNUP_PAYLOAD);
+    const { deps } = w.deps();
+    for (const [i, [what]] of AUTHORITY_EVENTS.entries()) {
+      expect([what, await leftOutReasonFor(deps, `c-auth-${i}`, NO_SKIP)]).toEqual([what, 'authority_history']);
+    }
+    for (const [i, [what]] of UNRELATED_EVENTS.entries()) {
+      expect([what, await leftOutReasonFor(deps, `c-other-${i}`, NO_SKIP)]).toEqual([what, null]);
+    }
+    expect(await leftOutReasonFor(deps, 'c-again', NO_SKIP)).toBe('signed_up_again');
+    expect(await leftOutReasonFor(deps, 'c-no-history', NO_SKIP)).toBeNull();
+  }, 120_000);
+
+  it('leftOutReasonFor pages backward past one page until a page comes back empty: an event on the OLDEST page still counts', async () => {
+    const w = await newWorld();
+    // Oldest first: the staff edit that cleared the authority, then four unrelated edits.
+    await w.audit('c-deep', '2026-07-01T10:00:00.000Z#aaaa0001', 'contact_updated', {
+      fields: ['housingAuthority'],
+      actor: 'user-0001',
+    });
+    const later = ['2026-07-02', '2026-07-03', '2026-07-04', '2026-07-05'];
+    for (const [i, day] of later.entries()) {
+      const payload = { fields: ['status'], actor: 'user-0001' };
+      await w.audit('c-deep', `${day}T10:00:00.000Z#bbbb000${i}`, 'contact_updated', payload);
+      await w.audit('c-clean', `${day}T10:00:00.000Z#bbbb000${i}`, 'contact_updated', payload);
+    }
+    const { deps } = w.deps();
+    const befores: Array<string | undefined> = [];
+    const audit: BackfillDeps['audit'] = {
+      append: (entityKey, eventType, payload) => deps.audit.append(entityKey, eventType, payload),
+      listByEntity: (entityKey, opts) => {
+        if (entityKey === 'contacts#c-deep') befores.push(opts?.before);
+        return deps.audit.listByEntity(entityKey, opts);
+      },
+    };
+    expect(await leftOutReasonFor({ audit, auditPageSize: 2 }, 'c-deep', NO_SKIP)).toBe('authority_history');
+    // Pages of two, newest first: [07-05, 07-04], [07-03, 07-02], [07-01], then the empty page that ends it.
+    expect(befores).toEqual([
+      undefined,
+      '2026-07-04T10:00:00.000Z#bbbb0002',
+      '2026-07-02T10:00:00.000Z#bbbb0000',
+      '2026-07-01T10:00:00.000Z#aaaa0001',
+    ]);
+    // A long history with nothing in it is read to its end too.
+    expect(await leftOutReasonFor({ audit, auditPageSize: 2 }, 'c-clean', NO_SKIP)).toBeNull();
+  }, 120_000);
 });

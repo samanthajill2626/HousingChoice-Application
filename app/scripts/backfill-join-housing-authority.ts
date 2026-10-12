@@ -45,8 +45,21 @@
 // operator's recognition aid (Cameron 2026-10-12, a deliberate departure from
 // clean-org-names). Structured log lines carry counts and contactIds only,
 // never a name or phone.
-import type { AuditEvent } from '../src/repos/auditRepo.js';
-import { isDeleted, type ContactItem } from '../src/repos/contactsRepo.js';
+import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { tableName } from '../src/lib/config.js';
+import { logger as defaultLogger, type Logger } from '../src/lib/logger.js';
+import { isOnListFor, KINDS_FOR_FIELD } from '../src/lib/orgNames.js';
+import { createAuditRepo, type AuditEvent, type AuditRepo } from '../src/repos/auditRepo.js';
+import {
+  createContactsRepo,
+  EMAIL_REF_PREFIX,
+  isDeleted,
+  PHONE_REF_PREFIX,
+  type ContactItem,
+  type ContactsRepo,
+} from '../src/repos/contactsRepo.js';
+import { createOrgListRepo, type OrgListRepo } from '../src/repos/orgListRepo.js';
+import { isOrgRewriteRunning } from '../src/services/orgNames.js';
 
 // ---------------------------------------------------------------------------
 // The rules (pure): who is a candidate, and which history leaves one out
@@ -249,4 +262,199 @@ export function formatBackfillReport(report: BackfillReport, apply: boolean): st
 /** Spec D10: 0 completed clean (warnings included); 1 completed with failures. Refusals and usage are the CLI's. */
 export function backfillExitCode(report: BackfillReport): 0 | 1 {
   return report.failed > 0 ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// The reads: the list check, the candidates, a candidate's whole history
+// ---------------------------------------------------------------------------
+
+/**
+ * The run refused before it read any contact (spec D10): no organization list
+ * is stored, "Atlanta Housing Authority" is not an exact housing_authority
+ * name on it, or - for --apply - an organization-name rewrite is running.
+ * Nothing was written. Exit 1.
+ */
+export class BackfillRefusedError extends Error {}
+
+/** The audit history page size (listByEntity's Limit). */
+export const AUDIT_PAGE_SIZE = 100;
+
+export interface BackfillDeps {
+  /** The stage's client: the contacts base-table Scan runs on it. */
+  doc: DynamoDBDocumentClient;
+  /** The stage's env (its TABLE_PREFIX): every table name resolves from it. */
+  env: NodeJS.ProcessEnv;
+  orgList: Pick<OrgListRepo, 'peek'>;
+  contacts: Pick<ContactsRepo, 'update'>;
+  audit: Pick<AuditRepo, 'append' | 'listByEntity'>;
+  /** One line of the operator report (the CLI prints it). Names go here, never to the logger. */
+  print: (line: string) => void;
+  /** Wall clock in ms: the rewrite lock's staleness test (isOrgRewriteRunning). */
+  now: () => number;
+  logger: Logger;
+  /** Test seam: the Scan page size (unset = DynamoDB's own page). */
+  scanLimit?: number;
+  /** Test seam: the audit history page size (unset = AUDIT_PAGE_SIZE). */
+  auditPageSize?: number;
+}
+
+/** The real deps: every repo on the stage's doc client and env - never the ambient TABLE_PREFIX. */
+export function buildBackfillDeps(
+  stage: { doc: DynamoDBDocumentClient; env: NodeJS.ProcessEnv },
+  opts: { logger?: Logger; print?: (line: string) => void; now?: () => number } = {},
+): BackfillDeps {
+  const logger = opts.logger ?? defaultLogger;
+  const { doc, env } = stage;
+  return {
+    doc,
+    env,
+    orgList: createOrgListRepo({ doc, env, logger }),
+    contacts: createContactsRepo({ doc, env, logger }),
+    audit: createAuditRepo({ doc, env, logger }),
+    print: opts.print ?? ((line: string) => console.log(line)),
+    now: opts.now ?? Date.now,
+    logger,
+  };
+}
+
+const NOTHING_DONE = 'No contact was read and nothing was written.';
+
+/**
+ * Spec D10: the list checks, BEFORE any contact is read. The stored item only
+ * (peek - never created, never the starting list); for --apply, the system's
+ * own rewrite-lock rule. Throws BackfillRefusedError.
+ */
+export async function checkBackfillList(deps: Pick<BackfillDeps, 'orgList' | 'now'>, apply: boolean): Promise<void> {
+  const item = await deps.orgList.peek();
+  if (item === null) {
+    throw new BackfillRefusedError(
+      `${SCRIPT_NAME}: REFUSED - this environment has no organization list yet: the deployed app creates it on its first read. ` +
+        `Open Settings > Housing authorities & agencies once, then re-run. ${NOTHING_DONE}`,
+    );
+  }
+  if (!isOnListFor(item.entries, BACKFILL_AUTHORITY, KINDS_FOR_FIELD.housingAuthority)) {
+    throw new BackfillRefusedError(
+      `${SCRIPT_NAME}: REFUSED - "${BACKFILL_AUTHORITY}" is not the exact name of a housing authority on this ` +
+        "environment's organization list (renamed, merged, deleted or made an agency). Check Settings > Housing authorities & agencies " +
+        `before going on. ${NOTHING_DONE}`,
+    );
+  }
+  const held = item.lastRewrite;
+  if (apply && held !== undefined && isOrgRewriteRunning(held, deps.now())) {
+    throw new BackfillRefusedError(
+      `${SCRIPT_NAME}: REFUSED - an organization-name rewrite is running (action ${held.action}, started ` +
+        `${held.startedAt}, last heartbeat ${held.heartbeatAt}). Wait for it to finish (Settings > Housing ` +
+        'authorities & agencies shows it); a rewrite whose process was killed stops blocking 15 minutes after its last ' +
+        `heartbeat. ${NOTHING_DONE}`,
+    );
+  }
+}
+
+/** Every item of one BASE table (deleted rows included), page by page - the clean-org-names loop. */
+async function* scanAll(
+  doc: DynamoDBDocumentClient,
+  table: string,
+  limit: number | undefined,
+): AsyncGenerator<Record<string, unknown>> {
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const page = await doc.send(
+      new ScanCommand({
+        TableName: table,
+        ConsistentRead: true,
+        ...(limit !== undefined && { Limit: limit }),
+        ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
+      }),
+    );
+    for (const item of (page.Items ?? []) as Record<string, unknown>[]) yield item;
+    exclusiveStartKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (exclusiveStartKey !== undefined);
+}
+
+const text = (v: unknown): string => (typeof v === 'string' ? v : '');
+
+function toLead(contact: ContactItem): BackfillLead {
+  const capturedAt = text(contact.captured_at);
+  return {
+    contactId: contact.contactId,
+    firstName: text(contact['firstName']),
+    lastName: text(contact['lastName']),
+    signedUpAt: capturedAt !== '' ? capturedAt : text(contact.created_at),
+    status: text(contact.status),
+  };
+}
+
+/** Oldest sign-up first; a lead with no date last; then by contactId. */
+function compareLeads(a: BackfillLead, b: BackfillLead): number {
+  if (a.signedUpAt !== b.signedUpAt) {
+    if (a.signedUpAt === '') return 1;
+    if (b.signedUpAt === '') return -1;
+    return a.signedUpAt < b.signedUpAt ? -1 : 1;
+  }
+  return a.contactId < b.contactId ? -1 : a.contactId > b.contactId ? 1 : 0;
+}
+
+export interface CandidateScan {
+  /** The candidates (spec D10), oldest sign-up first. */
+  leads: BackfillLead[];
+  /** Contacts read (pointer rows not counted). */
+  contactsScanned: number;
+  /** phone/email pointer rows - skipped. */
+  pointerRows: number;
+}
+
+/** Spec D10: one consistent Scan of the contacts BASE table (pointer rows skipped, as the cleanup does). */
+export async function scanCandidates(deps: Pick<BackfillDeps, 'doc' | 'env' | 'scanLimit'>): Promise<CandidateScan> {
+  const scan: CandidateScan = { leads: [], contactsScanned: 0, pointerRows: 0 };
+  for await (const row of scanAll(deps.doc, tableName('contacts', deps.env), deps.scanLimit)) {
+    const contactId = String(row['contactId'] ?? '');
+    if (contactId.startsWith(PHONE_REF_PREFIX) || contactId.startsWith(EMAIL_REF_PREFIX)) {
+      scan.pointerRows += 1;
+      continue;
+    }
+    scan.contactsScanned += 1;
+    const contact = row as ContactItem;
+    if (isCandidate(contact)) scan.leads.push(toLead(contact));
+  }
+  scan.leads.sort(compareLeads);
+  return scan;
+}
+
+/**
+ * Spec D10: an entity's WHOLE audit history. listByEntity is one newest-first
+ * Query with no cursor, so this pages backward with `before` = the oldest ts
+ * seen until a page comes back empty. A page that does not move back (a store
+ * ignoring `before`) throws rather than loop forever.
+ */
+export async function readWholeHistory(
+  audit: Pick<AuditRepo, 'listByEntity'>,
+  entityKey: string,
+  pageSize: number,
+): Promise<AuditEvent[]> {
+  const events: AuditEvent[] = [];
+  let before: string | undefined;
+  for (;;) {
+    const page = await audit.listByEntity(entityKey, { limit: pageSize, ...(before !== undefined && { before }) });
+    if (page.length === 0) return events;
+    events.push(...page);
+    const oldest = page.reduce((min, e) => (e.ts < min ? e.ts : min), page[0]!.ts);
+    if (before !== undefined && oldest >= before) {
+      throw new Error(`${SCRIPT_NAME}: audit history paging did not advance for ${entityKey}`);
+    }
+    before = oldest;
+  }
+}
+
+/**
+ * Why one candidate is left out, or null when it is a target: --skip first
+ * (no history read), then its whole history (leftOutReasonFromAudit).
+ */
+export async function leftOutReasonFor(
+  deps: Pick<BackfillDeps, 'audit' | 'auditPageSize'>,
+  contactId: string,
+  skip: ReadonlySet<string>,
+): Promise<LeftOutReason | null> {
+  if (skip.has(contactId)) return 'skipped';
+  const events = await readWholeHistory(deps.audit, `contacts#${contactId}`, deps.auditPageSize ?? AUDIT_PAGE_SIZE);
+  return leftOutReasonFromAudit(events);
 }

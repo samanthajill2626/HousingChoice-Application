@@ -515,11 +515,13 @@ export function ListingDetail(): React.JSX.Element {
    *  landlordId. There is no further fallback: the server's property-contact
    *  resolvers take the primary row, else the landlord of record, so with
    *  neither they find no one and calls and new relay groups for the property
-   *  reach no one. "+ Add contact" adds a NON-primary row, so adding a contact
-   *  does not end that: only making someone on the contact list the primary
-   *  contact, or adding a Landlord (which claims the vacant landlord-of-record
-   *  slot), restores the routing (caseworker-integrity, planner rulings Q2 and
-   *  Q3; R1 code review, dashboard finding 1). */
+   *  reach no one. A NEW contact added to such a property (no primary contact,
+   *  no landlord of record) becomes its primary contact automatically, whatever
+   *  its role - the server decides it, while "+ Add contact" still posts
+   *  `primaryContact: false`; otherwise only making someone on the contact list
+   *  the primary contact restores the routing (caseworker-integrity spec
+   *  revision 4 section 4 "Auto-primary", Cameron 2026-10-12, superseding
+   *  planner rulings Q2 and Q3; R1 code review, dashboard finding 1). */
   const promotionNotice = (): string => {
     const promoted =
       landlordOfRecord.length > 0
@@ -527,7 +529,7 @@ export function ListingDetail(): React.JSX.Element {
         : undefined;
     return promoted !== undefined
       ? `${promoted} becomes the primary contact - calls and new relay groups for this property will go to them.`
-      : 'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a landlord is added.';
+      : 'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a new contact is added.';
   };
 
   const onAddContact = (): void => {

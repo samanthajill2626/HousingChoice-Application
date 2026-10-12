@@ -1569,6 +1569,55 @@ describe('ListingDetail - Contacts card edit mode', () => {
     );
   });
 
+  it('auto-primary: an add the server answers with the new row as primary renders it as the primary contact', async () => {
+    // caseworker-integrity spec revision 4 section 4 "Auto-primary": on a
+    // property with no primary contact and no landlord of record (e.g. restored
+    // without a landlord) the server makes the added contact its primary
+    // contact. This page still posts primaryContact: false and renders the
+    // roster the server answers with.
+    const user = userEvent.setup();
+    const { landlordId: _dropped, primary_contact: _noPrimary, ...ownerless } = ROSTER_UNIT;
+    const dana = { contactId: 'pm2', role: 'pm' as const, primaryContact: false, name: 'Dana Reyes' };
+    useListing.mockReturnValue({
+      ...ROSTER_READY,
+      unit: { ...ownerless, contacts: [dana] } as NonNullable<ListingState['unit']>,
+      landlord: null,
+      roster: [ROSTER_READY.roster[2]!],
+    });
+    addUnitContact.mockReset().mockResolvedValue({
+      ...ownerless,
+      primary_contact: 'pm9',
+      contacts: [dana, { contactId: 'pm9', role: 'pm', primaryContact: true, name: 'Renata Vale' }],
+    });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    const card = screen.getByRole('heading', { name: /^Contacts/ }).closest('section') as HTMLElement;
+    // Before: nobody is the primary contact - no marker, and Dana offers Make primary.
+    expect(within(card).queryByText('(primary)')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Make Dana Reyes the primary contact' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '+ Add contact' }));
+    await user.type(screen.getByRole('combobox', { name: 'Add contact' }), 'Renata');
+    await user.click(screen.getByRole('option', { name: /Renata Vale/ }));
+    await user.click(screen.getByRole('button', { name: 'Add contact to this property' }));
+
+    // The page asks for a NON-primary row; the server decides.
+    expect(addUnitContact).toHaveBeenCalledTimes(1);
+    expect(addUnitContact).toHaveBeenCalledWith('u1', { contactId: 'pm9', role: 'pm', primaryContact: false });
+    // After: the card's primary marker is on the added row, which offers no
+    // Make primary; Dana still does.
+    const renataRemove = await screen.findByRole('button', { name: 'Remove Renata Vale from this property' });
+    expect(renataRemove.parentElement).toHaveTextContent('Renata Vale (primary)');
+    expect(within(card).getAllByText('(primary)')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Make Renata Vale the primary contact' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Make Dana Reyes the primary contact' })).toBeInTheDocument();
+
+    // Read mode lists the primary contact first, marked.
+    await user.click(screen.getByRole('button', { name: 'Done editing contacts' }));
+    expect(within(card).getAllByRole('link')[0]).toHaveTextContent('Renata Vale (primary)');
+  });
+
   it('refuses to silently replace the landlord of record when adding a Landlord contact', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue(ROSTER_READY);
@@ -1783,7 +1832,7 @@ describe('ListingDetail - Contacts card edit mode', () => {
     const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
     expect(
       within(dialog).getByText(
-        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a landlord is added.',
+        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a new contact is added.',
       ),
     ).toBeInTheDocument();
   });
@@ -1804,7 +1853,7 @@ describe('ListingDetail - Contacts card edit mode', () => {
     const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
     expect(
       within(dialog).getByText(
-        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a landlord is added.',
+        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a new contact is added.',
       ),
     ).toBeInTheDocument();
   });

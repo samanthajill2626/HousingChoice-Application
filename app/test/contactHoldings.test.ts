@@ -16,6 +16,7 @@ import {
   openPlacementIds,
   openTourIds,
   rosterUnitIds,
+  typeChangeRefusals,
   type ContactHoldingsDeps,
 } from '../src/services/contactHoldings.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -166,5 +167,91 @@ describe('rosterUnitIds', () => {
     expect(await rosterUnitIds(deps, ID, new Set())).toEqual(['scan-last']);
     expect(scan).toHaveBeenCalledTimes(2);
     for (const [options] of scan.mock.calls) expect(options).toMatchObject({ deleted: 'any' });
+  });
+});
+
+describe('typeChangeRefusals (spec 2026-10-12 D2)', () => {
+  function holdingEverything(): { world: FakeWorld; deps: ContactHoldingsDeps } {
+    const s = setup();
+    placement(s.world, 'pl-b', 'send_application');
+    placement(s.world, 'pl-a', 'send_application');
+    placement(s.world, 'pl-done', 'moved_in');
+    tour(s.world, 'tr-b', 'scheduled');
+    tour(s.world, 'tr-a', 'requested');
+    tour(s.world, 'tr-done', 'canceled');
+    unit(s.world, 'u-b', { landlordId: ID });
+    unit(s.world, 'u-a', { landlordId: ID });
+    unit(s.world, 'u-gone', { landlordId: ID, deleted_at: DELETED });
+    unit(s.world, 'u-seat', {
+      landlordId: OTHER,
+      contacts: [
+        { contactId: OTHER, role: 'landlord', primaryContact: true },
+        { contactId: ID, role: 'pm', primaryContact: false },
+      ],
+    });
+    return s;
+  }
+
+  const PLACEMENTS_AND_TOURS = [
+    { code: 'open_placement', placementId: 'pl-a' },
+    { code: 'open_placement', placementId: 'pl-b' },
+    { code: 'open_tour', tourId: 'tr-a' },
+    { code: 'open_tour', tourId: 'tr-b' },
+  ];
+  const LANDLORD = [
+    { code: 'landlord_of_record', unitId: 'u-a' },
+    { code: 'landlord_of_record', unitId: 'u-b' },
+  ];
+
+  it.each(['partner', 'unknown', 'team_member'])(
+    'to %s: every kind - placements, then tours, then live units, ids ascending',
+    async (toType) => {
+      const { deps } = holdingEverything();
+      expect(await typeChangeRefusals(deps, ID, toType)).toEqual([...PLACEMENTS_AND_TOURS, ...LANDLORD]);
+    },
+  );
+
+  it('to tenant: only the landlord kind (a tenant may hold open placements and tours)', async () => {
+    const { deps } = holdingEverything();
+    expect(await typeChangeRefusals(deps, ID, 'tenant')).toEqual(LANDLORD);
+  });
+
+  it('to landlord: only the placement and tour kinds (a landlord may be a landlord of record)', async () => {
+    const { deps } = holdingEverything();
+    expect(await typeChangeRefusals(deps, ID, 'landlord')).toEqual(PLACEMENTS_AND_TOURS);
+  });
+
+  it('a soft-deleted unit and a contact-list seat never refuse', async () => {
+    const { world, deps } = setup();
+    unit(world, 'u-gone', { landlordId: ID, deleted_at: DELETED });
+    unit(world, 'u-seat', {
+      landlordId: OTHER,
+      contacts: [
+        { contactId: OTHER, role: 'landlord', primaryContact: true },
+        { contactId: ID, role: 'pm', primaryContact: false },
+      ],
+    });
+    expect(await typeChangeRefusals(deps, ID, 'partner')).toEqual([]);
+  });
+
+  it('reads only the kinds the target needs, live units only, never the roster Scan', async () => {
+    const { world, deps } = setup();
+    const placementsRead = vi.spyOn(world.placementsRepo, 'listByTenant');
+    const toursRead = vi.spyOn(world.toursRepo, 'listByTenant');
+    const landlordRead = vi.spyOn(world.unitsRepo, 'listByLandlord');
+    const scan = vi.spyOn(world.unitsRepo, 'list');
+
+    await typeChangeRefusals(deps, ID, 'tenant');
+    expect(placementsRead).not.toHaveBeenCalled();
+    expect(toursRead).not.toHaveBeenCalled();
+    expect(landlordRead).toHaveBeenCalledWith(ID, { deleted: false });
+
+    landlordRead.mockClear();
+    await typeChangeRefusals(deps, ID, 'landlord');
+    expect(placementsRead).toHaveBeenCalledWith(ID, {});
+    expect(toursRead).toHaveBeenCalledWith(ID);
+    expect(landlordRead).not.toHaveBeenCalled();
+
+    expect(scan).not.toHaveBeenCalled();
   });
 });

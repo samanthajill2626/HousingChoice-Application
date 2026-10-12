@@ -110,3 +110,34 @@ export async function rosterUnitIds(
   } while (key !== undefined);
   return ids.sort(byId);
 }
+
+/**
+ * The contacts PATCH type-change refusal (spec 2026-10-12 D2), for a PATCH
+ * whose resulting type `toType` differs from the stored type. A result that is
+ * not `tenant` is refused by every open placement and open tour (I2); a result
+ * that is not `landlord` by every LIVE unit the contact is the landlord of
+ * record for (I3). Soft-deleted units are fenced at restore instead, and
+ * contact-list seats never refuse, so the roster Scan is never run. Ordered by
+ * kind (placement, tour, landlord), then id ascending.
+ */
+export async function typeChangeRefusals(
+  deps: ContactHoldingsDeps,
+  contactId: string,
+  toType: string,
+): Promise<TypeChangeRefusal[]> {
+  const refusals: TypeChangeRefusal[] = [];
+  if (toType !== 'tenant') {
+    for (const placementId of await openPlacementIds(deps, contactId)) {
+      refusals.push({ code: 'open_placement', placementId });
+    }
+    for (const tourId of await openTourIds(deps, contactId)) {
+      refusals.push({ code: 'open_tour', tourId });
+    }
+  }
+  if (toType !== 'landlord') {
+    for (const unitId of await landlordUnitIds(deps, contactId, { deleted: false })) {
+      refusals.push({ code: 'landlord_of_record', unitId });
+    }
+  }
+  return refusals;
+}

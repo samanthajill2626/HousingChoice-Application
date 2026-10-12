@@ -78,6 +78,7 @@ import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '.
 import { reachedCount } from '../services/shareRecipientState.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
 import { requireLandlordContact, sendContactTypeError } from '../services/contactTypeGuards.js';
+import { isCaseworker } from '../lib/caseworkers.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -1100,8 +1101,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const primaryContact = primaryContactRaw === true;
 
     // The unit must exist (404). We check up-front so an unknown unit is a clean
-    // 404 distinct from the unknown-contact 404 below.
-    const unit = await units.getById(unitId);
+    // 404 distinct from the unknown-contact 404 below. caseworker-integrity
+    // (spec 2026-10-12 section 4): the seat and claim checks below decide from
+    // THIS read, so it is consistent.
+    const unit = await units.getById(unitId, { consistentRead: true });
     if (!unit) {
       res.status(404).json({ error: 'unit_not_found' });
       return;
@@ -1110,9 +1113,32 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // Resolve the contact for denormalization (404 when the contact doesn't
     // exist — never roster a phantom). name/company are best-effort honest:
     // omitted when unknown, never invented.
-    const contact = await contacts.getById(contactId);
+    const contact = await contacts.getById(contactId, { consistentRead: true });
     if (!contact) {
       res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    // caseworker-integrity (spec 2026-10-12 section 4), in this order and both
+    // before the repo call; the repo's own 409 landlord_reassignment_required
+    // follows. Decided from the consistent reads above with the repo's own
+    // definitions (unitsRepo.addContact): a SEAT is a row of unitContacts(unit)
+    // (the landlord of record included); a CLAIM is a role-landlord add on a
+    // unit with no landlordId attribute.
+    //   I4: a caseworker never takes a NEW seat, whatever the role. A seat they
+    //       already hold stays editable (L2).
+    //   I3: claiming the vacant landlord slot needs a contact typed `landlord`.
+    //       Re-asserting the existing owner is not a claim and is not checked.
+    const seated = unitContacts(unit).some((row) => row.contactId === contactId);
+    if (!seated && isCaseworker(contact)) {
+      log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact refused: a caseworker cannot take a new seat');
+      res.status(409).json({ error: 'contact_list_caseworker' });
+      return;
+    }
+    const claimsVacantLandlord =
+      role === 'landlord' && !Object.prototype.hasOwnProperty.call(unit, 'landlordId');
+    if (claimsVacantLandlord && contact.type !== 'landlord') {
+      log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact refused: a landlord claim by a non-landlord');
+      res.status(409).json({ error: 'landlord_not_landlord' });
       return;
     }
     const name = displayNameOfContact(contact);

@@ -479,8 +479,9 @@ export interface UnitsRepo {
   /**
    * caseworker-integrity (spec 2026-10-12 section 4 "Restore"): restore a
    * soft-deleted property AND change its landlord of record in one
-   * conditional write. Reads the unit (consistent). When its landlordId is no
-   * longer `expectLandlordId` (undefined = ownerless) throws
+   * conditional write. Reads the unit (consistent). When it is not
+   * soft-deleted (restore never reassigns a LIVE property's landlord), or its
+   * landlordId is no longer `expectLandlordId` (undefined = ownerless), throws
    * RosterWriteConflictError and writes nothing. Otherwise REMOVEs deleted_at,
    * sets landlordId to `next.contactId` (or REMOVEs it for `next` null), drops
    * the old landlord's contact-list row, upserts `next` with role pinned
@@ -489,7 +490,9 @@ export interface UnitsRepo {
    * primary (roster flag or scalar), `next` becomes the sole primary, or with
    * no landlord the scalar is REMOVEd and no row stays primary (removeContact's
    * rule). The write is conditioned on the landlordId AND contacts[] it read
-   * (updateRosterIfCurrent); a contacts-only race re-reads and retries up to
+   * (updateRosterIfCurrent) and on deleted_at still existing, so a restore
+   * landing after the read re-reads into RosterWriteConflictError; a
+   * contacts-only race re-reads and retries up to
    * ROSTER_WRITE_MAX_ATTEMPTS, then RosterWriteConflictError. A missing unit
    * throws ConditionalCheckFailedException (route 404). Returns ALL_NEW.
    */
@@ -542,10 +545,13 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
    * the stored roster still match the caller's read. This keeps landlordId and
    * contacts[] structurally consistent across concurrent add/remove/claim
    * operations; callers re-read and retry a failed optimistic condition.
+   * `requireSoftDeleted` (restoreWithLandlord only) also requires deleted_at to
+   * still exist, so a restore landing after the caller's read loses the write.
    */
   async function updateRosterIfCurrent(
     unit: UnitItem,
     patch: Record<string, unknown>,
+    opts: { requireSoftDeleted?: boolean } = {},
   ): Promise<UnitItem> {
     const sets: string[] = [];
     const removes: string[] = [];
@@ -583,6 +589,10 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       conditions.push('#expectedContacts = :expectedContacts');
     } else {
       conditions.push('attribute_not_exists(#expectedContacts)');
+    }
+    if (opts.requireSoftDeleted === true) {
+      names['#expectedDeletedAt'] = 'deleted_at';
+      conditions.push('attribute_exists(#expectedDeletedAt)');
     }
 
     const clauses = [`SET ${sets.join(', ')}`];
@@ -1111,6 +1121,13 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
             $metadata: {},
           });
         }
+        // Restore only ever restores: a unit that is not soft-deleted (never
+        // deleted, or restored by someone else since the caller's read) must
+        // not have its landlord of record swapped or cleared here (R1 code
+        // review, backend finding 2) - a concurrent change the caller must
+        // re-read (route 409 unit_roster_conflict). The write below is
+        // conditioned on deleted_at too, for a restore landing after this read.
+        if (!isDeleted(unit)) throw new RosterWriteConflictError();
         const current =
           typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
         // The caller decided from THIS landlordId; any other owner now is a
@@ -1161,12 +1178,13 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         }
         let updated: UnitItem;
         try {
-          updated = await updateRosterIfCurrent(unit, patch);
+          updated = await updateRosterIfCurrent(unit, patch, { requireSoftDeleted: true });
         } catch (err) {
           if (!(err instanceof ConditionalCheckFailedException)) throw err;
           if (attempts >= ROSTER_WRITE_MAX_ATTEMPTS) throw new RosterWriteConflictError();
-          // Re-read: a vanished unit throws (route 404), a changed landlordId
-          // throws RosterWriteConflictError, a contacts-only race retries.
+          // Re-read: a vanished unit throws (route 404), a unit restored or a
+          // landlordId changed meanwhile throws RosterWriteConflictError, a
+          // contacts-only race retries.
           return write();
         }
         log.info(

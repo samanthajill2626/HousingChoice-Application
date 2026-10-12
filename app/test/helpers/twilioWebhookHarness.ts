@@ -3092,13 +3092,18 @@ export function createFakeWorld(): FakeWorld {
       return unit;
     },
     // caseworker-integrity (spec 2026-10-12 section 4 "Restore"): mirror the
-    // real repo - the stored landlordId must still be the caller's expectation
+    // real repo - the unit must still be soft-deleted and the stored
+    // landlordId must still be the caller's expectation
     // (RosterWriteConflictError otherwise); restore (drop deleted_at), swap or
     // clear the landlord of record, drop the old landlord's row, upsert the new
     // one with role pinned 'landlord', and keep primary_contact consistent.
     async restoreWithLandlord(unitId, input) {
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`restoreWithLandlord: no unit ${unitId}`);
+      // The real repo's read check and its attribute_exists(deleted_at) write
+      // condition (R1 code review, backend finding 2): restore never swaps or
+      // clears the landlord of a LIVE unit.
+      if (!isUnitDeleted(unit)) throw new RosterWriteConflictError();
       const current =
         typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
       if (current !== input.expectLandlordId) throw new RosterWriteConflictError();

@@ -209,6 +209,45 @@ describe('POST /api/units/:id/restore - with a landlord (I3)', () => {
     }
   });
 
+  // R1 code review, backend finding 2 - the review's interleaving through the
+  // route: the route reads the DELETED unit and its landlord (typed tenant, so
+  // a landlord is needed) and checks the choice; then, before the repo write,
+  // staff B re-types the old landlord back to landlord and plain-restores the
+  // property. Restore must never become a way to reassign or clear a LIVE
+  // property's landlord: 409 unit_roster_conflict, the live unit keeps c-old.
+  const RACE_CHOICES: Array<[string, string | null]> = [
+    ['with a landlord', 'c-new'],
+    ['without a landlord', null],
+  ];
+  it.each(RACE_CHOICES)(
+    '409s unit_roster_conflict for a restore %s when the property came back live before the write - nothing changed',
+    async (_label, landlordId) => {
+      const { app, world } = makeWebhookHarness();
+      seedDeletedUnit(world, 'u-race');
+      seedContact(world, 'c-old', { type: 'tenant' });
+      seedContact(world, 'c-new', { type: 'landlord' });
+      const write = world.unitsRepo.restoreWithLandlord.bind(world.unitsRepo);
+      world.unitsRepo.restoreWithLandlord = async (unitId, input) => {
+        // Staff B, after the route's reads and before this write.
+        world.contacts.find((c) => c.contactId === 'c-old')!.type = 'landlord';
+        await world.unitsRepo.restore(unitId);
+        return write(unitId, input);
+      };
+      const res = await restore(app, 'u-race', { landlordId });
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: 'unit_roster_conflict' });
+      const stored = world.units.get('u-race');
+      expect(stored?.deleted_at).toBeUndefined();
+      expect(stored?.landlordId).toBe('c-old');
+      expect(stored?.primary_contact).toBe('c-old');
+      expect(stored?.contacts).toEqual([
+        { contactId: 'c-old', role: 'landlord', primaryContact: true },
+        { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      ]);
+      expect(restoredEvents(world)).toHaveLength(0);
+    },
+  );
+
   it('409s unit_roster_conflict when the landlord changed under the request - no audit row', async () => {
     const { app, world } = makeWebhookHarness();
     seedDeletedUnit(world, 'u-9');

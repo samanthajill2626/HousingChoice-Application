@@ -3,7 +3,8 @@
 // landlord swap or clear in one conditional write, the old landlord's row
 // removed, the new one pinned 'landlord', primary_contact kept consistent, a
 // landlordId that changed under the read answered with
-// RosterWriteConflictError (nothing written), and a contacts-only race retried
+// RosterWriteConflictError (nothing written), a unit that is not (or no
+// longer) soft-deleted refused the same way, and a contacts-only race retried
 // without losing the concurrent row.
 //
 // Self-skipping like the other integration suites when nothing answers at
@@ -67,6 +68,28 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
     });
     await units.softDelete(created.unitId, AT);
     return created.unitId;
+  }
+
+  /** A LIVE (never soft-deleted) unit owned by c-old, with the given stored roster. */
+  async function liveUnit(contacts: UnitContact[], primary: string): Promise<string> {
+    const created = await units.create({
+      landlordId: 'c-old',
+      status: 'available',
+      contacts,
+      primary_contact: primary,
+    });
+    return created.unitId;
+  }
+
+  /** A repo that counts the UpdateCommands it sends for `unitId`. */
+  function countingRepo(unitId: string) {
+    const counter = { writes: 0 };
+    const countingDoc = Object.create(doc) as typeof doc;
+    countingDoc.send = (async (command: Parameters<typeof doc.send>[0]) => {
+      if (command instanceof UpdateCommand && command.input.Key?.['unitId'] === unitId) counter.writes += 1;
+      return doc.send(command);
+    }) as typeof doc.send;
+    return { repo: createUnitsRepo({ doc: countingDoc, env: testEnv, logger }), counter };
   }
 
   /** A repo whose FIRST read of `unitId` is followed by `race` (on the raw client). */
@@ -158,6 +181,56 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
     const stored = await units.getById(unitId, { consistentRead: true });
     expect(stored?.deleted_at).toBe(AT);
     expect(stored?.landlordId).toBe('c-old');
+  });
+
+  // R1 code review, backend finding 2: restoreWithLandlord only ever restores a
+  // SOFT-DELETED property. On a live one - never deleted, or restored by
+  // someone else after the caller's read - it must never swap or clear the
+  // landlord of record: RosterWriteConflictError (route 409
+  // unit_roster_conflict), decided on its own read, so no write is even sent.
+  const LIVE_CASES: Array<[string, { contactId: string } | null]> = [
+    ['swap', { contactId: 'c-new' }],
+    ['clear', null],
+  ];
+  it.each(LIVE_CASES)(
+    'a %s on a LIVE unit throws RosterWriteConflictError - landlord and contacts unchanged, no write sent',
+    async (_label, next) => {
+      const roster: UnitContact[] = [
+        { contactId: 'c-old', role: 'landlord', primaryContact: true },
+        { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      ];
+      const unitId = await liveUnit(roster, 'c-old');
+      const { repo, counter } = countingRepo(unitId);
+      await expect(repo.restoreWithLandlord(unitId, { expectLandlordId: 'c-old', next })).rejects.toBeInstanceOf(
+        RosterWriteConflictError,
+      );
+      expect(counter.writes).toBe(0);
+      const stored = await units.getById(unitId, { consistentRead: true });
+      expect(stored?.deleted_at).toBeUndefined();
+      expect(stored?.landlordId).toBe('c-old');
+      expect(stored?.primary_contact).toBe('c-old');
+      expect(stored?.contacts).toEqual(roster);
+    },
+  );
+
+  it('a plain restore landing between the read and the write is a conflict - the write requires deleted_at', async () => {
+    const roster: UnitContact[] = [
+      { contactId: 'c-old', role: 'landlord', primaryContact: true },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+    ];
+    const unitId = await deletedUnit(roster, 'c-old');
+    // Someone else's plain restore (the stored landlord is valid again) REMOVEs
+    // deleted_at right after this call's first read.
+    const racing = racingRepo(unitId, () => units.restore(unitId));
+    await expect(
+      racing.restoreWithLandlord(unitId, { expectLandlordId: 'c-old', next: { contactId: 'c-new' } }),
+    ).rejects.toBeInstanceOf(RosterWriteConflictError);
+    // Nothing of this call landed: live by the racer's restore, still c-old's.
+    const stored = await units.getById(unitId, { consistentRead: true });
+    expect(stored?.deleted_at).toBeUndefined();
+    expect(stored?.landlordId).toBe('c-old');
+    expect(stored?.primary_contact).toBe('c-old');
+    expect(stored?.contacts).toEqual(roster);
   });
 
   it('throws ConditionalCheckFailedException for an unknown unit', async () => {

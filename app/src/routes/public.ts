@@ -31,6 +31,7 @@ import { createHash } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { ORG_NAME_MAX } from '../lib/orgNames.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { CONSENT_VERSION, WELCOME_SMS } from '../lib/smsCompliance.js';
 import { resolveWithSettings } from '../messages/index.js';
@@ -88,13 +89,19 @@ interface HousingFairFields {
   voucherSize?: number;
   /** Optional flyer unit-of-interest (validated as shareable in the handler). */
   unitId?: string;
+  /** join-housing-authority D3: the /join form's choice; shape-checked here, list-checked in the handler. */
+  housingAuthority?: string;
 }
 
 /**
  * Validate the housing-fair body. Generic messages (never echo back which
  * field/why in detail beyond the field name) and strict shapes: names are
  * non-empty and length-capped, phone normalizes to valid E.164 or it's
- * rejected, voucherSize (optional) is an integer 0..12.
+ * rejected, voucherSize (optional) is an integer 0..12, housingAuthority
+ * (optional; join-housing-authority D3) is a string of 1 to ORG_NAME_MAX
+ * characters after the app-wide body trim - whether it is ON the list is the
+ * handler's check - and a request carrying both a unitId and a
+ * housingAuthority is refused outright (D4).
  *
  * do-not-remove — A2P/CTIA consent gate (server-side). The public form gates
  * submit on a required, unchecked-by-default consent checkbox (spec §3.1); the
@@ -151,12 +158,35 @@ function parseHousingFairBody(body: unknown): HousingFairFields | { error: strin
     unitId = u;
   }
 
+  // join-housing-authority D3: the optional housing authority the /join form
+  // chose. Absent or null = none. Present: a string of 1 to ORG_NAME_MAX
+  // characters AFTER the app-wide JSON body trim (app.ts trimJsonBody), else
+  // the generic error. Whether it is ON the list is decided in the handler,
+  // before any write - not here.
+  let housingAuthority: string | undefined;
+  if ('housingAuthority' in b && b['housingAuthority'] !== undefined && b['housingAuthority'] !== null) {
+    const h = b['housingAuthority'];
+    if (typeof h !== 'string' || h.length === 0 || h.length > ORG_NAME_MAX) {
+      return { error: 'invalid request' };
+    }
+    housingAuthority = h;
+  }
+
+  // D4: a flyer sign-up (a present, non-null unitId) never carries a housing
+  // authority - the flyer page shows no select. Refused with the generic error,
+  // keyed on the PRESENCE of unitId and decided before the unit is ever read,
+  // so the refusal reveals nothing about whether the unit exists or is shareable.
+  if (unitId !== undefined && housingAuthority !== undefined) {
+    return { error: 'invalid request' };
+  }
+
   return {
     firstName,
     lastName,
     phone,
     ...(voucherSize !== undefined && { voucherSize }),
     ...(unitId !== undefined && { unitId }),
+    ...(housingAuthority !== undefined && { housingAuthority }),
   };
 }
 

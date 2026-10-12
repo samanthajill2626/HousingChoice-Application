@@ -782,3 +782,63 @@ describe('GET /public/housing-authorities - its own limit, independent of the sh
     expect(flyer.status).toBe(429);
   });
 });
+
+// ---------------------------------------------------------------------------
+// join-housing-authority D3-D7: the sign-up's housingAuthority.
+// ---------------------------------------------------------------------------
+
+describe('POST /public/housing-fair - housingAuthority shape and the flyer refusal (D3, D4)', () => {
+  function harness() {
+    return makeWebhookHarness({ env: { PUBLIC_RATE_LIMIT_MAX: '100' } });
+  }
+
+  it('refuses a non-string, an empty, a blank and an over-long housingAuthority with the generic 400, writing nothing', async () => {
+    const { app, world } = harness();
+    for (const bad of [
+      42,
+      true,
+      ['Atlanta Housing Authority'],
+      { name: 'Atlanta Housing Authority' },
+      '',
+      '   ', // trimmed to '' by the body trim
+      'A'.repeat(121), // ORG_NAME_MAX is 120
+    ]) {
+      const res = await request(app)
+        .post(FAIR)
+        .set('x-origin-verify', SECRET)
+        .send(signupBody({ housingAuthority: bad }));
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(res.body, JSON.stringify(bad)).toEqual({ error: 'invalid request' });
+    }
+    expect(world.contacts).toHaveLength(0);
+    expect(world.conversations.size).toBe(0);
+    expect(world.sent).toHaveLength(0);
+    expect(world.auditEvents).toHaveLength(0);
+  });
+
+  it('refuses unitId + housingAuthority with the generic 400 whatever the unit is, without reading the unit', async () => {
+    const { app, world } = harness();
+    world.units.set('unit-flyer', { unitId: 'unit-flyer', landlordId: 'll-1', status: 'available', beds: 2 });
+    world.units.set('unit-placed', { unitId: 'unit-placed', landlordId: 'll-1', status: 'placed', beds: 2 });
+    const getById = vi.spyOn(world.unitsRepo, 'getById');
+    const bodies: unknown[] = [];
+    for (const unitId of ['unit-flyer', 'no-such-unit', 'unit-placed']) {
+      const res = await request(app)
+        .post(FAIR)
+        .set('x-origin-verify', SECRET)
+        .send(signupBody({ unitId, housingAuthority: 'Atlanta Housing Authority' }));
+      expect(res.status, unitId).toBe(400);
+      bodies.push(res.body);
+    }
+    // Identical for a shareable, a missing and a non-shareable unit: no oracle.
+    expect(bodies).toEqual([
+      { error: 'invalid request' },
+      { error: 'invalid request' },
+      { error: 'invalid request' },
+    ]);
+    expect(world.contacts).toHaveLength(0);
+    expect(world.conversations.size).toBe(0);
+    expect(world.sent).toHaveLength(0);
+    expect(getById).not.toHaveBeenCalled();
+  });
+});

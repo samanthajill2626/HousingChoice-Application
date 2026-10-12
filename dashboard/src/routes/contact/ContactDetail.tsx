@@ -58,7 +58,7 @@ import { Modal } from './Modal.js';
 import { ContactCommsPane } from './ContactCommsPane.js';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
-import { UnknownFile } from './UnknownFile.js';
+import { UnknownFile, type TriageError } from './UnknownFile.js';
 import { PartnerFile } from './PartnerFile.js';
 import { CaseworkerDialog } from './CaseworkerDialog.js';
 import { isCaseworkerContact } from './caseworkerRole.js';
@@ -71,6 +71,7 @@ import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { orgErrorCopy } from '../orgs/orgCopy.js';
+import { typeChangeRefusalsFrom } from '../../lib/holdingRefusals.js';
 import { CallMenu } from './CallMenu.js';
 import { useMe } from '../../app/useMe.js';
 import { VOICE_TAB_PATH } from '../settings/settingsTabs.js';
@@ -200,6 +201,9 @@ export function ContactDetail(): React.JSX.Element {
   const [optOutBusy, setOptOutBusy] = useState(false);
   const [voiceOptOutBusy, setVoiceOptOutBusy] = useState(false);
   const [triaging, setTriaging] = useState(false);
+  // The Unknown card's last Mark as failure (spec 2026-10-12 D2): a refused
+  // type change names what blocks it; anything else is the save sentence.
+  const [triageError, setTriageError] = useState<TriageError | null>(null);
   // The caseworker conversion dialog (spec 2026-10-06 D19). MOUNTED only while
   // open, so its preview is read only then - never at this page's mount
   // (ruling R4-13).
@@ -284,6 +288,8 @@ export function ContactDetail(): React.JSX.Element {
     setStatusBusy(false);
     setSuggestionBusy(null);
     setSuggestionError(null);
+    // Same reason: contact A's Mark as failure must not show on contact B.
+    setTriageError(null);
     // Spec D8: contact A's "Is this really new?" - and a check still in flight
     // for it - must not open on contact B.
     setHaReview(null);
@@ -667,10 +673,19 @@ export function ContactDetail(): React.JSX.Element {
   const onTriage = (kind: SuggestedContactKind): void => {
     if (triaging) return;
     setTriaging(true);
+    setTriageError(null);
+    // A failure for contact A must not land on contact B's card: the
+    // contact-change effect bumps reviewGenerationRef.
+    const generation = reviewGenerationRef.current;
     void updateContact(contact.contactId, patchForSuggestedContactKind(kind))
       .then((updated) => setContact(updated))
-      .catch(() => {
-        /* stay on the unknown view; the buttons re-enable for a retry */
+      .catch((err: unknown) => {
+        // Stay on the unknown view; the buttons re-enable for a retry. Say why
+        // on the card (spec 2026-10-12 D2): a refused type change names what
+        // blocks it, anything else is the save sentence.
+        if (generation !== reviewGenerationRef.current) return;
+        const refusals = typeChangeRefusalsFrom(err);
+        setTriageError(refusals !== null ? { refusals } : { message: "Couldn't save - please try again." });
       })
       .finally(() => setTriaging(false));
   };
@@ -1181,6 +1196,7 @@ export function ContactDetail(): React.JSX.Element {
                 // A deleted contact gets no conversion (spec D16): absent = disabled.
                 {...(!deleted && { onMakeCaseworker: () => setConverting(reviewGenerationRef.current) })}
                 triaging={triaging}
+                triageError={triageError}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />

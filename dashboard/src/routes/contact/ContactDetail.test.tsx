@@ -13,6 +13,7 @@ import {
   loadViewerImage,
 } from '../../ui/imageViewer/ImageViewer.testUtils.js';
 import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
+import { TYPE_CHANGE_LANDLORD_SENTENCE } from '../../lib/holdingRefusals.js';
 
 const getContact = vi.fn();
 const getContactTimeline = vi.fn();
@@ -553,6 +554,65 @@ describe('ContactDetail', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as Partner' })).toBeEnabled());
     expect(screen.getByRole('button', { name: 'Mark as Property Manager' })).toBeEnabled();
     expect(screen.getByText('Unknown')).toBeInTheDocument();
+  });
+
+  it('a refused Mark as (409 type_change_refused) shows each refusal and its View link on the Unknown card', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(UNKNOWN);
+    updateContact.mockRejectedValue(
+      new ApiError(409, 'type_change_refused', 'type_change_refused', {
+        error: 'type_change_refused',
+        refusals: [
+          { code: 'open_placement', placementId: 'p 7' },
+          { code: 'open_tour', tourId: 't1' },
+        ],
+      }),
+    );
+    renderAt('u9');
+    await user.click(await screen.findByRole('button', { name: 'Mark as Landlord' }));
+    const card = screen.getByRole('heading', { name: 'Needs triage' }).closest('section') as HTMLElement;
+    expect(await within(card).findByText("Finish or close this contact's placement first.")).toBeInTheDocument();
+    expect(within(card).getByText("Cancel or close this contact's open tour first.")).toBeInTheDocument();
+    expect(within(card).getByRole('link', { name: 'View placement' })).toHaveAttribute('href', '/placements/p%207');
+    expect(within(card).getByRole('link', { name: 'View tour' })).toHaveAttribute('href', '/tours/t1');
+    // Still untriaged, and every action re-enables for a retry.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as Landlord' })).toBeEnabled());
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+  });
+
+  it('any other Mark as failure shows the save sentence on the card instead of being swallowed', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(UNKNOWN);
+    updateContact.mockRejectedValue(new Error('offline'));
+    renderAt('u9');
+    await user.click(await screen.findByRole('button', { name: 'Mark as Partner' }));
+    const card = screen.getByRole('heading', { name: 'Needs triage' }).closest('section') as HTMLElement;
+    expect(await within(card).findByText("Couldn't save - please try again.")).toBeInTheDocument();
+  });
+
+  it('a new Mark as attempt replaces the previous message', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(UNKNOWN);
+    updateContact
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(
+        new ApiError(409, 'type_change_refused', 'type_change_refused', {
+          error: 'type_change_refused',
+          refusals: [{ code: 'landlord_of_record', unitId: 'u1' }],
+        }),
+      );
+    renderAt('u9');
+    await user.click(await screen.findByRole('button', { name: 'Mark as Tenant' }));
+    const card = screen.getByRole('heading', { name: 'Needs triage' }).closest('section') as HTMLElement;
+    expect(await within(card).findByText("Couldn't save - please try again.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as Tenant' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: 'Mark as Tenant' }));
+    expect(await within(card).findByText(TYPE_CHANGE_LANDLORD_SENTENCE)).toBeInTheDocument();
+    expect(within(card).queryByText("Couldn't save - please try again.")).toBeNull();
+    expect(within(card).getByRole('link', { name: 'View property' })).toHaveAttribute('href', '/listings/u1');
   });
 
   it('accepts a voucher-size AI suggestion: applies the returned contact in place (value + Auto badge, chip gone)', async () => {

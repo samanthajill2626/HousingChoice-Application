@@ -40,3 +40,15 @@ alone 1/1 (13.2 s). No trace (the gate does not set `E2E_TRACE=1`);
 screenshot and video kept on Cameron's machine. Different scenario from the
 first sighting, same signature: a blank document after contact navigation.
 Record: `docs/superpowers/reviews/2026-10-07-caseworkers/windows-gates-2026-10-11.md`.
+
+**Third sighting (2026-10-12, Windows, feat/join-housing-authority @67cd745c).** A full
+gate run (`timeout 2700 npm run e2e`, no trace) finished 339 passed / 1 failed in 21.9m:
+`tests/scenarios/landlord-onboarding.spec.ts:190` ("inbound text -> not a fit ->
+parked"), step "App relays the lead to Team (Unknown tab, by phone)"
+(`e2e/scenarios/steps.ts:627`) waited 15 s for the Unknown tab's link to the new
+contact's phone after `page.goto('/contacts/unknown')`; the screenshot is an entirely
+white document. The branch touches neither that page nor that flow. The file passed
+alone on the same tree right after (7/7, 47.0s, the test 5.2s, `E2E_TRACE=1`).
+Artifacts (screenshot, video, error-context) kept in that worktree under
+`.superpowers/sdd/e2e-results-run1/`. Same signature, third scenario. Record:
+`docs/superpowers/reviews/2026-10-12-join-housing-authority/code-review/R1-adjudications.md`.

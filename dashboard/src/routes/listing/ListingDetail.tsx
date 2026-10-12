@@ -214,8 +214,15 @@ export function ListingDetail(): React.JSX.Element {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   // caseworker-integrity (spec section 4 "Restore"): set when a plain restore
-  // answered 409 restore_needs_landlord - opens the landlord dialog.
-  const [restoreNeeds, setRestoreNeeds] = useState<{ landlordName?: string } | null>(null);
+  // answered 409 restore_needs_landlord - opens the landlord dialog. It records
+  // the property it opened for and is RESET when the route's unitId moves on
+  // (R1 code review, dashboard finding 8): the /listings/:unitId element is not
+  // keyed, so a history move to another property re-renders this same
+  // instance, and the dialog must neither survive it nor post its choice
+  // against the other property. Reset during render (React's "adjust state
+  // when a prop changes"), so no frame shows the dialog over the wrong property.
+  const [restoreNeeds, setRestoreNeeds] = useState<{ unitId: string; landlordName?: string } | null>(null);
+  if (restoreNeeds !== null && restoreNeeds.unitId !== unitId) setRestoreNeeds(null);
   const [editing, setEditing] = useState(false);
   // The "Start placement" dialog, pre-filled+locked to this property's unit.
   const [startingPlacement, setStartingPlacement] = useState(false);
@@ -372,7 +379,7 @@ export function ListingDetail(): React.JSX.Element {
         // a dead click (caseworker-integrity spec section 4 "Restore").
         if (err instanceof ApiError && err.status === 409 && err.code === 'restore_needs_landlord') {
           const landlordName = restoreLandlordName(err);
-          setRestoreNeeds(landlordName !== undefined ? { landlordName } : {});
+          setRestoreNeeds({ unitId: unit.unitId, ...(landlordName !== undefined && { landlordName }) });
           return;
         }
         /* any other failure: leave it deleted; the action re-enables for a retry */

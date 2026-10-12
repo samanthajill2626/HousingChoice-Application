@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { ApiError } from '../../api/index.js';
 import type { ListingState } from './useListing.js';
 
@@ -1398,6 +1398,64 @@ describe('ListingDetail', () => {
       expect(screen.getByRole('status')).toHaveTextContent(/deleted/i);
     },
   );
+
+  // R1 code review, dashboard finding 8: the landlord dialog belongs to the
+  // property it opened for. The /listings/:unitId element is not keyed, so a
+  // history move (browser Back / Forward) to another property re-renders this
+  // SAME instance: the dialog must close then - never post its choice against
+  // the other property - and must not come back with the first one.
+  it('the landlord dialog is reset by a history move to another property and never restores that property', async () => {
+    const user = userEvent.setup();
+    restoreUnit.mockReset().mockRejectedValue(
+      new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+        error: 'restore_needs_landlord',
+        landlordName: 'James Porter',
+      }),
+    );
+    getAllContacts.mockReset().mockResolvedValue([]);
+    const deletedU1: ListingState = {
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit: vi.fn(),
+    };
+    const liveU2: ListingState = {
+      ...READY,
+      unit: { ...READY.unit!, unitId: 'u2', address: { line1: '22 Elm St' } },
+      setUnit: vi.fn(),
+    };
+    useListing.mockImplementation((id: string) => (id === 'u2' ? liveU2 : deletedU1));
+    let go: ((delta: number) => void) | undefined;
+    function HistoryProbe(): null {
+      const navigate = useNavigate();
+      go = (delta) => void navigate(delta);
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={['/listings/u2', '/listings/u1']} initialIndex={1}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+        </Routes>
+        <HistoryProbe />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    expect(await screen.findByRole('dialog', { name: 'Restore property' })).toBeInTheDocument();
+
+    // Back to u2 with the dialog open: it closes.
+    act(() => go?.(-1));
+    expect(await screen.findByRole('heading', { name: /22 Elm St/ })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+
+    // Forward to u1 again: reset, not merely hidden.
+    act(() => go?.(1));
+    expect(await screen.findByRole('status')).toHaveTextContent(/deleted/i);
+    expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+
+    expect(restoreUnit).toHaveBeenCalledTimes(1);
+    expect(restoreUnit).toHaveBeenCalledWith('u1');
+    expect(restoreUnit.mock.calls.some(([id]) => id === 'u2')).toBe(false);
+  });
 });
 
 // --- Contacts card EDIT MODE (contact-rosters Task 9, spec 6.1 / D9) --------

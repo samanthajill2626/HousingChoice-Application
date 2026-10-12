@@ -1,6 +1,6 @@
 # /join housing authority dropdown, Onboarding start, and lead backfill - design
 
-Status: DRAFT (revision 2, 2026-10-12 - spec review round 1 folded in; see
+Status: DRAFT (revision 3, 2026-10-12 - spec review rounds 1-2 folded in; see
 `docs/superpowers/reviews/2026-10-12-join-housing-authority/design-review/adjudications.md`)
 Branch: `feat/join-housing-authority` (worktree `W:\tmp\join-housing-authority`, cut from main @19607658)
 Tracker: Improvements Tracker item #14 "Housing authority form default" (Before WP1, item 3)
@@ -114,25 +114,30 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
   the generic 400, whatever the unit's state. Keying on the presence of
   `unitId` rather than on the unit keeps the endpoint from revealing whether a
   unit exists or is shareable.
-- **D5 New /join contacts.** A NEW contact created by a request with NO
-  `unitId`:
+- **D5 New contacts.** EVERY new contact this endpoint creates after this
+  change - `/join` and flyer alike - carries `housing_fair_signup_v2: true`.
+  The marker means "created after the housing authority question shipped",
+  not "saw the select" (a `/join` page loaded before the deploy, the D8
+  failed-list state, and a direct POST all get it too); the backfill (D10)
+  never touches a contact holding it. In addition, a new contact created by
+  a request with NO `unitId`:
   - starts in status `onboarding`;
-  - holds the given `housingAuthority`, if any;
-  - carries `housing_fair_authority_asked: true` whether or not an authority
-    was given - the marker that this person was asked the question, so the
-    backfill (D10) never treats a "Not sure" answer as an old lead.
-  A request WITH a `unitId` behaves exactly as today (status `needs_review`,
-  no housing authority, no marker), including when the unit is missing or not
-  shareable and the contact is stamped `housing_fair`. `capture_source`, the
-  consent fields, and the welcome text are unchanged.
+  - holds the given `housingAuthority`, if any.
+  A request WITH a `unitId` otherwise behaves exactly as today (status
+  `needs_review`, no housing authority), including when the unit is missing
+  or not shareable and the contact is stamped `housing_fair`.
+  `capture_source`, the consent fields, and the welcome text are unchanged.
 - **D6 Existing contacts.** A sign-up from a phone that is already a contact
   writes neither `housingAuthority`, `status`, nor the marker to it. Today's
   welcome rule for an existing contact is unchanged. A public,
-  unauthenticated form must not edit an existing person's record.
-- **D7 Audit and log.** The `housing_fair_signup` audit payload gains
-  `housingAuthority`: the name written to a newly created contact, else
-  `null` (an organization name, not PII). The `housing-fair signup captured`
-  log line gains the boolean `withAuthority`. No new PII anywhere.
+  unauthenticated form must not edit an existing person's record. Its answer
+  is kept only in the audit (D7).
+- **D7 Audit and log.** Every `housing_fair_signup` audit event written after
+  this change gains `signupVersion: 2` and `housingAuthority`: the name the
+  request carried, else `null` (an organization name, not PII) - recorded for
+  an existing contact too, though D6 does not write it. The
+  `housing-fair signup captured` log line gains the boolean `withAuthority`.
+  No new PII anywhere.
 - **D8 The /join form.**
   - A "Housing authority" select, with the help text "The organization that
     runs your voucher.", placed after "Voucher size" and before the consent
@@ -148,10 +153,12 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
   - "Not sure" sends no `housingAuthority`; any other choice sends that exact
     name (`submitHousingFair` and `HousingFairInput` gain the field).
   - On `housing_authority_not_listed` (the list changed after the page loaded
-    it), the form reads the list again, keeps every typed field and the
-    consent box as they are, re-applies the default rule, and says: "The
-    housing authority list was updated. Check the housing authority and send
-    again."
+    it), the form reads the list again and keeps every typed field and the
+    consent box as they are. It does NOT pick a value: the select shows a
+    "Choose one" placeholder ahead of the names and "Not sure", and send
+    stays blocked until a choice is made. It says: "The housing authority
+    list was updated. Choose the housing authority again." If that read
+    fails, the D8 failed state applies.
   - On a 429 from the sign-up, the form says: "Too many sign-ups from this
     network in the last minute. Wait a minute, then send again." Every other
     failure keeps today's message.
@@ -183,13 +190,24 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
   - Candidates: contacts in the base table (pointer rows skipped, as the
     cleanup script does) with `capture_source === 'housing_fair'`,
     `type === 'tenant'`, not deleted, no `housingAuthority` attribute, and no
-    `housing_fair_authority_asked` marker.
-  - Left out, and listed separately: a candidate named in `--skip`, and a
-    candidate whose audit trail shows `housingAuthority` was ever written
-    (a staff edit, an AI write, an accepted suggestion, a Settings or cleanup
-    rewrite - the plan enumerates every audit event type that records such a
-    write). Its authority was removed on purpose, so it stays empty. A
-    `--skip` id that is not a candidate is reported and otherwise ignored.
+    `housing_fair_signup_v2` marker. Status is not a condition (Cameron: the
+    authority only, status left alone).
+  - Left out, and listed separately with the reason:
+    - a candidate named in `--skip`;
+    - a candidate with a `housing_fair_signup` audit event carrying
+      `signupVersion: 2` - a lead from before the change who signed up again
+      after it, and whose answer (D7) must not be overridden;
+    - a candidate whose audit trail shows `housingAuthority` was ever SET OR
+      REMOVED - its authority was removed on purpose, so it stays empty. The
+      event types, as of main @19607658: `contact_updated` (when its
+      `fields` include `housingAuthority`: staff edits and the caseworker
+      conversion), `ai_extraction_applied` (by `fields[].field`),
+      `ai_suggestion_accepted` (by `target`), `org_name_rewrite` and
+      `org_name_cleanup` (by `field`), and this script's own
+      `housing_authority_backfill`. The plan verifies the list against the
+      code. Those audit appends are best-effort, so a write whose append
+      failed is invisible here; that gap is accepted.
+    A `--skip` id that is not a candidate is reported and otherwise ignored.
   - Dry run: writes nothing. Prints each target on its own line - first and
     last name, sign-up date (`captured_at`, else `created_at`, as a date),
     current status, contactId - oldest first, then the count; then the
@@ -200,8 +218,11 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
     from a `/join` lead; the names and dates are only a recognition aid.
   - Apply: for each target, one conditional write that sets
     `housingAuthority` to "Atlanta Housing Authority" only while the contact
-    still has no authority, is still a tenant, and is still not deleted;
-    plus one `housing_authority_backfill` audit event
+    still has no authority, is still a tenant, and is still not deleted
+    (`contactsRepo.update` with `expect` clauses
+    `{ attr: 'housingAuthority', value: null }` and
+    `{ attr: 'type', value: 'tenant' }` plus `notDeleted`;
+    `rewriteOrgFields` cannot express the type and deleted guards); plus one `housing_authority_backfill` audit event
     `{ field: 'housingAuthority', from: '', to: 'Atlanta Housing Authority' }`
     with no actor. A lost condition is counted as skipped, not failed. Status
     and every other field are left alone.
@@ -213,8 +234,8 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
     is accepted instead of taking the rewrite lock, whose Settings copy names
     the one-time cleanup.
   - Safe to re-run at any time and in either order around the deploy: it
-    never touches a contact holding an authority, the marker, or a history of
-    one.
+    never touches a contact holding an authority, the marker, a post-change
+    sign-up, or a history of an authority.
   - Exit codes: 0 completed clean; 1 refused, completed with failures, or the
     target could not be resolved; 2 usage.
   - No agent runs it against dev or prod. An agent rehearses it only with
@@ -229,6 +250,13 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
 - Blasts have no status filter yet, so a lead's authority is what matters
   today: new `/join` leads with an authority, and backfilled leads, join
   blasts filtered on that authority at once.
+- The backfill has no status condition, so it also gives Atlanta Housing
+  Authority to `/join` leads staff have set to On hold or Inactive; until #6
+  adds a status rule they receive Atlanta-filtered blasts, like any parked
+  tenant that holds an authority today.
+- A sign-up with no authority after the deploy (a page loaded before the
+  deploy, the failed-list state, "Not sure") is never backfilled; staff set
+  the authority by hand if they learn it.
 - The Onboarding start pays off when tracker #6 adds the decided status rule.
   Backfilled leads keep their current status (mostly Needs review), so when #6
   ships they drop out of blasts until staff move them; #6 should account for
@@ -275,21 +303,25 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
     empty string, and an over-long string are the generic 400;
   - `unitId` plus an authority is the generic 400 for a shareable unit, a
     missing unit, and a non-shareable unit alike;
-  - a flyer sign-up without an authority behaves exactly as today (no marker);
+  - a flyer sign-up without an authority behaves exactly as today except
+    that a new contact gets the marker;
   - an existing phone with a valid authority changes no field the change
-    adds or touches;
+    adds or touches, and its audit event records the answer with
+    `signupVersion: 2`;
   - the list read returns housing authority names only, sorted, never writes
     the list item, and its limit is independent of the shared `/public`
     limit in both directions; the edge-guard test still passes;
   - the backfill: candidate selection (each condition, the marker included),
-    the left-out audit-history rule for each enumerated event type, `--skip`,
+    the post-change re-sign-up exclusion, the left-out audit-history rule for
+    each enumerated event type, `--skip`,
     dry run writes nothing, apply writes only where every condition still
     holds with one audit event each, a contact that changed between read and
     write is skipped, each refusal (the stale-lock case included), the
     post-apply rename warning, a re-run writes nothing new.
 - Dashboard: `/join` preselects Atlanta Housing Authority; "Not sure" sends no
   authority; loading, timeout and failed-list states; the
-  `housing_authority_not_listed` recovery keeps the typed fields; the 429
+  `housing_authority_not_listed` recovery keeps the typed fields, picks no
+  value and blocks send until a choice; the 429
   message; "Sign up another person" clears the person fields and the consent
   box, keeps the authority, and re-reads a failed list; the flyer form
   renders no select and keeps its messages.
@@ -307,7 +339,8 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
   `e2e/scenarios/steps.ts` (the housing-fair step's description),
   `e2e/tests/scenarios/tenant-onboarding.spec.ts` (its note that the POST has
   no housing authority field), `documentation/STATUS-MODEL.md` (the Needs
-  review section), and the existing assertion in
+  review section), `documentation/sequence-diagram-to-test.md` (the
+  self-serve portal note), and the existing assertion in
   `app/test/publicIntake.test.ts`.
 - `e2e/performance/templates.ts`: declare the new GET if a measured page
   requests it (`/join` is classified `public` in `e2e/performance/routes.ts`).

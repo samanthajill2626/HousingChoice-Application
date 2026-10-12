@@ -393,6 +393,13 @@ export interface UnitsRepo {
    * (unitId, contactId): an already-present contact has its role/primaryContact/
    * name/company updated in place. Maintains AT MOST ONE primaryContact across
    * the roster (when this contact is primaryContact, every other is demoted).
+   * This contact is primaryContact when the request asks for it, or - auto-
+   * primary, caseworker-integrity spec revision 4 section 4 - when it takes a
+   * NEW seat (not an upsert of a contact already on the roster) on a unit that,
+   * as that attempt read it, has no primaryContact row and no `landlordId`
+   * attribute, whatever its role (a role-`landlord` claim of the vacant slot
+   * included). Decided inside the conditional retry loop from each attempt's
+   * own read, so two racing adds never both become primary.
    * Adding role `landlord` to an ownerless legacy unit claims `landlordId` in
    * the same conditional write as contacts[]; a different existing or racing
    * owner throws LandlordReassignmentRequiredError instead of being replaced.
@@ -816,6 +823,20 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         // landlord is always represented), then upsert this contact by contactId.
         const roster = unitContacts(unit).map((c) => ({ ...c }));
         const existing = roster.find((c) => c.contactId === contact.contactId);
+        // Auto-primary (caseworker-integrity spec revision 4, section 4 "Contact
+        // list", Cameron 2026-10-12): a NEW seat on a unit that, as THIS attempt
+        // read it, has no row marked primary and no landlordId attribute (no
+        // landlord of record before this add - a Landlord-role add claiming the
+        // vacant slot included) becomes the primary contact, whatever its role.
+        // Decided here, per attempt, never by the caller: the write below is
+        // conditioned on the landlordId and contacts[] this attempt read, so of
+        // two racing adds only the first to commit is made primary; the loser
+        // re-reads, sees that primary, and joins non-primary. An upsert of a
+        // contact already on the list is not an add and keeps the request's flag.
+        const autoPrimary =
+          existing === undefined &&
+          !hasLandlordId &&
+          !roster.some((c) => c.primaryContact === true);
         // The owning landlord's role is STRUCTURAL: a row for the unit's
         // landlordId is always 'landlord', regardless of the supplied role — a
         // non-'landlord' add must never overwrite it (BE3/C3 FIX C).
@@ -825,7 +846,7 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         const next: UnitContact = {
           contactId: contact.contactId,
           role,
-          primaryContact: contact.primaryContact === true,
+          primaryContact: contact.primaryContact === true || autoPrimary,
           ...(contact.name !== undefined ? { name: contact.name } : {}),
           ...(contact.company !== undefined ? { company: contact.company } : {}),
         };
@@ -839,9 +860,12 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           roster.push(next);
         }
 
-        // EXACTLY-ONE-primaryContact: when this contact is the primary, demote every
-        // other. (When it isn't, leave any existing primary as-is — a roster may
-        // legitimately have its primary on another row.)
+        // EXACTLY-ONE-primaryContact: when this contact is the primary - asked for,
+        // or made so by the auto-primary rule above - demote every other. When it
+        // isn't, leave any existing primary as-is: a roster may legitimately have
+        // its primary on another row, or no primary row at all (the
+        // property-contact resolvers then fall back to the landlord of record,
+        // when there is one).
         if (next.primaryContact) {
           for (const c of roster) c.primaryContact = c.contactId === contact.contactId;
         }
@@ -888,6 +912,7 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
             contactId: contact.contactId,
             rosterSize: roster.length,
             primaryContact: next.primaryContact,
+            autoPrimary,
           },
           'unit contact added',
         );

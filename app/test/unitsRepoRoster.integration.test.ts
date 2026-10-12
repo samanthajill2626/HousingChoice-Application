@@ -79,11 +79,15 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
     });
 
     expect(updated.landlordId).toBe('c-new-landlord');
+    // The unit had no primary row and no landlord of record, so the claim is
+    // also its primary contact (auto-primary, caseworker-integrity spec
+    // revision 4 section 4; unitsRepoAutoPrimary.integration.test.ts).
     expect(updated.contacts).toContainEqual({
       contactId: 'c-new-landlord',
       role: 'landlord',
-      primaryContact: false,
+      primaryContact: true,
     });
+    expect(updated.primary_contact).toBe('c-new-landlord');
     const owned = await units.listByLandlord('c-new-landlord');
     expect(owned.items.map((unit) => unit.unitId)).toContain(created.unitId);
   });
@@ -208,9 +212,13 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
 
     const stored = await units.getById(created.unitId);
     expect(stored?.landlordId).toBe('c-new-landlord');
+    // In either order the claim lands on a unit with no primary row and no
+    // landlord of record, so it is also the primary contact (auto-primary,
+    // caseworker-integrity spec revision 4 section 4).
     expect(stored?.contacts).toEqual([
-      { contactId: 'c-new-landlord', role: 'landlord', primaryContact: false },
+      { contactId: 'c-new-landlord', role: 'landlord', primaryContact: true },
     ]);
+    expect(stored?.primary_contact).toBe('c-new-landlord');
   });
 
   it('bounds optimistic roster retries under sustained contention', async () => {

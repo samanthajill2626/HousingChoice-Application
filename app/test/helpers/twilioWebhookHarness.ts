@@ -2940,7 +2940,8 @@ export function createFakeWorld(): FakeWorld {
     },
     async addContact(unitId, contact) {
       // Mirror the real repo's invariants: seed from landlordId, upsert by
-      // contactId, exactly-one-primaryContact, and keep primary_contact
+      // contactId, auto-primary for a new seat on an ownerless primary-less
+      // unit, exactly-one-primaryContact, and keep primary_contact
       // consistent with the roster's ☎ primary.
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`addContact: no unit ${unitId}`);
@@ -2959,7 +2960,16 @@ export function createFakeWorld(): FakeWorld {
       }
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const existing = roster.find((c) => c.contactId === contact.contactId);
-      const primaryContact = contact.primaryContact === true;
+      // Auto-primary (caseworker-integrity spec revision 4 section 4), exactly
+      // as the real repo decides it per attempt: a NEW seat on a unit with no
+      // row marked primary and no landlordId attribute (before this add)
+      // becomes the primary contact, whatever its role; an upsert of a contact
+      // already on the list keeps the request's flag.
+      const autoPrimary =
+        existing === undefined &&
+        !hasLandlordId &&
+        !roster.some((c) => c.primaryContact === true);
+      const primaryContact = contact.primaryContact === true || autoPrimary;
       // FIX C: the owning landlord's role is structural — pinned to 'landlord'.
       const isLandlordOfRecord =
         claimsVacantLandlord || contact.contactId === landlordId;

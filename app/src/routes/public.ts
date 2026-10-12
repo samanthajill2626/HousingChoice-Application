@@ -10,11 +10,18 @@
 // and NO PII is ever logged (names/phones are hashed/truncated to a marker).
 //
 // Routes:
-//   POST /public/housing-fair  { firstName, lastName, phone, voucherSize?, unitId? }
+//   POST /public/housing-fair  { firstName, lastName, phone, voucherSize?, unitId?, housingAuthority? }
 //        → 200 { ok: true }   (creates/dedupes a tenant contact, sends the
 //          welcome text on FIRST capture only; leaks NO internal IDs/PII. A
 //          present + shareable unitId stamps capture_source:'flyer' +
-//          unit_of_interest on the CREATED contact instead of 'housing_fair'.)
+//          unit_of_interest on the CREATED contact instead of 'housing_fair'.
+//          join-housing-authority: housingAuthority (absent/null = none) must
+//          be the exact name of a listed housing authority, else 400
+//          housing_authority_not_listed; sent WITH a unitId it is the generic
+//          400. A new contact from a request with NO unitId starts
+//          'onboarding' and holds the authority; WITH a unitId it starts
+//          'needs_review'. Every new contact carries housing_fair_signup_v2;
+//          an existing contact is never changed beyond the welcome flag.)
 //   GET  /public/units/:unitId/flyer
 //        -> 200 { flyer }   (the FULL public payload upfront + contact_number)
 //        -> 404 { error, contact_number }   (missing/deleted/not-shareable;
@@ -318,18 +325,26 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       contactId = existing.contactId;
       alreadyWelcomed = existing['housing_fair_welcomed'] === true;
     } else {
-      // status 'needs_review' (review decision): fair signups go to the human
-      // triage queue (type=tenant, status=needs_review on byTypeStatus) — the
-      // team confirms before treating them as fully active. type 'tenant'
-      // (the fair is a tenant intake — this is asserted by the form, not a
-      // guess from an unknown inbound).
+      // Status (join-housing-authority D5). A request with NO unitId - the /join
+      // form, filled in by staff at housing fairs and by the public - starts the
+      // tenant lifecycle at 'onboarding', like a manual create in
+      // routes/contacts.ts (identity is asserted by the form). No status_source
+      // is stamped, so a later placement transition can still derive the
+      // lifecycle forward. A request WITH a unitId (the flyer's sign-up box)
+      // keeps 'needs_review' and stores no authority, even when the unit is
+      // missing or not shareable. type 'tenant': the form is a tenant intake,
+      // asserted by the form, not a guess from an unknown inbound.
       const created = await contacts.create({
         type: 'tenant',
-        status: 'needs_review',
+        status: unitId === undefined ? 'onboarding' : 'needs_review',
         phone,
         firstName,
         lastName,
         ...(voucherSize !== undefined && { voucherSize }),
+        // D5: the /join answer, on a create from a request with no unitId only
+        // (D4 already refused a request carrying both), exactly as the list
+        // check accepted it. Absent when none was chosen.
+        ...(unitId === undefined && housingAuthority !== undefined && { housingAuthority }),
         // Flyer signups are attributed to the originating home; a plain fair
         // signup (no/non-shareable unit) keeps the generic source. Only stamped
         // on CREATE (matching how capture_source is set), never on a deduped
@@ -338,6 +353,12 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
         ...(viaFlyer && unitId !== undefined && { unit_of_interest: unitId }),
         captured_at: new Date().toISOString(),
         housing_fair_welcomed: false,
+        // D5: EVERY contact this endpoint creates from now on - /join and flyer
+        // alike - carries the marker: "created after the housing authority
+        // question shipped" (not "saw the select"). The lead backfill
+        // (scripts/backfill-join-housing-authority.ts) never touches a contact
+        // holding it. Never written to an existing contact (D6).
+        housing_fair_signup_v2: true,
         // A2P/CTIA consent (spec §3.1): the required checkbox was checked (the
         // server gate above enforced it), so this signup carries a documented
         // web-form opt-in. consent_version pins the disclosure copy version.

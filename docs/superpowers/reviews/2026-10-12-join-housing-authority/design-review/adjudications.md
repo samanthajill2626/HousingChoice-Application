@@ -39,3 +39,30 @@ decision, cap 4).
 | J19 | 429 copy undefined in the rapid-entry flow (B-F17) | ACCEPT | D8: a 429 shows a wait-a-minute message. |
 | J20 | Wrong stage client path (A-F14, B-F15) | ACCEPT | Fixed to `app/scripts/lib/stageClient.ts`. |
 | J21 | Unenumerated surfaces: publicApi.ts body builder, stale needs_review statements (public.ts comments, e2e steps.ts, tenant-onboarding spec, STATUS-MODEL.md, publicIntake.test.ts), perf endpoint templates (A-F14) | ACCEPT | New section 7 lists them. |
+
+---
+
+# Spec review round 2 - adjudications
+
+Round 2 reviewed revision 2 (@842c6edf, consent issue dropped @138bc8ac).
+Reviewer B continued (`R2-reviewer-b.md`, 7 findings). It conceded all three
+contested rejections (J5 provenance stamp - the AutoBadge reads only
+`source === 'ai'`; J7 spelling resolution - Cameron's rule; J12 taking the
+lock - `acquireForCleanup` would also overwrite Settings' record of the last
+real rename) and judged the rev-2 fixes for D1, D2, D3 and the J12 staleness
+rule correct. It added that rev 2 no longer named the write method, and that
+`contactsRepo.update` with `expect` clauses plus `notDeleted` carries all
+three guards (verified: `UpdateContactOptions`, contactsRepo.ts:661-690).
+
+Result: 7 accepted. Decisions changed: yes (K1, K2, K3) - round 3 follows.
+
+| # | Finding | Ruling | Effect on rev 3 |
+|---|---|---|---|
+| K1 | R2-1 [MED] The not_listed recovery re-applies the default, silently swapping a renamed choice to Atlanta (or Atlanta to Not sure), and D9 carries the swap forward | ACCEPT | D8: the recovery picks no value - a "Choose one" placeholder blocks send until the person chooses. |
+| K2 | R2-2 [MED] A pre-change lead who signs up again after the deploy has its answer dropped (D6) and the backfill stamps Atlanta over it | ACCEPT | D7: every post-change `housing_fair_signup` event carries `signupVersion: 2` and the name the request carried (existing contacts included). D10 leaves out any candidate with such an event. |
+| K3 | R2-3 [LOW] Post-change flyer sign-ups for an unavailable unit get no marker, so every re-run stamps them | ACCEPT | D5: the marker (renamed `housing_fair_signup_v2`) goes on EVERY new contact this endpoint creates after the change, flyer included. |
+| K4 | R2-4 [LOW] The "asked" marker is set whether or not the select was shown | ACCEPT | Marker renamed and redefined as "created after the question shipped"; section 4 states that such no-authority sign-ups are never backfilled. |
+| K5 | R2-5 [LOW] The audit-history event list was delegated and incomplete; appends are best-effort | ACCEPT | D10 names the event types (contact_updated by fields, ai_extraction_applied, ai_suggestion_accepted, org_name_rewrite/org_name_cleanup, housing_authority_backfill), SET OR REMOVE, plan verifies; best-effort gap accepted in one sentence. |
+| K6 | R2-6 [LOW] No status condition: On hold / Inactive leads get Atlanta and join Atlanta blasts | ACCEPT (document) | Section 4 states it. No status condition added: Cameron set the target rule (authority only, status left alone), and it matches every parked tenant holding an authority while blasts have no status filter. |
+| K7 | R2-7 [LOW] sequence-diagram-to-test.md:110 still says needs_review | ACCEPT | Added to section 7. |
+| K8 | (Part 3) The write method was unnamed; rewriteOrgFields cannot carry the type/deleted guards | ACCEPT | D10 names `contactsRepo.update` with the two `expect` clauses plus `notDeleted`. |

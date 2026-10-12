@@ -1,0 +1,101 @@
+<style>
+  .hc-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; margin-top: 12px; }
+  .hc-pick { border: 2px solid transparent; border-radius: 14px; padding: 10px; cursor: pointer; background: #f7f8fa; }
+  .hc-pick.selected { border-color: #1f6feb; }
+  .hc-pick h3 { margin: 4px 4px 2px; font-size: 15px; }
+  .hc-pick .why { margin: 0 4px 10px; font-size: 12px; color: #5b6472; }
+  .hc-dlg { background: #fff; border: 1px solid #e2e5ea; border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,.08);
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #1a1d23; font-size: 13px; }
+  .hc-dlg .hd { display: flex; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #e2e5ea; font-weight: 600; font-size: 15px; }
+  .hc-dlg .bd { padding: 12px 14px; }
+  .hc-dlg .ft { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 14px; border-top: 1px solid #e2e5ea; }
+  .hc-btn { border-radius: 6px; padding: 5px 10px; font-size: 12px; border: 1px solid #e2e5ea; background: #fff; }
+  .hc-btn.primary { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+  .hc-btn.small { padding: 2px 8px; font-size: 11px; }
+  .hc-lbl { font-weight: 600; margin-bottom: 4px; }
+  .hc-ta { border: 1px solid #e2e5ea; border-radius: 8px; padding: 8px 10px; line-height: 1.45; min-height: 74px; }
+  .hc-cc { font-size: 12px; color: #5b6472; margin: 4px 0 10px; }
+  .hc-rcp { list-style: none; margin: 0; padding: 0; }
+  .hc-rcp li { padding: 4px 0; border-bottom: 1px solid #f1f3f6; }
+  .hc-rcp li:last-child { border-bottom: none; }
+  .hc-count { font-size: 12px; color: #5b6472; margin-top: 6px; }
+  .hc-warn { border: 1px solid #b06a00; border-radius: 4px; padding: 8px; font-size: 12px; margin-bottom: 10px; }
+  .hc-warn p { margin: 0 0 4px; }
+  .hc-link { color: #1f6feb; text-decoration: underline; }
+  .hc-note { font-size: 12px; color: #5b6472; margin: -4px 0 10px; }
+  .hc-check { border: 1px solid #e2e5ea; background: #f7f8fa; border-radius: 6px; padding: 8px 10px; font-size: 12px; margin-bottom: 10px; }
+  .hc-check ul { list-style: none; margin: 4px 0 6px; padding: 0; }
+  .hc-check li { padding: 2px 0; }
+  .ok { color: #1a7f37; font-weight: 700; }
+  .no { color: #b06a00; font-weight: 700; }
+</style>
+
+<h2>How should the open-group dialog explain the general intro?</h2>
+<p class="subtitle">Sam clicks "Open relay group" on a 470 Bolton tour. The property has no primary contact, so the tour intro can't name the landlord and the general intro is used. Click the one that would make Sam fix it herself.</p>
+
+<div class="hc-row">
+
+  <div class="hc-pick" data-choice="a" onclick="toggleSelect(this)">
+    <h3>A - Warning box above the message</h3>
+    <p class="why">Same amber box as the existing "already have an open group" warning. Read first, before she edits anything.</p>
+    <div class="hc-dlg">
+      <div class="hd"><span>Open the relay group?</span><span>&times;</span></div>
+      <div class="bd">
+        <div class="hc-warn">
+          <p><strong>Using the general intro, not the tour intro.</strong></p>
+          <p>470 Bolton Rd NW has no primary contact, so the tour intro can't name the landlord.</p>
+          <p><a class="hc-link">Set a primary contact</a> (opens the property) &nbsp; <button class="hc-btn small">Check again</button></p>
+        </div>
+        <div class="hc-lbl">Message - edit before sending</div>
+        <div class="hc-ta">Hey, it's Sam. You're now connected with Mark, BNS Property Management, and Keisha on this number. Reply here and everyone in the group sees it. Use this group text for anything that comes up. It can be a long process, so ask me anything in here!</div>
+        <div class="hc-cc">246 / 480</div>
+        <ul class="hc-rcp"><li>Keisha Brown</li><li>Mark Passmore</li><li>BNS Property Management</li></ul>
+        <div class="hc-count">3 recipients will receive this.</div>
+      </div>
+      <div class="ft"><button class="hc-btn">Cancel</button><button class="hc-btn primary">Open relay group</button></div>
+    </div>
+  </div>
+
+  <div class="hc-pick" data-choice="b" onclick="toggleSelect(this)">
+    <h3>B - Quiet note under the message</h3>
+    <p class="why">One muted line where the character count sits. Least noise, but easy to miss.</p>
+    <div class="hc-dlg">
+      <div class="hd"><span>Open the relay group?</span><span>&times;</span></div>
+      <div class="bd">
+        <div class="hc-lbl">Message - edit before sending</div>
+        <div class="hc-ta">Hey, it's Sam. You're now connected with Mark, BNS Property Management, and Keisha on this number. Reply here and everyone in the group sees it. Use this group text for anything that comes up. It can be a long process, so ask me anything in here!</div>
+        <div class="hc-cc">246 / 480</div>
+        <p class="hc-note">General intro: 470 Bolton Rd NW has no primary contact. <a class="hc-link">Set one</a> &middot; <a class="hc-link">Check again</a></p>
+        <ul class="hc-rcp"><li>Keisha Brown</li><li>Mark Passmore</li><li>BNS Property Management</li></ul>
+        <div class="hc-count">3 recipients will receive this.</div>
+      </div>
+      <div class="ft"><button class="hc-btn">Cancel</button><button class="hc-btn primary">Open relay group</button></div>
+    </div>
+  </div>
+
+  <div class="hc-pick" data-choice="c" onclick="toggleSelect(this)">
+    <h3>C - Checklist of what the tour intro needs</h3>
+    <p class="why">Shows all three requirements with a mark each, so she sees what's fine and what's missing in one look. Teaches the rule.</p>
+    <div class="hc-dlg">
+      <div class="hd"><span>Open the relay group?</span><span>&times;</span></div>
+      <div class="bd">
+        <div class="hc-check">
+          <strong>Using the general intro.</strong> The tour intro needs:
+          <ul>
+            <li><span class="no">&#10007;</span> A primary contact with a first name - <a class="hc-link">set one on 470 Bolton Rd NW</a></li>
+            <li><span class="ok">&#10003;</span> A street address</li>
+            <li><span class="ok">&#10003;</span> A tour time that hasn't passed</li>
+          </ul>
+          <button class="hc-btn small">Check again</button>
+        </div>
+        <div class="hc-lbl">Message - edit before sending</div>
+        <div class="hc-ta">Hey, it's Sam. You're now connected with Mark, BNS Property Management, and Keisha on this number. Reply here and everyone in the group sees it. Use this group text for anything that comes up. It can be a long process, so ask me anything in here!</div>
+        <div class="hc-cc">246 / 480</div>
+        <ul class="hc-rcp"><li>Keisha Brown</li><li>Mark Passmore</li><li>BNS Property Management</li></ul>
+        <div class="hc-count">3 recipients will receive this.</div>
+      </div>
+      <div class="ft"><button class="hc-btn">Cancel</button><button class="hc-btn primary">Open relay group</button></div>
+    </div>
+  </div>
+
+</div>

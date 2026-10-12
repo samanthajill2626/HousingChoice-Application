@@ -61,6 +61,13 @@ import {
 } from '../src/repos/contactsRepo.js';
 import { createOrgListRepo, type OrgListItem, type OrgListRepo } from '../src/repos/orgListRepo.js';
 import { isOrgRewriteRunning } from '../src/services/orgNames.js';
+import {
+  parseStageArgs,
+  resolveStageClient,
+  type StageClient,
+  type StageClientOpts,
+  type StageTarget,
+} from './lib/stageClient.js';
 
 // ---------------------------------------------------------------------------
 // The rules (pure): who is a candidate, and which history leaves one out
@@ -617,4 +624,104 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
   }
   for (const line of formatBackfillReport(report, opts.apply)) deps.print(line);
   return report;
+}
+
+// ---------------------------------------------------------------------------
+// The CLI
+// ---------------------------------------------------------------------------
+
+/** The argument names the CLI accepts beside --env and --lane (parseStageArgs refuses any other, and any repeat). */
+export const BACKFILL_ARGS = { values: ['--skip'], flags: ['--apply'] };
+
+/**
+ * --skip's value: contactIds, comma-separated, each trimmed; absent = none.
+ * An empty id (an empty value, a stray comma) is a usage error: undefined.
+ */
+export function parseSkipList(raw: string | undefined): ReadonlySet<string> | undefined {
+  if (raw === undefined) return new Set();
+  const ids = raw.split(',').map((id) => id.trim());
+  return ids.some((id) => id === '') ? undefined : new Set(ids);
+}
+
+/** What a usage error prints (exit 2). */
+export const USAGE =
+  `Usage: npx tsx app/scripts/${SCRIPT_NAME}.ts --env local|dev|prod [--lane <L>] [--apply] [--skip "<contactId>[,<contactId>...]"]\n` +
+  '  DRY RUN by default; --apply writes. --skip leaves the named leads out (ONE comma-separated value - quote it).\n' +
+  '  Unknown or repeated arguments and an empty --skip id are refused. --lane selects a hermetic e2e lane (local only).';
+
+/** The CLI's outside world - each member injectable, so the tests execute every exit code. */
+export interface CliDeps {
+  /** --env/--lane -> the stage client (default: resolveStageClient; for dev/prod the account guard runs first). */
+  resolveStage: (target: StageTarget, opts: StageClientOpts) => Promise<StageClient>;
+  /** The run on that client (default: runJoinAuthorityBackfill on buildBackfillDeps(stage)). */
+  run: (stage: StageClient, opts: BackfillOptions) => Promise<BackfillReport>;
+  /** The usage text and a refusal's message (default: console.error). */
+  printError: (text: string) => void;
+  logger: Logger;
+}
+
+/**
+ * The CLI (spec D10). Resolves to the exit code: 2 a usage error (nothing
+ * resolved, nothing read); 1 the target could not be resolved (nothing read),
+ * the run was refused (no contact read), it stopped before any write (the list
+ * read or the contacts Scan failed), or it completed with a failed lead; 0 it
+ * completed clean, warnings included. Once resolved, the stage client is
+ * destroyed whatever happens.
+ */
+export async function main(argv: readonly string[], cli: Partial<CliDeps> = {}): Promise<0 | 1 | 2> {
+  const printError = cli.printError ?? ((text: string) => console.error(text));
+  const log = cli.logger ?? defaultLogger;
+  const resolveStage: CliDeps['resolveStage'] =
+    cli.resolveStage ?? ((target, opts) => resolveStageClient(target, {}, opts));
+  const run: CliDeps['run'] = cli.run ?? ((stage, opts) => runJoinAuthorityBackfill(buildBackfillDeps(stage), opts));
+
+  const parsed = parseStageArgs([...argv], BACKFILL_ARGS);
+  const skip = 'usage' in parsed ? undefined : parseSkipList(parsed.values.get('--skip'));
+  if ('usage' in parsed || skip === undefined) {
+    printError(USAGE);
+    return 2;
+  }
+  const apply = parsed.flags.has('--apply');
+
+  // STEP 1 - resolve the target on its own: a refusal here (account guard,
+  // STS, an ambient AWS_ENDPOINT_URL*) happens BEFORE any table is read.
+  let stage: StageClient;
+  try {
+    stage = await resolveStage(parsed.target, parsed.lane !== undefined ? { lane: parsed.lane } : {});
+  } catch (err) {
+    log.error({ err }, `${SCRIPT_NAME} - FAILED before the run started (no table was read or written)`);
+    return 1;
+  }
+  // STEP 2 - the run. It prints its own report.
+  try {
+    log.info(
+      { target: parsed.target, endpoint: stage.describe, prefix: stage.prefix, apply, skip: skip.size },
+      `${SCRIPT_NAME} - starting`,
+    );
+    return backfillExitCode(await run(stage, { apply, skip }));
+  } catch (err) {
+    if (err instanceof BackfillRefusedError) {
+      printError(err.message);
+      return 1;
+    }
+    // The list read or the contacts Scan failed: the run stopped before any write.
+    log.error({ err }, `${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  } finally {
+    stage.doc.destroy();
+  }
+}
+
+const invokedDirectly =
+  import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith(`${SCRIPT_NAME}.ts`);
+if (invokedDirectly) {
+  void main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err: unknown) => {
+      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    },
+  );
 }

@@ -2,7 +2,10 @@
 // docs/superpowers/specs/2026-10-12-join-housing-authority-design.md, D10
 // and D11). The PURE rules first: who is a candidate, and which audit history
 // leaves one out - each writer's payload exactly as it appends it today.
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { GetCommand, PutCommand, ScanCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { afterEach, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
@@ -16,6 +19,7 @@ import type { AuditEvent } from '../src/repos/auditRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import { createOrgListRepo, type OrgListItem, type OrgListRepo, type OrgRewriteState } from '../src/repos/orgListRepo.js';
 import {
+  BACKFILL_ARGS,
   BACKFILL_AUDIT_TYPE,
   BACKFILL_AUTHORITY,
   BackfillRefusedError,
@@ -26,14 +30,19 @@ import {
   isCandidate,
   leftOutReasonFor,
   leftOutReasonFromAudit,
+  main,
+  parseSkipList,
   readWholeHistory,
   runJoinAuthorityBackfill,
   scanCandidates,
   touchesHousingAuthority,
+  USAGE,
   type BackfillDeps,
   type BackfillLead,
+  type BackfillOptions,
   type BackfillReport,
 } from '../scripts/backfill-join-housing-authority.js';
+import { parseStageArgs, type StageClient } from '../scripts/lib/stageClient.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 /** A /join lead from before the change, as the sign-up created it: no authority, no marker. */
@@ -1101,4 +1110,279 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect(report).toMatchObject({ written: 3, failed: 0 });
     expect((await w.orgList.peek())?.lastRewrite).toEqual(killed);
   }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// The CLI (spec D10: --env local|dev|prod, --lane with local only, dry run by
+// default, --apply, --skip; exit 0 completed clean, 1 refused / a failed lead /
+// the run stopped / the target unresolved, 2 usage). `main` is the CLI with
+// its outside world injected, so every exit code is EXECUTED here; the last
+// test runs the real entry point in a child process.
+// ---------------------------------------------------------------------------
+
+const SCRIPT_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'scripts',
+  'backfill-join-housing-authority.ts',
+);
+
+const CLEAN_REPORT: BackfillReport = {
+  targets: [],
+  leftOut: [],
+  unknownSkips: [],
+  written: 0,
+  skipped: 0,
+  failed: 0,
+  warnings: [],
+};
+
+/** A stage whose client is never sent a command; destroy() is counted. */
+function fakeStage(): { stage: StageClient; destroyed: () => number } {
+  let destroyed = 0;
+  const stage: StageClient = {
+    doc: {
+      destroy: () => {
+        destroyed += 1;
+      },
+    } as unknown as DynamoDBDocumentClient,
+    env: { TABLE_PREFIX: 'hc-local-4-' },
+    endpoint: 'http://localhost:8000',
+    prefix: 'hc-local-4-',
+    accessKeyId: 'hclane4',
+    describe: 'a fake stage',
+  };
+  return { stage, destroyed: () => destroyed };
+}
+
+describe('the CLI arguments', () => {
+  it('dry run by default; --apply writes; --skip takes ONE comma-separated value; anything else is a usage error', () => {
+    const dry = parseStageArgs(['--env', 'prod'], BACKFILL_ARGS);
+    if ('usage' in dry) throw new Error('expected a parse');
+    expect(dry.target).toBe('prod');
+    expect(dry.flags.has('--apply')).toBe(false);
+    expect(parseSkipList(dry.values.get('--skip'))).toEqual(new Set());
+    const lane = parseStageArgs(['--env', 'local', '--lane', '4', '--apply', '--skip', 'contact-a,contact-b'], BACKFILL_ARGS);
+    if ('usage' in lane) throw new Error('expected a parse');
+    expect(lane).toMatchObject({ target: 'local', lane: 4 });
+    expect(lane.flags.has('--apply')).toBe(true);
+    expect(parseSkipList(lane.values.get('--skip'))).toEqual(new Set(['contact-a', 'contact-b']));
+    for (const argv of [
+      ['--env', 'dev', '--dry-run'],
+      ['--env', 'dev', '--lane', '2'],
+      ['--env', 'dev', '--apply', '--apply'],
+      ['--env', 'dev', '--skip', 'contact-a', '--skip', 'contact-b'],
+      ['--env', 'dev', '--skip'],
+      ['--env', 'dev', '--skip', '--apply'],
+      ['--apply'],
+    ]) {
+      expect(parseStageArgs(argv, BACKFILL_ARGS)).toEqual({ usage: true });
+    }
+  });
+
+  it('parseSkipList trims each id; an empty id (an empty value, a stray comma) is a usage error', () => {
+    expect(parseSkipList(undefined)).toEqual(new Set());
+    expect(parseSkipList('contact-a')).toEqual(new Set(['contact-a']));
+    expect(parseSkipList(' contact-a , contact-b ')).toEqual(new Set(['contact-a', 'contact-b']));
+    for (const raw of ['', ' ', ',', 'contact-a,', 'contact-a,,contact-b']) {
+      expect(parseSkipList(raw)).toBeUndefined();
+    }
+  });
+});
+
+describe('main - every exit code, executed (spec D10)', () => {
+  it('exits 2 on a usage error and prints the usage text, before any target is resolved', async () => {
+    const errors: string[] = [];
+    let resolved = 0;
+    const usageErrors = [
+      [],
+      ['--env', 'dev', '--dry-run'],
+      ['--env', 'prod', '--lane', '3'],
+      ['--env', 'dev', '--skip', ''],
+      ['--env', 'dev', '--skip', 'contact-a,,contact-b'],
+    ];
+    for (const argv of usageErrors) {
+      const exit = await main(argv, {
+        printError: (text) => errors.push(text),
+        resolveStage: async () => {
+          resolved += 1;
+          return fakeStage().stage;
+        },
+        logger: silent,
+      });
+      expect([argv, exit]).toEqual([argv, 2]);
+    }
+    expect(resolved).toBe(0);
+    expect(errors).toEqual(usageErrors.map(() => USAGE));
+  });
+
+  it('hands --env, --lane, --apply and --skip on; exits 0 on a clean report (warnings included) and 1 on a failed lead; the client is destroyed each time', async () => {
+    const resolveCalls: unknown[] = [];
+    const runCalls: BackfillOptions[] = [];
+    const cases: Array<[BackfillReport, 0 | 1]> = [
+      [CLEAN_REPORT, 0],
+      [{ ...CLEAN_REPORT, warnings: ['a warning'] }, 0],
+      [{ ...CLEAN_REPORT, failed: 1 }, 1],
+    ];
+    for (const [report, code] of cases) {
+      const fake = fakeStage();
+      const stagesRun: StageClient[] = [];
+      const exit = await main(['--env', 'local', '--lane', '4', '--apply', '--skip', ' contact-a , contact-b '], {
+        resolveStage: async (target, opts) => {
+          resolveCalls.push([target, opts]);
+          return fake.stage;
+        },
+        run: async (stage, opts) => {
+          stagesRun.push(stage);
+          runCalls.push(opts);
+          return report;
+        },
+        logger: silent,
+      });
+      expect(exit).toBe(code);
+      expect(stagesRun).toEqual([fake.stage]);
+      expect(fake.destroyed()).toBe(1);
+    }
+    expect(resolveCalls).toEqual(cases.map(() => ['local', { lane: 4 }]));
+    expect(runCalls).toEqual(cases.map(() => ({ apply: true, skip: new Set(['contact-a', 'contact-b']) })));
+
+    // No --apply, no --lane, no --skip: a dry run with nothing skipped and no lane option.
+    const plain = fakeStage();
+    const seen: unknown[] = [];
+    const exit = await main(['--env', 'dev'], {
+      resolveStage: async (target, opts) => {
+        seen.push([target, opts]);
+        return plain.stage;
+      },
+      run: async (_stage, opts) => {
+        seen.push(opts);
+        return CLEAN_REPORT;
+      },
+      logger: silent,
+    });
+    expect(exit).toBe(0);
+    expect(seen).toEqual([['dev', {}], { apply: false, skip: new Set() }]);
+    expect(plain.destroyed()).toBe(1);
+  });
+
+  it('exits 1 when the target cannot be resolved - nothing is run', async () => {
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    let ran = 0;
+    const exit = await main(['--env', 'prod'], {
+      resolveStage: async () => {
+        throw new Error('ACCOUNT GUARD: wrong account');
+      },
+      run: async () => {
+        ran += 1;
+        return CLEAN_REPORT;
+      },
+      logger: log,
+    });
+    expect(exit).toBe(1);
+    expect(ran).toBe(0);
+    expect(capture.atLevel(50).some((l) => String(l['msg']).includes('FAILED before the run started'))).toBe(true);
+  });
+
+  it('exits 1 on a refusal (its message printed) and on a run that stopped (logged FAILED) - the client destroyed either way', async () => {
+    const errors: string[] = [];
+    const refused = fakeStage();
+    const refusedExit = await main(['--env', 'dev', '--apply'], {
+      resolveStage: async () => refused.stage,
+      run: async () => {
+        throw new BackfillRefusedError('REFUSED - a test refusal');
+      },
+      printError: (text) => errors.push(text),
+      logger: silent,
+    });
+    expect(refusedExit).toBe(1);
+    expect(errors).toEqual(['REFUSED - a test refusal']);
+    expect(refused.destroyed()).toBe(1);
+
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const stopped = fakeStage();
+    const stoppedExit = await main(['--env', 'dev'], {
+      resolveStage: async () => stopped.stage,
+      run: async () => {
+        throw new Error('contacts table unavailable');
+      },
+      printError: (text) => errors.push(text),
+      logger: log,
+    });
+    expect(stoppedExit).toBe(1);
+    expect(capture.atLevel(50).some((l) => l['msg'] === 'backfill-join-housing-authority - FAILED: contacts table unavailable')).toBe(
+      true,
+    );
+    expect(errors).toEqual(['REFUSED - a test refusal']);
+    expect(stopped.destroyed()).toBe(1);
+  });
+});
+
+describe.skipIf(!reachable)('main against DynamoDB Local - the real run behind the CLI', () => {
+  afterEach(dropCreatedTables, 120_000);
+
+  /** The world's own tables on the shared client (the recorder's destroy() is a no-op, so the shared client survives). */
+  const stageOf = (w: World): StageClient => ({
+    doc: recordingClient(doc).doc,
+    env: w.env,
+    endpoint,
+    prefix: String(w.env['TABLE_PREFIX']),
+    accessKeyId: undefined,
+    describe: 'a test world',
+  });
+  const realRun =
+    (printed: string[]) =>
+    (stage: StageClient, opts: BackfillOptions): Promise<BackfillReport> =>
+      runJoinAuthorityBackfill(buildBackfillDeps(stage, { logger: silent, print: (line) => printed.push(line) }), opts);
+
+  it('a dry run of the seeded world exits 0 and prints the report - nothing written', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const printed: string[] = [];
+    const exit = await main(['--env', 'local', '--lane', '7', '--skip', 'c-skip'], {
+      resolveStage: async () => stageOf(w),
+      run: realRun(printed),
+      logger: silent,
+    });
+    expect(exit).toBe(0);
+    expect(printed[0]).toBe(
+      'DRY RUN - nothing written. Leads that WOULD get "Atlanta Housing Authority" (oldest sign-up first; dates are UTC):',
+    );
+    expect(printed).toContain('Would update: 3 lead(s). Failed: 0.');
+    expect(await w.backfillEvents()).toEqual([]);
+  }, 120_000);
+
+  it('an apply on an environment with no organization list exits 1 with the refusal printed - nothing read, nothing written', async () => {
+    const w = await newWorld(null);
+    await seedLeads(w);
+    const before = await w.scanTable('contacts');
+    const errors: string[] = [];
+    const printed: string[] = [];
+    const exit = await main(['--env', 'local', '--lane', '7', '--apply'], {
+      resolveStage: async () => stageOf(w),
+      run: realRun(printed),
+      printError: (text) => errors.push(text),
+      logger: silent,
+    });
+    expect(exit).toBe(1);
+    expect(errors).toEqual([NO_LIST_REFUSAL]);
+    expect(printed).toEqual([]);
+    expect(await w.scanTable('contacts')).toEqual(before);
+  }, 120_000);
+});
+
+describe('the entry point, in a child process', () => {
+  it('a usage error exits 2 with the usage text - no client is ever built', () => {
+    // `node --import tsx <script>`: the app/test/otel.test.ts precedent (a
+    // .bin/tsx.cmd shim is EINVAL under spawnSync on Windows). The arguments
+    // fail to parse before any target is resolved: no database, no network.
+    const child = spawnSync(process.execPath, ['--import', 'tsx', SCRIPT_PATH, '--env', 'dev', '--bogus'], {
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    const seen = JSON.stringify({ status: child.status, signal: child.signal, error: child.error?.message, stderr: child.stderr });
+    expect(child.status, seen).toBe(2);
+    expect(child.stderr, seen).toContain('Usage: npx tsx app/scripts/backfill-join-housing-authority.ts --env local|dev|prod');
+  }, 90_000);
 });

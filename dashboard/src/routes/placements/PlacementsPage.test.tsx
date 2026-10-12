@@ -183,7 +183,10 @@ describe('PlacementsPage', () => {
 // of lost / moved_in for a contact that is not a tenant is refused 409
 // contact_not_tenant; the board says why instead of its generic copy.
 describe('PlacementsPage - contact-type refusals (caseworker integrity)', () => {
-  it('a move refused as contact_not_tenant shows the contact-type sentence and rolls back', async () => {
+  // The reachable path (R1 code review, dashboard finding 9): the server
+  // checks the tenant only when a placement LEAVES lost / moved_in, and the
+  // Closed view offers the stage menu on those rows.
+  it('a Lost placement moved back to an open stage from the Closed view, refused as contact_not_tenant, shows the contact-type sentence and stays Lost', async () => {
     const user = userEvent.setup();
     transitionPlacement.mockRejectedValue(
       new ApiError(409, 'contact_not_tenant', 'contact_not_tenant', {
@@ -191,16 +194,19 @@ describe('PlacementsPage - contact-type refusals (caseworker integrity)', () => 
         contactKind: 'landlord',
       }),
     );
-    usePlacements.mockReturnValue(baseState([mk({ placementId: 'a', stage: 'collect_rta' })]));
-    renderPage();
+    usePlacements.mockReturnValue(baseState([mk({ placementId: 'a', stage: 'lost' })]));
+    renderPage('/placements?view=closed');
     await user.click(screen.getByRole('button', { name: 'Actions for Tasha Nguyen' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Review RTA' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Collect RTA' }));
+    await waitFor(() =>
+      expect(transitionPlacement).toHaveBeenCalledWith('a', { toStage: 'collect_rta', source: 'manual' }),
+    );
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent(
         'Tours and placements are for tenants. This contact is a landlord.',
       ),
     );
-    expect(screen.getByRole('link', { name: 'Tasha Nguyen - Collect RTA' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Tasha Nguyen - Lost' })).toBeInTheDocument();
   });
 
   it('(PIN) any other rejected move keeps the fixed copy', async () => {

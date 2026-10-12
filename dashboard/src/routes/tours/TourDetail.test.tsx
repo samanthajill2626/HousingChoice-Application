@@ -2348,7 +2348,12 @@ describe('TourDetail - contact-type refusals (caseworker integrity)', () => {
     });
   }
 
-  it('a status change refused as contact_not_tenant shows the sentence in the header alert', async () => {
+  // DEFENSIVE mapping (R1 code review, dashboard finding 9): runDirect serves
+  // Mark toured / Mark no-show on a SCHEDULED tour, and the server never
+  // refuses those - it checks the tenant only when a CANCELED tour is revived
+  // or a closed one reopened. This pins that runDirect's catch maps the code
+  // if it ever arrives, not a wire the server sends today.
+  it('(DEFENSIVE) a Mark toured refused as contact_not_tenant would show the sentence in the header alert', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
     patchTour.mockRejectedValue(notTenant('team_member'));
     renderDetail();

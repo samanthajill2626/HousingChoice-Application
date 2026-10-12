@@ -19,6 +19,8 @@ import type {
   ResolutionReplayPlan,
 } from '../src/repos/suggestionResolutionRepo.js';
 import { createOrgNamesService } from '../src/services/orgNames.js';
+import { DECISION_TARGETS } from '../src/services/extraction/runTypes.js';
+import { EXTRACTABLE_FIELDS } from '../src/services/extraction/schema.js';
 import {
   createSuggestionResolutionService,
   TENANT_ONLY_TARGETS,
@@ -244,6 +246,42 @@ describe('D1 change 2: a tenant-only accept on a contact not typed tenant is ref
     expect([...TENANT_ONLY_TARGETS].sort()).toEqual([
       'evictions', 'housingAuthority', 'pets', 'porting', 'status', 'tenure', 'voucherSize',
     ]);
+  });
+
+  // R1 code review, backend finding 7 - a drift guard. TENANT_ONLY_TARGETS is
+  // a literal list beside extraction's own tenant-fact rule, so a NEW
+  // extractable field must be classified on purpose: every target an accept
+  // can commit is tenant-only (refused on a non-tenant, fenced) or neutral,
+  // exactly once, and this fails until someone decides which.
+  // The neutral set, by name: spec 2026-10-12 section 1, I1 ("Neutral
+  // targets (firstName, lastName, phone, address) are not affected").
+  const NEUTRAL_TARGETS: ReadonlySet<string> = new Set(['firstName', 'lastName', 'phone', 'address']);
+  // Every target an accept can commit, derived from the live code: the
+  // extractable fields (extraction/schema.ts), status, and the rest of the
+  // run's decision targets (extraction/runTypes.ts) - minus `type`, which is
+  // never accepted (accept_type_via_triage).
+  const ACCEPTABLE_TARGETS: readonly string[] = [
+    ...new Set<string>([
+      ...EXTRACTABLE_FIELDS,
+      'status',
+      ...DECISION_TARGETS.filter((target) => target !== 'type'),
+    ]),
+  ];
+
+  it('classifies every target an accept can commit EXACTLY ONCE - tenant-only or neutral', () => {
+    const unclassified = ACCEPTABLE_TARGETS.filter(
+      (target) => !TENANT_ONLY_TARGETS.has(target) && !NEUTRAL_TARGETS.has(target),
+    );
+    const both = ACCEPTABLE_TARGETS.filter(
+      (target) => TENANT_ONLY_TARGETS.has(target) && NEUTRAL_TARGETS.has(target),
+    );
+    expect(unclassified).toEqual([]);
+    expect(both).toEqual([]);
+  });
+
+  it('classifies only targets an accept can commit', () => {
+    const acceptable = new Set(ACCEPTABLE_TARGETS);
+    expect([...TENANT_ONLY_TARGETS, ...NEUTRAL_TARGETS].filter((target) => !acceptable.has(target))).toEqual([]);
   });
 
   it.each([

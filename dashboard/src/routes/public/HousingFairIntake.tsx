@@ -3,11 +3,11 @@
 // the backend stamps capture_source:'housing_fair'), then shows a generic
 // thank-you. There is NO reveal here (no home to reveal). Tenant-facing copy.
 //
-// Housing authority (join-housing-authority spec D8). The page reads the
+// Housing authority (join-housing-authority spec D8, D9). The page reads the
 // public list (GET /public/housing-authorities) and hands IntakeForm a
 // "Housing authority" select as its extraField. This component owns the list
-// state, the chosen value and the housing_authority_not_listed recovery;
-// IntakeForm owns the person's fields.
+// state, the chosen value, the housing_authority_not_listed recovery and the
+// "Sign up another person" reset; IntakeForm owns the person's fields.
 // - Default: "Atlanta Housing Authority" when that exact name is listed, else
 //   "Not sure". "Not sure" sends no housingAuthority.
 // - While the list loads the select shows "Loading..." and send is blocked. A
@@ -18,6 +18,10 @@
 //   "Choose one" placeholder and block send until a choice is made.
 // - A 429 on the sign-up gets its own message; every other failure keeps
 //   IntakeForm's message.
+// - "Sign up another person": an empty form (IntakeForm remounts on a new
+//   key), the select kept on the previous choice, focus on First name. The
+//   list read lives HERE, not in the remounting form, so the list is read
+//   again only when the last read failed (then the default rule applies).
 // The read is aborted on unmount. React StrictMode (dev and every e2e lane)
 // runs the effect twice: each run owns its own AbortController and timer, and
 // a run that was cleaned up ignores whatever its request later returns, so the
@@ -74,6 +78,9 @@ export function HousingFairIntake(): React.JSX.Element {
   const [choice, setChoice] = useState<string>(NOT_SURE_VALUE);
   const [listRequest, setListRequest] = useState<ListRequest>({ seq: 0, mode: 'default' });
   const [sending, setSending] = useState(false);
+  // D9: bumped by "Sign up another person". It is the IntakeForm key, so the
+  // form remounts empty (names, phone, voucher blank; consent unchecked).
+  const [round, setRound] = useState(0);
 
   // On submit the form swaps to a thank-you with a new <h1>, but focus would stay
   // on the (removed) submit button - silent to screen readers. Move focus to the
@@ -138,6 +145,14 @@ export function HousingFairIntake(): React.JSX.Element {
     setDone(true);
   }
 
+  function signUpAnotherPerson(): void {
+    // D9: the select keeps the previous choice; the list is read again only
+    // when the last read failed (that read applies the default rule).
+    if (list.kind === 'failed') readListAgain('default');
+    setRound((r) => r + 1);
+    setDone(false);
+  }
+
   if (done) {
     return (
       <section className={styles.card}>
@@ -147,6 +162,9 @@ export function HousingFairIntake(): React.JSX.Element {
         <p className={styles.muted}>
           We&apos;ve got your info. A team member will text you about homes that fit your voucher.
         </p>
+        <button type="button" className={styles.cta} onClick={signUpAnotherPerson}>
+          Sign up another person
+        </button>
       </section>
     );
   }
@@ -160,6 +178,7 @@ export function HousingFairIntake(): React.JSX.Element {
         Sign up and we&apos;ll text you about homes that fit your voucher.
       </p>
       <IntakeForm
+        key={round}
         onSubmit={handleSubmit}
         submitLabel="Sign me up"
         extraField={
@@ -167,6 +186,7 @@ export function HousingFairIntake(): React.JSX.Element {
         }
         submitBlocked={submitBlocked}
         errorMessage={joinErrorMessage}
+        autoFocusFirstName={round > 0}
       />
     </section>
   );

@@ -61,6 +61,11 @@ export interface ContactSearchFieldProps {
    *  has already snapshotted. Defaults to false - every existing call site is
    *  unaffected. */
   disabled?: boolean;
+  /** A caller's muted note after an option's kind (Matching's "Add a tenant"
+   *  passes "Not interested" / "Already sent", spec 5.3). DISPLAY ONLY, like
+   *  the kind: a sibling node, never folded into the committed `value.name`
+   *  (the header rule above). Return undefined for no note. */
+  annotate?: (c: Contact) => string | undefined;
 }
 
 /** Filter candidates whose display name or primary phone contains the query
@@ -86,6 +91,7 @@ export function ContactSearchField({
   candidates,
   inputLabel = 'Contact search',
   disabled = false,
+  annotate,
 }: ContactSearchFieldProps): React.JSX.Element {
   // Fix 3: keyboard navigation state
   const [activeIndex, setActiveIndex] = useState<number>(-1);
@@ -283,6 +289,7 @@ export function ContactSearchField({
             const phone = c.phones?.find((p) => p.primary)?.phone ?? c.phone;
             const displayName = contactDisplayName(c.firstName, c.lastName, phone);
             const isActive = idx === activeIndex;
+            const note = annotate?.(c);
             return (
               <li
                 key={c.contactId}
@@ -309,6 +316,7 @@ export function ContactSearchField({
                 <span className={styles.optionKind}>
                   {displayKind(c, (t) => CONTACT_TYPE_LABEL[t])}
                 </span>
+                {note !== undefined ? <span className={styles.optionNote}>{note}</span> : null}
               </li>
             );
           })}

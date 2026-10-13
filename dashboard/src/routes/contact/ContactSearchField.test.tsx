@@ -111,6 +111,34 @@ describe('ContactSearchField', () => {
     expect(onChange).toHaveBeenCalledWith({ name: 'Alice Smith', contactId: 'c1' });
   });
 
+  it('renders an annotate note as a muted suffix after the kind (last-heard-from 5.3)', () => {
+    render(
+      <ContactSearchField
+        value={{ name: 'li' }}
+        onChange={vi.fn()}
+        candidates={CANDIDATES}
+        annotate={(c) => (c.contactId === 'c1' ? 'Already sent' : undefined)}
+      />,
+    );
+    // Alice Smith (tenant) carries the note; Charlie Brown does not.
+    expect(screen.getByRole('option', { name: /Alice Smith\s+Tenant\s+Already sent/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Charlie Brown/ })).not.toHaveTextContent('Already sent');
+  });
+
+  it('does NOT commit the annotate note into value.name when a candidate is picked', () => {
+    const onChange = vi.fn();
+    render(
+      <ContactSearchField
+        value={{ name: 'Ali' }}
+        onChange={onChange}
+        candidates={CANDIDATES}
+        annotate={() => 'Not interested'}
+      />,
+    );
+    fireEvent.click(screen.getByRole('option', { name: /Alice Smith/i }));
+    expect(onChange).toHaveBeenCalledWith({ name: 'Alice Smith', contactId: 'c1' });
+  });
+
   it('a selected value renders the input read-only (typing cannot break the link)', () => {
     render(
       <ContactSearchField

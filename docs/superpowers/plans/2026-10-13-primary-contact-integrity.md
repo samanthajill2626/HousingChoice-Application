@@ -1,6 +1,6 @@
 # Primary contact integrity - implementation plan
 
-Status: v1 ASSEMBLED 2026-10-13 (sections 0-3 binding; slices S1-S5 from five section drafts; contract issues ruled in 3.2). Plan review pending.
+Status: v2 2026-10-13 (sections 0-3 binding; slices S1-S5 from five section drafts; contract issues ruled in 3.2; plan review round 1 folded in - see plan-review/adjudications.md).
 Spec: `docs/superpowers/specs/2026-10-12-primary-contact-integrity-design.md`
 (rev 6, approved and reconciled by Cameron 2026-10-13). Section references
 below like "spec 4.4" point there.
@@ -25,10 +25,24 @@ Worktree: `W:\tmp\primary-contact-integrity`, branch
 - Slice gates (end of each slice): `npm run typecheck` and the touched
   workspaces' tests. The FULL completion gates (AGENTS.md: typecheck, test,
   smoke, e2e, eslint on touched files) run at the end of S5 only.
-- Mid-build breakage stated aloud: none expected - every slice leaves `main`'s
-  behavior intact for paths it has not reached yet (S1 moves readers onto the
-  new lookup with identical results except the stated deleted-contact
-  change; S2 changes write paths; S3/S4 add fields and UI).
+- Mid-build breakage stated aloud (plan review R1 P2). Two short windows
+  INSIDE S2 leave the real API wrong between two consecutive tasks, by
+  construction (each repo task lands before the route task that wires it):
+  after S2.5 and before S2.6, removing a PRIMARY row through the real route
+  answers 500 (the repo needs `readContacts`, which the route passes only from
+  S2.6); after S2.7 and before S2.8, a landlord SWAP whose old landlord was
+  primary answers 500 the same way. The FakeWorld route tests do not see
+  either window. Never run e2e or a live session inside S2; every other slice
+  boundary leaves `main`'s behavior intact for paths not reached yet.
+- DynamoDB Local: `app/test/globalSetup.ts` PROBES it on EVERY vitest run in
+  the app workspace and throws when it is unreachable - even for test files
+  that use only in-memory fakes. Start it with
+  `cd W:/tmp/primary-contact-integrity && npm run db:start` (never RESTART a
+  shared container without Cameron's go). If it cannot be started, a
+  fake-only file may run with the prefix `ALLOW_SKIP_DYNAMO_TESTS=1` - a
+  deliberate unit-only pass, never a gate. Where a task below says "no
+  DynamoDB Local is needed", read it as "no tables are used; the probe still
+  needs the container or the prefix" (plan review R1 P4).
 - ASCII only in every new or touched line of code, comments, test names and
   docs. Edit source with the Edit tool, never a PowerShell rewrite.
 
@@ -277,6 +291,16 @@ Ordering traps:
   restore routes) and S3 (`enrichRoster`, GET, Activity projection). Each
   slice edits ONLY its regions; anchors are function names, not line numbers.
 - S4 needs S2's error codes and S3's payload shapes; S5's e2e needs all four.
+- Watch item (plan review R1 P3): the contact-DELETE hand-off runs one
+  strongly consistent units Scan per delete. `e2e/tests/dashboard-next/roster-paging.spec.ts`
+  deletes 60 contacts in one `Promise.all`, so gate 4 issues 60 concurrent
+  Scans against the lane's (small, per-lane) units table. Expected cheap; if
+  that spec slows or times out at gate 4, measure before blaming anything
+  else and report it - do not tune it away silently.
+- Restore paths decide "was the old landlord the primary?" from the FLAG only
+  (plan review R1 P1): Task S2.7 (real repo), Task S2.8 (`clearedLandlordHeir`
+  and the API-test fake) never read `primary_contact`; with no hand-off they
+  re-align it to the stored flag.
 
 ### 3.1 Surface -> task matrix (the invariant sweep; every row needs a task)
 
@@ -448,8 +472,10 @@ Preconditions (once, before Task S1.1):
   must succeed. If it fails with "No such file or directory", run
   `cd W:/tmp/primary-contact-integrity && npm ci` once.
 - Every test file S1 creates or edits is PURE or in-memory (fake repos, the
-  FakeWorld harness) - no DynamoDB Local is needed for Tasks S1.1-S1.7. Only
-  the slice gate's whole-workspace run (Task S1.8 step 3) needs it.
+  FakeWorld harness) - no DynamoDB Local TABLES are used for Tasks S1.1-S1.7.
+  The vitest globalSetup still PROBES the container on every run (section 0):
+  start it, or prefix these fake-only runs with `ALLOW_SKIP_DYNAMO_TESTS=1`.
+  The slice gate's whole-workspace run (Task S1.8 step 3) needs it running.
 
 Files S1 creates:
 
@@ -3670,7 +3696,10 @@ explicit `cd`. ASCII only in every new or touched line.
     pins the single complete batch read. Flagged so the planner knows a
     caseworker-integrity pin is deliberately relaxed; a later
     `ConsistentRead` option on `getManyByIds` would restore it.
-11. **S1 assumptions this slice relies on** (from contract 2.1): after S1,
+11. **[SUPERSEDED by ruling R2 - S1 imports it under the ALIAS
+    `autoRoutingEligible`; Task S2.4 step (c) and Task S2.8 step 3 (a) below
+    already carry the corrected import edits. Do not act on this item's import
+    text.]** **S1 assumptions this slice relies on** (from contract 2.1): after S1,
     `app/src/routes/units.ts` imports `isAutoRoutingEligible` BY THAT NAME
     from `'../lib/propertyContact.js'` (tasks S2.4/S2.8 extend that import
     line; if S1 aliased it, adapt the one import line and keep the call
@@ -7937,8 +7966,12 @@ ConditionalCheckFailedException separately. */`). Replacement:
         const keepsOld = next !== null && next.contactId === old;
         const roster = unitContacts(unit).map((c) => ({ ...c }));
         const oldRow = old !== undefined && !keepsOld ? roster.find((c) => c.contactId === old) : undefined;
-        const oldWasPrimary =
-          old !== undefined && !keepsOld && (oldRow?.primaryContact === true || unit.primary_contact === old);
+        // The FLAG is the truth (primary-contact-integrity spec 3 / 4.7; plan
+        // review R1 P1): the `primary_contact` scalar is never read to decide
+        // who is primary. caseworker-integrity's "or the scalar names them" is
+        // dropped - a stale scalar must not hand the primary away from a live
+        // flagged contact. The scalar is re-aligned below instead.
+        const oldWasPrimary = old !== undefined && !keepsOld && oldRow?.primaryContact === true;
         const nextRoster: UnitContact[] =
           old !== undefined && !keepsOld ? roster.filter((c) => c.contactId !== old) : roster;
         if (next !== null) {
@@ -8007,6 +8040,13 @@ ConditionalCheckFailedException separately. */`). Replacement:
             patch['primary_contact'] = applied.primaryContactScalar;
             heirId = promoted?.contactId;
           }
+        } else {
+          // No hand-off: keep the scalar consistent with the FLAG this write
+          // stores (spec 4.7) without ever reading the old scalar - the row
+          // marked primary, or REMOVE when none is (never left dangling at the
+          // removed landlord's row).
+          const flagged = nextRoster.find((c) => c.primaryContact === true);
+          patch['primary_contact'] = flagged !== undefined ? flagged.contactId : null;
         }
         let updated: UnitItem;
         try {
@@ -8461,6 +8501,34 @@ new_string:
       primaryPromoted: { to: 'c-pm' },
     });
   });
+
+  // plan review R1 P1 (spec 3 / 4.7): the FLAG is the truth. A stale
+  // primary_contact naming the cleared landlord must not hand the primary away
+  // from a live flagged contact; the restore re-aligns the scalar to the flag.
+  it('a stale primary_contact naming the cleared landlord does NOT move the primary off a live flagged contact; the scalar is re-aligned to it', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-p8', {
+      primary_contact: 'c-old',
+      contacts: [
+        { contactId: 'c-old', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+        { contactId: 'c-owner', role: 'owner', primaryContact: false },
+      ],
+    });
+    seedContact(world, 'c-old', { type: 'tenant' });
+    seedContact(world, 'c-pm', { type: 'landlord' });
+    seedContact(world, 'c-owner', { type: 'landlord' });
+
+    const res = await restore(app, 'u-p8', { landlordId: null });
+
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-p8')?.contacts).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      { contactId: 'c-owner', role: 'owner', primaryContact: false },
+    ]);
+    expect(world.units.get('u-p8')?.primary_contact).toBe('c-pm');
+    expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('primaryPromoted');
+  });
 ```
 
 Edit 3 - the consistent-read PIN becomes the one-batch-read PIN. old_string:
@@ -8574,7 +8642,10 @@ Expected failures: in the new file, the earliest-eligible case (the old
 promotion needs exactly one eligible row - two here), all four `liveness
 unknown` cases (200 instead of 503), the soft-deleted-new-landlord swap cases
 (c-new flagged), and every `assigned(...)` expectation; in the edited file,
-`two remaining contacts typed landlord: the EARLIEST-added...`, the one-batch
+`two remaining contacts typed landlord: the EARLIEST-added...`, `a stale
+primary_contact naming the cleared landlord does NOT move the primary...`
+(today the scalar alone counts the cleared landlord as primary, so the two
+eligible rows promote nobody and c-pm's flag is cleared), the one-batch
 PIN (`getManyByIds` never called with requireComplete) and the read-race test
 (`added` stays false, so the restore succeeds instead of 409).
 
@@ -8642,8 +8713,9 @@ marker lines. Replacement:
     // when no list is stored).
     const rows = unitContacts({ contacts: listRead, landlordId: clearedLandlordId });
     const clearedRow = rows.find((row) => row.contactId === clearedLandlordId);
-    const clearedWasPrimary =
-      clearedRow?.primaryContact === true || unit.primary_contact === clearedLandlordId;
+    // The FLAG is the truth (spec 3 / 4.7; plan review R1 P1): the scalar is
+    // never read to decide who is primary.
+    const clearedWasPrimary = clearedRow?.primaryContact === true;
     if (!clearedWasPrimary) return { kind: 'decided', promote: null };
     const read = await readRosterContacts(
       contacts,
@@ -8824,8 +8896,9 @@ the `unitsRepo` object). Replacement:
       const keepsOld = next !== null && next.contactId === old;
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const oldRow = old !== undefined && !keepsOld ? roster.find((c) => c.contactId === old) : undefined;
-      const oldWasPrimary =
-        old !== undefined && !keepsOld && (oldRow?.primaryContact === true || unit.primary_contact === old);
+      // The FLAG is the truth (spec 3 / 4.7; plan review R1 P1) - mirrors the
+      // real repo exactly; the scalar is re-aligned, never read.
+      const oldWasPrimary = old !== undefined && !keepsOld && oldRow?.primaryContact === true;
       let nextRoster: UnitContact[] =
         old !== undefined && !keepsOld ? roster.filter((c) => c.contactId !== old) : roster;
       if (next !== null) {
@@ -8875,6 +8948,11 @@ the `unitsRepo` object). Replacement:
           scalar = applied.primaryContactScalar;
           heirId = promoted?.contactId;
         }
+      } else {
+        // No hand-off: align the scalar with the stored FLAG, never reading
+        // the old scalar (mirrors the real repo).
+        const flagged = nextRoster.find((c) => c.primaryContact === true);
+        scalar = flagged !== undefined ? flagged.contactId : null;
       }
       unit.contacts = nextRoster;
       if (scalar === null) delete unit.primary_contact; // null -> REMOVE; never dangling
@@ -13698,6 +13776,22 @@ from the worktree root if needed) - none of these files writes to it:
 
 Expected: `Test Files  20 passed (20)`, `0 failed`.
 
+(2b) The WHOLE app workspace (plan review R1 P5 - the subset above is the fast
+look; this is the slice gate section 0 promises). DynamoDB Local must be
+running. Check for exported AWS keys first (AGENTS.md: an exported
+`AWS_ACCESS_KEY_ID` collapses every test file onto one database):
+
+`env | grep '^AWS_' || echo no-aws-env`
+
+then, bare (never piped), with any such keys unset:
+
+`cd W:/tmp/primary-contact-integrity && env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY npm test -w @housingchoice/app`
+
+Expected: exit 0, `Test Files  N passed (N)` with 0 failed. A red DynamoDB
+Local suite: re-run that FILE alone twice and compare with the same file at
+the merge base before calling it ours (AGENTS.md re-run-and-compare); any
+`[dynamoAdmin]` line is a real container fault - record it.
+
 (3) Lint the files this slice touched (a cheap early look at gate 5; the
 full gate runs in S5):
 
@@ -17148,6 +17242,21 @@ Steps:
    `cd W:/tmp/primary-contact-integrity/dashboard && npx vitest run`
    Expected: every test file passes, `0 failed`.
 
+2b. Lint the dashboard files this slice touched (plan review R1 P5 - S4's
+   edits sit in files that carry PRE-EXISTING `react-hooks/*` errors, so an
+   early look matters; the full gate 5 runs in S5). List them:
+   `cd W:/tmp/primary-contact-integrity && git diff --name-only --diff-filter=d f204106f..HEAD -- 'dashboard/*.ts' 'dashboard/*.tsx'`
+   then lint exactly that list, bare:
+   `cd W:/tmp/primary-contact-integrity && npx eslint $(git diff --name-only --diff-filter=d f204106f..HEAD -- 'dashboard/*.ts' 'dashboard/*.tsx')`
+   Expected: exit 0, or errors that ALL pre-date this branch. Attribute by
+   BASELINE, never by line number: for each file with an error, lint its
+   pre-branch version and compare the two outputs, e.g.
+   `cd W:/tmp/primary-contact-integrity && git show f204106f:dashboard/src/routes/listing/ListingDetail.tsx | npx eslint --stdin --stdin-filename dashboard/src/routes/listing/ListingDetail.tsx`
+   An error (rule + message) present now and absent at f204106f is this
+   slice's and BLOCKS - fix it in the owning task's file and commit. Name the
+   pre-existing ones in the slice report. (A NEW file has no baseline: any
+   error in it is this slice's.)
+
 3. ASCII check of this slice's dashboard diff (dashboard is touched only by
    S4; f204106f is the plan-skeleton commit before S1):
    `cd W:/tmp/primary-contact-integrity && git diff -U0 f204106f..HEAD -- dashboard/src | grep -nP '^\+(?!\+\+).*[^\x00-\x7F]'`
@@ -17248,7 +17357,8 @@ only in every line you add.
    `name` / `company` (the unit GET's `enrichRoster` is authoritative at read
    time). Path unchanged.
 
-3. **Gate 4's cap.** As instructed, the e2e gate runs under `timeout 1500`
+3. **[SUPERSEDED by ruling R24 - gate 4 runs under `timeout 2700`; Task S5.12
+   below already says so.]** **Gate 4's cap.** As instructed, the e2e gate runs under `timeout 1500`
    (also `documentation/FEATURE-DEVELOPMENT-WORKFLOW.md` 3.5). `e2e/README.md`
    records full-suite wall times of 33-43 minutes in the Linux cloud
    container, where missions use `timeout 2700`. If this machine's full suite

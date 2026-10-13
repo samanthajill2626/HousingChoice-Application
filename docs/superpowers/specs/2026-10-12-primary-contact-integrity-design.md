@@ -362,9 +362,14 @@ Paths (all through the heir function, 4.3):
   primary sets the scalar to it or REMOVEs it; a legacy scalar that disagrees
   with a live flagged primary is aligned by the script (section 8). Nothing
   reads the scalar at runtime.
-- After a remove, a landlord-clearing restore, or a landlord swap, a unit with
-  a live landlord of record or at least one ELIGIBLE live roster contact has a
-  live primary - unless liveness was unknown (they refuse).
+- After removing the PRIMARY row, a landlord-clearing restore of a PRIMARY
+  landlord, or a swap of a PRIMARY landlord, a unit with a live landlord of
+  record or at least one ELIGIBLE live roster contact has a live primary -
+  unless liveness was unknown (they refuse). A write that does not touch the
+  primary (removing another row, a swap of a non-primary landlord) does not
+  run a hand-off: a deleted contact still flagged there (left by a delete with
+  no heir at the time) stays flagged until the next eligible write (4.4) or
+  the script (section 8); P1 skips it meanwhile and the property box shows it.
 - After a roster write for an eligible contact X on a unit with no live primary
   and no live landlord of record, X is the primary. A write for a NON-eligible
   contact (a tenant, a partner) promotes nobody, by design: such a property
@@ -725,8 +730,15 @@ property contact:
   `useTour.ts:94-98`, `PlacementDetail.tsx:185-237,287-296`,
   `PlacementNowCard.tsx:114-118`).
 
-The `primary_contact` scalar has NO runtime reader (only writes, comments and
-a dashboard type, `types.ts:2506`). Comments that claim a masked call dials it
+The `primary_contact` scalar has NO runtime reader after this change (only
+writes, comments and a dashboard type, `types.ts:2506`). `main` (from
+caseworker-integrity) had two, both in the restore path - "the cleared
+landlord was the primary when its row is flagged OR the scalar names it"
+(`routes/units.ts` `soleLandlordToPromote`, `repos/unitsRepo.ts`
+`restoreWithLandlord`). Both are dropped (plan review R1): the FLAG decides,
+and a restore that runs no hand-off re-aligns the scalar to the flag instead
+of reading it, so a stale scalar can never hand the primary away from a live
+flagged contact. Comments that claim a masked call dials it
 or routes to the primary are corrected in the same change:
 `unitsRepo.ts:63,248,402,815-820`, `conversationsRepo.ts:207`,
 `routes/units.ts:1055-1056`, `ListingDetail.tsx:359,455`,

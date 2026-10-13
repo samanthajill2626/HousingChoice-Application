@@ -3,9 +3,10 @@ id: contact-search-popover-below-viewport
 title: Contact search options can be placed entirely below the viewport and cannot be clicked
 type: bug
 severity: med
-status: open
+status: resolved
 area: dashboard/contacts
 created: 2026-10-08
+resolved: 2026-10-13
 refs: dashboard/src/routes/contact/ContactSearchField.tsx:128, dashboard/src/routes/contact/ContactSearchField.module.css:64, e2e/tests/dashboard-next/matching-entry-points.spec.ts:228, docs/superpowers/reviews/2026-10-07-caseworkers/S10-recipient-picker-baseline.md
 ---
 
@@ -49,3 +50,12 @@ signature at `matching-entry-points.spec.ts:228` on both feature HEAD 51a4868c
 and the final merge base d8749158 (Linux, Chromium 141 substituted; see
 `docs/superpowers/reviews/2026-10-07-caseworkers/planner-final-review.md`
 section 5). Still pre-existing; no fix applied.
+
+**Resolution (2026-10-13, feat/last-heard-from).** The
+caseworkers review's proposed fix,
+`docs/superpowers/reviews/2026-10-07-caseworkers/C6-proposed-fix.patch`, was
+applied verbatim in commit 3509ad35: the list opens ABOVE its input when the
+room below is short and is constrained to the viewport space available. The
+populated Matching hand-pick case (`matching-entry-points.spec.ts`) passes
+with ordinary pointer clicks; that re-proof counts only in the full
+`npm run e2e` gate run, recorded in the mission handback.

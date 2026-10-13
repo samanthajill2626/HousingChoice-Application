@@ -4,13 +4,39 @@ import { describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/lib/config.js';
 import { createDevRouter } from '../src/routes/dev.js';
 
-function rig() {
+// Injected fakes (last heard from, spec 5.1 / 14.2): the fixture touches
+// through the live rule, so the rig records touches and appends - and every
+// case stays off the default DynamoDB client.
+function rig(threads: Record<string, Record<string, unknown>> = {}) {
   const puts: Record<string, unknown>[] = [];
+  const touches: { contactId: string; at: string }[] = [];
+  const appends: Record<string, unknown>[] = [];
   const doc = {
     send: async (command: { input?: { Item?: Record<string, unknown> } }) => {
       if (command.input?.Item !== undefined) puts.push(command.input.Item);
       return {};
     },
+  };
+  const heardFromRepos = {
+    contactsRepo: {
+      findByPhone: async () => undefined,
+      findByEmail: async () => undefined,
+      touchLastHeardFrom: async (contactId: string, at: string) => {
+        touches.push({ contactId, at });
+        return 'written' as const;
+      },
+    },
+    conversationsRepo: { getById: async (id: string) => threads[id] as never },
+  };
+  const voiceFixtureRepos = {
+    messages: {
+      append: async (m: { conversationId: string; providerTs: string; providerSid: string }) => {
+        appends.push(m);
+        return { deduped: false, tsMsgId: `${m.providerTs}#${m.providerSid}`, conversationId: m.conversationId };
+      },
+      setCallTranscript: async () => undefined,
+    },
+    extraction: { scheduleExtraction: async () => undefined },
   };
   const config = loadConfig({
     NODE_ENV: 'test',
@@ -19,9 +45,13 @@ function rig() {
     CF_ORIGIN_SECRET: 'test-origin-secret',
   });
   const app = express();
-  app.use(createDevRouter({ config, doc: doc as never }));
-  return { app, puts };
+  app.use(createDevRouter({ config, doc: doc as never, heardFromRepos, voiceFixtureRepos: voiceFixtureRepos as never }));
+  return { app, puts, touches, appends };
 }
+
+const TENANT_THREAD = {
+  'conversation-fixture': { type: 'tenant_1to1', participants: [{ contactId: 'c-t', phone: '+15550100001' }] },
+};
 
 const base = {
   conversationId: 'conversation-fixture',
@@ -68,5 +98,51 @@ describe('dev message transport fixture', () => {
     const response = await request(app).post('/__dev/extraction/message-fixture').send({ ...base, ...invalid });
     expect(response.status).toBe(400);
     expect(puts).toHaveLength(0);
+  });
+});
+
+describe('dev message fixture - last heard from (spec 5.1 / 14.2)', () => {
+  it('direct-Put branch, inbound: touches the thread participant at the planted instant', async () => {
+    const { app, touches } = rig(TENANT_THREAD);
+    const response = await request(app).post('/__dev/extraction/message-fixture').send(base);
+    expect(response.status).toBe(200);
+    expect(touches).toEqual([{ contactId: 'c-t', at: '2026-08-01T00:00:00.000Z' }]);
+  });
+
+  it('direct-Put branch, outbound: touches nobody', async () => {
+    const { app, touches } = rig(TENANT_THREAD);
+    const response = await request(app)
+      .post('/__dev/extraction/message-fixture')
+      .send({ ...base, direction: 'outbound', transport: { mode: 'versioned', requested: 'sms' } });
+    expect(response.status).toBe(200);
+    expect(touches).toEqual([]);
+  });
+
+  it('append branch: touches the thread participant', async () => {
+    const { app, touches, appends } = rig(TENANT_THREAD);
+    const response = await request(app)
+      .post('/__dev/extraction/message-fixture')
+      .send({ ...base, providerSid: 'SM' + 'a'.repeat(32) });
+    expect(response.status).toBe(200);
+    expect(appends).toHaveLength(1);
+    expect(touches).toEqual([{ contactId: 'c-t', at: '2026-08-01T00:00:00.000Z' }]);
+  });
+
+  it('a relay sender key on a relay thread names that member', async () => {
+    const { app, touches } = rig({
+      'conversation-fixture': { type: 'relay_group', participants: [{ contactId: 'c-r', phone: '+15550100002' }] },
+    });
+    const response = await request(app)
+      .post('/__dev/extraction/message-fixture')
+      .send({ ...base, relaySenderKey: 'c-r' });
+    expect(response.status).toBe(200);
+    expect(touches).toEqual([{ contactId: 'c-r', at: '2026-08-01T00:00:00.000Z' }]);
+  });
+
+  it('an unknown conversation answers 200 and touches nobody', async () => {
+    const { app, touches } = rig();
+    const response = await request(app).post('/__dev/extraction/message-fixture').send(base);
+    expect(response.status).toBe(200);
+    expect(touches).toEqual([]);
   });
 });

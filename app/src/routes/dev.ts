@@ -39,8 +39,10 @@ import { createTourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createToursRepo } from '../repos/toursRepo.js';
 import {
   createMessagesRepo,
+  splitTsMsgId,
   type DeliveryStatus,
   type MessageItem,
+  type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
 import { createSettingsRepo } from '../repos/settingsRepo.js';
@@ -64,7 +66,8 @@ import { createActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createPoolNumbersService } from '../services/poolNumbers.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import { RELAY_INTRO_JOB } from '../jobs/relayFanOut.js';
-import { createExtractionRepo } from '../repos/extractionRepo.js';
+import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
+import { attributeInbound, repoLookup, type HeardFromRow } from '../lib/heardFrom.js';
 import { createAiRunsRepo } from '../repos/aiRunsRepo.js';
 import { createAuditRepo } from '../repos/auditRepo.js';
 import { createExtractionDriver } from '../adapters/extraction.js';
@@ -142,6 +145,18 @@ export interface DevRouterDeps {
   /** Repos for POST /__dev/org-fixture - injected in tests (the world fakes);
    *  default to the real contacts and units repos. */
   orgFixtureRepos?: { contactsRepo: ContactsRepo; unitsRepo: UnitsRepo };
+  /** Repos for the last-heard-from touch in the two inbound fixture seams
+   *  (spec 5.1 / 14.2) - injected in tests; default to the real repos. */
+  heardFromRepos?: {
+    contactsRepo: Pick<ContactsRepo, 'findByPhone' | 'findByEmail' | 'touchLastHeardFrom'>;
+    conversationsRepo: Pick<ConversationsRepo, 'getById'>;
+  };
+  /** Repos for the transcript and message fixture APPENDS - injected in tests;
+   *  default to the real messages and extraction repos. */
+  voiceFixtureRepos?: {
+    messages: Pick<MessagesRepo, 'append' | 'setCallTranscript'>;
+    extraction: Pick<ExtractionRepo, 'scheduleExtraction'>;
+  };
 }
 
 export function isLoopbackRemoteAddress(remoteAddress: string | null): boolean {
@@ -781,15 +796,44 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   //   (the dev router only mounts behind lib/devRoutes.ts, structurally absent in
   //   every deployed env); json() is scoped to this route. PII: ids/counts/callSid
   //   ONLY - NEVER the sentence text.
-  let voiceFixtureRepos:
-    | { messages: ReturnType<typeof createMessagesRepo>; extraction: ReturnType<typeof createExtractionRepo> }
-    | undefined;
-  const transcriptFixtureRepos = () => {
+  let voiceFixtureRepos: NonNullable<DevRouterDeps['voiceFixtureRepos']> | undefined = deps.voiceFixtureRepos;
+  const transcriptFixtureRepos = (): NonNullable<DevRouterDeps['voiceFixtureRepos']> => {
     voiceFixtureRepos ??= {
       messages: createMessagesRepo({ logger: log }),
       extraction: createExtractionRepo({ logger: log }),
     };
     return voiceFixtureRepos;
+  };
+  // Last heard from for the two inbound fixture seams (spec 5.1 / 14.2): the
+  // same rule and the same writer as the live paths. Best-effort, like them:
+  // a failure is logged and the fixture still answers its normal response.
+  let heardFromRepos = deps.heardFromRepos;
+  const heardFromDeps = (): NonNullable<DevRouterDeps['heardFromRepos']> => {
+    heardFromRepos ??= {
+      contactsRepo: createContactsRepo({ logger: log }),
+      conversationsRepo: createConversationsRepo({ logger: log }),
+    };
+    return heardFromRepos;
+  };
+  const touchFixtureHeardFrom = async (
+    row: HeardFromRow,
+    persisted: { conversationId: string; tsMsgId: string },
+  ): Promise<void> => {
+    try {
+      const { contactsRepo, conversationsRepo } = heardFromDeps();
+      const thread = await conversationsRepo.getById(persisted.conversationId);
+      const heardFromId = thread === undefined ? undefined : await attributeInbound(row, thread, repoLookup(contactsRepo));
+      if (heardFromId === undefined) return;
+      const outcome = await contactsRepo.touchLastHeardFrom(heardFromId, splitTsMsgId(persisted.tsMsgId).providerTs);
+      if (outcome === 'failed') {
+        log.error({ conversationId: persisted.conversationId }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+      }
+    } catch (err) {
+      log.error(
+        { err, conversationId: persisted.conversationId },
+        'last_heard_from touch failed - message persisted, last_heard_from stale',
+      );
+    }
   };
   router.post('/__dev/voice/transcript-fixture', json(), async (req, res) => {
     const body = (req.body ?? {}) as {
@@ -848,7 +892,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     //    author 'unknown': the real founder-bridge append uses authorForContact(),
     //    whose fallback is 'unknown' ('contact' is NOT a MessageAuthor); the call's
     //    speaker attribution rides the transcript prefixes, not this cosmetic field.
-    await messages.append({
+    const appended = await messages.append({
       conversationId,
       providerSid: callSid,
       providerTs: nowIso,
@@ -861,6 +905,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       masked: false,
       ...(roles !== undefined && { transcriptChannelRoles: roles }),
     });
+    await touchFixtureHeardFrom({ direction, type: 'call' }, appended);
     // 2) Join sentences into the stored verbatim transcript (T1 role-aware join).
     const text = joinViSentences(sentences, roles);
     // 3) Stamp transcript + transcript_status='completed' atomically.
@@ -1084,6 +1129,14 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
           ),
         }),
       });
+      await touchFixtureHeardFrom(
+        {
+          direction,
+          type: 'sms',
+          ...(reqBody.relaySenderKey !== undefined && { relay_sender_key: reqBody.relaySenderKey }),
+        },
+        appended,
+      );
       log.info(
         { conversationId, tsMsgId: appended.tsMsgId, direction, createdAt, callbackAddressable: true },
         'dev extraction message-fixture planted',
@@ -1113,6 +1166,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       created_at: createdAt,
     }, declaration) as MessageItem;
     await doc.send(new PutCommand({ TableName: tableName('messages'), Item: item }));
+    await touchFixtureHeardFrom(item, item);
     log.info(
       { conversationId, tsMsgId: item.tsMsgId, direction, createdAt },
       'dev extraction message-fixture planted',

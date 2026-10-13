@@ -235,7 +235,7 @@ export interface LeftOutLead extends BackfillLead {
   reason: LeftOutReason;
   /** `pending_suggestion` only: the pending suggestion's value as stored (the report prints it escaped like a name). */
   suggestedValue?: string;
-  /** --apply, `skipped` only: its housing_authority_backfill_excluded event could not be appended - counted in `failed`. */
+  /** --apply, `skipped` only: appending its housing_authority_backfill_excluded event failed (it may have landed all the same) - counted in `failed`. */
   exclusionFailed?: true;
 }
 
@@ -255,7 +255,7 @@ export interface BackfillReport {
   /**
    * Leads that FAILED: a target whose history read failed (nothing written)
    * or whose write failed (it may or may not have landed), and - apply - a
-   * --skip lead whose exclusion could not be recorded.
+   * --skip lead whose exclusion append failed (it may not have been recorded).
    */
   failed: number;
   /** Printed as WARNING lines: the post-apply list check, a missing audit event. */
@@ -284,8 +284,9 @@ const OUTCOME_SUFFIX: Readonly<Record<TargetOutcome, string>> = {
     '  - FAILED: the write may or may not have landed (an ERROR line names this contactId) - re-run the dry run to see',
 };
 
+/** An append can land and then error (a timeout), so a failed one MAY not have been recorded - never "could not". */
 const EXCLUSION_FAILED_SUFFIX =
-  ' - FAILED: its exclusion could not be recorded (an ERROR line names this contactId) - keep it in --skip and re-run the apply';
+  ' - FAILED: its exclusion may not have been recorded (an ERROR line names this contactId) - keep it in --skip and re-run the apply';
 
 /** "2026-06-20" from an ISO stamp (UTC); "unknown" when there is none. */
 function signUpDate(signedUpAt: string): string {
@@ -666,8 +667,9 @@ async function writeOne(deps: BackfillDeps, contactId: string, report: BackfillR
  * candidate out with --skip - ONE housing_authority_backfill_excluded event
  * { field }, no actor - so a later run without the same --skip leaves it out
  * too. False when the append failed: the caller counts the lead failed (an
- * unrecorded exclusion is exactly what a later run would overwrite). Never
- * throws.
+ * unrecorded exclusion is exactly what a later run would overwrite). An
+ * append can land and then error (a timeout), so a failed one MAY not have
+ * been recorded - the lines say so, never "could not". Never throws.
  */
 async function recordExclusion(deps: BackfillDeps, contactId: string): Promise<boolean> {
   try {
@@ -675,7 +677,7 @@ async function recordExclusion(deps: BackfillDeps, contactId: string): Promise<b
   } catch (err) {
     deps.logger.error(
       { err, contactId },
-      `${SCRIPT_NAME} - the exclusion could NOT be recorded (named in --skip; its housing authority was not written) - keep it in --skip and re-run the apply`,
+      `${SCRIPT_NAME} - the exclusion append FAILED; it may not have been recorded (named in --skip; its housing authority was not written) - keep it in --skip and re-run the apply`,
     );
     return false;
   }

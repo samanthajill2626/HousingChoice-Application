@@ -348,7 +348,7 @@ describe('formatBackfillReport (spec D10: name, sign-up date, status, contactId 
     expect(lines).toContain('Would update: 1 lead(s). Failed: 1.');
   });
 
-  it('apply: a lead named in --skip whose exclusion could not be recorded is a FAILED left-out line', () => {
+  it('apply: a lead named in --skip whose exclusion append failed is a FAILED left-out line - it MAY not have been recorded', () => {
     const lines = formatBackfillReport(
       {
         ...DRY_REPORT,
@@ -369,7 +369,7 @@ describe('formatBackfillReport (spec D10: name, sign-up date, status, contactId 
       '  (none)',
       'Written: 0. Skipped (changed after the read): 0. Failed: 1.',
       'Left out (1 lead(s), oldest sign-up first):',
-      '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-3  - named in --skip - FAILED: its exclusion could not be recorded (an ERROR line names this contactId) - keep it in --skip and re-run the apply',
+      '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-3  - named in --skip - FAILED: its exclusion may not have been recorded (an ERROR line names this contactId) - keep it in --skip and re-run the apply',
     ]);
   });
 
@@ -1016,6 +1016,11 @@ const REREAD_WARNING =
   'Authority" is still on it - check Settings > Housing authorities & agencies > "Not on the list".';
 const AUDIT_WARNING = (contactId: string): string =>
   `the housing_authority_backfill audit event for contactId ${contactId} could not be written (its housing authority was set).`;
+/** The left-out line of c-skip when its exclusion append failed - it may have landed all the same (code review F4). */
+const SKIP_EXCLUSION_FAILED_LINE =
+  '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-skip  - named in --skip - FAILED: its exclusion may not have been recorded (an ERROR line names this contactId) - keep it in --skip and re-run the apply';
+const EXCLUSION_FAILED_LOG =
+  'backfill-join-housing-authority - the exclusion append FAILED; it may not have been recorded (named in --skip; its housing authority was not written) - keep it in --skip and re-run the apply';
 
 /**
  * The world the run tests share. Targets: c-old, c-mid, c-new. Left out:
@@ -1261,19 +1266,43 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
     expect(report).toMatchObject({ written: 3, skipped: 0, failed: 1, warnings: [] });
     expect(report.leftOut[0]).toEqual({ ...LEFT_OUT[0], exclusionFailed: true });
-    expect(base.printed).toContain(
-      '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-skip  - named in --skip - FAILED: its exclusion could not be recorded (an ERROR line names this contactId) - keep it in --skip and re-run the apply',
-    );
+    expect(base.printed).toContain(SKIP_EXCLUSION_FAILED_LINE);
     expect(base.printed).toContain('Written: 3. Skipped (changed after the read): 0. Failed: 1.');
     expect((await w.get('c-skip'))?.['housingAuthority']).toBeUndefined();
     expect(await w.excludedEvents()).toEqual([]);
-    expect(capture.atLevel(50).map((l) => l['contactId'])).toEqual(['c-skip']);
+    expect(capture.atLevel(50).map((l) => [l['contactId'], l['msg']])).toEqual([['c-skip', EXCLUSION_FAILED_LOG]]);
     expect(capture.lines.some((l) => JSON.stringify(l).includes('Dekalbson'))).toBe(false);
     expect(backfillExitCode(report)).toBe(1);
 
     const again = await runJoinAuthorityBackfill(w.deps().deps, { apply: true, skip: SKIP });
     expect(again).toMatchObject({ written: 0, failed: 0 });
     expect((await w.excludedEvents()).map((e) => e['entityKey'])).toEqual(['contacts#c-skip']);
+  }, 120_000);
+
+  it('an exclusion append that lands and THEN errors (a timeout) is a FAILED line that says it MAY not have been recorded - and a re-run with the same --skip adds no second event', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const base = w.deps();
+    const deps: BackfillDeps = {
+      ...base.deps,
+      audit: {
+        listByEntity: (entityKey, opts) => base.deps.audit.listByEntity(entityKey, opts),
+        append: async (entityKey, eventType, payload) => {
+          await base.deps.audit.append(entityKey, eventType, payload);
+          if (eventType === BACKFILL_EXCLUDED_AUDIT_TYPE) throw new Error('TimeoutError: socket hang up');
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report).toMatchObject({ written: 3, failed: 1 });
+    expect(base.printed).toContain(SKIP_EXCLUSION_FAILED_LINE);
+    // It DID land: the line's "may not" is the honest reading of an ambiguous error.
+    expect((await w.excludedEvents()).map((e) => e['entityKey'])).toEqual(['contacts#c-skip']);
+    expect(backfillExitCode(report)).toBe(1);
+
+    const again = await runJoinAuthorityBackfill(w.deps().deps, { apply: true, skip: SKIP });
+    expect(again).toMatchObject({ written: 0, failed: 0 });
+    expect(await w.excludedEvents()).toHaveLength(1);
   }, 120_000);
 
   it('a lead with a PENDING housing authority suggestion is left out - its value shown, escaped like a name - by the dry run and the apply; nothing written for it', async () => {

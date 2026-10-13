@@ -12,9 +12,11 @@
 // CONTACT now walks the candidates here. The readers that mean the landlord
 // of RECORD (the owner) - placement nudges, person events, related-property
 // and landlord timelines, the dashboard's landlord tabs - stay on
-// `unit.landlordId`, unchanged on purpose (spec 9.2). Every AUTOMATIC primary
-// choice (auto-primary, the handoffs, the backfill script) goes through
-// chooseHeir.
+// `unit.landlordId`, unchanged on purpose (spec 9.2). Every AUTOMATIC
+// hand-off (remove, contact delete, landlord restore, the backfill script)
+// goes through chooseHeir; auto-primary on a roster write promotes only the
+// contact being written (unitsRepo.decideAutoPrimary) and shares just the
+// eligibility rule, isAutoRoutingEligible.
 //
 // PURE where it can be: isAutoRoutingEligible, rosterContactIds,
 // decidePropertyContact, chooseHeir and applyPrimary do no I/O. The two async

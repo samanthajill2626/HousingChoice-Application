@@ -88,3 +88,29 @@ Screenshots (this folder): `last-heard-from-<n>-<what>.png`.
 Console: one 404 for /favicon.ico (pre-existing, unrelated); no app errors.
 Note: fixture tenants were created with a housingAuthority body field the create
 route does not persist (setup detail, not a defect of this feature).
+
+## Re-QA on the final code (after review fix waves 2 and 3) - PASS
+
+Lane 10 restarted from the worktree; `GET /__dev/ping` appCommit `d902b515`
+(code identical to the final tip). Fresh fixtures (prefix `R80422`): tenants
+Dana, Eli, Fay; property "R80422 Review Rd" (tour_type landlord_led); planted
+sends (Dana -3d, Eli -2d, Fay -2d).
+
+- Undo: Dana Not interested -> Undo (UI) -> GET recipients `no_reply`.
+- Durable supersession (spec 14.7) through the TOURS-PAGE path: Dana Not
+  interested (`not_interested`) -> `POST /api/tours` 201 (`interested`) ->
+  `PATCH /api/tours/:id {status:'canceled'}` 200 -> `no_reply` (the decline
+  stays superseded; before 14.7 this path read `not_interested`).
+- Stale route mode (review B R2-5): property page loaded in route mode, then the
+  unit's tour_type cleared through the API; Eli Interested -> the 409
+  `tour_type_required` fell through to the form: URL
+  `?tour=new&tenantId=<Eli>`, the Schedule a tour dialog open, no error alert.
+- Follow up actions resolve from the RETURNED row (review B R2-4): Fay Not
+  interested -> chip "Not interested" + Undo in place; Eli Interested (route
+  mode) -> the "Tour requested" link in place; group "R80422 Review Rd, Atlanta,
+  GA 30314 - 1 waiting", tab "Follow up 1"; Dana (whose superseding tour was
+  canceled) is back on the list, "No reply yet, 3 days".
+  (14-reqa-follow-up-actions.png)
+
+Console: only SSE `/api/events` reconnect errors from a page left open across
+the earlier lane stop (environmental).

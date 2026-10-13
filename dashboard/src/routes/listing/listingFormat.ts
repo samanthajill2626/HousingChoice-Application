@@ -165,6 +165,18 @@ const TOUR_LABELS: Record<string, string> = {
   tour_reopened: 'Tour reopened',
 };
 
+/** Why a primary contact was set without anyone clicking Make primary
+ *  (primary-contact-integrity spec 8, the `reason` on
+ *  unit_primary_contact_assigned). A Map, so an inherited name such as
+ *  `toString` never matches; an unknown reason humanizes. */
+const PRIMARY_ASSIGNED_REASON: ReadonlyMap<string, string> = new Map([
+  ['auto_on_add', 'the property had no primary contact'],
+  ['handoff_on_remove', 'the previous primary contact was removed'],
+  ['handoff_on_delete', 'the previous primary contact was deleted'],
+  ['handoff_on_restore', "the property's landlord changed when it was restored"],
+  ['backfill', 'set by a one-time data repair'],
+]);
+
 /** Staff copy per activity event (GLOSSARY: "property", never "listing"/"unit").
  *  `type` is an OPEN set — an unknown event humanizes (never a blank row). */
 export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescription {
@@ -221,6 +233,15 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
       if (e.from === undefined && e.to === undefined) return { label };
       const side = (v: string | undefined): string => (v === undefined || v === '' ? '(none)' : v);
       return { label, sub: `${side(e.from)} -> ${side(e.to)}` };
+    }
+    case 'unit_primary_contact_assigned': {
+      // primary-contact-integrity spec 8: a primary contact nobody clicked -
+      // an automatic pick or the backfill script - says who and why, and
+      // links to the contact. (`from` is a raw contact id; not shown.)
+      const why =
+        e.reason !== undefined ? (PRIMARY_ASSIGNED_REASON.get(e.reason) ?? humanize(e.reason)) : undefined;
+      const sub = [who, why].filter(Boolean).join(' - ');
+      return { label: 'Primary contact set automatically', ...(sub && { sub }), ...contactLink };
     }
     case 'unit_deleted':
       return { label: 'Property deleted' };

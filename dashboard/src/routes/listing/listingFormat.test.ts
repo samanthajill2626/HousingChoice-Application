@@ -271,6 +271,44 @@ describe('describeUnitActivity', () => {
     expect(describeUnitActivity(evt({ type: 'tour_canceled' }))).toEqual({ label: 'Tour canceled' });
   });
 
+  it('describes an automatic primary-contact pick with who, why, and a contact link (primary-contact-integrity spec 8)', () => {
+    const assigned = (reason?: string) =>
+      describeUnitActivity(
+        evt({
+          type: 'unit_primary_contact_assigned',
+          contactId: 'c1',
+          contactName: 'Mark Passmore',
+          ...(reason !== undefined && { reason }),
+        }),
+      );
+    expect(assigned('auto_on_add')).toEqual({
+      label: 'Primary contact set automatically',
+      sub: 'Mark Passmore - the property had no primary contact',
+      to: '/contacts/c1',
+    });
+    expect(assigned('handoff_on_remove').sub).toBe('Mark Passmore - the previous primary contact was removed');
+    expect(assigned('handoff_on_delete').sub).toBe('Mark Passmore - the previous primary contact was deleted');
+    expect(assigned('handoff_on_restore').sub).toBe(
+      "Mark Passmore - the property's landlord changed when it was restored",
+    );
+    expect(assigned('backfill').sub).toBe('Mark Passmore - set by a one-time data repair');
+    // An unknown reason humanizes; no reason leaves just who.
+    expect(assigned('manual_fix').sub).toBe('Mark Passmore - Manual fix');
+    expect(assigned()).toEqual({
+      label: 'Primary contact set automatically',
+      sub: 'Mark Passmore',
+      to: '/contacts/c1',
+    });
+    // An unresolved contact: the id stands in.
+    expect(
+      describeUnitActivity(evt({ type: 'unit_primary_contact_assigned', contactId: 'c2', reason: 'backfill' })),
+    ).toEqual({
+      label: 'Primary contact set automatically',
+      sub: 'c2 - set by a one-time data repair',
+      to: '/contacts/c2',
+    });
+  });
+
   it('describes the auto-close and reopen rows (spec 9.5) with their tour deep-links', () => {
     expect(describeUnitActivity(evt({ type: 'tour_auto_closed', tourId: 't3' }))).toEqual({
       label: 'Tour closed automatically: no outcome recorded after two weeks',

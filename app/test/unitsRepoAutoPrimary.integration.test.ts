@@ -89,7 +89,12 @@ describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB 
   async function restoredWithoutLandlord(): Promise<string> {
     const created = await units.create({ landlordId: 'c-old', status: 'available' });
     await units.softDelete(created.unitId, '2026-10-01T09:00:00.000Z');
-    await units.restoreWithLandlord(created.unitId, { expectLandlordId: 'c-old', next: null });
+    await units.restoreWithLandlord(created.unitId, {
+      expectLandlordId: 'c-old',
+      next: null,
+      expectContacts: undefined,
+      promote: null,
+    });
     return created.unitId;
   }
 

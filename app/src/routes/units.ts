@@ -414,6 +414,42 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     });
   }
 
+  /**
+   * caseworker-integrity spec revision 5, section 4 "Restore" (Cameron's Q5;
+   * fix wave 2 FW2-12): the sole-landlord promotion of a "Restore without a
+   * landlord". When the cleared landlord was the property's primary contact -
+   * its contact-list row flagged, or the primary_contact scalar naming it
+   * (unitsRepo.restoreWithLandlord's rule) - the ONE remaining row whose
+   * contact is typed `landlord` (any roster role; read CONSISTENTLY, and a
+   * missing contact or a routing pointer row is not eligible) is the one to
+   * promote; zero or two-plus such rows promote nobody (null). Decided from
+   * `unit`, the route's consistent read, whose contact list the restore's
+   * write is then conditioned on.
+   */
+  async function soleLandlordToPromote(unit: UnitItem, clearedLandlordId: string | undefined): Promise<string | null> {
+    if (clearedLandlordId === undefined) return null;
+    const rows = unitContacts(unit);
+    const clearedRow = rows.find((row) => row.contactId === clearedLandlordId);
+    const clearedWasPrimary =
+      clearedRow?.primaryContact === true || unit.primary_contact === clearedLandlordId;
+    if (!clearedWasPrimary) return null;
+    const remaining = rows.filter((row) => row.contactId !== clearedLandlordId);
+    const read = await Promise.all(
+      remaining.map((row) => contacts.getById(row.contactId, { consistentRead: true })),
+    );
+    const eligible = remaining.filter((_row, i) => {
+      const contact = read[i];
+      return (
+        contact !== undefined &&
+        contact.phone_ref !== true &&
+        contact.email_ref !== true &&
+        contact.type === 'landlord'
+      );
+    });
+    const [only] = eligible;
+    return eligible.length === 1 && only !== undefined ? only.contactId : null;
+  }
+
   // GET /api/units — filtered list. Exactly one filter is honored, in priority
   // order landlordId > status (each a single-partition Query); with no filter, a
   // paginated Scan (repo.list). This keeps every list read a bounded operation.
@@ -1648,10 +1684,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     //     { landlordName? } and nothing is written.
     //   - { landlordId: <id> } restores AND makes that contact (404
     //     landlord_not_found / 409 landlord_not_landlord) the landlord of record;
-    //     { landlordId: null } restores ownerless. Honored ONLY when the plain
+    //     { landlordId: null } restores ownerless and, when the cleared landlord
+    //     was the primary, promotes the one remaining contact typed landlord
+    //     (spec revision 5, soleLandlordToPromote). Honored ONLY when the plain
     //     restore would refuse (otherwise ignored), in ONE conditional write
-    //     (unitsRepo.restoreWithLandlord) on the landlordId read here - a
-    //     concurrent change answers 409 unit_roster_conflict.
+    //     (unitsRepo.restoreWithLandlord) on the landlordId read here - and, for
+    //     { landlordId: null }, the contact list read here - so a concurrent
+    //     change answers 409 unit_roster_conflict.
     //   - A unit that is NOT soft-deleted restores exactly as before with no
     //     check: nothing comes back to life, and restore must never become a
     //     way to reassign a live property's landlord.
@@ -1726,9 +1765,22 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       };
     }
 
+    // Restore WITHOUT a landlord: the sole-landlord promotion (spec revision
+    // 5) is decided here from the consistent reads, and the repo applies it
+    // only on the very contact list it was decided from (`expectContacts`) - a
+    // contact-list change in between answers 409 unit_roster_conflict.
+    const promote = next === null ? await soleLandlordToPromote(stored, storedLandlordId) : null;
     let restored: UnitItem;
     try {
-      restored = await units.restoreWithLandlord(unitId, { expectLandlordId: storedLandlordId, next });
+      restored =
+        next !== null
+          ? await units.restoreWithLandlord(unitId, { expectLandlordId: storedLandlordId, next })
+          : await units.restoreWithLandlord(unitId, {
+              expectLandlordId: storedLandlordId,
+              next: null,
+              expectContacts: stored.contacts,
+              promote,
+            });
     } catch (err) {
       if (err instanceof RosterWriteConflictError) {
         res.status(409).json({ error: 'unit_roster_conflict' });
@@ -1740,14 +1792,26 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
       throw err;
     }
+    // The promotion as written: the promoted row is primary in the written unit.
+    const primaryPromoted =
+      promote !== null &&
+      (restored.contacts ?? []).some((row) => row.contactId === promote && row.primaryContact === true);
     await audit.append(`units#${unitId}`, 'unit_restored', {
       actor: req.user?.userId,
       ...(next !== null
         ? { landlordReplaced: { from: storedLandlordId, to: next.contactId } }
-        : { landlordCleared: { from: storedLandlordId } }),
+        : {
+            landlordCleared: { from: storedLandlordId },
+            ...(primaryPromoted && { primaryPromoted: { to: promote } }),
+          }),
     });
     log.info(
-      { unitId, actor: req.user?.userId, landlordCleared: next === null },
+      {
+        unitId,
+        actor: req.user?.userId,
+        landlordCleared: next === null,
+        ...(primaryPromoted && { primaryPromoted: promote }),
+      },
       'unit restored via api with a landlord change',
     );
     // The enriched roster (the roster routes' shape) so the Contacts card can

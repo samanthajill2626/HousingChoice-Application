@@ -15,6 +15,7 @@
 // (README deviation row). The Address type is reused for tenant/contact
 // addresses later.
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
   BatchGetCommand,
@@ -168,6 +169,36 @@ export interface ContactListFacts {
    */
   landlordTyped: boolean;
 }
+
+/**
+ * restoreWithLandlord's input (caseworker-integrity spec 2026-10-12 section 4
+ * "Restore"). `expectLandlordId` is the landlordId the caller read (undefined:
+ * ownerless); `next` is the new landlord of record, or null for a restore
+ * WITHOUT a landlord - which also carries the caller's sole-landlord promotion
+ * (spec revision 5; fix wave 2 FW2-12) and the contact list it was decided
+ * from.
+ */
+export type RestoreWithLandlordInput =
+  | {
+      expectLandlordId: string | undefined;
+      next: { contactId: string; name?: string; company?: string };
+    }
+  | {
+      expectLandlordId: string | undefined;
+      next: null;
+      /**
+       * The stored `contacts` attribute the caller read and decided `promote`
+       * from (undefined: no list stored). The restore applies only to exactly
+       * this list; any other answers RosterWriteConflictError.
+       */
+      expectContacts: UnitContact[] | undefined;
+      /**
+       * The caller's decision: the one remaining row whose contact is typed
+       * landlord, made the sole primary when the cleared landlord was the
+       * primary; null when zero or two-plus such rows remain (nobody).
+       */
+      promote: string | null;
+    };
 
 /** An optimistic roster mutation lost too many consecutive write races. */
 export class RosterWriteConflictError extends Error {
@@ -552,21 +583,20 @@ export interface UnitsRepo {
    * 'landlord' (kept when already seated; name/company updated when supplied),
    * and keeps `primary_contact` consistent: when the old landlord was the
    * primary (roster flag or scalar), `next` becomes the sole primary, or with
-   * no landlord the scalar is REMOVEd and no row stays primary (removeContact's
-   * rule). The write is conditioned on the landlordId AND contacts[] it read
+   * no landlord the caller's sole-landlord promotion (`promote`, spec revision
+   * 5) becomes the sole primary when it names a remaining row, else the scalar
+   * is REMOVEd and no row stays primary (removeContact's rule). The write is
+   * conditioned on the landlordId AND contacts[] it read
    * (updateRosterIfCurrent) and on deleted_at still existing, so a restore
    * landing after the read re-reads into RosterWriteConflictError; a
    * contacts-only race re-reads and retries up to
-   * ROSTER_WRITE_MAX_ATTEMPTS, then RosterWriteConflictError. A missing unit
+   * ROSTER_WRITE_MAX_ATTEMPTS, then RosterWriteConflictError - except for
+   * `next` null, whose every read must show exactly the contact list the
+   * caller decided its promotion from (`expectContacts`), so a contact-list
+   * change answers RosterWriteConflictError, never a retry. A missing unit
    * throws ConditionalCheckFailedException (route 404). Returns ALL_NEW.
    */
-  restoreWithLandlord(
-    unitId: string,
-    input: {
-      expectLandlordId: string | undefined;
-      next: { contactId: string; name?: string; company?: string } | null;
-    },
-  ): Promise<UnitItem>;
+  restoreWithLandlord(unitId: string, input: RestoreWithLandlordInput): Promise<UnitItem>;
 }
 
 export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
@@ -1230,8 +1260,20 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         // The caller decided from THIS landlordId; any other owner now is a
         // concurrent change the caller must re-read (route 409 unit_roster_conflict).
         if (current !== input.expectLandlordId) throw new RosterWriteConflictError();
+        // A restore WITHOUT a landlord carries the caller's sole-landlord
+        // promotion (spec revision 5; fix wave 2 FW2-12), decided from the
+        // contact list the caller read. On any other list - a contact-list
+        // change since - that decision is stale: a conflict the caller must
+        // re-read (route 409 unit_roster_conflict), never a retry that applies
+        // it anyway. The write below is conditioned on this very list, so a
+        // change landing after this read loses the write and re-reads into here.
+        if (input.next === null && !isDeepStrictEqual(unit.contacts, input.expectContacts)) {
+          throw new RosterWriteConflictError();
+        }
         const old = input.expectLandlordId;
         const next = input.next;
+        const promote = input.next === null ? input.promote : null;
+        let primaryPromoted: string | undefined;
         // `next` naming the old landlord (only reachable when they became a
         // landlord again under a race) keeps their row instead of re-adding it.
         const keepsOld = next !== null && next.contactId === old;
@@ -1267,10 +1309,15 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
             for (const c of nextRoster) c.primaryContact = c.contactId === next.contactId;
             patch['primary_contact'] = next.contactId;
           } else {
-            // No landlord to fall back to (removeContact's rule): clear the
-            // scalar, never leave it dangling at the removed landlord.
-            for (const c of nextRoster) c.primaryContact = false;
-            patch['primary_contact'] = null;
+            // No landlord to fall back to. The caller's sole-landlord promotion
+            // (Cameron's Q5, spec revision 5), when it names a remaining row,
+            // becomes the sole primary in this same write; otherwise clear the
+            // scalar (removeContact's rule), never leave it dangling at the
+            // removed landlord.
+            const promoted = promote === null ? undefined : nextRoster.find((c) => c.contactId === promote);
+            for (const c of nextRoster) c.primaryContact = promoted !== undefined && c.contactId === promoted.contactId;
+            patch['primary_contact'] = promoted !== undefined ? promoted.contactId : null;
+            primaryPromoted = promoted?.contactId;
           }
         }
         let updated: UnitItem;
@@ -1281,11 +1328,18 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           if (attempts >= ROSTER_WRITE_MAX_ATTEMPTS) throw new RosterWriteConflictError();
           // Re-read: a vanished unit throws (route 404), a unit restored or a
           // landlordId changed meanwhile throws RosterWriteConflictError, a
-          // contacts-only race retries.
+          // contacts-only race retries - or, for a restore without a landlord,
+          // fails the contact-list check above (RosterWriteConflictError).
           return write();
         }
         log.info(
-          { unitId, attempts, landlordCleared: next === null, rosterSize: nextRoster.length },
+          {
+            unitId,
+            attempts,
+            landlordCleared: next === null,
+            ...(primaryPromoted !== undefined && { primaryPromoted }),
+            rosterSize: nextRoster.length,
+          },
           'unit restored with a landlord change',
         );
         return updated;

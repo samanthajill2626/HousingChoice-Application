@@ -9,8 +9,8 @@
 //   - the unit_restored audit gains landlordReplaced / landlordCleared.
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
-import { RosterWriteConflictError, type UnitItem } from '../src/repos/unitsRepo.js';
+import { phoneRefId, type ContactItem } from '../src/repos/contactsRepo.js';
+import { RosterWriteConflictError, type UnitContact, type UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
@@ -276,5 +276,204 @@ describe('POST /api/units/:id/restore - without a landlord (I3)', () => {
     expect(stored?.contacts).toEqual([{ contactId: 'c-pm', role: 'pm', primaryContact: false }]);
     expect(restoredEvents(world)[0]?.payload).toMatchObject({ landlordCleared: { from: 'c-old' } });
     expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('landlordReplaced');
+  });
+});
+
+// Cameron's Q5 (spec revision 5 section 4 "Restore", the sole-landlord
+// promotion; fix wave 2 FW2-12): a restore WITHOUT a landlord of a property
+// whose cleared landlord was its primary contact promotes the ONE remaining
+// contact-list row whose contact is typed landlord (any roster role; read
+// consistently, a missing contact or a routing pointer is not eligible) in the
+// same conditional write; with zero or two-plus such rows nobody is promoted.
+// The write is conditioned on the contact list the route read, so a
+// concurrent contact-list change answers 409 unit_roster_conflict. The audit
+// gains primaryPromoted { to } next to landlordCleared.
+describe('POST /api/units/:id/restore - without a landlord: the sole-landlord promotion', () => {
+  /** Deleted; c-old (now a tenant) was its landlord of record and primary; `remaining` rows stay on the list. */
+  function seedClearedPrimary(world: FakeWorld, unitId: string, remaining: UnitContact[]): void {
+    seedDeletedUnit(world, unitId, {
+      contacts: [{ contactId: 'c-old', role: 'landlord', primaryContact: true }, ...remaining],
+    });
+    seedContact(world, 'c-old', { type: 'tenant' });
+  }
+
+  it('one remaining contact typed landlord: promoted in the same write - its row primary, primary_contact set, audit primaryPromoted', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedClearedPrimary(world, 'u-p1', [
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-ten', role: 'other', primaryContact: false },
+    ]);
+    seedContact(world, 'c-pm', { type: 'landlord', firstName: 'Pat', lastName: 'Manager' });
+    seedContact(world, 'c-ten', { type: 'tenant' });
+
+    const res = await restore(app, 'u-p1', { landlordId: null });
+
+    expect(res.status).toBe(200);
+    const stored = world.units.get('u-p1');
+    expect(stored?.deleted_at).toBeUndefined();
+    expect(hasLandlordId(stored)).toBe(false);
+    expect(stored?.contacts).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      { contactId: 'c-ten', role: 'other', primaryContact: false },
+    ]);
+    expect(stored?.primary_contact).toBe('c-pm');
+    expect(res.body.unit.primary_contact).toBe('c-pm');
+    expect(res.body.unit.contacts).toContainEqual(
+      expect.objectContaining({ contactId: 'c-pm', primaryContact: true, name: 'Pat Manager' }),
+    );
+    expect(restoredEvents(world)).toHaveLength(1);
+    expect(restoredEvents(world)[0]?.payload).toMatchObject({
+      landlordCleared: { from: 'c-old' },
+      primaryPromoted: { to: 'c-pm' },
+    });
+  });
+
+  it('promoted too when only the primary_contact scalar named the cleared landlord', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-p2', {
+      contacts: [
+        { contactId: 'c-old', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      ],
+    });
+    seedContact(world, 'c-old', { type: 'tenant' });
+    seedContact(world, 'c-pm', { type: 'landlord' });
+
+    const res = await restore(app, 'u-p2', { landlordId: null });
+
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-p2')?.contacts).toEqual([{ contactId: 'c-pm', role: 'pm', primaryContact: true }]);
+    expect(world.units.get('u-p2')?.primary_contact).toBe('c-pm');
+    expect(restoredEvents(world)[0]?.payload).toMatchObject({ primaryPromoted: { to: 'c-pm' } });
+  });
+
+  it('two remaining contacts typed landlord: nobody is promoted - no primary row, primary_contact removed, no primaryPromoted', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedClearedPrimary(world, 'u-p3', [
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-owner', role: 'owner', primaryContact: false },
+    ]);
+    seedContact(world, 'c-pm', { type: 'landlord' });
+    seedContact(world, 'c-owner', { type: 'landlord' });
+
+    const res = await restore(app, 'u-p3', { landlordId: null });
+
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-p3')?.contacts).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-owner', role: 'owner', primaryContact: false },
+    ]);
+    expect(world.units.get('u-p3')?.primary_contact).toBeUndefined();
+    expect(restoredEvents(world)[0]?.payload).toMatchObject({ landlordCleared: { from: 'c-old' } });
+    expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('primaryPromoted');
+  });
+
+  it('only a contact NOT typed landlord remains: nobody is promoted', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedClearedPrimary(world, 'u-p4', [{ contactId: 'c-ten', role: 'other', primaryContact: false }]);
+    seedContact(world, 'c-ten', { type: 'tenant' });
+
+    const res = await restore(app, 'u-p4', { landlordId: null });
+
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-p4')?.contacts).toEqual([{ contactId: 'c-ten', role: 'other', primaryContact: false }]);
+    expect(world.units.get('u-p4')?.primary_contact).toBeUndefined();
+    expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('primaryPromoted');
+  });
+
+  it('the cleared landlord was NOT the primary (another row is): unchanged - that primary and the scalar stay', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-p5', {
+      primary_contact: 'c-ten',
+      contacts: [
+        { contactId: 'c-old', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: false },
+        { contactId: 'c-ten', role: 'other', primaryContact: true },
+      ],
+    });
+    seedContact(world, 'c-old', { type: 'tenant' });
+    seedContact(world, 'c-pm', { type: 'landlord' });
+    seedContact(world, 'c-ten', { type: 'tenant' });
+
+    const res = await restore(app, 'u-p5', { landlordId: null });
+
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-p5')?.contacts).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-ten', role: 'other', primaryContact: true },
+    ]);
+    expect(world.units.get('u-p5')?.primary_contact).toBe('c-ten');
+    expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('primaryPromoted');
+  });
+
+  it('a missing contact and a routing pointer row are not eligible - the one landlord-typed contact left is promoted', async () => {
+    const { app, world } = makeWebhookHarness();
+    const pointerId = phoneRefId('+15550004000');
+    seedClearedPrimary(world, 'u-p6', [
+      { contactId: 'c-ghost', role: 'other', primaryContact: false },
+      { contactId: pointerId, role: 'pm', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+    ]);
+    // The pointer row's flag decides, not a type: even one carrying `landlord` is never a contact.
+    world.contacts.push({
+      contactId: pointerId,
+      type: 'landlord',
+      phone: '+15550004000',
+      phone_ref: true,
+      phone_ref_owner: 'c-pm',
+    } as unknown as ContactItem);
+    seedContact(world, 'c-pm', { type: 'landlord', phone: '+15550004000' });
+
+    const res = await restore(app, 'u-p6', { landlordId: null });
+
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-p6')?.primary_contact).toBe('c-pm');
+    expect(world.units.get('u-p6')?.contacts?.filter((row) => row.primaryContact)).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+    ]);
+  });
+
+  it('(PIN) reads the remaining contacts CONSISTENTLY', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedClearedPrimary(world, 'u-p7', [{ contactId: 'c-pm', role: 'pm', primaryContact: false }]);
+    seedContact(world, 'c-pm', { type: 'landlord' });
+    const contactRead = vi.spyOn(world.contactsRepo, 'getById');
+
+    expect((await restore(app, 'u-p7', { landlordId: null })).status).toBe(200);
+
+    expect(contactRead).toHaveBeenCalledWith('c-pm', { consistentRead: true });
+  });
+
+  it('a contact-list change between the route read and the write: 409 unit_roster_conflict - nothing written, no audit', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedClearedPrimary(world, 'u-race', [{ contactId: 'c-pm', role: 'pm', primaryContact: false }]);
+    seedContact(world, 'c-pm', { type: 'landlord' });
+    seedContact(world, 'c-owner', { type: 'landlord' });
+    const write = world.unitsRepo.restoreWithLandlord.bind(world.unitsRepo);
+    world.unitsRepo.restoreWithLandlord = async (unitId, input) => {
+      // Staff B adds a second landlord-typed contact after the route decided
+      // "promote c-pm" from the list it read - that decision no longer holds.
+      await world.unitsRepo.addContact(
+        unitId,
+        { contactId: 'c-owner', role: 'owner' },
+        { caseworker: false, landlordTyped: true },
+      );
+      return write(unitId, input);
+    };
+
+    const res = await restore(app, 'u-race', { landlordId: null });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'unit_roster_conflict' });
+    const stored = world.units.get('u-race');
+    expect(stored?.deleted_at).toBe(DELETED_AT);
+    expect(stored?.landlordId).toBe('c-old');
+    expect(stored?.primary_contact).toBe('c-old');
+    expect(stored?.contacts).toEqual([
+      { contactId: 'c-old', role: 'landlord', primaryContact: true },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-owner', role: 'owner', primaryContact: false },
+    ]);
+    expect(restoredEvents(world)).toHaveLength(0);
   });
 });

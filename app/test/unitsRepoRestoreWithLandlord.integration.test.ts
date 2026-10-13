@@ -172,15 +172,18 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
     expect(stored?.primary_contact).toBe('c-new');
   });
 
-  it('clears the landlord: restored ownerless, old row gone, primary_contact removed', async () => {
-    const unitId = await deletedUnit(
-      [
-        { contactId: 'c-old', role: 'landlord', primaryContact: true },
-        { contactId: 'c-pm', role: 'pm', primaryContact: false },
-      ],
-      'c-old',
-    );
-    const updated = await units.restoreWithLandlord(unitId, { expectLandlordId: 'c-old', next: null });
+  it('clears the landlord with no promotion (no sole landlord-typed contact): restored ownerless, old row gone, primary_contact removed', async () => {
+    const roster: UnitContact[] = [
+      { contactId: 'c-old', role: 'landlord', primaryContact: true },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+    ];
+    const unitId = await deletedUnit(roster, 'c-old');
+    const updated = await units.restoreWithLandlord(unitId, {
+      expectLandlordId: 'c-old',
+      next: null,
+      expectContacts: roster,
+      promote: null,
+    });
     expect(updated.deleted_at).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(updated, 'landlordId')).toBe(false);
     expect(updated.primary_contact).toBeUndefined();
@@ -191,17 +194,153 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
 
   it('clears the landlord of a legacy unit with no stored roster', async () => {
     const unitId = await deletedUnit(undefined);
-    const updated = await units.restoreWithLandlord(unitId, { expectLandlordId: 'c-old', next: null });
+    const updated = await units.restoreWithLandlord(unitId, {
+      expectLandlordId: 'c-old',
+      next: null,
+      expectContacts: undefined,
+      promote: null,
+    });
     expect(updated.deleted_at).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(updated, 'landlordId')).toBe(false);
     expect(updated.contacts).toEqual([]);
     expect(updated.primary_contact).toBeUndefined();
   });
 
-  it('throws RosterWriteConflictError when the stored landlordId is not the expected one - nothing written', async () => {
-    const unitId = await deletedUnit([{ contactId: 'c-old', role: 'landlord', primaryContact: true }], 'c-old');
+  // Sole-landlord promotion (Cameron's Q5, spec revision 5 section 4
+  // "Restore"; fix wave 2 FW2-12). For a restore WITHOUT a landlord the caller
+  // decides, from the contact list it read (`expectContacts`), which remaining
+  // contact becomes the primary - the one typed landlord, when exactly one is
+  // (`promote`; null for nobody). The repo applies it only when the cleared
+  // landlord was the primary (its row flagged, or the scalar naming it), in
+  // the SAME conditional write, and only on that very contact list: any other
+  // list is RosterWriteConflictError (route 409 unit_roster_conflict), never a
+  // retry that would apply a decision made for a list that is gone.
+  const PROMOTION_ROSTER: UnitContact[] = [
+    { contactId: 'c-old', role: 'landlord', primaryContact: true },
+    { contactId: 'c-pm', role: 'pm', primaryContact: false },
+    { contactId: 'c-ten', role: 'other', primaryContact: false },
+  ];
+  const LATE_ROSTER: UnitContact[] = [
+    ...PROMOTION_ROSTER,
+    { contactId: 'c-late-owner', role: 'owner', primaryContact: false },
+  ];
+
+  it('without a landlord: promotes the sole landlord-typed contact when the cleared landlord was the primary - its row the only primary, primary_contact names it', async () => {
+    const unitId = await deletedUnit(PROMOTION_ROSTER, 'c-old');
+    const updated = await units.restoreWithLandlord(unitId, {
+      expectLandlordId: 'c-old',
+      next: null,
+      expectContacts: PROMOTION_ROSTER,
+      promote: 'c-pm',
+    });
+    expect(updated.deleted_at).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(updated, 'landlordId')).toBe(false);
+    expect(updated.contacts).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      { contactId: 'c-ten', role: 'other', primaryContact: false },
+    ]);
+    expect(updated.primary_contact).toBe('c-pm');
+    const stored = await units.getById(unitId, { consistentRead: true });
+    expect(stored?.contacts).toEqual(updated.contacts);
+    expect(stored?.primary_contact).toBe('c-pm');
+  });
+
+  it('without a landlord: promotes when only the primary_contact scalar named the cleared landlord', async () => {
+    const roster: UnitContact[] = [
+      { contactId: 'c-old', role: 'landlord', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+    ];
+    const unitId = await deletedUnit(roster, 'c-old');
+    const updated = await units.restoreWithLandlord(unitId, {
+      expectLandlordId: 'c-old',
+      next: null,
+      expectContacts: roster,
+      promote: 'c-pm',
+    });
+    expect(updated.contacts).toEqual([{ contactId: 'c-pm', role: 'pm', primaryContact: true }]);
+    expect(updated.primary_contact).toBe('c-pm');
+  });
+
+  it('(PIN) without a landlord: no promotion when the cleared landlord was NOT the primary - the other primary row and the scalar stay', async () => {
+    const roster: UnitContact[] = [
+      { contactId: 'c-old', role: 'landlord', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-ten', role: 'other', primaryContact: true },
+    ];
+    const unitId = await deletedUnit(roster, 'c-ten');
+    const updated = await units.restoreWithLandlord(unitId, {
+      expectLandlordId: 'c-old',
+      next: null,
+      expectContacts: roster,
+      promote: 'c-pm',
+    });
+    expect(updated.contacts).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-ten', role: 'other', primaryContact: true },
+    ]);
+    expect(updated.primary_contact).toBe('c-ten');
+  });
+
+  it("without a landlord: a contact list that changed after the caller's read is a conflict - no write sent, nothing changed", async () => {
+    const unitId = await deletedUnit(PROMOTION_ROSTER, 'c-old');
+    // A second landlord-typed contact joins after the caller decided "promote
+    // c-pm" from PROMOTION_ROSTER - the decision no longer holds.
+    await units.update(unitId, { contacts: LATE_ROSTER });
+    const { repo, counter } = countingRepo(unitId);
     await expect(
-      units.restoreWithLandlord(unitId, { expectLandlordId: 'c-someone-else', next: null }),
+      repo.restoreWithLandlord(unitId, {
+        expectLandlordId: 'c-old',
+        next: null,
+        expectContacts: PROMOTION_ROSTER,
+        promote: 'c-pm',
+      }),
+    ).rejects.toBeInstanceOf(RosterWriteConflictError);
+    expect(counter.writes).toBe(0);
+    const stored = await units.getById(unitId, { consistentRead: true });
+    expect(stored?.deleted_at).toBe(AT);
+    expect(stored?.landlordId).toBe('c-old');
+    expect(stored?.primary_contact).toBe('c-old');
+    expect(stored?.contacts).toEqual(LATE_ROSTER);
+  });
+
+  it('without a landlord: a contact list that changed between this read and the write is a conflict, not a retry - nothing written', async () => {
+    const unitId = await deletedUnit(PROMOTION_ROSTER, 'c-old');
+    const racing = racingRepo(unitId, () =>
+      doc.send(
+        new UpdateCommand({
+          TableName: tableName('units', testEnv),
+          Key: { unitId },
+          UpdateExpression: 'SET #c = :c',
+          ExpressionAttributeNames: { '#c': 'contacts' },
+          ExpressionAttributeValues: { ':c': LATE_ROSTER },
+        }),
+      ),
+    );
+    await expect(
+      racing.restoreWithLandlord(unitId, {
+        expectLandlordId: 'c-old',
+        next: null,
+        expectContacts: PROMOTION_ROSTER,
+        promote: 'c-pm',
+      }),
+    ).rejects.toBeInstanceOf(RosterWriteConflictError);
+    const stored = await units.getById(unitId, { consistentRead: true });
+    expect(stored?.deleted_at).toBe(AT);
+    expect(stored?.landlordId).toBe('c-old');
+    expect(stored?.primary_contact).toBe('c-old');
+    expect(stored?.contacts).toEqual(LATE_ROSTER);
+  });
+
+  it('throws RosterWriteConflictError when the stored landlordId is not the expected one - nothing written', async () => {
+    const roster: UnitContact[] = [{ contactId: 'c-old', role: 'landlord', primaryContact: true }];
+    const unitId = await deletedUnit(roster, 'c-old');
+    await expect(
+      units.restoreWithLandlord(unitId, {
+        expectLandlordId: 'c-someone-else',
+        next: null,
+        expectContacts: roster,
+        promote: null,
+      }),
     ).rejects.toBeInstanceOf(RosterWriteConflictError);
     const stored = await units.getById(unitId, { consistentRead: true });
     expect(stored?.deleted_at).toBe(AT);
@@ -226,9 +365,11 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
       ];
       const unitId = await liveUnit(roster, 'c-old');
       const { repo, counter } = countingRepo(unitId);
-      await expect(repo.restoreWithLandlord(unitId, { expectLandlordId: 'c-old', next })).rejects.toBeInstanceOf(
-        RosterWriteConflictError,
-      );
+      const input =
+        next === null
+          ? { expectLandlordId: 'c-old', next: null, expectContacts: roster, promote: null }
+          : { expectLandlordId: 'c-old', next };
+      await expect(repo.restoreWithLandlord(unitId, input)).rejects.toBeInstanceOf(RosterWriteConflictError);
       expect(counter.writes).toBe(0);
       const stored = await units.getById(unitId, { consistentRead: true });
       expect(stored?.deleted_at).toBeUndefined();
@@ -260,7 +401,12 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
 
   it('throws ConditionalCheckFailedException for an unknown unit', async () => {
     await expect(
-      units.restoreWithLandlord(`unit-missing-${randomUUID()}`, { expectLandlordId: 'c-old', next: null }),
+      units.restoreWithLandlord(`unit-missing-${randomUUID()}`, {
+        expectLandlordId: 'c-old',
+        next: null,
+        expectContacts: undefined,
+        promote: null,
+      }),
     ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
   });
 

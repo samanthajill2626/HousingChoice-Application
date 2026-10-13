@@ -301,7 +301,12 @@ describe('contact list - a property change after the route read is re-decided in
     world.unitsRepo.addContact = async (unitId, contact, facts) => {
       // Staff B's "Restore without a landlord" commits after the route's reads
       // (which saw an owner, so this add was no claim there).
-      await world.unitsRepo.restoreWithLandlord(unitId, { expectLandlordId: 'c-old', next: null });
+      await world.unitsRepo.restoreWithLandlord(unitId, {
+        expectLandlordId: 'c-old',
+        next: null,
+        expectContacts: world.units.get(unitId)?.contacts,
+        promote: null,
+      });
       return write(unitId, contact, facts);
     };
     const res = await addContact(app, 'u-race', { contactId: 'c-ten', role: 'landlord' });

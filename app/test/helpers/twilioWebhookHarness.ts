@@ -5,6 +5,7 @@
 // real, never mocked out.
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { isDeepStrictEqual } from 'node:util';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { Express, Router } from 'express';
 import request, { type Test } from 'supertest';
@@ -3116,7 +3117,9 @@ export function createFakeWorld(): FakeWorld {
     // landlordId must still be the caller's expectation
     // (RosterWriteConflictError otherwise); restore (drop deleted_at), swap or
     // clear the landlord of record, drop the old landlord's row, upsert the new
-    // one with role pinned 'landlord', and keep primary_contact consistent.
+    // one with role pinned 'landlord', and keep primary_contact consistent -
+    // a clear only on the contact list the caller decided its sole-landlord
+    // promotion from, applying that promotion.
     async restoreWithLandlord(unitId, input) {
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`restoreWithLandlord: no unit ${unitId}`);
@@ -3127,8 +3130,15 @@ export function createFakeWorld(): FakeWorld {
       const current =
         typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
       if (current !== input.expectLandlordId) throw new RosterWriteConflictError();
+      // The real repo's contact-list check (spec revision 5, fix wave 2
+      // FW2-12): a restore without a landlord applies only to the contact list
+      // its sole-landlord promotion was decided from.
+      if (input.next === null && !isDeepStrictEqual(unit.contacts, input.expectContacts)) {
+        throw new RosterWriteConflictError();
+      }
       const old = input.expectLandlordId;
       const next = input.next;
+      const promote = input.next === null ? input.promote : null;
       const keepsOld = next !== null && next.contactId === old;
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const oldRow = old !== undefined && !keepsOld ? roster.find((c) => c.contactId === old) : undefined;
@@ -3157,8 +3167,12 @@ export function createFakeWorld(): FakeWorld {
           for (const c of nextRoster) c.primaryContact = c.contactId === next.contactId;
           unit.primary_contact = next.contactId;
         } else {
-          for (const c of nextRoster) c.primaryContact = false;
-          delete unit.primary_contact; // null -> REMOVE; never dangling
+          // The caller's sole-landlord promotion when it names a remaining
+          // row; otherwise nobody (null -> REMOVE; never dangling).
+          const promoted = promote === null ? undefined : nextRoster.find((c) => c.contactId === promote);
+          for (const c of nextRoster) c.primaryContact = promoted !== undefined && c.contactId === promoted.contactId;
+          if (promoted !== undefined) unit.primary_contact = promoted.contactId;
+          else delete unit.primary_contact;
         }
       }
       unit.contacts = nextRoster;

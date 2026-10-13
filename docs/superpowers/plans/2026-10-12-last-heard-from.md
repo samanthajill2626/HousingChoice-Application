@@ -12,7 +12,7 @@
   and `.superpowers/sdd/plan-research/*-reference.md` (byte-exact quotes with
   current line numbers; read the reference for your slice before its first
   task - every citation below is verified there).
-- Status: PLAN v1 (planner, 2026-10-13) - plan review pending.
+- Status: PLAN v2 (planner, 2026-10-13) - plan review round 1 (21 findings, 15 rulings, all accepted) folded in; round 2 pending. Adjudications: `docs/superpowers/reviews/2026-10-12-last-heard-from/design-review/adjudications.md` ("Plan review").
 
 ## 0. Ground rules for this plan
 
@@ -395,8 +395,12 @@ checked against their source.
 
 ---
 
+
 <!-- W1 notes -->
 ## Contract notes (additions only - NO contract change requested)
+
+Unchanged by plan review round 1: the caller's failure log line (note 6)
+and the `'written' | 'skipped' | 'failed'` result of `touchLastHeardFrom`.
 
 The shared contracts in section 3.1 work for S1/S2/S9 as written. This
 section adds, and every other writer may rely on:
@@ -1130,6 +1134,27 @@ Locals: `caller` (`:997`), `reason` (`:1007`), `relayExternalCallerPhone`,
 match is soft-deleted or the lookup failed), `appended` (const inside the try
 `:1035-1070`).
 
+Spec 14.6 (plan review A4): today the external-caller identity is computed
+and written only when `reason === 'non_member'` (`:1019`, `:1052-1056`). A
+non-member whose call is refused for ANOTHER reason - a CLOSED thread, where
+`reason` is `closed_thread` because `isClosed` wins at `:1007-1008` - gets a
+row with neither `relay_sender_key` nor the external fields, which the rule
+cannot attribute. This task keys both on `caller === undefined` (the caller
+is not a roster member), whatever the reason. The row keeps
+`relay_refusal_reason: 'non_member'` whenever the fields are written: the
+append validator REQUIRES it beside them, with `author: 'unknown'` and no
+sender key (`assertRelayExternalCallerShape`, `messagesRepo.ts:943-962`),
+and it is true - the caller is a non-member; `received_on_closed_thread`
+(`:1051`) and the `Closed thread` label (`:1050`) still say why the call
+was refused.
+
+Reachability note for the reviewer: through the router this combination is
+currently unreachable - `resolveRelayInbound` returns `closed_member` only for
+a roster member (`relayInboundResolution.ts:89-91`) and sends a non-member to
+an OPEN group (`:93-94`) or to founder triage (`:96`). The change is the
+defensive form 14.6 asks for, and RED case 9 has to model the closed thread
+with a test seam (below).
+
 RED - `app/test/voiceWebhook.test.ts`, new
 `describe('inbound masked voice - last heard from (spec 5.1)')` after
 `:663` (helpers `seedRelay`, `inboundVoiceParams`, `ALICE`, `CAROL`), each
@@ -1153,16 +1178,65 @@ prefix:
 8. persist failure: case 1 with `world.messagesRepo.append = async () => { throw new Error('boom'); }`
    -> refusal TwiML (`<Hangup`) and touches `[]` (the touch sits after the
    append, inside its try).
+9. NON-MEMBER on a CLOSED thread (spec 14.6):
+   `world.contacts.push({ contactId: 'c-external', type: 'unknown', phone: CAROL })`;
+   a relay whose `status` reads `'open'` while the router resolves it and
+   `'closed'` once `handleMaskedInbound` runs. `handleMaskedInbound` reads
+   `relay.pool_number` at `:995`, right before `isClosed` at `:999`, and
+   `resolveRelayInbound` never reads `pool_number`, so the seam flips the
+   status there:
 
-GREEN - insert INSIDE the try, after the `if (!appended.deduped) { ... }`
-block (closing `}` at `:1065`) and before `} catch (err) {` (`:1066`):
+```ts
+    const state = { status: 'open' };
+    const base = seedRelay(world);
+    const relay = Object.defineProperties({ ...base }, {
+      status: { get: () => state.status, enumerable: true },
+      pool_number: { get: () => { state.status = 'closed'; return POOL; }, enumerable: true },
+    }) as ConversationItem;
+    world.conversationsRepo.getAllByPoolNumber = async () => [relay];
+```
+
+   (if the fake world's other reads touch `pool_number` before `:995` the
+   status flips early, the call falls to founder triage and the case FAILS
+   loudly - never a silent pass). Post `inboundVoiceParams({ From: CAROL, CallSid: 'CAheard-closed-nonmember' })`:
+   refusal TwiML (`<Hangup`, no `<Dial`); the row has
+   `received_on_closed_thread: true`, `call_party_label: 'Closed thread'`,
+   `relay_refusal_reason: 'non_member'`, `relay_external_caller_phone: CAROL`,
+   `relay_external_caller_contact_id: 'c-external'`, no `relay_sender_key`;
+   and the touch names `'c-external'`. RED today: the row carries none of the
+   three external fields and nothing is touched.
+10. (PIN) the existing `'does not add caller identity metadata to no-callee or
+    no-pool-number refusals'` case (`:627`) still passes: both callers there are
+    roster members.
+
+GREEN, part 1 - key the external identity on "not a roster member" (two
+edits in the refusal branch):
+
+- `voice.ts:1019`: `if (reason === 'non_member') {` becomes
+
+```ts
+      // Any caller who is NOT a roster member (spec 14.6), whatever the
+      // refusal reason - a non-member on a CLOSED thread included.
+      if (caller === undefined) {
+```
+
+  (the body `:1020-1033` is unchanged).
+- `voice.ts:1052`: `...(reason === 'non_member' && {` becomes
+  `...(caller === undefined && {` (the spread's body `:1053-1055` is
+  unchanged: `relayRefusalReason: 'non_member'` plus the two optional
+  fields, which the append validator requires together).
+
+GREEN, part 2 - the touch. Insert INSIDE the try, after the
+`if (!appended.deduped) { ... }` block (closing `}` at `:1065`) and before
+`} catch (err) {` (`:1066`):
 
 ```ts
         // Last heard from (spec 5.1 / 14.2): a refused call still means the
         // caller reached out - every refusal reason, fresh AND deduped. A member
         // is its roster key (a phone-only member resolves by phone); a
-        // non-member is its stored contact id, else findByPhone (the id is left
-        // unset for a soft-deleted match). Best-effort.
+        // non-member (on an open OR a closed thread) is its stored contact id,
+        // else findByPhone (the id is left unset for a soft-deleted match).
+        // Best-effort.
         try {
           const heardThread =
             appended.conversationId === relay.conversationId
@@ -1195,10 +1269,11 @@ block (closing `}` at `:1065`) and before `} catch (err) {` (`:1066`):
         }
 ```
 
-(The two external-caller locals are only ever set when `reason === 'non_member'`,
-so the row literal matches what `:1052-1056` persisted.)
+(After part 1 the two external-caller locals are set exactly when
+`caller === undefined`, the same condition as the persisted spread, so the
+row literal matches what the append wrote.)
 
-Commit: `feat(app): a refused masked relay call moves the caller's last heard from`.
+Commit: `feat(app): a refused masked relay call moves the caller's last heard from, a non-member on a closed thread included`.
 
 ### Task 1.9 - path 7, masked relay call bridged (`voice.ts:1101-1136`)
 
@@ -2375,11 +2450,24 @@ Commit: `docs(runbook): the last-heard-from backfill - deploy first, dry run, ap
    two reads (a just-converted caseworker), `404 tenant_not_found` when the row
    is gone. Both are tested (task 3.7).
 
+REVISION 2 (plan review round 1, adjudications "Plan review / Round 1"):
+items 1-3 above were ACCEPTED as plan head 3.4 #1-#3. Four review findings
+are folded into the tasks below: (a) `setListingSendOutcome` returns
+`{ row: ListingSendRow }` everywhere (head 3.4 #4) - tasks 3.8, 5.3, 5.4;
+(b) markup R1 - `SendRosterRow`'s root is an `<li>` and every host wraps its
+rows in `SendRosterList` (`<ul>`) - tasks 5.1, 5.3, 5.4; (c) markup R4 - the
+property page opens the Schedule tour form ONLY from the URL
+(`?tour=new[&tenantId=]`); a form-mode Interested click and "+ Tour" both
+NAVIGATE there with `setSearchParams`, and Cancel / create clear both params -
+task 5.3; (d) B8 - `Request a tour` renders only for a PARTNER recipient (the
+host passes `requestTourTo` only then; never a landlord row) - tasks 5.1, 5.3,
+5.4.
+
 ADDITIONS (new exported names beyond the head contracts; no existing contract
 changes): `wireDecline` and `ListingSendRowOptions` (app); `projectRecipientRow`
 and `groupToursByTenant` stay module-private in `routes/units.ts`;
-`interestedModeOf`, `SendRosterRowProps`, `SendRowAction` in
-`dashboard/src/routes/contact/Card.tsx`; `orderSendRows` in
+`interestedModeOf`, `SendRosterRowProps`, `SendRowAction`, `SendRosterList` in
+`dashboard/src/routes/contact/Card.tsx`; `groupSendRows` and `SendRowGroup` in
 `dashboard/src/routes/listing/listingFormat.ts`;
 `dashboard/src/lib/listingOutcomeErrors.ts` (`isOutcomeSaved`,
 `outcomeErrorCopy`, two copy constants); `useListing().setRecipientRow(unitId,
@@ -4670,14 +4758,14 @@ RED:
    import list and:
 
 ```ts
-it('setListingSendOutcome POSTs the outcome and unwraps { row }', async () => {
+it('setListingSendOutcome POSTs the outcome and returns the { row } body as-is (head 3.4 #4)', async () => {
   vi.mocked(request).mockResolvedValueOnce({ row: { contactId: 'c 1', unitId: 'u1', outcome: 'not_interested' } });
-  const row = await setListingSendOutcome('u1', 'c 1', 'not_interested');
+  const res = await setListingSendOutcome('u1', 'c 1', 'not_interested');
   expect(request).toHaveBeenCalledWith('/api/units/u1/recipients/c%201/outcome', {
     method: 'POST',
     body: { outcome: 'not_interested' },
   });
-  expect(row).toEqual({ contactId: 'c 1', unitId: 'u1', outcome: 'not_interested' });
+  expect(res).toEqual({ row: { contactId: 'c 1', unitId: 'u1', outcome: 'not_interested' } });
 });
 ```
 
@@ -4747,19 +4835,19 @@ export type InterestedMode = 'route' | 'form';
 
 ```ts
 /** POST /api/units/:unitId/recipients/:contactId/outcome (last-heard-from spec
- *  5.4) - record or clear a send outcome; returns the re-projected row. A 503
- *  whose body carries `saved: true` means the write landed but the re-read
- *  failed (lib/listingOutcomeErrors.ts reads it). */
+ *  5.4) - record or clear a send outcome; answers `{ row }`, the re-projected
+ *  row (the shape EVERY caller destructures - plan head 3.4 #4; the Follow up
+ *  view in S7 uses it too). A 503 whose body carries `saved: true` means the
+ *  write landed but the re-read failed (lib/listingOutcomeErrors.ts reads it). */
 export async function setListingSendOutcome(
   unitId: string,
   contactId: string,
   outcome: 'interested' | 'not_interested' | 'clear',
-): Promise<ListingSendRow> {
-  const res = await request<{ row: ListingSendRow }>(
+): Promise<{ row: ListingSendRow }> {
+  return request<{ row: ListingSendRow }>(
     `/api/units/${encodeURIComponent(unitId)}/recipients/${encodeURIComponent(contactId)}/outcome`,
     { method: 'POST', body: { outcome } },
   );
-  return res.row;
 }
 ```
 
@@ -6142,13 +6230,13 @@ RED - new `dashboard/src/routes/contact/SendRosterRow.test.tsx` (the
 `TourChip.test.tsx:1-19` style):
 
 ```tsx
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, type ListingSendRow } from '../../api/index.js';
 import { formatHeardFrom } from '../../lib/heardFrom.js';
-import { interestedModeOf, SendRosterRow, type SendRosterRowProps } from './Card.js';
+import { interestedModeOf, SendRosterList, SendRosterRow, type SendRosterRowProps } from './Card.js';
 
 const NOW = new Date('2026-10-13T12:00:00.000Z');
 const ROW: ListingSendRow = {
@@ -6165,21 +6253,58 @@ function renderRow(row: Partial<ListingSendRow> = {}, props: Partial<SendRosterR
   const onOutcome = props.onOutcome ?? vi.fn(() => Promise.resolve());
   render(
     <MemoryRouter>
-      <SendRosterRow
-        to="/contacts/c-1"
-        identity="Tia Moss"
-        row={{ ...ROW, ...row }}
-        address="12 Oak St"
-        name="Tia Moss"
-        interestedMode="route"
-        now={NOW}
-        {...props}
-        onOutcome={onOutcome}
-      />
+      <SendRosterList label="Properties sent">
+        <SendRosterRow
+          to="/contacts/c-1"
+          identity="Tia Moss"
+          row={{ ...ROW, ...row }}
+          address="12 Oak St"
+          name="Tia Moss"
+          interestedMode="route"
+          now={NOW}
+          {...props}
+          onOutcome={onOutcome}
+        />
+      </SendRosterList>
     </MemoryRouter>,
   );
   return { onOutcome };
 }
+
+describe('SendRosterRow - markup R1 (plan head 3.4 #10)', () => {
+  it('the row root is ONE listitem inside the named list, and nothing inside it is another listitem', () => {
+    renderRow({ outcome: 'not_interested', declined: { at: '2026-10-05T10:00:00.000Z', by: 'staff' } });
+    const list = screen.getByRole('list', { name: 'Properties sent' });
+    const items = within(list).getAllByRole('listitem');
+    expect(items).toHaveLength(1);
+    expect(items[0]!.tagName).toBe('LI');
+    expect(within(items[0]!).getByRole('link', { name: 'Tia Moss' })).toBeInTheDocument();
+    expect(within(items[0]!).getByText('Not interested', { exact: true })).toBeInTheDocument();
+  });
+
+  it('three rows in one list are exactly three listitems', () => {
+    render(
+      <MemoryRouter>
+        <SendRosterList label="Waiting">
+          {['c-1', 'c-2', 'c-3'].map((id) => (
+            <SendRosterRow
+              key={id}
+              to={`/contacts/${id}`}
+              identity={id}
+              row={{ ...ROW, contactId: id }}
+              address="12 Oak St"
+              name={id}
+              interestedMode="route"
+              onOutcome={() => Promise.resolve()}
+              now={NOW}
+            />
+          ))}
+        </SendRosterList>
+      </MemoryRouter>,
+    );
+    expect(within(screen.getByRole('list', { name: 'Waiting' })).getAllByRole('listitem')).toHaveLength(3);
+  });
+});
 
 describe('SendRosterRow - outcome rendering', () => {
   it('no_reply: the chip, both dates, Interested + Not interested with their names', () => {
@@ -6224,7 +6349,10 @@ describe('SendRosterRow - outcome rendering', () => {
     expect(screen.getByRole('button', { name: 'Mark Cora Reyes not interested in 12 Oak St' })).toBeInTheDocument();
   });
 
-  it('a partner row without requestTourTo shows neither Interested nor the link', () => {
+  // B8: the HOST passes requestTourTo only for a partner recipient, so a
+  // landlord / team-member row (interestedSupported false, no requestTourTo)
+  // renders neither - the host-level landlord negatives are in 5.3 / 5.4.
+  it('a non-tenant row without requestTourTo (a landlord row) shows neither Interested nor the link', () => {
     renderRow({ interestedSupported: false });
     expect(screen.queryByRole('link', { name: /^Request a tour/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Mark Tia Moss interested/ })).not.toBeInTheDocument();
@@ -6314,8 +6442,9 @@ describe('interestedModeOf', () => {
 });
 ```
 
-RED today: `SendRosterRow` takes `{ to, identity, kind, tour }`
-(`Card.tsx:218-247`); `interestedModeOf` / `SendRosterRowProps` do not exist.
+RED today: `SendRosterRow` takes `{ to, identity, kind, tour }` and renders a
+`<div>` root (`Card.tsx:218-247`); `interestedModeOf` / `SendRosterRowProps` /
+`SendRosterList` do not exist.
 
 GREEN - `dashboard/src/routes/contact/Card.tsx`:
 
@@ -6361,7 +6490,9 @@ export interface SendRosterRowProps {
   actionsDisabled?: boolean;
   /** Calls the outcome route and applies the returned row; rejects on failure. */
   onOutcome: (outcome: SendRowAction) => Promise<void>;
-  /** Partner rows: a Link to /listings/:unitId?tour=new (contract change 1). */
+  /** A Link to /listings/:unitId?tour=new (head 3.4 #1). The HOST passes it
+   *  ONLY for a PARTNER recipient (B8: the units route's `row.type`, or the
+   *  contact page's own type) - never for a landlord or team-member row. */
   requestTourTo?: string;
   /** interestedMode 'form' on a tenant row: open the Schedule tour form. */
   onOpenTourForm?: () => void;
@@ -6377,7 +6508,8 @@ function OutcomeChip({ row, now }: { row: ListingSendRow; now: Date }): React.JS
     case 'replied':
       return <span className={`${chip} ${styles.chipPositive ?? ''}`}>Replied</span>;
     case 'interested':
-      return row.tour ? <TourChip tourId={row.tour.tourId} state={row.tour.state} /> : null;
+      // Head 3.4 #5: an interested row whose response carries no `tour` reads `Interested`.
+      return row.tour ? <TourChip tourId={row.tour.tourId} state={row.tour.state} /> : <span className={chip}>Interested</span>;
     case 'not_interested': {
       const title = row.declined !== undefined ? formatHeardFrom(row.declined.at, now).title : '';
       return (
@@ -6391,9 +6523,23 @@ function OutcomeChip({ row, now }: { row: ListingSendRow; now: Date }): React.JS
   }
 }
 
+/** The list every send-roster host wraps its rows in (markup R1, plan head
+ *  3.4 #10): a `<ul>` named by `label` (a property-card group - `Waiting`,
+ *  `Interested`, `Not interested`, `Not eligible` - or `Properties sent` on a
+ *  contact card). Its children are SendRosterRows only, so every listitem in a
+ *  card is one roster row. */
+export function SendRosterList({ label, children }: { label: string; children: React.ReactNode }): React.JSX.Element {
+  return (
+    <ul className={styles.sendList} aria-label={label}>
+      {children}
+    </ul>
+  );
+}
+
 /** A send-roster row (last-heard-from spec 5.5): line one is the identity
  *  link (+ kind) and the muted "Sent <date> - Last heard from <date>"; line
- *  two is the outcome chip and the outcome's actions. The row is NOT a
+ *  two is the outcome chip and the outcome's actions. The root is an `<li>`
+ *  (markup R1) and must sit inside a SendRosterList. The row is NOT a
  *  full-row link (the identity, the tour chip and the actions go to different
  *  places). An action disables itself while in flight and the host replaces
  *  the row with the route's answer; a failure shows an inline error and
@@ -6428,7 +6574,7 @@ export function SendRosterRow({
   const waiting = row.outcome === 'no_reply' || row.outcome === 'replied';
   const canInterested = waiting && row.interestedSupported && (interestedMode === 'route' || onOpenTourForm !== undefined);
   return (
-    <div className={styles.sendRow}>
+    <li className={styles.sendRow}>
       <div className={styles.sendRowLine}>
         <span className={styles.liLabel}>
           <Link className={styles.rowLink ?? ''} to={to}>
@@ -6492,7 +6638,7 @@ export function SendRosterRow({
           {error}
         </p>
       ) : null}
-    </div>
+    </li>
   );
 }
 ```
@@ -6501,9 +6647,17 @@ export function SendRosterRow({
   (`:212-217`):
 
 ```css
-/* last-heard-from spec 5.5: the two-line send-roster row (SendRosterRow).
- * Line one: identity (+ kind) and the muted dates; line two: the outcome
- * chip and its actions. Both lines wrap on a narrow card. */
+/* last-heard-from markup R1: the roster list (SendRosterList) - a bare <ul>
+ * whose only children are SendRosterRow <li>s. */
+.sendList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* last-heard-from spec 5.5: the two-line send-roster row (SendRosterRow, an
+ * <li>). Line one: identity (+ kind) and the muted dates; line two: the
+ * outcome chip and its actions. Both lines wrap on a narrow card. */
 .sendRow {
   display: flex;
   flex-direction: column;
@@ -6612,8 +6766,11 @@ export function SendRosterRow({
   wire the actions in the same spots; the `now` state added here is final:
   - `ListingDetail.tsx`: add `const [now] = useState(() => new Date());`
     after `:245` (a lazy initializer keeps render pure; before the early
-    returns at `:296-314`), add `interestedModeOf` to the Card import (`:45`),
-    and replace the `SendRosterRow` element at `:1145-1151` with:
+    returns at `:296-314`), add `interestedModeOf, SendRosterList` to the
+    Card import (`:45`), wrap the `recipients.rows.map(...)` at `:1140-1153`
+    in ONE `<SendRosterList label="Sent to">...</SendRosterList>` (R1; task
+    5.3 replaces it with the four labelled group lists), and replace the
+    `SendRosterRow` element at `:1145-1151` with:
 
 ```tsx
                       <SendRosterRow
@@ -6632,9 +6789,11 @@ export function SendRosterRow({
 ```
 
   - `TenantFile.tsx`: add `import { useState } from 'react';` above `:9`,
-    `interestedModeOf` to the Card import (`:24-36`), the first body line
-    `const [now] = useState(() => new Date());` (before `:143`), and replace
-    `:312-317` with:
+    `interestedModeOf, SendRosterList` to the Card import (`:24-36`), the
+    first body line `const [now] = useState(() => new Date());` (before
+    `:143`), wrap the `listingsSent.map(...)` at `:311-318` in
+    `<SendRosterList label="Properties sent">...</SendRosterList>` (R1, final),
+    and replace the element at `:312-317` with:
 
 ```tsx
             <SendRosterRow
@@ -6651,10 +6810,15 @@ export function SendRosterRow({
             />
 ```
 
-  - `PartnerFile.tsx`: the same three edits (`useState` import, Card import
-    `:15` gains `interestedModeOf`, `const [now] = useState(() => new Date());`
-    as the first body line before `:81`), and `:174-178` becomes the
+  - `PartnerFile.tsx`: the same edits (`useState` import, Card import `:15`
+    gains `interestedModeOf, SendRosterList`, `const [now] = useState(() =>
+    new Date());` as the first body line before `:81`, the
+    `listingsSent.map(...)` at `:173-179` wrapped in
+    `<SendRosterList label="Properties sent">`), and `:174-178` becomes the
     TenantFile element above with `sentUnitLabel` in place of `unitLabel`.
+  - R1 audit of the three cards: the only other content inside each card is
+    `EmptyRow` / `PendingPanel` (`<p>`, `Card.tsx:79-88`) and the card aside -
+    no other listitem exists in a "Sent to" / "Properties sent" card.
 - KNOWING rewrites of `dashboard/src/routes/listing/ListingDetail.test.tsx`
   (findings C2) land HERE, because this is the first commit that breaks them
   (the untyped `vi.fn()` mock rows carry no `outcome`, so a toured row would
@@ -6681,8 +6845,9 @@ export function SendRosterRow({
     }
 ```
 
-    (`rowOf`, `:553-554`, resolves `closest('div')` = the row's first line,
-    which holds the identity link and the kind label - unchanged.)
+    (`rowOf`, `:553-554`, resolves `closest('div')` = the row's first line
+    inside its `<li>`, which holds the identity link and the kind label -
+    unchanged.)
   - `:563-579`: each row gains
     `outcome: 'interested', interestedSupported: true, interestedMode: 'route', eligible: true`.
   Other host tests stay green: the files.test.tsx fixtures already carry
@@ -6823,15 +6988,25 @@ GREEN:
 
 Commit: `feat(dashboard): per-row setters for the two send rosters`.
 
-### Task 5.3 - the property card: `?tour=new`, the four groups, deleted property
+### Task 5.3 - the property card: the four group lists, the URL-only tour form (R4), deleted property
+
+Markup contracts delivered here (plan head 3.4 #10): R1 - each non-empty
+group is a `SendRosterList` (`<ul>`) named `Waiting` / `Interested` /
+`Not interested` / `Not eligible`, whose children are the group's rows (each
+an `<li>`); nothing else in the card is a listitem. R4 - the Schedule a tour
+form on this page opens ONLY from the URL: a form-mode Interested click
+NAVIGATES (`setSearchParams`) to `?tour=new&tenantId=<id>`, "+ Tour" to
+`?tour=new`, a partner row's `Request a tour` link to `?tour=new`; the
+param-driven host opens the form (tenant LOCKED when `tenantId` is set);
+Cancel and create clear BOTH params. There is no local-state open path.
 
 RED:
 
 1. `dashboard/src/routes/listing/listingFormat.test.ts` - a new describe
-   (import `orderSendRows` and `type ListingSendRow`):
+   (import `groupSendRows` and `type ListingSendRow`):
 
 ```ts
-describe('orderSendRows - the four groups that cover every row (spec 5.5)', () => {
+describe('groupSendRows - the four groups that cover every row (spec 5.5)', () => {
   const row = (contactId: string, sentAt: string, over: Partial<ListingSendRow>): ListingSendRow => ({
     contactId,
     unitId: 'u1',
@@ -6843,7 +7018,7 @@ describe('orderSendRows - the four groups that cover every row (spec 5.5)', () =
     ...over,
   });
 
-  it('WAITING (eligible, newest first), interested, not_interested, NOT ELIGIBLE', () => {
+  it('Waiting (eligible, newest first), Interested, Not interested, Not eligible - always four, in order', () => {
     const rows = [
       row('ne-waiting', '2026-10-09T00:00:00.000Z', { eligible: false }),
       row('w-old', '2026-10-01T00:00:00.000Z', { outcome: 'replied' }),
@@ -6852,14 +7027,20 @@ describe('orderSendRows - the four groups that cover every row (spec 5.5)', () =
       row('int', '2026-10-02T00:00:00.000Z', { outcome: 'interested' }),
       row('w-new', '2026-10-05T00:00:00.000Z', {}),
     ];
-    const ordered = orderSendRows(rows).map((r) => r.contactId);
-    expect(ordered).toEqual(['w-new', 'w-old', 'int', 'ni', 'missing-ni', 'ne-waiting']);
+    const groups = groupSendRows(rows);
+    expect(groups.map((g) => [g.key, g.label, g.rows.map((r) => r.contactId)])).toEqual([
+      ['waiting', 'Waiting', ['w-new', 'w-old']],
+      ['interested', 'Interested', ['int']],
+      ['not_interested', 'Not interested', ['ni']],
+      ['not_eligible', 'Not eligible', ['missing-ni', 'ne-waiting']],
+    ]);
     // A cover: every row exactly once.
-    expect([...ordered].sort()).toEqual(rows.map((r) => r.contactId).sort());
+    expect(groups.flatMap((g) => g.rows.map((r) => r.contactId)).sort()).toEqual(rows.map((r) => r.contactId).sort());
   });
 
-  it('a row with no eligible flag is NOT ELIGIBLE (only the units route sets it)', () => {
-    expect(orderSendRows([row('a', '2026-10-01T00:00:00.000Z', { eligible: undefined })]).map((r) => r.contactId)).toEqual(['a']);
+  it('a row with no eligible flag is Not eligible (only the units route sets it); empty groups stay empty', () => {
+    const groups = groupSendRows([row('a', '2026-10-01T00:00:00.000Z', { eligible: undefined })]);
+    expect(groups.map((g) => g.rows.length)).toEqual([0, 0, 0, 1]);
   });
 });
 ```
@@ -6874,9 +7055,13 @@ describe('orderSendRows - the four groups that cover every row (spec 5.5)', () =
      existing call keeps its meaning).
    - The findings-C2 knowing rewrites of `:503-579` already landed in task
      5.1 (the first commit that broke them).
-   - New cases (a new describe; `const sent = (over) => ({ contactId: 'c-1', unitId: 'u1', sentAt: '2026-10-01T10:00:00.000Z', via: 'broadcast', tenantName: 'Tia Moss', outcome: 'no_reply', interestedSupported: true, interestedMode: 'route', eligible: true, ...over })`;
-     every case uses `unit: { ...READY.unit!, address: { line1: '12 Oak St' } }` so the
-     accessible names read `... in 12 Oak St`):
+   - The existing `'Tours card has a "+ Tour" action ...'` case (`:1070-1092`)
+     stays as it is and must stay green: "+ Tour" now navigates to
+     `?tour=new` and the param-driven host opens the same dialog (free tenant
+     typeahead, unit pre-committed).
+   - New cases (every case uses `unit: { ...READY.unit!, address: { line1: '12 Oak St' } }`
+     so the accessible names read `... in 12 Oak St`; `setListingSendOutcome`
+     resolves `{ row }` - plan head 3.4 #4):
 
 ```tsx
 describe('ListingDetail - "Sent to" outcomes (last-heard-from spec 5.5)', () => {
@@ -6894,7 +7079,7 @@ describe('ListingDetail - "Sent to" outcomes (last-heard-from spec 5.5)', () => 
     getAllUnits.mockResolvedValue([{ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '12 Oak St' } }]);
   });
 
-  it('orders the rows WAITING, interested, not interested, NOT ELIGIBLE', () => {
+  it('renders the rows as four named lists in order - Waiting, Interested, Not interested, Not eligible (R1)', () => {
     useListing.mockReturnValue({
       ...READY,
       unit,
@@ -6905,21 +7090,36 @@ describe('ListingDetail - "Sent to" outcomes (last-heard-from spec 5.5)', () => 
           sent({ contactId: 'c-ni', tenantName: 'Nia Declined', outcome: 'not_interested', declined: { at: '2026-10-03T10:00:00.000Z', by: 'staff' } }),
           sent({ contactId: 'c-in', tenantName: 'Ian Toured', outcome: 'interested', tour: { tourId: 't-1', state: 'toured' } }),
           sent({ contactId: 'c-w', tenantName: 'Wes Waiting', sentAt: '2026-10-05T10:00:00.000Z' }),
+          sent({ contactId: 'c-w2', tenantName: 'Wanda Older', sentAt: '2026-10-02T10:00:00.000Z' }),
         ],
       },
     });
     renderAt();
-    const names = within(card())
-      .getAllByRole('link')
-      .filter((a) => a.getAttribute('href')?.startsWith('/contacts/'))
-      .map((a) => a.textContent);
-    expect(names).toEqual(['Wes Waiting', 'Ian Toured', 'Nia Declined', 'Ned Ineligible']);
+    const lists = within(card()).getAllByRole('list');
+    expect(lists.map((l) => l.getAttribute('aria-label'))).toEqual(['Waiting', 'Interested', 'Not interested', 'Not eligible']);
+    // Every listitem in the card is one roster row - 5 rows, 5 listitems.
+    expect(within(card()).getAllByRole('listitem')).toHaveLength(5);
+    const namesIn = (label: string): Array<string | null> =>
+      within(within(card()).getByRole('list', { name: label }))
+        .getAllByRole('listitem')
+        .map((li) => within(li).getAllByRole('link').find((a) => a.getAttribute('href')?.startsWith('/contacts/'))?.textContent ?? null);
+    expect(namesIn('Waiting')).toEqual(['Wes Waiting', 'Wanda Older']);
+    expect(namesIn('Interested')).toEqual(['Ian Toured']);
+    expect(namesIn('Not interested')).toEqual(['Nia Declined']);
+    expect(namesIn('Not eligible')).toEqual(['Ned Ineligible']);
   });
 
-  it('Not interested calls the route and applies the returned row through setRecipientRow', async () => {
+  it('an empty group renders no list', () => {
+    useListing.mockReturnValue({ ...READY, unit, recipients: { status: 'ready', rows: [sent()] } });
+    renderAt();
+    expect(within(card()).getAllByRole('list').map((l) => l.getAttribute('aria-label'))).toEqual(['Waiting']);
+    expect(within(card()).getAllByRole('listitem')).toHaveLength(1);
+  });
+
+  it('Not interested calls the route and applies the returned { row } through setRecipientRow', async () => {
     const setRecipientRow = vi.fn();
     const returned = sent({ outcome: 'not_interested', declined: { at: '2026-10-13T10:00:00.000Z', by: 'staff' } });
-    setListingSendOutcome.mockResolvedValue(returned);
+    setListingSendOutcome.mockResolvedValue({ row: returned });
     useListing.mockReturnValue({ ...READY, unit, setRecipientRow, recipients: { status: 'ready', rows: [sent()] } });
     renderAt();
     await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss not interested in 12 Oak St' }));
@@ -6928,24 +7128,29 @@ describe('ListingDetail - "Sent to" outcomes (last-heard-from spec 5.5)', () => 
   });
 
   it("Interested in 'route' mode calls the route with interested", async () => {
-    setListingSendOutcome.mockResolvedValue(sent({ outcome: 'interested', tour: { tourId: 't-new', state: 'requested' } }));
+    setListingSendOutcome.mockResolvedValue({ row: sent({ outcome: 'interested', tour: { tourId: 't-new', state: 'requested' } }) });
     useListing.mockReturnValue({ ...READY, unit, recipients: { status: 'ready', rows: [sent()] } });
     renderAt();
     await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss interested in 12 Oak St' }));
     expect(setListingSendOutcome).toHaveBeenCalledWith('u1', 'c-1', 'interested');
   });
 
-  it("Interested in 'form' mode opens Schedule a tour with the row's tenant LOCKED and this property committed", async () => {
+  it("Interested in 'form' mode NAVIGATES to ?tour=new&tenantId=, the form opens with the tenant LOCKED, creates nothing, and Cancel clears both params (R4)", async () => {
     useListing.mockReturnValue({ ...READY, unit, recipients: { status: 'ready', rows: [sent({ interestedMode: 'form' })] } });
     renderAt();
     await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss interested in 12 Oak St' }));
+    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/listings/u1?tour=new&tenantId=c-1'));
     const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
     await waitFor(() => expect(within(dialog).getByRole('group', { name: 'Tenant' })).toHaveTextContent('Tia Moss'));
     await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Unit' })).toHaveValue('12 Oak St'));
     expect(setListingSendOutcome).not.toHaveBeenCalled();
+    expect(createTour).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Schedule a tour' })).not.toBeInTheDocument());
+    expect(screen.getByTestId('path')).toHaveTextContent(/^\/listings\/u1$/);
   });
 
-  it('a partner row links "Request a tour" to ?tour=new on this page; the form opens with NO tenant, and Cancel clears the params', async () => {
+  it('a PARTNER row links "Request a tour" to ?tour=new on this page; the form opens with NO tenant, and Cancel clears the params', async () => {
     useListing.mockReturnValue({
       ...READY,
       unit,
@@ -6960,6 +7165,18 @@ describe('ListingDetail - "Sent to" outcomes (last-heard-from spec 5.5)', () => 
     await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Schedule a tour' })).not.toBeInTheDocument());
     expect(screen.getByTestId('path')).toHaveTextContent(/^\/listings\/u1$/);
+  });
+
+  it('a LANDLORD row gets NO "Request a tour" link and no Interested button - only Not interested (B8)', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit,
+      recipients: { status: 'ready', rows: [sent({ contactId: 'c-ll', tenantName: 'Lee Park', type: 'landlord', interestedSupported: false })] },
+    });
+    renderAt();
+    expect(screen.queryByRole('link', { name: /^Request a tour/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark Lee Park interested in 12 Oak St' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark Lee Park not interested in 12 Oak St' })).toBeInTheDocument();
   });
 
   it('the URL entry ?tour=new&tenantId= opens the form on load with that tenant locked', async () => {
@@ -7009,8 +7226,8 @@ describe('ListingDetail - "Sent to" outcomes (last-heard-from spec 5.5)', () => 
 });
 ```
 
-RED today: no `orderSendRows`; the card renders rows in wire order, calls no
-route, ignores `?tour=new`.
+RED today: no `groupSendRows`; the card renders one `<div>` row per send in
+wire order, calls no route, and ignores `?tour=new`.
 
 GREEN:
 
@@ -7019,26 +7236,39 @@ GREEN:
   `sendRowKindLabel` at `:241`):
 
 ```ts
+/** One property "Sent to" group (last-heard-from spec 5.5): its key and the
+ *  accessible name of its list (markup R1). */
+export interface SendRowGroup {
+  key: 'waiting' | 'interested' | 'not_interested' | 'not_eligible';
+  label: 'Waiting' | 'Interested' | 'Not interested' | 'Not eligible';
+  rows: ListingSendRow[];
+}
+
 /**
- * last-heard-from spec 5.5: the property "Sent to" card's order - four groups
- * that together cover every row, each newest sentAt first: WAITING
- * (no_reply / replied on an ELIGIBLE recipient - the eligibility half only,
- * no lookback/quiet thresholds), then interested, then not_interested, then
- * NOT ELIGIBLE (a waiting outcome on an ineligible recipient, and EVERY row
- * whose contact is missing). `eligible` absent counts as not eligible.
+ * last-heard-from spec 5.5: the property "Sent to" card's four groups, ALWAYS
+ * returned in this order (empty ones included; the host skips them), which
+ * together cover every row, each newest sentAt first: Waiting (no_reply /
+ * replied on an ELIGIBLE recipient - the eligibility half only, no
+ * lookback/quiet thresholds), Interested, Not interested, Not eligible (a
+ * waiting outcome on an ineligible recipient, and EVERY row whose contact is
+ * missing). `eligible` absent counts as not eligible.
  */
-export function orderSendRows(rows: readonly ListingSendRow[]): ListingSendRow[] {
-  const group = (r: ListingSendRow): number => {
+export function groupSendRows(rows: readonly ListingSendRow[]): SendRowGroup[] {
+  const groups: SendRowGroup[] = [
+    { key: 'waiting', label: 'Waiting', rows: [] },
+    { key: 'interested', label: 'Interested', rows: [] },
+    { key: 'not_interested', label: 'Not interested', rows: [] },
+    { key: 'not_eligible', label: 'Not eligible', rows: [] },
+  ];
+  const indexOf = (r: ListingSendRow): number => {
     if (r.recipientMissing === true) return 3;
     if (r.outcome === 'interested') return 1;
     if (r.outcome === 'not_interested') return 2;
     return r.eligible === true ? 0 : 3;
   };
-  return [...rows].sort((a, b) => {
-    const byGroup = group(a) - group(b);
-    if (byGroup !== 0) return byGroup;
-    return a.sentAt < b.sentAt ? 1 : a.sentAt > b.sentAt ? -1 : 0;
-  });
+  const newestFirst = [...rows].sort((a, b) => (a.sentAt < b.sentAt ? 1 : a.sentAt > b.sentAt ? -1 : 0));
+  for (const r of newestFirst) groups[indexOf(r)]!.rows.push(r);
+  return groups;
 }
 ```
 
@@ -7046,19 +7276,20 @@ export function orderSendRows(rows: readonly ListingSendRow[]): ListingSendRow[]
   - `:16` becomes `import { useNavigate, useParams, useSearchParams } from 'react-router-dom';`
   - the api import `:17-33` gains `setListingSendOutcome,` (alphabetical
     position after `setUnitPhotoCover`) and `type ListingSendRow`.
-  - the `listingFormat` import gains `orderSendRows` (`interestedModeOf`
-    joined the Card import in 5.1).
-  - `:244-246` - replace the `schedulingTour` state and its comment with:
+  - the `listingFormat` import gains `groupSendRows` (`interestedModeOf` and
+    `SendRosterList` joined the Card import in 5.1).
+  - `:244-246` - DELETE the `schedulingTour` state and its comment (there is
+    no local open state any more) and replace them with:
 
 ```tsx
-  // The "Schedule a tour" dialog, unit side pre-committed to this property.
-  // `tenantId` set = the clicked "Sent to" row's tenant, pre-committed and
-  // LOCKED in the form (spec 14.3 B9). The URL entry `?tour=new` (and
-  // `&tenantId=<id>`) opens the same dialog from another page (the waiting
-  // list) or from a partner row's "Request a tour" link: it is read on every
-  // render, so a param change while this page is mounted opens it too, and
-  // closing (or creating) strips the params so Back / refresh never reopen it.
-  const [tourForm, setTourForm] = useState<{ tenantId?: string } | null>(null);
+  // The "Schedule a tour" dialog (markup R4) opens ONLY from the URL:
+  // `?tour=new` (free tenant) or `?tour=new&tenantId=<id>` (that tenant
+  // pre-committed and LOCKED in the form, spec 14.3 B9), unit side
+  // pre-committed to this property. Every entry point NAVIGATES there - "+
+  // Tour", a form-mode Interested click, a partner row's "Request a tour"
+  // link, and the waiting list on another page - so a param change while this
+  // page is mounted opens it, and Cancel / create clear both params so Back
+  // and refresh never reopen it.
   const [searchParams, setSearchParams] = useSearchParams();
   const { setUnit, setRecipientRow } = state;
 ```
@@ -7068,73 +7299,98 @@ export function orderSendRows(rows: readonly ListingSendRow[]): ListingSendRow[]
   - after `goToSend` (`:371`), add:
 
 ```tsx
-  // The URL entry (never on a deleted property - "+ Tour" is hidden there too).
-  const tourEntry = !deleted && searchParams.get('tour') === 'new';
-  const tourEntryTenant = searchParams.get('tenantId') ?? undefined;
-  const openTourForm: { tenantId?: string } | null =
-    tourForm ?? (tourEntry ? (tourEntryTenant !== undefined ? { tenantId: tourEntryTenant } : {}) : null);
-  const closeTourForm = (): void => {
-    setTourForm(null);
-    if (searchParams.has('tour') || searchParams.has('tenantId')) {
-      setSearchParams(
-        (prev) => {
-          const next = new URLSearchParams(prev);
-          next.delete('tour');
-          next.delete('tenantId');
-          return next;
-        },
-        { replace: true },
-      );
-    }
+  // The URL-driven tour form (never on a deleted property - "+ Tour" is hidden
+  // there too).
+  const tourFormOpen = !deleted && searchParams.get('tour') === 'new';
+  const tourFormTenant = searchParams.get('tenantId') ?? undefined;
+  /** Open the form by NAVIGATING (a history entry - Back closes it). */
+  const openTourForm = (tenantId?: string): void => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set('tour', 'new');
+      if (tenantId !== undefined) next.set('tenantId', tenantId);
+      else next.delete('tenantId');
+      return next;
+    });
   };
-  // One outcome action on a "Sent to" row: the route answers the
-  // re-projected row, applied in place (no refetch). A rejection propagates
-  // to the row, which shows its inline error.
+  /** Close it: strip BOTH params in place (replace). */
+  const closeTourForm = (): void => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('tour');
+        next.delete('tenantId');
+        return next;
+      },
+      { replace: true },
+    );
+  };
+  // One outcome action on a "Sent to" row: the route answers { row } (plan
+  // head 3.4 #4), applied in place (no refetch). A rejection propagates to
+  // the row, which shows its inline error.
   const onRecipientOutcome = async (contactId: string, outcome: 'interested' | 'not_interested' | 'clear'): Promise<void> => {
-    const next = await setListingSendOutcome(unit.unitId, contactId, outcome);
-    setRecipientRow(unit.unitId, contactId, next);
+    const { row } = await setListingSendOutcome(unit.unitId, contactId, outcome);
+    setRecipientRow(unit.unitId, contactId, row);
   };
 ```
 
-  - the Sent to rows `:1140-1153` become:
+  - the Sent to card's ready branch (`:1139-1154`, the single interim
+    `SendRosterList label="Sent to"` from 5.1 included) becomes:
 
 ```tsx
-                  orderSendRows(recipients.rows).map((row: ListingSendRow) => {
-                    // caseworkers D20/D22: a resolved non-tenant row is labelled by
-                    // its displayKind; tenant and unresolved rows are not.
-                    const kind = sendRowKindLabel(row);
-                    const name = row.tenantName ?? row.contactId;
-                    return (
-                      <SendRosterRow
-                        key={`${row.contactId}:${row.sentAt}`}
-                        to={`/contacts/${row.contactId}`}
-                        identity={name}
-                        {...(kind !== undefined && { kind })}
-                        row={row}
-                        address={address}
-                        name={name}
-                        interestedMode={row.interestedMode ?? interestedModeOf(unit)}
-                        actionsDisabled={deleted}
-                        onOutcome={(outcome) => onRecipientOutcome(row.contactId, outcome)}
-                        requestTourTo={`/listings/${encodeURIComponent(unit.unitId)}?tour=new`}
-                        onOpenTourForm={() => setTourForm({ tenantId: row.contactId })}
-                        now={now}
-                      />
-                    );
-                  })
+                recipients.rows.length === 0 ? (
+                  <EmptyRow>Not sent to anyone yet.</EmptyRow>
+                ) : (
+                  groupSendRows(recipients.rows)
+                    .filter((group) => group.rows.length > 0)
+                    .map((group) => (
+                      // Markup R1: one named list per non-empty group; its
+                      // children are roster rows only.
+                      <SendRosterList key={group.key} label={group.label}>
+                        {group.rows.map((row: ListingSendRow) => {
+                          // caseworkers D20/D22: a resolved non-tenant row is labelled by
+                          // its displayKind; tenant and unresolved rows are not.
+                          const kind = sendRowKindLabel(row);
+                          const name = row.tenantName ?? row.contactId;
+                          return (
+                            <SendRosterRow
+                              key={`${row.contactId}:${row.sentAt}`}
+                              to={`/contacts/${row.contactId}`}
+                              identity={name}
+                              {...(kind !== undefined && { kind })}
+                              row={row}
+                              address={address}
+                              name={name}
+                              interestedMode={row.interestedMode ?? interestedModeOf(unit)}
+                              actionsDisabled={deleted}
+                              onOutcome={(outcome) => onRecipientOutcome(row.contactId, outcome)}
+                              // B8: only a PARTNER recipient gets "Request a tour"
+                              // (never a landlord / team-member row).
+                              {...(row.type === 'partner' && {
+                                requestTourTo: `/listings/${encodeURIComponent(unit.unitId)}?tour=new`,
+                              })}
+                              // R4: form mode NAVIGATES to ?tour=new&tenantId=.
+                              onOpenTourForm={() => openTourForm(row.contactId)}
+                              now={now}
+                            />
+                          );
+                        })}
+                      </SendRosterList>
+                    ))
+                )
 ```
 
-  - "+ Tour" `:1169` becomes `onClick={() => setTourForm({})}`.
+  - "+ Tour" `:1169` becomes `onClick={() => openTourForm()}`.
   - the host `:1403-1412` becomes:
 
 ```tsx
-      {openTourForm !== null ? (
+      {tourFormOpen ? (
         <ScheduleTourForm
           initialUnitId={unit.unitId}
-          {...(openTourForm.tenantId !== undefined && { tenantId: openTourForm.tenantId })}
+          {...(tourFormTenant !== undefined && { tenantId: tourFormTenant })}
           onClose={closeTourForm}
           onCreated={(t) => {
-            // Strip the URL entry FIRST (replace), then push the tour page, so
+            // Strip the params FIRST (replace), then push the tour page, so
             // Back lands on the bare property page.
             closeTourForm();
             void navigate('/tours/' + t.tourId);
@@ -7143,11 +7399,7 @@ export function orderSendRows(rows: readonly ListingSendRow[]): ListingSendRow[]
       ) : null}
 ```
 
-  - The existing `'Tours card has a "+ Tour" action ...'` case
-    (`ListingDetail.test.tsx:1070-1092`) stays green unchanged (free tenant
-    typeahead, unit pre-committed).
-
-Commit: `feat(dashboard): property "Sent to" card - outcome actions, groups and the ?tour=new entry`.
+Commit: `feat(dashboard): property "Sent to" card - grouped lists, outcome actions and the URL-driven tour form`.
 
 ### Task 5.4 - contact cards: `listingsSentStatus`, `interestedMode` from `file.units`, the per-click unit, the partner link
 
@@ -7207,6 +7459,33 @@ RED:
     });
     expect(screen.getByText('No reply yet')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Mark / })).not.toBeInTheDocument();
+  });
+
+  // (PIN - the list wrapper landed in 5.1; this pins R1 on the real card.)
+  it("R1: the rows are the listitems of ONE list named 'Properties sent', and nothing else in the card is a listitem", () => {
+    renderIt({
+      listingsSentStatus: 'ready',
+      units: [UNIT, { unitId: 'u2', landlordId: 'L1', status: 'available', address: { line1: '2 Peachtree' } }],
+      listingsSent: [
+        { contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true },
+        { contactId: 'T1', unitId: 'u2', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', outcome: 'replied', interestedSupported: true },
+      ],
+    });
+    const card = screen.getByRole('heading', { name: /^Properties sent/ }).closest('section') as HTMLElement;
+    const list = within(card).getByRole('list', { name: 'Properties sent' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(card).getAllByRole('listitem')).toHaveLength(2);
+  });
+
+  it('B8: a non-partner row the tenant file shows with interestedSupported false (a team-member page) gets NO "Request a tour" link', () => {
+    renderIt({
+      contact: { ...contact, type: 'team_member' },
+      listingsSentStatus: 'ready',
+      listingsSent: [{ contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: false }],
+      onListingOutcome: vi.fn(() => Promise.resolve()),
+    });
+    expect(screen.queryByRole('link', { name: /^Request a tour/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Mark .* not interested in / })).toBeInTheDocument();
   });
 ```
 
@@ -7273,7 +7552,8 @@ RED:
     getAllUnits.mockResolvedValue([{ unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd', tour_type: 'self_guided' }]);
     const row = { contactId: 'k1', unitId: 'u1', sentAt: '2026-07-01T15:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true };
     getContactListingsSent.mockResolvedValue([row]);
-    setListingSendOutcome.mockResolvedValue({ ...row, outcome: 'not_interested', declined: { at: '2026-07-02T10:00:00.000Z', by: 'staff' } });
+    // The endpoint answers { row } (plan head 3.4 #4).
+    setListingSendOutcome.mockResolvedValue({ row: { ...row, outcome: 'not_interested', declined: { at: '2026-07-02T10:00:00.000Z', by: 'staff' } } });
     renderAt('k1');
     await user.click(await screen.findByRole('button', { name: 'Mark Tasha Williams not interested in 1450 Joseph Blvd' }));
     expect(setListingSendOutcome).toHaveBeenCalledWith('u1', 'k1', 'not_interested');
@@ -7334,43 +7614,85 @@ GREEN:
         ) : listingsSent.length === 0 ? (
           <EmptyRow>No properties sent yet.</EmptyRow>
         ) : (
-          listingsSent.map((s) => {
-            const unit = unitMap.get(s.unitId);
-            const label = unitLabel(unitMap, s.unitId);
-            return (
-              <SendRosterRow
-                key={`${s.unitId}:${s.sentAt}`}
-                to={`/listings/${s.unitId}`}
-                identity={label}
-                row={s}
-                address={label}
-                name={personName}
-                interestedMode={interestedModeOf(unit)}
-                // The page loads live units only (GET /api/units excludes
-                // deleted), so an absent unit is a deleted property (B10).
-                actionsDisabled={unit === undefined || onListingOutcome === undefined}
-                onOutcome={(outcome) => (onListingOutcome ? onListingOutcome(s.unitId, outcome) : Promise.resolve())}
-                requestTourTo={`/listings/${encodeURIComponent(s.unitId)}?tour=new`}
-                {...(onOpenTourForm !== undefined && { onOpenTourForm: () => onOpenTourForm(s.unitId) })}
-                now={now}
-              />
-            );
-          })
+          // Markup R1: the rows are the only listitems in the card.
+          <SendRosterList label="Properties sent">
+            {listingsSent.map((s) => {
+              const unit = unitMap.get(s.unitId);
+              const label = unitLabel(unitMap, s.unitId);
+              return (
+                <SendRosterRow
+                  key={`${s.unitId}:${s.sentAt}`}
+                  to={`/listings/${s.unitId}`}
+                  identity={label}
+                  row={s}
+                  address={label}
+                  name={personName}
+                  interestedMode={interestedModeOf(unit)}
+                  // The page loads live units only (GET /api/units excludes
+                  // deleted), so an absent unit is a deleted property (B10).
+                  actionsDisabled={unit === undefined || onListingOutcome === undefined}
+                  onOutcome={(outcome) => (onListingOutcome ? onListingOutcome(s.unitId, outcome) : Promise.resolve())}
+                  // No requestTourTo here (B8): this file renders tenants and
+                  // team members, never a partner (ContactDetail.tsx:599-607
+                  // routes partners to PartnerFile).
+                  {...(onOpenTourForm !== undefined && { onOpenTourForm: () => onOpenTourForm(s.unitId) })}
+                  now={now}
+                />
+              );
+            })}
+          </SendRosterList>
         )}
 ```
 
-- `dashboard/src/routes/contact/PartnerFile.tsx` - the same shape (its
-  `useState` import, `interestedModeOf` and `now` landed in 5.1): the Card
+- `dashboard/src/routes/contact/PartnerFile.tsx` (its `useState` import,
+  `interestedModeOf`, `SendRosterList` and `now` landed in 5.1): the Card
   import `:15` gains `type SendRowAction`; `./format.js` (`:19`) gains
   `contactDisplayName`; `import type { Slice } from './useContactFile.js';`;
   props `:42-45` become `listingsSentStatus: Slice<ListingSendRow>['status'];`
   + `listingsSent` + `onListingOutcome?: (unitId: string, outcome: SendRowAction) => Promise<void>;`
   (no `onOpenTourForm` - a partner never gets Interested); destructuring `:74`
   `listingsSentStatus,` + `onListingOutcome,`; after `const unitMap = ...`
-  (`:82`): `const personName = contactDisplayName(contact.firstName, contact.lastName, contact.phone);`;
-  the card body `:168-180` becomes the TenantFile block above with
-  `sentUnitLabel` in place of `unitLabel` and no `onOpenTourForm` spread. The
-  R3-F5 comment at `:154-157` gains: `The server no longer sends tour on a
+  (`:82`): `const personName = contactDisplayName(contact.firstName, contact.lastName, contact.phone);`.
+  The card body `:168-180` becomes:
+
+```tsx
+        {listingsSentStatus === 'error' ? (
+          <EmptyRow>We couldn&apos;t load properties sent.</EmptyRow>
+        ) : listingsSentStatus !== 'ready' ? (
+          <PendingPanel />
+        ) : listingsSent.length === 0 ? (
+          <EmptyRow>No properties sent yet.</EmptyRow>
+        ) : (
+          <SendRosterList label="Properties sent">
+            {listingsSent.map((s) => {
+              const unit = unitMap.get(s.unitId);
+              const label = sentUnitLabel(unitMap, s.unitId);
+              return (
+                <SendRosterRow
+                  key={`${s.unitId}:${s.sentAt}`}
+                  to={`/listings/${s.unitId}`}
+                  identity={label}
+                  row={s}
+                  address={label}
+                  name={personName}
+                  interestedMode={interestedModeOf(unit)}
+                  actionsDisabled={unit === undefined || onListingOutcome === undefined}
+                  onOutcome={(outcome) => (onListingOutcome ? onListingOutcome(s.unitId, outcome) : Promise.resolve())}
+                  // B8: "Request a tour" keys on the PAGE contact's type -
+                  // a partner (this file's only audience; the guard keeps it
+                  // honest if the file is ever reused).
+                  {...(contact.type === 'partner' && {
+                    requestTourTo: `/listings/${encodeURIComponent(s.unitId)}?tour=new`,
+                  })}
+                  now={now}
+                />
+              );
+            })}
+          </SendRosterList>
+        )}
+```
+
+  The R3-F5 comment at `:154-157` gains: `The server no longer sends tour on a
   partner row (spec 14.3 B11); SendRosterRow renders the outcome chip, which
   for a partner is never the tour chip.`
 
@@ -7388,10 +7710,10 @@ GREEN:
   - after the early returns (beside the other handlers that read `contact`):
 
 ```tsx
-  // One outcome action on a Properties-sent row: the route answers the
-  // re-projected row, applied in place; a rejection reaches the row.
+  // One outcome action on a Properties-sent row: the route answers { row }
+  // (plan head 3.4 #4), applied in place; a rejection reaches the row.
   const onListingOutcome = async (unitId: string, outcome: 'interested' | 'not_interested' | 'clear'): Promise<void> => {
-    const row = await setListingSendOutcome(unitId, contact.contactId, outcome);
+    const { row } = await setListingSendOutcome(unitId, contact.contactId, outcome);
     file.setListingSentRow(contact.contactId, unitId, row);
   };
 ```
@@ -7529,7 +7851,10 @@ orchestrator must reconcile with the other writers before building:
    `setListingSendOutcome(unitId: string, contactId: string, outcome: 'interested' | 'not_interested' | 'clear'): Promise<{ row: ListingSendRow }>`
    and the dashboard types `ListingSendOutcome` and `InterestedMode` exported
    from `dashboard/src/api/types.ts` (the app names, section 3.1). If W2 names
-   them differently, rename here; nothing else changes.
+   them differently, rename here; nothing else changes. (Plan review R1
+   confirmed `{ row }` everywhere.) S7.3 also imports W2's
+   `dashboard/src/lib/listingOutcomeErrors.ts` (`outcomeErrorCopy`) for the row
+   error copy instead of redefining it (R1 #12).
 2. DEPENDENCY (S1.1, S1.14, W1): app `ContactItem.last_heard_from_at?: string`
    and dashboard `Contact.last_heard_from_at?: string`. DEPENDENCY (S3.1-S3.3,
    W2): `deriveListingSendOutcome`, `isEligibleRecipient`, `isWaiting`,
@@ -7560,7 +7885,11 @@ orchestrator must reconcile with the other writers before building:
    Task 6.2 adds the decline fields.
 7. SMALL API ADDITIONS: `RecipientPreview` and `FollowUpView` each take an
    optional `now?: Date` (the test clock; production passes nothing).
-   `DevRouterDeps` gains `listingSendsRepo?`. `FollowUpItem.declined` stays in
+   `DevRouterDeps` gains `listingSendsRepo?`. The dev seam is CREATE-ONLY: it
+   answers 409 `{ error: 'send_exists' }` when the pair already has any
+   listing_sends row (R1 #11) - an addition to the plan-head dev-seam row.
+   `app/src/routes/units.ts:165` `displayNameOfContact` gains `export` so the
+   follow-ups builder reuses it (R1 #12). `FollowUpItem.declined` stays in
    the type (spec 5.6) but the builder never sets it: a waiting row has, by
    definition, no effective decline; an in-session decline lives in the
    dashboard's local state (Undo).
@@ -7650,6 +7979,50 @@ RED:
     });
 ```
 
+6. (PIN) Same file, new case right after case 4 (top-level describe, whose
+   `beforeEach` `:196-204` wires the queue and whose `afterEach` settles it).
+   It is green before AND after GREEN - the proof the projection change never
+   rides into the stored recipients map (plan review R1 #13):
+
+```ts
+  it('last-heard-from 5.3: markSending stores { status: queued } per key - never status or lastHeardFromAt (paths b and c)', async () => {
+    seedUnit(world);
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001', last_heard_from_at: '2026-10-03T09:30:00.000Z' });
+    seedTenant(world, { contactId: 'c-seed', phone: '+15550100002', last_heard_from_at: '2026-10-04T09:30:00.000Z' });
+    const markSending = vi.spyOn(world.broadcastsRepo, 'markSending');
+    const { app } = makeWebhookHarness({ world });
+    // Path (c): the no-body filter-resolve send snapshots ResolvedContact rows (:933-936).
+    const filterId = await createDraft(app);
+    const sendC = await request(app)
+      .post(`/api/broadcasts/${filterId}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(sendC.status).toBe(200);
+    // Path (b): a seeds_only draft resolves its seeds through resolveSeeds -> buildRecipientsFrom.
+    const seeded = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId: 'unit-1', body_template: 'hi', seedContactIds: ['c-seed'] });
+    expect(seeded.status).toBe(201);
+    const sendB = await request(app)
+      .post(`/api/broadcasts/${seeded.body.broadcastId}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(sendB.status).toBe(200);
+    expect(markSending).toHaveBeenCalledTimes(2);
+    // Exact equality: any extra field on a slot (status, lastHeardFromAt, ...) fails.
+    expect(markSending.mock.calls[0]![1]).toEqual({ 'c-1': { status: 'queued' }, 'c-seed': { status: 'queued' } });
+    expect(markSending.mock.calls[1]![1]).toEqual({ 'c-seed': { status: 'queued' } });
+  });
+```
+
+   (The spy keeps the real `markSending` running, so the fan-out proceeds as in
+   every other send case. Path (a) uses the same `buildRecipientsFrom` as (b)
+   from `{ contactId, phone }` survivors, `:845-856`, and is not repeated.)
+
 GREEN:
 
 - `app/src/services/audienceResolution.ts`, `ResolvedContact` (`:31-49`) - add
@@ -7699,11 +8072,12 @@ GREEN:
       ...(c.lastHeardFromAt !== undefined && { lastHeardFromAt: c.lastHeardFromAt }),
 ```
 
-  Persistence (spec 5.3's grep, finding B12): `ResolvedContact` is consumed only
-  by `broadcasts.ts`; both send paths store `{ status: 'queued' }` per key
-  (`buildRecipientsFrom` `:358-367`, path (c) `:933-936`), so neither new field
-  is ever written to a broadcast item. No test - the grep is the proof; record
-  it in the commit body.
+  Persistence (spec 5.3, finding B12, plan review R1 #13): `ResolvedContact` is
+  consumed only by `broadcasts.ts`; the send paths build the recipients map as
+  `{ status: 'queued' }` per key (`buildRecipientsFrom` `:358-367` for paths (a)
+  and (b), the path (c) loop `:933-936`) and the ONE write of it is
+  `broadcasts.markSending(broadcastId, recipients)` (`:942`). RED case 6 below
+  pins that neither new field reaches that write.
 
 Run: `cd "W:/tmp/last-heard-from/app"; npx vitest run test/audienceResolution.test.ts test/broadcastApi.test.ts`.
 
@@ -8182,16 +8556,20 @@ describe('RecipientPreview - columns, order and not-interested rows (last-heard-
     expect(screen.getByText('Name')).toBeInTheDocument();
     expect(screen.getByText('Status')).toBeInTheDocument();
     expect(screen.getByText('Housing authority')).toBeInTheDocument();
-    // The header plus each row's narrow-pane prefix.
-    expect(screen.getAllByText('Last heard from')).toHaveLength(3);
+    // ONE "Last heard from" in the DOM: the header, OUTSIDE the list. The
+    // narrow layout's per-row prefix is CSS ::before content (no DOM text).
+    expect(screen.getAllByText('Last heard from')).toHaveLength(1);
+    expect(within(listEl()).queryByText(/Last heard from/)).toBeNull();
     // The header sits OUTSIDE the list: still exactly one checkbox per row.
     expect(within(listEl()).getAllByRole('checkbox')).toHaveLength(2);
     const tasha = rowOf('Tasha');
     expect(within(tasha).getByText('Searching')).toBeInTheDocument();
     expect(within(tasha).getByText('Atlanta Housing Authority')).toBeInTheDocument();
-    expect(tasha).toHaveTextContent(`Last heard from ${formatHeardFrom('2026-10-07T14:00:00.000Z', NOW).label}`);
+    // The cell's text is exactly the bare label (the e2e matches it by regex).
+    const heardLabel = formatHeardFrom('2026-10-07T14:00:00.000Z', NOW).label;
+    expect(within(tasha).getByText(heardLabel).textContent).toBe(heardLabel);
     const bo = rowOf('Bo');
-    expect(bo).toHaveTextContent('Last heard from Never');
+    expect(within(bo).getByText('Never').textContent).toBe('Never');
     expect(within(bo).queryByText('Searching')).toBeNull();
   });
 
@@ -8593,8 +8971,12 @@ function initialRows(preview: PreviewResponse, declinedIds: ReadonlySet<string>)
                         {row.status !== undefined ? <StatusBadge kind="tenant" status={row.status} /> : null}
                       </span>
                       <span className={styles.cellAuthority}>{row.housingAuthority ?? null}</span>
+                      {/* The cell's DOM text is the bare label ("Never" or the
+                          formatted instant). The narrow layout's "Last heard
+                          from " prefix is CSS ::before content, never DOM text
+                          (plan review R1 #5: e2e 8.3 asserts the phrase is
+                          nowhere inside the list). */}
                       <span className={styles.cellHeard} title={heard.title}>
-                        <span className={styles.narrowOnly}>Last heard from </span>
                         {heard.label}
                       </span>
                     </span>
@@ -8739,8 +9121,13 @@ GREEN - `RecipientPreview.module.css`:
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .narrowOnly {
-    display: none;
+}
+/* The narrow (stacked) layout has no header row, so the last-heard-from cell
+ * names itself - as GENERATED content, so the cell's DOM text stays the bare
+ * label (plan review R1 #5). The wide layout's header names the column. */
+@container (max-width: 767.98px) {
+  .cellHeard::before {
+    content: 'Last heard from ';
   }
 }
 ```
@@ -8772,7 +9159,10 @@ E2E consequences for S8 (W4) - selectors, verified against the tree:
   `'<name> - already sent, not interested'` when the tenant also had the
   share), the tag with `row.getByText('Not interested')`, and the header with
   `getByText('Last heard from')` scoped to the review step (aria-hidden header:
-  query by text, not role).
+  query by text, not role). The phrase "Last heard from" is NEVER DOM text
+  inside `<ul aria-label="Candidate recipients">` (the narrow prefix is CSS
+  `::before`); a row's last-heard-from cell text is the bare label (`Never` or
+  the formatHeardFrom label), so a bare-label regex matches the cell.
 
 Commit: `feat(dashboard): review recipients - columns, last-heard-from order, not-interested rows`.
 
@@ -9138,6 +9528,7 @@ import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
 import type { ListingSendItem, ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import type { TourItem, ToursRepo } from '../repos/toursRepo.js';
 import { isDeleted, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
+import { displayNameOfContact } from '../routes/units.js';
 
 /** Available properties read per request (spec 5.6: tens in practice). */
 export const FOLLOW_UPS_UNIT_CAP = 100;
@@ -9183,11 +9574,12 @@ export interface FollowUpsDeps {
   now: number;
 }
 
+/** The row's name: the app's ONE display-name rule (units.ts
+ *  displayNameOfContact - first + last, part-wise trimmed; undefined when no
+ *  name is known), then the phone, then the id - FollowUpItem.name is required. */
 function nameOf(contact: ContactItem): string {
-  const first = typeof contact.firstName === 'string' ? contact.firstName.trim() : '';
-  const last = typeof contact.lastName === 'string' ? contact.lastName.trim() : '';
-  const joined = [first, last].filter((p) => p.length > 0).join(' ');
-  if (joined.length > 0) return joined;
+  const display = displayNameOfContact(contact);
+  if (display !== undefined) return display;
   return typeof contact.phone === 'string' && contact.phone.length > 0 ? contact.phone : contact.contactId;
 }
 
@@ -9293,6 +9685,14 @@ export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResp
 }
 ```
 
+GREEN 1b - `app/src/routes/units.ts:165`: `function displayNameOfContact(`
+becomes `export function displayNameOfContact(` (one word; the body at
+`:165-176` and its doc comment at `:155-164` are unchanged) so the builder
+reuses the app's existing name rule instead of a copy (plan review R1 #12).
+No import cycle: `units.ts` imports neither `broadcasts.ts` nor
+`services/followUps.ts`, and `api.ts` already loads `units.ts`. W2's outcome
+route keeps calling it locally.
+
 GREEN 2 - `app/src/routes/broadcasts.ts` (deps and repos came in Task 6.2):
 
 - Import: `import { buildFollowUps } from '../services/followUps.js';` after the
@@ -9382,14 +9782,31 @@ describe('POST /__dev/listing-send-fixture', () => {
     });
   });
 
-  it('a second plant replaces the sentAt and never touches a recorded decline (I2)', async () => {
+  it('409 send_exists when the pair already has a row - never overwrites its shares or moves sentAt (plan review R1 #11)', async () => {
     const { app, world } = buildHarness();
-    await request(app).post(SEAM).send({ unitId: 'u-fix', contactId: 'c-fix', sentAt: '2026-10-01T12:00:00.000Z' });
-    world.listingSends[0]!.declined = { at: '2026-10-02T12:00:00.000Z', by: 'staff', staffId: 'user-0002' };
-    const res = await request(app).post(SEAM).send({ unitId: 'u-fix', contactId: 'c-fix', sentAt: '2026-10-03T12:00:00.000Z' });
-    expect(res.status).toBe(201);
-    expect(world.listingSends[0]!.sentAt).toBe('2026-10-03T12:00:00.000Z');
-    expect(world.listingSends[0]!.declined).toEqual({ at: '2026-10-02T12:00:00.000Z', by: 'staff', staffId: 'user-0002' });
+    expect((await request(app).post(SEAM).send({ unitId: 'u-fix', contactId: 'c-fix', sentAt: '2026-10-03T12:00:00.000Z' })).status).toBe(201);
+    const before = structuredClone(world.listingSends[0]!);
+    const res = await request(app).post(SEAM).send({ unitId: 'u-fix', contactId: 'c-fix', sentAt: '2026-10-01T12:00:00.000Z' });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'send_exists' });
+    expect(world.listingSends).toHaveLength(1);
+    expect(world.listingSends[0]).toEqual(before);
+  });
+
+  it('409 send_exists for a pre-existing UN-counted row too (any row, listed or not)', async () => {
+    const { app, world } = buildHarness();
+    world.listingSends.push({
+      unitId: 'u-fix',
+      contactId: 'c-fix',
+      via: 'broadcast',
+      counted: false,
+      created_at: '2026-10-01T12:00:00.000Z',
+      updated_at: '2026-10-01T12:00:00.000Z',
+    });
+    const res = await request(app).post(SEAM).send({ unitId: 'u-fix', contactId: 'c-fix', sentAt: '2026-10-02T12:00:00.000Z' });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'send_exists' });
+    expect(world.listingSends[0]!.sentAt).toBeUndefined();
   });
 
   it('400 without unitId/contactId, or with an unparseable sentAt', async () => {
@@ -9439,8 +9856,9 @@ import { INDIVIDUAL_ATTEMPT_KEY } from '../lib/shareAttemptOrder.js';
   // nothing else can put a send older than the 24-hour QUIET threshold in front
   // of the Follow up tab. Written through putShareMemory as ONE counted
   // `individual` share entry (the shape shareLedger seeds for an individual
-  // send), on the row's current token, so the readers list it exactly like a
-  // real send. Never writes `declined` or any outcome (I2). No threshold
+  // send), so the readers list it exactly like a real send. CREATE ONLY: 409
+  // send_exists when the pair already has a row. Never writes `declined` or
+  // any outcome (I2). No threshold
   // override exists anywhere. Same hermetic-LOCAL-only construction as the
   // fixtures above (the dev router only mounts behind lib/devRoutes.ts:
   // DEV_AUTH_ENABLED, not production, a DynamoDB Local endpoint); json() is
@@ -9474,7 +9892,15 @@ import { INDIVIDUAL_ATTEMPT_KEY } from '../lib/shareAttemptOrder.js';
       return;
     }
     const listingSends = listingSendFixtureDeps();
-    const current = await listingSends.getByKeyConsistent(unitId, contactId);
+    // CREATE ONLY (plan review R1 #11): a pair that already has a row - listed
+    // or not - is refused, so the seam never overwrites a real share memory or
+    // moves a sentAt backward. A spec creates its own fresh pair per run.
+    if ((await listingSends.getByKeyConsistent(unitId, contactId)) !== undefined) {
+      res.status(409).json({ error: 'send_exists' });
+      return;
+    }
+    // token undefined = putShareMemory's `attribute_not_exists(shares_op)`
+    // condition; with the read above it can only lose to a concurrent create.
     const written = await listingSends.putShareMemory(
       unitId,
       contactId,
@@ -9484,11 +9910,10 @@ import { INDIVIDUAL_ATTEMPT_KEY } from '../lib/shareAttemptOrder.js';
         sentAt,
         broadcastId: undefined,
       },
-      { token: current?.shares_op },
+      { token: undefined },
     );
     if (!written) {
-      // A concurrent memory write moved the token - a dev tool reports it.
-      res.status(409).json({ error: 'fixture_raced' });
+      res.status(409).json({ error: 'send_exists' });
       return;
     }
     const row = await listingSends.getByKeyConsistent(unitId, contactId);
@@ -9510,6 +9935,17 @@ Run: `npx vitest run test/devListingSendFixture.test.ts test/devOrgFixture.test.
 Commit: `feat(dev): POST /__dev/listing-send-fixture - a backdated listed send for e2e`.
 
 ### Task 7.3 - dashboard: `useFollowUps`, `FollowUpView`, the Follow up tab
+
+THE IN-PLACE RULE (plan review R1 #4, binding on the hook, the view, these
+tests and S8's e2e 8.6): an actioned Follow up row shows its new state IN
+PLACE for the session - after Not interested it reads `Not interested` with
+an `Undo` button; after Interested (route mode) it shows the tour chip (or
+`Interested`) - and stays in the list; the group's `<n> waiting` and the tab's
+count drop at once. No action refetches. The row LEAVES the list on the next
+load (a reload or remount of Matching, or a Retry), because the server no
+longer serves it; every completed load replaces the session's resolutions.
+Form-mode Interested and Text navigate away and resolve nothing. S8 reloads
+the page before asserting a group is gone.
 
 API (additive, after the existing members):
 
@@ -9566,7 +10002,7 @@ the REAL hook, so a resolve / undo round trip is exercised end to end):
 // content (dates, the N-days chips), the actions (Interested route / form,
 // partner Request a tour, Not interested + Undo, Text), the error lines, and
 // the empty / error / truncated states.
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -9686,6 +10122,23 @@ describe('FollowUpView - actions', () => {
     expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('1 waiting');
   });
 
+  it('an actioned row stays IN PLACE for the session and leaves the list on the NEXT load', async () => {
+    const u = userEvent.setup();
+    setListingSendOutcome.mockResolvedValue({ row: {} });
+    renderView([item(), MARCUS]);
+    await u.click(await screen.findByRole('button', { name: /Mark Dario Vance not interested/ }));
+    // In place: still listed, now with Undo; no refetch on an action.
+    expect(await within(rowOf('Dario Vance')).findByRole('button', { name: 'Undo not interested for Dario Vance' })).toBeInTheDocument();
+    expect(getFollowUps).toHaveBeenCalledTimes(1);
+    // The next load (a fresh mount = a reload) is the server's truth, which no
+    // longer serves the row: the row and its now-empty group are gone.
+    cleanup();
+    renderView([MARCUS]);
+    expect(await screen.findByRole('link', { name: 'Marcus Dale' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Dario Vance' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: /672 Cameron Alexander Blvd A/ })).toBeNull();
+  });
+
   it('Interested (route) records it and shows the tour chip', async () => {
     const u = userEvent.setup();
     setListingSendOutcome.mockResolvedValue({ row: { tour: { tourId: 't1', state: 'requested' } } });
@@ -9694,6 +10147,9 @@ describe('FollowUpView - actions', () => {
     expect(setListingSendOutcome).toHaveBeenCalledWith('u1', 'c1', 'interested');
     const chip = await within(rowOf('Dario Vance')).findByRole('link', { name: 'Tour requested' });
     expect(chip).toHaveAttribute('href', '/tours/t1');
+    // In place: the row stays listed (no Interested / Not interested now); the count drops.
+    expect(within(rowOf('Dario Vance')).queryByRole('button', { name: /interested in/ })).toBeNull();
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('0 waiting');
   });
 
   it('Interested (form - no tour type on the property) opens the tour form, no API call', async () => {
@@ -9776,6 +10232,66 @@ describe('FollowUpView - states', () => {
   it('truncated', async () => {
     renderView([item()], true);
     expect(await screen.findByText('Showing follow-ups for the first 100 available properties.')).toBeInTheDocument();
+  });
+});
+```
+
+RED 1b - new `dashboard/src/routes/broadcasts/useFollowUps.test.tsx` (the
+in-place rule at the hook: a session resolution is local; a completed load
+replaces it):
+
+```tsx
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FollowUpItem } from '../../api/index.js';
+
+const getFollowUps = vi.fn();
+vi.mock('../../api/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
+  return { ...actual, getFollowUps: (...a: unknown[]) => getFollowUps(...a) };
+});
+
+import { followUpKey, useFollowUps } from './useFollowUps.js';
+
+const ITEM: FollowUpItem = {
+  unitId: 'u1',
+  unitLabel: '12 Oak St',
+  contactId: 'c1',
+  name: 'Dario Vance',
+  type: 'tenant',
+  sentAt: '2026-10-02T12:00:00.000Z',
+  outcome: 'no_reply',
+  interestedSupported: true,
+  interestedMode: 'route',
+  waitingSince: '2026-10-02T12:00:00.000Z',
+};
+
+beforeEach(() => getFollowUps.mockReset().mockResolvedValue({ items: [ITEM], byUnit: { u1: 1 }, truncated: false }));
+
+describe('useFollowUps - the in-place rule (plan review R1 #4)', () => {
+  it('resolve keeps the row in items, drops waitingCount, and does NOT refetch; unresolve restores it', async () => {
+    const { result } = renderHook(() => useFollowUps());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.resolve(ITEM, { kind: 'not_interested' }));
+    expect(result.current.items).toEqual([ITEM]);
+    expect(result.current.resolutions.get(followUpKey(ITEM))).toEqual({ kind: 'not_interested' });
+    expect(result.current.waitingCount).toBe(0);
+    expect(getFollowUps).toHaveBeenCalledTimes(1);
+    act(() => result.current.unresolve(ITEM));
+    expect(result.current.waitingCount).toBe(1);
+  });
+
+  it('a completed load replaces the session resolutions with the server truth', async () => {
+    const { result } = renderHook(() => useFollowUps());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => result.current.resolve(ITEM, { kind: 'not_interested' }));
+    getFollowUps.mockResolvedValueOnce({ items: [], byUnit: {}, truncated: false });
+    act(() => result.current.retry());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(getFollowUps).toHaveBeenCalledTimes(2);
+    expect(result.current.items).toEqual([]);
+    expect(result.current.resolutions.size).toBe(0);
+    expect(result.current.waitingCount).toBe(0);
   });
 });
 ```
@@ -9871,11 +10387,14 @@ GREEN 1 - new `dashboard/src/routes/broadcasts/useFollowUps.ts`:
 ```ts
 // useFollowUps - the Follow up tab's data (last-heard-from spec 5.6, 14.4).
 // Fetched ONCE when Matching mounts, whatever tab is active (the tab label
-// carries the count), and handed to FollowUpView as props. Row actions resolve
-// rows LOCALLY - no refetch: `resolve` marks a row interested / not interested
-// so the counts drop at once; `unresolve` puts it back (Undo). A reload serves
-// the server's truth. Loading is DERIVED (a stale load reads as loading) so no
-// effect sets state synchronously.
+// carries the count), and handed to FollowUpView as props.
+// THE RULE (plan review R1 #4): an actioned row shows its new state IN PLACE
+// for the session - `resolve` marks it interested / not interested (the row
+// stays listed, the counts drop at once), `unresolve` puts it back (Undo) -
+// and it leaves the list on the NEXT load, because the server no longer
+// serves it. No action refetches. Every completed load REPLACES the session's
+// resolutions with the server's truth. Loading is DERIVED (a stale load reads
+// as loading) so no effect sets state synchronously.
 import { useCallback, useEffect, useState } from 'react';
 import { getFollowUps, type FollowUpItem, type TourSignal } from '../../api/index.js';
 
@@ -9889,9 +10408,11 @@ export interface FollowUpsState {
   truncated: boolean;
   /** Rows still waiting: the served items minus the ones resolved here. */
   waitingCount: number;
+  /** This session's actions, by followUpKey - the rows shown in place. */
   resolutions: ReadonlyMap<string, FollowUpResolution>;
   resolve: (item: FollowUpItem, resolution: FollowUpResolution) => void;
   unresolve: (item: FollowUpItem) => void;
+  /** A new load; when it completes it replaces `items` AND clears `resolutions`. */
   retry: () => void;
 }
 
@@ -9919,6 +10440,8 @@ export function useFollowUps(): FollowUpsState {
       .then((res) => {
         if (controller.signal.aborted) return;
         setLoaded({ status: 'ready', items: res.items, truncated: res.truncated, forLoad: load });
+        // The next load is the server's truth: actioned rows are gone from it.
+        setResolutions(new Map());
       })
       .catch((err: unknown) => {
         if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
@@ -9969,9 +10492,12 @@ GREEN 2 - new `dashboard/src/routes/broadcasts/FollowUpView.tsx`:
 // the counts; Undo puts a not-interested row back.
 import { useId, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ApiError, ensureContactConversation, setListingSendOutcome, type FollowUpItem } from '../../api/index.js';
+import { ensureContactConversation, setListingSendOutcome, type FollowUpItem } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { daysSince, formatHeardFrom } from '../../lib/heardFrom.js';
+// The ONE outcome-error copy rule (W2 Task 3.8): 503 with saved:true ->
+// "Saved - reload to see the change.", anything else -> "Couldn't save - try again."
+import { outcomeErrorCopy } from '../../lib/listingOutcomeErrors.js';
 import { TourChip } from '../contact/Card.js';
 import { followUpKey, type FollowUpResolution, type FollowUpsState } from './useFollowUps.js';
 import styles from './FollowUpView.module.css';
@@ -9982,17 +10508,7 @@ export interface FollowUpViewProps {
   now?: Date;
 }
 
-const SAVE_FAILED = "Couldn't save - try again.";
-const SAVED_RELOAD = 'Saved - reload to see the change.';
 const TEXT_FAILED = "Couldn't open the conversation - try again.";
-
-function outcomeError(err: unknown): string {
-  if (err instanceof ApiError && err.status === 503) {
-    const body = err.body;
-    if (body !== null && typeof body === 'object' && (body as { saved?: unknown }).saved === true) return SAVED_RELOAD;
-  }
-  return SAVE_FAILED;
-}
 
 function dayCount(n: number): string {
   return n === 1 ? '1 day' : `${n} days`;
@@ -10046,7 +10562,7 @@ function FollowUpRow({
       else if (outcome === 'not_interested') onResolve({ kind: 'not_interested' });
       else onResolve({ kind: 'interested', ...(row.tour !== undefined && { tour: row.tour }) });
     } catch (err) {
-      setError(outcomeError(err));
+      setError(outcomeErrorCopy(err));
     } finally {
       setBusy(false);
     }
@@ -11151,7 +11667,11 @@ is the page's width).
    `getByText('Onboarding', { exact: true })` (the tenant StatusBadge) and
    `getByText(/^Today \d{1,2}:\d{2} [AP]M$/)`;
    `list.locator('li', { hasText: never.name }).getByText('Never', { exact: true })`
-   visible.
+   visible. Both match the BARE label: S6.5 renders the narrow-layout
+   "Last heard from " prefix as CSS `::before` content (plan review R1 #5),
+   so a cell's DOM text is only `Today 2:14 PM` / `Never` - and that is also
+   why `list.getByText('Last heard from', { exact: true })` count 0 holds at
+   any width. `allInnerTexts()` below never sees generated content either.
 4. Order: `const texts = await list.getByRole('listitem').allInnerTexts()`;
    `const at = (n: string) => texts.findIndex((x) => x.includes(n))`; all
    three found (>= 0); `at(recent.name) < at(older.name) < at(never.name)`.
@@ -11458,8 +11978,10 @@ matches by regex.)
    - Reply: `registerParty(request, { label: quiet.name, role: 'tenant', number: quiet.phone })`;
      `sendAsParty(request, { from: quiet.phone, to: APP_NUMBER, body: \`Yes ${quiet.firstName}\` })`;
      poll `followUps(api)` (20 s) until no item has `contactId === quiet.contactId`
-     and `byUnit[unitId] === 1`. Reload `/broadcasts?tab=follow-up` inside
-     `toPass`: `groupFor(page, line1)` contains `1 waiting`, its rows count 1
+     and `byUnit[unitId] === 1`. The tab never drops a row live (plan review
+     R1 #4: a row leaves the list on the NEXT LOAD), so load it fresh:
+     `page.goto(\`${NEXT}/broadcasts?tab=follow-up\`)`, then inside `toPass`
+     (`page.reload()` first on each attempt): `groupFor(page, line1)` contains `1 waiting`, its rows count 1
      and none contains `quiet.name`; `followUpTab(page)` `toHaveText(/^Follow up\s*1$/)`.
      `/listings`: `propertyRow(page, line1)` contains `1 waiting`.
    Proves: QUIET (a reply moves `max(sentAt, lastHeardFromAt)` to now),
@@ -11471,9 +11993,12 @@ matches by regex.)
    - `/broadcasts?tab=follow-up`: the row under `groupFor(page, line1)`
      reads `No reply yet, 3 days`; click
      `getByRole('button', { name: new RegExp(\`^Mark ${escapeRegExp(t.name)} not interested in \`) })`.
-   - `groupFor(page, line1)` count 0 (its only row left) and
-     `page.getByText('Nothing waiting on a reply.', { exact: true })` visible
-     (the only waiting row after the reseed).
+   - In place, for the session (plan review R1 #4 ruling): the row stays and
+     shows its new state - `Not interested` (exact) and a
+     `/^Undo not interested for /` button; it does NOT vanish before a load.
+   - `page.reload()`; then `groupFor(page, line1)` count 0 (its only row left)
+     and `page.getByText('Nothing waiting on a reply.', { exact: true })`
+     visible (the only waiting row after the reseed).
    - API: `followUps(api)` has no item for `t.contactId` and
      `byUnit[unitId]` is undefined; `GET /api/units/${unitId}/recipients`
      row `outcome === 'not_interested'`.
@@ -11508,9 +12033,15 @@ attribution"), so the proof is the FULL run.
    worktree); confirm no listener survives on the lane's ports (a killed
    suite orphans its stack, which `reuseExistingServer` then adopts on a
    commit match alone - AGENTS.md).
-3. `cd "W:/tmp/last-heard-from"; timeout 3000 npm run e2e` - bare, in the
-   background with its output captured; never piped; read the exit code from
-   the completion notice.
+3. `cd "W:/tmp/last-heard-from"; timeout 2400 npm run e2e` (the same budget
+   as S10's gate 4) - bare, in the background with its output captured; never
+   piped; read the exit code from the completion notice.
+   If the TIMEOUT fires (exit 124), the kill orphans the lane stack and the
+   next run's `reuseExistingServer` adopts it on a commit match alone
+   (AGENTS.md): before ANY further run, confirm no listener survives on the
+   lane's ports (app `9001+L*100`, dashboard `+10`, fake-twilio `+20`, public
+   base `+30`, L = the lane in `e2e/.artifacts/`), stopping only that lane's
+   processes (`npm run e2e:stop`), never a shared MCP browser.
 4. If red: COPY `e2e/test-results/` and `e2e/playwright-report/` to
    `.superpowers/sdd/e2e-runs/<timestamp>/` BEFORE any re-run (a re-run
    overwrites them). A named-spec failure is a REGRESSION to diagnose, not a
@@ -11643,8 +12174,16 @@ chase it with a second merge.
 2. `npm test` (DynamoDB Local running; `env | grep '^AWS_'` first - unset any
    exported `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`)
 3. `npm run smoke`
-4. `timeout 1500 npm run e2e` (run in the background with its output to a
-   file; read the exit code from the notification; never pipe)
+4. `timeout 2400 npm run e2e` (run in the background with its output to a
+   file; read the exit code from the notification; never pipe; the recorded
+   baseline is ~18 min and this branch adds five specs). If the timeout
+   fires, the stack is ORPHANED and the next run adopts it on a commit
+   match alone (AGENTS.md): confirm no listener survives on the lane's ports
+   before starting another run.
+6. Re-run Task 1.13B's I1 writer audit on the FINAL tree (every contacts-
+   table writer, incl. the ones later slices added, SETs/REMOVEs only named
+   attributes and never `last_heard_from_at`), and record its output under
+   `.superpowers/sdd/gates/i1-audit.txt`.
 5. `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')`
    - the list is NON-empty on this branch; attribute any error by BASELINE
    COMPARISON (run the same command on the same paths at the merge base and
@@ -11735,4 +12274,10 @@ Never merge. Never deploy. Never clean up.
   the fix.
 - An agent runs the backfill ONLY with `--env local --lane <L>`; bare
   `--env local` is Cameron's live stack (AGENTS.md live-stack rule).
+- Accepted and NOT to be "fixed": the placement conversion and an
+  outcome-only close never stamp `lastMarkedAt`, so they do not supersede a
+  decline (spec 14.6); an `email_new_address` row stays unattributed after
+  the address is linked (spec 14.6).
+- `setListingSendOutcome` returns `{ row }` EVERYWHERE (plan 3.4 #4); a bare
+  row anywhere is a seam bug.
 - Never restart the shared DynamoDB Local container (Cameron's go only).

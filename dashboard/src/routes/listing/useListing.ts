@@ -27,6 +27,7 @@ import {
   type Tour,
   type UnitActivityEvent,
   type UnitItem,
+  type UnitPropertyContact,
 } from '../../api/index.js';
 
 import { placementsOnUnit, listingRoster, relatedByLandlord, type RosterRow } from './buildListingFile.js';
@@ -67,6 +68,12 @@ export interface ListingState {
   activity: Slice<UnitActivityEvent>;
   /** Tours on this unit (GET /api/tours?unitId=), unbooked first then newest. */
   tours: Slice<Tour>;
+  /** The property-contact block (primary-contact-integrity spec 7.5) from the
+   *  load-time GET; ABSENT when the server could not tell. Like `roster` it is
+   *  fixed at load: setUnit (a status, edit-form or photo response, which
+   *  carry no block) never changes it. The page prefers a roster write's (or
+   *  a re-read's) own block over this one. */
+  propertyContact?: UnitPropertyContact;
 }
 
 const LOADING: Omit<ListingState, 'setUnit'> = {
@@ -216,6 +223,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
           unit,
           landlord,
           roster: listingRoster(unit, landlord),
+          ...(unit.propertyContact !== undefined && { propertyContact: unit.propertyContact }),
           placementsOnUnit: placementsOnUnit(placements, unitId),
           related,
           recipients,

@@ -28,9 +28,15 @@ export interface RosterRow {
   /** Human role label, e.g. "Landlord" / "Property manager". */
   roleLabel: string;
   company?: string;
-  /** The primary contact: the property's default contact - relay groups
-   *  and masked calls. */
+  /** The primary contact: the property's default contact - who new tours put
+   *  on the people list and the tour intro names. */
   primaryContact: boolean;
+  /** The row's contact is soft-deleted or missing (primary-contact-integrity
+   *  spec 7.5). The server sets it only from a complete contact read. */
+  deleted?: true;
+  /** The row's contact is a caseworker (spec 7.5). The server sets it only
+   *  from a complete contact read. */
+  caseworker?: true;
   /** True when synthesized from `landlordId` (C3 not live), false from contacts[]. */
   fallback: boolean;
 }
@@ -58,6 +64,8 @@ export function listingRoster(unit: UnitItem, landlord: Contact | null): RosterR
         ...(c.company !== undefined && { company: c.company }),
         primaryContact: c.primaryContact,
         fallback: false,
+        ...(c.deleted === true && { deleted: true as const }),
+        ...(c.caseworker === true && { caseworker: true as const }),
       }));
   }
 

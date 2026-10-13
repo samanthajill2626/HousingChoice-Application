@@ -260,6 +260,41 @@ describe('useListing', () => {
     expect(sorted.map((t) => t.tourId)).toEqual(['request', 'new', 'old', 'undated-toured', 'undated-canceled']);
   });
 
+  it('exposes the load-time propertyContact block (primary-contact-integrity spec 7.5), and setUnit keeps it', async () => {
+    const block = { contactId: null, reason: 'none' as const, heirIfPrimaryRemoved: null };
+    getUnit.mockResolvedValue({ ...UNIT, propertyContact: block });
+    getAllUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
+    getContact.mockResolvedValue(LANDLORD);
+    getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitSimilar.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitActivity.mockRejectedValue(new ApiError(404, 'x', 'x'));
+
+    const { result } = renderHook(() => useListing('u1'));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.propertyContact).toEqual(block);
+    // A status / edit-form / photo response carries no block - it never
+    // clears the load-time one (only a roster source supersedes it, in the page).
+    act(() => result.current.setUnit({ ...UNIT, status: 'occupied' }));
+    expect(result.current.propertyContact).toEqual(block);
+  });
+
+  it('leaves propertyContact absent when the GET carried no block (the server could not tell)', async () => {
+    getUnit.mockResolvedValue(UNIT);
+    getAllUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
+    getContact.mockResolvedValue(LANDLORD);
+    getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitSimilar.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitActivity.mockRejectedValue(new ApiError(404, 'x', 'x'));
+
+    const { result } = renderHook(() => useListing('u1'));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.propertyContact).toBeUndefined();
+  });
+
   it('errors when the unit itself fails to load', async () => {
     getUnit.mockRejectedValue(new ApiError(500, 'boom', 'x'));
     getAllUnits.mockResolvedValue(UNITS);

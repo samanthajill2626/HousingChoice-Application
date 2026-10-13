@@ -29,6 +29,23 @@ describe('listingRoster', () => {
     expect(rows[1]).toMatchObject({ roleLabel: 'Property manager', primaryContact: false });
   });
 
+  it('carries the server row flags deleted and caseworker through (primary-contact-integrity spec 7.5), and nothing when absent', () => {
+    const u = unit({
+      contacts: [
+        { contactId: 'pm1', role: 'pm', primaryContact: true, name: 'Gina Gone', deleted: true },
+        { contactId: 'cw1', role: 'other', primaryContact: false, name: 'Casey Worker', caseworker: true },
+        { contactId: 'pm2', role: 'pm', primaryContact: false, name: 'Mark Passmore' },
+      ],
+    });
+    const rows = listingRoster(u, null);
+    expect(rows[0]).toMatchObject({ contactId: 'pm1', deleted: true });
+    expect(rows[0]?.caseworker).toBeUndefined();
+    expect(rows[1]).toMatchObject({ contactId: 'cw1', caseworker: true });
+    expect(rows[1]?.deleted).toBeUndefined();
+    expect(rows[2]).not.toHaveProperty('deleted');
+    expect(rows[2]).not.toHaveProperty('caseworker');
+  });
+
   it('falls back to a single landlord row from the resolved contact when contacts[] is absent', () => {
     const u = unit({ landlordId: 'll1' });
     const landlord: Contact = {

@@ -9,8 +9,11 @@
 // non-primary; the route states the type as ContactListFacts) and eligible
 // for automatic routing (revision 6: not soft-deleted, not a routing pointer
 // - the route's `autoPrimaryEligible`, case (i)). Every other add keeps
-// the request's flag: a property with a landlord of record, one with a
-// primary row, and an upsert of a contact already on the list. The rule is
+// the request's flag: a property with a landlord of record and one with a
+// primary row (no liveness read is supplied here, so those are main's rule;
+// unitsRepoPrimaryOnAdd.integration.test.ts covers the deleted ones). An edit
+// of a contact already on the list follows the same rule as an add
+// (primary-contact-integrity spec 4.4, case (f)). The rule is
 // decided per attempt from the unit that attempt read, so of two racing adds
 // only the one whose write commits first is the primary; the loser re-reads
 // and joins non-primary.
@@ -282,11 +285,15 @@ describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB 
     expect(stored?.contacts?.find((c) => c.contactId === loserId)?.primaryContact).toBe(false);
   });
 
+  // primary-contact-integrity spec 4.4 (Cameron 2026-10-13) REPLACES the old
+  // pin "an upsert does NOT become primary": an edit of the contact's own row
+  // counts like an add, so on an ownerless property with no primary row the
+  // edited contact - eligible for automatic routing - becomes the primary.
   it.each([
     ['a role edit', 'owner'],
     ['a role edit that claims the vacant landlord slot', 'landlord'],
   ] as const)(
-    '(f) (PIN) an upsert of a contact already on an ownerless no-primary list (%s, primaryContact false) does NOT become primary',
+    '(f) an edit of a contact already on an ownerless no-primary list (%s, primaryContact false) makes THAT contact the primary',
     async (_kind, role) => {
       const unitId = await ownerlessUnit([{ contactId: 'c-seated', role: 'pm', primaryContact: false }]);
 
@@ -296,11 +303,10 @@ describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB 
         LANDLORD_FACTS,
       );
 
-      expect(updated.contacts).toEqual([{ contactId: 'c-seated', role, primaryContact: false }]);
-      expect(primaries(updated)).toEqual([]);
-      expect(updated.primary_contact).toBeUndefined();
-      // The landlord-role edit still claims the vacant slot (today's behavior);
-      // the resolvers then fall back to that landlord of record.
+      expect(updated.contacts).toEqual([{ contactId: 'c-seated', role, primaryContact: true }]);
+      expect(primaries(updated)).toEqual(['c-seated']);
+      expect(updated.primary_contact).toBe('c-seated');
+      // The landlord-role edit also claims the vacant slot (unchanged).
       if (role === 'landlord') expect(updated.landlordId).toBe('c-seated');
       else expect(Object.prototype.hasOwnProperty.call(updated, 'landlordId')).toBe(false);
     },

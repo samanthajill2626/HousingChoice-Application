@@ -619,15 +619,23 @@ export interface UnitsRepo {
    * name/company updated in place. Maintains AT MOST ONE primaryContact across
    * the roster (when this contact is primaryContact, every other is demoted).
    * This contact is primaryContact when the request asks for it, or - auto-
-   * primary, caseworker-integrity spec revision 4 section 4 - when it takes a
-   * NEW seat (not an upsert of a contact already on the roster) on a unit that,
-   * as that attempt read it, has no primaryContact row and no `landlordId`
-   * attribute, whatever its role (a role-`landlord` claim of the vacant slot
-   * included), provided it is eligible for automatic routing
-   * (`facts.autoPrimaryEligible`: typed landlord, not soft-deleted, not a
-   * routing pointer - spec revisions 5 and 6); any other contact joins
-   * non-primary. Decided inside the conditional retry loop from each
-   * attempt's own read, so two racing adds never both become primary.
+   * primary, caseworker-integrity spec revisions 4-6 as widened by
+   * primary-contact-integrity spec 4.4 - when, as that attempt read the unit,
+   * there is no LIVE flagged primary and no LIVE landlord of record (a
+   * soft-deleted or missing contact counts as absent; the liveness comes from
+   * `opts.readContacts`, called per attempt for exactly the flagged primary
+   * and the landlordId - decideAutoPrimary), whatever its role (a
+   * role-`landlord` claim of the vacant slot included) and whether it is a
+   * NEW seat or an edit of its own row, provided it is eligible for automatic
+   * routing (`facts.autoPrimaryEligible`: typed landlord, not soft-deleted,
+   * not a routing pointer). A write for this contact never promotes another.
+   * With no `opts.readContacts`, or a read that failed, liveness is unknown
+   * and nothing is promoted unless no row is flagged and there is no
+   * landlordId (main's rule). Decided inside the conditional retry loop from
+   * each attempt's own read, so two racing writes never both promote.
+   * A soft-deleted contact (`facts.contactDeleted`) asked to be primary on a
+   * row that is not already the primary throws PrimaryContactDeletedError
+   * (after the I4 / I3 refusals, before the reassignment refusal).
    * The contact-list rules (caseworker-integrity spec section 4), decided on
    * each attempt's own read from `facts` (ContactListFacts), in this order and
    * before the reassignment refusal below: a caseworker never takes a NEW seat
@@ -639,10 +647,13 @@ export interface UnitsRepo {
    * owner throws LandlordReassignmentRequiredError instead of being replaced.
    * All roster writes optimistically compare landlordId + contacts[], retry up
    * to three times, then throw RosterWriteConflictError under sustained races.
-   * When the roster's primaryContact changes, the unit's `primary_contact`
-   * scalar is kept consistent = the primary contact's contactId (nothing routes
-   * on the scalar: the roster resolvers take the row marked primary, else the
-   * landlordId - see the note above the write in the implementation).
+   * The unit's `primary_contact` scalar is kept consistent with the roster:
+   * the flagged row's contactId (a soft-deleted contact still flagged
+   * included - flag and scalar never split), or REMOVEd when no row is
+   * flagged after the write (nothing routes on the scalar: the
+   * property-contact lookup, lib/propertyContact.ts, takes the LIVE row
+   * marked primary, else the LIVE landlord of record, skipping a
+   * soft-deleted or missing contact).
    * Persists contacts[] + the scalar.
    */
   addContact(
@@ -655,6 +666,7 @@ export interface UnitsRepo {
       company?: string;
     },
     facts: ContactListFacts,
+    opts?: { readContacts?: ReadRosterContacts },
   ): Promise<UnitItem>;
   /**
    * BE3/C3: remove a contact from the unit's roster. REJECTS removing the
@@ -1027,7 +1039,7 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       return queryIndex('byProperty', 'propertyId', propertyId, opts);
     },
 
-    async addContact(unitId, contact, facts) {
+    async addContact(unitId, contact, facts, opts) {
       let attempts = 0;
       const write = async (): Promise<UnitItem> => {
         attempts += 1;
@@ -1065,8 +1077,18 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         // refused - never re-created or claimed.
         //   I4: a caseworker never takes a NEW seat (no row for the contact).
         //   I3: claiming the vacant landlord slot needs a contact typed landlord.
+        // Then primary-contact-integrity (spec 4.4): a soft-deleted contact is
+        // never made the primary unless its row already is - re-sending true
+        // for the current primary is never refused and changes nothing.
         if (existing === undefined && facts.caseworker) throw new ContactListCaseworkerError();
         if (claimsVacantLandlord && !facts.landlordTyped) throw new LandlordClaimNotLandlordError();
+        if (
+          contact.primaryContact === true &&
+          facts.contactDeleted === true &&
+          existing?.primaryContact !== true
+        ) {
+          throw new PrimaryContactDeletedError();
+        }
         if (
           contact.role === 'landlord' &&
           !claimsVacantLandlord &&
@@ -1074,28 +1096,37 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         ) {
           throw new LandlordReassignmentRequiredError();
         }
-        // Auto-primary (caseworker-integrity spec revision 4, section 4 "Contact
-        // list", Cameron 2026-10-12): a NEW seat on a unit that, as THIS attempt
-        // read it, has no row marked primary and no landlordId attribute (no
-        // landlord of record before this add - a Landlord-role add claiming the
-        // vacant slot included) becomes the primary contact, whatever its role -
-        // for a contact eligible for automatic routing only (the caller's
-        // `facts.autoPrimaryEligible`: typed landlord - spec revision 5,
-        // Cameron's Q4 - and not soft-deleted, not a routing pointer - spec
-        // revision 6, fix wave FWF-3): any other contact joins non-primary, as
-        // before the rule. The I3 claim above still asks only the type.
-        // Decided here, per attempt, never by the caller: the write below is
-        // conditioned on the landlordId and contacts[] this attempt read, so of
-        // two racing adds only the first to commit is made primary; the loser
-        // re-reads, sees that primary, and joins non-primary. An upsert of a
-        // contact already on the list is not an add and keeps the request's flag.
-        const autoPrimary =
-          facts.autoPrimaryEligible &&
-          existing === undefined &&
-          !hasLandlordId &&
-          !roster.some((c) => c.primaryContact === true);
+        // Auto-primary (caseworker-integrity spec revisions 4-6, widened by
+        // primary-contact-integrity spec 4.4, Cameron 2026-10-13): this write
+        // for contact X - an add or an edit of X's own row - makes X, and only
+        // X, the primary when X is eligible for automatic routing
+        // (`facts.autoPrimaryEligible`) and THIS attempt's read has no LIVE
+        // flagged primary and no LIVE landlord of record (soft-deleted or
+        // missing counts as absent). The liveness is the caller's
+        // `opts.readContacts`, called here - per attempt, after this attempt's
+        // unit read and before its conditional write - for exactly the ids
+        // autoPrimaryLivenessIds names; no read supplied, or a failed read, is
+        // unknown: no promotion (the route WARNs). The decision is the shared
+        // pure decideAutoPrimary (the API-test fake calls the same function).
+        // The write below is conditioned on the landlordId and contacts[] this
+        // attempt read, so of two racing writes only the first to commit can
+        // promote; the loser re-reads and sees that primary.
+        const autoArgs: AutoPrimaryArgs = {
+          roster,
+          landlordId,
+          contactId: contact.contactId,
+          eligible: facts.autoPrimaryEligible,
+          requested: contact.primaryContact === true,
+        };
+        const livenessIds = autoPrimaryLivenessIds(autoArgs);
+        const read =
+          livenessIds !== null && livenessIds.length > 0 && opts?.readContacts !== undefined
+            ? await opts.readContacts(livenessIds)
+            : undefined;
+        const decision = decideAutoPrimary({ ...autoArgs, read });
+        const autoPrimary = decision === 'promote';
         // The owning landlord's role is STRUCTURAL: a row for the unit's
-        // landlordId is always 'landlord', regardless of the supplied role — a
+        // landlordId is always 'landlord', regardless of the supplied role - a
         // non-'landlord' add must never overwrite it (BE3/C3 FIX C).
         const isLandlordOfRecord =
           claimsVacantLandlord || contact.contactId === landlordId;
@@ -1119,27 +1150,27 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
 
         // EXACTLY-ONE-primaryContact: when this contact is the primary - asked for,
         // or made so by the auto-primary rule above - demote every other. When it
-        // isn't, leave any existing primary as-is: a roster may legitimately have
-        // its primary on another row, or no primary row at all (the
-        // property-contact resolvers then fall back to the landlord of record,
-        // when there is one).
+        // isn't, leave any existing primary as-is (a soft-deleted primary that
+        // nobody replaced keeps its flag - spec 4.4).
         if (next.primaryContact) {
           for (const c of roster) c.primaryContact = c.contactId === contact.contactId;
         }
 
-        // Keep the `primary_contact` scalar (the property's default contact)
-        // consistent with the roster's primaryContact. Nothing routes on the
-        // scalar today: the roster resolvers (lib/rosterResolution.ts,
-        // lib/tourContacts.ts, services/rosterProvision.ts) take the row marked
-        // primary, else the landlordId, and a masked call dials the live
-        // thread's participants without reading the unit
-        // (routes/webhooks/voice.ts). Only rewrite it when there IS a primary on
-        // the roster; never blank it here (with no primary row the resolvers
-        // fall back to the legacy landlordId).
+        // Keep the `primary_contact` scalar consistent with the roster's
+        // primary row (nothing routes on the scalar: the property-contact
+        // lookup, lib/propertyContact.ts, takes the LIVE row marked primary,
+        // else the LIVE landlord of record, and a masked call dials the live
+        // thread's participants without reading the unit). With a primary row
+        // - a soft-deleted contact still flagged included, so flag and scalar
+        // never split (spec 4.4) - the scalar names it; with NO row flagged
+        // after this write the scalar is REMOVEd (null -> REMOVE), so a stale
+        // value left by an earlier demotion never lingers.
         const primary = roster.find((c) => c.primaryContact);
-        const patch: Record<string, unknown> = { contacts: roster };
+        const patch: Record<string, unknown> = {
+          contacts: roster,
+          primary_contact: primary !== undefined ? primary.contactId : null,
+        };
         if (claimsVacantLandlord) patch['landlordId'] = contact.contactId;
-        if (primary !== undefined) patch['primary_contact'] = primary.contactId;
 
         let updated: UnitItem;
         try {
@@ -1166,7 +1197,8 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
             throw new RosterWriteConflictError();
           }
           // Ownership or contacts[] changed after our read. Re-run from the
-          // current item so no concurrent roster row is lost.
+          // current item so no concurrent roster row is lost, deciding the
+          // auto-primary again on a fresh liveness read.
           return write();
         }
         log.info(
@@ -1176,6 +1208,7 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
             rosterSize: roster.length,
             primaryContact: next.primaryContact,
             autoPrimary,
+            ...(decision === 'unknown' && { autoPrimaryUnknown: true }),
           },
           'unit contact added',
         );

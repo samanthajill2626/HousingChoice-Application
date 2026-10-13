@@ -17,15 +17,19 @@
 // (touchesHousingAuthority); one with a PENDING housingAuthority AI suggestion
 // (extractionRepo.getSuggestion, one consistent GetItem, read only for a
 // candidate nothing earlier leaves out - spec D10 revision 5; the report shows
-// the suggested value). Every candidate's WHOLE history is read, --skip ones
-// included: auditRepo.listByEntity is one newest-first Query with no cursor,
-// so the run pages backward with `before` until a page comes back empty.
+// the suggested value). A candidate named in --skip is left out with NO read,
+// so no failed read can make it a target. Every other candidate's WHOLE
+// history is read: auditRepo.listByEntity is one newest-first Query with no
+// cursor, so the run pages backward with `before` until a page comes back
+// empty.
 //
 // EXCLUSIONS: an --apply appends ONE housing_authority_backfill_excluded event
 // { field: 'housingAuthority' }, no actor, to each candidate it leaves out
 // because of --skip, unless its history already holds one - so a later run
-// without the same --skip leaves that lead out too. A failed append counts the
-// lead failed (exit 1). A dry run records nothing.
+// without the same --skip leaves that lead out too. That history is read only
+// for this check: when the read fails, the event is appended anyway (a second
+// one is harmless). A failed append counts the lead failed (exit 1). A dry
+// run records nothing, and reads nothing of a --skip lead.
 //
 // THE LIST: the stored org-list item, read with peek() - never created. The
 // run REFUSES (exit 1, no contact read, nothing written) when no item is
@@ -570,35 +574,34 @@ export async function readWholeHistory(
 export interface CandidateVerdict {
   /** The ONE reason printed (the LeftOutReason order), or null: a target. */
   reason: LeftOutReason | null;
-  /** Its history already holds a housing_authority_backfill_excluded event: an --apply appends no second one. */
-  exclusionRecorded: boolean;
   /** `pending_suggestion` only: the pending suggestion's suggestedValue. */
   suggestedValue?: string;
 }
 
 /**
- * Why one candidate is left out, or null when it is a target. Its WHOLE
- * history is read first - a --skip lead's too, so an --apply knows whether
- * its exclusion is already recorded - then --skip on this run, then the
- * history (leftOutReasonFromAudit), and only when none of those leaves it
- * out, its pending housingAuthority suggestion: ONE consistent GetItem
- * (spec D10 revision 5). A suggestion row exists only while it is pending
- * (accept and dismiss delete it; a dismissal is a separate tombstone row), so
- * any row leaves the lead out - whatever its value. Throws when a read fails.
+ * Why one candidate is left out, or null when it is a target. A candidate
+ * named in --skip on this run is `skipped` with NO read at all - its reason
+ * never depends on one, so no failed read can make it a target (an --apply
+ * reads its history apart, in recordExclusion, only to avoid a second
+ * exclusion event). Any other candidate: its WHOLE history
+ * (leftOutReasonFromAudit), and only when that leaves it in, its pending
+ * housingAuthority suggestion: ONE consistent GetItem (spec D10 revision 5).
+ * A suggestion row exists only while it is pending (accept and dismiss delete
+ * it; a dismissal is a separate tombstone row), so any row leaves the lead
+ * out - whatever its value. Throws when a read fails.
  */
 export async function leftOutReasonFor(
   deps: Pick<BackfillDeps, 'audit' | 'auditPageSize' | 'suggestions'>,
   contactId: string,
   skip: ReadonlySet<string>,
 ): Promise<CandidateVerdict> {
+  if (skip.has(contactId)) return { reason: 'skipped' };
   const events = await readWholeHistory(deps.audit, `contacts#${contactId}`, deps.auditPageSize ?? AUDIT_PAGE_SIZE);
-  const exclusionRecorded = events.some(isExclusion);
-  if (skip.has(contactId)) return { reason: 'skipped', exclusionRecorded };
   const fromAudit = leftOutReasonFromAudit(events);
-  if (fromAudit !== null) return { reason: fromAudit, exclusionRecorded };
+  if (fromAudit !== null) return { reason: fromAudit };
   const pending = await deps.suggestions.getSuggestion(contactId, FIELD, { consistentRead: true });
-  if (pending === undefined) return { reason: null, exclusionRecorded };
-  return { reason: 'pending_suggestion', exclusionRecorded, suggestedValue: text(pending.suggestedValue) };
+  if (pending === undefined) return { reason: null };
+  return { reason: 'pending_suggestion', suggestedValue: text(pending.suggestedValue) };
 }
 
 // ---------------------------------------------------------------------------
@@ -662,16 +665,31 @@ async function writeOne(deps: BackfillDeps, contactId: string, report: BackfillR
   return 'written';
 }
 
+/** What recordExclusion did for one --skip candidate. */
+type ExclusionOutcome = 'recorded' | 'already_recorded' | 'failed';
+
 /**
  * Spec D10 (revision 5): an --apply records that the operator left this
  * candidate out with --skip - ONE housing_authority_backfill_excluded event
  * { field }, no actor - so a later run without the same --skip leaves it out
- * too. False when the append failed: the caller counts the lead failed (an
- * unrecorded exclusion is exactly what a later run would overwrite). An
- * append can land and then error (a timeout), so a failed one MAY not have
- * been recorded - the lines say so, never "could not". Never throws.
+ * too. Its whole history is read ONLY to avoid a second event: one already
+ * there is `already_recorded`. A failed history read does not stop the
+ * append - a second event is harmless, an unrecorded exclusion is what a
+ * later run would overwrite. `failed` only when the APPEND throws: the caller
+ * counts the lead failed. An append can land and then error (a timeout), so
+ * a failed one MAY not have been recorded - the lines say so, never "could
+ * not". Never throws.
  */
-async function recordExclusion(deps: BackfillDeps, contactId: string): Promise<boolean> {
+async function recordExclusion(deps: BackfillDeps, contactId: string): Promise<ExclusionOutcome> {
+  try {
+    const events = await readWholeHistory(deps.audit, `contacts#${contactId}`, deps.auditPageSize ?? AUDIT_PAGE_SIZE);
+    if (events.some(isExclusion)) return 'already_recorded';
+  } catch (err) {
+    deps.logger.warn(
+      { err, contactId },
+      `${SCRIPT_NAME} - could not read the audit history of a lead named in --skip; recording its exclusion anyway (a second exclusion event is harmless)`,
+    );
+  }
   try {
     await deps.audit.append(`contacts#${contactId}`, BACKFILL_EXCLUDED_AUDIT_TYPE, { field: FIELD });
   } catch (err) {
@@ -679,10 +697,10 @@ async function recordExclusion(deps: BackfillDeps, contactId: string): Promise<b
       { err, contactId },
       `${SCRIPT_NAME} - the exclusion append FAILED; it may not have been recorded (named in --skip; its housing authority was not written) - keep it in --skip and re-run the apply`,
     );
-    return false;
+    return 'failed';
   }
   deps.logger.info({ contactId }, `${SCRIPT_NAME} - exclusion recorded (named in --skip): later runs leave it out`);
-  return true;
+  return 'recorded';
 }
 
 /**
@@ -715,12 +733,13 @@ async function warnIfNameLeftList(deps: BackfillDeps, report: BackfillReport): P
  * Spec D10: the backfill. Refuses (BackfillRefusedError) before any contact
  * is read; then reads the candidates - an --apply refuses right after that
  * Scan, before any write, when a --skip id names no contact - and for each -
- * oldest first - reads its whole history right before its write (or, for a
- * --skip lead on an apply, before its exclusion is recorded); then (apply)
+ * oldest first - reads its whole history right before its write (a --skip
+ * lead: nothing on a dry run; on an apply, its history only before its
+ * exclusion is recorded, which a failed read does not stop); then (apply)
  * re-checks the list, prints the report through deps.print and returns it. A
- * failed history read, write or exclusion append is counted `failed` (exit 1)
- * and the run goes on; only the list read and the contacts Scan abort it,
- * both before any write.
+ * failed read of a candidate not named in --skip, a failed write and a failed
+ * exclusion append are each counted `failed` (exit 1) and the run goes on;
+ * only the list read and the contacts Scan abort it, both before any write.
  */
 export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: BackfillOptions): Promise<BackfillReport> {
   const log = deps.logger;
@@ -774,10 +793,10 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
         ...(verdict.suggestedValue !== undefined && { suggestedValue: verdict.suggestedValue }),
       };
       // Spec D10 revision 5: an --apply remembers the operator's --skip.
-      if (opts.apply && reason === 'skipped' && !verdict.exclusionRecorded) {
-        if (await recordExclusion(deps, lead.contactId)) {
-          exclusionsRecorded += 1;
-        } else {
+      if (opts.apply && reason === 'skipped') {
+        const outcome = await recordExclusion(deps, lead.contactId);
+        if (outcome === 'recorded') exclusionsRecorded += 1;
+        if (outcome === 'failed') {
           report.failed += 1;
           left.exclusionFailed = true;
         }

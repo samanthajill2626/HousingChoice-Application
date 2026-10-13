@@ -754,7 +754,7 @@ describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
     await expect(readWholeHistory(stuck, 'contacts#c-lead', 2)).rejects.toThrow('audit history paging did not advance');
   });
 
-  it('a lead named in --skip is left out - and its history is still read, so an --apply knows whether its exclusion is already recorded', async () => {
+  it('a lead named in --skip is left out with NO read - whatever its reads would do (an --apply reads its history apart, only to avoid a second exclusion event)', async () => {
     const reads: string[] = [];
     const histories: Record<string, AuditEvent[]> = {
       'contacts#c-excluded': [{ ...event(BACKFILL_EXCLUDED_AUDIT_TYPE, { field: 'housingAuthority' }), entityKey: 'contacts#c-excluded' }],
@@ -763,36 +763,28 @@ describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
       append: async () => {},
       listByEntity: async (entityKey, opts) => {
         reads.push(entityKey);
+        if (entityKey === 'contacts#c-skip') throw new Error('ThrottlingException');
         return opts?.before === undefined ? (histories[entityKey] ?? []) : [];
       },
     };
     const suggestions: BackfillDeps['suggestions'] = {
       getSuggestion: async (contactId) => {
         reads.push(`suggestion ${contactId}`);
+        if (contactId === 'c-skip') throw new Error('ThrottlingException');
         return undefined;
       },
     };
     const deps = { audit, suggestions };
     const skip = new Set(['c-skip', 'c-excluded']);
-    expect(await leftOutReasonFor(deps, 'c-skip', skip)).toEqual({ reason: 'skipped', exclusionRecorded: false });
-    expect(await leftOutReasonFor(deps, 'c-excluded', skip)).toEqual({ reason: 'skipped', exclusionRecorded: true });
+    expect(await leftOutReasonFor(deps, 'c-skip', skip)).toEqual({ reason: 'skipped' });
+    expect(await leftOutReasonFor(deps, 'c-excluded', skip)).toEqual({ reason: 'skipped' });
+    expect(reads).toEqual([]);
     // Without --skip on this run, the recorded exclusion leaves it out by itself.
-    expect(await leftOutReasonFor(deps, 'c-excluded', new Set())).toEqual({
-      reason: 'excluded_earlier',
-      exclusionRecorded: true,
-    });
-    expect(await leftOutReasonFor(deps, 'c-other', skip)).toEqual({ reason: null, exclusionRecorded: false });
-    // Every lead's history read to its end (a page, then the empty page) - the --skip ones included;
+    expect(await leftOutReasonFor(deps, 'c-excluded', new Set())).toEqual({ reason: 'excluded_earlier' });
+    expect(await leftOutReasonFor(deps, 'c-other', skip)).toEqual({ reason: null });
+    // A lead not named in --skip has its history read to its end (a page, then the empty page);
     // the pending suggestion only for the lead no earlier reason leaves out.
-    expect(reads).toEqual([
-      'contacts#c-skip',
-      'contacts#c-excluded',
-      'contacts#c-excluded',
-      'contacts#c-excluded',
-      'contacts#c-excluded',
-      'contacts#c-other',
-      'suggestion c-other',
-    ]);
+    expect(reads).toEqual(['contacts#c-excluded', 'contacts#c-excluded', 'contacts#c-other', 'suggestion c-other']);
   });
 
   it('a pending housingAuthority suggestion is read last - consistently, for the housingAuthority target - and leaves the lead out with its value', async () => {
@@ -817,16 +809,15 @@ describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
     };
     expect(await leftOutReasonFor(deps, 'c-pending', NO_SKIP)).toEqual({
       reason: 'pending_suggestion',
-      exclusionRecorded: false,
       suggestedValue: 'Cobb County Housing Authority',
     });
-    expect(await leftOutReasonFor(deps, 'c-none', NO_SKIP)).toEqual({ reason: null, exclusionRecorded: false });
+    expect(await leftOutReasonFor(deps, 'c-none', NO_SKIP)).toEqual({ reason: null });
     expect(calls).toEqual([
       ['c-pending', 'housingAuthority', { consistentRead: true }],
       ['c-none', 'housingAuthority', { consistentRead: true }],
     ]);
     // Named in --skip: left out as skipped, the suggestion never read.
-    expect(await leftOutReasonFor(deps, 'c-pending', new Set(['c-pending']))).toEqual({ reason: 'skipped', exclusionRecorded: false });
+    expect(await leftOutReasonFor(deps, 'c-pending', new Set(['c-pending']))).toEqual({ reason: 'skipped' });
     expect(calls).toHaveLength(2);
   });
 });
@@ -922,7 +913,7 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
       expect([what, await reasonOf(`c-other-${i}`)]).toEqual([what, null]);
     }
     expect(await reasonOf('c-again')).toBe('signed_up_again');
-    expect(await leftOutReasonFor(deps, 'c-excluded', NO_SKIP)).toEqual({ reason: 'excluded_earlier', exclusionRecorded: true });
+    expect(await leftOutReasonFor(deps, 'c-excluded', NO_SKIP)).toEqual({ reason: 'excluded_earlier' });
     expect(await reasonOf('c-no-history')).toBeNull();
   }, 120_000);
 
@@ -933,8 +924,8 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
     await w.audit('c-both', '2026-08-02T12:00:00.000Z#aaaa0001', 'contact_updated', { fields: ['housingAuthority'], actor: 'user-0001' });
     await w.audit('c-both', '2026-08-03T12:00:00.000Z#aaaa0001', 'housing_fair_signup', RESIGNUP_PAYLOAD);
     const { deps } = w.deps();
-    expect(await leftOutReasonFor(deps, 'c-both', new Set(['c-both']))).toEqual({ reason: 'skipped', exclusionRecorded: true });
-    expect(await leftOutReasonFor(deps, 'c-both', NO_SKIP)).toEqual({ reason: 'excluded_earlier', exclusionRecorded: true });
+    expect(await leftOutReasonFor(deps, 'c-both', new Set(['c-both']))).toEqual({ reason: 'skipped' });
+    expect(await leftOutReasonFor(deps, 'c-both', NO_SKIP)).toEqual({ reason: 'excluded_earlier' });
   }, 120_000);
 
   it('a PENDING suggestion through the store: it leaves a lead out only when nothing earlier does - and it is read only then; a dismissed one is not pending', async () => {
@@ -952,14 +943,13 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
     const skip = new Set(['c-skip']);
     expect(await leftOutReasonFor(deps, 'c-sugg', skip)).toEqual({
       reason: 'pending_suggestion',
-      exclusionRecorded: false,
       suggestedValue: 'Cobb County Housing Authority',
     });
     expect((await leftOutReasonFor(deps, 'c-hist', skip)).reason).toBe('authority_history');
     expect((await leftOutReasonFor(deps, 'c-again', skip)).reason).toBe('signed_up_again');
     expect((await leftOutReasonFor(deps, 'c-excl', skip)).reason).toBe('excluded_earlier');
     expect((await leftOutReasonFor(deps, 'c-skip', skip)).reason).toBe('skipped');
-    expect(await leftOutReasonFor(deps, 'c-dismissed', skip)).toEqual({ reason: null, exclusionRecorded: false });
+    expect(await leftOutReasonFor(deps, 'c-dismissed', skip)).toEqual({ reason: null });
     // One consistent GetItem each - for c-sugg and c-dismissed only.
     expect(getsOn(recorder, w, 'ai_extraction')).toEqual([
       { TableName: tableName('ai_extraction', w.env), Key: { itemId: 'sugg#c-sugg#housingAuthority' }, ConsistentRead: true },
@@ -1021,6 +1011,10 @@ const SKIP_EXCLUSION_FAILED_LINE =
   '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-skip  - named in --skip - FAILED: its exclusion may not have been recorded (an ERROR line names this contactId) - keep it in --skip and re-run the apply';
 const EXCLUSION_FAILED_LOG =
   'backfill-join-housing-authority - the exclusion append FAILED; it may not have been recorded (named in --skip; its housing authority was not written) - keep it in --skip and re-run the apply';
+/** An --apply could not read a --skip lead's history: it records the exclusion anyway (code review F1). */
+const SKIP_HISTORY_UNREAD_LOG =
+  'backfill-join-housing-authority - could not read the audit history of a lead named in --skip; recording its exclusion anyway (a second exclusion event is harmless)';
+const SKIP_LINE = '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-skip  - named in --skip';
 
 /**
  * The world the run tests share. Targets: c-old, c-mid, c-new. Left out:
@@ -1303,6 +1297,133 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     const again = await runJoinAuthorityBackfill(w.deps().deps, { apply: true, skip: SKIP });
     expect(again).toMatchObject({ written: 0, failed: 0 });
     expect(await w.excludedEvents()).toHaveLength(1);
+  }, 120_000);
+
+  // Code review F1: a lead named in --skip never depends on a read. Its reason
+  // is `skipped` whatever its reads do, and it is never listed as a target.
+  /** The world's deps with c-skip's audit-history read failing - and, when asked, every exclusion append. */
+  function skipHistoryUnreadable(
+    w: World,
+    log: Logger,
+    failAppend: boolean,
+  ): { deps: BackfillDeps; printed: string[] } {
+    const base = w.deps({ logger: log });
+    const deps: BackfillDeps = {
+      ...base.deps,
+      audit: {
+        listByEntity: async (entityKey, opts) => {
+          if (entityKey === 'contacts#c-skip') throw new Error('ThrottlingException');
+          return base.deps.audit.listByEntity(entityKey, opts);
+        },
+        append: async (entityKey, eventType, payload) => {
+          if (failAppend && eventType === BACKFILL_EXCLUDED_AUDIT_TYPE) throw new Error('ProvisionedThroughputExceededException');
+          await base.deps.audit.append(entityKey, eventType, payload);
+        },
+      },
+    };
+    return { deps, printed: base.printed };
+  }
+
+  it('apply: a --skip lead whose history read FAILS is still left out as named in --skip and its exclusion is still recorded - never a target, exit 0', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const capture = createLogCapture();
+    const { deps, printed } = skipHistoryUnreadable(w, createLogger({ level: 'info', destination: capture.stream }), false);
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report).toEqual({
+      targets: TARGET_LEADS.map((l) => ({ ...l, outcome: 'written' })),
+      leftOut: LEFT_OUT,
+      unknownSkips: [],
+      missingSkips: [],
+      written: 3,
+      skipped: 0,
+      failed: 0,
+      warnings: [],
+    });
+    expect(printed).toContain(SKIP_LINE);
+    expect(printed.some((line) => line.includes('contactId c-skip  - FAILED'))).toBe(false);
+    expect((await w.get('c-skip'))?.['housingAuthority']).toBeUndefined();
+    // The history could not say whether an exclusion was already there, so the append went ahead.
+    expect((await w.excludedEvents()).map((e) => [e['entityKey'], e['payload'], e['actorId']])).toEqual([
+      ['contacts#c-skip', { field: 'housingAuthority' }, undefined],
+    ]);
+    expect(capture.atLevel(50)).toEqual([]);
+    expect(capture.atLevel(40).map((l) => [l['contactId'], l['msg']])).toEqual([['c-skip', SKIP_HISTORY_UNREAD_LOG]]);
+    expect(backfillExitCode(report)).toBe(0);
+    // It is remembered: a later dry run WITHOUT the --skip leaves it out.
+    const later = await runJoinAuthorityBackfill(w.deps().deps, { apply: false, skip: new Set() });
+    expect(later.targets).toEqual([]);
+    expect(later.leftOut.map((l) => [l.contactId, l.reason])).toContainEqual(['c-skip', 'excluded_earlier']);
+  }, 120_000);
+
+  it('apply: a --skip lead whose history read fails AND whose exclusion append fails is a FAILED left-out line - never a target, exit 1', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const capture = createLogCapture();
+    const { deps, printed } = skipHistoryUnreadable(w, createLogger({ level: 'info', destination: capture.stream }), true);
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report.targets).toEqual(TARGET_LEADS.map((l) => ({ ...l, outcome: 'written' })));
+    expect(report.leftOut).toEqual([{ ...LEFT_OUT[0], exclusionFailed: true }, LEFT_OUT[1], LEFT_OUT[2]]);
+    expect(report).toMatchObject({ written: 3, skipped: 0, failed: 1, warnings: [] });
+    expect(printed).toContain(SKIP_EXCLUSION_FAILED_LINE);
+    expect(printed).toContain('Written: 3. Skipped (changed after the read): 0. Failed: 1.');
+    expect(printed.some((line) => line.includes('contactId c-skip  - FAILED: nothing written'))).toBe(false);
+    expect((await w.get('c-skip'))?.['housingAuthority']).toBeUndefined();
+    expect(await w.excludedEvents()).toEqual([]);
+    expect(capture.atLevel(50).map((l) => [l['contactId'], l['msg']])).toEqual([['c-skip', EXCLUSION_FAILED_LOG]]);
+    expect(capture.atLevel(40).map((l) => [l['contactId'], l['msg']])).toContainEqual(['c-skip', SKIP_HISTORY_UNREAD_LOG]);
+    expect(backfillExitCode(report)).toBe(1);
+  }, 120_000);
+
+  it('a dry run makes NO read for a --skip lead: left out as named in --skip even when every read of it would fail', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const base = w.deps();
+    const reads: string[] = [];
+    const deps: BackfillDeps = {
+      ...base.deps,
+      audit: {
+        append: async () => {
+          throw new Error('a dry run appends nothing');
+        },
+        listByEntity: async (entityKey, opts) => {
+          reads.push(entityKey);
+          if (entityKey === 'contacts#c-skip') throw new Error('ThrottlingException');
+          return base.deps.audit.listByEntity(entityKey, opts);
+        },
+      },
+      suggestions: {
+        getSuggestion: async (contactId, target, opts) => {
+          reads.push(`suggestion ${contactId}`);
+          if (contactId === 'c-skip') throw new Error('ThrottlingException');
+          return base.deps.suggestions.getSuggestion(contactId, target, opts);
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: false, skip: SKIP });
+    expect(report).toEqual({
+      targets: TARGET_LEADS.map((l) => ({ ...l, outcome: 'would_write' })),
+      leftOut: LEFT_OUT,
+      unknownSkips: [],
+      missingSkips: [],
+      written: 0,
+      skipped: 0,
+      failed: 0,
+      warnings: [],
+    });
+    expect(base.printed).toContain(SKIP_LINE);
+    // Every other candidate is read (oldest sign-up first); c-skip not once.
+    expect([...new Set(reads)]).toEqual([
+      'contacts#c-again',
+      'contacts#c-old',
+      'suggestion c-old',
+      'contacts#c-mid',
+      'suggestion c-mid',
+      'contacts#c-cleared',
+      'contacts#c-new',
+      'suggestion c-new',
+    ]);
+    expect(backfillExitCode(report)).toBe(0);
   }, 120_000);
 
   it('a lead with a PENDING housing authority suggestion is left out - its value shown, escaped like a name - by the dry run and the apply; nothing written for it', async () => {

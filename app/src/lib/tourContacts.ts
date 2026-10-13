@@ -7,8 +7,9 @@
 //
 // PII: log IDs only - never a name or phone.
 import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
-import { unitContacts, type UnitItem } from '../repos/unitsRepo.js';
+import type { UnitItem } from '../repos/unitsRepo.js';
 import { logger as defaultLogger, type Logger } from './logger.js';
+import { resolvePropertyContact, type PropertyContactResult } from './propertyContact.js';
 
 export interface TourContactNames {
   tenantFirstName?: string;
@@ -23,8 +24,19 @@ export interface ResolvedTourNames {
    *  or no name on it) is undefined fields with both flags false - failure
    *  and absence must never be conflated (spec 6.3b). */
   tenantReadFailed: boolean;
-  /** true only when the PROPERTY-CONTACT read threw. */
+  /** true only when the PROPERTY-CONTACT read threw (the shared lookup's
+   *  `read_failed`). A soft-deleted or missing candidate is NOT a failure:
+   *  the lookup skips it (primary-contact-integrity spec 4.1). */
   propertyReadFailed: boolean;
+  /**
+   * The shared lookup's own answer (lib/propertyContact.ts
+   * resolvePropertyContact) - WHO the property contact is, or why nobody
+   * (none / deleted / is_tenant / read_failed). PRESENT exactly when a unit was
+   * passed (a lookup ran); ABSENT when `unit` is undefined. The names above
+   * already reflect it; the relay intro reads it to explain a fallback to the
+   * general intro (spec 5.1).
+   */
+  propertyContact?: PropertyContactResult;
 }
 
 /**
@@ -85,9 +97,11 @@ function fullNameOf(c: ContactItem | undefined): string | undefined {
 
 /**
  * Resolve the two names tour-reminder copy interpolates: the TENANT, and the
- * unit's PRIMARY CONTACT falling back to the landlord of record - the
- * established rule (lib/rosterResolution.ts:273-275). Reads the LIVE contact
- * for names; roster rows carry a denormalized name that goes stale.
+ * PROPERTY CONTACT - the ONE shared lookup (lib/propertyContact.ts
+ * resolvePropertyContact, primary-contact-integrity spec 4.1): the roster row
+ * flagged primary, else the landlord of record, skipping a soft-deleted or
+ * missing contact. Reads the LIVE contact for names; roster rows carry a
+ * denormalized name that goes stale.
  *
  * The UNIT is passed in, not read here: every caller already holds (or has
  * already failed) its own unit read, and that failure is the caller's to
@@ -116,39 +130,33 @@ export async function resolveTourContactNames(args: {
     }
   }
 
-  // Primary-contact rule, with the inline empty-string guard replacing
-  // rosterResolution's module-private nonEmpty() (spec 6.1): a legacy
-  // landlordId of '' must read as "no property contact", never as an id.
-  let propertyContact: ContactItem | undefined;
+  // The property contact through the ONE shared lookup (lib/propertyContact.ts,
+  // primary-contact-integrity spec 4.1): the flagged primary row, else the
+  // landlord of record. A soft-deleted or missing candidate is SKIPPED; an
+  // empty landlordId is no candidate. A candidate who IS the tenant is NO
+  // property contact - without that, a unit whose landlordId is the tour's own
+  // tenant composes "Hey Alice, Alice will be headed that way shortly." and
+  // sends it to Alice; absence instead lets idFor() degrade the rung to the
+  // self-guided entry (spec 6.3). A read that THROWS is a failure, never
+  // absence: propertyReadFailed (the lookup already logged the error).
+  let propertyContactResult: PropertyContactResult | undefined;
   if (args.unit !== undefined) {
-    const primary = unitContacts(args.unit).find((c) => c.primaryContact === true);
-    const landlordId =
-      typeof args.unit.landlordId === 'string' && args.unit.landlordId.length > 0
-        ? args.unit.landlordId
-        : undefined;
-    const propertyContactId = primary?.contactId ?? landlordId;
-    // DE-DUPE the degenerate case where the tenant IS the property contact -
-    // the guard rosterResolution.ts:279-281 carries one line below the rule
-    // spec 6.1 told us to reuse, and which an earlier revision of this module
-    // copied the rule without. Without it a unit whose landlordId is the tour's
-    // own tenant composes "Hey Alice, Alice will be headed that way shortly."
-    // and sends it to Alice. Treating it as NO property contact is the right
-    // outcome rather than a special case: idFor() then degrades the rung to the
-    // self-guided entry, which is exactly spec 6.3's absence fallback.
-    const usablePropertyContactId =
-      propertyContactId === args.tenantId ? undefined : propertyContactId;
-    if (typeof usablePropertyContactId === 'string' && usablePropertyContactId.length > 0) {
-      try {
-        propertyContact = await args.contactsRepo.getById(usablePropertyContactId);
-      } catch (err) {
-        propertyReadFailed = true;
-        log.warn(
-          { err, unitId: args.unit.unitId, propertyContactId: usablePropertyContactId },
-          'tour names: property contact read failed',
-        );
-      }
+    propertyContactResult = await resolvePropertyContact({
+      unit: args.unit,
+      tenantId: args.tenantId,
+      contactsRepo: args.contactsRepo,
+      logger: log,
+    });
+    if (propertyContactResult.kind === 'read_failed') {
+      propertyReadFailed = true;
+      log.warn(
+        { unitId: args.unit.unitId, propertyContactId: propertyContactResult.candidateId },
+        'tour names: property contact read failed',
+      );
     }
   }
+  const propertyContact =
+    propertyContactResult?.kind === 'found' ? propertyContactResult.contact : undefined;
 
   const tenantFirst = firstNameOf(tenant);
   const tenantFull = fullNameOf(tenant);
@@ -163,5 +171,6 @@ export async function resolveTourContactNames(args: {
     },
     tenantReadFailed,
     propertyReadFailed,
+    ...(propertyContactResult !== undefined && { propertyContact: propertyContactResult }),
   };
 }

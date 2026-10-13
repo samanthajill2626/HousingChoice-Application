@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolveTourContactNames } from '../src/lib/tourContacts.js';
+import { composeTourReminderBody } from '../src/messages/tourCopy.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 
@@ -16,6 +17,11 @@ function repoOf(byId: Record<string, ContactItem | undefined>, calls: string[]) 
 }
 
 const TENANT = contact({ contactId: 'c-t', firstName: 'Alice', lastName: 'Rivera' });
+const DANA = contact({ contactId: 'c-pm', firstName: 'Dana', lastName: 'Ortiz' });
+const LEE = contact({ contactId: 'c-ll', firstName: 'Lee', lastName: 'Park' });
+const DELETED_AT = '2026-10-01T00:00:00.000Z';
+/** 2026-09-08 15:00 New York - any parseable instant composes the en-route rung. */
+const TOUR_AT = '2026-09-08T19:00:00.000Z';
 
 describe('resolveTourContactNames', () => {
   it('resolves the roster PRIMARY and the tenant, first and full names', async () => {
@@ -30,7 +36,7 @@ describe('resolveTourContactNames', () => {
           { contactId: 'c-pm', role: 'pm', primaryContact: true, name: 'Stale Cached' },
         ],
       }),
-      contactsRepo: repoOf({ 'c-t': TENANT, 'c-pm': contact({ contactId: 'c-pm', firstName: 'Dana', lastName: 'Ortiz' }) }, calls),
+      contactsRepo: repoOf({ 'c-t': TENANT, 'c-pm': DANA }, calls),
     });
     expect(r).toEqual({
       names: {
@@ -39,6 +45,7 @@ describe('resolveTourContactNames', () => {
       },
       tenantReadFailed: false,
       propertyReadFailed: false,
+      propertyContact: { kind: 'found', contactId: 'c-pm', contact: DANA },
     });
     // LIVE read, not the roster's denormalized name.
     expect(calls).toContain('c-pm');
@@ -184,5 +191,129 @@ describe('resolveTourContactNames', () => {
     });
     expect(r.names.tenantFirstName).toBe('Alice');
     expect(calls).toEqual([]);
+  });
+
+  // primary-contact-integrity spec 4.1: the property contact comes from the ONE
+  // shared lookup (lib/propertyContact.ts), which SKIPS a soft-deleted or
+  // missing contact. Before it, a deleted primary was named in every reminder.
+  it('a DELETED primary is skipped: the names and the en-route body come from the landlord of record', async () => {
+    const calls: string[] = [];
+    const r = await resolveTourContactNames({
+      tenantId: 'c-t',
+      unit: unit({
+        unitId: 'u1',
+        landlordId: 'c-ll',
+        contacts: [
+          { contactId: 'c-ll', role: 'landlord', primaryContact: false },
+          { contactId: 'c-pm', role: 'pm', primaryContact: true },
+        ],
+      }),
+      contactsRepo: repoOf(
+        {
+          'c-t': TENANT,
+          'c-pm': contact({ contactId: 'c-pm', firstName: 'Dana', lastName: 'Ortiz', deleted_at: DELETED_AT }),
+          'c-ll': LEE,
+        },
+        calls,
+      ),
+    });
+    expect(r.names.propertyContactFirstName).toBe('Lee');
+    expect(r.names.propertyContactName).toBe('Lee Park');
+    expect(r.propertyReadFailed).toBe(false);
+    expect(r.propertyContact).toEqual({ kind: 'found', contactId: 'c-ll', contact: LEE });
+    // Lazy: the landlord of record is read only because the primary was skipped.
+    expect(calls).toEqual(['c-t', 'c-pm', 'c-ll']);
+    const body = composeTourReminderBody({
+      kind: 'en_route',
+      scheduledAt: TOUR_AT,
+      timezone: 'America/New_York',
+      tourType: 'landlord_led',
+      names: r.names,
+    });
+    expect(body).toBe(
+      "Hey Alice, Lee will be headed that way shortly. Can you please text here when you're on the way?",
+    );
+  });
+
+  it('a deleted SOLE primary with no landlord of record is NO property contact (reason deleted)', async () => {
+    const r = await resolveTourContactNames({
+      tenantId: 'c-t',
+      unit: unit({
+        unitId: 'u1',
+        contacts: [{ contactId: 'c-pm', role: 'pm', primaryContact: true }],
+      }),
+      contactsRepo: repoOf(
+        { 'c-t': TENANT, 'c-pm': contact({ contactId: 'c-pm', firstName: 'Dana', deleted_at: DELETED_AT }) },
+        [],
+      ),
+    });
+    expect(r.names.propertyContactFirstName).toBeUndefined();
+    expect(r.names.propertyContactName).toBeUndefined();
+    expect(r.propertyReadFailed).toBe(false);
+    expect(r.propertyContact).toEqual({ kind: 'nobody', reason: 'deleted' });
+    // No name can back "will be headed that way": the rung degrades to the
+    // self-guided entry (spec 6.3) and never names the deleted contact.
+    expect(
+      composeTourReminderBody({
+        kind: 'en_route',
+        scheduledAt: TOUR_AT,
+        timezone: 'America/New_York',
+        tourType: 'landlord_led',
+        names: r.names,
+      }),
+    ).toBe("Hey Alice, can you please text me when you're on the way?");
+  });
+
+  it('a primary with NO record (an import retract hard-deletes) falls through to the landlord like a deleted one', async () => {
+    const r = await resolveTourContactNames({
+      tenantId: 'c-t',
+      unit: unit({
+        unitId: 'u1',
+        landlordId: 'c-ll',
+        contacts: [
+          { contactId: 'c-ll', role: 'landlord', primaryContact: false },
+          { contactId: 'c-gone', role: 'pm', primaryContact: true },
+        ],
+      }),
+      contactsRepo: repoOf({ 'c-t': TENANT, 'c-ll': LEE }, []),
+    });
+    expect(r.names.propertyContactFirstName).toBe('Lee');
+    expect(r.propertyContact).toEqual({ kind: 'found', contactId: 'c-ll', contact: LEE });
+  });
+
+  it('exposes the shared lookup answer for every outcome - and none at all without a unit', async () => {
+    const none = await resolveTourContactNames({
+      tenantId: 'c-t',
+      unit: unit({ unitId: 'u1', landlordId: '', contacts: [] }),
+      contactsRepo: repoOf({ 'c-t': TENANT }, []),
+    });
+    expect(none.propertyContact).toEqual({ kind: 'nobody', reason: 'none' });
+
+    const self = await resolveTourContactNames({
+      tenantId: 'c-t',
+      unit: unit({ unitId: 'u1', landlordId: 'c-t' }),
+      contactsRepo: repoOf({ 'c-t': TENANT }, []),
+    });
+    expect(self.propertyContact).toEqual({ kind: 'nobody', reason: 'is_tenant' });
+
+    const failed = await resolveTourContactNames({
+      tenantId: 'c-t',
+      unit: unit({ unitId: 'u1', landlordId: 'c-boom' }),
+      contactsRepo: {
+        async getById(id: string) {
+          if (id === 'c-boom') throw new Error('repo down');
+          return TENANT;
+        },
+      },
+    });
+    expect(failed.propertyContact).toEqual({ kind: 'read_failed', candidateId: 'c-boom' });
+    expect(failed.propertyReadFailed).toBe(true);
+
+    const noUnit = await resolveTourContactNames({
+      tenantId: 'c-t',
+      unit: undefined,
+      contactsRepo: repoOf({ 'c-t': TENANT }, []),
+    });
+    expect('propertyContact' in noUnit).toBe(false);
   });
 });

@@ -1347,11 +1347,13 @@ describe('ListingDetail', () => {
   });
 
   // caseworker-integrity spec revision 5 section 4 "Restore" (Cameron's Q5
-  // ruling; fix wave 2 FW2-13): "Restore without a landlord" on a property
-  // whose cleared landlord was its primary contact makes the one remaining
-  // contact typed landlord the primary contact in the same write. The page
-  // renders the roster the server answers with.
-  it('Restore without a landlord that promotes the sole landlord-typed contact shows that contact as the primary contact', async () => {
+  // ruling; fix wave 2 FW2-13), as primary-contact-integrity spec 4.6 now
+  // rules it: "Restore without a landlord" on a property whose cleared
+  // landlord was its primary contact hands the primary contact, in the same
+  // write, to the earliest-added remaining contact eligible for automatic
+  // routing (typed landlord, live, not a routing pointer). The page renders
+  // the roster the server answers with.
+  it('Restore without a landlord that promotes the earliest-added eligible contact shows that contact as the primary contact', async () => {
     const user = userEvent.setup();
     // Deleted: James (landlord of record and primary contact) was re-typed;
     // Dana, a property manager typed landlord, is still on the list.
@@ -2252,9 +2254,14 @@ describe('ListingDetail - Contacts card edit mode', () => {
     expect(removeUnitContact).not.toHaveBeenCalled();
   });
 
-  it('removing the CURRENT primary confirms first and NAMES the promotion', async () => {
+  it('removing the CURRENT primary confirms first and NAMES the heir the server reports', async () => {
     const user = userEvent.setup();
-    useListing.mockReturnValue(ROSTER_READY);
+    // primary-contact-integrity spec 7.3: the heir comes from the server's
+    // propertyContact block, never from a client-side copy of the rule.
+    useListing.mockReturnValue({
+      ...ROSTER_READY,
+      propertyContact: { contactId: 'pm1', heirIfPrimaryRemoved: { contactId: 'll1', name: 'James Porter' } },
+    });
     removeUnitContact.mockResolvedValue({
       ...ROSTER_UNIT,
       primary_contact: 'll1',
@@ -2272,7 +2279,7 @@ describe('ListingDetail - Contacts card edit mode', () => {
     const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
     expect(
       within(dialog).getByText(
-        'James Porter becomes the primary contact - calls and new relay groups for this property will go to them.',
+        'James Porter becomes the primary contact - new tours and relay groups for this property will use them.',
       ),
     ).toBeInTheDocument();
     expect(removeUnitContact).not.toHaveBeenCalled();
@@ -2286,12 +2293,13 @@ describe('ListingDetail - Contacts card edit mode', () => {
     );
   });
 
-  it('names the NO-primary outcome when there is no landlord of record to promote', async () => {
+  it('names the NO-primary outcome when the server reports no heir', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue({
       ...ROSTER_READY,
       unit: { ...ROSTER_UNIT, landlordId: '', contacts: [ROSTER_UNIT.contacts![0]!] },
       roster: [ROSTER_READY.roster[0]!],
+      propertyContact: { contactId: 'pm1', heirIfPrimaryRemoved: null },
     });
     renderAt();
 
@@ -2301,7 +2309,7 @@ describe('ListingDetail - Contacts card edit mode', () => {
     const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
     expect(
       within(dialog).getByText(
-        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a new contact is added.',
+        "This property will have no primary contact. New tours won't include a landlord, and tour group texts will use the general intro.",
       ),
     ).toBeInTheDocument();
   });
@@ -2313,6 +2321,7 @@ describe('ListingDetail - Contacts card edit mode', () => {
       ...ROSTER_READY,
       unit: { ...ownerless, contacts: [ROSTER_UNIT.contacts![0]!] } as NonNullable<ListingState['unit']>,
       roster: [ROSTER_READY.roster[0]!],
+      propertyContact: { contactId: 'pm1', heirIfPrimaryRemoved: null },
     });
     renderAt();
 
@@ -2322,9 +2331,134 @@ describe('ListingDetail - Contacts card edit mode', () => {
     const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
     expect(
       within(dialog).getByText(
-        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a new contact is added.',
+        "This property will have no primary contact. New tours won't include a landlord, and tour group texts will use the general intro.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it('an heir with no name on record: "Another contact on this property becomes the primary contact."', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue({
+      ...ROSTER_READY,
+      propertyContact: { contactId: 'pm1', heirIfPrimaryRemoved: { contactId: 'll1' } },
+    });
+    renderAt();
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Remove Alicia Grant from this property' }));
+    const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
+    expect(
+      within(dialog).getByText('Another contact on this property becomes the primary contact.'),
+    ).toBeInTheDocument();
+  });
+
+  it('no propertyContact block (the server could not tell): another contact MAY take over', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    renderAt();
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Remove Alicia Grant from this property' }));
+    const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
+    expect(
+      within(dialog).getByText('Another contact on this property may become the primary contact.'),
+    ).toBeInTheDocument();
+    // Never a client-side guess at the landlord of record.
+    expect(within(dialog).queryByText(/James Porter/)).not.toBeInTheDocument();
+  });
+
+  it("the notice reads the LATEST roster write's block, not the load-time one", async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue({
+      ...ROSTER_READY,
+      propertyContact: { contactId: 'pm1', heirIfPrimaryRemoved: { contactId: 'll1', name: 'James Porter' } },
+    });
+    // Make Dana primary; the write answers with its own block - Alicia would
+    // take over from Dana.
+    addUnitContact.mockReset().mockResolvedValue({
+      ...ROSTER_UNIT,
+      primary_contact: 'pm2',
+      contacts: [
+        { contactId: 'pm1', role: 'pm', primaryContact: false, name: 'Alicia Grant' },
+        { contactId: 'll1', role: 'landlord', primaryContact: false, name: 'James Porter' },
+        { contactId: 'pm2', role: 'pm', primaryContact: true, name: 'Dana Reyes' },
+      ],
+      propertyContact: { contactId: 'pm2', heirIfPrimaryRemoved: { contactId: 'pm1', name: 'Alicia Grant' } },
+    });
+    renderAt();
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Make Dana Reyes the primary contact' }));
+    // Wait for the write to land: Dana is the primary row now.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Remove Dana Reyes from this property' }).parentElement,
+      ).toHaveTextContent('Dana Reyes (primary)'),
+    );
+    await user.click(screen.getByRole('button', { name: 'Remove Dana Reyes from this property' }));
+    const dialog = await screen.findByRole('dialog', { name: /Remove the primary contact\?/i });
+    expect(
+      within(dialog).getByText(
+        'Alicia Grant becomes the primary contact - new tours and relay groups for this property will use them.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('a 409 primary_contact_deleted on Make primary names its own reason, and the re-read marks the row deleted', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    addUnitContact
+      .mockReset()
+      .mockRejectedValue(
+        new ApiError(409, 'primary_contact_deleted', 'primary_contact_deleted', { error: 'primary_contact_deleted' }),
+      );
+    getUnit.mockReset().mockResolvedValue({
+      ...ROSTER_UNIT,
+      contacts: ROSTER_UNIT.contacts!.map((row) =>
+        row.contactId === 'pm2' ? { ...row, deleted: true as const } : row,
+      ),
+    });
+    renderAt();
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Make Dana Reyes the primary contact' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('That contact was deleted - restore them first or choose someone else.');
+    expect(alert).not.toHaveTextContent(/landlord of record/);
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+    // Settled: Dana is marked deleted and no longer offers Make primary.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Make Dana Reyes the primary contact' }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole('button', { name: 'Remove Dana Reyes from this property' }).parentElement,
+    ).toHaveTextContent('Dana Reyes (deleted)');
+  });
+
+  it('a 503 roster_read_failed on removing the primary says the other contacts could not be checked, and re-reads nothing', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue({
+      ...ROSTER_READY,
+      propertyContact: { contactId: 'pm1', heirIfPrimaryRemoved: { contactId: 'll1', name: 'James Porter' } },
+    });
+    removeUnitContact
+      .mockReset()
+      .mockRejectedValue(
+        new ApiError(503, 'roster_read_failed', 'roster_read_failed', { error: 'roster_read_failed' }),
+      );
+    getUnit.mockReset();
+    renderAt();
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Remove Alicia Grant from this property' }));
+    const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
+    await user.click(within(dialog).getByRole('button', { name: 'Remove contact' }));
+
+    expect(removeUnitContact).toHaveBeenCalledWith('u1', 'pm1');
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      "Couldn't check the other contacts - try again.",
+    );
+    // Nothing was written, so there is nothing to settle.
+    expect(getUnit).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: /Remove the primary contact\?/i })).toBeInTheDocument();
   });
 
   it('a 409 renders inline on the row, refetches the unit, and the row VISIBLY SETTLES', async () => {

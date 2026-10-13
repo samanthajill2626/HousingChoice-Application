@@ -119,6 +119,23 @@ const LANDLORD_OF_RECORD_REASON = "Landlord of record - reassign the property's 
 const ROSTER_CONFLICT_COPY =
   "That contact is the landlord of record now - reassign the property's landlord first.";
 
+/** A 409 primary_contact_deleted (primary-contact-integrity spec 7.4): Make
+ *  primary on a contact who was deleted. Its own sentence - not the
+ *  landlord-of-record catch-all above. */
+const PRIMARY_CONTACT_DELETED_COPY = 'That contact was deleted - restore them first or choose someone else.';
+
+/** A 503 roster_read_failed on removing the primary (spec 7.3): the server
+ *  could not check who takes over, so it removed nothing. */
+const ROSTER_READ_FAILED_COPY = "Couldn't check the other contacts - try again.";
+
+/** The remove-the-primary confirm (spec 7.3), word for word: no heir, an heir
+ *  with no name on record, and no propertyContact block (could not tell). The
+ *  named-heir sentence is built in promotionNotice. */
+const NO_HEIR_NOTICE =
+  "This property will have no primary contact. New tours won't include a landlord, and tour group texts will use the general intro.";
+const UNNAMED_HEIR_NOTICE = 'Another contact on this property becomes the primary contact.';
+const UNKNOWN_HEIR_NOTICE = 'Another contact on this property may become the primary contact.';
+
 /** Adding a second Landlord label must not silently replace the property's
  *  actual landlordId. Point the operator to the explicit reassignment flow. */
 const LANDLORD_REASSIGNMENT_COPY =
@@ -339,8 +356,9 @@ export function ListingDetail(): React.JSX.Element {
   // the SAME roster source as the rows: a roster write's (or a re-read's) own
   // block, else the load-time GET's. Absent = the server could not tell.
   const propertyContact = contactsUnit !== null ? contactsUnit.propertyContact : state.propertyContact;
-  /** Who OWNS the property (`unit.landlordId`) - never removable from the roster,
-   *  and whoever inherits the primary-contact routing when the primary leaves. */
+  /** Who OWNS the property (`unit.landlordId`) - never removable from the
+   *  roster. Who takes over when the primary leaves is the SERVER's call
+   *  (propertyContact.heirIfPrimaryRemoved, primary-contact-integrity 7.3). */
   // An ownerless property (legacy, or restored without a landlord -
   // caseworker-integrity section 4) has NO landlordId (UnitItem.landlordId is
   // optional); read it as '' (the "no landlord" branch) so nothing below
@@ -426,10 +444,10 @@ export function ListingDetail(): React.JSX.Element {
   };
 
   // --- Contacts card edit mode (spec 6.1 / D9) ------------------------------
-  // This card is where the property's PRIMARY CONTACT is set: the person tours
-  // and placements put on the relay group and reach by masked call when nobody
-  // has overridden the roster. A deleted property is read-only, like every other
-  // card here.
+  // This card is where the property's PRIMARY CONTACT is set: the person new
+  // tours and placements put on their people list and the tour intro names
+  // (no live call routing reads it - primary-contact-integrity spec 9.2). A
+  // deleted property is read-only, like every other card here.
   const contactsEditing = editingContacts && !deleted;
   const rosteredIds = new Set(contactRows.map((r) => r.contactId));
   /** Search candidates for "+ Add contact": every live contact NOT already on
@@ -510,6 +528,13 @@ export function ListingDetail(): React.JSX.Element {
           await settle();
           return;
         }
+        // primary-contact-integrity spec 7.3: removing the primary could not
+        // check who takes over (a contact read failed), so the server wrote
+        // nothing. Not a race - no settle; the operator tries again.
+        if (err instanceof ApiError && err.status === 503 && err.code === 'roster_read_failed') {
+          setRosterError({ key, message: ROSTER_READ_FAILED_COPY });
+          return;
+        }
         const conflict = err instanceof ApiError && err.status === 409;
         setRosterError({
           key,
@@ -518,7 +543,9 @@ export function ListingDetail(): React.JSX.Element {
               ? LANDLORD_REASSIGNMENT_COPY
               : err.code === 'unit_roster_conflict'
                 ? ROSTER_RETRY_COPY
-              : ROSTER_CONFLICT_COPY
+                : err.code === 'primary_contact_deleted'
+                  ? PRIMARY_CONTACT_DELETED_COPY
+                  : ROSTER_CONFLICT_COPY
             : "Couldn't save that change - please try again.",
         });
         if (!conflict) return;
@@ -561,9 +588,10 @@ export function ListingDetail(): React.JSX.Element {
     );
   };
 
-  /** Removing the CURRENT primary contact re-points live masked calls and every
-   *  new relay group, so it confirms first and NAMES who inherits that routing.
-   *  Any other row removes on click. */
+  /** Removing the CURRENT primary contact changes who new tours and relay
+   *  groups for this property use, so it confirms first and NAMES who takes
+   *  over (primary-contact-integrity spec 7.3). Any other row removes on
+   *  click. */
   const onRemoveContactRow = (row: RosterRow): void => {
     if (row.primaryContact) {
       setRosterError(null);
@@ -573,36 +601,20 @@ export function ListingDetail(): React.JSX.Element {
     removeContactRow(row);
   };
 
-  /** Who the primary-contact routing lands on once `row` is gone: the landlord
-   *  of record (the repo promotes them), or nobody when the property has no
-   *  landlordId. There is no further fallback: the server's property-contact
-   *  resolvers take the primary row, else the landlord of record, so with
-   *  neither they find no one and calls and new relay groups for the property
-   *  reach no one. On such a property (no primary contact, no landlord of
-   *  record) the routing comes back in one of three ways:
-   *  - a NEW contact typed landlord (a landlord, property manager or owner,
-   *    whatever its role) added to the contact list becomes its primary
-   *    contact automatically - the server decides it, while "+ Add contact"
-   *    still posts `primaryContact: false`. A new contact of any other type
-   *    (tenant, partner, unknown, team member) joins non-primary;
-   *  - a contact already on the list and typed landlord, re-roled to
-   *    Landlord, claims the empty landlord slot (it is not made primary; the
-   *    resolvers fall back to it as the landlord of record);
-   *  - otherwise only Make primary on someone on the list.
-   *  The sentence below is Cameron's ruled copy and stays as ruled: it names
-   *  the first and last ways, and its "a new contact is added" holds for a new
-   *  contact typed landlord only (caseworker-integrity spec section 4
-   *  "Contact list" auto-primary: revision 4, superseding planner rulings Q2
-   *  and Q3, narrowed by revision 5 - Cameron's Q4 ruling; R1 code review,
-   *  dashboard finding 1; R2 code review, dashboard finding A5). */
+  /** The remove-the-primary confirm's sentence (primary-contact-integrity spec
+   *  7.3). WHO takes over is the server's call, read from the propertyContact
+   *  block's `heirIfPrimaryRemoved` (the heir function with the primary
+   *  excluded) - never a client-side copy of that rule. The block carries the
+   *  heir's name even for an off-roster landlord of record. "calls and" is
+   *  gone from the old sentence: the scalar drives no live call routing. An
+   *  absent block means the server could not tell. */
   const promotionNotice = (): string => {
-    const promoted =
-      landlordOfRecord.length > 0
-        ? contactRows.find((r) => r.contactId === landlordOfRecord)?.name ?? landlordOfRecord
-        : undefined;
-    return promoted !== undefined
-      ? `${promoted} becomes the primary contact - calls and new relay groups for this property will go to them.`
-      : 'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a new contact is added.';
+    if (propertyContact === undefined) return UNKNOWN_HEIR_NOTICE;
+    const heir = propertyContact.heirIfPrimaryRemoved;
+    if (heir === null) return NO_HEIR_NOTICE;
+    return heir.name !== undefined && heir.name.length > 0
+      ? `${heir.name} becomes the primary contact - new tours and relay groups for this property will use them.`
+      : UNNAMED_HEIR_NOTICE;
   };
 
   const onAddContact = (): void => {
@@ -1583,9 +1595,9 @@ export function ListingDetail(): React.JSX.Element {
         />
       ) : null}
 
-      {/* Removing the primary contact re-points live routing, so it NAMES the
-          promotion before it writes - silently moving calls is not acceptable
-          (spec 6.1). */}
+      {/* Removing the primary contact changes who new tours and relay groups
+          use, so it NAMES who takes over before it writes (spec 6.1; the
+          sentence is the server's call, primary-contact-integrity spec 7.3). */}
       {removingContact !== null ? (
         <Modal
           title="Remove the primary contact?"

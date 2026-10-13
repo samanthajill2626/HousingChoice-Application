@@ -994,7 +994,14 @@ export function getUnits(
 }
 
 /** GET /api/units/:id - a single unit record (the property detail page header +
- *  details + photos). Wrapped under { unit } on the wire; unwrapped here. */
+ *  details + photos). Wrapped under { unit } on the wire; unwrapped here.
+ *  primary-contact-integrity spec 7.5: its enriched `contacts` roster marks a
+ *  row `deleted: true` (the contact is soft-deleted or missing) or
+ *  `caseworker: true`, and the unit carries the `propertyContact` block (who
+ *  the app uses for this property, and who would take over if the primary row
+ *  were removed) - both ONLY when the server's contact read was complete.
+ *  Absent means the server could not tell: the rows then carry best-effort
+ *  names only, and the GET still answers 200. */
 export async function getUnit(unitId: string, signal?: AbortSignal): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>(`/api/units/${encodeURIComponent(unitId)}`, {
     ...(signal !== undefined && { signal }),
@@ -1034,16 +1041,25 @@ export async function deleteUnit(unitId: string): Promise<UnitItem> {
  *  `{ landlordId: <a landlord's contactId> }` to restore with that landlord, or
  *  `{ landlordId: null }` to restore without one (404 landlord_not_found /
  *  409 landlord_not_landlord / 409 unit_roster_conflict).
- *  Sole-landlord promotion (spec revision 5): a `{ landlordId: null }` restore
- *  of a property whose cleared landlord was its primary contact makes the ONE
- *  remaining live contact typed landlord (any role; a soft-deleted one does
- *  not count) the primary contact in the same write - with zero or two-plus,
- *  nobody. The answer's enriched roster carries the flags, so render the
- *  answer's roster, never the one the page loaded. 409 unit_roster_conflict
- *  means the property changed between the server's read and its write - its
- *  landlord of record, its deleted state or, for `{ landlordId: null }`, its
- *  contact list (a `{ landlordId: <id> }` restore re-reads and retries a
- *  contacts-only race itself): nothing was restored - re-read the property.
+ *  Primary hand-off (primary-contact-integrity spec 4.6, replacing the
+ *  sole-landlord promotion): when the landlord a `{ landlordId }` restore
+ *  clears or replaces was the primary contact (its row is the flagged
+ *  primary, or no row is flagged at all), the heir function picks who takes
+ *  over in the same write - the new landlord when live (a swap), else the
+ *  earliest-added remaining contact eligible for automatic routing (typed
+ *  landlord, any role, live, not a routing pointer), else nobody. 503
+ *  roster_read_failed means the server could not read the contacts that pick
+ *  needs: nothing was written - try again. A plain restore never hands the
+ *  primary off and never answers 503. The answer's enriched roster carries
+ *  the primary flags, so render the answer's roster, never the one the page
+ *  loaded - but no restore answer carries the `deleted` / `caseworker` row
+ *  flags or the `propertyContact` block (spec 7.5), so the property page
+ *  re-reads the property (getUnit) after either restore.
+ *  409 unit_roster_conflict means the property changed between the server's
+ *  read and its write - its landlord of record, its deleted state or, for
+ *  `{ landlordId: null }`, its contact list (a `{ landlordId: <id> }` restore
+ *  re-reads and retries a contacts-only race itself): nothing was restored -
+ *  re-read the property.
  *  409 restore_landlord_not_needed (either body; spec revision 7) means the
  *  plain restore would apply now (the property was restored meanwhile, its
  *  stored landlord is a landlord again, or it has none): nothing was written
@@ -1070,18 +1086,28 @@ export async function restoreUnit(
  *  sent. On an ownerless legacy property, adding a Landlord also claims its
  *  `landlordId`; an existing different owner is never silently replaced.
  *  Auto-primary (caseworker-integrity spec section 4 "Contact list",
- *  revisions 5 and 6): a NEW seat on a property with no primary row and no
- *  landlordId becomes its primary contact even when `primaryContact` is false
- *  or absent, when its contact is eligible for automatic routing - typed
- *  landlord (a landlord, property manager or owner, any role), not
- *  soft-deleted and not a routing pointer. Any other contact (another type,
- *  or a soft-deleted landlord-typed one) joins non-primary. The answer's
- *  roster carries the flags, so render the answer, never the request.
- *  Returns the updated unit with its enriched `contacts` roster. Errors: 409
- *  contact_list_caseworker (a caseworker taking a NEW seat) and 409
+ *  revisions 5 and 6, widened by primary-contact-integrity spec 4.4): a write
+ *  for contact X - a NEW seat, or an edit of X's own row such as a re-role -
+ *  makes X, and only X, the property's primary contact even when
+ *  `primaryContact` is false or absent, when X is eligible for automatic
+ *  routing - typed landlord (a landlord, property manager or owner, any
+ *  role), not soft-deleted and not a routing pointer - and the property has
+ *  no LIVE flagged primary and no LIVE landlord of record (a soft-deleted or
+ *  missing one counts as absent). A write never promotes anyone else, and
+ *  when the server cannot read that liveness it writes unpromoted. The
+ *  answer's roster carries the flags, so render the answer, never the
+ *  request.
+ *  Returns the updated unit with its enriched `contacts` roster and - when the
+ *  server's contact read was complete - the `deleted` / `caseworker` row
+ *  flags and the `propertyContact` block (spec 7.5, as getUnit). Errors: 409
+ *  contact_list_caseworker (a caseworker taking a NEW seat), 409
  *  landlord_not_landlord (a claim of the vacant landlord slot by a contact not
- *  typed landlord), each from the route's checks or from the roster write
- *  itself (a seat removed or a landlord cleared after the route's read);
+ *  typed landlord) and 409 primary_contact_deleted (`primaryContact: true`
+ *  for a soft-deleted contact whose row is not already the primary;
+ *  re-sending true for the current primary is never refused), in that order,
+ *  each from the route's checks or from the roster write itself (the
+ *  property changed after the route's read: a seat removed, a landlord
+ *  cleared, the primary moved);
  *  409 landlord_reassignment_required / unit_roster_conflict; 404
  *  unit_not_found / contact_not_found (a missing contact, or the id of a phone
  *  or email routing pointer); 400 on a bad role or a non-boolean
@@ -1098,10 +1124,18 @@ export async function addUnitContact(
 }
 
 /** DELETE /api/units/:unitId/contacts/:contactId (C3) - drop a contact from the
- *  property's roster. Returns the updated unit (with `contacts`). Removing the
- *  CURRENT primary contact promotes the landlord of record in its place (or
- *  clears the primary entirely when the property has no landlordId) - so the
- *  caller must confirm that promotion BEFORE calling (spec 6.1). Errors: 409
+ *  property's roster. Returns the updated unit (with `contacts` and - when the
+ *  server's contact read was complete - the `deleted` / `caseworker` row flags
+ *  and the `propertyContact` block, spec 7.5, as getUnit). Removing the
+ *  CURRENT primary contact hands the primary to the heir function's pick
+ *  (primary-contact-integrity spec 4.6): the live landlord of record (a
+ *  landlord row is added when they have none), else the earliest-added
+ *  remaining contact eligible for automatic routing, else nobody (every flag
+ *  cleared). The last read's `propertyContact.heirIfPrimaryRemoved` names that
+ *  pick, so the caller confirms it BEFORE calling (spec 6.1 / 7.3). Removing
+ *  any other row changes no primary. Errors: 503 roster_read_failed (removing
+ *  the primary when the server could not read the contacts it needs to pick
+ *  the heir: nothing was written - try again); 409
  *  cannot_remove_landlord_of_record (the target IS `unit.landlordId` - reassign
  *  the property's landlord first) / unit_roster_conflict; 404
  *  unit_or_contact_not_found. */

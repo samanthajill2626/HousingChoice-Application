@@ -30,6 +30,7 @@ import type { Logger } from '../lib/logger.js';
 import { zipFive } from '../lib/address.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { recordRosterMilestone } from '../lib/personEvents.js';
+import { resolvePropertyContact, type PropertyContactResult } from '../lib/propertyContact.js';
 import {
   resolveRoster,
   type ResolvedRoster,
@@ -48,7 +49,7 @@ import type { PlacementDeadlinesRepo } from '../repos/placementDeadlinesRepo.js'
 import { soonestDeadline } from '../repos/placementDeadlinesRepo.js';
 import type { PlacementItem, PlacementsRepo } from '../repos/placementsRepo.js';
 import type { TourItem, ToursRepo } from '../repos/toursRepo.js';
-import { unitContacts, type UnitsRepo } from '../repos/unitsRepo.js';
+import type { UnitItem, UnitsRepo } from '../repos/unitsRepo.js';
 import { TERMINAL_STAGES } from '../lib/statusModel.js';
 import {
   RelayProvisioningDisabledError,
@@ -174,6 +175,43 @@ function provisioningDisabledRefusal(): RosterOpenRefusal {
   };
 }
 
+/**
+ * The property contact for a too-thin DIAGNOSTIC - the ONE shared lookup
+ * (lib/propertyContact.ts, primary-contact-integrity spec 4.1), the same walk
+ * the resolver took to build the default roster. The lookup itself never
+ * throws, but these diagnostics always have: a contact read that throws here
+ * fails the open (the route's 500, the poller's retry) rather than naming the
+ * wrong rung. So a `read_failed` RE-THROWS the very error the read raised,
+ * captured on its way through.
+ */
+async function diagnosticPropertyContact(
+  contacts: Pick<ContactsRepo, 'getById'>,
+  log: Logger,
+  unit: UnitItem,
+  tenantId: string,
+): Promise<Exclude<PropertyContactResult, { kind: 'read_failed' }>> {
+  let thrown: unknown;
+  const result = await resolvePropertyContact({
+    unit,
+    tenantId,
+    contactsRepo: {
+      getById: async (contactId: string) => {
+        try {
+          return await contacts.getById(contactId);
+        } catch (err) {
+          thrown = err;
+          throw err;
+        }
+      },
+    },
+    logger: log,
+  });
+  if (result.kind === 'read_failed') {
+    throw thrown ?? new Error(`roster open: property contact read failed (candidateId=${result.candidateId})`);
+  }
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Tours
 // ---------------------------------------------------------------------------
@@ -227,16 +265,21 @@ async function resolveTourMembers(
 
   const unit = await deps.units.getById(tour.unitId);
   if (!unit) return { unresolvable: 'unit not found (cannot resolve landlord)' };
-  // The property's contact is the primaryContact row, falling back to the
-  // landlord of record (D3) - the same ladder the resolver walked.
-  const propertyContactId =
-    unitContacts(unit).find((c) => c.primaryContact === true)?.contactId ??
-    (typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined);
-  if (propertyContactId === undefined) {
-    return { unresolvable: 'unit has no landlord (cannot resolve landlord)' };
+  // The property's contact through the shared lookup - the same walk the
+  // resolver took. Each outcome keeps the detail string its state answered
+  // before the lookup existed (spec 4.1; the API tests assert them verbatim):
+  //   none      -> no flagged primary and no landlord of record;
+  //   deleted   -> every candidate soft-deleted or without a record - a
+  //                deleted contact now reads exactly like a missing one;
+  //   is_tenant -> the tenant IS the property contact: one party, too thin.
+  // A read that throws is re-thrown (diagnosticPropertyContact).
+  const lookup = await diagnosticPropertyContact(deps.contacts, deps.log, unit, tour.tenantId);
+  if (lookup.kind === 'nobody') {
+    if (lookup.reason === 'none') return { unresolvable: 'unit has no landlord (cannot resolve landlord)' };
+    if (lookup.reason === 'deleted') return { unresolvable: 'landlord contact not found' };
+    return { unresolvable: 'this tour roster has fewer than two reachable members' };
   }
-  const landlord = await deps.contacts.getById(propertyContactId);
-  if (!landlord) return { unresolvable: 'landlord contact not found' };
+  const landlord = lookup.contact;
   const landlordPhone =
     typeof landlord.phone === 'string' && landlord.phone.length > 0
       ? normalizeToE164(landlord.phone)
@@ -521,12 +564,22 @@ async function describeThinPlacementRoster(
   }
   const unit = await deps.units.getById(item.unitId);
   if (!unit) return { status: 400, body: { error: 'unit_not_found' } };
-  const propertyContactId =
-    unitContacts(unit).find((c) => c.primaryContact === true)?.contactId ?? unit.landlordId;
-  const landlord =
-    typeof propertyContactId === 'string' && propertyContactId.length > 0
-      ? await deps.contacts.getById(propertyContactId)
-      : undefined;
+  // The property's contact through the shared lookup (spec 4.1), each state
+  // keeping today's code: none / deleted -> landlord_unreachable (this ladder's
+  // one property-side code); is_tenant -> the too-thin answer, exactly what
+  // the tenant-as-landlord read used to reach. A read that throws is re-thrown
+  // (diagnosticPropertyContact).
+  const lookup = await diagnosticPropertyContact(deps.contacts, deps.log, unit, item.tenantId);
+  if (lookup.kind === 'nobody' && lookup.reason === 'is_tenant') {
+    return {
+      status: 400,
+      body: {
+        error: 'relay_member_unresolvable',
+        detail: 'this placement roster has fewer than two reachable members',
+      },
+    };
+  }
+  const landlord = lookup.kind === 'found' ? lookup.contact : undefined;
   if (!landlord || typeof landlord.phone !== 'string' || landlord.phone.length === 0) {
     return {
       status: 400,

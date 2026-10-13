@@ -86,9 +86,11 @@ already carries (R17, R23). Each slice brief points here.
 
 ## S5 additions
 
-- S5.5: the RED step answers 403 forbidden, not 404 - the dev router is
-  mounted before the origin-secret check (`app.ts:131-133`), so an unmatched
-  `/__dev` path falls through to `originSecret` (S3-F2).
+- S5.5: [WRONG - corrected 2026-10-13 after S5a] this delta claimed the RED
+  step answers 403 because an unmatched `/__dev` path falls through to
+  `originSecret`; `originSecret.ts:45` exempts the whole `/__dev/` prefix, so
+  the tree answers the plan's original 404. The S5a implementer trusted the
+  tree (S5a-report.md D1). Reader finding S3-F2 is withdrawn.
 - S5.1-S5.3: `consistentRead` is typed on `list`'s own parameter, as S2
   ships it (S3-F1) - use the shipped signature.
 - S5.3 / S5.4: add ONE DynamoDB-Local test that runs the script's real wiring

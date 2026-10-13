@@ -1,6 +1,6 @@
 # /join housing authority dropdown, Onboarding start, and lead backfill - design
 
-Status: APPROVED revision 4 (2026-10-12); revision 5 adds Cameron's post-build rulings (D10 earlier-run exclusions, pending-suggestion leads, honest failure wording; D12 Settings note). Review history:
+Status: APPROVED revision 4 (2026-10-12); revision 5 adds Cameron's post-build rulings (D10 earlier-run exclusions, pending-suggestion leads, honest failure wording; D12 Settings note); revision 6 (2026-10-13) adds the D10 dismissed-Atlanta and in-flight-resolution leave-outs and records exclusions before any write. Review history:
 `docs/superpowers/reviews/2026-10-12-join-housing-authority/design-review/adjudications.md`.
 Branch: `feat/join-housing-authority` (worktree `W:\tmp\join-housing-authority`, cut from main @19607658)
 Tracker: Improvements Tracker item #14 "Housing authority form default" (Before WP1, item 3)
@@ -210,6 +210,17 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
       (`app/src/repos/extractionRepo.ts`): the reason shows the suggested
       value - "has a pending housing authority suggestion (<value>) - accept
       or dismiss it first";
+    - a candidate for which staff DISMISSED a `housingAuthority` suggestion
+      naming "Atlanta Housing Authority" (revision 6, Cameron 2026-10-13):
+      the same dismissal rule the AI suggest path applies before it
+      re-suggests a value (its `hasDismissal` check), so the backfill never
+      writes a value staff already turned down; reason "staff dismissed an
+      Atlanta Housing Authority suggestion";
+    - a candidate whose `housingAuthority` suggestion is being accepted or
+      dismissed right now, or whose accept or dismiss was abandoned (its
+      suggestion resolution record is still active) (revision 6): reason "a
+      suggestion accept or dismiss is in progress - re-run after it
+      finishes";
     - a candidate with a `housing_fair_signup` audit event carrying
       `signupVersion: 2` - a lead from before the change who signed up again
       after it, on `/join` (whose answer, D7, must not be overridden) or on a
@@ -246,6 +257,11 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
     departure from the cleanup script's no-names rule, Cameron 2026-10-12).
     Nothing stored tells a flyer sign-up for an unavailable property apart
     from a `/join` lead; the names and dates are only a recognition aid.
+  - Apply, exclusions first (revision 6): an `--apply` records EVERY
+    `housing_authority_backfill_excluded` event it owes in a first pass,
+    BEFORE any housing authority write; if any of those appends fails, the
+    run stops before writing anything (exit 1), so an interrupted or failed
+    apply can never leave a written target beside an unrecorded exclusion.
   - Apply: for each target, one conditional write that sets
     `housingAuthority` to "Atlanta Housing Authority" only while the contact
     still has no authority, is still a tenant, and is still not deleted

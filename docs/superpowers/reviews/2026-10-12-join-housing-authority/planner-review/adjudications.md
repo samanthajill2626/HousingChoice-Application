@@ -91,3 +91,18 @@ blank-document failure, the file 5/5 alone).
 | B4 | adversarial-r2 3 [LOW] An accept/dismiss in flight or abandoned (its resolution record active, the suggestion row already deleted) is not seen; the backfill can supersede the accepted value | ACCEPT | FIX WAVE 2: leave a lead out while its (contactId, housingAuthority) resolution record is active. |
 | B5 | adversarial-r2 nit: the post-write audit warning still says "could not be written" | ACCEPT | FIX WAVE 2: "may not have been written" wording. |
 | B6 | conformance-r2 1, 2, 3, 5, 6, 7 [LOW] | ACCEPT as written | Exclusion recorded once per lead (same effect as "every apply"); the failure line's extra "(an ERROR line names this contactId)" inside the quoted phrase; one reason printed per lead; the D12 note also shows on the shared add dialog outside Settings (true there); a failed exclusion append or pending-suggestion read counts as FAILED; the post-apply re-read only after a write. |
+
+## Cameron's ruling (2026-10-13) and the fix wave 2 list
+
+- B3: INCLUDE the dismissed-Atlanta check (spec revision 6, D10).
+
+Fix wave 2 (backfill script, its test, RUNBOOK only):
+- FW2-1 (B1/B2): exclusions recorded in a first pass before any write; any
+  failed exclusion append stops the run before writing (exit 1). RUNBOOK:
+  keep the `--skip` value for every run on that environment, always.
+- FW2-2 (B3): leave out a candidate with a staff dismissal of an "Atlanta
+  Housing Authority" housingAuthority suggestion, using the AI suggest path's
+  own dismissal rule.
+- FW2-3 (B4): leave out a candidate whose housingAuthority suggestion
+  resolution record is active.
+- FW2-4 (B5): the post-write audit warning says "may not have been written".

@@ -17,6 +17,8 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
+import type { RosterContactsRead } from '../src/lib/propertyContact.js';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
 import { CannotRemoveLandlordOfRecordError, createUnitsRepo } from '../src/repos/unitsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -43,6 +45,21 @@ if (!reachable) {
  *  cases add is a live contact typed landlord (a PM or an owner is a landlord
  *  with a role), so it is also eligible for automatic routing. */
 const LANDLORD_FACTS = { caseworker: false, landlordTyped: true, autoPrimaryEligible: true };
+
+/**
+ * primary-contact-integrity (spec 4.6): removing the primary runs the heir
+ * function, which needs a liveness read. These answer every id as a live
+ * contact typed landlord (the landlord of record takes over, as before) or
+ * as a live tenant (nobody is eligible: every flag cleared, as before).
+ */
+const EVERYONE_LIVE_LANDLORD = async (ids: string[]): Promise<RosterContactsRead> => ({
+  ok: true,
+  byId: new Map(ids.map((id) => [id, { contactId: id, type: 'landlord' } as ContactItem] as const)),
+});
+const EVERYONE_LIVE_TENANT = async (ids: string[]): Promise<RosterContactsRead> => ({
+  ok: true,
+  byId: new Map(ids.map((id) => [id, { contactId: id, type: 'tenant' } as ContactItem] as const)),
+});
 
 describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
@@ -270,33 +287,33 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
     expect(updated.primary_contact).toBe('c-x');
   });
 
-  it('removeContact removes a non-landlord and falls the scalar back to landlordId when it was the ☎ primary', async () => {
+  it('removeContact of the primary pm hands the primary back to the live landlord of record (flag and scalar)', async () => {
     const unit = await units.create({ landlordId: 'c-ll-4', status: 'available' });
     await units.addContact(unit.unitId, { contactId: 'c-pm-4', role: 'pm', primaryContact: true }, LANDLORD_FACTS);
-    const removed = await units.removeContact(unit.unitId, 'c-pm-4');
+    const removed = await units.removeContact(unit.unitId, 'c-pm-4', { readContacts: EVERYONE_LIVE_LANDLORD });
     expect((removed.contacts ?? []).map((c) => c.contactId)).toEqual(['c-ll-4']);
-    // The removed contact was the ☎ primary → the scalar falls back to landlordId.
+    // The removed contact was the primary -> the live landlord of record takes over.
     expect(removed.primary_contact).toBe('c-ll-4');
   });
 
-  it('removeContact of the ☎-primary pm: exactly one primaryContact (the landlord) AND scalar === landlordId (FIX B)', async () => {
+  it('removeContact of the primary pm: exactly one primaryContact (the landlord) AND scalar === landlordId (FIX B)', async () => {
     const unit = await units.create({ landlordId: 'c-ll-b1', status: 'available' });
-    // pm becomes the ☎ primary (landlord demoted to primaryContact:false).
+    // pm becomes the primary (landlord demoted to primaryContact:false).
     await units.addContact(unit.unitId, { contactId: 'c-pm-b1', role: 'pm', primaryContact: true }, LANDLORD_FACTS);
-    const removed = await units.removeContact(unit.unitId, 'c-pm-b1');
+    const removed = await units.removeContact(unit.unitId, 'c-pm-b1', { readContacts: EVERYONE_LIVE_LANDLORD });
     const roster = removed.contacts ?? [];
-    // Exactly one primaryContact — the landlord — and the scalar AGREES.
+    // Exactly one primaryContact - the landlord - and the scalar AGREES.
     const primaries = roster.filter((c) => c.primaryContact);
     expect(primaries).toHaveLength(1);
     expect(primaries[0]?.contactId).toBe('c-ll-b1');
     expect(removed.primary_contact).toBe('c-ll-b1');
   });
 
-  it('removeContact of the ☎-primary with NO landlordId clears the scalar (no dangling) and leaves no primaryContact (FIX B)', async () => {
+  it('removeContact of the primary with NO landlordId and no eligible contact left clears every flag and REMOVEs the scalar (FIX B)', async () => {
     // A landlord-less unit. landlordId is the byLandlord GSI hash key, so an
-    // empty string is illegal at write time — create with a real landlordId,
-    // then REMOVE it (null→REMOVE) to reach the no-landlord state, then seed the
-    // roster + the ☎-primary scalar.
+    // empty string is illegal at write time - create with a real landlordId,
+    // then REMOVE it (null -> REMOVE) to reach the no-landlord state, then seed
+    // the roster + the primary scalar.
     const created = await units.create({ landlordId: 'c-temp', status: 'available' });
     const unit = await units.update(created.unitId, {
       landlordId: null,
@@ -307,11 +324,12 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
       primary_contact: 'c-b',
     });
     expect(unit.landlordId).toBeUndefined();
-    const removed = await units.removeContact(unit.unitId, 'c-b');
+    // c-a is a live TENANT: not eligible for automatic routing, so no heir.
+    const removed = await units.removeContact(unit.unitId, 'c-b', { readContacts: EVERYONE_LIVE_TENANT });
     const roster = removed.contacts ?? [];
     expect(roster.map((c) => c.contactId)).toEqual(['c-a']);
-    // No landlord to promote → no primaryContact and the scalar is CLEARED (not
-    // left dangling at the removed contact).
+    // No heir -> no primaryContact and the scalar is CLEARED (not left
+    // dangling at the removed contact).
     expect(roster.filter((c) => c.primaryContact)).toHaveLength(0);
     expect(removed.primary_contact).toBeUndefined();
   });

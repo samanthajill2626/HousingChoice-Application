@@ -39,7 +39,12 @@ import {
   type TransitionSource,
 } from '../lib/statusModel.js';
 import { UNIT_MEDIA_MAX } from '../lib/unitMedia.js';
-import type { RosterContactsRead } from '../lib/propertyContact.js';
+import {
+  applyPrimary,
+  chooseHeir,
+  rosterContactIds,
+  type RosterContactsRead,
+} from '../lib/propertyContact.js';
 import { isDeleted as isContactDeleted } from './contactsRepo.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
@@ -672,16 +677,23 @@ export interface UnitsRepo {
    * BE3/C3: remove a contact from the unit's roster. REJECTS removing the
    * LANDLORD OF RECORD (contactId === unit.landlordId) with
    * CannotRemoveLandlordOfRecordError (route 409). A contact not on the roster
-   * throws ConditionalCheckFailedException (route 404). When the removed contact
-   * was the current primaryContact, the roster flag and the `primary_contact`
-   * scalar are kept in AGREEMENT: with a `landlordId`, the landlord row is
-   * promoted to the lone primaryContact and the scalar points at it; with NO
-   * `landlordId`, both are cleared (the scalar is REMOVEd, never left dangling at
-   * the removed contact, and no row stays primaryContact). Persists contacts[] +
-   * the scalar. Uses the same bounded optimistic roster guard as addContact.
-   * Returns the unit.
+   * throws ConditionalCheckFailedException (route 404). When the removed
+   * contact was the current primaryContact (primary-contact-integrity spec
+   * 4.6), the heir function (lib/propertyContact.ts chooseHeir, the removed
+   * contact excluded) picks who takes over - the live landlord of record (its
+   * row added as primary when it has none), else the earliest-added remaining
+   * contact eligible for automatic routing - and the roster flag and the
+   * `primary_contact` scalar move to it together; with no heir every flag is
+   * cleared and the scalar REMOVEd (never left dangling at the removed
+   * contact). The liveness comes from `opts.readContacts`, called per attempt
+   * after a CONSISTENT unit read; a failed read or none supplied throws
+   * RosterReadFailedError and writes nothing (route 503 roster_read_failed).
+   * Removing a non-primary row reads nothing. `opts.onPrimaryHandoff` is
+   * called once after the write when an heir was flagged. Persists
+   * contacts[] + the scalar. Uses the same bounded optimistic roster guard as
+   * addContact. Returns the unit.
    */
-  removeContact(unitId: string, contactId: string): Promise<UnitItem>;
+  removeContact(unitId: string, contactId: string, opts?: RosterHandoffOpts): Promise<UnitItem>;
   /**
    * Property photos (unit-photos S1): ATOMIC append of new media keys onto
    * `media[]`. ONE UpdateItem - `list_append(if_not_exists(media, []), keys)` -
@@ -1217,19 +1229,21 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       return write();
     },
 
-    async removeContact(unitId, contactId) {
+    async removeContact(unitId, contactId, opts) {
       let attempts = 0;
       const write = async (): Promise<UnitItem> => {
         attempts += 1;
-        const unit = await this.getById(unitId);
+        // CONSISTENT (primary-contact-integrity spec 4.2): the heir below is
+        // decided on this read, and the conditional write is fenced on it.
+        const unit = await this.getById(unitId, { consistentRead: true });
         if (!unit) {
           throw new ConditionalCheckFailedException({
             message: `unit ${unitId} not found`,
             $metadata: {},
           });
         }
-        // The landlord of record (legacy landlordId) must remain in the roster —
-        // reassign landlordId first (typed error → route 409).
+        // The landlord of record (legacy landlordId) must remain in the roster -
+        // reassign landlordId first (typed error -> route 409).
         if (typeof unit.landlordId === 'string' && unit.landlordId === contactId) {
           throw new CannotRemoveLandlordOfRecordError();
         }
@@ -1243,28 +1257,36 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           });
         }
         const removedWasPrimaryContact = target.primaryContact;
-        const next = roster.filter((c) => c.contactId !== contactId);
-
-        const patch: Record<string, unknown> = { contacts: next };
-        // When the removed contact was the ☎ primary, keep the roster flag and the
-        // scalar `primary_contact` in AGREEMENT (BE3/C3 FIX B) — a frontend
-        // deriving "which is the ☎ primary" from either source must get the same
-        // answer, and the scalar must never dangle at the removed contact.
+        const remaining = roster.filter((c) => c.contactId !== contactId);
+        const patch: Record<string, unknown> = { contacts: remaining };
+        let heirId: string | undefined;
+        // Removing the PRIMARY row (primary-contact-integrity spec 4.6): the
+        // heir function picks who takes over, the removed contact EXCLUDED -
+        // the live landlord of record (its row added as primary when it has
+        // none), else the earliest-added remaining contact eligible for
+        // automatic routing - and applyPrimary flags exactly that row and sets
+        // the scalar to it, keeping flag and scalar in AGREEMENT (BE3/C3 FIX
+        // B); no heir clears every flag and REMOVEs the scalar. The liveness is
+        // the caller's `opts.readContacts`, called on THIS attempt after its
+        // consistent unit read (a retry reads again); a failed read - or none
+        // supplied - is unknown: refused with RosterReadFailedError and nothing
+        // written. Removing a non-primary row needs no liveness.
         if (removedWasPrimaryContact) {
-          const landlordId = typeof unit.landlordId === 'string' ? unit.landlordId : '';
-          if (landlordId.length > 0) {
-            // Promote the landlord row to the ☎ primary (exactly one) and point
-            // the scalar at it. The landlord can't be removed (guarded above), so
-            // its row is still present in `next`.
-            for (const c of next) c.primaryContact = c.contactId === landlordId;
-            patch['primary_contact'] = landlordId;
-          } else {
-            // No landlord to fall back to: clear the scalar (never leave it
-            // dangling at the removed contact) and leave the roster with no ☎
-            // primary. null → UpdateExpression REMOVE (see update()).
-            for (const c of next) c.primaryContact = false;
-            patch['primary_contact'] = null;
-          }
+          const landlordOfRecord =
+            typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
+          const read: RosterContactsRead =
+            opts?.readContacts !== undefined
+              ? await opts.readContacts(rosterContactIds(unit).filter((id) => id !== contactId))
+              : { ok: false };
+          const heir = chooseHeir({ roster, landlordId: landlordOfRecord, exclude: contactId, read });
+          if (heir.kind === 'unknown') throw new RosterReadFailedError();
+          const applied = applyPrimary(
+            remaining,
+            heir.kind === 'heir' ? { contactId: heir.contactId, addLandlordRow: heir.addLandlordRow } : null,
+          );
+          patch['contacts'] = applied.contacts;
+          patch['primary_contact'] = applied.primaryContactScalar;
+          heirId = heir.kind === 'heir' ? heir.contactId : undefined;
         }
 
         let updated: UnitItem;
@@ -1272,24 +1294,27 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           updated = await updateRosterIfCurrent(unit, patch);
         } catch (err) {
           if (!(err instanceof ConditionalCheckFailedException)) throw err;
-          const current = await this.getById(unitId);
+          const current = await this.getById(unitId, { consistentRead: true });
           if (current === undefined) throw err;
           if (attempts >= ROSTER_WRITE_MAX_ATTEMPTS) {
             throw new RosterWriteConflictError();
           }
           // Ownership or contacts[] changed after our read. Re-run from the
-          // current item so the removal applies without erasing the winner.
+          // current item so the removal applies without erasing the winner,
+          // and the heir is decided again on that read.
           return write();
         }
         log.info(
           {
             unitId,
             contactId,
-            rosterSize: next.length,
+            rosterSize: (patch['contacts'] as UnitContact[]).length,
             removedPrimaryContact: removedWasPrimaryContact,
+            ...(heirId !== undefined && { primaryHandedTo: heirId }),
           },
           'unit contact removed',
         );
+        if (heirId !== undefined) opts?.onPrimaryHandoff?.({ from: contactId, to: heirId });
         return updated;
       };
       return write();

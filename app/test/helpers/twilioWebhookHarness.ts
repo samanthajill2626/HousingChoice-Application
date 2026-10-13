@@ -25,6 +25,7 @@ import {
 } from '../../src/adapters/messaging.js';
 import { DEV_SESSION_SECRET_DEFAULT, loadConfig, type AppConfig } from '../../src/lib/config.js';
 import { createEventBus, type AppEventName, type EventBus } from '../../src/lib/events.js';
+import { normalizeInstant } from '../../src/lib/heardFrom.js';
 import { createLogger } from '../../src/lib/logger.js';
 import {
   decideActualTransportWrite,
@@ -514,6 +515,10 @@ export interface FakeWorld {
    * makes the two webhooks impossible to interleave wrongly.
    */
   crossCheckBalances: Map<string, CrossCheckPairState>;
+  /** Every contactsRepo.touchLastHeardFrom call, in order (spec 5.1): the raw
+   *  `at` the caller passed and the outcome the fake answered. A test that
+   *  replaces world.contactsRepo.touchLastHeardFrom bypasses this record. */
+  heardFromTouches: { contactId: string; at: string; outcome: 'written' | 'skipped' | 'failed' }[];
 }
 
 /** One pair's ledger balance in the fake world. See crossCheckBalances. */
@@ -548,6 +553,7 @@ export function createFakeWorld(): FakeWorld {
   // event_type values whose audit append throws (observability-failure tests).
   const failAuditAppendFor: FakeWorld['failAuditAppendFor'] = new Set<string>();
   const touches: FakeWorld['touches'] = [];
+  const heardFromTouches: FakeWorld['heardFromTouches'] = [];
   const contactCreates: string[] = [];
   const unreadIncrements: string[] = [];
   const unreadResets: string[] = [];
@@ -2595,6 +2601,25 @@ export function createFakeWorld(): FakeWorld {
       if (next.organization === null) delete contact['organization'];
       else if (next.organization !== undefined) contact['organization'] = next.organization;
       return 'written';
+    },
+    // Last heard from (spec 5.1): the real conditional UpdateItem's outcomes -
+    // 'skipped' for no such contact, a stored value at or after `at`, or an
+    // unparseable `at`. Every call is recorded in world.heardFromTouches with
+    // the RAW `at` the caller passed.
+    async touchLastHeardFrom(contactId, at) {
+      const normalized = normalizeInstant(at);
+      const contact = contacts.find((c) => c.contactId === contactId);
+      let outcome: 'written' | 'skipped' = 'skipped';
+      if (
+        normalized !== undefined &&
+        contact !== undefined &&
+        !(typeof contact.last_heard_from_at === 'string' && contact.last_heard_from_at >= normalized)
+      ) {
+        contact.last_heard_from_at = normalized;
+        outcome = 'written';
+      }
+      heardFromTouches.push({ contactId, at, outcome });
+      return outcome;
     },
   };
 
@@ -5222,6 +5247,7 @@ export function createFakeWorld(): FakeWorld {
     crossCheckClassicMarkers,
     crossCheckPending,
     crossCheckBalances,
+    heardFromTouches,
     groupRailEnqueuer,
   };
 }

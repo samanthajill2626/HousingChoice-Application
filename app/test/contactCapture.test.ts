@@ -153,6 +153,9 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     findAllByEmail: async () => {
       throw new Error('findAllByEmail: not used in this suite');
     },
+    touchLastHeardFrom: async () => {
+      throw new Error('touchLastHeardFrom: not used in this suite');
+    },
   };
 
   const conversationsRepo: ConversationsRepo = {

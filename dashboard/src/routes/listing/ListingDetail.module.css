@@ -344,6 +344,14 @@ a:hover .contactName {
   color: var(--c-danger);
 }
 
+/* "(deleted)" after a roster row whose contact is soft-deleted or missing
+ * (primary-contact-integrity spec 7.4). Muted: a fact, not an action. */
+.deletedMark {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+}
+
 .contactAdd {
   display: flex;
   flex-direction: column;

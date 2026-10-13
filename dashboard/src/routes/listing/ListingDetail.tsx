@@ -328,7 +328,10 @@ export function ListingDetail(): React.JSX.Element {
   // optional); read it as '' (the "no landlord" branch) so nothing below
   // touches undefined.
   const landlordOfRecord: string = contactsUnit?.landlordId ?? unit.landlordId ?? '';
-  const landlordName = contactRows.find((r) => r.primaryContact)?.company ?? contactRows[0]?.company;
+  // The facts subline names a LIVE contact's company (primary-contact-integrity
+  // spec 7.4): a row whose contact is deleted is skipped, primary or not.
+  const liveRows = contactRows.filter((r) => r.deleted !== true);
+  const landlordName = liveRows.find((r) => r.primaryContact)?.company ?? liveRows[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
   // The authorities whose vouchers this property accepts - ONE synthesized list
   // (spec section 8) behind the single "Housing authorities" detail row that
@@ -969,7 +972,7 @@ export function ListingDetail(): React.JSX.Element {
             }
           >
             {contactRows.length === 0 ? (
-              <EmptyRow>No contacts on this property yet.</EmptyRow>
+              <EmptyRow>No contacts on this property yet. Tours need a primary contact.</EmptyRow>
             ) : contactsEditing ? (
               contactRows.map((r) => {
                 const name = r.name ?? r.contactId;
@@ -984,6 +987,7 @@ export function ListingDetail(): React.JSX.Element {
                         move when the role controls wrap below 860px (spec 6.7). */}
                     <div className={styles.contactEditName}>
                       <span className={styles.contactName}>{name}</span>
+                      {r.deleted === true ? <span className={styles.deletedMark}> (deleted)</span> : null}
                       {r.primaryContact ? (
                         <span className={styles.primaryStar}> (primary)</span>
                       ) : null}
@@ -1014,7 +1018,10 @@ export function ListingDetail(): React.JSX.Element {
                           </option>
                         ))}
                       </select>
-                      {r.primaryContact ? null : (
+                      {/* A deleted contact can't be made primary (the server
+                          answers 409 primary_contact_deleted, spec 7.4) - no
+                          doomed click. Its role select and Remove stay. */}
+                      {r.primaryContact || r.deleted === true ? null : (
                         <button
                           type="button"
                           className={styles.contactRowAction}
@@ -1047,6 +1054,7 @@ export function ListingDetail(): React.JSX.Element {
                       {/* The NAME is the visible link (brand-styled; the whole row
                           stays the hit target) — no separate "Open" affordance. */}
                       <span className={styles.contactName}>{r.name ?? r.contactId}</span>
+                      {r.deleted === true ? <span className={styles.deletedMark}> (deleted)</span> : null}
                       {r.primaryContact ? <span className={styles.primaryStar}> (primary)</span> : null}
                       <span className={styles.roleLine}>
                         {r.roleLabel}

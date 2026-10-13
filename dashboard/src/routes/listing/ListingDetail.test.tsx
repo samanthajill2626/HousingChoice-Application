@@ -2,7 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { ApiError } from '../../api/index.js';
+import { ApiError, type UnitContact, type UnitPropertyContact } from '../../api/index.js';
+import { listingRoster } from './buildListingFile.js';
 import type { ListingState } from './useListing.js';
 
 const useListing = vi.fn();
@@ -2357,5 +2358,98 @@ describe('ListingDetail - Contacts card edit mode', () => {
         screen.getByRole('button', { name: 'Remove Dana Reyes from this property' }),
       ).toBeDisabled(),
     );
+  });
+});
+
+// --- primary-contact-integrity (spec 7.3 / 7.4 / 7.5) ------------------------
+// The server marks each roster row `deleted` / `caseworker` and sends a
+// propertyContact block (7.5); the page renders them and never re-derives the
+// heir rule. 470 Bolton is the motivating shape: no landlord of record, one
+// contact (Mark, a property manager), nobody primary.
+
+/** Mark Passmore, the 470 Bolton property manager - live, not primary. */
+const MARK: UnitContact = { contactId: 'pm-mark', role: 'pm', primaryContact: false, name: 'Mark Passmore' };
+
+/** A row whose contact was soft-deleted (the server's `deleted: true`). */
+const GINA_DELETED: UnitContact = {
+  contactId: 'pm-gone',
+  role: 'pm',
+  primaryContact: false,
+  name: 'Gina Gone',
+  deleted: true,
+};
+
+/** An OWNERLESS property whose roster is `contacts`, with the hook's rows
+ *  derived exactly as useListing derives them (listingRoster) and the
+ *  load-time propertyContact block when given. */
+function integrityState(
+  contacts: UnitContact[],
+  propertyContact?: UnitPropertyContact,
+  unitOver: Partial<NonNullable<ListingState['unit']>> = {},
+): ListingState {
+  const { landlordId: _ownerless, ...base } = READY.unit!;
+  const unit: NonNullable<ListingState['unit']> = { ...base, contacts, ...unitOver };
+  return {
+    ...READY,
+    unit,
+    landlord: null,
+    roster: listingRoster(unit, null),
+    ...(propertyContact !== undefined && { propertyContact }),
+  };
+}
+
+/** The Contacts card (its own <section>). */
+function contactsCard(): HTMLElement {
+  return screen.getByRole('heading', { name: /^Contacts/ }).closest('section') as HTMLElement;
+}
+
+describe('ListingDetail - deleted contact rows (primary-contact-integrity spec 7.4)', () => {
+  beforeEach(() => {
+    addUnitContact.mockReset();
+    removeUnitContact.mockReset();
+  });
+
+  it('marks a deleted row "(deleted)" in view mode', () => {
+    useListing.mockReturnValue(integrityState([{ ...MARK, primaryContact: true }, GINA_DELETED]));
+    renderAt();
+    const card = contactsCard();
+    expect(within(card).getByRole('link', { name: /Gina Gone/ })).toHaveTextContent('Gina Gone (deleted)');
+    expect(within(card).getByRole('link', { name: /Mark Passmore/ })).not.toHaveTextContent('(deleted)');
+  });
+
+  it('in edit mode a deleted row says "(deleted)" and offers no Make primary - its role select and Remove stay', async () => {
+    const user = userEvent.setup();
+    const dana: UnitContact = { contactId: 'pm-dana', role: 'pm', primaryContact: false, name: 'Dana Reyes' };
+    useListing.mockReturnValue(integrityState([{ ...MARK, primaryContact: true }, GINA_DELETED, dana]));
+    renderAt();
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+
+    const remove = screen.getByRole('button', { name: 'Remove Gina Gone from this property' });
+    expect(remove.parentElement).toHaveTextContent('Gina Gone (deleted)');
+    expect(remove).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: 'Role for Gina Gone' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Make Gina Gone the primary contact' })).not.toBeInTheDocument();
+    // A live non-primary row still offers it.
+    expect(screen.getByRole('button', { name: 'Make Dana Reyes the primary contact' })).toBeInTheDocument();
+  });
+
+  it('the header facts subline skips a deleted row when naming the company', () => {
+    useListing.mockReturnValue(
+      integrityState([
+        { ...GINA_DELETED, primaryContact: true, company: 'Gone LLC' },
+        { ...MARK, company: 'BNS Property Management' },
+      ]),
+    );
+    renderAt();
+    expect(
+      screen.getByText((t) => t.includes('2 BR') && t.includes('BNS Property Management')),
+    ).toBeInTheDocument();
+    expect(screen.queryByText((t) => t.includes('2 BR') && t.includes('Gone LLC'))).not.toBeInTheDocument();
+  });
+
+  it('the empty state says tours need a primary contact', () => {
+    useListing.mockReturnValue(integrityState([]));
+    renderAt();
+    expect(within(contactsCard()).getByText('No contacts on this property yet. Tours need a primary contact.')).toBeInTheDocument();
   });
 });

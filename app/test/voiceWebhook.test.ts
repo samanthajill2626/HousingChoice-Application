@@ -809,6 +809,62 @@ describe('inbound masked voice - last heard from (spec 5.1)', () => {
     expect(res.text).toContain('<Hangup');
     expect(world.heardFromTouches).toEqual([]);
   });
+
+  // Path 7 - the bridge: the calling member is touched.
+  it('a bridged member call touches the member at the call row instant', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams({ CallSid: 'CAheard-bridge' }));
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Dial');
+    expect(world.heardFromTouches).toEqual([
+      { contactId: 'c-alice', at: callAt(world, 'CAheard-bridge'), outcome: 'written' },
+    ]);
+  });
+
+  it('a bridged phone-only member resolves by phone', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, {
+      participants: [
+        { contactId: '', phone: ALICE },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    world.contacts.push({ contactId: 'c-alice-row', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ CallSid: 'CAheard-bridge-phone-only' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Dial');
+    expect(world.heardFromTouches).toEqual([
+      { contactId: 'c-alice-row', at: callAt(world, 'CAheard-bridge-phone-only'), outcome: 'written' },
+    ]);
+  });
+
+  it('a redelivered bridged call touches again at the same instant (written, then skipped)', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+    const params = inboundVoiceParams({ CallSid: 'CAheard-bridge' });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', params);
+    await signedTwilioPost(app, '/webhooks/twilio/voice', params);
+
+    expect(world.messages.filter((m) => m.provider_sid === 'CAheard-bridge')).toHaveLength(1);
+    const at = callAt(world, 'CAheard-bridge');
+    expect(world.heardFromTouches.map((t) => t.at)).toEqual([at, at]);
+    expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
+  });
 });
 
 describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {

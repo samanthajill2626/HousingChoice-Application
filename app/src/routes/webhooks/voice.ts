@@ -1201,6 +1201,35 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           deliveryStatus: 'delivered',
         });
       }
+      // Last heard from (spec 5.1 / 14.2): fresh AND deduped; the member's
+      // roster key (a phone-only member resolves by phone). Best-effort.
+      try {
+        const heardThread =
+          appended.conversationId === relay.conversationId
+            ? relay
+            : await conversations.getById(appended.conversationId);
+        const heardFromId =
+          heardThread === undefined
+            ? undefined
+            : await attributeInbound(
+                { direction: 'inbound', type: 'call', relay_sender_key: relayMemberKey(caller) },
+                heardThread,
+                repoLookup(contacts),
+              );
+        if (heardFromId !== undefined) {
+          const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+          if (outcome === 'failed') {
+            log.error({ callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+          }
+        }
+      } catch (err) {
+        // The error NAME only (as on the refusal branch): a failed phone
+        // lookup's text must not reach the logs on the masked path.
+        log.error(
+          { callSid: CallSid, errName: err instanceof Error ? err.name : typeof err },
+          'last_heard_from touch failed - message persisted, last_heard_from stale',
+        );
+      }
     } catch (err) {
       log.error({ err, callSid: CallSid }, 'masked call: persisting the call entry failed — bridging anyway');
     }

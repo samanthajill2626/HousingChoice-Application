@@ -57,6 +57,7 @@ import {
   type UnitListView,
 } from './unitListFacets.js';
 import { useListings } from './useListings.js';
+import { useFollowUpCounts } from './useFollowUpCounts.js';
 import styles from './ListingsList.module.css';
 
 const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
@@ -105,7 +106,7 @@ function historyIdx(): unknown {
   return typeof state === 'object' && state !== null ? (state as Record<string, unknown>)['idx'] : undefined;
 }
 
-function Row({ unit, onOpen }: { unit: UnitItem; onOpen: () => void }): React.JSX.Element {
+function Row({ unit, onOpen, waiting }: { unit: UnitItem; onOpen: () => void; waiting: number }): React.JSX.Element {
   const address = shortAddress(unit.address, unit.unitId);
   const beds = formatBedsBaths(unit.beds, unit.baths);
   const rent = formatRent(unit.rent_min, unit.rent_max);
@@ -121,6 +122,10 @@ function Row({ unit, onOpen }: { unit: UnitItem; onOpen: () => void }): React.JS
           <span className={styles.badge}>{statusLabel(unit.status)}</span>
           {beds ? <span className={styles.beds}>{beds} bd/ba</span> : null}
           {rent ? <span className={styles.rent}>{rent}/mo</span> : null}
+          {/* last-heard-from 5.6 (option C): sends waiting on a reply - inside
+           *  the link, so it joins the row's accessible name; never a link
+           *  itself (nested anchors are invalid HTML). */}
+          {waiting > 0 ? <span className={styles.waiting}>{waiting} waiting</span> : null}
         </span>
       </Link>
     </li>
@@ -202,6 +207,7 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
   const navigationType = useNavigationType();
   const [searchParams, setSearchParams] = useSearchParams();
   const { status, units } = useListings(deleted);
+  const waitingByUnit = useFollowUpCounts(!deleted);
   const view: UnitListView = deleted ? 'deleted' : 'active';
   // The "New property" dialog (Active view only) with an empty landlord picker.
   const [creating, setCreating] = useState(false);
@@ -416,7 +422,12 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
         visible.length > 0 ? (
           <ul className={styles.rows} aria-label="Properties">
             {visible.map((unit) => (
-              <Row key={unit.unitId} unit={unit} onOpen={persistSearch} />
+              <Row
+                key={unit.unitId}
+                unit={unit}
+                onOpen={persistSearch}
+                waiting={unit.status === 'available' ? (waitingByUnit[unit.unitId] ?? 0) : 0}
+              />
             ))}
           </ul>
         ) : isDefaultSelection(selection, view) ? (

@@ -14,6 +14,17 @@ let deletedState: ListingsState = { status: 'ready', units: [] };
 vi.mock('./useListings.js', () => ({
   useListings: (deleted: boolean) => (deleted ? deletedState : activeState),
 }));
+// last-heard-from 5.6: the "<n> waiting" counts come from their own hook
+// (never useListings, which ToursPage shares) - mocked the same way. The
+// `enabled` argument of every call is recorded (false on the Deleted view).
+let followUpCounts: Record<string, number> = {};
+let followUpEnabled: boolean[] = [];
+vi.mock('./useFollowUpCounts.js', () => ({
+  useFollowUpCounts: (enabled: boolean) => {
+    followUpEnabled.push(enabled);
+    return enabled ? followUpCounts : {};
+  },
+}));
 
 import { ListingsList } from './ListingsList.js';
 
@@ -157,6 +168,8 @@ const countsOf = (label: string): string[] =>
 beforeEach(() => {
   activeState = { status: 'loading', units: [] };
   deletedState = { status: 'ready', units: [] };
+  followUpCounts = {};
+  followUpEnabled = [];
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -919,6 +932,35 @@ describe('ListingsList', () => {
       await userEvent.click(within(voucherGroup()).getByRole('button', { name: '2-BR' }));
       // The pending entry is untouched: no replace landed on it.
       expect(window.location.pathname + window.location.search).toBe('/listings/deleted');
+    });
+  });
+
+  describe('the <n> waiting pill (last-heard-from 5.6)', () => {
+    it('shows "<n> waiting" inside an AVAILABLE row link only, and nothing at 0', async () => {
+      activeState = { status: 'ready', units: UNITS };
+      followUpCounts = { u1: 2, u2: 5 };
+      renderAt();
+      await userEvent.selectOptions(statusSelect(), 'all');
+      const available = screen.getByRole('link', { name: /123 Peachtree St/ });
+      expect(within(available).getByText('2 waiting')).toBeInTheDocument();
+      // The pill is not itself a link (nested anchors are invalid HTML).
+      expect(within(available).queryAllByRole('link')).toHaveLength(0);
+      // u2 is occupied: no pill even with a count.
+      const occupied = screen.getByRole('link', { name: /88 Oak Ave/ });
+      expect(within(occupied).queryByText(/waiting/)).toBeNull();
+    });
+    it('no count -> no pill (a failed fetch is silent)', () => {
+      activeState = { status: 'ready', units: UNITS };
+      renderAt();
+      expect(within(screen.getByRole('link', { name: /123 Peachtree St/ })).queryByText(/waiting/)).toBeNull();
+    });
+    it('the Deleted view asks for no counts', () => {
+      deletedState = { status: 'ready', units: [{ ...UNITS[0]!, deleted_at: '2026-09-01T00:00:00Z' }] };
+      followUpCounts = { u1: 2 };
+      renderAt('/listings/deleted');
+      expect(followUpEnabled.length).toBeGreaterThan(0);
+      expect(followUpEnabled.every((enabled) => !enabled)).toBe(true);
+      expect(screen.queryByText(/waiting/)).toBeNull();
     });
   });
 });

@@ -29,6 +29,7 @@ const UNITS: UnitItem[] = [
   { unitId: 'c', landlordId: 'l', status: 'occupied', voucher_size_accepted: 2, address: { line1: '3 Taken St' } },
 ];
 vi.mock('./useListings.js', () => ({ useListings: () => ({ status: 'ready', units: UNITS }) }));
+vi.mock('./useFollowUpCounts.js', () => ({ useFollowUpCounts: () => ({}) }));
 
 import { ListingsList } from './ListingsList.js';
 

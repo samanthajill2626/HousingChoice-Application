@@ -859,7 +859,11 @@ and P3's restore paths against the merged code.
 
 - GLOSSARY: add **property contact**; update **primary contact** (the flag is
   the truth; the scalar is absent on landlord-only units; the handoff rule;
-  zero primary is reachable only with no live heir or for legacy data).
+  every way zero primary stays reachable per 4.4 and 4.7 - no live heir, only
+  non-eligible contacts added, an explicit API demotion, classification of a
+  seated contact, legacy data - corrected 2026-10-13 at the planner's
+  independent review; this bullet first said "only with no live heir or for
+  legacy data", which contradicted 4.4 / 4.7).
 - RUNBOOK: the script section (section 8), owed with the deploy.
 - `docs/issues/tour-reminder-zero-primary-e2e-gap.md`: item 1 partially
   addressed (ownerless leg).

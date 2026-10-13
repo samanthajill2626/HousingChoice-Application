@@ -7,7 +7,7 @@
 // seats, re-asserting the owner, and other contact types stay allowed.
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { emailRefId, phoneRefId, type ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -197,6 +197,63 @@ describe('contact list - a role-landlord add that CLAIMS the vacant slot needs a
     expect(res.status).toBe(200);
     expect(hasLandlordId(world.units.get('u-vacant'))).toBe(false);
   });
+});
+
+// R2 code review finding A3 / challenge B-4 (fix wave 2 item FW2-3): a
+// contacts ROUTING POINTER row (phone_ref / email_ref - a routing record,
+// never a contact; FW-5's class) named as the contact to add is not found -
+// 404 contact_not_found, never a landlord claim's 409 and never a seat.
+const POINTERS: Array<[string, Record<string, unknown>]> = [
+  [
+    'phone',
+    { contactId: phoneRefId('+15550003000'), phone: '+15550003000', phone_ref: true, phone_ref_owner: 'c-owner' },
+  ],
+  [
+    'email',
+    {
+      contactId: emailRefId('owner@example.com'),
+      email: 'owner@example.com',
+      email_ref: true,
+      email_ref_owner: 'c-owner',
+    },
+  ],
+];
+
+describe('contact list - a routing pointer row is not a contact', () => {
+  function seedPointer(world: FakeWorld, pointer: Record<string, unknown>): void {
+    seedContact(world, 'c-owner', { type: 'landlord', phone: '+15550003000', email: 'owner@example.com' });
+    world.contacts.push(pointer as unknown as ContactItem);
+  }
+
+  it.each(POINTERS)(
+    'a %s pointer added with role landlord to an ownerless unit: 404 contact_not_found (not 409) - the slot stays vacant',
+    async (_kind, pointer) => {
+      const { app, world } = makeWebhookHarness();
+      seedOwnerlessUnit(world, 'u-vacant');
+      seedPointer(world, pointer);
+      const res = await addContact(app, 'u-vacant', { contactId: pointer['contactId'], role: 'landlord' });
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: 'contact_not_found' });
+      expect(hasLandlordId(world.units.get('u-vacant'))).toBe(false);
+      expect(world.units.get('u-vacant')?.contacts).toBeUndefined();
+      expect(world.auditEvents).toHaveLength(0);
+    },
+  );
+
+  it.each(POINTERS)(
+    'a %s pointer added with role pm: 404 contact_not_found - nothing seated',
+    async (_kind, pointer) => {
+      const { app, world } = makeWebhookHarness();
+      seedOwnerlessUnit(world, 'u-vacant');
+      seedPointer(world, pointer);
+      const res = await addContact(app, 'u-vacant', { contactId: pointer['contactId'], role: 'pm' });
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: 'contact_not_found' });
+      expect(world.units.get('u-vacant')?.contacts).toBeUndefined();
+      expect(world.units.get('u-vacant')?.primary_contact).toBeUndefined();
+      expect(world.auditEvents).toHaveLength(0);
+    },
+  );
 });
 
 // R1 code review backend finding 1, R2 challenge B-1 (fix wave 2 item FW2-1):

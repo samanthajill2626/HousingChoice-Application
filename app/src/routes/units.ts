@@ -1114,9 +1114,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
     // Resolve the contact for denormalization (404 when the contact doesn't
     // exist — never roster a phantom). name/company are best-effort honest:
-    // omitted when unknown, never invented.
+    // omitted when unknown, never invented. A phone or email ROUTING POINTER
+    // row (contactsRepo.ts `phone_ref` / `email_ref`: a routing record, never
+    // a contact) does not exist as a contact here either - the codebase's own
+    // pointer test, as in services/contactTypeGuards.ts (R2 code review finding
+    // A3, fix wave 2 FW2-3).
     const contact = await contacts.getById(contactId, { consistentRead: true });
-    if (!contact) {
+    if (!contact || contact.phone_ref === true || contact.email_ref === true) {
       res.status(404).json({ error: 'contact_not_found' });
       return;
     }

@@ -375,6 +375,9 @@ describe('DELETE /api/units/:id/contacts/:contactId (BE3/C3)', () => {
         { contactId: 'c-pm-c', role: 'pm', primaryContact: true },
       ],
     });
+    // primary-contact-integrity spec 4.6: the landlord of record takes over
+    // only when it is a LIVE contact.
+    seedContact(world, 'c-ll-c');
     const res = await request(app)
       .delete('/api/units/u-consist/contacts/c-pm-c')
       .set('x-origin-verify', SECRET)

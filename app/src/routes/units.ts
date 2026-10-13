@@ -51,10 +51,12 @@ import {
   LandlordClaimNotLandlordError,
   LandlordReassignmentRequiredError,
   PrimaryContactDeletedError,
+  RosterReadFailedError,
   RosterWriteConflictError,
   unitContacts,
   UNIT_CONTACT_ROLES,
   type ListUnitsOpts,
+  type PrimaryHandoff,
   type RelatedUnit,
   type UnitContact,
   type UnitItem,
@@ -1350,19 +1352,43 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     res.json({ unit: { ...updated, contacts: await enrichRoster(updated) } });
   });
 
-  // DELETE /api/units/:unitId/contacts/:contactId (BE3/C3) → { unit }. 404
+  // DELETE /api/units/:unitId/contacts/:contactId (BE3/C3) -> { unit }. 404
   // unknown unit / contact-not-on-roster; 409 removing the landlord of record
-  // (cannot_remove_landlord_of_record — reassign landlordId first) or exhausted
+  // (cannot_remove_landlord_of_record - reassign landlordId first) or exhausted
   // optimistic retries (unit_roster_conflict); audit unit_contact_removed.
+  // Removing the PRIMARY row (primary-contact-integrity spec 4.6) hands the
+  // primary to the heir function's pick (lib/propertyContact.ts chooseHeir,
+  // the removed contact excluded): the live landlord of record, else the
+  // earliest-added remaining contact eligible for automatic routing; no heir
+  // clears every flag and REMOVEs the scalar. The liveness read is ONE
+  // complete batch read per attempt (readRosterContacts); when it fails the
+  // removal is refused with 503 roster_read_failed and nothing is written. A
+  // hand-off also appends unit_primary_contact_assigned
+  // { reason: 'handoff_on_remove', from: <removed contact> }, from the hand-off
+  // the write itself reported.
   router.delete('/:unitId/contacts/:contactId', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const contactId = String(req.params['contactId'] ?? '');
+    const reported: { handoff?: PrimaryHandoff } = {};
     let updated: UnitItem;
     try {
-      updated = await units.removeContact(unitId, contactId);
+      updated = await units.removeContact(unitId, contactId, {
+        readContacts: (ids) => readRosterContacts(contacts, ids, log),
+        onPrimaryHandoff: (handoff) => {
+          reported.handoff = handoff;
+        },
+      });
     } catch (err) {
       if (err instanceof CannotRemoveLandlordOfRecordError) {
         res.status(409).json({ error: 'cannot_remove_landlord_of_record' });
+        return;
+      }
+      if (err instanceof RosterReadFailedError) {
+        log.warn(
+          { unitId, contactId, actor: req.user?.userId },
+          'unit contact remove refused: the liveness read failed',
+        );
+        res.status(503).json({ error: 'roster_read_failed' });
         return;
       }
       if (err instanceof RosterWriteConflictError) {
@@ -1370,7 +1396,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         return;
       }
       if (err instanceof ConditionalCheckFailedException) {
-        // Unknown unit OR contact-not-on-roster — both 404 (mirrors the unit
+        // Unknown unit OR contact-not-on-roster - both 404 (mirrors the unit
         // 404 posture; the message distinguishes them in logs only).
         res.status(404).json({ error: 'unit_or_contact_not_found' });
         return;
@@ -1381,7 +1407,24 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       actor: req.user?.userId,
       contactId,
     });
-    log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact removed via api');
+    const handoff = reported.handoff;
+    if (handoff !== undefined) {
+      await audit.append(`units#${unitId}`, 'unit_primary_contact_assigned', {
+        actor: req.user?.userId,
+        contactId: handoff.to,
+        reason: 'handoff_on_remove',
+        from: handoff.from,
+      });
+    }
+    log.info(
+      {
+        unitId,
+        contactId,
+        actor: req.user?.userId,
+        ...(handoff !== undefined && { primaryHandedTo: handoff.to }),
+      },
+      'unit contact removed via api',
+    );
     res.json({ unit: { ...updated, contacts: await enrichRoster(updated) } });
   });
 

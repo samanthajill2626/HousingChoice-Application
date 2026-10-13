@@ -123,6 +123,7 @@ import {
   LandlordReassignmentRequiredError,
   type ListUnitsOpts,
   PrimaryContactDeletedError,
+  RosterReadFailedError,
   RosterWriteConflictError,
   unitContacts,
   type UnitContact,
@@ -131,6 +132,12 @@ import {
   type UnitsRepo,
 } from '../../src/repos/unitsRepo.js';
 import { UNIT_MEDIA_MAX } from '../../src/lib/unitMedia.js';
+import {
+  applyPrimary,
+  chooseHeir,
+  rosterContactIds,
+  type RosterContactsRead,
+} from '../../src/lib/propertyContact.js';
 import { RosterPlanConflictError } from '../../src/lib/rosterResolution.js';
 import { type PlacementItem, type PlacementsRepo } from '../../src/repos/placementsRepo.js';
 import {
@@ -3023,7 +3030,13 @@ export function createFakeWorld(): FakeWorld {
       unit.updated_at = new Date().toISOString();
       return unit;
     },
-    async removeContact(unitId, contactId) {
+    async removeContact(unitId, contactId, opts) {
+      // Mirror the real repo: the landlord-of-record guard, the 404, and -
+      // when the removed row was the primary - the heir function
+      // (primary-contact-integrity spec 4.6) through the SAME pure chooseHeir /
+      // applyPrimary, the removed contact excluded and never read; unknown
+      // liveness (a failed read, or none supplied) refuses with
+      // RosterReadFailedError and writes nothing.
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`removeContact: no unit ${unitId}`);
       if (typeof unit.landlordId === 'string' && unit.landlordId === contactId) {
@@ -3032,23 +3045,31 @@ export function createFakeWorld(): FakeWorld {
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const target = roster.find((c) => c.contactId === contactId);
       if (!target) throw conditionalCheckFailed(`removeContact: unit ${unitId} has no contact ${contactId}`);
-      const removedWasPrimaryContact = target.primaryContact;
-      const next = roster.filter((c) => c.contactId !== contactId);
-      unit.contacts = next;
-      // FIX B: keep the roster primaryContact flag and the primary_contact
-      // scalar in agreement after removing the ☎ primary (lockstep with the real
-      // repo).
-      if (removedWasPrimaryContact) {
-        const landlordId = typeof unit.landlordId === 'string' ? unit.landlordId : '';
-        if (landlordId.length > 0) {
-          for (const c of next) c.primaryContact = c.contactId === landlordId;
-          unit.primary_contact = landlordId;
-        } else {
-          for (const c of next) c.primaryContact = false;
-          delete unit.primary_contact; // null → REMOVE; never dangling
-        }
+      let next = roster.filter((c) => c.contactId !== contactId);
+      let scalar: string | null | undefined;
+      let heirId: string | undefined;
+      if (target.primaryContact) {
+        const landlordOfRecord =
+          typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
+        const read: RosterContactsRead =
+          opts?.readContacts !== undefined
+            ? await opts.readContacts(rosterContactIds(unit).filter((id) => id !== contactId))
+            : { ok: false };
+        const heir = chooseHeir({ roster, landlordId: landlordOfRecord, exclude: contactId, read });
+        if (heir.kind === 'unknown') throw new RosterReadFailedError();
+        const applied = applyPrimary(
+          next,
+          heir.kind === 'heir' ? { contactId: heir.contactId, addLandlordRow: heir.addLandlordRow } : null,
+        );
+        next = applied.contacts;
+        scalar = applied.primaryContactScalar;
+        heirId = heir.kind === 'heir' ? heir.contactId : undefined;
       }
+      unit.contacts = next;
+      if (scalar === null) delete unit.primary_contact; // null -> REMOVE; never dangling
+      else if (scalar !== undefined) unit.primary_contact = scalar;
       unit.updated_at = new Date().toISOString();
+      if (heirId !== undefined) opts?.onPrimaryHandoff?.({ from: contactId, to: heirId });
       return unit;
     },
     async list(opts = {}) {

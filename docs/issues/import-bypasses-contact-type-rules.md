@@ -6,7 +6,8 @@ severity: low
 status: open
 area: app/import
 created: 2026-10-12
-refs: app/src/lib/import/apply.ts:883, app/src/lib/import/apply.ts:1065, app/src/lib/import/apply.ts:1110, app/src/lib/import/apply.ts:1137, app/src/lib/import/apply.ts:1519, app/src/repos/contactsRepo.ts:1501, app/src/services/contactHoldings.ts
+updated: 2026-10-13
+refs: app/src/lib/import/apply.ts:883, app/src/lib/import/apply.ts:1065, app/src/lib/import/apply.ts:1110, app/src/lib/import/apply.ts:1137, app/src/lib/import/apply.ts:1519, app/src/lib/import/apply.ts:1552, app/src/repos/contactsRepo.ts:1501, app/src/repos/unitsRepo.ts:1331, app/src/jobs/placementNudges.ts:443, app/src/services/contactHoldings.ts
 ---
 
 **Problem.** `fix/caseworker-integrity` (spec
@@ -54,3 +55,30 @@ in the run's summary instead of writing it; write a re-type with
 `landlordId` only when the matched contact's resolved type is `landlord`.
 Rehearse the dry run on a copy of production data first: the importer is the
 one writer that touches every record at once.
+
+**First to fix before the next `import:apply` run (2026-10-13; final review
+A1, rated MEDIUM by the plan-blind adversarial reviewer:
+`docs/superpowers/reviews/2026-10-12-caseworker-integrity/final-review/adversarial.md`
+finding 1).** Re-running the importer puts back a landlord that "Restore
+without a landlord" removed. `fix/caseworker-integrity` makes a live property
+with no landlord of record a deliberate state: `restoreWithLandlord` with
+`next: null` REMOVEs `landlordId` (`app/src/repos/unitsRepo.ts:1331`). The
+importer's property upsert matches the landlord by the import plan's
+`suggestedType === 'landlord'` and the name (`app/src/lib/import/apply.ts:1512-1520`),
+never by the contact's stored type, and a unit that carries `updated_at` - a
+restored unit always does - fails the first write's
+`attribute_not_exists(updated_at)` (`:1542`) and takes the human-owned branch
+(`:1548-1554`), which writes `landlordId = if_not_exists(landlordId, :landlordId)`.
+Scenario: L is the imported landlord of property U. Staff soft-delete U,
+re-type L to tenant (stamped `type_source: manual`, which the importer
+keeps), and restore U with "Restore without a landlord". The next import run
+finds no `landlordId` on U and writes L back: U is live with a landlord of
+record typed tenant - exactly the state I3 and the restore fence exist to
+prevent - and the contact list is not updated (L has no row; auto-primary and
+the sole-landlord promotion never run). Placement nudges route landlord rungs
+to `unit.landlordId` (`app/src/jobs/placementNudges.ts:436-443`), so L, now a
+tenant, starts getting landlord nudges for U. The reviewer's two fix options:
+(1) drop `landlordId` from the human-owned branch's `if_not_exists` facts
+entirely - a property a human has touched never gets its owner from the
+import; or (2), if that is too strong, write it only when the matched
+contact's STORED type is `landlord`, read consistently before the write.

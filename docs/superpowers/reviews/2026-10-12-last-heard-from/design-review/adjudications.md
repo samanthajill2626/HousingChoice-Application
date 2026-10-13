@@ -222,3 +222,76 @@ Round 3 result: NO decision changed - every accepted item is a precision
 edit to a mechanism already decided. Per the stop rule this is the terminal
 round; the design review is CLOSED at round 3 of a 4-round cap. Rejections
 across all rounds: one (B14), later reversed on contest; see round 2.
+
+# Plan review
+
+Plan: `docs/superpowers/plans/2026-10-12-last-heard-from.md` (v1 @0779fbe0).
+Reviewer reports: `plan-r1-reviewer-a.md` (10), `plan-r1-reviewer-b.md` (11).
+
+## Round 1 (2026-10-13) - plan v1 -> v2
+
+Merged where both reviewers hit the same seam. The plan was written by four
+slice writers against a shared contracts head, and the three HIGH findings
+are all cross-writer seams; each fix is routed to the slice that owns it.
+
+1. A1 + B3 - form-mode Interested on the property page opens the form from
+   local state while the markup contract (R4) and e2e 8.4 require the URL
+   `?tour=new&tenantId=`. ACCEPT. Task 5.3 navigates with `setSearchParams`
+   and the param-driven host opens the form; no local-state path. (S5)
+2. A2 + B2 - no task delivers R1 (roster rows as `<li>` in a `<ul>`). ACCEPT.
+   5.1 renders an `<li>` root; 5.3 and 5.4 wrap each group in a `<ul>`; a
+   unit test pins `listitem` counts. (S5)
+3. A3 + B1 - `setListingSendOutcome` returns `{ row }` in 3.4/S7 and a bare
+   row in 3.8/S5. ACCEPT. The contract is `{ row }` everywhere; 3.8 and S5's
+   call sites and tests are rewritten. (S3, S5)
+4. B4 - the Follow up tab keeps an actioned row on screen while e2e 8.6
+   expects it gone without a reload. ACCEPT, ruling: an actioned row shows
+   its new state in place for the session (Undo on a decline, the tour chip
+   on Interested) and leaves the list on the next load; 8.6 reloads before
+   asserting the group is gone. (S7 states it; S8 reloads)
+5. B5 + B6 - S6.5 renders a visually hidden "Last heard from " prefix span in
+   every narrow-layout row, so 8.3's "not inside the list" check fails and
+   the `getByText` regex may not match. ACCEPT. The narrow-layout prefix is
+   CSS `::before` content (no DOM text); the cell's text is the bare label.
+   (S6; S8 unchanged)
+6. B7 - gate 4 uses `timeout 1500` in S10 and 3000 in 8.5 against an ~18 min
+   baseline plus five new specs; a kill orphans the stack. ACCEPT. Both say
+   `timeout 2400`, and 8.5/S10 add the AGENTS.md post-abort check that no
+   listener survives on the lane's ports. (S8, S10)
+7. A4 - a non-member calling a CLOSED relay group gets a row with neither a
+   sender key nor the external-caller fields (`closed_thread` wins the
+   reason), so it is never attributed. ACCEPT. Path 6 computes the
+   external-caller fields whenever `caller === undefined`, whatever the
+   refusal reason; a unit case covers it. Spec amended (14.6). (S1)
+8. A5 - the placement conversion and the outcome-only exit are person-made
+   tour writes that do not stamp `lastMarkedAt`, so they never supersede a
+   decline. ACCEPT as a documented acceptance (watch items + spec 14.6): a
+   converted tour already reads Toured/Interested through `deriveTourSignal`,
+   and an outcome-only close yields no signal by design.
+9. A6 - ruling 3.4 #2 (a clear of a never-declined row writes no event)
+   deviates from spec 5.4's unconditional "then the audit writes". ACCEPT:
+   the spec is amended (14.6) rather than the ruling reverted - an event on a
+   timeline where nothing was declined is the dishonest option.
+10. A7 - an email row flagged `email_new_address` is never re-attributed
+    after staff link the address. ACCEPT as a known limit (spec 14.6): the
+    contact's NEXT inbound counts; history is not rewritten.
+11. A8 - the dev seam overwrites the shares map and can move `sentAt`
+    backward on an existing pair. ACCEPT. The seam answers 409
+    `send_exists` when the pair already has a row. (S7)
+12. A9 + B9 - FollowUpView redefines the outcome-error copy;
+    `followUps.ts` has its own `nameOf`. ACCEPT. Import
+    `lib/listingOutcomeErrors.ts`; reuse `displayNameOfContact`. (S7)
+13. A10 + B11 - the "not persisted" proof is a grep in a commit body. ACCEPT.
+    6.1 adds a unit test that the recipients map `markSending` writes carries
+    neither `status` nor `lastHeardFromAt`. (S6)
+14. B8 - "Request a tour" keys on `!interestedSupported`, so landlord rows
+    get it. ACCEPT. The link renders only when the row's recipient type is
+    `partner` (units route: the row's `type`; contact page: the page's
+    contact type). (S5)
+15. B10 - 1.13B says to re-run the I1 writer audit at the final gate; S10
+    has no step. ACCEPT. S10.2 gains it. (S10)
+
+Round 1 result: decisions CHANGED on the plan (the URL-driven form path,
+the `{ row }` shape, the row/list markup, the clear-no-event spec amendment,
+the voice path 6 fix). Round 2 proceeds with reviewer B continued (11
+findings, more accepted), carrying reviewer A's report.

@@ -1315,6 +1315,25 @@ type name `SendOutcome` already exist (the Twilio send-failure vocabulary,
   no e2e drives a member's relay call (unit-tested instead) (F18). The C6
   re-proof counts only in the full `npm run e2e` run (F17).
 
+14.6 Plan-review amendments (2026-10-13, plan review round 1):
+- Voice path 6 (a refused masked call): the external-caller fields
+  (`relay_external_caller_phone`, `relay_external_caller_contact_id`) are
+  written whenever the caller is NOT a roster member, whatever the refusal
+  reason (today only `non_member` writes them; a non-member calling a CLOSED
+  thread gets `closed_thread` and no fields, `voice.ts:1006-1055`), so the
+  attribution rule can resolve the row.
+- `clear` on a row that carries NO `declined` record answers 200 and writes
+  NO `listing_decline_cleared` event (a retry or a double click must not pin
+  "cleared" on a timeline where nothing was declined); section 5.4's
+  unconditional "then the audit writes" is narrowed accordingly.
+- Known limit: an email row flagged `email_new_address` stays unattributed
+  after staff link the address (the flag stays on the row); the contact's
+  NEXT inbound counts, history is not rewritten.
+- Accepted non-superseding tour writes: the placement conversion and an
+  outcome-only close do not stamp `lastMarkedAt` and so never supersede a
+  decline on their own; a converted tour already reads Interested through
+  `deriveTourSignal`, and an outcome-only close yields no signal by design.
+
 ## 13. Glossary additions
 
 `documentation/GLOSSARY.md` gains: "last heard from" (the most recent

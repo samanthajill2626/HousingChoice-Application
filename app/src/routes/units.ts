@@ -1262,8 +1262,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // resolves the contact's denormalized name/company (so the roster row is
   // self-describing); the repo maintains the single-primaryContact invariant and
   // keeps the primary_contact scalar consistent with the row marked primary
-  // (nothing routes on the scalar: the roster resolvers take the row marked
-  // primary, else the landlord of record - see unitsRepo.addContact).
+  // (nothing routes on the scalar: the roster resolvers take the live row
+  // marked primary, else the live landlord of record - see
+  // unitsRepo.addContact).
   // Auto-primary (caseworker-integrity spec revisions 4-6, widened by
   // primary-contact-integrity spec 4.4, Cameron 2026-10-13): a write for
   // contact X - an add, or an edit of X's own row - makes X, and only X, the
@@ -1489,7 +1490,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       },
       'unit contact added via api',
     );
-    res.json({ unit: { ...updated, contacts: await enrichRoster(updated) } });
+    res.json({ unit: { ...updated, ...(await enrichRosterView(updated)) } });
   });
 
   // DELETE /api/units/:unitId/contacts/:contactId (BE3/C3) -> { unit }. 404
@@ -1565,7 +1566,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       },
       'unit contact removed via api',
     );
-    res.json({ unit: { ...updated, contacts: await enrichRoster(updated) } });
+    res.json({ unit: { ...updated, ...(await enrichRosterView(updated)) } });
   });
 
   // GET /api/units/:unitId/related → { related: RelatedUnit[] } (BE3/C3). 404

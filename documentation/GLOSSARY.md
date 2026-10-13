@@ -269,8 +269,11 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   primary. So zero primary is reachable when nobody can take over (no live
   landlord of record and no eligible live contact), when only NON-eligible
   contacts were added (a tenant or partner is never promoted automatically),
-  after an explicit API write that sends `primaryContact: false` for the
-  current primary's own row, or for legacy data the script has not repaired;
+  when such a contact is classified as a landlord or property manager on its
+  contact page AFTER it joined (a type change is not a contact-list write, so
+  it promotes nobody - the 470 Bolton shape again), after an explicit API
+  write that sends `primaryContact: false` for the current primary's own row,
+  or for legacy data the script has not repaired;
   the property's Contacts card then shows a "No primary contact." box (with a
   live landlord of record the lookup still uses the landlord). A DELETED contact can stay flagged when nobody could
   take over; the property contact lookup skips it. Staff see the primary as

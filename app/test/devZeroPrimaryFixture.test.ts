@@ -1,9 +1,15 @@
 // POST /__dev/fixtures/zero-primary-property (primary-contact-integrity spec
 // section 10; plan contract 2.7 as refined by S5, task S5.5): the hermetic e2e
 // seam that creates a NEW property in the imported shape - no landlord of
-// record, the given contacts as NON-primary rows - because no UI path and no
-// lean seed unit reaches that state. Built like devOrgFixture.test.ts: the dev
-// router gets the world fakes and shares the world with the harness app.
+// record, the given contacts as NON-primary rows. The UI can reach a property
+// with no primary contact (Restore without a landlord, then add only contacts
+// not typed landlord), and can even recreate the imported shape - an eligible
+// contact left non-primary - by classifying one of those contacts as a
+// property manager after seating it (a type change promotes nobody, spec
+// 4.4). The dev seam exists so a spec builds that shape in one call without
+// the detour, and no lean seed unit is in it. Built like
+// devOrgFixture.test.ts: the dev router gets the world fakes and shares the
+// world with the harness app.
 import { describe, expect, it } from 'vitest';
 import request from 'supertest';
 import type { Express } from 'express';

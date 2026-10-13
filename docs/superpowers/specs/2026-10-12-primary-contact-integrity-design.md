@@ -390,7 +390,13 @@ Paths (all through the heir function, 4.3):
   has a live heir has moved to it - best effort (a failed unit is logged).
 - Known gaps, by design: the importer's hard-delete retraction and the API
   PATCH reassign leave rosters as they are; P1, the property box and the script
-  cover what they leave.
+  cover what they leave. Likewise a contact TYPE change runs no roster write
+  (4.4), so it can recreate the imported 470 Bolton shape: a contact that
+  joined a property with no landlord of record and no primary as a non-primary
+  row while not eligible (a tenant, an unknown), then is classified as a
+  landlord or property manager on its contact page, is left eligible and
+  non-primary with nobody primary (code review R2-1). The property box offers
+  the fix (7.4), and the script (section 8) repairs it whenever it runs.
 - The landlord of record is still immovable and still `role: 'landlord'`.
 
 ## 5. The intro fallback reasons (server)

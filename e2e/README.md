@@ -743,10 +743,14 @@ router module is not even imported there.
 - `POST /__dev/fixtures/zero-primary-property` - create a NEW property in the
   imported shape: no landlord of record, the given contacts as NON-primary
   rows (`{ street, rows: [{ contactId, role: pm|owner|other }] }` -> 201
-  `{ unitId }`). The only way to reach a property with no primary contact -
-  the UI requires a landlord and the lean seed has none on purpose. Create the
-  contacts first through `POST /api/contacts`; it never touches an existing
-  unit (`fixtures/primaryContact.ts`).
+  `{ unitId }`). The UI can reach a property with no primary contact (Restore
+  without a landlord, then add only contacts not typed landlord), and can even
+  recreate the imported shape - an eligible contact left non-primary - by
+  classifying one of those contacts as a property manager after seating it (a
+  type change promotes nobody, spec 4.4). The dev seam exists so a spec builds
+  that shape in one call without the detour; the lean seed has none on
+  purpose. Create the contacts first through `POST /api/contacts`; it never
+  touches an existing unit (`fixtures/primaryContact.ts`).
 
 **THE TICKS ARE NOT A CONVENIENCE.** The lane runs jobs in-process in the APP
 *and* spawns a real worker with its own pollers. Only the app's log lines reach

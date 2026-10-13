@@ -4,9 +4,14 @@
 // docs/superpowers/specs/2026-10-12-primary-contact-integrity-design.md,
 // section 10): POST /__dev/fixtures/zero-primary-property creates a NEW
 // property in the imported shape - no landlord of record, the given contacts
-// on its contact list as NON-primary rows, in the order given. No UI path
-// reaches that state (a new property requires a landlord, and an add on an
-// ownerless property makes an eligible contact primary at once), and the
+// on its contact list as NON-primary rows, in the order given. The UI can
+// reach a property with no primary contact (Restore without a landlord, then
+// add only contacts not typed landlord), and can even recreate the imported
+// shape - an eligible contact left non-primary - by classifying one of those
+// contacts as a property manager after seating it (a type change promotes
+// nobody, spec 4.4). The dev seam exists so a spec builds that shape in one
+// call without the detour: a new property requires a landlord, and an add on
+// an ownerless property makes an eligible contact primary at once. The
 // byte-stable lean seed has none on purpose. Create the contacts first
 // through POST /api/contacts; the seam writes only the property and never
 // touches an existing one. Relative path: the lane's Vite server proxies

@@ -1266,12 +1266,18 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // IMPORTED shape - no landlordId attribute at all (as the importer leaves
   // it when the landlord name matches nobody, lib/import/apply.ts) and the
   // given contacts as NON-primary contact-list rows, in the order given
-  // (array order = add order). It is the only way to reach that state: a new
-  // property requires a landlord, and an add on an ownerless property makes
-  // an eligible contact primary at once (auto-primary), so the rows go in
-  // through the create itself, never addContact. The spec creates the
-  // contacts first through the real POST /api/contacts; rows carry no
-  // name/company (the unit GET's read-time enrichment is authoritative).
+  // (array order = add order). The UI can reach a property with no primary
+  // contact (Restore without a landlord, then add only contacts not typed
+  // landlord), and can even recreate the imported shape - an eligible contact
+  // left non-primary - by classifying one of those contacts as a property
+  // manager after seating it (a type change promotes nobody, spec 4.4). The
+  // dev seam exists so a spec builds that shape in one call without the
+  // detour: a new property requires a landlord, and an add on an ownerless
+  // property makes an eligible contact primary at once (auto-primary), so the
+  // rows go in through the create itself, never addContact. The spec
+  // creates the contacts first through the real POST /api/contacts; rows
+  // carry no name/company (the unit GET's read-time enrichment is
+  // authoritative).
   // Role `landlord` is refused: on an ownerless property a landlord-role add
   // CLAIMS the landlord slot, so no path stores that row. Status `setup` and
   // no accepted_authorities keep it out of the Available view and the

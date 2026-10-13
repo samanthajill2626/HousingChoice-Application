@@ -4,9 +4,14 @@
 // docs/superpowers/specs/2026-10-12-primary-contact-integrity-design.md,
 // section 10). Three walks over a property in the IMPORTED shape - no
 // landlord of record, and contacts on its contact list of which none is
-// primary (470 Bolton). The UI cannot reach that state and the byte-stable
-// lean seed has none on purpose, so each walk builds its own through the
-// DEV-ONLY seam POST /__dev/fixtures/zero-primary-property
+// primary (470 Bolton). The UI can reach a property with no primary contact
+// (Restore without a landlord, then add only contacts not typed landlord),
+// and can even recreate the imported shape - an eligible contact left
+// non-primary - by classifying one of those contacts as a property manager
+// after seating it (a type change promotes nobody, spec 4.4). The dev seam
+// exists so a spec builds that shape in one call without the detour, and the
+// byte-stable lean seed has none on purpose, so each walk builds its own
+// through the DEV-ONLY seam POST /__dev/fixtures/zero-primary-property
 // (fixtures/primaryContact.ts):
 //
 //   (a) THE PROPERTY BOX (spec 7.4): the Contacts card says the property has

@@ -91,6 +91,7 @@ import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRe
 import { createUnitsRepo, unitContacts, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { resolveTourContactNames, type TourContactNames } from '../lib/tourContacts.js';
+import type { PropertyContactResult } from '../lib/propertyContact.js';
 import { formatStreet } from '../lib/address.js';
 import { formatLocalDate, formatLocalTime } from '../lib/localTime.js';
 import { localDateOf, resolveQuietHoursTimezone } from '../lib/quietHours.js';
@@ -352,6 +353,81 @@ export interface RelayComposeInputs {
   time?: string;
   /** member_added only (spec 9.4's role table). */
   role?: 'property manager' | 'landlord' | 'tenant';
+  /**
+   * primary-contact-integrity spec 5.1: WHY an OWNED conversation (tour or
+   * placement) resolves to the general (naked) intro. Present exactly then -
+   * never on a tour or placement variant, and never on an ownerless group (the
+   * general intro is its only intro). The member-added path ignores it.
+   */
+  introFallback?: IntroFallback;
+}
+
+/**
+ * primary-contact-integrity spec 5.1: why an owned conversation's intro fell
+ * back to the general one. Declared in the order the dialog lists them
+ * (INTRO_FALLBACK_ORDER below).
+ */
+export type IntroFallbackReason =
+  | 'no_property_contact' // P1 (lib/propertyContact): nobody, reason none
+  | 'property_contact_deleted' // P1: nobody, reason deleted (deleted or missing)
+  | 'property_contact_is_tenant' // P1: nobody, reason is_tenant
+  | 'property_contact_no_first_name' // P1 found a contact with no first name
+  | 'no_street_address' // formatStreet(unit.address) is empty
+  | 'tour_not_scheduled' // tour only: no scheduledAt
+  | 'tour_started' // tour only: scheduledAt <= now
+  | 'lookup_failed'; // a read failed or could not answer
+
+/** spec 5.1: the explanation the OPEN preview carries to the open-group dialog. */
+export interface IntroFallback {
+  /** Every reason that applies, in INTRO_FALLBACK_ORDER. Never empty. */
+  reasons: IntroFallbackReason[];
+  /** The property, when known (the owner read succeeded). */
+  unitId?: string;
+  /** formatStreet(unit.address), when non-empty. */
+  street?: string;
+  /** Set with property_contact_no_first_name: the contact missing a first name. */
+  propertyContactId?: string;
+}
+
+/** spec 5.1's reason order - the order `reasons` is reported in. */
+const INTRO_FALLBACK_ORDER: readonly IntroFallbackReason[] = [
+  'no_property_contact',
+  'property_contact_deleted',
+  'property_contact_is_tenant',
+  'property_contact_no_first_name',
+  'no_street_address',
+  'tour_not_scheduled',
+  'tour_started',
+  'lookup_failed',
+];
+
+/** P1's three "nobody" outcomes, each its own reason. */
+const NOBODY_REASON: Record<
+  Extract<PropertyContactResult, { kind: 'nobody' }>['reason'],
+  IntroFallbackReason
+> = {
+  none: 'no_property_contact',
+  deleted: 'property_contact_deleted',
+  is_tenant: 'property_contact_is_tenant',
+};
+
+/** The variant-specific half of a composed (non-naked) intro. */
+type IntroTiming =
+  | { variant: 'placement' }
+  | { variant: 'tour_today'; time: string }
+  | { variant: 'tour'; when: string };
+
+/** The reported explanation: the recorded reasons in spec order, plus the ids. */
+function introFallbackOf(
+  reasons: ReadonlySet<IntroFallbackReason>,
+  ids: Omit<IntroFallback, 'reasons'>,
+): IntroFallback {
+  return { reasons: INTRO_FALLBACK_ORDER.filter((reason) => reasons.has(reason)), ...ids };
+}
+
+/** spec 5.1: an owner that cannot be read decides nothing else. */
+function ownerUnreadable(): RelayComposeInputs {
+  return { variant: 'naked', introFallback: { reasons: ['lookup_failed'] } };
 }
 
 /**
@@ -415,6 +491,19 @@ function resolveMemberRole(
  * previews go through this one function, so the preview cannot drift from the
  * send by construction rather than by discipline.
  *
+ * WHY IT FELL BACK (primary-contact-integrity spec 5.1): for an OWNED
+ * conversation that resolves to the naked intro, `introFallback` carries every
+ * reason in INTRO_FALLBACK_ORDER, so the open-group dialog can explain it.
+ * Every check is evaluated - the resolver no longer stops at the first miss.
+ * An owner read that fails (or finds nothing) decides nothing else:
+ * `lookup_failed` alone. An unknown unit (read failed, found nothing, or no
+ * repo) still decides the tour reasons, plus `lookup_failed`. A failed
+ * property-contact read (P1 read_failed), a failed or empty settings read, or
+ * an unformattable tour time ADDS `lookup_failed` beside the decided reasons.
+ * Placements never carry the tour reasons; an ownerless conversation never
+ * carries `introFallback`. The variant rule is unchanged: any reason means
+ * naked.
+ *
  * IT NEVER THROWS. Every read gets its OWN try/catch and degrades toward
  * `variant: 'naked'` (spec 9.5): a relay intro must never be lost over a failed
  * unit read - it is composed AFTER the job's putJobExecutionMarker claim, so a
@@ -448,8 +537,13 @@ export async function resolveRelayComposeInputs(
   addedContactId?: string,
 ): Promise<RelayComposeInputs> {
   const log = deps.logger ?? defaultLogger;
+  // An ownerless group's ONLY intro is the general one, so there is nothing to
+  // explain (primary-contact-integrity spec 5.1) - and nothing is read.
   if (owner.type === null) return { variant: 'naked' };
   const nowIso = deps.nowIso ?? new Date().toISOString();
+  // Every miss below is RECORDED rather than returned on (spec 5.1): the
+  // open-group dialog lists all of them. Any reason at all means naked.
+  const reasons = new Set<IntroFallbackReason>();
 
   let tenantId: string;
   let unitId: string;
@@ -458,48 +552,56 @@ export async function resolveRelayComposeInputs(
     if (owner.type === 'tour') {
       // ToursRepo's getter is get(), never getById().
       const tour = await deps.toursRepo?.get(owner.id);
-      if (!tour) return { variant: 'naked' };
+      if (!tour) return ownerUnreadable();
       tenantId = tour.tenantId;
       unitId = tour.unitId;
       // OPTIONAL on TourItem: a 'requested' tour has no time at all, which
-      // spec 9.5 routes to the naked intro (there is no {when} to render).
+      // spec 9.5 routes to the naked intro (there is no {when} to render) -
+      // reason tour_not_scheduled. An empty string is no time either.
       //
       // A tour that has ALREADY STARTED is dropped here and takes exactly the
-      // same route, because both tour entries end "Please let us know when
-      // you're on the way" - copy that assumes the tour has not happened. This
-      // is the third writer of tour-time copy and the same staleness class the
-      // ladder's fire-time gate (retiredByTourStart) exists for; the two
-      // reachable paths are an operator opening the group from a tour whose
-      // outcome is not recorded yet, and a quiet-hours deferral that straddles
-      // the tour start (routes/tours.ts defers the open to quiet-end, and this
-      // composes THEN).
+      // same route (reason tour_started), because both tour entries end
+      // "Please let us know when you're on the way" - copy that assumes the
+      // tour has not happened. This is the third writer of tour-time copy and
+      // the same staleness class the ladder's fire-time gate
+      // (retiredByTourStart) exists for; the two reachable paths are an
+      // operator opening the group from a tour whose outcome is not recorded
+      // yet, and a quiet-hours deferral that straddles the tour start
+      // (routes/tours.ts defers the open to quiet-end, and this composes THEN).
       //
       // AT-OR-AFTER, matching retiredByTourStart's `now >= start` exactly
-      // (round 2, R2-S1). An earlier draft was strictly-before while claiming
-      // kinship with that gate, which meant one codebase answering "is
-      // forward-looking tour copy stale at t=start" two ways, with the newer
-      // site citing the older one as its authority. Same sentence, same
-      // boundary.
+      // (round 2, R2-S1): one codebase answers "is forward-looking tour copy
+      // stale at t=start" one way.
       //
       // An unparseable scheduledAt is NOT dropped here - Number.isFinite is
       // false, so it falls through to the formatter's own try/catch, which
-      // already degrades it. An unparseable `nowIso` likewise leaves the guard
-      // OFF (NaN comparisons are false) and the tour variant composes: a
+      // records lookup_failed. An unparseable `nowIso` likewise leaves the
+      // guard OFF (NaN comparisons are false) and the tour variant composes: a
       // deliberate fail-OPEN, because this resolver's first duty is never to
       // throw and never to lose an intro, and every production caller supplies
       // an ISO instant (the quiet-hours state, or the job's own default).
-      scheduledAt = tour.scheduledAt;
-      const startedAt = Date.parse(scheduledAt ?? '');
-      if (Number.isFinite(startedAt) && startedAt <= Date.parse(nowIso)) scheduledAt = undefined;
+      scheduledAt =
+        typeof tour.scheduledAt === 'string' && tour.scheduledAt.length > 0
+          ? tour.scheduledAt
+          : undefined;
+      if (scheduledAt === undefined) {
+        reasons.add('tour_not_scheduled');
+      } else {
+        const startedAt = Date.parse(scheduledAt);
+        if (Number.isFinite(startedAt) && startedAt <= Date.parse(nowIso)) {
+          scheduledAt = undefined;
+          reasons.add('tour_started');
+        }
+      }
     } else {
       const placement = await deps.placementsRepo?.getById(owner.id);
-      if (!placement) return { variant: 'naked' };
+      if (!placement) return ownerUnreadable();
       tenantId = placement.tenantId;
       unitId = placement.unitId;
     }
   } catch (err) {
     log.warn({ err, ownerType: owner.type, ownerId: owner.id }, 'relay copy: owner read failed - naked intro');
-    return { variant: 'naked' };
+    return ownerUnreadable();
   }
 
   let unit: UnitItem | undefined;
@@ -514,11 +616,14 @@ export async function resolveRelayComposeInputs(
   const role = resolveMemberRole(unit, tenantId, addedContactId);
   const withRole = role !== undefined ? { role } : {};
 
-  // REUSE (spec 9.3): resolveTourContactNames already applies the primary-
-  // contact-then-landlord rule, the tenant de-dupe, and inertName's brace
-  // stripping (which is what keeps a user-supplied name from re-opening a
-  // token). It never throws; the try is belt-and-braces around the repo pick.
+  // REUSE (spec 9.3): resolveTourContactNames applies the shared property-
+  // contact lookup (lib/propertyContact, primary-contact-integrity P1), the
+  // tenant de-dupe, and inertName's brace stripping (which is what keeps a
+  // user-supplied name from re-opening a token). It never throws; the try is
+  // belt-and-braces around the repo pick. `propertyContact` stays undefined
+  // when the lookup could not run at all.
   let names: TourContactNames = {};
+  let propertyContact: PropertyContactResult | undefined;
   if (deps.contactsRepo !== undefined) {
     try {
       const resolved = await resolveTourContactNames({
@@ -528,6 +633,7 @@ export async function resolveRelayComposeInputs(
         ...(deps.logger !== undefined && { logger: deps.logger }),
       });
       names = resolved.names;
+      propertyContact = resolved.propertyContact;
     } catch (err) {
       log.warn({ err, unitId }, 'relay copy: name resolution failed - naked intro');
     }
@@ -537,44 +643,88 @@ export async function resolveRelayComposeInputs(
     ...withRole,
   };
 
-  const where = formatStreet(unit?.address);
-  if (names.propertyContactFirstName === undefined || where.length === 0) {
-    return { variant: 'naked', ...withNames };
-  }
-  const named = {
-    ...withNames,
-    propertyContactFirstName: names.propertyContactFirstName,
-    where,
-  };
-
-  if (owner.type === 'placement') return { variant: 'placement', ...named };
-  if (scheduledAt === undefined) return { variant: 'naked', ...withNames };
-
-  let timezone: string;
-  try {
-    const settings = await deps.settingsRepo?.getOrgSettings();
-    if (!settings) return { variant: 'naked', ...withNames };
-    // The SAME seam the booked-too-late same-day test uses, so "today" here and
-    // "today" there can never disagree (spec 9.1).
-    timezone = resolveQuietHoursTimezone(settings);
-  } catch (err) {
-    log.warn({ err }, 'relay copy: org settings read failed - naked intro');
-    return { variant: 'naked', ...withNames };
-  }
-
-  try {
-    const time = formatLocalTime(scheduledAt, timezone);
-    if (localDateOf(nowIso, timezone) === localDateOf(scheduledAt, timezone)) {
-      return { variant: 'tour_today', ...named, time };
+  // The PROPERTY half (spec 5.1). An UNKNOWN unit - its read threw, found
+  // nothing, or no units repo is wired - decides none of it: lookup_failed,
+  // beside the tour reasons the owner read already decided.
+  const where = unit === undefined ? '' : formatStreet(unit.address);
+  let propertyContactFirstName: string | undefined;
+  let noFirstNameContactId: string | undefined;
+  if (unit === undefined) {
+    reasons.add('lookup_failed');
+  } else {
+    if (propertyContact === undefined || propertyContact.kind === 'read_failed') {
+      // A thrown candidate read is not absence (P1 never falls through it), and
+      // no contacts repo means nothing could be looked up at all.
+      reasons.add('lookup_failed');
+    } else if (propertyContact.kind === 'nobody') {
+      reasons.add(NOBODY_REASON[propertyContact.reason]);
+    } else if (names.propertyContactFirstName === undefined) {
+      reasons.add('property_contact_no_first_name');
+      noFirstNameContactId = propertyContact.contactId;
+    } else {
+      propertyContactFirstName = names.propertyContactFirstName;
     }
-    // "on {when}", not Sam's "at {when}": our {when} renders "Tue, Sep 8 at
-    // 3:00 PM" (tourCopy.ts builds it the same way), so "at Tue, Sep 8 at
-    // 3:00 PM" reads badly. Cameron approved "on" for the dated form.
-    return { variant: 'tour', ...named, when: `${formatLocalDate(scheduledAt, timezone)} at ${time}` };
-  } catch (err) {
-    log.warn({ err, ownerId: owner.id }, 'relay copy: tour time unformattable - naked intro');
-    return { variant: 'naked', ...withNames };
+    if (where.length === 0) reasons.add('no_street_address');
   }
+
+  // The TOUR TIME. A placement reads no settings at all. Only a tour with a
+  // usable, not-started time on a KNOWN unit gets here: every other tour
+  // already carries its reason, and formatting could add nothing.
+  //
+  // A SETTINGS read failure (or no settings) records lookup_failed rather than
+  // assuming the default zone: {time} and {when} are FACTS in a tenant's SMS,
+  // and a wrong-zone "3:00 PM" is worse copy than the naked intro.
+  let timing: IntroTiming | undefined =
+    owner.type === 'placement' ? { variant: 'placement' } : undefined;
+  if (owner.type === 'tour' && scheduledAt !== undefined && unit !== undefined) {
+    const at = scheduledAt;
+    let timezone: string | undefined;
+    try {
+      const settings = await deps.settingsRepo?.getOrgSettings();
+      // The SAME seam the booked-too-late same-day test uses, so "today" here
+      // and "today" there can never disagree (spec 9.1).
+      if (settings) timezone = resolveQuietHoursTimezone(settings);
+      else reasons.add('lookup_failed');
+    } catch (err) {
+      log.warn({ err }, 'relay copy: org settings read failed - naked intro');
+      reasons.add('lookup_failed');
+    }
+    if (timezone !== undefined) {
+      try {
+        const time = formatLocalTime(at, timezone);
+        // "on {when}", not Sam's "at {when}": our {when} renders "Tue, Sep 8 at
+        // 3:00 PM" (tourCopy.ts builds it the same way), so "at Tue, Sep 8 at
+        // 3:00 PM" reads badly. Cameron approved "on" for the dated form.
+        timing =
+          localDateOf(nowIso, timezone) === localDateOf(at, timezone)
+            ? { variant: 'tour_today', time }
+            : { variant: 'tour', when: `${formatLocalDate(at, timezone)} at ${time}` };
+      } catch (err) {
+        log.warn({ err, ownerId: owner.id }, 'relay copy: tour time unformattable - naked intro');
+        reasons.add('lookup_failed');
+      }
+    }
+  }
+
+  if (reasons.size > 0 || propertyContactFirstName === undefined || timing === undefined) {
+    // Every path that leaves a token unset has recorded a reason above; this
+    // only keeps `reasons` non-empty should a later edit break that.
+    if (reasons.size === 0) reasons.add('lookup_failed');
+    return {
+      variant: 'naked',
+      ...withNames,
+      introFallback: introFallbackOf(reasons, {
+        unitId,
+        ...(where.length > 0 && { street: where }),
+        ...(noFirstNameContactId !== undefined && { propertyContactId: noFirstNameContactId }),
+      }),
+    };
+  }
+
+  const named = { ...withNames, propertyContactFirstName, where };
+  if (timing.variant === 'placement') return { variant: 'placement', ...named };
+  if (timing.variant === 'tour_today') return { variant: 'tour_today', ...named, time: timing.time };
+  return { variant: 'tour', ...named, when: timing.when };
 }
 
 /**

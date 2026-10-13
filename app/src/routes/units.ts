@@ -1217,7 +1217,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // structured tour_type - the dashboard opens the form instead, D14); then
   // 200 { row } re-projected, or 503 { error: 'outcome_unavailable', saved:
   // true } when the write landed but the re-read failed (a click that wrote
-  // nothing gets the plain 503 - review A-3). Audit events are
+  // nothing gets the plain 503 - review A-3). Interested CREATES the tour
+  // (and records listing_interested) BEFORE it clears an effective decline
+  // (and records listing_decline_cleared) - deliberately the reverse of spec
+  // 5.4 steps 3/4, per code-review adjudication ADV-3: a failed create then
+  // leaves the decline (perhaps another staff member's) and the timeline
+  // untouched, and a failed clear after a create leaves a tour whose
+  // createdAt already supersedes the decline. Audit events are
   // best-effort (lib/listingOutcomeEvents.ts). A concurrent double click can
   // still race two creates (no conditional write on the pair - I3; the
   // dashboard disables the button in flight). PII: ids only in logs.
@@ -1296,24 +1302,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         res.status(409).json({ error: 'tour_type_required' });
         return;
       }
-      // (3) An EFFECTIVE decline is removed; its event is its history.
-      if (effectiveDecline(row, deriveTourActivityAt(pairTours))) {
-        if ((await listingSends.clearDeclined(unitId, contactId)) === 'not_found') {
-          res.status(404).json({ error: 'send_not_found' });
-          return;
-        }
-        wrote = true;
-        await recordListingOutcomeEvent(eventDeps, {
-          type: 'listing_decline_cleared',
-          contactId,
-          unitId,
-          label: `Not interested cleared for ${address}`,
-          ...(actor !== undefined && { actor }),
-          at,
-        });
-      }
-      // (4) Create, and ONLY then record listing_interested (a click that
-      // found an existing tour writes no event; a retry is not re-recorded).
+      // Whether a decline is EFFECTIVE is judged on the tours as read, before
+      // this click creates one (the new tour would supersede it).
+      const declineEffective = effectiveDecline(row, deriveTourActivityAt(pairTours));
+      // (4, run FIRST - review ADV-3) Create, and ONLY then record
+      // listing_interested (a click that found an existing tour writes no
+      // event; a retry is not re-recorded). A create failure throws here,
+      // before the decline or the timeline is touched.
       if (!existing && tourType !== undefined) {
         createdTour = await tours.create({ tenantId: contactId, unitId, tourType, status: 'requested' });
         wrote = true;
@@ -1326,6 +1321,28 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
           tourId: createdTour.tourId,
           at,
         });
+      }
+      // (3, run SECOND) An EFFECTIVE decline is removed; its event is its
+      // history. A clear that finds no counted row after a create is not a
+      // 404 - the tour was written - so it records nothing and falls through
+      // to the re-projection (which answers 503 saved for an uncounted row).
+      if (declineEffective) {
+        const cleared = await listingSends.clearDeclined(unitId, contactId);
+        if (cleared === 'not_found' && createdTour === undefined) {
+          res.status(404).json({ error: 'send_not_found' });
+          return;
+        }
+        if (cleared === 'ok') {
+          wrote = true;
+          await recordListingOutcomeEvent(eventDeps, {
+            type: 'listing_decline_cleared',
+            contactId,
+            unitId,
+            label: `Not interested cleared for ${address}`,
+            ...(actor !== undefined && { actor }),
+            at,
+          });
+        }
       }
     } else if (outcome === 'not_interested') {
       const record: DeclineRecord = { at, by: 'staff', ...(actor !== undefined && { staffId: actor }) };

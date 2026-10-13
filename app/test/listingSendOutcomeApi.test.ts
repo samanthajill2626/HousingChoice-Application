@@ -373,7 +373,10 @@ describe('outcome route - interested', () => {
     expect(world.toursMap.size).toBe(2);
   });
 
-  it('an effective decline with no tour: clear (event) THEN create (event), in that order', async () => {
+  // Review ADV-3 (knowing rewrite of the old "clear THEN create" order pin):
+  // the tour is created first, so a failed create can never cost another
+  // staff member's decline.
+  it('an effective decline with no tour: create (event) THEN clear (event), in that order', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, { tour_type: 'pm_team' });
     seedContact(world, 'c-1');
@@ -381,8 +384,47 @@ describe('outcome route - interested', () => {
     await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-25T00:00:00.000Z', by: 'staff' });
     const res = await post(app, { outcome: 'interested' });
     expect(res.status).toBe(200);
-    expect(outcomeEvents(world).map((e) => e.type)).toEqual(['listing_decline_cleared', 'listing_interested']);
+    expect(res.body.row).toMatchObject({ outcome: 'interested' });
+    expect(outcomeEvents(world).map((e) => e.type)).toEqual(['listing_interested', 'listing_decline_cleared']);
     expect(await stored(world)).not.toHaveProperty('declined');
+  });
+
+  it('a failed tour create leaves an effective decline and the timeline untouched (review ADV-3)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, { tour_type: 'self_guided' });
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    const decline = { at: '2026-06-25T00:00:00.000Z', by: 'staff' as const, staffId: 'usr_b' };
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', decline);
+    world.toursRepo.create = async () => {
+      throw new Error('tours write failed');
+    };
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(500);
+    expect((await stored(world))?.declined).toEqual(decline);
+    expect(outcomeEvents(world)).toEqual([]);
+    expect(world.toursMap.size).toBe(0);
+  });
+
+  it('a clear that finds no counted row AFTER the create is not a 404: the tour was written -> 503 saved, no cleared event', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, { tour_type: 'self_guided' });
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-25T00:00:00.000Z', by: 'staff' });
+    // The row stops being counted between the read and the clear.
+    const realGet = world.listingSendsRepo.getByKeyConsistent.bind(world.listingSendsRepo);
+    let reads = 0;
+    world.listingSendsRepo.getByKeyConsistent = async (unitId: string, contactId: string) => {
+      reads += 1;
+      return reads === 1 ? realGet(unitId, contactId) : undefined;
+    };
+    world.listingSendsRepo.clearDeclined = async () => 'not_found';
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable', saved: true });
+    expect(world.toursMap.size).toBe(1);
+    expect(outcomeEvents(world).map((e) => e.type)).toEqual(['listing_interested']);
   });
 
   it('503 (no saved) when the pre-write tours read fails - nothing written', async () => {

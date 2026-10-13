@@ -427,6 +427,71 @@ describe('outcome route - interested', () => {
     expect(outcomeEvents(world).map((e) => e.type)).toEqual(['listing_interested']);
   });
 
+  // Review B R2-1: compare-and-clear - the click clears only the decline it
+  // READ (its `at`), so a decline another staff member records meanwhile
+  // survives, and the re-projection answers the truth.
+  it("another staff member's decline recorded DURING the create survives (compare-and-clear, review B R2-1)", async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, { tour_type: 'self_guided' });
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    const read = { at: '2026-06-25T00:00:00.000Z', by: 'staff' as const, staffId: 'usr_a' };
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', read);
+    const theirs = { at: new Date(Date.now() + 60_000).toISOString(), by: 'staff' as const, staffId: 'usr_b' };
+    const realCreate = world.toursRepo.create.bind(world.toursRepo);
+    world.toursRepo.create = async (input) => {
+      const created = await realCreate(input);
+      // B clicks Not interested on another screen while A's create runs.
+      await world.listingSendsRepo.setDeclined('unit-1', 'c-1', theirs);
+      return created;
+    };
+    const clear = vi.spyOn(world.listingSendsRepo, 'clearDeclined');
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(200);
+    expect(clear).toHaveBeenCalledWith('unit-1', 'c-1', { expectedAt: read.at });
+    expect((await stored(world))?.declined).toEqual(theirs);
+    // B's decline is later than A's new tour, so it is effective.
+    expect(res.body.row).toMatchObject({ outcome: 'not_interested' });
+    expect(outcomeEvents(world).map((e) => e.type)).toEqual(['listing_interested']);
+    expect(world.toursMap.size).toBe(1);
+  });
+
+  it('a lost compare-and-clear with NO create is never a 404: no cleared event, the re-projection answers (review B R2-1)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.toursRepo.create({ tourId: 't-1', tenantId: 'c-1', unitId: 'unit-1', tourType: 'self_guided', status: 'scheduled', createdAt: '2026-06-20T00:00:00.000Z' });
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-25T00:00:00.000Z', by: 'staff' });
+    const theirs = { at: '2026-06-26T00:00:00.000Z', by: 'staff' as const, staffId: 'usr_b' };
+    // B re-declines between A's read and A's clear.
+    const realClear = world.listingSendsRepo.clearDeclined.bind(world.listingSendsRepo);
+    world.listingSendsRepo.clearDeclined = async (unitId, contactId, opts) => {
+      await world.listingSendsRepo.setDeclined(unitId, contactId, theirs);
+      return realClear(unitId, contactId, opts);
+    };
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(200);
+    expect(res.body.row).toMatchObject({ outcome: 'not_interested' });
+    expect((await stored(world))?.declined).toEqual(theirs);
+    expect(outcomeEvents(world)).toEqual([]);
+    expect(world.toursMap.size).toBe(1);
+  });
+
+  it('a clear answering not_found with NO create and the row unchanged is not a 404 either: 200 with the row as it stands (review B R2-1)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.toursRepo.create({ tourId: 't-1', tenantId: 'c-1', unitId: 'unit-1', tourType: 'self_guided', status: 'scheduled', createdAt: '2026-06-20T00:00:00.000Z' });
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-25T00:00:00.000Z', by: 'staff' });
+    world.listingSendsRepo.clearDeclined = async () => 'not_found';
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(200);
+    expect(res.body.row).toMatchObject({ outcome: 'not_interested' });
+    expect(outcomeEvents(world)).toEqual([]);
+  });
+
   it('503 (no saved) when the pre-write tours read fails - nothing written', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, { tour_type: 'self_guided' });

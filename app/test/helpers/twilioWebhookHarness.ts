@@ -3473,9 +3473,12 @@ export function createFakeWorld(): FakeWorld {
       row.updated_at = new Date().toISOString();
       return 'ok';
     },
-    async clearDeclined(unitId, contactId) {
+    // `expectedAt` mirrors the real compare-and-clear (review B R2-1): the
+    // stored record's `at` must equal it, and an absent record never does.
+    async clearDeclined(unitId, contactId, opts) {
       const row = findListingSend(unitId, contactId);
       if (row === undefined || row.counted === false) return 'not_found';
+      if (opts?.expectedAt !== undefined && row.declined?.at !== opts.expectedAt) return 'not_found';
       delete row.declined;
       row.updated_at = new Date().toISOString();
       return 'ok';

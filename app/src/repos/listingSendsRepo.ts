@@ -200,8 +200,15 @@ export interface ListingSendsRepo {
    * share counts); anything else throws. Never creates a row.
    */
   setDeclined(unitId: string, contactId: string, record: DeclineRecord): Promise<'ok' | 'not_found'>;
-  /** REMOVE `declined` (SET `updated_at`) under the same condition. Idempotent. */
-  clearDeclined(unitId: string, contactId: string): Promise<'ok' | 'not_found'>;
+  /**
+   * REMOVE `declined` (SET `updated_at`) under the same condition. Idempotent
+   * without `opts`. With `opts.expectedAt` it is a COMPARE-AND-CLEAR (spec
+   * 14.7, code review round 2 B R2-1): the condition also requires
+   * `declined.at = :readAt`, so it removes only the record the caller READ - a
+   * decline another staff member recorded meanwhile (or none at all) makes it
+   * answer 'not_found' and write nothing.
+   */
+  clearDeclined(unitId: string, contactId: string, opts?: { expectedAt?: string }): Promise<'ok' | 'not_found'>;
 }
 
 /** The key getByKeys answers under. */
@@ -388,22 +395,27 @@ export function createListingSendsRepo(deps: RepoDeps = {}): ListingSendsRepo {
       return 'ok';
     },
 
-    async clearDeclined(unitId, contactId) {
+    async clearDeclined(unitId, contactId, opts) {
       const now = new Date().toISOString();
+      const expectedAt = opts?.expectedAt;
+      const counted = 'attribute_exists(#unitId) AND (attribute_not_exists(#counted) OR #counted <> :false)';
       try {
         await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: { unitId, contactId },
             UpdateExpression: 'SET #updatedAt = :now REMOVE #declined',
-            ConditionExpression: 'attribute_exists(#unitId) AND (attribute_not_exists(#counted) OR #counted <> :false)',
+            // Compare-and-clear (B R2-1): an absent `declined` fails the
+            // comparison too, so only the record the caller read is removed.
+            ConditionExpression: expectedAt !== undefined ? `${counted} AND #declined.#at = :readAt` : counted,
             ExpressionAttributeNames: {
               '#declined': 'declined',
               '#updatedAt': 'updated_at',
               '#unitId': 'unitId',
               '#counted': 'counted',
+              ...(expectedAt !== undefined && { '#at': 'at' }),
             },
-            ExpressionAttributeValues: { ':now': now, ':false': false },
+            ExpressionAttributeValues: { ':now': now, ':false': false, ...(expectedAt !== undefined && { ':readAt': expectedAt }) },
           }),
         );
       } catch (err) {

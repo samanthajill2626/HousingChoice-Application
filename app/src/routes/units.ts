@@ -1323,15 +1323,15 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         });
       }
       // (3, run SECOND) An EFFECTIVE decline is removed; its event is its
-      // history. A clear that finds no counted row after a create is not a
-      // 404 - the tour was written - so it records nothing and falls through
-      // to the re-projection (which answers 503 saved for an uncounted row).
-      if (declineEffective) {
-        const cleared = await listingSends.clearDeclined(unitId, contactId);
-        if (cleared === 'not_found' && createdTour === undefined) {
-          res.status(404).json({ error: 'send_not_found' });
-          return;
-        }
+      // history. COMPARE-AND-CLEAR (review B R2-1): only the record this
+      // click READ (its `at`) is removed, so a decline another staff member
+      // records meanwhile survives. A clear that answers 'not_found' (someone
+      // re-declined, or the row stopped counting) records nothing and is
+      // NEVER a 404 here - the row was counted when read - so it falls
+      // through to the re-projection, which answers the truth.
+      const readDecline = row.declined;
+      if (declineEffective && readDecline !== undefined) {
+        const cleared = await listingSends.clearDeclined(unitId, contactId, { expectedAt: readDecline.at });
         if (cleared === 'ok') {
           wrote = true;
           await recordListingOutcomeEvent(eventDeps, {

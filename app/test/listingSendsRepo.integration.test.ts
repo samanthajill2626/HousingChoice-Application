@@ -200,6 +200,42 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
       expect(await repo.clearDeclined(unitId, contactId)).toBe('ok');
     });
 
+    it("clearDeclined with expectedAt (compare-and-clear, review B R2-1): clears only the record it names; a re-declined or absent record answers 'not_found' and writes nothing", async () => {
+      const unitId = `unit-${randomUUID().slice(0, 8)}`;
+      const contactId = `contact-${randomUUID().slice(0, 8)}`;
+      await seedListingSend(repo, { unitId, contactId, sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'bcast-1' });
+      // No decline stored yet: nothing to compare.
+      expect(await repo.clearDeclined(unitId, contactId, { expectedAt: DECLINE.at })).toBe('not_found');
+      await repo.setDeclined(unitId, contactId, DECLINE);
+      const before = await repo.getByKeyConsistent(unitId, contactId);
+      // Another staff member re-declined since the caller read the row: the
+      // caller's record is stale, so the clear loses and touches nothing.
+      expect(await repo.clearDeclined(unitId, contactId, { expectedAt: '2026-06-17T08:00:00.000Z' })).toBe('not_found');
+      expect(await repo.getByKeyConsistent(unitId, contactId)).toEqual(before);
+      // The record it names clears.
+      expect(await repo.clearDeclined(unitId, contactId, { expectedAt: DECLINE.at })).toBe('ok');
+      expect(await repo.getByKeyConsistent(unitId, contactId)).not.toHaveProperty('declined');
+      // Once cleared, the same compare loses (unlike the bare idempotent clear).
+      expect(await repo.clearDeclined(unitId, contactId, { expectedAt: DECLINE.at })).toBe('not_found');
+    });
+
+    it("clearDeclined with expectedAt on an UNCOUNTED row answers 'not_found' even when the record matches", async () => {
+      const unitId = `unit-${randomUUID().slice(0, 8)}`;
+      const contactId = `contact-${randomUUID().slice(0, 8)}`;
+      await seedListingSend(repo, { unitId, contactId, sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'bcast-1' });
+      await repo.setDeclined(unitId, contactId, DECLINE);
+      const token = (await repo.getByKeyConsistent(unitId, contactId))?.shares_op;
+      const failed: ShareMemoryWrite = {
+        shares: { 'b-1': { attempt: '2026-06-16T10:00:00.000Z#SM1', conversationId: 'conv-1', state: 'failed' } },
+        counted: false,
+        sentAt: undefined,
+        broadcastId: undefined,
+      };
+      expect(await repo.putShareMemory(unitId, contactId, failed, { token })).toBe(true);
+      expect(await repo.clearDeclined(unitId, contactId, { expectedAt: DECLINE.at })).toBe('not_found');
+      expect((await repo.getByKeyConsistent(unitId, contactId))?.declined).toEqual(DECLINE);
+    });
+
     it("an UNCOUNTED row is not declinable: both writers answer 'not_found' and write nothing", async () => {
       const unitId = `unit-${randomUUID().slice(0, 8)}`;
       const contactId = `contact-${randomUUID().slice(0, 8)}`;

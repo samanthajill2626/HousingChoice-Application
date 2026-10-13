@@ -1876,19 +1876,29 @@ describe('ListingDetail - Contacts card edit mode', () => {
     expect(screen.getByRole('combobox', { name: 'Add contact' })).toHaveValue('Renata Vale');
   });
 
+  // A typed contact-list refusal names its own reason, and (final review A3;
+  // fix wave FWF-2) settles like every other 409: the roster write answers
+  // these codes only when the property changed after the route's read (a seat
+  // removed, the landlord cleared) - exactly when this card is stale - so the
+  // page re-reads the property onto the card. The sentence stays.
   it.each([
     ['contact_list_caseworker', "Caseworkers can't be on a property's contact list."],
     ['landlord_not_landlord', "Only a landlord can be a property's landlord of record."],
   ] as const)(
-    'a %s refusal names its own reason - not the landlord-of-record catch-all - and does not refetch',
+    'a %s refusal names its own reason - not the landlord-of-record catch-all - and re-reads the property onto the Contacts card',
     async (code, sentence) => {
       const user = userEvent.setup();
       useListing.mockReturnValue(ROSTER_READY);
-      getUnit.mockReset();
+      // The re-read: meanwhile another operator removed Dana's seat.
+      getUnit.mockReset().mockResolvedValue({
+        ...ROSTER_UNIT,
+        contacts: ROSTER_UNIT.contacts!.filter((row) => row.contactId !== 'pm2'),
+      });
       addUnitContact.mockReset().mockRejectedValue(new ApiError(409, code, code, { error: code }));
       renderAt();
 
       await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+      expect(screen.getByRole('button', { name: 'Remove Dana Reyes from this property' })).toBeInTheDocument();
       await user.click(screen.getByRole('button', { name: '+ Add contact' }));
       await user.type(screen.getByRole('combobox', { name: 'Add contact' }), 'Renata');
       await user.click(screen.getByRole('option', { name: /Renata Vale/ }));
@@ -1897,10 +1907,55 @@ describe('ListingDetail - Contacts card edit mode', () => {
       const alert = await screen.findByRole('alert');
       expect(alert).toHaveTextContent(sentence);
       expect(alert).not.toHaveTextContent(/landlord of record now/);
-      expect(getUnit).not.toHaveBeenCalled();
+      await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+      // Settled onto the card: Dana's seat is gone ...
+      await waitFor(() =>
+        expect(
+          screen.queryByRole('button', { name: 'Remove Dana Reyes from this property' }),
+        ).not.toBeInTheDocument(),
+      );
+      // ... and the refusal's sentence stays on the add row, with the pick.
+      expect(screen.getByRole('alert')).toHaveTextContent(sentence);
       expect(screen.getByRole('combobox', { name: 'Add contact' })).toHaveValue('Renata Vale');
     },
   );
+
+  it("a typed refusal of a row's edit keeps that row's sentence after the re-read settles the card", async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    // The re-read: meanwhile the landlord of record was cleared (James's row
+    // and landlordId gone), so Dana's Landlord role was a claim of the vacant
+    // slot by a contact not typed landlord.
+    const { landlordId: _cleared, ...ownerless } = ROSTER_UNIT;
+    getUnit.mockReset().mockResolvedValue({
+      ...ownerless,
+      contacts: ROSTER_UNIT.contacts!.filter((row) => row.contactId !== 'll1'),
+    });
+    addUnitContact
+      .mockReset()
+      .mockRejectedValue(
+        new ApiError(409, 'landlord_not_landlord', 'landlord_not_landlord', { error: 'landlord_not_landlord' }),
+      );
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Role for Dana Reyes' }), 'landlord');
+
+    expect(addUnitContact).toHaveBeenCalledWith('u1', { contactId: 'pm2', role: 'landlord', primaryContact: false });
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+    // Settled onto the card: James is no longer listed ...
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Remove James Porter from this property' }),
+      ).not.toBeInTheDocument(),
+    );
+    // ... and Dana's row still carries its sentence.
+    const danaRow = screen.getByRole('button', { name: 'Remove Dana Reyes from this property' })
+      .parentElement?.parentElement as HTMLElement;
+    expect(within(danaRow).getByRole('alert')).toHaveTextContent(
+      "Only a landlord can be a property's landlord of record.",
+    );
+  });
 
   it('asks the operator to retry when repeated concurrent roster writes exhaust retries', async () => {
     const user = userEvent.setup();

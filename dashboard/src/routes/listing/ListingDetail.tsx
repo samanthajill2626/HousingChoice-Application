@@ -436,13 +436,26 @@ export function ListingDetail(): React.JSX.Element {
         onSuccess?.();
       })
       .catch(async (err: unknown) => {
+        // The settle: re-read the property onto the card AND the page.
+        const settle = async (): Promise<void> => {
+          try {
+            applyRosterUnit(await getUnit(unit.unitId));
+          } catch {
+            /* the refetch is the settle; on failure the inline reason still stands */
+          }
+        };
         // caseworker-integrity (spec section 4): a contact-type refusal
         // (contact_list_caseworker, landlord_not_landlord) names its own reason.
         // Mapped BEFORE the 409 catch-all below, whose copy would otherwise
-        // claim "landlord of record". Nothing was written, so nothing to settle.
+        // claim "landlord of record". It settles like the catch-all (final
+        // review A3, fix wave FWF-2): this request wrote nothing, but the
+        // roster write answers these codes only when the property changed
+        // after the route's read (a seat removed, the landlord cleared) -
+        // exactly when the card is stale.
         const typed = contactTypeErrorMessage(err);
         if (typed !== null) {
           setRosterError({ key, message: typed });
+          await settle();
           return;
         }
         const conflict = err instanceof ApiError && err.status === 409;
@@ -457,11 +470,7 @@ export function ListingDetail(): React.JSX.Element {
             : "Couldn't save that change - please try again.",
         });
         if (!conflict) return;
-        try {
-          applyRosterUnit(await getUnit(unit.unitId));
-        } catch {
-          /* the refetch is the settle; on failure the inline reason still stands */
-        }
+        await settle();
       })
       .finally(() => setRosterBusy(null));
   };

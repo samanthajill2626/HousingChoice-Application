@@ -5,7 +5,9 @@
 //     restore as before; otherwise 409 restore_needs_landlord { landlordName? }
 //     and nothing is written;
 //   - { landlordId: <id> } / { landlordId: null }: honored only when the plain
-//     restore would refuse - swap or clear the landlord in one write;
+//     restore would refuse - swap or clear the landlord in one write; a body
+//     that arrives when the plain restore would apply answers 409
+//     unit_roster_conflict and writes nothing (spec revision 6, fix wave FWF-1);
 //   - the unit_restored audit gains landlordReplaced / landlordCleared.
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
@@ -120,12 +122,14 @@ describe('POST /api/units/:id/restore - plain restore (I3)', () => {
     expect(res.body).toEqual({ error: 'unit_not_found' });
   });
 
+  // The plain restore (no body) of a live property; the same request WITH a
+  // body is the late-body case below (fix wave FWF-1).
   it('(PIN) a property that is not deleted restores as before with no landlord check', async () => {
     const { app, world } = makeWebhookHarness();
     const unit = seedDeletedUnit(world, 'u-live');
     delete unit.deleted_at;
     seedContact(world, 'c-old', { type: 'tenant' });
-    const res = await restore(app, 'u-live', { landlordId: null });
+    const res = await restore(app, 'u-live');
     expect(res.status).toBe(200);
     expect(world.units.get('u-live')?.landlordId).toBe('c-old');
   });
@@ -193,21 +197,66 @@ describe('POST /api/units/:id/restore - with a landlord (I3)', () => {
     expect(restoredEvents(world)).toHaveLength(0);
   });
 
-  it('(PIN) a body is ignored when the stored landlord is still valid - the restore is plain', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedDeletedUnit(world, 'u-8a');
-    seedDeletedUnit(world, 'u-8b');
-    seedContact(world, 'c-old', { type: 'landlord' });
-    seedContact(world, 'c-new', { type: 'landlord' });
-    expect((await restore(app, 'u-8a', { landlordId: 'c-new' })).status).toBe(200);
-    expect((await restore(app, 'u-8b', { landlordId: null })).status).toBe(200);
-    expect(world.units.get('u-8a')?.landlordId).toBe('c-old');
-    expect(world.units.get('u-8b')?.landlordId).toBe('c-old');
-    for (const event of restoredEvents(world)) {
-      expect(event.payload).not.toHaveProperty('landlordReplaced');
-      expect(event.payload).not.toHaveProperty('landlordCleared');
-    }
-  });
+  // Final review A2 (spec revision 6 section 4 "Restore"; fix wave FWF-1),
+  // replacing "a body is ignored when the stored landlord is still valid": a
+  // body is sent only after a 409 restore_needs_landlord, so one that arrives
+  // when the PLAIN restore would apply means the property changed under the
+  // dialog - it is no longer deleted, its stored landlord is typed landlord
+  // again, or it is ownerless. The route answers 409 unit_roster_conflict and
+  // writes NOTHING: no restore, no unit_restored audit row.
+  const PLAIN_PATH_STATES: Array<[string, (world: FakeWorld) => void]> = [
+    [
+      'the property is no longer deleted',
+      (world) => {
+        const unit = seedDeletedUnit(world, 'u-late');
+        delete unit.deleted_at;
+        seedContact(world, 'c-old', { type: 'tenant' });
+      },
+    ],
+    [
+      'its stored landlord is typed landlord again',
+      (world) => {
+        seedDeletedUnit(world, 'u-late');
+        seedContact(world, 'c-old', { type: 'landlord' });
+      },
+    ],
+    [
+      'it is ownerless',
+      (world) => {
+        const unit = seedDeletedUnit(world, 'u-late', {
+          contacts: [{ contactId: 'c-pm', role: 'pm', primaryContact: false }],
+        });
+        delete (unit as Partial<UnitItem>).landlordId;
+        delete unit.primary_contact;
+      },
+    ],
+  ];
+  const LATE_BODIES: Array<[string, string | null]> = [
+    ['with a landlord', 'c-new'],
+    ['without a landlord', null],
+  ];
+  const LATE_BODY_CASES = PLAIN_PATH_STATES.flatMap(([state, seed]) =>
+    LATE_BODIES.map(([choice, landlordId]) => [state, choice, seed, landlordId] as const),
+  );
+  it.each(LATE_BODY_CASES)(
+    'a body when the plain restore would apply (%s), restore %s: 409 unit_roster_conflict - nothing written, no audit',
+    async (_state, _choice, seed, landlordId) => {
+      const { app, world } = makeWebhookHarness();
+      seed(world);
+      seedContact(world, 'c-new', { type: 'landlord' });
+      const before = structuredClone(world.units.get('u-late'));
+      expect(before).toBeDefined();
+
+      const res = await restore(app, 'u-late', { landlordId });
+
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: 'unit_roster_conflict' });
+      // Unchanged in every field: a deleted property is still deleted, a live
+      // one keeps its landlord, and no write touched updated_at.
+      expect(world.units.get('u-late')).toEqual(before);
+      expect(restoredEvents(world)).toHaveLength(0);
+    },
+  );
 
   // R1 code review, backend finding 2 - the review's interleaving through the
   // route: the route reads the DELETED unit and its landlord (typed tenant, so

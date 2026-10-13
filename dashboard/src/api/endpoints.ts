@@ -1042,7 +1042,9 @@ export async function deleteUnit(unitId: string): Promise<UnitItem> {
  *  answer's roster, never the one the page loaded. For `{ landlordId: null }`,
  *  409 unit_roster_conflict also means the property's contact list changed
  *  between the server's read and its write: nothing was restored - re-read the
- *  property. */
+ *  property. With either body it also means the plain restore would apply
+ *  now (the property was restored meanwhile, its stored landlord is a
+ *  landlord again, or it has none): nothing was written (spec revision 6). */
 export async function restoreUnit(
   unitId: string,
   opts?: { landlordId: string | null },

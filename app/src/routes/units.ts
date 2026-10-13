@@ -1710,13 +1710,20 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     //     { landlordId: null } restores ownerless and, when the cleared landlord
     //     was the primary, promotes the one remaining contact typed landlord
     //     (spec revision 5, soleLandlordToPromote). Honored ONLY when the plain
-    //     restore would refuse (otherwise ignored), in ONE conditional write
+    //     restore would refuse, in ONE conditional write
     //     (unitsRepo.restoreWithLandlord) on the landlordId read here - and, for
     //     { landlordId: null }, the contact list read here - so a concurrent
     //     change answers 409 unit_roster_conflict.
+    //   - A body is sent only after a 409 restore_needs_landlord, so one that
+    //     arrives when the plain restore WOULD apply (the unit is no longer
+    //     soft-deleted, its stored landlord is typed landlord again, or it is
+    //     ownerless) means the state changed under the dialog: 409
+    //     unit_roster_conflict and NOTHING is written - no restore, no audit
+    //     (spec revision 6; final review A2, fix wave FWF-1). The dashboard
+    //     re-reads the property.
     //   - A unit that is NOT soft-deleted restores exactly as before with no
-    //     check: nothing comes back to life, and restore must never become a
-    //     way to reassign a live property's landlord.
+    //     check (plain restore only): nothing comes back to life, and restore
+    //     must never become a way to reassign a live property's landlord.
     const raw: unknown = req.body;
     const body =
       typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
@@ -1745,6 +1752,17 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     }
 
     if (!needsLandlord) {
+      // The late body (spec revision 6, fix wave FWF-1): the plain restore
+      // applies, so a landlord choice cannot be what the caller saw - refuse
+      // before anything is written, so the dialog re-reads the property.
+      if (choosesLandlord) {
+        log.info(
+          { unitId, actor: req.user?.userId },
+          'unit restore refused: a landlord choice arrived when the plain restore applies',
+        );
+        res.status(409).json({ error: 'unit_roster_conflict' });
+        return;
+      }
       let unit;
       try {
         unit = await units.restore(unitId);

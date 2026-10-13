@@ -1447,6 +1447,86 @@ describe('ListingDetail', () => {
     );
   });
 
+  // Spec revision 6 section 4 "Restore" (final review A2; fix wave FWF-1): a
+  // landlord choice that arrives when the plain restore would apply - here
+  // another staff member restored the property, with their own landlord, while
+  // this dialog was open - answers 409 unit_roster_conflict and writes nothing.
+  // The dialog's conflict path re-reads; the property is no longer deleted, so
+  // the dialog closes and the page shows the real state: live, with the
+  // re-read's landlord on the Contacts card - never the one picked here.
+  it('a landlord choice answered 409 unit_roster_conflict closes the dialog when the re-read shows the property live, and the page shows the re-read property', async () => {
+    const user = userEvent.setup();
+    const deletedUnit: NonNullable<ListingState['unit']> = {
+      ...READY.unit!,
+      deleted_at: '2026-06-19T00:00:00.000Z',
+      landlordId: 'll1',
+      primary_contact: 'll1',
+      contacts: [{ contactId: 'll1', role: 'landlord', primaryContact: true, name: 'James Porter' }],
+    };
+    // The re-read: staff B restored it with Yolanda as its landlord of record.
+    const { deleted_at: _live, ...liveBase } = deletedUnit;
+    const fresh: NonNullable<ListingState['unit']> = {
+      ...liveBase,
+      landlordId: 'll7',
+      primary_contact: 'll7',
+      contacts: [{ contactId: 'll7', role: 'landlord', primaryContact: true, name: 'Yolanda Banks' }],
+    };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+          error: 'restore_needs_landlord',
+          landlordName: 'James Porter',
+        }),
+      )
+      .mockRejectedValueOnce(
+        new ApiError(409, 'unit_roster_conflict', 'unit_roster_conflict', { error: 'unit_roster_conflict' }),
+      );
+    getUnit.mockReset().mockResolvedValue(fresh);
+    getAllContacts
+      .mockReset()
+      .mockResolvedValue([{ contactId: 'll9', type: 'landlord', firstName: 'Nora', lastName: 'Lane' }]);
+    // As the real hook: setUnit replaces the unit and keeps the roster rows
+    // derived at load, which only the Contacts card's own roster state can
+    // supersede.
+    let current: ListingState = {
+      ...READY,
+      unit: deletedUnit,
+      roster: [
+        { contactId: 'll1', name: 'James Porter', role: 'landlord', roleLabel: 'Landlord', primaryContact: true, fallback: false },
+      ],
+      setUnit: vi.fn((unit: NonNullable<ListingState['unit']>) => {
+        current = { ...current, unit };
+      }),
+    };
+    useListing.mockImplementation(() => current);
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await waitFor(() => expect(getAllContacts).toHaveBeenCalled());
+    await user.type(within(dialog).getByRole('combobox', { name: 'Landlord' }), 'Nora');
+    await user.click(await screen.findByRole('option', { name: /Nora Lane/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Restore with this landlord' }));
+
+    expect(restoreUnit).toHaveBeenLastCalledWith('u1', { landlordId: 'll9' });
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+    // The real state: live - no Deleted badge or Restore action, the status
+    // pill is back ...
+    expect(screen.queryByText('Deleted')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Restore$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Property status/i })).toBeInTheDocument();
+    // ... and the re-read's landlord on the Contacts card, not the pick.
+    const card = screen.getByRole('heading', { name: /^Contacts/ }).closest('section') as HTMLElement;
+    expect(within(card).getAllByRole('link')[0]).toHaveTextContent('Yolanda Banks (primary)');
+    expect(within(card).queryByText(/Nora Lane/)).not.toBeInTheDocument();
+    expect(within(card).queryByText(/James Porter/)).not.toBeInTheDocument();
+    expect(restoreUnit).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     [404, 'unit_not_found'],
     [409, 'unit_roster_conflict'],

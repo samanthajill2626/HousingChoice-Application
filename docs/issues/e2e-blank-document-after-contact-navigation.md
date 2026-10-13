@@ -40,3 +40,15 @@ alone 1/1 (13.2 s). No trace (the gate does not set `E2E_TRACE=1`);
 screenshot and video kept on Cameron's machine. Different scenario from the
 first sighting, same signature: a blank document after contact navigation.
 Record: `docs/superpowers/reviews/2026-10-07-caseworkers/windows-gates-2026-10-11.md`.
+
+**Third sighting (2026-10-12 ~23:40 EDT, Windows, `fix/caseworker-integrity` @6b220900,
+lane 6).** The same final gate run (344 passed / 2 failed, 27.9 min on a busy machine;
+the three earlier full runs that evening were 345/345 in about 22 min):
+`tests/scenarios/approval-and-move-in.spec.ts:242`, step "Team moves the placement ->
+Lost", stopped on "the placement page did not finish loading (waited 20007ms of a 20s
+budget)"; the screenshot is an entirely white document - a placement page this time,
+not a contact page, so the signature is "a blank document after an in-app navigation".
+The run's other failure was the sign-in twin (`e2e-blank-first-paint-at-sign-in`, third
+sighting); 2672 TIME_WAIT sockets right after. Artifacts:
+`W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p6-e2e-artifacts\`. Isolation and the
+clean re-run are recorded in the caseworker-integrity handback.

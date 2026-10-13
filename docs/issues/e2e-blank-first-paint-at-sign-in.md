@@ -66,3 +66,16 @@ full-reload message. If it recurs at mobile widths only, look at the viewport ch
 before `page.goto`. Do not add this to any re-run list: a sign-in that paints nothing is
 a dev-server event, and `reuseExistingServer`'s commit-match adoption means a stale
 orphaned stack would show the same symptom - check for one first.
+
+**Third sighting (2026-10-12 ~23:30 EDT, Windows, `fix/caseworker-integrity` @6b220900,
+lane 6).** The branch's FINAL gate run (its fourth full e2e of the evening, on a machine
+also running other missions' gates) finished 344 passed / 2 failed in 27.9 min against
+22.0-22.5 min for the three earlier full runs, which were 345/345. One failure is this
+signature: `tests/dashboard-next/inbox-comms.spec.ts:20` waited the whole 60 s test
+budget for "Continue as dev user" at sign-in; the screenshot is an entirely white
+document. Socket table right after: 2672 TIME_WAIT, 302 established (dynamic pool
+16384). The other failure is the contact-navigation twin
+(`e2e-blank-document-after-contact-navigation`, third sighting). Artifacts copied before
+any re-run: `W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p6-e2e-artifacts\`
+(screenshots, videos, error contexts). Isolation and the clean re-run are recorded in
+`docs/superpowers/reviews/2026-10-12-caseworker-integrity/handback.md`.

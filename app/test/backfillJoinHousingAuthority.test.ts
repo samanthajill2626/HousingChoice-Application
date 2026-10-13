@@ -20,6 +20,12 @@ import type { ContactItem } from '../src/repos/contactsRepo.js';
 import { createExtractionRepo } from '../src/repos/extractionRepo.js';
 import { createOrgListRepo, type OrgListItem, type OrgListRepo, type OrgRewriteState } from '../src/repos/orgListRepo.js';
 import {
+  createSuggestionResolutionRepo,
+  tokenFor,
+  type ResolutionReplayPlan,
+  type SuggestionResolutionItem,
+} from '../src/repos/suggestionResolutionRepo.js';
+import {
   BACKFILL_ARGS,
   BACKFILL_AUDIT_TYPE,
   BACKFILL_AUTHORITY,
@@ -577,14 +583,24 @@ function recordingClient(inner: DynamoDBDocumentClient): {
   return { doc: recording, sent, inputs };
 }
 
-/** The GetItem inputs a recorder sent to one base table of a world. */
+/**
+ * The GetItem inputs a recorder sent to one base table of a world - with a
+ * prefix, only those whose itemId starts with it (the ai_extraction table
+ * holds the suggestion `sugg#`, resolution `resolve#` and dismissal `dism#`
+ * rows side by side).
+ */
 const getsOn = (
   recorder: ReturnType<typeof recordingClient>,
   w: World,
   base: 'settings' | 'ai_extraction',
+  itemIdPrefix?: 'sugg#' | 'resolve#' | 'dism#',
 ): Array<Record<string, unknown>> =>
   recorder.inputs
     .filter((c) => c.name === 'GetCommand' && c.input['TableName'] === tableName(base, w.env))
+    .filter((c) => {
+      const key = c.input['Key'] as Record<string, unknown> | undefined;
+      return itemIdPrefix === undefined || String(key?.['itemId']).startsWith(itemIdPrefix);
+    })
     .map((c) => c.input);
 
 interface World {
@@ -600,6 +616,13 @@ interface World {
   suggest(contactId: string, suggestedValue: string): Promise<void>;
   /** Dismiss it the way the app does: the suggestion row deleted, a dismissal tombstone written. */
   dismiss(contactId: string, normalizedValue: string): Promise<void>;
+  /**
+   * A housingAuthority suggestion an accept or dismiss CLAIMED, through the
+   * real repos: its resolution record `active` and the suggestion row deleted
+   * (in flight, or abandoned by a process that died) - or claimed and then
+   * finished (`completed`).
+   */
+  resolving(contactId: string, state: 'active' | 'completed', action?: 'accept' | 'dismiss'): Promise<void>;
   get(contactId: string): Promise<Record<string, unknown> | undefined>;
   scanTable(base: 'contacts' | 'settings' | 'audit_events'): Promise<string[]>;
   backfillEvents(): Promise<Record<string, unknown>[]>;
@@ -621,6 +644,7 @@ async function newWorld(orgList: OrgListItem | null = listItem(startingEntries()
   }
   const orgListRepo = createOrgListRepo({ doc, env, logger: silent });
   const extraction = createExtractionRepo({ doc, env, logger: silent });
+  const resolutions = createSuggestionResolutionRepo({ doc, env, logger: silent });
   if (orgList !== null) await orgListRepo.putForSeed(orgList);
   const put = async (item: Record<string, unknown>): Promise<void> => {
     await doc.send(new PutCommand({ TableName: tableName('contacts', env), Item: item }));
@@ -664,6 +688,37 @@ async function newWorld(orgList: OrgListItem | null = listItem(startingEntries()
     dismiss: async (contactId, normalizedValue) => {
       await extraction.deleteSuggestion(contactId, 'housingAuthority');
       await extraction.putDismissal(contactId, 'housingAuthority', normalizedValue);
+    },
+    resolving: async (contactId, state, action = 'accept') => {
+      const { item } = await extraction.putSuggestion({
+        ownerContactId: contactId,
+        target: 'housingAuthority',
+        suggestedValue: 'Cobb County Housing Authority',
+        conversationId: `conv-${contactId}`,
+      });
+      const plan: ResolutionReplayPlan =
+        action === 'accept'
+          ? {
+              kind: 'contact',
+              patch: { housingAuthority: 'Cobb County Housing Authority' },
+              guard: { housingAuthority: { exists: false } },
+              audit: { eventType: 'ai_suggestion_accepted', payload: { target: 'housingAuthority' } },
+            }
+          : {
+              kind: 'dismiss',
+              normalizedValue: 'cobb county housing authority',
+              audit: { eventType: 'ai_suggestion_dismissed', payload: { target: 'housingAuthority' } },
+            };
+      const claimed = await resolutions.claim({ suggestion: item, action, actorId: 'user-0001', plan, now: new Date().toISOString() });
+      if (claimed.status !== 'claimed') throw new Error(`could not claim the suggestion of ${contactId}: ${claimed.status}`);
+      if (state === 'completed') {
+        const done = await resolutions.complete({
+          token: tokenFor(claimed.journal),
+          expectedPhase: 'claimed',
+          completedAt: new Date().toISOString(),
+        });
+        if (done !== 'completed') throw new Error(`could not complete the resolution of ${contactId}: ${done}`);
+      }
     },
     get: async (contactId) =>
       (await doc.send(new GetCommand({ TableName: tableName('contacts', env), Key: { contactId } }))).Item,
@@ -783,7 +838,14 @@ describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
         return undefined;
       },
     };
-    const deps = { audit, suggestions };
+    const resolutions: BackfillDeps['resolutions'] = {
+      get: async (contactId) => {
+        reads.push(`resolution ${contactId}`);
+        if (contactId === 'c-skip') throw new Error('ThrottlingException');
+        return undefined;
+      },
+    };
+    const deps = { audit, suggestions, resolutions };
     const skip = new Set(['c-skip', 'c-excluded']);
     expect(await leftOutReasonFor(deps, 'c-skip', skip)).toEqual({ reason: 'skipped' });
     expect(await leftOutReasonFor(deps, 'c-excluded', skip)).toEqual({ reason: 'skipped' });
@@ -792,14 +854,63 @@ describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
     expect(await leftOutReasonFor(deps, 'c-excluded', new Set())).toEqual({ reason: 'excluded_earlier' });
     expect(await leftOutReasonFor(deps, 'c-other', skip)).toEqual({ reason: null });
     // A lead not named in --skip has its history read to its end (a page, then the empty page);
-    // the pending suggestion only for the lead no earlier reason leaves out.
-    expect(reads).toEqual(['contacts#c-excluded', 'contacts#c-excluded', 'contacts#c-other', 'suggestion c-other']);
+    // its resolution record and then its pending suggestion only for the lead no earlier reason leaves out.
+    expect(reads).toEqual([
+      'contacts#c-excluded',
+      'contacts#c-excluded',
+      'contacts#c-other',
+      'resolution c-other',
+      'suggestion c-other',
+    ]);
+  });
+
+  it('a suggestion accept or dismiss IN PROGRESS (an ACTIVE resolution record) leaves the lead out - read after the history and before the pending suggestion, consistently, for the housingAuthority target; a COMPLETED record leaves nothing out', async () => {
+    const reads: string[] = [];
+    const states: Record<string, 'active' | 'completed'> = { 'c-active': 'active', 'c-done': 'completed' };
+    const deps: Parameters<typeof leftOutReasonFor>[0] = {
+      audit: {
+        append: async () => {},
+        listByEntity: async (entityKey) => {
+          reads.push(entityKey);
+          return [];
+        },
+      },
+      resolutions: {
+        get: async (contactId, target) => {
+          reads.push(`resolution ${contactId} ${target}`);
+          const state = states[contactId];
+          return state === undefined
+            ? undefined
+            : ({ itemId: `resolve#${contactId}#${target}`, state, contactId, target } as SuggestionResolutionItem);
+        },
+      },
+      suggestions: {
+        getSuggestion: async (contactId) => {
+          reads.push(`suggestion ${contactId}`);
+          return undefined;
+        },
+      },
+    };
+    expect(await leftOutReasonFor(deps, 'c-active', NO_SKIP)).toEqual({ reason: 'resolution_in_progress' });
+    expect(await leftOutReasonFor(deps, 'c-done', NO_SKIP)).toEqual({ reason: null });
+    expect(await leftOutReasonFor(deps, 'c-none', NO_SKIP)).toEqual({ reason: null });
+    expect(reads).toEqual([
+      'contacts#c-active',
+      'resolution c-active housingAuthority',
+      'contacts#c-done',
+      'resolution c-done housingAuthority',
+      'suggestion c-done',
+      'contacts#c-none',
+      'resolution c-none housingAuthority',
+      'suggestion c-none',
+    ]);
   });
 
   it('a pending housingAuthority suggestion is read last - consistently, for the housingAuthority target - and leaves the lead out with its value', async () => {
     const calls: unknown[] = [];
-    const deps: Pick<BackfillDeps, 'audit' | 'suggestions'> = {
+    const deps: Pick<BackfillDeps, 'audit' | 'resolutions' | 'suggestions'> = {
       audit: { append: async () => {}, listByEntity: async () => [] },
+      resolutions: { get: async () => undefined },
       suggestions: {
         getSuggestion: async (contactId, target, opts) => {
           calls.push([contactId, target, opts]);
@@ -960,9 +1071,42 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
     expect((await leftOutReasonFor(deps, 'c-skip', skip)).reason).toBe('skipped');
     expect(await leftOutReasonFor(deps, 'c-dismissed', skip)).toEqual({ reason: null });
     // One consistent GetItem each - for c-sugg and c-dismissed only.
-    expect(getsOn(recorder, w, 'ai_extraction')).toEqual([
+    expect(getsOn(recorder, w, 'ai_extraction', 'sugg#')).toEqual([
       { TableName: tableName('ai_extraction', w.env), Key: { itemId: 'sugg#c-sugg#housingAuthority' }, ConsistentRead: true },
       { TableName: tableName('ai_extraction', w.env), Key: { itemId: 'sugg#c-dismissed#housingAuthority' }, ConsistentRead: true },
+    ]);
+  }, 120_000);
+
+  it('an accept or dismiss IN PROGRESS through the store: an ACTIVE resolution record leaves a lead out (its suggestion row already deleted) with one consistent GetItem; a COMPLETED one does not; the precedence around it', async () => {
+    const w = await newWorld();
+    const ts = '2026-08-01T12:00:00.000Z#aaaa0001';
+    await w.resolving('c-accepting', 'active', 'accept');
+    await w.resolving('c-dismissing', 'active', 'dismiss');
+    await w.resolving('c-done', 'completed', 'accept');
+    // authority_history wins over an accept in progress - and the record is never read.
+    await w.resolving('c-hist', 'active');
+    await w.audit('c-hist', ts, 'contact_updated', { fields: ['housingAuthority'], actor: 'user-0001' });
+    // An accept in progress wins over a NEWER pending suggestion (an AI run suggested again after the claim) -
+    // and the suggestion is never read.
+    await w.resolving('c-both', 'active');
+    await w.suggest('c-both', 'DeKalb County Housing Authority');
+    const recorder = recordingClient(doc);
+    const { deps } = w.deps({ onDoc: recorder.doc });
+    expect(await leftOutReasonFor(deps, 'c-accepting', NO_SKIP)).toEqual({ reason: 'resolution_in_progress' });
+    expect(await leftOutReasonFor(deps, 'c-dismissing', NO_SKIP)).toEqual({ reason: 'resolution_in_progress' });
+    expect(await leftOutReasonFor(deps, 'c-done', NO_SKIP)).toEqual({ reason: null });
+    expect(await leftOutReasonFor(deps, 'c-hist', NO_SKIP)).toEqual({ reason: 'authority_history' });
+    expect(await leftOutReasonFor(deps, 'c-both', NO_SKIP)).toEqual({ reason: 'resolution_in_progress' });
+    const table = tableName('ai_extraction', w.env);
+    expect(getsOn(recorder, w, 'ai_extraction', 'resolve#')).toEqual(
+      ['c-accepting', 'c-dismissing', 'c-done', 'c-both'].map((id) => ({
+        TableName: table,
+        Key: { itemId: `resolve#${id}#housingAuthority` },
+        ConsistentRead: true,
+      })),
+    );
+    expect(getsOn(recorder, w, 'ai_extraction', 'sugg#').map((input) => input['Key'])).toEqual([
+      { itemId: 'sugg#c-done#housingAuthority' },
     ]);
   }, 120_000);
 
@@ -988,7 +1132,7 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
         return deps.audit.listByEntity(entityKey, opts);
       },
     };
-    const paged = { audit, auditPageSize: 2, suggestions: deps.suggestions };
+    const paged = { audit, auditPageSize: 2, resolutions: deps.resolutions, suggestions: deps.suggestions };
     expect((await leftOutReasonFor(paged, 'c-deep', NO_SKIP)).reason).toBe('authority_history');
     // Pages of two, newest first: [07-05, 07-04], [07-03, 07-02], [07-01], then the empty page that ends it.
     expect(befores).toEqual([
@@ -1024,6 +1168,9 @@ const EXCLUSION_FAILED_LOG =
 const SKIP_HISTORY_UNREAD_LOG =
   'backfill-join-housing-authority - could not read the audit history of a lead named in --skip; recording its exclusion anyway (a second exclusion event is harmless)';
 const SKIP_LINE = '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-skip  - named in --skip';
+/** The ERROR line of a lead one of whose reads failed - no write was attempted. */
+const READ_FAILED_LOG =
+  'backfill-join-housing-authority - could not read the audit history, the suggestion resolution record or the pending suggestion; nothing written for this contact';
 /** The done line of an --apply that STOPPED in its exclusions-first pass (spec D10 revision 6). */
 const STOPPED_LOG = (unrecorded: number): string =>
   `backfill-join-housing-authority - STOPPED before any housing authority write: ${unrecorded} exclusion(s) may not have been ` +
@@ -1158,10 +1305,16 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect(recorder.sent.filter((name) => !READ_COMMANDS.has(name))).toEqual([]);
     expect(getsOn(recorder, w, 'settings')).toHaveLength(1);
     // The pending-suggestion read: one consistent GetItem per would-be target, none for a lead left out earlier.
-    expect(getsOn(recorder, w, 'ai_extraction').map((input) => [input['Key'], input['ConsistentRead']])).toEqual([
+    expect(getsOn(recorder, w, 'ai_extraction', 'sugg#').map((input) => [input['Key'], input['ConsistentRead']])).toEqual([
       [{ itemId: 'sugg#c-old#housingAuthority' }, true],
       [{ itemId: 'sugg#c-mid#housingAuthority' }, true],
       [{ itemId: 'sugg#c-new#housingAuthority' }, true],
+    ]);
+    // The resolution-record read (spec D10 revision 6): the same - one consistent GetItem per would-be target.
+    expect(getsOn(recorder, w, 'ai_extraction', 'resolve#').map((input) => [input['Key'], input['ConsistentRead']])).toEqual([
+      [{ itemId: 'resolve#c-old#housingAuthority' }, true],
+      [{ itemId: 'resolve#c-mid#housingAuthority' }, true],
+      [{ itemId: 'resolve#c-new#housingAuthority' }, true],
     ]);
     expect(await w.scanTable('contacts')).toEqual(before.contacts);
     expect(await w.scanTable('settings')).toEqual(before.settings);
@@ -1535,6 +1688,13 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
           return base.deps.suggestions.getSuggestion(contactId, target, opts);
         },
       },
+      resolutions: {
+        get: async (contactId, target) => {
+          reads.push(`resolution ${contactId}`);
+          if (contactId === 'c-skip') throw new Error('ThrottlingException');
+          return base.deps.resolutions.get(contactId, target);
+        },
+      },
     };
     const report = await runJoinAuthorityBackfill(deps, { apply: false, skip: SKIP });
     expect(report).toEqual({
@@ -1552,11 +1712,14 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect([...new Set(reads)]).toEqual([
       'contacts#c-again',
       'contacts#c-old',
+      'resolution c-old',
       'suggestion c-old',
       'contacts#c-mid',
+      'resolution c-mid',
       'suggestion c-mid',
       'contacts#c-cleared',
       'contacts#c-new',
+      'resolution c-new',
       'suggestion c-new',
     ]);
     expect(backfillExitCode(report)).toBe(0);
@@ -1601,6 +1764,72 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect(backfillExitCode(report)).toBe(0);
   }, 120_000);
 
+  it('a lead whose housing authority suggestion accept or dismiss is IN PROGRESS (or was abandoned) is left out by the dry run and the apply - nothing written for it; a COMPLETED one is a target', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    await w.lead('c-busy', { firstName: 'Kai', lastName: 'Inflight', captured_at: '2026-06-15T09:00:00.000Z' });
+    await w.resolving('c-busy', 'active');
+    await w.lead('c-finished', { firstName: 'Lee', lastName: 'Finished', captured_at: '2026-08-20T09:00:00.000Z' });
+    await w.resolving('c-finished', 'completed', 'dismiss');
+    const busyLine =
+      '  Kai Inflight  signed up 2026-06-15  status needs_review  contactId c-busy' +
+      '  - a suggestion accept or dismiss is in progress - re-run after it finishes';
+    const busyLead = {
+      contactId: 'c-busy',
+      firstName: 'Kai',
+      lastName: 'Inflight',
+      signedUpAt: '2026-06-15T09:00:00.000Z',
+      status: 'needs_review',
+      reason: 'resolution_in_progress',
+    };
+
+    const dry = w.deps();
+    const dryReport = await runJoinAuthorityBackfill(dry.deps, { apply: false, skip: SKIP });
+    expect(dryReport.targets.map((t) => t.contactId)).toEqual(['c-old', 'c-mid', 'c-new', 'c-finished']);
+    expect(dryReport.leftOut).toEqual([LEFT_OUT[0], LEFT_OUT[1], busyLead, LEFT_OUT[2]]);
+    expect(dry.printed).toContain(busyLine);
+
+    const applied = w.deps();
+    const report = await runJoinAuthorityBackfill(applied.deps, { apply: true, skip: SKIP });
+    expect(report).toMatchObject({ written: 4, failed: 0 });
+    expect(report.leftOut).toContainEqual(busyLead);
+    expect(applied.printed).toContain(busyLine);
+    expect((await w.get('c-busy'))?.['housingAuthority']).toBeUndefined();
+    expect(await w.get('c-finished')).toMatchObject({ housingAuthority: 'Atlanta Housing Authority' });
+    expect((await w.backfillEvents()).map((e) => e['entityKey'])).not.toContain('contacts#c-busy');
+    expect((await w.excludedEvents()).map((e) => e['entityKey'])).toEqual(['contacts#c-skip']);
+    expect(backfillExitCode(report)).toBe(0);
+  }, 120_000);
+
+  it('a lead whose suggestion-resolution read fails is a read failure - nothing written for it - and the run goes on: exit 1', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const capture = createLogCapture();
+    const base = w.deps({ logger: createLogger({ level: 'info', destination: capture.stream }) });
+    const deps: BackfillDeps = {
+      ...base.deps,
+      resolutions: {
+        get: async (contactId, target) => {
+          if (contactId === 'c-new') throw new Error('ThrottlingException');
+          return base.deps.resolutions.get(contactId, target);
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report.targets.map((t) => [t.contactId, t.outcome])).toEqual([
+      ['c-old', 'written'],
+      ['c-mid', 'written'],
+      ['c-new', 'read_failed'],
+    ]);
+    expect(report).toMatchObject({ written: 2, failed: 1 });
+    expect((await w.get('c-new'))?.['housingAuthority']).toBeUndefined();
+    expect(base.printed).toContain(
+      '  Casey Quillfeather  signed up 2026-08-15  status onboarding  contactId c-new  - FAILED: nothing written (an ERROR line names this contactId); re-run',
+    );
+    expect(capture.atLevel(50).map((l) => [l['contactId'], l['msg']])).toEqual([['c-new', READ_FAILED_LOG]]);
+    expect(backfillExitCode(report)).toBe(1);
+  }, 120_000);
+
   it('a lead whose pending-suggestion read fails is a read failure - nothing written for it - and the run goes on: exit 1', async () => {
     const w = await newWorld();
     await seedLeads(w);
@@ -1628,7 +1857,7 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
       '  Blake Boothwick  signed up 2026-07-04  status on_hold  contactId c-mid  - FAILED: nothing written (an ERROR line names this contactId); re-run',
     );
     expect(capture.atLevel(50).map((l) => [l['contactId'], l['msg']])).toEqual([
-      ['c-mid', 'backfill-join-housing-authority - could not read the audit history or the pending suggestion; nothing written for this contact'],
+      ['c-mid', READ_FAILED_LOG],
     ]);
     expect(backfillExitCode(report)).toBe(1);
   }, 120_000);

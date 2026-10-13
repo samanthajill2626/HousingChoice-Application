@@ -14,14 +14,17 @@
 // event - spec D10 revision 5); one with a post-change sign-up (a
 // housing_fair_signup event carrying signupVersion 2, spec D7); one whose
 // audit trail shows housingAuthority was ever SET OR REMOVED
-// (touchesHousingAuthority); one with a PENDING housingAuthority AI suggestion
-// (extractionRepo.getSuggestion, one consistent GetItem, read only for a
-// candidate nothing earlier leaves out - spec D10 revision 5; the report shows
-// the suggested value). A candidate named in --skip is left out with NO read,
-// so no failed read can make it a target. Every other candidate's WHOLE
-// history is read: auditRepo.listByEntity is one newest-first Query with no
-// cursor, so the run pages backward with `before` until a page comes back
-// empty.
+// (touchesHousingAuthority); one whose housingAuthority suggestion accept or
+// dismiss is in flight or was abandoned (an ACTIVE suggestion resolution
+// record - suggestionResolutionRepo.get, one consistent GetItem, spec D10
+// revision 6); one with a PENDING housingAuthority AI suggestion
+// (extractionRepo.getSuggestion, one consistent GetItem - spec D10 revision 5;
+// the report shows the suggested value). Each of the last two is read only
+// for a candidate nothing earlier leaves out. A candidate named in --skip is
+// left out with NO read, so no failed read can make it a target. Every other
+// candidate's WHOLE history is read: auditRepo.listByEntity is one
+// newest-first Query with no cursor, so the run pages backward with `before`
+// until a page comes back empty.
 //
 // EXCLUSIONS: an --apply appends ONE housing_authority_backfill_excluded event
 // { field: 'housingAuthority' }, no actor, to each candidate it leaves out
@@ -87,6 +90,7 @@ import {
 } from '../src/repos/contactsRepo.js';
 import { createExtractionRepo, type ExtractionRepo } from '../src/repos/extractionRepo.js';
 import { createOrgListRepo, type OrgListItem, type OrgListRepo } from '../src/repos/orgListRepo.js';
+import { createSuggestionResolutionRepo, type SuggestionResolutionRepo } from '../src/repos/suggestionResolutionRepo.js';
 import { isOrgRewriteRunning } from '../src/services/orgNames.js';
 import {
   parseStageArgs,
@@ -119,12 +123,21 @@ export const BACKFILL_EXCLUDED_AUDIT_TYPE = 'housing_authority_backfill_excluded
 
 /**
  * Why a candidate is left out: listed with the reason, never written. Several
- * can hold at once; the ONE printed follows this order (spec D10 revision 5):
- * skipped (named in --skip on this run), excluded_earlier, signed_up_again,
- * authority_history, pending_suggestion (a pending housingAuthority AI
- * suggestion - read only for a candidate nothing earlier leaves out).
+ * can hold at once; the ONE printed follows this order (spec D10 revisions 5
+ * and 6): skipped (named in --skip on this run), excluded_earlier,
+ * signed_up_again, authority_history, resolution_in_progress (a
+ * housingAuthority suggestion accept or dismiss in flight or abandoned: its
+ * resolution record is active), pending_suggestion (a pending
+ * housingAuthority AI suggestion). The last two are each read only for a
+ * candidate nothing earlier leaves out.
  */
-export type LeftOutReason = 'skipped' | 'excluded_earlier' | 'signed_up_again' | 'authority_history' | 'pending_suggestion';
+export type LeftOutReason =
+  | 'skipped'
+  | 'excluded_earlier'
+  | 'signed_up_again'
+  | 'authority_history'
+  | 'resolution_in_progress'
+  | 'pending_suggestion';
 
 /** The capture_source only the sign-up route writes (a /join sign-up, or a flyer one for an unshareable unit). */
 const JOIN_CAPTURE_SOURCE = 'housing_fair';
@@ -199,7 +212,7 @@ const isExclusion = (event: AuditEvent): boolean => event.event_type === BACKFIL
  */
 export function leftOutReasonFromAudit(
   events: readonly AuditEvent[],
-): Exclude<LeftOutReason, 'skipped' | 'pending_suggestion'> | null {
+): Exclude<LeftOutReason, 'skipped' | 'resolution_in_progress' | 'pending_suggestion'> | null {
   if (events.some(isExclusion)) return 'excluded_earlier';
   const signedUpAgain = events.some(
     (e) => e.event_type === 'housing_fair_signup' && isRecord(e.payload) && e.payload['signupVersion'] === 2,
@@ -228,8 +241,9 @@ export interface BackfillLead {
 /**
  * What became of one target: would_write (dry run); written; skipped (its
  * write lost its condition - the lead changed after the read, nothing
- * written); read_failed (its history or pending-suggestion read threw - no
- * write was attempted, so nothing written); write_failed (its write threw any error but a lost
+ * written); read_failed (its history, suggestion-resolution or
+ * pending-suggestion read threw - no write was attempted, so nothing
+ * written); write_failed (its write threw any error but a lost
  * condition - a timeout can follow a write that landed, so it may or may not
  * have landed). Both failures count in `failed`; the run exits 1.
  */
@@ -287,6 +301,7 @@ const REASON_TEXT: Readonly<Record<Exclude<LeftOutReason, 'pending_suggestion'>,
   excluded_earlier: 'excluded on an earlier run',
   signed_up_again: 'signed up again after the change',
   authority_history: 'its housing authority was set or removed before - left empty on purpose',
+  resolution_in_progress: 'a suggestion accept or dismiss is in progress - re-run after it finishes',
 };
 
 /** A left-out lead's reason as printed; a suggested value is AI-heard text, escaped like a name. */
@@ -440,6 +455,12 @@ export interface BackfillDeps {
   audit: Pick<AuditRepo, 'append' | 'listByEntity'>;
   /** The extraction repo's pending-suggestion read (spec D10 revision 5: a pending housingAuthority suggestion leaves a lead out). */
   suggestions: Pick<ExtractionRepo, 'getSuggestion'>;
+  /**
+   * The suggestion-resolution journal's read (spec D10 revision 6): an ACTIVE
+   * housingAuthority record - an accept or dismiss in flight or abandoned -
+   * leaves a lead out.
+   */
+  resolutions: Pick<SuggestionResolutionRepo, 'get'>;
   /** One line of the operator report (the CLI prints it). Names go here, never to the logger. */
   print: (line: string) => void;
   /** Wall clock in ms: the rewrite lock's staleness test (isOrgRewriteRunning). */
@@ -465,6 +486,7 @@ export function buildBackfillDeps(
     contacts: createContactsRepo({ doc, env, logger }),
     audit: createAuditRepo({ doc, env, logger }),
     suggestions: createExtractionRepo({ doc, env, logger }),
+    resolutions: createSuggestionResolutionRepo({ doc, env, logger }),
     print: opts.print ?? ((line: string) => console.log(line)),
     now: opts.now ?? Date.now,
     logger,
@@ -616,14 +638,23 @@ export interface CandidateVerdict {
  * never depends on one, so no failed read can make it a target (an --apply
  * reads its history apart, in recordExclusion, only to avoid a second
  * exclusion event). Any other candidate: its WHOLE history
- * (leftOutReasonFromAudit), and only when that leaves it in, its pending
- * housingAuthority suggestion: ONE consistent GetItem (spec D10 revision 5).
- * A suggestion row exists only while it is pending (accept and dismiss delete
- * it; a dismissal is a separate tombstone row), so any row leaves the lead
- * out - whatever its value. Throws when a read fails.
+ * (leftOutReasonFromAudit); then, only while nothing earlier leaves it out,
+ * one read at a time, stopping at the first that does:
+ *   - its housingAuthority suggestion RESOLUTION record (spec D10 revision 6):
+ *     ONE consistent GetItem; `active` leaves it out. Staff CLAIMING an
+ *     accept or dismiss deletes the suggestion row and creates this record in
+ *     one transaction, so while the accept or dismiss is in flight - or after
+ *     its process died, until the app recovers it - the suggestion row is
+ *     gone and only this record shows it. A `completed` record leaves nothing
+ *     out;
+ *   - its PENDING housingAuthority suggestion (spec D10 revision 5): ONE
+ *     consistent GetItem. A suggestion row exists only while it is pending
+ *     (a claim deletes it; a dismissal is a separate tombstone row), so any
+ *     row leaves the lead out - whatever its value.
+ * Throws when a read fails.
  */
 export async function leftOutReasonFor(
-  deps: Pick<BackfillDeps, 'audit' | 'auditPageSize' | 'suggestions'>,
+  deps: Pick<BackfillDeps, 'audit' | 'auditPageSize' | 'resolutions' | 'suggestions'>,
   contactId: string,
   skip: ReadonlySet<string>,
 ): Promise<CandidateVerdict> {
@@ -631,6 +662,8 @@ export async function leftOutReasonFor(
   const events = await readWholeHistory(deps.audit, `contacts#${contactId}`, deps.auditPageSize ?? AUDIT_PAGE_SIZE);
   const fromAudit = leftOutReasonFromAudit(events);
   if (fromAudit !== null) return { reason: fromAudit };
+  const resolution = await deps.resolutions.get(contactId, FIELD);
+  if (resolution?.state === 'active') return { reason: 'resolution_in_progress' };
   const pending = await deps.suggestions.getSuggestion(contactId, FIELD, { consistentRead: true });
   if (pending === undefined) return { reason: null };
   return { reason: 'pending_suggestion', suggestedValue: text(pending.suggestedValue) };
@@ -844,7 +877,7 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
       report.targets.push({ ...lead, outcome: 'read_failed' });
       log.error(
         { err, contactId: lead.contactId },
-        `${SCRIPT_NAME} - could not read the audit history or the pending suggestion; nothing written for this contact`,
+        `${SCRIPT_NAME} - could not read the audit history, the suggestion resolution record or the pending suggestion; nothing written for this contact`,
       );
       continue;
     }

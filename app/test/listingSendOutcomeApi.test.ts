@@ -258,6 +258,46 @@ describe('outcome route - interested', () => {
     expect(outcomeEvents(world)).toEqual([]);
   });
 
+  it('503 WITHOUT saved when the click wrote nothing (existing tour, no decline) and the re-read fails (review A-3)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.toursRepo.create({ tourId: 't-1', tenantId: 'c-1', unitId: 'unit-1', tourType: 'self_guided', status: 'scheduled', createdAt: '2026-06-20T00:00:00.000Z' });
+    const before = await stored(world);
+    // The pre-write tours read succeeds; the re-projection's read throws.
+    const realListByUnit = world.toursRepo.listByUnit.bind(world.toursRepo);
+    let calls = 0;
+    world.toursRepo.listByUnit = async (unitId: string) => {
+      calls += 1;
+      if (calls === 1) return realListByUnit(unitId);
+      throw new Error('tours GSI unavailable');
+    };
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable' });
+    expect(world.toursMap.size).toBe(1);
+    expect(await stored(world)).toEqual(before);
+    expect(outcomeEvents(world)).toEqual([]);
+  });
+
+  it('503 WITHOUT saved when the click wrote nothing and the re-read finds no counted row (review A-3)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.toursRepo.create({ tourId: 't-1', tenantId: 'c-1', unitId: 'unit-1', tourType: 'self_guided', status: 'scheduled', createdAt: '2026-06-20T00:00:00.000Z' });
+    const realGet = world.listingSendsRepo.getByKeyConsistent.bind(world.listingSendsRepo);
+    let calls = 0;
+    world.listingSendsRepo.getByKeyConsistent = async (unitId: string, contactId: string) => {
+      calls += 1;
+      return calls === 1 ? realGet(unitId, contactId) : undefined;
+    };
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable' });
+  });
+
   it('an existing tour behind an EFFECTIVE decline: the decline is cleared (event), no create', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world);

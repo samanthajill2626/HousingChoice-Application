@@ -1216,7 +1216,8 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // POST /api/tours runs), 409 tour_type_required (no qualifying tour and no
   // structured tour_type - the dashboard opens the form instead, D14); then
   // 200 { row } re-projected, or 503 { error: 'outcome_unavailable', saved:
-  // true } when the write landed but the re-read failed. Audit events are
+  // true } when the write landed but the re-read failed (a click that wrote
+  // nothing gets the plain 503 - review A-3). Audit events are
   // best-effort (lib/listingOutcomeEvents.ts). A concurrent double click can
   // still race two creates (no conditional write on the pair - I3; the
   // dashboard disables the button in flight). PII: ids only in logs.
@@ -1260,6 +1261,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const address = formatAddress(unit.address) || unitId;
     const eventDeps = { activityEvents, audit, logger: log };
     let createdTour: TourItem | undefined;
+    // Review A-3: `saved: true` on a late 503 only when THIS click wrote
+    // (setDeclined / clearDeclined / a tour create). An Interested click
+    // that found a tour and no effective decline writes nothing.
+    let wrote = false;
 
     if (outcome === 'interested') {
       if (recipient?.type !== 'tenant') {
@@ -1297,6 +1302,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
           res.status(404).json({ error: 'send_not_found' });
           return;
         }
+        wrote = true;
         await recordListingOutcomeEvent(eventDeps, {
           type: 'listing_decline_cleared',
           contactId,
@@ -1310,6 +1316,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       // found an existing tour writes no event; a retry is not re-recorded).
       if (!existing && tourType !== undefined) {
         createdTour = await tours.create({ tenantId: contactId, unitId, tourType, status: 'requested' });
+        wrote = true;
         await recordListingOutcomeEvent(eventDeps, {
           type: 'listing_interested',
           contactId,
@@ -1326,6 +1333,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         res.status(404).json({ error: 'send_not_found' });
         return;
       }
+      wrote = true;
       await recordListingOutcomeEvent(eventDeps, {
         type: 'listing_declined',
         contactId,
@@ -1340,6 +1348,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         res.status(404).json({ error: 'send_not_found' });
         return;
       }
+      wrote = true;
       // A clear that found no decline records nothing (plan 3.4 #2).
       if (hadDecline) {
         await recordListingOutcomeEvent(eventDeps, {
@@ -1355,7 +1364,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
     // (5) Re-project (D12: the joins are required). The row is re-read
     // CONSISTENTLY; the byUnit GSI may not yet show a tour created a moment
-    // ago, so the created item joins the read.
+    // ago, so the created item joins the read. A failure here carries
+    // `saved: true` only when this click wrote (review A-3).
+    const unavailable = wrote ? { error: 'outcome_unavailable', saved: true } : { error: 'outcome_unavailable' };
     let after: ListingSendItem | undefined;
     let unitTours: TourItem[];
     try {
@@ -1364,12 +1375,12 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         tours.listByUnit(unitId),
       ]);
     } catch (err) {
-      log.warn({ err, unitId, contactId }, 'outcome: re-projection read failed after the write - 503 saved');
-      res.status(503).json({ error: 'outcome_unavailable', saved: true });
+      log.warn({ err, unitId, contactId, wrote }, 'outcome: re-projection read failed - 503');
+      res.status(503).json(unavailable);
       return;
     }
     if (after === undefined || !ledgerRowCounted(after)) {
-      res.status(503).json({ error: 'outcome_unavailable', saved: true });
+      res.status(503).json(unavailable);
       return;
     }
     const created = createdTour;

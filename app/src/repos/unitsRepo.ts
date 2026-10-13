@@ -972,12 +972,15 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           for (const c of roster) c.primaryContact = c.contactId === contact.contactId;
         }
 
-        // Keep the `primary_contact` scalar (the property's default contact -
-        // relay groups and masked calls; today it is also the contactId the
-        // masked-call landlord leg dials, see routes/webhooks/voice.ts) consistent
-        // with the roster's primaryContact. Only rewrite it when there IS a primary
-        // on the roster; never blank it here (a roster-less unit keeps routing to
-        // the legacy landlordId fallback in the bridge).
+        // Keep the `primary_contact` scalar (the property's default contact)
+        // consistent with the roster's primaryContact. Nothing routes on the
+        // scalar today: the roster resolvers (lib/rosterResolution.ts,
+        // lib/tourContacts.ts, services/rosterProvision.ts) take the row marked
+        // primary, else the landlordId, and a masked call dials the live
+        // thread's participants without reading the unit
+        // (routes/webhooks/voice.ts). Only rewrite it when there IS a primary on
+        // the roster; never blank it here (with no primary row the resolvers
+        // fall back to the legacy landlordId).
         const primary = roster.find((c) => c.primaryContact);
         const patch: Record<string, unknown> = { contacts: roster };
         if (claimsVacantLandlord) patch['landlordId'] = contact.contactId;

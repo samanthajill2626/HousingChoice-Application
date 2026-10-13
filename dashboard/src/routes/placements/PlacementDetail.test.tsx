@@ -1008,3 +1008,59 @@ describe('PlacementDetail - the intro fallback box and Check again (primary-cont
     expect(provisionPlacementRelay).not.toHaveBeenCalled();
   });
 });
+
+// --- primary-contact-integrity spec 7.5: a unit replacement keeps the roster rows ---
+describe('PlacementDetail - the People card after a final-rent save (primary-contact-integrity spec 7.5)', () => {
+  // The load-time GET enriches the roster: read-time names, and `deleted: true`
+  // on a row whose contact is soft-deleted (here the flagged primary, a legacy
+  // state the script repairs). The unit PATCH answers the STORED roster - no
+  // names, no `deleted` flag, no propertyContact block - and a final-rent write
+  // never changes the roster.
+  const LOADED_UNIT: UnitItem = {
+    ...UNIT,
+    contacts: [
+      { contactId: 'l1', role: 'landlord', primaryContact: false, name: 'Larry Owens' },
+      { contactId: 'pm-gone', role: 'pm', primaryContact: true, name: 'Gina Gone', deleted: true },
+      { contactId: 'pm2', role: 'pm', primaryContact: false, name: 'Dana Reyes' },
+    ],
+    propertyContact: { contactId: 'l1', heirIfPrimaryRemoved: { contactId: 'l1', name: 'Larry Owens' } },
+  };
+  const PATCH_ANSWER: UnitItem = {
+    ...UNIT,
+    final_rent: 1875,
+    contacts: [
+      { contactId: 'l1', role: 'landlord', primaryContact: false },
+      { contactId: 'pm-gone', role: 'pm', primaryContact: true },
+      { contactId: 'pm2', role: 'pm', primaryContact: false },
+    ],
+  };
+
+  /** The People card's "+ Add" suggestion lines, in order. */
+  function suggestionLines(): string[] {
+    return screen.queryAllByText(/^Also on this property: /).map((el) => el.textContent ?? '');
+  }
+
+  it('a deleted row is still not offered after the final-rent PATCH answers the stored roster', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'awaiting_rent_acceptance' });
+    getUnit.mockResolvedValue(LOADED_UNIT);
+    updateUnit.mockResolvedValue(PATCH_ANSWER);
+    renderAt();
+    await waitLoaded();
+    await user.click(await screen.findByRole('button', { name: 'Edit people' }));
+    expect(suggestionLines()).toEqual(['Also on this property: Dana Reyes - PM']);
+
+    const input = screen.getByLabelText('Accepted rent (monthly)');
+    await user.clear(input);
+    await user.type(input, '1875');
+    await user.click(screen.getByRole('button', { name: /Record accepted rent/ }));
+    // The PATCH answer applied (the facts card reads its final_rent) ...
+    await waitFor(() => expect(within(factsCard()).getByText('$1,875/mo')).toBeInTheDocument());
+    // ... and the People card still reads the load-time rows: the deleted
+    // primary is neither offered nor labeled "primary contact".
+    expect(suggestionLines()).toEqual(['Also on this property: Dana Reyes - PM']);
+    expect(
+      screen.queryByRole('button', { name: /^Add (Gina Gone|pm-gone) to this placement$/ }),
+    ).not.toBeInTheDocument();
+  });
+});

@@ -162,8 +162,25 @@ export function PlacementDetail(): React.JSX.Element {
   );
 
   // Apply an updated unit in place (after an in-place final_rent edit returns it).
+  // The PATCH answer carries the STORED roster - no read-time names, no `deleted`
+  // / `caseworker` row flags, no propertyContact block - and a final-rent write
+  // never changes the roster, so the rows and the block the load-time GET read
+  // are KEPT (primary-contact-integrity spec 7.5, the property page's useListing
+  // precedent). Applied raw, the answer would offer a deleted contact in the
+  // People card suggestions again until the next load.
   const setUnit = useCallback((next: UnitItem) => {
-    setLoaded((prev) => ({ ...prev, unit: next }));
+    setLoaded((prev) => {
+      const { contacts: _storedRows, propertyContact: _noBlock, ...stored } = next;
+      const kept = prev.unit;
+      return {
+        ...prev,
+        unit: {
+          ...stored,
+          ...(kept?.contacts !== undefined && { contacts: kept.contacts }),
+          ...(kept?.propertyContact !== undefined && { propertyContact: kept.propertyContact }),
+        },
+      };
+    });
   }, []);
 
   // Fetch (or refetch) the full placement bundle. No synchronous loading reset — on a

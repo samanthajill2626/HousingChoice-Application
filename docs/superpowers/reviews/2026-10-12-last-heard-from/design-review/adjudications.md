@@ -295,3 +295,33 @@ Round 1 result: decisions CHANGED on the plan (the URL-driven form path,
 the `{ row }` shape, the row/list markup, the clear-no-event spec amendment,
 the voice path 6 fix). Round 2 proceeds with reviewer B continued (11
 findings, more accepted), carrying reviewer A's report.
+
+## Round 2 (2026-10-13) - plan v2 @3cffb801 -> v3
+
+Reviewer B continued (`plan-r2-reviewer-b.md`, 6 findings, 4 contested
+round-1 adjudications). "Nothing blocks the build."
+
+1. R2-1 - the partner-only `Request a tour` rule (round-1 #14) reached the
+   cards but not the Follow up rows. ACCEPT (contest of #14 upheld: half
+   applied). `FollowUpRow` keys on `type === 'partner'`; a landlord-row
+   negative test. (S7)
+2. R2-2 - the voice path 6 change edits an unreachable state (the router
+   sends a non-member whose groups are all closed to founder triage,
+   `relayInboundResolution.ts:89-96`), and its getter-seam test is fragile.
+   ACCEPT (contest of #7 upheld). The path-6 code change is REVERTED; path 5
+   pins the reachable case; spec 14.6 restated. (S1)
+3. R2-3 - `displayNameOfContact` exported from a ROUTE module into a service
+   drags sharp/pdfium into the pure builder test. ACCEPT (contest of #12
+   upheld as to the fix). The helper moves to `app/src/lib/contactDisplay.ts`;
+   both import it. (S7)
+4. R2-4 - the final I1 re-audit wrote to gitignored run state and was
+   numbered as a gate. ACCEPT (contest of #15 upheld). It runs after gate 5
+   and its output is COMMITTED as `i1-audit-final.md` in the records. (S10)
+5. R2-5 - the tour form opens with a push and closes with a replace (two
+   identical history entries). ACCEPT. Both use `{ replace: true }`. (S5)
+6. R2-6 - the dev-seam row in the plan head and selectors.md promise an
+   unconditional 201. ACCEPT. Both state 201 on a fresh pair / 409
+   `send_exists` otherwise. (head, S7)
+
+Round 2 result: NO decision changed - precision edits only. Per the stop
+rule this is the terminal round; the plan review is CLOSED at round 2.

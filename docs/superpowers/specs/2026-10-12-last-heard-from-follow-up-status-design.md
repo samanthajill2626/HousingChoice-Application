@@ -1316,12 +1316,15 @@ type name `SendOutcome` already exist (the Twilio send-failure vocabulary,
   re-proof counts only in the full `npm run e2e` run (F17).
 
 14.6 Plan-review amendments (2026-10-13, plan review round 1):
-- Voice path 6 (a refused masked call): the external-caller fields
-  (`relay_external_caller_phone`, `relay_external_caller_contact_id`) are
-  written whenever the caller is NOT a roster member, whatever the refusal
-  reason (today only `non_member` writes them; a non-member calling a CLOSED
-  thread gets `closed_thread` and no fields, `voice.ts:1006-1055`), so the
-  attribution rule can resolve the row.
+- Voice path 6 (a refused masked call): a non-member calling a pool number
+  whose groups are all CLOSED never reaches the masked refusal handler - the
+  router sends that caller to founder triage, i.e. path 5
+  (`relayInboundResolution.ts:89-96`; plan review round 2) - so the
+  "closed_thread non-member row with no fields" is unreachable today and
+  path 6 is NOT changed. Path 5's tests pin the reachable case (a
+  non-member whose groups are closed is triaged and touched). If the router
+  ever routes such a caller to the masked handler, the external-caller
+  fields must be written for any non-member regardless of refusal reason.
 - `clear` on a row that carries NO `declined` record answers 200 and writes
   NO `listing_decline_cleared` event (a retry or a double click must not pin
   "cleared" on a timeline where nothing was declined); section 5.4's

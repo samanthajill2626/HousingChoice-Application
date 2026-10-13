@@ -12,7 +12,7 @@
   and `.superpowers/sdd/plan-research/*-reference.md` (byte-exact quotes with
   current line numbers; read the reference for your slice before its first
   task - every citation below is verified there).
-- Status: PLAN v2 (planner, 2026-10-13) - plan review round 1 (21 findings, 15 rulings, all accepted) folded in; round 2 pending. Adjudications: `docs/superpowers/reviews/2026-10-12-last-heard-from/design-review/adjudications.md` ("Plan review").
+- Status: PLAN v3 (planner, 2026-10-13) - plan review CLOSED: round 1 (21 findings, 15 rulings) and round 2 (6 findings, precision-only, terminal) folded in. Adjudications: `docs/superpowers/reviews/2026-10-12-last-heard-from/design-review/adjudications.md` ("Plan review").
 
 ## 0. Ground rules for this plan
 
@@ -79,7 +79,7 @@
 | outcome route answers | 200 `{ row }`; 400 `{ error: 'invalid_outcome' }`; 404 `{ error: 'unit_not_found' }`; 404 `{ error: 'send_not_found' }` (no COUNTED row for the pair, `ledgerRowCounted`); 409 `{ error: 'unit_deleted' }`; 400 `{ error: 'interested_unsupported' }` (interested on a non-tenant row); 404 `{ error: 'tenant_not_found' }` / 409 `{ error: 'contact_not_tenant', contactKind }` (from `requireTenantContact`); 409 `{ error: 'tour_type_required' }`; 503 `{ error: 'outcome_unavailable', saved?: true }` |
 | follow-ups endpoint | `GET /api/broadcasts/follow-ups` -> `{ items: FollowUpItem[], byUnit: Record<string, number>, truncated: boolean }`; 503 `{ error: 'outcome_unavailable' }` on a failed required join; walks `unitsRepo.listByStatus('available')` pages until 100 KEPT (non-deleted) units or exhaustion |
 | preview additions | per candidate `status?` (tenant rows only), `lastHeardFromAt?`, `declinedThisProperty: boolean`; top-level `declinedContactIds: string[]`, `declineLabelsUnavailable: boolean` |
-| dev seam | `POST /__dev/listing-send-fixture` `{ unitId, contactId, sentAt }` -> 201 `{ row }`; hermetic-local only (the `/__dev/reseed` gate); writes a COUNTED, listed row with that `sentAt` through `putShareMemory` |
+| dev seam | `POST /__dev/listing-send-fixture` `{ unitId, contactId, sentAt }` -> 201 `{ row }` on a FRESH pair; 409 `{ error: 'send_exists' }` when the pair already has any listing_sends row (never overwrite a shares map or move `sentAt` backward); hermetic-local only (the `/__dev/reseed` gate); writes a COUNTED, listed row with that `sentAt` through `putShareMemory` |
 | events | `ActivityEventType` += `listing_declined`, `listing_decline_cleared`, `listing_interested`; unit audit event types += the same three; writer `recordListingOutcomeEvent` in `app/src/lib/listingOutcomeEvents.ts`; contact timeline only (no landlord copy); `refType: 'unit'`, `refId: unitId`; unit audit payload `{ contactId, actor }` (+ `tourId` on interested) |
 | Tenants tab URL | `?sort=heard \| name` (absent = `heard`); repeated `?status=<value>` (absent = the DEFAULT set = all seven except `inactive`, `placed`; `?status=_empty` = none; values beat the sentinel; invalid-only = default); only a non-default selection is written |
 | Tenants tab rule | a tenant with no status or an off-list status is never hidden by the status facet and counts under no chip |
@@ -1075,6 +1075,19 @@ RED - `app/test/founderTriage.test.ts` (`founderHarness(world)`,
 3. redelivery: post the same params twice; two touches, same `at`.
 4. (PIN) in the existing SELF-CALL case (`:414`) and the no-holder case
    (`:432`), add `expect(world.heardFromTouches).toEqual([]);`.
+5. a NON-MEMBER calling a pool number whose relay groups are ALL CLOSED is
+   routed to founder triage and touched (the reachable form of "a non-member
+   calls a closed group"): `resolveRelayInbound` answers
+   `all_closed_non_member` (`app/src/services/relayInboundResolution.ts:89-96`)
+   and the voice router falls through to `handleFounderTriage`
+   (`voice.ts:594-619`, then `:633`). Setup: `const relay = seedRelayGroup(world); relay.status = 'closed';`
+   (the file's helper, `:66-85`; roster ALICE + BOB) and
+   `world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER })`;
+   post `bizVoiceParams({ To: POOL, CallSid: 'CAheard-closed-nonmember' })`.
+   Assert: the response dials `HOLDER_CELL` (the founder bridge); the call row
+   lives on the CALLER's 1:1 (`conversationId !== 'conv-relay-voice-1'`) and no
+   row was filed on the relay; touches
+   `[{ contactId: 'c-caller', at: <that row's tsMsgId prefix>, outcome: 'written' }]`.
 
 GREEN - `voice.ts`:
 
@@ -1134,26 +1147,12 @@ Locals: `caller` (`:997`), `reason` (`:1007`), `relayExternalCallerPhone`,
 match is soft-deleted or the lookup failed), `appended` (const inside the try
 `:1035-1070`).
 
-Spec 14.6 (plan review A4): today the external-caller identity is computed
-and written only when `reason === 'non_member'` (`:1019`, `:1052-1056`). A
-non-member whose call is refused for ANOTHER reason - a CLOSED thread, where
-`reason` is `closed_thread` because `isClosed` wins at `:1007-1008` - gets a
-row with neither `relay_sender_key` nor the external fields, which the rule
-cannot attribute. This task keys both on `caller === undefined` (the caller
-is not a roster member), whatever the reason. The row keeps
-`relay_refusal_reason: 'non_member'` whenever the fields are written: the
-append validator REQUIRES it beside them, with `author: 'unknown'` and no
-sender key (`assertRelayExternalCallerShape`, `messagesRepo.ts:943-962`),
-and it is true - the caller is a non-member; `received_on_closed_thread`
-(`:1051`) and the `Closed thread` label (`:1050`) still say why the call
-was refused.
-
-Reachability note for the reviewer: through the router this combination is
-currently unreachable - `resolveRelayInbound` returns `closed_member` only for
-a roster member (`relayInboundResolution.ts:89-91`) and sends a non-member to
-an OPEN group (`:93-94`) or to founder triage (`:96`). The change is the
-defensive form 14.6 asks for, and RED case 9 has to model the closed thread
-with a test seam (below).
+This path's source is unchanged apart from the touch. A non-member reaching
+the CLOSED-thread refusal is unreachable today: `resolveRelayInbound`
+returns `closed_member` only for a roster member and sends a non-member to
+an OPEN group or, when every group is closed, to founder triage
+(`app/src/services/relayInboundResolution.ts:89-96`) - that case is path 5,
+covered by Task 1.7 RED case 5.
 
 RED - `app/test/voiceWebhook.test.ts`, new
 `describe('inbound masked voice - last heard from (spec 5.1)')` after
@@ -1178,65 +1177,16 @@ prefix:
 8. persist failure: case 1 with `world.messagesRepo.append = async () => { throw new Error('boom'); }`
    -> refusal TwiML (`<Hangup`) and touches `[]` (the touch sits after the
    append, inside its try).
-9. NON-MEMBER on a CLOSED thread (spec 14.6):
-   `world.contacts.push({ contactId: 'c-external', type: 'unknown', phone: CAROL })`;
-   a relay whose `status` reads `'open'` while the router resolves it and
-   `'closed'` once `handleMaskedInbound` runs. `handleMaskedInbound` reads
-   `relay.pool_number` at `:995`, right before `isClosed` at `:999`, and
-   `resolveRelayInbound` never reads `pool_number`, so the seam flips the
-   status there:
 
-```ts
-    const state = { status: 'open' };
-    const base = seedRelay(world);
-    const relay = Object.defineProperties({ ...base }, {
-      status: { get: () => state.status, enumerable: true },
-      pool_number: { get: () => { state.status = 'closed'; return POOL; }, enumerable: true },
-    }) as ConversationItem;
-    world.conversationsRepo.getAllByPoolNumber = async () => [relay];
-```
-
-   (if the fake world's other reads touch `pool_number` before `:995` the
-   status flips early, the call falls to founder triage and the case FAILS
-   loudly - never a silent pass). Post `inboundVoiceParams({ From: CAROL, CallSid: 'CAheard-closed-nonmember' })`:
-   refusal TwiML (`<Hangup`, no `<Dial`); the row has
-   `received_on_closed_thread: true`, `call_party_label: 'Closed thread'`,
-   `relay_refusal_reason: 'non_member'`, `relay_external_caller_phone: CAROL`,
-   `relay_external_caller_contact_id: 'c-external'`, no `relay_sender_key`;
-   and the touch names `'c-external'`. RED today: the row carries none of the
-   three external fields and nothing is touched.
-10. (PIN) the existing `'does not add caller identity metadata to no-callee or
-    no-pool-number refusals'` case (`:627`) still passes: both callers there are
-    roster members.
-
-GREEN, part 1 - key the external identity on "not a roster member" (two
-edits in the refusal branch):
-
-- `voice.ts:1019`: `if (reason === 'non_member') {` becomes
-
-```ts
-      // Any caller who is NOT a roster member (spec 14.6), whatever the
-      // refusal reason - a non-member on a CLOSED thread included.
-      if (caller === undefined) {
-```
-
-  (the body `:1020-1033` is unchanged).
-- `voice.ts:1052`: `...(reason === 'non_member' && {` becomes
-  `...(caller === undefined && {` (the spread's body `:1053-1055` is
-  unchanged: `relayRefusalReason: 'non_member'` plus the two optional
-  fields, which the append validator requires together).
-
-GREEN, part 2 - the touch. Insert INSIDE the try, after the
-`if (!appended.deduped) { ... }` block (closing `}` at `:1065`) and before
-`} catch (err) {` (`:1066`):
+GREEN - insert INSIDE the try, after the `if (!appended.deduped) { ... }`
+block (closing `}` at `:1065`) and before `} catch (err) {` (`:1066`):
 
 ```ts
         // Last heard from (spec 5.1 / 14.2): a refused call still means the
         // caller reached out - every refusal reason, fresh AND deduped. A member
         // is its roster key (a phone-only member resolves by phone); a
-        // non-member (on an open OR a closed thread) is its stored contact id,
-        // else findByPhone (the id is left unset for a soft-deleted match).
-        // Best-effort.
+        // non-member is its stored contact id, else findByPhone (the id is
+        // left unset for a soft-deleted match). Best-effort.
         try {
           const heardThread =
             appended.conversationId === relay.conversationId
@@ -1269,11 +1219,10 @@ GREEN, part 2 - the touch. Insert INSIDE the try, after the
         }
 ```
 
-(After part 1 the two external-caller locals are set exactly when
-`caller === undefined`, the same condition as the persisted spread, so the
-row literal matches what the append wrote.)
+(The two external-caller locals are only ever set when `reason === 'non_member'`
+(`:1019`), so the row literal matches what `:1052-1056` persisted.)
 
-Commit: `feat(app): a refused masked relay call moves the caller's last heard from, a non-member on a closed thread included`.
+Commit: `feat(app): a refused masked relay call moves the caller's last heard from`.
 
 ### Task 1.9 - path 7, masked relay call bridged (`voice.ts:1101-1136`)
 
@@ -6494,6 +6443,9 @@ export interface SendRosterRowProps {
    *  ONLY for a PARTNER recipient (B8: the units route's `row.type`, or the
    *  contact page's own type) - never for a landlord or team-member row. */
   requestTourTo?: string;
+  /** Render that link with `replace` (the property page, whose tour dialog
+   *  adds no history entry - task 5.3); the contact pages leave it a push. */
+  requestTourReplace?: boolean;
   /** interestedMode 'form' on a tenant row: open the Schedule tour form. */
   onOpenTourForm?: () => void;
   now: Date;
@@ -6555,6 +6507,7 @@ export function SendRosterRow({
   actionsDisabled = false,
   onOutcome,
   requestTourTo,
+  requestTourReplace = false,
   onOpenTourForm,
   now,
 }: SendRosterRowProps): React.JSX.Element {
@@ -6604,7 +6557,12 @@ export function SendRosterRow({
               </button>
             ) : null}
             {waiting && !row.interestedSupported && requestTourTo !== undefined ? (
-              <Link className={styles.rowActionLink} to={requestTourTo} aria-label={`Request a tour for ${name} at ${address}`}>
+              <Link
+                className={styles.rowActionLink}
+                to={requestTourTo}
+                replace={requestTourReplace}
+                aria-label={`Request a tour for ${name} at ${address}`}
+              >
                 Request a tour
               </Link>
             ) : null}
@@ -6999,6 +6957,10 @@ NAVIGATES (`setSearchParams`) to `?tour=new&tenantId=<id>`, "+ Tour" to
 `?tour=new`, a partner row's `Request a tour` link to `?tour=new`; the
 param-driven host opens the form (tenant LOCKED when `tenantId` is set);
 Cancel and create clear BOTH params. There is no local-state open path.
+Both the open and the close are `{ replace: true }` (the partner link on this
+page renders with `replace` too), so the dialog never adds a history entry
+and Back after Cancel leaves the property page exactly as before (plan
+review round 2).
 
 RED:
 
@@ -7179,6 +7141,48 @@ describe('ListingDetail - "Sent to" outcomes (last-heard-from spec 5.5)', () => 
     expect(screen.getByRole('button', { name: 'Mark Lee Park not interested in 12 Oak St' })).toBeInTheDocument();
   });
 
+  it('the dialog adds NO history entry: open (Interested, + Tour or the partner link) then Cancel, and Back leaves the property page', async () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit,
+      recipients: {
+        status: 'ready',
+        rows: [
+          sent({ interestedMode: 'form' }),
+          sent({ contactId: 'c-cw', tenantName: 'Cora Reyes', type: 'partner', interestedSupported: false }),
+        ],
+      },
+    });
+    function Back(): React.JSX.Element {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => void navigate(-1)}>test-back</button>;
+    }
+    render(
+      <MemoryRouter initialEntries={['/elsewhere', '/listings/u1']} initialIndex={1}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+          <Route path="*" element={<div />} />
+        </Routes>
+        <LocationProbe />
+        <Back />
+      </MemoryRouter>,
+    );
+    const cancel = async (): Promise<void> => {
+      const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+      await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent(/^\/listings\/u1$/));
+    };
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss interested in 12 Oak St' }));
+    await cancel();
+    await userEvent.click(screen.getByRole('button', { name: 'Schedule a tour on this property' }));
+    await cancel();
+    await userEvent.click(screen.getByRole('link', { name: 'Request a tour for Cora Reyes at 12 Oak St' }));
+    await cancel();
+    // Three open/cancel cycles, still ONE entry for the property page.
+    await userEvent.click(screen.getByRole('button', { name: 'test-back' }));
+    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent(/^\/elsewhere$/));
+  });
+
   it('the URL entry ?tour=new&tenantId= opens the form on load with that tenant locked', async () => {
     useListing.mockReturnValue({ ...READY, unit, recipients: { status: 'ready', rows: [] } });
     renderAt('u1', '?tour=new&tenantId=c-1');
@@ -7289,7 +7293,8 @@ export function groupSendRows(rows: readonly ListingSendRow[]): SendRowGroup[] {
   // Tour", a form-mode Interested click, a partner row's "Request a tour"
   // link, and the waiting list on another page - so a param change while this
   // page is mounted opens it, and Cancel / create clear both params so Back
-  // and refresh never reopen it.
+  // and refresh never reopen it. On this page both the open and the close are
+  // REPLACE navigations: the dialog adds no history entry.
   const [searchParams, setSearchParams] = useSearchParams();
   const { setUnit, setRecipientRow } = state;
 ```
@@ -7303,15 +7308,20 @@ export function groupSendRows(rows: readonly ListingSendRow[]): SendRowGroup[] {
   // there too).
   const tourFormOpen = !deleted && searchParams.get('tour') === 'new';
   const tourFormTenant = searchParams.get('tenantId') ?? undefined;
-  /** Open the form by NAVIGATING (a history entry - Back closes it). */
+  /** Open the form by NAVIGATING in place (replace): the dialog adds NO
+   *  history entry, so open + Cancel leaves one entry and Back leaves the
+   *  property page as before (plan review round 2). */
   const openTourForm = (tenantId?: string): void => {
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev);
-      next.set('tour', 'new');
-      if (tenantId !== undefined) next.set('tenantId', tenantId);
-      else next.delete('tenantId');
-      return next;
-    });
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set('tour', 'new');
+        if (tenantId !== undefined) next.set('tenantId', tenantId);
+        else next.delete('tenantId');
+        return next;
+      },
+      { replace: true },
+    );
   };
   /** Close it: strip BOTH params in place (replace). */
   const closeTourForm = (): void => {
@@ -7366,7 +7376,9 @@ export function groupSendRows(rows: readonly ListingSendRow[]): SendRowGroup[] {
                               onOutcome={(outcome) => onRecipientOutcome(row.contactId, outcome)}
                               // B8: only a PARTNER recipient gets "Request a tour"
                               // (never a landlord / team-member row).
+                              // Same page: `replace`, so the dialog adds no history entry.
                               {...(row.type === 'partner' && {
+                                requestTourReplace: true,
                                 requestTourTo: `/listings/${encodeURIComponent(unit.unitId)}?tour=new`,
                               })}
                               // R4: form mode NAVIGATES to ?tour=new&tenantId=.
@@ -7886,10 +7898,12 @@ orchestrator must reconcile with the other writers before building:
 7. SMALL API ADDITIONS: `RecipientPreview` and `FollowUpView` each take an
    optional `now?: Date` (the test clock; production passes nothing).
    `DevRouterDeps` gains `listingSendsRepo?`. The dev seam is CREATE-ONLY: it
-   answers 409 `{ error: 'send_exists' }` when the pair already has any
-   listing_sends row (R1 #11) - an addition to the plan-head dev-seam row.
-   `app/src/routes/units.ts:165` `displayNameOfContact` gains `export` so the
-   follow-ups builder reuses it (R1 #12). `FollowUpItem.declined` stays in
+   answers 201 `{ row }` on a fresh pair and 409 `{ error: 'send_exists' }`
+   when the pair already has any listing_sends row (R1 #11, R2 #3) - an
+   addition to the plan-head dev-seam row.
+   `displayNameOfContact` moves from `app/src/routes/units.ts:155-176` to a new
+   `app/src/lib/contactDisplay.ts` (units.ts imports it) so the follow-ups
+   builder reuses it without importing a route (R1 #12, R2 #2). `FollowUpItem.declined` stays in
    the type (spec 5.6) but the builder never sets it: a waiting row has, by
    definition, no effective decline; an in-session decline lives in the
    dashboard's local state (Undo).
@@ -9528,7 +9542,7 @@ import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
 import type { ListingSendItem, ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import type { TourItem, ToursRepo } from '../repos/toursRepo.js';
 import { isDeleted, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
-import { displayNameOfContact } from '../routes/units.js';
+import { displayNameOfContact } from '../lib/contactDisplay.js';
 
 /** Available properties read per request (spec 5.6: tens in practice). */
 export const FOLLOW_UPS_UNIT_CAP = 100;
@@ -9574,7 +9588,7 @@ export interface FollowUpsDeps {
   now: number;
 }
 
-/** The row's name: the app's ONE display-name rule (units.ts
+/** The row's name: the app's ONE display-name rule (lib/contactDisplay.ts
  *  displayNameOfContact - first + last, part-wise trimmed; undefined when no
  *  name is known), then the phone, then the id - FollowUpItem.name is required. */
 function nameOf(contact: ContactItem): string {
@@ -9685,13 +9699,54 @@ export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResp
 }
 ```
 
-GREEN 1b - `app/src/routes/units.ts:165`: `function displayNameOfContact(`
-becomes `export function displayNameOfContact(` (one word; the body at
-`:165-176` and its doc comment at `:155-164` are unchanged) so the builder
-reuses the app's existing name rule instead of a copy (plan review R1 #12).
-No import cycle: `units.ts` imports neither `broadcasts.ts` nor
-`services/followUps.ts`, and `api.ts` already loads `units.ts`. W2's outcome
-route keeps calling it locally.
+GREEN 1a (do this BEFORE GREEN 1 - the builder imports it) - move the app's
+one display-name rule into a lib module (plan review R1 #12, R2 #2: a service
+must not import a route - `routes/units.ts` pulls the media/transcode stack
+into the pure builder test). No behavior change; the existing units suites
+cover every caller.
+
+- New `app/src/lib/contactDisplay.ts` - the function body is `units.ts:165-176`
+  verbatim; the doc comment is `:155-164` with its one em dash (`:157`) written
+  as " - " (a new file is ASCII-only):
+
+```ts
+// The app's ONE contact display-name rule (moved from routes/units.ts by
+// last-heard-from, plan review R2 #2, so a service can share it without
+// importing a route).
+
+/**
+ * BE3/C3: the denormalized display name for a roster row, from the contact's
+ * firstName/lastName (joined + trimmed). HONEST - undefined when no name is
+ * known (never invents one); the roster row then has no `name`.
+ */
+// Takes the MINIMAL shape both contact reads satisfy - a whole ContactItem
+// (getById / getManyByIds) and the ContactDisplayItem projection
+// (getDisplayById / getDisplaysByIds). `contactId` is here only as the anchor
+// that keeps TypeScript's weak-type check honest; the name comes from the two
+// optional fields.
+export function displayNameOfContact(contact: {
+  contactId: string;
+  firstName?: unknown;
+  lastName?: unknown;
+}): string | undefined {
+  // Part-wise trim BEFORE the join (legacy padded parts must not render an
+  // interior gap; new writes arrive trimmed via trimJsonBody).
+  const first = typeof contact.firstName === 'string' ? contact.firstName.trim() : '';
+  const last = typeof contact.lastName === 'string' ? contact.lastName.trim() : '';
+  const joined = [first, last].filter((p) => p.length > 0).join(' ');
+  return joined.length > 0 ? joined : undefined;
+}
+```
+
+- `app/src/routes/units.ts`: DELETE the local definition `:155-176` (doc
+  comment through the closing `}`), and add ONE import line after `:84`
+  (`import { isCaseworker } from '../lib/caseworkers.js';`):
+  `import { displayNameOfContact } from '../lib/contactDisplay.js';`.
+  Every existing call site (`:426`, `:1112`, `:1233`, `:1409`, `:1535`,
+  `:1775`, `:1826`) and W2's outcome route keep the same name and resolve to
+  the import - no other line changes.
+- Run `npx vitest run test/unitsApi.test.ts test/unitsApiRoster.test.ts test/unitsApiPlacements.test.ts`
+  plus typecheck: green before and after (a pure move).
 
 GREEN 2 - `app/src/routes/broadcasts.ts` (deps and repos came in Task 6.2):
 
@@ -9734,6 +9789,13 @@ Commit: `feat(app): GET /api/broadcasts/follow-ups - the waiting list`.
 
 ### Task 7.2 - the dev seam `POST /__dev/listing-send-fixture`
 
+Contract (plan-head dev-seam row as amended by plan review R1 #11 / R2 #3):
+`{ unitId, contactId, sentAt }` -> 201 `{ row }` on a FRESH pair (no
+listing_sends row yet); 409 `{ error: 'send_exists' }` when the pair already
+has a row, listed or not (create-only - it never overwrites a shares map or
+moves a sentAt); 400 on a bad body; 404 `unit_not_found` / `contact_not_found`.
+S8's e2e 8.6 therefore plants each pair ONCE, on a pair the spec created.
+
 RED - new `app/test/devListingSendFixture.test.ts` (the `devOrgFixture.test.ts:1-55` shape):
 
 ```ts
@@ -9741,7 +9803,8 @@ RED - new `app/test/devListingSendFixture.test.ts` (the `devOrgFixture.test.ts:1
 // hermetic seam that plants a LISTED, counted listing-send row with a chosen
 // sentAt through putShareMemory - a real send's sentAt is always "now", so
 // nothing else can put a send past the 24-hour QUIET threshold in front of
-// the Follow up tab. Built like devOrgFixture.test.ts.
+// the Follow up tab. 201 { row } on a fresh pair; 409 { error: 'send_exists' }
+// when the pair already has a row. Built like devOrgFixture.test.ts.
 import { describe, expect, it } from 'vitest';
 import request from 'supertest';
 import type { Express } from 'express';
@@ -9841,8 +9904,9 @@ import { INDIVIDUAL_ATTEMPT_KEY } from '../lib/shareAttemptOrder.js';
 - `DevRouterDeps` (`:106-145`), after `orgFixtureRepos?: ...;` (`:144`):
 
 ```ts
-  /** Repo for POST /__dev/listing-send-fixture (last-heard-from) - injected in
-   *  tests (the world fake); defaults to the real listing-sends repo. */
+  /** Repo for POST /__dev/listing-send-fixture (last-heard-from: 201 { row } on a
+   *  fresh pair, 409 { error: 'send_exists' } when the pair already has a row) -
+   *  injected in tests (the world fake); defaults to the real listing-sends repo. */
   listingSendsRepo?: ListingSendsRepo;
 ```
 
@@ -9856,8 +9920,10 @@ import { INDIVIDUAL_ATTEMPT_KEY } from '../lib/shareAttemptOrder.js';
   // nothing else can put a send older than the 24-hour QUIET threshold in front
   // of the Follow up tab. Written through putShareMemory as ONE counted
   // `individual` share entry (the shape shareLedger seeds for an individual
-  // send), so the readers list it exactly like a real send. CREATE ONLY: 409
-  // send_exists when the pair already has a row. Never writes `declined` or
+  // send), so the readers list it exactly like a real send. Answers: 201
+  // { row } on a FRESH pair; 409 { error: 'send_exists' } when the pair
+  // already has a row (create-only); 400 bad body; 404 unit_not_found /
+  // contact_not_found. Never writes `declined` or
   // any outcome (I2). No threshold
   // override exists anywhere. Same hermetic-LOCAL-only construction as the
   // fixtures above (the dev router only mounts behind lib/devRoutes.ts:
@@ -10167,6 +10233,16 @@ describe('FollowUpView - actions', () => {
     // A partner can still be marked not interested; only Interested is replaced.
     expect(screen.getByRole('button', { name: 'Mark Renee Carter not interested in 672 Cameron Alexander Blvd A' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Mark Renee Carter interested/ })).toBeNull();
+  });
+
+  it('a landlord row (not a partner) shows NEITHER Interested NOR Request a tour (plan review R2 #1)', async () => {
+    renderView([item({ type: 'landlord', interestedSupported: false, name: 'Keystone PM' })]);
+    expect(await screen.findByRole('link', { name: 'Keystone PM' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Request a tour/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Mark Keystone PM interested/ })).toBeNull();
+    // Not interested and Text stay available on any row.
+    expect(screen.getByRole('button', { name: 'Mark Keystone PM not interested in 672 Cameron Alexander Blvd A' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Text Keystone PM' })).toBeInTheDocument();
   });
 
   it('Text opens the 1:1 conversation', async () => {
@@ -10615,7 +10691,10 @@ function FollowUpRow({
               >
                 Interested
               </button>
-            ) : (
+            ) : item.type === 'partner' ? (
+              // Plan review R2 #1 (the B8 rule): the tour link is for a PARTNER
+              // recipient only - never a landlord or team-member row, which
+              // gets neither Interested nor the link.
               <Link
                 className={styles.link}
                 to={`${unitPath}?tour=new`}
@@ -10623,7 +10702,7 @@ function FollowUpRow({
               >
                 Request a tour
               </Link>
-            )}
+            ) : null}
             <button
               type="button"
               className={styles.btn}
@@ -12180,10 +12259,11 @@ chase it with a second merge.
    fires, the stack is ORPHANED and the next run adopts it on a commit
    match alone (AGENTS.md): confirm no listener survives on the lane's ports
    before starting another run.
-6. Re-run Task 1.13B's I1 writer audit on the FINAL tree (every contacts-
-   table writer, incl. the ones later slices added, SETs/REMOVEs only named
-   attributes and never `last_heard_from_at`), and record its output under
-   `.superpowers/sdd/gates/i1-audit.txt`.
+After gate 5: re-run Task 1.13B's I1 writer audit on the FINAL tree (every
+contacts-table writer, incl. the ones later slices added, SETs/REMOVEs only
+named attributes and never `last_heard_from_at`), and COMMIT its output as
+`docs/superpowers/reviews/2026-10-12-last-heard-from/i1-audit-final.md` (a
+mission record; the S1-time audit stays as the first record).
 5. `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')`
    - the list is NON-empty on this branch; attribute any error by BASELINE
    COMPARISON (run the same command on the same paths at the merge base and

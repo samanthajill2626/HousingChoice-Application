@@ -47,3 +47,20 @@ under option (b). Decisions changed: YES (Q1 refines P1's rule) -> round 3.
 | Q2 | R2-2 BLOCKING | ACCEPT | no | Task S2.4 step 1 (c): `unitsApiRoster.test.ts` seeds `c-ll-1` (the test means a live landlord), exactly as S2.6 (b) does for its remove test; Files, status read and commit updated. |
 | Q3 | R2-3 | ACCEPT | no | Real-repo pins: two new cases in S2.7's `unitsRepoRestoreHandoff.integration.test.ts` (swap and clear with a stale scalar next to a live flagged row); a pure `landlordWasPrimary.test.ts`; the restore decider is now ONE function shared by repo, route and fake. |
 | Q4 | R2-4 | ACCEPT | no | S5.9 GLOSSARY: zero primary is also reachable when only non-eligible contacts were added and after an explicit API `primaryContact: false` on the primary's own row (R10). |
+
+## Round 3 (plan v3 @fda75085)
+
+Report: `R3-reviewer-a.md` (reviewer A continued; 2 findings, no blocking;
+every v3 edit asked about checked out mechanically - the (a2)/(e0) anchors are
+unique at S2.8 time, nothing calls the helper before it is imported, the
+helper placement collides with no other insertion, the new stale-scalar swap
+and clear cases are RED on main and GREEN on v3, the pure test's import is
+safe, the S2.4 seed is the only one needed).
+
+Result: 2 ACCEPT, 0 REJECT. Decisions changed: YES (S1 replaces Q1's rule
+variant) -> round 4, the LAST allowed.
+
+| id | finding | verdict | decision changed? | resolution in v4 |
+|---|---|---|---|---|
+| S1 | R3-1 (contests Q1's variant) | ACCEPT the reviewer's alternative | yes | `landlordWasPrimary(roster, landlordId)` - NO scalar argument: hand off when the old landlord's row is the FLAGGED primary, or when NO row is flagged. Removes the order dependence (an add or re-role that removes a stale scalar no longer changes a later restore's outcome) and covers R10's API-demotion zero-flag units; keeps caseworker-integrity's three no-flag pins, both new S2.7 stale-scalar cases and the route u-p8 case GREEN. Only the pure test's "no flag, scalar absent -> false" flips (now true). The scalar again has NO runtime reader: spec 3 / 9.2, the S5 GLOSSARY and RUNBOOK sentences, the section 3 watch item and every code comment updated; `clearedLandlordHeir` drops its now-unused `unit` parameter (call site updated). |
+| S2 | R3-2 | ACCEPT | no | Stale wording fixed: S2.7 (c)'s NEW interface docblock (the old_string keeps main's text, as it must), S2.8 `clearedLandlordHeir` docblock, the repo and fake comments. Spec 4.7 bullet 1 ("Nothing reads the scalar at runtime") is TRUE again under S1, so it stands. |

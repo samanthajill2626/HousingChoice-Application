@@ -1,9 +1,10 @@
 # Last heard from, follow-up status for shared properties, and the off-screen contact search
 
 Date: 2026-10-12
-Status: DRAFT revision 4 - design review CLOSED after round 3 (a
-precision-only round); Cameron's spec gate next, then Sam's mockup feedback
-(section 9) before the build launches
+Status: DRAFT revision 5 - design review CLOSED after round 3 (a
+precision-only round); D11-D14 and the partner recommendation confirmed by
+Cameron 2026-10-12; Sam's mockup answers folded in 2026-10-13 (section 9);
+Cameron's spec gate next, then the plan
 Branch: feat/last-heard-from (worktree W:\tmp\last-heard-from, cut from main
 @19607658)
 Tracker: Sam's improvements #3 ("Most interested tenants" view, 5-8 hrs) and
@@ -132,7 +133,9 @@ Answers Cameron gave on 2026-10-12, recorded as the design's fixed points:
 - D1. The waiting list is designed with Sam from mockups (section 9), not
   decided here. Today is a candidate on equal footing with the Matching page
   and the property card. Wherever it lives, Inactive and Placed tenants are
-  left out.
+  left out. DECIDED 2026-10-13 from Sam's answers (section 9): option A (a
+  Follow up tab on Matching) plus option C's count on the Properties list;
+  24 hours of quiet; 14 days back; replied-then-quiet rows included.
 - D2. Replied = any inbound contact from the recipient after the send, in any
   thread: a text in their 1:1, in a relay group or in a native group, a call,
   or an email. Engagement with us in any context counts. Merely receiving a
@@ -767,9 +770,26 @@ Both cards (`ListingDetail.tsx` "Sent to", `TenantFile.tsx` and
   row never renders a tour chip (`deriveSendOutcome` ignores tours for it),
   which keeps the caseworkers ruling R3-F5.
 
-### 5.6 The waiting list (pending Sam)
+### 5.6 The waiting list - the "Follow up" tab on Matching, plus a count on the Properties list
 
-Mechanism, independent of where it lives:
+Decided 2026-10-13 (section 9): the list is option A, a "Follow up" tab on
+the Matching page next to the send-history tabs (`BroadcastsList.tsx`
+FILTERS), with a count in the tab label, grouped by property (the short
+address as the group heading with its own waiting count), longest-waiting
+first within a group and groups ordered by their oldest waiting row. Each
+row: name (link to the contact), Sent <date>, Last heard from
+<formatHeardFrom>, the outcome chip ("No reply yet, N days" / "Replied,
+quiet N days"), and the actions Interested / Not interested / Text. Sam's
+reading of the two chips is the design intent: Replied-then-quiet rows are
+the ones she texts again; No reply yet rows are the ones she calls to learn
+whether the tenant is still looking (the name link lands on the contact
+page, where the call action lives; the list adds no Call action). Option
+C's count comes with it: the Properties list's Available view shows "<n>
+waiting" on each available property with waiting rows, from the same
+response's `byUnit` map, so it costs one extra request per Properties list
+load and no second walk. Option B (Today) is not built.
+
+Mechanism:
 
 1. Candidate sends: every LISTED `listing_sends` row on every unit in
    status `available` (`unitsRepo.listByStatus('available')`, then
@@ -796,7 +816,8 @@ Mechanism, independent of where it lives:
 4. Order: longest-waiting first (oldest `max(sentAt, lastHeardFromAt)`).
 
 Endpoint: `GET /api/matching/follow-ups` returning
-`{ items: FollowUpItem[], truncated: boolean }` where
+`{ items: FollowUpItem[], byUnit: Record<string, number>, truncated: boolean }`
+(`byUnit` = waiting rows per unitId, for the Properties list count) where
 
 ```
 FollowUpItem {
@@ -808,14 +829,13 @@ FollowUpItem {
 }
 ```
 
-Defaults proposed to Sam: QUIET = 2 days (her "last couple of days"),
-LOOKBACK = 14 days. Both are constants in `app/src/lib/sendOutcome.ts`, set
-once Sam answers. The Today option (section 9, option B) reuses this
-endpoint's builder inside `GET /api/today` rather than adding a second
-walk.
+Thresholds, set from Sam's answers (section 9): QUIET = 24 hours (she asked
+for "24 hours of silence at any stage"), LOOKBACK = 14 days. Both are
+constants in `app/src/lib/sendOutcome.ts` (`FOLLOW_UP_QUIET_MS`,
+`FOLLOW_UP_LOOKBACK_MS`).
 
-Row actions on the list, wherever it lives: Interested / Not interested /
-Undo as on the cards, plus "Text" (opens the 1:1 conversation).
+Row actions on the list: Interested / Not interested / Undo as on the
+cards, plus "Text" (opens the 1:1 conversation).
 
 ### 5.7 Tenants tab
 
@@ -977,18 +997,44 @@ Property card: Interested creates exactly one tour, the tenant appears on
 Needs booking, the row shows Tour requested; Not interested then Undo; a
 tour scheduled from the Tours page after a decline flips the row to Tour
 scheduled; the contact card mirrors the row. (5) The populated Matching
-hand-pick case (C6) passes with ordinary clicks. (6) The waiting list, once
-its home is chosen. Gates per `AGENTS.md`.
+hand-pick case (C6) passes with ordinary clicks. (6) The Follow up tab: a
+send older than 24 hours with no reply appears under its property with the
+count in the tab; a reply through the fake carrier removes it; Not
+interested removes it; the Properties list shows the "<n> waiting" count.
+Gates per `AGENTS.md`.
 
-## 9. Mockups for Sam (the waiting list, and the row design)
+## 9. Mockups for Sam (the waiting list, and the row design) - ANSWERED
 
-Cameron shows Sam the mockups and brings back her choice before the build
-launches. The mockups are a static HTML page committed with this mission's
-records (`docs/superpowers/reviews/2026-10-12-last-heard-from/mockups.html`)
-and published privately for sharing. They show real-looking rows with the
-same example data in each option, so the comparison is about place and
-shape, not content. Each option states the rules in plain words (what counts
-as a reply, when a send appears, who is left out).
+Cameron showed Sam the mockups and brought back her answers on 2026-10-13.
+The mockups are a static HTML page committed with this mission's records
+(`docs/superpowers/reviews/2026-10-12-last-heard-from/mockups.html`) and
+published privately for sharing. They show real-looking rows with the same
+example data in each option, so the comparison is about place and shape,
+not content. Each option states the rules in plain words (what counts as a
+reply, when a send appears, who is left out).
+
+Sam's answers and Cameron's rulings (the decisions the build honors):
+
+1. Where: "Options A and C would both work." Ruling: build A (the Follow up
+   tab) plus C's count on the Properties list; not B.
+2. When a tenant appears: "after 24 hours of silence at any stage." Ruling:
+   QUIET = 24 hours.
+3. How far back: 14 days. Ruling: LOOKBACK = 14 days.
+4. Replied-then-quiet: "really the goal of my list ... the ones I am looking
+   for"; never-responded tenants "need a call ... to see if they are still
+   looking." Ruling: both kinds appear, distinguished by the outcome chip
+   (section 5.6).
+5. Row contents / more outcomes: Sam proposed waiting until she has used
+   Matching, and adding outcomes such as Maybe, Touring, Maybe after
+   touring. Cameron's ruling (2026-10-13): build now - the work is what lets
+   her run her current matching process on the platform, and #6 follows
+   right after; and the outcomes stay the four, because "maybe" states are
+   a mental burden applied inconsistently and each one lands in Interested,
+   Not interested or unknown anyway. Sam's point that a touring tenant
+   stays `searching` is correct and unaffected: a searching tenant with a
+   tour still receives properties; nothing here changes statuses.
+
+The original questions, kept for the record:
 
 Option A - a "Follow up" tab on the Matching page. Next to the send history
 tabs, with a count. Grouped by property (address as the group heading, the
@@ -1021,9 +1067,8 @@ Questions the mockups ask Sam, with the proposed defaults:
 5. What belongs on a row? Proposed: name, property, sent date, last heard
    from, outcome, Interested / Not interested / Text.
 
-The build launches once her answers are folded into sections 5.5, 5.6 and
-9 and the spec is re-committed. Sections 5.1-5.4, 5.7 and 5.8 are
-independent of those answers; 5.5's row content may move with question 5.
+Her answers are folded into sections 5.6 and 9 (5.5's row content stands as
+proposed); the build no longer waits on Sam.
 
 ## 10. Estimates (Cameron's hours)
 
@@ -1054,9 +1099,8 @@ independent of those answers; 5.5's row content may move with question 5.
 
 ## 12. Open questions
 
-- For Sam: section 9's five questions.
-- For Cameron: none blocking. The partner recommendation (section 5.4, D7)
-  is his to confirm at the spec gate.
+None. Sam's five are answered (section 9). Cameron confirmed D11, D12, D13,
+D14 and the partner recommendation (section 5.4, D7) on 2026-10-12.
 
 ## 13. Glossary additions
 

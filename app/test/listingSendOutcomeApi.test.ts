@@ -313,17 +313,70 @@ describe('outcome route - interested', () => {
     expect(world.toursMap.size).toBe(1);
   });
 
-  it('a SUPERSEDED decline is left on the row (inert) - no clear, no event', async () => {
+  // Knowing rewrite (review B R2-2 part 1, spec 14.7): this case used to pin
+  // that a SUPERSEDED decline is left on the row with no clear. An explicit
+  // Interested overrides EVERY earlier decline, so the record it read is now
+  // cleared whatever its effectiveness - but `listing_decline_cleared` is
+  // recorded only when that decline was effective (nothing visible changed).
+  it('a SUPERSEDED decline is cleared too (an explicit Interested overrides every earlier decline) - no event', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world);
     seedContact(world, 'c-1');
     await seedSend(world);
     await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-18T00:00:00.000Z', by: 'staff' });
     await world.toursRepo.create({ tourId: 't-1', tenantId: 'c-1', unitId: 'unit-1', tourType: 'self_guided', status: 'requested', createdAt: '2026-06-20T00:00:00.000Z' });
+    const clear = vi.spyOn(world.listingSendsRepo, 'clearDeclined');
     const res = await post(app, { outcome: 'interested' });
     expect(res.status).toBe(200);
-    expect((await stored(world))?.declined).toMatchObject({ at: '2026-06-18T00:00:00.000Z' });
+    expect(res.body.row).toMatchObject({ outcome: 'interested' });
+    expect(clear).toHaveBeenCalledWith('unit-1', 'c-1', { expectedAt: '2026-06-18T00:00:00.000Z' });
+    expect(await stored(world)).not.toHaveProperty('declined');
     expect(outcomeEvents(world)).toEqual([]);
+    expect(world.toursMap.size).toBe(1);
+  });
+
+  it('a retry after a clear that failed behind a create repairs it: the stale (now superseded) decline is cleared, no event (review B R2-2)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, { tour_type: 'self_guided' });
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-25T00:00:00.000Z', by: 'staff' });
+    // The first click created the tour, then its clear threw.
+    const realClear = world.listingSendsRepo.clearDeclined.bind(world.listingSendsRepo);
+    world.listingSendsRepo.clearDeclined = async () => {
+      throw new Error('throttled');
+    };
+    await post(app, { outcome: 'interested' });
+    expect(world.toursMap.size).toBe(1);
+    expect((await stored(world))?.declined).toBeDefined();
+    world.listingSendsRepo.clearDeclined = realClear;
+    // The retry finds the tour (no second create) and clears the stale record.
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(200);
+    expect(res.body.row).toMatchObject({ outcome: 'interested' });
+    expect(world.toursMap.size).toBe(1);
+    expect(await stored(world)).not.toHaveProperty('declined');
+    expect(outcomeEvents(world).map((e) => e.type)).toEqual(['listing_interested']);
+  });
+
+  it('clearing a superseded decline is a write: a failed re-read then answers 503 saved:true (review B R2-2 / A-3)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-18T00:00:00.000Z', by: 'staff' });
+    await world.toursRepo.create({ tourId: 't-1', tenantId: 'c-1', unitId: 'unit-1', tourType: 'self_guided', status: 'requested', createdAt: '2026-06-20T00:00:00.000Z' });
+    const realListByUnit = world.toursRepo.listByUnit.bind(world.toursRepo);
+    let calls = 0;
+    world.toursRepo.listByUnit = async (unitId: string) => {
+      calls += 1;
+      if (calls === 1) return realListByUnit(unitId);
+      throw new Error('tours GSI unavailable');
+    };
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable', saved: true });
+    expect(await stored(world)).not.toHaveProperty('declined');
   });
 
   it('409 tour_type_required with no qualifying tour and no structured tour_type - nothing written, decline kept', async () => {

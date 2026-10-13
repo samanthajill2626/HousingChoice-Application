@@ -1322,18 +1322,22 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
           at,
         });
       }
-      // (3, run SECOND) An EFFECTIVE decline is removed; its event is its
-      // history. COMPARE-AND-CLEAR (review B R2-1): only the record this
-      // click READ (its `at`) is removed, so a decline another staff member
-      // records meanwhile survives. A clear that answers 'not_found' (someone
-      // re-declined, or the row stopped counting) records nothing and is
-      // NEVER a 404 here - the row was counted when read - so it falls
+      // (3, run SECOND) The decline record this click READ is removed
+      // WHATEVER its effectiveness (review B R2-2: an explicit Interested
+      // overrides every earlier decline, and a retry repairs a clear that
+      // failed behind an earlier create); `listing_decline_cleared` is its
+      // history only when that decline was EFFECTIVE (a superseded record
+      // changed nothing visible). COMPARE-AND-CLEAR (review B R2-1): only the
+      // record whose `at` was read is removed, so a decline another staff
+      // member records meanwhile survives. A clear that answers 'not_found'
+      // (someone re-declined, or the row stopped counting) records nothing
+      // and is NEVER a 404 here - the row was counted when read - so it falls
       // through to the re-projection, which answers the truth.
       const readDecline = row.declined;
-      if (declineEffective && readDecline !== undefined) {
+      if (readDecline !== undefined) {
         const cleared = await listingSends.clearDeclined(unitId, contactId, { expectedAt: readDecline.at });
-        if (cleared === 'ok') {
-          wrote = true;
+        if (cleared === 'ok') wrote = true;
+        if (cleared === 'ok' && declineEffective) {
           await recordListingOutcomeEvent(eventDeps, {
             type: 'listing_decline_cleared',
             contactId,

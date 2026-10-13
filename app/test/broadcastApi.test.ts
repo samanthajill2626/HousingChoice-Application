@@ -292,6 +292,7 @@ describe('share-broadcast API (M1.8a)', () => {
         has_consent: true,
         alreadySentThisProperty: false,
         seeded: false,
+        status: 'searching',
       },
     ]);
     expect(res.body.priorRecipientContactIds).toEqual([]);
@@ -1164,6 +1165,57 @@ describe('share-broadcast API (M1.8a)', () => {
     // Absent on a contact lacking them (the fields are omitted, not null).
     expect(bare).not.toHaveProperty('voucherSize');
     expect(bare).not.toHaveProperty('housingAuthority');
+  });
+
+  it('last-heard-from 5.3: an audience candidate carries status and lastHeardFromAt', async () => {
+    seedUnit(world);
+    seedTenant(world, { contactId: 'c-heard', phone: '+15550100001', last_heard_from_at: '2026-10-03T09:30:00.000Z' });
+    const { app } = makeWebhookHarness({ world });
+    const id = await createDraft(app);
+    const res = await request(app)
+      .post(`/api/broadcasts/${id}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body.candidates[0]).toMatchObject({
+      contactId: 'c-heard',
+      status: 'searching',
+      lastHeardFromAt: '2026-10-03T09:30:00.000Z',
+    });
+  });
+
+  it('last-heard-from 5.3: markSending stores { status: queued } per key - never status or lastHeardFromAt (paths b and c)', async () => {
+    seedUnit(world);
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001', last_heard_from_at: '2026-10-03T09:30:00.000Z' });
+    seedTenant(world, { contactId: 'c-seed', phone: '+15550100002', last_heard_from_at: '2026-10-04T09:30:00.000Z' });
+    const markSending = vi.spyOn(world.broadcastsRepo, 'markSending');
+    const { app } = makeWebhookHarness({ world });
+    // Path (c): the no-body filter-resolve send snapshots ResolvedContact rows.
+    const filterId = await createDraft(app);
+    const sendC = await request(app)
+      .post(`/api/broadcasts/${filterId}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(sendC.status).toBe(200);
+    // Path (b): a seeds_only draft resolves its seeds through resolveSeeds -> buildRecipientsFrom.
+    const seeded = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId: 'unit-1', body_template: 'hi', seedContactIds: ['c-seed'] });
+    expect(seeded.status).toBe(201);
+    const sendB = await request(app)
+      .post(`/api/broadcasts/${seeded.body.broadcastId}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(sendB.status).toBe(200);
+    expect(markSending).toHaveBeenCalledTimes(2);
+    // Exact equality: any extra field on a slot (status, lastHeardFromAt, ...) fails.
+    expect(markSending.mock.calls[0]![1]).toEqual({ 'c-1': { status: 'queued' }, 'c-seed': { status: 'queued' } });
+    expect(markSending.mock.calls[1]![1]).toEqual({ 'c-seed': { status: 'queued' } });
   });
   it('caseworkers D20: a PARTNER seed previews WITHOUT voucher facts (lean Renee Carter is the negative); a tenant seed keeps them', async () => {
     seedUnit(world);
@@ -2369,6 +2421,26 @@ describe('share-broadcast API (M1.8a)', () => {
         has_consent: true,
       });
       expect(preview.body.unresolvedSeedIds).toEqual([]);
+    });
+
+    it('last-heard-from 5.3: a partner seed previews lastHeardFromAt but NEVER a status; a tenant seed carries both', async () => {
+      seedUnit(world);
+      seedPartner({ last_heard_from_at: '2026-10-01T12:00:00.000Z' });
+      seedTenant(world, { contactId: 'c-tenant', phone: '+15550100082', last_heard_from_at: '2026-10-03T09:30:00.000Z' });
+      const { app } = makeWebhookHarness({ world });
+      const created = await postSeeded(app, ['c-partner', 'c-tenant']);
+      expect(created.status).toBe(201);
+      const preview = await step(app, created.body.broadcastId, 'preview');
+      expect(preview.status).toBe(200);
+      const rows = preview.body.candidates as Array<Record<string, unknown>>;
+      const partnerRow = rows.find((c) => c['contactId'] === 'c-partner');
+      expect(partnerRow).toMatchObject({ lastHeardFromAt: '2026-10-01T12:00:00.000Z' });
+      // StatusBadge kind="tenant" must never see a partner's needs_review | active.
+      expect(partnerRow).not.toHaveProperty('status');
+      expect(rows.find((c) => c['contactId'] === 'c-tenant')).toMatchObject({
+        status: 'searching',
+        lastHeardFromAt: '2026-10-03T09:30:00.000Z',
+      });
     });
 
     it('a seeds_only no-body send texts the partner seed', async () => {

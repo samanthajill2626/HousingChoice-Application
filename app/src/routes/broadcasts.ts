@@ -466,6 +466,11 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
         ...(c.type === 'tenant' && typeof c.voucherSize === 'number' && { voucherSize: c.voucherSize }),
         ...(c.type === 'tenant' &&
           typeof c.housingAuthority === 'string' && { housingAuthority: c.housingAuthority }),
+        // last-heard-from (spec 5.3): a TENANT seed's lifecycle status; a
+        // partner seed carries none (StatusBadge kind="tenant" must never see
+        // it). Last heard from is any type's.
+        ...(c.type === 'tenant' && typeof c.status === 'string' && c.status.length > 0 && { status: c.status }),
+        ...(typeof c.last_heard_from_at === 'string' && { lastHeardFromAt: c.last_heard_from_at }),
         has_consent: hasSmsConsent(c),
       });
     }
@@ -716,6 +721,10 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       phone: c.phone,
       ...(c.voucherSize !== undefined && { voucherSize: c.voucherSize }),
       ...(c.housingAuthority !== undefined && { housingAuthority: c.housingAuthority }),
+      // last-heard-from (spec 5.3): tenant status (absent for a partner seed)
+      // and last heard from, for the review row's columns and order.
+      ...(c.status !== undefined && { status: c.status }),
+      ...(c.lastHeardFromAt !== undefined && { lastHeardFromAt: c.lastHeardFromAt }),
       // A2P/CTIA (LOCKED CONTRACT 3): whether this candidate has recorded SMS
       // consent. The composer surfaces "consent not recorded" for `false` +
       // a count; the fan-out EXCLUDES !has_consent recipients (broadcastFanOut).

@@ -1120,11 +1120,21 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // Add (or update) a roster contact → { unit } (with contacts). The ROUTE
   // resolves the contact's denormalized name/company (so the roster row is
   // self-describing); the repo maintains the single-primaryContact invariant and
-  // keeps the primary_contact scalar (the property's default contact - relay
-  // groups and masked calls) consistent. A Landlord role claims an ownerless
-  // legacy property; 409 landlord_reassignment_required when a different owner
-  // already exists, or unit_roster_conflict after repeated write races. 404
-  // unknown/disappeared unit or unknown contact; 400 bad role / primaryContact;
+  // keeps the primary_contact scalar consistent with the row marked primary
+  // (nothing routes on the scalar: the roster resolvers take the row marked
+  // primary, else the landlord of record - see unitsRepo.addContact).
+  // Auto-primary (caseworker-integrity spec revision 5, section 4 "Contact
+  // list"): a NEW seat for a contact typed landlord on a property with no row
+  // marked primary and no landlord of record becomes its primary contact even
+  // when the request's primaryContact is false or absent. A Landlord role
+  // claims an ownerless legacy property. 409 contact_list_caseworker (a
+  // caseworker taking a NEW seat) and 409 landlord_not_landlord (a claim of the
+  // vacant landlord slot by a contact not typed landlord), each from the
+  // route's checks below or from the roster write itself; 409
+  // landlord_reassignment_required when a different owner already exists, or
+  // unit_roster_conflict after repeated write races. 404 unit_not_found
+  // (unknown/disappeared unit) or contact_not_found (a missing contact, or the
+  // id of a phone or email routing pointer); 400 bad role / primaryContact;
   // audit unit_contact_added after successful writes only.
   router.post('/:unitId/contacts', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');

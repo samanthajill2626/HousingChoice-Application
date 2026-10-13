@@ -1033,7 +1033,16 @@ export async function deleteUnit(unitId: string): Promise<UnitItem> {
  *  the stored landlord can't stay the property's landlord; call again with
  *  `{ landlordId: <a landlord's contactId> }` to restore with that landlord, or
  *  `{ landlordId: null }` to restore without one (404 landlord_not_found /
- *  409 landlord_not_landlord / 409 unit_roster_conflict). */
+ *  409 landlord_not_landlord / 409 unit_roster_conflict).
+ *  Sole-landlord promotion (spec revision 5): a `{ landlordId: null }` restore
+ *  of a property whose cleared landlord was its primary contact makes the ONE
+ *  remaining live contact typed landlord (any role; a soft-deleted one does
+ *  not count) the primary contact in the same write - with zero or two-plus,
+ *  nobody. The answer's enriched roster carries the flags, so render the
+ *  answer's roster, never the one the page loaded. For `{ landlordId: null }`,
+ *  409 unit_roster_conflict also means the property's contact list changed
+ *  between the server's read and its write: nothing was restored - re-read the
+ *  property. */
 export async function restoreUnit(
   unitId: string,
   opts?: { landlordId: string | null },

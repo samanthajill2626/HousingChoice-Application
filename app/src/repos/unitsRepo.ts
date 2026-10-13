@@ -59,12 +59,14 @@ export const SHAREABLE_STATUSES: ReadonlySet<string> = SHAREABLE;
  * One contact on a unit's roster (BE3/C3 — contract verbatim; the frontend
  * imports the same shape). A unit has a many-to-many roster of the people who
  * own/manage it: the landlord, a property manager, the owner, or anyone else
- * relevant. At most one entry across the roster is `primaryContact: true` (the ☎
- * primary - the property's default contact: the person we put on the relay
- * group and reach by a masked call; see unitsRepo.addContact, which keeps
- * `primary_contact` consistent with it). `name`/`company` are DENORMALIZED at
- * write time (the route resolves them from the contact) so the roster row is
- * self-describing without a join.
+ * relevant. At most one entry across the roster is `primaryContact: true` (the
+ * primary - the property's default contact: the roster resolvers behind relay
+ * groups and tour copy take the row marked primary, else the landlord of
+ * record, and a masked call dials the live thread's participants without
+ * reading the unit; see unitsRepo.addContact, which keeps the
+ * `primary_contact` scalar consistent with it - nothing routes on the
+ * scalar). `name`/`company` are DENORMALIZED at write time (the route resolves
+ * them from the contact) so the roster row is self-describing without a join.
  */
 export interface UnitContact {
   contactId: string;
@@ -323,9 +325,13 @@ export interface UnitItem {
   /** The never-standardized per-unit application process (free text). INTERNAL. */
   application_process?: string;
   /**
-   * The unit's primary contact (CO1): the property's default contact - the
-   * person we put on the relay group and reach by a masked call. Stored as a
-   * contactId. PENDING FOUNDER CONFIRMATION — may move to per-placement (CO1
+   * The unit's primary contact (CO1), kept consistent with the contact-list
+   * row marked primary (see unitsRepo.addContact). Nothing routes on this
+   * scalar today: the roster resolvers (lib/rosterResolution.ts,
+   * lib/tourContacts.ts, services/rosterProvision.ts) take the row marked
+   * primary, else the landlordId, and a masked call dials the live thread's
+   * participants without reading the unit (routes/webhooks/voice.ts). Stored
+   * as a contactId. PENDING FOUNDER CONFIRMATION - may move to per-placement (CO1
    * notes routing comes "from the per-unit process" today; a later change
    * order may relocate this onto the placement). INTERNAL — never exposed
    * by the public flyer.
@@ -493,9 +499,10 @@ export interface UnitsRepo {
    * All roster writes optimistically compare landlordId + contacts[], retry up
    * to three times, then throw RosterWriteConflictError under sustained races.
    * When the roster's primaryContact changes, the unit's `primary_contact`
-   * scalar (the property's default contact - relay groups and masked calls) is
-   * kept consistent = the primary contact's contactId. Persists contacts[] +
-   * the scalar.
+   * scalar is kept consistent = the primary contact's contactId (nothing routes
+   * on the scalar: the roster resolvers take the row marked primary, else the
+   * landlordId - see the note above the write in the implementation).
+   * Persists contacts[] + the scalar.
    */
   addContact(
     unitId: string,

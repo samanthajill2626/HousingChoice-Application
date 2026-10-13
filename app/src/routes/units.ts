@@ -427,12 +427,20 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
    * contact is not eligible either (R3 code review finding A1, fix wave 3
    * FW3-1): deleting a contact keeps its seats, and this is an automatic
    * routing choice, where a deleted contact is unusable everywhere else.
-   * Decided from `unit`, the route's consistent read, whose contact list the
-   * restore's write is then conditioned on.
+   * Decided from `listRead` - the contact list of `unit` (the route's
+   * consistent read) taken ONCE, before these type reads are awaited - which
+   * is the very value the restore's write is then conditioned on
+   * (`expectContacts`; R3 code review finding A3, fix wave 3 FW3-2).
    */
-  async function soleLandlordToPromote(unit: UnitItem, clearedLandlordId: string | undefined): Promise<string | null> {
+  async function soleLandlordToPromote(
+    unit: UnitItem,
+    listRead: UnitItem['contacts'],
+    clearedLandlordId: string | undefined,
+  ): Promise<string | null> {
     if (clearedLandlordId === undefined) return null;
-    const rows = unitContacts(unit);
+    // unitContacts' own reading of that one list (the landlordId-derived row
+    // when no list is stored).
+    const rows = unitContacts({ contacts: listRead, landlordId: clearedLandlordId });
     const clearedRow = rows.find((row) => row.contactId === clearedLandlordId);
     const clearedWasPrimary =
       clearedRow?.primaryContact === true || unit.primary_contact === clearedLandlordId;
@@ -1773,8 +1781,14 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // Restore WITHOUT a landlord: the sole-landlord promotion (spec revision
     // 5) is decided here from the consistent reads, and the repo applies it
     // only on the very contact list it was decided from (`expectContacts`) - a
-    // contact-list change in between answers 409 unit_roster_conflict.
-    const promote = next === null ? await soleLandlordToPromote(stored, storedLandlordId) : null;
+    // contact-list change in between answers 409 unit_roster_conflict. The
+    // list is read ONCE, here, before the contact-type reads are awaited, and
+    // that one value is both the decision's input and `expectContacts` (R3
+    // code review finding A3, fix wave 3 FW3-2): `stored.contacts` read again
+    // after the awaits need not be the list the decision saw (a FakeWorld
+    // unit read is the live object a concurrent write replaces it on).
+    const listRead = stored.contacts;
+    const promote = next === null ? await soleLandlordToPromote(stored, listRead, storedLandlordId) : null;
     let restored: UnitItem;
     try {
       restored =
@@ -1783,7 +1797,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
           : await units.restoreWithLandlord(unitId, {
               expectLandlordId: storedLandlordId,
               next: null,
-              expectContacts: stored.contacts,
+              expectContacts: listRead,
               promote,
             });
     } catch (err) {

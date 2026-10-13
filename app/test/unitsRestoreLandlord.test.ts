@@ -520,4 +520,49 @@ describe('POST /api/units/:id/restore - without a landlord: the sole-landlord pr
     ]);
     expect(restoredEvents(world)).toHaveLength(0);
   });
+
+  // R3 code review, backend finding A3 (probe F1; fix wave 3 FW3-2): the same
+  // change landing EARLIER - while the route awaits the remaining contacts'
+  // type reads, after it captured the list it decides from. The write must be
+  // conditioned on that same list, not on a second read of the unit after the
+  // awaits (the FakeWorld's getById hands the route the live unit object, so a
+  // second read would see the NEW list and the stale promotion would go
+  // through).
+  it('a contact-list change WHILE the route reads the contact types: 409 unit_roster_conflict - nothing restored, no audit', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedClearedPrimary(world, 'u-race-read', [{ contactId: 'c-pm', role: 'pm', primaryContact: false }]);
+    seedContact(world, 'c-pm', { type: 'landlord' });
+    seedContact(world, 'c-owner', { type: 'landlord' });
+    const read = world.contactsRepo.getById.bind(world.contactsRepo);
+    let added = false;
+    world.contactsRepo.getById = async (contactId, opts) => {
+      // Staff B adds a second landlord-typed contact while the route reads
+      // c-pm's type for the promotion.
+      if (contactId === 'c-pm' && !added) {
+        added = true;
+        await world.unitsRepo.addContact(
+          'u-race-read',
+          { contactId: 'c-owner', role: 'owner' },
+          { caseworker: false, landlordTyped: true },
+        );
+      }
+      return read(contactId, opts);
+    };
+
+    const res = await restore(app, 'u-race-read', { landlordId: null });
+
+    expect(added).toBe(true);
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'unit_roster_conflict' });
+    const stored = world.units.get('u-race-read');
+    expect(stored?.deleted_at).toBe(DELETED_AT);
+    expect(stored?.landlordId).toBe('c-old');
+    expect(stored?.primary_contact).toBe('c-old');
+    expect(stored?.contacts).toEqual([
+      { contactId: 'c-old', role: 'landlord', primaryContact: true },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-owner', role: 'owner', primaryContact: false },
+    ]);
+    expect(restoredEvents(world)).toHaveLength(0);
+  });
 });

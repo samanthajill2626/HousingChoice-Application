@@ -1368,6 +1368,32 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       });
     }
 
+    // Last heard from (spec 5.1 / 14.2): fresh AND deduped, on the sender's
+    // 1:1. No captureContact runs here, so an unknown phone resolves to no
+    // contact and touches nobody. Best-effort.
+    try {
+      const heardThread =
+        appended.conversationId === conversation.conversationId
+          ? conversation
+          : await conversations.getById(appended.conversationId);
+      const heardFromId =
+        heardThread === undefined
+          ? undefined
+          : await attributeInbound(
+              { direction: 'inbound', type: mediaUrls.length > 0 ? 'mms' : 'sms' },
+              heardThread,
+              repoLookup(contacts, contact ? new Map([[From, contact]]) : undefined),
+            );
+      if (heardFromId !== undefined) {
+        const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+        if (outcome === 'failed') {
+          log.error({ providerSid: MessageSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+        }
+      }
+    } catch (err) {
+      log.error({ err, providerSid: MessageSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+    }
+
     // Inbox touch + unread + SSE - the minimal 1:1 subset (fresh-append only, so
     // a redelivery never double-counts/re-emits). Side-effect failures never
     // crash the webhook.

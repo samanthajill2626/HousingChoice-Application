@@ -664,8 +664,11 @@ every write is conditional, so concurrent runs cannot double-write.
   with `reason: 'auto_on_add' | 'handoff_on_remove' | 'handoff_on_delete' |
   'handoff_on_restore'`, so the property's Activity tab explains every primary
   change nobody clicked. The Activity projection whitelist
-  (`routes/units.ts:217-248`) gains `reason`, and the dashboard's unit
-  activity renderer gains a line for the event.
+  (`routes/units.ts:217-248`) gains `reason` for `unit_primary_contact_assigned`
+  ONLY (plan ruling R17, folded 2026-10-13 at build research:
+  `listing_status_changed` already stores staff free text under `reason`,
+  which stays off the wire), and the dashboard's unit activity renderer gains
+  a line for the event.
 - Dry run prints counts (targets, live vs soft-deleted units, `noHeir`,
   `unknown`) and unit ids only - never a person's name.
 - Idempotent: a completed apply plans nothing on a re-run.
@@ -815,9 +818,11 @@ P1 removes the property-contact route into this; the rest is filed as
   create requires a landlord), and the byte-stable lean seed has none on
   purpose (`docs/issues/tour-reminder-zero-primary-e2e-gap.md` item 1). A new
   DEV-ONLY seam (hermetic-only, structurally absent in deployed envs like
-  `/__dev/reseed`) CREATES a NEW property and contact of its own in the
-  imported shape - no landlord of record, one non-primary contact - and returns
-  their ids. It never rewrites a shared lean unit (the suite runs serially with
+  `/__dev/reseed`) CREATES a NEW property of its own in the imported shape -
+  no landlord of record, a roster of one to five NON-primary rows naming
+  contacts the spec first created through the real `POST /api/contacts` - and
+  returns its id (plan ruling R23 and plan contract 2.7, folded 2026-10-13 at
+  build research). It never rewrites a shared lean unit (the suite runs serially with
   one worker, so a rewritten shared unit would leak into every later spec);
   the next reseed removes what it made. Specs: (a) the property box and
   "Make <Name> primary"; (b) a tour on that property: the open-group dialog

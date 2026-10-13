@@ -3,7 +3,7 @@
 // and the capped available-unit walk. Pure - every repo is a fake.
 import { describe, expect, it } from 'vitest';
 import { createLogger } from '../src/lib/logger.js';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { IncompleteBatchReadError, type ContactItem, type RecipientDisplay } from '../src/repos/contactsRepo.js';
 import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
 import type { TourItem } from '../src/repos/toursRepo.js';
 import type { ListUnitsOpts, UnitItem, UnitsPage } from '../src/repos/unitsRepo.js';
@@ -36,6 +36,16 @@ function requestedTour(unitId: string, tenantId: string, createdAt: string): Tou
   return { tourId: `t-${unitId}-${tenantId}`, tenantId, unitId, _schedPartition: 'tours', tourType: 'self_guided', status: 'requested', createdAt, updatedAt: createdAt };
 }
 
+/** What the REAL getRecipientDisplaysByIds returns: RECIPIENT_PROJECTION's
+ *  attributes only (repos/contactsRepo.ts), so every case below runs on
+ *  projected data - a builder reading an unprojected attribute would see
+ *  undefined (review ADV-2). */
+const RECIPIENT_ATTRS = ['contactId', 'firstName', 'lastName', 'phone', 'deleted_at', 'type', 'role', 'status', 'last_heard_from_at', 'sms_opt_out', 'sms_unreachable'] as const;
+function projectRecipient(contact: ContactItem): RecipientDisplay {
+  const picked = Object.fromEntries(RECIPIENT_ATTRS.filter((key) => contact[key] !== undefined).map((key) => [key, contact[key]]));
+  return { ...picked, contactId: contact.contactId } as RecipientDisplay;
+}
+
 /** Fakes over `world`. `pageSize` forces short unit pages (the real byStatus
  *  page is shortened by the soft-delete filter); the fake returns deleted units
  *  too, so the builder must skip them itself. */
@@ -45,6 +55,7 @@ function depsFor(world: World, pageSize = Number.POSITIVE_INFINITY) {
     listByUnit: [] as string[],
     toursByUnit: [] as string[],
     batches: [] as Array<{ ids: string[]; requireComplete: boolean | undefined }>,
+    wholeItemBatches: [] as string[][],
   };
   const capture = createLogCapture();
   const deps: FollowUpsDeps = {
@@ -73,11 +84,16 @@ function depsFor(world: World, pageSize = Number.POSITIVE_INFINITY) {
       },
     },
     contacts: {
-      async getManyByIds(ids: string[], o?: { requireComplete?: boolean }) {
+      async getRecipientDisplaysByIds(ids: string[], o?: { requireComplete?: boolean }) {
         calls.batches.push({ ids: [...ids], requireComplete: o?.requireComplete });
+        return new Map(world.contacts.filter((c) => ids.includes(c.contactId)).map((c) => [c.contactId, projectRecipient(c)] as const));
+      },
+      // Review ADV-2 guard: the builder never reads WHOLE contact items.
+      async getManyByIds(ids: string[]) {
+        calls.wholeItemBatches.push([...ids]);
         return new Map(world.contacts.filter((c) => ids.includes(c.contactId)).map((c) => [c.contactId, c] as const));
       },
-    },
+    } as FollowUpsDeps['contacts'],
     log: createLogger({ destination: capture.stream }),
     now: NOW,
   };
@@ -188,6 +204,16 @@ describe('buildFollowUps (last-heard-from 5.6)', () => {
     expect((await buildFollowUps(depsFor(w).deps)).items).toEqual([]);
   });
 
+  it('drops a row whose projected contact carries no type (the required FollowUpItem.type cannot be filled)', async () => {
+    const w = emptyWorld();
+    w.units.push(unit('u1'));
+    const typeless = tenant('c-typeless');
+    delete (typeless as Partial<ContactItem>).type;
+    w.contacts.push(typeless, tenant('c-ok'));
+    w.sends.push(send('u1', 'c-typeless', ago(3 * DAY)), send('u1', 'c-ok', ago(3 * DAY)));
+    expect((await buildFollowUps(depsFor(w).deps)).items.map((i) => i.contactId)).toEqual(['c-ok']);
+  });
+
   it('orders longest-waiting first across properties; byUnit, unitLabel and interestedMode per property', async () => {
     const w = emptyWorld();
     w.units.push(
@@ -203,7 +229,7 @@ describe('buildFollowUps (last-heard-from 5.6)', () => {
     expect(out.items[1]).toMatchObject({ unitLabel: 'u2', interestedMode: 'form' });
   });
 
-  it('ONE requireComplete contacts batch of unique ids; no tours read for a property with no sends', async () => {
+  it('ONE requireComplete contacts batch of unique ids, through the RECIPIENT projection - never whole items (review ADV-2); no tours read for a property with no sends', async () => {
     const w = emptyWorld();
     w.units.push(unit('u1'), unit('u2'), unit('u3'));
     w.contacts.push(tenant('c1'), tenant('c2'));
@@ -213,6 +239,7 @@ describe('buildFollowUps (last-heard-from 5.6)', () => {
     expect(calls.batches).toHaveLength(1);
     expect(calls.batches[0]!.ids.sort()).toEqual(['c1', 'c2']);
     expect(calls.batches[0]!.requireComplete).toBe(true);
+    expect(calls.wholeItemBatches).toEqual([]);
     expect(calls.toursByUnit.sort()).toEqual(['u1', 'u2']);
   });
 
@@ -259,7 +286,7 @@ describe('buildFollowUps (last-heard-from 5.6)', () => {
     b.tours = { listByUnit: async () => { throw new Error('throttled'); } };
     await expect(buildFollowUps(b)).rejects.toThrow('throttled');
     const c = depsFor(w).deps;
-    c.contacts = { getManyByIds: async () => { throw new Error('IncompleteBatchReadError'); } };
-    await expect(buildFollowUps(c)).rejects.toThrow('IncompleteBatchReadError');
+    c.contacts = { getRecipientDisplaysByIds: async () => { throw new IncompleteBatchReadError(1, 1); } };
+    await expect(buildFollowUps(c)).rejects.toThrow(IncompleteBatchReadError);
   });
 });

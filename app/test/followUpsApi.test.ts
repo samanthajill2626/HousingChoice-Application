@@ -3,7 +3,7 @@
 // and answers 503 outcome_unavailable when a required join fails (D12).
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { IncompleteBatchReadError, type ContactItem } from '../src/repos/contactsRepo.js';
 import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -46,10 +46,10 @@ describe('GET /api/broadcasts/follow-ups', () => {
     expect(res.body.truncated).toBe(false);
   });
 
-  it('503 outcome_unavailable when the contacts batch fails', async () => {
+  it('503 outcome_unavailable when the contacts batch is incomplete (the projected read - review ADV-2)', async () => {
     const world = createFakeWorld();
     seed(world);
-    vi.spyOn(world.contactsRepo, 'getManyByIds').mockRejectedValueOnce(new Error('IncompleteBatchReadError'));
+    vi.spyOn(world.contactsRepo, 'getRecipientDisplaysByIds').mockRejectedValueOnce(new IncompleteBatchReadError(1, 3));
     const { app } = makeWebhookHarness({ world });
     const res = await get(app);
     expect(res.status).toBe(503);

@@ -6,10 +6,12 @@
 // GSI is hash-only and the soft-delete filter shortens pages, so the walk
 // follows lastEvaluatedKey). Joins (all REQUIRED, D12 - any failure rejects and
 // the route answers 503): listByUnit + tours.listByUnit per unit, then ONE
-// requireComplete contacts batch. A row is kept when its outcome is no_reply or
-// replied, the recipient is eligible (isEligibleRecipient - so every row's Text
-// action can work), the send is inside LOOKBACK and the recipient has been quiet
-// past QUIET (isWaiting). Order: longest-waiting first (oldest waitingSince), so
+// requireComplete contacts batch through the RECIPIENT projection
+// (getRecipientDisplaysByIds - review ADV-2: it carries every attribute read
+// here, a fraction of a whole contact item). A row is kept when its outcome is
+// no_reply or replied, the recipient is eligible (isEligibleRecipient - so every
+// row's Text action can work), the send is inside LOOKBACK and the recipient has
+// been quiet past QUIET (isWaiting). Order: longest-waiting first (oldest waitingSince), so
 // a client grouping by property in first-appearance order gets groups ordered by
 // their oldest row. Logs carry ids/counts only - never names or phones.
 import { formatAddress } from '../lib/address.js';
@@ -25,7 +27,7 @@ import {
   type InterestedMode,
   type ListingSendOutcome,
 } from '../lib/listingSendOutcome.js';
-import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
+import type { ContactsRepo, RecipientDisplay } from '../repos/contactsRepo.js';
 import type { ListingSendItem, ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import type { TourItem, ToursRepo } from '../repos/toursRepo.js';
 import { isDeleted, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
@@ -69,7 +71,7 @@ export interface FollowUpsDeps {
   units: Pick<UnitsRepo, 'listByStatus'>;
   listingSends: Pick<ListingSendsRepo, 'listByUnit'>;
   tours: Pick<ToursRepo, 'listByUnit'>;
-  contacts: Pick<ContactsRepo, 'getManyByIds'>;
+  contacts: Pick<ContactsRepo, 'getRecipientDisplaysByIds'>;
   log: Logger;
   /** Epoch ms - the thresholds' clock. */
   now: number;
@@ -78,7 +80,7 @@ export interface FollowUpsDeps {
 /** The row's name: the app's shared display-name rule (lib/contactName.ts
  *  contactDisplayName - first + last, part-wise trimmed; undefined when no
  *  name is known), then the phone, then the id - FollowUpItem.name is required. */
-function nameOf(contact: ContactItem): string {
+function nameOf(contact: RecipientDisplay): string {
   const display = contactDisplayName(contact);
   if (display !== undefined) return display;
   return typeof contact.phone === 'string' && contact.phone.length > 0 ? contact.phone : contact.contactId;
@@ -134,9 +136,10 @@ export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResp
   }
 
   // 3. ONE contacts batch; requireComplete because an absent contact would
-  //    silently drop a row (an OUTCOME, not a label).
+  //    silently drop a row (an OUTCOME, not a label). The recipient
+  //    projection, not whole items (review ADV-2).
   const ids = [...new Set(perUnit.flatMap((u) => u.rows.map((r) => r.contactId)))];
-  const byId = ids.length > 0 ? await deps.contacts.getManyByIds(ids, { requireComplete: true }) : new Map<string, ContactItem>();
+  const byId = ids.length > 0 ? await deps.contacts.getRecipientDisplaysByIds(ids, { requireComplete: true }) : new Map<string, RecipientDisplay>();
 
   // 4. Keep the waiting rows.
   const items: FollowUpItem[] = [];
@@ -145,6 +148,9 @@ export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResp
       if (typeof row.sentAt !== 'string') continue; // listByUnit returns LISTED rows only; a type guard
       const contact = byId.get(row.contactId);
       if (contact === undefined) continue; // the contact row is gone: nobody to text
+      // Every contact item carries its required `type`; the projection only
+      // TYPES it optional. A row without one could not be labeled - skipped.
+      if (contact.type === undefined) continue;
       const lastHeardFromAt = typeof contact.last_heard_from_at === 'string' ? contact.last_heard_from_at : undefined;
       const pairTours = toursByTenant.get(row.contactId) ?? [];
       const outcome = deriveListingSendOutcome({

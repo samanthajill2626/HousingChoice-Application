@@ -1,5 +1,6 @@
 // RestoreLandlordDialog (caseworker-integrity spec 2026-10-12 section 4
 // "Restore"): the sentence, the landlords-only picker, and the three actions.
+import { StrictMode } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -152,6 +153,44 @@ describe('RestoreLandlordDialog', () => {
     await user.click(without);
     expect(restoreUnit).toHaveBeenCalledWith('u1', { landlordId: null });
     await waitFor(() => expect(onRestored).toHaveBeenCalled());
+  });
+
+  // R2 code review, dashboard finding A3 (fix wave 2 FW2-6): the app runs
+  // under <StrictMode> (dashboard/src/main.tsx), so every dev and e2e mount
+  // runs the landlord-list effect twice and the FIRST read is aborted by the
+  // simulated unmount (the API client rethrows the AbortError). An aborted read
+  // is the effect's own cleanup, not a failed load: no "Couldn't load the
+  // landlords." beside a list that loaded.
+  it('under StrictMode the aborted first read is not a failure - no load alert, and the landlords are offered', async () => {
+    const user = userEvent.setup();
+    getAllContacts.mockReset().mockImplementation(
+      (_query: unknown, signal: AbortSignal) =>
+        new Promise<Contact[]>((resolve, reject) => {
+          const abort = (): void => reject(new DOMException('The operation was aborted.', 'AbortError'));
+          if (signal.aborted) {
+            abort();
+            return;
+          }
+          signal.addEventListener('abort', abort, { once: true });
+          // Answer on a later task, so the simulated unmount aborts the first
+          // read before it could land.
+          setTimeout(() => resolve(LANDLORDS), 0);
+        }),
+    );
+    render(
+      <StrictMode>
+        <RestoreLandlordDialog unitId="u1" onRestored={vi.fn()} onConflict={vi.fn()} onClose={vi.fn()} />
+      </StrictMode>,
+    );
+
+    // The premise: two reads, the first one aborted.
+    await waitFor(() => expect(getAllContacts).toHaveBeenCalledTimes(2));
+    const signals = getAllContacts.mock.calls.map((call) => call[1] as AbortSignal);
+    expect(signals.map((s) => s.aborted)).toEqual([true, false]);
+
+    await user.type(screen.getByRole('combobox', { name: 'Landlord' }), 'Nora');
+    expect(await screen.findByRole('option', { name: /Nora Lane/ })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('any other failure says the restore did not happen', async () => {

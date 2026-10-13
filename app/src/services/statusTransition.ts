@@ -45,6 +45,7 @@ import { type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import type { ConversationsRepo } from '../repos/conversationsRepo.js';
 import { recordPersonMilestone } from '../lib/personEvents.js';
 import { armRelayCloseNagIfOpen } from './relayCloseNag.js';
+import { requireTenantContact } from './contactTypeGuards.js';
 
 /**
  * The RTA submission hard clock (Post-Tour & Application): entering
@@ -336,6 +337,18 @@ export function createStatusTransitionService(
     try {
       const contact = await contactsRepo.getById(tenantId);
       if (!contact) return;
+      // Caseworker integrity (spec 2026-10-12 section 4, "Derived tenant
+      // status"): the derived lifecycle is a TENANT's. A placement whose
+      // contact is not typed tenant (a record from before the I2 checks, or a
+      // contact re-typed since) writes nothing here - no status, no audit, no
+      // milestone. The listing-status derivation is separate and unchanged.
+      if (contact.type !== 'tenant') {
+        log.info(
+          { tenantId, contactType: contact.type },
+          'derivation: contact is not a tenant - tenant status left unchanged',
+        );
+        return;
+      }
       const current = contact.status as TenantStatus | undefined;
       if (isTenantOverrideStatus(current)) return; // override-pinned → no write/no audit
       if (current === toStatus) return; // no-op → idempotent, no provenance rewrite
@@ -395,6 +408,18 @@ export function createStatusTransitionService(
       const existing = await placementsRepo.getById(placementId);
       if (!existing) throw new EntityNotFoundError('placement', placementId);
       const from = existing.stage;
+      // Caseworker integrity I2 (spec 2026-10-12 section 4): moving a placement
+      // OUT of a terminal stage (moved_in / lost) into a non-terminal one
+      // re-opens it, so its tenant must be a contact typed `tenant` - read
+      // CONSISTENTLY here, before any write, so every caller of the service is
+      // covered. Throws ContactNotTenantError / TenantNotFoundError (the route
+      // maps them). Moves between non-terminal stages, into a terminal stage,
+      // or between the two terminal stages are not checked. WHETHER a placement
+      // may leave lost / moved_in at all is filed separately
+      // (placement-terminal-stage-exit-unguarded), not decided here.
+      if (TERMINAL_STAGES.has(from) && !TERMINAL_STAGES.has(toStage)) {
+        await requireTenantContact(contactsRepo, existing.tenantId);
+      }
       const now = new Date().toISOString();
 
       // 1) Denormalize the stage + provenance onto the placement.

@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { ApiError } from '../../api/index.js';
 import type { ListingState } from './useListing.js';
 
@@ -155,6 +155,11 @@ beforeEach(() => {
 });
 
 afterEach(() => vi.restoreAllMocks());
+
+/** The deleted banner's sentence after a restore choice answered 409
+ *  restore_landlord_not_needed while the property is still deleted (spec
+ *  revision 7 section 4 "Dashboard copy for section 4"), byte for byte. */
+const RESTORE_LANDLORD_CHANGED = "This property's landlord changed while you were choosing. Choose Restore again.";
 
 /** Change the property status via the interactive pill: open it, then pick an option. */
 async function chooseStatus(
@@ -1203,6 +1208,666 @@ describe('ListingDetail', () => {
     await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
     expect(restoreUnit).toHaveBeenCalledWith('u1');
     await waitFor(() => expect(setUnit).toHaveBeenCalled());
+    // The normal case: no landlord dialog.
+    expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+  });
+
+  it('a restore that needs a landlord opens the landlord dialog; restoring through it applies the unit and closes it', async () => {
+    const user = userEvent.setup();
+    const setUnit = vi.fn();
+    const restored = { ...READY.unit!, landlordId: 'll9' };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+          error: 'restore_needs_landlord',
+          landlordName: 'James Porter',
+        }),
+      )
+      .mockResolvedValueOnce(restored);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit,
+    });
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    expect(
+      within(dialog).getByText(
+        "James Porter is no longer a landlord, so they can't stay this property's landlord. Choose its landlord:",
+      ),
+    ).toBeInTheDocument();
+    expect(restoreUnit).toHaveBeenCalledWith('u1');
+    expect(setUnit).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+    expect(restoreUnit).toHaveBeenLastCalledWith('u1', { landlordId: null });
+    await waitFor(() => expect(setUnit).toHaveBeenCalledWith(restored));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('a conflict inside the landlord dialog re-reads the property into the page AND the Contacts card, and keeps the dialog while it is still deleted', async () => {
+    const user = userEvent.setup();
+    const setUnit = vi.fn();
+    // The concurrent change put a new landlord of record on the property: the
+    // re-read carries its enriched contact row, which the Contacts card must show.
+    const fresh = {
+      ...READY.unit!,
+      landlordId: 'll2',
+      deleted_at: '2026-06-19T00:00:00.000Z',
+      contacts: [{ contactId: 'll2', role: 'landlord' as const, primaryContact: true, name: 'Nora Lane' }],
+    };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', { error: 'restore_needs_landlord' }),
+      )
+      .mockRejectedValueOnce(
+        new ApiError(409, 'unit_roster_conflict', 'unit_roster_conflict', { error: 'unit_roster_conflict' }),
+      );
+    getUnit.mockReset().mockResolvedValue(fresh);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit,
+    });
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    expect(
+      within(dialog).getByText(
+        "This property's landlord is no longer a landlord, so they can't stay this property's landlord. Choose its landlord:",
+      ),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'The property contacts changed - try that change again.',
+    );
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+    await waitFor(() => expect(setUnit).toHaveBeenCalledWith(fresh));
+    // applyRosterUnit, not setUnit alone: the Contacts card renders the
+    // re-read's landlord row (useListing is mocked, so only the card's own
+    // roster state can show it).
+    expect(await screen.findByText('Nora Lane')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Restore property' })).toBeInTheDocument();
+  });
+
+  // Gap pins from the S4b mutant check (extra mutants X1, X2, X5): behavior the
+  // restore wiring promises (plan Task 4.11 Goal, CONTRACT ISSUE 9, watch item
+  // W7) that no case above pinned.
+  it('(PIN) restoring through the landlord dialog puts the restored roster on the Contacts card, not just the page unit', async () => {
+    const user = userEvent.setup();
+    const setUnit = vi.fn();
+    // The body-path answer carries the ENRICHED roster (CONTRACT ISSUE 9): the
+    // chosen landlord's row, which only applyRosterUnit puts on the card.
+    const restored = {
+      ...READY.unit!,
+      landlordId: 'll9',
+      contacts: [{ contactId: 'll9', role: 'landlord' as const, primaryContact: true, name: 'Nora Lane' }],
+    };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', { error: 'restore_needs_landlord' }),
+      )
+      .mockResolvedValueOnce(restored);
+    getAllContacts
+      .mockReset()
+      .mockResolvedValue([{ contactId: 'll9', type: 'landlord', firstName: 'Nora', lastName: 'Lane' }]);
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit,
+    });
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await waitFor(() => expect(getAllContacts).toHaveBeenCalled());
+    await user.type(within(dialog).getByRole('combobox', { name: 'Landlord' }), 'Nora');
+    await user.click(await screen.findByRole('option', { name: /Nora Lane/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Restore with this landlord' }));
+
+    expect(restoreUnit).toHaveBeenLastCalledWith('u1', { landlordId: 'll9' });
+    await waitFor(() => expect(setUnit).toHaveBeenCalledWith(restored));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+    // applyRosterUnit, not setUnit alone: useListing is mocked, so only the
+    // card's own roster state can show the restored landlord row.
+    expect(screen.getByRole('link', { name: /Nora Lane/ })).toBeInTheDocument();
+  });
+
+  // caseworker-integrity spec revision 5 section 4 "Restore" (Cameron's Q5
+  // ruling; fix wave 2 FW2-13): "Restore without a landlord" on a property
+  // whose cleared landlord was its primary contact makes the one remaining
+  // contact typed landlord the primary contact in the same write. The page
+  // renders the roster the server answers with.
+  it('Restore without a landlord that promotes the sole landlord-typed contact shows that contact as the primary contact', async () => {
+    const user = userEvent.setup();
+    // Deleted: James (landlord of record and primary contact) was re-typed;
+    // Dana, a property manager typed landlord, is still on the list.
+    const james = { contactId: 'll1', role: 'landlord' as const, primaryContact: true, name: 'James Porter' };
+    const dana = { contactId: 'pm2', role: 'pm' as const, primaryContact: false, name: 'Dana Reyes' };
+    const deletedUnit: NonNullable<ListingState['unit']> = {
+      ...READY.unit!,
+      deleted_at: '2026-06-19T00:00:00.000Z',
+      landlordId: 'll1',
+      primary_contact: 'll1',
+      contacts: [james, dana],
+    };
+    // The server's answer: no landlord of record, James's row dropped, Dana
+    // promoted (her row flagged, the primary_contact scalar naming her).
+    const { landlordId: _cleared, deleted_at: _live, ...restoredBase } = deletedUnit;
+    const restored: NonNullable<ListingState['unit']> = {
+      ...restoredBase,
+      primary_contact: 'pm2',
+      contacts: [{ ...dana, primaryContact: true }],
+    };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+          error: 'restore_needs_landlord',
+          landlordName: 'James Porter',
+        }),
+      )
+      .mockResolvedValueOnce(restored);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    // As the real hook: setUnit replaces the unit and keeps the roster rows
+    // derived at load (James primary), which only the Contacts card's own
+    // roster state can supersede.
+    let current: ListingState = {
+      ...READY,
+      unit: deletedUnit,
+      roster: [
+        { contactId: 'll1', name: 'James Porter', role: 'landlord', roleLabel: 'Landlord', primaryContact: true, fallback: false },
+        { contactId: 'pm2', name: 'Dana Reyes', role: 'pm', roleLabel: 'Property manager', primaryContact: false, fallback: false },
+      ],
+      setUnit: vi.fn((unit: NonNullable<ListingState['unit']>) => {
+        current = { ...current, unit };
+      }),
+    };
+    useListing.mockImplementation(() => current);
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+    expect(restoreUnit).toHaveBeenLastCalledWith('u1', { landlordId: null });
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+
+    // Live again; the Contacts card lists Dana as the primary contact.
+    const card = screen.getByRole('heading', { name: /^Contacts/ }).closest('section') as HTMLElement;
+    expect(within(card).getAllByRole('link')[0]).toHaveTextContent('Dana Reyes (primary)');
+    expect(within(card).queryByText(/James Porter/)).not.toBeInTheDocument();
+    // Edit mode: her row is the primary and offers no Make primary.
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    expect(
+      screen.getByRole('button', { name: 'Remove Dana Reyes from this property' }).parentElement,
+    ).toHaveTextContent('Dana Reyes (primary)');
+    expect(within(card).getAllByText('(primary)')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Make Dana Reyes the primary contact' })).not.toBeInTheDocument();
+  });
+
+  it('(PIN) a conflict whose re-read shows the property already restored closes the landlord dialog', async () => {
+    const user = userEvent.setup();
+    const setUnit = vi.fn();
+    // Someone else restored the property meanwhile: the re-read is live.
+    const fresh = { ...READY.unit!, landlordId: 'll2' };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', { error: 'restore_needs_landlord' }),
+      )
+      .mockRejectedValueOnce(
+        new ApiError(409, 'unit_roster_conflict', 'unit_roster_conflict', { error: 'unit_roster_conflict' }),
+      );
+    getUnit.mockReset().mockResolvedValue(fresh);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit,
+    });
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+    await waitFor(() => expect(setUnit).toHaveBeenCalledWith(fresh));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+  });
+
+  // Spec revision 7 section 4 "Restore" (final review A2 and round 2 R2-1): a
+  // landlord choice that arrives when the plain restore would apply - here
+  // another staff member restored the property, with their own landlord, while
+  // this dialog was open - answers 409 restore_landlord_not_needed and writes
+  // nothing. The dialog closes and the page re-reads; the property is live, so
+  // the page shows the real state - live, with the re-read's landlord on the
+  // Contacts card, never the one picked here - and no landlord-changed
+  // sentence. Nothing re-runs the plain restore.
+  it('a landlord choice answered 409 restore_landlord_not_needed closes the dialog; the re-read is live - the page shows the re-read property and no sentence', async () => {
+    const user = userEvent.setup();
+    const deletedUnit: NonNullable<ListingState['unit']> = {
+      ...READY.unit!,
+      deleted_at: '2026-06-19T00:00:00.000Z',
+      landlordId: 'll1',
+      primary_contact: 'll1',
+      contacts: [{ contactId: 'll1', role: 'landlord', primaryContact: true, name: 'James Porter' }],
+    };
+    // The re-read: staff B restored it with Yolanda as its landlord of record.
+    const { deleted_at: _live, ...liveBase } = deletedUnit;
+    const fresh: NonNullable<ListingState['unit']> = {
+      ...liveBase,
+      landlordId: 'll7',
+      primary_contact: 'll7',
+      contacts: [{ contactId: 'll7', role: 'landlord', primaryContact: true, name: 'Yolanda Banks' }],
+    };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+          error: 'restore_needs_landlord',
+          landlordName: 'James Porter',
+        }),
+      )
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_landlord_not_needed', 'restore_landlord_not_needed', {
+          error: 'restore_landlord_not_needed',
+        }),
+      );
+    getUnit.mockReset().mockResolvedValue(fresh);
+    getAllContacts
+      .mockReset()
+      .mockResolvedValue([{ contactId: 'll9', type: 'landlord', firstName: 'Nora', lastName: 'Lane' }]);
+    // As the real hook: setUnit replaces the unit and keeps the roster rows
+    // derived at load, which only the Contacts card's own roster state can
+    // supersede.
+    let current: ListingState = {
+      ...READY,
+      unit: deletedUnit,
+      roster: [
+        { contactId: 'll1', name: 'James Porter', role: 'landlord', roleLabel: 'Landlord', primaryContact: true, fallback: false },
+      ],
+      setUnit: vi.fn((unit: NonNullable<ListingState['unit']>) => {
+        current = { ...current, unit };
+      }),
+    };
+    useListing.mockImplementation(() => current);
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await waitFor(() => expect(getAllContacts).toHaveBeenCalled());
+    await user.type(within(dialog).getByRole('combobox', { name: 'Landlord' }), 'Nora');
+    await user.click(await screen.findByRole('option', { name: /Nora Lane/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Restore with this landlord' }));
+
+    expect(restoreUnit).toHaveBeenLastCalledWith('u1', { landlordId: 'll9' });
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+    // The real state: live - no Deleted badge or Restore action, the status
+    // pill is back ...
+    await waitFor(() => expect(screen.queryByText('Deleted')).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /^Restore$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Property status/i })).toBeInTheDocument();
+    // ... and the re-read's landlord on the Contacts card, not the pick.
+    const card = screen.getByRole('heading', { name: /^Contacts/ }).closest('section') as HTMLElement;
+    expect(within(card).getAllByRole('link')[0]).toHaveTextContent('Yolanda Banks (primary)');
+    expect(within(card).queryByText(/Nora Lane/)).not.toBeInTheDocument();
+    expect(within(card).queryByText(/James Porter/)).not.toBeInTheDocument();
+    // No landlord-changed sentence on a live property, and no retry sentence.
+    expect(screen.queryByText(RESTORE_LANDLORD_CHANGED)).not.toBeInTheDocument();
+    expect(screen.queryByText('The property contacts changed - try that change again.')).not.toBeInTheDocument();
+    // The choice was sent once; nothing re-ran the plain restore.
+    expect(restoreUnit.mock.calls).toEqual([['u1'], ['u1', { landlordId: 'll9' }]]);
+  });
+
+  // Spec revision 7 section 4 "Restore" (final review round 2 R2-1): the same
+  // 409 restore_landlord_not_needed when the property is STILL deleted - its
+  // stored landlord, James, became a landlord again while the dialog was open,
+  // so the plain restore applies now. Under revision 6 this answered
+  // unit_roster_conflict and the dialog stayed open saying "try that change
+  // again" to a choice that could never succeed. Now the dialog closes, the
+  // page re-reads, and the deleted banner (its role="status" region) says why:
+  // the landlord changed while staff were choosing, so choose Restore again.
+  // The plain restore is NOT re-run automatically - it would silently override
+  // the choice staff made.
+  /** Restore, then 409 restore_needs_landlord opens the dialog; its "Restore
+   *  without a landlord" answers 409 restore_landlord_not_needed. */
+  function refuseTheLateChoice(): void {
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+          error: 'restore_needs_landlord',
+          landlordName: 'James Porter',
+        }),
+      )
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_landlord_not_needed', 'restore_landlord_not_needed', {
+          error: 'restore_landlord_not_needed',
+        }),
+      );
+  }
+
+  async function chooseRestoreWithoutLandlord(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+  }
+
+  /** A deleted property whose setUnit replaces the unit, as the real hook does. */
+  function deletedPropertyState(unit: NonNullable<ListingState['unit']>): { state: () => ListingState } {
+    let current: ListingState = {
+      ...READY,
+      unit,
+      setUnit: vi.fn((next: NonNullable<ListingState['unit']>) => {
+        current = { ...current, unit: next };
+      }),
+    };
+    useListing.mockImplementation(() => current);
+    return { state: () => current };
+  }
+
+  it('a landlord choice answered 409 restore_landlord_not_needed closes the dialog; the re-read is still deleted - the deleted banner says the landlord changed', async () => {
+    const user = userEvent.setup();
+    const deletedUnit = { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' };
+    // The re-read: still deleted, James (a landlord again) still its landlord of record.
+    const fresh: NonNullable<ListingState['unit']> = {
+      ...deletedUnit,
+      contacts: [{ contactId: 'll1', role: 'landlord', primaryContact: true, name: 'James Porter' }],
+    };
+    refuseTheLateChoice();
+    getUnit.mockReset().mockResolvedValue(fresh);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    const { state } = deletedPropertyState(deletedUnit);
+    renderAt();
+
+    await chooseRestoreWithoutLandlord(user);
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+    expect(getUnit).toHaveBeenCalledWith('u1');
+    await waitFor(() => expect(state().setUnit).toHaveBeenCalledWith(fresh));
+    const banner = screen.getByRole('status');
+    expect(banner).toHaveTextContent(/This property is deleted/);
+    expect(await within(banner).findByText(RESTORE_LANDLORD_CHANGED)).toBeInTheDocument();
+    expect(screen.queryByText('The property contacts changed - try that change again.')).not.toBeInTheDocument();
+    // The choice was sent once; nothing re-ran the plain restore.
+    expect(restoreUnit.mock.calls).toEqual([['u1'], ['u1', { landlordId: null }]]);
+  });
+
+  it('the landlord-changed sentence clears on the next Restore press', async () => {
+    const user = userEvent.setup();
+    const deletedUnit = { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' };
+    refuseTheLateChoice();
+    // The next press fails, so the property stays deleted: only the press
+    // itself can clear the sentence.
+    restoreUnit.mockRejectedValueOnce(new ApiError(500, 'http_500', 'Request failed (500)'));
+    getUnit.mockReset().mockResolvedValue(deletedUnit);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    deletedPropertyState(deletedUnit);
+    renderAt();
+
+    await chooseRestoreWithoutLandlord(user);
+    const banner = screen.getByRole('status');
+    expect(await within(banner).findByText(RESTORE_LANDLORD_CHANGED)).toBeInTheDocument();
+
+    await user.click(within(banner).getByRole('button', { name: 'Restore' }));
+    expect(restoreUnit).toHaveBeenLastCalledWith('u1');
+    expect(within(screen.getByRole('status')).queryByText(RESTORE_LANDLORD_CHANGED)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(screen.getByRole('status')).getByRole('button', { name: 'Restore' })).toBeEnabled(),
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(/This property is deleted/);
+    expect(screen.queryByText(RESTORE_LANDLORD_CHANGED)).not.toBeInTheDocument();
+    expect(restoreUnit).toHaveBeenCalledTimes(3);
+  });
+
+  // A failed re-read leaves the page showing the property deleted, so the
+  // banner still says why the dialog closed (Choose Restore again resolves it
+  // either way); still no automatic plain restore.
+  it('a failed re-read after 409 restore_landlord_not_needed still closes the dialog and the deleted banner says the landlord changed', async () => {
+    const user = userEvent.setup();
+    const deletedUnit = { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' };
+    refuseTheLateChoice();
+    getUnit.mockReset().mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));
+    getAllContacts.mockReset().mockResolvedValue([]);
+    const { state } = deletedPropertyState(deletedUnit);
+    renderAt();
+
+    await chooseRestoreWithoutLandlord(user);
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+    expect(await within(screen.getByRole('status')).findByText(RESTORE_LANDLORD_CHANGED)).toBeInTheDocument();
+    expect(getUnit).toHaveBeenCalledWith('u1');
+    expect(state().setUnit).not.toHaveBeenCalled();
+    expect(restoreUnit.mock.calls).toEqual([['u1'], ['u1', { landlordId: null }]]);
+  });
+
+  // The sentence belongs to the property it was said for, like the dialog
+  // (R1 code review, dashboard finding 8): the /listings/:unitId element is
+  // not keyed, so a history move re-renders this same instance - the sentence
+  // must not show on another property, nor come back with the first one.
+  it('the landlord-changed sentence is reset by a history move to another property', async () => {
+    const user = userEvent.setup();
+    const deletedUnit = { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' };
+    refuseTheLateChoice();
+    getUnit.mockReset().mockResolvedValue(deletedUnit);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    const deletedU1: ListingState = { ...READY, unit: deletedUnit, setUnit: vi.fn() };
+    const deletedU2: ListingState = {
+      ...READY,
+      unit: { ...deletedUnit, unitId: 'u2', address: { line1: '22 Elm St' } },
+      setUnit: vi.fn(),
+    };
+    useListing.mockImplementation((id: string) => (id === 'u2' ? deletedU2 : deletedU1));
+    let go: ((delta: number) => void) | undefined;
+    function HistoryProbe(): null {
+      const navigate = useNavigate();
+      go = (delta) => void navigate(delta);
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={['/listings/u2', '/listings/u1']} initialIndex={1}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+        </Routes>
+        <HistoryProbe />
+      </MemoryRouter>,
+    );
+
+    await chooseRestoreWithoutLandlord(user);
+    expect(await within(screen.getByRole('status')).findByText(RESTORE_LANDLORD_CHANGED)).toBeInTheDocument();
+
+    // Back to u2, also deleted: its banner never says u1's sentence.
+    act(() => go?.(-1));
+    expect(await screen.findByRole('heading', { name: /22 Elm St/ })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent(/This property is deleted/);
+    expect(screen.queryByText(RESTORE_LANDLORD_CHANGED)).not.toBeInTheDocument();
+
+    // Forward to u1 again: reset, not merely hidden.
+    act(() => go?.(1));
+    expect(await screen.findByRole('status')).toHaveTextContent(/This property is deleted/);
+    expect(screen.queryByText(RESTORE_LANDLORD_CHANGED)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [404, 'unit_not_found'],
+    [409, 'unit_roster_conflict'],
+    [500, 'http_500'],
+  ] as const)(
+    '(PIN, W7) a plain restore refused %i %s opens no landlord dialog; the property stays deleted and Restore re-enables',
+    async (status, code) => {
+      const user = userEvent.setup();
+      const setUnit = vi.fn();
+      restoreUnit.mockReset().mockRejectedValue(new ApiError(status, code, code, { error: code }));
+      useListing.mockReturnValue({
+        ...READY,
+        unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+        setUnit,
+      });
+      renderAt();
+
+      await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+      expect(restoreUnit).toHaveBeenCalledWith('u1');
+      await waitFor(() => expect(screen.getAllByRole('button', { name: /^Restore$/i })[0]).toBeEnabled());
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+      expect(setUnit).not.toHaveBeenCalled();
+      expect(screen.getByRole('status')).toHaveTextContent(/deleted/i);
+    },
+  );
+
+  // R1 code review, dashboard finding 8: the landlord dialog belongs to the
+  // property it opened for. The /listings/:unitId element is not keyed, so a
+  // history move (browser Back / Forward) to another property re-renders this
+  // SAME instance: the dialog must close then - never post its choice against
+  // the other property - and must not come back with the first one.
+  it('the landlord dialog is reset by a history move to another property and never restores that property', async () => {
+    const user = userEvent.setup();
+    restoreUnit.mockReset().mockRejectedValue(
+      new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+        error: 'restore_needs_landlord',
+        landlordName: 'James Porter',
+      }),
+    );
+    getAllContacts.mockReset().mockResolvedValue([]);
+    const deletedU1: ListingState = {
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit: vi.fn(),
+    };
+    const liveU2: ListingState = {
+      ...READY,
+      unit: { ...READY.unit!, unitId: 'u2', address: { line1: '22 Elm St' } },
+      setUnit: vi.fn(),
+    };
+    useListing.mockImplementation((id: string) => (id === 'u2' ? liveU2 : deletedU1));
+    let go: ((delta: number) => void) | undefined;
+    function HistoryProbe(): null {
+      const navigate = useNavigate();
+      go = (delta) => void navigate(delta);
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={['/listings/u2', '/listings/u1']} initialIndex={1}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+        </Routes>
+        <HistoryProbe />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    // The dialog's own action, held from before the move (R2 code review,
+    // dashboard finding A4; fix wave 2 FW2-7): pressed after the move it must
+    // reach no handler. A dialog that survived the move would still hold this
+    // button, now bound to the page's current property, and post its choice
+    // against u2 - so the u2 check below can fail.
+    const withoutLandlord = within(dialog).getByRole('button', { name: 'Restore without a landlord' });
+
+    // Back to u2 with the dialog open: it closes, and its action posts nothing.
+    act(() => go?.(-1));
+    expect(await screen.findByRole('heading', { name: /22 Elm St/ })).toBeInTheDocument();
+    fireEvent.click(withoutLandlord);
+    expect(restoreUnit.mock.calls.map(([id]) => id)).toEqual(['u1']);
+    expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+
+    // Forward to u1 again: reset, not merely hidden.
+    act(() => go?.(1));
+    expect(await screen.findByRole('status')).toHaveTextContent(/deleted/i);
+    expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+
+    // Only u1's own plain restore was ever sent.
+    expect(restoreUnit).toHaveBeenCalledTimes(1);
+    expect(restoreUnit).toHaveBeenCalledWith('u1');
+  });
+
+  // R2 code review, dashboard finding A4 (fix wave 2 FW2-7): FW-11 also drops
+  // a restore_needs_landlord 409 that answers AFTER the move. The answer
+  // belongs to the property it was asked for, so it opens no dialog on the
+  // other property, nor on going Forward back to its own. An effect-based
+  // reset keyed on the unitId would miss it: that effect runs at the move,
+  // before the late answer lands.
+  it('a restore_needs_landlord 409 that answers after a history move to another property opens no dialog there, nor on going Forward', async () => {
+    const user = userEvent.setup();
+    let refuse: ((err: unknown) => void) | undefined;
+    restoreUnit.mockReset().mockImplementation(
+      () =>
+        new Promise<never>((_resolve, reject) => {
+          refuse = reject;
+        }),
+    );
+    getAllContacts.mockReset().mockResolvedValue([]);
+    const deletedU1: ListingState = {
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit: vi.fn(),
+    };
+    const liveU2: ListingState = {
+      ...READY,
+      unit: { ...READY.unit!, unitId: 'u2', address: { line1: '22 Elm St' } },
+      setUnit: vi.fn(),
+    };
+    useListing.mockImplementation((id: string) => (id === 'u2' ? liveU2 : deletedU1));
+    let go: ((delta: number) => void) | undefined;
+    function HistoryProbe(): null {
+      const navigate = useNavigate();
+      go = (delta) => void navigate(delta);
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={['/listings/u2', '/listings/u1']} initialIndex={1}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+        </Routes>
+        <HistoryProbe />
+      </MemoryRouter>,
+    );
+
+    // On deleted u1: the plain restore is sent and left in flight.
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    expect(restoreUnit).toHaveBeenCalledWith('u1');
+
+    // Back to u2, then u1's answer lands: it needs a landlord.
+    act(() => go?.(-1));
+    expect(await screen.findByRole('heading', { name: /22 Elm St/ })).toBeInTheDocument();
+    await act(async () => {
+      refuse?.(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+          error: 'restore_needs_landlord',
+          landlordName: 'James Porter',
+        }),
+      );
+    });
+    expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+
+    // Forward to u1: the late answer was dropped, not parked.
+    act(() => go?.(1));
+    expect(await screen.findByRole('status')).toHaveTextContent(/deleted/i);
+    expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+    expect(restoreUnit).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1317,6 +1982,55 @@ describe('ListingDetail - Contacts card edit mode', () => {
     );
   });
 
+  it('auto-primary: an add the server answers with the new row as primary renders it as the primary contact', async () => {
+    // caseworker-integrity spec revision 4 section 4 "Auto-primary": on a
+    // property with no primary contact and no landlord of record (e.g. restored
+    // without a landlord) the server makes the added contact its primary
+    // contact. This page still posts primaryContact: false and renders the
+    // roster the server answers with.
+    const user = userEvent.setup();
+    const { landlordId: _dropped, primary_contact: _noPrimary, ...ownerless } = ROSTER_UNIT;
+    const dana = { contactId: 'pm2', role: 'pm' as const, primaryContact: false, name: 'Dana Reyes' };
+    useListing.mockReturnValue({
+      ...ROSTER_READY,
+      unit: { ...ownerless, contacts: [dana] } as NonNullable<ListingState['unit']>,
+      landlord: null,
+      roster: [ROSTER_READY.roster[2]!],
+    });
+    addUnitContact.mockReset().mockResolvedValue({
+      ...ownerless,
+      primary_contact: 'pm9',
+      contacts: [dana, { contactId: 'pm9', role: 'pm', primaryContact: true, name: 'Renata Vale' }],
+    });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    const card = screen.getByRole('heading', { name: /^Contacts/ }).closest('section') as HTMLElement;
+    // Before: nobody is the primary contact - no marker, and Dana offers Make primary.
+    expect(within(card).queryByText('(primary)')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Make Dana Reyes the primary contact' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '+ Add contact' }));
+    await user.type(screen.getByRole('combobox', { name: 'Add contact' }), 'Renata');
+    await user.click(screen.getByRole('option', { name: /Renata Vale/ }));
+    await user.click(screen.getByRole('button', { name: 'Add contact to this property' }));
+
+    // The page asks for a NON-primary row; the server decides.
+    expect(addUnitContact).toHaveBeenCalledTimes(1);
+    expect(addUnitContact).toHaveBeenCalledWith('u1', { contactId: 'pm9', role: 'pm', primaryContact: false });
+    // After: the card's primary marker is on the added row, which offers no
+    // Make primary; Dana still does.
+    const renataRemove = await screen.findByRole('button', { name: 'Remove Renata Vale from this property' });
+    expect(renataRemove.parentElement).toHaveTextContent('Renata Vale (primary)');
+    expect(within(card).getAllByText('(primary)')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Make Renata Vale the primary contact' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Make Dana Reyes the primary contact' })).toBeInTheDocument();
+
+    // Read mode lists the primary contact first, marked.
+    await user.click(screen.getByRole('button', { name: 'Done editing contacts' }));
+    expect(within(card).getAllByRole('link')[0]).toHaveTextContent('Renata Vale (primary)');
+  });
+
   it('refuses to silently replace the landlord of record when adding a Landlord contact', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue(ROSTER_READY);
@@ -1347,6 +2061,87 @@ describe('ListingDetail - Contacts card edit mode', () => {
     expect(screen.getByRole('combobox', { name: 'Add contact' })).toHaveValue('Renata Vale');
   });
 
+  // A typed contact-list refusal names its own reason, and (final review A3;
+  // fix wave FWF-2) settles like every other 409: the roster write answers
+  // these codes only when the property changed after the route's read (a seat
+  // removed, the landlord cleared) - exactly when this card is stale - so the
+  // page re-reads the property onto the card. The sentence stays.
+  it.each([
+    ['contact_list_caseworker', "Caseworkers can't be on a property's contact list."],
+    ['landlord_not_landlord', "Only a landlord can be a property's landlord of record."],
+  ] as const)(
+    'a %s refusal names its own reason - not the landlord-of-record catch-all - and re-reads the property onto the Contacts card',
+    async (code, sentence) => {
+      const user = userEvent.setup();
+      useListing.mockReturnValue(ROSTER_READY);
+      // The re-read: meanwhile another operator removed Dana's seat.
+      getUnit.mockReset().mockResolvedValue({
+        ...ROSTER_UNIT,
+        contacts: ROSTER_UNIT.contacts!.filter((row) => row.contactId !== 'pm2'),
+      });
+      addUnitContact.mockReset().mockRejectedValue(new ApiError(409, code, code, { error: code }));
+      renderAt();
+
+      await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+      expect(screen.getByRole('button', { name: 'Remove Dana Reyes from this property' })).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: '+ Add contact' }));
+      await user.type(screen.getByRole('combobox', { name: 'Add contact' }), 'Renata');
+      await user.click(screen.getByRole('option', { name: /Renata Vale/ }));
+      await user.click(screen.getByRole('button', { name: 'Add contact to this property' }));
+
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent(sentence);
+      expect(alert).not.toHaveTextContent(/landlord of record now/);
+      await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+      // Settled onto the card: Dana's seat is gone ...
+      await waitFor(() =>
+        expect(
+          screen.queryByRole('button', { name: 'Remove Dana Reyes from this property' }),
+        ).not.toBeInTheDocument(),
+      );
+      // ... and the refusal's sentence stays on the add row, with the pick.
+      expect(screen.getByRole('alert')).toHaveTextContent(sentence);
+      expect(screen.getByRole('combobox', { name: 'Add contact' })).toHaveValue('Renata Vale');
+    },
+  );
+
+  it("a typed refusal of a row's edit keeps that row's sentence after the re-read settles the card", async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    // The re-read: meanwhile the landlord of record was cleared (James's row
+    // and landlordId gone), so Dana's Landlord role was a claim of the vacant
+    // slot by a contact not typed landlord.
+    const { landlordId: _cleared, ...ownerless } = ROSTER_UNIT;
+    getUnit.mockReset().mockResolvedValue({
+      ...ownerless,
+      contacts: ROSTER_UNIT.contacts!.filter((row) => row.contactId !== 'll1'),
+    });
+    addUnitContact
+      .mockReset()
+      .mockRejectedValue(
+        new ApiError(409, 'landlord_not_landlord', 'landlord_not_landlord', { error: 'landlord_not_landlord' }),
+      );
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Role for Dana Reyes' }), 'landlord');
+
+    expect(addUnitContact).toHaveBeenCalledWith('u1', { contactId: 'pm2', role: 'landlord', primaryContact: false });
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+    // Settled onto the card: James is no longer listed ...
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Remove James Porter from this property' }),
+      ).not.toBeInTheDocument(),
+    );
+    // ... and Dana's row still carries its sentence.
+    const danaRow = screen.getByRole('button', { name: 'Remove Dana Reyes from this property' })
+      .parentElement?.parentElement as HTMLElement;
+    expect(within(danaRow).getByRole('alert')).toHaveTextContent(
+      "Only a landlord can be a property's landlord of record.",
+    );
+  });
+
   it('asks the operator to retry when repeated concurrent roster writes exhaust retries', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue(ROSTER_READY);
@@ -1364,6 +2159,32 @@ describe('ListingDetail - Contacts card edit mode', () => {
       'The property contacts changed - try that change again.',
     );
     expect(screen.getByRole('combobox', { name: 'Add contact' })).toHaveValue('Renata Vale');
+  });
+
+  it('the Add contact picker never offers a caseworker (I4) - other kinds still show', async () => {
+    const user = userEvent.setup();
+    useContacts.mockImplementation((filter: string) =>
+      filter === 'deleted'
+        ? { status: 'ready', contacts: [] }
+        : {
+            status: 'ready',
+            contacts: [
+              { contactId: 'pm9', type: 'landlord', status: 'active', firstName: 'Renata', lastName: 'Vale', phone: '+14045550188' },
+              { contactId: 'cw1', type: 'partner', role: 'Caseworker', status: 'active', firstName: 'Renee', lastName: 'Casey', phone: '+14045550199' },
+              { contactId: 'pt1', type: 'partner', role: 'Navigator', status: 'active', firstName: 'Renaldo', lastName: 'Park', phone: '+14045550177' },
+            ],
+          },
+    );
+    useListing.mockReturnValue(ROSTER_READY);
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: '+ Add contact' }));
+    await user.type(screen.getByRole('combobox', { name: 'Add contact' }), 'Ren');
+
+    expect(screen.getByRole('option', { name: /Renata Vale/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Renaldo Park/ })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /Renee Casey/ })).not.toBeInTheDocument();
   });
 
   it('make primary contact re-POSTs the row with primaryContact: true, role preserved', async () => {
@@ -1479,7 +2300,28 @@ describe('ListingDetail - Contacts card edit mode', () => {
     const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
     expect(
       within(dialog).getByText(
-        'This property will have no primary contact - tours fall back to the landlord of record.',
+        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a new contact is added.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('an OWNERLESS property (no landlordId at all, e.g. restored without a landlord) names the NO-primary outcome without crashing', async () => {
+    const user = userEvent.setup();
+    const { landlordId: _dropped, ...ownerless } = ROSTER_UNIT;
+    useListing.mockReturnValue({
+      ...ROSTER_READY,
+      unit: { ...ownerless, contacts: [ROSTER_UNIT.contacts![0]!] } as NonNullable<ListingState['unit']>,
+      roster: [ROSTER_READY.roster[0]!],
+    });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Remove Alicia Grant from this property' }));
+
+    const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
+    expect(
+      within(dialog).getByText(
+        'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a new contact is added.',
       ),
     ).toBeInTheDocument();
   });

@@ -45,8 +45,10 @@ import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
 import {
   CannotRemoveLandlordOfRecordError,
+  ContactListCaseworkerError,
   createUnitsRepo,
   isDeleted,
+  LandlordClaimNotLandlordError,
   LandlordReassignmentRequiredError,
   RosterWriteConflictError,
   unitContacts,
@@ -61,6 +63,7 @@ import {
 } from '../repos/unitsRepo.js';
 import {
   createContactsRepo,
+  isDeleted as isContactDeleted,
   type ContactItem,
   type ContactsRepo,
   type RecipientDisplay,
@@ -77,6 +80,8 @@ import { deriveTourSignal } from '../lib/listingSendTour.js';
 import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { reachedCount } from '../services/shareRecipientState.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
+import { requireLandlordContact, sendContactTypeError } from '../services/contactTypeGuards.js';
+import { isCaseworker } from '../lib/caseworkers.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -123,6 +128,28 @@ export interface UnitsRouterDeps {
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
 function isUnitContactRole(value: unknown): value is UnitContact['role'] {
   return typeof value === 'string' && (UNIT_CONTACT_ROLES as readonly string[]).includes(value);
+}
+
+/**
+ * The ONE eligibility rule for an AUTOMATIC routing choice (caseworker-
+ * integrity spec revision 6 section 4 "Contact list (I4)" and "Restore"; final
+ * review A4, fix wave FWF-3): auto-primary on a contact-list add (passed to
+ * unitsRepo.addContact as `autoPrimaryEligible`) and the restore's
+ * sole-landlord promotion (soleLandlordToPromote). The contact exists, is
+ * typed `landlord`, is NOT soft-deleted (the contacts repo's own test -
+ * deleting a contact keeps its seats, and a deleted contact is unusable for
+ * routing everywhere else) and is NOT a phone or email routing pointer (a
+ * routing record, never a contact). A deliberate choice - the I3 claim of a
+ * vacant landlord slot, a landlord picked for a restore - asks only the type.
+ */
+function autoRoutingEligible(contact: ContactItem | undefined): boolean {
+  return (
+    contact !== undefined &&
+    contact.phone_ref !== true &&
+    contact.email_ref !== true &&
+    !isContactDeleted(contact) &&
+    contact.type === 'landlord'
+  );
 }
 
 /**
@@ -410,6 +437,45 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     });
   }
 
+  /**
+   * caseworker-integrity spec revision 5, section 4 "Restore" (Cameron's Q5;
+   * fix wave 2 FW2-12): the sole-landlord promotion of a "Restore without a
+   * landlord". When the cleared landlord was the property's primary contact -
+   * its contact-list row flagged, or the primary_contact scalar naming it
+   * (unitsRepo.restoreWithLandlord's rule) - the ONE remaining row whose
+   * contact is eligible for automatic routing (any roster role; read
+   * CONSISTENTLY; `autoRoutingEligible`, the rule auto-primary shares since
+   * spec revision 6 / fix wave FWF-3: typed `landlord`, and a missing, a
+   * routing-pointer or a SOFT-DELETED contact - R3 code review finding A1,
+   * fix wave 3 FW3-1 - is not eligible) is the one to promote; zero or
+   * two-plus such rows promote nobody (null).
+   * Decided from `listRead` - the contact list of `unit` (the route's
+   * consistent read) taken ONCE, before these type reads are awaited - which
+   * is the very value the restore's write is then conditioned on
+   * (`expectContacts`; R3 code review finding A3, fix wave 3 FW3-2).
+   */
+  async function soleLandlordToPromote(
+    unit: UnitItem,
+    listRead: UnitItem['contacts'],
+    clearedLandlordId: string | undefined,
+  ): Promise<string | null> {
+    if (clearedLandlordId === undefined) return null;
+    // unitContacts' own reading of that one list (the landlordId-derived row
+    // when no list is stored).
+    const rows = unitContacts({ contacts: listRead, landlordId: clearedLandlordId });
+    const clearedRow = rows.find((row) => row.contactId === clearedLandlordId);
+    const clearedWasPrimary =
+      clearedRow?.primaryContact === true || unit.primary_contact === clearedLandlordId;
+    if (!clearedWasPrimary) return null;
+    const remaining = rows.filter((row) => row.contactId !== clearedLandlordId);
+    const read = await Promise.all(
+      remaining.map((row) => contacts.getById(row.contactId, { consistentRead: true })),
+    );
+    const eligible = remaining.filter((_row, i) => autoRoutingEligible(read[i]));
+    const [only] = eligible;
+    return eligible.length === 1 && only !== undefined ? only.contactId : null;
+  }
+
   // GET /api/units — filtered list. Exactly one filter is honored, in priority
   // order landlordId > status (each a single-partition Query); with no filter, a
   // paginated Scan (repo.list). This keeps every list read a bounded operation.
@@ -486,6 +552,21 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         return;
       }
       validation.fields['accepted_authorities'] = check.value;
+    }
+    // caseworker-integrity I3 (spec 2026-10-12 section 4): the owning
+    // landlordId must name a contact typed `landlord` (a property manager is a
+    // landlord with a role) - 404 landlord_not_found when no such contact
+    // exists, 409 landlord_not_landlord otherwise. A consistent read. It runs
+    // after the validator's 400s and the org-list 422, and nothing is created
+    // on a refusal. landlordId is guaranteed by validation.
+    try {
+      await requireLandlordContact(contacts, validation.fields['landlordId'] as string);
+    } catch (err) {
+      if (sendContactTypeError(err, res)) {
+        log.info({ actor: req.user?.userId }, 'unit create refused: landlordId is not a landlord');
+        return;
+      }
+      throw err;
     }
     // status is NOT a writable CRUD field (§8: property-status changes route
     // through PATCH /api/units/:unitId/listing-status). Create is not a
@@ -1052,11 +1133,22 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // Add (or update) a roster contact → { unit } (with contacts). The ROUTE
   // resolves the contact's denormalized name/company (so the roster row is
   // self-describing); the repo maintains the single-primaryContact invariant and
-  // keeps the primary_contact scalar (the property's default contact - relay
-  // groups and masked calls) consistent. A Landlord role claims an ownerless
-  // legacy property; 409 landlord_reassignment_required when a different owner
-  // already exists, or unit_roster_conflict after repeated write races. 404
-  // unknown/disappeared unit or unknown contact; 400 bad role / primaryContact;
+  // keeps the primary_contact scalar consistent with the row marked primary
+  // (nothing routes on the scalar: the roster resolvers take the row marked
+  // primary, else the landlord of record - see unitsRepo.addContact).
+  // Auto-primary (caseworker-integrity spec revisions 5 and 6, section 4
+  // "Contact list"): a NEW seat for a contact typed landlord and not
+  // soft-deleted (autoRoutingEligible) on a property with no row marked
+  // primary and no landlord of record becomes its primary contact even when
+  // the request's primaryContact is false or absent. A Landlord role
+  // claims an ownerless legacy property. 409 contact_list_caseworker (a
+  // caseworker taking a NEW seat) and 409 landlord_not_landlord (a claim of the
+  // vacant landlord slot by a contact not typed landlord), each from the
+  // route's checks below or from the roster write itself; 409
+  // landlord_reassignment_required when a different owner already exists, or
+  // unit_roster_conflict after repeated write races. 404 unit_not_found
+  // (unknown/disappeared unit) or contact_not_found (a missing contact, or the
+  // id of a phone or email routing pointer); 400 bad role / primaryContact;
   // audit unit_contact_added after successful writes only.
   router.post('/:unitId/contacts', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
@@ -1084,8 +1176,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const primaryContact = primaryContactRaw === true;
 
     // The unit must exist (404). We check up-front so an unknown unit is a clean
-    // 404 distinct from the unknown-contact 404 below.
-    const unit = await units.getById(unitId);
+    // 404 distinct from the unknown-contact 404 below. caseworker-integrity
+    // (spec 2026-10-12 section 4): the seat and claim checks below decide from
+    // THIS read, so it is consistent.
+    const unit = await units.getById(unitId, { consistentRead: true });
     if (!unit) {
       res.status(404).json({ error: 'unit_not_found' });
       return;
@@ -1093,10 +1187,47 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
     // Resolve the contact for denormalization (404 when the contact doesn't
     // exist — never roster a phantom). name/company are best-effort honest:
-    // omitted when unknown, never invented.
-    const contact = await contacts.getById(contactId);
-    if (!contact) {
+    // omitted when unknown, never invented. A phone or email ROUTING POINTER
+    // row (contactsRepo.ts `phone_ref` / `email_ref`: a routing record, never
+    // a contact) does not exist as a contact here either - the codebase's own
+    // pointer test, as in services/contactTypeGuards.ts (R2 code review finding
+    // A3, fix wave 2 FW2-3).
+    const contact = await contacts.getById(contactId, { consistentRead: true });
+    if (!contact || contact.phone_ref === true || contact.email_ref === true) {
       res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    // caseworker-integrity (spec 2026-10-12 section 4), in this order and both
+    // before the repo call; the repo's own 409 landlord_reassignment_required
+    // follows. Decided from the consistent reads above with the repo's own
+    // definitions (unitsRepo.addContact): a SEAT is a row of unitContacts(unit)
+    // (the landlord of record included); a CLAIM is a role-landlord add on a
+    // unit with no landlordId attribute.
+    //   I4: a caseworker never takes a NEW seat, whatever the role. A seat they
+    //       already hold stays editable (L2).
+    //   I3: claiming the vacant landlord slot needs a contact typed `landlord`.
+    //       Re-asserting the existing owner is not a claim and is not checked.
+    // These answer the common, no-race case. addContact decides both again on
+    // each attempt's own read from the facts passed below (fix wave 2 FW2-1),
+    // so a seat removed or a landlord cleared after THIS read answers the same
+    // 409s instead of re-seating a caseworker or letting a non-landlord claim.
+    // Auto-primary asks `autoPrimaryEligible`, the one automatic-routing rule
+    // shared with the restore's promotion (autoRoutingEligible): only a
+    // contact typed landlord that is not soft-deleted (and not a pointer,
+    // already a 404 above) is made the primary contact of an ownerless,
+    // primary-less property (spec revisions 5 and 6; FW2-11, FWF-3); the I3
+    // claim keeps asking `landlordTyped`.
+    const seated = unitContacts(unit).some((row) => row.contactId === contactId);
+    if (!seated && isCaseworker(contact)) {
+      log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact refused: a caseworker cannot take a new seat');
+      res.status(409).json({ error: 'contact_list_caseworker' });
+      return;
+    }
+    const claimsVacantLandlord =
+      role === 'landlord' && !Object.prototype.hasOwnProperty.call(unit, 'landlordId');
+    if (claimsVacantLandlord && contact.type !== 'landlord') {
+      log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact refused: a landlord claim by a non-landlord');
+      res.status(409).json({ error: 'landlord_not_landlord' });
       return;
     }
     const name = displayNameOfContact(contact);
@@ -1104,14 +1235,38 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
     let updated: UnitItem;
     try {
-      updated = await units.addContact(unitId, {
-        contactId,
-        role,
-        primaryContact,
-        ...(name !== undefined && { name }),
-        ...(company !== undefined && { company }),
-      });
+      updated = await units.addContact(
+        unitId,
+        {
+          contactId,
+          role,
+          primaryContact,
+          ...(name !== undefined && { name }),
+          ...(company !== undefined && { company }),
+        },
+        {
+          caseworker: isCaseworker(contact),
+          landlordTyped: contact.type === 'landlord',
+          autoPrimaryEligible: autoRoutingEligible(contact),
+        },
+      );
     } catch (err) {
+      if (err instanceof ContactListCaseworkerError) {
+        log.info(
+          { unitId, contactId, actor: req.user?.userId },
+          'unit contact refused at the roster write: a caseworker cannot take a new seat',
+        );
+        res.status(409).json({ error: 'contact_list_caseworker' });
+        return;
+      }
+      if (err instanceof LandlordClaimNotLandlordError) {
+        log.info(
+          { unitId, contactId, actor: req.user?.userId },
+          'unit contact refused at the roster write: a landlord claim by a non-landlord',
+        );
+        res.status(409).json({ error: 'landlord_not_landlord' });
+        return;
+      }
       if (err instanceof LandlordReassignmentRequiredError) {
         res.status(409).json({ error: 'landlord_reassignment_required' });
         return;
@@ -1126,13 +1281,33 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
       throw err;
     }
+    // The EFFECTIVE primary flag, read from the written unit (R2 code review
+    // finding A1, fix wave 2 FW2-2): auto-primary can make the contact primary
+    // although the request said false (every dashboard add does), so the
+    // durable record states what the write did, and `autoPrimary` says the
+    // rule - not the request - did it.
+    const effectivePrimary = (updated.contacts ?? []).some(
+      (row) => row.contactId === contactId && row.primaryContact === true,
+    );
+    const autoPrimary = effectivePrimary && !primaryContact;
     await audit.append(`units#${unitId}`, 'unit_contact_added', {
       actor: req.user?.userId,
       contactId,
       role,
-      primaryContact,
+      primaryContact: effectivePrimary,
+      ...(autoPrimary && { autoPrimary: true }),
     });
-    log.info({ unitId, contactId, role, primaryContact, actor: req.user?.userId }, 'unit contact added via api');
+    log.info(
+      {
+        unitId,
+        contactId,
+        role,
+        primaryContact: effectivePrimary,
+        ...(autoPrimary && { autoPrimary: true }),
+        actor: req.user?.userId,
+      },
+      'unit contact added via api',
+    );
     res.json({ unit: { ...updated, contacts: await enrichRoster(updated) } });
   });
 
@@ -1437,6 +1612,34 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
       validation.fields['accepted_authorities'] = check.value;
     }
+    // caseworker-integrity I3 (spec 2026-10-12 section 4): a CHANGED landlordId
+    // must name a contact typed `landlord` (404 landlord_not_found / 409
+    // landlord_not_landlord). "Changed" is decided on a CONSISTENT unit read; an
+    // unchanged landlordId is not checked (re-saving the stored owner, L2). An
+    // empty id names no contact, so it is a 404 without a contact read.
+    const landlordPatch = validation.fields['landlordId'];
+    if (typeof landlordPatch === 'string') {
+      const current = await units.getById(unitId, { consistentRead: true });
+      if (current === undefined) {
+        res.status(404).json({ error: 'unit_not_found' });
+        return;
+      }
+      if (current.landlordId !== landlordPatch) {
+        if (landlordPatch.length === 0) {
+          res.status(404).json({ error: 'landlord_not_found' });
+          return;
+        }
+        try {
+          await requireLandlordContact(contacts, landlordPatch);
+        } catch (err) {
+          if (sendContactTypeError(err, res)) {
+            log.info({ unitId, actor: req.user?.userId }, 'unit patch refused: landlordId is not a landlord');
+            return;
+          }
+          throw err;
+        }
+      }
+    }
     // D1 delete-on-removal (the raw E5 seam): `media` is PATCH-writable and a
     // wholesale replace can drop stored keys. Snapshot the PRIOR list BEFORE the
     // write - as a COPY, because a read-modify-write repo can return the SAME
@@ -1516,19 +1719,177 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // soft-deleted property back into the normal views. Audited; 404 when missing.
   router.post('/:unitId/restore', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
-    let unit;
+    // caseworker-integrity I3 (spec 2026-10-12 section 4 "Restore", Cameron
+    // 2026-10-12): a property comes back live only with a landlord of record
+    // typed `landlord`, or with none - and restore never dead-ends.
+    //   - Plain restore (no `landlordId` key in the body): when the unit is
+    //     ownerless or its landlordId names a contact typed `landlord`, restore
+    //     exactly as before. Otherwise 409 restore_needs_landlord
+    //     { landlordName? } and nothing is written.
+    //   - { landlordId: <id> } restores AND makes that contact (404
+    //     landlord_not_found / 409 landlord_not_landlord) the landlord of record;
+    //     { landlordId: null } restores ownerless and, when the cleared landlord
+    //     was the primary, promotes the one remaining contact typed landlord
+    //     (spec revision 5, soleLandlordToPromote). Honored ONLY when the plain
+    //     restore would refuse, in ONE conditional write
+    //     (unitsRepo.restoreWithLandlord) on the landlordId read here - and, for
+    //     { landlordId: null }, the contact list read here - so a concurrent
+    //     change answers 409 unit_roster_conflict.
+    //   - A body is sent only after a 409 restore_needs_landlord, so one that
+    //     arrives when the plain restore WOULD apply (the unit is no longer
+    //     soft-deleted, its stored landlord is typed landlord again, or it is
+    //     ownerless) means the state changed under the dialog: 409
+    //     restore_landlord_not_needed and NOTHING is written - no restore, no
+    //     audit (spec revision 7; final review A2 and round 2 R2-1). Its own
+    //     code, never unit_roster_conflict ("the contact list or landlord
+    //     changed, retry"): a retry of this body can never succeed. The
+    //     dashboard closes the dialog and re-reads the property; the plain
+    //     restore is never re-run for the caller, which would override the
+    //     choice it sent.
+    //   - A unit that is NOT soft-deleted restores exactly as before with no
+    //     check (plain restore only): nothing comes back to life, and restore
+    //     must never become a way to reassign a live property's landlord.
+    const raw: unknown = req.body;
+    const body =
+      typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    const choosesLandlord = Object.prototype.hasOwnProperty.call(body, 'landlordId');
+    const choice = body['landlordId'];
+    if (choosesLandlord && choice !== null && (typeof choice !== 'string' || choice.length === 0)) {
+      res.status(400).json({ error: 'landlordId must be a contact id or null' });
+      return;
+    }
+
+    const stored = await units.getById(unitId, { consistentRead: true });
+    if (stored === undefined) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    const storedLandlordId =
+      typeof stored.landlordId === 'string' && stored.landlordId.length > 0 ? stored.landlordId : undefined;
+    let needsLandlord = false;
+    let landlordName: string | undefined;
+    if (isDeleted(stored) && storedLandlordId !== undefined) {
+      const current = await contacts.getById(storedLandlordId, { consistentRead: true });
+      if (current === undefined || current.type !== 'landlord') {
+        needsLandlord = true;
+        landlordName = current === undefined ? undefined : displayNameOfContact(current);
+      }
+    }
+
+    if (!needsLandlord) {
+      // The late body (spec revision 7; final review A2, round 2 R2-1): the
+      // plain restore applies, so a landlord choice cannot be what the caller
+      // saw - refuse before anything is written, with the code that says no
+      // landlord is needed now, so the dialog closes and the page re-reads.
+      if (choosesLandlord) {
+        log.info(
+          { unitId, actor: req.user?.userId },
+          'unit restore refused: a landlord choice arrived when the plain restore applies',
+        );
+        res.status(409).json({ error: 'restore_landlord_not_needed' });
+        return;
+      }
+      let unit;
+      try {
+        unit = await units.restore(unitId);
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          res.status(404).json({ error: 'unit_not_found' });
+          return;
+        }
+        throw err;
+      }
+      await audit.append(`units#${unitId}`, 'unit_restored', { actor: req.user?.userId });
+      log.info({ unitId, actor: req.user?.userId }, 'unit restored via api');
+      res.json({ unit });
+      return;
+    }
+
+    if (!choosesLandlord) {
+      log.info({ unitId, actor: req.user?.userId }, 'unit restore refused: the landlord of record is not a landlord');
+      res.status(409).json({
+        error: 'restore_needs_landlord',
+        ...(landlordName !== undefined && { landlordName }),
+      });
+      return;
+    }
+
+    let next: { contactId: string; name?: string; company?: string } | null = null;
+    if (typeof choice === 'string') {
+      let landlord: ContactItem;
+      try {
+        landlord = await requireLandlordContact(contacts, choice);
+      } catch (err) {
+        if (sendContactTypeError(err, res)) return;
+        throw err;
+      }
+      const name = displayNameOfContact(landlord);
+      const company = typeof landlord['company'] === 'string' ? (landlord['company'] as string) : undefined;
+      next = {
+        contactId: choice,
+        ...(name !== undefined && { name }),
+        ...(company !== undefined && { company }),
+      };
+    }
+
+    // Restore WITHOUT a landlord: the sole-landlord promotion (spec revision
+    // 5) is decided here from the consistent reads, and the repo applies it
+    // only on the very contact list it was decided from (`expectContacts`) - a
+    // contact-list change in between answers 409 unit_roster_conflict. The
+    // list is read ONCE, here, before the contact-type reads are awaited, and
+    // that one value is both the decision's input and `expectContacts` (R3
+    // code review finding A3, fix wave 3 FW3-2): `stored.contacts` read again
+    // after the awaits need not be the list the decision saw (a FakeWorld
+    // unit read is the live object a concurrent write replaces it on).
+    const listRead = stored.contacts;
+    const promote = next === null ? await soleLandlordToPromote(stored, listRead, storedLandlordId) : null;
+    let restored: UnitItem;
     try {
-      unit = await units.restore(unitId);
+      restored =
+        next !== null
+          ? await units.restoreWithLandlord(unitId, { expectLandlordId: storedLandlordId, next })
+          : await units.restoreWithLandlord(unitId, {
+              expectLandlordId: storedLandlordId,
+              next: null,
+              expectContacts: listRead,
+              promote,
+            });
     } catch (err) {
+      if (err instanceof RosterWriteConflictError) {
+        res.status(409).json({ error: 'unit_roster_conflict' });
+        return;
+      }
       if (err instanceof ConditionalCheckFailedException) {
         res.status(404).json({ error: 'unit_not_found' });
         return;
       }
       throw err;
     }
-    await audit.append(`units#${unitId}`, 'unit_restored', { actor: req.user?.userId });
-    log.info({ unitId, actor: req.user?.userId }, 'unit restored via api');
-    res.json({ unit });
+    // The promotion as written: the promoted row is primary in the written unit.
+    const primaryPromoted =
+      promote !== null &&
+      (restored.contacts ?? []).some((row) => row.contactId === promote && row.primaryContact === true);
+    await audit.append(`units#${unitId}`, 'unit_restored', {
+      actor: req.user?.userId,
+      ...(next !== null
+        ? { landlordReplaced: { from: storedLandlordId, to: next.contactId } }
+        : {
+            landlordCleared: { from: storedLandlordId },
+            ...(primaryPromoted && { primaryPromoted: { to: promote } }),
+          }),
+    });
+    log.info(
+      {
+        unitId,
+        actor: req.user?.userId,
+        landlordCleared: next === null,
+        ...(primaryPromoted && { primaryPromoted: promote }),
+      },
+      'unit restored via api with a landlord change',
+    );
+    // The enriched roster (the roster routes' shape) so the Contacts card can
+    // apply the new landlord of record in place.
+    res.json({ unit: { ...restored, contacts: await enrichRoster(restored) } });
   });
 
   return router;

@@ -41,6 +41,14 @@ screenshot and video kept on Cameron's machine. Different scenario from the
 first sighting, same signature: a blank document after contact navigation.
 Record: `docs/superpowers/reviews/2026-10-07-caseworkers/windows-gates-2026-10-11.md`.
 
+**Numbering note (merge of main into feat/join-housing-authority, 2026-10-13).** Two
+branches appended sightings to this file in parallel on 2026-10-12/13 and each numbered
+its own from "third". Both sets are kept verbatim below: first the six from
+feat/join-housing-authority (its third to eighth), then the two from
+fix/caseworker-integrity (its third and fourth). Together with the first two above, that
+is TEN sightings, every one an entirely white document after an in-app navigation on a
+busy Windows host, every failing file green when re-run alone.
+
 **Third sighting (2026-10-12, Windows, feat/join-housing-authority @67cd745c).** A full
 gate run (`timeout 2700 npm run e2e`, no trace) finished 339 passed / 1 failed in 21.9m:
 `tests/scenarios/landlord-onboarding.spec.ts:190` ("inbound text -> not a fit ->
@@ -112,3 +120,25 @@ contact page's "Communications and activity" region never showed the sent bubble
 screenshot is an entirely white document. The same file re-run alone straight after: 5/5
 passed (43.8s). Run without E2E_TRACE, so no network trace; the shape matches the traced
 sightings above (a fresh navigation that never renders).
+
+**Third sighting (2026-10-12 ~23:40 EDT, Windows, `fix/caseworker-integrity` @6b220900,
+lane 6).** The same final gate run (344 passed / 2 failed, 27.9 min on a busy machine;
+the three earlier full runs that evening were 345/345 in about 22 min):
+`tests/scenarios/approval-and-move-in.spec.ts:242`, step "Team moves the placement ->
+Lost", stopped on "the placement page did not finish loading (waited 20007ms of a 20s
+budget)"; the screenshot is an entirely white document - a placement page this time,
+not a contact page, so the signature is "a blank document after an in-app navigation".
+The run's other failure was the sign-in twin (`e2e-blank-first-paint-at-sign-in`, third
+sighting); 2672 TIME_WAIT sockets right after. Artifacts:
+`W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p6-e2e-artifacts\`. Isolation and the
+clean re-run are recorded in the caseworker-integrity handback.
+
+**Fourth sighting (2026-10-13 ~03:00 EDT, Windows, `fix/caseworker-integrity` @05db50e0,
+lane 6).** The branch's final battery (its ninth full e2e in about 30 hours, on a host
+running about 50 node processes for other missions) finished 345 passed / 1 failed in
+24.8 min: `tests/dashboard-next/unknown-caller-triage.spec.ts:115` waited 15 s for the
+Unknown tab after `page.goto('/inbox?filter=unknown')`; the screenshot is an entirely
+white document - an inbox page this time. No `net::ERR_*` line in the run log; 2843
+TIME_WAIT sockets right after the run (141 when it started). The spec file passed alone
+2/2 (18.1 s), and the full re-run is recorded in the caseworker-integrity handback.
+Artifacts: `W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p9-e2e-artifacts\`.

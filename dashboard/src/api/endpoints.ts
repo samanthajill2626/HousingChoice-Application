@@ -1027,11 +1027,35 @@ export async function deleteUnit(unitId: string): Promise<UnitItem> {
 }
 
 /** POST /api/units/:id/restore - clear deleted_at, bringing a soft-deleted property
- *  back into the normal views. Returns the updated unit. */
-export async function restoreUnit(unitId: string): Promise<UnitItem> {
+ *  back into the normal views. Returns the updated unit.
+ *  caseworker-integrity (spec section 4 "Restore"): with no `opts` this is the
+ *  plain restore (no body). 409 restore_needs_landlord { landlordName? } means
+ *  the stored landlord can't stay the property's landlord; call again with
+ *  `{ landlordId: <a landlord's contactId> }` to restore with that landlord, or
+ *  `{ landlordId: null }` to restore without one (404 landlord_not_found /
+ *  409 landlord_not_landlord / 409 unit_roster_conflict).
+ *  Sole-landlord promotion (spec revision 5): a `{ landlordId: null }` restore
+ *  of a property whose cleared landlord was its primary contact makes the ONE
+ *  remaining live contact typed landlord (any role; a soft-deleted one does
+ *  not count) the primary contact in the same write - with zero or two-plus,
+ *  nobody. The answer's enriched roster carries the flags, so render the
+ *  answer's roster, never the one the page loaded. 409 unit_roster_conflict
+ *  means the property changed between the server's read and its write - its
+ *  landlord of record, its deleted state or, for `{ landlordId: null }`, its
+ *  contact list (a `{ landlordId: <id> }` restore re-reads and retries a
+ *  contacts-only race itself): nothing was restored - re-read the property.
+ *  409 restore_landlord_not_needed (either body; spec revision 7) means the
+ *  plain restore would apply now (the property was restored meanwhile, its
+ *  stored landlord is a landlord again, or it has none): nothing was written
+ *  and no retry of the same choice can succeed - re-read the property, and
+ *  never re-send the plain restore on the caller's behalf. */
+export async function restoreUnit(
+  unitId: string,
+  opts?: { landlordId: string | null },
+): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>(
     `/api/units/${encodeURIComponent(unitId)}/restore`,
-    { method: 'POST' },
+    { method: 'POST', ...(opts !== undefined && { body: { landlordId: opts.landlordId } }) },
   );
   return res.unit;
 }
@@ -1045,9 +1069,23 @@ export async function restoreUnit(unitId: string): Promise<UnitItem> {
  *  record's role is STRUCTURALLY pinned to 'landlord' server-side whatever is
  *  sent. On an ownerless legacy property, adding a Landlord also claims its
  *  `landlordId`; an existing different owner is never silently replaced.
+ *  Auto-primary (caseworker-integrity spec section 4 "Contact list",
+ *  revisions 5 and 6): a NEW seat on a property with no primary row and no
+ *  landlordId becomes its primary contact even when `primaryContact` is false
+ *  or absent, when its contact is eligible for automatic routing - typed
+ *  landlord (a landlord, property manager or owner, any role), not
+ *  soft-deleted and not a routing pointer. Any other contact (another type,
+ *  or a soft-deleted landlord-typed one) joins non-primary. The answer's
+ *  roster carries the flags, so render the answer, never the request.
  *  Returns the updated unit with its enriched `contacts` roster. Errors: 409
- *  landlord_reassignment_required / unit_roster_conflict; 404 unit_not_found /
- *  contact_not_found; 400 on a bad role or a non-boolean primaryContact. */
+ *  contact_list_caseworker (a caseworker taking a NEW seat) and 409
+ *  landlord_not_landlord (a claim of the vacant landlord slot by a contact not
+ *  typed landlord), each from the route's checks or from the roster write
+ *  itself (a seat removed or a landlord cleared after the route's read);
+ *  409 landlord_reassignment_required / unit_roster_conflict; 404
+ *  unit_not_found / contact_not_found (a missing contact, or the id of a phone
+ *  or email routing pointer); 400 on a bad role or a non-boolean
+ *  primaryContact. */
 export async function addUnitContact(
   unitId: string,
   input: { contactId: string; role: UnitContact['role']; primaryContact?: boolean },

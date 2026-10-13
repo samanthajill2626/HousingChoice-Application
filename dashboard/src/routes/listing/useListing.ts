@@ -139,7 +139,12 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
   });
 
   // Replace the in-memory unit in place (a mutation returned the updated unit).
-  // Keeps the rest of the committed state; no refetch.
+  // Keeps the rest of the committed state; no refetch. Bound to THIS unitId: a
+  // caller still holding the setter it got for an earlier id (a write on
+  // property A that answers after a history move to B - the route element is
+  // not keyed, so the page re-renders rather than remounts) is a no-op, never a
+  // write of A over B that would leave B deriving "loading" forever (the
+  // useContact.setContact precedent; R2 code review, dashboard finding A1).
   const setUnit = useCallback(
     (unit: UnitItem) => {
       setState((prev) => {
@@ -160,7 +165,7 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
           sameMedia(prev.unit.media, unit.media)
             ? { ...unit, mediaDisplay: prev.unit.mediaDisplay }
             : unit;
-        return { ...prev, status: 'ready', unit: applied, forId: unitId };
+        return prev.forId === unitId ? { ...prev, status: 'ready', unit: applied, forId: unitId } : prev;
       });
     },
     [unitId],

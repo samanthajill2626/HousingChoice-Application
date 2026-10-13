@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError, type Contact, type OrgEntry } from '../../api/index.js';
+import { MemoryRouter } from 'react-router-dom';
+import { TYPE_CHANGE_LANDLORD_SENTENCE } from '../../lib/holdingRefusals.js';
 
 const updateContact = vi.fn();
 const setTenantStatus = vi.fn();
@@ -1308,5 +1310,119 @@ describe('ContactEditForm - caseworkers and the partner organization (spec 2026-
     // Changing the field clears it.
     await user.click(screen.getByRole('button', { name: 'Remove Step Up' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+describe('ContactEditForm - a refused type change (spec 2026-10-12 D2)', () => {
+  const save = (): HTMLElement => screen.getByRole('button', { name: /^Save$/i });
+
+  function typeChangeRefused(refusals: unknown[]): ApiError {
+    return new ApiError(409, 'type_change_refused', 'type_change_refused', {
+      error: 'type_change_refused',
+      refusals,
+    });
+  }
+
+  function renderForm(contact: Contact): {
+    onSaved: ReturnType<typeof vi.fn>;
+    onClose: ReturnType<typeof vi.fn>;
+  } {
+    const onSaved = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <MemoryRouter>
+        <ContactEditForm contact={contact} onClose={onClose} onSaved={onSaved} />
+      </MemoryRouter>,
+    );
+    return { onSaved, onClose };
+  }
+
+  it('keeps the draft and shows each refusal with its View link beside the kind picker', async () => {
+    const user = userEvent.setup();
+    updateContact.mockRejectedValue(
+      typeChangeRefused([
+        { code: 'open_placement', placementId: 'p 7' },
+        { code: 'open_tour', tourId: 't1' },
+      ]),
+    );
+    const { onSaved, onClose } = renderForm({ ...TENANT, status: 'needs_review' });
+    await user.clear(screen.getByLabelText(/First name/i));
+    await user.type(screen.getByLabelText(/First name/i), 'Tash');
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Landlord' }));
+    await user.click(save());
+
+    const alert = await screen.findByRole('alert');
+    expect(within(alert).getByText("Finish or close this contact's placement first.")).toBeInTheDocument();
+    expect(within(alert).getByText("Cancel or close this contact's open tour first.")).toBeInTheDocument();
+    expect(within(alert).getByRole('link', { name: 'View placement' })).toHaveAttribute('href', '/placements/p%207');
+    expect(within(alert).getByRole('link', { name: 'View tour' })).toHaveAttribute('href', '/tours/t1');
+    // Beside the kind picker: inside the Type block that holds the picker.
+    const picker = screen.getByRole('group', { name: 'Contact kind' });
+    expect(picker.parentElement?.parentElement).toContainElement(alert);
+    // The draft is kept: still open, on the picked kind, with the edited name.
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Landlord' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText(/First name/i)).toHaveValue('Tash');
+    expect(save()).toBeEnabled();
+    // Never the raw code, never the generic retry line.
+    expect(screen.queryByText("Couldn't save - please try again.")).toBeNull();
+    expect(alert.textContent ?? '').not.toContain('type_change_refused');
+  });
+
+  it("a landlord of record gets the type change's own sentence, not the conversion's", async () => {
+    const user = userEvent.setup();
+    updateContact.mockRejectedValue(typeChangeRefused([{ code: 'landlord_of_record', unitId: 'u1' }]));
+    renderForm(LANDLORD);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Partner' }));
+    await user.click(save());
+    const alert = await screen.findByRole('alert');
+    expect(within(alert).getByText(TYPE_CHANGE_LANDLORD_SENTENCE)).toBeInTheDocument();
+    expect(within(alert).getByRole('link', { name: 'View property' })).toHaveAttribute('href', '/listings/u1');
+    expect(
+      screen.queryByText("This contact is the landlord of record for a property. Change that property's landlord first."),
+    ).toBeNull();
+  });
+
+  // R1 code review, dashboard finding 7: every save starts clean - a second
+  // save that fails for another reason shows the save sentence, never the
+  // first save's refusal list beside it.
+  it("a second save that fails for another reason no longer shows the first save's refusals", async () => {
+    const user = userEvent.setup();
+    updateContact
+      .mockRejectedValueOnce(typeChangeRefused([{ code: 'landlord_of_record', unitId: 'u1' }]))
+      .mockRejectedValueOnce(new ApiError(500, 'http_500', 'Request failed (500)'));
+    const { onSaved } = renderForm(LANDLORD);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Partner' }));
+    await user.click(save());
+    expect(await screen.findByText(TYPE_CHANGE_LANDLORD_SENTENCE)).toBeInTheDocument();
+
+    // Save again with the kind untouched (picking a kind clears the list on
+    // its own), and fail for another reason.
+    await user.click(save());
+    expect(await screen.findByText("Couldn't save - please try again.")).toBeInTheDocument();
+    expect(screen.queryByText(TYPE_CHANGE_LANDLORD_SENTENCE)).toBeNull();
+    expect(updateContact).toHaveBeenCalledTimes(2);
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it('picking another kind clears the refusals, and the next save asks the server again', async () => {
+    const user = userEvent.setup();
+    updateContact
+      .mockRejectedValueOnce(typeChangeRefused([{ code: 'landlord_of_record', unitId: 'u1' }]))
+      .mockResolvedValueOnce({ ...LANDLORD, role: 'Property Manager' });
+    const { onSaved } = renderForm(LANDLORD);
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Partner' }));
+    await user.click(save());
+    expect(await screen.findByText(TYPE_CHANGE_LANDLORD_SENTENCE)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Property Manager' }));
+    expect(screen.queryByText(TYPE_CHANGE_LANDLORD_SENTENCE)).toBeNull();
+    await user.click(save());
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(updateContact).toHaveBeenLastCalledWith('L1', { role: 'Property Manager' });
   });
 });

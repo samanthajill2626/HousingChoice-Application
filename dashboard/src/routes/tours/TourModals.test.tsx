@@ -7,12 +7,17 @@
 // says try again; the dialog stays open either way) and the Cancel button.
 // Plus a compile-time pin: the Record outcome dialog and patchTour carry only
 // a person's outcomes, never the sweep's no_outcome.
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { ApiError, type patchTour } from '../../api/index.js';
 import buttonStyles from '../../ui/Button.module.css';
-import { ReopenTourModal, TOUR_CHANGED_COPY, type RecordOutcomeModal } from './TourModals.js';
+import {
+  ReopenTourModal,
+  RescheduleTourModal,
+  TOUR_CHANGED_COPY,
+  type RecordOutcomeModal,
+} from './TourModals.js';
 import type { ReopenTarget } from './tourReopen.js';
 
 /** The shared 409 copy every writing tour dialog uses (spec 9.2 / D14). */
@@ -121,6 +126,78 @@ describe('ReopenTourModal', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+});
+
+// Caseworker integrity (spec 2026-10-12 section 4): the Reschedule dialog is
+// the dashboard's only way to revive a CANCELED tour and the Reopen dialog its
+// only way out of closed - both refused with contact_not_tenant when the
+// tour's contact is not a tenant. That refusal is not "the tour changed".
+describe('Tour dialogs - contact-type refusals (caseworker integrity)', () => {
+  const NOT_TENANT = 'Tours and placements are for tenants. This contact is a caseworker.';
+
+  function notTenant(): ApiError {
+    return new ApiError(409, 'contact_not_tenant', 'contact_not_tenant', {
+      error: 'contact_not_tenant',
+      contactKind: 'caseworker',
+    });
+  }
+
+  /** A datetime-local value two days from the real clock (never past, never past 14 days). */
+  function inTwoDaysLocal(): string {
+    const d = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  async function submitReschedule(onConfirm: () => Promise<void>): Promise<{ onClose: () => void }> {
+    const onClose = vi.fn();
+    render(<RescheduleTourModal onClose={onClose} onConfirm={onConfirm} />);
+    fireEvent.change(screen.getByLabelText('New date and time'), { target: { value: inTwoDaysLocal() } });
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm reschedule' }));
+    return { onClose };
+  }
+
+  it('Reopen: a 409 contact_not_tenant shows the contact-type sentence, not the reload copy', async () => {
+    const onConfirm = vi.fn().mockRejectedValue(notTenant());
+    const { onClose } = renderReopen('toured', onConfirm);
+    await userEvent.click(screen.getByRole('button', { name: 'Yes, reopen' }));
+    expect((await screen.findByRole('alert')).textContent).toBe(NOT_TENANT);
+    expect(screen.queryByText(CHANGED)).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Yes, reopen' })).toBeEnabled();
+  });
+
+  it('Reopen: a 404 tenant_not_found says the contact no longer exists', async () => {
+    const onConfirm = vi
+      .fn()
+      .mockRejectedValue(new ApiError(404, 'tenant_not_found', 'tenant_not_found', { error: 'tenant_not_found' }));
+    renderReopen('scheduled', onConfirm);
+    await userEvent.click(screen.getByRole('button', { name: 'Yes, reopen' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('That contact no longer exists.');
+    expect(screen.queryByText(GENERIC)).not.toBeInTheDocument();
+  });
+
+  it('Reschedule (reviving a canceled tour): a 409 contact_not_tenant shows the sentence; the dialog stays open', async () => {
+    const onConfirm = vi.fn().mockRejectedValue(notTenant());
+    const { onClose } = await submitReschedule(onConfirm);
+    expect((await screen.findByRole('alert')).textContent).toBe(NOT_TENANT);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('form', { name: 'Reschedule tour form' })).toBeInTheDocument();
+  });
+
+  it('(PIN) Reschedule: any other 409 still shows the reload copy', async () => {
+    const onConfirm = vi.fn().mockRejectedValue(new ApiError(409, 'tour_changed', 'tour_changed'));
+    await submitReschedule(onConfirm);
+    expect((await screen.findByRole('alert')).textContent).toBe(CHANGED);
+  });
+
+  it('(PIN) Reopen: any other 409 still shows the reload copy', async () => {
+    const onConfirm = vi.fn().mockRejectedValue(new ApiError(409, 'tour_changed', 'tour_changed'));
+    renderReopen('toured', onConfirm);
+    await userEvent.click(screen.getByRole('button', { name: 'Yes, reopen' }));
+    expect((await screen.findByRole('alert')).textContent).toBe(CHANGED);
   });
 });
 

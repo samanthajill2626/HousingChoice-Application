@@ -5,6 +5,7 @@
 // ?deleted=true view. Runs on the shared in-memory world (makeWebhookHarness).
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
@@ -51,6 +52,8 @@ describe('DELETE /api/units/:id (soft delete) + restore', () => {
   it('restore clears deleted_at and brings the listing back into the list', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-2');
+    // caseworker-integrity I3: the restored unit's landlord of record is a landlord.
+    world.contacts.push({ contactId: 'contact-ll-1', type: 'landlord' } as ContactItem);
 
     await auth(request(app).delete('/api/units/u-2'));
     const restore = await auth(request(app).post('/api/units/u-2/restore'));

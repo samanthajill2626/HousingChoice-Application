@@ -6,7 +6,8 @@ severity: low
 status: open
 area: app
 created: 2026-08-09
-refs: app/src/services/suggestionResolution.ts, app/src/repos/suggestionResolutionRepo.ts
+updated: 2026-10-13
+refs: app/src/services/suggestionResolution.ts:787, app/src/services/suggestionResolution.ts:894, app/src/repos/suggestionResolutionRepo.ts:303
 ---
 
 **Problem.** A first accept refused as `superseded_by_human_edit` now answers
@@ -54,3 +55,21 @@ replay 200 with `pets: "one dog"` after accepting "two cats"):
 
 **Trigger.** The next resolution-protocol wave, or the first operator report
 of a retried accept looking applied.
+
+**A second refusal kind, same mechanism (2026-10-13; final review A9,
+`docs/superpowers/reviews/2026-10-12-caseworker-integrity/final-review/adversarial.md`
+finding 9).** `fix/caseworker-integrity` (spec 2026-10-12 D1) added an accept
+refused because the contact's classification changed after the plan read it:
+the driving request answers 409 `suggestion_contact_reclassified`
+(`app/src/services/suggestionResolution.ts:894-895`, its own claim only). An
+identity-matched replay of that accept - the response lost to a proxy reset,
+or a client-side retry - reaches the same completed-row branch
+(`suggestionResolution.ts:787-801`) and answers 200, because
+`makeCompletedResolution` (`app/src/repos/suggestionResolutionRepo.ts:303-319`)
+keeps no outcome: a journal superseded by reclassification completes exactly
+like an applied one. As with `suggestion_field_edited`, the record stays
+honest (the run-log verdict is stamped at the verdict phase) and only the
+replay's status overstates; the dashboard does not auto-retry. The fix
+direction above covers both kinds: persist the outcome (or a refused
+disposition) on the completed row and answer the same 409 for an identity
+match. No separate issue was filed (the planner's ruling).

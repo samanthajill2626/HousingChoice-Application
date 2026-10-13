@@ -80,7 +80,14 @@ function seedTenantAndUnit(world: FakeWorld): void {
   seedUnitWithLandlord(world, LANDLORD);
 }
 
-async function createTour(app: App): Promise<string> {
+async function createTour(app: App, world: FakeWorld): Promise<string> {
+  // Caseworker integrity I2: POST /api/tours refuses a missing tenant (404)
+  // and a contact not typed tenant (409), and so does the reopen. TENANT is
+  // put in the world as a typed tenant first - unless the test already seeded
+  // it (seedTenantAndUnit), which is then used as the test wrote it.
+  if (!world.contacts.some((c) => c.contactId === TENANT)) {
+    world.contacts.push({ contactId: TENANT, type: 'tenant' });
+  }
   const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
   expect(created.status).toBe(201);
   return created.body.tour.tourId as string;
@@ -138,7 +145,7 @@ describe('POST /api/tours/:tourId/reopen - refusals', () => {
 
   it('409 tour_not_closed for a tour that is not closed (scheduled)', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     const before = { ...world.toursMap.get(tourId)! };
     const emitsBefore = world.emitted.length;
 
@@ -154,7 +161,7 @@ describe('POST /api/tours/:tourId/reopen - refusals', () => {
   it('409 tour_converted for a tour converted through the real conversion route', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
     seedTenantAndUnit(world);
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
     await authed(app)
       .patch(`/api/tours/${tourId}`)
@@ -181,7 +188,7 @@ describe('POST /api/tours/:tourId/reopen - refusals', () => {
 
   it('409 tour_converted for a closed tour mid-conversion (a pending: claim)', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     // A closed, decided tour whose conversion has claimed it but not finished.
     Object.assign(world.toursMap.get(tourId)!, {
       status: 'closed',
@@ -202,7 +209,7 @@ describe('POST /api/tours/:tourId/reopen - refusals', () => {
 
   it('409 tour_reopen_unsupported for a tour closed straight from scheduled (no autoClosedFrom, no decision)', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'closed' }).expect(200);
     const before = { ...world.toursMap.get(tourId)! };
     expect(before.status).toBe('closed');
@@ -219,7 +226,7 @@ describe('POST /api/tours/:tourId/reopen - refusals', () => {
 
   it('400 for any body field (the body must be empty), and for a body that is not an object', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await autoClose(world, tourId);
     const before = { ...world.toursMap.get(tourId)! };
 
@@ -249,7 +256,7 @@ describe('POST /api/tours/:tourId/reopen - back to the state the tour closed fro
   it('auto-closed from scheduled -> scheduled, fields removed, lastMarkedAt = now; SILENT', async () => {
     const { app, world, capture } = makeWebhookHarness({ toursNow: () => NOW });
     world.contacts.push({ contactId: TENANT, type: 'tenant', status: 'searching' });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await autoClose(world, tourId);
     // The create's booked_too_late rungs, under the retired ladder pointer.
     const rowsBefore = rowsFor(world, tourId);
@@ -288,7 +295,7 @@ describe('POST /api/tours/:tourId/reopen - back to the state the tour closed fro
   it('auto-closed from toured -> toured, its own stamp replacing the earlier mark (no body at all)', async () => {
     let clock = MARKED;
     const { app, world } = makeWebhookHarness({ toursNow: () => clock });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
     expect(world.toursMap.get(tourId)?.lastMarkedAt).toBe(MARKED);
     await autoClose(world, tourId);
@@ -305,7 +312,7 @@ describe('POST /api/tours/:tourId/reopen - back to the state the tour closed fro
   it('auto-closed from no_show -> no_show', async () => {
     let clock = MARKED;
     const { app, world } = makeWebhookHarness({ toursNow: () => clock });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' }).expect(200);
     await autoClose(world, tourId);
     clock = NOW;
@@ -320,7 +327,7 @@ describe('POST /api/tours/:tourId/reopen - back to the state the tour closed fro
 
   it('closed as not a fit -> toured with the decision removed, and the exit gate works again after it', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' }).expect(200);
     await authed(app)
       .patch(`/api/tours/${tourId}`)
@@ -354,7 +361,7 @@ describe('POST /api/tours/:tourId/reopen - back to the state the tour closed fro
 
   it('reads the tour CONSISTENTLY before its conditional write', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await autoClose(world, tourId);
     const readOpts: unknown[] = [];
     const realGet = world.toursRepo.get;
@@ -370,7 +377,7 @@ describe('POST /api/tours/:tourId/reopen - back to the state the tour closed fro
 
   it('after a reopen, GET shows the reopened tour and a second reopen is 409 tour_not_closed', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await autoClose(world, tourId);
     await reopen(app, tourId).send({}).expect(200);
 
@@ -394,7 +401,7 @@ describe('POST /api/tours/:tourId/reopen - side effects', () => {
   it("records tour_reopened through the shared writer: both parties' timelines, the units# and tours# rows", async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
     seedUnitWithLandlord(world, LANDLORD);
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await autoClose(world, tourId);
 
     await reopen(app, tourId).send({}).expect(200);
@@ -415,7 +422,7 @@ describe('POST /api/tours/:tourId/reopen - side effects', () => {
 
   it("clears a pending close-nag on the tour's OWN open relay group", async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     const groupId = await linkOpenGroupWithNag(world, tourId, '+15550100090', { type: 'tour', id: tourId });
     await autoClose(world, tourId);
 
@@ -426,7 +433,7 @@ describe('POST /api/tours/:tourId/reopen - side effects', () => {
 
   it('leaves the close-nag on a linked group another owner holds (a placement)', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     const groupId = await linkOpenGroupWithNag(world, tourId, '+15550100091', {
       type: 'placement',
       id: 'placement-x',
@@ -440,7 +447,7 @@ describe('POST /api/tours/:tourId/reopen - side effects', () => {
 
   it('emits exactly one tour.updated { tourId, status: <the target> } and nothing else', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' }).expect(200);
     await autoClose(world, tourId);
     const emitsBefore = world.emitted.length;
@@ -454,7 +461,7 @@ describe('POST /api/tours/:tourId/reopen - side effects', () => {
 
   it('a reopen that loses its conditional write to a concurrent reopen answers 409 tour_changed and records nothing', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => NOW });
-    const tourId = await createTour(app);
+    const tourId = await createTour(app, world);
     await autoClose(world, tourId);
 
     // The in-memory harness runs a request's read-check-write in one go, so

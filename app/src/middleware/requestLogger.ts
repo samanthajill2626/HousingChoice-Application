@@ -18,6 +18,10 @@ const SAFE_HEADER_ALLOWLIST = [
   'content-length',
   'traceparent',
   'x-forwarded-for',
+  // The viewer address CloudFront sets (and overwrites when a client forges
+  // it) - what the per-IP rate limiter keys on (middleware/rateLimit.ts). The
+  // same viewer IP X-Forwarded-For already carries, so no new data class.
+  'cloudfront-viewer-address',
 ] as const;
 
 export function requestLoggerMiddleware(log: Logger): RequestHandler {

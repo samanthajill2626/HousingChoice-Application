@@ -18,6 +18,8 @@ import type { AuditRepo } from '../../src/repos/auditRepo.js';
 import { seedPhonesForWrite, type ContactItem, type ContactsRepo } from '../../src/repos/contactsRepo.js';
 import type { ExtractionRepo, SuggestionItem } from '../../src/repos/extractionRepo.js';
 import {
+  effectiveGuard,
+  guardMismatchIsClassification,
   makeCompletedResolution,
   resolutionItemId,
   suggestionIdentityKey,
@@ -170,7 +172,9 @@ export function createSuggestionResolutionFake(deps: {
     input: PhaseInput,
     apply: (
       journal: ActiveSuggestionResolution,
-    ) => Promise<'committed' | 'phone_conflict' | 'superseded_by_human_edit' | 'stale'>,
+    ) => Promise<
+      'committed' | 'phone_conflict' | 'superseded_by_human_edit' | 'superseded_by_reclassification' | 'stale'
+    >,
   ): Promise<ResolutionEffectResult> {
     const current = items.get(key(input.token.contactId, input.token.target));
     // repo:497 - already_committed covers the next phase AND any phase PAST the
@@ -186,12 +190,14 @@ export function createSuggestionResolutionFake(deps: {
     if (journal === undefined) return 'stale';
     const result = await apply(journal);
     if (result === 'phone_conflict' || result === 'stale') return result;
-    if (result === 'superseded_by_human_edit') {
-      // repo:760 journalSuperseded stamps phase AND outcome together.
+    if (result === 'superseded_by_human_edit' || result === 'superseded_by_reclassification') {
+      // The repo's journalSuperseded stamps phase AND outcome together, and the
+      // stored outcome is superseded_by_human_edit for BOTH refusals (spec
+      // 2026-10-12 D1 change 5) - only the answer to the caller differs.
       items.set(key(journal.contactId, journal.target), {
         ...journal,
         phase: input.nextPhase,
-        outcome: result,
+        outcome: 'superseded_by_human_edit',
       });
       return result;
     }
@@ -327,12 +333,19 @@ export function createSuggestionResolutionFake(deps: {
         // repo:704 - nothing to SET and nothing to REMOVE is also stale.
         if (Object.values(journal.plan.patch).every((value) => value === undefined)) return 'stale';
         const contact = await deps.contactsRepo.getById(journal.contactId);
-        // repo:732-763 - arbitration order: the journal must still be ours at
-        // the expected phase (activeFor, above), THEN a consistent re-read
-        // decides. A contact that still matches the guard means the write lost
-        // to CONTENTION, which is 'stale'; only a MISMATCH is a human edit.
-        if (!contactMatchesGuard(contact, journal.plan.guard)) {
-          return 'superseded_by_human_edit';
+        // The repo's commitContactEffect arbitration order: the journal must
+        // still be ours at the expected phase (activeFor, above), THEN a
+        // consistent re-read decides. A contact that still matches the guard
+        // means the write lost to CONTENTION, which is 'stale'; only a MISMATCH
+        // is a refusal. The guard is effectiveGuard's - the SAME exported
+        // function the real repository evaluates at all three of its sites
+        // (spec 2026-10-12 D1 change 4) - and a classification mismatch wins a
+        // tie (change 5).
+        const guard = effectiveGuard(journal);
+        if (!contactMatchesGuard(contact, guard)) {
+          return guardMismatchIsClassification(guard, contact)
+            ? 'superseded_by_reclassification'
+            : 'superseded_by_human_edit';
         }
         await deps.contactsRepo.update(journal.contactId, journal.plan.patch);
         await appendAuditOnce(journal);

@@ -312,7 +312,9 @@ Restore builds on that instead of refusing:
   nobody is promoted. The remaining rows' contact types are read
   consistently before the write, and the write is conditioned on the roster
   that was read, so a concurrent contact-list change answers 409
-  `unit_roster_conflict`.
+  `unit_roster_conflict`. A soft-deleted, missing or routing-pointer contact
+  is not eligible (build clarification from code review round 3: this is an
+  automatic routing choice, unlike section 10's refusals).
 - A body is honored only when the plain restore would have refused; when the
   stored landlord is still valid, a body is ignored and the restore is plain.
   Each write conditions on the `landlordId` it read, so a concurrent change

@@ -42,3 +42,21 @@ Challenges agreed or noted: R3 backend agreed with B-1, with conditioning
 every `{ landlordId: null }` restore on the list read, and with FW2-10;
 C-2 (spec section 10's "a soft-deleted contact still exists" was set for
 refusals, not for automatic promotion) is accepted - it is the basis of FW3-1.
+
+## FW3 verification (orchestrator, revert checks - no further review round)
+
+FW3 landed d7a01893..71a49bc5 (+ report 78d8b2cc). The orchestrator re-ran
+the two behavior fixes' revert proofs itself on 78d8b2cc, each reverted and
+restored with the Edit tool (`app/src/routes/units.ts` sha256 `c9a3a458...`
+before and after):
+
+- FW3-1 reverted (the soft-deleted clause removed from the sole-landlord
+  eligibility): `test/unitsRestoreLandlord.test.ts` 2 failed / 27 - exactly
+  F3a and F3b. Restored: 27/27.
+- FW3-2 reverted (`expectContacts: stored.contacts` re-read after the type
+  reads): 1 failed / 27 - exactly F1 (the list change during the type reads).
+  Restored: 27/27.
+
+Spec revision 5's Restore paragraph gains one clause recording FW3-1 (a
+soft-deleted, missing or routing-pointer contact is not eligible) as a build
+clarification from this round. Review closed: no MEDIUM+ open.

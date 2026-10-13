@@ -52,3 +52,28 @@ alone on the same tree right after (7/7, 47.0s, the test 5.2s, `E2E_TRACE=1`).
 Artifacts (screenshot, video, error-context) kept in that worktree under
 `.superpowers/sdd/e2e-results-run1/`. Same signature, third scenario. Record:
 `docs/superpowers/reviews/2026-10-12-join-housing-authority/code-review/R1-adjudications.md`.
+
+**Fourth sighting - WITH A TRACE (2026-10-12, Windows, feat/join-housing-authority @83766228,
+`E2E_TRACE=1 timeout 2700 npm run e2e`).** 339 passed / 1 failed (29.3m):
+`tests/scenarios/landlord-onboarding.spec.ts:230` ("property intake ..."), step "App:
+landlord lead is interested" (`e2e/scenarios/steps.ts:1478`) - after a `page.goto` back to the
+contact page, the Details section never rendered; the screenshot is an entirely white
+document. The file passed alone right after (7/7, 1.0m, the test 5.9s). The retained trace
+(kept in that worktree at `.superpowers/sdd/e2e-results-fw1/scenarios-landlord-onboard-94546-...-chromium/trace.zip`)
+answers the issue's next discriminator:
+- the document for `/contacts/<id>` loaded 200 and its module graph started loading;
+- ONE module request, `GET /src/api/index.ts` (Vite dev server, the lane's dashboard port),
+  FAILED (status -1), and the console logged
+  `Failed to load resource: net::ERR_NO_BUFFER_SPACE` at that moment;
+- no `/auth/me` or API request followed - a failed static import stops the whole module
+  graph, so React never mounted: the blank document.
+`ERR_NO_BUFFER_SPACE` is Windows WSAENOBUFS (the socket layer is out of buffer space or
+ephemeral ports). A dev-mode page load is about 1650 unbundled requests here, the suite runs
+for 25+ minutes, and other worktrees' suites share the machine; right after the isolated
+re-run `netstat -ano` counted 1928 sockets in TIME_WAIT. Leading hypothesis, not yet
+proven: socket/ephemeral-port exhaustion on the Windows host under sustained dev-server load
+makes one module fetch fail, which blanks the page. It fits all four sightings (different
+scenarios, same signature, never on Linux, never alone). Next: on a recurrence, read the
+trace's failing request and console line first; consider measuring TIME_WAIT/ephemeral-port
+use during a full run, and whether keep-alive between Chromium and Vite (and Vite's proxy,
+see the vite-proxy-keepalive history) reduces the churn. No production code is implicated.

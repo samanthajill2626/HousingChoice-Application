@@ -1215,8 +1215,8 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // contact_not_tenant (requireTenantContact - the same CONSISTENT I2 guard
   // POST /api/tours runs), 409 tour_type_required (no qualifying tour and no
   // structured tour_type - the dashboard opens the form instead, D14);
-  // not_interested / clear only: 404 send_not_found when the conditional
-  // write finds no counted row; then 200 { row } re-projected.
+  // not_interested only: 404 send_not_found when the conditional write finds
+  // no counted row; then 200 { row } re-projected.
   // INTERESTED (spec 14.7 - steps 3 and 4 of 5.4 reversed): it CREATES the
   // tour (only when no qualifying tour exists) and records
   // listing_interested FIRST, so a failed create leaves the decline and the
@@ -1228,16 +1228,21 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // a row that stopped counting) records nothing and is never a 404 - the
   // re-projection answers the truth. listing_decline_cleared is recorded
   // only when the cleared decline was EFFECTIVE (review B R2-2). CLEAR (Undo)
-  // removes any stored decline and records listing_decline_cleared only when
-  // there was one.
+  // is the same COMPARE-AND-CLEAR (review B R3-1, spec 14.7): it removes the
+  // decline record it READ, conditioned on its `at`, and records
+  // listing_decline_cleared only when that clear answered 'ok'; when it read
+  // no decline it writes nothing (no clear at all), so it never removes a
+  // decline recorded meanwhile. A lost compare (a re-decline meanwhile, or a
+  // row that stopped counting) records nothing and is never a 404 - the
+  // re-projection answers the truth.
   // SAVED (review A-3, B R2-2, B R2-3; spec 14.7): a failure AFTER a write -
   // the re-read, or a throw such as the clear behind a create (logged at
   // error, ids only) - answers 503 { error: 'outcome_unavailable', saved:
   // true }, never a bare 500. The writes are setDeclined, a tour create and
-  // a clear that removed a record; a click that wrote none of them (an
+  // a clear that answered 'ok'; a click that wrote none of them (an
   // Interested that found a tour and no stored decline, an Undo with nothing
-  // to undo) gets the plain 503, and a throw before any write is the generic
-  // 500. Audit events are best-effort (lib/listingOutcomeEvents.ts). A
+  // to undo, a lost compare) gets the plain 503, and a throw before any
+  // write is the generic 500. Audit events are best-effort (lib/listingOutcomeEvents.ts). A
   // concurrent double click can still race two creates (no conditional write
   // on the pair - I3; the dashboard disables the button in flight). PII: ids
   // only in logs.
@@ -1281,10 +1286,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const address = formatAddress(unit.address) || unitId;
     const eventDeps = { activityEvents, audit, logger: log };
     let createdTour: TourItem | undefined;
-    // Review A-3 / B R2-3: `saved: true` on a late 503 only when THIS click
-    // wrote (setDeclined / a tour create / a clear that removed a record). An
-    // Interested click that found a tour and no stored decline, or an Undo
-    // with nothing to undo, writes nothing.
+    // Review A-3 / B R2-3 / B R3-1: `saved: true` on a late 503 only when THIS
+    // click wrote (setDeclined / a tour create / a clear that answered 'ok').
+    // An Interested click that found a tour and no stored decline, an Undo
+    // with nothing to undo, or a lost compare-and-clear writes nothing.
     let wrote = false;
 
     // Review B R2-2 part 2 / A R2-2 (spec 14.7): everything from here on runs
@@ -1385,24 +1390,33 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
           at,
         });
       } else {
-        const hadDecline = row.declined !== undefined;
-        if ((await listingSends.clearDeclined(unitId, contactId)) === 'not_found') {
-          res.status(404).json({ error: 'send_not_found' });
-          return;
-        }
-        // Review B R2-3: an Undo with nothing to undo changed nothing a
-        // person can see, so it is not a write for `saved` either.
-        wrote = hadDecline;
-        // A clear that found no decline records nothing (plan 3.4 #2).
-        if (hadDecline) {
-          await recordListingOutcomeEvent(eventDeps, {
-            type: 'listing_decline_cleared',
-            contactId,
-            unitId,
-            label: `Not interested cleared for ${address}`,
-            ...(actor !== undefined && { actor }),
-            at,
-          });
+        // CLEAR (Undo) - the same COMPARE-AND-CLEAR as Interested (review B
+        // R3-1, spec 14.7): only the decline record this click READ is
+        // removed (conditioned on its `at`), so a decline another staff member
+        // records while the Undo is in flight survives. An Undo that read NO
+        // decline writes nothing at all (no clear call, `wrote` stays false -
+        // review B R2-3) and records nothing (plan 3.4 #2), so it can never
+        // remove a decline recorded meanwhile. A clear that answers
+        // 'not_found' (someone re-declined, or the row stopped counting) is
+        // NEVER a 404 here - the row was counted when read, so send_not_found
+        // stays the pre-write ledger check's answer alone - it records
+        // nothing and falls through to the re-projection, which answers the
+        // truth (the re-declined row, or the plain 503 for a row that stopped
+        // counting). listing_decline_cleared only when the clear answered 'ok'.
+        const readDecline = row.declined;
+        if (readDecline !== undefined) {
+          const cleared = await listingSends.clearDeclined(unitId, contactId, { expectedAt: readDecline.at });
+          if (cleared === 'ok') {
+            wrote = true;
+            await recordListingOutcomeEvent(eventDeps, {
+              type: 'listing_decline_cleared',
+              contactId,
+              unitId,
+              label: `Not interested cleared for ${address}`,
+              ...(actor !== undefined && { actor }),
+              at,
+            });
+          }
         }
       }
 

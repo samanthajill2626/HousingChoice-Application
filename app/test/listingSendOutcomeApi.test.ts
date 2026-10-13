@@ -213,6 +213,93 @@ describe('outcome route - not_interested and clear', () => {
     expect(outcomeEvents(world).map((e) => e.type)).toEqual(['listing_decline_cleared']);
   });
 
+  // Review B R3-1 (spec 14.7): Undo is the same COMPARE-AND-CLEAR as
+  // Interested - it removes only the decline record it READ (conditioned on
+  // its `at`), and when it read none it writes nothing. A decline another
+  // staff member records while the Undo is in flight survives.
+  it('an ordinary Undo clears the decline it READ (compare-and-clear on its at) and records listing_decline_cleared (review B R3-1)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    const read = { at: '2026-06-25T00:00:00.000Z', by: 'staff' as const, staffId: 'usr_a' };
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', read);
+    const clear = vi.spyOn(world.listingSendsRepo, 'clearDeclined');
+    const res = await post(app, { outcome: 'clear' });
+    expect(res.status).toBe(200);
+    expect(res.body.row).toMatchObject({ outcome: 'no_reply' });
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(clear).toHaveBeenCalledWith('unit-1', 'c-1', { expectedAt: read.at });
+    expect(await stored(world)).not.toHaveProperty('declined');
+    expect(outcomeEvents(world).map((e) => e.type)).toEqual(['listing_decline_cleared']);
+  });
+
+  it('a re-decline that lands while the Undo is in flight SURVIVES: no cleared event, the row reads not_interested (review B R3-1 a)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    const read = { at: '2026-06-25T00:00:00.000Z', by: 'staff' as const, staffId: 'usr_a' };
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', read);
+    const theirs = { at: '2026-06-26T00:00:00.000Z', by: 'staff' as const, staffId: 'usr_b' };
+    // B re-declines on another screen just as A's clear reaches the table.
+    const realClear = world.listingSendsRepo.clearDeclined.bind(world.listingSendsRepo);
+    world.listingSendsRepo.clearDeclined = async (unitId, contactId, opts) => {
+      await world.listingSendsRepo.setDeclined(unitId, contactId, theirs);
+      return realClear(unitId, contactId, opts);
+    };
+    const clear = vi.spyOn(world.listingSendsRepo, 'clearDeclined');
+    const res = await post(app, { outcome: 'clear' });
+    expect(res.status).toBe(200);
+    expect(clear).toHaveBeenCalledWith('unit-1', 'c-1', { expectedAt: read.at });
+    expect((await stored(world))?.declined).toEqual(theirs);
+    expect(res.body.row).toMatchObject({ outcome: 'not_interested', declined: { at: theirs.at, by: 'staff' } });
+    expect(outcomeEvents(world)).toEqual([]);
+  });
+
+  it('an Undo whose read found NO decline writes nothing: a decline recorded meanwhile survives, no event, no clear call (review B R3-1 b)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    const theirs = { at: '2026-06-26T00:00:00.000Z', by: 'staff' as const, staffId: 'usr_b' };
+    // A's card was stale (someone already undid it); B declines between A's
+    // row read and the point where A's clear would run - the recipient read
+    // sits between them (B's proof shape).
+    const realDisplays = world.contactsRepo.getRecipientDisplaysByIds.bind(world.contactsRepo);
+    world.contactsRepo.getRecipientDisplaysByIds = async (ids, opts) => {
+      await world.listingSendsRepo.setDeclined('unit-1', 'c-1', theirs);
+      return realDisplays(ids, opts);
+    };
+    const clear = vi.spyOn(world.listingSendsRepo, 'clearDeclined');
+    const res = await post(app, { outcome: 'clear' });
+    expect(res.status).toBe(200);
+    expect(clear).not.toHaveBeenCalled();
+    expect((await stored(world))?.declined).toEqual(theirs);
+    expect(res.body.row).toMatchObject({ outcome: 'not_interested' });
+    expect(outcomeEvents(world)).toEqual([]);
+  });
+
+  it('a lost compare because the row stopped counting is NOT a 404 for an Undo: no event, the re-projection answers the plain 503 (review B R3-1)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-25T00:00:00.000Z', by: 'staff' });
+    // The row was counted when read; it stops counting before the clear.
+    const realGet = world.listingSendsRepo.getByKeyConsistent.bind(world.listingSendsRepo);
+    let reads = 0;
+    world.listingSendsRepo.getByKeyConsistent = async (unitId: string, contactId: string) => {
+      reads += 1;
+      return reads === 1 ? realGet(unitId, contactId) : undefined;
+    };
+    world.listingSendsRepo.clearDeclined = async () => 'not_found';
+    const res = await post(app, { outcome: 'clear' });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable' });
+    expect(outcomeEvents(world)).toEqual([]);
+  });
+
   it('a failed audit write never fails the route (best-effort)', async () => {
     const { app, world, capture } = makeWebhookHarness();
     seedUnit(world);

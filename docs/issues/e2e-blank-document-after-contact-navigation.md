@@ -77,3 +77,18 @@ scenarios, same signature, never on Linux, never alone). Next: on a recurrence, 
 trace's failing request and console line first; consider measuring TIME_WAIT/ephemeral-port
 use during a full run, and whether keep-alive between Chromium and Vite (and Vite's proxy,
 see the vite-proxy-keepalive history) reduces the churn. No production code is implicated.
+
+**Fifth and sixth sightings - both with traces, same mechanism (2026-10-12, Windows,
+feat/join-housing-authority @0f589643, the next full gate run, 338 passed / 2 failed, 30.6m).**
+`tests/dashboard-next/pool-numbers-admin.spec.ts:132` (a VA opening Today right after
+dev-login - so not only contact navigation) and `tests/scenarios/sending-unit.spec.ts:102`
+(a `page.goto` to a contact page). In each trace exactly one module request failed with
+status -1 and the console logged `net::ERR_NO_BUFFER_SPACE` at that instant -
+`/node_modules/.vite/deps/react-router-dom.js` in the first, `/src/app/EnvironmentIdentity.tsx`
+in the second - and nothing rendered. Both files passed alone right after (4/4, 47.4s).
+Socket state on the host: 3662 sockets in TIME_WAIT just after the run (TCP dynamic range
+49152 + 16384), most of them toward this lane's dashboard and app ports (9411, 9401) and
+another worktree's lane running at the same time (10411, 10401); they drained below 600
+within about 4.5 minutes. The signature is broader than the title: any dev-mode page load
+whose module graph loses one fetch to WSAENOBUFS goes blank. Retitling is left to whoever
+picks the issue up.

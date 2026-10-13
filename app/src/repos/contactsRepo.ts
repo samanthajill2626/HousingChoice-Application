@@ -364,8 +364,18 @@ export interface ContactDisplayItem {
  * fields plus the contact's `type` and `role`, so the units recipients route
  * can label a non-tenant row. A SECOND projection on purpose - the shared
  * display projection is not widened (R3-F4).
+ * last-heard-from (spec 5.5, B6/B7): plus status and the reachability facts,
+ * so the outcome reads can decide eligibility; read with requireComplete there.
  */
-export type RecipientDisplay = ContactDisplayItem & { type?: ContactType; role?: string };
+export type RecipientDisplay = ContactDisplayItem & {
+  type?: ContactType;
+  role?: string;
+  /** last-heard-from spec 5.5 (one eligibility rule, lib/listingSendOutcome.ts). */
+  status?: string;
+  last_heard_from_at?: string;
+  sms_opt_out?: boolean;
+  sms_unreachable?: boolean;
+};
 
 /**
  * A contact is soft-deleted when it carries a non-empty `deleted_at` stamp.
@@ -722,8 +732,11 @@ export interface ContactsRepo {
   /**
    * getDisplaysByIds plus `type` and `role` (plan 3.3) - for the units
    * recipients route ONLY (R3-F4). Missing ids are absent from the map.
+   * requireComplete: throw IncompleteBatchReadError on an unread key (an
+   * OUTCOME read - the outcome-serving routes, spec D12); a genuinely missing
+   * contact is still just absent.
    */
-  getRecipientDisplaysByIds(contactIds: string[]): Promise<Map<string, RecipientDisplay>>;
+  getRecipientDisplaysByIds(contactIds: string[], opts?: { requireComplete?: boolean }): Promise<Map<string, RecipientDisplay>>;
   /**
    * Batch-read WHOLE contacts by primary key - the `getById` fan-out killer for
    * callers that read attributes outside the display projection (roster
@@ -1024,14 +1037,20 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
 
   /**
    * The recipient projection (plan 3.3; R3-F4): the display fields plus `type`
-   * and `role` - both DynamoDB reserved words, hence placeholders.
+   * and `role` - both DynamoDB reserved words, hence placeholders - plus
+   * status (reserved - placeholder) and the last-heard-from reachability facts.
    */
   const RECIPIENT_PROJECTION = {
-    ProjectionExpression: '#contactId, #firstName, #lastName, #phone, #deletedAt, #type, #role',
+    ProjectionExpression:
+      '#contactId, #firstName, #lastName, #phone, #deletedAt, #type, #role, #status, #lastHeardFromAt, #smsOptOut, #smsUnreachable',
     ExpressionAttributeNames: {
       ...DISPLAY_PROJECTION.ExpressionAttributeNames,
       '#type': 'type',
       '#role': 'role',
+      '#status': 'status',
+      '#lastHeardFromAt': 'last_heard_from_at',
+      '#smsOptOut': 'sms_opt_out',
+      '#smsUnreachable': 'sms_unreachable',
     },
   } as const;
 
@@ -1292,8 +1311,11 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       return batchGetByIds<ContactDisplayItem>(contactIds, { projection: DISPLAY_PROJECTION });
     },
 
-    async getRecipientDisplaysByIds(contactIds) {
-      return batchGetByIds<RecipientDisplay>(contactIds, { projection: RECIPIENT_PROJECTION });
+    async getRecipientDisplaysByIds(contactIds, opts) {
+      return batchGetByIds<RecipientDisplay>(contactIds, {
+        projection: RECIPIENT_PROJECTION,
+        requireComplete: opts?.requireComplete,
+      });
     },
 
     async getManyByIds(contactIds, opts) {

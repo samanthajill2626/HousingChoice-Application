@@ -374,7 +374,7 @@ describe('contactsRepo.findAllByPhone / findAllByEmail (plan 3.3; D21 "own threa
 });
 
 describe('contactsRepo.getRecipientDisplaysByIds (plan 3.3; R3-F4)', () => {
-  parity('projects the display fields plus type and role - nothing else; a missing id is absent', async (w, id) => {
+  parity('projects the display fields plus type, role, status and the reachability facts - nothing else; a missing id is absent', async (w, id) => {
     const phone = nextPhone();
     await w.putContact({
       contactId: `${id}-p`,
@@ -403,14 +403,41 @@ describe('contactsRepo.getRecipientDisplaysByIds (plan 3.3; R3-F4)', () => {
       phone,
       type: 'partner',
       role: 'Caseworker',
+      status: 'active',
     });
     expect(map.get(`${id}-t`)).toEqual({
       contactId: `${id}-t`,
       firstName: 'Tia',
       type: 'tenant',
+      status: 'searching',
       deleted_at: '2026-10-07T09:00:00.000Z',
     });
     expect(map.has(`${id}-missing`)).toBe(false);
+  });
+
+  parity('projects last_heard_from_at, sms_opt_out and sms_unreachable (last-heard-from spec 5.5)', async (w, id) => {
+    const phone = nextPhone();
+    await w.putContact({
+      contactId: id,
+      type: 'tenant',
+      status: 'placed',
+      firstName: 'Ray',
+      phone,
+      sms_opt_out: true,
+      sms_unreachable: false,
+      last_heard_from_at: '2026-10-01T12:00:00.000Z',
+      notes: 'not projected',
+    });
+    expect((await w.contacts.getRecipientDisplaysByIds([id])).get(id)).toEqual({
+      contactId: id,
+      firstName: 'Ray',
+      phone,
+      type: 'tenant',
+      status: 'placed',
+      sms_opt_out: true,
+      sms_unreachable: false,
+      last_heard_from_at: '2026-10-01T12:00:00.000Z',
+    });
   });
 
   parity('(PIN) getDisplaysByIds keeps its narrower projection - no type, no role', async (w, id) => {

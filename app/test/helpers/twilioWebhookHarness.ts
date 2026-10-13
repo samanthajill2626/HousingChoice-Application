@@ -2218,10 +2218,11 @@ export function createFakeWorld(): FakeWorld {
 
   /**
    * MODELS THE REAL RECIPIENT PROJECTION (plan 3.3): projectDisplay plus
-   * `type` and `role` exactly as stored - nothing else, so a recipients caller
-   * reading another attribute fails here as it would against DynamoDB. (A fake
-   * pointer row would show its 'unknown' sentinel; recipients are never
-   * pointer ids.)
+   * `type` and `role` - and, for last-heard-from (spec 5.5), `status`,
+   * `last_heard_from_at`, `sms_opt_out` and `sms_unreachable` - exactly as
+   * stored, nothing else, so a recipients caller reading another attribute
+   * fails here as it would against DynamoDB. (A fake pointer row would show
+   * its 'unknown' sentinel; recipients are never pointer ids.)
    */
   const projectRecipient = (contact: ContactItem): RecipientDisplay => {
     const role = contact['role'];
@@ -2229,6 +2230,10 @@ export function createFakeWorld(): FakeWorld {
       ...projectDisplay(contact),
       ...(typeof contact.type === 'string' && { type: contact.type }),
       ...(typeof role === 'string' && { role }),
+      ...(typeof contact.status === 'string' && { status: contact.status }),
+      ...(typeof contact.last_heard_from_at === 'string' && { last_heard_from_at: contact.last_heard_from_at }),
+      ...(typeof contact.sms_opt_out === 'boolean' && { sms_opt_out: contact.sms_opt_out }),
+      ...(typeof contact.sms_unreachable === 'boolean' && { sms_unreachable: contact.sms_unreachable }),
     };
   };
 

@@ -2103,6 +2103,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // PERMANENTLY. Gate on completeness (not on `deduped`): re-putting an
     // already-stored key is an idempotent same-bytes no-op.
     let groupMediaAlreadyMirrored = false;
+    let groupPersisted: MessageItem | undefined;
     if (appended.deduped) {
       try {
         const persisted = await messages.getByProviderSid(MessageSid);
@@ -2122,6 +2123,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           );
           return { handled: false };
         }
+        groupPersisted = persisted;
         groupMediaAlreadyMirrored =
           mediaUrls.length > 0 &&
           persisted !== undefined &&
@@ -2163,6 +2165,37 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           'phone lastSeenAt touch failed - message persisted, lastSeenAt stale',
         );
       }
+    }
+
+    // Last heard from (spec 5.1 / 14.2) - DELIBERATELY NOT GATED ON
+    // `appended.deduped`, like the cross-check below: a redelivery repairs a
+    // crash between the append and this line. On a dedupe the PERSISTED row
+    // decides (an echo of our own send is outbound and touches nobody), and an
+    // unreadable persisted row touches nobody (that read failure is already
+    // logged above). The sender's resolved contact feeds the lookup cache.
+    try {
+      const heardRow: HeardFromRow | undefined = appended.deduped
+        ? groupPersisted
+        : { direction: 'inbound', type: mediaUrls.length > 0 ? 'mms' : 'sms', relay_sender_key: senderKey };
+      const heardFromId =
+        heardRow === undefined
+          ? undefined
+          : await attributeInbound(
+              heardRow,
+              thread,
+              repoLookup(
+                contacts,
+                senderContact && senderE164 !== undefined ? new Map([[senderE164, senderContact]]) : undefined,
+              ),
+            );
+      if (heardFromId !== undefined) {
+        const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+        if (outcome === 'failed') {
+          log.error({ providerSid: MessageSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+        }
+      }
+    } catch (err) {
+      log.error({ err, providerSid: MessageSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
     }
 
     // Inbox touch + unread + SSE, on the GROUP conversationId. touchLastActivity

@@ -145,6 +145,48 @@ describe('POST /api/units/:id/contacts - auto-primary (spec revision 4 section 4
     },
   );
 
+  // R2 code review finding A1 (fix wave 2 FW2-2): the unit_contact_added audit
+  // row records the EFFECTIVE primary flag, read from the written unit - the
+  // request's flag is false on every dashboard add - plus autoPrimary: true
+  // when the rule, not the request, made the contact primary.
+  const contactAddedPayloads = (world: FakeWorld) =>
+    world.auditEvents.filter((e) => e.event_type === 'unit_contact_added').map((e) => e.payload);
+
+  it('(h) the audit row of an auto-primary add says primary, and autoPrimary', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedOwnerlessUnit(world, 'u-h');
+    seedContact(world, 'c-pm');
+
+    const res = await addContact(app, 'u-h', { contactId: 'c-pm', role: 'pm', primaryContact: false });
+
+    expect(res.status).toBe(200);
+    const payloads = contactAddedPayloads(world);
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({ contactId: 'c-pm', role: 'pm', primaryContact: true, autoPrimary: true });
+  });
+
+  it('(h) (PIN) a requested primary is audited primary without autoPrimary; a non-primary add is audited not primary', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-h2', {
+      contacts: [{ contactId: 'c-ll', role: 'landlord', primaryContact: true }],
+      primary_contact: 'c-ll',
+    });
+    seedContact(world, 'c-ll');
+    seedContact(world, 'c-pm');
+    seedContact(world, 'c-owner');
+
+    expect((await addContact(app, 'u-h2', { contactId: 'c-pm', role: 'pm', primaryContact: true })).status).toBe(200);
+    expect((await addContact(app, 'u-h2', { contactId: 'c-owner', role: 'owner', primaryContact: false })).status).toBe(
+      200,
+    );
+
+    const [requested, plain] = contactAddedPayloads(world);
+    expect(requested).toMatchObject({ contactId: 'c-pm', primaryContact: true });
+    expect(requested).not.toHaveProperty('autoPrimary');
+    expect(plain).toMatchObject({ contactId: 'c-owner', primaryContact: false });
+    expect(plain).not.toHaveProperty('autoPrimary');
+  });
+
   it('(b) a landlord of record and no primary row: an added PM is NOT the primary contact and primary_contact stays unset', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-b', { contacts: [{ contactId: 'c-ll', role: 'landlord', primaryContact: false }] });

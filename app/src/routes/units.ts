@@ -1197,13 +1197,33 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
       throw err;
     }
+    // The EFFECTIVE primary flag, read from the written unit (R2 code review
+    // finding A1, fix wave 2 FW2-2): auto-primary can make the contact primary
+    // although the request said false (every dashboard add does), so the
+    // durable record states what the write did, and `autoPrimary` says the
+    // rule - not the request - did it.
+    const effectivePrimary = (updated.contacts ?? []).some(
+      (row) => row.contactId === contactId && row.primaryContact === true,
+    );
+    const autoPrimary = effectivePrimary && !primaryContact;
     await audit.append(`units#${unitId}`, 'unit_contact_added', {
       actor: req.user?.userId,
       contactId,
       role,
-      primaryContact,
+      primaryContact: effectivePrimary,
+      ...(autoPrimary && { autoPrimary: true }),
     });
-    log.info({ unitId, contactId, role, primaryContact, actor: req.user?.userId }, 'unit contact added via api');
+    log.info(
+      {
+        unitId,
+        contactId,
+        role,
+        primaryContact: effectivePrimary,
+        ...(autoPrimary && { autoPrimary: true }),
+        actor: req.user?.userId,
+      },
+      'unit contact added via api',
+    );
     res.json({ unit: { ...updated, contacts: await enrichRoster(updated) } });
   });
 

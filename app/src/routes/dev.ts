@@ -56,6 +56,8 @@ import {
 } from '../repos/placementsRepo.js';
 import { createPlacementDeadlinesRepo } from '../repos/placementDeadlinesRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
+import { INDIVIDUAL_ATTEMPT_KEY } from '../lib/shareAttemptOrder.js';
 import { runDuePlacementNudges, type RunDuePlacementNudgesDeps } from '../jobs/placementNudges.js';
 import {
   runDuePendingRosterActions,
@@ -145,6 +147,10 @@ export interface DevRouterDeps {
   /** Repos for POST /__dev/org-fixture - injected in tests (the world fakes);
    *  default to the real contacts and units repos. */
   orgFixtureRepos?: { contactsRepo: ContactsRepo; unitsRepo: UnitsRepo };
+  /** Repo for POST /__dev/listing-send-fixture (last-heard-from: 201 { row } on a
+   *  fresh pair, 409 { error: 'send_exists' } when the pair already has a row) -
+   *  injected in tests (the world fake); defaults to the real listing-sends repo. */
+  listingSendsRepo?: ListingSendsRepo;
   /** Repos for the last-heard-from touch in the two inbound fixture seams
    *  (spec 5.1 / 14.2) - injected in tests; default to the real repos. */
   heardFromRepos?: {
@@ -1309,6 +1315,78 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     }
     log.info({ unitId: id, field: 'accepted_authorities' }, 'dev org-fixture applied');
     res.status(200).json({ ok: true });
+  });
+
+  // POST /__dev/listing-send-fixture { unitId, contactId, sentAt } - plant a
+  // LISTED, counted listing-send row with a chosen sentAt (last-heard-from
+  // spec 14.4, e2e (6)). A real send's sentAt is the provider instant (now), so
+  // nothing else can put a send older than the 24-hour QUIET threshold in front
+  // of the Follow up tab. Written through putShareMemory as ONE counted
+  // `individual` share entry (the shape shareLedger seeds for an individual
+  // send), so the readers list it exactly like a real send. Answers: 201
+  // { row } on a FRESH pair; 409 { error: 'send_exists' } when the pair
+  // already has a row (create-only); 400 bad body; 404 unit_not_found /
+  // contact_not_found. Never writes `declined` or any outcome (I2). No
+  // threshold override exists anywhere. Same hermetic-LOCAL-only construction
+  // as /__dev/reseed and the fixtures above (the dev router only mounts behind
+  // lib/devRoutes.ts: DEV_AUTH_ENABLED, not production, a DynamoDB Local
+  // endpoint); json() is scoped to this route. Logs ids only.
+  let listingSendFixtureRepo = deps.listingSendsRepo;
+  const listingSendFixtureDeps = (): ListingSendsRepo => {
+    listingSendFixtureRepo ??= createListingSendsRepo({ logger: log });
+    return listingSendFixtureRepo;
+  };
+  router.post('/__dev/listing-send-fixture', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { unitId?: unknown; contactId?: unknown; sentAt?: unknown };
+    const unitId = typeof body.unitId === 'string' && body.unitId !== '' ? body.unitId : undefined;
+    const contactId = typeof body.contactId === 'string' && body.contactId !== '' ? body.contactId : undefined;
+    if (unitId === undefined || contactId === undefined) {
+      res.status(400).json({ error: 'unitId and contactId are required' });
+      return;
+    }
+    const sentAtMs = typeof body.sentAt === 'string' ? Date.parse(body.sentAt) : Number.NaN;
+    if (Number.isNaN(sentAtMs)) {
+      res.status(400).json({ error: 'sentAt must be an ISO 8601 instant' });
+      return;
+    }
+    const sentAt = new Date(sentAtMs).toISOString();
+    const { contactsRepo, unitsRepo } = orgFixtureDeps();
+    if ((await unitsRepo.getById(unitId)) === undefined) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    if ((await contactsRepo.getById(contactId)) === undefined) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    const listingSends = listingSendFixtureDeps();
+    // CREATE ONLY (plan review R1 #11): a pair that already has a row - listed
+    // or not - is refused, so the seam never overwrites a real share memory or
+    // moves a sentAt backward. A spec creates its own fresh pair per run.
+    if ((await listingSends.getByKeyConsistent(unitId, contactId)) !== undefined) {
+      res.status(409).json({ error: 'send_exists' });
+      return;
+    }
+    // token undefined = putShareMemory's `attribute_not_exists(shares_op)`
+    // condition; with the read above it can only lose to a concurrent create.
+    const written = await listingSends.putShareMemory(
+      unitId,
+      contactId,
+      {
+        shares: { individual: { attempt: INDIVIDUAL_ATTEMPT_KEY, state: 'counted', by: 'acceptance', countedAt: sentAt } },
+        counted: true,
+        sentAt,
+        broadcastId: undefined,
+      },
+      { token: undefined },
+    );
+    if (!written) {
+      res.status(409).json({ error: 'send_exists' });
+      return;
+    }
+    const row = await listingSends.getByKeyConsistent(unitId, contactId);
+    log.info({ unitId, contactId }, 'dev listing-send fixture written');
+    res.status(201).json({ row });
   });
 
   // POST /__dev/relay/replay-intros — re-fire the REAL relay.intro job for every

@@ -277,6 +277,16 @@ export function ContactDetail(): React.JSX.Element {
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   // The contact's pending AI suggestions (chips/badges + the accept/dismiss loop).
   const suggestions = useSuggestions(contactId);
+  // "Is this really new?" belongs to a TENANT: its close-name path writes the
+  // housing authority with a plain contact edit, which never meets the
+  // server's tenant-only rule (spec 2026-10-12 D1). When the contact stops
+  // being typed tenant while the review is open - a conversion or re-type by
+  // someone else, received through useContact's suggestion.updated re-read -
+  // the review closes, so that path can never write onto the re-typed
+  // contact (final review A5, fix wave FWF-4). Reset during render (React's
+  // "adjust state when a prop changes"), so no frame shows it over a
+  // non-tenant.
+  if (haReview !== null && contact !== null && contact.type !== 'tenant') setHaReview(null);
 
   // The /contacts/:contactId route re-renders this SAME component instance on a
   // param change (no remount — the same reason Timeline takes resetScrollKey), so

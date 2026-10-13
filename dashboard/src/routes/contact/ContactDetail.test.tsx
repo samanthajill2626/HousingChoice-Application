@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { useRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -92,6 +93,12 @@ const conversationUpdatedHandlers = new Set<(e: unknown) => void>();
 // mark-read, and useContactMedia's gallery refetch since 2026-08-18) - fanned
 // out the same way so a test can deliver ONE event to all of them.
 const messagePersistedHandlers = new Set<(e: unknown) => void>();
+// suggestion.updated has two listeners as well (useContact's in-place contact
+// re-read and useSuggestions' list re-read), but both pass an INLINE handler -
+// a new function every render - so a Set of handlers would collect one per
+// render. Modeled the way EventStreamProvider does it instead: one ref per
+// caller, holding that caller's latest handlers, read at dispatch time.
+const suggestionUpdatedRefs = new Set<{ current: Record<string, ((e: unknown) => void) | undefined> }>();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -143,6 +150,9 @@ vi.mock('../../api/index.js', async () => {
       if (handlers['onMessagePersisted'] !== undefined) {
         messagePersistedHandlers.add(handlers['onMessagePersisted']);
       }
+      const latest = useRef(handlers);
+      latest.current = handlers;
+      suggestionUpdatedRefs.add(latest);
     },
   };
 });
@@ -178,6 +188,13 @@ function emitConversationUpdated(event: Record<string, unknown>): void {
 function emitMessagePersisted(event: Record<string, unknown>): void {
   act(() => {
     for (const handler of [...messagePersistedHandlers]) handler(event);
+  });
+}
+
+/** Deliver one suggestion.updated to EVERY caller's latest handler. */
+function emitSuggestionUpdated(event: Record<string, unknown>): void {
+  act(() => {
+    for (const ref of [...suggestionUpdatedRefs]) ref.current['onSuggestionUpdated']?.(event);
   });
 }
 
@@ -288,6 +305,7 @@ const OTHER: Contact = {
 beforeEach(() => {
   conversationUpdatedHandlers.clear();
   messagePersistedHandlers.clear();
+  suggestionUpdatedRefs.clear();
   noteRowsCleared.mockReset();
   rollbackRowsCleared.mockReset();
   markInboxRead.mockReset().mockResolvedValue(undefined);
@@ -2705,6 +2723,34 @@ describe('ContactDetail - accepting a housing authority suggestion', () => {
     expect(updateContact).not.toHaveBeenCalled();
     // Refused before anything was consumed: the chip stays and offers Dismiss.
     expect(within(chip).getByRole('button', { name: 'Dismiss' })).toBeEnabled();
+  });
+
+  // Final review A5 (fix wave FWF-4): the review's close-name path writes the
+  // authority with a plain contact edit, which never meets the server's
+  // tenant-only rule. So the review closes when the contact stops being a
+  // tenant while it is open - here staff B converted the contact to a
+  // caseworker and this page received the converted contact through its own
+  // suggestion.updated re-read - and nothing can write onto the re-typed
+  // contact.
+  it('the review closes when the contact stops being a tenant while it is open - its close-name action sends nothing', async () => {
+    checkOrgText.mockResolvedValue({ candidates: [], close: [ATL] });
+    await pressAccept('Atlnta Housing');
+    const dialog = await screen.findByRole('dialog', { name: 'Is this really new?' });
+    // Held from before the type change: a review that survived it would still
+    // hold this button, and pressing it would send the plain contact edit.
+    const useCloseName = within(dialog).getByRole('button', { name: 'Use Atlanta Housing Authority' });
+
+    // Staff B's conversion: a caseworker now, the suggestion superseded.
+    getContact.mockResolvedValue({ ...TENANT, type: 'partner', role: 'Caseworker', organization: 'Hope Atlanta' });
+    getSuggestions.mockResolvedValue([]);
+    emitSuggestionUpdated({ contactId: 'k1' });
+    // The page shows the converted contact (a partner's header names its organization).
+    expect((await screen.findAllByText('Hope Atlanta')).length).toBeGreaterThan(0);
+
+    fireEvent.click(useCloseName);
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument();
+    expect(acceptSuggestion).not.toHaveBeenCalled();
   });
 
   it('a TENANT chip with the same non-list text still opens the review (PIN)', async () => {

@@ -372,6 +372,19 @@ a:hover .contactName {
   margin-bottom: 0;
 }
 
+/* The shared Button never wraps (ui/Button.module.css: white-space: nowrap),
+   but "Make <Name> primary" carries a contact's full name inside the narrow
+   Contacts card: the label wraps inside the box instead of poking out of the
+   card (self-QA measured a 246 px button in a 226 px box at a 929 px
+   viewport). The OrgPicker "Use <name>" buttons do the same. */
+.noPrimaryBox p > button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  line-height: 1.3;
+}
+
 .contactAdd {
   display: flex;
   flex-direction: column;

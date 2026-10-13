@@ -213,6 +213,29 @@ describe('POST /api/units/:id/contacts - auto-primary (spec revision 4 section 4
     expect(plain).not.toHaveProperty('autoPrimary');
   });
 
+  // primary-contact-integrity plan contract 2.4 (code review R1 finding L2):
+  // unit_primary_contact_assigned records an AUTOMATIC pick only - an explicit
+  // Make primary stays unit_contact_added, as before. The no-primary box's
+  // "Make <Name> primary" (spec 7.4) sends this same write, and on this shape
+  // the rule would have promoted the contact too, so only the request's own
+  // flag tells the two apart.
+  it('(h) (PIN) an explicit Make primary on an ownerless no-primary list appends unit_contact_added only - no unit_primary_contact_assigned', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedOwnerlessUnit(world, 'u-h3', { contacts: [{ contactId: 'c-seated', role: 'pm', primaryContact: false }] });
+    seedContact(world, 'c-seated');
+
+    const res = await addContact(app, 'u-h3', { contactId: 'c-seated', role: 'pm', primaryContact: true });
+
+    expect(res.status).toBe(200);
+    expect(primaries(res.body.unit.contacts as WireRow[])).toEqual(['c-seated']);
+    expect(world.units.get('u-h3')?.primary_contact).toBe('c-seated');
+    const payloads = contactAddedPayloads(world);
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({ contactId: 'c-seated', primaryContact: true });
+    expect(payloads[0]).not.toHaveProperty('autoPrimary');
+    expect(world.auditEvents.filter((e) => e.event_type === 'unit_primary_contact_assigned')).toEqual([]);
+  });
+
   it('(b) a landlord of record and no primary row: an added PM is NOT the primary contact and primary_contact stays unset', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-b', { contacts: [{ contactId: 'c-ll', role: 'landlord', primaryContact: false }] });

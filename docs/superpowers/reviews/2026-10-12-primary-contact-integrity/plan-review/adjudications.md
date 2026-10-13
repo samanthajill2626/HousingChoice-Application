@@ -64,3 +64,32 @@ variant) -> round 4, the LAST allowed.
 |---|---|---|---|---|
 | S1 | R3-1 (contests Q1's variant) | ACCEPT the reviewer's alternative | yes | `landlordWasPrimary(roster, landlordId)` - NO scalar argument: hand off when the old landlord's row is the FLAGGED primary, or when NO row is flagged. Removes the order dependence (an add or re-role that removes a stale scalar no longer changes a later restore's outcome) and covers R10's API-demotion zero-flag units; keeps caseworker-integrity's three no-flag pins, both new S2.7 stale-scalar cases and the route u-p8 case GREEN. Only the pure test's "no flag, scalar absent -> false" flips (now true). The scalar again has NO runtime reader: spec 3 / 9.2, the S5 GLOSSARY and RUNBOOK sentences, the section 3 watch item and every code comment updated; `clearedLandlordHeir` drops its now-unused `unit` parameter (call site updated). |
 | S2 | R3-2 | ACCEPT | no | Stale wording fixed: S2.7 (c)'s NEW interface docblock (the old_string keeps main's text, as it must), S2.8 `clearedLandlordHeir` docblock, the repo and fake comments. Spec 4.7 bullet 1 ("Nothing reads the scalar at runtime") is TRUE again under S1, so it stands. |
+
+## Round 4 (plan v4 @c0987bb7) - TERMINAL
+
+Report: `R4-reviewer-a.md` (reviewer A continued; 2 LOW findings + one
+cosmetic note; no adjudication contested). The main question - does "no row
+flagged -> hand off" break any existing restore pin? - answered NO after a
+sweep of every `restoreWithLandlord` caller and every restore-route test: the
+only no-flag rosters are the real-repo swap at `:154` (already given
+`readContacts` by S2.7 (b)), the real-repo clear at `:248` (needs no read) and
+the route clear `u-p2` (stays GREEN); the route passes `readContacts` on both
+restore branches. One new, expected behavior: a swap or clear of a no-flag
+unit answers 503 when the liveness read fails (spec 4.6 "unknown -> refuse").
+
+Result: 2 ACCEPT, 0 REJECT. Decisions changed: NO (spec wording only; one
+plan docblock word). Per the stop rule this is the terminal round; plan review
+CLOSES.
+
+| id | finding | verdict | decision changed? | resolution in v5 |
+|---|---|---|---|---|
+| T1 | R4-1 | ACCEPT | no | Spec 4.6 (clear and swap) and 4.7 bullet 2 point to `landlordWasPrimary` (9.2): "was primary" includes "no row flagged". |
+| T2 | R4-2 | ACCEPT | no | Spec 4.6 gains a "Restore vs. contact delete on a roster with NO flagged row - different on purpose" bullet so nobody "fixes" either side. |
+| T3 | cosmetic | ACCEPT | no | `clearedLandlordHeir` docblock no longer says "the contact list of `unit`". |
+
+## Totals (plan review rounds 1-4)
+
+21 findings (9 + 4 + 2 + 2, plus the round-4 cosmetic note and the reviewers'
+mechanical confirmations), all ACCEPTED (Q1 refined twice, ending as S1's
+scalar-free rule), 0 REJECT, 0 DEFER. Reviewer A's anchor sweep: all Edit
+old_strings and region markers verified against the tree.

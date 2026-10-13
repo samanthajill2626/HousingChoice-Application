@@ -428,7 +428,21 @@ export function ListingDetail(): React.JSX.Element {
     // A new press answers for itself: the last landlord-changed sentence goes.
     setRestoreNotice(null);
     void restoreUnit(unit.unitId)
-      .then((updated) => setUnit(updated))
+      .then((updated) => {
+        setUnit(updated);
+        // primary-contact-integrity spec 7.5: re-read the property and make
+        // the re-read the Contacts card's roster source, REPLACING any earlier
+        // roster-write response (a restore answers with no propertyContact
+        // block). Best-effort: on a failed re-read the card keeps what it had.
+        void getUnit(unit.unitId)
+          .then((fresh) => {
+            setRosterUnit(fresh);
+            setUnit(fresh);
+          })
+          .catch(() => {
+            /* best-effort re-read */
+          });
+      })
       .catch((err: unknown) => {
         // The stored landlord can't stay this property's landlord (gone, or no
         // longer a landlord): choose one - or none - in the dialog instead of
@@ -1556,6 +1570,16 @@ export function ListingDetail(): React.JSX.Element {
           onRestored={(updated) => {
             setRestoreNeeds(null);
             applyRosterUnit(updated);
+            // primary-contact-integrity spec 7.5: a landlord-clearing or
+            // landlord-swapping restore can hand the primary contact off, and
+            // its answer carries no propertyContact block - re-read, and let
+            // the re-read REPLACE this answer as the card's roster source.
+            // Best-effort: on a failure the card keeps the restore's roster.
+            void getUnit(unit.unitId)
+              .then((fresh) => applyRosterUnit(fresh))
+              .catch(() => {
+                /* best-effort re-read */
+              });
           }}
           onConflict={() => {
             void getUnit(unit.unitId)

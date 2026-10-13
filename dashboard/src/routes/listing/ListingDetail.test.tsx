@@ -1198,6 +1198,8 @@ describe('ListingDetail', () => {
     const user = userEvent.setup();
     const setUnit = vi.fn();
     restoreUnit.mockResolvedValue({ ...READY.unit }); // restored (no deleted_at)
+    // primary-contact-integrity spec 7.5: the page re-reads after a restore.
+    getUnit.mockReset().mockResolvedValue({ ...READY.unit });
     useListing.mockReturnValue({
       ...READY,
       unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
@@ -1217,6 +1219,8 @@ describe('ListingDetail', () => {
     const user = userEvent.setup();
     const setUnit = vi.fn();
     const restored = { ...READY.unit!, landlordId: 'll9' };
+    // primary-contact-integrity spec 7.5: the page re-reads after a restore.
+    getUnit.mockReset().mockResolvedValue(restored);
     restoreUnit.mockReset();
     restoreUnit
       .mockRejectedValueOnce(
@@ -1313,6 +1317,8 @@ describe('ListingDetail', () => {
       landlordId: 'll9',
       contacts: [{ contactId: 'll9', role: 'landlord' as const, primaryContact: true, name: 'Nora Lane' }],
     };
+    // primary-contact-integrity spec 7.5: the page re-reads after a restore.
+    getUnit.mockReset().mockResolvedValue(restored);
     restoreUnit.mockReset();
     restoreUnit
       .mockRejectedValueOnce(
@@ -1374,6 +1380,8 @@ describe('ListingDetail', () => {
       primary_contact: 'pm2',
       contacts: [{ ...dana, primaryContact: true }],
     };
+    // primary-contact-integrity spec 7.5: the page re-reads after a restore.
+    getUnit.mockReset().mockResolvedValue(restored);
     restoreUnit.mockReset();
     restoreUnit
       .mockRejectedValueOnce(
@@ -2718,5 +2726,115 @@ describe('ListingDetail - the no-primary box (primary-contact-integrity spec 7.4
     const box = within(contactsCard()).getByRole('status');
     await user.click(within(box).getByRole('button', { name: 'Make Mark Passmore primary' }));
     expect(await within(box).findByRole('alert')).toHaveTextContent("Couldn't save that change - please try again.");
+  });
+});
+
+describe('ListingDetail - a restore re-reads the roster source (primary-contact-integrity spec 7.5)', () => {
+  beforeEach(() => {
+    restoreUnit.mockReset();
+    getUnit.mockReset();
+    getAllContacts.mockReset().mockResolvedValue([]);
+  });
+
+  it('a plain restore re-reads the property, and the re-read becomes the Contacts card roster', async () => {
+    const user = userEvent.setup();
+    const james: UnitContact = { contactId: 'll1', role: 'landlord', primaryContact: true, name: 'James Porter' };
+    const dana: UnitContact = { contactId: 'pm2', role: 'pm', primaryContact: false, name: 'Dana Reyes' };
+    const deletedUnit: NonNullable<ListingState['unit']> = {
+      ...READY.unit!,
+      deleted_at: '2026-06-19T00:00:00.000Z',
+      contacts: [james, dana],
+    };
+    const { deleted_at: _live, ...liveUnit } = deletedUnit;
+    // The re-read: the server's own roster now (Dana primary) and its block.
+    const fresh: NonNullable<ListingState['unit']> = {
+      ...liveUnit,
+      contacts: [{ ...james, primaryContact: false }, { ...dana, primaryContact: true }],
+      propertyContact: { contactId: 'pm2', heirIfPrimaryRemoved: { contactId: 'll1', name: 'James Porter' } },
+    };
+    restoreUnit.mockResolvedValue(liveUnit);
+    getUnit.mockResolvedValue(fresh);
+    let current: ListingState = {
+      ...READY,
+      unit: deletedUnit,
+      roster: listingRoster(deletedUnit, null),
+      setUnit: vi.fn((unit: NonNullable<ListingState['unit']>) => {
+        current = { ...current, unit };
+      }),
+    };
+    useListing.mockImplementation(() => current);
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    expect(restoreUnit).toHaveBeenCalledWith('u1');
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+    await waitFor(() =>
+      expect(within(contactsCard()).getAllByRole('link')[0]).toHaveTextContent('Dana Reyes (primary)'),
+    );
+  });
+
+  it('a restore through the landlord dialog re-reads the property; the re-read REPLACES the restore answer as the roster source', async () => {
+    const user = userEvent.setup();
+    const james: UnitContact = { contactId: 'll1', role: 'landlord', primaryContact: true, name: 'James Porter' };
+    const dana: UnitContact = { contactId: 'pm2', role: 'pm', primaryContact: false, name: 'Dana Reyes' };
+    const deletedUnit: NonNullable<ListingState['unit']> = {
+      ...READY.unit!,
+      deleted_at: '2026-06-19T00:00:00.000Z',
+      landlordId: 'll1',
+      primary_contact: 'll1',
+      contacts: [james, dana],
+    };
+    const { landlordId: _cleared, deleted_at: _live, ...restoredBase } = deletedUnit;
+    // The restore's own answer: James's row gone, Dana handed the primary - and
+    // no propertyContact block (restore responses carry none).
+    const restoreAnswer: NonNullable<ListingState['unit']> = {
+      ...restoredBase,
+      primary_contact: 'pm2',
+      contacts: [{ ...dana, primaryContact: true }],
+    };
+    // The re-read carries the block: nobody would take over from Dana.
+    const reread: NonNullable<ListingState['unit']> = {
+      ...restoreAnswer,
+      propertyContact: { contactId: 'pm2', heirIfPrimaryRemoved: null },
+    };
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+          error: 'restore_needs_landlord',
+          landlordName: 'James Porter',
+        }),
+      )
+      .mockResolvedValueOnce(restoreAnswer);
+    getUnit.mockResolvedValue(reread);
+    let current: ListingState = {
+      ...READY,
+      unit: deletedUnit,
+      roster: listingRoster(deletedUnit, null),
+      setUnit: vi.fn((unit: NonNullable<ListingState['unit']>) => {
+        current = { ...current, unit };
+      }),
+    };
+    useListing.mockImplementation(() => current);
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+
+    // The re-read's block is what the remove confirm reads: the server says
+    // nobody takes over. The restore answer alone (no block) would only let
+    // the page say that someone MAY take over.
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Remove Dana Reyes from this property' }));
+    const confirm = await screen.findByRole('dialog', { name: /Remove the primary contact\?/i });
+    expect(
+      await within(confirm).findByText(
+        "This property will have no primary contact. New tours won't include a landlord, and tour group texts will use the general intro.",
+      ),
+    ).toBeInTheDocument();
   });
 });

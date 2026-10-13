@@ -287,4 +287,64 @@ describe('GET /api/units/:id/activity (property Activity card)', () => {
     const alsoBad = await authedGet(app, '/api/units/u-many/activity?limit=101');
     expect(alsoBad.status).toBe(400);
   });
+
+  // primary-contact-integrity C11: the event the roster writes, the contact
+  // delete fan-out and the backfill script append when the primary moves
+  // without a click. `reason` is projected for THIS event only.
+  it('projects unit_primary_contact_assigned with contactId, contactName, reason and from', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-handoff');
+    seedContact(world, 'c-heir', { type: 'landlord', firstName: 'Mark', lastName: 'Passmore' });
+    await world.auditRepo.append('units#u-handoff', 'unit_primary_contact_assigned', {
+      contactId: 'c-heir',
+      reason: 'handoff_on_delete',
+      from: 'c-gone',
+    });
+
+    const res = await authedGet(app, '/api/units/u-handoff/activity');
+    expect(res.status).toBe(200);
+    expect(res.body.events[0]).toEqual({
+      id: expect.any(String),
+      at: expect.any(String),
+      type: 'unit_primary_contact_assigned',
+      contactId: 'c-heir',
+      contactName: 'Mark Passmore',
+      reason: 'handoff_on_delete',
+      from: 'c-gone',
+    });
+  });
+
+  it('projects every primary-assignment reason code verbatim', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-reasons');
+    const codes = ['auto_on_add', 'handoff_on_remove', 'handoff_on_delete', 'handoff_on_restore', 'backfill'];
+    for (const reason of codes) {
+      await world.auditRepo.append('units#u-reasons', 'unit_primary_contact_assigned', {
+        contactId: 'c-x',
+        reason,
+      });
+    }
+
+    const res = await authedGet(app, '/api/units/u-reasons/activity');
+    expect(res.status).toBe(200);
+    const served = (res.body.events as Array<{ reason?: string }>).map((e) => e.reason);
+    expect([...served].sort()).toEqual([...codes].sort());
+  });
+
+  it('keeps a listing_status_changed free-text reason OFF the wire', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-status-reason', { status: 'available' });
+    await world.auditRepo.append('units#u-status-reason', 'listing_status_changed', {
+      actor: TEST_SESSION_USER.userId,
+      from: 'setup',
+      to: 'available',
+      source: 'manual',
+      reason: 'Owner asked to pause until spring',
+    });
+
+    const res = await authedGet(app, '/api/units/u-status-reason/activity');
+    expect(res.status).toBe(200);
+    expect(res.body.events[0]).toMatchObject({ type: 'listing_status_changed', from: 'setup', to: 'available' });
+    expect(res.body.events[0]).not.toHaveProperty('reason');
+  });
 });

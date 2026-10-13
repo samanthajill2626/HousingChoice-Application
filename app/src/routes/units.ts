@@ -199,7 +199,7 @@ function toRelatedUnit(
  * listing_status_changed, unit_deleted, unit_restored,
  * broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
  * tour_no_show, tour_canceled, tour_outcome, tour_auto_closed,
- * tour_reopened).
+ * tour_reopened, unit_primary_contact_assigned).
  * Details are a fixed-key whitelist lifted from the audit payload — NEVER the
  * raw payload document (a future payload field can't leak through here).
  */
@@ -223,6 +223,12 @@ interface UnitActivityEvent {
   tenantCount?: number;
   tourId?: string;
   outcome?: string;
+  /**
+   * unit_primary_contact_assigned ONLY (primary-contact-integrity C11): why
+   * the primary moved without a click - auto_on_add | handoff_on_remove |
+   * handoff_on_delete | handoff_on_restore | backfill.
+   */
+  reason?: string;
 }
 
 /** Project one audit row → the Activity wire shape (fixed-key whitelist). */
@@ -255,6 +261,12 @@ function toUnitActivityEvent(e: AuditEvent): UnitActivityEvent {
     ...(num('tenantCount') !== undefined && { tenantCount: num('tenantCount') }),
     ...(str('tourId') !== undefined && { tourId: str('tourId') }),
     ...(str('outcome') !== undefined && { outcome: str('outcome') }),
+    // primary-contact-integrity C11: `reason` is lifted for the primary-contact
+    // event ONLY. listing_status_changed stores a FREE-TEXT `reason` under the
+    // same key (services/statusTransition setListingStatus), which this
+    // projection has never served and must not start serving.
+    ...(e.event_type === 'unit_primary_contact_assigned' &&
+      str('reason') !== undefined && { reason: str('reason') }),
   };
 }
 

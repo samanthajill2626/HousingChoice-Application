@@ -14,16 +14,20 @@ import { Button, Spinner, StatusBadge } from '../../ui/index.js';
 import { contactDisplayName, formatPhone, humanize } from '../contact/format.js';
 import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
 import { ContactCreateForm } from '../contact/ContactCreateForm.js';
+import { compareByName, formatHeardFrom, sortByHeardFrom } from '../../lib/heardFrom.js';
 import { TenantFilters } from './TenantFilters.js';
 import {
   ALL_STATUS_SET,
   applySelection,
+  applySortToParams,
   applyToParams,
   buildFacets,
   factsLine,
   hiddenByStatusOnly,
   parseSelection,
+  parseSort,
   type TenantSelection,
+  type TenantSort,
 } from './tenantFacets.js';
 import { useContacts, type ContactsFilter } from './useContacts.js';
 import styles from './ContactsList.module.css';
@@ -126,23 +130,32 @@ function searchKey(contact: Contact): string {
 function Row({
   contact,
   showFacts,
+  showHeardFrom,
+  now,
 }: {
   contact: Contact;
   /** Tenant rows outside the Deleted view carry the eligibility facts. */
   showFacts: boolean;
+  /** The Tenants view only (spec 2026-10-12 5.7, 14.5 F13): the row's
+   *  "Last heard from" line. */
+  showHeardFrom: boolean;
+  /** The render clock for the label (captured once per list mount). */
+  now: Date;
 }): React.JSX.Element {
   const name = contactDisplayName(contact.firstName, contact.lastName, contact.phone);
   const phone = formatPhone(contact.phone);
   const facts = showFacts ? factsLine(contact) : null;
   const porting = showFacts && contact.porting === true;
+  const heard = showHeardFrom ? formatHeardFrom(contact.last_heard_from_at, now) : null;
   return (
     <li className={styles.rowItem}>
       <Link
         to={`/contacts/${contact.contactId}`}
         // .factsRow keys the wide-pane sacrifice order, so it goes on whenever ANY
         // chip was added - a porting-only tenant still gains a fourth unshrinkable
-        // chip. PER-ROW, not per-route: facts render on /contacts (All) too.
-        className={`${styles.row} ${facts !== null || porting ? styles.factsRow : ''}`}
+        // chip. PER-ROW, not per-route: facts render on /contacts (All) too. The
+        // last-heard line is such a chip.
+        className={`${styles.row} ${facts !== null || porting || heard !== null ? styles.factsRow : ''}`}
       >
         <span className={styles.name}>{name}</span>
         {/* Meta chips grouped so on a tight content pane they wrap to their own
@@ -167,6 +180,13 @@ function Row({
               Porting
             </span>
           ) : null}
+          {/* Spec 2026-10-12 5.7: AFTER Porting, unshrinkable (flex: 0 0 auto) -
+           *  .facts stays the ONE compressible child. */}
+          {heard !== null ? (
+            <span className={styles.heardFrom} {...(heard.title !== '' && { title: heard.title })}>
+              Last heard from {heard.label}
+            </span>
+          ) : null}
         </span>
       </Link>
     </li>
@@ -189,6 +209,8 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
   }, [phoneParam]);
   const [createOpen, setCreateOpen] = useState(false);
   const navigate = useNavigate();
+  // One clock per list mount (a lazy initializer, never a render-time read): the list refetches on mount anyway.
+  const [now] = useState(() => new Date());
 
   // The facet controls render - and APPLY - on the Tenants view only. Facet
   // params on any other view are inert: they filter nothing and no control shows.
@@ -239,10 +261,17 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
   }, [searchParams, validAuthorityKeys, facetProbe]);
 
   const q = query.trim().toLowerCase();
+  const sort: TenantSort = parseSort(searchParams);
   const visible = useMemo(() => {
     const queried = q ? contacts.filter((c) => searchKey(c).includes(q)) : contacts;
-    return isTenantView ? applySelection(queried, selection) : queried;
-  }, [contacts, q, isTenantView, selection]);
+    if (!isTenantView) return queried;
+    const selected = applySelection(queried, selection);
+    // The order lives HERE, never in useContacts (six other screens share it -
+    // spec 5.7). Both orders are total: contactId is compareByName's last key.
+    return sort === 'name'
+      ? [...selected].sort(compareByName)
+      : sortByHeardFrom(selected, { heardAt: (c) => c.last_heard_from_at, name: (c) => c });
+  }, [contacts, q, isTenantView, selection, sort]);
 
   // Counts are contextual (the query + the other facets), so the query predicate
   // goes IN rather than the already-filtered rows.
@@ -263,6 +292,13 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
     const params = new URLSearchParams(searchParams);
     applyToParams(params, next);
     // Replace, not push: Back leaves the page rather than walking chip toggles.
+    setSearchParams(params, { replace: true });
+  }
+
+  /** Serialize the sort, MERGING the query string like updateSelection. */
+  function updateSort(next: TenantSort): void {
+    const params = new URLSearchParams(searchParams);
+    applySortToParams(params, next);
     setSearchParams(params, { replace: true });
   }
 
@@ -293,7 +329,7 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
       <ContactsFilterTabs active={filter} tenantSearch={isTenantView ? searchParams.toString() : ''} />
 
       {isTenantView && status === 'ready' ? (
-        <TenantFilters model={facets} selection={selection} onChange={updateSelection} />
+        <TenantFilters model={facets} selection={selection} onChange={updateSelection} sort={sort} onSortChange={updateSort} />
       ) : null}
 
       <div className={styles.search}>
@@ -337,6 +373,8 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
                 key={contact.contactId}
                 contact={contact}
                 showFacts={contact.type === 'tenant' && filter !== 'deleted'}
+                showHeardFrom={isTenantView}
+                now={now}
               />
             ))}
           </ul>

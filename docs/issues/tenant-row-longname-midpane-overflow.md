@@ -56,3 +56,8 @@ jsdom does no layout, so a component test cannot assert any of this.
 
 Found by the adversarial reviewer (round 2, finding R2-2) during the tenant-list-visibility
 mission and confirmed by orchestrator measurement.
+
+**2026-10-13.** The Tenants view now ends every row with an unshrinkable `Last heard from <label>`
+chip (spec `2026-10-12-last-heard-from-follow-up-status-design.md` 5.7), up to about 30
+characters at `--fs-xs`, so the band where the facts span is exhausted starts wider than the
+561-700px measured above. Re-measure with the new chip before choosing option 1's cap.

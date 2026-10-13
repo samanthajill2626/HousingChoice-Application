@@ -10,7 +10,12 @@
 import { useId } from 'react';
 import { Chip, ChipGroup } from './FilterChips.js';
 import type { TenantStatus } from '../../api/index.js';
-import { DEFAULT_STATUS_SET, type TenantFacetModel, type TenantSelection } from './tenantFacets.js';
+import {
+  DEFAULT_STATUS_SET,
+  type TenantFacetModel,
+  type TenantSelection,
+  type TenantSort,
+} from './tenantFacets.js';
 import styles from './TenantFilters.module.css';
 
 export interface TenantFiltersProps {
@@ -20,6 +25,12 @@ export interface TenantFiltersProps {
   selection: TenantSelection;
   /** The NEXT selection after a chip/Clear interaction. */
   onChange: (next: TenantSelection) => void;
+  /** The list order (`?sort=`); only read when `onSortChange` is wired. */
+  sort?: TenantSort;
+  /** Wiring this renders the "Sort by" select in the controls row (spec 14.5
+   *  F14). Optional so a host without a sort (and the facet-only tests) is
+   *  unchanged. */
+  onSortChange?: (next: TenantSort) => void;
 }
 
 /** Toggle one key in a facet set, returning a new set. */
@@ -37,8 +48,9 @@ function toggledStatus(keys: ReadonlySet<TenantStatus>, key: string): Set<Tenant
   return next;
 }
 
-export function TenantFilters({ model, selection, onChange }: TenantFiltersProps): React.JSX.Element {
+export function TenantFilters({ model, selection, onChange, sort, onSortChange }: TenantFiltersProps): React.JSX.Element {
   const portingLabelId = useId();
+  const sortId = useId();
   return (
     <div className={styles.controls}>
       {/* Status (spec 2026-10-12 5.7): the facet that INVERTS "empty =
@@ -88,6 +100,24 @@ export function TenantFilters({ model, selection, onChange }: TenantFiltersProps
               onClick={() => onChange({ ...selection, porting: !selection.porting })}
             />
           </div>
+        </div>
+      ) : null}
+      {/* The list order (spec 2026-10-12 5.7): a labelled native select, the
+       *  Properties list's precedent (ListingsList.tsx's Status select). */}
+      {onSortChange !== undefined ? (
+        <div className={styles.control}>
+          <label className={styles.controlLabel} htmlFor={sortId}>
+            Sort by
+          </label>
+          <select
+            id={sortId}
+            className={styles.select}
+            value={sort ?? 'heard'}
+            onChange={(e) => onSortChange(e.target.value === 'name' ? 'name' : 'heard')}
+          >
+            <option value="heard">Last heard from</option>
+            <option value="name">Name</option>
+          </select>
         </div>
       ) : null}
     </div>

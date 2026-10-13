@@ -239,4 +239,18 @@ describe('TenantFilters', () => {
     await user.click(screen.getByRole('button', { name: 'Clear status filter' }));
     expect(onChange).toHaveBeenLastCalledWith({ ...off, status: new Set(DEFAULT_STATUS_SET) });
   });
+
+  it('renders the Sort by select only when the host wires it, and reports the choice', async () => {
+    const user = userEvent.setup();
+    const onSortChange = vi.fn();
+    const { unmount } = render(<TenantFilters model={MODEL} selection={EMPTY} onChange={vi.fn()} />);
+    expect(screen.queryByLabelText('Sort by')).toBeNull();
+    unmount();
+    render(<TenantFilters model={MODEL} selection={EMPTY} onChange={vi.fn()} sort="heard" onSortChange={onSortChange} />);
+    const select = screen.getByLabelText('Sort by');
+    expect(select).toHaveValue('heard');
+    expect(within(select).getAllByRole('option').map((o) => o.textContent)).toEqual(['Last heard from', 'Name']);
+    await user.selectOptions(select, 'name');
+    expect(onSortChange).toHaveBeenCalledWith('name');
+  });
 });

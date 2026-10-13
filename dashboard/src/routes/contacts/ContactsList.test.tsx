@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Contact } from '../../api/index.js';
 import { NONE_KEY } from './tenantFacets.js';
 import type { ContactsFilter, ContactsState } from './useContacts.js';
+import { formatInboxTimeFull } from '../inbox/inboxTime.js';
 
 // Drive the view through a mocked useContacts so these tests are independent of
 // fetching (covered separately) and assert the route → filter behavior, the
@@ -546,5 +547,65 @@ describe('ContactsList - status facet (spec 2026-10-12 5.7)', () => {
     // Sam (2-BR, searching) is hidden by the VOUCHER facet, not by status.
     expect(screen.getByText(/No matches for .sam.\./)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Show all statuses' })).toBeNull();
+  });
+});
+
+describe('ContactsList - sort and the last-heard line (spec 2026-10-12 5.7)', () => {
+  it('defaults to last heard from: most recent first, never-heard last', () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants');
+    expect(tenantRowNames()).toEqual(['Rae Recent', 'Sam Searching', 'Nell Nostatus']);
+    expect(screen.getByLabelText('Sort by')).toHaveValue('heard');
+  });
+
+  it('?sort=name orders by last name and round-trips through the select, merging the query string', async () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants?sort=name');
+    expect(tenantRowNames()).toEqual(['Nell Nostatus', 'Rae Recent', 'Sam Searching']);
+    expect(screen.getByLabelText('Sort by')).toHaveValue('name');
+    await userEvent.selectOptions(screen.getByLabelText('Sort by'), 'heard');
+    expect(screen.getByTestId('loc').textContent).not.toContain('sort=');
+    expect(tenantRowNames()).toEqual(['Rae Recent', 'Sam Searching', 'Nell Nostatus']);
+  });
+
+  it('a sort write keeps the facet params, and a facet write keeps the sort', async () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants?voucher=2');
+    await userEvent.selectOptions(screen.getByLabelText('Sort by'), 'name');
+    const afterSort = screen.getByTestId('loc').textContent ?? '';
+    expect(afterSort).toContain('voucher=2');
+    expect(afterSort).toContain('sort=name');
+    // Deselect the (pressed, so always clickable) 2-BR chip: the facet write keeps the sort.
+    await userEvent.click(screen.getByRole('button', { name: /^2-BR \(/ }));
+    const afterFacet = screen.getByTestId('loc').textContent ?? '';
+    expect(afterFacet).not.toContain('voucher=');
+    expect(afterFacet).toContain('sort=name');
+  });
+
+  it('Tenants rows end with "Last heard from <label>" (title = the full stamp), after the Porting chip', () => {
+    state = { status: 'ready', contacts: [...STATUS_TENANTS, T_SIX] };
+    renderAt('/contacts/tenants');
+    const sam = rowsOf('Tenants').getByRole('link', { name: /Sam Searching/ });
+    const line = within(sam).getByText('Last heard from Mar 5, 2024');
+    expect(line).toHaveAttribute('title', formatInboxTimeFull(S_SAM.last_heard_from_at as string));
+    const nell = rowsOf('Tenants').getByRole('link', { name: /Nell Nostatus/ });
+    expect(within(nell).getByText('Last heard from Never')).not.toHaveAttribute('title');
+    const six = rowsOf('Tenants').getByRole('link', { name: /Tessa Six/ });
+    const text = six.textContent ?? '';
+    expect(text.indexOf('Porting')).toBeLessThan(text.indexOf('Last heard from'));
+  });
+
+  it('other views: no sort control, no last-heard line, no status facet, list order untouched', () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts', 'all');
+    expect(screen.queryByLabelText('Sort by')).toBeNull();
+    expect(screen.queryByText(/Last heard from/)).toBeNull();
+    expect(rowsOf('Contacts').getAllByRole('listitem')).toHaveLength(5);
+  });
+
+  it('no sort control until the fetch is ready', () => {
+    state = { status: 'loading', contacts: [] };
+    renderAt('/contacts/tenants');
+    expect(screen.queryByLabelText('Sort by')).toBeNull();
   });
 });

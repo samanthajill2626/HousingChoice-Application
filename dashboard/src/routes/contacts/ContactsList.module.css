@@ -245,6 +245,18 @@
   white-space: nowrap;
 }
 
+/* "Last heard from <label>" (spec 2026-10-12 5.7, 14.5 F13): Tenants view
+ * only, LAST in .meta, and unshrinkable like every other chip - .facts stays
+ * the ONE compressible child (the sacrifice order documented above). This
+ * widens the fixed chip set that
+ * docs/issues/tenant-row-longname-midpane-overflow.md measures. */
+.heardFrom {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
 /* NOTE: 55cqw measures the .page query container (the only container-type in this
  * file), i.e. roughly 57-58% of the row box - the starting value is tuned in live
  * QA. The @container block BELOW must stay after this rule: identical

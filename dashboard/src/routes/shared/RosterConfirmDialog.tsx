@@ -28,10 +28,20 @@
 // must refetch rather than open a dialog. So the dialog only ever receives a
 // preview that really is previewable.
 import { useEffect, useState } from 'react';
-import type { RosterPreview, RosterPreviewRecipient } from '../../api/index.js';
+import type {
+  IntroFallback,
+  IntroFallbackReason,
+  RosterPreview,
+  RosterPreviewRecipient,
+} from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
-import { quietClockLabel, refusalMessage, RELAY_INTRO_MAX_CHARS } from './rosterWrites.js';
+import {
+  GENERIC_WRITE_FAILURE,
+  quietClockLabel,
+  refusalMessage,
+  RELAY_INTRO_MAX_CHARS,
+} from './rosterWrites.js';
 import styles from './RosterConfirmDialog.module.css';
 
 /** Why a listed recipient will not receive this send. */
@@ -84,6 +94,22 @@ export interface RosterConfirmDialogProps {
    * together with an endpoint that honors it.
    */
   editableBody?: boolean;
+  /**
+   * Whose intro the general intro replaced - the fallback box's heading
+   * (primary-contact-integrity spec 7.1). The tour and placement OPEN
+   * surfaces pass it; the server sets `preview.introFallback` only on those
+   * previews. The box renders only with BOTH: without an owner there is no
+   * heading to give, and the general intro is the ownerless path's only one.
+   */
+  introOwner?: 'tour' | 'placement';
+  /**
+   * "Check again" in the fallback box (spec 7.1): the caller re-runs its
+   * preview fetch and replaces the `preview` it passes in (a 409
+   * relay_already_provisioned is the caller's to handle - it closes the
+   * dialog). Rejects -> the message renders in the dialog's error line and the
+   * dialog stays open. Absent -> no button.
+   */
+  onCheckAgain?: () => Promise<void>;
 }
 
 /** "A", "A and B", "A, B and C" - the warning names who is already grouped. */
@@ -91,6 +117,119 @@ function formatNames(names: string[]): string {
   if (names.length === 0) return 'These people';
   if (names.length === 1) return names[0]!;
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]!}`;
+}
+
+/** The fallback box's heading, by whose intro the general intro replaced
+ *  (primary-contact-integrity spec 7.1), word for word. */
+const INTRO_FALLBACK_HEADING: Readonly<Record<'tour' | 'placement', string>> = {
+  tour: 'Using the general intro, not the tour intro.',
+  placement: 'Using the general intro, not the placement intro.',
+};
+
+/** Spec 5.1's reason order - the order the box lists them in. The server
+ *  already sends them in it; sorting here keeps the box right regardless. */
+const INTRO_FALLBACK_ORDER: readonly IntroFallbackReason[] = [
+  'no_property_contact',
+  'property_contact_deleted',
+  'property_contact_is_tenant',
+  'property_contact_no_first_name',
+  'no_street_address',
+  'tour_not_scheduled',
+  'tour_started',
+  'lookup_failed',
+];
+
+/** One line of the fallback box: the sentence, and the fix's link when the id
+ *  it needs is known. */
+interface IntroFallbackLine {
+  reason: IntroFallbackReason;
+  text: string;
+  link?: { href: string; label: string };
+}
+
+/** The box's lines (spec 7.1 table), word for word. `<Street>` is the
+ *  server's street, else "this property" ("This property" when it starts the
+ *  sentence). A link is omitted when its id is absent; an unknown reason (a
+ *  newer server) gets no line. */
+function introFallbackLines(fallback: IntroFallback): IntroFallbackLine[] {
+  const street = fallback.street !== undefined && fallback.street.length > 0 ? fallback.street : undefined;
+  const inStreet = street ?? 'this property';
+  const leadStreet = street ?? 'This property';
+  const listingHref =
+    fallback.unitId !== undefined && fallback.unitId.length > 0
+      ? `/listings/${encodeURIComponent(fallback.unitId)}`
+      : undefined;
+  const contactHref =
+    fallback.propertyContactId !== undefined && fallback.propertyContactId.length > 0
+      ? `/contacts/${encodeURIComponent(fallback.propertyContactId)}`
+      : undefined;
+  const linkTo = (href: string | undefined, label: string): IntroFallbackLine['link'] =>
+    href !== undefined ? { href, label } : undefined;
+  const present = new Set<IntroFallbackReason>(fallback.reasons);
+  const lines: IntroFallbackLine[] = [];
+  for (const reason of INTRO_FALLBACK_ORDER) {
+    if (!present.has(reason)) continue;
+    switch (reason) {
+      case 'no_property_contact':
+        lines.push({
+          reason,
+          text: `${leadStreet} has no primary contact, so the intro can't name the landlord.`,
+          link: linkTo(listingHref, 'Set a primary contact'),
+        });
+        break;
+      case 'property_contact_deleted':
+        lines.push({
+          reason,
+          text: `The contact on file for ${inStreet} was deleted, so the intro can't name the landlord.`,
+          link: linkTo(listingHref, 'Set a primary contact'),
+        });
+        break;
+      case 'property_contact_is_tenant':
+        lines.push({
+          reason,
+          text: `The contact on file for ${inStreet} is this tenant, so the intro can't name a landlord.`,
+          link: linkTo(listingHref, 'Set a primary contact'),
+        });
+        break;
+      case 'property_contact_no_first_name':
+        lines.push({
+          reason,
+          text: `The contact on file for ${inStreet} has no first name saved.`,
+          link: linkTo(contactHref, 'Add a first name'),
+        });
+        break;
+      case 'no_street_address':
+        lines.push({
+          reason,
+          text: 'This property has no street address.',
+          link: linkTo(listingHref, 'Add the address'),
+        });
+        break;
+      case 'tour_not_scheduled':
+        lines.push({ reason, text: 'This tour has no date and time yet.' });
+        break;
+      case 'tour_started':
+        lines.push({
+          reason,
+          text: "This tour's start time has passed. The tour intro asks the tenant to say when they're on the way.",
+        });
+        break;
+      case 'lookup_failed':
+        lines.push({ reason, text: "Some property details couldn't be loaded." });
+        break;
+    }
+  }
+  return lines;
+}
+
+/** The error line after a failed Check again: the server's own sentence when
+ *  it sent one, else this - the shared refusal fallback talks about SAVING,
+ *  and Check again saves nothing. */
+const CHECK_AGAIN_FAILURE = "Couldn't check again - please try again.";
+
+function checkAgainMessage(err: unknown): string {
+  const message = refusalMessage(err);
+  return message === GENERIC_WRITE_FAILURE ? CHECK_AGAIN_FAILURE : message;
 }
 
 export function RosterConfirmDialog({
@@ -102,9 +241,13 @@ export function RosterConfirmDialog({
   onClose,
   allowDefer = true,
   editableBody = false,
+  introOwner,
+  onCheckAgain,
 }: RosterConfirmDialogProps): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A "Check again" (spec 7.1) is in flight.
+  const [checking, setChecking] = useState(false);
   // Seeded from the server-composed preview. Re-seeded if the preview itself
   // changes (a re-preview behind an open dialog), which would otherwise leave
   // the operator editing text the server no longer proposes.
@@ -130,6 +273,20 @@ export function RosterConfirmDialog({
         setBusy(false);
       });
   };
+
+  // "Check again" (primary-contact-integrity spec 7.1): the CALLER re-fetches
+  // the preview and hands the dialog the new one. While it runs the button is
+  // disabled; a failure lands in the error line below and the dialog stays
+  // open - nothing was sent.
+  const checkAgain = (): void => {
+    if (onCheckAgain === undefined || checking || busy) return;
+    setChecking(true);
+    setError(null);
+    void onCheckAgain()
+      .catch((err: unknown) => setError(checkAgainMessage(err)))
+      .finally(() => setChecking(false));
+  };
+  const introFallback = preview.introFallback;
 
   const countLine =
     preview.recipientCount === 1
@@ -209,6 +366,45 @@ export function RosterConfirmDialog({
         </div>
       }
     >
+      {/* primary-contact-integrity spec 7.1 (layout A): why this OWNED group
+          opens with the GENERAL intro - read first, ABOVE the message, before
+          the operator edits anything. The duplicate warning's amber style
+          (--c-warning, not danger: nothing is refused). Links open in a NEW
+          TAB for the duplicate warning's reason: navigating this tab away
+          would discard the half-built group. */}
+      {introFallback !== undefined && introOwner !== undefined ? (
+        <div className={styles.duplicateWarning} role="status">
+          <p>
+            <strong>{INTRO_FALLBACK_HEADING[introOwner]}</strong>
+          </p>
+          {introFallbackLines(introFallback).map((line) => (
+            <p key={line.reason}>
+              {line.text}
+              {line.link !== undefined ? (
+                <>
+                  {' '}
+                  <a href={line.link.href} target="_blank" rel="noreferrer">
+                    {line.link.label}
+                  </a>
+                </>
+              ) : null}
+            </p>
+          ))}
+          {onCheckAgain !== undefined ? (
+            <p>
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={checkAgain}
+                disabled={checking || busy}
+              >
+                Check again
+              </Button>
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       <section className={styles.previewBox} aria-label="Message preview">
         {editableBody ? (
           <>

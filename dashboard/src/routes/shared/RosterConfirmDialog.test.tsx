@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
-import { ApiError, type RosterPreview } from '../../api/index.js';
+import { ApiError, type IntroFallback, type IntroFallbackReason, type RosterPreview } from '../../api/index.js';
 import { RosterConfirmDialog, type RosterConfirmDialogProps } from './RosterConfirmDialog.js';
 
 function preview(over: Partial<RosterPreview> = {}): RosterPreview {
@@ -394,8 +394,10 @@ describe('RosterConfirmDialog - duplicate warning (spec 5)', () => {
   it('renders nothing when there is no duplicate', () => {
     renderDialog();
     expect(screen.queryByText(/already have/i)).not.toBeInTheDocument();
-    // The block is the dialog's ONLY role=status, which is what the e2e locator
-    // scopes to - keep it absent, not merely empty, when there is no match.
+    // Keep the block absent, not merely empty, when there is no match. It is no
+    // longer the dialog's only role=status: the intro fallback box
+    // (primary-contact-integrity spec 7.1) is one too, so e2e locators filter
+    // the dialog's status blocks by their text.
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
@@ -509,5 +511,238 @@ describe('RosterConfirmDialog - editable intro', () => {
     // force=true AND the edit - the escape hatch must not drop the typing.
     await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
     expect(onConfirm).toHaveBeenCalledWith(true, 'Edited during quiet hours');
+  });
+});
+
+// --- primary-contact-integrity spec 7.1: the intro fallback box --------------
+// When an OWNED group (a tour or a placement) opens with the GENERAL intro,
+// the dialog says why ABOVE the message - every reason, in reason order - links
+// to each fix in a NEW TAB, and offers Check again, which re-fetches the
+// preview through the caller.
+describe('RosterConfirmDialog - the intro fallback box (primary-contact-integrity spec 7.1)', () => {
+  const GENERAL_INTRO = "Hey, it's Sam. You're now connected with Mark and Keisha on this number.";
+  const withFallback = (fallback: IntroFallback): RosterPreview =>
+    preview({ body: GENERAL_INTRO, introFallback: fallback });
+
+  it('renders ABOVE the message with the tour heading and one line per reason, in reason order', () => {
+    renderDialog({
+      introOwner: 'tour',
+      editableBody: true,
+      preview: withFallback({
+        reasons: ['no_property_contact', 'no_street_address', 'tour_started', 'lookup_failed'],
+        unitId: 'u-470',
+      }),
+    });
+    const box = screen.getByRole('status');
+    expect(within(box).getByText('Using the general intro, not the tour intro.')).toBeInTheDocument();
+    const text = box.textContent ?? '';
+    const positions = [
+      "This property has no primary contact, so the intro can't name the landlord.",
+      'This property has no street address.',
+      "This tour's start time has passed. The tour intro asks the tenant to say when they're on the way.",
+      "Some property details couldn't be loaded.",
+    ].map((line) => text.indexOf(line));
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    // ABOVE the message: read before the operator edits anything.
+    const message = screen.getByRole('region', { name: 'Message preview' });
+    expect(box.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('lists the reasons in reason order even when they arrive out of order', () => {
+    renderDialog({
+      introOwner: 'tour',
+      preview: withFallback({ reasons: ['lookup_failed', 'tour_not_scheduled', 'no_street_address'] }),
+    });
+    const text = screen.getByRole('status').textContent ?? '';
+    const positions = [
+      'This property has no street address.',
+      'This tour has no date and time yet.',
+      "Some property details couldn't be loaded.",
+    ].map((line) => text.indexOf(line));
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+
+  it('uses the placement heading on a placement', () => {
+    renderDialog({ introOwner: 'placement', preview: withFallback({ reasons: ['lookup_failed'] }) });
+    expect(
+      within(screen.getByRole('status')).getByText('Using the general intro, not the placement intro.'),
+    ).toBeInTheDocument();
+  });
+
+  type ReasonRow = [IntroFallbackReason, Partial<IntroFallback>, string, string | null, string | null];
+  const REASON_ROWS: ReasonRow[] = [
+    [
+      'no_property_contact',
+      { street: '470 Bolton Rd NW' },
+      "470 Bolton Rd NW has no primary contact, so the intro can't name the landlord.",
+      'Set a primary contact',
+      '/listings/u-470',
+    ],
+    [
+      'no_property_contact',
+      {},
+      "This property has no primary contact, so the intro can't name the landlord.",
+      'Set a primary contact',
+      '/listings/u-470',
+    ],
+    [
+      'property_contact_deleted',
+      { street: '470 Bolton Rd NW' },
+      "The contact on file for 470 Bolton Rd NW was deleted, so the intro can't name the landlord.",
+      'Set a primary contact',
+      '/listings/u-470',
+    ],
+    [
+      'property_contact_deleted',
+      {},
+      "The contact on file for this property was deleted, so the intro can't name the landlord.",
+      'Set a primary contact',
+      '/listings/u-470',
+    ],
+    [
+      'property_contact_is_tenant',
+      { street: '470 Bolton Rd NW' },
+      "The contact on file for 470 Bolton Rd NW is this tenant, so the intro can't name a landlord.",
+      'Set a primary contact',
+      '/listings/u-470',
+    ],
+    [
+      'property_contact_no_first_name',
+      { street: '470 Bolton Rd NW', propertyContactId: 'c-mark' },
+      'The contact on file for 470 Bolton Rd NW has no first name saved.',
+      'Add a first name',
+      '/contacts/c-mark',
+    ],
+    ['no_street_address', {}, 'This property has no street address.', 'Add the address', '/listings/u-470'],
+    ['tour_not_scheduled', {}, 'This tour has no date and time yet.', null, null],
+    [
+      'tour_started',
+      {},
+      "This tour's start time has passed. The tour intro asks the tenant to say when they're on the way.",
+      null,
+      null,
+    ],
+    ['lookup_failed', {}, "Some property details couldn't be loaded.", null, null],
+  ];
+
+  it.each(REASON_ROWS)('%s renders its line and its link (%o)', (reason, extra, line, linkName, href) => {
+    renderDialog({
+      introOwner: 'tour',
+      preview: withFallback({ reasons: [reason], unitId: 'u-470', ...extra }),
+    });
+    const lineEl = within(screen.getByRole('status')).getByText(line);
+    if (linkName === null) {
+      expect(within(lineEl).queryByRole('link')).not.toBeInTheDocument();
+      return;
+    }
+    const link = within(lineEl).getByRole('link', { name: linkName });
+    expect(link).toHaveAttribute('href', href);
+    // A NEW TAB, like the duplicate warning's link: navigating this tab away
+    // would discard the half-built group.
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noreferrer');
+  });
+
+  it('omits a link whose id is absent', () => {
+    renderDialog({
+      introOwner: 'tour',
+      preview: withFallback({
+        reasons: ['no_property_contact', 'property_contact_no_first_name'],
+        street: '470 Bolton Rd NW',
+      }),
+    });
+    const box = screen.getByRole('status');
+    expect(
+      within(box).getByText("470 Bolton Rd NW has no primary contact, so the intro can't name the landlord."),
+    ).toBeInTheDocument();
+    expect(
+      within(box).getByText('The contact on file for 470 Bolton Rd NW has no first name saved.'),
+    ).toBeInTheDocument();
+    expect(within(box).queryByRole('link')).not.toBeInTheDocument();
+  });
+
+  it('Check again runs the caller, is disabled while it runs, and comes back', async () => {
+    let settle!: () => void;
+    const onCheckAgain = vi.fn().mockReturnValue(
+      new Promise<void>((r) => {
+        settle = r;
+      }),
+    );
+    renderDialog({ introOwner: 'tour', onCheckAgain, preview: withFallback({ reasons: ['lookup_failed'] }) });
+    const button = within(screen.getByRole('status')).getByRole('button', { name: 'Check again' });
+    await userEvent.click(button);
+    expect(onCheckAgain).toHaveBeenCalledTimes(1);
+    expect(button).toBeDisabled();
+    settle();
+    await waitFor(() => expect(button).toBeEnabled());
+  });
+
+  it('a failed Check again renders in the error line and the dialog stays open', async () => {
+    const onCheckAgain = vi.fn().mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));
+    const { onClose } = renderDialog({
+      introOwner: 'tour',
+      onCheckAgain,
+      preview: withFallback({ reasons: ['lookup_failed'] }),
+    });
+    await userEvent.click(within(screen.getByRole('status')).getByRole('button', { name: 'Check again' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't check again - please try again.");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it("a failed Check again shows the server's own sentence when it sent one", async () => {
+    const onCheckAgain = vi.fn().mockRejectedValue(
+      new ApiError(503, 'preview_unavailable', 'preview_unavailable', {
+        error: 'preview_unavailable',
+        message: 'The preview could not be built - try again in a minute.',
+      }),
+    );
+    renderDialog({ introOwner: 'tour', onCheckAgain, preview: withFallback({ reasons: ['lookup_failed'] }) });
+    await userEvent.click(within(screen.getByRole('status')).getByRole('button', { name: 'Check again' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The preview could not be built - try again in a minute.',
+    );
+  });
+
+  it('offers no Check again without an onCheckAgain', () => {
+    renderDialog({ introOwner: 'tour', preview: withFallback({ reasons: ['lookup_failed'] }) });
+    expect(screen.getByRole('status')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Check again' })).not.toBeInTheDocument();
+  });
+
+  it('renders no box when the preview carries no introFallback (standalone and add-member previews)', () => {
+    renderDialog({ introOwner: 'tour' });
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Using the general intro/)).not.toBeInTheDocument();
+  });
+
+  it('renders no box when the caller names no owner (there is no heading to give)', () => {
+    renderDialog({ preview: withFallback({ reasons: ['lookup_failed'] }) });
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('sits beside the duplicate warning: two status blocks, the duplicate one unchanged', () => {
+    renderDialog({
+      introOwner: 'tour',
+      preview: preview({
+        body: GENERAL_INTRO,
+        introFallback: { reasons: ['lookup_failed'] },
+        duplicateOf: {
+          conversationId: 'conv-existing',
+          partition: 'open',
+          memberNames: ['Dana Reed', 'Marcus Bell'],
+        },
+      }),
+    });
+    const blocks = screen.getAllByRole('status');
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toHaveTextContent('Using the general intro, not the tour intro.');
+    expect(blocks[1]).toHaveTextContent(/already have an open relay group/);
+    expect(within(blocks[1]!).getByRole('link', { name: 'View the existing group' })).toHaveAttribute(
+      'href',
+      '/conversations/conv-existing',
+    );
   });
 });

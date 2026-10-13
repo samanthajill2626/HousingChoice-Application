@@ -242,3 +242,38 @@ export function sendRowKindLabel(row: Pick<ListingSendRow, 'type' | 'role'>): st
   if (row.type === undefined || row.type === 'tenant') return undefined;
   return displayKind({ type: row.type, role: row.role }, (t) => CONTACT_TYPE_LABEL[t]);
 }
+
+/** One property "Sent to" group (last-heard-from spec 5.5): its key and the
+ *  accessible name of its list (markup R1). */
+export interface SendRowGroup {
+  key: 'waiting' | 'interested' | 'not_interested' | 'not_eligible';
+  label: 'Waiting' | 'Interested' | 'Not interested' | 'Not eligible';
+  rows: ListingSendRow[];
+}
+
+/**
+ * last-heard-from spec 5.5: the property "Sent to" card's four groups, ALWAYS
+ * returned in this order (empty ones included; the host skips them), which
+ * together cover every row, each newest sentAt first: Waiting (no_reply /
+ * replied on an ELIGIBLE recipient - the eligibility half only, no
+ * lookback/quiet thresholds), Interested, Not interested, Not eligible (a
+ * waiting outcome on an ineligible recipient, and EVERY row whose contact is
+ * missing). `eligible` absent counts as not eligible.
+ */
+export function groupSendRows(rows: readonly ListingSendRow[]): SendRowGroup[] {
+  const groups: SendRowGroup[] = [
+    { key: 'waiting', label: 'Waiting', rows: [] },
+    { key: 'interested', label: 'Interested', rows: [] },
+    { key: 'not_interested', label: 'Not interested', rows: [] },
+    { key: 'not_eligible', label: 'Not eligible', rows: [] },
+  ];
+  const indexOf = (r: ListingSendRow): number => {
+    if (r.recipientMissing === true) return 3;
+    if (r.outcome === 'interested') return 1;
+    if (r.outcome === 'not_interested') return 2;
+    return r.eligible === true ? 0 : 3;
+  };
+  const newestFirst = [...rows].sort((a, b) => (a.sentAt < b.sentAt ? 1 : a.sentAt > b.sentAt ? -1 : 0));
+  for (const r of newestFirst) groups[indexOf(r)]!.rows.push(r);
+  return groups;
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { UnitActivityEvent, UnitItem } from '../../api/index.js';
+import type { ListingSendRow, UnitActivityEvent, UnitItem } from '../../api/index.js';
 import {
   acceptedVoucherSizes,
   authoritiesOf,
@@ -8,6 +8,7 @@ import {
   formatMoney,
   formatRent,
   describeUnitActivity,
+  groupSendRows,
   isMediaUrl,
   sendRowKindLabel,
   shortAddress,
@@ -302,5 +303,43 @@ describe('sendRowKindLabel (caseworkers D20/D22)', () => {
     expect(sendRowKindLabel({ type: 'tenant' })).toBeUndefined();
     expect(sendRowKindLabel({ type: 'tenant', role: 'Case worker' })).toBeUndefined();
     expect(sendRowKindLabel({})).toBeUndefined();
+  });
+});
+
+describe('groupSendRows - the four groups that cover every row (spec 5.5)', () => {
+  const row = (contactId: string, sentAt: string, over: Partial<ListingSendRow>): ListingSendRow => ({
+    contactId,
+    unitId: 'u1',
+    sentAt,
+    via: 'broadcast',
+    outcome: 'no_reply',
+    interestedSupported: true,
+    eligible: true,
+    ...over,
+  });
+
+  it('Waiting (eligible, newest first), Interested, Not interested, Not eligible - always four, in order', () => {
+    const rows = [
+      row('ne-waiting', '2026-10-09T00:00:00.000Z', { eligible: false }),
+      row('w-old', '2026-10-01T00:00:00.000Z', { outcome: 'replied' }),
+      row('ni', '2026-10-08T00:00:00.000Z', { outcome: 'not_interested' }),
+      row('missing-ni', '2026-10-10T00:00:00.000Z', { outcome: 'not_interested', recipientMissing: true, eligible: false }),
+      row('int', '2026-10-02T00:00:00.000Z', { outcome: 'interested' }),
+      row('w-new', '2026-10-05T00:00:00.000Z', {}),
+    ];
+    const groups = groupSendRows(rows);
+    expect(groups.map((g) => [g.key, g.label, g.rows.map((r) => r.contactId)])).toEqual([
+      ['waiting', 'Waiting', ['w-new', 'w-old']],
+      ['interested', 'Interested', ['int']],
+      ['not_interested', 'Not interested', ['ni']],
+      ['not_eligible', 'Not eligible', ['missing-ni', 'ne-waiting']],
+    ]);
+    // A cover: every row exactly once.
+    expect(groups.flatMap((g) => g.rows.map((r) => r.contactId)).sort()).toEqual(rows.map((r) => r.contactId).sort());
+  });
+
+  it('a row with no eligible flag is Not eligible (only the units route sets it); empty groups stay empty', () => {
+    const groups = groupSendRows([row('a', '2026-10-01T00:00:00.000Z', { eligible: undefined })]);
+    expect(groups.map((g) => g.rows.length)).toEqual([0, 0, 0, 1]);
   });
 });

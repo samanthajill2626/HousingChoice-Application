@@ -3032,3 +3032,45 @@ describe('ContactDetail - a partner page sends a property (caseworkers D20)', ()
     expect(screen.getByTestId('path')).toHaveTextContent('/broadcasts/new?contactId=p-send');
   });
 });
+
+// primary-contact-integrity spec 7.6: deleting a contact who is a property's
+// primary contact hands that property off (server, spec 4.6), and restoring
+// them does not take it back. The Delete dialog says so for every contact
+// that is not a tenant; a tenant-typed primary (a degenerate state) gets no
+// sentence - the dialog cannot know without the server's scan.
+describe('ContactDetail - the Delete dialog names the primary-contact handoff (primary-contact-integrity spec 7.6)', () => {
+  const HANDOFF =
+    "If they're a property's primary contact, the landlord or another contact on that property takes over, and restoring them won't change that back.";
+  const PARTNER_TO_DELETE: Contact = {
+    contactId: 'p-del',
+    type: 'partner',
+    firstName: 'Renee',
+    lastName: 'Carter',
+    status: 'active',
+    phone: '+14045550123',
+  };
+
+  async function openDeleteDialog(contact: Contact): Promise<HTMLElement> {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(contact);
+    renderAt(contact.contactId);
+    await user.click(await screen.findByRole('button', { name: /More actions/i }));
+    await user.click(screen.getByRole('menuitem', { name: /Delete contact/i }));
+    return screen.getByRole('dialog', { name: /Delete contact\?/i });
+  }
+
+  it.each([
+    ['a landlord', LANDLORD],
+    ['a partner', PARTNER_TO_DELETE],
+  ] as const)('%s gets the handoff sentence', async (_label, contact) => {
+    const dialog = await openDeleteDialog(contact);
+    expect(within(dialog).getByText(HANDOFF)).toBeInTheDocument();
+  });
+
+  it('a tenant does not', async () => {
+    const dialog = await openDeleteDialog(TENANT);
+    expect(within(dialog).queryByText(HANDOFF)).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/Nothing is erased/)).toBeInTheDocument();
+  });
+});

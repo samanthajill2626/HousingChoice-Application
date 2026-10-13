@@ -135,6 +135,11 @@ export const MARK_READ_ERROR = 'Could not mark read - try again';
 export const MARK_UNREAD_NO_THREAD =
   'No thread to mark unread yet - if this contact has messages, try again.';
 
+/** The Delete dialog's handoff sentence for a non-tenant contact
+ *  (primary-contact-integrity spec 7.6), word for word. */
+const DELETE_PRIMARY_HANDOFF_SENTENCE =
+  "If they're a property's primary contact, the landlord or another contact on that property takes over, and restoring them won't change that back.";
+
 /** The manual-run indicator's three states. `running` accumulates across the
  *  press's scheduled threads: it resolves only once EVERY one has reported, so
  *  one failing thread cannot hide what the others found. */
@@ -1404,6 +1409,12 @@ export function ContactDetail(): React.JSX.Element {
             review it. Nothing is erased — you can restore them from the Contacts{' '}
             <em>Deleted</em> view.
           </p>
+          {/* primary-contact-integrity spec 7.6: deleting a non-tenant hands
+              off any property it is the primary contact of, and a restore does
+              not take that back. A tenant-typed primary (a degenerate state)
+              gets no sentence: the dialog cannot know without the server's
+              scan. */}
+          {contact.type !== 'tenant' ? <p>{DELETE_PRIMARY_HANDOFF_SENTENCE}</p> : null}
           {deleteError !== null ? (
             <p role="alert" className={styles.error}>
               {deleteError}

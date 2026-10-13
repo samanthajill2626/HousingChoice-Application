@@ -333,17 +333,19 @@ describe('POST /api/units/:id/restore - without a landlord (I3)', () => {
   });
 });
 
-// Cameron's Q5 (spec revision 5 section 4 "Restore", the sole-landlord
-// promotion; fix wave 2 FW2-12): a restore WITHOUT a landlord of a property
-// whose cleared landlord was its primary contact promotes the ONE remaining
-// contact-list row whose contact is typed landlord (any roster role; read
-// consistently, a missing contact or a routing pointer is not eligible, nor -
-// fix wave 3 FW3-1 - a soft-deleted contact) in the same conditional write;
-// with zero or two-plus such rows nobody is promoted.
+// Cameron's Q5 (caseworker-integrity spec revision 5 section 4 "Restore"),
+// REPLACED by primary-contact-integrity spec 4.6 (Cameron 2026-10-13): a
+// restore WITHOUT a landlord of a property whose cleared landlord was its
+// primary contact hands the primary to the heir function's pick - the
+// EARLIEST-added remaining contact-list row whose contact is eligible for
+// automatic routing (typed landlord, any roster role; a missing contact, a
+// routing pointer or a soft-deleted contact is not eligible) - in the same
+// conditional write; with no such row nobody is promoted. The remaining
+// contacts are read in ONE complete batch read (spec 4.2).
 // The write is conditioned on the contact list the route read, so a
 // concurrent contact-list change answers 409 unit_roster_conflict. The audit
 // gains primaryPromoted { to } next to landlordCleared.
-describe('POST /api/units/:id/restore - without a landlord: the sole-landlord promotion', () => {
+describe('POST /api/units/:id/restore - without a landlord: the heir takes over', () => {
   /** Deleted; c-old (now a tenant) was its landlord of record and primary; `remaining` rows stay on the list. */
   function seedClearedPrimary(world: FakeWorld, unitId: string, remaining: UnitContact[]): void {
     seedDeletedUnit(world, unitId, {
@@ -383,7 +385,10 @@ describe('POST /api/units/:id/restore - without a landlord: the sole-landlord pr
     });
   });
 
-  it('promoted too when only the primary_contact scalar named the cleared landlord', async () => {
+  // NO row is flagged (the seeded primary_contact scalar still names the
+  // cleared landlord): the restore hands off because nothing is flagged
+  // (landlordWasPrimary) - the scalar decides nothing.
+  it('promoted too when no row is flagged - the scalar naming the cleared landlord decides nothing', async () => {
     const { app, world } = makeWebhookHarness();
     seedDeletedUnit(world, 'u-p2', {
       contacts: [
@@ -402,7 +407,9 @@ describe('POST /api/units/:id/restore - without a landlord: the sole-landlord pr
     expect(restoredEvents(world)[0]?.payload).toMatchObject({ primaryPromoted: { to: 'c-pm' } });
   });
 
-  it('two remaining contacts typed landlord: nobody is promoted - no primary row, primary_contact removed, no primaryPromoted', async () => {
+  // primary-contact-integrity spec 4.6 (Cameron 2026-10-13) REPLACES "two or
+  // more -> nobody": the earliest-added eligible contact takes over.
+  it('two remaining contacts typed landlord: the EARLIEST-added (c-pm) is promoted - its row primary, primary_contact set, audit primaryPromoted', async () => {
     const { app, world } = makeWebhookHarness();
     seedClearedPrimary(world, 'u-p3', [
       { contactId: 'c-pm', role: 'pm', primaryContact: false },
@@ -415,11 +422,41 @@ describe('POST /api/units/:id/restore - without a landlord: the sole-landlord pr
 
     expect(res.status).toBe(200);
     expect(world.units.get('u-p3')?.contacts).toEqual([
-      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
       { contactId: 'c-owner', role: 'owner', primaryContact: false },
     ]);
-    expect(world.units.get('u-p3')?.primary_contact).toBeUndefined();
-    expect(restoredEvents(world)[0]?.payload).toMatchObject({ landlordCleared: { from: 'c-old' } });
+    expect(world.units.get('u-p3')?.primary_contact).toBe('c-pm');
+    expect(restoredEvents(world)[0]?.payload).toMatchObject({
+      landlordCleared: { from: 'c-old' },
+      primaryPromoted: { to: 'c-pm' },
+    });
+  });
+
+  // plan review R1 P1 (spec 3 / 4.7): the FLAG is the truth. A stale
+  // primary_contact naming the cleared landlord must not hand the primary away
+  // from a live flagged contact; the restore re-aligns the scalar to the flag.
+  it('a stale primary_contact naming the cleared landlord does NOT move the primary off a live flagged contact; the scalar is re-aligned to it', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedDeletedUnit(world, 'u-p8', {
+      primary_contact: 'c-old',
+      contacts: [
+        { contactId: 'c-old', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+        { contactId: 'c-owner', role: 'owner', primaryContact: false },
+      ],
+    });
+    seedContact(world, 'c-old', { type: 'tenant' });
+    seedContact(world, 'c-pm', { type: 'landlord' });
+    seedContact(world, 'c-owner', { type: 'landlord' });
+
+    const res = await restore(app, 'u-p8', { landlordId: null });
+
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-p8')?.contacts).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      { contactId: 'c-owner', role: 'owner', primaryContact: false },
+    ]);
+    expect(world.units.get('u-p8')?.primary_contact).toBe('c-pm');
     expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('primaryPromoted');
   });
 
@@ -531,15 +568,19 @@ describe('POST /api/units/:id/restore - without a landlord: the sole-landlord pr
     });
   });
 
-  it('(PIN) reads the remaining contacts CONSISTENTLY', async () => {
+  // primary-contact-integrity spec 4.2: the remaining contacts are read in ONE
+  // complete batch read (readRosterContacts -> getManyByIds with
+  // requireComplete), replacing the per-row consistent getById of the
+  // sole-landlord promotion (plan S2 contract issue 10).
+  it('(PIN) reads the remaining contacts in ONE complete batch read', async () => {
     const { app, world } = makeWebhookHarness();
     seedClearedPrimary(world, 'u-p7', [{ contactId: 'c-pm', role: 'pm', primaryContact: false }]);
     seedContact(world, 'c-pm', { type: 'landlord' });
-    const contactRead = vi.spyOn(world.contactsRepo, 'getById');
+    const batchRead = vi.spyOn(world.contactsRepo, 'getManyByIds');
 
     expect((await restore(app, 'u-p7', { landlordId: null })).status).toBe(200);
 
-    expect(contactRead).toHaveBeenCalledWith('c-pm', { consistentRead: true });
+    expect(batchRead).toHaveBeenCalledWith(['c-pm'], { requireComplete: true });
   });
 
   it('a contact-list change between the route read and the write: 409 unit_roster_conflict - nothing written, no audit', async () => {
@@ -577,22 +618,23 @@ describe('POST /api/units/:id/restore - without a landlord: the sole-landlord pr
 
   // R3 code review, backend finding A3 (probe F1; fix wave 3 FW3-2): the same
   // change landing EARLIER - while the route awaits the remaining contacts'
-  // type reads, after it captured the list it decides from. The write must be
-  // conditioned on that same list, not on a second read of the unit after the
-  // awaits (the FakeWorld's getById hands the route the live unit object, so a
-  // second read would see the NEW list and the stale promotion would go
-  // through).
-  it('a contact-list change WHILE the route reads the contact types: 409 unit_roster_conflict - nothing restored, no audit', async () => {
+  // liveness read (primary-contact-integrity spec 4.2: ONE batch read,
+  // readRosterContacts), after it captured the list it decides from. The write
+  // must be conditioned on that same list, not on a second read of the unit
+  // after the awaits (the FakeWorld's getById hands the route the live unit
+  // object, so a second read would see the NEW list and the stale promotion
+  // would go through).
+  it('a contact-list change WHILE the route reads the contacts liveness: 409 unit_roster_conflict - nothing restored, no audit', async () => {
     const { app, world } = makeWebhookHarness();
     seedClearedPrimary(world, 'u-race-read', [{ contactId: 'c-pm', role: 'pm', primaryContact: false }]);
     seedContact(world, 'c-pm', { type: 'landlord' });
     seedContact(world, 'c-owner', { type: 'landlord' });
-    const read = world.contactsRepo.getById.bind(world.contactsRepo);
+    const read = world.contactsRepo.getManyByIds.bind(world.contactsRepo);
     let added = false;
-    world.contactsRepo.getById = async (contactId, opts) => {
+    world.contactsRepo.getManyByIds = async (contactIds, opts) => {
       // Staff B adds a second landlord-typed contact while the route reads
-      // c-pm's type for the promotion.
-      if (contactId === 'c-pm' && !added) {
+      // the remaining contacts' liveness for the heir.
+      if (contactIds.includes('c-pm') && !added) {
         added = true;
         await world.unitsRepo.addContact(
           'u-race-read',
@@ -600,7 +642,7 @@ describe('POST /api/units/:id/restore - without a landlord: the sole-landlord pr
           { caseworker: false, landlordTyped: true, autoPrimaryEligible: true },
         );
       }
-      return read(contactId, opts);
+      return read(contactIds, opts);
     };
 
     const res = await restore(app, 'u-race-read', { landlordId: null });

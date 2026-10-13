@@ -53,6 +53,7 @@ import {
   PrimaryContactDeletedError,
   RosterReadFailedError,
   RosterWriteConflictError,
+  landlordWasPrimary,
   unitContacts,
   UNIT_CONTACT_ROLES,
   type ListUnitsOpts,
@@ -87,11 +88,7 @@ import { requireLandlordContact, sendContactTypeError } from '../services/contac
 import { isCaseworker } from '../lib/caseworkers.js';
 // The ONE automatic-routing eligibility rule lives in lib/propertyContact.ts
 // (primary-contact-integrity spec 4.3), shared with the heir function.
-import {
-  isAutoRoutingEligible,
-  isAutoRoutingEligible as autoRoutingEligible,
-  readRosterContacts,
-} from '../lib/propertyContact.js';
+import { chooseHeir, isAutoRoutingEligible, readRosterContacts } from '../lib/propertyContact.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -426,42 +423,48 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   }
 
   /**
-   * caseworker-integrity spec revision 5, section 4 "Restore" (Cameron's Q5;
-   * fix wave 2 FW2-12): the sole-landlord promotion of a "Restore without a
-   * landlord". When the cleared landlord was the property's primary contact -
-   * its contact-list row flagged, or the primary_contact scalar naming it
-   * (unitsRepo.restoreWithLandlord's rule) - the ONE remaining row whose
-   * contact is eligible for automatic routing (any roster role; read
-   * CONSISTENTLY; `autoRoutingEligible`, the rule auto-primary shares since
-   * spec revision 6 / fix wave FWF-3: typed `landlord`, and a missing, a
-   * routing-pointer or a SOFT-DELETED contact - R3 code review finding A1,
-   * fix wave 3 FW3-1 - is not eligible) is the one to promote; zero or
-   * two-plus such rows promote nobody (null).
-   * Decided from `listRead` - the contact list of `unit` (the route's
-   * consistent read) taken ONCE, before these type reads are awaited - which
+   * primary-contact-integrity spec 4.6 ("Restore without a landlord", Cameron
+   * 2026-10-13; it replaced caseworker-integrity's sole-landlord promotion):
+   * when the restore needs a hand-off - the cleared landlord's row is the
+   * flagged primary, or no row is flagged at all (repos/unitsRepo.ts
+   * landlordWasPrimary, the rule restoreWithLandlord shares; it never reads
+   * the primary_contact scalar) - the heir function
+   * (lib/propertyContact.ts chooseHeir) picks who takes over, with the
+   * cleared landlord EXCLUDED and no landlord of record left: the
+   * earliest-added remaining contact eligible for automatic routing (typed
+   * landlord, live, not a routing pointer); nobody when none is.
+   * `{ kind: 'unknown' }` when the liveness read (ONE complete batch read,
+   * readRosterContacts) failed - the route then refuses with 503
+   * roster_read_failed and writes nothing.
+   * Decided from `listRead` - the contact list of the unit the route read
+   * (its consistent read) taken ONCE, before the liveness read is awaited - which
    * is the very value the restore's write is then conditioned on
-   * (`expectContacts`; R3 code review finding A3, fix wave 3 FW3-2).
+   * (`expectContacts`; caseworker-integrity R3 code review finding A3, fix
+   * wave 3 FW3-2), so a list change in between answers 409
+   * unit_roster_conflict instead of applying a stale pick.
    */
-  async function soleLandlordToPromote(
-    unit: UnitItem,
+  async function clearedLandlordHeir(
     listRead: UnitItem['contacts'],
     clearedLandlordId: string | undefined,
-  ): Promise<string | null> {
-    if (clearedLandlordId === undefined) return null;
+  ): Promise<{ kind: 'decided'; promote: string | null } | { kind: 'unknown' }> {
+    if (clearedLandlordId === undefined) return { kind: 'decided', promote: null };
     // unitContacts' own reading of that one list (the landlordId-derived row
     // when no list is stored).
     const rows = unitContacts({ contacts: listRead, landlordId: clearedLandlordId });
-    const clearedRow = rows.find((row) => row.contactId === clearedLandlordId);
-    const clearedWasPrimary =
-      clearedRow?.primaryContact === true || unit.primary_contact === clearedLandlordId;
-    if (!clearedWasPrimary) return null;
-    const remaining = rows.filter((row) => row.contactId !== clearedLandlordId);
-    const read = await Promise.all(
-      remaining.map((row) => contacts.getById(row.contactId, { consistentRead: true })),
+    // The SHARED rule (repos/unitsRepo.ts landlordWasPrimary, plan review
+    // R1-R3): hand off when the cleared landlord's row is the flagged primary
+    // or no row is flagged; a live flagged row elsewhere is never displaced.
+    // It never reads the primary_contact scalar.
+    const clearedWasPrimary = landlordWasPrimary(rows, clearedLandlordId);
+    if (!clearedWasPrimary) return { kind: 'decided', promote: null };
+    const read = await readRosterContacts(
+      contacts,
+      rows.filter((row) => row.contactId !== clearedLandlordId).map((row) => row.contactId),
+      log,
     );
-    const eligible = remaining.filter((_row, i) => autoRoutingEligible(read[i]));
-    const [only] = eligible;
-    return eligible.length === 1 && only !== undefined ? only.contactId : null;
+    const heir = chooseHeir({ roster: rows, landlordId: undefined, exclude: clearedLandlordId, read });
+    if (heir.kind === 'unknown') return { kind: 'unknown' };
+    return { kind: 'decided', promote: heir.kind === 'heir' ? heir.contactId : null };
   }
 
   // GET /api/units — filtered list. Exactly one filter is honored, in priority
@@ -1810,9 +1813,14 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     //     { landlordName? } and nothing is written.
     //   - { landlordId: <id> } restores AND makes that contact (404
     //     landlord_not_found / 409 landlord_not_landlord) the landlord of record;
-    //     { landlordId: null } restores ownerless and, when the cleared landlord
-    //     was the primary, promotes the one remaining contact typed landlord
-    //     (spec revision 5, soleLandlordToPromote). Honored ONLY when the plain
+    //     { landlordId: null } restores ownerless. When the old landlord was
+    //     the primary, the heir function picks who takes over
+    //     (primary-contact-integrity spec 4.6): for { landlordId: null } this
+    //     route decides it (clearedLandlordHeir: the earliest-added remaining
+    //     contact eligible for automatic routing), for a swap the repo re-runs
+    //     it per attempt; unknown liveness answers 503 roster_read_failed and
+    //     writes nothing; a hand-off appends unit_primary_contact_assigned
+    //     { reason: 'handoff_on_restore' }. Honored ONLY when the plain
     //     restore would refuse, in ONE conditional write
     //     (unitsRepo.restoreWithLandlord) on the landlordId read here - and, for
     //     { landlordId: null }, the contact list read here - so a concurrent
@@ -1914,29 +1922,54 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       };
     }
 
-    // Restore WITHOUT a landlord: the sole-landlord promotion (spec revision
-    // 5) is decided here from the consistent reads, and the repo applies it
-    // only on the very contact list it was decided from (`expectContacts`) - a
-    // contact-list change in between answers 409 unit_roster_conflict. The
-    // list is read ONCE, here, before the contact-type reads are awaited, and
-    // that one value is both the decision's input and `expectContacts` (R3
-    // code review finding A3, fix wave 3 FW3-2): `stored.contacts` read again
-    // after the awaits need not be the list the decision saw (a FakeWorld
-    // unit read is the live object a concurrent write replaces it on).
+    // Restore WITHOUT a landlord (primary-contact-integrity spec 4.6): when the
+    // cleared landlord was the primary, the heir function's pick
+    // (clearedLandlordHeir) takes over in the same write, and the repo applies
+    // it only on the very contact list it was decided from (`expectContacts`) -
+    // a contact-list change in between answers 409 unit_roster_conflict. The
+    // list is read ONCE, here, before the liveness read is awaited, and that
+    // one value is both the decision's input and `expectContacts`
+    // (caseworker-integrity R3 code review finding A3, fix wave 3 FW3-2):
+    // `stored.contacts` read again after the awaits need not be the list the
+    // decision saw (a FakeWorld unit read is the live object a concurrent write
+    // replaces it on). Unknown liveness refuses with 503 roster_read_failed
+    // before any write. The landlord SWAP decides its heir in the repo instead,
+    // per attempt, from the liveness read passed below - its contacts-only
+    // races are retried, so a decision made here could go stale.
     const listRead = stored.contacts;
-    const promote = next === null ? await soleLandlordToPromote(stored, listRead, storedLandlordId) : null;
+    let promote: string | null = null;
+    if (next === null) {
+      const decided = await clearedLandlordHeir(listRead, storedLandlordId);
+      if (decided.kind === 'unknown') {
+        log.warn({ unitId, actor: req.user?.userId }, 'unit restore refused: the liveness read failed');
+        res.status(503).json({ error: 'roster_read_failed' });
+        return;
+      }
+      promote = decided.promote;
+    }
+    const reported: { handoff?: PrimaryHandoff } = {};
+    const handoffOpts = {
+      readContacts: (ids: string[]) => readRosterContacts(contacts, ids, log),
+      onPrimaryHandoff: (handoff: PrimaryHandoff) => {
+        reported.handoff = handoff;
+      },
+    };
     let restored: UnitItem;
     try {
       restored =
         next !== null
-          ? await units.restoreWithLandlord(unitId, { expectLandlordId: storedLandlordId, next })
-          : await units.restoreWithLandlord(unitId, {
-              expectLandlordId: storedLandlordId,
-              next: null,
-              expectContacts: listRead,
-              promote,
-            });
+          ? await units.restoreWithLandlord(unitId, { expectLandlordId: storedLandlordId, next }, handoffOpts)
+          : await units.restoreWithLandlord(
+              unitId,
+              { expectLandlordId: storedLandlordId, next: null, expectContacts: listRead, promote },
+              handoffOpts,
+            );
     } catch (err) {
+      if (err instanceof RosterReadFailedError) {
+        log.warn({ unitId, actor: req.user?.userId }, 'unit restore refused: the liveness read failed');
+        res.status(503).json({ error: 'roster_read_failed' });
+        return;
+      }
       if (err instanceof RosterWriteConflictError) {
         res.status(409).json({ error: 'unit_roster_conflict' });
         return;
@@ -1960,12 +1993,24 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
             ...(primaryPromoted && { primaryPromoted: { to: promote } }),
           }),
     });
+    // The hand-off the restore write itself reported (plan contract 2.4):
+    // either branch, whenever an heir was flagged in place of the old landlord.
+    const handoff = reported.handoff;
+    if (handoff !== undefined) {
+      await audit.append(`units#${unitId}`, 'unit_primary_contact_assigned', {
+        actor: req.user?.userId,
+        contactId: handoff.to,
+        reason: 'handoff_on_restore',
+        from: handoff.from,
+      });
+    }
     log.info(
       {
         unitId,
         actor: req.user?.userId,
         landlordCleared: next === null,
         ...(primaryPromoted && { primaryPromoted: promote }),
+        ...(handoff !== undefined && { primaryHandedTo: handoff.to }),
       },
       'unit restored via api with a landlord change',
     );

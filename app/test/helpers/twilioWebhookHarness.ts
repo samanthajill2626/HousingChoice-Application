@@ -125,6 +125,7 @@ import {
   PrimaryContactDeletedError,
   RosterReadFailedError,
   RosterWriteConflictError,
+  landlordWasPrimary,
   unitContacts,
   type UnitContact,
   type UnitDisplayItem,
@@ -3151,10 +3152,13 @@ export function createFakeWorld(): FakeWorld {
     // landlordId must still be the caller's expectation
     // (RosterWriteConflictError otherwise); restore (drop deleted_at), swap or
     // clear the landlord of record, drop the old landlord's row, upsert the new
-    // one with role pinned 'landlord', and keep primary_contact consistent -
-    // a clear only on the contact list the caller decided its sole-landlord
-    // promotion from, applying that promotion.
-    async restoreWithLandlord(unitId, input) {
+    // one with role pinned 'landlord', and keep primary_contact consistent
+    // through the SAME pure chooseHeir / applyPrimary as the real repo
+    // (primary-contact-integrity spec 4.6): a swap of a primary landlord
+    // re-runs the heir function (unknown liveness: RosterReadFailedError,
+    // nothing written); a clear applies the caller's heir pick, only on the
+    // contact list it was decided from.
+    async restoreWithLandlord(unitId, input, opts) {
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`restoreWithLandlord: no unit ${unitId}`);
       // The real repo's read check and its attribute_exists(deleted_at) write
@@ -3164,9 +3168,8 @@ export function createFakeWorld(): FakeWorld {
       const current =
         typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
       if (current !== input.expectLandlordId) throw new RosterWriteConflictError();
-      // The real repo's contact-list check (spec revision 5, fix wave 2
-      // FW2-12): a restore without a landlord applies only to the contact list
-      // its sole-landlord promotion was decided from.
+      // The real repo's contact-list check: a restore without a landlord
+      // applies only to the contact list its heir pick was decided from.
       if (input.next === null && !isDeepStrictEqual(unit.contacts, input.expectContacts)) {
         throw new RosterWriteConflictError();
       }
@@ -3175,10 +3178,13 @@ export function createFakeWorld(): FakeWorld {
       const promote = input.next === null ? input.promote : null;
       const keepsOld = next !== null && next.contactId === old;
       const roster = unitContacts(unit).map((c) => ({ ...c }));
-      const oldRow = old !== undefined && !keepsOld ? roster.find((c) => c.contactId === old) : undefined;
+      // The SHARED rule (landlordWasPrimary, plan review R1-R3) - the real
+      // repo's decision exactly, never a twin: hand off when the old
+      // landlord's row is the flagged primary or no row is flagged; the scalar
+      // is never read.
       const oldWasPrimary =
-        old !== undefined && !keepsOld && (oldRow?.primaryContact === true || unit.primary_contact === old);
-      const nextRoster: UnitContact[] =
+        old !== undefined && !keepsOld && landlordWasPrimary(roster, old);
+      let nextRoster: UnitContact[] =
         old !== undefined && !keepsOld ? roster.filter((c) => c.contactId !== old) : roster;
       if (next !== null) {
         const seated = nextRoster.find((c) => c.contactId === next.contactId);
@@ -3196,24 +3202,51 @@ export function createFakeWorld(): FakeWorld {
           });
         }
       }
+      let scalar: string | null | undefined;
+      let heirId: string | undefined;
       if (oldWasPrimary) {
         if (next !== null) {
-          for (const c of nextRoster) c.primaryContact = c.contactId === next.contactId;
-          unit.primary_contact = next.contactId;
+          const read: RosterContactsRead =
+            opts?.readContacts !== undefined
+              ? await opts.readContacts(
+                  rosterContactIds({ contacts: nextRoster, landlordId: next.contactId }).filter(
+                    (id) => id !== old,
+                  ),
+                )
+              : { ok: false };
+          const heir = chooseHeir({ roster: nextRoster, landlordId: next.contactId, exclude: old, read });
+          if (heir.kind === 'unknown') throw new RosterReadFailedError();
+          const applied = applyPrimary(
+            nextRoster,
+            heir.kind === 'heir' ? { contactId: heir.contactId, addLandlordRow: heir.addLandlordRow } : null,
+          );
+          nextRoster = applied.contacts;
+          scalar = applied.primaryContactScalar;
+          heirId = heir.kind === 'heir' ? heir.contactId : undefined;
         } else {
-          // The caller's sole-landlord promotion when it names a remaining
-          // row; otherwise nobody (null -> REMOVE; never dangling).
           const promoted = promote === null ? undefined : nextRoster.find((c) => c.contactId === promote);
-          for (const c of nextRoster) c.primaryContact = promoted !== undefined && c.contactId === promoted.contactId;
-          if (promoted !== undefined) unit.primary_contact = promoted.contactId;
-          else delete unit.primary_contact;
+          const applied = applyPrimary(
+            nextRoster,
+            promoted !== undefined ? { contactId: promoted.contactId, addLandlordRow: false } : null,
+          );
+          nextRoster = applied.contacts;
+          scalar = applied.primaryContactScalar;
+          heirId = promoted?.contactId;
         }
+      } else {
+        // No hand-off: align the scalar with the stored FLAG, never reading
+        // the old scalar (mirrors the real repo).
+        const flagged = nextRoster.find((c) => c.primaryContact === true);
+        scalar = flagged !== undefined ? flagged.contactId : null;
       }
       unit.contacts = nextRoster;
+      if (scalar === null) delete unit.primary_contact; // null -> REMOVE; never dangling
+      else if (scalar !== undefined) unit.primary_contact = scalar;
       if (next !== null) unit.landlordId = next.contactId;
       else delete (unit as Partial<UnitItem>).landlordId;
       delete unit.deleted_at;
       unit.updated_at = new Date().toISOString();
+      if (heirId !== undefined && old !== undefined) opts?.onPrimaryHandoff?.({ from: old, to: heirId });
       return unit;
     },
   };

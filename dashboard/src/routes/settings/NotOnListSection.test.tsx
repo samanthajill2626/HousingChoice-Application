@@ -627,6 +627,20 @@ describe('NotOnListPanel - the public sign-up note on Add as new (join-housing-a
     expect(within(group).queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
   });
 
+  // fw1 review F7: on a HOUSING AUTHORITY value the new entry's kind is
+  // already a housing authority, so only the action itself keeps the note off.
+  it('a housing authority value: a settle that adds no entry (Use, Clear) shows nothing new', async () => {
+    const user = userEvent.setup();
+    renderPanel('Merln Housng');
+    for (const choice of ['Use Merlin Housing Authority', 'Clear']) {
+      const group = await pick(user, choice);
+      // The confirm is open under the pick...
+      expect(within(group).getByRole('button', { name: choice })).toBeInTheDocument();
+      // ...and says nothing about the public form.
+      expect(within(group).queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
+    }
+  });
+
   it('an organization value: Add as new says so only once Housing authority is the chosen kind', async () => {
     const user = userEvent.setup();
     renderPanel('Kite Ade', {

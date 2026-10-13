@@ -112,7 +112,9 @@ Non-goals (each deliberately left out):
   stored primary exists (`unitsRepo.ts:821-824`); it is ABSENT on every
   landlord-only unit, whose primary is the DERIVED landlord row
   (`unitContacts()`, `unitsRepo.ts:296-303`). Code that needs "who is primary"
-  reads `unitContacts(unit)`, never the scalar.
+  reads `unitContacts(unit)`; the one exception is the restore's "was the old
+  landlord the primary?" when NO row is flagged (section 9.2,
+  `landlordWasPrimary`).
 - **landlord of record**: unchanged - `unit.landlordId`. It normally has a
   roster row (`role: 'landlord'`); it can lack one after an API PATCH reassign
   or an importer re-import (section 9.1).
@@ -730,15 +732,18 @@ property contact:
   `useTour.ts:94-98`, `PlacementDetail.tsx:185-237,287-296`,
   `PlacementNowCard.tsx:114-118`).
 
-The `primary_contact` scalar has NO runtime reader after this change (only
-writes, comments and a dashboard type, `types.ts:2506`). `main` (from
-caseworker-integrity) had two, both in the restore path - "the cleared
-landlord was the primary when its row is flagged OR the scalar names it"
-(`routes/units.ts` `soleLandlordToPromote`, `repos/unitsRepo.ts`
-`restoreWithLandlord`). Both are dropped (plan review R1): the FLAG decides,
-and a restore that runs no hand-off re-aligns the scalar to the flag instead
-of reading it, so a stale scalar can never hand the primary away from a live
-flagged contact. Comments that claim a masked call dials it
+The `primary_contact` scalar is read at runtime in exactly ONE place after
+this change: a restore deciding whether the old landlord WAS the primary
+(`landlordWasPrimary`, shared by `repos/unitsRepo.ts` `restoreWithLandlord`,
+the restore route and the API-test fake). `main` (from caseworker-integrity)
+read "row flagged OR scalar names them" there, which let a stale scalar hand
+the primary away from a live flagged contact. Plan review R1/R2 narrowed it:
+whenever ANY row is flagged only the flag counts; only when NO row is flagged
+does a scalar naming the old landlord count (caseworker-integrity R1 code
+review backend finding 4 - a legacy PATCH-written scalar; P2b stops new
+ones). A restore that runs no hand-off re-aligns the scalar to the stored
+flag. Otherwise the scalar has no runtime reader (writes, comments and a
+dashboard type, `types.ts:2506`). Comments that claim a masked call dials it
 or routes to the primary are corrected in the same change:
 `unitsRepo.ts:63,248,402,815-820`, `conversationsRepo.ts:207`,
 `routes/units.ts:1055-1056`, `ListingDetail.tsx:359,455`,

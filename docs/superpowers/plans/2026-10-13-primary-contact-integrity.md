@@ -1,6 +1,6 @@
 # Primary contact integrity - implementation plan
 
-Status: v2 2026-10-13 (sections 0-3 binding; slices S1-S5 from five section drafts; contract issues ruled in 3.2; plan review round 1 folded in - see plan-review/adjudications.md).
+Status: v3 2026-10-13 (sections 0-3 binding; slices S1-S5 from five section drafts; contract issues ruled in 3.2; plan review rounds 1-2 folded in - see plan-review/adjudications.md).
 Spec: `docs/superpowers/specs/2026-10-12-primary-contact-integrity-design.md`
 (rev 6, approved and reconciled by Cameron 2026-10-13). Section references
 below like "spec 4.4" point there.
@@ -297,10 +297,13 @@ Ordering traps:
   Scans against the lane's (small, per-lane) units table. Expected cheap; if
   that spec slows or times out at gate 4, measure before blaming anything
   else and report it - do not tune it away silently.
-- Restore paths decide "was the old landlord the primary?" from the FLAG only
-  (plan review R1 P1): Task S2.7 (real repo), Task S2.8 (`clearedLandlordHeir`
-  and the API-test fake) never read `primary_contact`; with no hand-off they
-  re-align it to the stored flag.
+- Restore paths decide "was the old landlord the primary?" through ONE shared
+  pure rule, `landlordWasPrimary` (Task S2.7 (e); plan review R1 P1 / R2):
+  whenever any row is flagged only the flag counts; only with NO row flagged
+  does a `primary_contact` naming the old landlord count (keeps
+  caseworker-integrity's three scalar-only pins GREEN). Task S2.7 (real repo),
+  Task S2.8 (`clearedLandlordHeir`, the API-test fake) all call it; with no
+  hand-off they re-align the scalar to the stored flag.
 
 ### 3.1 Surface -> task matrix (the invariant sweep; every row needs a task)
 
@@ -5137,6 +5140,7 @@ Files:
   block + the fake `addContact` ONLY)
 - Create: `app/test/unitsApiPrimaryOnAdd.test.ts`
 - Modify: `app/test/unitsApiRosterAutoPrimary.test.ts` (case (f) reverses)
+- Modify: `app/test/unitsApiRoster.test.ts` (one seed line - step 1 (c))
 
 DynamoDB Local: not needed (FakeWorld harness).
 
@@ -5581,6 +5585,34 @@ new_string:
     },
   );
 ```
+
+(c) `app/test/unitsApiRoster.test.ts` - the existing add test
+`adds a roster contact, denormalizes name/company, and audits unit_contact_added`
+seeds a unit whose landlord of record `c-ll-1` has NO contact record. Under
+spec 4.4 a missing landlord of record counts as absent, so the widened P2
+would make the added landlord-typed `c-pm-3` primary and the test's
+`primaryContact: false` would fail (plan review R2 P9). The test means "a
+property with a live landlord": seed it, exactly as Task S2.6 (b) does for its
+remove test. Edit, old_string:
+
+```ts
+    seedUnit(world, 'u-3', { landlordId: 'c-ll-1' });
+    seedContact(world, 'c-pm-3', { type: 'landlord', firstName: 'Pat', lastName: 'Manager', company: 'Acme PM' });
+```
+
+new_string:
+
+```ts
+    seedUnit(world, 'u-3', { landlordId: 'c-ll-1' });
+    // primary-contact-integrity spec 4.4: a missing landlord of record counts
+    // as absent (auto-primary would fire); this test means a LIVE landlord.
+    seedContact(world, 'c-ll-1');
+    seedContact(world, 'c-pm-3', { type: 'landlord', firstName: 'Pat', lastName: 'Manager', company: 'Acme PM' });
+```
+
+The test's assertions stay exactly as they are. It is GREEN before and after
+this slice (it pins that a live landlord keeps P2 from firing); it is not part
+of the RED list below.
 
 **Step 2 - run RED.**
 
@@ -6041,12 +6073,12 @@ Expected: exit 0.
 cd W:/tmp/primary-contact-integrity && git status
 ```
 
-Read it: `app/src/routes/units.ts`, `app/test/helpers/twilioWebhookHarness.ts`
-and `app/test/unitsApiRosterAutoPrimary.test.ts` modified, the new test
-untracked; no `.git/MERGE_HEAD`.
+Read it: `app/src/routes/units.ts`, `app/test/helpers/twilioWebhookHarness.ts`,
+`app/test/unitsApiRosterAutoPrimary.test.ts` and `app/test/unitsApiRoster.test.ts`
+modified, the new test untracked; no `.git/MERGE_HEAD`.
 
 ```bash
-cd W:/tmp/primary-contact-integrity && git add app/src/routes/units.ts app/test/helpers/twilioWebhookHarness.ts app/test/unitsApiPrimaryOnAdd.test.ts app/test/unitsApiRosterAutoPrimary.test.ts && git commit -m "feat(units): contact-list add reads liveness for auto-primary, refuses a deleted primary (409), audits auto_on_add" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+cd W:/tmp/primary-contact-integrity && git add app/src/routes/units.ts app/test/helpers/twilioWebhookHarness.ts app/test/unitsApiPrimaryOnAdd.test.ts app/test/unitsApiRosterAutoPrimary.test.ts app/test/unitsApiRoster.test.ts && git commit -m "feat(units): contact-list add reads liveness for auto-primary, refuses a deleted primary (409), audits auto_on_add" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -7651,6 +7683,62 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord - the heir function (
     expect(updated.contacts).toEqual([{ contactId: 'c-pm', role: 'pm', primaryContact: true }]);
     expect(updated.primary_contact).toBe('c-pm');
   });
+
+  // plan review R2 (spec 3 / 4.7; landlordWasPrimary): when ANY row is
+  // flagged, only the flag says who is primary. A stale primary_contact naming
+  // the old landlord moves nothing, and the write re-aligns the scalar to the
+  // flagged row. (With NO row flagged, a scalar naming the old landlord still
+  // counts - caseworker-integrity's pins in
+  // unitsRepoRestoreWithLandlord.integration.test.ts keep that.)
+  it('swap: a stale scalar naming the old landlord does NOT move the primary off a live flagged row; the scalar is re-aligned', async () => {
+    const unitId = await deletedUnit(
+      [
+        { contactId: 'c-old', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      ],
+      'c-old',
+    );
+    const handoffs: PrimaryHandoff[] = [];
+
+    const updated = await units.restoreWithLandlord(
+      unitId,
+      { expectLandlordId: 'c-old', next: { contactId: 'c-new' } },
+      {
+        onPrimaryHandoff: (handoff) => {
+          handoffs.push(handoff);
+        },
+      },
+    );
+
+    expect(updated.contacts).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      { contactId: 'c-new', role: 'landlord', primaryContact: false },
+    ]);
+    expect(updated.primary_contact).toBe('c-pm');
+    expect(handoffs).toEqual([]);
+  });
+
+  it('without a landlord: a stale scalar naming the cleared landlord does NOT move the primary off a live flagged row', async () => {
+    const roster: UnitContact[] = [
+      { contactId: 'c-old', role: 'landlord', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      { contactId: 'c-owner', role: 'owner', primaryContact: false },
+    ];
+    const unitId = await deletedUnit(roster, 'c-old');
+
+    const updated = await units.restoreWithLandlord(unitId, {
+      expectLandlordId: 'c-old',
+      next: null,
+      expectContacts: roster,
+      promote: null,
+    });
+
+    expect(updated.contacts).toEqual([
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      { contactId: 'c-owner', role: 'owner', primaryContact: false },
+    ]);
+    expect(updated.primary_contact).toBe('c-pm');
+  });
 });
 ```
 
@@ -7817,19 +7905,69 @@ new_string:
       ),
 ```
 
+(c) Create `app/test/landlordWasPrimary.test.ts` (pure - no tables; the
+vitest globalSetup still probes DynamoDB Local, see section 0):
+
+```ts
+// primary-contact-integrity (plan review R2; spec 3 / 4.7): "was this landlord
+// the property's primary?" - ONE pure rule shared by the real
+// restoreWithLandlord, the restore route's heir pick and the API-test fake.
+// The FLAG decides whenever any row is flagged; only when NO row is flagged
+// does a primary_contact scalar naming the landlord count
+// (caseworker-integrity R1 code review backend finding 4: a legacy
+// PATCH-written scalar). A stale scalar can never move the primary off a live
+// flagged row.
+import { describe, expect, it } from 'vitest';
+import { landlordWasPrimary, type UnitContact } from '../src/repos/unitsRepo.js';
+
+function row(contactId: string, primaryContact: boolean): UnitContact {
+  return { contactId, role: contactId === 'c-old' ? 'landlord' : 'pm', primaryContact };
+}
+
+describe('landlordWasPrimary', () => {
+  it('the landlord row is flagged -> true (the scalar is ignored)', () => {
+    expect(landlordWasPrimary([row('c-old', true), row('c-pm', false)], 'c-old', undefined)).toBe(true);
+    expect(landlordWasPrimary([row('c-old', true), row('c-pm', false)], 'c-old', 'c-pm')).toBe(true);
+  });
+
+  it('ANOTHER row is flagged -> false, even when the scalar names the landlord', () => {
+    expect(landlordWasPrimary([row('c-old', false), row('c-pm', true)], 'c-old', 'c-old')).toBe(false);
+  });
+
+  it('NO row is flagged and the scalar names the landlord -> true', () => {
+    expect(landlordWasPrimary([row('c-old', false), row('c-pm', false)], 'c-old', 'c-old')).toBe(true);
+  });
+
+  it('NO row is flagged and the scalar is absent or names someone else -> false', () => {
+    expect(landlordWasPrimary([row('c-old', false), row('c-pm', false)], 'c-old', undefined)).toBe(false);
+    expect(landlordWasPrimary([row('c-old', false), row('c-pm', false)], 'c-old', 'c-pm')).toBe(false);
+    expect(landlordWasPrimary([], 'c-old', 'c-other')).toBe(false);
+  });
+});
+```
+
 **Step 2 - run RED.**
 
 ```bash
-cd W:/tmp/primary-contact-integrity/app && npx vitest run test/unitsRepoRestoreHandoff.integration.test.ts test/unitsRepoRestoreWithLandlord.integration.test.ts
+cd W:/tmp/primary-contact-integrity/app && npx vitest run test/unitsRepoRestoreHandoff.integration.test.ts test/unitsRepoRestoreWithLandlord.integration.test.ts test/landlordWasPrimary.test.ts
 ```
 
 Expected failures (new file): the soft-deleted-new-landlord cases (the old
 code flags c-new unconditionally), both `liveness unknown` cases (resolved),
-the retry case (`liveness.calls` length 0), and every `handoffs`/`picked`
-expectation (the old code never reports). The edited existing file passes
-already (the old code ignores the third argument).
+the retry case (`liveness.calls` length 0), every `handoffs`/`picked`
+expectation (the old code never reports), and both `a stale scalar naming the
+old/cleared landlord does NOT move the primary...` cases (the old code counts
+the scalar alone as primary, so the swap flags c-new and the clear removes
+c-pm's flag). `landlordWasPrimary.test.ts` fails to import
+(`landlordWasPrimary` is not exported yet). The edited existing file passes
+already (the old code ignores the third argument; its three scalar-only pins
+- `moves the primary to the new landlord when only the primary_contact scalar
+named the old one`, `without a landlord: promotes when only the
+primary_contact scalar named the cleared landlord`, and the route twin in
+`unitsRestoreLandlord.test.ts` - stay GREEN under `landlordWasPrimary`, which
+keeps the scalar as the no-flag tie-break).
 
-**Step 3 - implementation** (`app/src/repos/unitsRepo.ts`, four Edits).
+**Step 3 - implementation** (`app/src/repos/unitsRepo.ts`, five Edits).
 
 (a) `RestoreWithLandlordInput` header. old_string:
 
@@ -7965,13 +8103,14 @@ ConditionalCheckFailedException separately. */`). Replacement:
         // landlord again under a race) keeps their row instead of re-adding it.
         const keepsOld = next !== null && next.contactId === old;
         const roster = unitContacts(unit).map((c) => ({ ...c }));
-        const oldRow = old !== undefined && !keepsOld ? roster.find((c) => c.contactId === old) : undefined;
-        // The FLAG is the truth (primary-contact-integrity spec 3 / 4.7; plan
-        // review R1 P1): the `primary_contact` scalar is never read to decide
-        // who is primary. caseworker-integrity's "or the scalar names them" is
-        // dropped - a stale scalar must not hand the primary away from a live
-        // flagged contact. The scalar is re-aligned below instead.
-        const oldWasPrimary = old !== undefined && !keepsOld && oldRow?.primaryContact === true;
+        // Was the old landlord the primary? The shared rule (landlordWasPrimary,
+        // plan review R1 P1 / R2): the FLAG decides whenever any row is flagged,
+        // so a stale scalar can never hand the primary away from a live
+        // flagged contact; only with NO row flagged does a scalar naming them
+        // count (caseworker-integrity R1 backend finding 4). With no hand-off,
+        // the scalar is re-aligned to the flag below.
+        const oldWasPrimary =
+          old !== undefined && !keepsOld && landlordWasPrimary(roster, old, unit.primary_contact);
         const nextRoster: UnitContact[] =
           old !== undefined && !keepsOld ? roster.filter((c) => c.contactId !== old) : roster;
         if (next !== null) {
@@ -8078,10 +8217,47 @@ ConditionalCheckFailedException separately. */`). Replacement:
     },
 ```
 
+(e) The shared "was this landlord the primary?" rule (plan review R2), used by
+(d) above, by the restore route's heir pick (Task S2.8) and by the API-test
+fake (Task S2.8). Insert it directly above the line
+`export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {` - Edit,
+old_string:
+
+```ts
+export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
+```
+
+new_string:
+
+```ts
+/**
+ * primary-contact-integrity (plan review R2; spec 3 / 4.7): was `landlordId`
+ * the property's primary contact? ONE pure rule for the real
+ * restoreWithLandlord, the restore route's heir pick and the API-test fake.
+ * The FLAG decides whenever ANY row is flagged - so a stale primary_contact
+ * scalar can never move the primary off a live flagged row. Only when NO row
+ * is flagged does a scalar naming the landlord count (caseworker-integrity R1
+ * code review backend finding 4: a legacy PATCH-written scalar - this branch
+ * no longer lets PATCH write it, P2b). `roster` is unitContacts(unit).
+ */
+export function landlordWasPrimary(
+  roster: readonly UnitContact[],
+  landlordId: string,
+  scalar: unknown,
+): boolean {
+  if (roster.some((c) => c.primaryContact === true)) {
+    return roster.some((c) => c.contactId === landlordId && c.primaryContact === true);
+  }
+  return scalar === landlordId;
+}
+
+export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
+```
+
 **Step 4 - run GREEN.**
 
 ```bash
-cd W:/tmp/primary-contact-integrity/app && npx vitest run test/unitsRepoRestoreHandoff.integration.test.ts test/unitsRepoRestoreWithLandlord.integration.test.ts test/unitsRepoAutoPrimary.integration.test.ts
+cd W:/tmp/primary-contact-integrity/app && npx vitest run test/unitsRepoRestoreHandoff.integration.test.ts test/unitsRepoRestoreWithLandlord.integration.test.ts test/unitsRepoAutoPrimary.integration.test.ts test/landlordWasPrimary.test.ts
 ```
 
 Expected: all pass.
@@ -8099,11 +8275,12 @@ cd W:/tmp/primary-contact-integrity && git status
 ```
 
 Read it: `app/src/repos/unitsRepo.ts` and
-`app/test/unitsRepoRestoreWithLandlord.integration.test.ts` modified, the new
-test untracked; no `.git/MERGE_HEAD`.
+`app/test/unitsRepoRestoreWithLandlord.integration.test.ts` modified, the two
+new tests (`unitsRepoRestoreHandoff.integration.test.ts`,
+`landlordWasPrimary.test.ts`) untracked; no `.git/MERGE_HEAD`.
 
 ```bash
-cd W:/tmp/primary-contact-integrity && git add app/src/repos/unitsRepo.ts app/test/unitsRepoRestoreHandoff.integration.test.ts app/test/unitsRepoRestoreWithLandlord.integration.test.ts && git commit -m "feat(units): restore swap re-runs the heir function per attempt; restores report the primary hand-off" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+cd W:/tmp/primary-contact-integrity && git add app/src/repos/unitsRepo.ts app/test/unitsRepoRestoreHandoff.integration.test.ts app/test/unitsRepoRestoreWithLandlord.integration.test.ts app/test/landlordWasPrimary.test.ts && git commit -m "feat(units): restore swap re-runs the heir function per attempt; restores report the primary hand-off; landlordWasPrimary decides by the flag" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -8674,6 +8851,24 @@ After (b) below, run
 every hit must read `isAutoRoutingEligible`. A bare `autoRoutingEligible`
 means a caller was missed - stop and report.
 
+(a2) `app/src/routes/units.ts` - the unitsRepo import gains the shared rule
+Task S2.7 (e) exported (plan review R2). Edit, old_string:
+
+```ts
+  RosterReadFailedError,
+  RosterWriteConflictError,
+  unitContacts,
+```
+
+new_string:
+
+```ts
+  RosterReadFailedError,
+  RosterWriteConflictError,
+  landlordWasPrimary,
+  unitContacts,
+```
+
 (b) `app/src/routes/units.ts` - replace the `soleLandlordToPromote` helper
 WITH its docblock: from the line `  /**` directly above the line that begins
 `   * caseworker-integrity spec revision 5, section 4 "Restore" (Cameron's Q5;`
@@ -8712,10 +8907,11 @@ marker lines. Replacement:
     // unitContacts' own reading of that one list (the landlordId-derived row
     // when no list is stored).
     const rows = unitContacts({ contacts: listRead, landlordId: clearedLandlordId });
-    const clearedRow = rows.find((row) => row.contactId === clearedLandlordId);
-    // The FLAG is the truth (spec 3 / 4.7; plan review R1 P1): the scalar is
-    // never read to decide who is primary.
-    const clearedWasPrimary = clearedRow?.primaryContact === true;
+    // The SHARED rule (repos/unitsRepo.ts landlordWasPrimary, plan review R1
+    // P1 / R2): the flag decides when any row is flagged, so a stale scalar
+    // cannot take the primary from a live flagged row; with none flagged, a
+    // scalar naming the cleared landlord counts.
+    const clearedWasPrimary = landlordWasPrimary(rows, clearedLandlordId, unit.primary_contact);
     if (!clearedWasPrimary) return { kind: 'decided', promote: null };
     const read = await readRosterContacts(
       contacts,
@@ -8857,6 +9053,25 @@ through the handler's last statement
     res.json({ unit: { ...restored, contacts: await enrichRoster(restored) } });
 ```
 
+(e0) `app/test/helpers/twilioWebhookHarness.ts` - its unitsRepo import gains
+the shared rule (plan review R2; the fake calls the real rule, never a twin).
+Edit, old_string:
+
+```ts
+  RosterReadFailedError,
+  RosterWriteConflictError,
+  unitContacts,
+```
+
+new_string:
+
+```ts
+  RosterReadFailedError,
+  RosterWriteConflictError,
+  landlordWasPrimary,
+  unitContacts,
+```
+
 (e) `app/test/helpers/twilioWebhookHarness.ts` - replace the fake
 `restoreWithLandlord` WITH the comment block above it: from the comment line
 `    // caseworker-integrity (spec 2026-10-12 section 4 "Restore"): mirror the`
@@ -8895,10 +9110,11 @@ the `unitsRepo` object). Replacement:
       const promote = input.next === null ? input.promote : null;
       const keepsOld = next !== null && next.contactId === old;
       const roster = unitContacts(unit).map((c) => ({ ...c }));
-      const oldRow = old !== undefined && !keepsOld ? roster.find((c) => c.contactId === old) : undefined;
-      // The FLAG is the truth (spec 3 / 4.7; plan review R1 P1) - mirrors the
-      // real repo exactly; the scalar is re-aligned, never read.
-      const oldWasPrimary = old !== undefined && !keepsOld && oldRow?.primaryContact === true;
+      // The SHARED rule (landlordWasPrimary, plan review R2) - the real repo's
+      // decision exactly, never a twin: the flag decides when any row is
+      // flagged; with none flagged, a scalar naming the old landlord counts.
+      const oldWasPrimary =
+        old !== undefined && !keepsOld && landlordWasPrimary(roster, old, unit.primary_contact);
       let nextRoster: UnitContact[] =
         old !== undefined && !keepsOld ? roster.filter((c) => c.contactId !== old) : roster;
       if (next !== null) {
@@ -20273,8 +20489,11 @@ new_string:
   `primary_contact` mirrors it, is written only by the roster writes (and the
   one-time `app/scripts/assign-primary-contacts.ts`), never by a unit create or
   PATCH, and is ABSENT on a landlord-only unit, whose primary is the DERIVED
-  landlord row (`unitContacts()`); nothing reads the scalar at runtime, so code
-  that needs "who is primary" reads `unitContacts(unit)`. AT MOST ONE per unit.
+  landlord row (`unitContacts()`). Code that needs "who is primary" reads
+  `unitContacts(unit)`; the scalar is read in exactly ONE place - a restore
+  that finds NO row flagged treats a scalar naming the old landlord as "was
+  primary" (`landlordWasPrimary`, a legacy PATCH-written scalar), and whenever
+  any row is flagged only the flag counts. AT MOST ONE per unit.
   The HANDOFF rule (spec
   `docs/superpowers/specs/2026-10-12-primary-contact-integrity-design.md`,
   section 4): when the primary is removed from the property, deleted, or cleared
@@ -20283,10 +20502,13 @@ new_string:
   (typed landlord, live, not a phone or email routing pointer: never a tenant or
   a caseworker) - and an add or an edit of an eligible contact on a property
   with no live primary and no live landlord of record makes THAT contact
-  primary. So zero primary is reachable only when nobody can take over (no live
-  landlord of record and no eligible live contact) or for legacy data the
-  script has not repaired; the property's Contacts card then shows a "No
-  primary contact." box. A DELETED contact can stay flagged when nobody could
+  primary. So zero primary is reachable when nobody can take over (no live
+  landlord of record and no eligible live contact), when only NON-eligible
+  contacts were added (a tenant or partner is never promoted automatically),
+  after an explicit API write that sends `primaryContact: false` for the
+  current primary's own row, or for legacy data the script has not repaired;
+  the property's Contacts card then shows a "No primary contact." box (with a
+  live landlord of record the lookup still uses the landlord). A DELETED contact can stay flagged when nobody could
   take over; the property contact lookup skips it. Staff see the primary as
   "(primary)" on the property's Contacts card. RENAMED 2026-08-04 from
   `primaryVoice` / `primary_voice_contact`: the old names meant only "the
@@ -20372,7 +20594,7 @@ new_string:
 
 **NOT YET RUN - owed on dev AND prod once this branch has deployed there; take dev all the way through before prod.** No Terraform, no secrets, no env var, no schema or index change. Spec: `docs/superpowers/specs/2026-10-12-primary-contact-integrity-design.md`, sections 8 and 13. Run it AFTER that environment's deploy: until then the old app can still leave a property with no primary contact (removing the primary from a property with no landlord, or deleting a contact, left nobody) and the old unit PATCH can still write the `primary_contact` field. It is safe at any time and re-runnable, but after the deploy one pass catches them all.
 
-What `app/scripts/assign-primary-contacts.ts` does: it gives a primary contact to every property whose primary contact is missing or deleted, when someone can take over - the repair for properties like 470 Bolton (imported with no landlord of record; its only contact added later as Property Manager and never made primary), whose tours open their group texts with the general intro and leave that contact off new tours. It reads every property (soft-deleted ones included) with one consistent Scan, and for each one ONE complete read of the contacts its contact list and landlord of record name. A property is a TARGET when its flagged primary contact is absent, deleted or missing AND someone can take over - the HEIR, by the app's own rule (`chooseHeir`, `app/src/lib/propertyContact.ts`): the landlord of record when live, else the earliest-added contact on the list that is eligible for automatic routing (typed landlord, live, not a phone or email routing pointer - never a tenant or a caseworker). For each target it makes ONE conditional write: the heir becomes the only primary row (a landlord of record with no row on the list gets a `landlord` row), the `primary_contact` field names it, and one `unit_primary_contact_assigned` audit event `{ contactId, reason: 'backfill', from }` is appended with no actor (`from` names the deleted contact that was flagged, when there was one) - the property's Activity tab shows it. It also ALIGNS the `primary_contact` field on a property whose flagged primary is live but whose field is empty or names someone else (the same conditional write, the contact list unchanged, no audit event - the primary did not change); a property with no stored contact list (its primary is its landlord of record, derived) is left alone. Nothing reads that field at runtime; it is kept consistent for the masked-call path not yet built. Every write is conditional on the property's contact list AND landlord of record still being exactly what the run read: a property changed meanwhile (someone made a contact primary, added or removed one) is counted `skippedOnCondition` and left for a re-run - the script never overwrites a choice made after it read. It takes no lock (every write is conditional, so two runs at once cannot double-write). Idempotent: a re-run of a completed apply plans nothing.
+What `app/scripts/assign-primary-contacts.ts` does: it gives a primary contact to every property whose primary contact is missing or deleted, when someone can take over - the repair for properties like 470 Bolton (imported with no landlord of record; its only contact added later as Property Manager and never made primary), whose tours open their group texts with the general intro and leave that contact off new tours. It reads every property (soft-deleted ones included) with one consistent Scan, and for each one ONE complete read of the contacts its contact list and landlord of record name. A property is a TARGET when its flagged primary contact is absent, deleted or missing AND someone can take over - the HEIR, by the app's own rule (`chooseHeir`, `app/src/lib/propertyContact.ts`): the landlord of record when live, else the earliest-added contact on the list that is eligible for automatic routing (typed landlord, live, not a phone or email routing pointer - never a tenant or a caseworker). For each target it makes ONE conditional write: the heir becomes the only primary row (a landlord of record with no row on the list gets a `landlord` row), the `primary_contact` field names it, and one `unit_primary_contact_assigned` audit event `{ contactId, reason: 'backfill', from }` is appended with no actor (`from` names the deleted contact that was flagged, when there was one) - the property's Activity tab shows it. It also ALIGNS the `primary_contact` field on a property whose flagged primary is live but whose field is empty or names someone else (the same conditional write, the contact list unchanged, no audit event - the primary did not change); a property with no stored contact list (its primary is its landlord of record, derived) is left alone. The field decides who is primary in only ONE legacy case (a restore of a property with no flagged row); otherwise it is kept consistent for the masked-call path not yet built. Every write is conditional on the property's contact list AND landlord of record still being exactly what the run read: a property changed meanwhile (someone made a contact primary, added or removed one) is counted `skippedOnCondition` and left for a re-run - the script never overwrites a choice made after it read. It takes no lock (every write is conditional, so two runs at once cannot double-write). Idempotent: a re-run of a completed apply plans nothing.
 
 Counted and NOT written: `noHeir` - no live contact and no live landlord of record (nothing anyone can do; an ownerless property with no contacts counts here); `noEligible` - live contacts exist but none is eligible for automatic routing (only a tenant or a caseworker), listed by property id: on each one the Contacts card's "No primary contact." box lets Sam choose by name; `unknown` - the contact read for that property failed (throttling): re-run.
 

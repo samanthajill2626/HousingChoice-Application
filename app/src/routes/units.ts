@@ -77,24 +77,34 @@ import {
   type ListingSendsRepo,
 } from '../repos/listingSendsRepo.js';
 import { createPlacementsRepo, type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
-import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
+import { createToursRepo, type TourItem, type ToursRepo, type TourType } from '../repos/toursRepo.js';
 import { deriveTourActivityAt, deriveTourSignal } from '../lib/listingSendTour.js';
 import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { reachedCount } from '../services/shareRecipientState.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
-import { requireLandlordContact, sendContactTypeError } from '../services/contactTypeGuards.js';
+import { requireLandlordContact, requireTenantContact, sendContactTypeError } from '../services/contactTypeGuards.js';
 import { isCaseworker } from '../lib/caseworkers.js';
 import {
   deriveListingSendOutcome,
+  effectiveDecline,
   interestedModeFor,
   isEligibleRecipient,
   wireDecline,
+  type DeclineRecord,
 } from '../lib/listingSendOutcome.js';
+import { recordListingOutcomeEvent } from '../lib/listingOutcomeEvents.js';
+import { formatAddress } from '../lib/address.js';
+import { ledgerRowCounted } from '../services/shareLedger.js';
+import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
   unitsRepo?: UnitsRepo;
   auditRepo?: AuditRepo;
+  /** last-heard-from spec 5.4 / 14.3: the outcome route pins the contact
+   *  timeline (lib/listingOutcomeEvents.ts). auditRepo, contactsRepo and
+   *  toursRepo already exist and serve the same route. */
+  activityEventsRepo?: ActivityEventsRepo;
   /** BE3/C3: resolve a roster contact's display name/company for denormalization. */
   contactsRepo?: ContactsRepo;
   /** BE4/C4: the listing-send record (the "Sent to" recipients read). */
@@ -267,6 +277,15 @@ function projectRecipientRow(row: ListingSendItem, unit: UnitItem, join: Recipie
   });
 }
 
+/** The outcome route's body: exactly { outcome } with one of the three values. */
+function parseOutcomeBody(body: unknown): 'interested' | 'not_interested' | 'clear' | undefined {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
+  const keys = Object.keys(body);
+  if (keys.length !== 1 || keys[0] !== 'outcome') return undefined;
+  const value = (body as Record<string, unknown>)['outcome'];
+  return value === 'interested' || value === 'not_interested' || value === 'clear' ? value : undefined;
+}
+
 /**
  * BE3/C3: project a unit onto the RelatedUnit wire shape (contract verbatim).
  * `address` reuses the legacy unit address field (structured or legacy string);
@@ -425,6 +444,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
@@ -1182,6 +1202,184 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       return;
     }
     res.json({ recipients: rows.map((row) => projectRecipientRow(row, unit, join)) });
+  });
+
+  // POST /api/units/:unitId/recipients/:contactId/outcome - the ONE way a
+  // send outcome changes (last-heard-from spec 5.4 as amended by 14.3).
+  // Body { outcome: 'interested' | 'not_interested' | 'clear' }. Answers, in
+  // this order: 404 unit_not_found; 409 unit_deleted (every outcome, B10);
+  // 404 send_not_found (no COUNTED row - ledgerRowCounted, B5); 400
+  // invalid_outcome; 503 outcome_unavailable when a required read fails
+  // BEFORE any write; interested only: 400 interested_unsupported (not a
+  // tenant on the recipient projection), 404 tenant_not_found / 409
+  // contact_not_tenant (requireTenantContact - the same CONSISTENT I2 guard
+  // POST /api/tours runs), 409 tour_type_required (no qualifying tour and no
+  // structured tour_type - the dashboard opens the form instead, D14); then
+  // 200 { row } re-projected, or 503 { error: 'outcome_unavailable', saved:
+  // true } when the write landed but the re-read failed. Audit events are
+  // best-effort (lib/listingOutcomeEvents.ts). A concurrent double click can
+  // still race two creates (no conditional write on the pair - I3; the
+  // dashboard disables the button in flight). PII: ids only in logs.
+  router.post('/:unitId/recipients/:contactId/outcome', async (req: AuthedRequest, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const contactId = String(req.params['contactId'] ?? '');
+    const unit = await units.getById(unitId);
+    if (!unit) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    if (isDeleted(unit)) {
+      res.status(409).json({ error: 'unit_deleted' });
+      return;
+    }
+    const row = await listingSends.getByKeyConsistent(unitId, contactId);
+    if (row === undefined || !ledgerRowCounted(row)) {
+      res.status(404).json({ error: 'send_not_found' });
+      return;
+    }
+    const outcome = parseOutcomeBody(req.body);
+    if (outcome === undefined) {
+      res.status(400).json({ error: 'invalid_outcome' });
+      return;
+    }
+
+    // The recipient projection (requireComplete): the type for the
+    // interested check AND the name / type / reachability for the
+    // re-projection. A failure here has written nothing.
+    let recipient: RecipientDisplay | undefined;
+    try {
+      recipient = (await contacts.getRecipientDisplaysByIds([contactId], { requireComplete: true })).get(contactId);
+    } catch (err) {
+      log.warn({ err, unitId, contactId }, 'outcome: recipient read failed - nothing written');
+      res.status(503).json({ error: 'outcome_unavailable' });
+      return;
+    }
+
+    const actor = req.user?.userId;
+    const at = new Date().toISOString();
+    const address = formatAddress(unit.address) || unitId;
+    const eventDeps = { activityEvents, audit, logger: log };
+    let createdTour: TourItem | undefined;
+
+    if (outcome === 'interested') {
+      if (recipient?.type !== 'tenant') {
+        res.status(400).json({ error: 'interested_unsupported' });
+        return;
+      }
+      try {
+        await requireTenantContact(contacts, contactId);
+      } catch (err) {
+        if (sendContactTypeError(err, res)) return;
+        throw err;
+      }
+      let pairTours: TourItem[];
+      try {
+        // Accepted (build adjudication F6): the unit's tours filtered to the
+        // tenant read the same pair set as spec 5.4's byTenant read.
+        pairTours = (await tours.listByUnit(unitId)).filter((t) => t.tenantId === contactId);
+      } catch (err) {
+        log.warn({ err, unitId, contactId }, 'outcome: tours read failed - nothing written');
+        res.status(503).json({ error: 'outcome_unavailable' });
+        return;
+      }
+      // (1) ANY qualifying tour (the chip's set) means no tour is created.
+      const existing = deriveTourSignal(pairTours) !== undefined;
+      // (2) interestedModeFor's rule: no structured tour_type -> the form
+      // path. The tour type is the unit's own field ONLY (D14) - never derived.
+      const tourType: TourType | undefined = unit.tour_type;
+      if (!existing && tourType === undefined) {
+        res.status(409).json({ error: 'tour_type_required' });
+        return;
+      }
+      // (3) An EFFECTIVE decline is removed; its event is its history.
+      if (effectiveDecline(row, deriveTourActivityAt(pairTours))) {
+        if ((await listingSends.clearDeclined(unitId, contactId)) === 'not_found') {
+          res.status(404).json({ error: 'send_not_found' });
+          return;
+        }
+        await recordListingOutcomeEvent(eventDeps, {
+          type: 'listing_decline_cleared',
+          contactId,
+          unitId,
+          label: `Not interested cleared for ${address}`,
+          ...(actor !== undefined && { actor }),
+          at,
+        });
+      }
+      // (4) Create, and ONLY then record listing_interested (a click that
+      // found an existing tour writes no event; a retry is not re-recorded).
+      if (!existing && tourType !== undefined) {
+        createdTour = await tours.create({ tenantId: contactId, unitId, tourType, status: 'requested' });
+        await recordListingOutcomeEvent(eventDeps, {
+          type: 'listing_interested',
+          contactId,
+          unitId,
+          label: `Interested in ${address} - tour requested`,
+          ...(actor !== undefined && { actor }),
+          tourId: createdTour.tourId,
+          at,
+        });
+      }
+    } else if (outcome === 'not_interested') {
+      const record: DeclineRecord = { at, by: 'staff', ...(actor !== undefined && { staffId: actor }) };
+      if ((await listingSends.setDeclined(unitId, contactId, record)) === 'not_found') {
+        res.status(404).json({ error: 'send_not_found' });
+        return;
+      }
+      await recordListingOutcomeEvent(eventDeps, {
+        type: 'listing_declined',
+        contactId,
+        unitId,
+        label: `Not interested in ${address}`,
+        ...(actor !== undefined && { actor }),
+        at,
+      });
+    } else {
+      const hadDecline = row.declined !== undefined;
+      if ((await listingSends.clearDeclined(unitId, contactId)) === 'not_found') {
+        res.status(404).json({ error: 'send_not_found' });
+        return;
+      }
+      // A clear that found no decline records nothing (plan 3.4 #2).
+      if (hadDecline) {
+        await recordListingOutcomeEvent(eventDeps, {
+          type: 'listing_decline_cleared',
+          contactId,
+          unitId,
+          label: `Not interested cleared for ${address}`,
+          ...(actor !== undefined && { actor }),
+          at,
+        });
+      }
+    }
+
+    // (5) Re-project (D12: the joins are required). The row is re-read
+    // CONSISTENTLY; the byUnit GSI may not yet show a tour created a moment
+    // ago, so the created item joins the read.
+    let after: ListingSendItem | undefined;
+    let unitTours: TourItem[];
+    try {
+      [after, unitTours] = await Promise.all([
+        listingSends.getByKeyConsistent(unitId, contactId),
+        tours.listByUnit(unitId),
+      ]);
+    } catch (err) {
+      log.warn({ err, unitId, contactId }, 'outcome: re-projection read failed after the write - 503 saved');
+      res.status(503).json({ error: 'outcome_unavailable', saved: true });
+      return;
+    }
+    if (after === undefined || !ledgerRowCounted(after)) {
+      res.status(503).json({ error: 'outcome_unavailable', saved: true });
+      return;
+    }
+    const created = createdTour;
+    const joinedTours = created === undefined ? unitTours : [...unitTours.filter((t) => t.tourId !== created.tourId), created];
+    const join: RecipientJoin = {
+      toursByTenant: groupToursByTenant(joinedTours),
+      displays: recipient !== undefined ? new Map([[contactId, recipient]]) : new Map(),
+    };
+    log.info({ unitId, contactId, outcome, tourCreated: created !== undefined }, 'listing send outcome recorded');
+    res.json({ row: projectRecipientRow(after, unit, join) });
   });
 
   // POST /api/units/:unitId/contacts { contactId, role, primaryContact? } (BE3/C3).

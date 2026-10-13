@@ -965,6 +965,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       listingSendsRepo: listingSends,
       // listing-response-tour-chip: derive the per-row tour chip (byUnit GSI).
       toursRepo: tours,
+      // last-heard-from spec 5.4: the outcome route pins the contact timeline
+      // (the shared activity-events repo built above).
+      activityEventsRepo: activityEvents,
       // FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched).
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       // share-sent-outcome D5: GET /:id/activity recounts "Sent to N tenants"

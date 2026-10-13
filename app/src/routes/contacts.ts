@@ -294,8 +294,15 @@ function isContactType(value: unknown): value is ContactType {
  * caseworker-review route, `type_source` only by the PATCH's staff-override
  * stamp and the conversion. A client value is REFUSED, loudly, on both
  * contact writers (one helper both parsers call), like consent_captured_by.
+ * `last_heard_from_at` is written only by contactsRepo.touchLastHeardFrom
+ * (spec 5.1, invariant I1).
  */
-const SERVER_OWNED_CONTACT_FIELDS = ['caseworker_review', 'caseworker_conversion', 'type_source'] as const;
+const SERVER_OWNED_CONTACT_FIELDS = [
+  'caseworker_review',
+  'caseworker_conversion',
+  'type_source',
+  'last_heard_from_at',
+] as const;
 
 function refuseServerOwnedFields(b: Record<string, unknown>): { error: string } | undefined {
   for (const key of SERVER_OWNED_CONTACT_FIELDS) {

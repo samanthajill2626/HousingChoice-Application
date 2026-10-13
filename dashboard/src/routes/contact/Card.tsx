@@ -5,7 +5,9 @@
 // media) and the manual-now preferences — we never fabricate data.
 import { useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { TourSignalState } from '../../api/index.js';
+import type { InterestedMode, ListingSendRow, TourSignalState } from '../../api/index.js';
+import { formatHeardFrom } from '../../lib/heardFrom.js';
+import { outcomeErrorCopy } from '../../lib/listingOutcomeErrors.js';
 import styles from './Card.module.css';
 
 export interface CardProps {
@@ -209,40 +211,195 @@ export function TourChip({
   );
 }
 
-/** A send-roster row: the identity links to its detail page (a contact on the
- *  property card, a property on the tenant card) and, when a qualifying tour
- *  exists for the pairing, a `TourChip` links to that tour. The row is NOT a
- *  full-row link because the identity and the chip navigate to DIFFERENT places
- *  (nesting anchors would be invalid) - each is its own link. Rows without a
- *  tour render just the identity. */
-export function SendRosterRow({
-  to,
-  identity,
-  kind,
-  tour,
-}: {
+/** What a send-roster row's action asks the outcome route for. */
+export type SendRowAction = 'interested' | 'not_interested' | 'clear';
+
+/** last-heard-from spec 14.3 B2: the contact page derives the Interested mode
+ *  from the units it already loaded ('route' = one click creates the tour). An
+ *  absent unit (deleted, or not loaded) reads 'form'. */
+export function interestedModeOf(unit: { tour_type?: string } | undefined): InterestedMode {
+  return typeof unit?.tour_type === 'string' && unit.tour_type.length > 0 ? 'route' : 'form';
+}
+
+export interface SendRosterRowProps {
+  /** The identity link's route (a contact on the property card, a property on a contact card). */
   to: string;
   identity: React.ReactNode;
   /** caseworkers D20: a muted label after the identity link (a non-tenant
    *  recipient's displayKind on the property "Sent to" card). Outside the
    *  link, so the link's accessible name stays the identity. */
   kind?: string;
-  tour?: { tourId: string; state: TourSignalState };
-}): React.JSX.Element {
-  return (
-    <div className={styles.li}>
-      <span className={styles.liLabel}>
-        <Link className={styles.rowLink ?? ''} to={to}>
-          {identity}
-        </Link>
-        {kind !== undefined ? <span className={styles.rowKind}>{kind}</span> : null}
-      </span>
-      {tour ? (
-        <span className={styles.liRight}>
-          <TourChip tourId={tour.tourId} state={tour.state} />
+  /** The whole wire row (outcome, dates, tour, decline). */
+  row: ListingSendRow;
+  /** For the accessible names: the property's (short) address ... */
+  address: string;
+  /** ... and the person's name. */
+  name: string;
+  /** Computed by the host (server on the property card, file.units on the contact page). */
+  interestedMode: InterestedMode;
+  /** A deleted property: outcomes show, actions do not (spec 14.3 B10). */
+  actionsDisabled?: boolean;
+  /** Calls the outcome route and applies the returned row; rejects on failure. */
+  onOutcome: (outcome: SendRowAction) => Promise<void>;
+  /** A Link to /listings/:unitId?tour=new (head 3.4 #1). The HOST passes it
+   *  ONLY for a PARTNER recipient (B8: the units route's `row.type`, or the
+   *  contact page's own type) - never for a landlord or team-member row. */
+  requestTourTo?: string;
+  /** Render that link with `replace` (the property page, whose tour dialog
+   *  adds no history entry - task 5.3); the contact pages leave it a push. */
+  requestTourReplace?: boolean;
+  /** interestedMode 'form' on a tenant row: open the Schedule tour form. */
+  onOpenTourForm?: () => void;
+  now: Date;
+}
+
+/** The outcome chip (spec 5.5). `interested` IS the tour chip - no second chip. */
+function OutcomeChip({ row, now }: { row: ListingSendRow; now: Date }): React.JSX.Element | null {
+  const chip = styles.outcomeChip ?? '';
+  switch (row.outcome) {
+    case 'no_reply':
+      return <span className={chip}>No reply yet</span>;
+    case 'replied':
+      return <span className={`${chip} ${styles.chipPositive ?? ''}`}>Replied</span>;
+    case 'interested':
+      // Head 3.4 #5: an interested row whose response carries no `tour` reads `Interested`.
+      return row.tour ? <TourChip tourId={row.tour.tourId} state={row.tour.state} /> : <span className={chip}>Interested</span>;
+    case 'not_interested': {
+      const title = row.declined !== undefined ? formatHeardFrom(row.declined.at, now).title : '';
+      return (
+        <span className={`${chip} ${styles.chipMuted ?? ''}`} {...(title !== '' && { title })}>
+          {row.declined?.by === 'engine' ? 'Not interested (auto)' : 'Not interested'}
         </span>
+      );
+    }
+    default:
+      return null;
+  }
+}
+
+/** The list every send-roster host wraps its rows in (markup R1, plan head
+ *  3.4 #10): a `<ul>` named by `label` (a property-card group - `Waiting`,
+ *  `Interested`, `Not interested`, `Not eligible` - or `Properties sent` on a
+ *  contact card). Its children are SendRosterRows only, so every listitem in a
+ *  card is one roster row. */
+export function SendRosterList({ label, children }: { label: string; children: React.ReactNode }): React.JSX.Element {
+  return (
+    <ul className={styles.sendList} aria-label={label}>
+      {children}
+    </ul>
+  );
+}
+
+/** A send-roster row (last-heard-from spec 5.5): line one is the identity
+ *  link (+ kind) and the muted "Sent <date> - Last heard from <date>"; line
+ *  two is the outcome chip and the outcome's actions. The root is an `<li>`
+ *  (markup R1) and must sit inside a SendRosterList. The row is NOT a
+ *  full-row link (the identity, the tour chip and the actions go to different
+ *  places; nesting anchors would be invalid). An action disables itself while
+ *  in flight and the host replaces the row with the route's answer; a failure
+ *  shows an inline error and leaves the row unchanged. */
+export function SendRosterRow({
+  to,
+  identity,
+  kind,
+  row,
+  address,
+  name,
+  interestedMode,
+  actionsDisabled = false,
+  onOutcome,
+  requestTourTo,
+  requestTourReplace = false,
+  onOpenTourForm,
+  now,
+}: SendRosterRowProps): React.JSX.Element {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = (outcome: SendRowAction): void => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    void onOutcome(outcome)
+      .catch((err: unknown) => setError(outcomeErrorCopy(err)))
+      .finally(() => setBusy(false));
+  };
+  const sent = formatHeardFrom(row.sentAt, now);
+  const heard = formatHeardFrom(row.lastHeardFromAt, now);
+  const showActions = !actionsDisabled && row.recipientMissing !== true;
+  const waiting = row.outcome === 'no_reply' || row.outcome === 'replied';
+  const canInterested = waiting && row.interestedSupported && (interestedMode === 'route' || onOpenTourForm !== undefined);
+  return (
+    <li className={styles.sendRow}>
+      <div className={styles.sendRowLine}>
+        <span className={styles.liLabel}>
+          <Link className={styles.rowLink ?? ''} to={to}>
+            {identity}
+          </Link>
+          {kind !== undefined ? <span className={styles.rowKind}>{kind}</span> : null}
+        </span>
+        <span className={styles.sendRowDates}>
+          {/* Contract N1: an empty title (a "Never" label) renders NO title attribute. */}
+          <span {...(sent.title !== '' && { title: sent.title })}>Sent {sent.label}</span>
+          {' - '}
+          <span {...(heard.title !== '' && { title: heard.title })}>Last heard from {heard.label}</span>
+        </span>
+      </div>
+      <div className={styles.sendRowLine}>
+        <OutcomeChip row={row} now={now} />
+        {showActions ? (
+          <span className={styles.rowActions}>
+            {canInterested ? (
+              <button
+                type="button"
+                className={styles.rowButton}
+                aria-label={`Mark ${name} interested in ${address}`}
+                disabled={busy}
+                onClick={() => (interestedMode === 'route' ? run('interested') : onOpenTourForm?.())}
+              >
+                Interested
+              </button>
+            ) : null}
+            {waiting && !row.interestedSupported && requestTourTo !== undefined ? (
+              <Link
+                className={styles.rowActionLink ?? ''}
+                to={requestTourTo}
+                replace={requestTourReplace}
+                aria-label={`Request a tour for ${name} at ${address}`}
+              >
+                Request a tour
+              </Link>
+            ) : null}
+            {waiting ? (
+              <button
+                type="button"
+                className={styles.rowButton}
+                aria-label={`Mark ${name} not interested in ${address}`}
+                disabled={busy}
+                onClick={() => run('not_interested')}
+              >
+                Not interested
+              </button>
+            ) : null}
+            {row.outcome === 'not_interested' ? (
+              <button
+                type="button"
+                className={styles.rowButton}
+                aria-label={`Undo not interested for ${name}`}
+                disabled={busy}
+                onClick={() => run('clear')}
+              >
+                Undo
+              </button>
+            ) : null}
+          </span>
+        ) : null}
+      </div>
+      {error !== null ? (
+        <p role="alert" className={styles.rowError}>
+          {error}
+        </p>
       ) : null}
-    </div>
+    </li>
   );
 }
 

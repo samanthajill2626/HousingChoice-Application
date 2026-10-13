@@ -11,8 +11,9 @@
 // Organization is `contact.organization` (spec D17, edited in the edit form).
 // Unlike UnknownFile it carries NO "Needs triage" call-to-action - a partner is
 // already classified (A2, email-channel-v1).
+import { useState } from 'react';
 import type { Contact, ContactPhone, GroupThreadRow, ListingSendRow, UnitItem } from '../../api/index.js';
-import { BLANK, Card, CardAction, CardInlineAction, EmptyRow, KV, NotesText, PendingPanel, SendRosterRow } from './Card.js';
+import { BLANK, Card, CardAction, CardInlineAction, EmptyRow, KV, NotesText, PendingPanel, SendRosterList, SendRosterRow, interestedModeOf } from './Card.js';
 import { GroupThreadsCard } from './GroupThreadsCard.js';
 import { MediaGallery, type MediaGalleryPaging } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
@@ -78,6 +79,8 @@ export function PartnerFile({
   onManagePhones,
   onContactUpdated,
 }: PartnerFileProps): React.JSX.Element {
+  // The Properties sent rows' date labels read one clock per mount.
+  const [now] = useState(() => new Date());
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' - ');
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
   const notes = typeof contact.notes === 'string' ? contact.notes.trim() : '';
@@ -170,13 +173,22 @@ export function PartnerFile({
         ) : listingsSent.length === 0 ? (
           <EmptyRow>No properties sent yet.</EmptyRow>
         ) : (
-          listingsSent.map((s) => (
-            <SendRosterRow
-              key={`${s.unitId}:${s.sentAt}`}
-              to={`/listings/${s.unitId}`}
-              identity={sentUnitLabel(unitMap, s.unitId)}
-            />
-          ))
+          <SendRosterList label="Properties sent">
+            {listingsSent.map((s) => (
+              <SendRosterRow
+                key={`${s.unitId}:${s.sentAt}`}
+                to={`/listings/${s.unitId}`}
+                identity={sentUnitLabel(unitMap, s.unitId)}
+                row={s}
+                address={sentUnitLabel(unitMap, s.unitId)}
+                name={sentUnitLabel(unitMap, s.unitId)}
+                interestedMode={interestedModeOf(unitMap.get(s.unitId))}
+                actionsDisabled
+                onOutcome={() => Promise.resolve()}
+                now={now}
+              />
+            ))}
+          </SendRosterList>
         )}
       </Card>
 

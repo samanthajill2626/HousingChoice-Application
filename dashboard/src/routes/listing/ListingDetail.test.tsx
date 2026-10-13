@@ -505,7 +505,18 @@ describe('ListingDetail', () => {
       ...READY,
       recipients: {
         status: 'ready',
-        rows: [{ contactId: 'c-t9', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast' }],
+        rows: [
+          {
+            contactId: 'c-t9',
+            unitId: 'u1',
+            sentAt: '2026-06-30T10:00:00Z',
+            via: 'broadcast',
+            outcome: 'no_reply',
+            interestedSupported: true,
+            interestedMode: 'route',
+            eligible: true,
+          },
+        ],
       },
     });
     renderAt();
@@ -523,7 +534,17 @@ describe('ListingDetail', () => {
       recipients: {
         status: 'ready',
         rows: [
-          { contactId: 'c-t9', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', tenantName: 'Brianna Whitfield' },
+          {
+            contactId: 'c-t9',
+            unitId: 'u1',
+            sentAt: '2026-06-30T10:00:00Z',
+            via: 'broadcast',
+            tenantName: 'Brianna Whitfield',
+            outcome: 'no_reply',
+            interestedSupported: true,
+            interestedMode: 'route',
+            eligible: true,
+          },
         ],
       },
     });
@@ -540,11 +561,11 @@ describe('ListingDetail', () => {
       recipients: {
         status: 'ready',
         rows: [
-          { contactId: 'c-ten', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', tenantName: 'Tia Moss', type: 'tenant' },
-          { contactId: 'c-cw', unitId: 'u1', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tenantName: 'Cora Reyes', type: 'partner', role: 'Caseworker' },
-          { contactId: 'c-pt', unitId: 'u1', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tenantName: 'Pat Lin', type: 'partner' },
-          { contactId: 'c-ll', unitId: 'u1', sentAt: '2026-06-27T10:00:00Z', via: 'broadcast', tenantName: 'Lee Park', type: 'landlord' },
-          { contactId: 'c-gone', unitId: 'u1', sentAt: '2026-06-26T10:00:00Z', via: 'broadcast' },
+          { contactId: 'c-ten', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', tenantName: 'Tia Moss', type: 'tenant', outcome: 'no_reply', interestedSupported: true, interestedMode: 'route', eligible: true },
+          { contactId: 'c-cw', unitId: 'u1', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tenantName: 'Cora Reyes', type: 'partner', role: 'Caseworker', outcome: 'no_reply', interestedSupported: false, interestedMode: 'route', eligible: true },
+          { contactId: 'c-pt', unitId: 'u1', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tenantName: 'Pat Lin', type: 'partner', outcome: 'no_reply', interestedSupported: false, interestedMode: 'route', eligible: true },
+          { contactId: 'c-ll', unitId: 'u1', sentAt: '2026-06-27T10:00:00Z', via: 'broadcast', tenantName: 'Lee Park', type: 'landlord', outcome: 'no_reply', interestedSupported: false, interestedMode: 'route', eligible: true },
+          { contactId: 'c-gone', unitId: 'u1', sentAt: '2026-06-26T10:00:00Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: false, eligible: false, recipientMissing: true },
         ],
       },
     });
@@ -556,8 +577,13 @@ describe('ListingDetail', () => {
     expect(within(rowOf('Cora Reyes')).getByText('Caseworker')).toBeInTheDocument();
     expect(within(rowOf('Pat Lin')).getByText('Partner')).toBeInTheDocument();
     expect(within(rowOf('Lee Park')).getByText('Landlord')).toBeInTheDocument();
-    expect(rowOf('Tia Moss').textContent).toBe('Tia Moss');
-    expect(rowOf('c-gone').textContent).toBe('c-gone');
+    // Tenant and unresolved rows carry NO kind label (rows grew dates and an
+    // outcome chip, so the old textContent-equals-name check was rewritten).
+    for (const name of ['Tia Moss', 'c-gone']) {
+      for (const label of ['Tenant', 'Partner', 'Caseworker', 'Landlord']) {
+        expect(within(rowOf(name)).queryByText(label)).not.toBeInTheDocument();
+      }
+    }
   });
 
   it('renders each tour-chip state on "Sent to" rows, linking to the tour', () => {
@@ -566,9 +592,9 @@ describe('ListingDetail', () => {
       recipients: {
         status: 'ready',
         rows: [
-          { contactId: 'c-r', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'individual', tour: { tourId: 't-a', state: 'requested' } },
-          { contactId: 'c-s', unitId: 'u1', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tour: { tourId: 't-b', state: 'scheduled' } },
-          { contactId: 'c-t', unitId: 'u1', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tour: { tourId: 't-c', state: 'toured' } },
+          { contactId: 'c-r', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'individual', tour: { tourId: 't-a', state: 'requested' }, outcome: 'interested', interestedSupported: true, interestedMode: 'route', eligible: true },
+          { contactId: 'c-s', unitId: 'u1', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tour: { tourId: 't-b', state: 'scheduled' }, outcome: 'interested', interestedSupported: true, interestedMode: 'route', eligible: true },
+          { contactId: 'c-t', unitId: 'u1', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tour: { tourId: 't-c', state: 'toured' }, outcome: 'interested', interestedSupported: true, interestedMode: 'route', eligible: true },
         ],
       },
     });

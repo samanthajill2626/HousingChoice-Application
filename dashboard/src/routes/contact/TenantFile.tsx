@@ -6,6 +6,7 @@
 // (/api/placements, /api/tours?tenantId=, /api/contacts/:id/listings-sent,
 // /api/contacts/:id/relay-groups); Preferences are manual-now (pending until the
 // gleaning slice). Each list row links to its detail route.
+import { useState } from 'react';
 import {
   STAGE_LABELS,
   tourStatusLabel,
@@ -31,7 +32,9 @@ import {
   KV,
   PendingPanel,
   Row,
+  SendRosterList,
   SendRosterRow,
+  interestedModeOf,
   responseClass,
 } from './Card.js';
 import { DeadlineChip } from '../placements/DeadlineChip.js';
@@ -140,6 +143,8 @@ export function TenantFile({
   onSendProperty,
   onCreateRelayGroup,
 }: TenantFileProps): React.JSX.Element {
+  // The Properties sent rows' date labels read one clock per mount.
+  const [now] = useState(() => new Date());
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
   // A pending suggestion for `target` rendered as a review chip (or null). Shared
   // by the Details rows below and passed down to the Eligibility intake card.
@@ -308,14 +313,22 @@ export function TenantFile({
         ) : listingsSent.length === 0 ? (
           <EmptyRow>No properties sent yet.</EmptyRow>
         ) : (
-          listingsSent.map((s) => (
-            <SendRosterRow
-              key={`${s.unitId}:${s.sentAt}`}
-              to={`/listings/${s.unitId}`}
-              identity={unitLabel(unitMap, s.unitId)}
-              {...(s.tour && { tour: s.tour })}
-            />
-          ))
+          <SendRosterList label="Properties sent">
+            {listingsSent.map((s) => (
+              <SendRosterRow
+                key={`${s.unitId}:${s.sentAt}`}
+                to={`/listings/${s.unitId}`}
+                identity={unitLabel(unitMap, s.unitId)}
+                row={s}
+                address={unitLabel(unitMap, s.unitId)}
+                name={unitLabel(unitMap, s.unitId)}
+                interestedMode={interestedModeOf(unitMap.get(s.unitId))}
+                actionsDisabled
+                onOutcome={() => Promise.resolve()}
+                now={now}
+              />
+            ))}
+          </SendRosterList>
         )}
       </Card>
 

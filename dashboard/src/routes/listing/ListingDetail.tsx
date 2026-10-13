@@ -42,7 +42,7 @@ import {
   undatedTourLabel,
   type ListingStatus,
 } from '../../api/index.js';
-import { BLANK, Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterRow, responseClass } from '../contact/Card.js';
+import { BLANK, Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterList, SendRosterRow, interestedModeOf, responseClass } from '../contact/Card.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { Modal } from '../contact/Modal.js';
 import { isCaseworkerContact } from '../contact/caseworkerRole.js';
@@ -243,6 +243,9 @@ export function ListingDetail(): React.JSX.Element {
   const [startingPlacement, setStartingPlacement] = useState(false);
   // The "Schedule a tour" dialog, unit side pre-committed to this property.
   const [schedulingTour, setSchedulingTour] = useState(false);
+  // The "Sent to" rows' date labels read one clock per page mount (a lazy
+  // initializer keeps render pure).
+  const [now] = useState(() => new Date());
   const { setUnit } = state;
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -1137,20 +1140,28 @@ export function ListingDetail(): React.JSX.Element {
               recipients.rows.length === 0 ? (
                 <EmptyRow>Not sent to anyone yet.</EmptyRow>
               ) : (
-                recipients.rows.map((row) => {
-                  // caseworkers D20/D22: a resolved non-tenant row is labelled by
-                  // its displayKind; tenant and unresolved rows are not.
-                  const kind = sendRowKindLabel(row);
-                  return (
-                    <SendRosterRow
-                      key={`${row.contactId}:${row.sentAt}`}
-                      to={`/contacts/${row.contactId}`}
-                      identity={row.tenantName ?? row.contactId}
-                      {...(kind !== undefined && { kind })}
-                      {...(row.tour && { tour: row.tour })}
-                    />
-                  );
-                })
+                <SendRosterList label="Sent to">
+                  {recipients.rows.map((row) => {
+                    // caseworkers D20/D22: a resolved non-tenant row is labelled by
+                    // its displayKind; tenant and unresolved rows are not.
+                    const kind = sendRowKindLabel(row);
+                    return (
+                      <SendRosterRow
+                        key={`${row.contactId}:${row.sentAt}`}
+                        to={`/contacts/${row.contactId}`}
+                        identity={row.tenantName ?? row.contactId}
+                        {...(kind !== undefined && { kind })}
+                        row={row}
+                        address={address}
+                        name={row.tenantName ?? row.contactId}
+                        interestedMode={row.interestedMode ?? interestedModeOf(unit)}
+                        actionsDisabled
+                        onOutcome={() => Promise.resolve()}
+                        now={now}
+                      />
+                    );
+                  })}
+                </SendRosterList>
               )
             ) : recipients.status === 'error' ? (
               <EmptyRow>We couldn&apos;t load recipients.</EmptyRow>

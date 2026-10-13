@@ -515,13 +515,23 @@ export function ListingDetail(): React.JSX.Element {
    *  landlordId. There is no further fallback: the server's property-contact
    *  resolvers take the primary row, else the landlord of record, so with
    *  neither they find no one and calls and new relay groups for the property
-   *  reach no one. A NEW contact added to such a property (no primary contact,
-   *  no landlord of record) becomes its primary contact automatically, whatever
-   *  its role - the server decides it, while "+ Add contact" still posts
-   *  `primaryContact: false`; otherwise only making someone on the contact list
-   *  the primary contact restores the routing (caseworker-integrity spec
-   *  revision 4 section 4 "Auto-primary", Cameron 2026-10-12, superseding
-   *  planner rulings Q2 and Q3; R1 code review, dashboard finding 1). */
+   *  reach no one. On such a property (no primary contact, no landlord of
+   *  record) the routing comes back in one of three ways:
+   *  - a NEW contact typed landlord (a landlord, property manager or owner,
+   *    whatever its role) added to the contact list becomes its primary
+   *    contact automatically - the server decides it, while "+ Add contact"
+   *    still posts `primaryContact: false`. A new contact of any other type
+   *    (tenant, partner, unknown, team member) joins non-primary;
+   *  - a contact already on the list and typed landlord, re-roled to
+   *    Landlord, claims the empty landlord slot (it is not made primary; the
+   *    resolvers fall back to it as the landlord of record);
+   *  - otherwise only Make primary on someone on the list.
+   *  The sentence below is Cameron's ruled copy and stays as ruled: it names
+   *  the first and last ways, and its "a new contact is added" holds for a new
+   *  contact typed landlord only (caseworker-integrity spec section 4
+   *  "Contact list" auto-primary: revision 4, superseding planner rulings Q2
+   *  and Q3, narrowed by revision 5 - Cameron's Q4 ruling; R1 code review,
+   *  dashboard finding 1; R2 code review, dashboard finding A5). */
   const promotionNotice = (): string => {
     const promoted =
       landlordOfRecord.length > 0

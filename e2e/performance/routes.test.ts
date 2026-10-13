@@ -704,6 +704,24 @@ describe('representative resolvers', () => {
     expect(api.calls.every((call) => !call.includes('deleted=false'))).toBe(true);
   });
 
+  it('binds the first tenant the DEFAULT Tenants view renders - never an inactive or placed one', async () => {
+    const api = new FakeApi();
+    api.pages.set('/api/contacts?limit=100&type=tenant', [{
+      contacts: [
+        { contactId: 'contact-private-inactive', type: 'tenant', status: 'inactive' },
+        { contactId: 'contact-private-placed', type: 'tenant', status: 'placed' },
+        { contactId: 'contact-private-gone', type: 'tenant', status: 'searching', deleted_at: 'x' },
+        { contactId: 'contact-private-live', type: 'tenant', status: 'searching' },
+      ],
+      nextCursor: null,
+    }]);
+    await expect(resolveContactDetail(api, new FakeDom(new Set(['/contacts/contact-private-live'])))).resolves.toEqual({
+      kind: 'resolved', coldPath: '/contacts/contact-private-live',
+      warmTarget: { path: '/contacts/contact-private-live', query: { kind: 'absent' } },
+      branch: { kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0 },
+    });
+  });
+
   it('retains only sanitized conditional branch facts and maps closed skip reasons', () => {
     const branches: RouteContractBranch[] = [
       { kind: 'contact_detail', contactType: 'landlord', landlordUnitCount: 17 },
@@ -872,6 +890,36 @@ describe('Properties list terminal copy', () => {
         expect(['text', 'list'], `${surfaceId}: unexpected role ${contract.role}`).toContain(contract.role);
         expect(pageSource, `${surfaceId} waits for ${contract.role} "${name}"`).toContain(needle);
       }
+    }
+  });
+});
+
+describe('Tenants list terminal copy', () => {
+  // The Tenants view's Status facet HIDES inactive and placed tenants by default
+  // (spec 2026-10-12 5.7), so a world whose every tenant is inactive or placed
+  // renders neither the rows list nor "No tenants yet" - it renders the
+  // filter-miss line. The contract must accept it, or that world samples as a
+  // misattributed ready_timeout (build-research adjudication tenants-F2).
+  it('accepts the status-hidden empty state, a string the page actually renders', () => {
+    const tenants = ROUTES.find((candidate) => candidate.surfaceId === '/contacts/tenants')!;
+    expect(tenants.terminal.empty.map((contract) => contract.name)).toEqual([
+      'No tenants yet',
+      'No tenants match the selected filters.',
+    ]);
+    // Either empty state alone is ready (two single-locator alternatives).
+    expect(tenants.terminal.emptyAlternatives).toHaveLength(2);
+    expect(tenants.terminal.emptyAlternatives.every((alternative) => alternative.length === 1)).toBe(true);
+    const pageSource = readFileSync(
+      fileURLToPath(new URL('../../dashboard/src/routes/contacts/ContactsList.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(pageSource).toContain("'No tenants match the selected filters.'");
+  });
+
+  it('keeps the other contact lists on their single empty state (the facets are Tenants-only)', () => {
+    for (const surfaceId of ['/contacts', '/contacts/landlords', '/contacts/unknown', '/contacts/deleted']) {
+      const route = ROUTES.find((candidate) => candidate.surfaceId === surfaceId)!;
+      expect(route.terminal.empty, surfaceId).toHaveLength(1);
     }
   });
 });

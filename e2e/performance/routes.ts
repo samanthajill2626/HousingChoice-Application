@@ -393,8 +393,16 @@ const TODAY_TERMINAL = terminal(
   [locator('text', 'All caught up')],
   [locator('alert', "We couldn't load your queue", 'contains')],
 );
+// The Tenants view's Status facet HIDES inactive and placed tenants by default
+// (spec 2026-10-12 5.7), so a world whose every tenant is inactive or placed
+// renders neither the rows list nor "No tenants yet" - it renders the
+// filter-miss line. Without that alternative the sample would read `unknown`
+// and fail as a misattributed ready_timeout. The facets render on the Tenants
+// view only, so no other contact list can reach that line.
 function contactListTerminal(heading: string): TerminalContract {
-  return terminal([locator('list', heading)], [locator('text', `No ${heading.toLowerCase()} yet`)], [L.alert]);
+  const empty = [locator('text', `No ${heading.toLowerCase()} yet`)];
+  if (heading === 'Tenants') empty.push(locator('text', 'No tenants match the selected filters.'));
+  return terminal([locator('list', heading)], empty, [L.alert]);
 }
 // The Active list opens on Available (tracker #1), so a world with properties
 // but none Available renders neither the rows list nor "No properties yet" -
@@ -801,7 +809,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
   terminals: Object.freeze({
     '/': 'dashboard/src/routes/today/Today.tsx:36-48,226-261,278-291',
     '/contacts': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
-    '/contacts/tenants': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
+    '/contacts/tenants': 'dashboard/src/routes/contacts/ContactsList.tsx:352-404',
     '/contacts/landlords': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/contacts/unknown': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
     '/contacts/deleted': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
@@ -1114,11 +1122,23 @@ export function resolveBoundSelfQaDetail(
   throw new Error('self_qa_bound_route_invalid');
 }
 
+// The warm sample clicks this tenant's row on `/contacts/tenants`, whose
+// Status facet HIDES inactive and placed tenants by default (spec 2026-10-12
+// 5.7) - and GSI byte order lists `inactive` first. Bind a default-VISIBLE
+// tenant (no status, an off-list one, or any status but those two), or every
+// sample skips as fixture_not_navigable.
+const HIDDEN_BY_DEFAULT: ReadonlySet<string> = new Set(['inactive', 'placed']);
+
 export async function resolveContactDetail(api: ResolverApi, dom: ResolverDom): Promise<ResolverResult> {
   let cursor: string | undefined;
   do {
     const page = object(await api.get('/api/contacts', { type: 'tenant', limit: '100', ...(cursor !== undefined && { cursor }) }));
-    const match = rowsFrom(page, 'contacts').find((row) => row.deleted_at === undefined && stringField(row, 'contactId') !== undefined);
+    const match = rowsFrom(page, 'contacts').find(
+      (row) =>
+        row.deleted_at === undefined &&
+        !(typeof row.status === 'string' && HIDDEN_BY_DEFAULT.has(row.status)) &&
+        stringField(row, 'contactId') !== undefined,
+    );
     if (match !== undefined) {
       return bindResolved(dom, `/contacts/${stringField(match, 'contactId')!}`, {
         kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0,

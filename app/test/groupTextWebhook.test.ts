@@ -148,6 +148,10 @@ describe('group detection: branch placement (T3.2)', () => {
       'conversations.setParticipantsIfAbsent',
       // (3.6) multi-phone lastSeenAt
       'contacts.touchPhoneLastSeen',
+      // (3.7) last heard from (spec 5.1) - KNOWING rewrite: the touch is 1:1-path
+      // work, not a group-branch cost. It reuses the conversation and the
+      // captured contact as the lookup cache, so it adds no read.
+      'contacts.touchLastHeardFrom',
       // (4) keywords: plain inbound, contact already consented -> ZERO writes
       // (5) media: none
       // (6) inbox touch

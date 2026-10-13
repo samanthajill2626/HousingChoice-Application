@@ -13,6 +13,7 @@ import {
 import { loadConfig } from '../src/lib/config.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ExtractionRepo } from '../src/repos/extractionRepo.js';
+import { splitTsMsgId } from '../src/repos/messagesRepo.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
@@ -363,6 +364,8 @@ describe('POST /webhooks/twilio/sms — echo-loop defenses (doc §7.1)', () => {
     expect(world.messages).toHaveLength(1); // still exactly one — dedupe no-op
     expect(world.sent).toHaveLength(1); // and absolutely nothing re-sent
     expect(world.flagWrites).toHaveLength(0);
+    // Last heard from (spec 5.1): the persisted row is OUR send - nobody is touched.
+    expect(world.heardFromTouches).toEqual([]);
   });
 
   it('REDELIVERY: the identical inbound webhook twice persists exactly one message and re-runs the idempotent side effects', async () => {
@@ -1389,5 +1392,80 @@ describe('POST /webhooks/twilio/sms - conversation-fact-extraction scheduling (T
     expect(world.messages).toHaveLength(1);
     const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('extraction schedule failed'));
     expect(warn).toBeDefined();
+  });
+});
+
+describe('last heard from (spec 5.1) - 1:1 inbound', () => {
+  const TOUCH_FAILED = 'last_heard_from touch failed - message persisted, last_heard_from stale';
+
+  it('a known tenant is touched at the persisted row instant', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-tenant', type: 'tenant', phone: TENANT_PHONE });
+
+    const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams());
+
+    expect(res.status).toBe(200);
+    const row = world.messages[0]!;
+    const at = splitTsMsgId(row.tsMsgId).providerTs;
+    expect(world.heardFromTouches).toEqual([{ contactId: 'c-tenant', at, outcome: 'written' }]);
+    expect(world.contacts.find((c) => c.contactId === 'c-tenant')!.last_heard_from_at).toBe(at);
+  });
+
+  it('an unknown phone touches the auto-captured stub (the captured contact feeds the lookup cache)', async () => {
+    const { app, world } = makeWebhookHarness();
+
+    const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams());
+
+    expect(res.status).toBe(200);
+    const stub = world.contacts.find((c) => c.phone === TENANT_PHONE)!;
+    expect(stub).toBeDefined();
+    const at = splitTsMsgId(world.messages[0]!.tsMsgId).providerTs;
+    expect(world.heardFromTouches).toEqual([{ contactId: stub.contactId, at, outcome: 'written' }]);
+  });
+
+  it('a REDELIVERY touches again at the FIRST row instant (written, then skipped)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-tenant', type: 'tenant', phone: TENANT_PHONE });
+    const params = inboundSmsParams();
+
+    await signedTwilioPost(app, SMS_PATH, params);
+    await signedTwilioPost(app, SMS_PATH, params);
+
+    expect(world.messages).toHaveLength(1);
+    const at = splitTsMsgId(world.messages[0]!.tsMsgId).providerTs;
+    expect(world.heardFromTouches.map((t) => t.at)).toEqual([at, at]);
+    expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
+  });
+
+  it('a failed touch is logged and answered 200; the redelivery repairs it', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-tenant', type: 'tenant', phone: TENANT_PHONE });
+    const real = world.contactsRepo.touchLastHeardFrom.bind(world.contactsRepo);
+    let calls = 0;
+    world.contactsRepo.touchLastHeardFrom = async (id, at) => (++calls === 1 ? 'failed' : real(id, at));
+    const params = inboundSmsParams();
+
+    const first = await signedTwilioPost(app, SMS_PATH, params);
+
+    expect(first.status).toBe(200);
+    expect(capture.atLevel(ERROR).some((l) => l['msg'] === TOUCH_FAILED)).toBe(true);
+    expect(world.contacts.find((c) => c.contactId === 'c-tenant')!.last_heard_from_at).toBeUndefined();
+
+    await signedTwilioPost(app, SMS_PATH, params);
+
+    const at = splitTsMsgId(world.messages[0]!.tsMsgId).providerTs;
+    expect(world.contacts.find((c) => c.contactId === 'c-tenant')!.last_heard_from_at).toBe(at);
+  });
+
+  it('an echo dedupe reads the PERSISTED row: our own outbound touches nobody', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-tenant', type: 'tenant', phone: TENANT_PHONE });
+    const params = inboundSmsParams();
+
+    await signedTwilioPost(app, SMS_PATH, params);
+    world.messages[0]!.direction = 'outbound';
+    await signedTwilioPost(app, SMS_PATH, params);
+
+    expect(world.heardFromTouches).toHaveLength(1);
   });
 });

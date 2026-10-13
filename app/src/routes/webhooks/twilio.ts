@@ -39,6 +39,7 @@ import {
 import { summarizeError } from '../../lib/errors.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { classifyInboundKeyword } from '../../lib/smsCompliance.js';
+import { attributeInbound, repoLookup, type HeardFromRow } from '../../lib/heardFrom.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import type { PoolNumbersService } from '../../services/poolNumbers.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
@@ -74,6 +75,7 @@ import {
   createMessagesRepo,
   mediaAttachmentsOf,
   relayMemberKey,
+  splitTsMsgId,
   type DeliveryStatus,
   type MediaAttachment,
   type MessageItem,
@@ -2499,6 +2501,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     let persistedConversationId = conversation.conversationId;
     let persistedTsMsgId = appended.tsMsgId;
     let mediaAlreadyMirrored = false;
+    let persistedRow: MessageItem | undefined;
     if (appended.deduped) {
       // Dedupe must NOT skip the side effects below: a redelivery usually
       // means the FIRST delivery 5xx'd/crashed AFTER the append but before
@@ -2522,6 +2525,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       }
       persistedConversationId = persisted.conversationId;
       persistedTsMsgId = persisted.tsMsgId;
+      persistedRow = persisted;
       // Skip re-mirroring only when ALL attachments are already stored. Gating on
       // completeness (not mere presence) recovers a PARTIAL first mirror: if the
       // first delivery stored 1 of 2 (the other's fetch/put threw) and then 5xx'd
@@ -2575,6 +2579,40 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           'phone lastSeenAt touch failed — message persisted, lastSeenAt stale',
         );
       }
+    }
+
+    // (3.7) Last heard from (spec 5.1 / 14.2). Runs on the fresh AND the
+    // deduped branch (a redelivery repairs a crash between the append and this
+    // line); the instant is the PERSISTED row's key, so a redelivery never
+    // moves the value past the first delivery. On a dedupe the persisted row
+    // decides: our own send's echo is outbound and touches nobody. Attribution
+    // runs on the PERSISTED thread, with the captured contact as the lookup
+    // cache (the byPhone index lags a stub minted moments ago). Best-effort.
+    try {
+      const heardThread =
+        persistedConversationId === conversation.conversationId
+          ? conversation
+          : await conversations.getById(persistedConversationId);
+      const heardRow: HeardFromRow = persistedRow ?? {
+        direction: 'inbound',
+        type: mediaUrls.length > 0 ? 'mms' : 'sms',
+      };
+      const heardFromId =
+        heardThread === undefined
+          ? undefined
+          : await attributeInbound(
+              heardRow,
+              heardThread,
+              repoLookup(contacts, effectiveContact ? new Map([[From, effectiveContact]]) : undefined),
+            );
+      if (heardFromId !== undefined) {
+        const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(persistedTsMsgId).providerTs);
+        if (outcome === 'failed') {
+          log.error({ providerSid: MessageSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+        }
+      }
+    } catch (err) {
+      log.error({ err, providerSid: MessageSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
     }
 
     // (4) STOP / HELP / START keyword handling (spec 6 - TWILIO owns the

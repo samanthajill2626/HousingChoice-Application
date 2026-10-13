@@ -53,6 +53,12 @@ export interface ListingState {
    *  RETURNS the updated unit) — applied directly, no refetch. Mirrors
    *  useContact.setContact. */
   setUnit: (unit: UnitItem) => void;
+  /** Replace ONE "Sent to" row in place after an outcome action (the route
+   *  RETURNS the re-projected row) - no refetch. Bound to the unitId passed:
+   *  a late answer for property A after a history move to B is a no-op (the
+   *  setUnit precedent). An unknown contactId, or a slice that is not
+   *  'ready', is left alone. */
+  setRecipientRow: (unitId: string, contactId: string, row: ListingSendRow) => void;
   /** The resolved landlord contact (for the roster fallback), or null. */
   landlord: Contact | null;
   roster: RosterRow[];
@@ -69,7 +75,7 @@ export interface ListingState {
   tours: Slice<Tour>;
 }
 
-const LOADING: Omit<ListingState, 'setUnit'> = {
+const LOADING: Omit<ListingState, 'setUnit' | 'setRecipientRow'> = {
   status: 'loading',
   unit: null,
   landlord: null,
@@ -128,12 +134,12 @@ async function loadLandlord(
   }
 }
 
-export function useListing(unitId: string): ListingState & { setUnit: (unit: UnitItem) => void } {
+export function useListing(unitId: string): ListingState {
   // `forId` records which unitId the committed state describes. On a unitId
   // change we DERIVE loading during render until the new fetch commits, rather
   // than resetting with a synchronous setState in the effect (which the React
   // Compiler flags as a cascading render — set-state-in-effect).
-  const [state, setState] = useState<Omit<ListingState, 'setUnit'> & { forId: string }>({
+  const [state, setState] = useState<Omit<ListingState, 'setUnit' | 'setRecipientRow'> & { forId: string }>({
     ...LOADING,
     forId: unitId,
   });
@@ -170,6 +176,20 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
     },
     [unitId],
   );
+
+  // Replace ONE "Sent to" row with the outcome route's answer, in place. Bound
+  // to the unitId the CALLER passes (not this render's), so an answer for a
+  // property the page has since moved away from is a no-op.
+  const setRecipientRow = useCallback((forUnitId: string, contactId: string, row: ListingSendRow) => {
+    setState((prev) => {
+      if (prev.forId !== forUnitId || prev.recipients.status !== 'ready') return prev;
+      const index = prev.recipients.rows.findIndex((r) => r.contactId === contactId);
+      if (index < 0) return prev;
+      const rows = prev.recipients.rows.slice();
+      rows[index] = row;
+      return { ...prev, recipients: { status: 'ready', rows } };
+    });
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -237,6 +257,6 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
   // roster/panels stay; only the unit record (and its deleted_at) changes.
 
   // Committed state is for the previous unitId → the new fetch is in flight.
-  if (state.forId !== unitId) return { ...LOADING, setUnit };
-  return { ...state, setUnit };
+  if (state.forId !== unitId) return { ...LOADING, setUnit, setRecipientRow };
+  return { ...state, setUnit, setRecipientRow };
 }

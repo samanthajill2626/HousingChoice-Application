@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import type { PlacementItem, UnitItem } from '../../api/index.js';
@@ -186,5 +186,23 @@ describe('useContactFile', () => {
     render(<Probe contactId="k1" />);
 
     await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('error'));
+  });
+
+  it('setListingSentRow replaces ONE Properties-sent row, bound to the contact it was called for', async () => {
+    const r1 = { contactId: 'k1', unitId: 'u1', sentAt: '2026-10-01T10:00:00.000Z', via: 'broadcast' as const, outcome: 'no_reply' as const, interestedSupported: true };
+    const r2 = { ...r1, unitId: 'u2' };
+    getAllPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue(UNITS);
+    getContactListingsSent.mockResolvedValue([r1, r2]);
+    getContactRelayGroups.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
+
+    const { result } = renderHook(() => useContactFile('k1'));
+    await waitFor(() => expect(result.current.listingsSent.status).toBe('ready'));
+
+    const replied = { ...r2, outcome: 'replied' as const };
+    act(() => result.current.setListingSentRow('k1', 'u2', replied));
+    expect(result.current.listingsSent).toEqual({ status: 'ready', rows: [r1, replied] });
+    act(() => result.current.setListingSentRow('someone-else', 'u1', { ...r1, outcome: 'replied' }));
+    expect(result.current.listingsSent).toEqual({ status: 'ready', rows: [r1, replied] });
   });
 });

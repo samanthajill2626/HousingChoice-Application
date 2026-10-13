@@ -81,6 +81,7 @@ function renderAt(unitId = 'u1'): void {
 const READY: ListingState = {
   status: 'ready',
   setUnit: vi.fn(),
+  setRecipientRow: vi.fn(),
   unit: {
     unitId: 'u1',
     landlordId: 'll1',

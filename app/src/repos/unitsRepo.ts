@@ -198,9 +198,9 @@ export interface ContactListFacts {
  * restoreWithLandlord's input (caseworker-integrity spec 2026-10-12 section 4
  * "Restore"). `expectLandlordId` is the landlordId the caller read (undefined:
  * ownerless); `next` is the new landlord of record, or null for a restore
- * WITHOUT a landlord - which also carries the caller's sole-landlord promotion
- * (spec revision 5; fix wave 2 FW2-12) and the contact list it was decided
- * from.
+ * WITHOUT a landlord - which also carries the caller's heir pick
+ * (primary-contact-integrity spec 4.6; it replaced caseworker-integrity's
+ * sole-landlord promotion) and the contact list it was decided from.
  */
 export type RestoreWithLandlordInput =
   | {
@@ -217,9 +217,11 @@ export type RestoreWithLandlordInput =
        */
       expectContacts: UnitContact[] | undefined;
       /**
-       * The caller's decision: the one remaining row whose contact is typed
-       * landlord, made the sole primary when the cleared landlord was the
-       * primary; null when zero or two-plus such rows remain (nobody).
+       * The caller's decision (primary-contact-integrity spec 4.6): the heir
+       * function's pick - chooseHeir with the cleared landlord excluded and no
+       * landlord of record, i.e. the earliest-added remaining contact eligible
+       * for automatic routing - made the sole primary when the cleared
+       * landlord was the primary; null for nobody.
        */
       promote: string | null;
     };
@@ -753,11 +755,18 @@ export interface UnitsRepo {
    * sets landlordId to `next.contactId` (or REMOVEs it for `next` null), drops
    * the old landlord's contact-list row, upserts `next` with role pinned
    * 'landlord' (kept when already seated; name/company updated when supplied),
-   * and keeps `primary_contact` consistent: when the old landlord was the
-   * primary (roster flag or scalar), `next` becomes the sole primary, or with
-   * no landlord the caller's sole-landlord promotion (`promote`, spec revision
-   * 5) becomes the sole primary when it names a remaining row, else the scalar
-   * is REMOVEd and no row stays primary (removeContact's rule). The write is
+   * and keeps `primary_contact` consistent: when the restore needs a hand-off
+   * (landlordWasPrimary: the old landlord's row is the flagged primary, or no
+   * row is flagged; the scalar is never read) - primary-contact-integrity spec
+   * 4.6 - a SWAP re-runs the heir function after the swap (chooseHeir on this
+   * attempt's swapped roster, the old landlord excluded: the new landlord when
+   * live, else the earliest-added remaining contact eligible for automatic
+   * routing, else nobody), its liveness from `opts.readContacts` per attempt
+   * (a failed read or none supplied: RosterReadFailedError, nothing written);
+   * a restore WITHOUT a landlord applies the caller's heir pick (`promote`)
+   * when it names a remaining row, else the scalar is REMOVEd and no row stays
+   * primary (removeContact's rule). `opts.onPrimaryHandoff` is called once
+   * after the write when an heir was flagged. The write is
    * conditioned on the landlordId AND contacts[] it read
    * (updateRosterIfCurrent) and on deleted_at still existing, so a restore
    * landing after the read re-reads into RosterWriteConflictError; a
@@ -768,7 +777,30 @@ export interface UnitsRepo {
    * change answers RosterWriteConflictError, never a retry. A missing unit
    * throws ConditionalCheckFailedException (route 404). Returns ALL_NEW.
    */
-  restoreWithLandlord(unitId: string, input: RestoreWithLandlordInput): Promise<UnitItem>;
+  restoreWithLandlord(
+    unitId: string,
+    input: RestoreWithLandlordInput,
+    opts?: RosterHandoffOpts,
+  ): Promise<UnitItem>;
+}
+
+/**
+ * primary-contact-integrity (plan review R2/R3; spec 3 / 4.6 / 4.7): does a
+ * restore that removes `landlordId`'s row need a primary hand-off? ONE pure
+ * rule for the real restoreWithLandlord, the restore route's heir pick and the
+ * API-test fake. True when the landlord's row is the FLAGGED primary, or when
+ * NO row is flagged at all (the property has no primary, so the hand-off is
+ * how it gets one - the heir function picks who). Never reads the
+ * `primary_contact` scalar: a stale scalar can neither move the primary off a
+ * live flagged row nor decide anything when nothing is flagged. (This keeps
+ * caseworker-integrity's R1 backend finding 4 cases - a no-flag unit whose
+ * scalar named the old landlord - handing off, without reading the scalar.)
+ * `roster` is unitContacts(unit), so a landlord-only unit's DERIVED landlord
+ * row counts as flagged.
+ */
+export function landlordWasPrimary(roster: readonly UnitContact[], landlordId: string): boolean {
+  if (!roster.some((c) => c.primaryContact === true)) return true;
+  return roster.some((c) => c.contactId === landlordId && c.primaryContact === true);
 }
 
 export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
@@ -1456,7 +1488,7 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       return 'written';
     },
 
-    async restoreWithLandlord(unitId, input) {
+    async restoreWithLandlord(unitId, input, opts) {
       let attempts = 0;
       const write = async (): Promise<UnitItem> => {
         attempts += 1;
@@ -1479,27 +1511,31 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         // The caller decided from THIS landlordId; any other owner now is a
         // concurrent change the caller must re-read (route 409 unit_roster_conflict).
         if (current !== input.expectLandlordId) throw new RosterWriteConflictError();
-        // A restore WITHOUT a landlord carries the caller's sole-landlord
-        // promotion (spec revision 5; fix wave 2 FW2-12), decided from the
-        // contact list the caller read. On any other list - a contact-list
-        // change since - that decision is stale: a conflict the caller must
-        // re-read (route 409 unit_roster_conflict), never a retry that applies
-        // it anyway. The write below is conditioned on this very list, so a
-        // change landing after this read loses the write and re-reads into here.
+        // A restore WITHOUT a landlord carries the caller's heir pick
+        // (primary-contact-integrity spec 4.6), decided from the contact list
+        // the caller read. On any other list - a contact-list change since -
+        // that decision is stale: a conflict the caller must re-read (route 409
+        // unit_roster_conflict), never a retry that applies it anyway. The
+        // write below is conditioned on this very list, so a change landing
+        // after this read loses the write and re-reads into here.
         if (input.next === null && !isDeepStrictEqual(unit.contacts, input.expectContacts)) {
           throw new RosterWriteConflictError();
         }
         const old = input.expectLandlordId;
         const next = input.next;
         const promote = input.next === null ? input.promote : null;
-        let primaryPromoted: string | undefined;
         // `next` naming the old landlord (only reachable when they became a
         // landlord again under a race) keeps their row instead of re-adding it.
         const keepsOld = next !== null && next.contactId === old;
         const roster = unitContacts(unit).map((c) => ({ ...c }));
-        const oldRow = old !== undefined && !keepsOld ? roster.find((c) => c.contactId === old) : undefined;
+        // Does this restore need a hand-off? The shared rule (landlordWasPrimary,
+        // plan review R1-R3): yes when the old landlord's row is the FLAGGED
+        // primary, or when NO row is flagged (the heir function then picks
+        // who); a live flagged row elsewhere is never displaced. The
+        // primary_contact scalar is never read; with no hand-off it is
+        // re-aligned to the flag below.
         const oldWasPrimary =
-          old !== undefined && !keepsOld && (oldRow?.primaryContact === true || unit.primary_contact === old);
+          old !== undefined && !keepsOld && landlordWasPrimary(roster, old);
         const nextRoster: UnitContact[] =
           old !== undefined && !keepsOld ? roster.filter((c) => c.contactId !== old) : roster;
         if (next !== null) {
@@ -1523,21 +1559,58 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           landlordId: next !== null ? next.contactId : null, // null -> REMOVE
           deleted_at: null, // null -> REMOVE: the restore itself
         };
+        let heirId: string | undefined;
         if (oldWasPrimary) {
           if (next !== null) {
-            for (const c of nextRoster) c.primaryContact = c.contactId === next.contactId;
-            patch['primary_contact'] = next.contactId;
+            // The landlord SWAP (primary-contact-integrity spec 4.6, Cameron
+            // 2026-10-13): re-run the heir function after the swap instead of
+            // flagging the new landlord unconditionally - the new landlord of
+            // record when live, else the earliest-added remaining contact
+            // eligible for automatic routing, else nobody - so a soft-deleted
+            // new landlord is not made primary. Decided HERE, per attempt, on
+            // this attempt's swapped roster (a contacts-only race is retried,
+            // so a decision made by the caller could go stale); the old
+            // landlord is excluded and not read. Unknown liveness refuses with
+            // RosterReadFailedError and writes nothing (route 503).
+            const read: RosterContactsRead =
+              opts?.readContacts !== undefined
+                ? await opts.readContacts(
+                    rosterContactIds({ contacts: nextRoster, landlordId: next.contactId }).filter(
+                      (id) => id !== old,
+                    ),
+                  )
+                : { ok: false };
+            const heir = chooseHeir({ roster: nextRoster, landlordId: next.contactId, exclude: old, read });
+            if (heir.kind === 'unknown') throw new RosterReadFailedError();
+            const applied = applyPrimary(
+              nextRoster,
+              heir.kind === 'heir' ? { contactId: heir.contactId, addLandlordRow: heir.addLandlordRow } : null,
+            );
+            patch['contacts'] = applied.contacts;
+            patch['primary_contact'] = applied.primaryContactScalar;
+            heirId = heir.kind === 'heir' ? heir.contactId : undefined;
           } else {
-            // No landlord to fall back to. The caller's sole-landlord promotion
-            // (Cameron's Q5, spec revision 5), when it names a remaining row,
-            // becomes the sole primary in this same write; otherwise clear the
-            // scalar (removeContact's rule), never leave it dangling at the
-            // removed landlord.
+            // No landlord left. The caller's heir pick (spec 4.6), when it
+            // names a remaining row, becomes the sole primary in this same
+            // write; otherwise every flag is cleared and the scalar REMOVEd
+            // (removeContact's rule), never left dangling at the removed
+            // landlord.
             const promoted = promote === null ? undefined : nextRoster.find((c) => c.contactId === promote);
-            for (const c of nextRoster) c.primaryContact = promoted !== undefined && c.contactId === promoted.contactId;
-            patch['primary_contact'] = promoted !== undefined ? promoted.contactId : null;
-            primaryPromoted = promoted?.contactId;
+            const applied = applyPrimary(
+              nextRoster,
+              promoted !== undefined ? { contactId: promoted.contactId, addLandlordRow: false } : null,
+            );
+            patch['contacts'] = applied.contacts;
+            patch['primary_contact'] = applied.primaryContactScalar;
+            heirId = promoted?.contactId;
           }
+        } else {
+          // No hand-off: keep the scalar consistent with the FLAG this write
+          // stores (spec 4.7) without ever reading the old scalar - the row
+          // marked primary, or REMOVE when none is (never left dangling at the
+          // removed landlord's row).
+          const flagged = nextRoster.find((c) => c.primaryContact === true);
+          patch['primary_contact'] = flagged !== undefined ? flagged.contactId : null;
         }
         let updated: UnitItem;
         try {
@@ -1547,8 +1620,9 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           if (attempts >= ROSTER_WRITE_MAX_ATTEMPTS) throw new RosterWriteConflictError();
           // Re-read: a vanished unit throws (route 404), a unit restored or a
           // landlordId changed meanwhile throws RosterWriteConflictError, a
-          // contacts-only race retries - or, for a restore without a landlord,
-          // fails the contact-list check above (RosterWriteConflictError).
+          // contacts-only race retries (deciding a swap's heir again) - or, for
+          // a restore without a landlord, fails the contact-list check above
+          // (RosterWriteConflictError).
           return write();
         }
         log.info(
@@ -1556,11 +1630,12 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
             unitId,
             attempts,
             landlordCleared: next === null,
-            ...(primaryPromoted !== undefined && { primaryPromoted }),
-            rosterSize: nextRoster.length,
+            ...(heirId !== undefined && { primaryPromoted: heirId }),
+            rosterSize: (patch['contacts'] as UnitContact[]).length,
           },
           'unit restored with a landlord change',
         );
+        if (heirId !== undefined && old !== undefined) opts?.onPrimaryHandoff?.({ from: old, to: heirId });
         return updated;
       };
       return write();

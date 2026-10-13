@@ -18,6 +18,8 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
+import type { RosterContactsRead } from '../src/lib/propertyContact.js';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
 import { createUnitsRepo, RosterWriteConflictError, type UnitContact } from '../src/repos/unitsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -39,6 +41,17 @@ if (!reachable) {
       'Run `npm run db:start` to exercise this suite.',
   );
 }
+
+/**
+ * primary-contact-integrity (spec 4.6): a SWAP of a landlord who was the
+ * primary re-runs the heir function, which needs a liveness read. This one
+ * answers every id as a live contact typed landlord, so the new landlord of
+ * record takes the primary exactly as before the heir function.
+ */
+const EVERYONE_LIVE_LANDLORD = async (ids: string[]): Promise<RosterContactsRead> => ({
+  ok: true,
+  byId: new Map(ids.map((id) => [id, { contactId: id, type: 'landlord' } as ContactItem] as const)),
+});
 
 describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
@@ -115,10 +128,11 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
       ],
       'c-old',
     );
-    const updated = await units.restoreWithLandlord(unitId, {
-      expectLandlordId: 'c-old',
-      next: { contactId: 'c-new', name: 'Nora Lane', company: 'Lane Homes' },
-    });
+    const updated = await units.restoreWithLandlord(
+      unitId,
+      { expectLandlordId: 'c-old', next: { contactId: 'c-new', name: 'Nora Lane', company: 'Lane Homes' } },
+      { readContacts: EVERYONE_LIVE_LANDLORD },
+    );
     expect(updated.deleted_at).toBeUndefined();
     expect(updated.landlordId).toBe('c-new');
     expect(updated.primary_contact).toBe('c-new');
@@ -147,11 +161,13 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
     expect(updated.contacts).toEqual([{ contactId: 'c-pm', role: 'landlord', primaryContact: true }]);
   });
 
-  // R1 code review, backend finding 4: the old landlord was the primary by the
-  // primary_contact SCALAR alone (no roster row flagged - the scalar is
-  // PATCH-writable). The new landlord still takes the primary, so the scalar
-  // never dangles at a contact who is off the list and no longer the landlord.
-  it('moves the primary to the new landlord when only the primary_contact scalar named the old one', async () => {
+  // R1 code review, backend finding 4: NO roster row is flagged and the stored
+  // primary_contact scalar names the old landlord. Since primary-contact-
+  // integrity the restore hands off because NO row is flagged
+  // (landlordWasPrimary, plan review R1-R3) - the scalar is never read - so
+  // the new landlord still takes the primary, and the scalar never dangles at
+  // a contact who is off the list and no longer the landlord.
+  it('moves the primary to the new landlord when no row is flagged - the scalar naming the old one decides nothing', async () => {
     const unitId = await deletedUnit(
       [
         { contactId: 'c-old', role: 'landlord', primaryContact: false },
@@ -159,10 +175,11 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
       ],
       'c-old',
     );
-    const updated = await units.restoreWithLandlord(unitId, {
-      expectLandlordId: 'c-old',
-      next: { contactId: 'c-new' },
-    });
+    const updated = await units.restoreWithLandlord(
+      unitId,
+      { expectLandlordId: 'c-old', next: { contactId: 'c-new' } },
+      { readContacts: EVERYONE_LIVE_LANDLORD },
+    );
     expect(updated.primary_contact).toBe('c-new');
     expect(updated.contacts).toEqual([
       { contactId: 'c-pm', role: 'pm', primaryContact: false },
@@ -206,14 +223,16 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
     expect(updated.primary_contact).toBeUndefined();
   });
 
-  // Sole-landlord promotion (Cameron's Q5, spec revision 5 section 4
-  // "Restore"; fix wave 2 FW2-12). For a restore WITHOUT a landlord the caller
-  // decides, from the contact list it read (`expectContacts`), which remaining
-  // contact becomes the primary - the one typed landlord, when exactly one is
-  // (`promote`; null for nobody). The repo applies it only when the cleared
-  // landlord was the primary (its row flagged, or the scalar naming it), in
-  // the SAME conditional write, and only on that very contact list: any other
-  // list is RosterWriteConflictError (route 409 unit_roster_conflict), never a
+  // The caller's heir pick (Cameron's Q5, spec revision 5 section 4
+  // "Restore"; fix wave 2 FW2-12 - the sole-landlord promotion, REPLACED by
+  // primary-contact-integrity spec 4.6: the heir function's earliest-added
+  // eligible contact). For a restore WITHOUT a landlord the caller decides,
+  // from the contact list it read (`expectContacts`), which remaining contact
+  // becomes the primary (`promote`; null for nobody). The repo applies it only
+  // when the cleared landlord was the primary - its row flagged, or NO row
+  // flagged at all (landlordWasPrimary; the scalar is never read) - in the
+  // SAME conditional write, and only on that very contact list: any other list
+  // is RosterWriteConflictError (route 409 unit_roster_conflict), never a
   // retry that would apply a decision made for a list that is gone.
   const PROMOTION_ROSTER: UnitContact[] = [
     { contactId: 'c-old', role: 'landlord', primaryContact: true },
@@ -245,7 +264,9 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
     expect(stored?.primary_contact).toBe('c-pm');
   });
 
-  it('without a landlord: promotes when only the primary_contact scalar named the cleared landlord', async () => {
+  // NO row flagged: the restore hands off (landlordWasPrimary) whatever the
+  // scalar says - here it still names the cleared landlord, and decides nothing.
+  it('without a landlord: promotes when no row is flagged - the scalar naming the cleared landlord decides nothing', async () => {
     const roster: UnitContact[] = [
       { contactId: 'c-old', role: 'landlord', primaryContact: false },
       { contactId: 'c-pm', role: 'pm', primaryContact: false },
@@ -389,7 +410,11 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
     // deleted_at right after this call's first read.
     const racing = racingRepo(unitId, () => units.restore(unitId));
     await expect(
-      racing.restoreWithLandlord(unitId, { expectLandlordId: 'c-old', next: { contactId: 'c-new' } }),
+      racing.restoreWithLandlord(
+        unitId,
+        { expectLandlordId: 'c-old', next: { contactId: 'c-new' } },
+        { readContacts: EVERYONE_LIVE_LANDLORD },
+      ),
     ).rejects.toBeInstanceOf(RosterWriteConflictError);
     // Nothing of this call landed: live by the racer's restore, still c-old's.
     const stored = await units.getById(unitId, { consistentRead: true });
@@ -424,7 +449,11 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
       ),
     );
     await expect(
-      racing.restoreWithLandlord(unitId, { expectLandlordId: 'c-old', next: { contactId: 'c-new' } }),
+      racing.restoreWithLandlord(
+        unitId,
+        { expectLandlordId: 'c-old', next: { contactId: 'c-new' } },
+        { readContacts: EVERYONE_LIVE_LANDLORD },
+      ),
     ).rejects.toBeInstanceOf(RosterWriteConflictError);
     const stored = await units.getById(unitId, { consistentRead: true });
     expect(stored?.landlordId).toBe('c-racer');
@@ -449,10 +478,11 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
         }),
       ),
     );
-    const updated = await racing.restoreWithLandlord(unitId, {
-      expectLandlordId: 'c-old',
-      next: { contactId: 'c-new' },
-    });
+    const updated = await racing.restoreWithLandlord(
+      unitId,
+      { expectLandlordId: 'c-old', next: { contactId: 'c-new' } },
+      { readContacts: EVERYONE_LIVE_LANDLORD },
+    );
     expect(updated.landlordId).toBe('c-new');
     expect(updated.deleted_at).toBeUndefined();
     expect(updated.contacts).toEqual([
@@ -499,7 +529,11 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
     const contended = createUnitsRepo({ doc: contendedDoc, env: testEnv, logger });
 
     await expect(
-      contended.restoreWithLandlord(unitId, { expectLandlordId: 'c-old', next: { contactId: 'c-new' } }),
+      contended.restoreWithLandlord(
+        unitId,
+        { expectLandlordId: 'c-old', next: { contactId: 'c-new' } },
+        { readContacts: EVERYONE_LIVE_LANDLORD },
+      ),
     ).rejects.toBeInstanceOf(RosterWriteConflictError);
     expect(writes).toBe(3);
     // Nothing of the restore landed: still deleted, still c-old's, and the

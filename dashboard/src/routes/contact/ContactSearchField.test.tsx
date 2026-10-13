@@ -302,4 +302,63 @@ describe('ContactSearchField', () => {
     expect(screen.queryByRole('listbox')).toBeNull();
     expect(input).toHaveAttribute('aria-expanded', 'false');
   });
+
+  it('opens above a low input so a matching option stays reachable', () => {
+    const viewportHeight = window.innerHeight;
+    const rectSpy = vi.spyOn(HTMLInputElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      top: viewportHeight - 40, bottom: viewportHeight - 4,
+      left: 24, right: 324, width: 300, height: 36,
+      x: 24, y: viewportHeight - 40, toJSON: () => ({}),
+    } as DOMRect);
+    const heightSpy = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(120);
+    try {
+      const { onChange } = setup({ name: 'Ali' });
+      const list = screen.getByRole('listbox');
+      expect(list.style.bottom).toBe('44px');
+      expect(list.style.top).toBe('');
+      expect(Number.parseFloat(list.style.maxHeight)).toBeLessThanOrEqual(viewportHeight - 56);
+      fireEvent.click(screen.getByRole('option', { name: /Alice Smith/ }));
+      expect(onChange).toHaveBeenCalledWith({ name: 'Alice Smith', contactId: 'c1' });
+    } finally {
+      rectSpy.mockRestore();
+      heightSpy.mockRestore();
+    }
+  });
+
+  it('keeps a short list below the input when it fits there', () => {
+    const rectSpy = vi.spyOn(HTMLInputElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      top: 100, bottom: 136, left: 24, right: 324, width: 300, height: 36,
+      x: 24, y: 100, toJSON: () => ({}),
+    } as DOMRect);
+    const heightSpy = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(40);
+    try {
+      setup({ name: 'Ali' });
+      const list = screen.getByRole('listbox');
+      expect(list.style.top).toBe('140px');
+      expect(list.style.bottom).toBe('');
+    } finally {
+      rectSpy.mockRestore();
+      heightSpy.mockRestore();
+    }
+  });
+
+  it('caps the list to available space in a short viewport without a minimum overflow', () => {
+    const originalHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight');
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 120 });
+    const rectSpy = vi.spyOn(HTMLInputElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      top: 44, bottom: 80, left: 24, right: 324, width: 300, height: 36,
+      x: 24, y: 44, toJSON: () => ({}),
+    } as DOMRect);
+    const heightSpy = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(200);
+    try {
+      setup({ name: 'Ali' });
+      const list = screen.getByRole('listbox');
+      expect(list.style.bottom).toBe('80px');
+      expect(list.style.maxHeight).toBe('28px');
+    } finally {
+      rectSpy.mockRestore();
+      heightSpy.mockRestore();
+      if (originalHeight) Object.defineProperty(window, 'innerHeight', originalHeight);
+    }
+  });
 });

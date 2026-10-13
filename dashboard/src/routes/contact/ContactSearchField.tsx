@@ -94,7 +94,7 @@ export function ContactSearchField({
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   /** Viewport coordinates for the portaled list, measured from the input. */
-  const [pos, setPos] = useState<{ top: number; left: number; width: number; maxHeight: string } | null>(
+  const [pos, setPos] = useState<{ top?: number; bottom?: number; left: number; width: number; maxHeight: number } | null>(
     null,
   );
   /** The input's viewport position when the list was measured - what a scroll
@@ -125,14 +125,21 @@ export function ContactSearchField({
     }
     const rect = inputRef.current.getBoundingClientRect();
     anchorRef.current = { top: rect.top, left: rect.left };
-    const top = rect.bottom + 4;
+    const gap = 4;
+    const edge = 12;
+    const below = Math.max(0, window.innerHeight - rect.bottom - gap - edge);
+    const above = Math.max(0, rect.top - gap - edge);
+    const listHeight = (listRef.current?.scrollHeight ?? 0) + 2;
+    const openAbove = below < listHeight && above > below;
     setPos({
-      top,
+      ...(openAbove
+        ? { bottom: window.innerHeight - rect.top + gap }
+        : { top: rect.bottom + gap }),
       left: rect.left,
       width: rect.width,
-      // Fit the remaining viewport, with a floor so a field near the bottom of
-      // a short window still shows something worth reading.
-      maxHeight: `max(9rem, min(${Math.round(window.innerHeight - top - 12)}px, 60vh))`,
+      // The fixed portal cannot be scrolled into view by an ancestor. Use the
+      // roomier side when needed and never force a minimum beyond the viewport.
+      maxHeight: Math.min(openAbove ? above : below, window.innerHeight * 0.6),
     });
   }, [isListShown, matches.length]);
 
@@ -268,7 +275,7 @@ export function ContactSearchField({
           aria-label={`${inputLabel} suggestions`}
           style={
             pos
-              ? { top: pos.top, left: pos.left, width: pos.width, maxHeight: pos.maxHeight }
+              ? { top: pos.top, bottom: pos.bottom, left: pos.left, width: pos.width, maxHeight: pos.maxHeight }
               : undefined
           }
         >

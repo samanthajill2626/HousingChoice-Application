@@ -165,6 +165,16 @@ const TOUR_LABELS: Record<string, string> = {
   tour_reopened: 'Tour reopened',
 };
 
+/** last-heard-from spec 5.4 / 14.3: the send-outcome rows the outcome route
+ *  appends to the unit audit (payload { contactId, actor } + tourId on
+ *  interested). Prefixed by the contact (`who`). "(auto)" never shows here -
+ *  `by` is not on the Activity wire. */
+const OUTCOME_LABELS: Record<string, string> = {
+  listing_declined: 'not interested',
+  listing_decline_cleared: 'not interested cleared',
+  listing_interested: 'interested - tour requested',
+};
+
 /** Staff copy per activity event (GLOSSARY: "property", never "listing"/"unit").
  *  `type` is an OPEN set — an unknown event humanizes (never a blank row). */
 export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescription {
@@ -187,6 +197,15 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
   const tourLabel = TOUR_LABELS[e.type];
   if (tourLabel !== undefined) {
     return { label: tourLabel, ...(e.tourId ? { to: `/tours/${e.tourId}` } : {}) };
+  }
+  const outcomeLabel = OUTCOME_LABELS[e.type];
+  if (outcomeLabel !== undefined) {
+    // `who` is always present in practice (the route writes contactId); the
+    // fallback keeps the open-set rule - never a blank or "undefined" row.
+    return {
+      label: `${who ?? 'A recipient'} ${outcomeLabel}`,
+      ...(e.type === 'listing_interested' && e.tourId ? { to: `/tours/${e.tourId}` } : contactLink),
+    };
   }
   switch (e.type) {
     case 'unit_created':

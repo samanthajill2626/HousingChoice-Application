@@ -171,6 +171,27 @@ describe('describeUnitActivity', () => {
     expect(describeUnitActivity(evt({ type: 'unit_restored' }))).toEqual({ label: 'Property restored' });
   });
 
+  it('describes the send-outcome rows with the contact (name -> id) and links (spec 5.4)', () => {
+    expect(describeUnitActivity(evt({ type: 'listing_declined', contactId: 'c1', contactName: 'Tia Moss' }))).toEqual({
+      label: 'Tia Moss not interested',
+      to: '/contacts/c1',
+    });
+    expect(describeUnitActivity(evt({ type: 'listing_decline_cleared', contactId: 'c1' }))).toEqual({
+      label: 'c1 not interested cleared',
+      to: '/contacts/c1',
+    });
+    // Interested links the tour it created.
+    expect(describeUnitActivity(evt({ type: 'listing_interested', contactId: 'c1', contactName: 'Tia Moss', tourId: 't9' }))).toEqual({
+      label: 'Tia Moss interested - tour requested',
+      to: '/tours/t9',
+    });
+    // No tourId -> the contact link.
+    expect(describeUnitActivity(evt({ type: 'listing_interested', contactId: 'c1' }))).toEqual({
+      label: 'c1 interested - tour requested',
+      to: '/contacts/c1',
+    });
+  });
+
   it('lists the humanized changed fields on an edit', () => {
     expect(describeUnitActivity(evt({ type: 'unit_updated', fields: ['rent_min', 'deposit'] }))).toEqual({
       label: 'Property updated',

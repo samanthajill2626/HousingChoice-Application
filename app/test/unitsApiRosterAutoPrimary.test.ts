@@ -192,7 +192,7 @@ describe('POST /api/units/:id/contacts - auto-primary (spec revision 4 section 4
     expect(payloads[0]).toMatchObject({ contactId: 'c-pm', role: 'pm', primaryContact: true, autoPrimary: true });
   });
 
-  it('(h) (PIN) a requested primary is audited primary without autoPrimary; a non-primary add is audited not primary', async () => {
+  it('(h2) (PIN) a requested primary is audited primary without autoPrimary; a non-primary add is audited not primary', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-h2', {
       contacts: [{ contactId: 'c-ll', role: 'landlord', primaryContact: true }],
@@ -220,7 +220,7 @@ describe('POST /api/units/:id/contacts - auto-primary (spec revision 4 section 4
   // "Make <Name> primary" (spec 7.4) sends this same write, and on this shape
   // the rule would have promoted the contact too, so only the request's own
   // flag tells the two apart.
-  it('(h) (PIN) an explicit Make primary on an ownerless no-primary list appends unit_contact_added only - no unit_primary_contact_assigned', async () => {
+  it('(h3) (PIN) an explicit Make primary on an ownerless no-primary list appends unit_contact_added only - no unit_primary_contact_assigned', async () => {
     const { app, world } = makeWebhookHarness();
     seedOwnerlessUnit(world, 'u-h3', { contacts: [{ contactId: 'c-seated', role: 'pm', primaryContact: false }] });
     seedContact(world, 'c-seated');

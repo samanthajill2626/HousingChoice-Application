@@ -6,7 +6,7 @@ severity: med
 status: open
 area: app
 created: 2026-10-13
-refs: app/src/services/primaryHandoff.ts:86-89, app/src/repos/unitsRepo.ts:1738-1740, app/src/repos/unitsRepo.ts:865-868, app/src/lib/propertyContact.ts:149-156, app/src/routes/contacts.ts:2275-2279, dashboard/src/routes/contact/ContactDetail.tsx:140-141
+refs: app/src/services/primaryHandoff.ts:86-89, app/src/repos/unitsRepo.ts:1739-1741, app/src/repos/unitsRepo.ts:865-868, app/src/lib/propertyContact.ts:151-158, app/src/routes/contacts.ts:2275-2279, dashboard/src/routes/contact/ContactDetail.tsx:140-141
 ---
 
 **Problem.** The contact-DELETE hand-off (`DELETE /api/contacts/:id`,
@@ -16,12 +16,12 @@ the consistent units Scan collects a unit as a target only when its
 `unitContacts()` flagged row is that contact
 (`app/src/services/primaryHandoff.ts:86-89`), and `handOffPrimaryFrom`
 re-checks the same thing on its consistent re-read and answers
-`not_primary` otherwise (`app/src/repos/unitsRepo.ts:1738-1740`).
+`not_primary` otherwise (`app/src/repos/unitsRepo.ts:1739-1741`).
 
 On a property with a stored contact list where NO row is flagged and
 `landlordId` names contact L, L IS the property's contact: the
 property-contact lookup falls back to the landlord of record when nothing is
-flagged (`app/src/lib/propertyContact.ts:149-156`), and the restore paths
+flagged (`app/src/lib/propertyContact.ts:151-158`), and the restore paths
 already treat L as the primary - `landlordWasPrimary`
 (`app/src/repos/unitsRepo.ts:865-868`) answers true when no row is flagged.
 Deleting L hands off nothing: the unit is never a target, no
@@ -30,7 +30,9 @@ skips the deleted L and answers nobody (`reason: 'deleted'`) even when a
 live, eligible contact sits on the list. Nothing re-runs the hand-off later
 (only the one-time backfill repairs such a unit, if it runs after the
 delete). A landlord-only unit with NO stored list is not affected: its
-DERIVED landlord row counts as flagged, so it is handed off.
+DERIVED landlord row counts as flagged, so the Scan does target it, but that
+row is its only row - `chooseHeir` finds no heir and `handOffPrimaryFrom`
+answers `unchanged`, so nothing moves (there is nobody to move it to).
 
 **By design, for now.** Spec 4.6's last bullet ("Restore vs. contact delete
 on a roster with NO flagged row") makes the difference deliberate: a restore
@@ -82,7 +84,7 @@ when nothing is flagged:
   `landlordWasPrimary` alone is true for EVERY no-flag unit whoever its
   landlord is; the landlord-of-record test is what keeps one delete from
   targeting all of them.
-- `handOffPrimaryFrom`'s re-check (`unitsRepo.ts:1738-1740`): the same
+- `handOffPrimaryFrom`'s re-check (`unitsRepo.ts:1739-1741`): the same
   predicate on the consistent re-read, so a retry still re-checks.
   `chooseHeir` already excludes the deleted landlord (step 1 skips it, step
   2 takes the earliest-added eligible contact) and `applyPrimary` flags the

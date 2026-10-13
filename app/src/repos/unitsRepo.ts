@@ -1617,9 +1617,10 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         // primary, or when NO row is flagged (the heir function then picks
         // who); a FLAGGED row elsewhere is never displaced, deleted or not -
         // the rule reads the flag, never liveness, so a soft-deleted contact
-        // still flagged there stays flagged (spec 4.7: until the next
-        // eligible write or the script). The primary_contact scalar is never
-        // read; with no hand-off it is re-aligned to the flag below.
+        // still flagged there stays flagged (spec 4.7) until the script, a Make
+        // primary or that row's removal - or, after a clear (4.4 needs no live
+        // landlord of record), the next eligible write. The primary_contact scalar
+        // is never read; with no hand-off it is re-aligned to the flag below.
         const oldWasPrimary =
           old !== undefined && !keepsOld && landlordWasPrimary(roster, old);
         const nextRoster: UnitContact[] =

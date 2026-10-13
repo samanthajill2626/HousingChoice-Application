@@ -6,20 +6,20 @@ severity: low
 status: open
 area: app
 created: 2026-10-13
-refs: app/src/repos/contactsRepo.ts:978-980, app/src/repos/contactsRepo.ts:1288-1290, app/src/lib/propertyContact.ts:84-102, app/src/routes/units.ts:1408, app/src/routes/units.ts:597, app/src/repos/unitsRepo.ts:1375, app/src/repos/unitsRepo.ts:1663, app/src/repos/unitsRepo.ts:1744, app/src/services/primaryHandoff.ts:100-105, app/scripts/assign-primary-contacts.ts:314, app/src/repos/unitsRepo.ts:865-868
+refs: app/src/repos/contactsRepo.ts:978-980, app/src/repos/contactsRepo.ts:1288-1290, app/src/lib/propertyContact.ts:86-104, app/src/routes/units.ts:1408, app/src/routes/units.ts:597, app/src/repos/unitsRepo.ts:1375, app/src/repos/unitsRepo.ts:1664, app/src/repos/unitsRepo.ts:1745, app/src/services/primaryHandoff.ts:100-105, app/scripts/assign-primary-contacts.ts:314, app/src/repos/unitsRepo.ts:865-868
 ---
 
 **Problem.** Since `feat/primary-contact-integrity`, every AUTOMATIC
 primary-contact decision reads the liveness (and type) of the roster
-contacts through `readRosterContacts` (`app/src/lib/propertyContact.ts:84-102`),
+contacts through `readRosterContacts` (`app/src/lib/propertyContact.ts:86-104`),
 that is `contactsRepo.getManyByIds(ids, { requireComplete: true })`
 (`app/src/repos/contactsRepo.ts:1288-1290`), whose BatchGet carries no
 `ConsistentRead` (`contactsRepo.ts:978-980`). The callers that decide a WRITE
 from it: auto-primary on an add or edit (`app/src/routes/units.ts:1408` ->
 `decideAutoPrimary`), the remove hand-off (`app/src/repos/unitsRepo.ts:1375`),
-the restore swap (`unitsRepo.ts:1663`), the "Restore without a landlord" heir
+the restore swap (`unitsRepo.ts:1664`), the "Restore without a landlord" heir
 pick (`app/src/routes/units.ts:597`), the contact-delete hand-off
-(`app/src/services/primaryHandoff.ts:100-105` -> `unitsRepo.ts:1744`) and the
+(`app/src/services/primaryHandoff.ts:100-105` -> `unitsRepo.ts:1745`) and the
 one-time backfill (`app/scripts/assign-primary-contacts.ts:314`). The restore
 heir pick replaced caseworker-integrity's per-row consistent `getById`; plan
 ruling R13 accepted that relaxation deliberately
@@ -42,9 +42,11 @@ adjudicated them accepted; they are filed together here.
    still return a contact soft-deleted a moment ago as live, and the heir
    function or auto-primary then picks it. Example: Staff A deletes C while
    Staff B runs "Restore without a landlord"; the heir pick reads C's
-   pre-delete image and C becomes the primary, which spec 4.4 forbids, and
-   C's own delete hand-off may already have scanned past that unit. The same
-   end state needs no stale replica at all (F4): two near-simultaneous
+   pre-delete image and C becomes the primary - spec 4.2's accepted-race
+   class (spec 4.4's refusal is the 409 on an explicit write, which an
+   automatic pick never meets) - and C's own delete hand-off may already
+   have scanned past that unit. The same end state needs no stale replica
+   at all (F4): two near-simultaneous
    deletes - P's hand-off reads Q live, Q is deleted and Q's own hand-off
    Scan still sees P flagged (so the unit is not Q's target), then P's
    hand-off writes Q flagged, because its write is fenced on `landlordId` and

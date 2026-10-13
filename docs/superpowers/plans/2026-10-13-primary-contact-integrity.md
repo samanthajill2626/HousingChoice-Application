@@ -1,6 +1,6 @@
 # Primary contact integrity - implementation plan
 
-Status: v4 2026-10-13 (sections 0-3 binding; slices S1-S5 from five section drafts; contract issues ruled in 3.2; plan review rounds 1-3 folded in - see plan-review/adjudications.md).
+Status: v5 FINAL 2026-10-13 (sections 0-3 binding; slices S1-S5 from five section drafts; contract issues ruled in 3.2; plan review CLOSED after round 4, terminal - see plan-review/adjudications.md).
 Spec: `docs/superpowers/specs/2026-10-12-primary-contact-integrity-design.md`
 (rev 6, approved and reconciled by Cameron 2026-10-13). Section references
 below like "spec 4.4" point there.
@@ -8891,8 +8891,8 @@ marker lines. Replacement:
    * `{ kind: 'unknown' }` when the liveness read (ONE complete batch read,
    * readRosterContacts) failed - the route then refuses with 503
    * roster_read_failed and writes nothing.
-   * Decided from `listRead` - the contact list of `unit` (the route's
-   * consistent read) taken ONCE, before the liveness read is awaited - which
+   * Decided from `listRead` - the contact list of the unit the route read
+   * (its consistent read) taken ONCE, before the liveness read is awaited - which
    * is the very value the restore's write is then conditioned on
    * (`expectContacts`; caseworker-integrity R3 code review finding A3, fix
    * wave 3 FW3-2), so a list change in between answers 409

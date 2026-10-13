@@ -345,16 +345,26 @@ Paths (all through the heir function, 4.3):
 - **caseworker-integrity's restores** (on `main` since 2026-10-13): the
   landlord-CLEARING restore ("Restore without a landlord",
   `restoreWithLandlord` with `next: null`) removes the landlord row; if the
-  cleared landlord was the primary it runs the remove rule above (heir /
-  clear; unknown -> refuse). This REPLACES `main`'s sole-landlord promotion
+  cleared landlord was the primary (by `landlordWasPrimary`, 9.2: its row is
+  the flagged primary, OR no row is flagged at all) it runs the remove rule
+  above (heir / clear; unknown -> refuse). This REPLACES `main`'s sole-landlord promotion
   (`routes/units.ts` `soleLandlordToPromote`: exactly ONE remaining eligible
   contact promoted, two or more -> nobody): Cameron, 2026-10-13 - the
   earliest-added eligible contact takes over everywhere, restore included. The
-  landlord SWAP (`next: <id>`), when the old landlord was primary, re-runs the
-  heir function after the swap instead of flagging the new landlord
-  unconditionally - so a soft-deleted new landlord is not made primary.
-  `main`'s tests that assert "nobody promoted with two or more" change; the
-  plan updates them.
+  landlord SWAP (`next: <id>`), when the old landlord was primary (same
+  `landlordWasPrimary` test), re-runs the heir function after the swap instead
+  of flagging the new landlord unconditionally - so a soft-deleted new
+  landlord is not made primary. `main`'s tests that assert "nobody promoted
+  with two or more" change; the plan updates them.
+- **Restore vs. contact delete on a roster with NO flagged row** - different
+  on purpose. A restore REMOVES the landlord's row (and, on a swap, changes
+  the landlord of record), so with nobody flagged it hands off: the heir
+  function decides who the property's primary is from here. The contact-
+  DELETE fan-out matches only a FLAGGED primary (`unitContacts()`), so
+  deleting the landlord of a no-flag roster hands off nothing: nobody was
+  primary before or after, P1 skips the deleted landlord, the property box
+  shows it, and the next eligible write (4.4) or the script (section 8)
+  assigns one. Neither side is a bug to "fix" toward the other.
 
 ### 4.7 P4 - what holds afterwards
 
@@ -365,9 +375,11 @@ Paths (all through the heir function, 4.3):
 - After removing the PRIMARY row, a landlord-clearing restore of a PRIMARY
   landlord, or a swap of a PRIMARY landlord, a unit with a live landlord of
   record or at least one ELIGIBLE live roster contact has a live primary -
-  unless liveness was unknown (they refuse). A write that does not touch the
-  primary (removing another row, a swap of a non-primary landlord) does not
-  run a hand-off: a deleted contact still flagged there (left by a delete with
+  unless liveness was unknown (they refuse). (A restore of a unit with NO
+  flagged row also hands off - `landlordWasPrimary`, 4.6 / 9.2.) A write that
+  does not touch the primary (removing another row, a swap of a landlord who is
+  not the flagged primary while another row is) does not run a hand-off: a
+  deleted contact still flagged there (left by a delete with
   no heir at the time) stays flagged until the next eligible write (4.4) or
   the script (section 8); P1 skips it meanwhile and the property box shows it.
 - After a roster write for an eligible contact X on a unit with no live primary

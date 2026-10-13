@@ -2402,3 +2402,75 @@ describe('TourDetail - contact-type refusals (caseworker integrity)', () => {
     expect(navigateSpy).not.toHaveBeenCalled();
   });
 });
+
+// --- primary-contact-integrity spec 7.1: the fallback box and Check again ---
+describe('TourDetail - the intro fallback box and Check again (primary-contact-integrity spec 7.1)', () => {
+  const GENERAL_INTRO = "Hey, it's Sam. You're now connected with Ann and Lon on this number.";
+  const TOUR_INTRO = "Hey Ann! It's Sam. Putting you in a group text with Lon to tour 123 Main St on Fri Jul 10.";
+  const RECIPIENTS = [
+    { name: 'Ann Tenant', reachability: 'reachable' as const },
+    { name: 'Lon Landlord', reachability: 'reachable' as const },
+  ];
+  const FALLBACK_PREVIEW = {
+    body: GENERAL_INTRO,
+    recipients: RECIPIENTS,
+    recipientCount: 2,
+    deferred: false,
+    introFallback: { reasons: ['no_property_contact' as const], unitId: 'unit-1', street: '123 Main St' },
+  };
+  const TOUR_PREVIEW = { body: TOUR_INTRO, recipients: RECIPIENTS, recipientCount: 2, deferred: false };
+
+  async function openTheDialog(): Promise<HTMLElement> {
+    getTour.mockResolvedValue(makeTour({ status: 'requested', groupThreadId: undefined }));
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Open relay group' }));
+    return screen.findByRole('dialog', { name: 'Open the relay group?' });
+  }
+
+  it('the open dialog explains the general intro with the TOUR heading and links to the property', async () => {
+    previewTourRosterOpen.mockResolvedValue(FALLBACK_PREVIEW);
+    const dialog = await openTheDialog();
+    const box = within(dialog).getByRole('status');
+    expect(within(box).getByText('Using the general intro, not the tour intro.')).toBeInTheDocument();
+    expect(
+      within(box).getByText("123 Main St has no primary contact, so the intro can't name the landlord."),
+    ).toBeInTheDocument();
+    expect(within(box).getByRole('link', { name: 'Set a primary contact' })).toHaveAttribute(
+      'href',
+      '/listings/unit-1',
+    );
+  });
+
+  it('Check again re-runs the preview and swaps the unedited draft for the tour intro', async () => {
+    previewTourRosterOpen.mockResolvedValueOnce(FALLBACK_PREVIEW).mockResolvedValueOnce(TOUR_PREVIEW);
+    const dialog = await openTheDialog();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(previewTourRosterOpen).toHaveBeenCalledTimes(2));
+    expect(previewTourRosterOpen).toHaveBeenLastCalledWith('tour-abc');
+    await waitFor(() =>
+      expect(within(dialog).getByRole('textbox', { name: /Message/ })).toHaveValue(TOUR_INTRO),
+    );
+    expect(within(dialog).queryByRole('status')).not.toBeInTheDocument();
+    expect(createTourRelay).not.toHaveBeenCalled();
+  });
+
+  it('Check again answered 409 relay_already_provisioned closes the dialog and refetches the roster', async () => {
+    previewTourRosterOpen
+      .mockResolvedValueOnce(FALLBACK_PREVIEW)
+      .mockRejectedValueOnce(
+        new ApiError(409, 'relay_already_provisioned', 'relay_already_provisioned', {
+          error: 'relay_already_provisioned',
+        }),
+      );
+    const dialog = await openTheDialog();
+    const rosterReads = getTourRoster.mock.calls.length;
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Check again' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Open the relay group?' })).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(getTourRoster.mock.calls.length).toBeGreaterThan(rosterReads));
+    expect(createTourRelay).not.toHaveBeenCalled();
+  });
+});

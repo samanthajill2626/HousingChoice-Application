@@ -459,6 +459,28 @@ function TourDetailLoaded({
     }
   };
 
+  // primary-contact-integrity spec 7.1 "Check again": re-run the open preview
+  // behind the open dialog and hand it the new one - after the property is
+  // fixed in another tab, the tour intro comes back without reopening the
+  // dialog. A 409 relay_already_provisioned means someone opened the group
+  // meanwhile: close the dialog and refetch the roster, exactly as the first
+  // fetch does. Any other failure rejects, and the dialog shows it in its own
+  // error line. The functional update keeps a dialog that closed while this
+  // was in flight closed.
+  const checkOpenPreviewAgain = async (): Promise<void> => {
+    try {
+      const next = await previewTourRosterOpen(tourId);
+      setOpenPreview((prev) => (prev === null ? null : next));
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'relay_already_provisioned') {
+        setOpenPreview(null);
+        roster.refetch();
+        return;
+      }
+      throw err;
+    }
+  };
+
   // Provision the masked group thread (members auto-resolved server-side) - the
   // confirmed half of handleOpenGroup. Throws on failure so the dialog can show
   // the reason and stay open.
@@ -936,6 +958,10 @@ function TourDetailLoaded({
           deferLabel="Open"
           // The intro is editable here: POST /api/tours/:id/relay accepts introBody.
           editableBody
+          // primary-contact-integrity spec 7.1: the fallback box's heading,
+          // and its Check again.
+          introOwner="tour"
+          onCheckAgain={checkOpenPreviewAgain}
           onConfirm={runOpenGroup}
           onClose={() => setOpenPreview(null)}
         />

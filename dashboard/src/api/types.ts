@@ -2275,6 +2275,9 @@ export interface Contact {
   evictions_source?: FieldSource;
   tenure_source?: FieldSource;
   porting_source?: FieldSource;
+  /** ISO 8601 - the most recent inbound text, call or email FROM this contact
+   *  (any thread). Absent = never heard from. Read-only: the server owns it. */
+  last_heard_from_at?: string;
   [key: string]: unknown;
 }
 

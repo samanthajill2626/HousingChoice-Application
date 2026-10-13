@@ -109,6 +109,7 @@ import {
   type CaseworkerConversionService,
 } from '../services/caseworkerConversion.js';
 import { typeChangeRefusals } from '../services/contactHoldings.js';
+import { handOffPrimariesOfDeletedContact } from '../services/primaryHandoff.js';
 import { registerCaseworkerRoutes } from './caseworkerReview.js';
 import {
   displayNameOf,
@@ -2263,6 +2264,19 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       actor: req.user?.userId,
       deletedAt,
     });
+    // primary-contact-integrity (spec 2026-10-12 section 4.6): now that the
+    // soft delete has persisted, hand every property whose primary contact
+    // this was to its heir (services/primaryHandoff.ts: one consistent Scan of
+    // live and soft-deleted units, the deleted contact excluded and never
+    // read; no heir changes nothing). BEST-EFFORT, like the fan-outs below:
+    // the service never throws, and it is guarded here anyway so a failure can
+    // never turn this successful delete into a 500. Restore runs nothing like
+    // it (spec 4.6: restoring a contact changes no roster).
+    try {
+      await handOffPrimariesOfDeletedContact({ units, contacts, audit, logger: log }, contactId, req.user?.userId);
+    } catch (err) {
+      log.warn({ err, contactId }, 'contact delete: primary handoff failed (best-effort)');
+    }
     // ZERO the unread on every thread this contact still owns (inbox-unread-index
     // spec 4.2, human ruling at the spec gate). A deleted contact's unread threads
     // are invisible to every reader but stay resident in the sparse byUnread

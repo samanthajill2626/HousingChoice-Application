@@ -1337,6 +1337,30 @@ type name `SendOutcome` already exist (the Twilio send-failure vocabulary,
   decline on their own; a converted tour already reads Interested through
   `deriveTourSignal`, and an outcome-only close yields no signal by design.
 
+14.7 Build code-review amendments (2026-10-13, the build orchestrator, recorded in
+`docs/superpowers/reviews/2026-10-12-last-heard-from/code-review/adjudications-round2.md`;
+Cameron may reverse the first one - it is one function):
+- Tour supersession of a decline is DURABLE (D11's intent: "a tour created ...
+  by a PERSON after a decline means the tenant changed their mind, from any
+  tour-creating path"). `deriveTourActivityAt` counts the `createdAt` of EVERY
+  tour for the pair, qualifying or not, and the `lastMarkedAt` of QUALIFYING
+  tours only. So a tour created after a decline keeps it superseded even after
+  that tour is canceled, marked no-show or closed not-a-fit, whichever path
+  created it (before this, a decline came back after the cancel on the Tours
+  page path but not on the Interested path, which deletes the record - review
+  round 2). A cancel / no-show / not-a-fit MARK never supersedes on its own:
+  staff canceling a tour BECAUSE the tenant declined leaves the decline
+  effective. Section 5.4's "a canceled, no-show or not-a-fit tour ... contributes
+  no activity" is narrowed to its `lastMarkedAt`.
+- The Interested route creates the tour BEFORE it clears the decline (5.4 steps
+  (3) and (4) reversed), clears the decline record it READ whatever its
+  effectiveness (compare-and-clear on its `at`, so a decline another staff
+  member records meanwhile survives), records `listing_decline_cleared` only
+  when that decline was effective, and answers 503 `{ error:
+  'outcome_unavailable', saved: true }` for any failure after a write; `saved`
+  is never sent when the click wrote nothing (an Interested that found a tour,
+  an Undo with nothing to undo).
+
 ## 13. Glossary additions
 
 `documentation/GLOSSARY.md` gains: "last heard from" (the most recent

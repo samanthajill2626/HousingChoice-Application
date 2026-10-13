@@ -45,6 +45,9 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
   it('returns a back-compat single-row roster for a roster-less unit (derived from landlordId)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-1', { landlordId: 'c-ll-9' });
+    // A LIVE landlord record: a landlordId naming no record now reads as
+    // deleted (primary-contact-integrity spec 7.5).
+    seedContact(world, 'c-ll-9');
     const res = await request(app)
       .get('/api/units/u-1')
       .set('x-origin-verify', SECRET)
@@ -56,6 +59,7 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
     expect(res.body.unit.contacts).toEqual([
       { contactId: 'c-ll-9', role: 'landlord', primaryContact: true },
     ]);
+    expect(res.body.unit.propertyContact).toEqual({ contactId: 'c-ll-9', heirIfPrimaryRemoved: null });
   });
 
   it('returns the stored roster when present, name/company enriched at read time', async () => {

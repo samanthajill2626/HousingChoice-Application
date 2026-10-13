@@ -88,7 +88,13 @@ import { requireLandlordContact, sendContactTypeError } from '../services/contac
 import { isCaseworker } from '../lib/caseworkers.js';
 // The ONE automatic-routing eligibility rule lives in lib/propertyContact.ts
 // (primary-contact-integrity spec 4.3), shared with the heir function.
-import { chooseHeir, isAutoRoutingEligible, readRosterContacts } from '../lib/propertyContact.js';
+import {
+  chooseHeir,
+  decidePropertyContact,
+  isAutoRoutingEligible,
+  readRosterContacts,
+  rosterContactIds,
+} from '../lib/propertyContact.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -270,6 +276,85 @@ function toUnitActivityEvent(e: AuditEvent): UnitActivityEvent {
   };
 }
 
+/**
+ * primary-contact-integrity spec 7.5: one roster row as the property page
+ * receives it. The two flags are RESPONSE-only (never stored) and set ONLY from
+ * a complete read of the roster's contacts: `deleted` when the row's contact is
+ * soft-deleted or has no record, `caseworker` when it is a caseworker
+ * (lib/caseworkers isCaseworker). Absent otherwise.
+ */
+interface UnitContactView extends UnitContact {
+  deleted?: true;
+  caseworker?: true;
+}
+
+/**
+ * primary-contact-integrity spec 7.5: who this property's contact is. Served on
+ * the unit ONLY when the roster read was complete (absent = could not tell).
+ */
+interface PropertyContactBlock {
+  /** P1 (lib/propertyContact decidePropertyContact) with no tenant; null = nobody. */
+  contactId: string | null;
+  /** Why nobody, when contactId is null. */
+  reason?: 'none' | 'deleted';
+  /**
+   * The heir function (chooseHeir) excluding the current flagged primary: who
+   * takes over if that row is removed. null when nobody would, and when no row
+   * is flagged (there is no primary to remove). `name` is the heir's display
+   * name from the same read - present even for an off-roster landlord, who has
+   * no row to take a name from.
+   */
+  heirIfPrimaryRemoved: { contactId: string; name?: string } | null;
+}
+
+/**
+ * primary-contact-integrity spec 7.5: decide the propertyContact block from ONE
+ * complete roster read (`byId` holds every roster id and landlordId that has a
+ * record; an absent id is a missing contact). PURE. Undefined = could not tell
+ * - unreachable on a complete read (P1 with no tenant never answers is_tenant,
+ * an all-ok lookup never answers read_failed, and chooseHeir with a read never
+ * answers unknown), kept so the caller omits the block rather than inventing
+ * one.
+ */
+function propertyContactBlockOf(
+  unit: Pick<UnitItem, 'contacts' | 'landlordId'>,
+  byId: Map<string, ContactItem>,
+): PropertyContactBlock | undefined {
+  const decided = decidePropertyContact({
+    unit,
+    lookup: (contactId) => ({ ok: true as const, contact: byId.get(contactId) }),
+  });
+  let contactId: string | null;
+  let reason: 'none' | 'deleted' | undefined;
+  if (decided.kind === 'found') {
+    contactId = decided.contactId;
+  } else if (decided.kind === 'nobody' && decided.reason !== 'is_tenant') {
+    contactId = null;
+    reason = decided.reason;
+  } else {
+    return undefined;
+  }
+
+  const roster = unitContacts(unit);
+  const primary = roster.find((row) => row.primaryContact === true);
+  let heirIfPrimaryRemoved: PropertyContactBlock['heirIfPrimaryRemoved'] = null;
+  if (primary !== undefined) {
+    const heir = chooseHeir({
+      roster,
+      landlordId: unit.landlordId,
+      exclude: primary.contactId,
+      read: { ok: true as const, byId },
+    });
+    if (heir.kind === 'unknown') return undefined;
+    if (heir.kind === 'heir') {
+      const heirContact = byId.get(heir.contactId);
+      const name = heirContact !== undefined ? displayNameOfContact(heirContact) : undefined;
+      heirIfPrimaryRemoved = { contactId: heir.contactId, ...(name !== undefined && { name }) };
+    }
+  }
+  return { contactId, ...(reason !== undefined && { reason }), heirIfPrimaryRemoved };
+}
+
 const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
 
@@ -418,20 +503,58 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       // un-enriched, which is the same degradation the per-row catch gave.
       log.warn({ unitId: unit.unitId, err }, 'roster enrich: contact lookup failed (best-effort)');
     }
-    return roster.map((row) => {
-      const contact = byId.get(row.contactId);
-      const name = contact ? displayNameOfContact(contact) : undefined;
-      const company =
-        contact && typeof contact['company'] === 'string' ? (contact['company'] as string) : undefined;
-      // Read-time enrichment is authoritative: drop any stale stored name/company
-      // and re-set ONLY when the contact currently carries one.
-      const { name: _staleName, company: _staleCompany, ...rest } = row;
+    return roster.map((row) => enrichRow(row, byId.get(row.contactId)));
+  }
+
+  /**
+   * One roster row's read-time name/company from `contact` (undefined: the row
+   * serves un-enriched). Read-time enrichment is authoritative: any stale
+   * stored name/company is dropped and re-set ONLY when the contact currently
+   * carries one. Shared by enrichRoster and enrichRosterView so the two can
+   * never name a row differently.
+   */
+  function enrichRow(row: UnitContact, contact: ContactItem | undefined): UnitContact {
+    const name = contact ? displayNameOfContact(contact) : undefined;
+    const company =
+      contact && typeof contact['company'] === 'string' ? (contact['company'] as string) : undefined;
+    const { name: _staleName, company: _staleCompany, ...rest } = row;
+    return {
+      ...rest,
+      ...(name !== undefined && { name }),
+      ...(company !== undefined && { company }),
+    };
+  }
+
+  /**
+   * primary-contact-integrity spec 7.5: the roster as the PROPERTY PAGE reads
+   * it - GET /api/units/:id and the two contact-list writes. ONE complete read
+   * (requireComplete, lib/propertyContact readRosterContacts) of the roster's
+   * contact ids AND landlordId - an off-roster landlord of record must not read
+   * as missing. On that complete read every row gets `deleted: true` (contact
+   * soft-deleted or missing) and `caseworker: true` (isCaseworker), each only
+   * when it holds, and the unit gets the `propertyContact` block. When the read
+   * fails in EITHER shape (a raw chunk error or IncompleteBatchReadError -
+   * neither carries a partial map; readRosterContacts answers { ok: false }
+   * for both) the rows fall back to enrichRoster's best-effort read exactly as
+   * before and the block is ABSENT ("could not tell"). readRosterContacts never
+   * throws and enrichRoster guards its own read, so the GET never 500s here.
+   * enrichRoster itself is unchanged for the other caller (the unit restore).
+   */
+  async function enrichRosterView(
+    unit: UnitItem,
+  ): Promise<{ contacts: UnitContactView[]; propertyContact?: PropertyContactBlock }> {
+    const read = await readRosterContacts(contacts, rosterContactIds(unit), log);
+    if (!read.ok) return { contacts: await enrichRoster(unit) };
+    const rows = unitContacts(unit).map((row): UnitContactView => {
+      const contact = read.byId.get(row.contactId);
       return {
-        ...rest,
-        ...(name !== undefined && { name }),
-        ...(company !== undefined && { company }),
+        ...enrichRow(row, contact),
+        ...((contact === undefined || isContactDeleted(contact)) && { deleted: true as const }),
+        ...(contact !== undefined && isCaseworker(contact) && { caseworker: true as const }),
       };
     });
+    const block = propertyContactBlockOf(unit, read.byId);
+    return { contacts: rows, ...(block !== undefined && { propertyContact: block }) };
   }
 
   /**
@@ -612,7 +735,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // unit-photos: resolve stored media keys to stable same-origin /unit-media
     // URLs (design 2026-07-21) ALONGSIDE the raw `media` (the management handle).
     const mediaDisplay = resolveUnitMedia(unit, { logger: log });
-    res.json({ unit: { ...unit, contacts: await enrichRoster(unit), mediaDisplay } });
+    // primary-contact-integrity spec 7.5: rows flagged and the propertyContact
+    // block ONLY on a complete roster read; else today's rows and no block.
+    res.json({ unit: { ...unit, ...(await enrichRosterView(unit)), mediaDisplay } });
   });
 
   // POST /api/units/:unitId/photos/presign  body { count, contentTypes[] }

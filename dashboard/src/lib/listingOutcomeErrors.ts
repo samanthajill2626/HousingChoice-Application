@@ -16,6 +16,16 @@ export function isOutcomeSaved(err: unknown): boolean {
   return body !== null && typeof body === 'object' && (body as Record<string, unknown>)['saved'] === true;
 }
 
+/**
+ * True for the outcome route's 409 { error: 'tour_type_required' }: a
+ * route-mode Interested click whose property lost its structured tour_type
+ * since the page loaded (review B R2-5). Not an error to show - the caller
+ * falls through to the form path (the Schedule tour form) instead.
+ */
+export function isTourTypeRequired(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 409 && err.code === 'tour_type_required';
+}
+
 /** The inline row error for a failed outcome action. */
 export function outcomeErrorCopy(err: unknown): string {
   return isOutcomeSaved(err) ? OUTCOME_SAVED_RELOAD : OUTCOME_SAVE_FAILED;

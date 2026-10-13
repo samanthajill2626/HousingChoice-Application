@@ -14,7 +14,7 @@ import { Spinner } from '../../ui/index.js';
 import { daysSince, formatHeardFrom } from '../../lib/heardFrom.js';
 // The ONE outcome-error copy rule (W2 Task 3.8): 503 with saved:true ->
 // "Saved - reload to see the change.", anything else -> "Couldn't save - try again."
-import { outcomeErrorCopy } from '../../lib/listingOutcomeErrors.js';
+import { isTourTypeRequired, outcomeErrorCopy } from '../../lib/listingOutcomeErrors.js';
 import { TourChip } from '../contact/Card.js';
 import { followUpKey, type FollowUpResolution, type FollowUpsState } from './useFollowUps.js';
 import styles from './FollowUpView.module.css';
@@ -68,6 +68,8 @@ function FollowUpRow({
   const sent = formatHeardFrom(item.sentAt, now);
   const heard = formatHeardFrom(item.lastHeardFromAt, now);
   const unitPath = `/listings/${encodeURIComponent(item.unitId)}`;
+  // The form path: the property page's Schedule tour form with the tenant set.
+  const tourFormPath = `${unitPath}?tour=new&tenantId=${encodeURIComponent(item.contactId)}`;
 
   async function record(outcome: 'interested' | 'not_interested' | 'clear'): Promise<void> {
     if (busy) return;
@@ -82,7 +84,10 @@ function FollowUpRow({
       else if (row.outcome === 'not_interested') onResolve({ kind: 'not_interested' });
       else onUnresolve();
     } catch (err) {
-      setError(outcomeErrorCopy(err));
+      // Review B R2-5: the property lost its tour_type since the list loaded
+      // (409 tour_type_required) - fall through to the form path.
+      if (outcome === 'interested' && isTourTypeRequired(err)) navigate(tourFormPath);
+      else setError(outcomeErrorCopy(err));
     } finally {
       setBusy(false);
     }
@@ -131,7 +136,7 @@ function FollowUpRow({
                 aria-label={`Mark ${item.name} interested in ${item.unitLabel}`}
                 onClick={() => {
                   if (item.interestedMode === 'route') void record('interested');
-                  else navigate(`${unitPath}?tour=new&tenantId=${encodeURIComponent(item.contactId)}`);
+                  else navigate(tourFormPath);
                 }}
               >
                 Interested

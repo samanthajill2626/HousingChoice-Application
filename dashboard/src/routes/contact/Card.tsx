@@ -7,7 +7,7 @@ import { useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { InterestedMode, ListingSendRow, TourSignalState } from '../../api/index.js';
 import { formatHeardFrom } from '../../lib/heardFrom.js';
-import { outcomeErrorCopy } from '../../lib/listingOutcomeErrors.js';
+import { isTourTypeRequired, outcomeErrorCopy } from '../../lib/listingOutcomeErrors.js';
 import styles from './Card.module.css';
 
 export interface CardProps {
@@ -248,7 +248,9 @@ export interface SendRosterRowProps {
   /** Render that link with `replace` (the property page, whose tour dialog
    *  adds no history entry - task 5.3); the contact pages leave it a push. */
   requestTourReplace?: boolean;
-  /** interestedMode 'form' on a tenant row: open the Schedule tour form. */
+  /** interestedMode 'form' on a tenant row: open the Schedule tour form. Also
+   *  the fall-through when a 'route' click answers 409 tour_type_required (the
+   *  property lost its tour_type since the page loaded - review B R2-5). */
   onOpenTourForm?: () => void;
   now: Date;
 }
@@ -320,7 +322,16 @@ export function SendRosterRow({
     setBusy(true);
     setError(null);
     void onOutcome(outcome)
-      .catch((err: unknown) => setError(outcomeErrorCopy(err)))
+      .catch((err: unknown) => {
+        // Review B R2-5: the property lost its tour_type since the page
+        // loaded (409 tour_type_required) - fall through to the form path
+        // when the host has one, rather than a dead-end "try again".
+        if (outcome === 'interested' && isTourTypeRequired(err) && onOpenTourForm !== undefined) {
+          onOpenTourForm();
+          return;
+        }
+        setError(outcomeErrorCopy(err));
+      })
       .finally(() => setBusy(false));
   };
   const sent = formatHeardFrom(row.sentAt, now);

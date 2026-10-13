@@ -226,6 +226,19 @@ describe('FollowUpView - actions', () => {
     expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('1 waiting');
   });
 
+  // Review B R2-5: the property lost its tour_type since the list loaded -
+  // the route answers 409 tour_type_required, and the click falls through to
+  // the form path instead of a dead-end "try again".
+  it('Interested (route) answered 409 tour_type_required opens the tour form, no error line', async () => {
+    const u = userEvent.setup();
+    setListingSendOutcome.mockRejectedValue(new ApiError(409, 'tour_type_required', 'tour_type_required', { error: 'tour_type_required' }));
+    renderView([item()]);
+    await u.click(await screen.findByRole('button', { name: 'Mark Dario Vance interested in 672 Cameron Alexander Blvd A' }));
+    expect(setListingSendOutcome).toHaveBeenCalledWith('u1', 'c1', 'interested');
+    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/listings/u1?tour=new&tenantId=c1'));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('Interested (form - no tour type on the property) opens the tour form, no API call', async () => {
     const u = userEvent.setup();
     renderView([item({ interestedMode: 'form' })]);

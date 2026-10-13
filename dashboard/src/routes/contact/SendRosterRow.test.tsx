@@ -185,6 +185,25 @@ describe('SendRosterRow - actions', () => {
     expect(onOutcome).not.toHaveBeenCalled();
   });
 
+  // Review B R2-5: the property lost its tour_type since the page loaded, so
+  // the route answers 409 tour_type_required - fall through to the form path.
+  it("'route' mode answered 409 tour_type_required opens the tour form (no error line)", async () => {
+    const onOpenTourForm = vi.fn();
+    const onOutcome = vi.fn(() => Promise.reject(new ApiError(409, 'tour_type_required', 'tour_type_required', { error: 'tour_type_required' })));
+    renderRow({}, { onOutcome, onOpenTourForm });
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss interested in 12 Oak St' }));
+    expect(onOutcome).toHaveBeenCalledWith('interested');
+    await vi.waitFor(() => expect(onOpenTourForm).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it("'route' mode answered 409 tour_type_required with no form host shows the existing error", async () => {
+    const onOutcome = vi.fn(() => Promise.reject(new ApiError(409, 'tour_type_required', 'tour_type_required', { error: 'tour_type_required' })));
+    renderRow({}, { onOutcome });
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss interested in 12 Oak St' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't save - try again.");
+  });
+
   it("'form' mode with no form host shows Not interested but no Interested button", () => {
     renderRow({}, { interestedMode: 'form' });
     expect(screen.getByRole('button', { name: 'Mark Tia Moss not interested in 12 Oak St' })).toBeInTheDocument();

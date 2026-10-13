@@ -1360,6 +1360,23 @@ Cameron may reverse the first one - it is one function):
   'outcome_unavailable', saved: true }` for any failure after a write; `saved`
   is never sent when the click wrote nothing (an Interested that found a tour,
   an Undo with nothing to undo).
+- Undo (`clear`) is the same compare-and-clear (review round 3, B R3-1): it
+  removes the decline record it READ (conditioned on its `at`), and when it
+  read none it writes nothing. A decline another staff member records while the
+  Undo is in flight survives. Known limit (A R3-1, round 3): a STALE card's Undo
+  or Interested still acts on the decline the server reads, not the one the
+  card showed; closing that needs the client to send the decline `at` it
+  displayed (a contract addition, filed as
+  `docs/issues/outcome-actions-act-on-server-read-decline.md`).
+- Known limits of durable supersession (review round 3): only a tour's CREATION
+  is durable. A qualifying tour that was rescheduled or reopened after a decline
+  supersedes it while it qualifies, but `lastMarkedAt` is one field, so a later
+  cancel / no-show / not-a-fit mark overwrites the reschedule and the decline is
+  effective again (A R3-1; a durable revival would need the tours PATCH to
+  clear the decline - a product call). And a recipient whose type changes from
+  tenant (a caseworker conversion) reads no tours at all (the "a non-tenant
+  never reads a tour" rule), so a decline its tenant-era tour superseded is
+  effective again (B R3-2).
 
 ## 13. Glossary additions
 

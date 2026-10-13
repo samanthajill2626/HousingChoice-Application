@@ -493,7 +493,9 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   contact: No reply yet / Replied / Interested / Not interested. Interested =
   a qualifying tour exists for that tenant and property (tenants only - a
   partner row never reads a tour); Not interested = a recorded decline not
-  superseded by a later send or later tour activity; Replied = heard from
+  superseded by a later send or later tour activity (a tour CREATED after the
+  decline, by any path - even if that tour is later canceled - or a qualifying
+  tour rescheduled / reopened after it; never a cancel or no-show mark); Replied = heard from
   after the send; otherwise No reply yet. Precedence: Not interested >
   Interested > Replied > No reply yet. DERIVED, never stored, except the
   decline record (`listing_sends.declined`). "(auto)" marks an engine decline

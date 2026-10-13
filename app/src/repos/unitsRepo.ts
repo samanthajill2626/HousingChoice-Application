@@ -765,6 +765,24 @@ export interface UnitsRepo {
     next: string[],
   ): Promise<'written' | 'skipped'>;
   /**
+   * primary-contact-integrity (spec section 8; plan C12): the ONE-TIME
+   * assign-primary-contacts script's write. Sets `contacts` to
+   * `next.contacts` and the `primary_contact` scalar to `next.primaryContact`
+   * ONLY while the unit's landlordId AND contacts[] are still exactly what the
+   * caller read - `unit` IS that read (the updateRosterIfCurrent guard; a
+   * missing unit fails it too). ONE attempt: no re-read and no retry, so a
+   * primary someone set after the read is never overwritten - a lost
+   * condition answers 'skipped' (the script counts it skippedOnCondition and
+   * leaves the unit for a re-run). Any other error is thrown. Stamps
+   * updated_at like every roster write: every unit the script writes has a
+   * stored contact list, which in dev and prod only roster writes create, and
+   * each of those stamps it - so the importer's ownership line never moves.
+   */
+  assignPrimaryIfCurrent(
+    unit: UnitItem,
+    next: { contacts: UnitContact[]; primaryContact: string },
+  ): Promise<'written' | 'skipped'>;
+  /**
    * caseworker-integrity (spec 2026-10-12 section 4 "Restore"): restore a
    * soft-deleted property AND change its landlord of record in one
    * conditional write. Reads the unit (consistent). When it is not
@@ -1534,6 +1552,23 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         throw err;
       }
       log.info({ unitId, members: next.length }, 'unit accepted authorities rewritten');
+      return 'written';
+    },
+
+    async assignPrimaryIfCurrent(unit, next) {
+      try {
+        await updateRosterIfCurrent(unit, {
+          contacts: next.contacts,
+          primary_contact: next.primaryContact,
+        });
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return 'skipped';
+        throw err;
+      }
+      log.info(
+        { unitId: unit.unitId, primaryContact: next.primaryContact, rosterSize: next.contacts.length },
+        'unit primary contact assigned (script)',
+      );
       return 'written';
     },
 

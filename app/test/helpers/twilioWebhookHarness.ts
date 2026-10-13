@@ -3115,6 +3115,19 @@ export function createFakeWorld(): FakeWorld {
       unit.accepted_authorities = [...next];
       return 'written';
     },
+    // primary-contact-integrity (plan S5.1): the one-time script's write - the
+    // real repo's updateRosterIfCurrent guard (landlordId AND contacts[] as the
+    // caller read them; a missing unit fails it), ONE attempt, no re-read.
+    async assignPrimaryIfCurrent(read, next) {
+      const unit = units.get(read.unitId);
+      if (!unit || unit.landlordId !== read.landlordId || !isDeepStrictEqual(unit.contacts, read.contacts)) {
+        return 'skipped';
+      }
+      unit.contacts = next.contacts.map((c) => ({ ...c }));
+      unit.primary_contact = next.primaryContact;
+      unit.updated_at = new Date().toISOString();
+      return 'written';
+    },
     // Property photos (unit-photos S1): mirror the real repo's atomic append +
     // cap guard, entry-conditioned remove, and move-to-front cover.
     async appendMedia(unitId, keys, cap = UNIT_MEDIA_MAX) {

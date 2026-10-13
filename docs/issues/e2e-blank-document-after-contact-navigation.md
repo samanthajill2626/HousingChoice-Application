@@ -52,3 +52,13 @@ The run's other failure was the sign-in twin (`e2e-blank-first-paint-at-sign-in`
 sighting); 2672 TIME_WAIT sockets right after. Artifacts:
 `W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p6-e2e-artifacts\`. Isolation and the
 clean re-run are recorded in the caseworker-integrity handback.
+
+**Fourth sighting (2026-10-13 ~03:00 EDT, Windows, `fix/caseworker-integrity` @05db50e0,
+lane 6).** The branch's final battery (its ninth full e2e in about 30 hours, on a host
+running about 50 node processes for other missions) finished 345 passed / 1 failed in
+24.8 min: `tests/dashboard-next/unknown-caller-triage.spec.ts:115` waited 15 s for the
+Unknown tab after `page.goto('/inbox?filter=unknown')`; the screenshot is an entirely
+white document - an inbox page this time. No `net::ERR_*` line in the run log; 2843
+TIME_WAIT sockets right after the run (141 when it started). The spec file passed alone
+2/2 (18.1 s), and the full re-run is recorded in the caseworker-integrity handback.
+Artifacts: `W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p9-e2e-artifacts\`.

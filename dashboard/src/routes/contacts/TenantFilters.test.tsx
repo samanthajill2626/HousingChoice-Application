@@ -1,7 +1,7 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
-import type { Contact } from '../../api/index.js';
+import { TENANT_STATUSES, type Contact, type TenantStatus } from '../../api/index.js';
 import { buildFacets, NONE_KEY, type TenantSelection } from './tenantFacets.js';
 import { TenantFilters } from './TenantFilters.js';
 
@@ -13,6 +13,7 @@ const EMPTY: TenantSelection = {
   voucher: new Set<string>(),
   ha: new Set<string>(),
   porting: false,
+  status: new Set<TenantStatus>(TENANT_STATUSES),
 };
 
 let seq = 0;
@@ -145,7 +146,7 @@ describe('TenantFilters', () => {
     const onChange = vi.fn();
     // '2' is selected AND its contextual count is 0: the only 2-BR tenant is
     // excluded by the OTHER facet.
-    const sel: TenantSelection = { voucher: new Set(['2']), ha: new Set(['dca']), porting: false };
+    const sel: TenantSelection = { voucher: new Set(['2']), ha: new Set(['dca']), porting: false, status: new Set<TenantStatus>(TENANT_STATUSES) };
     const tenants = [tenant({ voucherSize: 2 }), tenant({ voucherSize: 3, housingAuthority: 'DCA' })];
     const model = buildFacets(tenants, sel, ALL);
     expect(model.voucher.find((o) => o.key === '2')?.count).toBe(0);
@@ -159,7 +160,7 @@ describe('TenantFilters', () => {
   it('renders a per-facet Clear only for a non-empty facet, and clears only that facet', async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
-    const sel: TenantSelection = { voucher: new Set(['0']), ha: new Set(['dca']), porting: false };
+    const sel: TenantSelection = { voucher: new Set(['0']), ha: new Set(['dca']), porting: false, status: new Set<TenantStatus>(TENANT_STATUSES) };
     const model = buildFacets(TENANTS, sel, ALL);
     render(<TenantFilters model={model} selection={sel} onChange={onChange} />);
     const voucher = screen.getByRole('group', { name: 'Voucher size' });
@@ -169,6 +170,7 @@ describe('TenantFilters', () => {
       voucher: new Set<string>(),
       ha: new Set(['dca']),
       porting: false,
+      status: new Set<TenantStatus>(TENANT_STATUSES),
     });
   });
 

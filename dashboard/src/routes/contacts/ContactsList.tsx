@@ -16,6 +16,7 @@ import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
 import { ContactCreateForm } from '../contact/ContactCreateForm.js';
 import { TenantFilters } from './TenantFilters.js';
 import {
+  ALL_STATUS_SET,
   applySelection,
   applyToParams,
   buildFacets,
@@ -96,11 +97,13 @@ function statusLabel(status: string | undefined): string {
 }
 
 /** An unconstrained selection - used to derive the SELECTION-INDEPENDENT
- *  authority option keys (see `validAuthorityKeys`). */
+ *  authority option keys (see `validAuthorityKeys`). Status is the facet that
+ *  INVERTS "empty = unconstrained", so its unconstrained value is all seven. */
 const NO_SELECTION: TenantSelection = {
   voucher: new Set<string>(),
   ha: new Set<string>(),
   porting: false,
+  status: ALL_STATUS_SET,
 };
 
 /** "No search query active", for that same selection-independent derivation. */
@@ -218,6 +221,10 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
   // selected chip is always clickable - deselection must never lock).
   // The URL is deliberately NOT rewritten on mount; the next interaction
   // re-serializes the pruned selection.
+  // Status needs no prune here: its seven chips always render (no empty line,
+  // never hidden), so no status selection can go invisible, and parseSelection
+  // already drops invalid values and reads an all-invalid `?status=` as the
+  // default.
   const selection = useMemo<TenantSelection>(() => {
     const parsed = parseSelection(searchParams);
     const ha = new Set<string>();
@@ -226,6 +233,7 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
       ha,
       voucher: facetProbe.voucherEmpty ? new Set<string>() : parsed.voucher,
       porting: facetProbe.showPorting ? parsed.porting : false,
+      status: parsed.status,
     };
   }, [searchParams, validAuthorityKeys, facetProbe]);
 

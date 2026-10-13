@@ -1015,7 +1015,10 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           updated = await updateRosterIfCurrent(unit, patch);
         } catch (err) {
           if (!(err instanceof ConditionalCheckFailedException)) throw err;
-          const current = await this.getById(unitId);
+          // CONSISTENT, like each attempt's read (final review round 2 R2-4):
+          // the reassignment refusal below is thrown on this re-read and
+          // writes nothing, so no conditional write ever confirms it.
+          const current = await this.getById(unitId, { consistentRead: true });
           if (current === undefined) throw err;
           const currentHasLandlordId = Object.prototype.hasOwnProperty.call(
             current,

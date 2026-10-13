@@ -14,7 +14,8 @@
 // Each race runs `race` on the raw client right after the FIRST read of the
 // unit through the racing client: the caller's (route's) read when the test
 // makes it, else the add's own first read. Each attempt's own read is
-// CONSISTENT (final review A7, fix wave FWF-5): the two PINs at the end.
+// CONSISTENT (final review A7, fix wave FWF-5), and so is the re-read after a
+// lost write (final review round 2 R2-4): the three PINs at the end.
 //
 // Self-skipping like the other integration suites when nothing answers at
 // DYNAMODB_ENDPOINT (`npm run db:start` to run for real).
@@ -217,5 +218,42 @@ describe.skipIf(!reachable)('unitsRepo.addContact contact-list rules per attempt
     // Attempt 1's read and the last read - attempt 2's, which refused.
     expect(counter.unitReads[0]).toBe(true);
     expect(counter.unitReads.at(-1)).toBe(true);
+  });
+
+  // Final review round 2 R2-4: after a lost conditional write, addContact
+  // re-reads the unit and can refuse from THAT read -
+  // LandlordReassignmentRequiredError when the property now has another
+  // landlord of record - before any retry. Nothing confirms that refusal
+  // either, so the re-read is CONSISTENT too: a lagging replica must not
+  // answer 409 landlord_reassignment_required for a slot that is vacant.
+  it('(PIN) the re-read after a lost write is CONSISTENT - the reassignment refusal decided on it included', async () => {
+    // Ownerless (no landlordId attribute), one property manager on the list.
+    const created = await units.create({ landlordId: 'c-temp', status: 'available' });
+    const unitId = created.unitId;
+    const pmRow: UnitContact = { contactId: 'c-pm', role: 'pm', primaryContact: false };
+    await units.update(unitId, { landlordId: null, contacts: [pmRow] });
+    const claimed: UnitContact[] = [pmRow, { contactId: 'c-other', role: 'landlord', primaryContact: true }];
+    // Staff B claims the vacant landlord slot right after attempt 1's read,
+    // so attempt 1's claim loses its no-landlord condition and the add
+    // re-reads: another landlord of record now, so it refuses from there.
+    const { repo, counter } = racingRepo(unitId, () =>
+      units.update(unitId, { landlordId: 'c-other', contacts: claimed, primary_contact: 'c-other' }),
+    );
+
+    await expect(
+      repo.addContact(
+        unitId,
+        { contactId: 'c-new', role: 'landlord', primaryContact: false },
+        { caseworker: false, landlordTyped: true, autoPrimaryEligible: true },
+      ),
+    ).rejects.toMatchObject({ name: 'LandlordReassignmentRequiredError' });
+
+    expect(counter.writes).toBe(1);
+    expect(counter.lostWrites).toBe(1);
+    // Attempt 1's read, then the re-read the refusal was decided on.
+    expect(counter.unitReads).toEqual([true, true]);
+    const stored = await units.getById(unitId, { consistentRead: true });
+    expect(stored?.landlordId).toBe('c-other');
+    expect(stored?.contacts).toEqual(claimed);
   });
 });

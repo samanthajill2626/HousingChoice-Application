@@ -2,8 +2,8 @@
 //
 // The property page's Contacts card is the ROSTER EDITOR (contact-rosters spec
 // 6.1 / D9). It is the ONE place a property's PRIMARY CONTACT is set, and the
-// primary contact is who a tour or placement puts on the relay group and reaches
-// by masked call whenever nobody has overridden that tour's own roster.
+// primary contact is who a tour or placement puts on its people list (and so
+// on the relay group) whenever nobody has overridden that tour's own roster.
 //
 // This spec is the end-to-end proof that the editor and the resolver are the
 // same fact, walked over the motivating PM-managed property:
@@ -14,8 +14,9 @@
 //   3. the TOUR page's People card now resolves to the PM (slice 3 resolution) -
 //      the card the operator reads for "who is on this tour" followed a change
 //      made on a different page entirely
-//   4. remove the PM - the confirm NAMES the owner who inherits the routing,
-//      because silently re-pointing live calls is not acceptable
+//   4. remove the PM - the confirm NAMES the owner who takes over (the server's
+//      heir), because silently changing who new tours and relay groups use is
+//      not acceptable
 //   5. the tour's People card falls back to the owner
 //
 // The tour deliberately has NO relay group and no plan override, so its roster
@@ -240,15 +241,17 @@ test.describe('Property roster editor - the Contacts card sets the primary conta
     await expect(narrowConfirm).toHaveCount(0);
     await page.setViewportSize(WIDE_RESTORE);
 
-    // --- 4. Remove the PM: the confirm NAMES the promotion -------------------
+    // --- 4. Remove the PM: the confirm NAMES who takes over ------------------
     await page.goto(`${NEXT}/listings/${unitId}`);
     await page.getByRole('button', { name: 'Edit contacts' }).click();
     await page.getByRole('button', { name: `Remove ${pm.name} from this property` }).click();
     const dialog = page.getByRole('dialog', { name: 'Remove the primary contact?' });
     await expect(dialog).toBeVisible();
+    // The heir is read from the server's propertyContact block (spec 7.3 of
+    // primary-contact-integrity): the landlord of record, who is live here.
     await expect(
       dialog.getByText(
-        `${owner.name} becomes the primary contact - calls and new relay groups for this property will go to them.`,
+        `${owner.name} becomes the primary contact - new tours and relay groups for this property will use them.`,
       ),
     ).toBeVisible();
     await dialog.getByRole('button', { name: 'Remove contact' }).click();

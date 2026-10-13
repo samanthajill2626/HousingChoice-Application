@@ -45,8 +45,10 @@ import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
 import {
   CannotRemoveLandlordOfRecordError,
+  ContactListCaseworkerError,
   createUnitsRepo,
   isDeleted,
+  LandlordClaimNotLandlordError,
   LandlordReassignmentRequiredError,
   RosterWriteConflictError,
   unitContacts,
@@ -1128,6 +1130,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     //       already hold stays editable (L2).
     //   I3: claiming the vacant landlord slot needs a contact typed `landlord`.
     //       Re-asserting the existing owner is not a claim and is not checked.
+    // These answer the common, no-race case. addContact decides both again on
+    // each attempt's own read from the facts passed below (fix wave 2 FW2-1),
+    // so a seat removed or a landlord cleared after THIS read answers the same
+    // 409s instead of re-seating a caseworker or letting a non-landlord claim.
     const seated = unitContacts(unit).some((row) => row.contactId === contactId);
     if (!seated && isCaseworker(contact)) {
       log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact refused: a caseworker cannot take a new seat');
@@ -1146,14 +1152,34 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
     let updated: UnitItem;
     try {
-      updated = await units.addContact(unitId, {
-        contactId,
-        role,
-        primaryContact,
-        ...(name !== undefined && { name }),
-        ...(company !== undefined && { company }),
-      });
+      updated = await units.addContact(
+        unitId,
+        {
+          contactId,
+          role,
+          primaryContact,
+          ...(name !== undefined && { name }),
+          ...(company !== undefined && { company }),
+        },
+        { caseworker: isCaseworker(contact), landlordTyped: contact.type === 'landlord' },
+      );
     } catch (err) {
+      if (err instanceof ContactListCaseworkerError) {
+        log.info(
+          { unitId, contactId, actor: req.user?.userId },
+          'unit contact refused at the roster write: a caseworker cannot take a new seat',
+        );
+        res.status(409).json({ error: 'contact_list_caseworker' });
+        return;
+      }
+      if (err instanceof LandlordClaimNotLandlordError) {
+        log.info(
+          { unitId, contactId, actor: req.user?.userId },
+          'unit contact refused at the roster write: a landlord claim by a non-landlord',
+        );
+        res.status(409).json({ error: 'landlord_not_landlord' });
+        return;
+      }
       if (err instanceof LandlordReassignmentRequiredError) {
         res.status(409).json({ error: 'landlord_reassignment_required' });
         return;

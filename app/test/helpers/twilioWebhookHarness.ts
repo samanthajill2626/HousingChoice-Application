@@ -114,7 +114,9 @@ import {
 } from '../../src/repos/messagesRepo.js';
 import {
   CannotRemoveLandlordOfRecordError,
+  ContactListCaseworkerError,
   isDeleted as isUnitDeleted,
+  LandlordClaimNotLandlordError,
   LandlordReassignmentRequiredError,
   type ListUnitsOpts,
   RosterWriteConflictError,
@@ -2938,11 +2940,11 @@ export function createFakeWorld(): FakeWorld {
         .slice(0, opts.limit ?? 50);
       return { items };
     },
-    async addContact(unitId, contact) {
+    async addContact(unitId, contact, facts) {
       // Mirror the real repo's invariants: seed from landlordId, upsert by
-      // contactId, auto-primary for a new seat on an ownerless primary-less
-      // unit, exactly-one-primaryContact, and keep primary_contact
-      // consistent with the roster's ☎ primary.
+      // contactId, the contact-list rules on this read, auto-primary for a
+      // new seat on an ownerless primary-less unit, exactly-one-primaryContact,
+      // and keep primary_contact consistent with the roster's primary row.
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`addContact: no unit ${unitId}`);
       const hasLandlordId = Object.prototype.hasOwnProperty.call(unit, 'landlordId');
@@ -2951,6 +2953,14 @@ export function createFakeWorld(): FakeWorld {
           ? unit.landlordId
           : undefined;
       const claimsVacantLandlord = contact.role === 'landlord' && !hasLandlordId;
+      const roster = unitContacts(unit).map((c) => ({ ...c }));
+      const existing = roster.find((c) => c.contactId === contact.contactId);
+      // caseworker-integrity fix wave 2 FW2-1, exactly as the real repo decides
+      // it per attempt from the caller's facts: I4 (a caseworker never takes a
+      // NEW seat), then I3 (claiming the vacant landlord slot needs a contact
+      // typed landlord), then the reassignment refusal.
+      if (existing === undefined && facts.caseworker) throw new ContactListCaseworkerError();
+      if (claimsVacantLandlord && !facts.landlordTyped) throw new LandlordClaimNotLandlordError();
       if (
         contact.role === 'landlord' &&
         !claimsVacantLandlord &&
@@ -2958,8 +2968,6 @@ export function createFakeWorld(): FakeWorld {
       ) {
         throw new LandlordReassignmentRequiredError();
       }
-      const roster = unitContacts(unit).map((c) => ({ ...c }));
-      const existing = roster.find((c) => c.contactId === contact.contactId);
       // Auto-primary (caseworker-integrity spec revision 4 section 4), exactly
       // as the real repo decides it per attempt: a NEW seat on a unit with no
       // row marked primary and no landlordId attribute (before this add)

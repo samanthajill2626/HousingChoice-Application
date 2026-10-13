@@ -198,3 +198,64 @@ describe('contact list - a role-landlord add that CLAIMS the vacant slot needs a
     expect(hasLandlordId(world.units.get('u-vacant'))).toBe(false);
   });
 });
+
+// R1 code review backend finding 1, R2 challenge B-1 (fix wave 2 item FW2-1):
+// the checks above decide from the route's own consistent reads; a property
+// change landing between those reads and the roster write is re-decided
+// inside unitsRepo.addContact, per attempt, from the facts the route read
+// about the contact - the same 409s, nothing written. Each race is injected
+// right after the route's reads (the R2 review's two probes).
+describe('contact list - a property change after the route read is re-decided in the roster write', () => {
+  it('I4: a caseworker whose seat is removed after the route read is not re-seated - 409 contact_list_caseworker, nothing written', async () => {
+    const { app, world } = makeWebhookHarness();
+    // Ownerless and primary-less, so a re-created seat would also have become
+    // the primary contact (R2 finding A6).
+    seedOwnerlessUnit(world, 'u-race', { contacts: [{ contactId: 'c-cw', role: 'other', primaryContact: false }] });
+    seedContact(world, 'c-cw', CASEWORKER);
+    const write = world.unitsRepo.addContact.bind(world.unitsRepo);
+    world.unitsRepo.addContact = async (unitId, contact, facts) => {
+      // Staff B removes the seat after the route's reads, before this write.
+      await world.unitsRepo.removeContact(unitId, 'c-cw');
+      return write(unitId, contact, facts);
+    };
+    // The role edit the dashboard sends for a seated row.
+    const res = await addContact(app, 'u-race', { contactId: 'c-cw', role: 'pm', primaryContact: false });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'contact_list_caseworker' });
+    const stored = world.units.get('u-race');
+    expect(stored?.contacts).toEqual([]);
+    expect(stored?.primary_contact).toBeUndefined();
+    expect(hasLandlordId(stored)).toBe(false);
+    expect(world.auditEvents).toHaveLength(0);
+  });
+
+  it('I3: the landlord of record cleared after the route read - a tenant landlord-role add does not claim the slot - 409 landlord_not_landlord', async () => {
+    const { app, world } = makeWebhookHarness();
+    // Soft-deleted; its landlord of record c-old (the primary) was re-typed to tenant.
+    seedUnit(world, 'u-race', {
+      landlordId: 'c-old',
+      primary_contact: 'c-old',
+      contacts: [{ contactId: 'c-old', role: 'landlord', primaryContact: true }],
+      deleted_at: STAMP,
+    });
+    seedContact(world, 'c-old', { type: 'tenant' });
+    seedContact(world, 'c-ten', { type: 'tenant' });
+    const write = world.unitsRepo.addContact.bind(world.unitsRepo);
+    world.unitsRepo.addContact = async (unitId, contact, facts) => {
+      // Staff B's "Restore without a landlord" commits after the route's reads
+      // (which saw an owner, so this add was no claim there).
+      await world.unitsRepo.restoreWithLandlord(unitId, { expectLandlordId: 'c-old', next: null });
+      return write(unitId, contact, facts);
+    };
+    const res = await addContact(app, 'u-race', { contactId: 'c-ten', role: 'landlord' });
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'landlord_not_landlord' });
+    const stored = world.units.get('u-race');
+    // B's restore stands; the landlord slot stays vacant and c-ten is not seated.
+    expect(stored?.deleted_at).toBeUndefined();
+    expect(hasLandlordId(stored)).toBe(false);
+    expect(stored?.contacts).toEqual([]);
+    expect(stored?.primary_contact).toBeUndefined();
+    expect(world.auditEvents).toHaveLength(0);
+  });
+});

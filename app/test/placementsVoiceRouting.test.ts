@@ -236,11 +236,12 @@ describe('BE3 property primaryContact vs. a LIVE thread roster', () => {
     seedPlacementRelay(world, {}); // no primary_contact seeded; thread = tenant + owner
     // The operator adds the PM to the property roster as the primary contact -
     // exactly what POST /api/units/:id/contacts does.
-    await world.unitsRepo.addContact('unit-vr', {
-      contactId: 'c-pm',
-      role: 'pm',
-      primaryContact: true,
-    });
+    await world.unitsRepo.addContact(
+      'unit-vr',
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      // The facts the route states for a property manager (a landlord-typed contact).
+      { caseworker: false, landlordTyped: true },
+    );
     expect(world.units.get('unit-vr')?.primary_contact).toBe('c-pm');
 
     const { app } = makeWebhookHarness({ world });

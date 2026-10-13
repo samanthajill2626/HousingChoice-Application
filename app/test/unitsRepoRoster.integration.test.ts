@@ -39,6 +39,10 @@ if (!reachable) {
   );
 }
 
+/** The contact facts the route states (ContactListFacts): every contact these
+ *  cases add is typed landlord (a PM or an owner is a landlord with a role). */
+const LANDLORD_FACTS = { caseworker: false, landlordTyped: true };
+
 describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
   const client = createDynamoClient({ endpoint });
@@ -59,7 +63,7 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
   it('addContact seeds the roster from the legacy landlordId and keeps the landlord present', async () => {
     const unit = await units.create({ landlordId: 'c-ll-1', status: 'available' });
     // The landlord starts as the implicit primaryContact (back-compat serializer).
-    const updated = await units.addContact(unit.unitId, { contactId: 'c-pm-1', role: 'pm' });
+    const updated = await units.addContact(unit.unitId, { contactId: 'c-pm-1', role: 'pm' }, LANDLORD_FACTS);
     const roster = updated.contacts ?? [];
     expect(roster.map((c) => c.contactId).sort()).toEqual(['c-ll-1', 'c-pm-1']);
     const landlord = roster.find((c) => c.contactId === 'c-ll-1');
@@ -73,10 +77,11 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
     const created = await units.create({ landlordId: 'c-temporary', status: 'available' });
     await units.update(created.unitId, { landlordId: null });
 
-    const updated = await units.addContact(created.unitId, {
-      contactId: 'c-new-landlord',
-      role: 'landlord',
-    });
+    const updated = await units.addContact(
+      created.unitId,
+      { contactId: 'c-new-landlord', role: 'landlord' },
+      LANDLORD_FACTS,
+    );
 
     expect(updated.landlordId).toBe('c-new-landlord');
     // The unit had no primary row and no landlord of record, so the claim is
@@ -96,10 +101,7 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
     const created = await units.create({ landlordId: 'c-current-landlord', status: 'available' });
 
     await expect(
-      units.addContact(created.unitId, {
-        contactId: 'c-different-landlord',
-        role: 'landlord',
-      }),
+      units.addContact(created.unitId, { contactId: 'c-different-landlord', role: 'landlord' }, LANDLORD_FACTS),
     ).rejects.toMatchObject({ name: 'LandlordReassignmentRequiredError' });
 
     const unchanged = await units.getById(created.unitId);
@@ -129,8 +131,8 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
     const racingUnits = createUnitsRepo({ doc: gatedDoc, env: testEnv, logger });
 
     const outcomes = await Promise.allSettled([
-      racingUnits.addContact(created.unitId, { contactId: 'c-racer-one', role: 'landlord' }),
-      racingUnits.addContact(created.unitId, { contactId: 'c-racer-two', role: 'landlord' }),
+      racingUnits.addContact(created.unitId, { contactId: 'c-racer-one', role: 'landlord' }, LANDLORD_FACTS),
+      racingUnits.addContact(created.unitId, { contactId: 'c-racer-two', role: 'landlord' }, LANDLORD_FACTS),
     ]);
 
     expect(outcomes.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
@@ -166,8 +168,8 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
     const racingUnits = createUnitsRepo({ doc: gatedDoc, env: testEnv, logger });
 
     await Promise.all([
-      racingUnits.addContact(created.unitId, { contactId: 'c-new-landlord', role: 'landlord' }),
-      racingUnits.addContact(created.unitId, { contactId: 'c-property-manager', role: 'pm' }),
+      racingUnits.addContact(created.unitId, { contactId: 'c-new-landlord', role: 'landlord' }, LANDLORD_FACTS),
+      racingUnits.addContact(created.unitId, { contactId: 'c-property-manager', role: 'pm' }, LANDLORD_FACTS),
     ]);
 
     const stored = await units.getById(created.unitId);
@@ -206,7 +208,7 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
     const racingUnits = createUnitsRepo({ doc: gatedDoc, env: testEnv, logger });
 
     await Promise.all([
-      racingUnits.addContact(created.unitId, { contactId: 'c-new-landlord', role: 'landlord' }),
+      racingUnits.addContact(created.unitId, { contactId: 'c-new-landlord', role: 'landlord' }, LANDLORD_FACTS),
       racingUnits.removeContact(created.unitId, 'c-property-manager'),
     ]);
 
@@ -235,14 +237,14 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
     const contendedUnits = createUnitsRepo({ doc: contendedDoc, env: testEnv, logger });
 
     await expect(
-      contendedUnits.addContact(created.unitId, { contactId: 'c-property-manager', role: 'pm' }),
+      contendedUnits.addContact(created.unitId, { contactId: 'c-property-manager', role: 'pm' }, LANDLORD_FACTS),
     ).rejects.toMatchObject({ name: 'RosterWriteConflictError' });
     expect(updateAttempts).toBe(3);
   });
 
   it('addContact with primaryContact demotes others (single-primaryContact) and updates the scalar', async () => {
     const unit = await units.create({ landlordId: 'c-ll-2', status: 'available' });
-    await units.addContact(unit.unitId, { contactId: 'c-pm-2', role: 'pm', primaryContact: true });
+    await units.addContact(unit.unitId, { contactId: 'c-pm-2', role: 'pm', primaryContact: true }, LANDLORD_FACTS);
     const after = await units.getById(unit.unitId);
     const roster = after?.contacts ?? [];
     const primaries = roster.filter((c) => c.primaryContact);
@@ -254,13 +256,12 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
 
   it('addContact is idempotent on (unitId, contactId): updates role/primaryContact/name/company in place', async () => {
     const unit = await units.create({ landlordId: 'c-ll-3', status: 'available' });
-    await units.addContact(unit.unitId, { contactId: 'c-x', role: 'other', name: 'Old', company: 'Co' });
-    const updated = await units.addContact(unit.unitId, {
-      contactId: 'c-x',
-      role: 'owner',
-      primaryContact: true,
-      name: 'New',
-    });
+    await units.addContact(unit.unitId, { contactId: 'c-x', role: 'other', name: 'Old', company: 'Co' }, LANDLORD_FACTS);
+    const updated = await units.addContact(
+      unit.unitId,
+      { contactId: 'c-x', role: 'owner', primaryContact: true, name: 'New' },
+      LANDLORD_FACTS,
+    );
     const roster = updated.contacts ?? [];
     expect(roster.filter((c) => c.contactId === 'c-x')).toHaveLength(1); // no dup
     const row = roster.find((c) => c.contactId === 'c-x');
@@ -270,7 +271,7 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
 
   it('removeContact removes a non-landlord and falls the scalar back to landlordId when it was the ☎ primary', async () => {
     const unit = await units.create({ landlordId: 'c-ll-4', status: 'available' });
-    await units.addContact(unit.unitId, { contactId: 'c-pm-4', role: 'pm', primaryContact: true });
+    await units.addContact(unit.unitId, { contactId: 'c-pm-4', role: 'pm', primaryContact: true }, LANDLORD_FACTS);
     const removed = await units.removeContact(unit.unitId, 'c-pm-4');
     expect((removed.contacts ?? []).map((c) => c.contactId)).toEqual(['c-ll-4']);
     // The removed contact was the ☎ primary → the scalar falls back to landlordId.
@@ -280,7 +281,7 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
   it('removeContact of the ☎-primary pm: exactly one primaryContact (the landlord) AND scalar === landlordId (FIX B)', async () => {
     const unit = await units.create({ landlordId: 'c-ll-b1', status: 'available' });
     // pm becomes the ☎ primary (landlord demoted to primaryContact:false).
-    await units.addContact(unit.unitId, { contactId: 'c-pm-b1', role: 'pm', primaryContact: true });
+    await units.addContact(unit.unitId, { contactId: 'c-pm-b1', role: 'pm', primaryContact: true }, LANDLORD_FACTS);
     const removed = await units.removeContact(unit.unitId, 'c-pm-b1');
     const roster = removed.contacts ?? [];
     // Exactly one primaryContact — the landlord — and the scalar AGREES.
@@ -317,7 +318,7 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
   it('addContact pins the owning landlord row to role:landlord even when added as a non-landlord role (FIX C)', async () => {
     const unit = await units.create({ landlordId: 'c-ll-c1', status: 'available' });
     // Add the landlord's own contactId but (mistakenly) as a 'pm'.
-    const updated = await units.addContact(unit.unitId, { contactId: 'c-ll-c1', role: 'pm' });
+    const updated = await units.addContact(unit.unitId, { contactId: 'c-ll-c1', role: 'pm' }, LANDLORD_FACTS);
     const landlord = (updated.contacts ?? []).find((c) => c.contactId === 'c-ll-c1');
     expect(landlord?.role).toBe('landlord'); // pinned, not 'pm'
   });
@@ -338,7 +339,7 @@ describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB 
 
   it('addContact throws ConditionalCheckFailedException for an unknown unit', async () => {
     await expect(
-      units.addContact('unit-ghost', { contactId: 'c-z', role: 'pm' }),
+      units.addContact('unit-ghost', { contactId: 'c-z', role: 'pm' }, LANDLORD_FACTS),
     ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
   });
 

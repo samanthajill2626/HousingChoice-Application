@@ -121,6 +121,53 @@ export class LandlordReassignmentRequiredError extends Error {
   }
 }
 
+/**
+ * Thrown by addContact when a CASEWORKER would take a NEW contact-list seat:
+ * the attempt's own read of the unit has no row for the contact
+ * (caseworker-integrity I4, spec 2026-10-12 section 4 "Contact list"). The
+ * route maps it to 409 contact_list_caseworker.
+ */
+export class ContactListCaseworkerError extends Error {
+  constructor(message = 'a caseworker cannot take a new seat on a property contact list') {
+    super(message);
+    this.name = 'ContactListCaseworkerError';
+  }
+}
+
+/**
+ * Thrown by addContact when a role-landlord add would CLAIM the vacant
+ * landlord-of-record slot (no landlordId attribute on the attempt's own read)
+ * for a contact that is not typed landlord (caseworker-integrity I3, spec
+ * 2026-10-12 section 4 "Landlord of record"). The route maps it to 409
+ * landlord_not_landlord.
+ */
+export class LandlordClaimNotLandlordError extends Error {
+  constructor(message = 'only a contact typed landlord can claim a property landlord of record') {
+    super(message);
+    this.name = 'LandlordClaimNotLandlordError';
+  }
+}
+
+/**
+ * What the caller read about the contact being added to a property's contact
+ * list (caseworker-integrity spec 2026-10-12 section 4; fix wave 2 FW2-1) -
+ * facts about the CONTACT, which the unit cannot tell addContact. The
+ * contact-list route reads the contact consistently and states both;
+ * addContact applies them on EACH attempt's own read of the unit, so the unit
+ * side of every rule is decided on the roster and landlordId the conditional
+ * write is fenced on. Only the contact's type is a read before the write
+ * (spec L1).
+ */
+export interface ContactListFacts {
+  /** isCaseworker(contact) (lib/caseworkers.ts): a caseworker never takes a NEW seat (I4). */
+  caseworker: boolean;
+  /**
+   * contact.type === 'landlord' (a property manager or an owner is a landlord
+   * with a role): required to claim the vacant landlord slot (I3).
+   */
+  landlordTyped: boolean;
+}
+
 /** An optimistic roster mutation lost too many consecutive write races. */
 export class RosterWriteConflictError extends Error {
   constructor(message = 'property contacts changed repeatedly; retry the roster change') {
@@ -400,6 +447,12 @@ export interface UnitsRepo {
    * attribute, whatever its role (a role-`landlord` claim of the vacant slot
    * included). Decided inside the conditional retry loop from each attempt's
    * own read, so two racing adds never both become primary.
+   * The contact-list rules (caseworker-integrity spec section 4), decided on
+   * each attempt's own read from `facts` (ContactListFacts), in this order and
+   * before the reassignment refusal below: a caseworker never takes a NEW seat
+   * (ContactListCaseworkerError), and a claim of the vacant landlord slot needs
+   * a contact typed landlord (LandlordClaimNotLandlordError). A refusal
+   * writes nothing.
    * Adding role `landlord` to an ownerless legacy unit claims `landlordId` in
    * the same conditional write as contacts[]; a different existing or racing
    * owner throws LandlordReassignmentRequiredError instead of being replaced.
@@ -419,6 +472,7 @@ export interface UnitsRepo {
       name?: string;
       company?: string;
     },
+    facts: ContactListFacts,
   ): Promise<UnitItem>;
   /**
    * BE3/C3: remove a contact from the unit's roster. REJECTS removing the
@@ -792,7 +846,7 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       return queryIndex('byProperty', 'propertyId', propertyId, opts);
     },
 
-    async addContact(unitId, contact) {
+    async addContact(unitId, contact, facts) {
       let attempts = 0;
       const write = async (): Promise<UnitItem> => {
         attempts += 1;
@@ -812,6 +866,22 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
             ? unit.landlordId
             : undefined;
         const claimsVacantLandlord = contact.role === 'landlord' && !hasLandlordId;
+        // Seed the roster from the legacy landlordId when absent (so the primary
+        // landlord is always represented), then upsert this contact by contactId.
+        const roster = unitContacts(unit).map((c) => ({ ...c }));
+        const existing = roster.find((c) => c.contactId === contact.contactId);
+        // caseworker-integrity (spec 2026-10-12 section 4; R1 code review backend
+        // finding 1, fix wave 2 FW2-1): the contact-list rules, decided again on
+        // THIS attempt's read from the facts the caller read about the contact.
+        // The route checks them first on its own read (the no-race answer, in
+        // the spec's order); deciding them here too, where the write below is
+        // conditioned on the landlordId and contacts[] this attempt read, means
+        // a seat removed or a landlord cleared after the route's read is
+        // refused - never re-created or claimed.
+        //   I4: a caseworker never takes a NEW seat (no row for the contact).
+        //   I3: claiming the vacant landlord slot needs a contact typed landlord.
+        if (existing === undefined && facts.caseworker) throw new ContactListCaseworkerError();
+        if (claimsVacantLandlord && !facts.landlordTyped) throw new LandlordClaimNotLandlordError();
         if (
           contact.role === 'landlord' &&
           !claimsVacantLandlord &&
@@ -819,10 +889,6 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         ) {
           throw new LandlordReassignmentRequiredError();
         }
-        // Seed the roster from the legacy landlordId when absent (so the primary
-        // landlord is always represented), then upsert this contact by contactId.
-        const roster = unitContacts(unit).map((c) => ({ ...c }));
-        const existing = roster.find((c) => c.contactId === contact.contactId);
         // Auto-primary (caseworker-integrity spec revision 4, section 4 "Contact
         // list", Cameron 2026-10-12): a NEW seat on a unit that, as THIS attempt
         // read it, has no row marked primary and no landlordId attribute (no

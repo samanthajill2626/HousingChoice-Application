@@ -44,6 +44,10 @@ if (!reachable) {
   );
 }
 
+/** The contact facts the route states (ContactListFacts) for a contact typed
+ *  landlord - a landlord, a property manager or an owner. */
+const LANDLORD_FACTS = { caseworker: false, landlordTyped: true };
+
 describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
   const client = createDynamoClient({ endpoint });
@@ -109,7 +113,7 @@ describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB 
       expect(before !== undefined && Object.prototype.hasOwnProperty.call(before, 'landlordId')).toBe(false);
       expect(primaries(before)).toEqual([]);
 
-      const updated = await units.addContact(unitId, { contactId: 'c-pm', role: 'pm' });
+      const updated = await units.addContact(unitId, { contactId: 'c-pm', role: 'pm' }, LANDLORD_FACTS);
 
       expect(updated.contacts).toContainEqual({ contactId: 'c-pm', role: 'pm', primaryContact: true });
       expect(primaries(updated)).toEqual(['c-pm']);
@@ -131,7 +135,7 @@ describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB 
       contacts: [{ contactId: 'c-ll', role: 'landlord', primaryContact: false }],
     });
 
-    const updated = await units.addContact(created.unitId, { contactId: 'c-pm', role: 'pm' });
+    const updated = await units.addContact(created.unitId, { contactId: 'c-pm', role: 'pm' }, LANDLORD_FACTS);
 
     expect(updated.contacts).toEqual([
       { contactId: 'c-ll', role: 'landlord', primaryContact: false },
@@ -144,7 +148,7 @@ describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB 
   it('(c) ownerless WITH a primary row: the add is not primary and the existing primary is unchanged', async () => {
     const unitId = await ownerlessUnit([{ contactId: 'c-first', role: 'pm', primaryContact: true }], 'c-first');
 
-    const updated = await units.addContact(unitId, { contactId: 'c-second', role: 'pm' });
+    const updated = await units.addContact(unitId, { contactId: 'c-second', role: 'pm' }, LANDLORD_FACTS);
 
     expect(updated.contacts).toEqual([
       { contactId: 'c-first', role: 'pm', primaryContact: true },
@@ -156,7 +160,7 @@ describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB 
   it('(d) ownerless, no primary: a Landlord-role add claims landlordId AND becomes the primary contact', async () => {
     const unitId = await ownerlessUnit();
 
-    const updated = await units.addContact(unitId, { contactId: 'c-new-ll', role: 'landlord' });
+    const updated = await units.addContact(unitId, { contactId: 'c-new-ll', role: 'landlord' }, LANDLORD_FACTS);
 
     expect(updated.landlordId).toBe('c-new-ll');
     expect(updated.contacts).toEqual([{ contactId: 'c-new-ll', role: 'landlord', primaryContact: true }]);
@@ -197,8 +201,8 @@ describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB 
     const racingUnits = createUnitsRepo({ doc: gatedDoc, env: testEnv, logger });
 
     const answers = await Promise.all([
-      racingUnits.addContact(unitId, { contactId: 'c-racer-one', role: 'pm' }),
-      racingUnits.addContact(unitId, { contactId: 'c-racer-two', role: 'other' }),
+      racingUnits.addContact(unitId, { contactId: 'c-racer-one', role: 'pm' }, LANDLORD_FACTS),
+      racingUnits.addContact(unitId, { contactId: 'c-racer-two', role: 'other' }, LANDLORD_FACTS),
     ]);
 
     // The second add's first write lost; it re-read and wrote again.
@@ -224,7 +228,11 @@ describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB 
     async (_kind, role) => {
       const unitId = await ownerlessUnit([{ contactId: 'c-seated', role: 'pm', primaryContact: false }]);
 
-      const updated = await units.addContact(unitId, { contactId: 'c-seated', role, primaryContact: false });
+      const updated = await units.addContact(
+        unitId,
+        { contactId: 'c-seated', role, primaryContact: false },
+        LANDLORD_FACTS,
+      );
 
       expect(updated.contacts).toEqual([{ contactId: 'c-seated', role, primaryContact: false }]);
       expect(primaries(updated)).toEqual([]);

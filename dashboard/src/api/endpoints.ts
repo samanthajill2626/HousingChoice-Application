@@ -1054,9 +1054,21 @@ export async function restoreUnit(
  *  record's role is STRUCTURALLY pinned to 'landlord' server-side whatever is
  *  sent. On an ownerless legacy property, adding a Landlord also claims its
  *  `landlordId`; an existing different owner is never silently replaced.
+ *  Auto-primary (caseworker-integrity spec section 4 "Contact list", revision
+ *  5): a NEW seat for a contact typed landlord (a landlord, property manager
+ *  or owner, any role) on a property with no primary row and no landlordId
+ *  becomes its primary contact even when `primaryContact` is false or absent;
+ *  a contact of any other type joins non-primary. The answer's roster carries
+ *  the flags, so render the answer, never the request.
  *  Returns the updated unit with its enriched `contacts` roster. Errors: 409
- *  landlord_reassignment_required / unit_roster_conflict; 404 unit_not_found /
- *  contact_not_found; 400 on a bad role or a non-boolean primaryContact. */
+ *  contact_list_caseworker (a caseworker taking a NEW seat) and 409
+ *  landlord_not_landlord (a claim of the vacant landlord slot by a contact not
+ *  typed landlord), each from the route's checks or from the roster write
+ *  itself (a seat removed or a landlord cleared after the route's read);
+ *  409 landlord_reassignment_required / unit_roster_conflict; 404
+ *  unit_not_found / contact_not_found (a missing contact, or the id of a phone
+ *  or email routing pointer); 400 on a bad role or a non-boolean
+ *  primaryContact. */
 export async function addUnitContact(
   unitId: string,
   input: { contactId: string; role: UnitContact['role']; primaryContact?: boolean },

@@ -41,7 +41,10 @@ const PER_UNIT_CONCURRENCY = 10;
 /** One waiting row (spec 5.6 as amended; mirrored in dashboard/src/api/types.ts). */
 export interface FollowUpItem {
   unitId: string;
-  /** formatAddress(unit.address) || unitId - the dashboard's shortAddress rule. */
+  /** formatAddress(unit.address) || unitId - the SERVER formatter
+   *  (lib/address.ts, `City, ST ZIP`) as spec 5.6 / 14.3 mandate. NOT the
+   *  dashboard's shortAddress, which joins `City, ST, ZIP` (code review A-2;
+   *  aligning the two formatters is out of this branch's scope). */
   unitLabel: string;
   contactId: string;
   name: string;

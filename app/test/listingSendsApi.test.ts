@@ -4,9 +4,9 @@
 // The units direction adds optional recipient facts. The former response PATCH route is
 // GONE (the `response` label was removed end to end) -- a 404 pin guards its removal.
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
-import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { IncompleteBatchReadError, type ContactItem } from '../src/repos/contactsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { seedListingSend } from './helpers/listingSendSeed.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
@@ -61,7 +61,7 @@ describe('GET /api/units/:unitId/recipients (BE4/C4 - "Sent to")', () => {
     expect(c1).not.toHaveProperty('updated_at');
   });
 
-  it('enriches each recipient with the tenant display name; honest absence when unknown', async () => {
+  it('enriches each recipient with the tenant display name; a missing contact serves as recipientMissing', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
     const named = seedTenant(world, 'c-named');
@@ -81,6 +81,8 @@ describe('GET /api/units/:unitId/recipients (BE4/C4 - "Sent to")', () => {
     expect(namedRow.tenantName).toBe('Brianna Whitfield');
     const ghostRow = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-ghost');
     expect(ghostRow).not.toHaveProperty('tenantName');
+    expect(ghostRow).toMatchObject({ recipientMissing: true, outcome: 'no_reply', interestedSupported: false, eligible: false });
+    expect(ghostRow).not.toHaveProperty('tour');
   });
 
   it('returns [] for a real unit with zero recipients', async () => {
@@ -143,7 +145,7 @@ describe('GET /api/contacts/:contactId/listings-sent (BE4/C4 — "Listings sent"
   });
 });
 
-describe('the two directions share row fields; units adds recipient facts', () => {
+describe('the two directions share row fields; units adds recipient facts, interestedMode and eligible', () => {
   it('a single seeded row surfaces in both units/recipients and contacts/listings-sent', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-x');
@@ -162,7 +164,12 @@ describe('the two directions share row fields; units adds recipient facts', () =
     // caseworkers D20 (plan 3.7): the units side ALSO carries the recipient's
     // type (and role when set); the contact side does not (its contact is the
     // page owner). Otherwise the two directions return the same row.
-    expect(byUnit.body.recipients[0]).toEqual({ ...byContact.body.sent[0], type: 'tenant' });
+    // last-heard-from spec 5.4: the units side also carries interestedMode and
+    // eligible (the unit and the recipient's reachability are known there).
+    expect(byUnit.body.recipients[0]).toEqual({ ...byContact.body.sent[0], type: 'tenant', interestedMode: 'form', eligible: true });
+    expect(byContact.body.sent[0]).toMatchObject({ outcome: 'no_reply', interestedSupported: true });
+    expect(byContact.body.sent[0]).not.toHaveProperty('interestedMode');
+    expect(byContact.body.sent[0]).not.toHaveProperty('eligible');
     expect(byContact.body.sent[0]).not.toHaveProperty('type');
     expect(byContact.body.sent[0]).not.toHaveProperty('role');
   });
@@ -197,7 +204,7 @@ describe('share-sent-outcome D7: a pair no share counts is listed nowhere', () =
       .get('/api/contacts/c-2/listings-sent')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
-    expect(listed.body.sent).toEqual([{ contactId: 'c-2', unitId: 'unit-1', sentAt: '2026-09-28T10:00:00.000Z', via: 'broadcast', broadcastId: 'b-1' }]);
+    expect(listed.body.sent).toEqual([{ contactId: 'c-2', unitId: 'unit-1', sentAt: '2026-09-28T10:00:00.000Z', via: 'broadcast', broadcastId: 'b-1', outcome: 'no_reply', interestedSupported: true }]);
   });
 });
 
@@ -205,6 +212,10 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
   it('recipients: a qualifying tour lights ONLY the matching (unit, tenant) row', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
+    // last-heard-from D12: a tour is read only for a RESOLVED tenant (a row
+    // with no contact would now serve as recipientMissing).
+    seedTenant(world, 'c-1');
+    seedTenant(world, 'c-2');
     await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
     await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-2', sentAt: SENT_AT });
     // c-1 has a scheduled tour on unit-1; c-2 has none.
@@ -225,7 +236,7 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
     const c1 = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-1');
     const c2 = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-2');
     // Exact optional-field wire shape: tour is EXACTLY { tourId, state }.
-    expect(c1).toEqual({ contactId: 'c-1', unitId: 'unit-1', sentAt: c1.sentAt, via: 'broadcast', tour: { tourId: 'tour-c1', state: 'scheduled' } });
+    expect(c1).toEqual({ contactId: 'c-1', unitId: 'unit-1', sentAt: c1.sentAt, via: 'broadcast', tour: { tourId: 'tour-c1', state: 'scheduled' }, type: 'tenant', outcome: 'interested', interestedSupported: true, interestedMode: 'form', eligible: true });
     // c-2 (no tour) carries NO tour field (absent, not null).
     expect(c2).not.toHaveProperty('tour');
   });
@@ -234,6 +245,9 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-x');
     seedUnit(world, 'unit-y');
+    // last-heard-from D12: tours are read only for RESOLVED tenants.
+    seedTenant(world, 'c-a');
+    seedTenant(world, 'c-b');
     // unit-x sent to A and B; unit-y sent to A.
     await seedListingSend(world.listingSendsRepo, { unitId: 'unit-x', contactId: 'c-a', sentAt: SENT_AT });
     await seedListingSend(world.listingSendsRepo, { unitId: 'unit-x', contactId: 'c-b', sentAt: SENT_AT });
@@ -295,9 +309,13 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
     expect(r2.tour).toEqual({ tourId: 'tour-u2', state: 'requested' });
   });
 
-  it('E3 degrade: a tours-query failure serves 200 chipless rows and logs (recipients)', async () => {
+  // last-heard-from D12 (knowing rewrite of the E3 degrade pins): an outcome
+  // drives buttons and a to-do list, so the tours join is REQUIRED - a failure
+  // is a 503, never chipless rows with a guessed outcome.
+  it('D12: a tours-query failure is a 503 outcome_unavailable - no guessed outcome (recipients)', async () => {
     const { app, world, capture } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
+    seedTenant(world, 'c-1');
     await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
     world.toursRepo.listByUnit = async () => {
       throw new Error('tours GSI unavailable');
@@ -308,15 +326,12 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
 
-    expect(res.status).toBe(200);
-    expect(res.body.recipients).toHaveLength(1);
-    expect(res.body.recipients[0]).not.toHaveProperty('tour');
-    expect(
-      capture.atLevel(40).some((l) => l['msg'] === 'recipients tour-chip hydration failed (best-effort)'),
-    ).toBe(true);
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable' });
+    expect(capture.atLevel(40).some((l) => l['msg'] === 'recipients outcome join failed - 503 outcome_unavailable')).toBe(true);
   });
 
-  it('E3 degrade: a tours-query failure serves 200 chipless rows and logs (listings-sent)', async () => {
+  it('D12: a tours-query failure is a 503 outcome_unavailable (listings-sent)', async () => {
     const { app, world, capture } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
     seedTenant(world, 'c-1');
@@ -330,12 +345,9 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
 
-    expect(res.status).toBe(200);
-    expect(res.body.sent).toHaveLength(1);
-    expect(res.body.sent[0]).not.toHaveProperty('tour');
-    expect(
-      capture.atLevel(40).some((l) => l['msg'] === 'listings-sent tour-chip hydration failed (best-effort)'),
-    ).toBe(true);
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable' });
+    expect(capture.atLevel(40).some((l) => l['msg'] === 'listings-sent outcome join failed - 503 outcome_unavailable')).toBe(true);
   });
 });
 
@@ -414,6 +426,10 @@ describe('caseworkers D20: recipients rows carry the contact type and role', () 
     // No contact row: the fields are OMITTED, never null (ruling R3-F3).
     expect(byId.get('c-gone')).not.toHaveProperty('type');
     expect(byId.get('c-gone')).not.toHaveProperty('role');
+    // last-heard-from spec 5.4: Interested is a tenant action only.
+    expect(byId.get('c-gone')).toMatchObject({ recipientMissing: true, interestedSupported: false });
+    expect(byId.get('c-pt01')).toMatchObject({ interestedSupported: false });
+    expect(byId.get('c-ten1')).toMatchObject({ interestedSupported: true });
 
     const contactSide = await request(app)
       .get('/api/contacts/c-pt01/listings-sent')
@@ -422,27 +438,141 @@ describe('caseworkers D20: recipients rows carry the contact type and role', () 
     expect(contactSide.status).toBe(200);
     expect(contactSide.body.sent[0]).not.toHaveProperty('type');
     expect(contactSide.body.sent[0]).not.toHaveProperty('role');
+    expect(contactSide.body.sent[0]).toMatchObject({ interestedSupported: false });
   });
 
-  it('a failed display batch serves the rows with neither names nor type (best-effort, never a 500)', async () => {
+  // last-heard-from D12 (knowing rewrite of the best-effort pin): the contacts
+  // join is REQUIRED and read with requireComplete.
+  it('D12: a failed or incomplete display batch is a 503 outcome_unavailable, never nameless guessed rows', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1');
-    // Named, so the OLD read path (getDisplaysByIds, not stubbed) would serve a
-    // tenantName - the RED evidence that the route switched methods.
-    const named = seedTenant(world, 'c-ten2');
-    named.firstName = 'Tia';
+    seedTenant(world, 'c-ten2');
     await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-ten2', sentAt: SENT_AT });
     world.contactsRepo.getRecipientDisplaysByIds = async () => {
       throw new Error('dynamo down');
     };
-
-    const res = await request(app)
+    const failed = await request(app)
       .get('/api/units/unit-1/recipients')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
-    expect(res.status).toBe(200);
+    expect(failed.status).toBe(503);
+    expect(failed.body).toEqual({ error: 'outcome_unavailable' });
+
+    world.contactsRepo.getRecipientDisplaysByIds = async () => {
+      throw new IncompleteBatchReadError(1, 1);
+    };
+    const incomplete = await request(app)
+      .get('/api/units/unit-1/recipients')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(incomplete.status).toBe(503);
+  });
+});
+
+describe('last-heard-from: the outcome on both GET projections (spec 5.4, D12)', () => {
+  const get = (app: ReturnType<typeof makeWebhookHarness>['app'], path: string) =>
+    request(app).get(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+  it('the contacts join is read with requireComplete: true', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedTenant(world, 'c-1');
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
+    const spy = vi.spyOn(world.contactsRepo, 'getRecipientDisplaysByIds');
+    await get(app, '/api/units/unit-1/recipients');
+    expect(spy).toHaveBeenCalledWith(['c-1'], { requireComplete: true });
+  });
+
+  it('replied when the tenant was heard from after the send; lastHeardFromAt rides the row', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const t = seedTenant(world, 'c-1');
+    t.last_heard_from_at = '2026-06-17T09:00:00.000Z';
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
+    const units = await get(app, '/api/units/unit-1/recipients');
+    expect(units.body.recipients[0]).toMatchObject({ outcome: 'replied', lastHeardFromAt: '2026-06-17T09:00:00.000Z' });
+    const contact = await get(app, '/api/contacts/c-1/listings-sent');
+    expect(contact.body.sent[0]).toMatchObject({ outcome: 'replied', lastHeardFromAt: '2026-06-17T09:00:00.000Z' });
+  });
+
+  it('an effective decline reads not_interested with { at, by } (no staffId); a later share supersedes it', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedTenant(world, 'c-1');
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-17T10:00:00.000Z', by: 'staff', staffId: 'usr_x' });
+    const declined = await get(app, '/api/units/unit-1/recipients');
+    expect(declined.body.recipients[0]).toMatchObject({ outcome: 'not_interested', declined: { at: '2026-06-17T10:00:00.000Z', by: 'staff' } });
+    expect(declined.body.recipients[0].declined).not.toHaveProperty('staffId');
+    const contactSide = await get(app, '/api/contacts/c-1/listings-sent');
+    expect(contactSide.body.sent[0]).toMatchObject({ outcome: 'not_interested' });
+
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: '2026-06-18T10:00:00.000Z', broadcastId: 'b-2' });
+    const superseded = await get(app, '/api/units/unit-1/recipients');
+    expect(superseded.body.recipients[0]).toMatchObject({ outcome: 'no_reply' });
+    expect(superseded.body.recipients[0]).not.toHaveProperty('declined');
+  });
+
+  it('a tour created after the decline supersedes it -> interested', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedTenant(world, 'c-1');
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-17T10:00:00.000Z', by: 'staff' });
+    await world.toursRepo.create({ tourId: 't-late', tenantId: 'c-1', unitId: 'unit-1', tourType: 'self_guided', status: 'scheduled', createdAt: '2026-06-20T10:00:00.000Z' });
+    const res = await get(app, '/api/units/unit-1/recipients');
+    expect(res.body.recipients[0]).toMatchObject({ outcome: 'interested', tour: { tourId: 't-late', state: 'scheduled' } });
+  });
+
+  it('eligible follows isEligibleRecipient (inactive tenant, opted out); interestedMode follows the unit tour_type', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1').tour_type = 'landlord_led';
+    seedTenant(world, 'c-ok');
+    seedTenant(world, 'c-inactive').status = 'inactive';
+    seedTenant(world, 'c-stop').sms_opt_out = true;
+    for (const contactId of ['c-ok', 'c-inactive', 'c-stop']) {
+      await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId, sentAt: SENT_AT });
+    }
+    const res = await get(app, '/api/units/unit-1/recipients');
+    const byId = new Map((res.body.recipients as Array<Record<string, unknown>>).map((r) => [r['contactId'] as string, r]));
+    expect(byId.get('c-ok')).toMatchObject({ eligible: true, interestedMode: 'route' });
+    expect(byId.get('c-inactive')).toMatchObject({ eligible: false, interestedMode: 'route' });
+    expect(byId.get('c-stop')).toMatchObject({ eligible: false });
+  });
+
+  it('a PARTNER row is served WITHOUT tour even when tour data exists (B11), interestedSupported false', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    world.contacts.push({ contactId: 'c-pt', type: 'partner', status: 'active', phone: '+15550109009', role: 'Caseworker' });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-pt', sentAt: SENT_AT });
+    // A converted caseworker's tenant-era tour (the tours API accepts any contactId).
+    await world.toursRepo.create({ tourId: 't-old', tenantId: 'c-pt', unitId: 'unit-1', tourType: 'self_guided', status: 'toured' });
+    const units = await get(app, '/api/units/unit-1/recipients');
+    expect(units.body.recipients[0]).not.toHaveProperty('tour');
+    expect(units.body.recipients[0]).toMatchObject({ outcome: 'no_reply', interestedSupported: false, type: 'partner' });
+
+    const listByTenant = vi.spyOn(world.toursRepo, 'listByTenant');
+    const contact = await get(app, '/api/contacts/c-pt/listings-sent');
+    expect(contact.status).toBe(200);
+    expect(contact.body.sent[0]).not.toHaveProperty('tour');
+    expect(contact.body.sent[0]).toMatchObject({ outcome: 'no_reply', interestedSupported: false });
+    // A partner page never reads tours at all.
+    expect(listByTenant).not.toHaveBeenCalled();
+  });
+
+  it('a missing contact with an unsuperseded decline reads not_interested, still recipientMissing and not eligible', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-gone', sentAt: SENT_AT });
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-gone', { at: '2026-06-17T10:00:00.000Z', by: 'staff' });
+    const res = await get(app, '/api/units/unit-1/recipients');
+    expect(res.body.recipients[0]).toMatchObject({
+      contactId: 'c-gone',
+      outcome: 'not_interested',
+      recipientMissing: true,
+      eligible: false,
+      interestedSupported: false,
+    });
     expect(res.body.recipients[0]).not.toHaveProperty('tenantName');
-    expect(res.body.recipients[0]).not.toHaveProperty('type');
-    expect(res.body.recipients[0]).not.toHaveProperty('role');
   });
 });

@@ -71,17 +71,25 @@ import {
 import {
   createListingSendsRepo,
   toListingSendRow,
+  type ListingSendItem,
   type ListingSendRecipientFacts,
+  type ListingSendRow,
   type ListingSendsRepo,
 } from '../repos/listingSendsRepo.js';
 import { createPlacementsRepo, type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
 import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
-import { deriveTourSignal } from '../lib/listingSendTour.js';
+import { deriveTourActivityAt, deriveTourSignal } from '../lib/listingSendTour.js';
 import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { reachedCount } from '../services/shareRecipientState.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
 import { requireLandlordContact, sendContactTypeError } from '../services/contactTypeGuards.js';
 import { isCaseworker } from '../lib/caseworkers.js';
+import {
+  deriveListingSendOutcome,
+  interestedModeFor,
+  isEligibleRecipient,
+  wireDecline,
+} from '../lib/listingSendOutcome.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -98,11 +106,9 @@ export interface UnitsRouterDeps {
    * tenant count from its share at read time (one projected batch read).
    */
   broadcastsRepo?: BroadcastsRepo;
-  /**
-   * listing-response-tour-chip: GET /:id/recipients derives a per-row tour chip
-   * from the unit's tours (byUnit GSI). Best-effort join - a query failure
-   * degrades to chipless rows, never a 500.
-   */
+  /** listing-response-tour-chip + last-heard-from D12: GET /:id/recipients and
+   *  the outcome route read the unit's tours (byUnit GSI) - a REQUIRED join: a
+   *  query failure is a 503 outcome_unavailable, never a guessed outcome. */
   toursRepo?: ToursRepo;
   /**
    * unit-photos: the media bucket store for photo upload (PUT) + display
@@ -186,6 +192,79 @@ function recipientFactsOf(contact: RecipientDisplay): ListingSendRecipientFacts 
     ...(contact.type !== undefined && { type: contact.type }),
     ...(role.length > 0 && { role }),
   };
+}
+
+/** The joins every outcome-serving units read needs (last-heard-from D12):
+ *  the unit's tours grouped by tenant, and the recipients' display projection
+ *  read with requireComplete. Both REQUIRED. */
+interface RecipientJoin {
+  toursByTenant: Map<string, TourItem[]>;
+  displays: Map<string, RecipientDisplay>;
+}
+
+/** Group a unit's tours strictly by the pairing's tenant. */
+function groupToursByTenant(unitTours: TourItem[]): Map<string, TourItem[]> {
+  const byTenant = new Map<string, TourItem[]>();
+  for (const t of unitTours) {
+    const arr = byTenant.get(t.tenantId);
+    if (arr === undefined) byTenant.set(t.tenantId, [t]);
+    else arr.push(t);
+  }
+  return byTenant;
+}
+
+/**
+ * One "Sent to" row with its derived outcome (spec 5.4 / 5.5). A recipient
+ * whose contact row is GONE is not an incomplete read (requireComplete only
+ * throws on unread keys): it serves with the id as its name,
+ * recipientMissing, no type (so no tour signal and no reply can be known),
+ * interestedSupported false and eligible false. A non-tenant row reads no
+ * tours and carries no `tour` (B11).
+ */
+function projectRecipientRow(row: ListingSendItem, unit: UnitItem, join: RecipientJoin): ListingSendRow {
+  const interestedMode = interestedModeFor(unit);
+  const contact = join.displays.get(row.contactId);
+  if (contact === undefined) {
+    const outcome = deriveListingSendOutcome({
+      row,
+      recipientType: undefined,
+      lastHeardFromAt: undefined,
+      tour: undefined,
+      tourActivityAt: undefined,
+    });
+    const declined = wireDecline(row, outcome);
+    return toListingSendRow(row, {
+      outcome,
+      ...(declined !== undefined && { declined }),
+      interestedSupported: false,
+      interestedMode,
+      eligible: false,
+      recipientMissing: true,
+    });
+  }
+  const isTenant = contact.type === 'tenant';
+  const pairTours = isTenant ? (join.toursByTenant.get(row.contactId) ?? []) : [];
+  const tour = deriveTourSignal(pairTours);
+  const outcome = deriveListingSendOutcome({
+    row,
+    recipientType: contact.type,
+    lastHeardFromAt: contact.last_heard_from_at,
+    tour,
+    tourActivityAt: deriveTourActivityAt(pairTours),
+  });
+  const declined = wireDecline(row, outcome);
+  const tenantName = displayNameOfContact(contact);
+  return toListingSendRow(row, {
+    ...(tour !== undefined && { tour }),
+    ...(tenantName !== undefined && { tenantName }),
+    facts: recipientFactsOf(contact),
+    outcome,
+    ...(contact.last_heard_from_at !== undefined && { lastHeardFromAt: contact.last_heard_from_at }),
+    ...(declined !== undefined && { declined }),
+    interestedSupported: isTenant,
+    interestedMode,
+    eligible: isEligibleRecipient(contact),
+  });
 }
 
 /**
@@ -1070,10 +1149,14 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // records listing_sends per recipient. No separate individual-send route.
 
   // GET /api/units/:unitId/recipients - the property's "Sent to" list (BE4/C4).
-  // Returns { recipients: ListingSendRow[] } from listByUnit. Mirrors the units
-  // 404 posture: an unknown unit is a 404 (consistent with GET /:unitId); a real
-  // unit with zero recipients returns []. (`recipients` is a distinct segment
-  // from the bare :unitId routes, so there is no route collision.)
+  // Returns { recipients: ListingSendRow[] } from listByUnit, each row with its
+  // derived send outcome (last-heard-from spec 5.4). Mirrors the units 404
+  // posture: an unknown unit is a 404; a real unit with zero recipients
+  // returns []. D12: the tours join and the contacts join (read with
+  // requireComplete) are REQUIRED - an outcome drives buttons and a to-do
+  // list, so a failed join is a 503 outcome_unavailable, never a guessed row.
+  // (`recipients` is a distinct segment from the bare :unitId routes, so
+  // there is no route collision.)
   router.get('/:unitId/recipients', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const unit = await units.getById(unitId);
@@ -1082,52 +1165,23 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       return;
     }
     const rows = await listingSends.listByUnit(unitId);
-    // Derive the per-row tour chip from the unit's tours (ONE byUnit GSI query,
-    // grouped by tenantId). Best-effort (E3): a tours-query failure serves the
-    // rows WITHOUT any tour field and logs - the roster never 500s on the join.
-    let toursByTenant: Map<string, TourItem[]> | undefined;
+    let join: RecipientJoin;
     try {
-      const unitTours = await tours.listByUnit(unitId);
-      toursByTenant = new Map<string, TourItem[]>();
-      for (const t of unitTours) {
-        const arr = toursByTenant.get(t.tenantId);
-        if (arr === undefined) toursByTenant.set(t.tenantId, [t]);
-        else arr.push(t);
-      }
+      // ONE byUnit GSI query and ONE BatchGet of the recipient projection for
+      // the whole page (the batch de-dupes ids). caseworkers D20 (ruling
+      // R3-F4): the recipients-only projection carries type and role, so the
+      // dashboard can label a non-tenant row.
+      const [unitTours, displays] = await Promise.all([
+        tours.listByUnit(unitId),
+        contacts.getRecipientDisplaysByIds(rows.map((row) => row.contactId), { requireComplete: true }),
+      ]);
+      join = { toursByTenant: groupToursByTenant(unitTours), displays };
     } catch (err) {
-      log.warn({ err, unitId }, 'recipients tour-chip hydration failed (best-effort)');
+      log.warn({ err, unitId }, 'recipients outcome join failed - 503 outcome_unavailable');
+      res.status(503).json({ error: 'outcome_unavailable' });
+      return;
     }
-    // Denormalize each recipient's display name. ONE BatchGet of the display
-    // projection for the whole page (was one getById per unique recipient, with
-    // no route-level cap); the batch de-dupes ids, so a tenant sent to N times
-    // still costs one read. Best-effort like the tour join: a missing id is
-    // simply absent from the map and a failed batch leaves the map empty, so
-    // rows serve nameless (the dashboard falls back to the id) - never a 500.
-    const namesByContact = new Map<string, string | undefined>();
-    const factsByContact = new Map<string, ListingSendRecipientFacts>();
-    try {
-      // caseworkers D20 (ruling R3-F4): the recipients-only projection also
-      // carries type and role, so the dashboard can label a non-tenant row.
-      const displays = await contacts.getRecipientDisplaysByIds(rows.map((row) => row.contactId));
-      for (const [contactId, contact] of displays) {
-        namesByContact.set(contactId, displayNameOfContact(contact));
-        factsByContact.set(contactId, recipientFactsOf(contact));
-      }
-    } catch (err) {
-      log.warn({ err, unitId }, 'recipients name hydration failed (best-effort)');
-    }
-    res.json({
-      recipients: rows.map((row) => {
-        const pairing = toursByTenant?.get(row.contactId);
-        const signal = pairing !== undefined ? deriveTourSignal(pairing) : undefined;
-        return toListingSendRow(
-          row,
-          signal,
-          namesByContact.get(row.contactId),
-          factsByContact.get(row.contactId),
-        );
-      }),
-    });
+    res.json({ recipients: rows.map((row) => projectRecipientRow(row, unit, join)) });
   });
 
   // POST /api/units/:unitId/contacts { contactId, role, primaryContact? } (BE3/C3).

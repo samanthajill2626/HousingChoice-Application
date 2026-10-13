@@ -46,7 +46,7 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { TourSignal } from '../lib/listingSendTour.js';
-import type { DeclineRecord } from '../lib/listingSendOutcome.js';
+import type { DeclineRecord, InterestedMode, ListingSendOutcome } from '../lib/listingSendOutcome.js';
 import type { ContactType } from './contactsRepo.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
@@ -127,6 +127,7 @@ export interface ListingSendRow {
   sentAt: string;
   via: ListingSendVia;
   broadcastId?: string;
+  /** TENANT rows only - never on a partner or missing recipient's row (spec 14.3 B11). */
   tour?: TourSignal;
   /** caseworkers D20 (plan 3.7): the recipient's contact type - on the units
    *  recipients read ONLY, and only when the contact resolves (absent, never
@@ -134,6 +135,20 @@ export interface ListingSendRow {
   type?: ContactType;
   /** caseworkers D20: the recipient's role, when it holds text (same rules as `type`). */
   role?: string;
+  /** last-heard-from spec 5.4 - the recipient's own last_heard_from_at. */
+  lastHeardFromAt?: string;
+  /** The derived send outcome (lib/listingSendOutcome.ts). */
+  outcome: ListingSendOutcome;
+  /** Present ONLY while the stored decline is effective; never staffId. */
+  declined?: { at: string; by: 'staff' | 'engine' };
+  /** false on a non-tenant or missing recipient (partners never read a tour). */
+  interestedSupported: boolean;
+  /** Units route only (the unit is known): 'route' with a structured tour_type. */
+  interestedMode?: InterestedMode;
+  /** Units route only: isEligibleRecipient on the recipient. */
+  eligible?: boolean;
+  /** true when the contact row is gone (a hard-deleted contact behind a listed row). */
+  recipientMissing?: boolean;
 }
 
 /** caseworkers D20: the recipient facts the units recipients read attaches to a row. */
@@ -193,18 +208,27 @@ function isListed(row: ListingSendItem): boolean {
   return row.counted !== false && typeof row.sentAt === 'string';
 }
 
+/** The options a GET projection (or the outcome route) passes to toListingSendRow. */
+export interface ListingSendRowOptions {
+  tour?: TourSignal;
+  tenantName?: string;
+  facts?: ListingSendRecipientFacts;
+  outcome: ListingSendOutcome;
+  lastHeardFromAt?: string;
+  declined?: { at: string; by: 'staff' | 'engine' };
+  interestedSupported: boolean;
+  interestedMode?: InterestedMode;
+  eligible?: boolean;
+  recipientMissing?: boolean;
+}
+
 /**
- * Pure serializer to the C4 wire shape. Drops the audit furniture
- * (created_at/updated_at); includes broadcastId only when present. The optional
- * `tour` chip signal (derived from the tours table by the caller) is attached
- * only when supplied - a row with no qualifying tour carries no `tour` field.
+ * Pure serializer to the C4 wire shape. Drops the audit furniture and the
+ * STORED decline (a caller passes `declined` only while it is effective -
+ * wireDecline); includes broadcastId only when present; every optional field
+ * only when supplied (absent, never null). `recipientMissing` only when true.
  */
-export function toListingSendRow(
-  item: ListingSendItem,
-  tour?: TourSignal,
-  tenantName?: string,
-  recipient?: ListingSendRecipientFacts,
-): ListingSendRow {
+export function toListingSendRow(item: ListingSendItem, opts: ListingSendRowOptions): ListingSendRow {
   // share-sent-outcome D7: only a counted row is projected (the readers filter
   // the rest), and a counted row always carries sentAt - the guard documents it.
   if (item.sentAt === undefined) {
@@ -212,14 +236,21 @@ export function toListingSendRow(
   }
   return {
     contactId: item.contactId,
-    ...(tenantName !== undefined && { tenantName }),
+    ...(opts.tenantName !== undefined && { tenantName: opts.tenantName }),
     unitId: item.unitId,
     sentAt: item.sentAt,
     via: item.via,
     ...(item.broadcastId !== undefined && { broadcastId: item.broadcastId }),
-    ...(tour !== undefined && { tour }),
-    ...(recipient?.type !== undefined && { type: recipient.type }),
-    ...(recipient?.role !== undefined && { role: recipient.role }),
+    ...(opts.tour !== undefined && { tour: opts.tour }),
+    ...(opts.facts?.type !== undefined && { type: opts.facts.type }),
+    ...(opts.facts?.role !== undefined && { role: opts.facts.role }),
+    ...(opts.lastHeardFromAt !== undefined && { lastHeardFromAt: opts.lastHeardFromAt }),
+    outcome: opts.outcome,
+    ...(opts.declined !== undefined && { declined: { at: opts.declined.at, by: opts.declined.by } }),
+    interestedSupported: opts.interestedSupported,
+    ...(opts.interestedMode !== undefined && { interestedMode: opts.interestedMode }),
+    ...(opts.eligible !== undefined && { eligible: opts.eligible }),
+    ...(opts.recipientMissing === true && { recipientMissing: true }),
   };
 }
 

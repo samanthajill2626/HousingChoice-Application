@@ -86,7 +86,8 @@ import {
   type ListingSendsRepo,
 } from '../repos/listingSendsRepo.js';
 import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
-import { deriveTourSignal } from '../lib/listingSendTour.js';
+import { deriveTourActivityAt, deriveTourSignal } from '../lib/listingSendTour.js';
+import { deriveListingSendOutcome, wireDecline } from '../lib/listingSendOutcome.js';
 import {
   createContactVocabularyRepo,
   type ContactVocabularyRepo,
@@ -127,11 +128,9 @@ export interface ContactsRouterDeps {
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4: serve a contact's "Properties sent" (GET /:id/listings-sent). */
   listingSendsRepo?: ListingSendsRepo;
-  /**
-   * listing-response-tour-chip: GET /:id/listings-sent derives a per-row tour
-   * chip from the tenant's tours (byTenant GSI). Best-effort join - a query
-   * failure degrades to chipless rows, never a 500.
-   */
+  /** listing-response-tour-chip + last-heard-from D12: GET /:id/listings-sent
+   *  reads a TENANT's tours (byTenant GSI) - a REQUIRED join (503
+   *  outcome_unavailable on failure); a non-tenant page reads none. */
   toursRepo?: ToursRepo;
   /** Task 4: auto-suggest vocabulary (roles, relationship roles, field labels). */
   vocabularyRepo?: ContactVocabularyRepo;
@@ -1218,12 +1217,18 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     });
   });
 
-  // GET /api/contacts/:contactId/listings-sent — the tenant page's "Properties
-  // sent" (BE4/C4). Returns { sent: ListingSendRow[] } via listByContact
-  // (newest-first by sentAt). Returns [] for none. A phone-pointer id (BE1's
-  // internal routing record) is a 404 — never a contact, never a properties owner.
-  // (`listings-sent` is a distinct segment from the bare :contactId routes, so
-  // there is no route collision.)
+  // GET /api/contacts/:contactId/listings-sent - the contact page's
+  // "Properties sent" (BE4/C4). Returns { sent: ListingSendRow[] } via
+  // listByContact (newest-first by sentAt), each row with its derived send
+  // outcome (last-heard-from spec 5.4) from the contact's OWN type and
+  // last_heard_from_at (the contact is already loaded - no contacts join). A
+  // tenant's tours are ONE byTenant query grouped by unitId - REQUIRED (D12:
+  // a failure is a 503 outcome_unavailable). A non-tenant reads no tours and
+  // its rows carry no `tour` (B11). No units join: the page derives
+  // interestedMode from the units it already loaded (spec 14.3 B2). A
+  // phone-pointer id is a 404 - never a contact. (`listings-sent` is a
+  // distinct segment from the bare :contactId routes, so there is no route
+  // collision.)
   router.get('/:contactId/listings-sent', async (req, res) => {
     const contactId = String(req.params['contactId'] ?? '');
     mergeContext({ contactId });
@@ -1233,26 +1238,40 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       return;
     }
     const rows = await listingSends.listByContact(contactId);
-    // Derive the per-row tour chip from the tenant's tours (ONE byTenant GSI
-    // query, grouped by unitId). Best-effort (E3): a tours-query failure serves
-    // the rows WITHOUT any tour field and logs - never a 500 on the join.
-    let toursByUnit: Map<string, TourItem[]> | undefined;
-    try {
-      const tenantTours = await tours.listByTenant(contactId);
-      toursByUnit = new Map<string, TourItem[]>();
-      for (const t of tenantTours) {
-        const arr = toursByUnit.get(t.unitId);
-        if (arr === undefined) toursByUnit.set(t.unitId, [t]);
-        else arr.push(t);
+    const isTenant = contact.type === 'tenant';
+    const toursByUnit = new Map<string, TourItem[]>();
+    if (isTenant) {
+      try {
+        for (const t of await tours.listByTenant(contactId)) {
+          const arr = toursByUnit.get(t.unitId);
+          if (arr === undefined) toursByUnit.set(t.unitId, [t]);
+          else arr.push(t);
+        }
+      } catch (err) {
+        log.warn({ err, contactId }, 'listings-sent outcome join failed - 503 outcome_unavailable');
+        res.status(503).json({ error: 'outcome_unavailable' });
+        return;
       }
-    } catch (err) {
-      log.warn({ err, contactId }, 'listings-sent tour-chip hydration failed (best-effort)');
     }
     res.json({
       sent: rows.map((row) => {
-        const pairing = toursByUnit?.get(row.unitId);
-        const signal = pairing !== undefined ? deriveTourSignal(pairing) : undefined;
-        return toListingSendRow(row, signal);
+        const pairTours = toursByUnit.get(row.unitId) ?? [];
+        const tour = deriveTourSignal(pairTours);
+        const outcome = deriveListingSendOutcome({
+          row,
+          recipientType: contact.type,
+          lastHeardFromAt: contact.last_heard_from_at,
+          tour,
+          tourActivityAt: deriveTourActivityAt(pairTours),
+        });
+        const declined = wireDecline(row, outcome);
+        return toListingSendRow(row, {
+          ...(isTenant && tour !== undefined && { tour }),
+          outcome,
+          ...(contact.last_heard_from_at !== undefined && { lastHeardFromAt: contact.last_heard_from_at }),
+          ...(declined !== undefined && { declined }),
+          interestedSupported: isTenant,
+        });
       }),
     });
   });

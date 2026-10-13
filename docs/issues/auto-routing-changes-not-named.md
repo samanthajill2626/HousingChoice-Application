@@ -95,3 +95,30 @@ receives routing" is now enforced. The vacant-slot claim itself is still
 type-only (an API caller can still make a soft-deleted landlord-typed contact
 the landlord of record); it now routes nowhere. The refs above are the
 pre-change locations.
+
+**Update (2026-10-13, `feat/primary-contact-integrity` code review round 1,
+pre-existing finding PRE-1 - `R1-adversarial.md` section 4, its `R1-PRE-1`
+repro): the vacant-slot claim of a soft-deleted contact is NOT API-only - the
+dashboard reaches it too.** On a property with no landlord of record (no
+`landlordId` attribute), the Contacts card's edit mode keeps the role select
+on a "(deleted)" row - spec 7.4 drops only its "Make primary"
+(`dashboard/src/routes/listing/ListingDetail.tsx:1106-1131`) - and choosing
+Landlord there re-posts the row (`onSetContactRole`, `ListingDetail.tsx:569-577`:
+`POST /api/units/:id/contacts` with role `landlord` and the row's own flag).
+Both claim checks ask only the contact's TYPE
+(`app/src/routes/units.ts:1363-1369`; `app/src/repos/unitsRepo.ts:1173`,
+`:1192`), so re-roling a "(deleted)" row whose contact is typed landlord
+claims the slot: the deleted contact becomes the landlord of record
+(`unitsRepo.ts:1281`), joins non-primary (it is not eligible for automatic
+routing), and its row can then no longer be removed (409
+`cannot_remove_landlord_of_record`, `unitsRepo.ts:1343-1344`). With no live
+flagged primary elsewhere, the shared lookup skips that landlord and the
+property has no property contact (the property box leads "This property's
+contact was deleted."). The same review lists the other type-only checks
+through which a soft-deleted contact becomes or stays a landlord of record:
+unit create, PATCH `landlordId`, the restore choice
+(`requireLandlordContact`, `app/src/services/contactTypeGuards.ts:83-90`)
+and the plain restore (`app/src/routes/units.ts:2001-2007`, which keeps a
+stored landlord of record typed landlord, deleted or not). Behavior is
+unchanged on `feat/primary-contact-integrity` (caseworker-integrity's domain;
+spec 7.4 keeps the role select on deleted rows).

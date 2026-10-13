@@ -116,9 +116,9 @@ function followUpTab(page: Page): Locator {
   return page.getByRole('tab', { name: /^Follow up\b/ });
 }
 
-/** A property group: a region named by its heading, `<unitLabel><n> waiting`
- *  (no separator between the address and the count) - so match a pattern that
- *  STARTS with the street line. */
+/** A property group: a region named by its heading, `<unitLabel> - <n> waiting`
+ *  (code review ORCH-1 added the separator) - so match a pattern that STARTS
+ *  with the street line. */
 function groupFor(page: Page, line1: string): Locator {
   return page.getByRole('region', { name: new RegExp(`^${escapeRegExp(line1)}`) });
 }

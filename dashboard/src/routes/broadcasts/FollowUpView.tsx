@@ -229,7 +229,11 @@ export function FollowUpView({ followUps, now: nowProp }: FollowUpViewProps): Re
         const waiting = group.items.filter((i) => !followUps.resolutions.has(followUpKey(i))).length;
         return (
           <section key={group.unitId} className={styles.group} aria-labelledby={headingId}>
-            <h2 id={headingId} className={styles.groupTitle}>
+            {/* Review ORCH-1: the address and the count are two flex items, so
+                the name computed from content ran them together ("...A1
+                waiting"). The explicit name separates them; the section takes
+                it through aria-labelledby. */}
+            <h2 id={headingId} className={styles.groupTitle} aria-label={`${group.unitLabel} - ${waiting} waiting`}>
               {group.unitLabel}
               <span className={styles.groupSub}>{waiting} waiting</span>
             </h2>

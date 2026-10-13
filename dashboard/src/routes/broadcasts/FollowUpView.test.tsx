@@ -83,10 +83,13 @@ describe('FollowUpView - grouping and rows', () => {
   it('groups by property in server order (longest-waiting first), each with its own waiting count', async () => {
     renderView([item(), MARCUS, TASHA]);
     const headings = await screen.findAllByRole('heading', { level: 2 });
-    expect(headings.map((h) => h.textContent)).toEqual([
-      '672 Cameron Alexander Blvd A1 waiting',
-      '1427 Griffin St, downstairs2 waiting',
-    ]);
+    // Review ORCH-1 (knowing rewrite of the old textContent pin, which read
+    // "...Blvd A1 waiting"): the accessible name separates the address and
+    // the count, `<unitLabel> - <n> waiting`, and the region shares it.
+    expect(headings).toHaveLength(2);
+    expect(headings[0]).toBe(screen.getByRole('heading', { level: 2, name: '672 Cameron Alexander Blvd A - 1 waiting' }));
+    expect(headings[1]).toBe(screen.getByRole('heading', { level: 2, name: '1427 Griffin St, downstairs - 2 waiting' }));
+    expect(screen.getByRole('region', { name: '1427 Griffin St, downstairs - 2 waiting' })).toBeInTheDocument();
     const griffin = within(group(/1427 Griffin St/)).getAllByRole('listitem');
     expect(griffin.map((li) => within(li).getByRole('link').textContent)).toEqual(['Marcus Dale', 'Tasha Reed']);
   });
@@ -131,10 +134,13 @@ describe('FollowUpView - actions', () => {
     const undo = await within(row).findByRole('button', { name: 'Undo not interested for Dario Vance' });
     expect(within(row).getByText('Not interested')).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('0 waiting');
+    // ORCH-1: the accessible name follows the count.
+    expect(screen.getByRole('heading', { level: 2, name: '672 Cameron Alexander Blvd A - 0 waiting' })).toBeInTheDocument();
     await u.click(undo);
     expect(setListingSendOutcome).toHaveBeenLastCalledWith('u1', 'c1', 'clear');
     expect(await within(row).findByText('No reply yet, 10 days')).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('1 waiting');
+    expect(screen.getByRole('heading', { level: 2, name: '672 Cameron Alexander Blvd A - 1 waiting' })).toBeInTheDocument();
   });
 
   it('an actioned row stays IN PLACE for the session and leaves the list on the NEXT load', async () => {

@@ -104,8 +104,13 @@ export interface ListingSendItem {
   /** share-sent-outcome D7: the change token every putShareMemory stamps (a random id, never a clock). */
   shares_op?: string;
   /** last-heard-from spec 5.4: a recorded "not interested". Absent = not
-   *  declined. Written ONLY by setDeclined / clearDeclined; a superseded
-   *  record stays here and is simply ineffective (lib/listingSendOutcome.ts). */
+   *  declined. Written ONLY by setDeclined / clearDeclined. Supersession is
+   *  NOT stored: every read recomputes it (lib/listingSendOutcome.ts
+   *  effectiveDecline) from the row's sentAt and the pair's QUALIFYING
+   *  tours, so a record superseded only by a tour is effective AGAIN once
+   *  that tour stops qualifying (canceled, no_show, closed not a fit) -
+   *  deliberate per spec 5.4 (code review ADV-1; pinned in
+   *  test/listingSendOutcome.test.ts). */
   declined?: DeclineRecord;
   [key: string]: unknown;
 }

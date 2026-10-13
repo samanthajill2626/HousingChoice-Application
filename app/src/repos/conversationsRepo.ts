@@ -203,9 +203,11 @@ export interface ConversationItem {
   unread_flag?: 'unread';
   /**
    * The placement this relay_group is the thread for (M1.10): the
-   * conversation→placement BACK-REFERENCE. It lets the voice masked-call seam resolve
-   * the landlord-leg target (placement→unit.primary_contact) and the
-   * failed-send escalation flag the right placement. Set when a relay is provisioned
+   * conversation-to-placement BACK-REFERENCE. It lets the failed-send
+   * escalation flag the right placement. (The voice masked-call seam dials the
+   * live thread's participants and reads no unit field - nothing routes on the
+   * unit's primary_contact scalar; primary-contact-integrity spec 9.2.)
+   * Set when a relay is provisioned
    * FROM a placement; absent on 1:1 threads and standalone (test-scaffold) relays.
    *
    * LEGACY: superseded by `owner` (Task 5 generalization). `owner` is the

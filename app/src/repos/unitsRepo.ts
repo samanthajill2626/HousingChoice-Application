@@ -67,13 +67,15 @@ export const SHAREABLE_STATUSES: ReadonlySet<string> = SHAREABLE;
  * imports the same shape). A unit has a many-to-many roster of the people who
  * own/manage it: the landlord, a property manager, the owner, or anyone else
  * relevant. At most one entry across the roster is `primaryContact: true` (the
- * primary - the property's default contact: the roster resolvers behind relay
- * groups and tour copy take the row marked primary, else the landlord of
- * record, and a masked call dials the live thread's participants without
- * reading the unit; see unitsRepo.addContact, which keeps the
- * `primary_contact` scalar consistent with it - nothing routes on the
- * scalar). `name`/`company` are DENORMALIZED at write time (the route resolves
- * them from the contact) so the roster row is self-describing without a join.
+ * primary - the property's default contact: the property-contact lookup
+ * behind relay groups and tour copy, lib/propertyContact.ts, takes the LIVE
+ * row marked primary, else the LIVE landlord of record, skipping a
+ * soft-deleted or missing contact; a masked call dials the live thread's
+ * participants without reading the unit. The roster writes - addContact,
+ * removeContact, restoreWithLandlord, handOffPrimaryFrom - keep the
+ * `primary_contact` scalar consistent with it; nothing routes on the scalar).
+ * `name`/`company` are DENORMALIZED at write time (the route resolves them
+ * from the contact) so the roster row is self-describing without a join.
  */
 export interface UnitContact {
   contactId: string;
@@ -473,11 +475,18 @@ export interface UnitItem {
   application_process?: string;
   /**
    * The unit's primary contact (CO1), kept consistent with the contact-list
-   * row marked primary (see unitsRepo.addContact). Nothing routes on this
-   * scalar today: the roster resolvers (lib/rosterResolution.ts,
-   * lib/tourContacts.ts, services/rosterProvision.ts) take the row marked
-   * primary, else the landlordId, and a masked call dials the live thread's
-   * participants without reading the unit (routes/webhooks/voice.ts). Stored
+   * row marked primary by the roster writes (unitsRepo.addContact,
+   * removeContact, restoreWithLandlord, handOffPrimaryFrom): that row's
+   * contactId, or REMOVEd when no row is flagged; normally absent on a
+   * landlord-only unit, whose primary is the derived landlord row (legacy data
+   * may still carry one there - nothing reads it). No longer client-writable
+   * (primary-contact-integrity spec 4.5). Nothing reads this scalar at
+   * runtime (spec 9.2): the property-contact lookup (lib/propertyContact.ts,
+   * behind lib/rosterResolution.ts, lib/tourContacts.ts and
+   * services/rosterProvision.ts) takes the LIVE row marked primary, else the
+   * LIVE landlord of record, skipping a soft-deleted or missing contact, and a
+   * masked call dials the live thread's participants without reading the unit
+   * (routes/webhooks/voice.ts). Stored
    * as a contactId. PENDING FOUNDER CONFIRMATION - may move to per-placement (CO1
    * notes routing comes "from the per-unit process" today; a later change
    * order may relocate this onto the placement). INTERNAL — never exposed

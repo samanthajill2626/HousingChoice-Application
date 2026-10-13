@@ -1340,6 +1340,80 @@ describe('ListingDetail', () => {
     expect(screen.getByRole('link', { name: /Nora Lane/ })).toBeInTheDocument();
   });
 
+  // caseworker-integrity spec revision 5 section 4 "Restore" (Cameron's Q5
+  // ruling; fix wave 2 FW2-13): "Restore without a landlord" on a property
+  // whose cleared landlord was its primary contact makes the one remaining
+  // contact typed landlord the primary contact in the same write. The page
+  // renders the roster the server answers with.
+  it('Restore without a landlord that promotes the sole landlord-typed contact shows that contact as the primary contact', async () => {
+    const user = userEvent.setup();
+    // Deleted: James (landlord of record and primary contact) was re-typed;
+    // Dana, a property manager typed landlord, is still on the list.
+    const james = { contactId: 'll1', role: 'landlord' as const, primaryContact: true, name: 'James Porter' };
+    const dana = { contactId: 'pm2', role: 'pm' as const, primaryContact: false, name: 'Dana Reyes' };
+    const deletedUnit: NonNullable<ListingState['unit']> = {
+      ...READY.unit!,
+      deleted_at: '2026-06-19T00:00:00.000Z',
+      landlordId: 'll1',
+      primary_contact: 'll1',
+      contacts: [james, dana],
+    };
+    // The server's answer: no landlord of record, James's row dropped, Dana
+    // promoted (her row flagged, the primary_contact scalar naming her).
+    const { landlordId: _cleared, deleted_at: _live, ...restoredBase } = deletedUnit;
+    const restored: NonNullable<ListingState['unit']> = {
+      ...restoredBase,
+      primary_contact: 'pm2',
+      contacts: [{ ...dana, primaryContact: true }],
+    };
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+          error: 'restore_needs_landlord',
+          landlordName: 'James Porter',
+        }),
+      )
+      .mockResolvedValueOnce(restored);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    // As the real hook: setUnit replaces the unit and keeps the roster rows
+    // derived at load (James primary), which only the Contacts card's own
+    // roster state can supersede.
+    let current: ListingState = {
+      ...READY,
+      unit: deletedUnit,
+      roster: [
+        { contactId: 'll1', name: 'James Porter', role: 'landlord', roleLabel: 'Landlord', primaryContact: true, fallback: false },
+        { contactId: 'pm2', name: 'Dana Reyes', role: 'pm', roleLabel: 'Property manager', primaryContact: false, fallback: false },
+      ],
+      setUnit: vi.fn((unit: NonNullable<ListingState['unit']>) => {
+        current = { ...current, unit };
+      }),
+    };
+    useListing.mockImplementation(() => current);
+    renderAt();
+
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+    expect(restoreUnit).toHaveBeenLastCalledWith('u1', { landlordId: null });
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+
+    // Live again; the Contacts card lists Dana as the primary contact.
+    const card = screen.getByRole('heading', { name: /^Contacts/ }).closest('section') as HTMLElement;
+    expect(within(card).getAllByRole('link')[0]).toHaveTextContent('Dana Reyes (primary)');
+    expect(within(card).queryByText(/James Porter/)).not.toBeInTheDocument();
+    // Edit mode: her row is the primary and offers no Make primary.
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    expect(
+      screen.getByRole('button', { name: 'Remove Dana Reyes from this property' }).parentElement,
+    ).toHaveTextContent('Dana Reyes (primary)');
+    expect(within(card).getAllByText('(primary)')).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: 'Make Dana Reyes the primary contact' })).not.toBeInTheDocument();
+  });
+
   it('(PIN) a conflict whose re-read shows the property already restored closes the landlord dialog', async () => {
     const user = userEvent.setup();
     const setUnit = vi.fn();

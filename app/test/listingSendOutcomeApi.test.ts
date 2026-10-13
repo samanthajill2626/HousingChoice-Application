@@ -459,6 +459,29 @@ describe('outcome route - interested', () => {
     expect(world.toursMap.size).toBe(0);
   });
 
+  // Review B R2-2 part 2 / A R2-2 (spec 14.7): once the click wrote, a throw
+  // is never a bare 500 - the copy must say "Saved", not invite a retry.
+  it('a clear that THROWS after a successful create answers 503 saved:true, logged with ids only (review B R2-2 / A R2-2)', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    seedUnit(world, { tour_type: 'self_guided' });
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-25T00:00:00.000Z', by: 'staff' });
+    world.listingSendsRepo.clearDeclined = async () => {
+      throw new Error('throttled');
+    };
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable', saved: true });
+    expect(world.toursMap.size).toBe(1);
+    expect((await stored(world))?.declined).toBeDefined();
+    expect(outcomeEvents(world).map((e) => e.type)).toEqual(['listing_interested']);
+    const line = capture.atLevel(50).find((l) => l['msg'] === 'outcome: failed after a write - 503 saved');
+    expect(line).toMatchObject({ unitId: 'unit-1', contactId: 'c-1', outcome: 'interested' });
+    // PII: ids only - never the name or the phone.
+    expect(JSON.stringify(line)).not.toMatch(/Tia|Moss|5550100001/);
+  });
+
   it('a clear that finds no counted row AFTER the create is not a 404: the tour was written -> 503 saved, no cleared event', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, { tour_type: 'self_guided' });

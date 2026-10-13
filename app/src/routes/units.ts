@@ -1272,72 +1272,112 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // that found a tour and no effective decline writes nothing.
     let wrote = false;
 
-    if (outcome === 'interested') {
-      if (recipient?.type !== 'tenant') {
-        res.status(400).json({ error: 'interested_unsupported' });
-        return;
-      }
-      try {
-        await requireTenantContact(contacts, contactId);
-      } catch (err) {
-        if (sendContactTypeError(err, res)) return;
-        throw err;
-      }
-      let pairTours: TourItem[];
-      try {
-        // Accepted (build adjudication F6): the unit's tours filtered to the
-        // tenant read the same pair set as spec 5.4's byTenant read.
-        pairTours = (await tours.listByUnit(unitId)).filter((t) => t.tenantId === contactId);
-      } catch (err) {
-        log.warn({ err, unitId, contactId }, 'outcome: tours read failed - nothing written');
-        res.status(503).json({ error: 'outcome_unavailable' });
-        return;
-      }
-      // (1) ANY qualifying tour (the chip's set) means no tour is created.
-      const existing = deriveTourSignal(pairTours) !== undefined;
-      // (2) interestedModeFor's rule: no structured tour_type -> the form
-      // path. The tour type is the unit's own field ONLY (D14) - never derived.
-      const tourType: TourType | undefined = unit.tour_type;
-      if (!existing && tourType === undefined) {
-        res.status(409).json({ error: 'tour_type_required' });
-        return;
-      }
-      // Whether a decline is EFFECTIVE is judged on the tours as read, before
-      // this click creates one (the new tour would supersede it).
-      const declineEffective = effectiveDecline(row, deriveTourActivityAt(pairTours));
-      // (4, run FIRST - review ADV-3) Create, and ONLY then record
-      // listing_interested (a click that found an existing tour writes no
-      // event; a retry is not re-recorded). A create failure throws here,
-      // before the decline or the timeline is touched.
-      if (!existing && tourType !== undefined) {
-        createdTour = await tours.create({ tenantId: contactId, unitId, tourType, status: 'requested' });
+    // Review B R2-2 part 2 / A R2-2 (spec 14.7): everything from here on runs
+    // under one guard. A throw BEFORE any write stays the generic 500 (nothing
+    // was saved, so a retry is right); a throw AFTER one (the Interested clear
+    // behind a create, the re-projection) is never a bare 500 - the click DID
+    // save, so it answers 503 saved:true and invites no retry.
+    try {
+      if (outcome === 'interested') {
+        if (recipient?.type !== 'tenant') {
+          res.status(400).json({ error: 'interested_unsupported' });
+          return;
+        }
+        try {
+          await requireTenantContact(contacts, contactId);
+        } catch (err) {
+          if (sendContactTypeError(err, res)) return;
+          throw err;
+        }
+        let pairTours: TourItem[];
+        try {
+          // Accepted (build adjudication F6): the unit's tours filtered to the
+          // tenant read the same pair set as spec 5.4's byTenant read.
+          pairTours = (await tours.listByUnit(unitId)).filter((t) => t.tenantId === contactId);
+        } catch (err) {
+          log.warn({ err, unitId, contactId }, 'outcome: tours read failed - nothing written');
+          res.status(503).json({ error: 'outcome_unavailable' });
+          return;
+        }
+        // (1) ANY qualifying tour (the chip's set) means no tour is created.
+        const existing = deriveTourSignal(pairTours) !== undefined;
+        // (2) interestedModeFor's rule: no structured tour_type -> the form
+        // path. The tour type is the unit's own field ONLY (D14) - never derived.
+        const tourType: TourType | undefined = unit.tour_type;
+        if (!existing && tourType === undefined) {
+          res.status(409).json({ error: 'tour_type_required' });
+          return;
+        }
+        // Whether a decline is EFFECTIVE is judged on the tours as read, before
+        // this click creates one (the new tour would supersede it).
+        const declineEffective = effectiveDecline(row, deriveTourActivityAt(pairTours));
+        // (4, run FIRST - review ADV-3) Create, and ONLY then record
+        // listing_interested (a click that found an existing tour writes no
+        // event; a retry is not re-recorded). A create failure throws here,
+        // before the decline or the timeline is touched.
+        if (!existing && tourType !== undefined) {
+          createdTour = await tours.create({ tenantId: contactId, unitId, tourType, status: 'requested' });
+          wrote = true;
+          await recordListingOutcomeEvent(eventDeps, {
+            type: 'listing_interested',
+            contactId,
+            unitId,
+            label: `Interested in ${address} - tour requested`,
+            ...(actor !== undefined && { actor }),
+            tourId: createdTour.tourId,
+            at,
+          });
+        }
+        // (3, run SECOND) The decline record this click READ is removed
+        // WHATEVER its effectiveness (review B R2-2: an explicit Interested
+        // overrides every earlier decline, and a retry repairs a clear that
+        // failed behind an earlier create); `listing_decline_cleared` is its
+        // history only when that decline was EFFECTIVE (a superseded record
+        // changed nothing visible). COMPARE-AND-CLEAR (review B R2-1): only the
+        // record whose `at` was read is removed, so a decline another staff
+        // member records meanwhile survives. A clear that answers 'not_found'
+        // (someone re-declined, or the row stopped counting) records nothing
+        // and is NEVER a 404 here - the row was counted when read - so it falls
+        // through to the re-projection, which answers the truth.
+        const readDecline = row.declined;
+        if (readDecline !== undefined) {
+          const cleared = await listingSends.clearDeclined(unitId, contactId, { expectedAt: readDecline.at });
+          if (cleared === 'ok') wrote = true;
+          if (cleared === 'ok' && declineEffective) {
+            await recordListingOutcomeEvent(eventDeps, {
+              type: 'listing_decline_cleared',
+              contactId,
+              unitId,
+              label: `Not interested cleared for ${address}`,
+              ...(actor !== undefined && { actor }),
+              at,
+            });
+          }
+        }
+      } else if (outcome === 'not_interested') {
+        const record: DeclineRecord = { at, by: 'staff', ...(actor !== undefined && { staffId: actor }) };
+        if ((await listingSends.setDeclined(unitId, contactId, record)) === 'not_found') {
+          res.status(404).json({ error: 'send_not_found' });
+          return;
+        }
         wrote = true;
         await recordListingOutcomeEvent(eventDeps, {
-          type: 'listing_interested',
+          type: 'listing_declined',
           contactId,
           unitId,
-          label: `Interested in ${address} - tour requested`,
+          label: `Not interested in ${address}`,
           ...(actor !== undefined && { actor }),
-          tourId: createdTour.tourId,
           at,
         });
-      }
-      // (3, run SECOND) The decline record this click READ is removed
-      // WHATEVER its effectiveness (review B R2-2: an explicit Interested
-      // overrides every earlier decline, and a retry repairs a clear that
-      // failed behind an earlier create); `listing_decline_cleared` is its
-      // history only when that decline was EFFECTIVE (a superseded record
-      // changed nothing visible). COMPARE-AND-CLEAR (review B R2-1): only the
-      // record whose `at` was read is removed, so a decline another staff
-      // member records meanwhile survives. A clear that answers 'not_found'
-      // (someone re-declined, or the row stopped counting) records nothing
-      // and is NEVER a 404 here - the row was counted when read - so it falls
-      // through to the re-projection, which answers the truth.
-      const readDecline = row.declined;
-      if (readDecline !== undefined) {
-        const cleared = await listingSends.clearDeclined(unitId, contactId, { expectedAt: readDecline.at });
-        if (cleared === 'ok') wrote = true;
-        if (cleared === 'ok' && declineEffective) {
+      } else {
+        const hadDecline = row.declined !== undefined;
+        if ((await listingSends.clearDeclined(unitId, contactId)) === 'not_found') {
+          res.status(404).json({ error: 'send_not_found' });
+          return;
+        }
+        wrote = true;
+        // A clear that found no decline records nothing (plan 3.4 #2).
+        if (hadDecline) {
           await recordListingOutcomeEvent(eventDeps, {
             type: 'listing_decline_cleared',
             contactId,
@@ -1348,70 +1388,41 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
           });
         }
       }
-    } else if (outcome === 'not_interested') {
-      const record: DeclineRecord = { at, by: 'staff', ...(actor !== undefined && { staffId: actor }) };
-      if ((await listingSends.setDeclined(unitId, contactId, record)) === 'not_found') {
-        res.status(404).json({ error: 'send_not_found' });
-        return;
-      }
-      wrote = true;
-      await recordListingOutcomeEvent(eventDeps, {
-        type: 'listing_declined',
-        contactId,
-        unitId,
-        label: `Not interested in ${address}`,
-        ...(actor !== undefined && { actor }),
-        at,
-      });
-    } else {
-      const hadDecline = row.declined !== undefined;
-      if ((await listingSends.clearDeclined(unitId, contactId)) === 'not_found') {
-        res.status(404).json({ error: 'send_not_found' });
-        return;
-      }
-      wrote = true;
-      // A clear that found no decline records nothing (plan 3.4 #2).
-      if (hadDecline) {
-        await recordListingOutcomeEvent(eventDeps, {
-          type: 'listing_decline_cleared',
-          contactId,
-          unitId,
-          label: `Not interested cleared for ${address}`,
-          ...(actor !== undefined && { actor }),
-          at,
-        });
-      }
-    }
 
-    // (5) Re-project (D12: the joins are required). The row is re-read
-    // CONSISTENTLY; the byUnit GSI may not yet show a tour created a moment
-    // ago, so the created item joins the read. A failure here carries
-    // `saved: true` only when this click wrote (review A-3).
-    const unavailable = wrote ? { error: 'outcome_unavailable', saved: true } : { error: 'outcome_unavailable' };
-    let after: ListingSendItem | undefined;
-    let unitTours: TourItem[];
-    try {
-      [after, unitTours] = await Promise.all([
-        listingSends.getByKeyConsistent(unitId, contactId),
-        tours.listByUnit(unitId),
-      ]);
+      // (5) Re-project (D12: the joins are required). The row is re-read
+      // CONSISTENTLY; the byUnit GSI may not yet show a tour created a moment
+      // ago, so the created item joins the read. A failure here carries
+      // `saved: true` only when this click wrote (review A-3).
+      const unavailable = wrote ? { error: 'outcome_unavailable', saved: true } : { error: 'outcome_unavailable' };
+      let after: ListingSendItem | undefined;
+      let unitTours: TourItem[];
+      try {
+        [after, unitTours] = await Promise.all([
+          listingSends.getByKeyConsistent(unitId, contactId),
+          tours.listByUnit(unitId),
+        ]);
+      } catch (err) {
+        log.warn({ err, unitId, contactId, wrote }, 'outcome: re-projection read failed - 503');
+        res.status(503).json(unavailable);
+        return;
+      }
+      if (after === undefined || !ledgerRowCounted(after)) {
+        res.status(503).json(unavailable);
+        return;
+      }
+      const created = createdTour;
+      const joinedTours = created === undefined ? unitTours : [...unitTours.filter((t) => t.tourId !== created.tourId), created];
+      const join: RecipientJoin = {
+        toursByTenant: groupToursByTenant(joinedTours),
+        displays: recipient !== undefined ? new Map([[contactId, recipient]]) : new Map(),
+      };
+      log.info({ unitId, contactId, outcome, tourCreated: created !== undefined }, 'listing send outcome recorded');
+      res.json({ row: projectRecipientRow(after, unit, join) });
     } catch (err) {
-      log.warn({ err, unitId, contactId, wrote }, 'outcome: re-projection read failed - 503');
-      res.status(503).json(unavailable);
-      return;
+      if (!wrote) throw err;
+      log.error({ err, unitId, contactId, outcome, tourCreated: createdTour !== undefined }, 'outcome: failed after a write - 503 saved');
+      if (!res.headersSent) res.status(503).json({ error: 'outcome_unavailable', saved: true });
     }
-    if (after === undefined || !ledgerRowCounted(after)) {
-      res.status(503).json(unavailable);
-      return;
-    }
-    const created = createdTour;
-    const joinedTours = created === undefined ? unitTours : [...unitTours.filter((t) => t.tourId !== created.tourId), created];
-    const join: RecipientJoin = {
-      toursByTenant: groupToursByTenant(joinedTours),
-      displays: recipient !== undefined ? new Map([[contactId, recipient]]) : new Map(),
-    };
-    log.info({ unitId, contactId, outcome, tourCreated: created !== undefined }, 'listing send outcome recorded');
-    res.json({ row: projectRecipientRow(after, unit, join) });
   });
 
   // POST /api/units/:unitId/contacts { contactId, role, primaryContact? } (BE3/C3).

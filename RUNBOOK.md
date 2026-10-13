@@ -497,6 +497,30 @@ Cost: one consistent Scan of the contacts table, then per candidate (one named i
 
 **No agent runs it against dev or prod; an agent rehearses on a lane: `--env local --lane <L>`.** Never a bare `--env local` - that is the live local stack. No app path creates a candidate any more (every new sign-up gets the marker, and no seed writes `capture_source` `housing_fair`), so a rehearsal writes pre-change-shaped leads into the lane's contacts table directly.
 
+### Last heard from: the backfill (`feat/last-heard-from`) - owed on dev AND prod after this branch deploys
+
+**Owed on dev AND prod once this branch has deployed there; take dev all the way through before prod.** No Terraform, no secrets, no env var, no schema or index change (`last_heard_from_at` is a plain contact attribute, never an index key). Spec: `docs/superpowers/specs/2026-10-12-last-heard-from-follow-up-status-design.md`, sections 5.1, 5.2 and 14.2.
+
+What `app/scripts/backfill-last-heard-from.ts` does: from the deploy on, every inbound text, call and email moves its contact's "Last heard from" as it arrives. Contacts who last reached out BEFORE the deploy read "Never" until this backfill runs. The script walks every conversation's inbound history, attributes each row with the same rule the live paths use, keeps the latest instant per contact across all threads, and makes one conditional, forward-only write per contact. It never moves a value backward, so a contact who texted after the deploy keeps that newer value.
+
+Per environment, in this order:
+
+1. **Deploy FIRST** (`npm run deploy:dev`, then the promote for prod). The live touches start at the deploy; running the backfill before it leaves a gap (anyone who reaches out between the backfill and the deploy keeps their old value until they reach out again). After the deploy nothing can be missed: history is backfilled and new traffic is touched live.
+2. **Dry run (the DEFAULT; writes nothing):** `npx tsx app/scripts/backfill-last-heard-from.ts --env dev`. Read the start line (`target`, `prefix`) and confirm it names the environment you mean.
+3. **Read the counts** on the `backfill-last-heard-from - done (DRY RUN - nothing written)` line:
+   - `conversationsWalked` - conversations read (`pointerRows` are claim rows, skipped);
+   - `messagesRead` - inbound, non-retry rows read (one-to-one threads stop at their newest attributed inbound; group threads are read to the end);
+   - `planned` - contacts that will get a value;
+   - `unattributed` - inbound rows no contact can be named for: an email from an address not on any contact, an imported group call, a phone with no contact. `unattributedSample` lists up to 10 conversationIds to look at; a handful is normal;
+   - `unparseableInstants` - rows whose stored key carries no readable time (expected 0).
+4. **Apply:** `npx tsx app/scripts/backfill-last-heard-from.ts --env dev --apply`. `written` = values set; `skipped` = no contact row (a removed contact) or a value already as late (a live inbound since the deploy); `failed` = any other write error, which STOPS the run with a `PARTIAL result` line (the counters as of the stop) and exit 1 - fix the cause (usually throttling or credentials) and re-run.
+5. **Verify in THAT environment's dashboard:** open a tenant you know texted before the deploy - the contact header shows "Last heard from <date>", and Contacts > Tenants sorted by "Last heard from" puts recent repliers first.
+6. **Idempotent:** a second `--apply` reports `written: 0` and `skipped` equal to `planned`. Safe to re-run at any time.
+
+Cost: one Scan of the conversations table, one filtered Query per conversation (plus pages for long group threads), one byPhone or byEmail Query per distinct number or address the rule needs, and on an apply one conditional UpdateItem per planned contact - seconds to a minute at today's volume. Exit codes: 0 the run completed (dry run or apply); 1 a write failed, or a read failed mid-run (either way a `PARTIAL result` report), or the target could not be resolved (nothing read); 2 usage.
+
+**No agent runs it against dev or prod; an agent rehearses on a lane: `--env local --lane <L>`.** Never a bare `--env local` - that is the live local stack.
+
 ### Caseworkers (`feat/caseworkers`): DEPLOYED dev + prod 2026-10-12 (release 1.5.1) - nothing was owed; the conversion's repair, and putting a mistaken conversion back
 
 **DEPLOYED 2026-10-12: dev and prod run release `1.5.1` (main `e27868bc`), deployed by Cameron.** The follow-up `fix/caseworker-integrity` (R2-ADV-1 and the contact-type checks) shipped in release `1.5.3`, deployed to dev and prod 2026-10-13. A caseworker converted between the two deploys while a housing authority suggestion accept was in flight could have kept that authority (issue `claimed-suggestion-accept-after-caseworker-conversion`); "Make caseworker" again does not clear it - clear any such authority by hand.

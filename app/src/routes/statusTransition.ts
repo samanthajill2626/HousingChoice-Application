@@ -42,6 +42,7 @@ import {
   type StatusTransitionService,
 } from '../services/statusTransition.js';
 import { appEvents, type EventBus } from '../lib/events.js';
+import { sendContactTypeError } from '../services/contactTypeGuards.js';
 
 export interface StatusTransitionRouterDeps {
   logger?: Logger;
@@ -328,6 +329,11 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
 
 /** Map a transition error to its HTTP status (404 unknown, 400 refused, else rethrow). */
 function handleTransitionError(err: unknown, res: import('express').Response): void {
+  // Caseworker integrity I2 (spec 2026-10-12 section 4): transitionPlacement
+  // refuses a placement leaving a terminal stage for a contact that is not a
+  // tenant (409 { error: 'contact_not_tenant', contactKind }) or no longer
+  // exists (404 tenant_not_found).
+  if (sendContactTypeError(err, res)) return;
   if (err instanceof EntityNotFoundError) {
     res.status(404).json({ error: `${err.entity}_not_found` });
     return;

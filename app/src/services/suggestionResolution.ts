@@ -21,12 +21,17 @@ import {
   contactAddressToParts,
   formatAddressParts,
 } from './extraction/address.js';
-import { isDecisionTarget } from './extraction/runTypes.js';
+import { isDecisionTarget, TENANT_ONLY_TARGETS } from './extraction/runTypes.js';
 import { buildContactStatusTransitionPlan } from './statusTransition.js';
 import type { TenantStatus } from '../lib/statusModel.js';
 import { statusAllowlistFor } from '../lib/statusModel.js';
 import { checkScalarWrite, KINDS_FOR_FIELD, resolveOrgText, type OrgEntry } from '../lib/orgNames.js';
 import type { OrgNamesService } from './orgNames.js';
+
+// Spec 2026-10-12 D1: the seven tenant-only targets, exported here under the
+// plan's binding name. Defined in extraction/runTypes.ts (a leaf module) so the
+// resolution repository can read it without importing this service.
+export { TENANT_ONLY_TARGETS };
 
 const EXTRACTABLE = new Set<string>(EXTRACTABLE_FIELDS);
 const MAX_RESOLUTION_LOOPS = 6;
@@ -207,6 +212,28 @@ function guardForPatch(
 }
 
 /**
+ * Spec 2026-10-12 D1 change 3 (I1): a tenant-only ACCEPT is fenced on the
+ * contact's classification as the plan read it. The caseworker conversion and
+ * every contacts-PATCH type/role change bump classification_revision in the
+ * same write (contactsRepo update), so the guard transaction refuses an accept
+ * that spans any reclassification. Neutral targets are never fenced.
+ */
+function withClassificationFence(
+  contact: ContactItem,
+  target: string,
+  guard: ResolutionAttributeGuard,
+): ResolutionAttributeGuard {
+  if (!TENANT_ONLY_TARGETS.has(target)) return guard;
+  const revision = contact.classification_revision;
+  return {
+    ...guard,
+    classification_revision: revision === undefined
+      ? { exists: false }
+      : { exists: true, value: revision },
+  };
+}
+
+/**
  * Spec 2026-10-06 D8 + D5: the name an accepted housingAuthority suggestion
  * writes, decided against the CURRENT list inside buildPlan - before the
  * claim, so a refusal never consumes the suggestion.
@@ -279,7 +306,7 @@ function buildPlan(
     return {
       kind: 'status',
       patch: status.patch,
-      guard: guardForPatch(contact, status.patch),
+      guard: withClassificationFence(contact, target, guardForPatch(contact, status.patch)),
       audit: status.audit,
       ...(status.activity !== undefined && { activity: status.activity }),
     };
@@ -338,7 +365,7 @@ function buildPlan(
     return {
       kind: 'contact',
       patch,
-      guard: guardForPatch(contact, patch),
+      guard: withClassificationFence(contact, target, guardForPatch(contact, patch)),
       audit: {
         eventType: 'ai_suggestion_accepted',
         payload: {
@@ -361,7 +388,7 @@ function buildPlan(
     return {
       kind: 'contact',
       patch,
-      guard: guardForPatch(contact, patch),
+      guard: withClassificationFence(contact, target, guardForPatch(contact, patch)),
       audit: {
         eventType: 'ai_suggestion_accepted',
         payload: {
@@ -464,13 +491,16 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
   async function applyJournal(
     initial: ActiveSuggestionResolution,
     opts: { helping: boolean },
-  ): Promise<{ stateChanged: boolean; refusedByHumanEdit: boolean }> {
+  ): Promise<{ stateChanged: boolean; refusedByHumanEdit: boolean; refusedByReclassification: boolean }> {
     let journal = initial;
     // Entering above `claimed` means the domain effect is already durable (a
     // previous process committed it), so carrying the journal forward is still
     // a state change the dashboard has never been told about.
     let stateChanged = initial.phase !== 'claimed';
     let refusedByHumanEdit = false;
+    // Spec 2026-10-12 D1 change 5: the fenced write was refused because the
+    // contact's classification (type or role) changed after the plan read it.
+    let refusedByReclassification = false;
     for (let attempt = 0; attempt < MAX_RESOLUTION_LOOPS; attempt += 1) {
       const token = tokenFor(journal);
       if (journal.phase === 'claimed') {
@@ -566,7 +596,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           // gives the requester an answer about their OWN chip (adv P2-5).
           // 'stale' alone still throws: nothing is settled and the caller
           // should retry.
-          if (opts.helping && released !== 'stale') return { stateChanged, refusedByHumanEdit };
+          if (opts.helping && released !== 'stale') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
           throw new SuggestionResolutionError(409, 'phone_in_use');
         }
         // `stale` means this token can no longer prove its domain transaction
@@ -583,10 +613,11 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         // journal still runs to completion below (verdict + scrub); this flag is
         // what lets `resolve()` answer the REQUESTER honestly (H1 / item 1).
         if (result === 'superseded_by_human_edit') refusedByHumanEdit = true;
+        if (result === 'superseded_by_reclassification') refusedByReclassification = true;
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
         // Post-commit: the effect + audit + phase advance landed atomically and
         // somebody else now owns the journal. The human's action took effect.
-        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit };
+        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
         // FENCE NOTE (item 12): this re-ADOPTS whatever token the journal now
         // carries instead of enforcing our own - a helper that took over mid
         // flight is followed, not refused. Benign ONLY because every effect
@@ -633,9 +664,9 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         }
         // Post-commit from here on: the domain effect and its audit are durable,
         // so losing the journal to another helper is not the human's problem.
-        if (result === 'stale') return { stateChanged, refusedByHumanEdit };
+        if (result === 'stale') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
-        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit };
+        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
         // Same fence re-adoption as the post-commit read above - see FENCE NOTE.
         journal = refreshed;
         await boundary('activity_applied', journal);
@@ -651,9 +682,9 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           expectedPhase: journal.phase,
           nextPhase: 'verdict_attempted',
         });
-        if (result === 'stale') return { stateChanged, refusedByHumanEdit };
+        if (result === 'stale') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
-        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit };
+        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit, refusedByReclassification };
         // Same fence re-adoption as the post-commit read above - see FENCE NOTE.
         journal = refreshed;
         await boundary('verdict_attempted', journal);
@@ -667,7 +698,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         expectedPhase: 'verdict_attempted',
         completedAt: now(),
       });
-      return { stateChanged, refusedByHumanEdit };
+      return { stateChanged, refusedByHumanEdit, refusedByReclassification };
     }
     throw new SuggestionResolutionError(409, 'suggestion_resolution_retry_exhausted', true);
   }
@@ -775,8 +806,24 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           if (!matchesIdentity(suggestion, input.identity)) {
             throw new SuggestionResolutionError(409, 'suggestion_replaced');
           }
-          const contact = await deps.contactsRepo.getById(input.contactId);
+          // Spec 2026-10-12 D1 change 1: CONSISTENT. This read drives the
+          // tenant-only type rule and the classification_revision fence; a stale
+          // read would refuse spuriously and, for the fence, consume the chip.
+          const contact = await deps.contactsRepo.getById(input.contactId, { consistentRead: true });
           if (!contact) throw new SuggestionResolutionError(404, 'contact_not_found');
+          // Spec 2026-10-12 D1 change 2: tenant facts are accepted only onto a
+          // contact typed tenant - the rule extraction proposes them by
+          // (extraction/apply.ts fieldApplies). Refused BEFORE the claim, so the
+          // chip is not consumed and staff can still dismiss it; a dismiss is
+          // never refused. It runs before buildPlan, so a status accept meets
+          // it before the type-scoped allowlist check.
+          if (
+            input.action === 'accept'
+            && TENANT_ONLY_TARGETS.has(input.target)
+            && contact.type !== 'tenant'
+          ) {
+            throw new SuggestionResolutionError(409, 'suggestion_contact_not_tenant');
+          }
           // Spec 2026-10-06 D8: a housingAuthority accept is checked against the
           // CURRENT organization list while the plan is built - before the claim
           // below, so a refusal never consumes the suggestion. Nothing else
@@ -838,6 +885,15 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           // the operator their action applied when nothing of it did. Same
           // shape as the `released_unsafe` refusal above: throw AFTER the
           // durable work, never instead of it.
+          // Spec 2026-10-12 D1 change 5: the same shape for a refusal caused by
+          // a reclassification (the caseworker conversion, or a type or role
+          // change) after the plan read the contact. The repository decides
+          // classification first, so a tie answers this code. Only THIS
+          // request's own claim answers it; a helped journal keeps today's
+          // answers (applyJournal's flags are ignored on the help path).
+          if (applied.refusedByReclassification) {
+            throw new SuggestionResolutionError(409, 'suggestion_contact_reclassified');
+          }
           if (applied.refusedByHumanEdit) {
             throw new SuggestionResolutionError(409, 'suggestion_field_edited');
           }

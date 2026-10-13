@@ -1,4 +1,4 @@
-import { test, expect, type Page, type Locator } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page, type Locator } from '@playwright/test';
 import { expectTodayReady } from '../../support/today.js';
 
 // Placements page (:5174) against the real status-model backend. The kanban
@@ -316,4 +316,89 @@ test('mobile: a stage can still be picked from the scrolled menu', async ({ page
   await expect(
     page.getByRole('dialog').or(placementBanner(page).getByText('Send application')).first(),
   ).toBeVisible({ timeout: 10_000 });
+});
+
+// ---------------------------------------------------------------------------
+// Caseworker integrity (spec docs/superpowers/specs/2026-10-12-caseworker-
+// integrity-design.md D3): a placement leaving a TERMINAL stage (lost /
+// moved_in) for an open one checks that its tenant is still typed tenant. The
+// dashboard reaches the refusal like this: a Lost placement whose tenant was
+// re-typed while it was closed (allowed - a closed placement is not open),
+// moved back from the placement page's Move to menu. Its own world, run-unique;
+// the file's afterEach still resets placement-0001.
+// ---------------------------------------------------------------------------
+
+/** The refusal sentence for a landlord (dashboard src/lib/contactTypeErrors.ts). */
+const NOT_A_TENANT_LANDLORD = 'Tours and placements are for tenants. This contact is a landlord.';
+
+async function createTypedContact(
+  request: APIRequestContext,
+  type: 'tenant' | 'landlord',
+  firstName: string,
+  lastName: string,
+): Promise<string> {
+  const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
+  const res = await request.post(`${NEXT}/api/contacts`, { data: { type, firstName, lastName, phone } });
+  expect(res.ok(), `create ${type} ${firstName}: ${await res.text()}`).toBeTruthy();
+  return ((await res.json()) as { contact: { contactId: string } }).contact.contactId;
+}
+
+test('hub: a Lost placement whose tenant is no longer a tenant cannot move back, and the page says why', async ({
+  page,
+}) => {
+  test.slow(); // a fresh world (two contacts, a property, a placement) plus the hub.
+  await devLoginAndReset(page);
+  const req = page.request;
+  const stamp = `${Date.now()}`.slice(-6);
+  const lastName = `Plret${stamp}`;
+  const tenantId = await createTypedContact(req, 'tenant', 'Lostten', lastName);
+  const ownerId = await createTypedContact(req, 'landlord', 'Lostown', lastName);
+  const unitRes = await req.post(`${NEXT}/api/units`, {
+    data: {
+      landlordId: ownerId,
+      beds: 2,
+      rent_min: 1500,
+      rent_max: 1600,
+      address: { line1: `${stamp} Lost Placement Way NW`, city: 'Atlanta', state: 'GA', zip: '30314' },
+    },
+  });
+  expect(unitRes.ok(), await unitRes.text()).toBeTruthy();
+  const unitId = ((await unitRes.json()) as { unit: { unitId: string } }).unit.unitId;
+  const created = await req.post(`${NEXT}/api/placements`, {
+    data: { tenantId, unitId, stage: 'send_application' },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const placementId = ((await created.json()) as { placement: { placementId: string } }).placement.placementId;
+  const lost = await req.post(`${NEXT}/api/placements/${placementId}/transition`, {
+    data: { toStage: 'lost', source: 'manual', lostReason: { category: 'tenant_withdrew' } },
+  });
+  expect(lost.ok(), await lost.text()).toBeTruthy();
+  // Closed, so the contact holds no open record and the re-type is allowed.
+  // Retried while the placements index catches up with the move to Lost (spec
+  // L1); a refused PATCH writes nothing.
+  await expect
+    .poll(
+      async () => (await req.patch(`${NEXT}/api/contacts/${tenantId}`, { data: { type: 'landlord' } })).ok(),
+      { timeout: 10_000 },
+    )
+    .toBe(true);
+
+  await page.goto(`${NEXT}/placements/${placementId}`);
+  const banner = placementBanner(page);
+  await expect(banner.getByText('Lost', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('button', { name: /^Placement stage/ }).click();
+  await page.getByRole('menuitemradio', { name: 'Send application', exact: true }).click();
+  await expect(page.getByRole('alert').filter({ hasText: NOT_A_TENANT_LANDLORD })).toBeVisible();
+  await expect(banner.getByText('Lost', { exact: true })).toBeVisible();
+
+  // On the wire: 409 with the contact's kind, and the placement did not move.
+  const refused = await req.post(`${NEXT}/api/placements/${placementId}/transition`, {
+    data: { toStage: 'send_application', source: 'manual' },
+  });
+  expect(refused.status()).toBe(409);
+  expect(await refused.json()).toMatchObject({ error: 'contact_not_tenant', contactKind: 'landlord' });
+  const after = await req.get(`${NEXT}/api/placements/${placementId}`);
+  expect(after.ok(), await after.text()).toBeTruthy();
+  expect(((await after.json()) as { placement: { stage: string } }).placement.stage).toBe('lost');
 });

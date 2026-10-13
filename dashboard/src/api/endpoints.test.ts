@@ -47,6 +47,7 @@ import {
   provisionPlacementRelay,
   setPlacementFollowUp,
   clearPlacementFollowUp,
+  restoreUnit,
   setListingStatus,
   setTenantStatus,
   transitionPlacement,
@@ -794,4 +795,24 @@ it('caseworker writes POST the action body and unwrap { contact }', async () => 
     method: 'POST',
     body: { action: 'dismiss' },
   });
+});
+
+it('restoreUnit POSTs no body by default, and { landlordId } only when given (caseworker-integrity)', async () => {
+  vi.mocked(request).mockResolvedValue({ unit: { unitId: 'u1', status: 'available' } });
+
+  await restoreUnit('u1');
+  expect(request).toHaveBeenLastCalledWith('/api/units/u1/restore', { method: 'POST' });
+
+  await restoreUnit('u 1', { landlordId: 'c-nora' });
+  expect(request).toHaveBeenLastCalledWith('/api/units/u%201/restore', {
+    method: 'POST',
+    body: { landlordId: 'c-nora' },
+  });
+
+  const u = await restoreUnit('u1', { landlordId: null });
+  expect(request).toHaveBeenLastCalledWith('/api/units/u1/restore', {
+    method: 'POST',
+    body: { landlordId: null },
+  });
+  expect(u).toEqual({ unitId: 'u1', status: 'available' });
 });

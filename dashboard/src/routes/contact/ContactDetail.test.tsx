@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { useRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -13,6 +14,7 @@ import {
   loadViewerImage,
 } from '../../ui/imageViewer/ImageViewer.testUtils.js';
 import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
+import { TYPE_CHANGE_LANDLORD_SENTENCE } from '../../lib/holdingRefusals.js';
 
 const getContact = vi.fn();
 const getContactTimeline = vi.fn();
@@ -91,6 +93,12 @@ const conversationUpdatedHandlers = new Set<(e: unknown) => void>();
 // mark-read, and useContactMedia's gallery refetch since 2026-08-18) - fanned
 // out the same way so a test can deliver ONE event to all of them.
 const messagePersistedHandlers = new Set<(e: unknown) => void>();
+// suggestion.updated has two listeners as well (useContact's in-place contact
+// re-read and useSuggestions' list re-read), but both pass an INLINE handler -
+// a new function every render - so a Set of handlers would collect one per
+// render. Modeled the way EventStreamProvider does it instead: one ref per
+// caller, holding that caller's latest handlers, read at dispatch time.
+const suggestionUpdatedRefs = new Set<{ current: Record<string, ((e: unknown) => void) | undefined> }>();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -142,6 +150,9 @@ vi.mock('../../api/index.js', async () => {
       if (handlers['onMessagePersisted'] !== undefined) {
         messagePersistedHandlers.add(handlers['onMessagePersisted']);
       }
+      const latest = useRef(handlers);
+      latest.current = handlers;
+      suggestionUpdatedRefs.add(latest);
     },
   };
 });
@@ -177,6 +188,13 @@ function emitConversationUpdated(event: Record<string, unknown>): void {
 function emitMessagePersisted(event: Record<string, unknown>): void {
   act(() => {
     for (const handler of [...messagePersistedHandlers]) handler(event);
+  });
+}
+
+/** Deliver one suggestion.updated to EVERY caller's latest handler. */
+function emitSuggestionUpdated(event: Record<string, unknown>): void {
+  act(() => {
+    for (const ref of [...suggestionUpdatedRefs]) ref.current['onSuggestionUpdated']?.(event);
   });
 }
 
@@ -287,6 +305,7 @@ const OTHER: Contact = {
 beforeEach(() => {
   conversationUpdatedHandlers.clear();
   messagePersistedHandlers.clear();
+  suggestionUpdatedRefs.clear();
   noteRowsCleared.mockReset();
   rollbackRowsCleared.mockReset();
   markInboxRead.mockReset().mockResolvedValue(undefined);
@@ -555,6 +574,151 @@ describe('ContactDetail', () => {
     expect(screen.getByText('Unknown')).toBeInTheDocument();
   });
 
+  it('a refused Mark as (409 type_change_refused) shows each refusal and its View link on the Unknown card', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(UNKNOWN);
+    updateContact.mockRejectedValue(
+      new ApiError(409, 'type_change_refused', 'type_change_refused', {
+        error: 'type_change_refused',
+        refusals: [
+          { code: 'open_placement', placementId: 'p 7' },
+          { code: 'open_tour', tourId: 't1' },
+        ],
+      }),
+    );
+    renderAt('u9');
+    await user.click(await screen.findByRole('button', { name: 'Mark as Landlord' }));
+    const card = screen.getByRole('heading', { name: 'Needs triage' }).closest('section') as HTMLElement;
+    expect(await within(card).findByText("Finish or close this contact's placement first.")).toBeInTheDocument();
+    expect(within(card).getByText("Cancel or close this contact's open tour first.")).toBeInTheDocument();
+    expect(within(card).getByRole('link', { name: 'View placement' })).toHaveAttribute('href', '/placements/p%207');
+    expect(within(card).getByRole('link', { name: 'View tour' })).toHaveAttribute('href', '/tours/t1');
+    // Still untriaged, and every action re-enables for a retry.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as Landlord' })).toBeEnabled());
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+  });
+
+  it('any other Mark as failure shows the save sentence on the card instead of being swallowed', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(UNKNOWN);
+    updateContact.mockRejectedValue(new Error('offline'));
+    renderAt('u9');
+    await user.click(await screen.findByRole('button', { name: 'Mark as Partner' }));
+    const card = screen.getByRole('heading', { name: 'Needs triage' }).closest('section') as HTMLElement;
+    expect(await within(card).findByText("Couldn't save - please try again.")).toBeInTheDocument();
+  });
+
+  it('a new Mark as attempt replaces the previous message', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(UNKNOWN);
+    updateContact
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(
+        new ApiError(409, 'type_change_refused', 'type_change_refused', {
+          error: 'type_change_refused',
+          refusals: [{ code: 'landlord_of_record', unitId: 'u1' }],
+        }),
+      );
+    renderAt('u9');
+    await user.click(await screen.findByRole('button', { name: 'Mark as Tenant' }));
+    const card = screen.getByRole('heading', { name: 'Needs triage' }).closest('section') as HTMLElement;
+    expect(await within(card).findByText("Couldn't save - please try again.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as Tenant' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: 'Mark as Tenant' }));
+    expect(await within(card).findByText(TYPE_CHANGE_LANDLORD_SENTENCE)).toBeInTheDocument();
+    expect(within(card).queryByText("Couldn't save - please try again.")).toBeNull();
+    expect(within(card).getByRole('link', { name: 'View property' })).toHaveAttribute('href', '/listings/u1');
+  });
+
+  // R1 code review, dashboard finding 6: the Unknown card's two
+  // contact-isolation guards. The renderWithNavToOther pattern (the kebab
+  // unread toggle describe, below) with an UNKNOWN second contact:
+  // ContactDetail is re-rendered, not remounted, on the param change, so both
+  // contacts share one Needs triage card.
+  const UNKNOWN_OTHER: Contact = {
+    contactId: 'u10',
+    type: 'unknown',
+    status: 'needs_review',
+    firstName: 'Una',
+    lastName: 'Second',
+    phone: '+15550100002',
+  };
+
+  function renderUnknownWithNavToOther() {
+    getContact.mockImplementation((id: unknown) =>
+      id === 'u10' ? Promise.resolve(UNKNOWN_OTHER) : Promise.resolve(UNKNOWN),
+    );
+    return render(
+      <MemoryRouter initialEntries={['/contacts/u9']}>
+        <ImageViewerProvider>
+          <Routes>
+            <Route
+              path="/contacts/:contactId"
+              element={
+                <>
+                  <Link to="/contacts/u10">NAV-TO-OTHER</Link>
+                  <ContactDetail />
+                </>
+              }
+            />
+          </Routes>
+        </ImageViewerProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  const refusedOpenPlacement = (): ApiError =>
+    new ApiError(409, 'type_change_refused', 'type_change_refused', {
+      error: 'type_change_refused',
+      refusals: [{ code: 'open_placement', placementId: 'p7' }],
+    });
+
+  it("contact A's Mark as refusal that lands AFTER the move to contact B never renders on B's card", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    let rejectA: ((err: unknown) => void) | undefined;
+    updateContact.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectA = reject;
+        }),
+    );
+    renderUnknownWithNavToOther();
+    await user.click(await screen.findByRole('button', { name: 'Mark as Landlord' }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('u9', expect.anything()));
+
+    await user.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByText('Una Second');
+    await act(async () => {
+      rejectA?.(refusedOpenPlacement());
+      await Promise.resolve();
+    });
+    // A's request has settled (its finally re-enabled the shared buttons)...
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Mark as Landlord' })).toBeEnabled());
+    // ...and B's card says nothing about A's placement.
+    const card = screen.getByRole('heading', { name: 'Needs triage' }).closest('section') as HTMLElement;
+    expect(within(card).queryByRole('alert')).toBeNull();
+    expect(screen.queryByText("Finish or close this contact's placement first.")).toBeNull();
+  });
+
+  it("contact A's Mark as refusal does not survive the move to contact B", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    updateContact.mockRejectedValue(refusedOpenPlacement());
+    renderUnknownWithNavToOther();
+    await user.click(await screen.findByRole('button', { name: 'Mark as Landlord' }));
+    expect(await screen.findByText("Finish or close this contact's placement first.")).toBeInTheDocument();
+
+    await user.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByText('Una Second');
+    const card = screen.getByRole('heading', { name: 'Needs triage' }).closest('section') as HTMLElement;
+    expect(within(card).queryByRole('alert')).toBeNull();
+    expect(screen.queryByText("Finish or close this contact's placement first.")).toBeNull();
+  });
+
   it('accepts a voucher-size AI suggestion: applies the returned contact in place (value + Auto badge, chip gone)', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();
@@ -699,17 +863,21 @@ describe('ContactDetail', () => {
       await waitFor(() => expect(getSuggestions).toHaveBeenCalledTimes(2));
     });
 
-    // The SERVER answers these three with a list that has genuinely moved on:
+    // The SERVER answers these four with a list that has genuinely moved on:
     // two of them PROMISE "the list now shows its real state", and a refused
     // accept has already deleted the row. The server does emit
-    // `suggestion.updated` for a helped commit and for the refused accept (the
-    // helped-or-refused emit in the suggestions router's shared error path),
-    // but an SSE is asynchronous and not guaranteed to reach THIS tab before
-    // the operator looks - the refetch is what makes the answer true here.
+    // `suggestion.updated` for a helped commit and for both refused accepts (a
+    // field edit or a reclassification) (the helped-or-refused emit in the
+    // suggestions router's shared error path), but an SSE is asynchronous and
+    // not guaranteed to reach THIS tab before the operator looks - the refetch
+    // is what makes the answer true here.
     it.each([
       ['no_pending_suggestion', 404],
       ['suggestion_already_resolved', 409],
       ['suggestion_field_edited', 409],
+      // Spec 2026-10-12 D1: refused by the classification fence after claim()
+      // consumed the row - the list has moved on exactly like a field edit.
+      ['suggestion_contact_reclassified', 409],
     ])('refetches on a SERVER %s so the list really does show its real state', async (code, httpStatus) => {
       acceptSuggestion.mockRejectedValue(new ApiError(httpStatus, code, code));
       const chip = await clickChip('Accept');
@@ -731,6 +899,20 @@ describe('ContactDetail', () => {
 
       const alert = await within(chip).findByRole('alert');
       expect(alert).toHaveTextContent('try again in a moment');
+      expect(getSuggestions).toHaveBeenCalledTimes(1);
+    });
+
+    // Spec 2026-10-12 D1: refused BEFORE the claim, so the chip is still
+    // pending server-side - it stays, says why, and offers Dismiss.
+    it('keeps the chip and does NOT refetch on suggestion_contact_not_tenant (PIN)', async () => {
+      acceptSuggestion.mockRejectedValue(
+        new ApiError(409, 'suggestion_contact_not_tenant', 'suggestion_contact_not_tenant'),
+      );
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent("This contact isn't a tenant, so this can't be applied. Dismiss it instead.");
+      expect(within(chip).getByRole('button', { name: 'Dismiss' })).toBeEnabled();
       expect(getSuggestions).toHaveBeenCalledTimes(1);
     });
   });
@@ -2509,6 +2691,74 @@ describe('ContactDetail - accepting a housing authority suggestion', () => {
     expect(acceptSuggestion).not.toHaveBeenCalled();
     // The edit superseded the suggestion server-side; the page re-reads them.
     await waitFor(() => expect(getSuggestions).toHaveBeenCalledTimes(2));
+  });
+
+  // Spec 2026-10-12 D1, planner-ruled addition (build research RF1-F1 / Q1): a
+  // team member's page renders the tenant file and its chips, but a housing
+  // authority is a tenant fact. The review's close-name path would write it by
+  // a plain contact edit that never meets the server's tenant-only rule, so a
+  // non-tenant's chip skips the review and sends the plain accept, which the
+  // server refuses before anything is consumed.
+  it('a TEAM MEMBER chip skips the review and sends the plain accept, refused as not a tenant', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    // What the review would offer this text: a close name, i.e. a plain edit.
+    checkOrgText.mockResolvedValue({ candidates: [], close: [ATL] });
+    acceptSuggestion.mockRejectedValue(
+      new ApiError(409, 'suggestion_contact_not_tenant', 'suggestion_contact_not_tenant'),
+    );
+    getContact.mockResolvedValue({ ...TENANT, type: 'team_member' });
+    getSuggestions.mockResolvedValue([haSuggestion('Atlnta Housing')]);
+    renderAt('k1');
+    const chip = await screen.findByRole('group', { name: 'AI suggestion for housing authority' });
+    await user.click(within(chip).getByRole('button', { name: 'Accept' }));
+
+    // The plain accept: the identity only, never a chosen value.
+    await waitFor(() => expect(acceptSuggestion).toHaveBeenCalledTimes(1));
+    expect(acceptSuggestion.mock.calls[0]).toStrictEqual(['k1', 'housingAuthority', IDENTITY]);
+    const alert = await within(chip).findByRole('alert');
+    expect(alert).toHaveTextContent("This contact isn't a tenant, so this can't be applied. Dismiss it instead.");
+    expect(checkOrgText).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument();
+    expect(updateContact).not.toHaveBeenCalled();
+    // Refused before anything was consumed: the chip stays and offers Dismiss.
+    expect(within(chip).getByRole('button', { name: 'Dismiss' })).toBeEnabled();
+  });
+
+  // Final review A5 (fix wave FWF-4): the review's close-name path writes the
+  // authority with a plain contact edit, which never meets the server's
+  // tenant-only rule. So the review closes when the contact stops being a
+  // tenant while it is open - here staff B converted the contact to a
+  // caseworker and this page received the converted contact through its own
+  // suggestion.updated re-read - and nothing can write onto the re-typed
+  // contact.
+  it('the review closes when the contact stops being a tenant while it is open - its close-name action sends nothing', async () => {
+    checkOrgText.mockResolvedValue({ candidates: [], close: [ATL] });
+    await pressAccept('Atlnta Housing');
+    const dialog = await screen.findByRole('dialog', { name: 'Is this really new?' });
+    // Held from before the type change: a review that survived it would still
+    // hold this button, and pressing it would send the plain contact edit.
+    const useCloseName = within(dialog).getByRole('button', { name: 'Use Atlanta Housing Authority' });
+
+    // Staff B's conversion: a caseworker now, the suggestion superseded.
+    getContact.mockResolvedValue({ ...TENANT, type: 'partner', role: 'Caseworker', organization: 'Hope Atlanta' });
+    getSuggestions.mockResolvedValue([]);
+    emitSuggestionUpdated({ contactId: 'k1' });
+    // The page shows the converted contact (a partner's header names its organization).
+    expect((await screen.findAllByText('Hope Atlanta')).length).toBeGreaterThan(0);
+
+    fireEvent.click(useCloseName);
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: 'Is this really new?' })).not.toBeInTheDocument();
+    expect(acceptSuggestion).not.toHaveBeenCalled();
+  });
+
+  it('a TENANT chip with the same non-list text still opens the review (PIN)', async () => {
+    checkOrgText.mockResolvedValue({ candidates: [], close: [ATL] });
+    await pressAccept('Atlnta Housing');
+    expect(await screen.findByRole('dialog', { name: 'Is this really new?' })).toBeInTheDocument();
+    expect(checkOrgText).toHaveBeenCalledWith({ kind: 'housing_authority', text: 'Atlnta Housing' });
+    expect(acceptSuggestion).not.toHaveBeenCalled();
   });
 
   it('an agency name says so and offers Dismiss', async () => {

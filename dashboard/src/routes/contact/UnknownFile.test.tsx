@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -7,7 +7,8 @@ import {
   installImageViewerResizeObserver,
   loadViewerImage,
 } from '../../ui/imageViewer/ImageViewer.testUtils.js';
-import { UnknownFile } from './UnknownFile.js';
+import { UnknownFile, type TriageError } from './UnknownFile.js';
+import { TYPE_CHANGE_LANDLORD_SENTENCE } from '../../lib/holdingRefusals.js';
 import type { SuggestedContactKind } from './contactProfile.js';
 import type { CommsMediaItem } from './media.js';
 import type { Contact, GroupThreadRow, SuggestionItem } from '../../api/index.js';
@@ -33,6 +34,7 @@ function renderIt(opts: {
   onMakeCaseworker?: () => void;
   triaging?: boolean;
   media?: CommsMediaItem[];
+  triageError?: TriageError | null;
 } = {}): void {
   render(
     <MemoryRouter>
@@ -47,6 +49,7 @@ function renderIt(opts: {
           onTriage={opts.onTriage ?? vi.fn()}
           onMakeCaseworker={opts.onMakeCaseworker ?? vi.fn()}
           triaging={opts.triaging}
+          triageError={opts.triageError ?? null}
           groupThreadsPending={false}
           groupThreads={opts.groupThreads ?? []}
           groupThreadsTruncated={false}
@@ -189,5 +192,41 @@ describe('UnknownFile - Mark as Caseworker (spec 2026-10-06 D16)', () => {
   it('the card says Caseworker is one of the kinds', () => {
     renderIt();
     expect(screen.getByText(/Tenant, Landlord, Partner, Caseworker, or Property Manager/)).toBeInTheDocument();
+  });
+});
+
+describe('UnknownFile - a Mark as failure on the card (spec 2026-10-12 D2)', () => {
+  const card = (): HTMLElement =>
+    screen.getByRole('heading', { name: 'Needs triage' }).closest('section') as HTMLElement;
+
+  it('a refused type change shows each refusal sentence with its View link', () => {
+    renderIt({
+      triageError: {
+        refusals: [
+          { code: 'open_placement', placementId: 'p 7' },
+          { code: 'open_tour', tourId: 't1' },
+          { code: 'landlord_of_record', unitId: 'u1' },
+        ],
+      },
+    });
+    const alert = within(card()).getByRole('alert');
+    expect(within(alert).getByText("Finish or close this contact's placement first.")).toBeInTheDocument();
+    expect(within(alert).getByText("Cancel or close this contact's open tour first.")).toBeInTheDocument();
+    expect(within(alert).getByText(TYPE_CHANGE_LANDLORD_SENTENCE)).toBeInTheDocument();
+    expect(within(alert).getByRole('link', { name: 'View placement' })).toHaveAttribute('href', '/placements/p%207');
+    expect(within(alert).getByRole('link', { name: 'View tour' })).toHaveAttribute('href', '/tours/t1');
+    expect(within(alert).getByRole('link', { name: 'View property' })).toHaveAttribute('href', '/listings/u1');
+    // The actions stay available for a retry.
+    expect(screen.getByRole('button', { name: 'Mark as Tenant' })).toBeEnabled();
+  });
+
+  it('any other failure shows its sentence on the card', () => {
+    renderIt({ triageError: { message: "Couldn't save - please try again." } });
+    expect(within(card()).getByRole('alert')).toHaveTextContent("Couldn't save - please try again.");
+  });
+
+  it('(PIN) shows nothing on the card without a failure', () => {
+    renderIt();
+    expect(within(card()).queryByRole('alert')).toBeNull();
   });
 });

@@ -5,6 +5,7 @@
 // internal/landlord/contact field.
 import { describe, expect, it } from 'vitest';
 import {
+  acceptedVoucherSizes,
   authoritiesOf,
   toUnitFlyer,
   validateUnitBody,
@@ -61,9 +62,9 @@ describe('validateUnitBody — new public-flyer fields', () => {
 });
 
 describe('validateUnitBody — voucher_size_accepted (landlord-onboarding)', () => {
-  // A writable, STORED voucher size the unit accepts — DISTINCT from the derived
-  // read-only voucher_size (which projects from beds). A 3bd unit may accept a
-  // 2BR voucher, so this is its own number field feeding matching.
+  // A writable, STORED voucher size the unit accepts - DISTINCT from beds. A 3bd
+  // unit may accept a 2BR voucher, so this is its own number field; readers go
+  // through acceptedVoucherSizes (below), which falls back to beds.
   it('accepts voucher_size_accepted (a number >= 0)', () => {
     expect(validateUnitBody({ voucher_size_accepted: 2 }, 'update')).toEqual({
       ok: true,
@@ -87,6 +88,25 @@ describe('validateUnitBody — voucher_size_accepted (landlord-onboarding)', () 
     expect(validateUnitBody({ voucher_size_accepted: -1 }, 'update')).toEqual({
       ok: false,
       error: 'voucher_size_accepted must be >= 0',
+    });
+  });
+
+  it('null CLEARS voucher_size_accepted (a null patch value -> REMOVE), so beds decide again', () => {
+    expect(validateUnitBody({ voucher_size_accepted: null }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: null },
+    });
+    // An empty string is not a clear - only null is.
+    expect(validateUnitBody({ voucher_size_accepted: '' }, 'update')).toEqual({
+      ok: false,
+      error: 'voucher_size_accepted must be a number',
+    });
+  });
+
+  it('other number fields still reject null (only the voucher size is clearable)', () => {
+    expect(validateUnitBody({ beds: null }, 'update')).toEqual({
+      ok: false,
+      error: 'beds must be a number',
     });
   });
 });
@@ -256,6 +276,39 @@ describe('validateUnitBody - accepted_authorities consolidation (spec section 8)
   });
 });
 
+describe('acceptedVoucherSizes', () => {
+  // THE one reader of "which voucher sizes does this unit take" (Cameron,
+  // 2026-10-04): the recorded `voucher_size_accepted` when there is one - ONE
+  // number today, a multi-select LIST with tracker #12 (the `full` demo seed
+  // already stores [2, 3]) - otherwise the bedroom count; nothing only when
+  // BOTH are missing. The SAME cases as the dashboard mirror's suite
+  // (dashboard/src/routes/listing/listingFormat.test.ts) - keep them in step.
+  it('a recorded single size wins, even over a different bedroom count', () => {
+    expect(acceptedVoucherSizes({ voucher_size_accepted: 2 })).toEqual([2]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: 2, beds: 3 })).toEqual([2]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: 0, beds: 1 })).toEqual([0]);
+  });
+  it('a recorded list wins, keeping every finite number in order', () => {
+    expect(acceptedVoucherSizes({ voucher_size_accepted: [2, 3], beds: 4 })).toEqual([2, 3]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: [2, 'x', null, Number.NaN, 3] })).toEqual([2, 3]);
+  });
+  it('falls back to the bedroom count when no voucher size is recorded', () => {
+    expect(acceptedVoucherSizes({ beds: 3 })).toEqual([3]);
+    expect(acceptedVoucherSizes({ beds: 0 })).toEqual([0]);
+    // An empty or unusable recorded value records nothing, so beds still decide.
+    expect(acceptedVoucherSizes({ voucher_size_accepted: [], beds: 2 })).toEqual([2]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: ['x', null], beds: 2 })).toEqual([2]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: Number.NaN, beds: 2 })).toEqual([2]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: '2', beds: 1 })).toEqual([1]);
+  });
+  it('is empty (Not recorded) only when BOTH are missing or unusable', () => {
+    expect(acceptedVoucherSizes({})).toEqual([]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: null, beds: null })).toEqual([]);
+    expect(acceptedVoucherSizes({ voucher_size_accepted: [], beds: Number.NaN })).toEqual([]);
+    expect(acceptedVoucherSizes({ beds: '3' })).toEqual([]);
+  });
+});
+
 describe('toUnitFlyer - the merged public allowlist', () => {
   // A unit loaded with EVERY internal/landlord/contact field set, to prove none
   // leak through the projection.
@@ -373,6 +426,30 @@ describe('toUnitFlyer - the merged public allowlist', () => {
     expect(toUnitFlyer(fullUnit({ pets: false })).pets).toBe(false);
     expect(toUnitFlyer(fullUnit({ pets: 'Cats only' })).pets).toBe('Cats only');
     expect(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }).pets).toBeNull();
+  });
+
+  it('voucher_size states the RECORDED size over the bedroom count; the key stays off', () => {
+    // The reported prod bug (2026-10-12): a unit whose recorded voucher size
+    // differed from its bedrooms showed the bedroom count, because the flyer read
+    // beds alone.
+    const flyer = toUnitFlyer(fullUnit({ beds: 2, voucher_size_accepted: 3 }));
+    expect(flyer.voucher_size).toBe(3);
+    expect(flyer.beds).toBe(2);
+    // The VALUE ships as voucher_size; the internal KEY never does.
+    expect(Object.keys(flyer)).not.toContain('voucher_size_accepted');
+  });
+
+  it('voucher_size falls back to beds, and is null only when both are missing', () => {
+    expect(toUnitFlyer(fullUnit({ beds: 3 })).voucher_size).toBe(3);
+    expect(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }).voucher_size).toBeNull();
+    expect(
+      toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available', voucher_size_accepted: 1 }).voucher_size,
+    ).toBe(1);
+  });
+
+  it('voucher_size takes the first size of a recorded list (demo seed only until #12)', () => {
+    const listed = fullUnit({ beds: 4, voucher_size_accepted: [2, 3] as unknown as number });
+    expect(toUnitFlyer(listed).voucher_size).toBe(2);
   });
 
   it('drops a legacy plain-string address (only structured sub-fields survive)', () => {

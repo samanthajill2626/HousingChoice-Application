@@ -33,6 +33,11 @@ import { expectTodayReady } from '../../support/today.js';
 //   6. Unavailable - a bogus id and a non-shareable unit stay opaque; BOTH CTA
 //      variants land somewhere (public -> /join, text -> a tap-to-text sms: CTA fed
 //      by the opaque-404 body's contact_number).
+//   7. `/join` housing authority (join-housing-authority spec D8/D9, 2026-10-12) -
+//      the select defaults to Atlanta Housing Authority; two sign-ups in a row via
+//      "Sign up another person" (an empty form, consent unchecked, the authority
+//      KEPT, no second list read); each lead starts Onboarding holding its
+//      authority, read through the authenticated contacts API.
 //
 // Seeded data we lean on (app/src/lib/seedData.ts):
 //   - contact-landlord-0001 = Marcus Bell (we own our test units under him).
@@ -47,6 +52,11 @@ import { expectTodayReady } from '../../support/today.js';
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const SEEDED_LANDLORD = 'contact-landlord-0001';
 const NON_SHAREABLE_UNIT = 'unit-0001'; // seeded `under_application` -> opaque 404
+// Two seeded housing authority NAMES (app/src/lib/seed/orgList.ts SEED_AUTHORITY;
+// both reseed profiles write the starting list). No spec renames either, so the
+// /join select always lists them.
+const ATLANTA = 'Atlanta Housing Authority';
+const DEKALB = 'DeKalb County Housing Authority';
 
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
@@ -155,6 +165,38 @@ async function fillIntake(
   await page.getByRole('checkbox', { name: /I agree to receive/i }).check();
 }
 
+/** The /join form as "Sign up another person" must leave it (spec D9): every
+ *  person field blank and the consent box unchecked, exactly as on first load. */
+async function expectEmptyIntake(page: Page): Promise<void> {
+  await expect(page.getByLabel('First name')).toHaveValue('');
+  await expect(page.getByLabel('Last name')).toHaveValue('');
+  await expect(page.getByLabel('Phone number')).toHaveValue('');
+  await expect(page.getByLabel(/Voucher size/)).toHaveValue('');
+  await expect(page.getByRole('checkbox', { name: /I agree to receive/i })).not.toBeChecked();
+}
+
+/** Read a contact through the AUTHENTICATED contacts API by its phone (the exact
+ *  byPhone lookup returns the stored item). `request` MUST carry the staff
+ *  session (pass `staff.request` after devLogin). Polls, like the flyer case. */
+async function contactByPhone(
+  request: APIRequestContext,
+  phone: string,
+): Promise<Record<string, unknown>> {
+  let contact: Record<string, unknown> | undefined;
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get(`${NEXT}/api/contacts?phone=${encodeURIComponent(phone)}`);
+        if (!res.ok()) return false;
+        contact = ((await res.json()) as { contacts: Array<Record<string, unknown>> }).contacts[0];
+        return contact !== undefined;
+      },
+      { timeout: 10_000 },
+    )
+    .toBe(true);
+  return contact!;
+}
+
 test.describe('Public pages - the unauthenticated full-info flyer + /join', () => {
   test('full info is public with NO session and NO gate', async ({ page, request }) => {
     // Staff context (separate page) ONLY to mint the shareable unit; the public
@@ -175,6 +217,8 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     await expect(page.getByRole('heading', { name: new RegExp(unit.area) })).toBeVisible();
     await expect(page.getByText(new RegExp(`${unit.beds}\\s*beds`))).toBeVisible();
     await expect(page.getByText(`$${unit.rent}`, { exact: false }).first()).toBeVisible();
+    // No voucher size is recorded on this unit, so the flyer falls back to beds.
+    await expect(page.getByText(`Fits a ${unit.beds}-bedroom voucher`)).toBeVisible();
 
     // Every tenant-useful fact is shown UPFRONT - no gate (this IS the feature).
     await expect(page.getByText(unit.addressLine1)).toBeVisible();
@@ -320,11 +364,18 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     // Staff edits the fields (this is exactly what ListingEditForm PATCHes).
     const editedFee = 99;
     const editedVideo = `https://tours.example.com/edited-${Date.now()}`;
+    // A recorded voucher size that DIFFERS from the unit's beds (2): the flyer
+    // must state the recorded size, not the bedroom count (2026-10-12 prod report).
+    const editedVoucherSize = unit.beds + 1;
     const patchRes = await staff.request.patch(`${NEXT}/api/units/${unit.unitId}`, {
-      data: { application_fee: editedFee, video_url: editedVideo, same_day_rta: false },
+      data: {
+        application_fee: editedFee,
+        video_url: editedVideo,
+        same_day_rta: false,
+        voucher_size_accepted: editedVoucherSize,
+      },
     });
     expect(patchRes.ok()).toBeTruthy();
-    await staff.close();
 
     // The bare public page (a FRESH context - no prior visit, so sessionStorage is
     // clean) shows the EDITED values immediately, with no funnel/reveal steps.
@@ -338,6 +389,25 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     await expect(page.getByText('Same-day RTA')).toHaveCount(0);
     // The stale fee never appears.
     await expect(page.getByText('$30')).toHaveCount(0);
+    // The recorded voucher size wins over the bedroom count; the beds fact is
+    // unchanged.
+    await expect(page.getByText(`Fits a ${editedVoucherSize}-bedroom voucher`)).toBeVisible();
+    await expect(page.getByText(`Fits a ${unit.beds}-bedroom voucher`)).toHaveCount(0);
+    await expect(page.getByText(new RegExp(`${unit.beds}\\s*beds`))).toBeVisible();
+
+    // Staff CLEARS the recorded size (null - what ListingEditForm sends when the
+    // field is emptied): the stored field is removed, so the flyer falls back to
+    // the bedroom count on the next load.
+    const clearRes = await staff.request.patch(`${NEXT}/api/units/${unit.unitId}`, {
+      data: { voucher_size_accepted: null },
+    });
+    expect(clearRes.ok()).toBeTruthy();
+    expect('voucher_size_accepted' in (await clearRes.json()).unit).toBe(false);
+    await staff.close();
+
+    await page.reload();
+    await expect(page.getByText(`Fits a ${unit.beds}-bedroom voucher`)).toBeVisible();
+    await expect(page.getByText(`Fits a ${editedVoucherSize}-bedroom voucher`)).toHaveCount(0);
   });
 
   test('/join: standalone intake with no session -> thank-you (no reveal)', async ({ page }) => {
@@ -355,6 +425,101 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     await expect(page.getByRole('heading', { name: /you're signed up/i })).toBeVisible();
     await expect(page.getByText('Application fee')).toHaveCount(0);
     await expect(page.getByText('Address')).toHaveCount(0);
+  });
+
+  test('/join: housing authority defaults to Atlanta, Sign up another person keeps the choice, each lead starts Onboarding', async ({
+    page,
+    request,
+  }) => {
+    // (a) The list read that feeds the select (spec D1), straight through the
+    // proxy with no session: housing authority NAMES only, never cached.
+    const listRes = await request.get(`${NEXT}/public/housing-authorities`);
+    expect(listRes.status()).toBe(200);
+    expect(listRes.headers()['cache-control'] ?? '').toContain('no-store');
+    const { names } = (await listRes.json()) as { names: string[] };
+    expect(names).toEqual(expect.arrayContaining([ATLANTA, DEKALB]));
+    expect(names).not.toContain('Step Up'); // a seeded AGENCY - never offered
+
+    // Count the PAGE's own list reads. D9: none on "Sign up another person"
+    // after a good read. React StrictMode may double the FIRST read in this dev
+    // build, so only "no growth after the first sign-up" is asserted.
+    let listReads = 0;
+    page.on('request', (r) => {
+      if (new URL(r.url()).pathname === '/public/housing-authorities') listReads += 1;
+    });
+
+    // (b) No session on `page` - the public /join form, as staff use it at a fair.
+    await page.goto(`${NEXT}/join`);
+    await expect(page.getByRole('heading', { name: /Find your next home/i })).toBeVisible();
+    const authority = page.getByRole('combobox', { name: 'Housing authority' });
+    await expect(authority).toBeVisible();
+    await expect(authority).toBeEnabled(); // D8: disabled ("Loading...") until the list arrives
+    // The shown choice is the selected option's TEXT (whatever its `value`).
+    await expect(authority.locator('option:checked')).toHaveText(ATLANTA); // the D8 default
+    await expect(page.getByText('The organization that runs your voucher.')).toBeVisible();
+    await expect(authority.getByRole('option').last()).toHaveText('Not sure');
+    await expect(authority.getByRole('option', { name: 'Choose one' })).toHaveCount(0);
+    await expect(authority.getByRole('option', { name: 'Step Up', exact: true })).toHaveCount(0);
+
+    // (c) Person 1 leaves the default alone.
+    const firstPhone = uniquePhone();
+    await fillIntake(page, { firstName: 'Fairfirst', lastName: 'Lead', phone: firstPhone, voucher: '4' });
+    await page.getByRole('button', { name: 'Sign me up' }).click();
+    await expect(page.getByRole('heading', { name: /you're signed up/i })).toBeVisible();
+    const readsBeforeReset = listReads;
+    expect(readsBeforeReset).toBeGreaterThan(0);
+
+    // (d) "Sign up another person": an EMPTY form, focus on First name, and the
+    // authority KEPT (D9).
+    await page.getByRole('button', { name: 'Sign up another person' }).click();
+    await expect(page.getByLabel('First name')).toBeFocused();
+    await expectEmptyIntake(page);
+    await expect(authority.locator('option:checked')).toHaveText(ATLANTA);
+
+    // (e) Person 2 picks another listed authority.
+    const secondPhone = uniquePhone();
+    await fillIntake(page, { firstName: 'Fairsecond', lastName: 'Lead', phone: secondPhone });
+    await authority.selectOption({ label: DEKALB });
+    await page.getByRole('button', { name: 'Sign me up' }).click();
+    await expect(page.getByRole('heading', { name: /you're signed up/i })).toBeVisible();
+
+    // (f) The next form keeps DeKalb - the previous person's CHOICE, not the
+    // Atlanta default - which is what tells "kept" apart from "reset".
+    await page.getByRole('button', { name: 'Sign up another person' }).click();
+    await expect(page.getByLabel('First name')).toBeFocused();
+    await expectEmptyIntake(page);
+    await expect(authority.locator('option:checked')).toHaveText(DEKALB);
+
+    // (g) Each lead, read through the AUTHENTICATED contacts API from a separate
+    // staff context: a new tenant in Onboarding holding its authority and the
+    // post-change marker (D5), still attributed to the housing fair.
+    const staff = await page.context().browser()!.newPage();
+    await devLogin(staff);
+    const first = await contactByPhone(staff.request, firstPhone);
+    expect(first).toMatchObject({
+      type: 'tenant',
+      status: 'onboarding',
+      housingAuthority: ATLANTA,
+      capture_source: 'housing_fair',
+      housing_fair_signup_v2: true,
+      firstName: 'Fairfirst',
+      voucherSize: 4,
+    });
+    const second = await contactByPhone(staff.request, secondPhone);
+    expect(second).toMatchObject({
+      type: 'tenant',
+      status: 'onboarding',
+      housingAuthority: DEKALB,
+      capture_source: 'housing_fair',
+      housing_fair_signup_v2: true,
+      firstName: 'Fairsecond',
+    });
+    // The voucher field really was cleared: person 2 sent none.
+    expect(second['voucherSize']).toBeUndefined();
+    await staff.close();
+
+    // (h) D9: neither "Sign up another person" read the list again.
+    expect(listReads).toBe(readsBeforeReset);
   });
 
   test('unavailable: a bogus id and a non-shareable unit stay opaque; both CTA variants land somewhere', async ({

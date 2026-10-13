@@ -263,3 +263,206 @@ test.describe('Property roster editor - the Contacts card sets the primary conta
     await expect(roster.getByRole('link', { name: pm.name })).toHaveCount(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Caseworker integrity (spec docs/superpowers/specs/2026-10-12-caseworker-
+// integrity-design.md section 4): a property's contact list never takes a
+// caseworker (I4), and restoring a deleted property whose landlord is no
+// longer a landlord asks who its landlord is instead of failing (I3,
+// "Restore"). Same isolation as above: every contact and property is minted
+// fresh, nothing reseeds.
+// ---------------------------------------------------------------------------
+
+/** A fresh PARTNER; `role: 'Caseworker'` makes it a caseworker (lib/caseworkers.ts). */
+async function createPartnerContact(
+  request: APIRequestContext,
+  firstName: string,
+  lastName: string,
+  role?: string,
+): Promise<Party> {
+  const phone = freshPhone();
+  const res = await request.post(`${NEXT}/api/contacts`, {
+    data: { type: 'partner', firstName, lastName, phone, ...(role !== undefined && { role }) },
+  });
+  expect(res.ok(), await res.text()).toBeTruthy();
+  const contactId = ((await res.json()) as { contact: { contactId: string } }).contact.contactId;
+  return { contactId, firstName, lastName, phone, name: `${firstName} ${lastName}` };
+}
+
+interface UnitWire {
+  landlordId?: string;
+  deleted_at?: string;
+  primary_contact?: string;
+  contacts?: Array<{ contactId: string; role: string; primaryContact?: boolean }>;
+}
+
+async function readUnit(request: APIRequestContext, unitId: string): Promise<UnitWire> {
+  const res = await request.get(`${NEXT}/api/units/${unitId}`);
+  expect(res.ok(), await res.text()).toBeTruthy();
+  return ((await res.json()) as { unit: UnitWire }).unit;
+}
+
+/** A soft-deleted property whose landlord of record was then re-typed to
+ *  tenant. The re-type is allowed because a DELETED property does not hold its
+ *  landlord (spec D2); it is retried while the owned-properties index catches
+ *  up with the delete (spec L1) - a refused PATCH writes nothing. */
+async function deletedWithRetypedOwner(request: APIRequestContext, owner: Party): Promise<string> {
+  const unitId = await createAvailableUnit(request, owner.contactId);
+  const del = await request.delete(`${NEXT}/api/units/${unitId}`);
+  expect(del.ok(), await del.text()).toBeTruthy();
+  await expect
+    .poll(
+      async () =>
+        (await request.patch(`${NEXT}/api/contacts/${owner.contactId}`, { data: { type: 'tenant' } })).ok(),
+      { timeout: 10_000 },
+    )
+    .toBe(true);
+  return unitId;
+}
+
+/** The deleted property's banner; its Restore is the plain restore. */
+const deletedBanner = (page: Page) => page.getByRole('status').filter({ hasText: 'This property is deleted' });
+
+/** The restore dialog, by its title - "Restore property", bound by the plan's
+ *  ruling S4-8. Each test also reads the dialog's sentence. */
+const restoreDialog = (page: Page) => page.getByRole('dialog', { name: 'Restore property', exact: true });
+
+/** Press the deleted banner's Restore - the PLAIN restore, no body - and read
+ *  the server's answer: 409 restore_needs_landlord naming the old landlord. */
+async function restoreRefused(page: Page, unitId: string, landlordName: string): Promise<void> {
+  const answer = page.waitForResponse(
+    (r) => r.request().method() === 'POST' && new URL(r.url()).pathname === `/api/units/${unitId}/restore`,
+  );
+  await deletedBanner(page).getByRole('button', { name: 'Restore', exact: true }).click();
+  const res = await answer;
+  expect(res.status()).toBe(409);
+  expect(await res.json()).toMatchObject({ error: 'restore_needs_landlord', landlordName });
+}
+
+test.describe('Property contact list and restore - caseworker integrity', () => {
+  test('the Add contact search never offers a caseworker, and the route refuses one', async ({ page }) => {
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const lastName = `Cwkseat${stamp}`;
+    const owner = await createContact(req, 'landlord', `Seatown${stamp}`);
+    const unitId = await createAvailableUnit(req, owner.contactId);
+    const caseworker = await createPartnerContact(req, 'Seatcwk', lastName, 'Caseworker');
+    const partner = await createPartnerContact(req, 'Seatptr', lastName);
+
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    await page.getByRole('button', { name: 'Edit contacts' }).click();
+    await page.getByRole('button', { name: '+ Add contact' }).click();
+    await page.getByRole('combobox', { name: 'Add contact' }).fill(lastName);
+    // The search ran: the plain partner sharing the last name IS offered...
+    await expect(page.getByRole('option', { name: partner.name })).toBeVisible();
+    // ...and the caseworker is not.
+    await expect(page.getByRole('option', { name: caseworker.name })).toHaveCount(0);
+
+    // The route refuses a caseworker a new seat whatever the role, and writes nothing.
+    const refused = await req.post(`${NEXT}/api/units/${unitId}/contacts`, {
+      data: { contactId: caseworker.contactId, role: 'other' },
+    });
+    expect(refused.status()).toBe(409);
+    expect(await refused.json()).toMatchObject({ error: 'contact_list_caseworker' });
+    const unit = await readUnit(req, unitId);
+    expect((unit.contacts ?? []).map((c) => c.contactId)).not.toContain(caseworker.contactId);
+  });
+
+  test('Restore asks for a landlord when the old one is no longer a landlord: Cancel, then Restore without a landlord', async ({
+    page,
+  }) => {
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const oldOwner = await createContact(req, 'landlord', `Rsgone${stamp}`);
+    // Added once the property is ownerless (the last step); minted before the
+    // page loads so the Add contact search offers them.
+    const pm = await createContact(req, 'landlord', `Rspm${stamp}`);
+    const unitId = await deletedWithRetypedOwner(req, oldOwner);
+
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    const banner = deletedBanner(page);
+    await restoreRefused(page, unitId, oldOwner.name);
+    const dialog = restoreDialog(page);
+    await expect(dialog).toContainText(
+      `${oldOwner.name} is no longer a landlord, so they can't stay this property's landlord.`,
+    );
+    await expect(dialog).toContainText('Choose its landlord:');
+    await expect(dialog.getByRole('button', { name: 'Restore with this landlord', exact: true })).toBeDisabled();
+
+    // Cancel writes nothing: still deleted, the old landlord still on record.
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(banner).toBeVisible();
+    let unit = await readUnit(req, unitId);
+    expect(typeof unit.deleted_at).toBe('string');
+    expect(unit.landlordId).toBe(oldOwner.contactId);
+
+    // Restore without a landlord: back, ownerless, the old landlord's row gone.
+    await restoreRefused(page, unitId, oldOwner.name);
+    await dialog.getByRole('button', { name: 'Restore without a landlord', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(banner).toHaveCount(0);
+    unit = await readUnit(req, unitId);
+    expect(unit.deleted_at).toBeUndefined();
+    expect(unit.landlordId).toBeUndefined();
+    expect((unit.contacts ?? []).map((c) => c.contactId)).not.toContain(oldOwner.contactId);
+
+    // Auto-primary (spec revision 4 section 4, Cameron 2026-10-12): the property
+    // now has no primary contact and no landlord of record, so the contact added
+    // next becomes its primary contact - no separate Make primary.
+    await page.getByRole('button', { name: 'Edit contacts' }).click();
+    await page.getByRole('button', { name: '+ Add contact' }).click();
+    await page.getByRole('combobox', { name: 'Add contact' }).fill(pm.firstName);
+    await page.getByRole('option', { name: pm.name }).click();
+    await page.getByRole('combobox', { name: 'Role for the new contact' }).selectOption('pm');
+    await page.getByRole('button', { name: 'Add contact to this property' }).click();
+    await expect(page.getByRole('button', { name: `Remove ${pm.name} from this property` })).toBeVisible({
+      timeout: 20_000,
+    });
+    // The primary contact is the one row without a Make primary action...
+    await expect(page.getByRole('button', { name: `Make ${pm.name} the primary contact` })).toHaveCount(0);
+    // ...and, out of edit mode, its row carries the card's primary marker.
+    await page.getByRole('button', { name: 'Done editing contacts' }).click();
+    await expect(page.getByRole('link', { name: new RegExp(`^${pm.name} \\(primary\\)`) })).toBeVisible();
+    unit = await readUnit(req, unitId);
+    expect(unit.primary_contact).toBe(pm.contactId);
+    expect(unit.contacts ?? []).toContainEqual(
+      expect.objectContaining({ contactId: pm.contactId, role: 'pm', primaryContact: true }),
+    );
+    expect(unit.landlordId).toBeUndefined();
+  });
+
+  test('Restore with this landlord: the property comes back owned by the landlord picked', async ({ page }) => {
+    await devLogin(page);
+    const req = page.request;
+    const stamp = `${Date.now()}`.slice(-6);
+    const oldOwner = await createContact(req, 'landlord', `Rsold${stamp}`);
+    const newOwner = await createContact(req, 'landlord', `Rsnew${stamp}`);
+    const unitId = await deletedWithRetypedOwner(req, oldOwner);
+
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    await restoreRefused(page, unitId, oldOwner.name);
+    const dialog = restoreDialog(page);
+    await expect(dialog).toContainText(`${oldOwner.name} is no longer a landlord`);
+    const restoreWith = dialog.getByRole('button', { name: 'Restore with this landlord', exact: true });
+    await expect(restoreWith).toBeDisabled();
+    // A landlords-only committed-pick search (the New property picker's source).
+    await dialog.getByRole('combobox', { name: 'Landlord', exact: true }).fill(newOwner.firstName);
+    await page.getByRole('option', { name: newOwner.name }).click();
+    await expect(restoreWith).toBeEnabled();
+    await restoreWith.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(deletedBanner(page)).toHaveCount(0);
+
+    // One write: restored, the new landlord of record seated as landlord, the old one's row gone.
+    const unit = await readUnit(req, unitId);
+    expect(unit.deleted_at).toBeUndefined();
+    expect(unit.landlordId).toBe(newOwner.contactId);
+    expect(unit.contacts ?? []).toContainEqual(
+      expect.objectContaining({ contactId: newOwner.contactId, role: 'landlord' }),
+    );
+    expect((unit.contacts ?? []).map((c) => c.contactId)).not.toContain(oldOwner.contactId);
+  });
+});

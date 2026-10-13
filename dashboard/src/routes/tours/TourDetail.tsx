@@ -56,6 +56,7 @@ import {
   type UnitItem,
 } from '../../api/index.js';
 import { Button, Spinner, StatusBadge, useTwoPaneNarrow } from '../../ui/index.js';
+import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import { Card, CardAction, Chips, EmptyRow, KV, NotesText, PendingPanel, Row } from '../contact/Card.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
 import { PeopleCard } from '../shared/PeopleCard.js';
@@ -379,7 +380,7 @@ function TourDetailLoaded({
       setTour(await fn());
       return true;
     } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : failMsg);
+      setActionError(contactTypeErrorMessage(err) ?? (err instanceof ApiError ? err.message : failMsg));
       return false;
     } finally {
       setBusy(false);
@@ -511,7 +512,9 @@ function TourDetailLoaded({
       const { placement } = await createPlacementFromTour(tourId);
       navigate(`/placements/${placement.placementId}`);
     } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : 'Failed to start placement');
+      setActionError(
+        contactTypeErrorMessage(err) ?? (err instanceof ApiError ? err.message : 'Failed to start placement'),
+      );
       setBusy(false);
     }
   };
@@ -586,7 +589,8 @@ function TourDetailLoaded({
         navigate(`/placements/${placement.placementId}`);
       } catch (err) {
         setActionError(
-          err instanceof ApiError ? err.message : 'Outcome saved, but starting the placement failed',
+          contactTypeErrorMessage(err) ??
+            (err instanceof ApiError ? err.message : 'Outcome saved, but starting the placement failed'),
         );
       }
     } else {

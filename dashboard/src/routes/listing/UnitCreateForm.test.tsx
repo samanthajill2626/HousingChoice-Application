@@ -308,6 +308,27 @@ describe('UnitCreateForm', () => {
     expect(alert.textContent ?? '').not.toContain('org_not_on_list');
     expect(onCreated).not.toHaveBeenCalled();
   });
+
+  // caseworker-integrity I3 (spec section 4): the owning landlord was refused.
+  it.each([
+    ['landlord_not_landlord', 409, "Only a landlord can be a property's landlord of record."],
+    ['landlord_not_found', 404, 'That landlord no longer exists.'],
+  ] as const)(
+    'shows the server landlord refusal %s as its sentence; the dialog stays open',
+    async (code, status, sentence) => {
+      const user = userEvent.setup();
+      createUnit.mockRejectedValue(new ApiError(status, code, code, { error: code }));
+      const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
+
+      await screen.findByRole('dialog', { name: 'New property' });
+      await user.click(screen.getByRole('button', { name: /^Create$/ }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(sentence);
+      expect(screen.getByRole('dialog', { name: 'New property' })).toBeInTheDocument();
+      expect(onCreated).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: /^Create$/ })).toBeEnabled();
+    },
+  );
 });
 
 // --- Code review R1-ADV-FE-7: a name "Is this really new?" answered with ----

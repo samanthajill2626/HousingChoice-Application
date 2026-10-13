@@ -53,6 +53,7 @@ import {
 } from '../../ui/index.js';
 import { Card, EmptyRow, KV, NotesText, Row } from '../contact/Card.js';
 import { formatMoney } from '../listing/listingFormat.js';
+import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
 import {
   dateTime,
@@ -398,6 +399,15 @@ export function PlacementDetail(): React.JSX.Element {
           if (updated.stage === 'lost' || updated.stage === 'moved_in') {
             void askCloseGroupIfOpen(updated);
           }
+        })
+        // Caseworker integrity: a contact-type refusal (a lost / moved-in
+        // placement moved back to an active stage for a contact that is not a
+        // tenant, or no longer exists) has its own sentence; anything else
+        // falls through to the fixed copy in the next catch.
+        .catch((err: unknown) => {
+          const typeCopy = contactTypeErrorMessage(err);
+          if (typeCopy === null) throw err;
+          setError(typeCopy);
         })
         .catch(() => setError('That move was rejected — please try again.'))
         .finally(() => {

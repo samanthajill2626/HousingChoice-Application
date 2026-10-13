@@ -108,6 +108,7 @@ import {
   createCaseworkerConversionService,
   type CaseworkerConversionService,
 } from '../services/caseworkerConversion.js';
+import { typeChangeRefusals } from '../services/contactHoldings.js';
 import { registerCaseworkerRoutes } from './caseworkerReview.js';
 import {
   displayNameOf,
@@ -1633,6 +1634,23 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         log.info({ contactId }, 'contact patch refused: a caseworker is made through the conversion');
         res.status(409).json({ error: 'caseworker_use_conversion' });
         return;
+      }
+      // CASEWORKER INTEGRITY (spec 2026-10-12 D2): a TYPE change must not
+      // leave an open placement or open tour on a non-tenant (I2), or a LIVE
+      // unit's landlord of record on a non-landlord (I3). Soft-deleted units
+      // do not count (restore fences them), contact-list seats never refuse,
+      // and a role-only change is not checked. After the caseworker 409 (W6)
+      // and before any write; index reads, so not atomic with the write (L1).
+      if ('type' in parsed.patch && newType !== stored.type) {
+        const refusals = await typeChangeRefusals({ placements, tours, units }, contactId, String(newType));
+        if (refusals.length > 0) {
+          log.info(
+            { contactId, fromType: stored.type, toType: newType, refusals: refusals.length },
+            'contact patch refused: the type change would orphan open records',
+          );
+          res.status(409).json({ error: 'type_change_refused', refusals });
+          return;
+        }
       }
       // D21: a staff OVERRIDE of a typed contact (tenant, landlord or partner
       // to a different type) is stamped server-side so a re-import does not

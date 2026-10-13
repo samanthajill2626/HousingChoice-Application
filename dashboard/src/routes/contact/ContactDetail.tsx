@@ -58,7 +58,7 @@ import { Modal } from './Modal.js';
 import { ContactCommsPane } from './ContactCommsPane.js';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
-import { UnknownFile } from './UnknownFile.js';
+import { UnknownFile, type TriageError } from './UnknownFile.js';
 import { PartnerFile } from './PartnerFile.js';
 import { CaseworkerDialog } from './CaseworkerDialog.js';
 import { isCaseworkerContact } from './caseworkerRole.js';
@@ -71,6 +71,7 @@ import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { orgErrorCopy } from '../orgs/orgCopy.js';
+import { typeChangeRefusalsFrom } from '../../lib/holdingRefusals.js';
 import { CallMenu } from './CallMenu.js';
 import { useMe } from '../../app/useMe.js';
 import { VOICE_TAB_PATH } from '../settings/settingsTabs.js';
@@ -200,6 +201,9 @@ export function ContactDetail(): React.JSX.Element {
   const [optOutBusy, setOptOutBusy] = useState(false);
   const [voiceOptOutBusy, setVoiceOptOutBusy] = useState(false);
   const [triaging, setTriaging] = useState(false);
+  // The Unknown card's last Mark as failure (spec 2026-10-12 D2): a refused
+  // type change names what blocks it; anything else is the save sentence.
+  const [triageError, setTriageError] = useState<TriageError | null>(null);
   // The caseworker conversion dialog (spec 2026-10-06 D19). MOUNTED only while
   // open, so its preview is read only then - never at this page's mount
   // (ruling R4-13).
@@ -273,6 +277,22 @@ export function ContactDetail(): React.JSX.Element {
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   // The contact's pending AI suggestions (chips/badges + the accept/dismiss loop).
   const suggestions = useSuggestions(contactId);
+  // "Is this really new?" belongs to a TENANT: its close-name path writes the
+  // housing authority with a plain contact edit, which never meets the
+  // server's tenant-only rule (spec 2026-10-12 D1). When the loaded contact
+  // stops being typed tenant while the review is open, the review closes, so
+  // that path cannot write onto the re-typed contact (final review A5, fix
+  // wave FWF-4). The page learns of someone else's type change only through
+  // useContact's suggestion.updated re-read. The caseworker conversion emits
+  // one (it supersedes the pending suggestions), so a conversion closes the
+  // review. A generic contacts-PATCH re-type usually emits none (only when it
+  // drains a pending type suggestion), so after one the review can stay open
+  // and its close-name pick still sends the plain PATCH (final review round 2
+  // R2-2). Reset during render (React's "adjust state when a prop changes"),
+  // so no frame shows the review over a non-tenant.
+  // TODO(ha-review-close-name-patch-unfenced): the server-side fence closes
+  // the plain re-type case.
+  if (haReview !== null && contact !== null && contact.type !== 'tenant') setHaReview(null);
 
   // The /contacts/:contactId route re-renders this SAME component instance on a
   // param change (no remount — the same reason Timeline takes resetScrollKey), so
@@ -284,6 +304,8 @@ export function ContactDetail(): React.JSX.Element {
     setStatusBusy(false);
     setSuggestionBusy(null);
     setSuggestionError(null);
+    // Same reason: contact A's Mark as failure must not show on contact B.
+    setTriageError(null);
     // Spec D8: contact A's "Is this really new?" - and a check still in flight
     // for it - must not open on contact B.
     setHaReview(null);
@@ -667,10 +689,19 @@ export function ContactDetail(): React.JSX.Element {
   const onTriage = (kind: SuggestedContactKind): void => {
     if (triaging) return;
     setTriaging(true);
+    setTriageError(null);
+    // A failure for contact A must not land on contact B's card: the
+    // contact-change effect bumps reviewGenerationRef.
+    const generation = reviewGenerationRef.current;
     void updateContact(contact.contactId, patchForSuggestedContactKind(kind))
       .then((updated) => setContact(updated))
-      .catch(() => {
-        /* stay on the unknown view; the buttons re-enable for a retry */
+      .catch((err: unknown) => {
+        // Stay on the unknown view; the buttons re-enable for a retry. Say why
+        // on the card (spec 2026-10-12 D2): a refused type change names what
+        // blocks it, anything else is the save sentence.
+        if (generation !== reviewGenerationRef.current) return;
+        const refusals = typeChangeRefusalsFrom(err);
+        setTriageError(refusals !== null ? { refusals } : { message: "Couldn't save - please try again." });
       })
       .finally(() => setTriaging(false));
   };
@@ -705,22 +736,26 @@ export function ContactDetail(): React.JSX.Element {
   const failSuggestion = (target: string, err: unknown): void => {
     if (err instanceof ApiError) {
       setSuggestionError({ target, message: suggestionResolutionErrorMessage(err.code) });
-      // These three answer with a list that has genuinely moved on: two of them
-      // PROMISE "the list now shows its real state", and a refused accept has
-      // already deleted the row server-side. The server DOES emit
-      // `suggestion.updated` for `suggestion_field_edited` now, and for any
-      // request that helped somebody else's journal commit - the
-      // `helped || refused` emit in the suggestions router's shared error path
-      // (named rather than cited by line, so an edit above it cannot silently
-      // repoint this reference). Neither covers a plain `no_pending_suggestion`
-      // or `suggestion_already_resolved`, and no emit reaches a tab whose SSE
+      // These four answer with a list that has genuinely moved on: two of them
+      // PROMISE "the list now shows its real state", and a refused accept
+      // (`suggestion_field_edited`, or `suggestion_contact_reclassified` when
+      // the contact's type or role changed - spec 2026-10-12 D1) has already
+      // deleted the row server-side. The server DOES emit `suggestion.updated`
+      // for both refused accepts now, and for any request that helped somebody
+      // else's journal commit - the `helped || refused` emit in the
+      // suggestions router's shared error path (named rather than cited by
+      // line, so an edit above it cannot silently repoint this reference).
+      // Neither covers a plain `no_pending_suggestion` or
+      // `suggestion_already_resolved`, and no emit reaches a tab whose SSE
       // stream has dropped, so the refetch is what makes the answer true HERE.
-      // The remaining codes describe a live in-flight resolution and promise
-      // nothing about the list.
+      // `suggestion_contact_not_tenant` is refused BEFORE anything is consumed,
+      // so its chip stays and is not refetched. The remaining codes describe a
+      // live in-flight resolution and promise nothing about the list.
       if (
         err.code === 'no_pending_suggestion' ||
         err.code === 'suggestion_already_resolved' ||
-        err.code === 'suggestion_field_edited'
+        err.code === 'suggestion_field_edited' ||
+        err.code === 'suggestion_contact_reclassified'
       ) {
         suggestions.refetch();
       }
@@ -813,9 +848,16 @@ export function ContactDetail(): React.JSX.Element {
       .finally(() => setSuggestionBusy(null));
   };
   // Declared after the helpers it calls (never a use before declaration).
+  // Spec 2026-10-12 D1 (planner-ruled, build research RF1-F1): a housing
+  // authority is a tenant fact, and a team member's page shows the tenant file
+  // and its chips. On a contact not typed tenant the "Is this really new?"
+  // review is skipped - its close-name path writes the authority by a plain
+  // contact edit that never meets the server's tenant-only rule - and the
+  // plain accept is sent, so the server refuses it before anything is consumed
+  // (409 suggestion_contact_not_tenant) and the chip says why.
   const onAcceptSuggestion = (target: string): void => {
     if (suggestionBusy !== null) return;
-    if (target === 'housingAuthority') {
+    if (target === 'housingAuthority' && contact.type === 'tenant') {
       reviewHousingAuthority();
       return;
     }
@@ -1170,6 +1212,7 @@ export function ContactDetail(): React.JSX.Element {
                 // A deleted contact gets no conversion (spec D16): absent = disabled.
                 {...(!deleted && { onMakeCaseworker: () => setConverting(reviewGenerationRef.current) })}
                 triaging={triaging}
+                triageError={triageError}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />

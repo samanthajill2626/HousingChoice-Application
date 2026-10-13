@@ -80,6 +80,9 @@ const UI = {
   rename: (name: string): string => `Rename ${name}`,
   newNameBox: 'New name',
   renameConfirm: 'Rename',
+  // join-housing-authority spec D12: the help line a housing authority's add,
+  // rename or kind change carries (the public /join form lists every one).
+  publicNote: 'Housing authority names appear on the public sign-up form.',
   showRecords: 'Show records',
   deletedMarker: /deleted/i,
   rememberSpelling: 'Remember this spelling',
@@ -632,6 +635,11 @@ test.describe('Settings > Housing authorities & agencies (spec D10-D13)', () => 
     await expect(panel).toContainText(UI.usedByProperties(1));
     await panel.getByRole('button', { name: UI.rename(oldName), exact: true }).click();
     const dialog = page.getByRole('dialog');
+    // A housing authority's name is on the public /join form, and the rename
+    // says so as the New name field's description (join spec D12).
+    await expect(dialog.getByRole('textbox', { name: UI.newNameBox, exact: true })).toHaveAccessibleDescription(
+      UI.publicNote,
+    );
     await dialog.getByRole('textbox', { name: UI.newNameBox, exact: true }).fill(newName);
     await dialog.getByRole('button', { name: UI.renameConfirm, exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);

@@ -30,6 +30,7 @@ import {
   AGENCY_KINDS,
   FIELD_LABEL,
   HOUSING_AUTHORITY_KINDS,
+  HOUSING_AUTHORITY_PUBLIC_NOTE,
   KIND_PLURAL_TITLE,
   holderHref,
   holderKindLabel,
@@ -262,6 +263,7 @@ function SettleConfirm({
   const [addKind, setAddKind] = useState<OrgKind | null>(organizationRow ? null : (kinds[0] ?? 'housing_authority'));
   const nameId = useId();
   const rememberId = useId();
+  const publicNoteId = useId();
   const [useName, setUseName] = useState(settle.action === 'use' ? (settle.name ?? '') : '');
   const [splitHa, setSplitHa] = useState(settle.action === 'split' ? settle.name : '');
   const [splitAgency, setSplitAgency] = useState(settle.action === 'split' ? settle.agencyName : '');
@@ -326,6 +328,11 @@ function SettleConfirm({
         ? addName.trim() !== '' && normalizeOrgText(addName) !== normalizeOrgText(row.value)
         : false;
   const rememberOn = rememberApplies && remember && rememberProblem === null;
+  // Join spec D12: Add as new puts the name on the list, and a housing
+  // authority's name is then on the public /join form - said under the Name
+  // field while the new entry is (an organization value: once it is chosen to
+  // be) a housing authority. No other settle adds an entry.
+  const publicNote = settle.action === 'add' && addKind === 'housing_authority';
 
   const field = FIELD_LABEL[row.field];
   const records = recordsText(row, rows);
@@ -452,12 +459,18 @@ function SettleConfirm({
               maxLength={120}
               disabled={busy}
               autoComplete="off"
+              {...(publicNote && { 'aria-describedby': publicNoteId })}
               onChange={(e) => setAddName(e.target.value)}
             />
           </div>
         ) : null}
         {settle.action === 'add' && organizationRow ? (
           <OrgKindChoice value={addKind} onChange={setAddKind} disabled={busy} />
+        ) : null}
+        {publicNote ? (
+          <p id={publicNoteId} className={styles.dialogMuted}>
+            {HOUSING_AUTHORITY_PUBLIC_NOTE}
+          </p>
         ) : null}
         {rememberApplies ? (
           <div className={styles.checkboxRow}>

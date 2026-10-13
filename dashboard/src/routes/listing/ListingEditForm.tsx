@@ -125,17 +125,22 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
   const [error, setError] = useState<string | null>(null);
 
   /** Diff a number field: unchanged → skip; cleared → leave untouched (the
-   *  server expects a number, and clearing a number isn't a supported edit);
-   *  else validate finite >= 0. Returns false on a validation failure. */
+   *  server expects a number, and clearing a number isn't a supported edit) -
+   *  unless `clearable`, where clearing a stored value sends null and the server
+   *  REMOVEs it; else validate finite >= 0. Returns false on a validation failure. */
   function addNumber(
     patch: Record<string, unknown>,
     key: keyof UnitItem,
     value: string,
     initial: string,
     label: string,
+    clearable = false,
   ): boolean {
     if (value === initial) return true;
-    if (value.trim() === '') return true; // clearing a number isn't supported
+    if (value.trim() === '') {
+      if (clearable && initial !== '') patch[key as string] = null;
+      return true;
+    }
     const n = Number(value);
     if (!Number.isFinite(n) || n < 0) {
       setError(`${label} must be a number 0 or greater.`);
@@ -185,7 +190,18 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     if (!addNumber(patch, 'application_fee', applicationFee, numStr(unit.application_fee), 'Application fee')) {
       return null;
     }
-    if (!addNumber(patch, 'voucher_size_accepted', voucherSize, numStr(unit.voucher_size_accepted), 'Voucher size accepted')) {
+    // Clearable (2026-10-12): emptying a recorded size removes it, so the
+    // property falls back to its bedroom count wherever a voucher size is read.
+    if (
+      !addNumber(
+        patch,
+        'voucher_size_accepted',
+        voucherSize,
+        numStr(unit.voucher_size_accepted),
+        'Voucher size accepted',
+        true,
+      )
+    ) {
       return null;
     }
 

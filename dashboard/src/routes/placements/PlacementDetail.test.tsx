@@ -18,7 +18,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { PlacementItem, PlacementUpdatedEvent, EventStreamHandlers, HistoryRow, RosterView, UnitItem, PlacementStage } from '../../api/index.js';
-import { STAGE_LABELS } from '../../api/index.js';
+import { ApiError, STAGE_LABELS } from '../../api/index.js';
 
 const getPlacement = vi.fn();
 const getUnit = vi.fn();
@@ -901,5 +901,39 @@ describe('PlacementDetail - mobile', () => {
     await user.click(conversation);
     expect(conversation).toHaveAttribute('aria-pressed', 'true');
     expect(details).toHaveAttribute('aria-pressed', 'false');
+  });
+});
+
+// Caseworker integrity (spec 2026-10-12 section 4): moving a LOST placement
+// back to an active stage re-opens it, which the server refuses (409
+// contact_not_tenant) when its contact is not a tenant. The page says why.
+describe('PlacementDetail - contact-type refusals (caseworker integrity)', () => {
+  it('a lost placement moved back to an active stage, refused as contact_not_tenant, shows the sentence', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'lost' });
+    transitionPlacement.mockRejectedValue(
+      new ApiError(409, 'contact_not_tenant', 'contact_not_tenant', {
+        error: 'contact_not_tenant',
+        contactKind: 'caseworker',
+      }),
+    );
+    renderAt();
+    await waitLoaded();
+    await chooseStage(user, 'send_application');
+    expect(
+      await screen.findByText('Tours and placements are for tenants. This contact is a caseworker.'),
+    ).toBeInTheDocument();
+    expect(transitionPlacement).toHaveBeenCalledWith('c1', { toStage: 'send_application', source: 'manual' });
+    expect(screen.queryByText(/That move was rejected/)).not.toBeInTheDocument();
+  });
+
+  it('(PIN) any other rejected move keeps the fixed copy', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'lost' });
+    transitionPlacement.mockRejectedValue(new ApiError(500, 'internal_error', 'internal_error'));
+    renderAt();
+    await waitLoaded();
+    await chooseStage(user, 'send_application');
+    expect(await screen.findByText(/That move was rejected/)).toBeInTheDocument();
   });
 });

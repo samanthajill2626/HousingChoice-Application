@@ -5,7 +5,7 @@
 // (the funnel reveals details; /join shows a generic thank-you). Every input has
 // an associated <label> (getByLabel-resolvable); the submit button has a clear
 // accessible name. Mobile-first.
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import styles from './IntakeForm.module.css';
 import type { HousingFairInput } from './publicApi.js';
 import {
@@ -20,12 +20,33 @@ const PHONE_ERROR = 'Enter a 10-digit US number, or a full international number 
 export interface IntakeFormProps {
   /** Submit handler — resolves on success, throws on failure. The parent decides
    *  what to do next (reveal vs. thank-you). */
-  onSubmit: (input: Omit<HousingFairInput, 'unitId'>) => Promise<void>;
+  onSubmit: (input: Omit<HousingFairInput, 'unitId' | 'housingAuthority'>) => Promise<void>;
   /** The submit button's label (e.g. "Send my info" / "Sign up"). */
   submitLabel?: string;
+  // The props below are optional and /join-only (join-housing-authority spec
+  // D8, D9). The flyer passes none of them, and with none of them this form
+  // renders and behaves exactly as it always has.
+  /** Rendered after "Voucher size", before the consent box (the /join
+   *  "Housing authority" select). */
+  extraField?: React.ReactNode;
+  /** Disables the submit button and ignores a submit (the list is loading, or
+   *  the "Choose one" placeholder is showing). */
+  submitBlocked?: boolean;
+  /** Maps a thrown submit error to its copy; null/undefined keeps today's
+   *  message. */
+  errorMessage?: (err: unknown) => string | null | undefined;
+  /** Focus "First name" on mount (after "Sign up another person"). */
+  autoFocusFirstName?: boolean;
 }
 
-export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFormProps): React.JSX.Element {
+export function IntakeForm({
+  onSubmit,
+  submitLabel = 'Send my info',
+  extraField,
+  submitBlocked = false,
+  errorMessage,
+  autoFocusFirstName = false,
+}: IntakeFormProps): React.JSX.Element {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [phone, setPhone] = useState('');
@@ -36,6 +57,14 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [phoneError, setPhoneError] = useState<string | null>(null);
+
+  // autoFocusFirstName: move focus to "First name" on mount, so the fresh form
+  // after "Sign up another person" is ready to type into. Off by default - a
+  // page load never moves focus.
+  const firstNameRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (autoFocusFirstName) firstNameRef.current?.focus();
+  }, [autoFocusFirstName]);
 
   // Clear a standing validation error the moment the user edits any field, so a
   // corrected field stops reading as errored (the error re-evaluates on submit).
@@ -66,6 +95,9 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
 
   async function handleSubmit(e: FormEvent): Promise<void> {
     e.preventDefault();
+    // The parent blocks a send. The button is disabled too; this also stops an
+    // Enter-key submit.
+    if (submitBlocked) return;
     // Client validation: names + phone must be non-empty (the backend re-checks).
     if (firstName.trim() === '' || lastName.trim() === '') {
       setError('Please enter your first and last name.');
@@ -97,8 +129,8 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
         smsConsent: true,
         ...(voucherSize !== undefined && Number.isFinite(voucherSize) && { voucherSize }),
       });
-    } catch {
-      setError("Sorry, we couldn't send that. Please try again.");
+    } catch (err) {
+      setError(errorMessage?.(err) ?? "Sorry, we couldn't send that. Please try again.");
       setPending(false);
     }
   }
@@ -147,6 +179,7 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
           </span>
         </label>
         <input
+          ref={firstNameRef}
           id="intake-first"
           className={styles.input}
           value={firstName}
@@ -220,6 +253,7 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
           disabled={pending}
         />
       </div>
+      {extraField}
 
       {/* do-not-remove — A2P/CTIA consent gate (client-side; server also
           enforces). REQUIRED, unchecked by default; submit is blocked until it
@@ -252,7 +286,7 @@ export function IntakeForm({ onSubmit, submitLabel = 'Send my info' }: IntakeFor
         </p>
       )}
 
-      <button className={styles.submit} type="submit" disabled={pending}>
+      <button className={styles.submit} type="submit" disabled={pending || submitBlocked}>
         {pending ? 'Sending…' : submitLabel}
       </button>
     </form>

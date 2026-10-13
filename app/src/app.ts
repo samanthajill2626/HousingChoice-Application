@@ -29,7 +29,11 @@ import { createApiRouter, type ApiRouterDeps } from './routes/api.js';
 import { createAppIdentityRouter } from './routes/appIdentity.js';
 import { createAuthRouter, type AuthRouterDeps } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
-import { createPublicRouter, type PublicRouterDeps } from './routes/public.js';
+import {
+  createPublicHousingAuthoritiesRouter,
+  createPublicRouter,
+  type PublicRouterDeps,
+} from './routes/public.js';
 import { createUnitMediaServeRouter } from './routes/unitMediaServe.js';
 import { createWebhooksRouter, type WebhooksRouterDeps } from './routes/webhooks/index.js';
 import { createInternalRouter } from './routes/internal.js';
@@ -162,6 +166,22 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   // reads are now stable relative /unit-media URLs (design 2026-07-21), resolved
   // with no store. Built from config (undefined when MEDIA_BUCKET is unset).
   const mediaServeStore = createMediaStore({ config });
+  // join-housing-authority D1/D2: the public housing authority list read
+  // (GET /public/housing-authorities), mounted IMMEDIATELY BEFORE the shared
+  // /public mount below. It defines that one GET route, with its own
+  // hard-coded 60-per-minute per-IP limiter on the route alone (the
+  // /unit-media precedent: no env var). Every other /public request matches
+  // nothing here and falls through to the shared mount and its limiter
+  // exactly as before; the list read never consumes, and is never blocked by,
+  // the shared limit. Same prefix, so the edge classification
+  // (EDGE_MUTATING_PREFIXES) and CloudFront's /public/* behavior cover it.
+  app.use(
+    '/public',
+    createPublicHousingAuthoritiesRouter({
+      logger: log,
+      ...(deps.public?.orgListRepo !== undefined && { orgListRepo: deps.public.orgListRepo }),
+    }),
+  );
   app.use(
     '/public',
     createRateLimit({

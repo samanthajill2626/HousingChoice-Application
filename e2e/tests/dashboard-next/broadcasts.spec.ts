@@ -260,6 +260,25 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     expect(unitRes.ok()).toBeTruthy();
     expect(((await unitRes.json()) as { unit: { status: string } }).unit.status).toBe('available');
   });
+
+  test('the voucher size pre-fills from a RECORDED voucher size, not the bedroom count', async ({ page }) => {
+    // The 2026-10-12 report: a property with its own voucher size was matched on
+    // its bedrooms. A 2-bed unit that records a 3-BR voucher size.
+    await devLogin(page);
+    const stamp = `${Date.now()}`.slice(-6);
+    const unitId = await createUnitViaApi(page.request, stamp, { available: true });
+    const patch = await page.request.patch(`${NEXT}/api/units/${unitId}`, {
+      data: { voucher_size_accepted: 3 },
+    });
+    expect(patch.ok()).toBeTruthy();
+
+    await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
+    const threeBr = page.getByRole('button', { name: /^3-BR/ });
+    await expect(threeBr).toHaveAttribute('aria-pressed', 'true');
+    await expect(threeBr).toContainText(/matches property/i);
+    await expect(page.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'false');
+    await expect(page.getByText('Pre-filled to the 3-bedroom voucher this property takes')).toBeVisible();
+  });
 });
 
 test.describe('Broadcasts - live send progress + disjoint buckets + recipient identity', () => {

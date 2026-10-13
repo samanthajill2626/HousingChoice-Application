@@ -36,3 +36,10 @@ with the identical `[ 'rem-e-d', 'rem-e-b', ... ]` signature). The file passed
 ALONE twice right after (69/69, 69/69). That branch does not touch the test, the
 tour reminders route or its repository. Still the fixture's two clock reads; the
 suggested fix stands.
+
+**Third sighting (2026-10-12).** `feat/join-housing-authority` @348bf3c7, the build
+orchestrator's gate-2 `npm test` (app workspace 439 of 440 files passed, 9264 tests
+passed, this one case failed with the identical `[ 'rem-e-d', 'rem-e-b', ... ]`
+signature). The same tree's previous full `npm test` passed, and the file passed
+ALONE twice right after (69/69, 69/69). That branch does not touch the test, the
+tour reminders route or its repository. The suggested one-line fix still stands.

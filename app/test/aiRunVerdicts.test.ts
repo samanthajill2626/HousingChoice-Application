@@ -643,8 +643,9 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
   });
 
   // H1 / item 1: the contact read that builds the plan and its attribute guard is
-  // eventually consistent, so the requester's OWN claim can still lose the fence
-  // to a human edit that lands before the commit. The journal must still run to
+  // consistent (spec 2026-10-12 D1 change 1), but it is not the commit: the
+  // requester's OWN claim can still lose the fence to a human edit that lands
+  // after that read and before the fenced write. The journal must still run to
   // completion (verdict stamped, snapshot scrubbed) - but answering 200 would
   // tell the operator their accept applied when the fenced write was REFUSED and
   // the returned contact does not carry the value. Same class as F2.
@@ -654,8 +655,8 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     await seedSuggestion(world, {
       ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
     });
-    // The edit lands after the plan was built from the eventually consistent
-    // read and before the fenced contact write - the real race, not a helper.
+    // The edit lands after the plan was built from the consistent read and
+    // before the fenced contact write - the real race, not a helper.
     const racing = makeWebhookHarness({
       world,
       suggestionResolutionHooks: {

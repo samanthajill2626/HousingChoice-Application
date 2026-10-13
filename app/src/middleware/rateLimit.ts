@@ -25,13 +25,35 @@
 // right amount of machinery for the scale. Idle entries are swept lazily on
 // access plus by a periodic sweep so the map can't grow unbounded.
 //
-// CLIENT IP: in production CloudFront is the only origin client, so the socket
-// address is always CloudFront — the real client is the FIRST entry of
-// X-Forwarded-For (CloudFront appends the viewer IP). We do NOT set Express
-// `trust proxy` (it would also affect req.ip elsewhere); the resolver here is
-// local to rate limiting. XFF is attacker-spoofable in general, but behind
-// CloudFront the viewer IP CloudFront stamps is trustworthy; the socket
-// fallback covers local/dev where there is no proxy.
+// CLIENT KEY (docs/issues/public-rate-limit-key-spoofable-xff.md, 2026-10-12):
+// in production CloudFront is the only origin client (the security group admits
+// only CloudFront's origin-facing ranges, and the x-origin-verify secret proves
+// the request came through OUR distribution), so the socket peer is a CloudFront
+// edge server, never the viewer. The viewer is read from the
+// CloudFront-Viewer-Address header, which CloudFront SETS itself under the
+// managed AllViewerExceptHostHeader origin request policy and which REPLACES any
+// value the viewer sent - proven 2026-10-12 against a throwaway distribution on
+// that policy: a forged single line, two forged lines in mixed case and a forged
+// IPv6-shaped value each arrived as the real viewer address.
+//
+// X-Forwarded-For is NEVER read here. CloudFront APPENDS the viewer to whatever
+// the client already sent, so the FIRST entry (what this resolver used to read)
+// is client-chosen: one caller got a fresh bucket per request.
+//
+// No header - local dev, the hermetic e2e lanes and tests, where only Vite (which
+// adds no such header) fronts the app - falls back to the socket address. A
+// deployed request would get the same fallback if the policy ever stopped sending
+// the header: an edge server's address, ONE bucket shared by many viewers. Too
+// strict, never open. Off CloudFront a client can send the header itself, which
+// is harmless: no deployed path reaches the app except through CloudFront.
+//
+// IPv6: one subscriber holds a whole /64 (often more) and can pick any source
+// address inside it, so an IPv6 client is keyed by its /64 prefix; an
+// IPv4-mapped address collapses to its IPv4 form.
+//
+// We do NOT set Express `trust proxy` (it would also affect req.ip elsewhere);
+// the resolver here is local to rate limiting.
+import { isIP } from 'node:net';
 import type { Request, RequestHandler } from 'express';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 // Phone-bearing routes put a real E.164 number in req.path (log-hygiene 4).
@@ -58,19 +80,86 @@ interface WindowState {
 }
 
 /**
- * Resolve the real client IP for rate limiting. Behind CloudFront the socket
- * peer is CloudFront, so prefer the FIRST X-Forwarded-For entry (the viewer);
- * fall back to the socket address locally/in dev. Never throws — an
- * unresolvable client collapses to a constant key (still rate limited as one
- * bucket, fail-closed-ish, never fail-open per-request).
+ * Resolve the client's rate-limit key (see CLIENT KEY above): the
+ * CloudFront-Viewer-Address IP when the header is present and readable,
+ * otherwise the socket address - each through addressKey, so an IPv6 client is
+ * its /64. Never X-Forwarded-For. Never throws - an unresolvable client
+ * collapses to a constant key (still rate limited as one bucket, fail-closed-ish,
+ * never fail-open per-request).
  */
 export function clientIpOf(req: Request): string {
-  const xff = req.headers['x-forwarded-for'];
-  if (typeof xff === 'string' && xff.length > 0) {
-    const first = xff.split(',')[0]?.trim();
-    if (first !== undefined && first.length > 0) return first;
+  const viewer = req.headers['cloudfront-viewer-address'];
+  if (typeof viewer === 'string') {
+    const ip = viewerAddressIp(viewer);
+    if (ip !== undefined) return addressKey(ip) ?? ip;
   }
-  return req.socket.remoteAddress ?? 'unknown';
+  const socketAddress = req.socket.remoteAddress;
+  if (socketAddress === undefined) return 'unknown';
+  return addressKey(socketAddress) ?? socketAddress;
+}
+
+/**
+ * The IP inside one CloudFront-Viewer-Address value, `<ip>:<port>`. CloudFront
+ * writes IPv6 WITHOUT brackets (`2001:db8::1:46532`), so the port is whatever
+ * follows the LAST colon; a bracketed `[ip]:port` is accepted too. More than one
+ * value (a comma: Node joins repeated header lines) or anything unparseable
+ * answers undefined, so the caller falls back to the socket rather than key on
+ * a value it cannot read.
+ */
+export function viewerAddressIp(value: string): string | undefined {
+  const text = value.trim();
+  if (text.includes(',')) return undefined;
+  const bracketed = /^\[([^\]]+)\]:\d{1,5}$/.exec(text);
+  if (bracketed !== null) {
+    const ip = bracketed[1] as string;
+    return isIP(ip) === 6 ? ip : undefined;
+  }
+  const cut = text.lastIndexOf(':');
+  if (cut <= 0 || !/^\d{1,5}$/.test(text.slice(cut + 1))) return undefined;
+  const ip = text.slice(0, cut);
+  return isIP(ip) !== 0 ? ip : undefined;
+}
+
+/**
+ * The rate-limit key for one address: IPv4 as-is; IPv4-mapped IPv6
+ * (`::ffff:192.0.2.1`) as its IPv4; any other IPv6 as its /64 prefix
+ * (`2001:db8:0:1::/64`). A zone suffix (`fe80::1%eth0`) is dropped first.
+ * Not an IP address -> undefined.
+ */
+export function addressKey(address: string): string | undefined {
+  const bare = address.split('%', 1)[0] as string;
+  const family = isIP(bare);
+  if (family === 4) return bare;
+  if (family !== 6) return undefined;
+  const groups = ipv6Groups(bare);
+  const [, , , , , g5, g6, g7] = groups as [number, number, number, number, number, number, number, number];
+  if (groups.slice(0, 5).every((g) => g === 0) && g5 === 0xffff) {
+    return [g6 >> 8, g6 & 0xff, g7 >> 8, g7 & 0xff].join('.');
+  }
+  return `${groups
+    .slice(0, 4)
+    .map((g) => g.toString(16))
+    .join(':')}::/64`;
+}
+
+/** The eight 16-bit groups of a VALID IPv6 address (isIP already said 6). */
+function ipv6Groups(address: string): number[] {
+  let text = address.toLowerCase();
+  // An embedded IPv4 tail (`::ffff:192.0.2.1`) becomes its two hex groups.
+  if (text.includes('.')) {
+    const cut = text.lastIndexOf(':');
+    const [a, b, c, d] = text
+      .slice(cut + 1)
+      .split('.')
+      .map(Number) as [number, number, number, number];
+    text = `${text.slice(0, cut + 1)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = text.split('::');
+  const head = halves[0] === '' ? [] : (halves[0] as string).split(':');
+  if (halves.length === 1) return head.map((g) => Number.parseInt(g, 16));
+  const tail = halves[1] === '' ? [] : (halves[1] as string).split(':');
+  const zeros = Array<string>(8 - head.length - tail.length).fill('0');
+  return [...head, ...zeros, ...tail].map((g) => Number.parseInt(g, 16));
 }
 
 /**

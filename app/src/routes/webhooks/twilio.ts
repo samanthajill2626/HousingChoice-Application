@@ -940,6 +940,33 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       });
     }
 
+    // Last heard from (spec 5.1 / 14.2): fresh AND deduped. A member is its
+    // roster key; a phone-only member and a NON-member (`phone#From`) resolve
+    // through findByPhone. No echo reaches this path (relay legs are sent FROM
+    // the pool number and dropped upstream), so no read-back. Best-effort.
+    try {
+      const heardThread =
+        appended.conversationId === relay.conversationId
+          ? relay
+          : await conversations.getById(appended.conversationId);
+      const heardFromId =
+        heardThread === undefined
+          ? undefined
+          : await attributeInbound(
+              { direction: 'inbound', type: mediaUrls.length > 0 ? 'mms' : 'sms', relay_sender_key: senderKey },
+              heardThread,
+              repoLookup(contacts),
+            );
+      if (heardFromId !== undefined) {
+        const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+        if (outcome === 'failed') {
+          log.error({ providerSid: MessageSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+        }
+      }
+    } catch (err) {
+      log.error({ err, providerSid: MessageSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+    }
+
     // Classify the inbound body/OptOutType ONCE via the shared detector (spec
     // 3.1). STOP-family and HELP are ALWAYS commands to the SYSTEM: they SKIP
     // the fan-out below and are processed against the sender's own 1:1 further

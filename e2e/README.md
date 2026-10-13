@@ -740,6 +740,13 @@ router module is not even imported there.
   housingAuthority|agency|organization, value }` SETs it, `{ unitId, field:
   accepted_authorities, value }` appends it. The only way to put a run-unique
   value under Settings > "Not on the list" - nothing off-list is seeded.
+- `POST /__dev/fixtures/zero-primary-property` - create a NEW property in the
+  imported shape: no landlord of record, the given contacts as NON-primary
+  rows (`{ street, rows: [{ contactId, role: pm|owner|other }] }` -> 201
+  `{ unitId }`). The only way to reach a property with no primary contact -
+  the UI requires a landlord and the lean seed has none on purpose. Create the
+  contacts first through `POST /api/contacts`; it never touches an existing
+  unit (`fixtures/primaryContact.ts`).
 
 **THE TICKS ARE NOT A CONVENIENCE.** The lane runs jobs in-process in the APP
 *and* spawns a real worker with its own pollers. Only the app's log lines reach
@@ -750,7 +757,7 @@ claimed the cadence period.
 
 ## Layout
 - `playwright.config.ts` - one `chromium` project, reporters, `webServer` (which runs `scripts/e2e-session.mjs`).
-- `fixtures/` - `reseed`, `fakeTwilio` (inbound injection incl. CARRIER GROUP texts, the Conversations inspectors, and `getOutboundTo` proof-of-send reads), `groupText` (log tail + guardrail ticks), `fakeEmail`, `fakeVoice`, `relayConnect`, `voiceSetup`, `extraction`, `orgFixture` (the organization list over the API: add a run-unique name, read usage and "Not on the list", plant an off-list value through `/__dev/org-fixture`, and `waitForRewrite`).
+- `fixtures/` - `reseed`, `fakeTwilio` (inbound injection incl. CARRIER GROUP texts, the Conversations inspectors, and `getOutboundTo` proof-of-send reads), `groupText` (log tail + guardrail ticks), `fakeEmail`, `fakeVoice`, `relayConnect`, `voiceSetup`, `extraction`, `orgFixture` (the organization list over the API: add a run-unique name, read usage and "Not on the list", plant an off-list value through `/__dev/org-fixture`, and `waitForRewrite`), `primaryContact` (`createZeroPrimaryProperty` - a NEW property with no primary contact and no landlord of record, through `/__dev/fixtures/zero-primary-property`).
 - `support/` - `selectors.md` (the selector conventions), `urls.ts` (central lane-URL module), `lane.mjs` (lane resolver), `preflight.ts` (globalSetup), `viewport.ts`.
 - `tests/` - `dashboard-next/`, `flows/`, `scenarios/`, plus two loose specs.
 - `scenarios/` - `steps.ts`, the sequence-diagram vocabulary.

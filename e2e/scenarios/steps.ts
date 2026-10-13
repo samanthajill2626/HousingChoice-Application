@@ -37,8 +37,10 @@ import {
 import { composeTourReminderBody } from '../../app/src/messages/tourCopy.js';
 // TYPE-ONLY, and it must stay that way. TourContactNames is re-exported by the
 // composer precisely so the harness never reaches for app/src/lib/tourContacts.js
-// directly: that module VALUE-imports unitContacts from repos/unitsRepo.js, which
-// would drag the AWS SDK into the e2e bundle. toursModel.ts has zero imports.
+// directly: that module VALUE-imports resolvePropertyContact from
+// lib/propertyContact.js, which value-imports unitContacts from
+// repos/unitsRepo.js and isDeleted from repos/contactsRepo.js - either would
+// drag the AWS SDK into the e2e bundle. toursModel.ts has zero imports.
 import type { TourContactNames } from '../../app/src/messages/tourCopy.js';
 import type { TourType } from '../../app/src/lib/toursModel.js';
 import { expectTodayReady } from '../support/today.js';

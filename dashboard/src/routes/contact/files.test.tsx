@@ -7,7 +7,7 @@ import {
   installImageViewerResizeObserver,
   loadViewerImage,
 } from '../../ui/imageViewer/ImageViewer.testUtils.js';
-import { TenantFile } from './TenantFile.js';
+import { TenantFile, type TenantFileProps } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
 import { PartnerFile } from './PartnerFile.js';
 import { BLANK } from './Card.js';
@@ -58,7 +58,7 @@ describe('TenantFile', () => {
 
   function renderIt(
     opts: {
-      listingsSentPending?: boolean;
+      listingsSentStatus?: 'loading' | 'pending' | 'ready' | 'error';
       listingsSent?: ListingSendRow[];
       media?: CommsMediaItem[];
       tours?: Tour[];
@@ -69,6 +69,8 @@ describe('TenantFile', () => {
       groupThreadsTruncated?: boolean;
       onSendProperty?: () => void;
       onCreateRelayGroup?: () => void;
+      onListingOutcome?: TenantFileProps['onListingOutcome'];
+      onOpenTourForm?: TenantFileProps['onOpenTourForm'];
       // Per-test fixture override (the LandlordFile helper below does the same).
       // Never mutate the shared `contact` - other assertions depend on it.
       contact?: Contact;
@@ -83,7 +85,7 @@ describe('TenantFile', () => {
             placements={[TENANT_CASE]}
             tours={opts.tours ?? []}
             units={opts.units ?? [UNIT]}
-            listingsSentPending={opts.listingsSentPending ?? true}
+            listingsSentStatus={opts.listingsSentStatus ?? 'loading'}
             listingsSent={opts.listingsSent ?? []}
             relayGroupsPending={opts.relayGroupsPending ?? true}
             relayGroups={opts.relayGroups ?? []}
@@ -93,6 +95,8 @@ describe('TenantFile', () => {
             media={opts.media ?? []}
             onSendProperty={opts.onSendProperty}
             onCreateRelayGroup={opts.onCreateRelayGroup}
+            onListingOutcome={opts.onListingOutcome}
+            onOpenTourForm={opts.onOpenTourForm}
           />
         </ImageViewerProvider>
       </MemoryRouter>,
@@ -158,13 +162,13 @@ describe('TenantFile', () => {
   });
 
   it('shows the pending state for listings-sent until the backend lands', () => {
-    renderIt({ listingsSentPending: true });
+    renderIt({ listingsSentStatus: 'loading' });
     expect(screen.getAllByText(/Arrives with the backend/i).length).toBeGreaterThanOrEqual(1);
   });
 
   it('renders Properties-sent rows linking to the unit (C4 data), no chip without a tour', () => {
     renderIt({
-      listingsSentPending: false,
+      listingsSentStatus: 'ready',
       listingsSent: [
         { contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true },
       ],
@@ -182,7 +186,7 @@ describe('TenantFile', () => {
 
   it('renders the tour chip on a Properties-sent row, linking to the tour', () => {
     renderIt({
-      listingsSentPending: false,
+      listingsSentStatus: 'ready',
       listingsSent: [
         {
           contactId: 'T1',
@@ -204,7 +208,7 @@ describe('TenantFile', () => {
 
   it('renders each tour-chip state on Properties-sent rows', () => {
     renderIt({
-      listingsSentPending: false,
+      listingsSentStatus: 'ready',
       units: [
         UNIT,
         { unitId: 'u2', landlordId: 'L1', status: 'available', address: { line1: '2 Peachtree' } },
@@ -222,13 +226,13 @@ describe('TenantFile', () => {
   });
 
   it('shows "No properties sent yet." when the slice is ready but empty', () => {
-    renderIt({ listingsSentPending: false, listingsSent: [] });
+    renderIt({ listingsSentStatus: 'ready', listingsSent: [] });
     expect(screen.getByText('No properties sent yet.')).toBeInTheDocument();
   });
 
   it('Properties sent card shows "+ Send" and fires onSendProperty', async () => {
     const onSendProperty = vi.fn();
-    renderIt({ listingsSentPending: false, onSendProperty });
+    renderIt({ listingsSentStatus: 'ready', onSendProperty });
     await userEvent.click(screen.getByRole('button', { name: 'Send a property to this tenant' }));
     expect(onSendProperty).toHaveBeenCalled();
   });
@@ -243,7 +247,7 @@ describe('TenantFile', () => {
       interestedSupported: true,
     });
     renderIt({
-      listingsSentPending: false,
+      listingsSentStatus: 'ready',
       onSendProperty: vi.fn(),
       listingsSent: [send('u1'), send('u2')],
     });
@@ -263,10 +267,82 @@ describe('TenantFile', () => {
       outcome: 'no_reply',
       interestedSupported: true,
     });
-    renderIt({ listingsSentPending: false, listingsSent: [send('u1'), send('u2')] });
+    renderIt({ listingsSentStatus: 'ready', listingsSent: [send('u1'), send('u2')] });
     expect(screen.getByRole('heading', { name: /Properties sent/ })).toHaveTextContent(
       /^Properties sent$/,
     );
+  });
+
+  it('an errored listings-sent slice shows the error row, not the pending panel (D12)', () => {
+    renderIt({ listingsSentStatus: 'error' });
+    const card = screen.getByRole('heading', { name: /^Properties sent/ }).closest('section') as HTMLElement;
+    expect(within(card).getByText("We couldn't load properties sent.")).toBeInTheDocument();
+    expect(within(card).queryByText(/Arrives with the backend/)).not.toBeInTheDocument();
+  });
+
+  it('a waiting row offers Interested / Not interested named for the tenant and the property', async () => {
+    const onListingOutcome = vi.fn(() => Promise.resolve());
+    renderIt({
+      contact: { ...contact, firstName: 'Tia', lastName: 'Moss' },
+      listingsSentStatus: 'ready',
+      units: [{ ...UNIT, tour_type: 'self_guided' }],
+      listingsSent: [{ contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true }],
+      onListingOutcome,
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss interested in 1450 Joseph Blvd, Atlanta, GA' }));
+    expect(onListingOutcome).toHaveBeenCalledWith('u1', 'interested');
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss not interested in 1450 Joseph Blvd, Atlanta, GA' }));
+    expect(onListingOutcome).toHaveBeenCalledWith('u1', 'not_interested');
+  });
+
+  it("a property with no tour_type opens the form for THAT property ('form' mode from file.units)", async () => {
+    const onOpenTourForm = vi.fn();
+    renderIt({
+      contact: { ...contact, firstName: 'Tia', lastName: 'Moss' },
+      listingsSentStatus: 'ready',
+      listingsSent: [{ contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', outcome: 'replied', interestedSupported: true }],
+      onListingOutcome: vi.fn(() => Promise.resolve()),
+      onOpenTourForm,
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss interested in 1450 Joseph Blvd, Atlanta, GA' }));
+    expect(onOpenTourForm).toHaveBeenCalledWith('u1');
+  });
+
+  it('a row whose property is not in the loaded units (deleted) shows the outcome but no actions', () => {
+    renderIt({
+      listingsSentStatus: 'ready',
+      listingsSent: [{ contactId: 'T1', unitId: 'u-gone', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true }],
+      onListingOutcome: vi.fn(() => Promise.resolve()),
+    });
+    expect(screen.getByText('No reply yet')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Mark / })).not.toBeInTheDocument();
+  });
+
+  // (PIN - the list wrapper landed in 5.1; this pins R1 on the real card.)
+  it("R1: the rows are the listitems of ONE list named 'Properties sent', and nothing else in the card is a listitem", () => {
+    renderIt({
+      listingsSentStatus: 'ready',
+      units: [UNIT, { unitId: 'u2', landlordId: 'L1', status: 'available', address: { line1: '2 Peachtree' } }],
+      listingsSent: [
+        { contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true },
+        { contactId: 'T1', unitId: 'u2', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', outcome: 'replied', interestedSupported: true },
+      ],
+    });
+    const card = screen.getByRole('heading', { name: /^Properties sent/ }).closest('section') as HTMLElement;
+    const list = within(card).getByRole('list', { name: 'Properties sent' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(card).getAllByRole('listitem')).toHaveLength(2);
+  });
+
+  it('B8: a non-partner row the tenant file shows with interestedSupported false (a team-member page) gets NO "Request a tour" link', () => {
+    renderIt({
+      contact: { ...contact, type: 'team_member' },
+      listingsSentStatus: 'ready',
+      listingsSent: [{ contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: false }],
+      onListingOutcome: vi.fn(() => Promise.resolve()),
+    });
+    expect(screen.queryByRole('link', { name: /^Request a tour/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Mark .* not interested in / })).toBeInTheDocument();
   });
 
   it('renders a timeless (requested) tour row as "Needs booking" - never "Invalid Date"', () => {
@@ -568,7 +644,7 @@ describe('PartnerFile', () => {
           groupThreads={groupThreads}
           groupThreadsTruncated={false}
           units={[]}
-          listingsSentPending={false}
+          listingsSentStatus="ready"
           listingsSent={[]}
         />
       </MemoryRouter>,
@@ -627,7 +703,7 @@ describe('PartnerFile - role, organization and staff notes', () => {
           groupThreads={[]}
           groupThreadsTruncated={false}
           units={[]}
-          listingsSentPending={false}
+          listingsSentStatus="ready"
           listingsSent={[]}
           {...(onContactUpdated !== undefined && { onContactUpdated })}
         />
@@ -680,7 +756,12 @@ describe('PartnerFile - Properties sent (caseworkers D20)', () => {
   };
 
   function renderSent(
-    opts: { listingsSentPending?: boolean; listingsSent?: ListingSendRow[]; onSendProperty?: () => void } = {},
+    opts: {
+      listingsSentStatus?: 'loading' | 'pending' | 'ready' | 'error';
+      listingsSent?: ListingSendRow[];
+      onSendProperty?: () => void;
+      onListingOutcome?: (unitId: string, outcome: 'interested' | 'not_interested' | 'clear') => Promise<void>;
+    } = {},
   ) {
     return render(
       <MemoryRouter>
@@ -692,9 +773,10 @@ describe('PartnerFile - Properties sent (caseworkers D20)', () => {
           groupThreads={[]}
           groupThreadsTruncated={false}
           units={[UNIT]}
-          listingsSentPending={opts.listingsSentPending ?? false}
+          listingsSentStatus={opts.listingsSentStatus ?? 'ready'}
           listingsSent={opts.listingsSent ?? []}
           {...(opts.onSendProperty !== undefined && { onSendProperty: opts.onSendProperty })}
+          {...(opts.onListingOutcome !== undefined && { onListingOutcome: opts.onListingOutcome })}
         />
       </MemoryRouter>,
     );
@@ -707,7 +789,7 @@ describe('PartnerFile - Properties sent (caseworkers D20)', () => {
   });
 
   it('shows the pending panel while the slice loads', () => {
-    renderSent({ listingsSentPending: true });
+    renderSent({ listingsSentStatus: 'loading' });
     const card = screen.getByRole('heading', { name: /^Properties sent/ }).closest('section') as HTMLElement;
     expect(within(card).getByText('Arrives with the backend.')).toBeInTheDocument();
   });
@@ -733,5 +815,22 @@ describe('PartnerFile - Properties sent (caseworkers D20)', () => {
     unmount();
     renderSent();
     expect(screen.queryByRole('button', { name: 'Send a property to this partner' })).not.toBeInTheDocument();
+  });
+
+  it('a partner row links "Request a tour" to the property page and offers Not interested; never Interested', async () => {
+    const onListingOutcome = vi.fn(() => Promise.resolve());
+    renderSent({
+      listingsSent: [{ contactId: 'P2', unitId: 'u1', sentAt: '2026-07-01T12:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: false }],
+      onListingOutcome,
+    });
+    expect(screen.getByRole('link', { name: 'Request a tour for Cora Reyes at 1450 Joseph Blvd, Atlanta, GA' })).toHaveAttribute('href', '/listings/u1?tour=new');
+    expect(screen.queryByRole('button', { name: /^Mark Cora Reyes interested/ })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Cora Reyes not interested in 1450 Joseph Blvd, Atlanta, GA' }));
+    expect(onListingOutcome).toHaveBeenCalledWith('u1', 'not_interested');
+  });
+
+  it('an errored slice shows the error row', () => {
+    renderSent({ listingsSentStatus: 'error' });
+    expect(screen.getByText("We couldn't load properties sent.")).toBeInTheDocument();
   });
 });

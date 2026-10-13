@@ -32,6 +32,7 @@ import {
   runExtraction,
   setContactOptOut,
   setContactVoiceOptOut,
+  setListingSendOutcome,
   setTenantStatus,
   suggestionResolutionErrorMessage,
   updateContact,
@@ -194,6 +195,10 @@ export function ContactDetail(): React.JSX.Element {
   const [startingPlacement, setStartingPlacement] = useState(false);
   // The "Schedule a tour" dialog, pre-filled+locked to this (tenant) contact.
   const [schedulingTour, setSchedulingTour] = useState(false);
+  // The clicked Properties-sent row's property for the Schedule-a-tour dialog
+  // (Interested on a property with no tour_type, spec 5.4 D14). Undefined ->
+  // the dialog pre-commits the LATEST send, as before.
+  const [tourUnitOverride, setTourUnitOverride] = useState<string | undefined>(undefined);
   // The "New property" dialog, pre-filled+locked to this (landlord) contact.
   const [addingProperty, setAddingProperty] = useState(false);
   // The "Create a relay group" dialog, seeded with this contact as a locked
@@ -654,6 +659,13 @@ export function ContactDetail(): React.JSX.Element {
   const relayCreateAction = deleted
     ? {}
     : { onCreateRelayGroup: (): void => setCreatingRelayGroup(true) };
+
+  // One outcome action on a Properties-sent row: the route answers { row }
+  // (plan head 3.4 #4), applied in place; a rejection reaches the row.
+  const onListingOutcome = async (unitId: string, outcome: 'interested' | 'not_interested' | 'clear'): Promise<void> => {
+    const { row } = await setListingSendOutcome(unitId, contact.contactId, outcome);
+    file.setListingSentRow(contact.contactId, unitId, row);
+  };
 
   // Header ⋯ menu + UnknownFile triage. Each endpoint RETURNS the updated contact,
   // so we apply it in place (setContact) — the header, file pane, facts, and reply
@@ -1185,8 +1197,9 @@ export function ContactDetail(): React.JSX.Element {
               <PartnerFile
                 contact={contact}
                 units={file.units}
-                listingsSentPending={file.listingsSent.status !== 'ready'}
+                listingsSentStatus={file.listingsSent.status}
                 listingsSent={file.listingsSent.status === 'ready' ? file.listingsSent.rows : []}
+                onListingOutcome={onListingOutcome}
                 onSendProperty={() =>
                   navigate(`/broadcasts/new?contactId=${encodeURIComponent(contact.contactId)}`)
                 }
@@ -1237,8 +1250,13 @@ export function ContactDetail(): React.JSX.Element {
                 placements={file.placements}
                 tours={file.tours}
                 units={file.units}
-                listingsSentPending={file.listingsSent.status !== 'ready'}
+                listingsSentStatus={file.listingsSent.status}
                 listingsSent={file.listingsSent.status === 'ready' ? file.listingsSent.rows : []}
+                onListingOutcome={onListingOutcome}
+                onOpenTourForm={(unitId) => {
+                  setTourUnitOverride(unitId);
+                  setSchedulingTour(true);
+                }}
                 relayGroupsPending={file.relayGroups.status !== 'ready'}
                 relayGroups={file.relayGroups.status === 'ready' ? file.relayGroups.rows : []}
                 groupThreadsPending={file.groupThreads.status !== 'ready'}
@@ -1360,14 +1378,20 @@ export function ContactDetail(): React.JSX.Element {
       {schedulingTour ? (
         <ScheduleTourForm
           tenantId={contact.contactId}
-          // Continue from the latest send: pre-commit the unit side to the most
-          // recent "Properties sent" row (rows arrive newest-first by sentAt).
+          // The clicked row's property (Interested, 'form' mode), else continue
+          // from the latest send: the most recent "Properties sent" row (rows
+          // arrive newest-first by sentAt).
           initialUnitId={
-            file.listingsSent.status === 'ready' ? file.listingsSent.rows[0]?.unitId : undefined
+            tourUnitOverride ??
+            (file.listingsSent.status === 'ready' ? file.listingsSent.rows[0]?.unitId : undefined)
           }
-          onClose={() => setSchedulingTour(false)}
+          onClose={() => {
+            setSchedulingTour(false);
+            setTourUnitOverride(undefined);
+          }}
           onCreated={(t) => {
             setSchedulingTour(false);
+            setTourUnitOverride(undefined);
             void navigate('/tours/' + t.tourId);
           }}
         />

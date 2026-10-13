@@ -36,7 +36,7 @@ function fileFor(contact: Contact): React.JSX.Element {
         placements={[]}
         tours={[]}
         units={[]}
-        listingsSentPending={false}
+        listingsSentStatus="ready"
         listingsSent={[]}
         relayGroupsPending={false}
         relayGroups={[]}
@@ -114,7 +114,7 @@ describe('TenantFile - tours and placements are for tenants (caseworker integrit
           placements={[]}
           tours={[]}
           units={[]}
-          listingsSentPending={false}
+          listingsSentStatus="ready"
           listingsSent={[]}
           relayGroupsPending={false}
           relayGroups={[]}

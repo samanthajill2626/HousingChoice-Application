@@ -26,6 +26,7 @@ import {
   type SuggestionResolutionItem,
 } from '../src/repos/suggestionResolutionRepo.js';
 import {
+  atlantaDismissalKeys,
   BACKFILL_ARGS,
   BACKFILL_AUDIT_TYPE,
   BACKFILL_AUTHORITY,
@@ -349,6 +350,25 @@ describe('formatBackfillReport (spec D10: name, sign-up date, status, contactId 
     ]);
   });
 
+  it('the revision 6 reasons, in their lines: an accept or dismiss in progress, and a dismissed Atlanta Housing Authority suggestion', () => {
+    const lines = formatBackfillReport(
+      {
+        ...DRY_REPORT,
+        targets: [],
+        leftOut: [
+          { ...lead('c-8', 'Kai', 'Inflight', '2026-06-15T09:00:00.000Z', 'needs_review'), reason: 'resolution_in_progress' },
+          { ...lead('c-9', 'Morgan', 'Dismissed', '2026-06-16T09:00:00.000Z', 'on_hold'), reason: 'dismissed_atlanta' },
+        ],
+      },
+      false,
+    );
+    expect(lines.slice(-3)).toEqual([
+      'Left out (2 lead(s), oldest sign-up first):',
+      '  Kai Inflight  signed up 2026-06-15  status needs_review  contactId c-8  - a suggestion accept or dismiss is in progress - re-run after it finishes',
+      '  Morgan Dismissed  signed up 2026-06-16  status on_hold  contactId c-9  - staff dismissed an Atlanta Housing Authority suggestion',
+    ]);
+  });
+
   it('a dry run counts only the leads it would write; a failed lead is listed and counted apart', () => {
     const dryFailed: BackfillReport = {
       ...DRY_REPORT,
@@ -523,6 +543,19 @@ const created: string[] = [];
 const silent = createLogger({ level: 'silent' });
 const READ_COMMANDS = new Set(['ScanCommand', 'QueryCommand', 'GetCommand']);
 const NO_SKIP: ReadonlySet<string> = new Set();
+/**
+ * Atlanta Housing Authority's dismissal keys on the starting list
+ * (lib/orgStartingList.ts), written out: its name and each of its spellings
+ * that names it ALONE, normalized as the suggest path normalizes a dismissed
+ * value. "AHA" names Augusta Housing Authority too, so it is not one.
+ */
+const ATLANTA_KEYS: readonly string[] = [
+  'atlanta housing authority',
+  'atlanta housing',
+  'housing authority of the city of atlanta',
+  'atlanta (aha)',
+  'atlanta, aha, atlanta housing',
+];
 const LIST_AT = '2026-10-06T00:00:00.000Z';
 
 const NO_LIST_REFUSAL =
@@ -812,6 +845,34 @@ describe('checkBackfillList - the refusals, before any contact is read (spec D10
   });
 });
 
+describe('atlantaDismissalKeys (spec D10 revision 6: the AI suggest path dismissal rule, on the list the run read)', () => {
+  const entry = (orgId: string, kind: OrgEntry['kind'], name: string, spellings: string[]): OrgEntry => ({
+    orgId,
+    kind,
+    name,
+    spellings,
+    createdAt: LIST_AT,
+    createdBy: 'user-0001',
+    updatedAt: LIST_AT,
+    updatedBy: 'user-0001',
+  });
+
+  it('the name and each spelling that names Atlanta Housing Authority ALONE, normalized - never "AHA", which names Augusta too', () => {
+    expect(atlantaDismissalKeys(startingEntries())).toEqual(ATLANTA_KEYS);
+  });
+
+  it('a spelling staff added counts; one another housing authority shares does not; one that normalizes to a key already there is not repeated', () => {
+    const entries = [
+      ...withAtlanta((e) => ({
+        ...e,
+        spellings: [...e.spellings, 'ATL  Housing Auth', 'ATLANTA HOUSING AUTHORITY', 'Metro HA'],
+      })),
+      entry('org-metro', 'housing_authority', 'Metro Housing Authority', ['Metro HA']),
+    ];
+    expect(atlantaDismissalKeys(entries)).toEqual([...ATLANTA_KEYS, 'atl housing auth']);
+  });
+});
+
 describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
   it('stops with an error rather than loop forever on a store whose pages do not move back', async () => {
     const stuck = { listByEntity: async () => [event('contact_updated', { fields: ['status'] })] };
@@ -845,22 +906,58 @@ describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
         return undefined;
       },
     };
-    const deps = { audit, suggestions, resolutions };
+    const dismissals: BackfillDeps['dismissals'] = {
+      hasDismissal: async (contactId, _target, key) => {
+        reads.push(`dismissal ${contactId} ${key}`);
+        if (contactId === 'c-skip') throw new Error('ThrottlingException');
+        return false;
+      },
+    };
+    const deps = { audit, suggestions, resolutions, dismissals };
     const skip = new Set(['c-skip', 'c-excluded']);
-    expect(await leftOutReasonFor(deps, 'c-skip', skip)).toEqual({ reason: 'skipped' });
-    expect(await leftOutReasonFor(deps, 'c-excluded', skip)).toEqual({ reason: 'skipped' });
+    expect(await leftOutReasonFor(deps, 'c-skip', skip, ATLANTA_KEYS)).toEqual({ reason: 'skipped' });
+    expect(await leftOutReasonFor(deps, 'c-excluded', skip, ATLANTA_KEYS)).toEqual({ reason: 'skipped' });
     expect(reads).toEqual([]);
     // Without --skip on this run, the recorded exclusion leaves it out by itself.
-    expect(await leftOutReasonFor(deps, 'c-excluded', new Set())).toEqual({ reason: 'excluded_earlier' });
-    expect(await leftOutReasonFor(deps, 'c-other', skip)).toEqual({ reason: null });
+    expect(await leftOutReasonFor(deps, 'c-excluded', new Set(), ATLANTA_KEYS)).toEqual({ reason: 'excluded_earlier' });
+    expect(await leftOutReasonFor(deps, 'c-other', skip, ATLANTA_KEYS)).toEqual({ reason: null });
     // A lead not named in --skip has its history read to its end (a page, then the empty page);
-    // its resolution record and then its pending suggestion only for the lead no earlier reason leaves out.
+    // its resolution record, its pending suggestion and then each dismissal key only for the lead
+    // no earlier reason leaves out.
     expect(reads).toEqual([
       'contacts#c-excluded',
       'contacts#c-excluded',
       'contacts#c-other',
       'resolution c-other',
       'suggestion c-other',
+      ...ATLANTA_KEYS.map((key) => `dismissal c-other ${key}`),
+    ]);
+  });
+
+  it('a staff DISMISSAL of Atlanta Housing Authority is read last - for the housingAuthority target, key by key in the order given, stopping at the first that is there - and leaves the lead out', async () => {
+    const reads: string[] = [];
+    const dismissed: Record<string, string> = { 'c-name': 'atlanta housing authority', 'c-spelling': 'atlanta (aha)' };
+    const deps: Parameters<typeof leftOutReasonFor>[0] = {
+      audit: { append: async () => {}, listByEntity: async () => [] },
+      resolutions: { get: async () => undefined },
+      suggestions: { getSuggestion: async () => undefined },
+      dismissals: {
+        hasDismissal: async (contactId, target, key) => {
+          reads.push(`${contactId} ${target} ${key}`);
+          return dismissed[contactId] === key;
+        },
+      },
+    };
+    expect(await leftOutReasonFor(deps, 'c-name', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'dismissed_atlanta' });
+    expect(await leftOutReasonFor(deps, 'c-spelling', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'dismissed_atlanta' });
+    expect(await leftOutReasonFor(deps, 'c-none', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: null });
+    expect(reads).toEqual([
+      'c-name housingAuthority atlanta housing authority',
+      'c-spelling housingAuthority atlanta housing authority',
+      'c-spelling housingAuthority atlanta housing',
+      'c-spelling housingAuthority housing authority of the city of atlanta',
+      'c-spelling housingAuthority atlanta (aha)',
+      ...ATLANTA_KEYS.map((key) => `c-none housingAuthority ${key}`),
     ]);
   });
 
@@ -890,10 +987,11 @@ describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
           return undefined;
         },
       },
+      dismissals: { hasDismissal: async () => false },
     };
-    expect(await leftOutReasonFor(deps, 'c-active', NO_SKIP)).toEqual({ reason: 'resolution_in_progress' });
-    expect(await leftOutReasonFor(deps, 'c-done', NO_SKIP)).toEqual({ reason: null });
-    expect(await leftOutReasonFor(deps, 'c-none', NO_SKIP)).toEqual({ reason: null });
+    expect(await leftOutReasonFor(deps, 'c-active', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'resolution_in_progress' });
+    expect(await leftOutReasonFor(deps, 'c-done', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: null });
+    expect(await leftOutReasonFor(deps, 'c-none', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: null });
     expect(reads).toEqual([
       'contacts#c-active',
       'resolution c-active housingAuthority',
@@ -908,9 +1006,10 @@ describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
 
   it('a pending housingAuthority suggestion is read last - consistently, for the housingAuthority target - and leaves the lead out with its value', async () => {
     const calls: unknown[] = [];
-    const deps: Pick<BackfillDeps, 'audit' | 'resolutions' | 'suggestions'> = {
+    const deps: Pick<BackfillDeps, 'audit' | 'resolutions' | 'suggestions' | 'dismissals'> = {
       audit: { append: async () => {}, listByEntity: async () => [] },
       resolutions: { get: async () => undefined },
+      dismissals: { hasDismissal: async () => false },
       suggestions: {
         getSuggestion: async (contactId, target, opts) => {
           calls.push([contactId, target, opts]);
@@ -927,17 +1026,17 @@ describe('readWholeHistory and leftOutReasonFor (pure seams)', () => {
         },
       },
     };
-    expect(await leftOutReasonFor(deps, 'c-pending', NO_SKIP)).toEqual({
+    expect(await leftOutReasonFor(deps, 'c-pending', NO_SKIP, ATLANTA_KEYS)).toEqual({
       reason: 'pending_suggestion',
       suggestedValue: 'Cobb County Housing Authority',
     });
-    expect(await leftOutReasonFor(deps, 'c-none', NO_SKIP)).toEqual({ reason: null });
+    expect(await leftOutReasonFor(deps, 'c-none', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: null });
     expect(calls).toEqual([
       ['c-pending', 'housingAuthority', { consistentRead: true }],
       ['c-none', 'housingAuthority', { consistentRead: true }],
     ]);
     // Named in --skip: left out as skipped, the suggestion never read.
-    expect(await leftOutReasonFor(deps, 'c-pending', new Set(['c-pending']))).toEqual({ reason: 'skipped' });
+    expect(await leftOutReasonFor(deps, 'c-pending', new Set(['c-pending']), ATLANTA_KEYS)).toEqual({ reason: 'skipped' });
     expect(calls).toHaveLength(2);
   });
 });
@@ -1025,7 +1124,7 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
     await w.audit('c-again', ts, 'housing_fair_signup', RESIGNUP_PAYLOAD);
     await w.audit('c-excluded', ts, BACKFILL_EXCLUDED_AUDIT_TYPE, { field: 'housingAuthority' });
     const { deps } = w.deps();
-    const reasonOf = async (contactId: string): Promise<string | null> => (await leftOutReasonFor(deps, contactId, NO_SKIP)).reason;
+    const reasonOf = async (contactId: string): Promise<string | null> => (await leftOutReasonFor(deps, contactId, NO_SKIP, ATLANTA_KEYS)).reason;
     for (const [i, [what]] of AUTHORITY_EVENTS.entries()) {
       expect([what, await reasonOf(`c-auth-${i}`)]).toEqual([what, 'authority_history']);
     }
@@ -1033,7 +1132,7 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
       expect([what, await reasonOf(`c-other-${i}`)]).toEqual([what, null]);
     }
     expect(await reasonOf('c-again')).toBe('signed_up_again');
-    expect(await leftOutReasonFor(deps, 'c-excluded', NO_SKIP)).toEqual({ reason: 'excluded_earlier' });
+    expect(await leftOutReasonFor(deps, 'c-excluded', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'excluded_earlier' });
     expect(await reasonOf('c-no-history')).toBeNull();
   }, 120_000);
 
@@ -1044,8 +1143,8 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
     await w.audit('c-both', '2026-08-02T12:00:00.000Z#aaaa0001', 'contact_updated', { fields: ['housingAuthority'], actor: 'user-0001' });
     await w.audit('c-both', '2026-08-03T12:00:00.000Z#aaaa0001', 'housing_fair_signup', RESIGNUP_PAYLOAD);
     const { deps } = w.deps();
-    expect(await leftOutReasonFor(deps, 'c-both', new Set(['c-both']))).toEqual({ reason: 'skipped' });
-    expect(await leftOutReasonFor(deps, 'c-both', NO_SKIP)).toEqual({ reason: 'excluded_earlier' });
+    expect(await leftOutReasonFor(deps, 'c-both', new Set(['c-both']), ATLANTA_KEYS)).toEqual({ reason: 'skipped' });
+    expect(await leftOutReasonFor(deps, 'c-both', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'excluded_earlier' });
   }, 120_000);
 
   it('a PENDING suggestion through the store: it leaves a lead out only when nothing earlier does - and it is read only then; a dismissed one is not pending', async () => {
@@ -1061,15 +1160,15 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
     const recorder = recordingClient(doc);
     const { deps } = w.deps({ onDoc: recorder.doc });
     const skip = new Set(['c-skip']);
-    expect(await leftOutReasonFor(deps, 'c-sugg', skip)).toEqual({
+    expect(await leftOutReasonFor(deps, 'c-sugg', skip, ATLANTA_KEYS)).toEqual({
       reason: 'pending_suggestion',
       suggestedValue: 'Cobb County Housing Authority',
     });
-    expect((await leftOutReasonFor(deps, 'c-hist', skip)).reason).toBe('authority_history');
-    expect((await leftOutReasonFor(deps, 'c-again', skip)).reason).toBe('signed_up_again');
-    expect((await leftOutReasonFor(deps, 'c-excl', skip)).reason).toBe('excluded_earlier');
-    expect((await leftOutReasonFor(deps, 'c-skip', skip)).reason).toBe('skipped');
-    expect(await leftOutReasonFor(deps, 'c-dismissed', skip)).toEqual({ reason: null });
+    expect((await leftOutReasonFor(deps, 'c-hist', skip, ATLANTA_KEYS)).reason).toBe('authority_history');
+    expect((await leftOutReasonFor(deps, 'c-again', skip, ATLANTA_KEYS)).reason).toBe('signed_up_again');
+    expect((await leftOutReasonFor(deps, 'c-excl', skip, ATLANTA_KEYS)).reason).toBe('excluded_earlier');
+    expect((await leftOutReasonFor(deps, 'c-skip', skip, ATLANTA_KEYS)).reason).toBe('skipped');
+    expect(await leftOutReasonFor(deps, 'c-dismissed', skip, ATLANTA_KEYS)).toEqual({ reason: null });
     // One consistent GetItem each - for c-sugg and c-dismissed only.
     expect(getsOn(recorder, w, 'ai_extraction', 'sugg#')).toEqual([
       { TableName: tableName('ai_extraction', w.env), Key: { itemId: 'sugg#c-sugg#housingAuthority' }, ConsistentRead: true },
@@ -1092,11 +1191,11 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
     await w.suggest('c-both', 'DeKalb County Housing Authority');
     const recorder = recordingClient(doc);
     const { deps } = w.deps({ onDoc: recorder.doc });
-    expect(await leftOutReasonFor(deps, 'c-accepting', NO_SKIP)).toEqual({ reason: 'resolution_in_progress' });
-    expect(await leftOutReasonFor(deps, 'c-dismissing', NO_SKIP)).toEqual({ reason: 'resolution_in_progress' });
-    expect(await leftOutReasonFor(deps, 'c-done', NO_SKIP)).toEqual({ reason: null });
-    expect(await leftOutReasonFor(deps, 'c-hist', NO_SKIP)).toEqual({ reason: 'authority_history' });
-    expect(await leftOutReasonFor(deps, 'c-both', NO_SKIP)).toEqual({ reason: 'resolution_in_progress' });
+    expect(await leftOutReasonFor(deps, 'c-accepting', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'resolution_in_progress' });
+    expect(await leftOutReasonFor(deps, 'c-dismissing', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'resolution_in_progress' });
+    expect(await leftOutReasonFor(deps, 'c-done', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: null });
+    expect(await leftOutReasonFor(deps, 'c-hist', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'authority_history' });
+    expect(await leftOutReasonFor(deps, 'c-both', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'resolution_in_progress' });
     const table = tableName('ai_extraction', w.env);
     expect(getsOn(recorder, w, 'ai_extraction', 'resolve#')).toEqual(
       ['c-accepting', 'c-dismissing', 'c-done', 'c-both'].map((id) => ({
@@ -1107,6 +1206,48 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
     );
     expect(getsOn(recorder, w, 'ai_extraction', 'sugg#').map((input) => input['Key'])).toEqual([
       { itemId: 'sugg#c-done#housingAuthority' },
+    ]);
+  }, 120_000);
+
+  it('a staff DISMISSAL through the store: of the name or of a spelling that names Atlanta Housing Authority alone leaves a lead out; of the shared "AHA" or of another authority does not; read only for a would-be target', async () => {
+    const w = await newWorld();
+    const ts = '2026-08-01T12:00:00.000Z#aaaa0001';
+    // Dismissed the way the app dismisses: the suggestion row deleted, the tombstone of its normalized value written.
+    await w.suggest('c-name', 'Atlanta Housing Authority');
+    await w.dismiss('c-name', 'atlanta housing authority');
+    await w.suggest('c-spelling', 'Atlanta Housing');
+    await w.dismiss('c-spelling', 'atlanta housing');
+    await w.suggest('c-aha', 'AHA');
+    await w.dismiss('c-aha', 'aha');
+    await w.suggest('c-dekalb', 'DeKalb County Housing Authority');
+    await w.dismiss('c-dekalb', 'dekalb county housing authority');
+    // A pending suggestion wins over a dismissal (an earlier one dismissed, a new one pending) - the dismissal never read.
+    await w.suggest('c-pending', 'Atlanta Housing Authority');
+    await w.dismiss('c-pending', 'atlanta housing authority');
+    await w.suggest('c-pending', 'Cobb County Housing Authority');
+    // An authority history wins too - the dismissal never read.
+    await w.suggest('c-hist', 'Atlanta Housing Authority');
+    await w.dismiss('c-hist', 'atlanta housing authority');
+    await w.audit('c-hist', ts, 'contact_updated', { fields: ['housingAuthority'], actor: 'user-0001' });
+    const recorder = recordingClient(doc);
+    const { deps } = w.deps({ onDoc: recorder.doc });
+    expect(await leftOutReasonFor(deps, 'c-name', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'dismissed_atlanta' });
+    expect(await leftOutReasonFor(deps, 'c-spelling', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'dismissed_atlanta' });
+    expect(await leftOutReasonFor(deps, 'c-aha', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: null });
+    expect(await leftOutReasonFor(deps, 'c-dekalb', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: null });
+    expect(await leftOutReasonFor(deps, 'c-pending', NO_SKIP, ATLANTA_KEYS)).toEqual({
+      reason: 'pending_suggestion',
+      suggestedValue: 'Cobb County Housing Authority',
+    });
+    expect(await leftOutReasonFor(deps, 'c-hist', NO_SKIP, ATLANTA_KEYS)).toEqual({ reason: 'authority_history' });
+    // One GetItem per key, in order, stopping at the first tombstone - and none for c-pending or c-hist.
+    const dism = (contactId: string, key: string): string => `dism#${contactId}#housingAuthority#${key}`;
+    expect(getsOn(recorder, w, 'ai_extraction', 'dism#').map((input) => (input['Key'] as Record<string, unknown>)['itemId'])).toEqual([
+      dism('c-name', 'atlanta housing authority'),
+      dism('c-spelling', 'atlanta housing authority'),
+      dism('c-spelling', 'atlanta housing'),
+      ...ATLANTA_KEYS.map((key) => dism('c-aha', key)),
+      ...ATLANTA_KEYS.map((key) => dism('c-dekalb', key)),
     ]);
   }, 120_000);
 
@@ -1132,8 +1273,14 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
         return deps.audit.listByEntity(entityKey, opts);
       },
     };
-    const paged = { audit, auditPageSize: 2, resolutions: deps.resolutions, suggestions: deps.suggestions };
-    expect((await leftOutReasonFor(paged, 'c-deep', NO_SKIP)).reason).toBe('authority_history');
+    const paged = {
+      audit,
+      auditPageSize: 2,
+      resolutions: deps.resolutions,
+      suggestions: deps.suggestions,
+      dismissals: deps.dismissals,
+    };
+    expect((await leftOutReasonFor(paged, 'c-deep', NO_SKIP, ATLANTA_KEYS)).reason).toBe('authority_history');
     // Pages of two, newest first: [07-05, 07-04], [07-03, 07-02], [07-01], then the empty page that ends it.
     expect(befores).toEqual([
       undefined,
@@ -1142,7 +1289,7 @@ describe.skipIf(!reachable)('the reads against DynamoDB Local (spec D10)', () =>
       '2026-07-01T10:00:00.000Z#aaaa0001',
     ]);
     // A long history with nothing in it is read to its end too.
-    expect((await leftOutReasonFor(paged, 'c-clean', NO_SKIP)).reason).toBeNull();
+    expect((await leftOutReasonFor(paged, 'c-clean', NO_SKIP, ATLANTA_KEYS)).reason).toBeNull();
   }, 120_000);
 });
 
@@ -1170,7 +1317,7 @@ const SKIP_HISTORY_UNREAD_LOG =
 const SKIP_LINE = '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-skip  - named in --skip';
 /** The ERROR line of a lead one of whose reads failed - no write was attempted. */
 const READ_FAILED_LOG =
-  'backfill-join-housing-authority - could not read the audit history, the suggestion resolution record or the pending suggestion; nothing written for this contact';
+  'backfill-join-housing-authority - could not read the audit history, the suggestion resolution record, the pending suggestion or a dismissal; nothing written for this contact';
 /** The done line of an --apply that STOPPED in its exclusions-first pass (spec D10 revision 6). */
 const STOPPED_LOG = (unrecorded: number): string =>
   `backfill-join-housing-authority - STOPPED before any housing authority write: ${unrecorded} exclusion(s) may not have been ` +
@@ -1316,6 +1463,10 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
       [{ itemId: 'resolve#c-mid#housingAuthority' }, true],
       [{ itemId: 'resolve#c-new#housingAuthority' }, true],
     ]);
+    // The dismissal reads (spec D10 revision 6): one GetItem per Atlanta key - five on the starting list - per would-be target.
+    expect(getsOn(recorder, w, 'ai_extraction', 'dism#').map((input) => (input['Key'] as Record<string, unknown>)['itemId'])).toEqual(
+      ['c-old', 'c-mid', 'c-new'].flatMap((id) => ATLANTA_KEYS.map((key) => `dism#${id}#housingAuthority#${key}`)),
+    );
     expect(await w.scanTable('contacts')).toEqual(before.contacts);
     expect(await w.scanTable('settings')).toEqual(before.settings);
     expect(await w.scanTable('audit_events')).toEqual(before.audit);
@@ -1695,6 +1846,13 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
           return base.deps.resolutions.get(contactId, target);
         },
       },
+      dismissals: {
+        hasDismissal: async (contactId, target, key) => {
+          reads.push(`dismissal ${contactId}`);
+          if (contactId === 'c-skip') throw new Error('ThrottlingException');
+          return base.deps.dismissals.hasDismissal(contactId, target, key);
+        },
+      },
     };
     const report = await runJoinAuthorityBackfill(deps, { apply: false, skip: SKIP });
     expect(report).toEqual({
@@ -1714,13 +1872,16 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
       'contacts#c-old',
       'resolution c-old',
       'suggestion c-old',
+      'dismissal c-old',
       'contacts#c-mid',
       'resolution c-mid',
       'suggestion c-mid',
+      'dismissal c-mid',
       'contacts#c-cleared',
       'contacts#c-new',
       'resolution c-new',
       'suggestion c-new',
+      'dismissal c-new',
     ]);
     expect(backfillExitCode(report)).toBe(0);
   }, 120_000);
@@ -1799,6 +1960,79 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect((await w.backfillEvents()).map((e) => e['entityKey'])).not.toContain('contacts#c-busy');
     expect((await w.excludedEvents()).map((e) => e['entityKey'])).toEqual(['contacts#c-skip']);
     expect(backfillExitCode(report)).toBe(0);
+  }, 120_000);
+
+  it('a lead whose Atlanta Housing Authority suggestion staff DISMISSED is left out by the dry run and the apply - nothing written for it; a dismissal of the shared "AHA" alone leaves a lead in; the keys come from the list the run read', async () => {
+    // A spelling staff added to Atlanta Housing Authority on this environment's list.
+    const w = await newWorld(listItem(withAtlanta((e) => ({ ...e, spellings: [...e.spellings, 'ATL Housing Auth'] }))));
+    await seedLeads(w);
+    await w.lead('c-turned-down', { firstName: 'Morgan', lastName: 'Dismissed', captured_at: '2026-06-15T09:00:00.000Z' });
+    await w.suggest('c-turned-down', 'Atlanta (AHA)');
+    await w.dismiss('c-turned-down', 'atlanta (aha)');
+    await w.lead('c-staff-spelling', { firstName: 'Noel', lastName: 'Listed', captured_at: '2026-06-16T09:00:00.000Z' });
+    await w.dismiss('c-staff-spelling', 'atl housing auth');
+    await w.lead('c-aha-only', { firstName: 'Oakley', lastName: 'Ambiguous', captured_at: '2026-08-20T09:00:00.000Z' });
+    await w.suggest('c-aha-only', 'AHA');
+    await w.dismiss('c-aha-only', 'aha');
+    const dismissedLead = (contactId: string, firstName: string, lastName: string, signedUpAt: string) => ({
+      contactId,
+      firstName,
+      lastName,
+      signedUpAt,
+      status: 'needs_review',
+      reason: 'dismissed_atlanta',
+    });
+    const turnedDown = dismissedLead('c-turned-down', 'Morgan', 'Dismissed', '2026-06-15T09:00:00.000Z');
+    const staffSpelling = dismissedLead('c-staff-spelling', 'Noel', 'Listed', '2026-06-16T09:00:00.000Z');
+    const turnedDownLine =
+      '  Morgan Dismissed  signed up 2026-06-15  status needs_review  contactId c-turned-down' +
+      '  - staff dismissed an Atlanta Housing Authority suggestion';
+
+    const dry = w.deps();
+    const dryReport = await runJoinAuthorityBackfill(dry.deps, { apply: false, skip: SKIP });
+    expect(dryReport.targets.map((t) => t.contactId)).toEqual(['c-old', 'c-mid', 'c-new', 'c-aha-only']);
+    expect(dryReport.leftOut).toEqual([LEFT_OUT[0], LEFT_OUT[1], turnedDown, staffSpelling, LEFT_OUT[2]]);
+    expect(dry.printed).toContain(turnedDownLine);
+
+    const applied = w.deps();
+    const report = await runJoinAuthorityBackfill(applied.deps, { apply: true, skip: SKIP });
+    expect(report).toMatchObject({ written: 4, failed: 0 });
+    expect(report.leftOut).toEqual([LEFT_OUT[0], LEFT_OUT[1], turnedDown, staffSpelling, LEFT_OUT[2]]);
+    expect(applied.printed).toContain(turnedDownLine);
+    expect((await w.get('c-turned-down'))?.['housingAuthority']).toBeUndefined();
+    expect((await w.get('c-staff-spelling'))?.['housingAuthority']).toBeUndefined();
+    expect(await w.get('c-aha-only')).toMatchObject({ housingAuthority: 'Atlanta Housing Authority' });
+    expect((await w.excludedEvents()).map((e) => e['entityKey'])).toEqual(['contacts#c-skip']);
+    expect(backfillExitCode(report)).toBe(0);
+  }, 120_000);
+
+  it('a lead whose dismissal read fails is a read failure - nothing written for it - and the run goes on: exit 1', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const capture = createLogCapture();
+    const base = w.deps({ logger: createLogger({ level: 'info', destination: capture.stream }) });
+    const deps: BackfillDeps = {
+      ...base.deps,
+      dismissals: {
+        hasDismissal: async (contactId, target, key) => {
+          if (contactId === 'c-old' && key === 'atlanta (aha)') throw new Error('ThrottlingException');
+          return base.deps.dismissals.hasDismissal(contactId, target, key);
+        },
+      },
+    };
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
+    expect(report.targets.map((t) => [t.contactId, t.outcome])).toEqual([
+      ['c-old', 'read_failed'],
+      ['c-mid', 'written'],
+      ['c-new', 'written'],
+    ]);
+    expect(report).toMatchObject({ written: 2, failed: 1 });
+    expect((await w.get('c-old'))?.['housingAuthority']).toBeUndefined();
+    expect(base.printed).toContain(
+      '  Avery Fairlead  signed up 2026-06-20  status needs_review  contactId c-old  - FAILED: nothing written (an ERROR line names this contactId); re-run',
+    );
+    expect(capture.atLevel(50).map((l) => [l['contactId'], l['msg']])).toEqual([['c-old', READ_FAILED_LOG]]);
+    expect(backfillExitCode(report)).toBe(1);
   }, 120_000);
 
   it('a lead whose suggestion-resolution read fails is a read failure - nothing written for it - and the run goes on: exit 1', async () => {

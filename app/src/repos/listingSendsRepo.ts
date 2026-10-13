@@ -11,9 +11,18 @@
 // re-send can never duplicate. The byContact GSI inverts it (PK contactId, SK
 // sentAt) for the reverse direction.
 //
-// NO-RESET INVARIANT: the one writer, putShareMemory, stamps created_at (and
-// via) only when absent, so a later share never rewrites the first-write
-// furniture. (share-sent-outcome T7 retired the old blind upsert writer.)
+// NO-RESET INVARIANT: the one share writer, putShareMemory, stamps created_at
+// (and via) only when absent, so a later share never rewrites the first-write
+// furniture. (share-sent-outcome T7 retired the old blind upsert writer.) It
+// extends to `declined` (last-heard-from spec 5.4): putShareMemory never SETs
+// or REMOVEs it, and NO writer resets it except clearDeclined. The outcome
+// route's two writers, setDeclined / clearDeclined, touch ONLY `declined` and
+// `updated_at`, conditioned on a COUNTED row. A cleared decline's history
+// lives in the activity / audit events, never on the row. The ONE accepted
+// exception is dev-only: the seed runner's full PutCommand (lib/seed/index.ts,
+// seedAll's Put loop) rewrites the seeded listing_sends rows (seed/cast.ts and
+// seed/matrix.ts) whole, so a NON-wiping re-seed drops `declined` on those
+// seeded pairs (/__dev/reseed clears the tables first, so it loses nothing).
 //
 // Items stay flexible documents; only the two key attrs + the byContact GSI key
 // attrs (contactId, sentAt) are contractual (lib/tables.ts).
@@ -37,6 +46,7 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { TourSignal } from '../lib/listingSendTour.js';
+import type { DeclineRecord } from '../lib/listingSendOutcome.js';
 import type { ContactType } from './contactsRepo.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
@@ -93,6 +103,10 @@ export interface ListingSendItem {
   shares?: Record<string, ShareLedgerEntry>;
   /** share-sent-outcome D7: the change token every putShareMemory stamps (a random id, never a clock). */
   shares_op?: string;
+  /** last-heard-from spec 5.4: a recorded "not interested". Absent = not
+   *  declined. Written ONLY by setDeclined / clearDeclined; a superseded
+   *  record stays here and is simply ineffective (lib/listingSendOutcome.ts). */
+  declined?: DeclineRecord;
   [key: string]: unknown;
 }
 
@@ -154,6 +168,15 @@ export interface ListingSendsRepo {
   listByUnit(unitId: string): Promise<ListingSendItem[]>;
   /** The contact's listings-sent (byContact GSI, newest-first by sentAt); a row no share counts is filtered out. */
   listByContact(contactId: string): Promise<ListingSendItem[]>;
+  /**
+   * last-heard-from spec 5.4: SET `declined` (and `updated_at`) on a COUNTED
+   * row - condition `attribute_exists(unitId) AND (attribute_not_exists(counted)
+   * OR counted <> :false)`. 'not_found' when the condition fails (no row, or no
+   * share counts); anything else throws. Never creates a row.
+   */
+  setDeclined(unitId: string, contactId: string, record: DeclineRecord): Promise<'ok' | 'not_found'>;
+  /** REMOVE `declined` (SET `updated_at`) under the same condition. Idempotent. */
+  clearDeclined(unitId: string, contactId: string): Promise<'ok' | 'not_found'>;
 }
 
 /** The key getByKeys answers under. */
@@ -292,6 +315,62 @@ export function createListingSendsRepo(deps: RepoDeps = {}): ListingSendsRepo {
         'listing send memory written',
       );
       return true;
+    },
+
+    async setDeclined(unitId, contactId, record) {
+      const now = new Date().toISOString();
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { unitId, contactId },
+            UpdateExpression: 'SET #declined = :declined, #updatedAt = :now',
+            ConditionExpression: 'attribute_exists(#unitId) AND (attribute_not_exists(#counted) OR #counted <> :false)',
+            ExpressionAttributeNames: {
+              '#declined': 'declined',
+              '#updatedAt': 'updated_at',
+              '#unitId': 'unitId',
+              '#counted': 'counted',
+            },
+            ExpressionAttributeValues: {
+              ':declined': { at: record.at, by: record.by, ...(record.staffId !== undefined && { staffId: record.staffId }) },
+              ':now': now,
+              ':false': false,
+            },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return 'not_found';
+        throw err;
+      }
+      log.info({ unitId, contactId, by: record.by }, 'listing send decline recorded');
+      return 'ok';
+    },
+
+    async clearDeclined(unitId, contactId) {
+      const now = new Date().toISOString();
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { unitId, contactId },
+            UpdateExpression: 'SET #updatedAt = :now REMOVE #declined',
+            ConditionExpression: 'attribute_exists(#unitId) AND (attribute_not_exists(#counted) OR #counted <> :false)',
+            ExpressionAttributeNames: {
+              '#declined': 'declined',
+              '#updatedAt': 'updated_at',
+              '#unitId': 'unitId',
+              '#counted': 'counted',
+            },
+            ExpressionAttributeValues: { ':now': now, ':false': false },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return 'not_found';
+        throw err;
+      }
+      log.info({ unitId, contactId }, 'listing send decline cleared');
+      return 'ok';
     },
 
     async getByKeys(pairs) {

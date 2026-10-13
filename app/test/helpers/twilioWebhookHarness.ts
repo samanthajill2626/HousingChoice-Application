@@ -147,6 +147,7 @@ import {
   type ListingSendsRepo,
   type ShareLedgerEntry,
 } from '../../src/repos/listingSendsRepo.js';
+import type { DeclineRecord } from '../../src/lib/listingSendOutcome.js';
 import {
   type ContactVocabulary,
   type ContactVocabularyRepo,
@@ -3453,6 +3454,26 @@ export function createFakeWorld(): FakeWorld {
       if (next.broadcastId !== undefined) row.broadcastId = next.broadcastId;
       else delete row.broadcastId;
       return true;
+    },
+    // last-heard-from spec 5.4: the decline writers, modelled on the real
+    // conditional UpdateItem - a row must exist and count (`counted` absent on
+    // a legacy row reads as counted); otherwise 'not_found' and nothing is
+    // written. They touch ONLY `declined` + `updated_at`, so putShareMemory
+    // (which mutates its own fields in place) never clobbers a decline. Held
+    // to the real repo by twilioWebhookHarnessRepoAdditions.integration.test.ts.
+    async setDeclined(unitId, contactId, record) {
+      const row = findListingSend(unitId, contactId);
+      if (row === undefined || row.counted === false) return 'not_found';
+      row.declined = JSON.parse(JSON.stringify(record)) as DeclineRecord;
+      row.updated_at = new Date().toISOString();
+      return 'ok';
+    },
+    async clearDeclined(unitId, contactId) {
+      const row = findListingSend(unitId, contactId);
+      if (row === undefined || row.counted === false) return 'not_found';
+      delete row.declined;
+      row.updated_at = new Date().toISOString();
+      return 'ok';
     },
     // share-sent-outcome T3 (spec D6): the BatchGet by pair - found rows only,
     // keyed `${unitId}|${contactId}`.

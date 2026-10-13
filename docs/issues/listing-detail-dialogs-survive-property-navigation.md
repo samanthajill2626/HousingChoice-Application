@@ -35,3 +35,16 @@ Regression test in the style of FW-11's
 is reset by a history move to another property ..."): open "Delete
 property?" on u1, move to u2, expect no dialog and `deleteUnit` never called
 for u2.
+
+**Update 2026-10-12 (fix wave 2 FW2-5; R2 code review, dashboard finding
+A1).** The IN-FLIGHT half of this class is fixed at the root: a property write
+that answers after the move (the banner Restore, a status change, a roster
+write, a photo write, the edit form, or the restore dialog's two writes) used
+to call the `setUnit` held for the old property, which stamped the old id over
+the new page's state and left it on a permanent spinner. `useListing.setUnit` is now
+bound to its own unitId and is a no-op once the hook has moved on
+(`dashboard/src/routes/listing/useListing.ts:168`, the `useContact.setContact`
+precedent), pinned by the two cases in
+`dashboard/src/routes/listing/useListing.test.tsx:303`. What stays open is the
+half this issue is titled for: the pre-existing "Delete property?" confirm (and
+the other un-reset per-property state above) surviving the move while open.

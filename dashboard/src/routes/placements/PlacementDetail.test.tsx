@@ -937,3 +937,74 @@ describe('PlacementDetail - contact-type refusals (caseworker integrity)', () =>
     expect(await screen.findByText(/That move was rejected/)).toBeInTheDocument();
   });
 });
+
+// --- primary-contact-integrity spec 7.1: the fallback box and Check again ---
+describe('PlacementDetail - the intro fallback box and Check again (primary-contact-integrity spec 7.1)', () => {
+  const GENERAL_INTRO = "Hey, it's Sam. You're now connected with Tasha and Larry on this number.";
+  const PLACEMENT_INTRO = "Hey Tasha! It's Sam. Putting you in a group text with Larry about 12 Oak St.";
+  const RECIPIENTS = [
+    { name: 'Tasha Nguyen', reachability: 'reachable' as const },
+    { name: 'Larry Owens', reachability: 'reachable' as const },
+  ];
+  const FALLBACK_PREVIEW = {
+    body: GENERAL_INTRO,
+    recipients: RECIPIENTS,
+    recipientCount: 2,
+    deferred: false,
+    introFallback: { reasons: ['no_property_contact' as const], unitId: 'u1', street: '12 Oak St' },
+  };
+  const PLACEMENT_PREVIEW = { body: PLACEMENT_INTRO, recipients: RECIPIENTS, recipientCount: 2, deferred: false };
+
+  async function openTheDialog(user: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> {
+    renderAt();
+    await waitLoaded();
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Open relay group' }));
+    return screen.findByRole('dialog', { name: 'Open the relay group?' });
+  }
+
+  it('the open dialog explains the general intro with the PLACEMENT heading and links to the property', async () => {
+    const user = userEvent.setup();
+    previewPlacementRosterOpen.mockResolvedValue(FALLBACK_PREVIEW);
+    const dialog = await openTheDialog(user);
+    const box = within(dialog).getByRole('status');
+    expect(within(box).getByText('Using the general intro, not the placement intro.')).toBeInTheDocument();
+    expect(
+      within(box).getByText("12 Oak St has no primary contact, so the intro can't name the landlord."),
+    ).toBeInTheDocument();
+    expect(within(box).getByRole('link', { name: 'Set a primary contact' })).toHaveAttribute('href', '/listings/u1');
+  });
+
+  it('Check again re-runs the preview and swaps the unedited draft for the placement intro', async () => {
+    const user = userEvent.setup();
+    previewPlacementRosterOpen.mockResolvedValueOnce(FALLBACK_PREVIEW).mockResolvedValueOnce(PLACEMENT_PREVIEW);
+    const dialog = await openTheDialog(user);
+    await user.click(within(dialog).getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(previewPlacementRosterOpen).toHaveBeenCalledTimes(2));
+    expect(previewPlacementRosterOpen).toHaveBeenLastCalledWith('c1');
+    await waitFor(() =>
+      expect(within(dialog).getByRole('textbox', { name: /Message/ })).toHaveValue(PLACEMENT_INTRO),
+    );
+    expect(within(dialog).queryByRole('status')).not.toBeInTheDocument();
+    expect(provisionPlacementRelay).not.toHaveBeenCalled();
+  });
+
+  it('Check again answered 409 relay_already_provisioned closes the dialog and refetches the roster', async () => {
+    const user = userEvent.setup();
+    previewPlacementRosterOpen
+      .mockResolvedValueOnce(FALLBACK_PREVIEW)
+      .mockRejectedValueOnce(
+        new ApiError(409, 'relay_already_provisioned', 'relay_already_provisioned', {
+          error: 'relay_already_provisioned',
+        }),
+      );
+    const dialog = await openTheDialog(user);
+    const rosterReads = getPlacementRoster.mock.calls.length;
+    await user.click(within(dialog).getByRole('button', { name: 'Check again' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Open the relay group?' })).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(getPlacementRoster.mock.calls.length).toBeGreaterThan(rosterReads));
+    expect(provisionPlacementRelay).not.toHaveBeenCalled();
+  });
+});

@@ -326,6 +326,26 @@ export function PlacementDetail(): React.JSX.Element {
       .finally(() => setBusy(false));
   }, [busy, placementId, roster]);
 
+  // primary-contact-integrity spec 7.1 "Check again": re-run the open preview
+  // behind the open dialog and hand it the new one. A 409
+  // relay_already_provisioned means someone opened the group meanwhile: close
+  // the dialog and refetch the roster, exactly as the first fetch does. Any
+  // other failure rejects, and the dialog shows it in its own error line. The
+  // functional update keeps a dialog that closed meanwhile closed.
+  const checkOpenPreviewAgain = useCallback(async (): Promise<void> => {
+    try {
+      const next = await previewPlacementRosterOpen(placementId);
+      setOpenPreview((prev) => (prev === null ? null : next));
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'relay_already_provisioned') {
+        setOpenPreview(null);
+        roster.refetch();
+        return;
+      }
+      throw err;
+    }
+  }, [placementId, roster]);
+
   // The confirmed half. Throws on failure so the dialog shows the reason and
   // stays open; on success the plan is consumed (spec D1), so re-read.
   // TWO successful outcomes (spec D7): inside quiet hours the server DEFERS and
@@ -768,6 +788,10 @@ export function PlacementDetail(): React.JSX.Element {
           deferLabel="Open"
           // The intro is editable here: POST /api/placements/:id/relay accepts introBody.
           editableBody
+          // primary-contact-integrity spec 7.1: the fallback box's heading,
+          // and its Check again.
+          introOwner="placement"
+          onCheckAgain={checkOpenPreviewAgain}
           onConfirm={runOpenGroup}
           onClose={() => setOpenPreview(null)}
         />

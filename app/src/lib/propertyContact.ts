@@ -20,7 +20,7 @@
 // PII (doc section 9): log lines carry ids and counts only - never a name or
 // a phone.
 import { isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
-import { unitContacts, type UnitItem } from '../repos/unitsRepo.js';
+import { unitContacts, type UnitContact, type UnitItem } from '../repos/unitsRepo.js';
 import { logger as defaultLogger, type Logger } from './logger.js';
 
 /** A non-empty string id, else undefined: a legacy landlordId of '' is "none". */
@@ -237,4 +237,114 @@ export async function resolvePropertyContact(args: {
     return verdict;
   }
   return exhausted(skippedAny);
+}
+
+// ---------------------------------------------------------------------------
+// The heir function (spec 4.3, plan C4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Who takes over as primary (spec 4.3):
+ *   heir    - `contactId` becomes primary; `addLandlordRow` says the heir is
+ *             the landlord of record with NO roster row, which the write must
+ *             add (`role: 'landlord'`);
+ *   none    - `no_live_candidate` (no live, non-excluded roster contact at
+ *             all) or `no_eligible_candidate` (live ones exist, none eligible
+ *             for automatic routing). The backfill script's noHeir /
+ *             noEligible counts read this - nothing re-derives the rule;
+ *   unknown - the liveness read failed (the caller's path rule applies).
+ */
+export type HeirResult =
+  | { kind: 'heir'; contactId: string; addLandlordRow: boolean }
+  | { kind: 'none'; why: 'no_live_candidate' | 'no_eligible_candidate' }
+  | { kind: 'unknown' };
+
+/**
+ * The heir function, PURE (spec 4.3) - used by the real units repo AND the
+ * API-test fake, so the two cannot drift:
+ *
+ *   1. the landlord of record, if live and not excluded - NO type test (the
+ *      owner by definition, and P1's own fallback);
+ *   2. else the EARLIEST-ADDED roster contact (array order = add order) that
+ *      is eligible for automatic routing (isAutoRoutingEligible: typed
+ *      landlord, live, not a routing pointer) and not excluded - a tenant or a
+ *      caseworker added by accident is never promoted automatically;
+ *   3. else none, with why.
+ *
+ * `roster` is unitContacts(unit). `read` is readRosterContacts over
+ * rosterContactIds(unit) of the SAME unit snapshot; `{ ok: false }` answers
+ * unknown. The `exclude`d contact counts as NOT live at every step, whatever
+ * `read` says: the delete fan-out never picks the contact it just deleted
+ * (whose eventually consistent read can still say live), and the heir "if the
+ * primary were removed" never names that primary.
+ */
+export function chooseHeir(args: {
+  roster: readonly UnitContact[];
+  landlordId: string | undefined;
+  exclude?: string;
+  read: RosterContactsRead;
+}): HeirResult {
+  const read = args.read;
+  if (!read.ok) return { kind: 'unknown' };
+  const exclude = nonEmptyId(args.exclude);
+  /** The live, non-excluded record for an id - else undefined. */
+  const usable = (contactId: string): ContactItem | undefined => {
+    if (contactId === exclude) return undefined;
+    const contact = read.byId.get(contactId);
+    return isLive(contact) ? contact : undefined;
+  };
+
+  const landlordId = nonEmptyId(args.landlordId);
+  if (landlordId !== undefined && usable(landlordId) !== undefined) {
+    return {
+      kind: 'heir',
+      contactId: landlordId,
+      addLandlordRow: !args.roster.some((row) => row.contactId === landlordId),
+    };
+  }
+
+  let anyLive = false;
+  for (const row of args.roster) {
+    const contactId = nonEmptyId(row.contactId);
+    if (contactId === undefined) continue;
+    const contact = usable(contactId);
+    if (contact === undefined) continue;
+    anyLive = true;
+    if (isAutoRoutingEligible(contact)) return { kind: 'heir', contactId, addLandlordRow: false };
+  }
+  return { kind: 'none', why: anyLive ? 'no_eligible_candidate' : 'no_live_candidate' };
+}
+
+/**
+ * Apply an heir to a COPY of the roster (PURE; the input is never mutated):
+ * flag exactly the heir and demote every other row - APPENDING the landlord's
+ * row (`role: 'landlord'`, primary) when `addLandlordRow` and the roster has
+ * none - or, for `null`, clear every flag. Returns the new roster and the
+ * `primary_contact` scalar the same write must store: the heir's id, or null =
+ * REMOVE the attribute (spec 4.7: every write that sets or moves the primary
+ * sets the scalar to it or removes it). The appended row carries no
+ * name/company - read-time enrichment names it.
+ *
+ * An heir with no roster row and `addLandlordRow: false` cannot be flagged -
+ * chooseHeir never produces one - and THROWS rather than return a scalar no
+ * row agrees with.
+ */
+export function applyPrimary(
+  roster: readonly UnitContact[],
+  heir: { contactId: string; addLandlordRow: boolean } | null,
+): { contacts: UnitContact[]; primaryContactScalar: string | null } {
+  if (heir === null) {
+    return {
+      contacts: roster.map((row) => ({ ...row, primaryContact: false })),
+      primaryContactScalar: null,
+    };
+  }
+  const contacts = roster.map((row) => ({ ...row, primaryContact: row.contactId === heir.contactId }));
+  if (!contacts.some((row) => row.contactId === heir.contactId)) {
+    if (!heir.addLandlordRow) {
+      throw new Error(`applyPrimary: heir ${heir.contactId} has no roster row and addLandlordRow is false`);
+    }
+    contacts.push({ contactId: heir.contactId, role: 'landlord', primaryContact: true });
+  }
+  return { contacts, primaryContactScalar: heir.contactId };
 }

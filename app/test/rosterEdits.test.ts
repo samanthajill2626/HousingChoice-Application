@@ -195,7 +195,14 @@ describe('owner vs standalone parity', () => {
 
     expect(ownerOutcome.ok).toBe(true);
     if (!ownerOutcome.ok) return;
-    expect(standalone).toEqual(ownerOutcome.preview);
+    // The ONE intended difference (primary-contact-integrity spec 5.2): an
+    // owner OPEN preview explains a general intro, and this fixture wires no
+    // tours repo, so its owner read cannot answer. The standalone preview
+    // never carries introFallback.
+    const { introFallback, ...ownerPreview } = ownerOutcome.preview;
+    expect(introFallback).toEqual({ reasons: ['lookup_failed'] });
+    expect(standalone.introFallback).toBeUndefined();
+    expect(standalone).toEqual(ownerPreview);
     // Spelled out too, so a future failure names the field that drifted.
     expect(standalone.body).toBe(ownerOutcome.preview.body);
     expect(standalone.recipients).toEqual(ownerOutcome.preview.recipients);
@@ -225,7 +232,9 @@ describe('owner vs standalone parity', () => {
     if (!ownerOutcome.ok) return;
     expect(standalone.deferred).toBe(true);
     expect(standalone.quietEndsAt).toBe(ownerOutcome.preview.quietEndsAt);
-    expect(standalone).toEqual(ownerOutcome.preview);
+    // introFallback is owner-only (spec 5.2); see the test above.
+    const { introFallback: _ownerOnly, ...ownerPreview } = ownerOutcome.preview;
+    expect(standalone).toEqual(ownerPreview);
   });
 
   it('DIVERGES on a per-phone STOP record: standalone opted_out, owner reachable', async () => {

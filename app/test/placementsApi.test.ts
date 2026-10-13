@@ -1045,6 +1045,30 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
     expect(add.body.recipientCount).toBe(3);
   });
 
+  it('preview-open explains a general intro with introFallback - never a tour reason (primary-contact-integrity spec 5.1-5.2)', async () => {
+    // The street is what the placement intro needs and this unit loses it; the
+    // primary (Pat) still resolves, so it is the ONLY reason.
+    const { address: _dropped, ...streetless } = world.units.get('unit-r')!;
+    world.units.set('unit-r', streetless as never);
+    const placementId = await createPlacement();
+
+    const res = await authedReq.get(`/api/placements/${placementId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.body).toContain("You're now connected with");
+    expect(res.body.introFallback).toEqual({ reasons: ['no_street_address'], unitId: 'unit-r' });
+  });
+
+  it('preview-open carries NO introFallback when the placement intro composes', async () => {
+    const placementId = await createPlacement();
+
+    const res = await authedReq.get(`/api/placements/${placementId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.body).toContain('Excited to have you move into 52 Edgewood Ave.');
+    expect(res.body).not.toHaveProperty('introFallback');
+  });
+
   it('preview-open carries duplicateOf when a live group already holds exactly this roster', async () => {
     // Pins the WIRING, not the detector (relayGroupDuplicates.test.ts owns that).
     // The route passes findOpenGroupWithSamePhones as an OPTIONAL argument, so

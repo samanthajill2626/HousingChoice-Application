@@ -48,6 +48,7 @@ import {
   composeIntroBody,
   composeMemberAddedGroupBody,
   resolveRelayComposeInputs,
+  type IntroFallback,
   type RelayComposeDeps,
   type RelayComposeInputs,
 } from '../jobs/relayFanOut.js';
@@ -353,6 +354,14 @@ export interface RosterPreview {
    * distinguish those, by design: both mean "say nothing".
    */
   duplicateOf?: DuplicateOpenGroup;
+  /**
+   * primary-contact-integrity spec 5.2: why an OWNED open falls back to the
+   * general intro - every reason, in order, plus the ids the dialog links to.
+   * Set ONLY by the tour and placement OPEN preview (buildOpenPreview); never
+   * by the standalone preview or the add-member preview. Absent = the owner's
+   * own intro (or an ownerless group).
+   */
+  introFallback?: IntroFallback;
 }
 
 export type RosterPreviewOutcome =
@@ -589,27 +598,35 @@ export async function buildOpenPreview(
     composeDepsOf(deps, quiet),
   );
 
+  const preview = buildOpenPreviewFromParts(
+    {
+      inputs,
+      bodyMembers: provisioned.map((m) => ({
+        ...(m.name !== undefined && { name: m.name }),
+        memberKey: resolvedMemberKey(m),
+      })),
+      recipients: view.members.map((m) => ({
+        ...(m.name !== undefined && { name: m.name }),
+        memberKey: m.memberKey,
+        // Feeds recipientLabel's "Unnamed number ...1234" for a member with no
+        // saved name. RosterMemberView already exposes it; nothing widened.
+        ...(m.phoneLast4 !== undefined && { phoneLast4: m.phoneLast4 }),
+        reachability: m.reachability,
+      })),
+      ...(duplicateOf !== undefined && { duplicateOf }),
+    },
+    quiet,
+  );
+  // primary-contact-integrity spec 5.2: the OPEN preview is the ONLY one that
+  // explains a general intro. buildOpenPreviewFromParts never copies it (the
+  // standalone preview shares that builder, and buildAddPreview composes its
+  // own), so it is attached here and only here.
   return {
     ok: true,
-    preview: buildOpenPreviewFromParts(
-      {
-        inputs,
-        bodyMembers: provisioned.map((m) => ({
-          ...(m.name !== undefined && { name: m.name }),
-          memberKey: resolvedMemberKey(m),
-        })),
-        recipients: view.members.map((m) => ({
-          ...(m.name !== undefined && { name: m.name }),
-          memberKey: m.memberKey,
-          // Feeds recipientLabel's "Unnamed number ...1234" for a member with no
-          // saved name. RosterMemberView already exposes it; nothing widened.
-          ...(m.phoneLast4 !== undefined && { phoneLast4: m.phoneLast4 }),
-          reachability: m.reachability,
-        })),
-        ...(duplicateOf !== undefined && { duplicateOf }),
-      },
-      quiet,
-    ),
+    preview:
+      inputs.introFallback === undefined
+        ? preview
+        : { ...preview, introFallback: inputs.introFallback },
   };
 }
 

@@ -5166,6 +5166,33 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(res.body.body).toContain("You're now connected with Tina and Pat");
   });
 
+  it('preview-open explains the general intro: introFallback carries the reasons, the unit and the street (primary-contact-integrity spec 5.2)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+    const tourId = await createTour(app, { scheduledAt: '2020-01-10T10:00:00.000Z' });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.introFallback).toEqual({
+      reasons: ['tour_started'],
+      unitId: 'unit-abc',
+      street: '318 Marietta St',
+    });
+  });
+
+  it('preview-open carries NO introFallback when the tour intro composes', async () => {
+    const { app } = makeWebhookHarness({ world });
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+    const tourId = await createTour(app, { scheduledAt: FUTURE_TOUR_AT });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.body).toContain('Putting you in a group text with Pat to tour 318 Marietta St');
+    expect(res.body).not.toHaveProperty('introFallback');
+  });
+
   it('preview-open carries duplicateOf when a live group already holds exactly this roster', async () => {
     // Pins the WIRING, not the detector (relayGroupDuplicates.test.ts owns that).
     // The route passes findOpenGroupWithSamePhones as an OPTIONAL argument, so

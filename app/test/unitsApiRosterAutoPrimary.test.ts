@@ -147,7 +147,8 @@ describe('POST /api/units/:id/contacts - auto-primary (spec revision 4 section 4
 
   // Spec revision 6 section 4 "Contact list (I4)" (final review A4; fix wave
   // FWF-3): auto-primary follows the ONE automatic-routing eligibility rule
-  // the restore's sole-landlord promotion uses - typed landlord, not
+  // the restore's hand-off uses (the earliest-added eligible contact takes
+  // over, primary-contact-integrity spec 4.3 / 4.6) - typed landlord, not
   // soft-deleted, not a routing pointer. A soft-deleted contact still exists
   // and can be added, but a soft-deleted landlord-typed contact joins
   // NON-primary; the I3 claim still asks only the type, so its Landlord-role

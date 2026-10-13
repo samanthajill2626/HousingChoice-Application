@@ -189,7 +189,7 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
     expect(stored?.primary_contact).toBe('c-new');
   });
 
-  it('clears the landlord with no promotion (no sole landlord-typed contact): restored ownerless, old row gone, primary_contact removed', async () => {
+  it('clears the landlord with no promotion (no eligible contact for the heir pick): restored ownerless, old row gone, primary_contact removed', async () => {
     const roster: UnitContact[] = [
       { contactId: 'c-old', role: 'landlord', primaryContact: true },
       { contactId: 'c-pm', role: 'pm', primaryContact: false },
@@ -244,7 +244,7 @@ describe.skipIf(!reachable)('unitsRepo.restoreWithLandlord against DynamoDB Loca
     { contactId: 'c-late-owner', role: 'owner', primaryContact: false },
   ];
 
-  it('without a landlord: promotes the sole landlord-typed contact when the cleared landlord was the primary - its row the only primary, primary_contact names it', async () => {
+  it('without a landlord: promotes the earliest-added eligible contact (the heir the caller picked) when the cleared landlord was the primary - its row the only primary, primary_contact names it', async () => {
     const unitId = await deletedUnit(PROMOTION_ROSTER, 'c-old');
     const updated = await units.restoreWithLandlord(unitId, {
       expectLandlordId: 'c-old',

@@ -1615,9 +1615,11 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         // Does this restore need a hand-off? The shared rule (landlordWasPrimary,
         // plan review R1-R3): yes when the old landlord's row is the FLAGGED
         // primary, or when NO row is flagged (the heir function then picks
-        // who); a live flagged row elsewhere is never displaced. The
-        // primary_contact scalar is never read; with no hand-off it is
-        // re-aligned to the flag below.
+        // who); a FLAGGED row elsewhere is never displaced, deleted or not -
+        // the rule reads the flag, never liveness, so a soft-deleted contact
+        // still flagged there stays flagged (spec 4.7: until the next
+        // eligible write or the script). The primary_contact scalar is never
+        // read; with no hand-off it is re-aligned to the flag below.
         const oldWasPrimary =
           old !== undefined && !keepsOld && landlordWasPrimary(roster, old);
         const nextRoster: UnitContact[] =

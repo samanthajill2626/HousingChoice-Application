@@ -588,8 +588,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const rows = unitContacts({ contacts: listRead, landlordId: clearedLandlordId });
     // The SHARED rule (repos/unitsRepo.ts landlordWasPrimary, plan review
     // R1-R3): hand off when the cleared landlord's row is the flagged primary
-    // or no row is flagged; a live flagged row elsewhere is never displaced.
-    // It never reads the primary_contact scalar.
+    // or no row is flagged; a FLAGGED row elsewhere is never displaced,
+    // deleted or not - the rule reads the flag, never liveness (spec 4.7: a
+    // soft-deleted contact still flagged there stays flagged until the next
+    // eligible write or the script). It never reads the primary_contact scalar.
     const clearedWasPrimary = landlordWasPrimary(rows, clearedLandlordId);
     if (!clearedWasPrimary) return { kind: 'decided', promote: null };
     const read = await readRosterContacts(

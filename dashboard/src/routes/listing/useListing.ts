@@ -241,8 +241,12 @@ export function useListing(unitId: string): ListingState & { setUnit: (unit: Uni
     return () => controller.abort();
   }, [unitId]);
 
-  // Apply an updated unit in place (e.g. after restore) without a refetch — the
-  // roster/panels stay; only the unit record (and its deleted_at) changes.
+  // setUnit (above) applies an updated unit in place without a refetch - the
+  // roster/panels stay; only the unit record (and its deleted_at) changes. A
+  // restore applies its answer this way and THEN re-reads the property
+  // (ListingDetail's onRestore and the restore dialog's onRestored,
+  // primary-contact-integrity spec 7.5): no restore answer carries a
+  // propertyContact block, and a landlord restore can hand the primary off.
 
   // Committed state is for the previous unitId → the new fetch is in flight.
   if (state.forId !== unitId) return { ...LOADING, setUnit };

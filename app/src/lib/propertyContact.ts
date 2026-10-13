@@ -8,9 +8,13 @@
 // both services/rosterProvision.ts diagnostics. None checked `deleted_at`, and
 // contactsRepo.getById returns a soft-deleted contact, so a deleted primary
 // was named in intro and reminder copy, put on the default people list,
-// provisioned onto the relay group and texted. Every reader now walks the
-// candidates here, and every AUTOMATIC primary choice (auto-primary, the
-// handoffs, the backfill script) goes through chooseHeir.
+// provisioned onto the relay group and texted. Every reader of the PROPERTY
+// CONTACT now walks the candidates here. The readers that mean the landlord
+// of RECORD (the owner) - placement nudges, person events, related-property
+// and landlord timelines, the dashboard's landlord tabs - stay on
+// `unit.landlordId`, unchanged on purpose (spec 9.2). Every AUTOMATIC primary
+// choice (auto-primary, the handoffs, the backfill script) goes through
+// chooseHeir.
 //
 // PURE where it can be: isAutoRoutingEligible, rosterContactIds,
 // decidePropertyContact, chooseHeir and applyPrimary do no I/O. The two async

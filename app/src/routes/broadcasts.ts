@@ -9,6 +9,7 @@
 //   GET  /api/broadcasts/:id/results                                                 → { broadcastId, status, stats, recipients }
 //   GET  /api/broadcasts/:id/results?view=stats                                      -> { broadcastId, status, unitId, stats, created_at }
 //   GET  /api/broadcasts?status=&limit=                                              → { broadcasts:[...], nextCursor }
+//   GET  /api/broadcasts/follow-ups                                                  -> { items, byUnit, truncated } | 503 outcome_unavailable
 //
 // Audience: a FILTER resolves TENANT 1:1 contacts ONLY (never relay-group
 // rosters), by housing authority and/or exact bedroom size; hand-picked seeds
@@ -80,6 +81,7 @@ import {
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { checkScalarWrite, isOnListFor, KINDS_FOR_FIELD, type OrgNotOnList } from '../lib/orgNames.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
+import { buildFollowUps } from '../services/followUps.js';
 
 /** The lifecycle statuses ?status= may filter on (byStatus GSI partition). */
 const BROADCAST_STATUSES: ReadonlySet<string> = new Set<BroadcastStatus>([
@@ -1058,6 +1060,28 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     });
     log.info({ broadcastId, count, actor }, 'broadcast send started via api');
     res.json({ broadcastId, status: sending.status, count });
+  });
+
+  // GET /api/broadcasts/follow-ups - the waiting list behind Matching's Follow
+  // up tab and the Properties list pill (last-heard-from spec 5.6, 14.4).
+  // { items, byUnit, truncated }; 503 outcome_unavailable when a required read
+  // fails (D12 - an outcome shown with buttons is never guessed). Registered
+  // ABOVE every /broadcasts/:broadcastId route so a future
+  // GET /broadcasts/:broadcastId cannot answer this path. Mounted under /api
+  // (all methods at the edge already) - no CloudFront change.
+  router.get('/broadcasts/follow-ups', async (_req, res) => {
+    mergeContext({});
+    try {
+      const out = await buildFollowUps({ units, listingSends, tours, contacts, log, now: Date.now() });
+      log.info(
+        { items: out.items.length, units: Object.keys(out.byUnit).length, truncated: out.truncated },
+        'follow-ups served',
+      );
+      res.json(out);
+    } catch (err) {
+      log.warn({ err }, 'follow-ups: a required read failed - 503');
+      res.status(503).json({ error: 'outcome_unavailable' });
+    }
   });
 
   // GET /api/broadcasts/:id/results - stats + per-recipient delivery map.

@@ -1,6 +1,6 @@
 # Caseworker integrity - design
 
-Status: APPROVED revision 5 (2026-10-12). Branch `fix/caseworker-integrity`,
+Status: APPROVED revision 6 (2026-10-13). Branch `fix/caseworker-integrity`,
 worktree `W:\tmp\caseworker-integrity`, cut from `main` @19607658.
 Revision 2 folds in design review round 1
 (`docs/superpowers/reviews/2026-10-12-caseworker-integrity/design-review/adjudications.md`).
@@ -14,6 +14,12 @@ Revision 5 (Cameron, after review round 2): auto-primary applies only to
 contacts typed `landlord`, and "Restore without a landlord" promotes the one
 remaining landlord-typed contact when the cleared landlord was the primary
 (section 4, Contact list and Restore).
+Revision 6 (planner final review, decisions delegated by Cameron): a restore
+body that arrives when the plain restore would apply answers 409
+`unit_roster_conflict` and writes nothing; the plain restore stays an
+unconditioned write (L1); automatic routing eligibility is one rule (typed
+`landlord`, not soft-deleted, not a routing pointer); the `contact_not_tenant`
+phrase table (section 4).
 
 Closes three filed issues that share one theme: a contact converted to a
 caseworker (or re-typed by hand) can still end up holding tenant-only data or
@@ -312,14 +318,24 @@ Restore builds on that instead of refusing:
   nobody is promoted. The remaining rows' contact types are read
   consistently before the write, and the write is conditioned on the roster
   that was read, so a concurrent contact-list change answers 409
-  `unit_roster_conflict`. A soft-deleted, missing or routing-pointer contact
-  is not eligible (build clarification from code review round 3: this is an
-  automatic routing choice, unlike section 10's refusals).
-- A body is honored only when the plain restore would have refused; when the
-  stored landlord is still valid, a body is ignored and the restore is plain.
-  Each write conditions on the `landlordId` it read, so a concurrent change
-  answers 409 `unit_roster_conflict` (the roster's existing code) and the
-  dashboard re-reads.
+  `unit_roster_conflict`. Eligibility is the automatic-routing rule shared
+  with auto-primary (section 4, Contact list): a contact typed `landlord`,
+  not soft-deleted, not a routing pointer (a soft-deleted, missing or
+  routing-pointer contact is not eligible - an automatic routing choice,
+  unlike section 10's refusals).
+- A body is sent only after a 409 `restore_needs_landlord`, so a body that
+  arrives when the plain restore would apply (the property is no longer
+  deleted, its stored landlord is typed `landlord` again, or it is ownerless)
+  means the state changed under the dialog: the route answers 409
+  `unit_roster_conflict` and writes nothing (no restore, no audit); the
+  dashboard re-reads and, when the property is no longer deleted, closes the
+  dialog and shows its real state (revision 6, replacing "a body is ignored
+  when the stored landlord is still valid"). The plain restore (no body) is
+  today's unconditioned write - the residual between its read and its write
+  is the L1 window; only the restore with a body conditions its single write
+  on the `landlordId` and contact list it read, so a concurrent change answers
+  409 `unit_roster_conflict` (the roster's existing code) and the dashboard
+  re-reads.
 - Audit: the existing `unit_restored` entry gains `landlordReplaced`
   (`{ from, to }`) or `landlordCleared` (`{ from }`) when one applied, and
   `primaryPromoted` (`{ to }`) when the sole-landlord promotion applied.
@@ -356,9 +372,14 @@ Landlord-role add that claims the vacant slot included. A contact of any other
 type (tenant, unknown, partner, team member) joins such a list NON-primary, as
 before; making them primary takes a deliberate Make primary. It is decided
 inside the repository's conditional roster write from the unit each attempt
-read, with the contact's type read consistently by the route, so two
-concurrent adds cannot both become primary; every other add behaves as before
-(primary only when the request asks for it).
+read (a consistent read), with the contact read consistently by the route, so
+two concurrent adds cannot both become primary; every other add behaves as
+before (primary only when the request asks for it). Eligibility (revision 6)
+is ONE route-side rule for automatic routing, shared with the restore's
+sole-landlord promotion: the contact is typed `landlord`, is not soft-deleted
+and is not a routing pointer; a soft-deleted landlord-typed contact joins
+non-primary. The I3 claim check still asks only whether the contact is typed
+`landlord`.
 
 ### Dashboard copy for section 4
 
@@ -366,8 +387,11 @@ One shared dashboard helper maps the new codes to sentences, used at every
 site below (several show raw codes or fixed copy today):
 
 - `contact_not_tenant`: "Tours and placements are for tenants. This contact
-  is a <kind label>." (kind label from `contactKind`, e.g. Caseworker,
-  Landlord, Partner, Team member, Unknown);
+  is <phrase>." with the phrase by `contactKind` (revision 6 folds in the
+  planner's ruling P-1): tenant "a tenant", landlord "a landlord", partner "a
+  partner", caseworker "a caseworker", team_member "a team member", unknown
+  "not classified yet"; a missing or unrecognized `contactKind` "not a
+  tenant";
 - `tenant_not_found`: "That contact no longer exists.";
 - `landlord_not_landlord`: "Only a landlord can be a property's landlord of
   record." (restore's own refusal opens the dialog above instead);

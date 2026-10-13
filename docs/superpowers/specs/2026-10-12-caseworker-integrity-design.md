@@ -1,6 +1,6 @@
 # Caseworker integrity - design
 
-Status: APPROVED revision 4 (2026-10-12). Branch `fix/caseworker-integrity`,
+Status: APPROVED revision 5 (2026-10-12). Branch `fix/caseworker-integrity`,
 worktree `W:\tmp\caseworker-integrity`, cut from `main` @19607658.
 Revision 2 folds in design review round 1
 (`docs/superpowers/reviews/2026-10-12-caseworker-integrity/design-review/adjudications.md`).
@@ -10,6 +10,10 @@ existing data is not swept or repaired (L2).
 Revision 4 (Cameron, during the build): auto-primary - a contact added to a
 property with no primary contact and no landlord of record becomes its
 primary contact (section 4, Contact list).
+Revision 5 (Cameron, after review round 2): auto-primary applies only to
+contacts typed `landlord`, and "Restore without a landlord" promotes the one
+remaining landlord-typed contact when the cleared landlord was the primary
+(section 4, Contact list and Restore).
 
 Closes three filed issues that share one theme: a contact converted to a
 caseworker (or re-typed by hand) can still end up holding tenant-only data or
@@ -300,13 +304,23 @@ Restore builds on that instead of refusing:
   at them (the existing "no landlord remains" handling,
   `unitsRepo.ts:665,907`). Staff can add a landlord later from the contact
   list (Add contact, role Landlord), which already claims an empty slot.
+  **Sole-landlord promotion (Cameron, 2026-10-12, revision 5):** when the
+  cleared landlord was the property's primary contact and exactly ONE
+  remaining contact-list row belongs to a contact typed `landlord` (any roster
+  role), that contact becomes the primary contact in the SAME conditional
+  write (`primary_contact` consistent); with zero or two-plus such rows,
+  nobody is promoted. The remaining rows' contact types are read
+  consistently before the write, and the write is conditioned on the roster
+  that was read, so a concurrent contact-list change answers 409
+  `unit_roster_conflict`.
 - A body is honored only when the plain restore would have refused; when the
   stored landlord is still valid, a body is ignored and the restore is plain.
   Each write conditions on the `landlordId` it read, so a concurrent change
   answers 409 `unit_roster_conflict` (the roster's existing code) and the
   dashboard re-reads.
 - Audit: the existing `unit_restored` entry gains `landlordReplaced`
-  (`{ from, to }`) or `landlordCleared` (`{ from }`) when one applied.
+  (`{ from, to }`) or `landlordCleared` (`{ from }`) when one applied, and
+  `primaryPromoted` (`{ to }`) when the sole-landlord promotion applied.
 
 Dashboard (`ListingDetail.tsx:349`, the only Restore button): on 409
 `restore_needs_landlord`, open a dialog:
@@ -330,15 +344,19 @@ the repo call; the repo's own 409 `landlord_reassignment_required` follows.
 The property Add contact picker (`dashboard/src/routes/listing/ListingDetail.tsx:194,367,967-986`,
 fed by `useContacts('all')`) hides caseworkers.
 
-**Auto-primary (Cameron, 2026-10-12).** When `POST /api/units/:id/contacts`
-adds a contact (a new seat - editing a contact already on the list is not an
-add) to a property that has no primary contact (no contact-list row marked
-primary) and no landlord of record (`landlordId` absent), the added contact
-becomes the property's primary contact, whatever its role - a Landlord-role
-add that claims the vacant slot included. It is decided inside the
-repository's conditional roster write from the unit it read, so two
-concurrent adds cannot both become primary; every other add behaves as
-before (primary only when the request asks for it).
+**Auto-primary (Cameron, 2026-10-12; revision 5 narrows it).** When
+`POST /api/units/:id/contacts` adds a contact typed `landlord` (landlords,
+property managers, owners - any roster role) as a new seat (editing a contact
+already on the list is not an add) to a property that has no primary contact
+(no contact-list row marked primary) and no landlord of record (`landlordId`
+absent), the added contact becomes the property's primary contact - a
+Landlord-role add that claims the vacant slot included. A contact of any other
+type (tenant, unknown, partner, team member) joins such a list NON-primary, as
+before; making them primary takes a deliberate Make primary. It is decided
+inside the repository's conditional roster write from the unit each attempt
+read, with the contact's type read consistently by the route, so two
+concurrent adds cannot both become primary; every other add behaves as before
+(primary only when the request asks for it).
 
 ### Dashboard copy for section 4
 

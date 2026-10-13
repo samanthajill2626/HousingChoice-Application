@@ -64,3 +64,38 @@ B5, B7, B8, B9 (REJECT), B10 (REJECT wire change), D2, D4, D10, D11, and SA-1's
   behavior and FILE it (staff use Make primary; the page shows no "(primary)");
   (c) new copy in the dialog or a page notice (spec-approved dialog copy
   would change). Recommendation: (a), else (b).
+
+## Cameron's rulings on Q4 and Q5 (relayed by the planner, 2026-10-12)
+
+- Q4 - RULED: auto-primary applies ONLY to contacts typed `landlord`
+  (landlords, property managers, owners - any roster role). A contact of any
+  other type (tenant, unknown, partner, team_member) added to a property with
+  no primary and no landlord of record joins the list NON-primary, exactly as
+  before SA-1; making them primary still takes a deliberate Make primary.
+  Decided inside `unitsRepo.addContact`'s per-attempt read, with the contact's
+  type read consistently by the route (or passed in); parity in every fake.
+  Tests: a PM (landlord-typed) still auto-promotes; a tenant / partner /
+  unknown on the same property does not. -> fix wave 2 item FW2-11.
+- Q5 - RULED option (a): "Restore without a landlord" (`{ landlordId: null }`)
+  on a property whose cleared landlord was its primary: when exactly ONE
+  remaining contact-list row belongs to a landlord-typed contact (Q4's
+  eligibility), that contact becomes the primary contact in the SAME
+  conditional write (`primary_contact` consistent); with zero or two-plus
+  eligible rows, nobody is promoted. The remaining rows' contact types are read
+  consistently before the write, and the write is conditioned on the roster
+  read, so a concurrent roster change answers the existing 409
+  `unit_roster_conflict`. Tests on DynamoDB Local and the fake: one eligible ->
+  promoted; two eligible -> none; one non-landlord-typed row only -> none;
+  the audit records the promotion (`landlordCleared` plus
+  `primaryPromoted { to }`). The restore e2e is extended only if it is one
+  assertion on existing fixtures. -> fix wave 2 item FW2-12.
+- Spec: revision 5 (orchestrator commit with this record) - section 4
+  "Contact list" auto-primary paragraph narrowed to landlord-typed contacts;
+  "Restore" gains the sole-landlord promotion and its audit field.
+- Orchestrator note on copy (no change, flagged for Cameron): the ownerless
+  "Remove the primary contact?" sentence (SA-1's ruled text) ends "...or a new
+  contact is added". After Q4 that holds for a new landlord-typed contact (a
+  landlord, property manager or owner - the contacts staff normally add to a
+  property's list); a new tenant, partner or unknown is not promoted. The
+  ruled sentence stands; the code comment above `promotionNotice` (FW2-8)
+  states the precise rule.

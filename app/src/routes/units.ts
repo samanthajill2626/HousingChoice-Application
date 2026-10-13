@@ -50,6 +50,7 @@ import {
   isDeleted,
   LandlordClaimNotLandlordError,
   LandlordReassignmentRequiredError,
+  PrimaryContactDeletedError,
   RosterWriteConflictError,
   unitContacts,
   UNIT_CONTACT_ROLES,
@@ -63,6 +64,7 @@ import {
 } from '../repos/unitsRepo.js';
 import {
   createContactsRepo,
+  isDeleted as isContactDeleted,
   type ContactItem,
   type ContactsRepo,
   type RecipientDisplay,
@@ -82,9 +84,12 @@ import { createOrgNamesService, type OrgNamesService } from '../services/orgName
 import { requireLandlordContact, sendContactTypeError } from '../services/contactTypeGuards.js';
 import { isCaseworker } from '../lib/caseworkers.js';
 // The ONE automatic-routing eligibility rule lives in lib/propertyContact.ts
-// (primary-contact-integrity spec 4.3), shared with the heir function. It is
-// imported under its old local name so every call site below reads as before.
-import { isAutoRoutingEligible as autoRoutingEligible } from '../lib/propertyContact.js';
+// (primary-contact-integrity spec 4.3), shared with the heir function.
+import {
+  isAutoRoutingEligible,
+  isAutoRoutingEligible as autoRoutingEligible,
+  readRosterContacts,
+} from '../lib/propertyContact.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -1111,26 +1116,33 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   });
 
   // POST /api/units/:unitId/contacts { contactId, role, primaryContact? } (BE3/C3).
-  // Add (or update) a roster contact → { unit } (with contacts). The ROUTE
+  // Add (or update) a roster contact -> { unit } (with contacts). The ROUTE
   // resolves the contact's denormalized name/company (so the roster row is
   // self-describing); the repo maintains the single-primaryContact invariant and
   // keeps the primary_contact scalar consistent with the row marked primary
   // (nothing routes on the scalar: the roster resolvers take the row marked
   // primary, else the landlord of record - see unitsRepo.addContact).
-  // Auto-primary (caseworker-integrity spec revisions 5 and 6, section 4
-  // "Contact list"): a NEW seat for a contact typed landlord and not
-  // soft-deleted (autoRoutingEligible) on a property with no row marked
-  // primary and no landlord of record becomes its primary contact even when
-  // the request's primaryContact is false or absent. A Landlord role
-  // claims an ownerless legacy property. 409 contact_list_caseworker (a
-  // caseworker taking a NEW seat) and 409 landlord_not_landlord (a claim of the
-  // vacant landlord slot by a contact not typed landlord), each from the
-  // route's checks below or from the roster write itself; 409
-  // landlord_reassignment_required when a different owner already exists, or
-  // unit_roster_conflict after repeated write races. 404 unit_not_found
-  // (unknown/disappeared unit) or contact_not_found (a missing contact, or the
-  // id of a phone or email routing pointer); 400 bad role / primaryContact;
-  // audit unit_contact_added after successful writes only.
+  // Auto-primary (caseworker-integrity spec revisions 4-6, widened by
+  // primary-contact-integrity spec 4.4, Cameron 2026-10-13): a write for
+  // contact X - an add, or an edit of X's own row - makes X, and only X, the
+  // primary contact when X is eligible for automatic routing
+  // (isAutoRoutingEligible) and the property has no LIVE flagged primary and
+  // no LIVE landlord of record on the roster write's own read (soft-deleted or
+  // missing counts as absent). The liveness read is ONE complete batch read per
+  // attempt (readRosterContacts), passed to the repo; when it fails the write
+  // succeeds unpromoted and this route WARNs. An automatic promotion also
+  // appends unit_primary_contact_assigned { reason: 'auto_on_add' }. A
+  // Landlord role claims an ownerless legacy property. 409
+  // contact_list_caseworker (a caseworker taking a NEW seat), 409
+  // landlord_not_landlord (a claim of the vacant landlord slot by a contact
+  // not typed landlord) and 409 primary_contact_deleted (primaryContact true
+  // for a soft-deleted contact whose row is not already the primary), in that
+  // order, each from the route's checks below or from the roster write
+  // itself; 409 landlord_reassignment_required when a different owner already
+  // exists, or unit_roster_conflict after repeated write races. 404
+  // unit_not_found (unknown/disappeared unit) or contact_not_found (a missing
+  // contact, or the id of a phone or email routing pointer); 400 bad role /
+  // primaryContact; audit unit_contact_added after successful writes only.
   router.post('/:unitId/contacts', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const body = req.body;
@@ -1167,7 +1179,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     }
 
     // Resolve the contact for denormalization (404 when the contact doesn't
-    // exist — never roster a phantom). name/company are best-effort honest:
+    // exist - never roster a phantom). name/company are best-effort honest:
     // omitted when unknown, never invented. A phone or email ROUTING POINTER
     // row (contactsRepo.ts `phone_ref` / `email_ref`: a routing record, never
     // a contact) does not exist as a contact here either - the codebase's own
@@ -1178,26 +1190,25 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(404).json({ error: 'contact_not_found' });
       return;
     }
-    // caseworker-integrity (spec 2026-10-12 section 4), in this order and both
-    // before the repo call; the repo's own 409 landlord_reassignment_required
-    // follows. Decided from the consistent reads above with the repo's own
-    // definitions (unitsRepo.addContact): a SEAT is a row of unitContacts(unit)
-    // (the landlord of record included); a CLAIM is a role-landlord add on a
-    // unit with no landlordId attribute.
+    // caseworker-integrity (spec 2026-10-12 section 4), then
+    // primary-contact-integrity (spec 4.4), in this order and all before the
+    // repo call; the repo's own 409 landlord_reassignment_required follows.
+    // Decided from the consistent reads above with the repo's own definitions
+    // (unitsRepo.addContact): a SEAT is a row of unitContacts(unit) (the
+    // landlord of record included); a CLAIM is a role-landlord add on a unit
+    // with no landlordId attribute.
     //   I4: a caseworker never takes a NEW seat, whatever the role. A seat they
     //       already hold stays editable (L2).
     //   I3: claiming the vacant landlord slot needs a contact typed `landlord`.
     //       Re-asserting the existing owner is not a claim and is not checked.
-    // These answer the common, no-race case. addContact decides both again on
-    // each attempt's own read from the facts passed below (fix wave 2 FW2-1),
-    // so a seat removed or a landlord cleared after THIS read answers the same
-    // 409s instead of re-seating a caseworker or letting a non-landlord claim.
-    // Auto-primary asks `autoPrimaryEligible`, the one automatic-routing rule
-    // shared with the restore's promotion (autoRoutingEligible): only a
-    // contact typed landlord that is not soft-deleted (and not a pointer,
-    // already a 404 above) is made the primary contact of an ownerless,
-    // primary-less property (spec revisions 5 and 6; FW2-11, FWF-3); the I3
-    // claim keeps asking `landlordTyped`.
+    //   P2: a soft-deleted contact is never MADE the primary - primaryContact
+    //       true for a row that is not already the primary. Re-sending true
+    //       for the current primary is never refused (the dashboard's re-role
+    //       sends the row's own flag); adding a deleted contact non-primary
+    //       stays allowed.
+    // These answer the common, no-race case. addContact decides all three again
+    // on each attempt's own read from the facts passed below (fix wave 2
+    // FW2-1), so a change landing after THIS read answers the same 409s.
     const seated = unitContacts(unit).some((row) => row.contactId === contactId);
     if (!seated && isCaseworker(contact)) {
       log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact refused: a caseworker cannot take a new seat');
@@ -1209,6 +1220,18 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     if (claimsVacantLandlord && contact.type !== 'landlord') {
       log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact refused: a landlord claim by a non-landlord');
       res.status(409).json({ error: 'landlord_not_landlord' });
+      return;
+    }
+    const contactDeleted = isContactDeleted(contact);
+    const alreadyPrimary = unitContacts(unit).some(
+      (row) => row.contactId === contactId && row.primaryContact === true,
+    );
+    if (primaryContact && contactDeleted && !alreadyPrimary) {
+      log.info(
+        { unitId, contactId, actor: req.user?.userId },
+        'unit contact refused: a soft-deleted contact cannot be made the primary',
+      );
+      res.status(409).json({ error: 'primary_contact_deleted' });
       return;
     }
     const name = displayNameOfContact(contact);
@@ -1228,7 +1251,24 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         {
           caseworker: isCaseworker(contact),
           landlordTyped: contact.type === 'landlord',
-          autoPrimaryEligible: autoRoutingEligible(contact),
+          autoPrimaryEligible: isAutoRoutingEligible(contact),
+          contactDeleted,
+        },
+        {
+          // P2's liveness read (spec 4.2): ONE complete batch read of the ids
+          // the repo names (the flagged primary and the landlord of record),
+          // per attempt. A failure is unknown liveness: the repo writes
+          // unpromoted, and this is the WARN the spec asks for.
+          readContacts: async (ids) => {
+            const read = await readRosterContacts(contacts, ids, log);
+            if (!read.ok) {
+              log.warn(
+                { unitId, contactId, actor: req.user?.userId },
+                'unit contact add: the liveness read failed - auto-primary skipped',
+              );
+            }
+            return read;
+          },
         },
       );
     } catch (err) {
@@ -1246,6 +1286,14 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
           'unit contact refused at the roster write: a landlord claim by a non-landlord',
         );
         res.status(409).json({ error: 'landlord_not_landlord' });
+        return;
+      }
+      if (err instanceof PrimaryContactDeletedError) {
+        log.info(
+          { unitId, contactId, actor: req.user?.userId },
+          'unit contact refused at the roster write: a soft-deleted contact cannot be made the primary',
+        );
+        res.status(409).json({ error: 'primary_contact_deleted' });
         return;
       }
       if (err instanceof LandlordReassignmentRequiredError) {
@@ -1266,7 +1314,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // finding A1, fix wave 2 FW2-2): auto-primary can make the contact primary
     // although the request said false (every dashboard add does), so the
     // durable record states what the write did, and `autoPrimary` says the
-    // rule - not the request - did it.
+    // rule - not the request - did it. That same derivation, from the write's
+    // own result, drives unit_primary_contact_assigned { reason: 'auto_on_add' }
+    // (primary-contact-integrity spec section 8; plan contract 2.4): only the
+    // auto rule can make X primary when the request did not ask.
     const effectivePrimary = (updated.contacts ?? []).some(
       (row) => row.contactId === contactId && row.primaryContact === true,
     );
@@ -1278,6 +1329,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       primaryContact: effectivePrimary,
       ...(autoPrimary && { autoPrimary: true }),
     });
+    if (autoPrimary) {
+      await audit.append(`units#${unitId}`, 'unit_primary_contact_assigned', {
+        actor: req.user?.userId,
+        contactId,
+        reason: 'auto_on_add',
+      });
+    }
     log.info(
       {
         unitId,

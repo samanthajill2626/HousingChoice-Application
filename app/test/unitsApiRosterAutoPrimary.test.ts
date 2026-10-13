@@ -264,11 +264,15 @@ describe('POST /api/units/:id/contacts - auto-primary (spec revision 4 section 4
     expect(world.units.get('u-d')?.primary_contact).toBe('c-new-ll');
   });
 
+  // primary-contact-integrity spec 4.4 (Cameron 2026-10-13) REPLACES the old
+  // pin "an upsert does NOT become primary": an edit of the contact's own row
+  // counts like an add - the edited contact becomes the primary and the
+  // promotion is audited auto_on_add.
   it.each([
     ['a role edit', 'owner'],
     ['a role edit that claims the vacant landlord slot', 'landlord'],
   ] as const)(
-    '(f) (PIN) an upsert of a contact already on an ownerless no-primary list (%s, primaryContact false) does NOT become primary',
+    '(f) an edit of a contact already on an ownerless no-primary list (%s, primaryContact false) makes THAT contact the primary',
     async (_kind, role) => {
       const { app, world } = makeWebhookHarness();
       seedOwnerlessUnit(world, 'u-f', { contacts: [{ contactId: 'c-seated', role: 'pm', primaryContact: false }] });
@@ -279,11 +283,16 @@ describe('POST /api/units/:id/contacts - auto-primary (spec revision 4 section 4
       expect(res.status).toBe(200);
       const rows = res.body.unit.contacts as WireRow[];
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ contactId: 'c-seated', role, primaryContact: false });
-      expect(res.body.unit.primary_contact).toBeUndefined();
-      expect(world.units.get('u-f')?.primary_contact).toBeUndefined();
-      // The landlord-role edit still claims the vacant slot (today's behavior).
+      expect(rows[0]).toMatchObject({ contactId: 'c-seated', role, primaryContact: true });
+      expect(res.body.unit.primary_contact).toBe('c-seated');
+      expect(world.units.get('u-f')?.primary_contact).toBe('c-seated');
+      // The landlord-role edit also claims the vacant slot (unchanged).
       expect(hasLandlordId(world.units.get('u-f'))).toBe(role === 'landlord');
+      expect(
+        world.auditEvents
+          .filter((e) => e.event_type === 'unit_primary_contact_assigned')
+          .map((e) => e.payload),
+      ).toEqual([expect.objectContaining({ contactId: 'c-seated', reason: 'auto_on_add' })]);
     },
   );
 });

@@ -167,6 +167,9 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
   it('adds a roster contact, denormalizes name/company, and audits unit_contact_added', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-3', { landlordId: 'c-ll-1' });
+    // primary-contact-integrity spec 4.4: a missing landlord of record counts
+    // as absent (auto-primary would fire); this test means a LIVE landlord.
+    seedContact(world, 'c-ll-1');
     seedContact(world, 'c-pm-3', { type: 'landlord', firstName: 'Pat', lastName: 'Manager', company: 'Acme PM' });
 
     const res = await request(app)

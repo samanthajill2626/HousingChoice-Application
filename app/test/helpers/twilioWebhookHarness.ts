@@ -114,12 +114,15 @@ import {
   type PendingCrossCheckEvent,
 } from '../../src/repos/messagesRepo.js';
 import {
+  autoPrimaryLivenessIds,
   CannotRemoveLandlordOfRecordError,
   ContactListCaseworkerError,
+  decideAutoPrimary,
   isDeleted as isUnitDeleted,
   LandlordClaimNotLandlordError,
   LandlordReassignmentRequiredError,
   type ListUnitsOpts,
+  PrimaryContactDeletedError,
   RosterWriteConflictError,
   unitContacts,
   type UnitContact,
@@ -2941,11 +2944,15 @@ export function createFakeWorld(): FakeWorld {
         .slice(0, opts.limit ?? 50);
       return { items };
     },
-    async addContact(unitId, contact, facts) {
+    async addContact(unitId, contact, facts, opts) {
       // Mirror the real repo's invariants: seed from landlordId, upsert by
-      // contactId, the contact-list rules on this read, auto-primary for a
-      // new seat on an ownerless primary-less unit, exactly-one-primaryContact,
-      // and keep primary_contact consistent with the roster's primary row.
+      // contactId, the contact-list rules on this read (I4, I3, the
+      // soft-deleted-primary refusal, the reassignment refusal - in the real
+      // repo's order), auto-primary through the SAME pure decision
+      // (autoPrimaryLivenessIds / decideAutoPrimary, primary-contact-integrity
+      // spec 4.4; liveness from the caller's opts.readContacts),
+      // exactly-one-primaryContact, and the primary_contact scalar: the
+      // flagged row's id, else REMOVEd.
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`addContact: no unit ${unitId}`);
       const hasLandlordId = Object.prototype.hasOwnProperty.call(unit, 'landlordId');
@@ -2956,12 +2963,15 @@ export function createFakeWorld(): FakeWorld {
       const claimsVacantLandlord = contact.role === 'landlord' && !hasLandlordId;
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const existing = roster.find((c) => c.contactId === contact.contactId);
-      // caseworker-integrity fix wave 2 FW2-1, exactly as the real repo decides
-      // it per attempt from the caller's facts: I4 (a caseworker never takes a
-      // NEW seat), then I3 (claiming the vacant landlord slot needs a contact
-      // typed landlord), then the reassignment refusal.
       if (existing === undefined && facts.caseworker) throw new ContactListCaseworkerError();
       if (claimsVacantLandlord && !facts.landlordTyped) throw new LandlordClaimNotLandlordError();
+      if (
+        contact.primaryContact === true &&
+        facts.contactDeleted === true &&
+        existing?.primaryContact !== true
+      ) {
+        throw new PrimaryContactDeletedError();
+      }
       if (
         contact.role === 'landlord' &&
         !claimsVacantLandlord &&
@@ -2969,21 +2979,21 @@ export function createFakeWorld(): FakeWorld {
       ) {
         throw new LandlordReassignmentRequiredError();
       }
-      // Auto-primary (caseworker-integrity spec revision 4 section 4), exactly
-      // as the real repo decides it per attempt: a NEW seat on a unit with no
-      // row marked primary and no landlordId attribute (before this add)
-      // becomes the primary contact, whatever its role, when the contact is
-      // eligible for automatic routing (the caller's autoPrimaryEligible -
-      // typed landlord, not soft-deleted, not a routing pointer; spec
-      // revisions 5 and 6); an upsert of a contact already on the list keeps
-      // the request's flag.
-      const autoPrimary =
-        facts.autoPrimaryEligible &&
-        existing === undefined &&
-        !hasLandlordId &&
-        !roster.some((c) => c.primaryContact === true);
+      const autoArgs = {
+        roster,
+        landlordId,
+        contactId: contact.contactId,
+        eligible: facts.autoPrimaryEligible,
+        requested: contact.primaryContact === true,
+      };
+      const livenessIds = autoPrimaryLivenessIds(autoArgs);
+      const read =
+        livenessIds !== null && livenessIds.length > 0 && opts?.readContacts !== undefined
+          ? await opts.readContacts(livenessIds)
+          : undefined;
+      const autoPrimary = decideAutoPrimary({ ...autoArgs, read }) === 'promote';
       const primaryContact = contact.primaryContact === true || autoPrimary;
-      // FIX C: the owning landlord's role is structural — pinned to 'landlord'.
+      // FIX C: the owning landlord's role is structural - pinned to 'landlord'.
       const isLandlordOfRecord =
         claimsVacantLandlord || contact.contactId === landlordId;
       const role: UnitContact['role'] = isLandlordOfRecord ? 'landlord' : contact.role;
@@ -3009,6 +3019,7 @@ export function createFakeWorld(): FakeWorld {
       if (claimsVacantLandlord) unit.landlordId = contact.contactId;
       const primary = roster.find((c) => c.primaryContact);
       if (primary !== undefined) unit.primary_contact = primary.contactId;
+      else delete unit.primary_contact; // null -> REMOVE, exactly as the real repo
       unit.updated_at = new Date().toISOString();
       return unit;
     },

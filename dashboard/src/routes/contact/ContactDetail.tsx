@@ -279,13 +279,19 @@ export function ContactDetail(): React.JSX.Element {
   const suggestions = useSuggestions(contactId);
   // "Is this really new?" belongs to a TENANT: its close-name path writes the
   // housing authority with a plain contact edit, which never meets the
-  // server's tenant-only rule (spec 2026-10-12 D1). When the contact stops
-  // being typed tenant while the review is open - a conversion or re-type by
-  // someone else, received through useContact's suggestion.updated re-read -
-  // the review closes, so that path can never write onto the re-typed
-  // contact (final review A5, fix wave FWF-4). Reset during render (React's
-  // "adjust state when a prop changes"), so no frame shows it over a
-  // non-tenant.
+  // server's tenant-only rule (spec 2026-10-12 D1). When the loaded contact
+  // stops being typed tenant while the review is open, the review closes, so
+  // that path cannot write onto the re-typed contact (final review A5, fix
+  // wave FWF-4). The page learns of someone else's type change only through
+  // useContact's suggestion.updated re-read. The caseworker conversion emits
+  // one (it supersedes the pending suggestions), so a conversion closes the
+  // review. A generic contacts-PATCH re-type usually emits none (only when it
+  // drains a pending type suggestion), so after one the review can stay open
+  // and its close-name pick still sends the plain PATCH (final review round 2
+  // R2-2). Reset during render (React's "adjust state when a prop changes"),
+  // so no frame shows the review over a non-tenant.
+  // TODO(ha-review-close-name-patch-unfenced): the server-side fence closes
+  // the plain re-type case.
   if (haReview !== null && contact !== null && contact.type !== 'tenant') setHaReview(null);
 
   // The /contacts/:contactId route re-renders this SAME component instance on a

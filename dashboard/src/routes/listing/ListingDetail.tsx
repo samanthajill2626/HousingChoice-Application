@@ -465,10 +465,13 @@ export function ListingDetail(): React.JSX.Element {
         // (contact_list_caseworker, landlord_not_landlord) names its own reason.
         // Mapped BEFORE the 409 catch-all below, whose copy would otherwise
         // claim "landlord of record". It settles like the catch-all (final
-        // review A3, fix wave FWF-2): this request wrote nothing, but the
-        // roster write answers these codes only when the property changed
-        // after the route's read (a seat removed, the landlord cleared) -
-        // exactly when the card is stale.
+        // review A3, fix wave FWF-2): this request wrote nothing. These codes
+        // come from the route's own pre-checks with no race at all (an API
+        // caller, or a stale picker) as well as from the roster write, which
+        // answers them when the property changed after the route's read (a
+        // seat removed, the landlord cleared) - exactly when the card is
+        // stale. In the no-race case the extra re-read is harmless (final
+        // review round 2 R2-F5).
         const typed = contactTypeErrorMessage(err);
         if (typed !== null) {
           setRosterError({ key, message: typed });

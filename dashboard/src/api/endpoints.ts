@@ -1069,12 +1069,14 @@ export async function restoreUnit(
  *  record's role is STRUCTURALLY pinned to 'landlord' server-side whatever is
  *  sent. On an ownerless legacy property, adding a Landlord also claims its
  *  `landlordId`; an existing different owner is never silently replaced.
- *  Auto-primary (caseworker-integrity spec section 4 "Contact list", revision
- *  5): a NEW seat for a contact typed landlord (a landlord, property manager
- *  or owner, any role) on a property with no primary row and no landlordId
- *  becomes its primary contact even when `primaryContact` is false or absent;
- *  a contact of any other type joins non-primary. The answer's roster carries
- *  the flags, so render the answer, never the request.
+ *  Auto-primary (caseworker-integrity spec section 4 "Contact list",
+ *  revisions 5 and 6): a NEW seat on a property with no primary row and no
+ *  landlordId becomes its primary contact even when `primaryContact` is false
+ *  or absent, when its contact is eligible for automatic routing - typed
+ *  landlord (a landlord, property manager or owner, any role), not
+ *  soft-deleted and not a routing pointer. Any other contact (another type,
+ *  or a soft-deleted landlord-typed one) joins non-primary. The answer's
+ *  roster carries the flags, so render the answer, never the request.
  *  Returns the updated unit with its enriched `contacts` roster. Errors: 409
  *  contact_list_caseworker (a caseworker taking a NEW seat) and 409
  *  landlord_not_landlord (a claim of the vacant landlord slot by a contact not

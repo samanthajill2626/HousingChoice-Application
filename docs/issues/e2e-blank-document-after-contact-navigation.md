@@ -102,3 +102,13 @@ budget at `devLogin` for "Continue as dev user": the trace shows `GET /@react-re
 (3/3, 33.3s). Three consecutive full runs on this host that evening each lost one or two
 tests this way (traces in that worktree under `.superpowers/sdd/e2e-results-fw1*/`), while
 other worktrees' suites ran on lanes 6 and 14 at the same time; every lost test passed alone.
+
+**Eighth sighting - no trace (2026-10-12/13 overnight, Windows, feat/join-housing-authority
+@f563e68d, the planner's own gate 4).** `timeout 2700 npm run e2e` ran 339 passed / 1 failed
+(30.4m) with 585 sockets in TIME_WAIT at start, right after another worktree's suite had
+finished. The failure: `tests/scenarios/scheduled-visibility.spec.ts:177` (a)+(b), at
+`e2e/scenarios/steps.ts:3666` - the reminder's proof-of-send step had ALREADY passed, then the
+contact page's "Communications and activity" region never showed the sent bubble; the saved
+screenshot is an entirely white document. The same file re-run alone straight after: 5/5
+passed (43.8s). Run without E2E_TRACE, so no network trace; the shape matches the traced
+sightings above (a fresh navigation that never renders).

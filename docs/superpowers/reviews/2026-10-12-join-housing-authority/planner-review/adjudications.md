@@ -69,3 +69,25 @@ reveals nothing).
   resolve `join-backfill-ignores-pending-authority-suggestion` (FW-2 fixes it).
 - RUNBOOK and the backfill rehearsal's expected output updated to match;
   tests for each.
+
+---
+
+# Planner independent review - round 2 (after fix wave 1)
+
+Both reviewers were CONTINUED with the re-review charge on the fix diff
+(15c1676f..0eb44652): `conformance-r2.md` (revision 5: 18 CONFORMS,
+2 DEVIATES immaterial, 0 MISSING; the fix wave broke none of the round-1
+rows; D12 shows on exactly the four surfaces that add or rename a housing
+authority) and `adversarial-r2.md` (0 BLOCKING, 0 HIGH, 1 MEDIUM, 2 LOW; it
+conceded A2, A3, A6, A11 and A12). The planner's own round-2 gates:
+`planner-gates-r2.md` (1, 2, 3, 5 green; gate 4 one environmental
+blank-document failure, the file 5/5 alone).
+
+| # | Finding | Ruling | Effect |
+|---|---|---|---|
+| B1 | adversarial-r2 1 [MED] An interrupted --apply leaves later --skip exclusions unrecorded (they are appended in the same oldest-first loop as the writes), and the RUNBOOK says to drop --skip on later runs | ACCEPT | FIX WAVE 2: record every exclusion in a FIRST pass before any write; stop (exit 1, nothing written) if any exclusion append fails. RUNBOOK: keep the --skip value for every run on that environment, always. |
+| B2 | conformance-r2 4 [LOW] RUNBOOK step 4 says "apply again" without the same --skip | ACCEPT | Folded into B1's RUNBOOK change. |
+| B3 | adversarial-r2 2 [LOW] = fix-wave F2: a lead whose "Atlanta Housing Authority" suggestion staff dismissed is still written | CAMERON'S CALL | Recommended: leave it out (reuse the AI path's dismissal check). |
+| B4 | adversarial-r2 3 [LOW] An accept/dismiss in flight or abandoned (its resolution record active, the suggestion row already deleted) is not seen; the backfill can supersede the accepted value | ACCEPT | FIX WAVE 2: leave a lead out while its (contactId, housingAuthority) resolution record is active. |
+| B5 | adversarial-r2 nit: the post-write audit warning still says "could not be written" | ACCEPT | FIX WAVE 2: "may not have been written" wording. |
+| B6 | conformance-r2 1, 2, 3, 5, 6, 7 [LOW] | ACCEPT as written | Exclusion recorded once per lead (same effect as "every apply"); the failure line's extra "(an ERROR line names this contactId)" inside the quoted phrase; one reason printed per lead; the D12 note also shows on the shared add dialog outside Settings (true there); a failed exclusion append or pending-suggestion read counts as FAILED; the post-apply re-read only after a write. |

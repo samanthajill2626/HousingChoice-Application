@@ -2739,7 +2739,11 @@ export type TimelineMilestoneType =
   // `group_text` conversation type, and they are PERSISTED on historical rows.
   // The dashboard reads them only to pick a milestone colour.
   | 'added_to_group_text'
-  | 'removed_from_group_text';
+  | 'removed_from_group_text'
+  // last-heard-from spec 5.4: mirrors the server union (activityEventsRepo.ts).
+  | 'listing_declined'
+  | 'listing_decline_cleared'
+  | 'listing_interested';
 
 interface TimelineBase {
   id: string;
@@ -3130,7 +3134,8 @@ export interface SimilarUnit {
  *  listing_status_changed, unit_deleted, unit_restored,
  *  broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
  *  tour_no_show, tour_canceled, tour_outcome, tour_auto_closed,
- *  tour_reopened.
+ *  tour_reopened, listing_declined, listing_decline_cleared,
+ *  listing_interested.
  *  Unknown types must still render (humanized), never blank. */
 export interface UnitActivityEvent {
   /** The audit ts sort key — unique within the unit (a stable React key). */

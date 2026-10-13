@@ -214,7 +214,8 @@ function toRelatedUnit(
  * listing_status_changed, unit_deleted, unit_restored,
  * broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
  * tour_no_show, tour_canceled, tour_outcome, tour_auto_closed,
- * tour_reopened).
+ * tour_reopened, listing_declined, listing_decline_cleared,
+ * listing_interested).
  * Details are a fixed-key whitelist lifted from the audit payload — NEVER the
  * raw payload document (a future payload field can't leak through here).
  */

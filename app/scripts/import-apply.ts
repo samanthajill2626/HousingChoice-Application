@@ -427,6 +427,11 @@ if (unroutable.calls.length > 0) {
       `(${unroutable.anonymousCalls} withheld caller ID)`,
   );
 }
+console.log(
+  `  last heard from stamps  : ${report.lastHeardFromStamps.planned} planned, ` +
+    `${report.lastHeardFromStamps.written} written, ${report.lastHeardFromStamps.skipped} already as late, ` +
+    `${report.lastHeardFromStamps.failed} failed`,
+);
 console.log(`  units written           : ${report.units.written}`);
 console.log(`    dropped by review     : ${report.units.skippedDropped}`);
 // A dry run never calls upsertUnit, so it cannot know this - and printing a

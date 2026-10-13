@@ -73,13 +73,19 @@ function stubDoc(): { doc: DynamoDBDocumentClient; sent: RecordedCommand[] } {
   return { doc: doc as unknown as DynamoDBDocumentClient, sent };
 }
 
-/** The ONE UpdateCommand upsertContact sent for this phone's contact. */
+/** The last-heard-from stamp's UpdateExpression (contactsRepo.touchLastHeardFrom,
+ *  spec 5.1): the importer sends it AFTER the upsert for a contact it heard from. */
+const HEARD_FROM_STAMP = 'SET #lhf = :at';
+
+/** The ONE UpdateCommand upsertContact sent for this phone's contact (the
+ *  last-heard-from stamp, a second UpdateCommand on the same key, is skipped). */
 function contactUpdate(sent: RecordedCommand[], phone: string): Record<string, unknown> {
   const contactId = contactIdForPhone(phone);
   const found = sent.filter(
     (c) =>
       c.name === 'UpdateCommand' &&
-      (c.input['Key'] as { contactId?: unknown } | undefined)?.contactId === contactId,
+      (c.input['Key'] as { contactId?: unknown } | undefined)?.contactId === contactId &&
+      c.input['UpdateExpression'] !== HEARD_FROM_STAMP,
   );
   expect(found, `one contact UpdateCommand for ${phone}`).toHaveLength(1);
   return found[0]!.input;

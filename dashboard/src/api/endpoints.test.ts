@@ -40,6 +40,7 @@ import {
   listTours,
   getPlacement,
   getContactVocabulary,
+  getFollowUps,
   getPlacementHistory,
   getPlacementNudges,
   patchPlacementNudge,
@@ -826,4 +827,15 @@ it('setListingSendOutcome POSTs the outcome and returns the { row } body as-is (
     body: { outcome: 'not_interested' },
   });
   expect(res).toEqual({ row: { contactId: 'c 1', unitId: 'u1', outcome: 'not_interested' } });
+});
+
+it('getFollowUps GETs the waiting list and forwards the abort signal (last-heard-from 5.6)', async () => {
+  const body = { items: [], byUnit: { u1: 2 }, truncated: false };
+  vi.mocked(request).mockResolvedValueOnce(body);
+  const signal = new AbortController().signal;
+  await expect(getFollowUps(signal)).resolves.toEqual(body);
+  expect(request).toHaveBeenLastCalledWith('/api/broadcasts/follow-ups', { signal });
+  vi.mocked(request).mockResolvedValueOnce(body);
+  await getFollowUps();
+  expect(request).toHaveBeenLastCalledWith('/api/broadcasts/follow-ups', {});
 });

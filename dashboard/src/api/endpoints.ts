@@ -13,6 +13,7 @@ import type {
   BroadcastsPage,
   BroadcastStatsView,
   BroadcastStatus,
+  FollowUpsResponse,
   PreviewResponse,
   SettingsPatch,
   SettingsResponse,
@@ -1931,6 +1932,14 @@ export function listBroadcasts(
 ): Promise<BroadcastsPage> {
   return request<BroadcastsPage>('/api/broadcasts', {
     query: { status: params.status, cursor: params.cursor, limit: params.limit },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/broadcasts/follow-ups - the waiting list (last-heard-from spec 5.6).
+ *  Throws ApiError 503 outcome_unavailable when a required read failed. */
+export function getFollowUps(signal?: AbortSignal): Promise<FollowUpsResponse> {
+  return request<FollowUpsResponse>('/api/broadcasts/follow-ups', {
     ...(signal !== undefined && { signal }),
   });
 }

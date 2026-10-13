@@ -3435,6 +3435,33 @@ export interface PreviewResponse {
   declineLabelsUnavailable: boolean;
 }
 
+/** GET /api/broadcasts/follow-ups -> one waiting row (last-heard-from spec 5.6;
+ *  app/src/services/followUps.ts FollowUpItem, hand-mirrored). */
+export interface FollowUpItem {
+  unitId: string;
+  /** The property's short address (unitId when it has none). */
+  unitLabel: string;
+  contactId: string;
+  name: string;
+  type: ContactType;
+  role?: string;
+  sentAt: string;
+  lastHeardFromAt?: string;
+  outcome: ListingSendOutcome;
+  declined?: { at: string; by: 'staff' | 'engine' };
+  interestedSupported: boolean;
+  interestedMode: InterestedMode;
+  /** max(sentAt, lastHeardFromAt) - "N days" counts from here. */
+  waitingSince: string;
+}
+
+/** GET /api/broadcasts/follow-ups response; 503 outcome_unavailable on a failed join. */
+export interface FollowUpsResponse {
+  items: FollowUpItem[];
+  byUnit: Record<string, number>;
+  truncated: boolean;
+}
+
 /** GET /api/events 'broadcast.updated' payload. The send job + delivery rollup
  *  emit this with the live status + stats (NO per-recipient detail — the
  *  Results view refetches getBroadcastResults to pick up recipient changes).

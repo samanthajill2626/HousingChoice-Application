@@ -13,6 +13,7 @@ import type { BroadcastStatus, BroadcastSummary, BroadcastsPage, EventStreamHand
 const listBroadcasts = vi.fn();
 const deleteBroadcast = vi.fn();
 const getBroadcastStats = vi.fn();
+const getFollowUps = vi.fn();
 let sse: EventStreamHandlers = {};
 
 vi.mock('../../api/index.js', async () => {
@@ -22,6 +23,7 @@ vi.mock('../../api/index.js', async () => {
     listBroadcasts: (...a: unknown[]) => listBroadcasts(...a),
     deleteBroadcast: (...a: unknown[]) => deleteBroadcast(...a),
     getBroadcastStats: (...a: unknown[]) => getBroadcastStats(...a),
+    getFollowUps: (...a: unknown[]) => getFollowUps(...a),
     useEventStream: (h: EventStreamHandlers) => {
       sse = h;
     },
@@ -52,9 +54,9 @@ function LocationProbe(): React.JSX.Element {
   return <span data-testid="path">{`${loc.pathname}${loc.search}`}</span>;
 }
 
-function renderList(): void {
+function renderList(entry = '/broadcasts'): void {
   render(
-    <MemoryRouter initialEntries={['/broadcasts']}>
+    <MemoryRouter initialEntries={[entry]}>
       <Routes>
         <Route path="/broadcasts" element={<BroadcastsList />} />
         <Route path="*" element={<div />} />
@@ -68,6 +70,7 @@ beforeEach(() => {
   listBroadcasts.mockReset();
   deleteBroadcast.mockReset().mockResolvedValue({ deleted: true });
   getBroadcastStats.mockReset();
+  getFollowUps.mockReset().mockResolvedValue({ items: [], byUnit: {}, truncated: false });
   sse = {};
 });
 afterEach(() => vi.restoreAllMocks());
@@ -372,5 +375,83 @@ describe('BroadcastsList - live broadcast.updated merge', () => {
     expect(getBroadcastStats).not.toHaveBeenCalled();
     expect(within(list).getByText('Not sent')).toBeInTheDocument();
     expect(within(list).getAllByRole('listitem')).toHaveLength(1);
+  });
+});
+
+describe('BroadcastsList - Follow up tab (last-heard-from 5.6)', () => {
+  const waiting = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      unitId: 'u1',
+      unitLabel: '12 Oak St',
+      contactId: `c${i}`,
+      name: `Tenant ${i}`,
+      type: 'tenant',
+      sentAt: '2026-10-02T12:00:00.000Z',
+      outcome: 'no_reply',
+      interestedSupported: true,
+      interestedMode: 'route',
+      waitingSince: '2026-10-02T12:00:00.000Z',
+    }));
+
+  it('fetches follow-ups ONCE on mount and shows the count while All is active', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary()]));
+    getFollowUps.mockResolvedValue({ items: waiting(4), byUnit: { u1: 4 }, truncated: false });
+    renderList();
+    const tab = await screen.findByRole('tab', { name: 'Follow up 4' });
+    expect(tab).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByRole('tab', { name: 'All' })).toHaveAttribute('aria-selected', 'true');
+    expect(getFollowUps).toHaveBeenCalledTimes(1);
+  });
+
+  it('selecting Follow up writes ?tab=follow-up and shows the waiting list in the tab panel', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary()]));
+    getFollowUps.mockResolvedValue({ items: waiting(1), byUnit: { u1: 1 }, truncated: false });
+    renderList();
+    await screen.findByRole('list', { name: 'Property sends' });
+    await userEvent.setup().click(screen.getByRole('tab', { name: /^Follow up/ }));
+    expect(screen.getByTestId('path')).toHaveTextContent('/broadcasts?tab=follow-up');
+    const tab = screen.getByRole('tab', { name: /^Follow up/ });
+    expect(tab).toHaveAttribute('aria-selected', 'true');
+    const panel = screen.getByRole('tabpanel');
+    expect(panel).toHaveAttribute('aria-labelledby', tab.id);
+    expect(within(panel).getByRole('heading', { name: /12 Oak St/ })).toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Property sends' })).toBeNull();
+    // The tab switch reuses the mount's fetch - no second request.
+    expect(getFollowUps).toHaveBeenCalledTimes(1);
+  });
+
+  it('a deep link to ?tab=follow-up opens the tab directly', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([]));
+    renderList('/broadcasts?tab=follow-up');
+    expect(await screen.findByText('Nothing waiting on a reply.')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /^Follow up/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'All' })).toHaveAttribute('aria-selected', 'false');
+  });
+
+  it('a status tab from Follow up drops ?tab and queries that status', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary()]));
+    renderList('/broadcasts?tab=follow-up');
+    await userEvent.setup().click(await screen.findByRole('tab', { name: 'Drafts' }));
+    expect(screen.getByTestId('path')).toHaveTextContent(/^\/broadcasts$/);
+    await waitFor(() => expect((listBroadcasts.mock.calls.at(-1)?.[0] as { status?: BroadcastStatus }).status).toBe('draft'));
+    // The Follow up tab is never a status filter (spec 14.4): no call ever
+    // asked the list for a follow-up status.
+    expect(listBroadcasts.mock.calls.every((c) => (c[0] as { status?: string }).status !== 'follow-up')).toBe(true);
+  });
+
+  it('every tab controls the one tab panel', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary()]));
+    renderList();
+    await screen.findByRole('list', { name: 'Property sends' });
+    const panelId = screen.getByRole('tabpanel').id;
+    for (const tab of screen.getAllByRole('tab')) expect(tab).toHaveAttribute('aria-controls', panelId);
+  });
+
+  it('a failed follow-ups fetch shows no count and leaves the send list alone', async () => {
+    listBroadcasts.mockResolvedValue(pageOf([summary()]));
+    getFollowUps.mockRejectedValue(new ApiError(503, 'outcome_unavailable', 'x'));
+    renderList();
+    await screen.findByRole('list', { name: 'Property sends' });
+    expect(screen.getByRole('tab', { name: 'Follow up' })).toBeInTheDocument();
   });
 });

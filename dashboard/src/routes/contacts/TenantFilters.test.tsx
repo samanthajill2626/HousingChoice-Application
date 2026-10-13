@@ -2,7 +2,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { TENANT_STATUSES, type Contact, type TenantStatus } from '../../api/index.js';
-import { buildFacets, NONE_KEY, type TenantSelection } from './tenantFacets.js';
+import { buildFacets, DEFAULT_STATUS_SET, NONE_KEY, type TenantSelection } from './tenantFacets.js';
 import { TenantFilters } from './TenantFilters.js';
 
 // Structure + behavior only. jsdom does NO layout (no container queries, no
@@ -59,9 +59,9 @@ describe('TenantFilters', () => {
 
   it('gives each group its OWN accessible name (one useId per group)', () => {
     render(<TenantFilters model={MODEL} selection={EMPTY} onChange={vi.fn()} />);
-    // Three distinct groups - a single shared label id would collapse them and
+    // Four distinct groups - a single shared label id would collapse them and
     // void every group-scoped query in this file.
-    expect(screen.getAllByRole('group')).toHaveLength(3);
+    expect(screen.getAllByRole('group')).toHaveLength(4);
     const voucher = screen.getByRole('group', { name: 'Voucher size' });
     const authority = screen.getByRole('group', { name: 'Housing authority' });
     expect(voucher).not.toBe(authority);
@@ -201,5 +201,42 @@ describe('TenantFilters', () => {
     expect(within(voucher).queryAllByRole('button')).toHaveLength(0);
     // The other facet still renders its chips.
     expect(screen.getByRole('button', { name: 'DCA (1)' })).toBeInTheDocument();
+  });
+
+  it('renders the Status group: seven chips in TENANT_STATUSES order with StatusBadge labels and counts', () => {
+    const tenants = [tenant({ status: 'searching' }), tenant({ status: 'inactive' }), tenant({})];
+    const sel: TenantSelection = { ...EMPTY, status: new Set(DEFAULT_STATUS_SET) };
+    render(<TenantFilters model={buildFacets(tenants, sel, ALL)} selection={sel} onChange={vi.fn()} />);
+    const group = screen.getByRole('group', { name: 'Status' });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'Needs review (0)',
+      'Onboarding (0)',
+      'Searching (1)',
+      'Placing (0)',
+      'Placed (0)',
+      'On hold (0)',
+      'Inactive (1)',
+    ]);
+    expect(within(group).getByRole('button', { name: 'Searching (1)' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(group).getByRole('button', { name: 'Inactive (1)' })).toHaveAttribute('aria-pressed', 'false');
+    // At the default there is nothing to clear.
+    expect(within(group).queryByRole('button', { name: 'Clear status filter' })).toBeNull();
+  });
+
+  it('a status chip toggles through onChange; Clear returns to the DEFAULT set and shows only off-default', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const tenants = [tenant({ status: 'inactive' })];
+    const def: TenantSelection = { ...EMPTY, status: new Set(DEFAULT_STATUS_SET) };
+    const { unmount } = render(<TenantFilters model={buildFacets(tenants, def, ALL)} selection={def} onChange={onChange} />);
+    await user.click(screen.getByRole('button', { name: 'Inactive (1)' }));
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: new Set([...DEFAULT_STATUS_SET, 'inactive']) }),
+    );
+    unmount();
+    const off: TenantSelection = { ...EMPTY, status: new Set<TenantStatus>() }; // the _empty selection
+    render(<TenantFilters model={buildFacets(tenants, off, ALL)} selection={off} onChange={onChange} />);
+    await user.click(screen.getByRole('button', { name: 'Clear status filter' }));
+    expect(onChange).toHaveBeenLastCalledWith({ ...off, status: new Set(DEFAULT_STATUS_SET) });
   });
 });

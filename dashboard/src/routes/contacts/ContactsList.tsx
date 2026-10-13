@@ -21,6 +21,7 @@ import {
   applyToParams,
   buildFacets,
   factsLine,
+  hiddenByStatusOnly,
   parseSelection,
   type TenantSelection,
 } from './tenantFacets.js';
@@ -250,6 +251,13 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
     [contacts, selection, q],
   );
 
+  // The hidden-match hint (spec 5.7, 14.5 F11): the query matches some tenant
+  // that ONLY the status facet hides (voucher, authority and porting pass).
+  const hiddenMatch = useMemo(
+    () => isTenantView && q !== '' && contacts.some((c) => searchKey(c).includes(q) && hiddenByStatusOnly(c, selection)),
+    [contacts, q, isTenantView, selection],
+  );
+
   /** Serialize a new selection, MERGING the query string (`?phone=` survives). */
   function updateSelection(next: TenantSelection): void {
     const params = new URLSearchParams(searchParams);
@@ -335,8 +343,20 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
         ) : (
           <p className={styles.noMatches}>
             {/* The query message wins when both are active. Entity quotes, never
-             *  literal curly ones - every new line here stays ASCII. */}
-            {query.trim() ? (
+             *  literal curly ones - every new line here stays ASCII. A query that
+             *  only a hidden STATUS keeps from matching says so, with the way out. */}
+            {query.trim() && hiddenMatch ? (
+              <>
+                No matches for &ldquo;{query.trim()}&rdquo; among the statuses shown.{' '}
+                <button
+                  type="button"
+                  className={styles.showAll}
+                  onClick={() => updateSelection({ ...selection, status: new Set(ALL_STATUS_SET) })}
+                >
+                  Show all statuses
+                </button>
+              </>
+            ) : query.trim() ? (
               <>No matches for &ldquo;{query.trim()}&rdquo;.</>
             ) : (
               'No tenants match the selected filters.'

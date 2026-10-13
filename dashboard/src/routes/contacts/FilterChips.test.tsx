@@ -64,4 +64,18 @@ describe('FilterChips - ChipGroup', () => {
     expect(within(group).getByText('No organizations recorded yet')).toBeInTheDocument();
     expect(within(group).queryAllByRole('button')).toHaveLength(0);
   });
+
+  it('with a baseline, Clear shows only while the selection DIFFERS from it - an empty selection included', async () => {
+    const user = userEvent.setup();
+    const onClear = vi.fn();
+    const baseline = new Set(['hope atlanta', 'step up']);
+    const props = { label: 'Organization', emptyLine: null, options: OPTIONS, onToggle: vi.fn(), onClear, baseline };
+    const { rerender } = render(<ChipGroup {...props} selected={new Set(['step up', 'hope atlanta'])} />);
+    expect(screen.queryByRole('button', { name: 'Clear organization filter' })).toBeNull();
+    rerender(<ChipGroup {...props} selected={new Set(['hope atlanta'])} />);
+    expect(screen.getByRole('button', { name: 'Clear organization filter' })).toBeInTheDocument();
+    rerender(<ChipGroup {...props} selected={new Set<string>()} />);
+    await user.click(screen.getByRole('button', { name: 'Clear organization filter' }));
+    expect(onClear).toHaveBeenCalledTimes(1);
+  });
 });

@@ -339,6 +339,27 @@
   color: var(--c-text-muted);
 }
 
+/* "Show all statuses" inside the no-match line (spec 2026-10-12 5.7): a quiet
+ * text button in the facet Clear's language (TenantFilters.module.css .clear). */
+.showAll {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--c-brand);
+  font: inherit;
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+
+.showAll:hover {
+  text-decoration: underline;
+}
+
+.showAll:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
 .empty {
   margin-top: var(--sp-5);
   padding: var(--sp-6);

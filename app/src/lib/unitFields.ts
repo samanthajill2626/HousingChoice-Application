@@ -104,7 +104,10 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   // the flyer projections below.
   tour_type: 'tour_type',
   application_process: 'string',
-  primary_contact: 'string',
+  // primary_contact is deliberately NOT writable (primary-contact-integrity
+  // spec 4.5, P2b): only the roster writes (unitsRepo addContact /
+  // removeContact / restoreWithLandlord / handOffPrimaryFrom) set the scalar,
+  // so a body carrying it is refused as an unknown field on create and PATCH.
   // BE3/C3: the PARENT property/building group id (byProperty GSI hash). WRITABLE
   // so the related-units `same_property` branch is reachable through the API
   // (create/PATCH), not only via seeded fakes — without this it'd be permanently

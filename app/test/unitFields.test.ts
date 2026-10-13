@@ -148,6 +148,25 @@ describe('validateUnitBody — lease_terms (moved off the landlord contact 2026-
   });
 });
 
+describe('validateUnitBody - primary_contact is not writable (primary-contact-integrity spec 4.5)', () => {
+  // P2b: only the roster writes set the primary_contact scalar, so a body
+  // carrying it is refused like any other non-writable key, on create and on
+  // update alike.
+  it('refuses primary_contact on create', () => {
+    expect(validateUnitBody({ landlordId: 'c-ll', primary_contact: 'c-pm' }, 'create')).toEqual({
+      ok: false,
+      error: 'unknown field: primary_contact',
+    });
+  });
+
+  it('refuses primary_contact on update, even beside a writable field', () => {
+    expect(validateUnitBody({ notes: 'x', primary_contact: 'c-pm' }, 'update')).toEqual({
+      ok: false,
+      error: 'unknown field: primary_contact',
+    });
+  });
+});
+
 describe('validateUnitBody - tour_type (structured, clear-to-absent)', () => {
   // A dedicated enum field: a value must be in the TourType union, and clearing
   // it (''/null) maps to a null patch value so the repo REMOVEs the attribute

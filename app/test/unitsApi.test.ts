@@ -179,7 +179,7 @@ describe('POST /api/units — create', () => {
     expect(res.status).toBe(400);
   });
 
-  it('accepts the per-unit internal fields incl. primary_contact (CO1)', async () => {
+  it('accepts the per-unit internal fields (CO1)', async () => {
     const { app } = landlordHarness();
     const res = await request(app)
       .post('/api/units')
@@ -189,12 +189,38 @@ describe('POST /api/units — create', () => {
         landlordId: 'contact-ll-1',
         tour_process: 'lockbox 1234',
         application_process: 'online portal',
-        primary_contact: 'contact-ll-agent-7',
         pets: true,
       });
     expect(res.status).toBe(201);
-    expect(res.body.unit.primary_contact).toBe('contact-ll-agent-7');
+    expect(res.body.unit.tour_process).toBe('lockbox 1234');
+    expect(res.body.unit.application_process).toBe('online portal');
     expect(res.body.unit.pets).toBe(true);
+  });
+
+  // primary-contact-integrity spec 4.5 (P2b, Cameron 2026-10-13): only the
+  // roster writes set the primary_contact scalar; a unit body carrying it is
+  // refused like any other non-writable key.
+  it('refuses primary_contact on create and on PATCH - 400, nothing written', async () => {
+    const { app, world } = landlordHarness();
+    const create = await request(app)
+      .post('/api/units')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ landlordId: 'contact-ll-1', primary_contact: 'contact-ll-agent-7' });
+    expect(create.status).toBe(400);
+    expect(create.body).toEqual({ error: 'unknown field: primary_contact' });
+    expect([...world.units.values()].some((u) => u.primary_contact === 'contact-ll-agent-7')).toBe(false);
+
+    seedUnit(world, 'unit-pc');
+    const patch = await request(app)
+      .patch('/api/units/unit-pc')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ primary_contact: 'contact-ll-agent-7' });
+    expect(patch.status).toBe(400);
+    expect(patch.body).toEqual({ error: 'unknown field: primary_contact' });
+    expect(world.units.get('unit-pc')?.primary_contact).toBeUndefined();
+    expect(world.auditEvents).toHaveLength(0);
   });
 });
 

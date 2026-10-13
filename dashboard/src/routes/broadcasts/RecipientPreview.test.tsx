@@ -9,10 +9,11 @@
 // Results link); Delete draft (409 → Results).
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { ApiError } from '../../api/index.js';
 import type { Contact, PreviewResponse } from '../../api/index.js';
+import { formatHeardFrom } from '../../lib/heardFrom.js';
 
 const sendBroadcast = vi.fn();
 const deleteBroadcast = vi.fn();
@@ -93,6 +94,7 @@ function renderPreview(props: {
   draftId?: string;
   unitId?: string;
   resolvedFor?: { contactId: string; name: string };
+  now?: Date;
 }): void {
   render(
     <MemoryRouter initialEntries={['/broadcasts/new']}>
@@ -107,6 +109,7 @@ function renderPreview(props: {
               candidatesLoading={props.candidatesLoading ?? false}
               {...(props.unitId !== undefined && { unitId: props.unitId })}
               {...(props.resolvedFor !== undefined && { resolvedFor: props.resolvedFor })}
+              {...(props.now !== undefined && { now: props.now })}
             />
           }
         />
@@ -431,7 +434,7 @@ describe('RecipientPreview — consent treatment', () => {
     // The no-consent row carries the "consent not recorded — fix before sending"
     // treatment, is unchecked, and is disabled (a hard fence).
     expect(within(list).getByText(/consent not recorded — fix before sending/i)).toBeInTheDocument();
-    const noConsentBox = within(list).getByRole('checkbox', { name: /NoConsent — consent not recorded/i });
+    const noConsentBox = within(list).getByRole('checkbox', { name: /NoConsent - consent not recorded/i });
     expect(noConsentBox).not.toBeChecked();
     expect(noConsentBox).toBeDisabled();
     // The count of no-consent recipients is surfaced.
@@ -809,5 +812,179 @@ describe('availability pre-flight on Send (spec 2026-07-10)', () => {
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent(/isn't Available/),
     );
+  });
+});
+
+describe('RecipientPreview - columns, order and not-interested rows (last-heard-from 5.3)', () => {
+  const NOW = new Date('2026-10-12T15:00:00.000Z');
+  const listEl = (): HTMLElement => screen.getByRole('list', { name: 'Candidate recipients' });
+  const rowOf = (text: string): HTMLElement => within(listEl()).getByText(text).closest('li') as HTMLElement;
+  const namesInOrder = (): string[] => within(listEl()).getAllByRole('link').map((a) => a.textContent ?? '');
+
+  it('renders the column headers and each row status, housing authority and last heard from', () => {
+    renderPreview({
+      now: NOW,
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Tasha', status: 'searching', housingAuthority: 'Atlanta Housing Authority', lastHeardFromAt: '2026-10-07T14:00:00.000Z' }),
+          candidate({ contactId: 'c2', firstName: 'Bo', phone: '+14040000002' }),
+        ],
+      }),
+    });
+    expect(screen.getByText('Name')).toBeInTheDocument();
+    expect(screen.getByText('Status')).toBeInTheDocument();
+    expect(screen.getByText('Housing authority')).toBeInTheDocument();
+    // ONE "Last heard from" in the DOM: the header, OUTSIDE the list. The
+    // narrow layout's per-row prefix is CSS ::before content (no DOM text).
+    expect(screen.getAllByText('Last heard from')).toHaveLength(1);
+    expect(within(listEl()).queryByText(/Last heard from/)).toBeNull();
+    // The header sits OUTSIDE the list: still exactly one checkbox per row.
+    expect(within(listEl()).getAllByRole('checkbox')).toHaveLength(2);
+    const tasha = rowOf('Tasha');
+    expect(within(tasha).getByText('Searching')).toBeInTheDocument();
+    expect(within(tasha).getByText('Atlanta Housing Authority')).toBeInTheDocument();
+    // The cell's text is exactly the bare label (the e2e matches it by regex).
+    const heardLabel = formatHeardFrom('2026-10-07T14:00:00.000Z', NOW).label;
+    expect(within(tasha).getByText(heardLabel).textContent).toBe(heardLabel);
+    const bo = rowOf('Bo');
+    expect(within(bo).getByText('Never').textContent).toBe('Never');
+    expect(within(bo).queryByText('Searching')).toBeNull();
+  });
+
+  it('orders the list by last heard from, most recent first, never-heard last', () => {
+    renderPreview({
+      now: NOW,
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Ann', lastName: 'Zed' }),
+          candidate({ contactId: 'c2', firstName: 'Bo', lastName: 'Young', phone: '+14040000002', lastHeardFromAt: '2026-10-01T12:00:00.000Z' }),
+          candidate({ contactId: 'c3', firstName: 'Cy', lastName: 'Xu', phone: '+14040000003', lastHeardFromAt: '2026-10-05T12:00:00.000Z' }),
+        ],
+      }),
+    });
+    expect(namesInOrder()).toEqual(['Cy Xu', 'Bo Young', 'Ann Zed']);
+  });
+
+  it('an added tenant slots into place by last heard from, keeps its facts, and is scrolled into view (block nearest)', async () => {
+    const scrolled: MockInstance<HTMLElement['scrollIntoView']> = vi.spyOn(HTMLElement.prototype, 'scrollIntoView');
+    const u = userEvent.setup();
+    renderPreview({
+      now: NOW,
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Ann', lastName: 'Zed' }),
+          candidate({ contactId: 'c2', firstName: 'Bo', lastName: 'Young', phone: '+14040000002', lastHeardFromAt: '2026-10-01T12:00:00.000Z' }),
+        ],
+      }),
+      tenantCandidates: [
+        tenant({ contactId: 'cX', firstName: 'New', lastName: 'Tenant', status: 'searching', housingAuthority: 'DeKalb Housing Authority', last_heard_from_at: '2026-10-09T12:00:00.000Z' }),
+      ],
+    });
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'New');
+    await u.click(await screen.findByRole('option', { name: /New Tenant/ }));
+    expect(namesInOrder()).toEqual(['New Tenant', 'Bo Young', 'Ann Zed']);
+    const added = rowOf('New Tenant');
+    expect(within(added).getByText('Added')).toBeInTheDocument();
+    expect(within(added).getByText('Searching')).toBeInTheDocument();
+    expect(within(added).getByText('DeKalb Housing Authority')).toBeInTheDocument();
+    expect(scrolled).toHaveBeenLastCalledWith({ block: 'nearest' });
+    expect(scrolled.mock.contexts.at(-1)).toBe(added);
+  });
+
+  it('a declined audience row starts UNCHECKED (still enabled), tagged "Not interested", named "<name> - not interested"', () => {
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Tasha', declinedThisProperty: true }),
+          candidate({ contactId: 'c2', firstName: 'Bo', phone: '+14040000002' }),
+        ],
+        declinedContactIds: ['c1'],
+      }),
+    });
+    const box = within(listEl()).getByRole('checkbox', { name: 'Tasha - not interested' });
+    expect(box).not.toBeChecked();
+    expect(box).toBeEnabled();
+    expect(within(rowOf('Tasha')).getByText('Not interested')).toBeInTheDocument();
+    expect(within(listEl()).getByRole('checkbox', { name: 'Bo' })).toBeChecked();
+  });
+
+  it('ASCII names: "<name> - already sent", and both tags read "<name> - already sent, not interested"', () => {
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Ana', alreadySentThisProperty: true }),
+          candidate({ contactId: 'c2', firstName: 'Bo', phone: '+14040000002', alreadySentThisProperty: true, declinedThisProperty: true }),
+        ],
+        priorRecipientContactIds: ['c1', 'c2'],
+        declinedContactIds: ['c2'],
+      }),
+    });
+    expect(within(listEl()).getByRole('checkbox', { name: 'Ana - already sent' })).not.toBeChecked();
+    const both = within(listEl()).getByRole('checkbox', { name: 'Bo - already sent, not interested' });
+    expect(both).not.toBeChecked();
+    expect(within(rowOf('Bo')).getByText('Already sent')).toBeInTheDocument();
+    expect(within(rowOf('Bo')).getByText('Not interested')).toBeInTheDocument();
+  });
+
+  it('a SEEDED declined row starts checked; Select all keeps it and skips an unseeded declined row', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Picked', seeded: true, declinedThisProperty: true }),
+          candidate({ contactId: 'c2', firstName: 'Filter', phone: '+14040000002', declinedThisProperty: true }),
+          candidate({ contactId: 'c3', firstName: 'Plain', phone: '+14040000003' }),
+        ],
+        declinedContactIds: ['c1', 'c2'],
+        seedContactIds: ['c1'],
+      }),
+    });
+    const box = (name: string): HTMLElement => within(rowOf(name)).getByRole('checkbox');
+    expect(box('Picked')).toBeChecked();
+    expect(box('Filter')).not.toBeChecked();
+    await u.click(screen.getByRole('button', { name: 'Deselect all' }));
+    await u.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(box('Picked')).toBeChecked();
+    expect(box('Filter')).not.toBeChecked();
+    expect(box('Plain')).toBeChecked();
+  });
+
+  it('a hand-added declined tenant is CHECKED (a pick is deliberate) and tagged "Not interested"', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({ candidates: [candidate({ contactId: 'c1', firstName: 'Tasha' })], declinedContactIds: ['cX'] }),
+      tenantCandidates: [tenant({ contactId: 'cX', firstName: 'Dee', lastName: 'Clined' })],
+    });
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Dee');
+    await u.click(await screen.findByRole('option', { name: /Dee Clined/ }));
+    const box = within(listEl()).getByRole('checkbox', { name: 'Dee Clined - not interested' });
+    expect(box).toBeChecked();
+    expect(within(rowOf('Dee Clined')).getByText('Not interested')).toBeInTheDocument();
+  });
+
+  it('annotates the Add-a-tenant options: "Not interested" beats "Already sent"', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({ candidates: [], priorRecipientContactIds: ['cA', 'cB'], declinedContactIds: ['cB'] }),
+      tenantCandidates: [
+        tenant({ contactId: 'cA', firstName: 'Zoe', lastName: 'Prior', phone: '+14040000071' }),
+        tenant({ contactId: 'cB', firstName: 'Zia', lastName: 'Both', phone: '+14040000072' }),
+        tenant({ contactId: 'cC', firstName: 'Zed', lastName: 'Fresh', phone: '+14040000073' }),
+      ],
+    });
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Z');
+    expect(await screen.findByRole('option', { name: /Zoe Prior.*Already sent/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Zia Both.*Not interested/ })).not.toHaveTextContent('Already sent');
+    expect(screen.getByRole('option', { name: /Zed Fresh/ })).not.toHaveTextContent(/Already sent|Not interested/);
+  });
+
+  it('shows the degraded line when the decline labels could not load, and not otherwise', () => {
+    const LINE = "Couldn't load not-interested labels - a tenant who said no may be checked; sends still work";
+    renderPreview({ preview: previewOf({ candidates: [candidate()], declineLabelsUnavailable: true }) });
+    expect(screen.getByText(LINE)).toBeInTheDocument();
+  });
+  it('no degraded line on a healthy preview', () => {
+    renderPreview({ preview: previewOf({ candidates: [candidate()] }) });
+    expect(screen.queryByText(/Couldn't load not-interested labels/)).toBeNull();
   });
 });

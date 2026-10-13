@@ -24,3 +24,26 @@ Result: 7 ACCEPT, 0 REJECT. Decisions changed: YES (P1) -> round 2.
 | P5 | A4 | ACCEPT | no | S3.7 gains the whole app workspace run (AWS-env check, bare); S4.13 gains a baseline-compared eslint step on the dashboard files the branch touched. |
 | P6 | A5 | ACCEPT (spec wording) | no | Spec 4.7 bullet narrowed to writes that touch the PRIMARY; a deleted flagged primary on a write that does not touch it stays until the next eligible write or the script (stated, no new behavior - a non-goal-safe reading). |
 | P7 | A6 | ACCEPT | no | Rulings R2 corrected to the real import chain; S2 contract item 11 and S5 contract item 3 marked SUPERSEDED in place. |
+
+## Round 2 (plan v2 @dd8505e5)
+
+Report: `R2-reviewer-a.md` (reviewer A continued; 4 findings, 2 BLOCKING;
+contests P1 and P6). Re-checked in the code: the three caseworker-integrity
+scalar-only pins (`unitsRepoRestoreWithLandlord.integration.test.ts` "moves
+the primary to the new landlord when only the primary_contact scalar named
+the old one" and "without a landlord: promotes when only the primary_contact
+scalar named the cleared landlord"; `unitsRestoreLandlord.test.ts` "promoted
+too when only the primary_contact scalar named the cleared landlord") - they
+come from caseworker-integrity R1 code review backend finding 4 (a
+PATCH-written scalar with no flagged row). `unitsApiRoster.test.ts` "adds a
+roster contact..." seeds `landlordId: 'c-ll-1'` with no contact record.
+
+Result: 4 ACCEPT, 0 REJECT. Reviewer's P1 contest upheld; P6 contest moot
+under option (b). Decisions changed: YES (Q1 refines P1's rule) -> round 3.
+
+| id | finding | verdict | decision changed? | resolution in v3 |
+|---|---|---|---|---|
+| Q1 | R2-1 BLOCKING (contests P1) | ACCEPT option (b) | yes | ONE shared pure rule `landlordWasPrimary(roster, landlordId, scalar)` (new Task S2.7 sub-edit (e), exported from `unitsRepo.ts`): whenever ANY row is flagged only the flag counts; only with NO row flagged does a scalar naming the landlord count. Keeps caseworker-integrity's reviewed no-flag behavior and its three pins GREEN, and still fixes the stale-scalar case (a live flagged row is never displaced). The real repo, `clearedLandlordHeir` and the fake all call it (no twin). Spec 3 / 9.2 and the S5 GLOSSARY / RUNBOOK text say the scalar is read in exactly that one place. Option (a) (rewrite the pins) rejected: it would drop a reviewed legacy-data behavior and leave a zero-flag clear undescribed (the reviewer's P6 contest). |
+| Q2 | R2-2 BLOCKING | ACCEPT | no | Task S2.4 step 1 (c): `unitsApiRoster.test.ts` seeds `c-ll-1` (the test means a live landlord), exactly as S2.6 (b) does for its remove test; Files, status read and commit updated. |
+| Q3 | R2-3 | ACCEPT | no | Real-repo pins: two new cases in S2.7's `unitsRepoRestoreHandoff.integration.test.ts` (swap and clear with a stale scalar next to a live flagged row); a pure `landlordWasPrimary.test.ts`; the restore decider is now ONE function shared by repo, route and fake. |
+| Q4 | R2-4 | ACCEPT | no | S5.9 GLOSSARY: zero primary is also reachable when only non-eligible contacts were added and after an explicit API `primaryContact: false` on the primary's own row (R10). |

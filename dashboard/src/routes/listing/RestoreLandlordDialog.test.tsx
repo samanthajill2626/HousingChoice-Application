@@ -26,6 +26,7 @@ const RESTORED: UnitItem = { unitId: 'u1', landlordId: 'c-nora', status: 'availa
 function setup(props: { landlordName?: string } = {}) {
   const onRestored = vi.fn();
   const onConflict = vi.fn();
+  const onLandlordNotNeeded = vi.fn();
   const onClose = vi.fn();
   render(
     <RestoreLandlordDialog
@@ -33,10 +34,11 @@ function setup(props: { landlordName?: string } = {}) {
       {...props}
       onRestored={onRestored}
       onConflict={onConflict}
+      onLandlordNotNeeded={onLandlordNotNeeded}
       onClose={onClose}
     />,
   );
-  return { onRestored, onConflict, onClose };
+  return { onRestored, onConflict, onLandlordNotNeeded, onClose };
 }
 
 async function pickNora(user: ReturnType<typeof userEvent.setup>): Promise<void> {
@@ -136,6 +138,37 @@ describe('RestoreLandlordDialog', () => {
     expect(onRestored).not.toHaveBeenCalled();
   });
 
+  // Spec revision 7 section 4 "Restore" (final review round 2 R2-1): a choice
+  // that arrives when the plain restore applies answers 409
+  // restore_landlord_not_needed - its own code, because a retry of the same
+  // choice can never succeed. The dialog hands it to the close callback that
+  // code maps to: no retry sentence (the old unit_roster_conflict answer
+  // looped on it), no onConflict, nothing restored, and no second request.
+  it.each([
+    ['Restore without a landlord', null],
+    ['Restore with this landlord', 'c-nora'],
+  ] as const)(
+    '%s answered 409 restore_landlord_not_needed goes to onLandlordNotNeeded - no retry sentence, no onConflict',
+    async (action, landlordId) => {
+      const user = userEvent.setup();
+      restoreUnit.mockRejectedValue(
+        new ApiError(409, 'restore_landlord_not_needed', 'restore_landlord_not_needed', {
+          error: 'restore_landlord_not_needed',
+        }),
+      );
+      const { onLandlordNotNeeded, onConflict, onRestored, onClose } = setup({ landlordName: 'Lee Lord' });
+      if (landlordId !== null) await pickNora(user);
+      await user.click(screen.getByRole('button', { name: action }));
+
+      await waitFor(() => expect(onLandlordNotNeeded).toHaveBeenCalledTimes(1));
+      expect(restoreUnit.mock.calls).toEqual([['u1', { landlordId }]]);
+      expect(onConflict).not.toHaveBeenCalled();
+      expect(onRestored).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    },
+  );
+
   // R1 code review, dashboard finding 5: a failed landlords read is said, not
   // swallowed - the picker cannot offer anyone, so staff learn why and keep
   // the two actions that still work.
@@ -179,7 +212,13 @@ describe('RestoreLandlordDialog', () => {
     );
     render(
       <StrictMode>
-        <RestoreLandlordDialog unitId="u1" onRestored={vi.fn()} onConflict={vi.fn()} onClose={vi.fn()} />
+        <RestoreLandlordDialog
+          unitId="u1"
+          onRestored={vi.fn()}
+          onConflict={vi.fn()}
+          onLandlordNotNeeded={vi.fn()}
+          onClose={vi.fn()}
+        />
       </StrictMode>,
     );
 

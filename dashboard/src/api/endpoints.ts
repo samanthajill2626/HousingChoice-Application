@@ -1039,12 +1039,16 @@ export async function deleteUnit(unitId: string): Promise<UnitItem> {
  *  remaining live contact typed landlord (any role; a soft-deleted one does
  *  not count) the primary contact in the same write - with zero or two-plus,
  *  nobody. The answer's enriched roster carries the flags, so render the
- *  answer's roster, never the one the page loaded. For `{ landlordId: null }`,
- *  409 unit_roster_conflict also means the property's contact list changed
- *  between the server's read and its write: nothing was restored - re-read the
- *  property. With either body it also means the plain restore would apply
- *  now (the property was restored meanwhile, its stored landlord is a
- *  landlord again, or it has none): nothing was written (spec revision 6). */
+ *  answer's roster, never the one the page loaded. 409 unit_roster_conflict
+ *  means the property changed between the server's read and its write - its
+ *  landlord of record, its deleted state or, for `{ landlordId: null }`, its
+ *  contact list (a `{ landlordId: <id> }` restore re-reads and retries a
+ *  contacts-only race itself): nothing was restored - re-read the property.
+ *  409 restore_landlord_not_needed (either body; spec revision 7) means the
+ *  plain restore would apply now (the property was restored meanwhile, its
+ *  stored landlord is a landlord again, or it has none): nothing was written
+ *  and no retry of the same choice can succeed - re-read the property, and
+ *  never re-send the plain restore on the caller's behalf. */
 export async function restoreUnit(
   unitId: string,
   opts?: { landlordId: string | null },

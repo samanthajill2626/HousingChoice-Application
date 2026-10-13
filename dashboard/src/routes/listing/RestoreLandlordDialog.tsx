@@ -33,6 +33,12 @@ export interface RestoreLandlordDialogProps {
   onRestored: (unit: UnitItem) => void;
   /** A 409 unit_roster_conflict: the caller re-reads the property. */
   onConflict: () => void;
+  /** A 409 restore_landlord_not_needed (spec revision 7; final review round 2
+   *  R2-1): the plain restore applies now - the property's landlord changed
+   *  while staff were choosing - and nothing was written. A retry of the same
+   *  choice can never succeed, so the caller closes the dialog and re-reads the
+   *  property; it never re-runs the plain restore on its own. */
+  onLandlordNotNeeded: () => void;
   onClose: () => void;
 }
 
@@ -41,6 +47,7 @@ export function RestoreLandlordDialog({
   landlordName,
   onRestored,
   onConflict,
+  onLandlordNotNeeded,
   onClose,
 }: RestoreLandlordDialogProps): React.JSX.Element {
   const [landlords, setLandlords] = useState<Contact[]>([]);
@@ -77,6 +84,11 @@ export function RestoreLandlordDialog({
         const typed = contactTypeErrorMessage(err);
         if (typed !== null) {
           setError(typed);
+          return;
+        }
+        // Not ROSTER_RETRY_COPY: no retry of this choice can succeed.
+        if (err instanceof ApiError && err.status === 409 && err.code === 'restore_landlord_not_needed') {
+          onLandlordNotNeeded();
           return;
         }
         if (err instanceof ApiError && err.status === 409 && err.code === 'unit_roster_conflict') {

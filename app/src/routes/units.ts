@@ -1739,9 +1739,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     //     arrives when the plain restore WOULD apply (the unit is no longer
     //     soft-deleted, its stored landlord is typed landlord again, or it is
     //     ownerless) means the state changed under the dialog: 409
-    //     unit_roster_conflict and NOTHING is written - no restore, no audit
-    //     (spec revision 6; final review A2, fix wave FWF-1). The dashboard
-    //     re-reads the property.
+    //     restore_landlord_not_needed and NOTHING is written - no restore, no
+    //     audit (spec revision 7; final review A2 and round 2 R2-1). Its own
+    //     code, never unit_roster_conflict ("the contact list or landlord
+    //     changed, retry"): a retry of this body can never succeed. The
+    //     dashboard closes the dialog and re-reads the property; the plain
+    //     restore is never re-run for the caller, which would override the
+    //     choice it sent.
     //   - A unit that is NOT soft-deleted restores exactly as before with no
     //     check (plain restore only): nothing comes back to life, and restore
     //     must never become a way to reassign a live property's landlord.
@@ -1773,15 +1777,16 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     }
 
     if (!needsLandlord) {
-      // The late body (spec revision 6, fix wave FWF-1): the plain restore
-      // applies, so a landlord choice cannot be what the caller saw - refuse
-      // before anything is written, so the dialog re-reads the property.
+      // The late body (spec revision 7; final review A2, round 2 R2-1): the
+      // plain restore applies, so a landlord choice cannot be what the caller
+      // saw - refuse before anything is written, with the code that says no
+      // landlord is needed now, so the dialog closes and the page re-reads.
       if (choosesLandlord) {
         log.info(
           { unitId, actor: req.user?.userId },
           'unit restore refused: a landlord choice arrived when the plain restore applies',
         );
-        res.status(409).json({ error: 'unit_roster_conflict' });
+        res.status(409).json({ error: 'restore_landlord_not_needed' });
         return;
       }
       let unit;

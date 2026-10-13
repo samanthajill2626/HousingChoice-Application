@@ -192,6 +192,13 @@ function restoreLandlordName(err: ApiError): string | undefined {
   return typeof name === 'string' && name.length > 0 ? name : undefined;
 }
 
+/** The deleted banner's sentence after the restore dialog's choice answered
+ *  409 restore_landlord_not_needed and the re-read property is still deleted
+ *  (caseworker-integrity spec revision 7 section 4 "Restore" and "Dashboard
+ *  copy for section 4"): the page's own sentence, not the shared helper's. */
+const RESTORE_LANDLORD_CHANGED_COPY =
+  "This property's landlord changed while you were choosing. Choose Restore again.";
+
 export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();
   const navigate = useNavigate();
@@ -223,6 +230,14 @@ export function ListingDetail(): React.JSX.Element {
   // when a prop changes"), so no frame shows the dialog over the wrong property.
   const [restoreNeeds, setRestoreNeeds] = useState<{ unitId: string; landlordName?: string } | null>(null);
   if (restoreNeeds !== null && restoreNeeds.unitId !== unitId) setRestoreNeeds(null);
+  // caseworker-integrity spec revision 7 section 4 "Restore" (final review
+  // round 2 R2-1): set when the dialog's choice answered 409
+  // restore_landlord_not_needed and the property is still deleted after the
+  // re-read - the deleted banner then says why the dialog closed. The next
+  // Restore press clears it; like restoreNeeds it records the property it was
+  // set for and is reset during render when the route's unitId moves on.
+  const [restoreNotice, setRestoreNotice] = useState<{ unitId: string } | null>(null);
+  if (restoreNotice !== null && restoreNotice.unitId !== unitId) setRestoreNotice(null);
   const [editing, setEditing] = useState(false);
   // The "Start placement" dialog, pre-filled+locked to this property's unit.
   const [startingPlacement, setStartingPlacement] = useState(false);
@@ -371,6 +386,8 @@ export function ListingDetail(): React.JSX.Element {
   const onRestore = (): void => {
     if (deleteBusy) return;
     setDeleteBusy(true);
+    // A new press answers for itself: the last landlord-changed sentence goes.
+    setRestoreNotice(null);
     void restoreUnit(unit.unitId)
       .then((updated) => setUnit(updated))
       .catch((err: unknown) => {
@@ -760,6 +777,12 @@ export function ListingDetail(): React.JSX.Element {
           <span>
             This property is <strong>deleted</strong> - hidden from the properties and the
             landlord&apos;s file. Its data is retained.
+            {restoreNotice !== null ? (
+              <>
+                {' '}
+                <span>{RESTORE_LANDLORD_CHANGED_COPY}</span>
+              </>
+            ) : null}
           </span>
           <Button variant="secondary" size="sm" type="button" onClick={onRestore} disabled={deleteBusy}>
             Restore
@@ -1448,6 +1471,25 @@ export function ListingDetail(): React.JSX.Element {
               })
               .catch(() => {
                 /* best-effort re-read; the dialog's retry message stands */
+              });
+          }}
+          onLandlordNotNeeded={() => {
+            // The plain restore applies now (spec revision 7; final review
+            // round 2 R2-1): close the dialog and re-read, the same settle as
+            // onConflict - and never re-run the plain restore from here, which
+            // would silently override the choice staff just made.
+            setRestoreNeeds(null);
+            void getUnit(unit.unitId)
+              .then((fresh) => {
+                applyRosterUnit(fresh);
+                if (typeof fresh.deleted_at === 'string' && fresh.deleted_at.length > 0) {
+                  setRestoreNotice({ unitId: unit.unitId });
+                }
+              })
+              .catch(() => {
+                // Best-effort re-read: the page still shows the property
+                // deleted, so the banner still says why the dialog closed.
+                setRestoreNotice({ unitId: unit.unitId });
               });
           }}
           onClose={() => setRestoreNeeds(null)}

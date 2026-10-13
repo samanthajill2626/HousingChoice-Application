@@ -156,6 +156,11 @@ beforeEach(() => {
 
 afterEach(() => vi.restoreAllMocks());
 
+/** The deleted banner's sentence after a restore choice answered 409
+ *  restore_landlord_not_needed while the property is still deleted (spec
+ *  revision 7 section 4 "Dashboard copy for section 4"), byte for byte. */
+const RESTORE_LANDLORD_CHANGED = "This property's landlord changed while you were choosing. Choose Restore again.";
+
 /** Change the property status via the interactive pill: open it, then pick an option. */
 async function chooseStatus(
   user: ReturnType<typeof userEvent.setup>,
@@ -1447,14 +1452,15 @@ describe('ListingDetail', () => {
     );
   });
 
-  // Spec revision 6 section 4 "Restore" (final review A2; fix wave FWF-1): a
+  // Spec revision 7 section 4 "Restore" (final review A2 and round 2 R2-1): a
   // landlord choice that arrives when the plain restore would apply - here
   // another staff member restored the property, with their own landlord, while
-  // this dialog was open - answers 409 unit_roster_conflict and writes nothing.
-  // The dialog's conflict path re-reads; the property is no longer deleted, so
-  // the dialog closes and the page shows the real state: live, with the
-  // re-read's landlord on the Contacts card - never the one picked here.
-  it('a landlord choice answered 409 unit_roster_conflict closes the dialog when the re-read shows the property live, and the page shows the re-read property', async () => {
+  // this dialog was open - answers 409 restore_landlord_not_needed and writes
+  // nothing. The dialog closes and the page re-reads; the property is live, so
+  // the page shows the real state - live, with the re-read's landlord on the
+  // Contacts card, never the one picked here - and no landlord-changed
+  // sentence. Nothing re-runs the plain restore.
+  it('a landlord choice answered 409 restore_landlord_not_needed closes the dialog; the re-read is live - the page shows the re-read property and no sentence', async () => {
     const user = userEvent.setup();
     const deletedUnit: NonNullable<ListingState['unit']> = {
       ...READY.unit!,
@@ -1480,7 +1486,9 @@ describe('ListingDetail', () => {
         }),
       )
       .mockRejectedValueOnce(
-        new ApiError(409, 'unit_roster_conflict', 'unit_roster_conflict', { error: 'unit_roster_conflict' }),
+        new ApiError(409, 'restore_landlord_not_needed', 'restore_landlord_not_needed', {
+          error: 'restore_landlord_not_needed',
+        }),
       );
     getUnit.mockReset().mockResolvedValue(fresh);
     getAllContacts
@@ -1516,7 +1524,7 @@ describe('ListingDetail', () => {
     );
     // The real state: live - no Deleted badge or Restore action, the status
     // pill is back ...
-    expect(screen.queryByText('Deleted')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('Deleted')).not.toBeInTheDocument());
     expect(screen.queryByRole('button', { name: /^Restore$/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Property status/i })).toBeInTheDocument();
     // ... and the re-read's landlord on the Contacts card, not the pick.
@@ -1524,7 +1532,184 @@ describe('ListingDetail', () => {
     expect(within(card).getAllByRole('link')[0]).toHaveTextContent('Yolanda Banks (primary)');
     expect(within(card).queryByText(/Nora Lane/)).not.toBeInTheDocument();
     expect(within(card).queryByText(/James Porter/)).not.toBeInTheDocument();
-    expect(restoreUnit).toHaveBeenCalledTimes(2);
+    // No landlord-changed sentence on a live property, and no retry sentence.
+    expect(screen.queryByText(RESTORE_LANDLORD_CHANGED)).not.toBeInTheDocument();
+    expect(screen.queryByText('The property contacts changed - try that change again.')).not.toBeInTheDocument();
+    // The choice was sent once; nothing re-ran the plain restore.
+    expect(restoreUnit.mock.calls).toEqual([['u1'], ['u1', { landlordId: 'll9' }]]);
+  });
+
+  // Spec revision 7 section 4 "Restore" (final review round 2 R2-1): the same
+  // 409 restore_landlord_not_needed when the property is STILL deleted - its
+  // stored landlord, James, became a landlord again while the dialog was open,
+  // so the plain restore applies now. Under revision 6 this answered
+  // unit_roster_conflict and the dialog stayed open saying "try that change
+  // again" to a choice that could never succeed. Now the dialog closes, the
+  // page re-reads, and the deleted banner (its role="status" region) says why:
+  // the landlord changed while staff were choosing, so choose Restore again.
+  // The plain restore is NOT re-run automatically - it would silently override
+  // the choice staff made.
+  /** Restore, then 409 restore_needs_landlord opens the dialog; its "Restore
+   *  without a landlord" answers 409 restore_landlord_not_needed. */
+  function refuseTheLateChoice(): void {
+    restoreUnit.mockReset();
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+          error: 'restore_needs_landlord',
+          landlordName: 'James Porter',
+        }),
+      )
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_landlord_not_needed', 'restore_landlord_not_needed', {
+          error: 'restore_landlord_not_needed',
+        }),
+      );
+  }
+
+  async function chooseRestoreWithoutLandlord(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+  }
+
+  /** A deleted property whose setUnit replaces the unit, as the real hook does. */
+  function deletedPropertyState(unit: NonNullable<ListingState['unit']>): { state: () => ListingState } {
+    let current: ListingState = {
+      ...READY,
+      unit,
+      setUnit: vi.fn((next: NonNullable<ListingState['unit']>) => {
+        current = { ...current, unit: next };
+      }),
+    };
+    useListing.mockImplementation(() => current);
+    return { state: () => current };
+  }
+
+  it('a landlord choice answered 409 restore_landlord_not_needed closes the dialog; the re-read is still deleted - the deleted banner says the landlord changed', async () => {
+    const user = userEvent.setup();
+    const deletedUnit = { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' };
+    // The re-read: still deleted, James (a landlord again) still its landlord of record.
+    const fresh: NonNullable<ListingState['unit']> = {
+      ...deletedUnit,
+      contacts: [{ contactId: 'll1', role: 'landlord', primaryContact: true, name: 'James Porter' }],
+    };
+    refuseTheLateChoice();
+    getUnit.mockReset().mockResolvedValue(fresh);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    const { state } = deletedPropertyState(deletedUnit);
+    renderAt();
+
+    await chooseRestoreWithoutLandlord(user);
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+    expect(getUnit).toHaveBeenCalledWith('u1');
+    await waitFor(() => expect(state().setUnit).toHaveBeenCalledWith(fresh));
+    const banner = screen.getByRole('status');
+    expect(banner).toHaveTextContent(/This property is deleted/);
+    expect(await within(banner).findByText(RESTORE_LANDLORD_CHANGED)).toBeInTheDocument();
+    expect(screen.queryByText('The property contacts changed - try that change again.')).not.toBeInTheDocument();
+    // The choice was sent once; nothing re-ran the plain restore.
+    expect(restoreUnit.mock.calls).toEqual([['u1'], ['u1', { landlordId: null }]]);
+  });
+
+  it('the landlord-changed sentence clears on the next Restore press', async () => {
+    const user = userEvent.setup();
+    const deletedUnit = { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' };
+    refuseTheLateChoice();
+    // The next press fails, so the property stays deleted: only the press
+    // itself can clear the sentence.
+    restoreUnit.mockRejectedValueOnce(new ApiError(500, 'http_500', 'Request failed (500)'));
+    getUnit.mockReset().mockResolvedValue(deletedUnit);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    deletedPropertyState(deletedUnit);
+    renderAt();
+
+    await chooseRestoreWithoutLandlord(user);
+    const banner = screen.getByRole('status');
+    expect(await within(banner).findByText(RESTORE_LANDLORD_CHANGED)).toBeInTheDocument();
+
+    await user.click(within(banner).getByRole('button', { name: 'Restore' }));
+    expect(restoreUnit).toHaveBeenLastCalledWith('u1');
+    expect(within(screen.getByRole('status')).queryByText(RESTORE_LANDLORD_CHANGED)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(screen.getByRole('status')).getByRole('button', { name: 'Restore' })).toBeEnabled(),
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(/This property is deleted/);
+    expect(screen.queryByText(RESTORE_LANDLORD_CHANGED)).not.toBeInTheDocument();
+    expect(restoreUnit).toHaveBeenCalledTimes(3);
+  });
+
+  // A failed re-read leaves the page showing the property deleted, so the
+  // banner still says why the dialog closed (Choose Restore again resolves it
+  // either way); still no automatic plain restore.
+  it('a failed re-read after 409 restore_landlord_not_needed still closes the dialog and the deleted banner says the landlord changed', async () => {
+    const user = userEvent.setup();
+    const deletedUnit = { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' };
+    refuseTheLateChoice();
+    getUnit.mockReset().mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));
+    getAllContacts.mockReset().mockResolvedValue([]);
+    const { state } = deletedPropertyState(deletedUnit);
+    renderAt();
+
+    await chooseRestoreWithoutLandlord(user);
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument(),
+    );
+    expect(await within(screen.getByRole('status')).findByText(RESTORE_LANDLORD_CHANGED)).toBeInTheDocument();
+    expect(getUnit).toHaveBeenCalledWith('u1');
+    expect(state().setUnit).not.toHaveBeenCalled();
+    expect(restoreUnit.mock.calls).toEqual([['u1'], ['u1', { landlordId: null }]]);
+  });
+
+  // The sentence belongs to the property it was said for, like the dialog
+  // (R1 code review, dashboard finding 8): the /listings/:unitId element is
+  // not keyed, so a history move re-renders this same instance - the sentence
+  // must not show on another property, nor come back with the first one.
+  it('the landlord-changed sentence is reset by a history move to another property', async () => {
+    const user = userEvent.setup();
+    const deletedUnit = { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' };
+    refuseTheLateChoice();
+    getUnit.mockReset().mockResolvedValue(deletedUnit);
+    getAllContacts.mockReset().mockResolvedValue([]);
+    const deletedU1: ListingState = { ...READY, unit: deletedUnit, setUnit: vi.fn() };
+    const deletedU2: ListingState = {
+      ...READY,
+      unit: { ...deletedUnit, unitId: 'u2', address: { line1: '22 Elm St' } },
+      setUnit: vi.fn(),
+    };
+    useListing.mockImplementation((id: string) => (id === 'u2' ? deletedU2 : deletedU1));
+    let go: ((delta: number) => void) | undefined;
+    function HistoryProbe(): null {
+      const navigate = useNavigate();
+      go = (delta) => void navigate(delta);
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={['/listings/u2', '/listings/u1']} initialIndex={1}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+        </Routes>
+        <HistoryProbe />
+      </MemoryRouter>,
+    );
+
+    await chooseRestoreWithoutLandlord(user);
+    expect(await within(screen.getByRole('status')).findByText(RESTORE_LANDLORD_CHANGED)).toBeInTheDocument();
+
+    // Back to u2, also deleted: its banner never says u1's sentence.
+    act(() => go?.(-1));
+    expect(await screen.findByRole('heading', { name: /22 Elm St/ })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent(/This property is deleted/);
+    expect(screen.queryByText(RESTORE_LANDLORD_CHANGED)).not.toBeInTheDocument();
+
+    // Forward to u1 again: reset, not merely hidden.
+    act(() => go?.(1));
+    expect(await screen.findByRole('status')).toHaveTextContent(/This property is deleted/);
+    expect(screen.queryByText(RESTORE_LANDLORD_CHANGED)).not.toBeInTheDocument();
   });
 
   it.each([

@@ -7,7 +7,8 @@
 //   - { landlordId: <id> } / { landlordId: null }: honored only when the plain
 //     restore would refuse - swap or clear the landlord in one write; a body
 //     that arrives when the plain restore would apply answers 409
-//     unit_roster_conflict and writes nothing (spec revision 6, fix wave FWF-1);
+//     restore_landlord_not_needed and writes nothing (spec revision 7, final
+//     review round 2 R2-1; revision 6 answered unit_roster_conflict);
 //   - the unit_restored audit gains landlordReplaced / landlordCleared.
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
@@ -202,8 +203,12 @@ describe('POST /api/units/:id/restore - with a landlord (I3)', () => {
   // body is sent only after a 409 restore_needs_landlord, so one that arrives
   // when the PLAIN restore would apply means the property changed under the
   // dialog - it is no longer deleted, its stored landlord is typed landlord
-  // again, or it is ownerless. The route answers 409 unit_roster_conflict and
-  // writes NOTHING: no restore, no unit_restored audit row.
+  // again, or it is ownerless. The route writes NOTHING: no restore, no
+  // unit_restored audit row. Its answer is its own 409
+  // restore_landlord_not_needed (spec revision 7; final review round 2 R2-1),
+  // not unit_roster_conflict: that code means "the contact list or landlord
+  // changed, retry", and a retry of this body can never succeed - the dialog
+  // looped on it while the property stayed deleted.
   const PLAIN_PATH_STATES: Array<[string, (world: FakeWorld) => void]> = [
     [
       'the property is no longer deleted',
@@ -239,7 +244,7 @@ describe('POST /api/units/:id/restore - with a landlord (I3)', () => {
     LATE_BODIES.map(([choice, landlordId]) => [state, choice, seed, landlordId] as const),
   );
   it.each(LATE_BODY_CASES)(
-    'a body when the plain restore would apply (%s), restore %s: 409 unit_roster_conflict - nothing written, no audit',
+    'a body when the plain restore would apply (%s), restore %s: 409 restore_landlord_not_needed - nothing written, no audit',
     async (_state, _choice, seed, landlordId) => {
       const { app, world } = makeWebhookHarness();
       seed(world);
@@ -250,7 +255,7 @@ describe('POST /api/units/:id/restore - with a landlord (I3)', () => {
       const res = await restore(app, 'u-late', { landlordId });
 
       expect(res.status).toBe(409);
-      expect(res.body).toEqual({ error: 'unit_roster_conflict' });
+      expect(res.body).toEqual({ error: 'restore_landlord_not_needed' });
       // Unchanged in every field: a deleted property is still deleted, a live
       // one keeps its landlord, and no write touched updated_at.
       expect(world.units.get('u-late')).toEqual(before);

@@ -175,6 +175,8 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     await expect(page.getByRole('heading', { name: new RegExp(unit.area) })).toBeVisible();
     await expect(page.getByText(new RegExp(`${unit.beds}\\s*beds`))).toBeVisible();
     await expect(page.getByText(`$${unit.rent}`, { exact: false }).first()).toBeVisible();
+    // No voucher size is recorded on this unit, so the flyer falls back to beds.
+    await expect(page.getByText(`Fits a ${unit.beds}-bedroom voucher`)).toBeVisible();
 
     // Every tenant-useful fact is shown UPFRONT - no gate (this IS the feature).
     await expect(page.getByText(unit.addressLine1)).toBeVisible();
@@ -320,11 +322,18 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     // Staff edits the fields (this is exactly what ListingEditForm PATCHes).
     const editedFee = 99;
     const editedVideo = `https://tours.example.com/edited-${Date.now()}`;
+    // A recorded voucher size that DIFFERS from the unit's beds (2): the flyer
+    // must state the recorded size, not the bedroom count (2026-10-12 prod report).
+    const editedVoucherSize = unit.beds + 1;
     const patchRes = await staff.request.patch(`${NEXT}/api/units/${unit.unitId}`, {
-      data: { application_fee: editedFee, video_url: editedVideo, same_day_rta: false },
+      data: {
+        application_fee: editedFee,
+        video_url: editedVideo,
+        same_day_rta: false,
+        voucher_size_accepted: editedVoucherSize,
+      },
     });
     expect(patchRes.ok()).toBeTruthy();
-    await staff.close();
 
     // The bare public page (a FRESH context - no prior visit, so sessionStorage is
     // clean) shows the EDITED values immediately, with no funnel/reveal steps.
@@ -338,6 +347,25 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     await expect(page.getByText('Same-day RTA')).toHaveCount(0);
     // The stale fee never appears.
     await expect(page.getByText('$30')).toHaveCount(0);
+    // The recorded voucher size wins over the bedroom count; the beds fact is
+    // unchanged.
+    await expect(page.getByText(`Fits a ${editedVoucherSize}-bedroom voucher`)).toBeVisible();
+    await expect(page.getByText(`Fits a ${unit.beds}-bedroom voucher`)).toHaveCount(0);
+    await expect(page.getByText(new RegExp(`${unit.beds}\\s*beds`))).toBeVisible();
+
+    // Staff CLEARS the recorded size (null - what ListingEditForm sends when the
+    // field is emptied): the stored field is removed, so the flyer falls back to
+    // the bedroom count on the next load.
+    const clearRes = await staff.request.patch(`${NEXT}/api/units/${unit.unitId}`, {
+      data: { voucher_size_accepted: null },
+    });
+    expect(clearRes.ok()).toBeTruthy();
+    expect('voucher_size_accepted' in (await clearRes.json()).unit).toBe(false);
+    await staff.close();
+
+    await page.reload();
+    await expect(page.getByText(`Fits a ${unit.beds}-bedroom voucher`)).toBeVisible();
+    await expect(page.getByText(`Fits a ${editedVoucherSize}-bedroom voucher`)).toHaveCount(0);
   });
 
   test('/join: standalone intake with no session -> thank-you (no reveal)', async ({ page }) => {

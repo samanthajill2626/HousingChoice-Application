@@ -447,7 +447,9 @@ Cost: one consistent Scan of the contacts table and one of the units table, plus
 
 **The importer uses the same list.** `import:apply` resolves housing authority and agency values against the stored item (else the starting list; it never creates the item), writes them fill-only on contacts, never writes an agency to a property, and prints what it did not write under "organization names NOT written" (a dry run lists them too).
 
-### Caseworkers (`feat/caseworkers`): NOTHING is owed at deploy - the conversion's repair, and putting a mistaken conversion back
+### Caseworkers (`feat/caseworkers`): DEPLOYED dev + prod 2026-10-12 (release 1.5.1) - nothing was owed; the conversion's repair, and putting a mistaken conversion back
+
+**DEPLOYED 2026-10-12: dev and prod run release `1.5.1` (main `e27868bc`), deployed by Cameron.** The follow-up `fix/caseworker-integrity` (R2-ADV-1 and the contact-type checks) was not yet merged at this deploy and ships separately. Until it is live, a caseworker converted while a housing authority suggestion accept was in flight can end up holding that authority (issue `claimed-suggestion-accept-after-caseworker-conversion`); "Make caseworker" again does not clear it - clear the authority by hand.
 
 **Deploy the app image (app + worker) and you are done: no Terraform, no secrets, no new table or index, no script, no backfill.** Spec: `docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md`, D16-D22 and section 11. A caseworker is a `partner` contact with the role `Caseworker`; Contacts > Caseworkers lists them, with a "Possible caseworkers" list to review.
 

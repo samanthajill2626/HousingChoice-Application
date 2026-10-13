@@ -13,7 +13,8 @@
 //        landlord_not_landlord), and the slot stays vacant.
 // Each race runs `race` on the raw client right after the FIRST read of the
 // unit through the racing client: the caller's (route's) read when the test
-// makes it, else the add's own first read.
+// makes it, else the add's own first read. Each attempt's own read is
+// CONSISTENT (final review A7, fix wave FWF-5): the two PINs at the end.
 //
 // Self-skipping like the other integration suites when nothing answers at
 // DYNAMODB_ENDPOINT (`npm run db:start` to run for real).
@@ -73,11 +74,12 @@ describe.skipIf(!reachable)('unitsRepo.addContact contact-list rules per attempt
   /**
    * A repo whose FIRST read of `unitId` is followed by `race` (on the raw
    * client, so the racer's own writes are not counted), counting the
-   * UpdateCommands it sends for the unit and how many lost their condition.
+   * UpdateCommands it sends for the unit and how many lost their condition,
+   * and recording each GetCommand's ConsistentRead for the unit, in order.
    */
   function racingRepo(unitId: string, race: () => Promise<unknown>) {
     let raced = false;
-    const counter = { writes: 0, lostWrites: 0 };
+    const counter = { writes: 0, lostWrites: 0, unitReads: [] as Array<boolean | undefined> };
     const racingDoc = Object.create(doc) as typeof doc;
     racingDoc.send = (async (command: Parameters<typeof doc.send>[0]) => {
       if (command instanceof UpdateCommand && command.input.Key?.['unitId'] === unitId) {
@@ -90,9 +92,12 @@ describe.skipIf(!reachable)('unitsRepo.addContact contact-list rules per attempt
         }
       }
       const result = await doc.send(command);
-      if (!raced && command instanceof GetCommand && command.input.Key?.['unitId'] === unitId) {
-        raced = true;
-        await race();
+      if (command instanceof GetCommand && command.input.Key?.['unitId'] === unitId) {
+        counter.unitReads.push(command.input.ConsistentRead);
+        if (!raced) {
+          raced = true;
+          await race();
+        }
       }
       return result;
     }) as typeof doc.send;
@@ -178,5 +183,39 @@ describe.skipIf(!reachable)('unitsRepo.addContact contact-list rules per attempt
     expect(stored !== undefined && Object.prototype.hasOwnProperty.call(stored, 'landlordId')).toBe(false);
     expect(stored?.contacts).toEqual([]);
     expect(stored?.primary_contact).toBeUndefined();
+  });
+
+  // Final review A7 (fix wave FWF-5): the refusals above are thrown on the
+  // add's OWN per-attempt read of the unit - a refusal writes nothing, so no
+  // conditional write ever confirms what that read saw. The read is therefore
+  // CONSISTENT: a lagging replica must never answer a 409 for a state the
+  // route's consistent read already saw as allowed.
+  it("(PIN) a refusal is decided on a CONSISTENT read of the unit - attempt 1's own read", async () => {
+    const unitId = await unitWithCaseworkerSeat();
+    const { repo, counter } = racingRepo(unitId, async () => undefined);
+
+    // A caseworker with no seat here: refused on the add's first read.
+    await expect(
+      repo.addContact(unitId, { contactId: 'c-cw-2', role: 'pm', primaryContact: false }, CASEWORKER_FACTS),
+    ).rejects.toMatchObject({ name: 'ContactListCaseworkerError' });
+
+    expect(counter.unitReads).toEqual([true]);
+    expect(counter.writes).toBe(0);
+  });
+
+  it("(PIN) every attempt reads the unit CONSISTENTLY - the retry's read the refusal is decided on included", async () => {
+    const unitId = await unitWithCaseworkerSeat();
+    // B's removal lands right after attempt 1's read: attempt 1's write loses,
+    // and attempt 2 re-reads and refuses (the per-attempt case above).
+    const { repo, counter } = racingRepo(unitId, () => units.removeContact(unitId, 'c-cw'));
+
+    await expect(
+      repo.addContact(unitId, { contactId: 'c-cw', role: 'pm', primaryContact: true }, CASEWORKER_FACTS),
+    ).rejects.toMatchObject({ name: 'ContactListCaseworkerError' });
+
+    expect(counter.lostWrites).toBe(1);
+    // Attempt 1's read and the last read - attempt 2's, which refused.
+    expect(counter.unitReads[0]).toBe(true);
+    expect(counter.unitReads.at(-1)).toBe(true);
   });
 });

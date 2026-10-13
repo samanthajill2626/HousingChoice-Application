@@ -900,7 +900,11 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       let attempts = 0;
       const write = async (): Promise<UnitItem> => {
         attempts += 1;
-        const unit = await this.getById(unitId);
+        // CONSISTENT (final review A7, fix wave FWF-5): the contact-list
+        // refusals below are thrown on this read and write nothing, so no
+        // conditional write ever confirms it - a lagging replica must not
+        // refuse a state the route's own consistent read saw as allowed.
+        const unit = await this.getById(unitId, { consistentRead: true });
         if (!unit) {
           throw new ConditionalCheckFailedException({
             message: `unit ${unitId} not found`,

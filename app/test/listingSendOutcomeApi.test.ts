@@ -178,6 +178,41 @@ describe('outcome route - not_interested and clear', () => {
     expect(outcomeEvents(world)).toEqual([]);
   });
 
+  it('an Undo with nothing to undo wrote nothing: a failed re-read answers 503 WITHOUT saved (review B R2-3)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    const realGet = world.listingSendsRepo.getByKeyConsistent.bind(world.listingSendsRepo);
+    let reads = 0;
+    world.listingSendsRepo.getByKeyConsistent = async (unitId: string, contactId: string) => {
+      reads += 1;
+      return reads === 1 ? realGet(unitId, contactId) : undefined;
+    };
+    const res = await post(app, { outcome: 'clear' });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable' });
+    expect(outcomeEvents(world)).toEqual([]);
+  });
+
+  it('an Undo that removed a decline DID write: a failed re-read answers 503 saved:true', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedSend(world);
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-06-25T00:00:00.000Z', by: 'staff' });
+    const realGet = world.listingSendsRepo.getByKeyConsistent.bind(world.listingSendsRepo);
+    let reads = 0;
+    world.listingSendsRepo.getByKeyConsistent = async (unitId: string, contactId: string) => {
+      reads += 1;
+      return reads === 1 ? realGet(unitId, contactId) : undefined;
+    };
+    const res = await post(app, { outcome: 'clear' });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'outcome_unavailable', saved: true });
+    expect(outcomeEvents(world).map((e) => e.type)).toEqual(['listing_decline_cleared']);
+  });
+
   it('a failed audit write never fails the route (best-effort)', async () => {
     const { app, world, capture } = makeWebhookHarness();
     seedUnit(world);

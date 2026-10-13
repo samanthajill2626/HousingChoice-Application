@@ -1205,28 +1205,42 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   });
 
   // POST /api/units/:unitId/recipients/:contactId/outcome - the ONE way a
-  // send outcome changes (last-heard-from spec 5.4 as amended by 14.3).
-  // Body { outcome: 'interested' | 'not_interested' | 'clear' }. Answers, in
-  // this order: 404 unit_not_found; 409 unit_deleted (every outcome, B10);
-  // 404 send_not_found (no COUNTED row - ledgerRowCounted, B5); 400
-  // invalid_outcome; 503 outcome_unavailable when a required read fails
-  // BEFORE any write; interested only: 400 interested_unsupported (not a
-  // tenant on the recipient projection), 404 tenant_not_found / 409
+  // send outcome changes (last-heard-from spec 5.4 as amended by 14.3 and
+  // 14.7). Body { outcome: 'interested' | 'not_interested' | 'clear' }.
+  // Answers, in this order: 404 unit_not_found; 409 unit_deleted (every
+  // outcome, B10); 404 send_not_found (no COUNTED row - ledgerRowCounted,
+  // B5); 400 invalid_outcome; 503 outcome_unavailable when a required read
+  // fails BEFORE any write; interested only: 400 interested_unsupported (not
+  // a tenant on the recipient projection), 404 tenant_not_found / 409
   // contact_not_tenant (requireTenantContact - the same CONSISTENT I2 guard
   // POST /api/tours runs), 409 tour_type_required (no qualifying tour and no
-  // structured tour_type - the dashboard opens the form instead, D14); then
-  // 200 { row } re-projected, or 503 { error: 'outcome_unavailable', saved:
-  // true } when the write landed but the re-read failed (a click that wrote
-  // nothing gets the plain 503 - review A-3). Interested CREATES the tour
-  // (and records listing_interested) BEFORE it clears an effective decline
-  // (and records listing_decline_cleared) - deliberately the reverse of spec
-  // 5.4 steps 3/4, per code-review adjudication ADV-3: a failed create then
-  // leaves the decline (perhaps another staff member's) and the timeline
-  // untouched, and a failed clear after a create leaves a tour whose
-  // createdAt already supersedes the decline. Audit events are
-  // best-effort (lib/listingOutcomeEvents.ts). A concurrent double click can
-  // still race two creates (no conditional write on the pair - I3; the
-  // dashboard disables the button in flight). PII: ids only in logs.
+  // structured tour_type - the dashboard opens the form instead, D14);
+  // not_interested / clear only: 404 send_not_found when the conditional
+  // write finds no counted row; then 200 { row } re-projected.
+  // INTERESTED (spec 14.7 - steps 3 and 4 of 5.4 reversed): it CREATES the
+  // tour (only when no qualifying tour exists) and records
+  // listing_interested FIRST, so a failed create leaves the decline and the
+  // timeline untouched. THEN it clears the decline record it READ, whatever
+  // its effectiveness (an explicit Interested overrides every earlier
+  // decline, and a retry repairs a clear that failed behind a create), as a
+  // COMPARE-AND-CLEAR on that record's `at` (review B R2-1): a decline
+  // another staff member records meanwhile survives, and a lost compare (or
+  // a row that stopped counting) records nothing and is never a 404 - the
+  // re-projection answers the truth. listing_decline_cleared is recorded
+  // only when the cleared decline was EFFECTIVE (review B R2-2). CLEAR (Undo)
+  // removes any stored decline and records listing_decline_cleared only when
+  // there was one.
+  // SAVED (review A-3, B R2-2, B R2-3; spec 14.7): a failure AFTER a write -
+  // the re-read, or a throw such as the clear behind a create (logged at
+  // error, ids only) - answers 503 { error: 'outcome_unavailable', saved:
+  // true }, never a bare 500. The writes are setDeclined, a tour create and
+  // a clear that removed a record; a click that wrote none of them (an
+  // Interested that found a tour and no stored decline, an Undo with nothing
+  // to undo) gets the plain 503, and a throw before any write is the generic
+  // 500. Audit events are best-effort (lib/listingOutcomeEvents.ts). A
+  // concurrent double click can still race two creates (no conditional write
+  // on the pair - I3; the dashboard disables the button in flight). PII: ids
+  // only in logs.
   router.post('/:unitId/recipients/:contactId/outcome', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const contactId = String(req.params['contactId'] ?? '');
@@ -1267,9 +1281,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const address = formatAddress(unit.address) || unitId;
     const eventDeps = { activityEvents, audit, logger: log };
     let createdTour: TourItem | undefined;
-    // Review A-3: `saved: true` on a late 503 only when THIS click wrote
-    // (setDeclined / clearDeclined / a tour create). An Interested click
-    // that found a tour and no effective decline writes nothing.
+    // Review A-3 / B R2-3: `saved: true` on a late 503 only when THIS click
+    // wrote (setDeclined / a tour create / a clear that removed a record). An
+    // Interested click that found a tour and no stored decline, or an Undo
+    // with nothing to undo, writes nothing.
     let wrote = false;
 
     // Review B R2-2 part 2 / A R2-2 (spec 14.7): everything from here on runs
@@ -1375,7 +1390,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
           res.status(404).json({ error: 'send_not_found' });
           return;
         }
-        wrote = true;
+        // Review B R2-3: an Undo with nothing to undo changed nothing a
+        // person can see, so it is not a write for `saved` either.
+        wrote = hadDecline;
         // A clear that found no decline records nothing (plan 3.4 #2).
         if (hadDecline) {
           await recordListingOutcomeEvent(eventDeps, {

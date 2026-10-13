@@ -155,3 +155,16 @@
   color: var(--c-text-muted);
   text-align: right;
 }
+
+/* "The intro changed." under the editable box (primary-contact-integrity spec
+ * 7.2): the operator's edit was kept over a newer server intro. A note with
+ * its one action, not a warning - nothing is wrong. */
+.introChanged {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}

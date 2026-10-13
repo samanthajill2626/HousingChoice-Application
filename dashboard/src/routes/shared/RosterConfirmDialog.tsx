@@ -27,7 +27,7 @@
 // once a thread exists and preview-add 409s `no_thread` before one, and both
 // must refetch rather than open a dialog. So the dialog only ever receives a
 // preview that really is previewable.
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type {
   IntroFallback,
   IntroFallbackReason,
@@ -248,13 +248,30 @@ export function RosterConfirmDialog({
   const [error, setError] = useState<string | null>(null);
   // A "Check again" (spec 7.1) is in flight.
   const [checking, setChecking] = useState(false);
-  // Seeded from the server-composed preview. Re-seeded if the preview itself
-  // changes (a re-preview behind an open dialog), which would otherwise leave
-  // the operator editing text the server no longer proposes.
+  // The edited-draft rule (primary-contact-integrity spec 7.2). The draft is
+  // seeded from the server-composed preview, and `seed` remembers that body.
+  // On a NEW preview (a Check again, or a re-preview behind an open dialog):
+  // an UNEDITED draft (still equal to its seed) takes the new body, seed and
+  // all; an EDITED draft is KEPT, and the note under the box offers the new
+  // body. Adjusted during render (React's "adjust state when a prop changes"),
+  // never in an effect, so no frame pairs the new preview with the old draft.
+  // What is sent is unchanged: a draft that differs from the CURRENT preview
+  // body posts `introBody` (see `run`).
   const [draft, setDraft] = useState(preview.body);
-  useEffect(() => {
+  const [seed, setSeed] = useState(preview.body);
+  const [seenBody, setSeenBody] = useState(preview.body);
+  if (seenBody !== preview.body) {
+    setSeenBody(preview.body);
+    if (draft === seed) {
+      setDraft(preview.body);
+      setSeed(preview.body);
+    }
+  }
+  const introChanged = editableBody && seed !== preview.body;
+  const applyUpdatedIntro = (): void => {
     setDraft(preview.body);
-  }, [preview.body]);
+    setSeed(preview.body);
+  };
 
   const run = (force: boolean): void => {
     if (busy) return;
@@ -426,6 +443,22 @@ export function RosterConfirmDialog({
             <p className={styles.charCount} aria-live="polite">
               {draft.length} / {RELAY_INTRO_MAX_CHARS}
             </p>
+            {/* Spec 7.2: the operator's edit was kept over a newer server
+                intro. Say so under the box, with the one-click way back. */}
+            {introChanged ? (
+              <p className={styles.introChanged}>
+                The intro changed.{' '}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  type="button"
+                  onClick={applyUpdatedIntro}
+                  disabled={busy}
+                >
+                  Use the updated intro
+                </Button>
+              </p>
+            ) : null}
           </>
         ) : (
           <p className={styles.bubble}>{preview.body}</p>

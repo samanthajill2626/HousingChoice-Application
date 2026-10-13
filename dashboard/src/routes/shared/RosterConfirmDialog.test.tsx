@@ -746,3 +746,97 @@ describe('RosterConfirmDialog - the intro fallback box (primary-contact-integrit
     );
   });
 });
+
+// --- primary-contact-integrity spec 7.2: the edited-draft rule --------------
+// A Check again (or any re-preview behind the open dialog) must never
+// overwrite text the operator typed. An unedited draft follows the server; an
+// edited one is kept, with a one-click way to take the new intro.
+describe('RosterConfirmDialog - the edited-draft rule (primary-contact-integrity spec 7.2)', () => {
+  const FIRST = "Hey, it's Sam. You're now connected with Mark and Keisha on this number.";
+  const SECOND =
+    "Hey Keisha! It's Sam. Putting you in a group text with Mark to tour 470 Bolton Rd NW on Fri Oct 16.";
+  const THIRD =
+    "Hey Keisha! It's Sam. Putting you in a group text with Mark to tour 470 Bolton Rd NW on Sat Oct 17.";
+  const TYPED = 'My own words for Keisha and Mark.';
+
+  /** An editable open dialog on FIRST; `rerenderWith` hands it a new preview
+   *  body, as a caller does after Check again. */
+  function renderEditable(): {
+    rerenderWith: (body: string) => void;
+    onConfirm: ReturnType<typeof vi.fn>;
+  } {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const props: RosterConfirmDialogProps = {
+      title: 'Open the relay group?',
+      preview: preview({ body: FIRST }),
+      confirmLabel: 'Open relay group',
+      deferLabel: 'Open',
+      onConfirm,
+      onClose: vi.fn(),
+      editableBody: true,
+    };
+    const { rerender } = render(<RosterConfirmDialog {...props} />);
+    return {
+      rerenderWith: (body) => rerender(<RosterConfirmDialog {...props} preview={preview({ body })} />),
+      onConfirm,
+    };
+  }
+
+  /** Replace the draft with TYPED. */
+  async function editDraft(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    const box = screen.getByRole('textbox', { name: /Message/ });
+    await user.clear(box);
+    await user.type(box, TYPED);
+  }
+
+  it('an UNEDITED draft takes the new body, with no notice', () => {
+    const { rerenderWith } = renderEditable();
+    rerenderWith(SECOND);
+    expect(screen.getByRole('textbox', { name: /Message/ })).toHaveValue(SECOND);
+    expect(screen.queryByText('The intro changed.')).not.toBeInTheDocument();
+  });
+
+  it('an EDITED draft is KEPT on a new preview, and the dialog says the intro changed', async () => {
+    const user = userEvent.setup();
+    const { rerenderWith } = renderEditable();
+    await editDraft(user);
+    rerenderWith(SECOND);
+    expect(screen.getByRole('textbox', { name: /Message/ })).toHaveValue(TYPED);
+    expect(screen.getByText('The intro changed.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Use the updated intro' })).toBeInTheDocument();
+  });
+
+  it('"Use the updated intro" takes the new body and clears the notice; sent untouched, it posts no introBody', async () => {
+    const user = userEvent.setup();
+    const { rerenderWith, onConfirm } = renderEditable();
+    await editDraft(user);
+    rerenderWith(SECOND);
+    await user.click(screen.getByRole('button', { name: 'Use the updated intro' }));
+    expect(screen.getByRole('textbox', { name: /Message/ })).toHaveValue(SECOND);
+    expect(screen.queryByText('The intro changed.')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Open relay group' }));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+    expect(onConfirm).toHaveBeenCalledWith(false, undefined);
+  });
+
+  it('a KEPT edit is what is sent - it differs from the CURRENT preview body', async () => {
+    const user = userEvent.setup();
+    const { rerenderWith, onConfirm } = renderEditable();
+    await editDraft(user);
+    rerenderWith(SECOND);
+    await user.click(screen.getByRole('button', { name: 'Open relay group' }));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+    expect(onConfirm).toHaveBeenCalledWith(false, TYPED);
+  });
+
+  it('after "Use the updated intro" the draft is unedited again: the next preview replaces it', async () => {
+    const user = userEvent.setup();
+    const { rerenderWith } = renderEditable();
+    await editDraft(user);
+    rerenderWith(SECOND);
+    await user.click(screen.getByRole('button', { name: 'Use the updated intro' }));
+    rerenderWith(THIRD);
+    expect(screen.getByRole('textbox', { name: /Message/ })).toHaveValue(THIRD);
+    expect(screen.queryByText('The intro changed.')).not.toBeInTheDocument();
+  });
+});

@@ -13,6 +13,7 @@
 import { describe, expect, it } from 'vitest';
 import request from 'supertest';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { splitTsMsgId } from '../src/repos/messagesRepo.js';
 import {
   createFakeWorld,
   makeWebhookHarness,
@@ -659,6 +660,154 @@ describe('inbound masked voice - non-member caller identity', () => {
     expect(noPoolCall?.relay_refusal_reason).toBeUndefined();
     expect(noPoolCall?.relay_external_caller_phone).toBeUndefined();
     expect(noPoolCall?.relay_external_caller_contact_id).toBeUndefined();
+  });
+});
+
+describe('inbound masked voice - last heard from (spec 5.1)', () => {
+  /** The persisted call row's instant (its tsMsgId prefix). */
+  const callAt = (world: FakeWorld, callSid: string): string => {
+    const row = world.messages.find((m) => m.provider_sid === callSid);
+    expect(row, `expected a call row for ${callSid}`).toBeDefined();
+    return splitTsMsgId(row!.tsMsgId).providerTs;
+  };
+
+  // Path 6 - the refusal branch: every refusal reason touches the caller.
+  it('closed_thread: a roster member calling a closed group is touched', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { status: 'closed' });
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams({ CallSid: 'CAheard-closed' }));
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Hangup');
+    expect(world.heardFromTouches).toEqual([
+      { contactId: 'c-alice', at: callAt(world, 'CAheard-closed'), outcome: 'written' },
+    ]);
+  });
+
+  it('non_member, live match: the stored external caller id is touched', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-external', type: 'unknown', phone: CAROL });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: CAROL, CallSid: 'CAheard-nonmember' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Hangup');
+    expect(world.heardFromTouches).toEqual([
+      { contactId: 'c-external', at: callAt(world, 'CAheard-nonmember'), outcome: 'written' },
+    ]);
+  });
+
+  it('non_member, SOFT-DELETED match: no id is stored on the row, but findByPhone still names the contact', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    world.contacts.push({
+      contactId: 'c-external',
+      type: 'unknown',
+      phone: CAROL,
+      deleted_at: '2026-08-28T12:00:00.000Z',
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: CAROL, CallSid: 'CAheard-nonmember-deleted' }),
+    );
+
+    expect(res.status).toBe(200);
+    const row = world.messages.find((m) => m.provider_sid === 'CAheard-nonmember-deleted');
+    expect(row?.relay_external_caller_contact_id).toBeUndefined();
+    expect(world.heardFromTouches).toEqual([
+      { contactId: 'c-external', at: callAt(world, 'CAheard-nonmember-deleted'), outcome: 'written' },
+    ]);
+  });
+
+  it('non_member, unmatched: nobody is touched', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      inboundVoiceParams({ From: CAROL, CallSid: 'CAheard-nonmember-unmatched' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(world.messages.find((m) => m.provider_sid === 'CAheard-nonmember-unmatched')).toBeDefined();
+    expect(world.heardFromTouches).toEqual([]);
+  });
+
+  it('no_callee: a phone-only caller resolves by phone', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { participants: [{ contactId: '', phone: ALICE }] });
+    world.contacts.push({ contactId: 'c-alice-row', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams({ CallSid: 'CAheard-no-callee' }));
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Dial');
+    expect(world.heardFromTouches).toEqual([
+      { contactId: 'c-alice-row', at: callAt(world, 'CAheard-no-callee'), outcome: 'written' },
+    ]);
+  });
+
+  it('no_pool_number: the roster member is touched', async () => {
+    const world = createFakeWorld();
+    const relay = seedRelay(world, { pool_number: undefined });
+    world.conversationsRepo.getAllByPoolNumber = async () => [relay];
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams({ CallSid: 'CAheard-no-pool' }));
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Dial');
+    expect(world.heardFromTouches).toEqual([
+      { contactId: 'c-alice', at: callAt(world, 'CAheard-no-pool'), outcome: 'written' },
+    ]);
+  });
+
+  it('a deduped refusal redelivery touches again at the same instant', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-external', type: 'unknown', phone: CAROL });
+    const { app } = makeWebhookHarness({ world });
+    const params = inboundVoiceParams({ From: CAROL, CallSid: 'CAheard-nonmember-redelivery' });
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', params);
+    await signedTwilioPost(app, '/webhooks/twilio/voice', params);
+
+    expect(world.messages.filter((m) => m.provider_sid === 'CAheard-nonmember-redelivery')).toHaveLength(1);
+    const at = callAt(world, 'CAheard-nonmember-redelivery');
+    expect(world.heardFromTouches.map((t) => t.contactId)).toEqual(['c-external', 'c-external']);
+    expect(world.heardFromTouches.map((t) => t.at)).toEqual([at, at]);
+  });
+
+  it('a refusal whose call row fails to persist touches nobody (the touch sits after the append)', async () => {
+    const world = createFakeWorld();
+    seedRelay(world, { status: 'closed' });
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    world.messagesRepo.append = async () => {
+      throw new Error('boom');
+    };
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoiceParams({ CallSid: 'CAheard-closed' }));
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Hangup');
+    expect(world.heardFromTouches).toEqual([]);
   });
 });
 

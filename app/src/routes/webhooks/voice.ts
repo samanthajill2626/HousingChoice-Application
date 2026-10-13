@@ -1092,6 +1092,47 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
             deliveryStatus: 'delivered',
           });
         }
+        // Last heard from (spec 5.1 / 14.2): a refused call still means the
+        // caller reached out - every refusal reason, fresh AND deduped. A member
+        // is its roster key (a phone-only member resolves by phone); a
+        // non-member is its stored contact id, else findByPhone (the id is
+        // left unset for a soft-deleted match). Best-effort.
+        try {
+          const heardThread =
+            appended.conversationId === relay.conversationId
+              ? relay
+              : await conversations.getById(appended.conversationId);
+          const heardFromId =
+            heardThread === undefined
+              ? undefined
+              : await attributeInbound(
+                  {
+                    direction: 'inbound',
+                    type: 'call',
+                    ...(caller !== undefined && { relay_sender_key: relayMemberKey(caller) }),
+                    ...(relayExternalCallerPhone !== undefined && { relay_external_caller_phone: relayExternalCallerPhone }),
+                    ...(relayExternalCallerContactId !== undefined && {
+                      relay_external_caller_contact_id: relayExternalCallerContactId,
+                    }),
+                  },
+                  heardThread,
+                  repoLookup(contacts),
+                );
+          if (heardFromId !== undefined) {
+            const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+            if (outcome === 'failed') {
+              log.error({ callSid: CallSid, reason }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+            }
+          }
+        } catch (err) {
+          // The error NAME only, never the message: a failed phone lookup's
+          // text must not reach the logs on this path (the non-member lookup
+          // above logs none either - PII hygiene, pinned by its test).
+          log.error(
+            { callSid: CallSid, reason, errName: err instanceof Error ? err.name : typeof err },
+            'last_heard_from touch failed - message persisted, last_heard_from stale',
+          );
+        }
       } catch (err) {
         // Never 5xx a webhook on a persist failure — answer with the masked
         // refusal regardless (a redelivery dedupes at the append).

@@ -283,8 +283,9 @@ describe('POST /api/units/:id/restore - without a landlord (I3)', () => {
 // promotion; fix wave 2 FW2-12): a restore WITHOUT a landlord of a property
 // whose cleared landlord was its primary contact promotes the ONE remaining
 // contact-list row whose contact is typed landlord (any roster role; read
-// consistently, a missing contact or a routing pointer is not eligible) in the
-// same conditional write; with zero or two-plus such rows nobody is promoted.
+// consistently, a missing contact or a routing pointer is not eligible, nor -
+// fix wave 3 FW3-1 - a soft-deleted contact) in the same conditional write;
+// with zero or two-plus such rows nobody is promoted.
 // The write is conditioned on the contact list the route read, so a
 // concurrent contact-list change answers 409 unit_roster_conflict. The audit
 // gains primaryPromoted { to } next to landlordCleared.
@@ -431,6 +432,49 @@ describe('POST /api/units/:id/restore - without a landlord: the sole-landlord pr
     expect(world.units.get('u-p6')?.contacts?.filter((row) => row.primaryContact)).toEqual([
       { contactId: 'c-pm', role: 'pm', primaryContact: true },
     ]);
+  });
+
+  // R3 code review, backend finding A1 (probes F3a / F3b; fix wave 3 FW3-1):
+  // deleting a contact never removes its property seats, so a list can hold a
+  // SOFT-DELETED contact typed landlord. The promotion is an automatic routing
+  // choice, and everywhere else a soft-deleted contact is unusable for routing,
+  // so it is never eligible - and never blocks the one live landlord-typed row.
+  it('a SOFT-DELETED contact typed landlord is not eligible: it is the only one left - nobody is promoted', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedClearedPrimary(world, 'u-p8', [{ contactId: 'c-gone', role: 'pm', primaryContact: false }]);
+    seedContact(world, 'c-gone', { type: 'landlord', deleted_at: DELETED_AT });
+
+    const res = await restore(app, 'u-p8', { landlordId: null });
+
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-p8')?.deleted_at).toBeUndefined();
+    expect(world.units.get('u-p8')?.contacts).toEqual([{ contactId: 'c-gone', role: 'pm', primaryContact: false }]);
+    expect(world.units.get('u-p8')?.primary_contact).toBeUndefined();
+    expect(restoredEvents(world)[0]?.payload).toMatchObject({ landlordCleared: { from: 'c-old' } });
+    expect(restoredEvents(world)[0]?.payload).not.toHaveProperty('primaryPromoted');
+  });
+
+  it('a soft-deleted contact typed landlord does not block the one LIVE landlord-typed contact - the live one is promoted', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedClearedPrimary(world, 'u-p9', [
+      { contactId: 'c-gone', role: 'pm', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+    ]);
+    seedContact(world, 'c-gone', { type: 'landlord', deleted_at: DELETED_AT });
+    seedContact(world, 'c-pm', { type: 'landlord' });
+
+    const res = await restore(app, 'u-p9', { landlordId: null });
+
+    expect(res.status).toBe(200);
+    expect(world.units.get('u-p9')?.contacts).toEqual([
+      { contactId: 'c-gone', role: 'pm', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+    ]);
+    expect(world.units.get('u-p9')?.primary_contact).toBe('c-pm');
+    expect(restoredEvents(world)[0]?.payload).toMatchObject({
+      landlordCleared: { from: 'c-old' },
+      primaryPromoted: { to: 'c-pm' },
+    });
   });
 
   it('(PIN) reads the remaining contacts CONSISTENTLY', async () => {

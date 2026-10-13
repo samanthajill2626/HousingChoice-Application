@@ -63,6 +63,7 @@ import {
 } from '../repos/unitsRepo.js';
 import {
   createContactsRepo,
+  isDeleted as isContactDeleted,
   type ContactItem,
   type ContactsRepo,
   type RecipientDisplay,
@@ -422,9 +423,12 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
    * (unitsRepo.restoreWithLandlord's rule) - the ONE remaining row whose
    * contact is typed `landlord` (any roster role; read CONSISTENTLY, and a
    * missing contact or a routing pointer row is not eligible) is the one to
-   * promote; zero or two-plus such rows promote nobody (null). Decided from
-   * `unit`, the route's consistent read, whose contact list the restore's
-   * write is then conditioned on.
+   * promote; zero or two-plus such rows promote nobody (null). A SOFT-DELETED
+   * contact is not eligible either (R3 code review finding A1, fix wave 3
+   * FW3-1): deleting a contact keeps its seats, and this is an automatic
+   * routing choice, where a deleted contact is unusable everywhere else.
+   * Decided from `unit`, the route's consistent read, whose contact list the
+   * restore's write is then conditioned on.
    */
   async function soleLandlordToPromote(unit: UnitItem, clearedLandlordId: string | undefined): Promise<string | null> {
     if (clearedLandlordId === undefined) return null;
@@ -443,6 +447,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         contact !== undefined &&
         contact.phone_ref !== true &&
         contact.email_ref !== true &&
+        !isContactDeleted(contact) &&
         contact.type === 'landlord'
       );
     });

@@ -112,3 +112,129 @@ export function rosterContactIds(unit: Pick<UnitItem, 'contacts' | 'landlordId'>
   }
   return ids;
 }
+
+// ---------------------------------------------------------------------------
+// P1 - the property-contact lookup (spec 4.1, plan C1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Who the app uses as a property's contact (spec 4.1), or why nobody:
+ *   found       - the first live candidate;
+ *   nobody      - `none` (no candidate at all), `deleted` (every candidate was
+ *                 soft-deleted or has no record), `is_tenant` (a candidate IS
+ *                 the given tenant - the walk STOPS there, no fall-through);
+ *   read_failed - a candidate's read THREW. The walk stops: a failed read is
+ *                 not absence, and falling through would name the wrong
+ *                 person (the reminders fail closed on it, and the default
+ *                 people list keeps a bare row for `candidateId`).
+ */
+export type PropertyContactResult =
+  | { kind: 'found'; contactId: string; contact: ContactItem }
+  | { kind: 'nobody'; reason: 'none' | 'deleted' | 'is_tenant' }
+  | { kind: 'read_failed'; candidateId: string };
+
+/** One candidate's read: `contact` undefined = no record; `{ ok: false }` = the read threw. */
+type CandidateRead = { ok: true; contact: ContactItem | undefined } | { ok: false };
+
+/**
+ * The candidates, in order: the flagged primary row's contact (through
+ * unitContacts, so a landlord-only unit's DERIVED row counts), then the
+ * landlord of record when it is non-empty and a different id. A flagged row
+ * with an empty contactId names nobody and is no candidate.
+ */
+function propertyContactCandidates(unit: Pick<UnitItem, 'contacts' | 'landlordId'>): string[] {
+  const primary = nonEmptyId(unitContacts(unit).find((row) => row.primaryContact === true)?.contactId);
+  const landlordId = nonEmptyId(unit.landlordId);
+  const candidates: string[] = [];
+  if (primary !== undefined) candidates.push(primary);
+  if (landlordId !== undefined && landlordId !== primary) candidates.push(landlordId);
+  return candidates;
+}
+
+/** The tenant test (spec 4.1): an id comparison made BEFORE any read. */
+function isTheTenant(candidateId: string, tenantId: string | undefined): boolean {
+  const tenant = nonEmptyId(tenantId);
+  return tenant !== undefined && candidateId === tenant;
+}
+
+/**
+ * The per-candidate rule (spec 4.1), shared by both walks below so the sync
+ * and async lookups cannot drift. Returns the walk's answer, or 'skip' for a
+ * candidate that is soft-deleted or has no record.
+ */
+function judgeCandidate(candidateId: string, read: CandidateRead): PropertyContactResult | 'skip' {
+  if (!read.ok) return { kind: 'read_failed', candidateId };
+  const contact = read.contact;
+  if (!isLive(contact)) return 'skip';
+  return { kind: 'found', contactId: candidateId, contact };
+}
+
+/** The walk ran out of candidates: `deleted` if any was skipped, else `none`. */
+function exhausted(skippedAny: boolean): PropertyContactResult {
+  return { kind: 'nobody', reason: skippedAny ? 'deleted' : 'none' };
+}
+
+/**
+ * C1, PURE (spec 4.1): decide the property contact from reads the caller
+ * already holds. `lookup` answers per id `{ ok: true, contact }` (`contact`
+ * undefined = no record) or `{ ok: false }` (the read threw), and is asked
+ * only about the candidates the walk actually reaches. Never throws unless
+ * `lookup` itself throws.
+ */
+export function decidePropertyContact(args: {
+  unit: Pick<UnitItem, 'contacts' | 'landlordId'>;
+  tenantId?: string;
+  lookup: (contactId: string) => { ok: true; contact: ContactItem | undefined } | { ok: false };
+}): PropertyContactResult {
+  let skippedAny = false;
+  for (const candidateId of propertyContactCandidates(args.unit)) {
+    if (isTheTenant(candidateId, args.tenantId)) return { kind: 'nobody', reason: 'is_tenant' };
+    const verdict = judgeCandidate(candidateId, args.lookup(candidateId));
+    if (verdict === 'skip') {
+      skippedAny = true;
+      continue;
+    }
+    return verdict;
+  }
+  return exhausted(skippedAny);
+}
+
+/** Read one candidate for the async walk: a throw is logged (ids only) and answered `{ ok: false }`. */
+async function readCandidate(
+  contactsRepo: Pick<ContactsRepo, 'getById'>,
+  candidateId: string,
+  log: Logger,
+): Promise<CandidateRead> {
+  try {
+    return { ok: true, contact: await contactsRepo.getById(candidateId) };
+  } catch (err) {
+    log.warn({ err, candidateId }, 'property contact: candidate read failed - lookup stops');
+    return { ok: false };
+  }
+}
+
+/**
+ * C1, async (spec 4.1): the same walk, reading each candidate LAZILY with
+ * getById - the landlord of record is read only when the flagged primary was
+ * skipped, so a healthy property costs the one read it always did. Never
+ * throws.
+ */
+export async function resolvePropertyContact(args: {
+  unit: Pick<UnitItem, 'contacts' | 'landlordId'>;
+  tenantId?: string;
+  contactsRepo: Pick<ContactsRepo, 'getById'>;
+  logger?: Logger;
+}): Promise<PropertyContactResult> {
+  const log = args.logger ?? defaultLogger;
+  let skippedAny = false;
+  for (const candidateId of propertyContactCandidates(args.unit)) {
+    if (isTheTenant(candidateId, args.tenantId)) return { kind: 'nobody', reason: 'is_tenant' };
+    const verdict = judgeCandidate(candidateId, await readCandidate(args.contactsRepo, candidateId, log));
+    if (verdict === 'skip') {
+      skippedAny = true;
+      continue;
+    }
+    return verdict;
+  }
+  return exhausted(skippedAny);
+}

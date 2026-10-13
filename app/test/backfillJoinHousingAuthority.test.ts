@@ -262,6 +262,17 @@ describe('leftOutReasonFromAudit (spec D10: the WHOLE history, any order)', () =
 // The report the operator reads (pure). Names go to the PRINTED report only.
 // ---------------------------------------------------------------------------
 
+/**
+ * The first and last lines of an --apply that STOPPED in its exclusions-first
+ * pass (spec D10 revision 6): an exclusion append failed, so no target was
+ * read and no housing authority was written for any lead.
+ */
+const STOP_HEADER =
+  'STOPPED - no housing authority was written for any lead: the exclusion of each lead below, named in --skip, may not have been recorded (oldest sign-up first; dates are UTC):';
+const STOP_FOOTER = (failed: number): string =>
+  'The run stopped before reading any lead not named in --skip. Keep the same --skip value and re-run the apply ' +
+  `(an exclusion already recorded is not recorded twice). Failed: ${failed}.`;
+
 const lead = (contactId: string, firstName: string, lastName: string, signedUpAt: string, status: string): BackfillLead => ({
   contactId,
   firstName,
@@ -348,28 +359,26 @@ describe('formatBackfillReport (spec D10: name, sign-up date, status, contactId 
     expect(lines).toContain('Would update: 1 lead(s). Failed: 1.');
   });
 
-  it('apply: a lead named in --skip whose exclusion append failed is a FAILED left-out line - it MAY not have been recorded', () => {
-    const lines = formatBackfillReport(
-      {
-        ...DRY_REPORT,
-        targets: [],
-        leftOut: [
-          {
-            ...lead('c-3', 'Drew', 'Dekalbson', '2026-06-01T09:00:00.000Z', 'needs_review'),
-            reason: 'skipped',
-            exclusionFailed: true,
-          },
-        ],
-        failed: 1,
-      },
-      true,
-    );
-    expect(lines).toEqual([
-      'Leads given "Atlanta Housing Authority" (oldest sign-up first; dates are UTC):',
-      '  (none)',
-      'Written: 0. Skipped (changed after the read): 0. Failed: 1.',
-      'Left out (1 lead(s), oldest sign-up first):',
+  it('apply STOPPED before any housing authority write (spec D10 revision 6: exclusions first): the leads whose exclusion MAY not have been recorded, each a FAILED line, and the count', () => {
+    const failedSkip = (contactId: string, firstName: string, signedUpAt: string) => ({
+      ...lead(contactId, firstName, 'Dekalbson', signedUpAt, 'needs_review'),
+      reason: 'skipped' as const,
+      exclusionFailed: true as const,
+    });
+    const stopped: BackfillReport = {
+      ...DRY_REPORT,
+      targets: [],
+      leftOut: [failedSkip('c-3', 'Drew', '2026-06-01T09:00:00.000Z'), failedSkip('c-8', 'Jordan', '2026-07-01T09:00:00.000Z')],
+      unknownSkips: ['c-flyer'],
+      failed: 2,
+      stopped: true,
+    };
+    expect(formatBackfillReport(stopped, true)).toEqual([
+      STOP_HEADER,
       '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-3  - named in --skip - FAILED: its exclusion may not have been recorded (an ERROR line names this contactId) - keep it in --skip and re-run the apply',
+      '  Jordan Dekalbson  signed up 2026-07-01  status needs_review  contactId c-8  - named in --skip - FAILED: its exclusion may not have been recorded (an ERROR line names this contactId) - keep it in --skip and re-run the apply',
+      STOP_FOOTER(2),
+      '--skip ids that are not candidates (ignored): c-flyer',
     ]);
   });
 
@@ -1015,6 +1024,10 @@ const EXCLUSION_FAILED_LOG =
 const SKIP_HISTORY_UNREAD_LOG =
   'backfill-join-housing-authority - could not read the audit history of a lead named in --skip; recording its exclusion anyway (a second exclusion event is harmless)';
 const SKIP_LINE = '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-skip  - named in --skip';
+/** The done line of an --apply that STOPPED in its exclusions-first pass (spec D10 revision 6). */
+const STOPPED_LOG = (unrecorded: number): string =>
+  `backfill-join-housing-authority - STOPPED before any housing authority write: ${unrecorded} exclusion(s) may not have been ` +
+  'recorded (see the ERROR lines naming them) - keep the same --skip value and re-run the apply';
 
 /**
  * The world the run tests share. Targets: c-old, c-mid, c-new. Left out:
@@ -1241,39 +1254,160 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect(await w.excludedEvents()).toHaveLength(1);
   }, 120_000);
 
-  it('an exclusion that cannot be recorded is a FAILED left-out line: the lead is still left out, the run goes on, exit 1 - and a re-run with the same --skip records it', async () => {
-    const w = await newWorld();
-    await seedLeads(w);
-    const capture = createLogCapture();
-    const log = createLogger({ level: 'info', destination: capture.stream });
-    const base = w.deps({ logger: log });
+  /**
+   * The world's deps with every call that reads or writes a lead recorded in
+   * order - its history, its suggestion, its write, each audit append - and
+   * each exclusion append failing for the contactIds in `failAppendFor`.
+   */
+  function orderSpy(
+    w: World,
+    opts: { logger?: Logger; failAppendFor?: ReadonlySet<string> } = {},
+  ): { deps: BackfillDeps; printed: string[]; calls: string[] } {
+    const base = w.deps(opts.logger !== undefined ? { logger: opts.logger } : {});
+    const calls: string[] = [];
     const deps: BackfillDeps = {
       ...base.deps,
+      contacts: {
+        update: async (contactId, patch, updateOpts) => {
+          calls.push(`update ${contactId}`);
+          return base.deps.contacts.update(contactId, patch, updateOpts);
+        },
+      },
       audit: {
-        listByEntity: (entityKey, opts) => base.deps.audit.listByEntity(entityKey, opts),
+        listByEntity: async (entityKey, listOpts) => {
+          calls.push(`history ${entityKey}`);
+          return base.deps.audit.listByEntity(entityKey, listOpts);
+        },
         append: async (entityKey, eventType, payload) => {
-          if (eventType === BACKFILL_EXCLUDED_AUDIT_TYPE) throw new Error('ProvisionedThroughputExceededException');
+          calls.push(`append ${eventType} ${entityKey}`);
+          if (eventType === BACKFILL_EXCLUDED_AUDIT_TYPE && opts.failAppendFor?.has(entityKey.slice('contacts#'.length))) {
+            throw new Error('ProvisionedThroughputExceededException');
+          }
           await base.deps.audit.append(entityKey, eventType, payload);
         },
       },
+      suggestions: {
+        getSuggestion: async (contactId, target, getOpts) => {
+          calls.push(`suggestion ${contactId}`);
+          return base.deps.suggestions.getSuggestion(contactId, target, getOpts);
+        },
+      },
     };
+    return { deps, printed: base.printed, calls };
+  }
+
+  it('an apply records every exclusion FIRST (spec D10 revision 6) - before any other lead is read and before any write: a YOUNGER --skip lead is recorded before the older targets are written; a re-apply adds no second event', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    // c-new (signed up 2026-08-15) is the youngest candidate: in sign-up order it comes LAST.
+    const skip = new Set(['c-new']);
+    const { deps, printed, calls } = orderSpy(w);
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip });
+    expect(report).toMatchObject({ written: 3, skipped: 0, failed: 0, warnings: [] });
+    expect(report.targets.map((t) => [t.contactId, t.outcome])).toEqual([
+      ['c-skip', 'written'],
+      ['c-old', 'written'],
+      ['c-mid', 'written'],
+    ]);
+    expect(report.leftOut.map((l) => [l.contactId, l.reason])).toEqual([
+      ['c-again', 'signed_up_again'],
+      ['c-cleared', 'authority_history'],
+      ['c-new', 'skipped'],
+    ]);
+    expect(report.stopped).toBeUndefined();
+    expect(printed).toEqual(formatBackfillReport(report, true));
+    // The exclusion pass (c-new's history, for the no-duplicate check, then its append) comes before
+    // anything else; then each other lead oldest first - its reads, then its write - and c-new not again.
+    expect(calls).toEqual([
+      'history contacts#c-new',
+      `append ${BACKFILL_EXCLUDED_AUDIT_TYPE} contacts#c-new`,
+      'history contacts#c-skip',
+      'suggestion c-skip',
+      'update c-skip',
+      `append ${BACKFILL_AUDIT_TYPE} contacts#c-skip`,
+      'history contacts#c-again',
+      'history contacts#c-again',
+      'history contacts#c-old',
+      'history contacts#c-old',
+      'suggestion c-old',
+      'update c-old',
+      `append ${BACKFILL_AUDIT_TYPE} contacts#c-old`,
+      'history contacts#c-mid',
+      'suggestion c-mid',
+      'update c-mid',
+      `append ${BACKFILL_AUDIT_TYPE} contacts#c-mid`,
+      'history contacts#c-cleared',
+      'history contacts#c-cleared',
+    ]);
+    expect((await w.excludedEvents()).map((e) => e['entityKey'])).toEqual(['contacts#c-new']);
+    expect((await w.get('c-new'))?.['housingAuthority']).toBeUndefined();
+    expect(backfillExitCode(report)).toBe(0);
+
+    // A re-apply with the same --skip writes nothing new and records no second exclusion.
+    const again = await runJoinAuthorityBackfill(w.deps().deps, { apply: true, skip });
+    expect(again).toMatchObject({ targets: [], written: 0, failed: 0 });
+    expect(await w.excludedEvents()).toHaveLength(1);
+    expect(await w.backfillEvents()).toHaveLength(3);
+  }, 120_000);
+
+  it('an exclusion that cannot be recorded STOPS the apply before any other read and any write: no housing authority written for any lead, the stop report, exit 1 - and a re-run with the same --skip records it and writes', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const before = { contacts: await w.scanTable('contacts'), audit: await w.scanTable('audit_events') };
+    const capture = createLogCapture();
+    const log = createLogger({ level: 'info', destination: capture.stream });
+    const { deps, printed, calls } = orderSpy(w, { logger: log, failAppendFor: SKIP });
     const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
-    expect(report).toMatchObject({ written: 3, skipped: 0, failed: 1, warnings: [] });
-    expect(report.leftOut[0]).toEqual({ ...LEFT_OUT[0], exclusionFailed: true });
-    expect(base.printed).toContain(SKIP_EXCLUSION_FAILED_LINE);
-    expect(base.printed).toContain('Written: 3. Skipped (changed after the read): 0. Failed: 1.');
-    expect((await w.get('c-skip'))?.['housingAuthority']).toBeUndefined();
-    expect(await w.excludedEvents()).toEqual([]);
+    expect(report).toEqual({
+      targets: [],
+      leftOut: [{ ...LEFT_OUT[0], exclusionFailed: true }],
+      unknownSkips: [],
+      missingSkips: [],
+      written: 0,
+      skipped: 0,
+      failed: 1,
+      warnings: [],
+      stopped: true,
+    });
+    expect(printed).toEqual([STOP_HEADER, SKIP_EXCLUSION_FAILED_LINE, STOP_FOOTER(1)]);
+    // Only c-skip was touched: its history read (the no-duplicate check) and the failed append. No other lead was read.
+    expect(calls).toEqual(['history contacts#c-skip', `append ${BACKFILL_EXCLUDED_AUDIT_TYPE} contacts#c-skip`]);
+    expect(await w.scanTable('contacts')).toEqual(before.contacts);
+    expect(await w.scanTable('audit_events')).toEqual(before.audit);
     expect(capture.atLevel(50).map((l) => [l['contactId'], l['msg']])).toEqual([['c-skip', EXCLUSION_FAILED_LOG]]);
+    const done = capture.atLevel(40).map((l) => String(l['msg']));
+    expect(done).toEqual([STOPPED_LOG(1)]);
     expect(capture.lines.some((l) => JSON.stringify(l).includes('Dekalbson'))).toBe(false);
     expect(backfillExitCode(report)).toBe(1);
 
     const again = await runJoinAuthorityBackfill(w.deps().deps, { apply: true, skip: SKIP });
-    expect(again).toMatchObject({ written: 0, failed: 0 });
+    expect(again).toMatchObject({ written: 3, failed: 0 });
+    expect(again.stopped).toBeUndefined();
     expect((await w.excludedEvents()).map((e) => e['entityKey'])).toEqual(['contacts#c-skip']);
   }, 120_000);
 
-  it('an exclusion append that lands and THEN errors (a timeout) is a FAILED line that says it MAY not have been recorded - and a re-run with the same --skip adds no second event', async () => {
+  it('the exclusion pass tries EVERY --skip lead before it stops: one that fails is listed, one that succeeds stays recorded - and nothing is written for any lead', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const skip = new Set(['c-skip', 'c-new']);
+    const { deps, printed, calls } = orderSpy(w, { failAppendFor: new Set(['c-skip']) });
+    const report = await runJoinAuthorityBackfill(deps, { apply: true, skip });
+    expect(report).toMatchObject({ targets: [], written: 0, skipped: 0, failed: 1, stopped: true });
+    expect(report.leftOut).toEqual([{ ...LEFT_OUT[0], exclusionFailed: true }]);
+    expect(printed).toEqual([STOP_HEADER, SKIP_EXCLUSION_FAILED_LINE, STOP_FOOTER(1)]);
+    expect(calls).toEqual([
+      'history contacts#c-skip',
+      `append ${BACKFILL_EXCLUDED_AUDIT_TYPE} contacts#c-skip`,
+      'history contacts#c-new',
+      `append ${BACKFILL_EXCLUDED_AUDIT_TYPE} contacts#c-new`,
+    ]);
+    expect((await w.excludedEvents()).map((e) => e['entityKey'])).toEqual(['contacts#c-new']);
+    expect(await w.backfillEvents()).toEqual([]);
+    for (const id of ['c-skip', 'c-old', 'c-mid', 'c-new']) expect((await w.get(id))?.['housingAuthority']).toBeUndefined();
+    expect(backfillExitCode(report)).toBe(1);
+  }, 120_000);
+
+  it('an exclusion append that lands and THEN errors (a timeout) STOPS the apply with a line that says it MAY not have been recorded - and a re-run with the same --skip adds no second event', async () => {
     const w = await newWorld();
     await seedLeads(w);
     const base = w.deps();
@@ -1288,14 +1422,15 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
       },
     };
     const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
-    expect(report).toMatchObject({ written: 3, failed: 1 });
-    expect(base.printed).toContain(SKIP_EXCLUSION_FAILED_LINE);
+    expect(report).toMatchObject({ written: 0, failed: 1, stopped: true });
+    expect(base.printed).toEqual([STOP_HEADER, SKIP_EXCLUSION_FAILED_LINE, STOP_FOOTER(1)]);
     // It DID land: the line's "may not" is the honest reading of an ambiguous error.
     expect((await w.excludedEvents()).map((e) => e['entityKey'])).toEqual(['contacts#c-skip']);
+    expect(await w.backfillEvents()).toEqual([]);
     expect(backfillExitCode(report)).toBe(1);
 
     const again = await runJoinAuthorityBackfill(w.deps().deps, { apply: true, skip: SKIP });
-    expect(again).toMatchObject({ written: 0, failed: 0 });
+    expect(again).toMatchObject({ written: 3, failed: 0 });
     expect(await w.excludedEvents()).toHaveLength(1);
   }, 120_000);
 
@@ -1356,19 +1491,20 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect(later.leftOut.map((l) => [l.contactId, l.reason])).toContainEqual(['c-skip', 'excluded_earlier']);
   }, 120_000);
 
-  it('apply: a --skip lead whose history read fails AND whose exclusion append fails is a FAILED left-out line - never a target, exit 1', async () => {
+  it('apply: a --skip lead whose history read fails AND whose exclusion append fails STOPS the apply with its FAILED line - never a target, nothing written for any lead, exit 1', async () => {
     const w = await newWorld();
     await seedLeads(w);
     const capture = createLogCapture();
     const { deps, printed } = skipHistoryUnreadable(w, createLogger({ level: 'info', destination: capture.stream }), true);
     const report = await runJoinAuthorityBackfill(deps, { apply: true, skip: SKIP });
-    expect(report.targets).toEqual(TARGET_LEADS.map((l) => ({ ...l, outcome: 'written' })));
-    expect(report.leftOut).toEqual([{ ...LEFT_OUT[0], exclusionFailed: true }, LEFT_OUT[1], LEFT_OUT[2]]);
-    expect(report).toMatchObject({ written: 3, skipped: 0, failed: 1, warnings: [] });
-    expect(printed).toContain(SKIP_EXCLUSION_FAILED_LINE);
-    expect(printed).toContain('Written: 3. Skipped (changed after the read): 0. Failed: 1.');
+    expect(report.targets).toEqual([]);
+    expect(report.leftOut).toEqual([{ ...LEFT_OUT[0], exclusionFailed: true }]);
+    expect(report).toMatchObject({ written: 0, skipped: 0, failed: 1, warnings: [], stopped: true });
+    expect(printed).toEqual([STOP_HEADER, SKIP_EXCLUSION_FAILED_LINE, STOP_FOOTER(1)]);
     expect(printed.some((line) => line.includes('contactId c-skip  - FAILED: nothing written'))).toBe(false);
     expect((await w.get('c-skip'))?.['housingAuthority']).toBeUndefined();
+    for (const l of TARGET_LEADS) expect((await w.get(l.contactId))?.['housingAuthority']).toBeUndefined();
+    expect(await w.backfillEvents()).toEqual([]);
     expect(await w.excludedEvents()).toEqual([]);
     expect(capture.atLevel(50).map((l) => [l['contactId'], l['msg']])).toEqual([['c-skip', EXCLUSION_FAILED_LOG]]);
     expect(capture.atLevel(40).map((l) => [l['contactId'], l['msg']])).toContainEqual(['c-skip', SKIP_HISTORY_UNREAD_LOG]);
@@ -2070,6 +2206,38 @@ describe.skipIf(!reachable)('main against DynamoDB Local - the real run behind t
     expect(printed).toEqual([]);
     expect(await w.scanTable('contacts')).toEqual(before.contacts);
     expect(await w.scanTable('audit_events')).toEqual(before.audit);
+  }, 120_000);
+
+  it('an apply whose exclusion cannot be recorded exits 1 with the stop report printed - no housing authority written for any lead', async () => {
+    const w = await newWorld();
+    await seedLeads(w);
+    const before = await w.scanTable('contacts');
+    const errors: string[] = [];
+    const printed: string[] = [];
+    const exit = await main(['--env', 'local', '--lane', '7', '--apply', '--skip', 'c-skip'], {
+      resolveStage: async () => stageOf(w),
+      run: (stage, opts) => {
+        const deps = buildBackfillDeps(stage, { logger: silent, print: (line) => printed.push(line) });
+        return runJoinAuthorityBackfill(
+          {
+            ...deps,
+            audit: {
+              listByEntity: (entityKey, listOpts) => deps.audit.listByEntity(entityKey, listOpts),
+              append: async () => {
+                throw new Error('ProvisionedThroughputExceededException');
+              },
+            },
+          },
+          opts,
+        );
+      },
+      printError: (text) => errors.push(text),
+      logger: silent,
+    });
+    expect(exit).toBe(1);
+    expect(errors).toEqual([]);
+    expect(printed).toEqual([STOP_HEADER, SKIP_EXCLUSION_FAILED_LINE, STOP_FOOTER(1)]);
+    expect(await w.scanTable('contacts')).toEqual(before);
   }, 120_000);
 
   it('an apply on an environment with no organization list exits 1 with the refusal printed - nothing read, nothing written', async () => {

@@ -28,8 +28,11 @@
 // because of --skip, unless its history already holds one - so a later run
 // without the same --skip leaves that lead out too. That history is read only
 // for this check: when the read fails, the event is appended anyway (a second
-// one is harmless). A failed append counts the lead failed (exit 1). A dry
-// run records nothing, and reads nothing of a --skip lead.
+// one is harmless). EXCLUSIONS FIRST (spec D10 revision 6): an --apply
+// records every one in a first pass, BEFORE it reads any other lead or writes
+// anything; if any append failed, the run STOPS there (exit 1) - no target is
+// read and no housing authority is written for any lead. A dry run records
+// nothing, and reads nothing of a --skip lead.
 //
 // THE LIST: the stored org-list item, read with peek() - never created. The
 // run REFUSES (exit 1, no contact read, nothing written) when no item is
@@ -48,12 +51,13 @@
 // Scan, before any write (exit 1).
 //
 // DRY RUN (the default) writes nothing at all - not even the list item.
-// --apply writes, per target, ONE conditional contactsRepo.update - the
-// authority is set only while the contact still has none, is still a tenant
-// and is still not deleted; a lost condition is counted `skipped`, any other
-// error `write_failed` (it may or may not have landed) - then one
-// housing_authority_backfill audit event { field, from: '', to }, no actor.
-// Each candidate's history is read right before its write.
+// --apply writes, after its exclusions, per target, ONE conditional
+// contactsRepo.update - the authority is set only while the contact still has
+// none, is still a tenant and is still not deleted; a lost condition is
+// counted `skipped`, any other error `write_failed` (it may or may not have
+// landed) - then one housing_authority_backfill audit event
+// { field, from: '', to }, no actor. Each candidate's history is read right
+// before its write.
 //
 // TARGET: --env local|dev|prod through scripts/lib/stageClient.ts. An agent
 // runs this ONLY with --env local --lane <L> against a hermetic e2e lane it
@@ -239,7 +243,11 @@ export interface LeftOutLead extends BackfillLead {
   reason: LeftOutReason;
   /** `pending_suggestion` only: the pending suggestion's value as stored (the report prints it escaped like a name). */
   suggestedValue?: string;
-  /** --apply, `skipped` only: appending its housing_authority_backfill_excluded event failed (it may have landed all the same) - counted in `failed`. */
+  /**
+   * --apply, `skipped` only: appending its housing_authority_backfill_excluded
+   * event failed (it may have landed all the same) - counted in `failed`; the
+   * run STOPPED before any housing authority write (BackfillReport.stopped).
+   */
   exclusionFailed?: true;
 }
 
@@ -264,6 +272,14 @@ export interface BackfillReport {
   failed: number;
   /** Printed as WARNING lines: the post-apply list check, a missing audit event. */
   warnings: string[];
+  /**
+   * --apply only (spec D10 revision 6, exclusions first): an exclusion append
+   * of its first pass failed, so the run STOPPED before reading any lead not
+   * named in --skip and before any housing authority write. `targets` is
+   * empty, and `leftOut` holds ONLY the --skip leads whose exclusion may not
+   * have been recorded (each `exclusionFailed`, counted in `failed`).
+   */
+  stopped?: true;
 }
 
 const REASON_TEXT: Readonly<Record<Exclude<LeftOutReason, 'pending_suggestion'>, string>> = {
@@ -339,13 +355,29 @@ function leadLine(lead: BackfillLead): string {
   );
 }
 
+/** The first line of an --apply that STOPPED in its exclusions-first pass (spec D10 revision 6). */
+const STOPPED_HEADER =
+  'STOPPED - no housing authority was written for any lead: the exclusion of each lead below, named in --skip, ' +
+  'may not have been recorded (oldest sign-up first; dates are UTC):';
+
 /**
  * Spec D10: what the CLI prints - each target on its own line (name, sign-up
  * date, status, contactId), oldest first, then the count; then the left-out
  * leads the same way with the reason; then each --skip id that names no
  * contact on its own line, the ids that name a non-candidate, and warnings.
+ * A STOPPED apply (revision 6) prints instead the leads whose exclusion may
+ * not have been recorded, what to do, and the count.
  */
 export function formatBackfillReport(report: BackfillReport, apply: boolean): string[] {
+  if (report.stopped === true) {
+    return [
+      STOPPED_HEADER,
+      ...report.leftOut.map((l) => `${leadLine(l)}  - ${reasonText(l)}${EXCLUSION_FAILED_SUFFIX}`),
+      'The run stopped before reading any lead not named in --skip. Keep the same --skip value and re-run the apply ' +
+        `(an exclusion already recorded is not recorded twice). Failed: ${report.failed}.`,
+      ...(report.unknownSkips.length > 0 ? [`--skip ids that are not candidates (ignored): ${report.unknownSkips.join(', ')}`] : []),
+    ];
+  }
   const lines: string[] = [
     apply
       ? `Leads given "${BACKFILL_AUTHORITY}" (oldest sign-up first; dates are UTC):`
@@ -676,8 +708,9 @@ type ExclusionOutcome = 'recorded' | 'already_recorded' | 'failed';
  * there is `already_recorded`. A failed history read does not stop the
  * append - a second event is harmless, an unrecorded exclusion is what a
  * later run would overwrite. `failed` only when the APPEND throws: the caller
- * counts the lead failed. An append can land and then error (a timeout), so
- * a failed one MAY not have been recorded - the lines say so, never "could
+ * counts the lead failed and stops the run before any housing authority
+ * write (spec D10 revision 6). An append can land and then error (a timeout),
+ * so a failed one MAY not have been recorded - the lines say so, never "could
  * not". Never throws.
  */
 async function recordExclusion(deps: BackfillDeps, contactId: string): Promise<ExclusionOutcome> {
@@ -732,14 +765,17 @@ async function warnIfNameLeftList(deps: BackfillDeps, report: BackfillReport): P
 /**
  * Spec D10: the backfill. Refuses (BackfillRefusedError) before any contact
  * is read; then reads the candidates - an --apply refuses right after that
- * Scan, before any write, when a --skip id names no contact - and for each -
- * oldest first - reads its whole history right before its write (a --skip
- * lead: nothing on a dry run; on an apply, its history only before its
- * exclusion is recorded, which a failed read does not stop); then (apply)
+ * Scan, before any write, when a --skip id names no contact. An --apply then
+ * records the exclusion of every --skip candidate FIRST (revision 6: its
+ * history read only for the no-duplicate check, which a failed read does not
+ * stop) and, if any append failed, STOPS: it prints the stop report and
+ * returns it (`stopped`, exit 1) - no other lead read, no housing authority
+ * written. Then, for each candidate - oldest first - it reads its whole
+ * history right before its write (a --skip lead: no read); then (apply)
  * re-checks the list, prints the report through deps.print and returns it. A
- * failed read of a candidate not named in --skip, a failed write and a failed
- * exclusion append are each counted `failed` (exit 1) and the run goes on;
- * only the list read and the contacts Scan abort it, both before any write.
+ * failed read of a candidate not named in --skip and a failed write are each
+ * counted `failed` (exit 1) and the run goes on; only the list read and the
+ * contacts Scan abort it, both before any write.
  */
 export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: BackfillOptions): Promise<BackfillReport> {
   const log = deps.logger;
@@ -771,7 +807,34 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
     warnings: [],
   };
 
+  // Spec D10 revision 6, EXCLUSIONS FIRST: an --apply records every exclusion
+  // it owes BEFORE it reads any other lead or writes anything, so no apply -
+  // stopped, failed or killed part-way - can leave a written target beside an
+  // unrecorded exclusion. Every --skip candidate is tried; if any append
+  // failed, the run stops here.
   let exclusionsRecorded = 0;
+  if (opts.apply) {
+    const unrecorded: LeftOutLead[] = [];
+    for (const lead of scan.leads) {
+      if (!opts.skip.has(lead.contactId)) continue;
+      const outcome = await recordExclusion(deps, lead.contactId);
+      if (outcome === 'recorded') exclusionsRecorded += 1;
+      if (outcome === 'failed') unrecorded.push({ ...lead, reason: 'skipped', exclusionFailed: true });
+    }
+    if (unrecorded.length > 0) {
+      report.leftOut = unrecorded;
+      report.failed = unrecorded.length;
+      report.stopped = true;
+      log.warn(
+        { candidates: scan.leads.length, unrecorded: unrecorded.length, exclusionsRecorded, apply: opts.apply },
+        `${SCRIPT_NAME} - STOPPED before any housing authority write: ${unrecorded.length} exclusion(s) may not have been ` +
+          'recorded (see the ERROR lines naming them) - keep the same --skip value and re-run the apply',
+      );
+      for (const line of formatBackfillReport(report, opts.apply)) deps.print(line);
+      return report;
+    }
+  }
+
   for (const lead of scan.leads) {
     let verdict: CandidateVerdict;
     try {
@@ -787,21 +850,12 @@ export async function runJoinAuthorityBackfill(deps: BackfillDeps, opts: Backfil
     }
     const { reason } = verdict;
     if (reason !== null) {
-      const left: LeftOutLead = {
+      // A --skip lead's exclusion was recorded in the first pass (an --apply).
+      report.leftOut.push({
         ...lead,
         reason,
         ...(verdict.suggestedValue !== undefined && { suggestedValue: verdict.suggestedValue }),
-      };
-      // Spec D10 revision 5: an --apply remembers the operator's --skip.
-      if (opts.apply && reason === 'skipped') {
-        const outcome = await recordExclusion(deps, lead.contactId);
-        if (outcome === 'recorded') exclusionsRecorded += 1;
-        if (outcome === 'failed') {
-          report.failed += 1;
-          left.exclusionFailed = true;
-        }
-      }
-      report.leftOut.push(left);
+      });
       log.info({ contactId: lead.contactId, reason }, `${SCRIPT_NAME} - left out`);
       continue;
     }
@@ -883,8 +937,9 @@ export interface CliDeps {
  * The CLI (spec D10). Resolves to the exit code: 2 a usage error (nothing
  * resolved, nothing read); 1 the target could not be resolved (nothing read),
  * the run was refused (nothing written), it stopped before any write (the list
- * read or the contacts Scan failed), or it completed with a failed lead; 0 it
- * completed clean, warnings included. Once resolved, the stage client is
+ * read or the contacts Scan failed, or an --apply's exclusion append - its
+ * report says so), or it completed with a failed lead; 0 it completed clean,
+ * warnings included. Once resolved, the stage client is
  * destroyed whatever happens.
  */
 export async function main(argv: readonly string[], cli: Partial<CliDeps> = {}): Promise<0 | 1 | 2> {

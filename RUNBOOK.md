@@ -1674,6 +1674,8 @@ npm run import:plan -- --quo "<new export dir>" --airtable "<new export dir>" --
 Apply — **always dry-run first**; the write needs an explicit `--yes`. The stage
 is a required flag, NOT environment variables.
 
+**Before any `import:apply` run, read `docs/issues/import-bypasses-contact-type-rules.md`** (while it is open): the importer applies none of the contact-type rules, so it can re-add a landlord of record that "Restore without a landlord" removed.
+
 **Each stage loads its operator env file automatically (2026-08-13):** `.env`
 for local (optional), `.env.dev` / `.env.prod` for the AWS stages (required —
 the run refuses without them). That file is where the parity-gate identity vars

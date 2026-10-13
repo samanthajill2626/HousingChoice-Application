@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app
 created: 2026-10-13
-refs: app/src/routes/units.ts:1220, app/src/routes/units.ts:1226, app/src/repos/unitsRepo.ts:922, app/src/repos/unitsRepo.ts:937, app/src/routes/units.ts:467, app/src/repos/unitsRepo.ts:1309, app/src/services/contactTypeGuards.ts:71, app/src/services/contactTypeGuards.ts:88, app/src/routes/units.ts:148, app/src/routes/units.ts:1196, app/src/routes/contacts.ts:1532, app/test/helpers/twilioWebhookHarness.ts:2839, app/test/helpers/twilioWebhookHarness.ts:2944, app/test/helpers/twilioWebhookHarness.ts:3125
+refs: app/src/routes/units.ts:1220, app/src/routes/units.ts:1226, app/src/repos/unitsRepo.ts:922, app/src/repos/unitsRepo.ts:937, app/src/routes/units.ts:467, app/src/repos/unitsRepo.ts:1312, app/src/repos/unitsRepo.ts:1021, app/src/repos/unitsRepo.ts:1060, app/src/repos/unitsRepo.ts:1111, app/src/services/contactTypeGuards.ts:71, app/src/services/contactTypeGuards.ts:88, app/src/routes/units.ts:148, app/src/routes/units.ts:1196, app/src/routes/contacts.ts:1532, app/test/helpers/twilioWebhookHarness.ts:2839, app/test/helpers/twilioWebhookHarness.ts:2944, app/test/helpers/twilioWebhookHarness.ts:3125
 ---
 
 **Problem.** Found by the caseworker-integrity final review (A7,
@@ -20,7 +20,7 @@ more than one place, so a change to one copy can silently miss another:
   `:937-938`).
 - "The cleared landlord was the primary" exists twice: the route's
   `soleLandlordToPromote` (`units.ts:467-468`) and the repo's
-  `restoreWithLandlord` (`unitsRepo.ts:1309-1310`).
+  `restoreWithLandlord` (`unitsRepo.ts:1312-1313`).
 - The routing-pointer test (`phone_ref === true || email_ref === true`) is
   repeated in `app/src/services/contactTypeGuards.ts:71`, `:88`,
   `units.ts:148-149` (`autoRoutingEligible`), `:1196` and
@@ -39,7 +39,15 @@ more than one place, so a change to one copy can silently miss another:
 
 The review's fifth point - `addContact`'s per-attempt refusals were decided
 on an eventually consistent read - was fixed in fix wave FWF-5 (that read is
-consistent now).
+consistent now). Its re-read after a lost write, which can refuse
+`landlord_reassignment_required` before any retry, is consistent too since
+final review round 2 R2-4 (fix wave FWF2, `app/src/repos/unitsRepo.ts:1021`).
+`removeContact`'s reads are still eventually consistent: its per-attempt read
+(`unitsRepo.ts:1060`), which throws `CannotRemoveLandlordOfRecordError` and
+the "not on the roster" 404 with no write to confirm them (`:1069-1080`), and
+its re-read after a lost write (`:1111`). Pre-existing and untouched by this
+branch; a lagging replica can answer a spurious 409 or 404 that a retry
+corrects.
 
 **Suggested fix.** Export one pure `contactListDecision(unit, contactId,
 role, facts)` from `unitsRepo` and call it from both the route's pre-check

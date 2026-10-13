@@ -311,3 +311,183 @@ completed row and answer the same 409 for an identity match.
   roster's typed refusals are mapped before the catch-alls.
   `useListing.setUnit` and the contactsUnit guard prevent a cross-property
   stamp after a history move.
+
+---
+
+## Round 2
+
+Scope: `git diff 8be5b730..1358fb42 -- app dashboard e2e` (the final fix wave),
+read cold, plus a fresh sweep of the state it touches. I also read
+final-review/adjudications.md. I ran nothing. Line numbers are at 1358fb42.
+
+### R2-1. [MEDIUM] The restore dialog can loop forever: when the property is still deleted, every retry gets the same 409
+
+Evidence:
+- `app/src/routes/units.ts:1775-1786`: a body that arrives when the plain
+  restore would apply now answers 409 `unit_roster_conflict` and writes
+  nothing. Three states lead here (the new route test enumerates them,
+  `app/test/unitsRestoreLandlord.test.ts`, PLAIN_PATH_STATES): no longer
+  deleted, stored landlord typed landlord again, or ownerless. Two of the
+  three leave the property STILL soft-deleted.
+- `dashboard/src/routes/listing/RestoreLandlordDialog.tsx:82-85`: the dialog
+  shows ROSTER_RETRY_COPY ("The property contacts changed - try that change
+  again.", `rosterCopy.ts:7`) and calls onConflict.
+- `dashboard/src/routes/listing/ListingDetail.tsx:1438-1447`: onConflict
+  re-reads and closes the dialog only when the property is no longer
+  deleted.
+- The new dashboard test covers only the live re-read
+  (ListingDetail.test.tsx, "closes the dialog when the re-read shows the
+  property live"). Nothing tests a still-deleted re-read.
+
+Failure scenario: Staff A opens the dialog (L was retyped to tenant). Staff
+B corrects L back to landlord. A picks X, or picks "Restore without a
+landlord". The answer is 409. The re-read shows the unit still deleted, so
+the dialog stays open and tells A to try again. Every retry, with either
+button, gets the identical 409, because the server's state no longer needs
+a landlord. The only exit is Cancel, then Restore from the actions menu.
+Nothing on screen says so. "Restore never dead-ends" is now false in a
+reachable two-staff race, and the copy actively sends staff around the loop.
+The same loop follows an API-only PATCH of `landlordId` to a landlord-typed
+contact while the dialog is open.
+
+Root cause: one code, `unit_roster_conflict`, now means two things the
+client must handle differently. In "the list or landlord changed, retry"
+a retry can succeed. In "no landlord is needed any more" a retry can never
+succeed.
+
+Suggested fix: answer the late body with a distinct code (for example
+`restore_landlord_not_needed`). On it, the dialog closes and the page
+re-runs the plain restore, which either succeeds or answers a fresh 409
+restore_needs_landlord with the current name. A smaller fix: in onConflict,
+when the re-read is still deleted, close the dialog and re-run onRestore.
+Either way, add the still-deleted test.
+
+### R2-2. [LOW] The fix for A5 (closing the housing-authority review) only works when a `suggestion.updated` event arrives, and an ordinary re-type usually sends none
+
+Evidence:
+- `dashboard/src/routes/contact/ContactDetail.tsx:289` closes `haReview` when
+  the page's `contact.type` stops being tenant. Its comment says a
+  "conversion or re-type by someone else" arrives through useContact.
+- `dashboard/src/routes/contact/useContact.ts:60-71`: the page's contact is
+  re-fetched ONLY on `suggestion.updated` for this contact. ContactDetail
+  subscribes to nothing else that refreshes the contact (its other
+  useEventStream handlers at `:376` and `:514` cover unread state and AI
+  runs).
+- The caseworker conversion supersedes every pending suggestion, the
+  housing-authority chip included, and emits
+  (`app/src/services/caseworkerConversion.ts:358-372`). So the conversion
+  case is covered.
+- A plain contacts PATCH type change (tenant to landlord, partner or team
+  member) emits only when it superseded a pending suggestion for a field IN
+  THE PATCH, or drained a pending `type` suggestion
+  (`app/src/routes/contacts.ts:1818-1853`). A pending `housingAuthority`
+  chip is neither.
+
+Failure scenario: A has the review open on tenant T, which has a pending
+housing-authority chip. B re-types T to landlord through the edit form. No
+event reaches A's page, so T still reads as a tenant there and the review
+stays open. A picks a close name, and the plain PATCH writes the authority
+onto a landlord. This is the residual A5 meant to close, minus the
+conversion case. The server-side fence remains deferred.
+
+Suggested fix: make the comment honest about the trigger, or emit
+`suggestion.updated` (or a contact event useContact listens to) from the
+contacts PATCH whenever the type changes. The latter also lets every open
+contact page notice a re-type.
+
+### R2-3. [LOW] The fix for A4 (one eligibility rule for automatic routing) changes the primary flag, not where messages go: a soft-deleted landlord still receives them through the landlord-of-record fallback
+
+Evidence:
+- `app/src/routes/units.ts:145-153` (autoRoutingEligible) is passed as
+  `autoPrimaryEligible` (`:1250`). The I3 claim still asks only the type.
+- `app/test/unitsApiRosterAutoPrimary.test.ts:155-171` pins that a
+  SOFT-DELETED landlord-typed contact added with role `landlord` to an
+  ownerless, primary-less property claims `landlordId` (and joins
+  non-primary).
+- With no primary row, the resolvers fall back to `landlordId`:
+  `app/src/lib/rosterResolution.ts:292-301` and
+  `app/src/lib/tourContacts.ts:124-129`. `memberFromContact`
+  (`rosterResolution.ts:181-200`) does not filter soft-deleted contacts.
+
+Failure scenario: the same add as before the fix, with role Landlord, still
+makes relay groups and tour copy resolve to the deleted contact. The only
+difference is that it now happens through the fallback instead of the
+primary row. The fix's premise, "a deleted contact is unusable for routing
+everywhere else", does not hold in the resolvers. The A4 fix is consistent
+as a flag rule but does not stop routing to a deleted contact.
+
+Suggested fix: decide where "deleted contacts never receive routing" is
+enforced. The honest place is the resolvers, skipping a soft-deleted
+primary or landlord-of-record contact. Otherwise, document that the rule
+covers only the primary flag.
+
+### R2-4. [LOW] The fix for A7 (consistent read in addContact) is partial: the retry path still refuses on an eventually consistent read
+
+Evidence:
+- `app/src/repos/unitsRepo.ts:907` is now consistent. However, the
+  conflict path re-reads with `this.getById(unitId)` at `:1018` (eventually
+  consistent) and throws LandlordReassignmentRequiredError at `:1024-1030`
+  from that read. No write confirms the refusal, which is exactly the
+  rationale FWF-5 gives for the first read.
+- removeContact has the same class of read: `:1057` (throws
+  CannotRemoveLandlordOfRecordError and the "not on the roster" 404 from it)
+  and `:1108`.
+
+Failure scenario: a Landlord-role claim races a change on the same
+property. The conditional write fails, and a lagging replica returns the
+state from before the attempt's own consistent read, which may still name a
+landlord that has since been cleared. The add answers 409
+landlord_reassignment_required although the slot is vacant. The window is
+narrow.
+
+Suggested fix: make the `:1018` re-read consistent too. Do the same for
+removeContact's two reads while touching it.
+
+### R2-5. [LOW] The type-change copy says "must stay a landlord" to a contact that is not a landlord
+
+Evidence:
+- `dashboard/src/lib/holdingRefusals.ts:35-36`: TYPE_CHANGE_LANDLORD_SENTENCE
+  reads "...so they must stay a landlord".
+- `app/src/services/contactHoldings.ts:139-143` refuses ANY `toType` other
+  than landlord for a contact that is the landlord of record of a live
+  property, whatever its CURRENT type.
+
+Failure scenario: a legacy live property whose `landlordId` names a contact
+typed unknown or tenant. Imported data can produce this, as can a re-type
+made before this branch. Staff press "Mark as Tenant" on the Unknown card
+and read "they must stay a landlord" about a contact the page shows as
+unclassified. The action that actually unblocks them, Mark as Landlord, is
+not named.
+
+Suggested fix: word it for the current state, for example "...so they must
+be a landlord", or pick the copy from the stored type.
+
+### Fixes reviewed and found correct
+
+- A2 server side (`units.ts:1775-1786`): the late body refuses before any
+  write or audit, and the route test checks that the unit is unchanged in
+  every field. The dashboard side is incomplete (R2-1).
+- A3 (`ListingDetail.tsx:440-473`): one settle, run for both the typed and
+  the 409 paths, and bound to the property by the existing contactsUnit and
+  forId guards. `rosterBusy` stays set until the settle finishes.
+- A4: the real repo, FakeWorld and every test fact object now carry
+  `autoPrimaryEligible`. I found no other addContact implementation in the
+  repo. Its scope is limited (R2-3).
+- A5 client: correct as far as it reaches. Resetting state during render is
+  conditional, so it cannot loop. Its trigger is narrower than its comment
+  claims (R2-2).
+- A7 read: correct for the first read; partial overall (R2-4).
+
+### Adjudication contests
+
+- A1 (importer): I concede it as a merge blocker. It is a human-run script,
+  and fixing it is now recorded as the precondition to the next
+  `import:apply`.
+- A5 server: I concede it as a merge blocker. R2-2 makes the client half
+  weaker than recorded, so the filed issue should say the client close does
+  not cover a plain re-type.
+- A6 (PATCH swap): I concede. It is API-only and pre-existing.
+- A7 refactor and fake clone: I concede. The read is a separate matter
+  (R2-4).
+- A8 (naming routing changes): I concede.
+- A9 (replay answers 200): I concede.

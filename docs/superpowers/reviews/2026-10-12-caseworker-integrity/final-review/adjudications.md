@@ -43,3 +43,25 @@ Fix wave: A2, A3, A4, A5 (client), A7 (consistent read) + spec revision 6
 (A2, C1, C2) + issue updates (A1, A5, A6, A7, A8, A9). Dispatched through the
 build orchestrator (fresh foreground child), then the planner re-runs every
 gate on the new tip.
+
+## Round 2 (re-review of the FWF fix wave, 1358fb42)
+
+Both reviewers were continued with the re-review charge. Adversarial: 1
+MEDIUM, 4 LOW; conceded A1, A5-server, A6, A7-refactor, A8, A9 as
+non-blocking. Conformance: re-walked items CONFORMS 33 / DEVIATES 2 /
+MISSING 0; C1, C2 closed; A3-A9 not contested.
+
+| # | Finding | Ruling | Action |
+|---|---|---|---|
+| R2-1 / R2-F3 | MED - FWF-1 introduced a dialog loop: a late body answers 409 `unit_roster_conflict`; when the re-read shows the property STILL deleted (its landlord is a landlord again, or it is ownerless), the dialog stays open saying "try that change again" and every retry gets the same 409 | ACCEPT - FIX (planner's own regression) | Distinct 409 `restore_landlord_not_needed` (still writes nothing) for "a body arrived but the plain restore applies"; `unit_roster_conflict` keeps meaning "the list or landlord changed, retry". Dashboard: on `restore_landlord_not_needed` the dialog closes, the page re-reads, and when the property is still deleted the page says "This property's landlord changed while you were choosing. Choose Restore again." The plain restore is NOT re-run automatically (it would silently override the staff member's explicit choice - the A2 complaint). Tests: still-deleted and live re-reads. |
+| R2-4 / R2-F6 | LOW - addContact's conflict re-read (`unitsRepo.ts:1018`) is still eventually consistent and throws from it | ACCEPT - FIX | Make that re-read consistent. removeContact's reads are pre-existing and untouched by this branch: noted in `contact-list-rule-duplication-and-fake-drift`. |
+| R2-2 | LOW - the HA-review close fires only on `suggestion.updated`; a plain re-type usually emits none, so the review can stay open | ACCEPT (comment + issue) | Make the comment state the real trigger (the conversion path); add the plain re-type case to `ha-review-close-name-patch-unfenced`, which carries the server-side fence that closes it fully. |
+| R2-F5 | INFO - the FWF-2 comment overstates when typed refusals arrive | ACCEPT | Comment fix. |
+| R2-F1, R2-F2 | LOW - spec rev 6 text: a `{ landlordId: <id> }` restore retries a contacts-only race (only `null` refuses it); section 8 still says "a body ignored when not needed"; "the only Restore button" (there are three entry points on one `onRestore`) | ACCEPT | Spec revision 7 precision. |
+| R2-F4 | LOW - the A1 gate ("fix before the next import:apply run") lives only in the issue; the RUNBOOK import procedure does not mention it | ACCEPT | One operational caution line in the RUNBOOK `import:apply` procedure pointing at the issue. |
+| R2-3 / R2-F7 | LOW - the I3 claim is type-only, so an API caller can make a soft-deleted landlord-typed contact the landlord of record of an ownerless property, and the resolvers fall back to it (they never filter deleted contacts) | DEFER | Pre-existing resolver behavior (any soft-deleted landlord of record routes today); API-only (the picker lists live contacts). Appended to `auto-routing-changes-not-named` as "the resolvers do not filter soft-deleted contacts; the I3 claim is type-only". |
+| R2-5 | LOW - the type-change landlord sentence says "must stay a landlord" to a legacy landlord of record that is not typed landlord | DEFER | Appended to `contact-type-refusal-copy-edge-cases`. |
+| R2-F8 | INFO | noted | No action. |
+
+Micro-wave FWF2: R2-1, R2-4, R2-2 (comment + issue), R2-F5, spec rev 7
+(R2-F1, R2-F2), RUNBOOK caution (R2-F4), issue appends (R2-3, R2-5).

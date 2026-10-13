@@ -1,6 +1,6 @@
 # Caseworker integrity - design
 
-Status: APPROVED revision 6 (2026-10-13). Branch `fix/caseworker-integrity`,
+Status: APPROVED revision 7 (2026-10-13). Branch `fix/caseworker-integrity`,
 worktree `W:\tmp\caseworker-integrity`, cut from `main` @19607658.
 Revision 2 folds in design review round 1
 (`docs/superpowers/reviews/2026-10-12-caseworker-integrity/design-review/adjudications.md`).
@@ -20,6 +20,12 @@ body that arrives when the plain restore would apply answers 409
 unconditioned write (L1); automatic routing eligibility is one rule (typed
 `landlord`, not soft-deleted, not a routing pointer); the `contact_not_tenant`
 phrase table (section 4).
+Revision 7 (planner final review round 2): that late body answers its own 409
+`restore_landlord_not_needed` (still writes nothing) and the page says the
+landlord changed, while `unit_roster_conflict` keeps meaning "the contact list
+or landlord changed, retry"; a `{ landlordId: <id> }` restore retries a
+contacts-only race and only `{ landlordId: null }` refuses any contact-list
+change; three Restore entry points share one handler (sections 4 and 8).
 
 Closes three filed issues that share one theme: a contact converted to a
 caseworker (or re-typed by hand) can still end up holding tenant-only data or
@@ -327,21 +333,31 @@ Restore builds on that instead of refusing:
   arrives when the plain restore would apply (the property is no longer
   deleted, its stored landlord is typed `landlord` again, or it is ownerless)
   means the state changed under the dialog: the route answers 409
-  `unit_roster_conflict` and writes nothing (no restore, no audit); the
-  dashboard re-reads and, when the property is no longer deleted, closes the
-  dialog and shows its real state (revision 6, replacing "a body is ignored
-  when the stored landlord is still valid"). The plain restore (no body) is
-  today's unconditioned write - the residual between its read and its write
-  is the L1 window; only the restore with a body conditions its single write
-  on the `landlordId` and contact list it read, so a concurrent change answers
-  409 `unit_roster_conflict` (the roster's existing code) and the dashboard
-  re-reads.
+  `restore_landlord_not_needed` and writes nothing (no restore, no audit).
+  The dashboard closes the dialog and re-reads the property: when it is
+  still deleted, the page shows "This property's landlord changed while you
+  were choosing. Choose Restore again." (in the page's restore notice slot);
+  when it is live, the page shows the live state. The plain restore is NOT
+  re-run automatically - it would silently override the staff member's
+  explicit choice (revision 7; revision 6 answered `unit_roster_conflict`,
+  whose "try that change again" then looped; both replace "a body is ignored
+  when the stored landlord is still valid").
+- The plain restore (no body) is today's unconditioned write - the residual
+  between its read and its write is the L1 window. The restore with a body
+  conditions its single write on what it read: `{ landlordId: <id> }` on the
+  `landlordId` (a contacts-only race is re-read and retried up to the
+  roster's attempt limit), `{ landlordId: null }` on the `landlordId` AND the
+  contact list the sole-landlord promotion was decided from (any contact-list
+  change refuses). A refused write answers 409 `unit_roster_conflict` (the
+  roster's existing code, meaning "the contact list or landlord changed,
+  retry") and the dashboard re-reads.
 - Audit: the existing `unit_restored` entry gains `landlordReplaced`
   (`{ from, to }`) or `landlordCleared` (`{ from }`) when one applied, and
   `primaryPromoted` (`{ to }`) when the sole-landlord promotion applied.
 
-Dashboard (`ListingDetail.tsx:349`, the only Restore button): on 409
-`restore_needs_landlord`, open a dialog:
+Dashboard (`ListingDetail.tsx`; three Restore entry points - the deleted
+banner, the header button and the actions menu's "Restore property" - share
+one handler): on 409 `restore_needs_landlord`, open a dialog:
 
 > <landlordName or "This property's landlord"> is no longer a landlord, so
 > they can't stay this property's landlord. Choose its landlord:
@@ -398,6 +414,12 @@ site below (several show raw codes or fixed copy today):
 - `landlord_not_found`: "That landlord no longer exists.";
 - `contact_list_caseworker`: "Caseworkers can't be on a property's contact
   list."
+
+The restore dialog's late-body refusal is the property page's own sentence,
+not the shared helper's (revision 7): on 409 `restore_landlord_not_needed`
+the dialog closes and, when the re-read property is still deleted, the page's
+restore notice reads "This property's landlord changed while you were
+choosing. Choose Restore again."
 
 Sites: `TourDetail.tsx` (status changes :382, Start placement / from-tour
 :514, outcome then from-tour :589 - all show `err.message` today);
@@ -529,7 +551,9 @@ caseworkers list.
   restore: plain (valid landlord, ownerless), 409 `restore_needs_landlord`
   (non-landlord, missing contact), with a landlord (row swap, primary kept
   consistent), without a landlord (ownerless after, row removed), a body
-  ignored when not needed, and the restore dialog's three actions;
+  that arrives when the plain restore applies answering 409
+  `restore_landlord_not_needed` with nothing written (revision 7), and the
+  restore dialog's three actions;
   `deriveTenantStatus` skips a non-tenant;
   TenantFile hides both buttons for a team member; the Add contact picker
   hides caseworkers; each dashboard copy site in section 4 shows its sentence.

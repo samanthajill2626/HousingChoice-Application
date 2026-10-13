@@ -260,3 +260,192 @@ build (the check exists, in the service, as specified), it is documented
 Section 9 gates (typecheck, npm test, smoke, e2e, eslint): this review is
 read-only and ran nothing; the handback's gate table is a claim for the
 planner's own gate run to confirm.
+
+## Round 2
+
+Scope: spec revision 6 (`git diff 8be5b730..1358fb42 -- docs/superpowers/specs/`)
+and the final fix wave (`git diff 8be5b730..1358fb42 -- app dashboard e2e
+docs/issues RUNBOOK.md`; commits 437686d6..1358fb42), read cold at 1358fb42
+against the planner's `final-review/adjudications.md` and the builder's
+`final-review/FWF-report.md` (claims only). Read-only again: no test, vitest,
+e2e, server or DynamoDB run. Order as asked: (1) re-walk of the touched spec
+items, (2) the fix diff for drift, (3) adjudication contests, (4) C1 / C2.
+
+### Re-walk totals (the touched items only)
+
+| Verdict | Count |
+| --- | --- |
+| CONFORMS | 33 |
+| DEVIATES | 2 |
+| MISSING | 0 |
+
+Both deviations are SPEC-TEXT drift in revision 6 (the code is the safer
+reading in each); no code deviates from a stated code or copy string.
+
+### Re-walk table
+
+"rN" = round 1 item number. Paths relative to the worktree, lines at 1358fb42.
+
+| # | Spec item (rev 6) | Verdict | Evidence |
+| --- | --- | --- | --- |
+| 1 | (r46) Plain restore: ownerless or landlord-typed -> as today; else 409 `restore_needs_landlord` `{ landlordName? }` | CONFORMS | `app/src/routes/units.ts:1767-1773` (check), `:1775-1801` (plain), `:1803-1810` (409) |
+| 2 | (r47) Restore with a landlord: 404 / 409 checks, one conditional write, old row out, new row pinned `landlord`, primary consistent | CONFORMS | units.ts:1812-1830; `app/src/repos/unitsRepo.ts` restoreWithLandlord |
+| 3 | (r48) Restore without a landlord: landlordId, old row and a primary_contact naming them removed in one write | CONFORMS | unitsRepo.ts:1331, :1340-1348 |
+| 4 | (r49) Sole-landlord promotion: exactly one eligible remaining row -> primary; zero / two-plus -> nobody | CONFORMS | units.ts:462-477 |
+| 5 | (r50, rev 6) Promotion eligibility IS the shared automatic-routing rule; consistent reads; write conditioned on the roster read -> 409 | CONFORMS | units.ts:145-153 (`autoRoutingEligible`), :474; unitsRepo.ts:1297-1299 |
+| 6 | (r51 replaced, rev 6) A body when the plain restore would apply (no longer deleted / landlord typed again / ownerless) -> 409 `unit_roster_conflict`, no restore, no audit | CONFORMS | units.ts:1779-1786 (before `units.restore` at :1789 and the audit); `app/test/unitsRestoreLandlord.test.ts:200-259` (six cases, unit deep-equal, no audit row) |
+| 7 | (rev 6) Dashboard re-reads; closes the dialog when the property is no longer deleted | CONFORMS | `RestoreLandlordDialog.tsx:82-84`; `ListingDetail.tsx:1438-1452` |
+| 8 | (r52, rev 6) Plain restore is today's unconditioned write (L1) | CONFORMS | units.ts:1789 -> repo `restore` (condition `attribute_exists(unitId)` only). C1 closed |
+| 9 | (rev 6) "only the restore with a body conditions its single write on the `landlordId` and contact list it read, so a concurrent change answers 409" | DEVIATES (R2-F1) | unitsRepo.ts:1297 (list check for `next === null` only), retry at :1355-1360 |
+| 10 | (r53) Audit `landlordReplaced` / `landlordCleared` / `primaryPromoted` | CONFORMS | units.ts:1867-1876 |
+| 11 | (r54) 409 `restore_needs_landlord` opens the dialog; normal case no dialog | CONFORMS | ListingDetail.tsx:376-386 |
+| 12 | (r55) Dialog sentence byte-exact, fallback "This property's landlord" | CONFORMS | RestoreLandlordDialog.tsx:92, :122 |
+| 13 | (r56) Picker landlords-only, Add property's source | CONFORMS | RestoreLandlordDialog.tsx:57 |
+| 14 | (r57) Three actions; with-landlord disabled until a pick | CONFORMS | RestoreLandlordDialog.tsx:96-116 |
+| 15 | (r58) 409 `contact_list_caseworker` for a NEW seat, any role | CONFORMS | units.ts:1220-1225 |
+| 16 | (r59) Route order caseworker -> landlord_not_landlord, both before the repo call; repo reassignment after | CONFORMS (see R2-F6) | units.ts:1220-1231; unitsRepo.ts:937-945 |
+| 17 | (r60) Add contact picker hides caseworkers | CONFORMS | ListingDetail.tsx:402-404 (unchanged) |
+| 18 | (r61, rev 6) Auto-primary eligibility = typed landlord, not soft-deleted, not a pointer; a soft-deleted landlord-typed contact joins non-primary | CONFORMS | units.ts:1250; unitsRepo.ts:961-965 |
+| 19 | (rev 6) The I3 claim still asks only the type | CONFORMS (see R2-F7) | unitsRepo.ts:938 (`landlordTyped`); units.ts:1226-1231 |
+| 20 | (r62, rev 6) Decided per attempt from a CONSISTENT unit read; contact read consistently by the route | CONFORMS | unitsRepo.ts:907; units.ts:1195 |
+| 21 | (r63) FakeWorld mirrors the new fact | CONFORMS | `app/test/helpers/twilioWebhookHarness.ts:2972-2984` |
+| 22 | (r65, rev 6) `contact_not_tenant`: "Tours and placements are for tenants. This contact is <phrase>." with the seven-entry phrase table and the "not a tenant" fallback | CONFORMS | `dashboard/src/lib/contactTypeErrors.ts:13-23`, `:34` - byte-exact against spec :389-394. C2 closed |
+| 23 | (r64) One shared helper | CONFORMS | contactTypeErrors.ts (unchanged) |
+| 24 | (r66) Other four section 4 sentences | CONFORMS | contactTypeErrors.ts:36-43 (unchanged) |
+| 25 | (r72) `runRosterWrite` maps typed codes BEFORE the 409 catch-all (now also re-reads) | CONFORMS (see R2-F5) | ListingDetail.tsx:438-474 |
+| 26 | (r79-80) RUNBOOK D1 paragraph and L1 paragraph still accurate after the wave | CONFORMS | RUNBOOK.md:475, :477 (untouched; nothing they state changed) |
+| 27 | (r81) Three resolved issues | CONFORMS | untouched by the wave |
+| 28 | (r82) `tours-placements-no-contact-type-check` corrections | CONFORMS | untouched |
+| 29 | (r83) `placement-terminal-stage-exit-unguarded` filed | CONFORMS | untouched |
+| 30 | (r84) `import-bypasses-contact-type-rules` + A1 appended (scenario, both fix options, refs) | CONFORMS (see R2-F4) | issue, appended section at its end |
+| 31 | (r85) `landlord-of-record-no-reassign-ui` + A6 appended | CONFORMS | issue, appended section at its end |
+| 32 | (r86) GLOSSARY: no new noun | CONFORMS | "automatic routing" is a rule name, not a domain noun |
+| 33 | Adjudicated issue work (A5 filed, A7 filed, A8 filed, A9 appended to the existing issue, item 2 of `contact-type-refusal-copy-edge-cases` superseded) - frontmatter valid, refs live | CONFORMS | 22 `path:line` refs across the new and edited issues spot-checked at 1358fb42: all land on the cited code |
+| 34 | Spec section 8 restore test list vs rev 6 section 4 | DEVIATES (R2-F2) | spec :531-532 |
+| 35 | (r100) Restore tests follow rev 6 (six late-body 409 cases; the live-unit PIN now sends no body) | CONFORMS | unitsRestoreLandlord.test.ts:127, :200-259 |
+
+### Findings (round 2)
+
+#### R2-F1 - LOW - Revision 6 overstates the with-landlord restore's conditioning
+
+Spec :333-337: "only the restore with a body conditions its single write on
+the `landlordId` and contact list it read, so a concurrent change answers
+409 `unit_roster_conflict`". True for `{ landlordId: null }` (the repo
+rejects any list other than the route's `expectContacts`,
+unitsRepo.ts:1297-1299). NOT true for `{ landlordId: <id> }`: the repo
+checks only the route's `landlordId` (`expectLandlordId`), conditions each
+attempt on the list THAT ATTEMPT read, and on a contacts-only race re-reads
+and retries (unitsRepo.ts:1355-1360; its own doc says "a contacts-only race
+retries"), so a concurrent contact-list change is absorbed into the write,
+not answered 409. The code is the safe reading (the swap is recomputed on the
+fresh list, and revision 5 asked this path to condition on `landlordId`
+only); the sentence is what drifted when C1 was folded in. Fix: spec wording,
+e.g. "conditions on the `landlordId` it read (and, without a landlord, on the
+contact list it read)".
+
+#### R2-F2 - LOW - Spec section 8 still requires "a body ignored when not needed"
+
+Spec :531-532 lists "a body ignored when not needed" among the restore tests.
+Revision 6 section 4 (:326-333) replaced that behavior with 409
+`unit_roster_conflict`, and the tests now assert the 409
+(unitsRestoreLandlord.test.ts:200-259), so the approved contract contradicts
+itself. Fix: "a body that arrives when the plain restore applies answers 409
+`unit_roster_conflict` and writes nothing". Same pass, cosmetic: spec :343
+still calls `ListingDetail.tsx:349` "the only Restore button"; there are three
+Restore entry points (ListingDetail.tsx:741, :752, :764), all on `onRestore`,
+so behavior is unaffected.
+
+#### R2-F3 - LOW - Contest A2's code choice: the still-deleted late body loops in the dialog
+
+A2 answers a late body with `unit_roster_conflict`, the code the dialog
+already reads as "retry" (RestoreLandlordDialog.tsx:82-84 sets
+"The property contacts changed - try that change again." and calls
+`onConflict`; ListingDetail.tsx:1443-1447 keeps the dialog open while the
+re-read is still deleted). When the plain restore applies but the property is
+STILL deleted - its stored landlord re-typed to landlord while the dialog
+was open, or the property restored-with-a-landlord and deleted again - every
+retry of either restore action answers the same 409, the copy keeps saying
+"try that change again", and the first sentence ("... is no longer a
+landlord") is false. The only exit is Cancel, then the banner's Restore. This
+IS recorded (FWF report "The still-deleted behavior, recorded";
+`contact-type-refusal-copy-edge-cases.md` item 2 replacement paragraph), so it
+was not missed - but the record stops at "kept as is by the fix wave's brief"
+with no direction, and inside the dialog it is the dead end spec revision 3
+ruled out ("restore never dead-ends"). Rare (needs one of the two races
+above). The client cannot tell this 409 from the without-landlord list race
+(where staying open and retrying is right), so a fix needs a distinct answer,
+e.g. 409 `restore_landlord_not_needed`, on which the dialog closes and the
+page says to press Restore (or re-sends the plain restore). Suggest adding
+that direction to the issue; no change needed for merge.
+
+#### R2-F4 - LOW - Contest A1's deferral placement: the import gate is not where an operator meets it
+
+DEFER is consistent with the spec's non-goal (the importer is filed). But the
+issue's own ruling is "First to fix before the next `import:apply` run", and
+that gate lives only in `docs/issues/import-bypasses-contact-type-rules.md`.
+The RUNBOOK's `import:apply` procedure (RUNBOOK.md:1648-1690, the dry-run and
+apply commands at :1689-1690) carries no caution, so anyone following the
+runbook will run the importer with the gate unmet - and the failure is a
+landlord-nudge send to a contact now typed tenant
+(`app/src/jobs/placementNudges.ts:436-443`, per the issue). Suggest one
+operational line in that RUNBOOK section pointing at the issue until it is
+fixed (RUNBOOK stays operational; the issue stays the bug record).
+
+#### R2-F5 - INFO - FWF-2's comment overstates when the typed codes arrive
+
+ListingDetail.tsx:449-454 says the roster write answers
+`contact_list_caseworker` / `landlord_not_landlord` "only when the property
+changed after the route's read". The route's own pre-checks
+(units.ts:1220-1231) answer the same codes in the no-race case (an API
+caller, or a stale picker). The extra re-read is harmless there. It also
+brings the typed path under the already-filed late-answer navigation race
+(`listing-detail-dialogs-survive-property-navigation`), as the catch-all
+path already was. No action.
+
+#### R2-F6 - INFO - Under a lost write, `landlord_reassignment_required` can precede the contact-list refusals
+
+`addContact`'s re-read after a lost conditional write (unitsRepo.ts:1018) is
+eventually consistent and throws `LandlordReassignmentRequiredError`
+(:1025-1030) before the next attempt re-decides the two contact-list rules
+(:937-938). In that race the answer order can be reassignment first, not the
+spec's caseworker -> claim -> reassignment; every path writes nothing. The
+route's no-race order (row 16) is exact. FWF "Noticed, not fixed" 1 records
+the read; no action.
+
+#### R2-F7 - INFO - A soft-deleted landlord can still become landlord of record by claim
+
+Per revision 6 the I3 claim asks only the type (row 19), so an API caller can
+add a SOFT-DELETED landlord-typed contact with role Landlord to an ownerless
+property: it claims `landlordId` and joins non-primary - and the roster
+resolvers then fall back to the landlord of record anyway, so the
+auto-primary exclusion does not keep routing off a deleted contact on that
+shape. Conformant to the text and API-only (the Add contact picker offers
+live contacts only); FWF "Noticed, not fixed" 2 is the sibling for the
+restore. Worth one line in `auto-routing-changes-not-named` or
+`contact-list-rule-duplication-and-fake-drift` if the rule is ever
+generalized.
+
+#### R2-F8 - INFO - "Automatic routing eligibility is one rule" is scoped to the two new choices
+
+The revision 6 header reads globally, but `removeContact`'s pre-existing
+promotion of the landlord of record when the primary row leaves
+(unitsRepo.ts:1087-1093) is a third automatic routing choice outside the
+rule (structural, pre-existing, and the landlord of record of a live unit is
+landlord-typed under I3). Section 4's own text scopes the rule correctly; no
+action.
+
+### Adjudications not contested
+
+A3, A4, A5 (client fix plus filed server fence), A6, A7, A8, A9 and C3-C8 are
+sound against the spec and the code at 1358fb42; the FWF changes for A2-A5
+and A7 do what the rulings say (rows 6, 18-20, 25 and the FWF-4 render-time
+reset at `ContactDetail.tsx:289`, which also covers a review whose org check
+resolves after the type change, since the reset runs on every render).
+
+### C1 / C2
+
+- C1: CLOSED. Revision 6 states the plain restore is an unconditioned write
+  (L1), which is what units.ts:1789 does. The sentence that closed it
+  introduced R2-F1.
+- C2: CLOSED. Spec :389-394 and contactTypeErrors.ts:13-23, :34 match byte
+  for byte (sentence frame, seven phrases, fallback).

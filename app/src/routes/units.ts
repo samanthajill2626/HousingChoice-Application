@@ -63,7 +63,6 @@ import {
 } from '../repos/unitsRepo.js';
 import {
   createContactsRepo,
-  isDeleted as isContactDeleted,
   type ContactItem,
   type ContactsRepo,
   type RecipientDisplay,
@@ -82,6 +81,10 @@ import { reachedCount } from '../services/shareRecipientState.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
 import { requireLandlordContact, sendContactTypeError } from '../services/contactTypeGuards.js';
 import { isCaseworker } from '../lib/caseworkers.js';
+// The ONE automatic-routing eligibility rule lives in lib/propertyContact.ts
+// (primary-contact-integrity spec 4.3), shared with the heir function. It is
+// imported under its old local name so every call site below reads as before.
+import { isAutoRoutingEligible as autoRoutingEligible } from '../lib/propertyContact.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
@@ -128,28 +131,6 @@ export interface UnitsRouterDeps {
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
 function isUnitContactRole(value: unknown): value is UnitContact['role'] {
   return typeof value === 'string' && (UNIT_CONTACT_ROLES as readonly string[]).includes(value);
-}
-
-/**
- * The ONE eligibility rule for an AUTOMATIC routing choice (caseworker-
- * integrity spec revision 6 section 4 "Contact list (I4)" and "Restore"; final
- * review A4, fix wave FWF-3): auto-primary on a contact-list add (passed to
- * unitsRepo.addContact as `autoPrimaryEligible`) and the restore's
- * sole-landlord promotion (soleLandlordToPromote). The contact exists, is
- * typed `landlord`, is NOT soft-deleted (the contacts repo's own test -
- * deleting a contact keeps its seats, and a deleted contact is unusable for
- * routing everywhere else) and is NOT a phone or email routing pointer (a
- * routing record, never a contact). A deliberate choice - the I3 claim of a
- * vacant landlord slot, a landlord picked for a restore - asks only the type.
- */
-function autoRoutingEligible(contact: ContactItem | undefined): boolean {
-  return (
-    contact !== undefined &&
-    contact.phone_ref !== true &&
-    contact.email_ref !== true &&
-    !isContactDeleted(contact) &&
-    contact.type === 'landlord'
-  );
 }
 
 /**

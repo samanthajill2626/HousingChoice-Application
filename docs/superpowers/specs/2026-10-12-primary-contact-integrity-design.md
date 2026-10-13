@@ -1,8 +1,14 @@
 # Primary contact integrity and the intro fallback explanation - design
 
-Date: 2026-10-12. Status: rev 5 - APPROVED by Cameron 2026-10-13, including
+Date: 2026-10-12. Status: rev 6 - APPROVED by Cameron 2026-10-13, including
 the planner's six calls (caseworker exclusion, P2b, 409, Delete-dialog
-sentence, Activity event, dev-only e2e seam). Design review CLOSED after round
+sentence, Activity event, dev-only e2e seam), then RECONCILED with the merged
+caseworker-integrity rules by Cameron the same day: automatic picks use
+`main`'s eligibility rule (typed landlord, live, not a routing pointer);
+auto-primary promotes only the contact being written, on an add or an edit of
+that contact, when there is no live primary and no live landlord of record;
+the earliest-added eligible contact takes over everywhere, restore without a
+landlord included (sections 4.3, 4.4, 4.6). Design review CLOSED after round
 4 (terminal, precision only; rounds 1-4 folded in;
 adjudications at
 `docs/superpowers/reviews/2026-10-12-primary-contact-integrity/design-review/adjudications.md`).
@@ -33,9 +39,12 @@ WHY.
 470 Bolton is an imported property: the importer leaves `landlordId` unset when
 the landlord name does not match exactly one imported person
 (`app/src/lib/import/apply.ts:1506-1520`). Its only contact, Mark Passmore, was
-later added as Property Manager, and adding a contact never makes anyone
-primary (`ListingDetail.tsx:486` sends `primaryContact: false`;
-`unitsRepo.addContact` honors it). So the property has no primary contact and
+later added as Property Manager, and at the time adding a contact never made
+anyone primary (`ListingDetail.tsx:486` sends `primaryContact: false`, and
+`unitsRepo.addContact` honored it). `main` gained a narrower auto-primary on
+2026-10-13 (caseworker-integrity: an eligible NEW seat on a property with no
+flagged primary and no landlord of record); it does not repair a property
+that is already in this state, and section 4.4 widens it. So the property has no primary contact and
 no landlord of record, the property-contact lookup finds nobody, and every tour
 there gets the general intro. New tours also leave Mark off their default
 people list, for the same reason.
@@ -167,11 +176,12 @@ resolves past it to the next live candidate.
 
 ### 4.2 Liveness reads for writes
 
-Every write that picks an heir (P2, P3, the script, the 7.5 heir field) needs
-the liveness of the landlord of record and of every roster contact. Contract:
+Every automatic decision (P2's "no live primary, no live landlord" test, the
+P3 handoffs, the script, the 7.5 fields) needs the liveness - and, for the heir
+function, the type - of the landlord of record and of the roster contacts.
+Contract:
 
-- ONE batch read of those ids (the roster's contact ids, `landlordId`, and on
-  an add the ADDED contact, which is not on the pre-write roster) with
+- ONE batch read of those ids (the roster's contact ids and `landlordId`) with
   `requireComplete` (`contactsRepo.getManyByIds`, `contactsRepo.ts:940-997`);
   its default is best-effort and silently drops unprocessed keys, which would
   read as "missing" - not allowed here.
@@ -208,23 +218,24 @@ read failed) used by the real repo AND by the API-test fake
 1. the landlord of record, if live and not the excluded contact. If the
    landlord has no roster row, the result says so and the write ADDS their row
    (`role: 'landlord'`) as primary;
-2. else the earliest-added LIVE roster contact that is not the excluded one and
-   not a caseworker;
-3. else no heir, with WHY: `no_live_candidate` or `only_caseworkers` (at least
-   one live non-excluded roster contact existed, and every one was a
-   caseworker). The script's `noHeir` / `caseworkerOnly` counts and the 7.4 box
-   read this result; nothing re-derives the rule.
+2. else the earliest-added roster contact that is ELIGIBLE FOR AUTOMATIC
+   ROUTING and is not the excluded one;
+3. else no heir, with WHY: `no_live_candidate` (no live non-excluded roster
+   contact at all) or `no_eligible_candidate` (live ones exist, none eligible).
+   The script's `noHeir` / `noEligible` counts read this result; nothing
+   re-derives the rule.
 
-Caseworkers are never picked AUTOMATICALLY at step 2 (`isCaseworker`,
-`lib/caseworkers.ts:86-88`: a `partner` with a caseworker role). A caseworker
-is the tenant's agency contact, not the property side; caseworker-integrity
-refuses NEW caseworker roster seats but leaves existing ones in place, so
-without this rule P2, P3 or the script could make one primary - named as the
-landlord in the tour intro and put on every new tour's default list. Step 1 is
-NOT filtered: the landlord of record is the property's owner by definition (it
-is also P1's own fallback, which has no type test), and caseworker-integrity
-refuses a caseworker as a NEW landlord of record. An explicit "Make primary" is
-not an automatic pick and is not affected here.
+ELIGIBLE FOR AUTOMATIC ROUTING is the ONE rule `main` already ships
+(caseworker-integrity revisions 5-6, Cameron 2026-10-12;
+`routes/units.ts` `autoRoutingEligible`): the contact exists, is typed
+`landlord` (landlords, property managers, owners - any roster role), is not
+soft-deleted and is not a phone or email routing pointer. Cameron, 2026-10-13:
+a tenant added to a property by accident must never be promoted automatically,
+so the takeover uses the same test as auto-primary. Caseworkers (type
+`partner`) are therefore never picked automatically. Step 1 is NOT filtered by
+type: the landlord of record is the property's owner by definition (it is also
+P1's own fallback, which has no type test). An explicit "Make primary" is not
+an automatic pick and is not affected here.
 
 The excluded contact counts as not live at EVERY step, whatever the liveness
 map says - so `heirIfPrimaryRemoved` (7.5) on a unit whose landlord is the
@@ -234,42 +245,56 @@ contact it just deleted.
 Liveness unknown for any candidate the function would need to decide on ->
 the result is `unknown` (the caller's path rule applies).
 
-### 4.4 P2 - auto-primary on add
+### 4.4 P2 - auto-primary on add or edit (Cameron, 2026-10-13)
 
-When a contact is added to (or upserted on) a property's roster and, after
-the write, there is NO LIVE flagged primary - no row is flagged, or the flagged
-row's contact is deleted or missing - the write runs the heir function over
-the resulting roster (the added row included; a deleted flagged primary is
-not live, so it cannot be its own heir). Every add therefore does the 4.2
-liveness read. The "deleted flagged primary" case matters because the delete
-handoff leaves the flag on a deleted contact when it had no heir (4.6):
-"delete Mark, then add his replacement" must promote the replacement, exactly
-as "add the replacement, then delete Mark" does.
+`main` already ships auto-primary (caseworker-integrity revisions 4-6;
+`unitsRepo.addContact`, decided per attempt from the route's
+`facts.autoPrimaryEligible`): a NEW seat for a contact eligible for automatic
+routing (4.3), on a unit with no row marked primary and no `landlordId`
+attribute, becomes the primary. This spec keeps that rule and widens it in
+exactly two ways, both ruled by Cameron on 2026-10-13:
 
-- heir -> that contact is flagged primary and the scalar set, in the same
-  conditional write;
-- no heir -> flags are left as they are. If NO row is flagged, the scalar is
-  REMOVEd if present (today `addContact` can leave a stale scalar after a
-  demotion, `unitsRepo.ts:815-824`). If a DELETED contact is still flagged, it
-  keeps both its flag and the scalar - the same state the delete fan-out
-  leaves (4.6), so flag and scalar never split;
-- unknown -> the add still succeeds without a promotion, with a WARN log; the
-  property box (7.4) and the script (section 8) are the backstop.
+1. **Deleted counts as absent.** "No primary" means no LIVE flagged primary
+   (no row flagged, or the flagged contact deleted/missing), and "no landlord
+   of record" means no LIVE one (`landlordId` absent, or naming a
+   deleted/missing contact). Without this, the delete handoff - which leaves
+   the flag on a deleted sole contact when nobody can take over (4.6) - would
+   block the replacement forever: "delete Mark, then add his replacement" must
+   promote the replacement, as "add the replacement, then delete Mark" does.
+2. **An edit of THAT contact counts, never anyone else.** A roster write for
+   contact X (an add, or an edit of X's own row such as a role change) can make
+   X - and only X - the primary, under the same conditions. A write for X never
+   promotes any OTHER contact, and nothing outside the contact-list routes
+   (unit PATCH, status, photos) ever promotes anyone.
 
-In the 470 Bolton case (no landlord, Mark the only contact) the heir is Mark.
-Properties whose landlord-of-record row is flagged primary AND live are
-untouched. The re-add of the CURRENT primary without `primaryContact` (an
-API-only demotion to zero, `unitsRepo.ts:794,800`) now ends with the heir
-primary again.
+So: a roster write for contact X makes X the primary when ALL of these hold
+on the attempt's own read - X is eligible for automatic routing (the route's
+`facts.autoPrimaryEligible`, unchanged), there is no live flagged primary, and
+there is no live landlord of record. Otherwise the write keeps the request's
+flag as it does today. The liveness of the flagged primary and of the landlord
+of record comes from the 4.2 read (X's own facts are already read by the route).
+
+- When X is promoted, every other row is demoted and the scalar set, in the
+  same conditional write (today's mechanics).
+- When nobody is promoted and NO row is flagged after the write, a stale scalar
+  is REMOVEd (today `addContact` can leave one after a demotion). A deleted
+  contact that is still flagged keeps both its flag and the scalar - the same
+  state the delete fan-out leaves (4.6), so flag and scalar never split.
+- Liveness unknown -> the write still succeeds without a promotion, with a
+  WARN log; the property box (7.4) and the script (section 8) are the backstop.
+
+In the 470 Bolton case (no landlord, Mark the only contact, typed landlord)
+an add or an edit of Mark makes Mark the primary; if Mark is not typed
+landlord, nothing is automatic and the property box offers the click.
+Properties with a live landlord of record are never touched by P2.
 
 Making a contact primary that is NOT already primary, when that contact is
 soft-deleted, is refused with 409 `primary_contact_deleted`. A missing contact
 cannot reach this: the route answers 404 `contact_not_found` first
 (`routes/units.ts:1097-1100`). Re-sending `primaryContact: true` for a row that
 is ALREADY primary (the dashboard's re-role sends the row's current flag,
-`ListingDetail.tsx:425-433`) is never refused, even if that contact is deleted;
-for a deleted one the write's P2 check then hands the primary off as above
-(heir, or no change when there is none). Order: after the 404 and after caseworker-integrity's type
+`ListingDetail.tsx:425-433`) is never refused and changes nothing, even if that
+contact is deleted. Order: after the 404 and after caseworker-integrity's type
 checks on this route (the plan pins it against the merged code). Adding a
 deleted contact as a NON-primary row stays allowed (caseworker-integrity
 deliberately dropped a deleted-contact refusal here; not reopened).
@@ -317,14 +342,19 @@ Paths (all through the heir function, 4.3):
   only contact leaves the property exactly as it was.
 - **Restore a contact**: no roster change. A contact whose primary moved to a
   live heir does not get it back (the Delete dialog says so, 7.6).
-- **caseworker-integrity's restores** (once on `main`): the landlord-CLEARING
-  restore (`restoreWithLandlord` with `next: null`) removes the landlord row;
-  if that row was primary it runs the remove rule above (heir / clear; unknown
-  -> refuse). The landlord SWAP (`next: <id>`), when the old landlord was
-  primary, re-runs the heir function after the swap instead of flagging the
-  new landlord unconditionally - so a soft-deleted new landlord is not made
-  primary. That branch's tests that assert "no primary after a clear" change
-  where an heir exists; the plan updates them.
+- **caseworker-integrity's restores** (on `main` since 2026-10-13): the
+  landlord-CLEARING restore ("Restore without a landlord",
+  `restoreWithLandlord` with `next: null`) removes the landlord row; if the
+  cleared landlord was the primary it runs the remove rule above (heir /
+  clear; unknown -> refuse). This REPLACES `main`'s sole-landlord promotion
+  (`routes/units.ts` `soleLandlordToPromote`: exactly ONE remaining eligible
+  contact promoted, two or more -> nobody): Cameron, 2026-10-13 - the
+  earliest-added eligible contact takes over everywhere, restore included. The
+  landlord SWAP (`next: <id>`), when the old landlord was primary, re-runs the
+  heir function after the swap instead of flagging the new landlord
+  unconditionally - so a soft-deleted new landlord is not made primary.
+  `main`'s tests that assert "nobody promoted with two or more" change; the
+  plan updates them.
 
 ### 4.7 P4 - what holds afterwards
 
@@ -332,10 +362,13 @@ Paths (all through the heir function, 4.3):
   primary sets the scalar to it or REMOVEs it; a legacy scalar that disagrees
   with a live flagged primary is aligned by the script (section 8). Nothing
   reads the scalar at runtime.
-- After an add, a remove, a landlord-clearing restore, or a landlord swap, a
-  unit with at least one live roster contact (or a live landlord of record) has
-  a LIVE primary - unless liveness was unknown (add proceeds without promotion;
-  remove and restore refuse).
+- After a remove, a landlord-clearing restore, or a landlord swap, a unit with
+  a live landlord of record or at least one ELIGIBLE live roster contact has a
+  live primary - unless liveness was unknown (they refuse).
+- After a roster write for an eligible contact X on a unit with no live primary
+  and no live landlord of record, X is the primary. A write for a NON-eligible
+  contact (a tenant, a partner) promotes nobody, by design: such a property
+  keeps no primary and the property box (7.4) asks for a deliberate choice.
 - After a contact delete, every unit whose primary was that contact and that
   has a live heir has moved to it - best effort (a failed unit is logged).
 - Known gaps, by design: the importer's hard-delete retraction and the API
@@ -493,15 +526,19 @@ least one row. Amber box, same style as 7.1. Mockup:
   `deleted`, "This property's contact was deleted." (it may have been the
   primary or the landlord of record) - followed by "New tours won't include
   the landlord, and tour group texts use the general intro."
-- Action, counting ELIGIBLE rows only (live and not a caseworker - the same
-  test as heir step 2; 7.5 marks both):
+- Action, counting ELIGIBLE rows only (live and not a caseworker; 7.5 marks
+  both). This is a DELIBERATE click, so it is broader than the automatic
+  rule (4.3) - it can name a contact who is not typed landlord, and the
+  button names the person before Sam clicks (Cameron, 2026-10-13):
   - exactly ONE eligible row: button "Make <Name> primary" - the same write as
     the edit-mode "Make primary" (`onMakePrimaryContact`,
     `ListingDetail.tsx:437`).
   - two or more eligible rows: button "Choose a primary" - enters the card's
     edit mode.
   - no eligible row (no live contact, or only caseworkers): no button; the
-    line reads "Add a contact - they become the primary automatically."
+    line reads "Add the landlord or property manager - they become the
+    primary automatically." (true: an eligible add on a property with no live
+    primary and no live landlord is promoted, 4.4).
 - Not shown on a soft-deleted property (the card is read-only there), and not
   shown when the block is absent (could not tell).
 - Zero roster rows: no box. The existing empty state "No contacts on this
@@ -596,8 +633,10 @@ every write is conditional, so concurrent runs cannot double-write.
   the landlord row when the heir is an off-roster landlord) and sets the
   scalar.
 - Counted, not written: `noHeir` (no live contact and no live landlord),
-  `caseworkerOnly` (the only live candidates are caseworkers, whom the heir
-  function never picks - 4.3; listed by unit id so Sam can choose by hand),
+  `noEligible` (live contacts exist but none is eligible for automatic routing
+  - e.g. only a tenant or a caseworker; the heir function's
+  `no_eligible_candidate`, 4.3; listed by unit id so Sam can choose by hand
+  with the property box),
   `unknown` (a liveness read failed).
 - Also aligned, with the same conditional write and no audit event (it is not
   a primary change): a unit whose flagged primary is live but whose scalar is
@@ -629,11 +668,11 @@ a task or a watch item.
 |---|---|---|
 | `POST /api/units` (`routes/units.ts:464-514`, repo `create` `unitsRepo.ts:581-609`) | sets `landlordId`; accepts `primary_contact` unchecked | derived landlord primary (unchanged); `primary_contact` refused (P2b) |
 | `PATCH /api/units/:id` (`units.ts:1376-1491`, repo `update` `:662-708`) | can reassign `landlordId` and set `primary_contact`, no roster sync | `primary_contact` refused (P2b); `landlordId` reassign UNCHANGED (API-only, no UI; caseworker-integrity owns its type check); the heir function handles the resulting off-roster landlord |
-| `POST /api/units/:id/contacts` (`units.ts:1061-1137`, repo `addContact` `:754-863`) | flag from input; can demote to zero; scalar can go stale | P2 (heir function); 409 `primary_contact_deleted` |
+| `POST /api/units/:id/contacts` (`units.ts` contact-list route, repo `addContact`; `facts.autoPrimaryEligible` from the route's `autoRoutingEligible`) | `main`: auto-primary for an eligible NEW seat on a unit with no flagged primary and no `landlordId`; otherwise the flag from input; can demote to zero; scalar can go stale | P2 (4.4: deleted counts as absent; an edit of X's own row counts; never another contact); 409 `primary_contact_deleted` |
 | `DELETE /api/units/:id/contacts/:cid` (`units.ts:1143-1172`, repo `removeContact` `:865-941`) | landlord heir or none; off-roster landlord -> flag/scalar disagree | P3 remove rule; 503 `roster_read_failed` |
 | `DELETE /api/contacts/:id` (`routes/contacts.ts:2228-2347`) | touches no unit | P3 delete fan-out |
 | `POST /api/contacts/:id/restore` (`contacts.ts:2352-2374`) | touches no unit | unchanged |
-| `DELETE` / `POST restore` on a unit (`units.ts:1497-1532`) | `deleted_at` only | unchanged on `main`; caseworker-integrity's `restoreWithLandlord` clear and swap follow P3 once merged |
+| `DELETE` / `POST restore` on a unit (`units.ts` restore route; repo `restore`, `restoreWithLandlord`) | `main`: plain restore `deleted_at` only; "Restore without a landlord" promotes the ONE remaining eligible contact (`soleLandlordToPromote`), two or more -> nobody; the swap flags the new landlord when the old was primary | plain restore unchanged; the clear runs the P3 remove rule (earliest-added eligible) in place of `soleLandlordToPromote`; the swap re-runs the heir function |
 | importer `upsertUnit` (`lib/import/apply.ts:1411-1556`) | `landlordId` on an exact match only, never a roster; on a re-import of a human-touched unit, `if_not_exists(landlordId)` (`:1545-1552`) can attach a landlord with NO roster row | unchanged; the heir function and the script handle the off-roster landlord |
 | importer `retractImported` (`apply.ts:316-328`, `:769-775`) | hard-deletes contacts, leaves roster/landlord ids dangling | unchanged; P1 treats a missing contact as deleted |
 | API-test fake (`app/test/helpers/twilioWebhookHarness.ts:2940-3017`) | its own copies of `addContact` / `removeContact` | uses the shared heir function (4.3) |
@@ -711,10 +750,16 @@ P1 removes the property-contact route into this; the rest is filed as
   deleted landlord; tenant primary STOPS; read failure carries the candidate id
   and does not fall through; reason `none` vs `deleted`); the heir function
   (landlord heir, off-roster landlord heir with row add, earliest live heir,
-  deleted skipped, excluded contact, unknown); P2 (no primary -> heir; a
-  primary exists -> untouched; derived-landlord unit untouched; no heir ->
-  stale scalar removed; unknown -> add succeeds unpromoted; 409 only for a
-  deleted contact not already primary); P3 per path (remove: heir / clear /
+  deleted skipped, excluded contact, a non-landlord-typed / routing-pointer /
+  caseworker contact never picked at step 2, a non-landlord-typed landlord of
+  record still picked at step 1, `no_live_candidate` vs `no_eligible_candidate`,
+  unknown); P2 (an eligible add or an edit of X's own row on a unit with no
+  live primary and no live landlord -> X primary; a deleted flagged primary or
+  a deleted landlord counts as absent; a NON-eligible X -> nobody promoted; a
+  write for X NEVER promotes another contact; a live primary or a live
+  landlord -> untouched; no flag left -> stale scalar removed; unknown -> the
+  write succeeds unpromoted; 409 only for a deleted contact not already
+  primary); P3 per path (remove: heir / clear /
   503 on unknown; delete: move to heir / no heir unchanged / unknown skipped /
   one unit failing does not fail the delete / delete-then-restore lossless);
   the reasons (each alone, combinations, ordering, owner/unit failure alone,
@@ -724,9 +769,8 @@ P1 removes the property-contact route into this; the rest is filed as
   ignores `requireComplete`, so the 503 / unknown paths are tested with an
   injected contacts repo whose batch read throws - in BOTH shapes (a raw error
   and `IncompleteBatchReadError`), on add, remove, the unit GET and the delete
-  fan-out. The heir function's caseworker exclusion is pinned at step 2, and a
-caseworker landlord of record is pinned as still picked at step 1; the
-`only_caseworkers` result and the 7.4 box's eligible-row count are pinned.
+  fan-out. The 7.4 box's eligible-row count (live, not a caseworker) is
+  pinned separately from the heir function's automatic rule.
 - App API tests: the 7.5 block (complete read, incomplete read -> absent,
   deleted rows), the preview `introFallback`, the contact DELETE handoff, P2b's
   refusal, the Activity projection's `reason`.
@@ -756,13 +800,16 @@ caseworker landlord of record is pinned as still picked at step 1; the
 
 ## 11. Sequencing with fix/caseworker-integrity
 
-`fix/caseworker-integrity` (slice S4) rewrites the same surfaces: the property
-contact-list add route's checks (`routes/units.ts:1061`), unit restore and its
-new `restoreWithLandlord` (clear and swap), and `ListingDetail.tsx`'s roster
-writes, conflict-copy map and Add contact picker. Decision (Cameron,
-2026-10-12): this spec and its review run now; the PLAN is written against
-`main` after that branch merges, and the build is cut from that `main`. P2's
-409 ordering and P3's restore paths are pinned against the merged code.
+`fix/caseworker-integrity` (slice S4) rewrote the same surfaces: the property
+contact-list add route's checks and its auto-primary, unit restore and its new
+`restoreWithLandlord` (clear and swap) with the sole-landlord promotion, and
+`ListingDetail.tsx`'s roster writes, conflict-copy map, restore dialog and Add
+contact picker. Decision (Cameron, 2026-10-12): the spec and its review ran
+first; the PLAN is written against `main` after that branch merged. It merged
+on 2026-10-13, and `main` was merged into this branch at 0e565b86 before the
+plan. Section 4 was reconciled with the merged rules by Cameron the same day
+(rev 6: 4.3 eligibility, 4.4 P2, 4.6 restore). The plan pins P2's 409 ordering
+and P3's restore paths against the merged code.
 
 ## 12. Docs and issues
 

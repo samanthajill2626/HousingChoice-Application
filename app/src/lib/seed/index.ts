@@ -21,6 +21,7 @@ import { matrixItems } from './matrix.js';
 import { seedLive } from './live.js';
 import { seedMedia } from './media.js';
 import { historyItems } from './history.js';
+import { deriveSeedHeardFrom } from './heardFrom.js';
 import type { TableNamespace } from '../devReset.js';
 
 export { SEED } from './lean.js';
@@ -142,6 +143,16 @@ export async function seedAll(
     tables['audit_events'] = history.audit_events;
     tables['activity_events'] = history.activity_events;
   }
+
+  // Last heard from (spec 5.1 / 14.2; invariant I4): derived from the MERGED
+  // rows of whichever profile is loading - after the cast/matrix merge (matrix
+  // adds no messages), before the Put loop - through the live paths' one rule.
+  // Returns COPIES: the SEED and cast items are shared module literals.
+  tables['contacts'] = await deriveSeedHeardFrom(
+    tables['messages'] ?? [],
+    tables['conversations'] ?? [],
+    tables['contacts'] ?? [],
+  );
 
   const doc = createDocumentClient({ endpoint });
   let count = 0;

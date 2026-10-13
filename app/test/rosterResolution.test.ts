@@ -458,6 +458,132 @@ describe('resolveRoster - the property default (no thread, no plan)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// DEFAULT through the shared property-contact lookup (primary-contact-integrity
+// spec 4.1): a soft-deleted or missing candidate is SKIPPED; a read that THROWS
+// keeps the bare row and never falls through to the next candidate.
+// ---------------------------------------------------------------------------
+
+describe('resolveRoster - the property default skips a deleted property contact (spec 4.1)', () => {
+  const DELETED_AT = '2026-10-01T00:00:00.000Z';
+  const pmPrimary: UnitItem = {
+    unitId: 'unit-1',
+    landlordId: 'c-owner',
+    status: 'available',
+    contacts: [
+      { contactId: 'c-owner', role: 'landlord', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+    ],
+    primary_contact: 'c-pm',
+  };
+
+  it('a DELETED primary is not on the list - the live landlord of record takes its slot', async () => {
+    const deps = makeDeps({
+      units: { 'unit-1': pmPrimary },
+      contacts: {
+        'c-tenant': contact('c-tenant', '+15550100001', 'Tina'),
+        'c-pm': { ...contact('c-pm', '+15550100002', 'Pat'), deleted_at: DELETED_AT },
+        'c-owner': contact('c-owner', '+15550100004', 'Olive'),
+      },
+    });
+
+    const resolved = await resolveRoster(deps, TOUR);
+
+    expect(resolved).toEqual({
+      source: 'default',
+      members: [
+        { contactId: 'c-tenant', phone: '+15550100001', name: 'Tina Person' },
+        { contactId: 'c-owner', phone: '+15550100004', name: 'Olive Person' },
+      ],
+    });
+  });
+
+  it('a deleted SOLE primary with no landlord of record leaves the tenant alone - never the deleted phone', async () => {
+    const deps = makeDeps({
+      units: {
+        'unit-1': {
+          unitId: 'unit-1',
+          status: 'available',
+          contacts: [{ contactId: 'c-pm', role: 'pm', primaryContact: true }],
+        } as unknown as UnitItem,
+      },
+      contacts: {
+        'c-tenant': contact('c-tenant', '+15550100001', 'Tina'),
+        'c-pm': { ...contact('c-pm', '+15550100002', 'Pat'), deleted_at: DELETED_AT },
+      },
+    });
+
+    const resolved = await resolveRoster(deps, TOUR);
+
+    expect(resolved.members.map((m) => m.contactId)).toEqual(['c-tenant']);
+  });
+
+  it('a primary with NO record is skipped like a deleted one (the importer hard-deletes)', async () => {
+    const deps = makeDeps({
+      units: { 'unit-1': pmPrimary },
+      contacts: {
+        'c-tenant': contact('c-tenant', '+15550100001', 'Tina'),
+        'c-owner': contact('c-owner', '+15550100004', 'Olive'),
+      },
+    });
+
+    const resolved = await resolveRoster(deps, TOUR);
+
+    expect(resolved.members.map((m) => m.contactId)).toEqual(['c-tenant', 'c-owner']);
+  });
+
+  it('a deleted primary, then the landlord IS the tenant: the tenant alone, one slot', async () => {
+    const deps = makeDeps({
+      units: {
+        'unit-1': {
+          unitId: 'unit-1',
+          landlordId: 'c-tenant',
+          status: 'available',
+          contacts: [
+            { contactId: 'c-tenant', role: 'landlord', primaryContact: false },
+            { contactId: 'c-pm', role: 'pm', primaryContact: true },
+          ],
+        },
+      },
+      contacts: {
+        'c-tenant': contact('c-tenant', '+15550100001', 'Tina'),
+        'c-pm': { ...contact('c-pm', '+15550100002', 'Pat'), deleted_at: DELETED_AT },
+      },
+    });
+
+    const resolved = await resolveRoster(deps, TOUR);
+
+    expect(resolved.members).toEqual([{ contactId: 'c-tenant', phone: '+15550100001', name: 'Tina Person' }]);
+  });
+
+  it('(PIN) a THROWING property-contact read keeps the BARE row for that candidate and never falls through', async () => {
+    const live: Record<string, ContactItem> = {
+      'c-tenant': contact('c-tenant', '+15550100001', 'Tina'),
+      'c-owner': contact('c-owner', '+15550100004', 'Olive'),
+    };
+    const deps = makeDeps({ units: { 'unit-1': pmPrimary }, contacts: live });
+    deps.contacts = {
+      getById: vi.fn(async (contactId: string) => {
+        deps.contactReads.push(contactId);
+        if (contactId === 'c-pm') throw new Error('dynamodb: ProvisionedThroughputExceededException');
+        return live[contactId];
+      }),
+    };
+
+    const resolved = await resolveRoster(deps, TOUR);
+
+    expect(resolved).toEqual({
+      source: 'default',
+      members: [
+        { contactId: 'c-tenant', phone: '+15550100001', name: 'Tina Person' },
+        { contactId: 'c-pm' },
+      ],
+    });
+    // The landlord of record was never read: a failed read is not absence.
+    expect(deps.contactReads).toEqual(['c-tenant', 'c-pm']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // describeRoster - the DISPLAY name chain
 // ---------------------------------------------------------------------------
 

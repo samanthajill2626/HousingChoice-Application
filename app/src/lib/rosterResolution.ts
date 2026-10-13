@@ -6,8 +6,10 @@
 //
 //   NO THREAD  -> the roster is a PLAN: the `roster` override when the operator
 //                 materialized one, else the property default (the tenant plus
-//                 the unit's primary contact, falling back to the landlord of
-//                 record when no roster row is primary).
+//                 the PROPERTY CONTACT from the one shared lookup,
+//                 lib/propertyContact.ts: the roster row flagged primary, else
+//                 the landlord of record, skipping a soft-deleted or missing
+//                 contact).
 //   A THREAD   -> the roster is a FACT: `relay.participants` on that
 //                 conversation, in ANY status - open, connecting, or CLOSED.
 //                 Reopen is a pure status flip, so a close-edit-reopen sequence
@@ -36,6 +38,7 @@
 // PII (doc section 9): ids and counts only - never phones or names in logs.
 import type { Logger } from './logger.js';
 import { normalizeToE164 } from './phone.js';
+import { resolvePropertyContact } from './propertyContact.js';
 import { isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import type { ConversationsRepo } from '../repos/conversationsRepo.js';
 import { relayMemberKey } from '../repos/messagesRepo.js';
@@ -131,6 +134,15 @@ export interface ResolvedRoster {
 export interface RosterResolutionDeps {
   conversations: Pick<ConversationsRepo, 'getById'>;
   units: Pick<UnitsRepo, 'getById'>;
+  /**
+   * The contact read behind every member: plan entries and the tenant slot
+   * (memberFromContact), describeRoster's names, removed-contact roles and
+   * opt-outs, and the preview composer's names. The property DEFAULT reads its
+   * property contact through the ONE shared lookup (lib/propertyContact.ts
+   * resolvePropertyContact, primary-contact-integrity spec 4.1) with this
+   * same repo - lazily, so the landlord of record is read only when the
+   * flagged primary was skipped as soft-deleted or record-less.
+   */
   contacts: Pick<ContactsRepo, 'getById'>;
   /**
    * Quiet-hours deferrals (spec 5.3 / 6.5), OPTIONAL: supply it and every
@@ -149,7 +161,9 @@ export interface RosterResolutionDeps {
    * will send - which is what keeps an operator from pinning the wrong variant
    * by editing a previewed naked intro (spec 9.0). Omitted, the resolver has no
    * read that can answer and the preview degrades to the naked intro, exactly
-   * as spec 9.5 degrades every other missing input. The three production
+   * as spec 9.5 degrades every other missing input - and the tour and
+   * placement OPEN previews report it: their `introFallback` reasons include
+   * `lookup_failed` (primary-contact-integrity spec 5.1). The three production
    * preview routes MUST wire them; the toursApi / placementsApi parity pins go
    * through the real routes and are what prove that.
    */
@@ -171,12 +185,38 @@ function nonEmpty(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+/** A member from a contact record already in hand: its E.164 phone and its display name. */
+function memberFromRecord(contactId: string, contact: ContactItem): ResolvedMember {
+  const phone = nonEmpty(contact.phone);
+  const normalized = phone !== undefined ? normalizeToE164(phone) : undefined;
+  const name = displayName(contact);
+  return {
+    contactId,
+    ...(normalized !== undefined && { phone: normalized }),
+    ...(name !== undefined && { name }),
+  };
+}
+
 /**
- * Build a member from a contactId. A contact that cannot be read - deleted,
- * dangling, or a repo throw - KEEPS ITS ROW (spec 5.2 DANGLING IDS): the row
- * renders as "removed contact", is excluded from every send and from call
- * routing, and stays removable like any other member. Dropping it would hide a
- * member the operator can still see on the thread.
+ * Build a member from a contactId - a plan entry, or the tenant slot. A
+ * contact that cannot be read KEEPS ITS ROW (spec 5.2 DANGLING IDS) and stays
+ * removable like any other member; dropping it would hide a member the
+ * operator can still see:
+ *
+ * - a DANGLING id (no record) or a repo THROW gives the bare `{ contactId }`
+ *   row. It carries no phone, so provisioning and every send skip it.
+ * - a SOFT-DELETED contact is a different case: contactsRepo.getById returns
+ *   the record, so its row keeps the phone and the name. describeRoster
+ *   labels it `removed_contact` but still counts it reachable, and
+ *   provisioning puts it on the relay thread - it is NOT excluded from sends.
+ *   Filed as docs/issues/relay-provision-includes-deleted-contacts.md
+ *   (primary-contact-integrity spec 9.3).
+ *
+ * The property DEFAULT (resolveRoster below) does not build its property
+ * contact here: the shared lookup (lib/propertyContact.ts) skips a
+ * soft-deleted OR record-less (missing) candidate, so neither is ever added
+ * as the property contact - not even as a bare row. Only a property-contact
+ * read that THROWS keeps a bare row there.
  */
 async function memberFromContact(
   deps: RosterResolutionDeps,
@@ -189,14 +229,7 @@ async function memberFromContact(
     deps.log.warn({ err, contactId }, 'roster resolution: contact read failed - bare row kept');
   }
   if (!contact) return { contactId };
-  const phone = nonEmpty(contact.phone);
-  const normalized = phone !== undefined ? normalizeToE164(phone) : undefined;
-  const name = displayName(contact);
-  return {
-    contactId,
-    ...(normalized !== undefined && { phone: normalized }),
-    ...(name !== undefined && { name }),
-  };
+  return memberFromRecord(contactId, contact);
 }
 
 /**
@@ -285,19 +318,32 @@ export async function resolveRoster(
   }
   if (!unit) return { source: 'default', members };
 
-  // The property's default contact, with the D3 fallback: when NO roster row
-  // carries primaryContact (zero-primary is legal and reachable, spec 5.1) fall
-  // back to the LANDLORD OF RECORD - exactly the pre-roster behavior, so no
-  // working property regresses to a too-thin roster.
-  const roster = unitContacts(unit);
-  const primary = roster.find((c) => c.primaryContact === true);
-  const propertyContactId = primary?.contactId ?? nonEmpty(unit.landlordId);
-  if (propertyContactId === undefined || propertyContactId.length === 0) {
-    return { source: 'default', members };
-  }
-  // De-dupe the degenerate case where the tenant IS the property contact.
-  if (propertyContactId !== tenantId) {
-    members.push(await memberFromContact(deps, propertyContactId));
+  // The property's default contact: the ONE shared lookup
+  // (lib/propertyContact.ts, primary-contact-integrity spec 4.1). The roster
+  // row flagged primary, else the LANDLORD OF RECORD (the D3 fallback:
+  // zero-primary is legal and reachable, so no working property regresses to
+  // a too-thin roster) - and a soft-deleted or missing contact is SKIPPED, so
+  // a deleted primary is never put on this list, provisioned or texted. A
+  // candidate who IS the tenant is no property contact (the tenant already
+  // holds a slot).
+  const lookup = await resolvePropertyContact({
+    unit,
+    tenantId,
+    contactsRepo: deps.contacts,
+    logger: deps.log,
+  });
+  if (lookup.kind === 'found') {
+    members.push(memberFromRecord(lookup.contactId, lookup.contact));
+  } else if (lookup.kind === 'read_failed') {
+    // A read that THREW is not absence (spec 4.1): keep today's bare row for
+    // that candidate, so a plan materialized from this default
+    // (services/rosterEdits.ts applyRosterPlanEdit) never silently loses the
+    // property contact. It carries no phone, so no send reaches it.
+    deps.log.warn(
+      { ownerType: owner.type, ownerId: owner.id, contactId: lookup.candidateId },
+      'roster resolution: property contact read failed - bare row kept',
+    );
+    members.push({ contactId: lookup.candidateId });
   }
   return { source: 'default', members };
 }

@@ -996,12 +996,15 @@ export function ContactDetail(): React.JSX.Element {
           </div>
           {/* The facts line always renders now: "Last heard from" (spec
               2026-10-12 5.7) is its own span here for EVERY contact type -
-              never appended to buildFacts()'s string, which tests pin exactly. */}
+              never appended to buildFacts()'s string, which tests pin exactly.
+              Review A-1: the facts text is the ONE child that shrinks and
+              ellipsizes; the separator and "Last heard from" keep their width
+              (see .factsText / .factsSep / .heardFrom). */}
           <div className={styles.facts}>
             {facts ? (
               <>
-                <span>{facts}</span>
-                {' - '}
+                <span className={styles.factsText}>{facts}</span>
+                <span className={styles.factsSep}>{' - '}</span>
               </>
             ) : null}
             <LastHeardFrom iso={contact.last_heard_from_at} />

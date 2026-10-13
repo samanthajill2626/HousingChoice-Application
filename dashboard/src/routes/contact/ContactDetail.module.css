@@ -86,20 +86,43 @@
   color: var(--c-text-inverse);
 }
 
+/* The facts line is a one-line flex row with an explicit sacrifice order
+ * (code review A-1; the Tenants row's F13 shape, ContactsList.module.css):
+ * .factsText is the ONLY shrinkable child and ellipsizes; the separator and
+ * "Last heard from" never shrink, so on a narrow pane the voucher /
+ * authority text is cut first and the value Sam sorts by stays whole.
+ * overflow: hidden only contains the extreme case where "Last heard from"
+ * alone is wider than the line. */
 .facts {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
   margin-top: 2px;
   color: var(--c-header-facts);
   font-size: var(--fs-xs);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.factsText {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* " - ": pre keeps the spaces a flex item would otherwise trim at its edges. */
+.factsSep {
+  flex: 0 0 auto;
+  white-space: pre;
+}
+
 /* "Last heard from" (spec 2026-10-12 5.7): its own span on the facts line,
- * in the header facts token it inherits. The label never wraps internally;
- * an over-long line is still clipped (with an ellipsis) at its END by
- * .facts, so a very long facts string can hide this span on a narrow pane. */
+ * in the header facts token it inherits. Unshrinkable and never wrapped -
+ * .factsText gives way first (A-1). */
 .heardFrom {
+  flex: 0 0 auto;
   white-space: nowrap;
 }
 

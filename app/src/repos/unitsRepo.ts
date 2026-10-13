@@ -39,6 +39,8 @@ import {
   type TransitionSource,
 } from '../lib/statusModel.js';
 import { UNIT_MEDIA_MAX } from '../lib/unitMedia.js';
+import type { RosterContactsRead } from '../lib/propertyContact.js';
+import { isDeleted as isContactDeleted } from './contactsRepo.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /**
@@ -170,14 +172,21 @@ export interface ContactListFacts {
    */
   landlordTyped: boolean;
   /**
-   * The contact is eligible for an AUTOMATIC routing choice - the route's one
-   * rule (routes/units.ts `autoRoutingEligible`, shared with the restore's
-   * sole-landlord promotion): typed landlord, not soft-deleted, not a phone or
-   * email routing pointer. Only such a contact is made primary by auto-primary
-   * (spec revision 6, final review A4, fix wave FWF-3; revision 5 / FW2-11
-   * keyed it on the type alone).
+   * The contact is eligible for an AUTOMATIC routing choice - the one rule
+   * (lib/propertyContact.ts `isAutoRoutingEligible`, shared with the heir
+   * function): typed landlord, not soft-deleted, not a phone or email routing
+   * pointer. Only such a contact is made primary by auto-primary
+   * (caseworker-integrity spec revision 6, final review A4, fix wave FWF-3;
+   * revision 5 / FW2-11 keyed it on the type alone).
    */
   autoPrimaryEligible: boolean;
+  /**
+   * The contact is soft-deleted (contactsRepo `isDeleted`) -
+   * primary-contact-integrity spec 4.4: such a contact is never made the
+   * primary unless its row already is (PrimaryContactDeletedError). Optional:
+   * absent means not deleted.
+   */
+  contactDeleted?: boolean;
 }
 
 /**
@@ -219,6 +228,128 @@ export class RosterWriteConflictError extends Error {
 }
 
 const ROSTER_WRITE_MAX_ATTEMPTS = 3;
+
+/**
+ * primary-contact-integrity (spec 2026-10-12 sections 4.2 and 4.6): a roster
+ * write that must hand the primary contact to an heir could not tell who is
+ * live - the contacts liveness read threw or came back incomplete (either
+ * shape: a raw chunk error or IncompleteBatchReadError, both of which
+ * readRosterContacts answers as `{ ok: false }`), or the caller supplied no
+ * read. Nothing was written. The routes map it to 503 roster_read_failed.
+ */
+export class RosterReadFailedError extends Error {
+  constructor(message = 'could not read the property contacts to choose who takes over; nothing was changed') {
+    super(message);
+    this.name = 'RosterReadFailedError';
+  }
+}
+
+/**
+ * primary-contact-integrity (spec 2026-10-12 section 4.4): a contact-list
+ * write would make a SOFT-DELETED contact the primary contact while its row
+ * is not already the primary. Decided per attempt from the caller's
+ * `ContactListFacts.contactDeleted`. Nothing was written. The route maps it
+ * to 409 primary_contact_deleted.
+ */
+export class PrimaryContactDeletedError extends Error {
+  constructor(message = 'a soft-deleted contact cannot be made the primary contact') {
+    super(message);
+    this.name = 'PrimaryContactDeletedError';
+  }
+}
+
+/**
+ * The liveness read for automatic primary decisions (spec 4.2): the caller
+ * binds lib/propertyContact.ts readRosterContacts to its contacts repo. ONE
+ * batch read with requireComplete; any failure answers `{ ok: false }`.
+ */
+export type ReadRosterContacts = (ids: string[]) => Promise<RosterContactsRead>;
+
+/** A primary hand-off a roster write made, reported by that write itself so
+ *  the caller can audit it (spec section 8) without a second read. */
+export interface PrimaryHandoff {
+  /** The contact whose primary flag went away (removed, or the old landlord). */
+  from: string;
+  /** The heir the write flagged primary. */
+  to: string;
+}
+
+/** Options of the roster writes that can hand the primary contact off (spec 4.6). */
+export interface RosterHandoffOpts {
+  /**
+   * The liveness read, called on EACH attempt after that attempt's consistent
+   * unit read and before its conditional write (a retry reads again). Absent
+   * = liveness unknown: a hand-off that needs it throws RosterReadFailedError.
+   */
+  readContacts?: ReadRosterContacts;
+  /** Called once, after the successful write, when that write flagged an heir. */
+  onPrimaryHandoff?: (handoff: PrimaryHandoff) => void;
+}
+
+/** handOffPrimaryFrom's answer (spec 4.6, contact delete). */
+export type PrimaryHandOffResult =
+  | { outcome: 'moved'; unit: UnitItem; to: string }
+  | { outcome: 'unchanged' | 'not_primary' | 'unknown' };
+
+/** The inputs of the P2 decision (spec 4.4), all from ONE attempt's read. */
+export interface AutoPrimaryArgs {
+  /** unitContacts(unit) of this attempt's read (a derived landlord row included). */
+  roster: readonly UnitContact[];
+  /** This attempt's non-empty landlordId, else undefined. */
+  landlordId: string | undefined;
+  /** X - the contact this roster write is for. */
+  contactId: string;
+  /** ContactListFacts.autoPrimaryEligible (the route's consistent read of X). */
+  eligible: boolean;
+  /** The request's own primaryContact flag. */
+  requested: boolean;
+}
+
+/**
+ * P2 step 1, PURE (primary-contact-integrity spec 4.4; shared by
+ * unitsRepo.addContact and the API-test fake): the ids whose liveness decides
+ * whether X is made the primary automatically - the flagged primary row's
+ * contact and the landlord of record, each once - or null when no read can
+ * change the answer: X is not eligible, the request already asks for primary,
+ * X is itself the flagged primary (eligible means live, so a live primary
+ * exists - an explicit `false` on X's own primary row still demotes it), or X
+ * is the landlord of record (a live landlord of record). An empty list means
+ * nothing is flagged and there is no landlord of record: no read is needed.
+ */
+export function autoPrimaryLivenessIds(args: AutoPrimaryArgs): string[] | null {
+  if (!args.eligible || args.requested) return null;
+  if (args.landlordId !== undefined && args.landlordId === args.contactId) return null;
+  const flagged = args.roster.find((row) => row.primaryContact === true);
+  if (flagged !== undefined && flagged.contactId === args.contactId) return null;
+  const ids: string[] = [];
+  if (flagged !== undefined) ids.push(flagged.contactId);
+  if (args.landlordId !== undefined && !ids.includes(args.landlordId)) ids.push(args.landlordId);
+  return ids;
+}
+
+/**
+ * P2 step 2, PURE: 'promote' = X becomes the primary (on this attempt's read
+ * there is no LIVE flagged primary and no LIVE landlord of record - a
+ * soft-deleted or missing contact counts as absent); 'keep' = the request's
+ * own flag stands; 'unknown' = the decision needed a liveness read that failed
+ * or was not supplied - the write proceeds without a promotion (the route
+ * WARNs). A write for X never promotes any other contact.
+ */
+export function decideAutoPrimary(
+  args: AutoPrimaryArgs & { read: RosterContactsRead | undefined },
+): 'promote' | 'keep' | 'unknown' {
+  const ids = autoPrimaryLivenessIds(args);
+  if (ids === null) return 'keep';
+  if (ids.length === 0) return 'promote';
+  const read = args.read;
+  if (read === undefined || !read.ok) return 'unknown';
+  const byId = read.byId;
+  const anyLive = ids.some((id) => {
+    const contact = byId.get(id);
+    return contact !== undefined && !isContactDeleted(contact);
+  });
+  return anyLive ? 'keep' : 'promote';
+}
 
 /**
  * The contractual + commonly read attributes; items stay flexible documents

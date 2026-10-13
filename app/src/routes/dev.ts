@@ -53,7 +53,7 @@ import {
   type PlacementDeadlineType,
 } from '../repos/placementsRepo.js';
 import { createPlacementDeadlinesRepo } from '../repos/placementDeadlinesRepo.js';
-import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createUnitsRepo, type CreateUnitInput, type UnitContact, type UnitsRepo } from '../repos/unitsRepo.js';
 import { runDuePlacementNudges, type RunDuePlacementNudgesDeps } from '../jobs/placementNudges.js';
 import {
   runDuePendingRosterActions,
@@ -142,6 +142,9 @@ export interface DevRouterDeps {
   /** Repos for POST /__dev/org-fixture - injected in tests (the world fakes);
    *  default to the real contacts and units repos. */
   orgFixtureRepos?: { contactsRepo: ContactsRepo; unitsRepo: UnitsRepo };
+  /** Repos for POST /__dev/fixtures/zero-primary-property - injected in tests
+   *  (the world fakes); default to the real contacts and units repos. */
+  zeroPrimaryFixtureRepos?: { contactsRepo: ContactsRepo; unitsRepo: UnitsRepo };
 }
 
 export function isLoopbackRemoteAddress(remoteAddress: string | null): boolean {
@@ -1255,6 +1258,90 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     }
     log.info({ unitId: id, field: 'accepted_authorities' }, 'dev org-fixture applied');
     res.status(200).json({ ok: true });
+  });
+
+  // POST /__dev/fixtures/zero-primary-property { street, rows: [{ contactId,
+  // role }] } -> 201 { unitId } (primary-contact-integrity spec section 10;
+  // plan contract 2.7 as refined by S5). Creates a NEW property in the
+  // IMPORTED shape - no landlordId attribute at all (as the importer leaves
+  // it when the landlord name matches nobody, lib/import/apply.ts) and the
+  // given contacts as NON-primary contact-list rows, in the order given
+  // (array order = add order). It is the only way to reach that state: a new
+  // property requires a landlord, and an add on an ownerless property makes
+  // an eligible contact primary at once (auto-primary), so the rows go in
+  // through the create itself, never addContact. The spec creates the
+  // contacts first through the real POST /api/contacts; rows carry no
+  // name/company (the unit GET's read-time enrichment is authoritative).
+  // Role `landlord` is refused: on an ownerless property a landlord-role add
+  // CLAIMS the landlord slot, so no path stores that row. Status `setup` and
+  // no accepted_authorities keep it out of the Available view and the
+  // organization usage counts other specs read. It never touches an existing
+  // unit, so the lean world stays byte-stable; the next reseed removes what
+  // it made. Same hermetic-LOCAL-only construction as the fixtures above (the
+  // dev router only mounts behind lib/devRoutes.ts, structurally absent in
+  // every deployed env); json() is scoped to this route. Logs ids and counts
+  // only - never a name or the street.
+  const ZERO_PRIMARY_MAX_ROWS = 5;
+  let zeroPrimaryRepos = deps.zeroPrimaryFixtureRepos;
+  const zeroPrimaryDeps = (): { contactsRepo: ContactsRepo; unitsRepo: UnitsRepo } => {
+    zeroPrimaryRepos ??= {
+      contactsRepo: createContactsRepo({ logger: log }),
+      unitsRepo: createUnitsRepo({ logger: log }),
+    };
+    return zeroPrimaryRepos;
+  };
+  router.post('/__dev/fixtures/zero-primary-property', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { street?: unknown; rows?: unknown };
+    const street = typeof body.street === 'string' ? body.street.trim() : '';
+    if (street === '') {
+      res.status(400).json({ error: 'street must be a non-empty string' });
+      return;
+    }
+    const rawRows = body.rows;
+    if (!Array.isArray(rawRows) || rawRows.length === 0 || rawRows.length > ZERO_PRIMARY_MAX_ROWS) {
+      res.status(400).json({ error: `rows must be an array of 1 to ${ZERO_PRIMARY_MAX_ROWS} entries` });
+      return;
+    }
+    const rows: Array<{ contactId: string; role: UnitContact['role'] }> = [];
+    for (const raw of rawRows as unknown[]) {
+      const row = (typeof raw === 'object' && raw !== null ? raw : {}) as { contactId?: unknown; role?: unknown };
+      const contactId = typeof row.contactId === 'string' ? row.contactId : '';
+      if (contactId === '') {
+        res.status(400).json({ error: 'each row needs a non-empty contactId' });
+        return;
+      }
+      const role = row.role;
+      if (role !== 'pm' && role !== 'owner' && role !== 'other') {
+        res.status(400).json({ error: 'each row role must be pm, owner or other' });
+        return;
+      }
+      if (rows.some((r) => r.contactId === contactId)) {
+        res.status(400).json({ error: 'a contactId may appear once' });
+        return;
+      }
+      rows.push({ contactId, role });
+    }
+    const { contactsRepo, unitsRepo } = zeroPrimaryDeps();
+    for (const row of rows) {
+      if ((await contactsRepo.getById(row.contactId)) === undefined) {
+        res.status(404).json({ error: 'contact_not_found', contactId: row.contactId });
+        return;
+      }
+    }
+    const contacts: UnitContact[] = rows.map((row) => ({
+      contactId: row.contactId,
+      role: row.role,
+      primaryContact: false,
+    }));
+    // CreateUnitInput types landlordId as required because every API create
+    // has one; this fixture is the one caller that omits it on purpose.
+    const unit = await unitsRepo.create({
+      status: 'setup',
+      address: { line1: street, city: 'Atlanta', state: 'GA', zip: '30314' },
+      contacts,
+    } as unknown as CreateUnitInput);
+    log.info({ unitId: unit.unitId, rows: contacts.length }, 'dev zero-primary-property fixture created');
+    res.status(201).json({ unitId: unit.unitId });
   });
 
   // POST /__dev/relay/replay-intros — re-fire the REAL relay.intro job for every

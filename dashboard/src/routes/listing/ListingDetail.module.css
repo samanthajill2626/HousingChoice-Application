@@ -352,6 +352,26 @@ a:hover .contactName {
   font-weight: var(--fw-regular);
 }
 
+/* The no-primary-contact box on the Contacts card (primary-contact-integrity
+ * spec 7.4, layout A). The SAME amber treatment as the open-group dialog's
+ * fallback box (shared/RosterConfirmDialog.module.css .duplicateWarning):
+ * --c-warning, not danger - nothing is broken until a tour needs it. */
+.noPrimaryBox {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--c-warning);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+}
+
+.noPrimaryBox p {
+  margin: 0 0 var(--sp-1);
+}
+
+.noPrimaryBox p:last-child {
+  margin-bottom: 0;
+}
+
 .contactAdd {
   display: flex;
   flex-direction: column;

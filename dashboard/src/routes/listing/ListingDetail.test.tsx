@@ -2453,3 +2453,136 @@ describe('ListingDetail - deleted contact rows (primary-contact-integrity spec 7
     expect(within(contactsCard()).getByText('No contacts on this property yet. Tours need a primary contact.')).toBeInTheDocument();
   });
 });
+
+describe('ListingDetail - the no-primary box (primary-contact-integrity spec 7.4)', () => {
+  /** The server's block for a property with no property contact. */
+  const NO_PRIMARY: UnitPropertyContact = { contactId: null, reason: 'none', heirIfPrimaryRemoved: null };
+  const DANA: UnitContact = { contactId: 'pm-dana', role: 'pm', primaryContact: false, name: 'Dana Reyes' };
+  const CASEY_CASEWORKER: UnitContact = {
+    contactId: 'cw-casey',
+    role: 'other',
+    primaryContact: false,
+    name: 'Casey Worker',
+    caseworker: true,
+  };
+
+  beforeEach(() => {
+    addUnitContact.mockReset();
+    removeUnitContact.mockReset();
+  });
+
+  it('exactly one eligible row: "Make <Name> primary" above the rows - the same write as Make primary', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(integrityState([MARK], NO_PRIMARY));
+    const { landlordId: _ownerless, ...base } = READY.unit!;
+    addUnitContact.mockResolvedValue({
+      ...base,
+      primary_contact: 'pm-mark',
+      contacts: [{ ...MARK, primaryContact: true }],
+      propertyContact: { contactId: 'pm-mark', heirIfPrimaryRemoved: null },
+    });
+    renderAt();
+
+    const card = contactsCard();
+    const box = within(card).getByRole('status');
+    expect(within(box).getByText('No primary contact.')).toBeInTheDocument();
+    expect(
+      within(box).getByText("New tours won't include the landlord, and tour group texts use the general intro."),
+    ).toBeInTheDocument();
+    // ABOVE the rows.
+    const row = within(card).getByRole('link', { name: /Mark Passmore/ });
+    expect(box.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(within(box).getByRole('button', { name: 'Make Mark Passmore primary' }));
+    expect(addUnitContact).toHaveBeenCalledWith('u1', { contactId: 'pm-mark', role: 'pm', primaryContact: true });
+    // The write's own block names a property contact now: the box goes.
+    await waitFor(() => expect(within(card).queryByRole('status')).not.toBeInTheDocument());
+    expect(within(card).getByRole('link', { name: /Mark Passmore/ })).toHaveTextContent('Mark Passmore (primary)');
+  });
+
+  it('counts only ELIGIBLE rows: a deleted row and a caseworker row do not count', () => {
+    useListing.mockReturnValue(integrityState([MARK, GINA_DELETED, CASEY_CASEWORKER], NO_PRIMARY));
+    renderAt();
+    const box = within(contactsCard()).getByRole('status');
+    expect(within(box).getByRole('button', { name: 'Make Mark Passmore primary' })).toBeInTheDocument();
+    expect(within(box).queryByRole('button', { name: 'Choose a primary' })).not.toBeInTheDocument();
+  });
+
+  it('two or more eligible rows: "Choose a primary" opens the edit mode', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(integrityState([MARK, DANA], NO_PRIMARY));
+    renderAt();
+    const box = within(contactsCard()).getByRole('status');
+    expect(within(box).queryByRole('button', { name: /^Make .* primary$/ })).not.toBeInTheDocument();
+    await user.click(within(box).getByRole('button', { name: 'Choose a primary' }));
+    expect(screen.getByRole('button', { name: 'Make Mark Passmore the primary contact' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Make Dana Reyes the primary contact' })).toBeInTheDocument();
+    expect(addUnitContact).not.toHaveBeenCalled();
+  });
+
+  it('no eligible row: no button, and the line says an added landlord or property manager becomes primary', () => {
+    useListing.mockReturnValue(integrityState([GINA_DELETED, CASEY_CASEWORKER], NO_PRIMARY));
+    renderAt();
+    const box = within(contactsCard()).getByRole('status');
+    expect(within(box).getByText('No primary contact.')).toBeInTheDocument();
+    expect(
+      within(box).getByText('Add the landlord or property manager - they become the primary automatically.'),
+    ).toBeInTheDocument();
+    expect(within(box).queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it("a deleted property contact leads with \"This property's contact was deleted.\"", () => {
+    useListing.mockReturnValue(
+      integrityState([{ ...GINA_DELETED, primaryContact: true }, MARK], {
+        contactId: null,
+        reason: 'deleted',
+        heirIfPrimaryRemoved: { contactId: 'pm-mark', name: 'Mark Passmore' },
+      }),
+    );
+    renderAt();
+    const box = within(contactsCard()).getByRole('status');
+    expect(within(box).getByText("This property's contact was deleted.")).toBeInTheDocument();
+    expect(within(box).queryByText('No primary contact.')).not.toBeInTheDocument();
+    expect(
+      within(box).getByText("New tours won't include the landlord, and tour group texts use the general intro."),
+    ).toBeInTheDocument();
+    expect(within(box).getByRole('button', { name: 'Make Mark Passmore primary' })).toBeInTheDocument();
+  });
+
+  it('no box when the block is absent (the server could not tell)', () => {
+    useListing.mockReturnValue(integrityState([MARK]));
+    renderAt();
+    expect(within(contactsCard()).queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('no box when the block names a property contact', () => {
+    useListing.mockReturnValue(
+      integrityState([{ ...MARK, primaryContact: true }], { contactId: 'pm-mark', heirIfPrimaryRemoved: null }),
+    );
+    renderAt();
+    expect(within(contactsCard()).queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('no box on a soft-deleted property (the card is read-only there)', () => {
+    useListing.mockReturnValue(integrityState([MARK], NO_PRIMARY, { deleted_at: '2026-06-19T00:00:00.000Z' }));
+    renderAt();
+    expect(within(contactsCard()).queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('no box with zero roster rows - the empty state speaks instead', () => {
+    useListing.mockReturnValue(integrityState([], NO_PRIMARY));
+    renderAt();
+    expect(within(contactsCard()).queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.getByText(/Tours need a primary contact\./)).toBeInTheDocument();
+  });
+
+  it('a failed write from the box shows its error inside the box', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(integrityState([MARK], NO_PRIMARY));
+    addUnitContact.mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));
+    renderAt();
+    const box = within(contactsCard()).getByRole('status');
+    await user.click(within(box).getByRole('button', { name: 'Make Mark Passmore primary' }));
+    expect(await within(box).findByRole('alert')).toHaveTextContent("Couldn't save that change - please try again.");
+  });
+});

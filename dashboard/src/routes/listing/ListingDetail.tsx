@@ -124,6 +124,20 @@ const ROSTER_CONFLICT_COPY =
 const LANDLORD_REASSIGNMENT_COPY =
   'This property already has a landlord of record - reassign it before choosing Landlord.';
 
+/** The no-primary box (primary-contact-integrity spec 7.4), word for word.
+ *  The lead names the case; the effect sentence follows it. */
+const NO_PRIMARY_LEAD = 'No primary contact.';
+const DELETED_CONTACT_LEAD = "This property's contact was deleted.";
+const NO_PRIMARY_EFFECT = "New tours won't include the landlord, and tour group texts use the general intro.";
+/** No eligible row to offer (no live contact, or only caseworkers). True: an
+ *  eligible add on a property with no live primary and no live landlord of
+ *  record is made primary by the server (spec 4.4). */
+const NO_ELIGIBLE_LINE = 'Add the landlord or property manager - they become the primary automatically.';
+
+/** The busy/error key for the box's one-click Make primary: its error renders
+ *  IN the box, which shows outside edit mode too. */
+const NO_PRIMARY_BOX_KEY = 'no-primary-box';
+
 // Mirror of app/src/lib/unitMedia.ts UNIT_MEDIA_MAX (the dashboard has no import
 // path into the app lib). An abuse/runaway BACKSTOP, not a product limit; keep in
 // sync if the server cap changes.
@@ -321,6 +335,10 @@ export function ListingDetail(): React.JSX.Element {
   const contactsUnit = rosterUnit !== null && rosterUnit.unitId === unit.unitId ? rosterUnit : null;
   const contactRows: RosterRow[] =
     contactsUnit !== null ? listingRoster(contactsUnit, state.landlord) : roster;
+  // The property-contact block (primary-contact-integrity spec 7.5) comes from
+  // the SAME roster source as the rows: a roster write's (or a re-read's) own
+  // block, else the load-time GET's. Absent = the server could not tell.
+  const propertyContact = contactsUnit !== null ? contactsUnit.propertyContact : state.propertyContact;
   /** Who OWNS the property (`unit.landlordId`) - never removable from the roster,
    *  and whoever inherits the primary-contact routing when the primary leaves. */
   // An ownerless property (legacy, or restored without a landlord -
@@ -422,6 +440,17 @@ export function ListingDetail(): React.JSX.Element {
   const addContactCandidates = contactsList.filter(
     (c) => !rosteredIds.has(c.contactId) && !isCaseworkerContact(c),
   );
+  // The no-primary box (spec 7.4). Shown only when the server TOLD us there
+  // is no property contact (block present, contactId null), the property has
+  // at least one row, and it is live (the card is read-only on a deleted
+  // property). Its action counts ELIGIBLE rows - live and not a caseworker,
+  // both from the server's row flags. That is broader than the server's
+  // AUTOMATIC rule (typed landlord) on purpose: this is a deliberate click,
+  // and the button names the person before it writes.
+  const showNoPrimaryBox =
+    !deleted && propertyContact !== undefined && propertyContact.contactId === null && contactRows.length > 0;
+  const eligibleRows = contactRows.filter((r) => r.deleted !== true && r.caseworker !== true);
+  const soleEligible = eligibleRows.length === 1 ? eligibleRows[0] : undefined;
 
   /** The server's answer IS the new truth - apply it to the card AND the page. */
   const applyRosterUnit = (updated: UnitItem): void => {
@@ -511,9 +540,11 @@ export function ListingDetail(): React.JSX.Element {
   };
 
   /** Promote a row to the property's primary contact - the same upsert with
-   *  `primaryContact: true`; the server demotes whoever held it. Idempotent. */
-  const onMakePrimaryContact = (row: RosterRow): void => {
-    runRosterWrite(row.contactId, () =>
+   *  `primaryContact: true`; the server demotes whoever held it. Idempotent.
+   *  `key` is where its busy state and error land: the row's own slot in edit
+   *  mode, or the no-primary box (spec 7.4), which shows outside edit mode. */
+  const onMakePrimaryContact = (row: RosterRow, key: string = row.contactId): void => {
+    runRosterWrite(key, () =>
       addUnitContact(unit.unitId, {
         contactId: row.contactId,
         role: row.role,
@@ -971,6 +1002,51 @@ export function ListingDetail(): React.JSX.Element {
               )
             }
           >
+            {showNoPrimaryBox ? (
+              <div className={styles.noPrimaryBox} role="status">
+                <p>
+                  <strong>
+                    {propertyContact?.reason === 'deleted' ? DELETED_CONTACT_LEAD : NO_PRIMARY_LEAD}
+                  </strong>{' '}
+                  {NO_PRIMARY_EFFECT}
+                </p>
+                {soleEligible !== undefined ? (
+                  <p>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      type="button"
+                      onClick={() => onMakePrimaryContact(soleEligible, NO_PRIMARY_BOX_KEY)}
+                      disabled={rosterBusy !== null}
+                    >
+                      {`Make ${soleEligible.name ?? soleEligible.contactId} primary`}
+                    </Button>
+                  </p>
+                ) : eligibleRows.length > 1 ? (
+                  <p>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      type="button"
+                      onClick={() => {
+                        setEditingContacts(true);
+                        setRosterError(null);
+                        closeAddContact();
+                      }}
+                    >
+                      Choose a primary
+                    </Button>
+                  </p>
+                ) : (
+                  <p>{NO_ELIGIBLE_LINE}</p>
+                )}
+                {rosterError !== null && rosterError.key === NO_PRIMARY_BOX_KEY ? (
+                  <p role="alert" className={styles.contactRowError}>
+                    {rosterError.message}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
             {contactRows.length === 0 ? (
               <EmptyRow>No contacts on this property yet. Tours need a primary contact.</EmptyRow>
             ) : contactsEditing ? (

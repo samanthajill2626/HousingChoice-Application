@@ -72,3 +72,19 @@ so none was changed there, and all are rare.
 **Suggested fix.** Decide each direction above with Cameron (items 1, 2 and 4
 change spec-approved sentences); each change needs a dashboard test that
 fails on the old behavior.
+
+**Related: the Activity row for a restore that changed the landlord (R2 code
+review, dashboard finding A7; fix wave 2 FW2-10).** The property's Activity
+card reads a bare "Property restored" for every `unit_restored` row
+(`dashboard/src/routes/listing/listingFormat.ts:229-230`), including a restore
+that replaced the landlord of record, one that cleared it, and one that
+cleared it and made the sole remaining contact typed landlord the primary
+contact (spec revision 5). The audit row carries each outcome
+(`landlordReplaced { from, to }`, `landlordCleared { from }`,
+`primaryPromoted { to }`; `app/src/routes/units.ts:1799-1806`), so the label is
+not false, but the one place staff can later see that a restore changed who
+owns or answers for the property does not say it. Direction: a sub line such
+as "Landlord changed" / "Landlord cleared" - new copy, and the Activity
+projection would also have to carry the fields (its fixed-key whitelist drops
+them today, `app/src/routes/units.ts:221`). The spec asks only for the audit
+fields, so nothing was changed.

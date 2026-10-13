@@ -1,13 +1,24 @@
 ---
 id: lint-backlog-repo-wide
-title: 23 pre-existing react-hooks lint errors across 18 files keep `npm run lint` from being a bare completion gate
+title: 22 pre-existing react-hooks lint errors across 17 files keep `npm run lint` from being a bare completion gate
 type: debt
 severity: med
 status: open
 area: repo
 created: 2026-08-24
+updated: 2026-10-13
 refs: eslint.config.mjs, AGENTS.md
 ---
+
+**Status 2026-10-13 (`feat/primary-contact-integrity`).** **22 errors across
+17 files, 0 warnings**, every one still a `react-hooks/*` rule in
+`dashboard/src` (14 `set-state-in-effect`, 4 `refs`, 2 `purity`, 2
+`immutability`; `npx eslint .` on the branch). One fewer than below: the
+`react-hooks/set-state-in-effect` at
+`dashboard/src/routes/shared/RosterConfirmDialog.tsx:113` is gone - the
+dialog's draft re-seed effect became an adjust-during-render (the
+edited-draft rule, commit 2905b44c). `AGENTS.md`'s "23 errors across 18
+dashboard files" is a dated (2026-10-07) statement and is left as it is.
 
 **Status 2026-10-07 (`fix/lint-cleanup`).** Down from 111 errors / 61 files
 (plus 36 warnings) on `main` that day to **23 errors across 18 files, 0

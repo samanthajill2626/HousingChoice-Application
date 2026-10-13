@@ -3,7 +3,8 @@ id: unit-primary-contact-unchecked
 title: A property's primary_contact is writable on unit create and PATCH with any contactId - no existence, type, caseworker or contact-list check
 type: debt
 severity: low
-status: open
+status: resolved
+resolved: 2026-10-13
 area: app/units
 created: 2026-10-12
 refs: app/src/lib/unitFields.ts:104, app/src/routes/units.ts:1072, app/src/repos/unitsRepo.ts:839, app/src/routes/webhooks/voice.ts:627, app/src/repos/conversationsRepo.ts:207, app/src/services/rosterProvision.ts:233
@@ -52,3 +53,24 @@ list - with the consistent contact read the contact-list checks use
 the M1.10 path must consult the THREAD roster, not the unit scalar
 (`voice-business-number-roster`); if it does, the scalar's write path can be
 removed outright. Correct the stale `unitsRepo.ts:840-841` comment either way.
+
+**Resolution (2026-10-13, `feat/primary-contact-integrity`).** The first
+suggested fix, as spec
+`docs/superpowers/specs/2026-10-12-primary-contact-integrity-design.md`
+section 4.5 (P2b) rules it: `primary_contact` is no longer in the writable unit
+field set (`app/src/lib/unitFields.ts`), so `POST /api/units` and
+`PATCH /api/units/:id` refuse a body carrying it as an unknown field (400,
+nothing written) - commit 02ccba0f, pinned in `app/test/unitFields.test.ts` and
+`app/test/unitsApi.test.ts`. Only the roster writes set the scalar now
+(`addContact`, `removeContact`, `restoreWithLandlord`, `handOffPrimaryFrom`,
+and the one-time `app/scripts/assign-primary-contacts.ts` through
+`assignPrimaryIfCurrent`), always to the contact-list row they flag or by
+REMOVEing it, so it can no longer name a contact who holds no seat. Nothing
+reads the scalar at runtime (spec 9.2): the property-contact lookup
+(`app/src/lib/propertyContact.ts`) takes the live row marked primary, else the
+live landlord of record. The stale comments are corrected: the `unitsRepo.ts`
+`UnitContact` and `primary_contact` docblocks and the `conversationsRepo.ts`
+placementId docblock no longer claim a masked call dials the scalar (commit
+77aebbdf). The M1.10 masked-call path is still unbuilt; when it is, it consults
+the thread roster (`voice-business-number-roster`). The refs above are the
+pre-fix locations.

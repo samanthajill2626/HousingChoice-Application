@@ -1,11 +1,12 @@
 ---
 id: auto-routing-changes-not-named
-title: Automatic primary-contact changes (the restore's sole-landlord promotion, auto-primary on add) are not named before the write
+title: Automatic primary-contact changes (the restore's hand-off, auto-primary on add or edit) are not named before the write
 type: improvement
 severity: low
 status: open
 area: dashboard
 created: 2026-10-13
+updated: 2026-10-13
 refs: dashboard/src/routes/listing/RestoreLandlordDialog.tsx:134, dashboard/src/routes/listing/ListingDetail.tsx:564, dashboard/src/routes/listing/ListingDetail.tsx:579, dashboard/src/routes/listing/ListingDetail.tsx:1502, app/src/routes/units.ts:1845, app/src/repos/unitsRepo.ts:1347, app/src/repos/unitsRepo.ts:938, app/src/lib/rosterResolution.ts:294, app/src/lib/tourContacts.ts:129
 ---
 
@@ -57,3 +58,40 @@ today) and API-only (the Add contact picker lists live contacts). Direction:
 decide where "a deleted contact never receives routing" is enforced - the
 resolvers skipping a soft-deleted primary or landlord-of-record contact is
 the honest place - or document that the rule covers only the primary flag.
+
+**Update (2026-10-13, `feat/primary-contact-integrity`): the premise
+changed; the gap itself - nothing names an AUTOMATIC change before the
+write - stays open.** Spec
+`docs/superpowers/specs/2026-10-12-primary-contact-integrity-design.md`
+(rev 6, Cameron's rulings) widened both rules:
+
+- "Restore without a landlord" no longer promotes "the one remaining"
+  contact: when the cleared landlord was the primary, or no row is flagged
+  (`landlordWasPrimary`, `app/src/repos/unitsRepo.ts`), the heir function
+  (`chooseHeir`, `app/src/lib/propertyContact.ts`) picks the EARLIEST-added
+  remaining contact eligible for automatic routing (spec 4.6; commits
+  11b05393, d7991940). The restore dialog still names no one before the
+  click.
+- Auto-primary now also fires on an edit of the contact's OWN row (a role
+  change), and a soft-deleted or missing flagged primary or landlord of
+  record counts as absent (spec 4.4; 57bc3a74, 21741f91). Still no notice
+  before or right after the write.
+- New since this issue was filed: every automatic primary change appends a
+  `unit_primary_contact_assigned` audit event with its reason (`auto_on_add`,
+  `handoff_on_remove`, `handoff_on_delete`, `handoff_on_restore`,
+  `backfill`), and the property's Activity card shows it as "Primary contact
+  set automatically" with "<Name> - <why>" (9cde6088, ba944a79) - an
+  after-the-fact record, not the before-the-write naming asked for here. The
+  remove-the-primary confirm now reads who takes over from the server
+  (26a8dba6), and the contact Delete dialog warns that a property's primary
+  contact is handed over, without naming who (2d5daa99).
+
+The "Related" paragraph is resolved: the one shared property-contact lookup
+(`app/src/lib/propertyContact.ts`; 857355d6, e7710793, 03b058e9, d95feb1e)
+skips a soft-deleted or missing primary or landlord of record, so relay
+groups, tour copy and the default people list no longer route to a deleted
+landlord of record - the resolvers are where "a deleted contact never
+receives routing" is now enforced. The vacant-slot claim itself is still
+type-only (an API caller can still make a soft-deleted landlord-typed contact
+the landlord of record); it now routes nowhere. The refs above are the
+pre-change locations.

@@ -3,7 +3,8 @@ id: restore-without-landlord-can-leave-nobody-reachable
 title: Restore without a landlord can bring a property back with nobody reachable, and nothing says so
 type: decision
 severity: low
-status: open
+status: resolved
+resolved: 2026-10-13
 area: app
 created: 2026-10-12
 refs: app/src/routes/units.ts:445, app/src/repos/unitsRepo.ts:1292, app/test/helpers/twilioWebhookHarness.ts:3145, app/src/lib/rosterResolution.ts:294, dashboard/src/routes/listing/RestoreLandlordDialog.tsx:122
@@ -84,3 +85,35 @@ The branch's R3 code review found two shapes.
 Records: `docs/superpowers/reviews/2026-10-12-caseworker-integrity/code-review/R3-backend.md`
 (finding A2, challenge C-1), `R3-dashboard.md` (challenge C2) and
 `R3-adjudications.md` (rows R3B-A2 / C-1 and R3D-C2) in the same folder.
+
+**Resolution (2026-10-13, `feat/primary-contact-integrity`).** Both shapes
+are settled by Cameron's rulings in spec
+`docs/superpowers/specs/2026-10-12-primary-contact-integrity-design.md`
+(rev 6, sections 4.3 and 4.6) and the plan review's shared rule:
+
+- Shape 1: YES, "no row flagged" counts. One shared pure rule,
+  `landlordWasPrimary(roster, landlordId)` (`app/src/repos/unitsRepo.ts`),
+  decides whether a restore hands the primary off: the cleared (or swapped)
+  landlord's row is the flagged primary, OR no row is flagged at all. The
+  scalar is never read. `restoreWithLandlord`, the restore route
+  (`clearedLandlordHeir`) and the API-test fake all call it (commits 11b05393,
+  d7991940), so the reviewer's example now promotes the one remaining contact
+  typed landlord.
+- Shape 2: "Restore without a landlord" now hands off through the heir
+  function (`chooseHeir`, `app/src/lib/propertyContact.ts`): the EARLIEST-added
+  remaining contact eligible for automatic routing (typed landlord, live, not a
+  routing pointer) takes over - two or more no longer means nobody - and the
+  hand-off is audited `unit_primary_contact_assigned` `handoff_on_restore`
+  (d7991940). A liveness read that fails refuses the restore with 503
+  `roster_read_failed` and writes nothing. When nobody is eligible the
+  property still comes back with no primary, by design, but it no longer goes
+  unsaid: after either restore the property page re-reads the property
+  (9a3242e7) and the Contacts card shows the "No primary contact." box
+  (a566c3e3) - with "Make <Name> primary" for one live contact that is not a
+  caseworker, "Choose a primary" for several, or "Add the landlord or property
+  manager - they become the primary automatically." - or, with no contacts
+  left, the empty state "No contacts on this property yet. Tours need a
+  primary contact." (90af0532). The restore dialog itself still says nothing
+  before the click (the issue's "or as a page notice after it").
+
+The refs above are the pre-fix locations; `soleLandlordToPromote` is gone.

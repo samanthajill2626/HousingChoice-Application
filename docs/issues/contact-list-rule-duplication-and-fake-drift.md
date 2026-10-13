@@ -6,6 +6,7 @@ severity: low
 status: open
 area: app
 created: 2026-10-13
+updated: 2026-10-13
 refs: app/src/routes/units.ts:1220, app/src/routes/units.ts:1226, app/src/repos/unitsRepo.ts:922, app/src/repos/unitsRepo.ts:937, app/src/routes/units.ts:467, app/src/repos/unitsRepo.ts:1312, app/src/repos/unitsRepo.ts:1021, app/src/repos/unitsRepo.ts:1060, app/src/repos/unitsRepo.ts:1111, app/src/services/contactTypeGuards.ts:71, app/src/services/contactTypeGuards.ts:88, app/src/routes/units.ts:148, app/src/routes/units.ts:1196, app/src/routes/contacts.ts:1532, app/test/helpers/twilioWebhookHarness.ts:2839, app/test/helpers/twilioWebhookHarness.ts:2944, app/test/helpers/twilioWebhookHarness.ts:3125
 ---
 
@@ -57,3 +58,35 @@ repo). Have the fake call the same pure helpers instead of copying them, and
 have its `getById` return a `structuredClone`. Deferred by the planner's
 ruling because the shared-helper refactor and the clone change touch many
 tests.
+
+**Update (2026-10-13, `feat/primary-contact-integrity`): the PRIMARY half
+is shared now; the seat and claim half and the live-object `getById` are
+still open.** What changed:
+
+- "The cleared landlord was the primary" is ONE shared pure rule,
+  `landlordWasPrimary(roster, landlordId)` (`app/src/repos/unitsRepo.ts`),
+  called by `restoreWithLandlord`, the restore route (`clearedLandlordHeir`,
+  which replaced `soleLandlordToPromote`) and the FakeWorld (commits
+  11b05393, d7991940). It no longer reads the `primary_contact` scalar.
+- Every PRIMARY decision in the FakeWorld's `addContact`, `removeContact`,
+  `restoreWithLandlord` and new `handOffPrimaryFrom` calls the same pure
+  functions as the real repo - `autoPrimaryLivenessIds` /
+  `decideAutoPrimary` (`unitsRepo.ts`) and `chooseHeir` / `applyPrimary`
+  (`app/src/lib/propertyContact.ts`) - instead of copying them, and
+  `app/test/primaryHandoffParity.integration.test.ts` pins the real repo and
+  the fake to the same result on nine cases - five removes, two delete
+  hand-offs, a restore swap and an add (f44a4c3a).
+- `removeContact`'s per-attempt read and its re-read after a lost write are
+  consistent now (b198e2e0), so the spurious 409 / 404 from a lagging replica
+  described above is gone.
+
+Still open: the SEAT and CLAIM definitions are still written out in the
+route's pre-checks and again in the repo's per-attempt decision, and the
+fake's `addContact` still hand-copies them - joined by a third hand-written
+rule, the 409 `primary_contact_deleted` refusal (route, repo and fake each
+decide it; plan ruling R8). The routing-pointer test moved rather than
+merged: `units.ts` `autoRoutingEligible` is now `isAutoRoutingEligible` in
+`app/src/lib/propertyContact.ts` (c28493f5, bcb6f834), and the copies in
+`contactTypeGuards.ts`, the contact-list route and `routes/contacts.ts`
+remain. FakeWorld's `unitsRepo.getById` still returns the live map object.
+The refs above are the pre-change locations.

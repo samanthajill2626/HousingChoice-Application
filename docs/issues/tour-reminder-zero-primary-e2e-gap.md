@@ -6,7 +6,8 @@ severity: low
 status: open
 area: e2e
 created: 2026-08-26
-refs: e2e/scenarios/steps.ts, app/test/tourContacts.test.ts, app/test/tourReminders.test.ts, app/test/relayApi.test.ts, app/test/tourRemindersApi.test.ts
+updated: 2026-10-13
+refs: e2e/scenarios/steps.ts, app/test/tourContacts.test.ts, app/test/tourReminders.test.ts, app/test/relayApi.test.ts, app/test/tourRemindersApi.test.ts, app/src/routes/dev.ts, e2e/tests/dashboard-next/primary-contact-integrity.spec.ts
 ---
 
 **Problem.** The tour-reminder ladder rewrite (spec
@@ -26,6 +27,20 @@ rediscovered one at a time.
    Playwright spec exercises the fallback. Giving it one means changing the
    BYTE-STABLE lean seed, which is its own change with its own blast radius -
    deferred by adjudication 2026-08-26, not overlooked.
+
+   **Update (2026-10-13, `feat/primary-contact-integrity`): the OWNERLESS leg
+   now has an e2e path; the landlord-fallback leg is still open.** A dev-only
+   seam, `POST /__dev/fixtures/zero-primary-property` (`app/src/routes/dev.ts`),
+   creates a NEW property in the imported shape - no landlord of record, the
+   given contacts as non-primary rows - without touching the byte-stable lean
+   seed. `e2e/tests/dashboard-next/primary-contact-integrity.spec.ts` drives
+   it: a booked tour on such a property previews its relay group with the
+   GENERAL intro and the open-group dialog says why, and once the property has
+   a primary contact, Check again turns the preview into the tour intro naming
+   that contact. Still without an e2e path: a property WITH a landlord of
+   record whose contact list has rows but no primary, where the lookup falls
+   back to the landlord. The same seam could carry it with a `landlordId`
+   option; not built, because that branch did not change that fallback.
 
 2. **The step helpers cannot compose an exact `en_route` LANDLORD-LED body.**
    `tourReminderBody()` composes through the app's own composer, but the

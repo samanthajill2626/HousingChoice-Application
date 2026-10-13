@@ -25,7 +25,8 @@
 // TIES within the winning state: the most recently created qualifying tour wins
 // (compare createdAt, ISO 8601 - lexical order is chronological); its tourId is
 // returned so the chip links to that tour.
-// deriveTourActivityAt (below) is the sibling the send OUTCOME reads (D11).
+// deriveTourActivityAt (below) is the sibling the send OUTCOME reads (D11; spec
+// 14.7 widens it beyond the chip's qualifying set - see its doc comment).
 import type { TourItem } from '../repos/toursRepo.js';
 
 /** The tour states a listing-send chip can show. */
@@ -88,26 +89,36 @@ export function deriveTourSignal(tours: TourItem[]): TourSignal | undefined {
 }
 
 /**
- * The pair's latest tour ACTIVITY instant (last-heard-from spec 5.4, D11):
- * the max over EVERY qualifying tour (the chip's set - requested, scheduled,
- * toured, converted, auto-closed from toured) of max(createdAt, lastMarkedAt).
- * `lastMarkedAt` is the model's "a person marked / rescheduled / reopened it"
- * (toursModel.ts; stamped by PATCH on any status change or new time in
- * routes/tours.ts, and by reopenIf) and is absent until a person acts, so
- * createdAt carries a fresh tour. NEVER updatedAt - that is
- * last-touched-by-anything (toursRepo.ts) and would let an automated write
- * undo a decline. A SEPARATE function, not a field on deriveTourSignal's
- * result: that result IS the wire `tour` field (route tests pin it with
- * toEqual({ tourId, state })). Not the chip winner's own time either: the
- * winner is the most PROGRESSED tour, so an old toured tour would hide a
- * request made after a decline. Returns the stored string of the latest
- * parseable instant, or undefined when no qualifying tour has one.
+ * The pair's latest tour ACTIVITY instant (last-heard-from spec 5.4, D11, as
+ * amended by 14.7 - DURABLE supersession): the max over EVERY tour for the
+ * pair of its `createdAt`, qualifying or not, and over the QUALIFYING tours
+ * only (the chip's set - requested, scheduled, toured, converted, auto-closed
+ * from toured) of its `lastMarkedAt`. So a tour CREATED after a decline keeps
+ * that decline superseded even once the tour is canceled, marked no-show or
+ * closed not a fit, whichever path created it (the Interested route, the
+ * Schedule tour form, the Tours page, the contact page) - a person creating
+ * a tour after a decline means the tenant changed their mind. A cancel /
+ * no-show / not-a-fit MARK (a non-qualifying tour's lastMarkedAt) never
+ * supersedes on its own: staff canceling a tour BECAUSE the tenant declined
+ * leaves the decline effective. `lastMarkedAt` is the model's "a person
+ * marked / rescheduled / reopened it" (toursModel.ts; stamped by PATCH on any
+ * status change or new time in routes/tours.ts, and by reopenIf) and is
+ * absent until a person acts, so createdAt carries a fresh tour. NEVER
+ * updatedAt - that is last-touched-by-anything (toursRepo.ts) and would let
+ * an automated write undo a decline. A SEPARATE function, not a field on
+ * deriveTourSignal's result: that result IS the wire `tour` field (route
+ * tests pin it with toEqual({ tourId, state })) and does NOT change with
+ * 14.7. Not the chip winner's own time either: the winner is the most
+ * PROGRESSED tour, so an old toured tour would hide a request made after a
+ * decline. Returns the stored string of the latest parseable instant, or
+ * undefined when no tour has one.
  */
 export function deriveTourActivityAt(tours: TourItem[]): string | undefined {
   let best: { at: string; ms: number } | undefined;
   for (const tour of tours) {
-    if (qualifyingState(tour) === undefined) continue;
-    for (const candidate of [tour.createdAt, tour.lastMarkedAt]) {
+    // 14.7: a non-qualifying tour's creation counts, its mark never does.
+    const candidates = qualifyingState(tour) === undefined ? [tour.createdAt] : [tour.createdAt, tour.lastMarkedAt];
+    for (const candidate of candidates) {
       if (typeof candidate !== 'string' || candidate.length === 0) continue;
       const ms = Date.parse(candidate);
       if (!Number.isFinite(ms)) continue;

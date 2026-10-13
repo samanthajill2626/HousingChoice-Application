@@ -96,20 +96,30 @@ describe('deriveListingSendOutcome - precedence not_interested > interested > re
   });
 });
 
-// (PIN - code review ADV-1) Supersession is recomputed on every read, never
-// stored: a decline superseded ONLY by a tour is effective again once that tour
-// stops qualifying. Deliberate - spec 5.4 ("a canceled, no-show or not-a-fit
-// tour yields no signal and contributes no activity"); D11. Raised for Cameron
-// with the reviewer's narrower alternative; change this pin only with that call.
-describe('a decline superseded only by a tour comes back when the tour stops qualifying (ADV-1 PIN)', () => {
+// (PIN - spec 14.7, code review round 2 A R2-1) Tour supersession of a decline
+// is DURABLE. KNOWING REWRITE of the round-1 "ADV-1 PIN", which pinned the
+// opposite (a decline superseded only by a tour came back once that tour was
+// canceled / no-show / closed not a fit) - that made the outcome depend on WHICH
+// path created the tour (the Interested route deletes the record, POST
+// /api/tours does not). Now a tour CREATED after the decline keeps it superseded
+// whatever became of the tour, and a cancel / no-show / not-a-fit MARK never
+// supersedes on its own. Raised for Cameron as reversible (one function).
+describe('tour supersession of a decline is durable (spec 14.7 PIN - replaces the round-1 ADV-1 PIN)', () => {
+  const BEFORE_DECLINE = '2026-06-30T18:00:00.000Z'; // T0 < T1
   const DECLINED = '2026-07-01T12:00:00.000Z'; // T1
   const CREATED = '2026-07-02T12:00:00.000Z'; // T2 > T1
   const MARKED = '2026-07-05T12:00:00.000Z'; // the later cancel / no-show / close
-  const row = { sentAt: '2026-06-30T12:00:00.000Z', declined: staff(DECLINED) };
+  const SENT_AT = '2026-06-30T12:00:00.000Z';
+  const row = { sentAt: SENT_AT, declined: staff(DECLINED) };
   const pairTour = (over: Partial<TourItem>): TourItem =>
     ({ tourId: 't-1', tenantId: 'c-1', unitId: 'u-1', _schedPartition: 'tours', tourType: 'self_guided', status: 'requested', createdAt: CREATED, updatedAt: CREATED, ...over }) as TourItem;
-  const outcomeWith = (tours: TourItem[]) =>
-    deriveListingSendOutcome({ row, recipientType: 'tenant', lastHeardFromAt: undefined, tour: deriveTourSignal(tours), tourActivityAt: deriveTourActivityAt(tours) });
+  const outcomeWith = (tours: TourItem[], lastHeardFromAt?: string) =>
+    deriveListingSendOutcome({ row, recipientType: 'tenant', lastHeardFromAt, tour: deriveTourSignal(tours), tourActivityAt: deriveTourActivityAt(tours) });
+  const MARKS = [
+    ['canceled', { status: 'canceled' }],
+    ['no_show', { status: 'no_show' }],
+    ['closed not a fit', { status: 'closed', outcome: 'not_a_fit' }],
+  ] as const;
 
   it('decline T1, then a tour created T2 > T1 -> interested (the tour supersedes the decline)', () => {
     const tours = [pairTour({})];
@@ -117,14 +127,24 @@ describe('a decline superseded only by a tour comes back when the tour stops qua
     expect(outcomeWith(tours)).toBe('interested');
   });
 
-  it.each([
-    ['canceled', { status: 'canceled' }],
-    ['no_show', { status: 'no_show' }],
-    ['closed not a fit', { status: 'closed', outcome: 'not_a_fit' }],
-  ] as const)('the same tour later %s -> not_interested again', (_label, change) => {
+  it.each(MARKS)('the same tour (created T2 > T1) later %s -> NOT not_interested (no_reply, or replied)', (_label, change) => {
     const tours = [pairTour({ ...change, lastMarkedAt: MARKED, updatedAt: MARKED })];
+    expect(deriveTourSignal(tours)).toBeUndefined();
+    expect(effectiveDecline(row, deriveTourActivityAt(tours))).toBe(false);
+    expect(outcomeWith(tours)).toBe('no_reply');
+    expect(outcomeWith(tours, '2026-07-03T12:00:00.000Z')).toBe('replied');
+  });
+
+  it.each(MARKS)('a tour created T0 < T1 and %s at T3 > T1 -> still not_interested (a MARK never supersedes)', (_label, change) => {
+    const tours = [pairTour({ ...change, createdAt: BEFORE_DECLINE, lastMarkedAt: MARKED, updatedAt: MARKED })];
     expect(effectiveDecline(row, deriveTourActivityAt(tours))).toBe(true);
     expect(outcomeWith(tours)).toBe('not_interested');
+  });
+
+  it('contrast: a QUALIFYING tour created T0 < T1 and rescheduled at T3 > T1 supersedes (its mark counts)', () => {
+    const tours = [pairTour({ status: 'scheduled', createdAt: BEFORE_DECLINE, lastMarkedAt: MARKED, updatedAt: MARKED })];
+    expect(effectiveDecline(row, deriveTourActivityAt(tours))).toBe(false);
+    expect(outcomeWith(tours)).toBe('interested');
   });
 });
 

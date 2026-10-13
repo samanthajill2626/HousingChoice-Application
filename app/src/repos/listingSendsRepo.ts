@@ -106,11 +106,16 @@ export interface ListingSendItem {
   /** last-heard-from spec 5.4: a recorded "not interested". Absent = not
    *  declined. Written ONLY by setDeclined / clearDeclined. Supersession is
    *  NOT stored: every read recomputes it (lib/listingSendOutcome.ts
-   *  effectiveDecline) from the row's sentAt and the pair's QUALIFYING
-   *  tours, so a record superseded only by a tour is effective AGAIN once
-   *  that tour stops qualifying (canceled, no_show, closed not a fit) -
-   *  deliberate per spec 5.4 (code review ADV-1; pinned in
-   *  test/listingSendOutcome.test.ts). */
+   *  effectiveDecline) from the row's sentAt and the pair's tour activity
+   *  (lib/listingSendTour.ts deriveTourActivityAt). Tour supersession is
+   *  DURABLE (spec 14.7, code review round 2 A R2-1): the createdAt of EVERY
+   *  tour for the pair counts, qualifying or not, so a record superseded by
+   *  a tour created after it stays superseded - simply ineffective, left on
+   *  the row - even once that tour is canceled, no_show or closed not a fit,
+   *  whichever path created it. A cancel / no-show / not-a-fit MARK (a
+   *  non-qualifying tour's lastMarkedAt) never supersedes on its own; only a
+   *  QUALIFYING tour's lastMarkedAt does. Pinned in
+   *  test/listingSendOutcome.test.ts (the spec 14.7 PIN). */
   declined?: DeclineRecord;
   [key: string]: unknown;
 }

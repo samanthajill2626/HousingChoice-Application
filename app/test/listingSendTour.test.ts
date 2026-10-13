@@ -168,7 +168,7 @@ describe('deriveTourSignal - auto-closed tours', () => {
   });
 });
 
-describe('deriveTourActivityAt - the latest qualifying ACTIVITY instant (spec 5.4, D11)', () => {
+describe('deriveTourActivityAt - the latest tour ACTIVITY instant (spec 5.4, D11, 14.7)', () => {
   it('no tours -> undefined', () => {
     expect(deriveTourActivityAt([])).toBeUndefined();
   });
@@ -208,17 +208,28 @@ describe('deriveTourActivityAt - the latest qualifying ACTIVITY instant (spec 5.
     ).toBe('2026-07-01T00:00:00.000Z');
   });
 
-  it('non-qualifying tours contribute nothing (canceled, no_show, a not-a-fit close, auto-closed from scheduled)', () => {
+  // Knowing rewrite (spec 14.7, review A R2-1): this case used to pin that a
+  // non-qualifying tour contributes NOTHING. Supersession is now durable - a
+  // tour's CREATION counts whatever became of it - while a cancel / no-show /
+  // not-a-fit MARK (its lastMarkedAt) never counts.
+  it('a non-qualifying tour contributes its createdAt, never its lastMarkedAt (canceled, no_show, a not-a-fit close, auto-closed from scheduled)', () => {
     const dead = [
-      tour({ tourId: 'c', status: 'canceled', createdAt: '2026-11-01T00:00:00.000Z', lastMarkedAt: '2026-11-02T00:00:00.000Z' }),
-      tour({ tourId: 'n', status: 'no_show', createdAt: '2026-11-01T00:00:00.000Z' }),
-      tour({ tourId: 'x', status: 'closed', outcome: 'not_a_fit', createdAt: '2026-11-01T00:00:00.000Z' }),
-      tour({ tourId: 'a', status: 'closed', autoClosedFrom: 'scheduled', createdAt: '2026-11-01T00:00:00.000Z' }),
+      tour({ tourId: 'c', status: 'canceled', createdAt: '2026-11-01T00:00:00.000Z', lastMarkedAt: '2026-11-09T00:00:00.000Z' }),
+      tour({ tourId: 'n', status: 'no_show', createdAt: '2026-11-02T00:00:00.000Z', lastMarkedAt: '2026-11-08T00:00:00.000Z' }),
+      tour({ tourId: 'x', status: 'closed', outcome: 'not_a_fit', createdAt: '2026-11-03T00:00:00.000Z', lastMarkedAt: '2026-11-07T00:00:00.000Z' }),
+      tour({ tourId: 'a', status: 'closed', autoClosedFrom: 'scheduled', createdAt: '2026-11-04T00:00:00.000Z' }),
     ];
-    expect(deriveTourActivityAt(dead)).toBeUndefined();
-    expect(deriveTourActivityAt([...dead, tour({ tourId: 'q', status: 'requested', createdAt: '2026-07-01T00:00:00.000Z' })])).toBe(
-      '2026-07-01T00:00:00.000Z',
-    );
+    // Each alone: its creation instant, not its later mark.
+    expect(deriveTourActivityAt([dead[0]!])).toBe('2026-11-01T00:00:00.000Z');
+    expect(deriveTourActivityAt([dead[1]!])).toBe('2026-11-02T00:00:00.000Z');
+    expect(deriveTourActivityAt([dead[2]!])).toBe('2026-11-03T00:00:00.000Z');
+    expect(deriveTourActivityAt([dead[3]!])).toBe('2026-11-04T00:00:00.000Z');
+    // Together: the latest creation; every mark (up to 11-09) is ignored.
+    expect(deriveTourActivityAt(dead)).toBe('2026-11-04T00:00:00.000Z');
+    // A QUALIFYING tour still contributes its lastMarkedAt.
+    expect(
+      deriveTourActivityAt([...dead, tour({ tourId: 'q', status: 'requested', createdAt: '2026-07-01T00:00:00.000Z', lastMarkedAt: '2026-11-10T00:00:00.000Z' })]),
+    ).toBe('2026-11-10T00:00:00.000Z');
   });
 
   it('a converted close and an auto-close FROM toured qualify, exactly as for the chip', () => {

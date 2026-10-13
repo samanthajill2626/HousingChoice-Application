@@ -2973,10 +2973,12 @@ export function createFakeWorld(): FakeWorld {
       // as the real repo decides it per attempt: a NEW seat on a unit with no
       // row marked primary and no landlordId attribute (before this add)
       // becomes the primary contact, whatever its role, when the contact is
-      // typed landlord (spec revision 5); an upsert of a contact already on
-      // the list keeps the request's flag.
+      // eligible for automatic routing (the caller's autoPrimaryEligible -
+      // typed landlord, not soft-deleted, not a routing pointer; spec
+      // revisions 5 and 6); an upsert of a contact already on the list keeps
+      // the request's flag.
       const autoPrimary =
-        facts.landlordTyped &&
+        facts.autoPrimaryEligible &&
         existing === undefined &&
         !hasLandlordId &&
         !roster.some((c) => c.primaryContact === true);

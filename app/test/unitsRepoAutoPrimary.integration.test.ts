@@ -6,7 +6,9 @@
 // whatever its role - a Landlord-role add that claims the vacant slot
 // included - and the primary_contact scalar names it, when the contact is
 // typed landlord (revision 5, Cameron's Q4: case (g) - any other type joins
-// non-primary; the route states the type as ContactListFacts). Every other add keeps
+// non-primary; the route states the type as ContactListFacts) and eligible
+// for automatic routing (revision 6: not soft-deleted, not a routing pointer
+// - the route's `autoPrimaryEligible`, case (i)). Every other add keeps
 // the request's flag: a property with a landlord of record, one with a
 // primary row, and an upsert of a contact already on the list. The rule is
 // decided per attempt from the unit that attempt read, so of two racing adds
@@ -46,12 +48,16 @@ if (!reachable) {
   );
 }
 
-/** The contact facts the route states (ContactListFacts) for a contact typed
- *  landlord - a landlord, a property manager or an owner. */
-const LANDLORD_FACTS = { caseworker: false, landlordTyped: true };
+/** The contact facts the route states (ContactListFacts) for a live contact
+ *  typed landlord - a landlord, a property manager or an owner. */
+const LANDLORD_FACTS = { caseworker: false, landlordTyped: true, autoPrimaryEligible: true };
 /** ...and for a contact of any other type (a tenant, a partner who is not a
  *  caseworker, an unknown contact, a team member). */
-const NOT_LANDLORD_FACTS = { caseworker: false, landlordTyped: false };
+const NOT_LANDLORD_FACTS = { caseworker: false, landlordTyped: false, autoPrimaryEligible: false };
+/** ...and for a SOFT-DELETED contact typed landlord: still typed landlord (the
+ *  I3 claim asks only that), but not eligible for automatic routing (spec
+ *  revision 6; fix wave FWF-3). */
+const DELETED_LANDLORD_FACTS = { caseworker: false, landlordTyped: true, autoPrimaryEligible: false };
 
 describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
@@ -156,6 +162,29 @@ describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB 
       expect(primaries(withPm)).toEqual(['c-pm']);
       expect(withPm.primary_contact).toBe('c-pm');
       expect(withPm.contacts).toContainEqual({ contactId: 'c-not-ll', role, primaryContact: false });
+    },
+  );
+
+  // Spec revision 6 section 4 "Contact list (I4)" (final review A4; fix wave
+  // FWF-3): auto-primary follows the ONE automatic-routing eligibility rule
+  // the route states as `autoPrimaryEligible` (typed landlord, not
+  // soft-deleted, not a routing pointer), not the type alone. A soft-deleted
+  // landlord-typed contact joins NON-primary; the I3 claim still asks only the
+  // type, so its Landlord-role add still claims the vacant slot.
+  it.each(['pm', 'landlord'] as const)(
+    '(i) ownerless, no primary: a landlord-typed contact that is not eligible for automatic routing (soft-deleted) added as %s joins NON-primary',
+    async (role) => {
+      const unitId = await restoredWithoutLandlord();
+
+      const updated = await units.addContact(unitId, { contactId: 'c-gone', role }, DELETED_LANDLORD_FACTS);
+
+      expect(updated.contacts).toEqual([{ contactId: 'c-gone', role, primaryContact: false }]);
+      expect(updated.primary_contact).toBeUndefined();
+      if (role === 'landlord') expect(updated.landlordId).toBe('c-gone');
+      else expect(Object.prototype.hasOwnProperty.call(updated, 'landlordId')).toBe(false);
+      const stored = await units.getById(unitId, { consistentRead: true });
+      expect(primaries(stored)).toEqual([]);
+      expect(stored?.primary_contact).toBeUndefined();
     },
   );
 

@@ -1,7 +1,7 @@
 // caseworker-integrity (spec 2026-10-12 revision 4, section 4 "Contact list
 // (I4)", paragraph "Auto-primary", Cameron 2026-10-12) through
 // POST /api/units/:id/contacts on the FakeWorld harness: the same cases (a)-(d),
-// (f) and (g) as unitsRepoAutoPrimary.integration.test.ts runs on the real repo,
+// (f), (g) and (i) as unitsRepoAutoPrimary.integration.test.ts runs on the real repo,
 // which is what proves the FakeWorld UnitsRepo fake mirrors the real
 // addContact. The body says `primaryContact: false`, exactly as the dashboard's
 // "+ Add contact" posts it; the answer's roster carries the new primary. The
@@ -142,6 +142,32 @@ describe('POST /api/units/:id/contacts - auto-primary (spec revision 4 section 4
       expect(pm.status).toBe(200);
       expect(primaries(pm.body.unit.contacts as WireRow[])).toEqual(['c-pm']);
       expect(world.units.get('u-g')?.primary_contact).toBe('c-pm');
+    },
+  );
+
+  // Spec revision 6 section 4 "Contact list (I4)" (final review A4; fix wave
+  // FWF-3): auto-primary follows the ONE automatic-routing eligibility rule
+  // the restore's sole-landlord promotion uses - typed landlord, not
+  // soft-deleted, not a routing pointer. A soft-deleted contact still exists
+  // and can be added, but a soft-deleted landlord-typed contact joins
+  // NON-primary; the I3 claim still asks only the type, so its Landlord-role
+  // add still claims the vacant slot.
+  it.each(['pm', 'landlord'] as const)(
+    '(i) a SOFT-DELETED contact typed landlord added as %s to an ownerless no-primary property joins NON-primary',
+    async (role) => {
+      const { app, world } = makeWebhookHarness();
+      seedOwnerlessUnit(world, 'u-i', { contacts: [] });
+      seedContact(world, 'c-gone', { deleted_at: STAMP });
+
+      const res = await addContact(app, 'u-i', { contactId: 'c-gone', role, primaryContact: false });
+
+      expect(res.status).toBe(200);
+      const rows = res.body.unit.contacts as WireRow[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ contactId: 'c-gone', role, primaryContact: false });
+      expect(res.body.unit.primary_contact).toBeUndefined();
+      expect(world.units.get('u-i')?.primary_contact).toBeUndefined();
+      expect(hasLandlordId(world.units.get('u-i'))).toBe(role === 'landlord');
     },
   );
 

@@ -549,7 +549,7 @@ describe('POST /api/units/:id/restore - without a landlord: the sole-landlord pr
       await world.unitsRepo.addContact(
         unitId,
         { contactId: 'c-owner', role: 'owner' },
-        { caseworker: false, landlordTyped: true },
+        { caseworker: false, landlordTyped: true, autoPrimaryEligible: true },
       );
       return write(unitId, input);
     };
@@ -592,7 +592,7 @@ describe('POST /api/units/:id/restore - without a landlord: the sole-landlord pr
         await world.unitsRepo.addContact(
           'u-race-read',
           { contactId: 'c-owner', role: 'owner' },
-          { caseworker: false, landlordTyped: true },
+          { caseworker: false, landlordTyped: true, autoPrimaryEligible: true },
         );
       }
       return read(contactId, opts);

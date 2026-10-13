@@ -48,9 +48,10 @@ if (!reachable) {
   );
 }
 
-/** What the route reads about the contact being added (isCaseworker, type === 'landlord'). */
-const CASEWORKER_FACTS = { caseworker: true, landlordTyped: false };
-const TENANT_FACTS = { caseworker: false, landlordTyped: false };
+/** What the route reads about the contact being added (isCaseworker, type ===
+ *  'landlord', eligible for automatic routing). */
+const CASEWORKER_FACTS = { caseworker: true, landlordTyped: false, autoPrimaryEligible: false };
+const TENANT_FACTS = { caseworker: false, landlordTyped: false, autoPrimaryEligible: false };
 
 describe.skipIf(!reachable)('unitsRepo.addContact contact-list rules per attempt against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };

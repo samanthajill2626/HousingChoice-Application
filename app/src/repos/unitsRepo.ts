@@ -166,10 +166,18 @@ export interface ContactListFacts {
   caseworker: boolean;
   /**
    * contact.type === 'landlord' (a property manager or an owner is a landlord
-   * with a role): required to claim the vacant landlord slot (I3), and the
-   * only type auto-primary promotes (spec revision 5; fix wave 2 FW2-11).
+   * with a role): required to claim the vacant landlord slot (I3).
    */
   landlordTyped: boolean;
+  /**
+   * The contact is eligible for an AUTOMATIC routing choice - the route's one
+   * rule (routes/units.ts `autoRoutingEligible`, shared with the restore's
+   * sole-landlord promotion): typed landlord, not soft-deleted, not a phone or
+   * email routing pointer. Only such a contact is made primary by auto-primary
+   * (spec revision 6, final review A4, fix wave FWF-3; revision 5 / FW2-11
+   * keyed it on the type alone).
+   */
+  autoPrimaryEligible: boolean;
 }
 
 /**
@@ -484,10 +492,11 @@ export interface UnitsRepo {
    * NEW seat (not an upsert of a contact already on the roster) on a unit that,
    * as that attempt read it, has no primaryContact row and no `landlordId`
    * attribute, whatever its role (a role-`landlord` claim of the vacant slot
-   * included), provided it is typed landlord (`facts.landlordTyped`, spec
-   * revision 5); any other type joins non-primary. Decided inside the
-   * conditional retry loop from each attempt's own read, so two racing adds
-   * never both become primary.
+   * included), provided it is eligible for automatic routing
+   * (`facts.autoPrimaryEligible`: typed landlord, not soft-deleted, not a
+   * routing pointer - spec revisions 5 and 6); any other contact joins
+   * non-primary. Decided inside the conditional retry loop from each
+   * attempt's own read, so two racing adds never both become primary.
    * The contact-list rules (caseworker-integrity spec section 4), decided on
    * each attempt's own read from `facts` (ContactListFacts), in this order and
    * before the reassignment refusal below: a caseworker never takes a NEW seat
@@ -935,15 +944,18 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         // read it, has no row marked primary and no landlordId attribute (no
         // landlord of record before this add - a Landlord-role add claiming the
         // vacant slot included) becomes the primary contact, whatever its role -
-        // for a contact typed landlord only (spec revision 5, Cameron's Q4):
-        // a contact of any other type joins non-primary, as before the rule.
+        // for a contact eligible for automatic routing only (the caller's
+        // `facts.autoPrimaryEligible`: typed landlord - spec revision 5,
+        // Cameron's Q4 - and not soft-deleted, not a routing pointer - spec
+        // revision 6, fix wave FWF-3): any other contact joins non-primary, as
+        // before the rule. The I3 claim above still asks only the type.
         // Decided here, per attempt, never by the caller: the write below is
         // conditioned on the landlordId and contacts[] this attempt read, so of
         // two racing adds only the first to commit is made primary; the loser
         // re-reads, sees that primary, and joins non-primary. An upsert of a
         // contact already on the list is not an add and keeps the request's flag.
         const autoPrimary =
-          facts.landlordTyped &&
+          facts.autoPrimaryEligible &&
           existing === undefined &&
           !hasLandlordId &&
           !roster.some((c) => c.primaryContact === true);

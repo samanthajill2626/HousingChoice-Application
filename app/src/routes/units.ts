@@ -131,6 +131,28 @@ function isUnitContactRole(value: unknown): value is UnitContact['role'] {
 }
 
 /**
+ * The ONE eligibility rule for an AUTOMATIC routing choice (caseworker-
+ * integrity spec revision 6 section 4 "Contact list (I4)" and "Restore"; final
+ * review A4, fix wave FWF-3): auto-primary on a contact-list add (passed to
+ * unitsRepo.addContact as `autoPrimaryEligible`) and the restore's
+ * sole-landlord promotion (soleLandlordToPromote). The contact exists, is
+ * typed `landlord`, is NOT soft-deleted (the contacts repo's own test -
+ * deleting a contact keeps its seats, and a deleted contact is unusable for
+ * routing everywhere else) and is NOT a phone or email routing pointer (a
+ * routing record, never a contact). A deliberate choice - the I3 claim of a
+ * vacant landlord slot, a landlord picked for a restore - asks only the type.
+ */
+function autoRoutingEligible(contact: ContactItem | undefined): boolean {
+  return (
+    contact !== undefined &&
+    contact.phone_ref !== true &&
+    contact.email_ref !== true &&
+    !isContactDeleted(contact) &&
+    contact.type === 'landlord'
+  );
+}
+
+/**
  * BE3/C3: the denormalized display name for a roster row, from the contact's
  * firstName/lastName (joined + trimmed). HONEST — undefined when no name is
  * known (never invents one); the roster row then has no `name`.
@@ -421,12 +443,12 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
    * landlord". When the cleared landlord was the property's primary contact -
    * its contact-list row flagged, or the primary_contact scalar naming it
    * (unitsRepo.restoreWithLandlord's rule) - the ONE remaining row whose
-   * contact is typed `landlord` (any roster role; read CONSISTENTLY, and a
-   * missing contact or a routing pointer row is not eligible) is the one to
-   * promote; zero or two-plus such rows promote nobody (null). A SOFT-DELETED
-   * contact is not eligible either (R3 code review finding A1, fix wave 3
-   * FW3-1): deleting a contact keeps its seats, and this is an automatic
-   * routing choice, where a deleted contact is unusable everywhere else.
+   * contact is eligible for automatic routing (any roster role; read
+   * CONSISTENTLY; `autoRoutingEligible`, the rule auto-primary shares since
+   * spec revision 6 / fix wave FWF-3: typed `landlord`, and a missing, a
+   * routing-pointer or a SOFT-DELETED contact - R3 code review finding A1,
+   * fix wave 3 FW3-1 - is not eligible) is the one to promote; zero or
+   * two-plus such rows promote nobody (null).
    * Decided from `listRead` - the contact list of `unit` (the route's
    * consistent read) taken ONCE, before these type reads are awaited - which
    * is the very value the restore's write is then conditioned on
@@ -449,16 +471,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const read = await Promise.all(
       remaining.map((row) => contacts.getById(row.contactId, { consistentRead: true })),
     );
-    const eligible = remaining.filter((_row, i) => {
-      const contact = read[i];
-      return (
-        contact !== undefined &&
-        contact.phone_ref !== true &&
-        contact.email_ref !== true &&
-        !isContactDeleted(contact) &&
-        contact.type === 'landlord'
-      );
-    });
+    const eligible = remaining.filter((_row, i) => autoRoutingEligible(read[i]));
     const [only] = eligible;
     return eligible.length === 1 && only !== undefined ? only.contactId : null;
   }
@@ -1123,10 +1136,11 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // keeps the primary_contact scalar consistent with the row marked primary
   // (nothing routes on the scalar: the roster resolvers take the row marked
   // primary, else the landlord of record - see unitsRepo.addContact).
-  // Auto-primary (caseworker-integrity spec revision 5, section 4 "Contact
-  // list"): a NEW seat for a contact typed landlord on a property with no row
-  // marked primary and no landlord of record becomes its primary contact even
-  // when the request's primaryContact is false or absent. A Landlord role
+  // Auto-primary (caseworker-integrity spec revisions 5 and 6, section 4
+  // "Contact list"): a NEW seat for a contact typed landlord and not
+  // soft-deleted (autoRoutingEligible) on a property with no row marked
+  // primary and no landlord of record becomes its primary contact even when
+  // the request's primaryContact is false or absent. A Landlord role
   // claims an ownerless legacy property. 409 contact_list_caseworker (a
   // caseworker taking a NEW seat) and 409 landlord_not_landlord (a claim of the
   // vacant landlord slot by a contact not typed landlord), each from the
@@ -1197,9 +1211,12 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // each attempt's own read from the facts passed below (fix wave 2 FW2-1),
     // so a seat removed or a landlord cleared after THIS read answers the same
     // 409s instead of re-seating a caseworker or letting a non-landlord claim.
-    // `landlordTyped` also decides auto-primary: only a contact typed landlord
-    // is made the primary contact of an ownerless, primary-less property
-    // (spec revision 5, FW2-11).
+    // Auto-primary asks `autoPrimaryEligible`, the one automatic-routing rule
+    // shared with the restore's promotion (autoRoutingEligible): only a
+    // contact typed landlord that is not soft-deleted (and not a pointer,
+    // already a 404 above) is made the primary contact of an ownerless,
+    // primary-less property (spec revisions 5 and 6; FW2-11, FWF-3); the I3
+    // claim keeps asking `landlordTyped`.
     const seated = unitContacts(unit).some((row) => row.contactId === contactId);
     if (!seated && isCaseworker(contact)) {
       log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact refused: a caseworker cannot take a new seat');
@@ -1227,7 +1244,11 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
           ...(name !== undefined && { name }),
           ...(company !== undefined && { company }),
         },
-        { caseworker: isCaseworker(contact), landlordTyped: contact.type === 'landlord' },
+        {
+          caseworker: isCaseworker(contact),
+          landlordTyped: contact.type === 'landlord',
+          autoPrimaryEligible: autoRoutingEligible(contact),
+        },
       );
     } catch (err) {
       if (err instanceof ContactListCaseworkerError) {

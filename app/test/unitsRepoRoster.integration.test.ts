@@ -40,8 +40,9 @@ if (!reachable) {
 }
 
 /** The contact facts the route states (ContactListFacts): every contact these
- *  cases add is typed landlord (a PM or an owner is a landlord with a role). */
-const LANDLORD_FACTS = { caseworker: false, landlordTyped: true };
+ *  cases add is a live contact typed landlord (a PM or an owner is a landlord
+ *  with a role), so it is also eligible for automatic routing. */
+const LANDLORD_FACTS = { caseworker: false, landlordTyped: true, autoPrimaryEligible: true };
 
 describe.skipIf(!reachable)('unitsRepo roster + property (BE3) against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };

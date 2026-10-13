@@ -239,8 +239,8 @@ describe('BE3 property primaryContact vs. a LIVE thread roster', () => {
     await world.unitsRepo.addContact(
       'unit-vr',
       { contactId: 'c-pm', role: 'pm', primaryContact: true },
-      // The facts the route states for a property manager (a landlord-typed contact).
-      { caseworker: false, landlordTyped: true },
+      // The facts the route states for a property manager (a live landlord-typed contact).
+      { caseworker: false, landlordTyped: true, autoPrimaryEligible: true },
     );
     expect(world.units.get('unit-vr')?.primary_contact).toBe('c-pm');
 

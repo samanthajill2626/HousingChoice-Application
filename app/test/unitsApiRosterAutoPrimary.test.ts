@@ -1,10 +1,12 @@
 // caseworker-integrity (spec 2026-10-12 revision 4, section 4 "Contact list
 // (I4)", paragraph "Auto-primary", Cameron 2026-10-12) through
-// POST /api/units/:id/contacts on the FakeWorld harness: the same cases (a)-(d)
-// and (f) as unitsRepoAutoPrimary.integration.test.ts runs on the real repo,
+// POST /api/units/:id/contacts on the FakeWorld harness: the same cases (a)-(d),
+// (f) and (g) as unitsRepoAutoPrimary.integration.test.ts runs on the real repo,
 // which is what proves the FakeWorld UnitsRepo fake mirrors the real
 // addContact. The body says `primaryContact: false`, exactly as the dashboard's
-// "+ Add contact" posts it; the answer's roster carries the new primary.
+// "+ Add contact" posts it; the answer's roster carries the new primary. The
+// contacts are typed landlord unless a case says otherwise: since revision 5
+// (Cameron's Q4) only a landlord-typed contact is auto-promoted - case (g).
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
@@ -105,6 +107,41 @@ describe('POST /api/units/:id/contacts - auto-primary (spec revision 4 section 4
       expect(res.status).toBe(200);
       expect(primaries(res.body.unit.contacts as WireRow[])).toEqual(['c-new']);
       expect(world.units.get('u-a')?.primary_contact).toBe('c-new');
+    },
+  );
+
+  // Q4 (Cameron 2026-10-12, spec revision 5): auto-primary applies only to a
+  // contact typed landlord. A contact of any other type added to an ownerless,
+  // primary-less property joins the list NON-primary; the landlord-typed PM
+  // added next to the same property is still made its primary contact.
+  const NOT_LANDLORDS: Array<[string, Partial<ContactItem>]> = [
+    ['tenant', { type: 'tenant' }],
+    ['partner who is not a caseworker', { type: 'partner', role: 'Navigator' }],
+    ['unknown contact', { type: 'unknown' }],
+    ['team member', { type: 'team_member' }],
+  ];
+  it.each(NOT_LANDLORDS)(
+    '(g) a %s added to an ownerless no-primary property joins NON-primary; a landlord-typed PM added next is the primary contact',
+    async (_kind, fields) => {
+      const { app, world } = makeWebhookHarness();
+      seedOwnerlessUnit(world, 'u-g', { contacts: [] });
+      seedContact(world, 'c-not-ll', fields);
+      seedContact(world, 'c-pm', { firstName: 'Pat', lastName: 'Manager' });
+
+      const res = await addContact(app, 'u-g', { contactId: 'c-not-ll', role: 'other', primaryContact: false });
+
+      expect(res.status).toBe(200);
+      const rows = res.body.unit.contacts as WireRow[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ contactId: 'c-not-ll', role: 'other', primaryContact: false });
+      expect(res.body.unit.primary_contact).toBeUndefined();
+      expect(world.units.get('u-g')?.primary_contact).toBeUndefined();
+
+      const pm = await addContact(app, 'u-g', { contactId: 'c-pm', role: 'pm', primaryContact: false });
+
+      expect(pm.status).toBe(200);
+      expect(primaries(pm.body.unit.contacts as WireRow[])).toEqual(['c-pm']);
+      expect(world.units.get('u-g')?.primary_contact).toBe('c-pm');
     },
   );
 

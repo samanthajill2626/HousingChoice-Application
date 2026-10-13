@@ -4,7 +4,9 @@
 // no primary contact (no contact-list row marked primary) and no landlord of
 // record (no landlordId attribute) becomes the property's primary contact,
 // whatever its role - a Landlord-role add that claims the vacant slot
-// included - and the primary_contact scalar names it. Every other add keeps
+// included - and the primary_contact scalar names it, when the contact is
+// typed landlord (revision 5, Cameron's Q4: case (g) - any other type joins
+// non-primary; the route states the type as ContactListFacts). Every other add keeps
 // the request's flag: a property with a landlord of record, one with a
 // primary row, and an upsert of a contact already on the list. The rule is
 // decided per attempt from the unit that attempt read, so of two racing adds
@@ -47,6 +49,9 @@ if (!reachable) {
 /** The contact facts the route states (ContactListFacts) for a contact typed
  *  landlord - a landlord, a property manager or an owner. */
 const LANDLORD_FACTS = { caseworker: false, landlordTyped: true };
+/** ...and for a contact of any other type (a tenant, a partner who is not a
+ *  caseworker, an unknown contact, a team member). */
+const NOT_LANDLORD_FACTS = { caseworker: false, landlordTyped: false };
 
 describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
@@ -123,6 +128,29 @@ describe.skipIf(!reachable)('unitsRepo.addContact auto-primary against DynamoDB 
       const stored = await units.getById(unitId, { consistentRead: true });
       expect(primaries(stored)).toEqual(['c-pm']);
       expect(stored?.primary_contact).toBe('c-pm');
+    },
+  );
+
+  // Q4 (Cameron 2026-10-12, spec revision 5): auto-primary applies only to a
+  // contact typed landlord. On the very property (a) promotes a PM on, a
+  // contact of any other type joins the list NON-primary, whatever its role;
+  // the landlord-typed PM added next is still made the primary contact.
+  it.each(['pm', 'owner', 'other'] as const)(
+    '(g) ownerless, no primary: a contact NOT typed landlord added as %s joins non-primary; a landlord-typed PM added next is the primary',
+    async (role) => {
+      const unitId = await restoredWithoutLandlord();
+
+      const joined = await units.addContact(unitId, { contactId: 'c-not-ll', role }, NOT_LANDLORD_FACTS);
+
+      expect(joined.contacts).toEqual([{ contactId: 'c-not-ll', role, primaryContact: false }]);
+      expect(joined.primary_contact).toBeUndefined();
+      expect(Object.prototype.hasOwnProperty.call(joined, 'landlordId')).toBe(false);
+
+      const withPm = await units.addContact(unitId, { contactId: 'c-pm', role: 'pm' }, LANDLORD_FACTS);
+
+      expect(primaries(withPm)).toEqual(['c-pm']);
+      expect(withPm.primary_contact).toBe('c-pm');
+      expect(withPm.contacts).toContainEqual({ contactId: 'c-not-ll', role, primaryContact: false });
     },
   );
 

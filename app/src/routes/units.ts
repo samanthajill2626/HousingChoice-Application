@@ -1134,6 +1134,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // each attempt's own read from the facts passed below (fix wave 2 FW2-1),
     // so a seat removed or a landlord cleared after THIS read answers the same
     // 409s instead of re-seating a caseworker or letting a non-landlord claim.
+    // `landlordTyped` also decides auto-primary: only a contact typed landlord
+    // is made the primary contact of an ownerless, primary-less property
+    // (spec revision 5, FW2-11).
     const seated = unitContacts(unit).some((row) => row.contactId === contactId);
     if (!seated && isCaseworker(contact)) {
       log.info({ unitId, contactId, actor: req.user?.userId }, 'unit contact refused: a caseworker cannot take a new seat');

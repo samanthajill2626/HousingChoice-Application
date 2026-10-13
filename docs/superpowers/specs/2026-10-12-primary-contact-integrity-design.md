@@ -1,7 +1,9 @@
 # Primary contact integrity and the intro fallback explanation - design
 
-Date: 2026-10-12. Status: rev 5 - design review CLOSED after round 4
-(terminal, precision only); awaiting Cameron's spec gate (rounds 1-4 folded in;
+Date: 2026-10-12. Status: rev 5 - APPROVED by Cameron 2026-10-13, including
+the planner's six calls (caseworker exclusion, P2b, 409, Delete-dialog
+sentence, Activity event, dev-only e2e seam). Design review CLOSED after round
+4 (terminal, precision only; rounds 1-4 folded in;
 adjudications at
 `docs/superpowers/reviews/2026-10-12-primary-contact-integrity/design-review/adjudications.md`).
 Branch: `feat/primary-contact-integrity` (worktree `W:\tmp\primary-contact-integrity`).

@@ -932,7 +932,9 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       // AFTER the idempotency claim, and LOSE the announcement. The whole point
       // of spec 9.5 is that a failure downgrades the copy, never the send.
       log.warn({ err, ownerType: owner.type }, 'relay copy: repo construction failed - naked intro');
-      return { variant: 'naked' };
+      // An OWNED conversation whose reads cannot even be built is explained
+      // like any unreadable owner (primary-contact-integrity spec 5.1).
+      return ownerUnreadable();
     }
     return resolveRelayComposeInputs(
       owner,
@@ -1098,13 +1100,28 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
     } else {
       // Precedence 2-4: tour, then placement, then naked - routed on the
       // conversation's own owner, which this handler already holds.
-      const inputs = await resolveOwnerInputs(
-        conversation ? getOwner(conversation) : { type: null },
-      );
+      const owner: RelayOwner = conversation ? getOwner(conversation) : { type: null };
+      const inputs = await resolveOwnerInputs(owner);
       body = composeIntroBody(
         inputs,
         roster.map((m) => m.name),
       );
+      // primary-contact-integrity spec 5.2, observability only: `introFallback`
+      // is present exactly when an OWNED conversation resolved to the general
+      // intro. Ids and reason codes ONLY - never a name or the street (PII,
+      // doc Sec 9). The operator-edited branch above never reaches here, and
+      // the member-added handler below ignores introFallback.
+      if (owner.type !== null && inputs.introFallback !== undefined) {
+        log.info(
+          {
+            conversationId: payload.relayConversationId,
+            ownerType: owner.type,
+            ownerId: owner.id,
+            reasons: inputs.introFallback.reasons,
+          },
+          'relay intro: general intro used',
+        );
+      }
     }
     await sendRelayAnnouncement(
       {

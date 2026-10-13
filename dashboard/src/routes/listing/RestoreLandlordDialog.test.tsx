@@ -232,6 +232,21 @@ describe('RestoreLandlordDialog', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('a 503 roster_read_failed says the other contacts could not be checked, and stays open', async () => {
+    const user = userEvent.setup();
+    restoreUnit.mockRejectedValue(
+      new ApiError(503, 'roster_read_failed', 'roster_read_failed', { error: 'roster_read_failed' }),
+    );
+    const { onRestored, onConflict } = setup();
+    await user.click(screen.getByRole('button', { name: 'Restore without a landlord' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "Couldn't check the other contacts - try again.",
+    );
+    expect(onRestored).not.toHaveBeenCalled();
+    expect(onConflict).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'Restore property' })).toBeInTheDocument();
+  });
+
   it('any other failure says the restore did not happen', async () => {
     const user = userEvent.setup();
     restoreUnit.mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));

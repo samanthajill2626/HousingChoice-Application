@@ -15,7 +15,7 @@ import { ContactSearchField, type ContactSearchValue } from '../contact/ContactS
 import { Modal } from '../contact/Modal.js';
 // The roster's own sentence for the same 409 unit_roster_conflict (the
 // landlord changed under the request) - one shared literal, never a copy.
-import { ROSTER_RETRY_COPY } from './rosterCopy.js';
+import { ROSTER_READ_FAILED_COPY, ROSTER_RETRY_COPY } from './rosterCopy.js';
 import styles from './ListingDetail.module.css';
 
 /** Any other failure: nothing was restored. */
@@ -94,6 +94,13 @@ export function RestoreLandlordDialog({
         if (err instanceof ApiError && err.status === 409 && err.code === 'unit_roster_conflict') {
           setError(ROSTER_RETRY_COPY);
           onConflict();
+          return;
+        }
+        // primary-contact-integrity spec 4.6: the server could not read the
+        // contacts it needs to pick the next primary and wrote nothing. A
+        // retry can succeed, so the dialog stays open and asks for one.
+        if (err instanceof ApiError && err.status === 503 && err.code === 'roster_read_failed') {
+          setError(ROSTER_READ_FAILED_COPY);
           return;
         }
         setError(RESTORE_FAILED_COPY);

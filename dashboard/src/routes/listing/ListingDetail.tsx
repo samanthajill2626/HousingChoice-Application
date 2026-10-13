@@ -49,7 +49,7 @@ import { isCaseworkerContact } from '../contact/caseworkerRole.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { useListing } from './useListing.js';
-import { ROSTER_RETRY_COPY } from './rosterCopy.js';
+import { ROSTER_READ_FAILED_COPY, ROSTER_RETRY_COPY } from './rosterCopy.js';
 import { listingRoster, ROLE_LABEL, type RosterRow } from './buildListingFile.js';
 import { useContacts } from '../contacts/useContacts.js';
 import { tenantName } from '../placements/placementsFormat.js';
@@ -123,10 +123,6 @@ const ROSTER_CONFLICT_COPY =
  *  primary on a contact who was deleted. Its own sentence - not the
  *  landlord-of-record catch-all above. */
 const PRIMARY_CONTACT_DELETED_COPY = 'That contact was deleted - restore them first or choose someone else.';
-
-/** A 503 roster_read_failed on removing the primary (spec 7.3): the server
- *  could not check who takes over, so it removed nothing. */
-const ROSTER_READ_FAILED_COPY = "Couldn't check the other contacts - try again.";
 
 /** The remove-the-primary confirm (spec 7.3), word for word: no heir, an heir
  *  with no name on record, and no propertyContact block (could not tell). The

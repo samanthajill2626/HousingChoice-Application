@@ -55,7 +55,8 @@ export interface RosterSuggestion {
   name: string;
   lead: string;
   roleLabel: string;
-  /** The property's primary contact - worth saying, it is who calls route to. */
+  /** The property's primary contact - worth saying, it is who new tours put
+   *  on the people list and the tour intro names. */
   primaryContact?: boolean;
 }
 
@@ -104,6 +105,9 @@ export function rosterSuggestions(input: RosterSuggestionsInput): RosterSuggesti
     });
   }
   for (const c of unitContacts ?? []) {
+    // primary-contact-integrity spec 7.5: a deleted contact is never offered
+    // for "+ Add" nor labeled "primary contact" (the server marks the row).
+    if (c.deleted === true) continue;
     if (onRoster.has(c.contactId)) continue;
     if (out.some((s) => s.contactId === c.contactId)) continue;
     out.push({

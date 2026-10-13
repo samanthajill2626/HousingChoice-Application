@@ -1100,11 +1100,13 @@ export interface TourActivityEvent {
  * WHERE the roster the client is looking at came from (spec D1, the PLAN vs FACT
  * split). `participants` = a relay thread exists (ANY status) and its member
  * rows ARE the roster; `plan` = a stored override waiting to be consumed at
- * open; `default` = the property's primary contact + the tenant; `unavailable` =
- * a thread pointer is set but the conversation could NOT be read. An
- * `unavailable` roster is NEVER silently re-resolved into the default - the card
- * says so and offers a retry, because being wrong about who is on a live relay
- * group outranks "never show an error".
+ * open; `default` = the tenant + the PROPERTY CONTACT (the roster row flagged
+ * primary, else the landlord of record, skipping a deleted or missing contact -
+ * primary-contact-integrity spec 4.1); `unavailable` = a thread pointer is set
+ * but the conversation could NOT be read. An `unavailable` roster is NEVER
+ * silently re-resolved into the default - the card says so and offers a retry,
+ * because being wrong about who is on a live relay group outranks "never show
+ * an error".
  */
 export type RosterSource = 'participants' | 'plan' | 'default' | 'unavailable';
 
@@ -1278,6 +1280,40 @@ export interface RosterPreview {
   /** A live group with exactly these members already exists. Absent when none
    *  does AND when the server could not tell - both mean "say nothing". */
   duplicateOf?: DuplicateOpenGroup;
+  /** Why this OWNED group's open preview uses the GENERAL intro instead of the
+   *  tour or placement intro (primary-contact-integrity spec 5.1). Set only by
+   *  the tour and placement OPEN previews, and only when the general intro is
+   *  used; never by the standalone or add-member previews. */
+  introFallback?: IntroFallback;
+}
+
+/**
+ * One reason an owned group's intro fell back to the general intro. MIRRORS
+ * app/src/jobs/relayFanOut.ts `IntroFallbackReason` (primary-contact-integrity
+ * spec 5.1); the union order IS the order the dialog lists them in.
+ */
+export type IntroFallbackReason =
+  | 'no_property_contact'
+  | 'property_contact_deleted'
+  | 'property_contact_is_tenant'
+  | 'property_contact_no_first_name'
+  | 'no_street_address'
+  | 'tour_not_scheduled'
+  | 'tour_started'
+  | 'lookup_failed';
+
+/** MIRRORS app/src/jobs/relayFanOut.ts `IntroFallback` (spec 5.1). */
+export interface IntroFallback {
+  /** Every reason that applies, in the order above. */
+  reasons: IntroFallbackReason[];
+  /** The property, when known - the "Set a primary contact" and "Add the
+   *  address" links open it. */
+  unitId?: string;
+  /** formatStreet(unit.address), when non-empty. */
+  street?: string;
+  /** Set with property_contact_no_first_name - the "Add a first name" link
+   *  opens this contact. */
+  propertyContactId?: string;
 }
 
 // --- Tour reminder ladder (scheduled-message-visibility) ---------------------
@@ -2516,6 +2552,10 @@ export interface UnitItem {
   /** Free-text "how to apply" copy (the property page's process card). */
   application_process?: string;
   primary_contact?: string;
+  /** The property-contact block (primary-contact-integrity spec 7.5) - see
+   *  UnitPropertyContact. Absent on the units LIST, on status / PATCH / photo /
+   *  restore responses, and whenever the server could not tell. */
+  propertyContact?: UnitPropertyContact;
   /** Soft-delete marker (ISO 8601). Present → the property is "deleted": hidden
    *  from the property lists + landlord card but fully retained (restore clears it). */
   deleted_at?: string;
@@ -3095,6 +3135,31 @@ export interface UnitContact {
   primaryContact: boolean; // the ☎ primary
   name?: string;
   company?: string; // denormalized for the roster row
+  /** RESPONSE ONLY (primary-contact-integrity spec 7.5): the row's contact is
+   *  soft-deleted or missing. Present only when the server's contact read was
+   *  complete; never stored. */
+  deleted?: true;
+  /** RESPONSE ONLY (spec 7.5): the row's contact is a caseworker. Present only
+   *  when the server's contact read was complete; never stored. */
+  caseworker?: true;
+}
+
+/**
+ * The property-contact block on a unit response (primary-contact-integrity
+ * spec 7.5): GET /api/units/:id and the two contact-list writes. ABSENT when
+ * the server's contact read was incomplete - the page then shows no box, no
+ * "(deleted)" marks and the generic remove notice.
+ */
+export interface UnitPropertyContact {
+  /** Who the app uses for this property (the shared lookup, no tenant), or
+   *  null for nobody. */
+  contactId: string | null;
+  /** Why nobody, when `contactId` is null. */
+  reason?: 'none' | 'deleted';
+  /** Who takes over if the primary row is removed (the heir function with the
+   *  primary excluded), or null for nobody. `name` is present even for an
+   *  off-roster landlord of record. */
+  heirIfPrimaryRemoved: { contactId: string; name?: string } | null;
 }
 // UnitItem gains: contacts?: UnitContact[]   (legacy landlordId stays = the landlord of record)
 export interface RelatedUnit {
@@ -3127,7 +3192,7 @@ export interface SimilarUnit {
  *  listing_status_changed, unit_deleted, unit_restored,
  *  broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
  *  tour_no_show, tour_canceled, tour_outcome, tour_auto_closed,
- *  tour_reopened.
+ *  tour_reopened, unit_primary_contact_assigned.
  *  Unknown types must still render (humanized), never blank. */
 export interface UnitActivityEvent {
   /** The audit ts sort key — unique within the unit (a stable React key). */
@@ -3149,6 +3214,11 @@ export interface UnitActivityEvent {
   tenantCount?: number;
   tourId?: string;
   outcome?: string;
+  /** unit_primary_contact_assigned only: why the primary contact was set
+   *  automatically (primary-contact-integrity spec 8) - auto_on_add,
+   *  handoff_on_remove, handoff_on_delete, handoff_on_restore or backfill. An
+   *  open set: an unknown value humanizes. */
+  reason?: string;
 }
 
 // --- Broadcasts (the "Share properties to tenants" surface) -----------------

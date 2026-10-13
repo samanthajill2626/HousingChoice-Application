@@ -87,4 +87,27 @@ describe('rosterSuggestions', () => {
       }),
     ).toEqual([]);
   });
+
+  // primary-contact-integrity spec 7.5: a row the server marks `deleted` is
+  // never offered for "+ Add" and never labeled "primary contact" - even when
+  // it is still the property's flagged primary row.
+  it('never suggests a row whose contact is deleted, primary or not', () => {
+    const DELETED_PRIMARY: UnitContact = { ...PM, deleted: true };
+    const DELETED_OTHER: UnitContact = {
+      contactId: 'c-gone',
+      role: 'other',
+      primaryContact: false,
+      name: 'Gina Gone',
+      deleted: true,
+    };
+    expect(
+      rosterSuggestions({
+        scope: 'tour',
+        roster: view(),
+        unitContacts: [DELETED_PRIMARY, OWNER, DELETED_OTHER],
+      }),
+    ).toEqual([
+      { contactId: 'c-own', name: 'Marcus Webb', lead: 'Also on this property', roleLabel: 'owner' },
+    ]);
+  });
 });

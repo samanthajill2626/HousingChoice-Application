@@ -1440,11 +1440,19 @@ describe('ListingDetail', () => {
     );
 
     await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
-    expect(await screen.findByRole('dialog', { name: 'Restore property' })).toBeInTheDocument();
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    // The dialog's own action, held from before the move (R2 code review,
+    // dashboard finding A4; fix wave 2 FW2-7): pressed after the move it must
+    // reach no handler. A dialog that survived the move would still hold this
+    // button, now bound to the page's current property, and post its choice
+    // against u2 - so the u2 check below can fail.
+    const withoutLandlord = within(dialog).getByRole('button', { name: 'Restore without a landlord' });
 
-    // Back to u2 with the dialog open: it closes.
+    // Back to u2 with the dialog open: it closes, and its action posts nothing.
     act(() => go?.(-1));
     expect(await screen.findByRole('heading', { name: /22 Elm St/ })).toBeInTheDocument();
+    fireEvent.click(withoutLandlord);
+    expect(restoreUnit.mock.calls.map(([id]) => id)).toEqual(['u1']);
     expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
 
     // Forward to u1 again: reset, not merely hidden.
@@ -1452,9 +1460,75 @@ describe('ListingDetail', () => {
     expect(await screen.findByRole('status')).toHaveTextContent(/deleted/i);
     expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
 
+    // Only u1's own plain restore was ever sent.
     expect(restoreUnit).toHaveBeenCalledTimes(1);
     expect(restoreUnit).toHaveBeenCalledWith('u1');
-    expect(restoreUnit.mock.calls.some(([id]) => id === 'u2')).toBe(false);
+  });
+
+  // R2 code review, dashboard finding A4 (fix wave 2 FW2-7): FW-11 also drops
+  // a restore_needs_landlord 409 that answers AFTER the move. The answer
+  // belongs to the property it was asked for, so it opens no dialog on the
+  // other property, nor on going Forward back to its own. An effect-based
+  // reset keyed on the unitId would miss it: that effect runs at the move,
+  // before the late answer lands.
+  it('a restore_needs_landlord 409 that answers after a history move to another property opens no dialog there, nor on going Forward', async () => {
+    const user = userEvent.setup();
+    let refuse: ((err: unknown) => void) | undefined;
+    restoreUnit.mockReset().mockImplementation(
+      () =>
+        new Promise<never>((_resolve, reject) => {
+          refuse = reject;
+        }),
+    );
+    getAllContacts.mockReset().mockResolvedValue([]);
+    const deletedU1: ListingState = {
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      setUnit: vi.fn(),
+    };
+    const liveU2: ListingState = {
+      ...READY,
+      unit: { ...READY.unit!, unitId: 'u2', address: { line1: '22 Elm St' } },
+      setUnit: vi.fn(),
+    };
+    useListing.mockImplementation((id: string) => (id === 'u2' ? liveU2 : deletedU1));
+    let go: ((delta: number) => void) | undefined;
+    function HistoryProbe(): null {
+      const navigate = useNavigate();
+      go = (delta) => void navigate(delta);
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={['/listings/u2', '/listings/u1']} initialIndex={1}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+        </Routes>
+        <HistoryProbe />
+      </MemoryRouter>,
+    );
+
+    // On deleted u1: the plain restore is sent and left in flight.
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    expect(restoreUnit).toHaveBeenCalledWith('u1');
+
+    // Back to u2, then u1's answer lands: it needs a landlord.
+    act(() => go?.(-1));
+    expect(await screen.findByRole('heading', { name: /22 Elm St/ })).toBeInTheDocument();
+    await act(async () => {
+      refuse?.(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', {
+          error: 'restore_needs_landlord',
+          landlordName: 'James Porter',
+        }),
+      );
+    });
+    expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+
+    // Forward to u1: the late answer was dropped, not parked.
+    act(() => go?.(1));
+    expect(await screen.findByRole('status')).toHaveTextContent(/deleted/i);
+    expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+    expect(restoreUnit).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -247,21 +247,44 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   store, a different `status`. The Email nav badge counts UNMATCHED unread only,
   never quarantine.
 
-- **primary contact** (contact-rosters, 2026-08-04) - the property-side person we
-  put on relay groups and reach by a masked call: the unit's DEFAULT contact. Code
-  and data: the roster-row flag `UnitContact.primaryContact` plus the unit scalar
-  `primary_contact`, which `unitsRepo.addContact` / `removeContact` keep
-  consistent with each other. AT MOST ONE per unit (zero is legal and reachable -
-  removing the primary from a unit with no `landlordId` clears both). Staff see it
-  as the "primary" on the property's Contacts card. RENAMED 2026-08-04 from
+- **primary contact** (contact-rosters, 2026-08-04; kept usable by
+  primary-contact-integrity, 2026-10-13) - the property-side person the app puts
+  on a tour's or placement's default people list and names in the relay intro and
+  the tour reminders: the unit's DEFAULT contact (read through the **property
+  contact** lookup, below). Code and data: the roster-row flag
+  `UnitContact.primaryContact` - THE FLAG IS THE TRUTH. The unit scalar
+  `primary_contact` mirrors it, is written only by the roster writes (and the
+  one-time `app/scripts/assign-primary-contacts.ts`), never by a unit create or
+  PATCH, and is ABSENT on a landlord-only unit, whose primary is the DERIVED
+  landlord row (`unitContacts()`); nothing reads the scalar at runtime, so code
+  that needs "who is primary" reads `unitContacts(unit)`. AT MOST ONE per unit.
+  The HANDOFF rule (spec
+  `docs/superpowers/specs/2026-10-12-primary-contact-integrity-design.md`,
+  section 4): when the primary is removed from the property, deleted, or cleared
+  by "Restore without a landlord", the HEIR takes over - the landlord of record
+  when live, else the earliest-added contact eligible for automatic routing
+  (typed landlord, live, not a phone or email routing pointer: never a tenant or
+  a caseworker) - and an add or an edit of an eligible contact on a property
+  with no live primary and no live landlord of record makes THAT contact
+  primary. So zero primary is reachable when nobody can take over (no live
+  landlord of record and no eligible live contact), when only NON-eligible
+  contacts were added (a tenant or partner is never promoted automatically),
+  after an explicit API write that sends `primaryContact: false` for the
+  current primary's own row, or for legacy data the script has not repaired;
+  the property's Contacts card then shows a "No primary contact." box (with a
+  live landlord of record the lookup still uses the landlord). A DELETED contact can stay flagged when nobody could
+  take over; the property contact lookup skips it. Staff see the primary as
+  "(primary)" on the property's Contacts card. RENAMED 2026-08-04 from
   `primaryVoice` / `primary_voice_contact`: the old names meant only "the
-  landlord-side person a masked tenant call routes to", and the concept widened to
-  cover relay groups as well as calls (persisted keys were renamed too - safe only
-  because prod is not live yet and dev reseeds).
+  landlord-side person a masked tenant call routes to", and the concept widened
+  to cover relay groups as well as calls (persisted keys were renamed too - safe
+  only because prod is not live yet and dev reseeds).
 
 - **landlord of record** (contact-rosters, 2026-08-04) - `unit.landlordId`: who
-  OWNS the unit. Deliberately distinct from the **primary contact** (who we put on
-  threads and dial): the landlord of record is IMMOVABLE from the roster -
+  OWNS the unit. Deliberately distinct from the **primary contact** (who new
+  tours and placements put on their people list and the relay intro names; the
+  **property contact** lookup falls back to the landlord of record when no live
+  primary is flagged): the landlord of record is IMMOVABLE from the roster -
   `unitsRepo.removeContact` refuses with `CannotRemoveLandlordOfRecordError`,
   which the route maps to 409 `cannot_remove_landlord_of_record` ("cannot remove
   the unit's landlord of record; reassign landlordId first"). Their roster row's
@@ -269,6 +292,21 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   `CannotRemovePrimaryLandlordError` / `cannot_remove_primary_landlord`: the old
   "primary landlord" wording collided with the primary contact, which is exactly
   the ambiguity this pair of names removes.
+
+- **property contact** (primary-contact-integrity, 2026-10-13) - who the app
+  actually USES for a property, given a tenant: the answer of the ONE shared
+  lookup in `app/src/lib/propertyContact.ts` (`resolvePropertyContact` /
+  `decidePropertyContact`). It walks the flagged **primary contact**, then the
+  **landlord of record** when set and different; a deleted or missing contact
+  is skipped, a candidate who IS the tenant stops the walk (nobody), and a read
+  that fails stops it too (never read as "deleted"). It is what the tour and
+  placement default people lists, the relay intros, the tour reminders and the
+  "cannot open a group" diagnostics use. Distinct from the primary contact (a
+  stored flag, which can name a deleted contact) and from the landlord of
+  record (the owner). When it finds nobody, an owned group opens with the
+  general intro and the open-group dialog says why; the property page reads it
+  as the unit's `propertyContact` block. Staff copy keeps saying "primary
+  contact" - that is what they set.
 
 - **housing authority** (tenant-list-visibility, 2026-08-10; rewritten by
   clean-org-names, 2026-10-06) - the organization that RUNS a tenant's voucher:

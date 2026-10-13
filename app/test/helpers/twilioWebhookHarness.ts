@@ -3249,6 +3249,31 @@ export function createFakeWorld(): FakeWorld {
       if (heirId !== undefined && old !== undefined) opts?.onPrimaryHandoff?.({ from: old, to: heirId });
       return unit;
     },
+    // primary-contact-integrity (spec 2026-10-12 section 4.6, contact delete):
+    // mirror the real repo - re-check that `fromContactId` is STILL the
+    // flagged primary (else not_primary), read liveness WITHOUT that contact,
+    // and run the SAME pure chooseHeir / applyPrimary with it excluded:
+    // heir -> moved (flag and scalar), none -> unchanged, unknown -> unknown.
+    // (The fake's list() ignores `consistentRead`: in memory is consistent.)
+    async handOffPrimaryFrom(unitId, fromContactId, readContacts) {
+      const unit = units.get(unitId);
+      if (!unit) return { outcome: 'not_primary' };
+      const roster = unitContacts(unit).map((c) => ({ ...c }));
+      const flagged = roster.find((c) => c.primaryContact === true);
+      if (flagged === undefined || flagged.contactId !== fromContactId) return { outcome: 'not_primary' };
+      const landlordOfRecord =
+        typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
+      const read = await readContacts(rosterContactIds(unit).filter((id) => id !== fromContactId));
+      const heir = chooseHeir({ roster, landlordId: landlordOfRecord, exclude: fromContactId, read });
+      if (heir.kind === 'unknown') return { outcome: 'unknown' };
+      if (heir.kind === 'none') return { outcome: 'unchanged' };
+      const applied = applyPrimary(roster, { contactId: heir.contactId, addLandlordRow: heir.addLandlordRow });
+      unit.contacts = applied.contacts;
+      if (applied.primaryContactScalar === null) delete unit.primary_contact;
+      else unit.primary_contact = applied.primaryContactScalar;
+      unit.updated_at = new Date().toISOString();
+      return { outcome: 'moved', unit, to: heir.contactId };
+    },
   };
 
   // In-memory placements (M1.10): mirror the repo's contractual semantics —

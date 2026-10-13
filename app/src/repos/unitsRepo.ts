@@ -730,7 +730,17 @@ export interface UnitsRepo {
    * (§5.1): stream-fed indexes. Commented so the Scan is a known, bounded
    * choice, not an oversight.
    */
-  list(opts?: ListUnitsOpts): Promise<UnitsPage>;
+  list(
+    opts?: ListUnitsOpts & {
+      /**
+       * primary-contact-integrity (spec 2026-10-12 section 4.6): a strongly
+       * consistent Scan (`ConsistentRead`) - the contact-delete hand-off
+       * decides what to write from it. On `list` only: the GSI list methods
+       * share ListUnitsOpts, and DynamoDB rejects ConsistentRead on a GSI.
+       */
+      consistentRead?: boolean;
+    },
+  ): Promise<UnitsPage>;
   /**
    * Organization-name rewrite (spec 2026-10-06 D11; plan 3.7): SET
    * `accepted_authorities` to `next` only while the stored list is EXACTLY
@@ -782,6 +792,33 @@ export interface UnitsRepo {
     input: RestoreWithLandlordInput,
     opts?: RosterHandoffOpts,
   ): Promise<UnitItem>;
+  /**
+   * primary-contact-integrity (spec 2026-10-12 section 4.6, "Delete the
+   * contact"): hand a unit's primary away from `fromContactId`, a contact the
+   * caller has just soft-deleted. Reads the unit CONSISTENTLY and first
+   * re-checks that `fromContactId` is STILL its flagged primary
+   * (unitContacts(); else 'not_primary', nothing read or written - a unit
+   * that no longer exists answers the same). Then the heir function
+   * (lib/propertyContact.ts chooseHeir) with `fromContactId` EXCLUDED - its id
+   * is left out of the ids passed to `readContacts`, so the eventually
+   * consistent batch read never answers it live (spec 4.2):
+   *   heir    -> ONE conditional write (updateRosterIfCurrent, fenced on the
+   *              landlordId and contacts[] read) moves the flag AND the scalar
+   *              to it (applyPrimary; an off-roster landlord heir gets its
+   *              row): { outcome: 'moved', unit, to };
+   *   none    -> nothing changes - the deleted contact stays flagged, so a
+   *              later restore of the contact leaves the unit as it was:
+   *              { outcome: 'unchanged' };
+   *   unknown -> nothing changes: { outcome: 'unknown' }.
+   * A lost conditional write re-reads, re-checks and re-decides, bounded at
+   * ROSTER_WRITE_MAX_ATTEMPTS, then RosterWriteConflictError. The deleted
+   * contact's own row stays on the roster.
+   */
+  handOffPrimaryFrom(
+    unitId: string,
+    fromContactId: string,
+    readContacts: ReadRosterContacts,
+  ): Promise<PrimaryHandOffResult>;
 }
 
 /**
@@ -1441,6 +1478,9 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       const scopeFilter = deletedScopeFilter(opts.deleted);
       const input: ScanCommandInput = {
         TableName: table,
+        // A strongly consistent Scan on request (primary-contact-integrity
+        // spec 4.6: the contact-delete hand-off decides writes from it).
+        ...(opts.consistentRead === true && { ConsistentRead: true }),
         // Soft-delete scope: default excludes deleted; deleted:true shows only
         // them; deleted:'any' scans with no filter (and no #del name).
         ...(scopeFilter !== undefined && {
@@ -1639,6 +1679,47 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         return updated;
       };
       return write();
+    },
+    async handOffPrimaryFrom(unitId, fromContactId, readContacts) {
+      let attempts = 0;
+      const attempt = async (): Promise<PrimaryHandOffResult> => {
+        attempts += 1;
+        // CONSISTENT: the re-check and the heir are decided on this read, and
+        // the write is fenced on it.
+        const unit = await this.getById(unitId, { consistentRead: true });
+        if (!unit) return { outcome: 'not_primary' };
+        const roster = unitContacts(unit).map((c) => ({ ...c }));
+        const flagged = roster.find((c) => c.primaryContact === true);
+        // Re-check first: someone may already have moved it (done).
+        if (flagged === undefined || flagged.contactId !== fromContactId) return { outcome: 'not_primary' };
+        const landlordOfRecord =
+          typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
+        // The deleted contact is EXCLUDED and never read (spec 4.2).
+        const read = await readContacts(rosterContactIds(unit).filter((id) => id !== fromContactId));
+        const heir = chooseHeir({ roster, landlordId: landlordOfRecord, exclude: fromContactId, read });
+        if (heir.kind === 'unknown') return { outcome: 'unknown' };
+        if (heir.kind === 'none') return { outcome: 'unchanged' };
+        const applied = applyPrimary(roster, { contactId: heir.contactId, addLandlordRow: heir.addLandlordRow });
+        let updated: UnitItem;
+        try {
+          updated = await updateRosterIfCurrent(unit, {
+            contacts: applied.contacts,
+            primary_contact: applied.primaryContactScalar,
+          });
+        } catch (err) {
+          if (!(err instanceof ConditionalCheckFailedException)) throw err;
+          if (attempts >= ROSTER_WRITE_MAX_ATTEMPTS) throw new RosterWriteConflictError();
+          // The unit changed since this attempt's read: re-read, re-check
+          // that the contact is still the primary, and decide again.
+          return attempt();
+        }
+        log.info(
+          { unitId, attempts, from: fromContactId, to: heir.contactId },
+          'unit primary handed off from a deleted contact',
+        );
+        return { outcome: 'moved', unit: updated, to: heir.contactId };
+      };
+      return attempt();
     },
   };
 }

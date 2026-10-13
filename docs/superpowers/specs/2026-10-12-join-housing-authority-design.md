@@ -1,3 +1,11 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-10-13).** This document describes how
+> this work was *designed/planned at the time of writing*. The work shipped to the main line and
+> its feature branch + worktree were deleted during cleanup. **This file is NOT current
+> documentation and the live code may have drifted from it - do not treat it as authoritative
+> guidance on how the system should be built or behaves today.** For current truth read the code
+> and the project's living docs. Kept only as a point-in-time record of intent.
+
 # /join housing authority dropdown, Onboarding start, and lead backfill - design
 
 Status: APPROVED revision 4 (2026-10-12); revision 5 adds Cameron's post-build rulings (D10 earlier-run exclusions, pending-suggestion leads, honest failure wording; D12 Settings note); revision 6 (2026-10-13) adds the D10 dismissed-Atlanta and in-flight-resolution leave-outs and records exclusions before any write. Review history:

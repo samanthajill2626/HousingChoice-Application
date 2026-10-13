@@ -142,3 +142,9 @@ white document - an inbox page this time. No `net::ERR_*` line in the run log; 2
 TIME_WAIT sockets right after the run (141 when it started). The spec file passed alone
 2/2 (18.1 s), and the full re-run is recorded in the caseworker-integrity handback.
 Artifacts: `W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p9-e2e-artifacts\`.
+
+**Artifacts moved (2026-10-13).** The feat/join-housing-authority worktree was retired after
+its merge. Its artifacts cited above (`.superpowers/sdd/e2e-results-run1/`,
+`e2e-results-fw1/`, `e2e-results-fw1-run2/`, `e2e-results-fw1-run3/` with the traces, and
+`planner-e2e-results-1/` for the eighth sighting) are preserved with a SHA-256 manifest at
+`W:\tmp\_preserved-artifacts\join-housing-authority-20261013\.superpowers\sdd\`.

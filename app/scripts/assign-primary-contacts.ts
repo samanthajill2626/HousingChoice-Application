@@ -53,9 +53,25 @@
 //
 // PII: prints and logs counts, unit ids and contact ids only - never a
 // person's name, a phone or a street.
-import { applyPrimary, chooseHeir, type RosterContactsRead } from '../src/lib/propertyContact.js';
-import { isDeleted as isContactDeleted } from '../src/repos/contactsRepo.js';
-import { unitContacts, type UnitContact, type UnitItem } from '../src/repos/unitsRepo.js';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { logger as defaultLogger, type Logger } from '../src/lib/logger.js';
+import {
+  applyPrimary,
+  chooseHeir,
+  readRosterContacts,
+  rosterContactIds,
+  type RosterContactsRead,
+} from '../src/lib/propertyContact.js';
+import { createAuditRepo, type AuditRepo } from '../src/repos/auditRepo.js';
+import { createContactsRepo, isDeleted as isContactDeleted, type ContactsRepo } from '../src/repos/contactsRepo.js';
+import {
+  createUnitsRepo,
+  isDeleted as isUnitDeleted,
+  unitContacts,
+  type UnitContact,
+  type UnitItem,
+  type UnitsRepo,
+} from '../src/repos/unitsRepo.js';
 
 // ---------------------------------------------------------------------------
 // Planning (pure): what one unit needs
@@ -132,4 +148,322 @@ export function planUnitPrimary(unit: UnitItem, read: RosterContactsRead): UnitP
     ...(flagged !== undefined && { from: flagged.contactId }),
     write: { contacts: applied.contacts, primaryContact: heir.contactId },
   };
+}
+
+// ---------------------------------------------------------------------------
+// The run (dry run by default; --apply writes, unit by unit)
+// ---------------------------------------------------------------------------
+
+/** What the run reads and writes through. */
+export interface AssignDeps {
+  units: Pick<UnitsRepo, 'list' | 'assignPrimaryIfCurrent'>;
+  contacts: Pick<ContactsRepo, 'getManyByIds'>;
+  audit: Pick<AuditRepo, 'append'>;
+}
+
+/** The real deps, every repo on the stage's doc client and env - never the ambient TABLE_PREFIX. */
+export function buildAssignDeps(
+  stage: { doc: DynamoDBDocumentClient; env: NodeJS.ProcessEnv },
+  logger: Logger,
+): AssignDeps {
+  const { doc, env } = stage;
+  return {
+    units: createUnitsRepo({ doc, env, logger }),
+    contacts: createContactsRepo({ doc, env, logger }),
+    audit: createAuditRepo({ doc, env, logger }),
+  };
+}
+
+export interface AssignOptions {
+  /** Write. false = dry run (the CLI's default). */
+  apply: boolean;
+  logger?: Logger;
+  /** Test seam: the Scan page size (unset = DynamoDB's own page). */
+  scanLimit?: number;
+}
+
+/**
+ * The counts (spec section 8) and the unit ids behind them. `targets` and the
+ * id lists are what the run PLANNED (both modes); `assigned` is what an apply
+ * wrote; `scalarAligned` is what a dry run would align and an apply aligned.
+ */
+export interface AssignResult {
+  unitsScanned: number;
+  /** Soft-deleted units among them - read and repaired like live ones. */
+  deletedUnits: number;
+  /** Units whose primary is absent or not live AND that have an heir. */
+  targets: number;
+  targetsOnDeletedUnits: number;
+  /** Apply only: primaries written. */
+  assigned: number;
+  /** Units whose live, stored primary the scalar did not match. */
+  scalarAligned: number;
+  /** Apply only: writes whose condition failed - the unit changed after the read; nothing written. Re-run. */
+  skippedOnCondition: number;
+  /** Apply only: writes that failed otherwise - they may or may not have landed. */
+  writeFailed: number;
+  /** No live contact and no live landlord of record: nothing anyone can do. */
+  noHeir: number;
+  /** Live contacts, none eligible for automatic routing: Sam chooses on the property page. */
+  noEligible: number;
+  /** The contact read failed: liveness unknown, nothing decided. Re-run. */
+  unknown: number;
+  /** Nothing to do. */
+  unchanged: number;
+  /** Apply only: audit events that may not have been written AFTER their primary write landed. Expected 0. */
+  auditFailed: number;
+  targetUnitIds: string[];
+  alignedUnitIds: string[];
+  noEligibleUnitIds: string[];
+  unknownUnitIds: string[];
+  skippedUnitIds: string[];
+  failedUnitIds: string[];
+}
+
+function emptyResult(): AssignResult {
+  return {
+    unitsScanned: 0,
+    deletedUnits: 0,
+    targets: 0,
+    targetsOnDeletedUnits: 0,
+    assigned: 0,
+    scalarAligned: 0,
+    skippedOnCondition: 0,
+    writeFailed: 0,
+    noHeir: 0,
+    noEligible: 0,
+    unknown: 0,
+    unchanged: 0,
+    auditFailed: 0,
+    targetUnitIds: [],
+    alignedUnitIds: [],
+    noEligibleUnitIds: [],
+    unknownUnitIds: [],
+    skippedUnitIds: [],
+    failedUnitIds: [],
+  };
+}
+
+/** The counters as one flat record: every summary log line, the PARTIAL one included. */
+function flatCounts(result: AssignResult): Record<string, number> {
+  return {
+    unitsScanned: result.unitsScanned,
+    deletedUnits: result.deletedUnits,
+    targets: result.targets,
+    targetsOnDeletedUnits: result.targetsOnDeletedUnits,
+    assigned: result.assigned,
+    scalarAligned: result.scalarAligned,
+    skippedOnCondition: result.skippedOnCondition,
+    writeFailed: result.writeFailed,
+    noHeir: result.noHeir,
+    noEligible: result.noEligible,
+    unknown: result.unknown,
+    unchanged: result.unchanged,
+    auditFailed: result.auditFailed,
+  };
+}
+
+/**
+ * The run. A Scan failure ABORTS: a PARTIAL report (the counters so far) is
+ * logged and the error rethrown - every write is conditional, so re-running
+ * after the fix is safe. Everything else is per unit and never aborts.
+ */
+export async function assignPrimaryContacts(deps: AssignDeps, opts: AssignOptions): Promise<AssignResult> {
+  const log = opts.logger ?? defaultLogger;
+  const result = emptyResult();
+  try {
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    do {
+      const page = await deps.units.list({
+        deleted: 'any',
+        consistentRead: true,
+        ...(opts.scanLimit !== undefined && { limit: opts.scanLimit }),
+        ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
+      });
+      for (const unit of page.items) await handleUnit(deps, opts.apply, result, log, unit);
+      exclusiveStartKey = page.lastEvaluatedKey;
+    } while (exclusiveStartKey !== undefined);
+  } catch (err) {
+    log.error(
+      { err, ...flatCounts(result), apply: opts.apply },
+      `${SCRIPT_NAME} - PARTIAL result: the run ABORTED and these counters cover only what completed before the failure. Every write is conditional, so re-running after the fix is safe.`,
+    );
+    throw err;
+  }
+  return result;
+}
+
+async function handleUnit(
+  deps: AssignDeps,
+  apply: boolean,
+  result: AssignResult,
+  log: Logger,
+  unit: UnitItem,
+): Promise<void> {
+  const unitId = unit.unitId;
+  const deleted = isUnitDeleted(unit);
+  result.unitsScanned += 1;
+  if (deleted) result.deletedUnits += 1;
+  const read = await readRosterContacts(deps.contacts, rosterContactIds(unit), log);
+  const plan = planUnitPrimary(unit, read);
+  switch (plan.kind) {
+    case 'unchanged':
+      result.unchanged += 1;
+      return;
+    case 'noHeir':
+      result.noHeir += 1;
+      log.info({ unitId, deleted }, `${SCRIPT_NAME} - no heir: no live contact and no live landlord of record`);
+      return;
+    case 'noEligible':
+      result.noEligible += 1;
+      result.noEligibleUnitIds.push(unitId);
+      log.info(
+        { unitId, deleted },
+        `${SCRIPT_NAME} - no eligible contact: only a tenant or a caseworker is live (choose one on the property page)`,
+      );
+      return;
+    case 'unknown':
+      result.unknown += 1;
+      result.unknownUnitIds.push(unitId);
+      log.warn(
+        { unitId, deleted },
+        `${SCRIPT_NAME} - a contact read failed: liveness unknown, nothing decided or written for this unit (re-run)`,
+      );
+      return;
+    case 'align': {
+      result.alignedUnitIds.push(unitId);
+      if (!apply) {
+        result.scalarAligned += 1;
+        log.info({ unitId, deleted }, `${SCRIPT_NAME} - DRY RUN: would align primary_contact with the flagged primary`);
+        return;
+      }
+      if ((await writeUnit(deps, result, log, unit, plan.write)) === 'written') {
+        result.scalarAligned += 1;
+        log.info({ unitId, deleted }, `${SCRIPT_NAME} - primary_contact aligned with the flagged primary`);
+      }
+      return;
+    }
+    case 'target': {
+      result.targets += 1;
+      if (deleted) result.targetsOnDeletedUnits += 1;
+      result.targetUnitIds.push(unitId);
+      const ids = { unitId, deleted, contactId: plan.heirId, ...(plan.from !== undefined && { from: plan.from }) };
+      if (!apply) {
+        log.info(ids, `${SCRIPT_NAME} - DRY RUN: would make this contact the primary contact`);
+        return;
+      }
+      if ((await writeUnit(deps, result, log, unit, plan.write)) !== 'written') return;
+      result.assigned += 1;
+      try {
+        await deps.audit.append(`units#${unitId}`, PRIMARY_ASSIGNED_EVENT, {
+          contactId: plan.heirId,
+          reason: 'backfill',
+          ...(plan.from !== undefined && { from: plan.from }),
+        });
+      } catch (err) {
+        // An append can land and then error (a timeout): MAY not have been written.
+        result.auditFailed += 1;
+        log.warn(
+          { err, unitId },
+          `${SCRIPT_NAME} - the audit event may not have been written (the primary was assigned); counted in auditFailed, continuing`,
+        );
+      }
+      log.info(ids, `${SCRIPT_NAME} - primary contact assigned`);
+      return;
+    }
+  }
+}
+
+/** ONE conditional write; a lost condition is skipped, any other failure counted - the run goes on. */
+async function writeUnit(
+  deps: AssignDeps,
+  result: AssignResult,
+  log: Logger,
+  unit: UnitItem,
+  write: PrimaryWrite,
+): Promise<'written' | 'skipped' | 'failed'> {
+  let outcome: 'written' | 'skipped';
+  try {
+    outcome = await deps.units.assignPrimaryIfCurrent(unit, write);
+  } catch (err) {
+    result.writeFailed += 1;
+    result.failedUnitIds.push(unit.unitId);
+    log.error(
+      { err, unitId: unit.unitId },
+      `${SCRIPT_NAME} - the write FAILED; it may or may not have landed - re-run the dry run to see`,
+    );
+    return 'failed';
+  }
+  if (outcome === 'skipped') {
+    result.skippedOnCondition += 1;
+    result.skippedUnitIds.push(unit.unitId);
+    log.info(
+      { unitId: unit.unitId },
+      `${SCRIPT_NAME} - the unit changed after the run read it; skipped, nothing written (re-run)`,
+    );
+  }
+  return outcome;
+}
+
+/** The end-of-run log line and the exit code it earns: 1 when a unit could not be decided or a write failed. */
+export function reportAssignRun(result: AssignResult, apply: boolean, log: Logger = defaultLogger): 0 | 1 {
+  const suffix = apply ? '' : ' (DRY RUN - nothing written)';
+  const fields = { ...flatCounts(result), apply };
+  if (result.unknown > 0 || result.writeFailed > 0) {
+    log.warn(
+      fields,
+      `${SCRIPT_NAME} - COMPLETED WITH FAILURES${suffix}: ${result.unknown} unit(s) could not be decided (a contact read failed) and ${result.writeFailed} write(s) failed - see the WARN and ERROR lines naming them, then re-run (idempotent).`,
+    );
+    return 1;
+  }
+  if (result.skippedOnCondition > 0 || result.auditFailed > 0) {
+    log.warn(
+      fields,
+      `${SCRIPT_NAME} - done${suffix}: ${result.skippedOnCondition} unit(s) changed while the run worked (re-run to finish them) and ${result.auditFailed} audit event(s) may not have been written`,
+    );
+    return 0;
+  }
+  log.info(fields, `${SCRIPT_NAME} - done${suffix}`);
+  return 0;
+}
+
+/**
+ * What the CLI prints (spec section 8): the counts, then the unit ids of each
+ * list - never a name, a phone or a street.
+ */
+export function formatAssignSummary(result: AssignResult, apply: boolean): string[] {
+  const ids = (list: readonly string[]): string => (list.length === 0 ? 'none' : list.join(', '));
+  const lines = [
+    apply ? 'Primary contacts - APPLIED:' : 'Primary contacts - DRY RUN, nothing written:',
+    `  Properties scanned: ${result.unitsScanned} (${result.deletedUnits} soft-deleted)`,
+    `  ${apply ? 'Planned a primary contact' : 'Would get a primary contact'}: ${result.targets} (${result.targetsOnDeletedUnits} on soft-deleted properties)`,
+  ];
+  if (apply) lines.push(`  Primary contacts assigned: ${result.assigned}`);
+  lines.push(
+    `  primary_contact field ${apply ? 'aligned' : 'would be aligned'} with the flagged primary: ${result.scalarAligned}`,
+    `  No heir - no live contact and no live landlord of record (nothing to do): ${result.noHeir}`,
+    `  No eligible contact - only a tenant or a caseworker is live (choose one on the property page): ${result.noEligible}`,
+    `  Unknown - a contact read failed (re-run): ${result.unknown}`,
+    `  Already fine: ${result.unchanged}`,
+  );
+  if (apply) {
+    lines.push(
+      `  Skipped - the property changed after the run read it (re-run): ${result.skippedOnCondition}`,
+      `  Writes that FAILED (re-run the dry run to see): ${result.writeFailed}`,
+      `  Audit events that may not have been written: ${result.auditFailed} (expected 0)`,
+    );
+  }
+  lines.push(
+    `${apply ? 'Properties planned for a primary contact' : 'Properties that would get a primary contact'}: ${ids(result.targetUnitIds)}`,
+    `${apply ? 'Properties planned for a primary_contact field alignment' : 'Properties whose primary_contact field would be aligned'}: ${ids(result.alignedUnitIds)}`,
+    `Properties with no eligible contact (open each one and choose a primary contact): ${ids(result.noEligibleUnitIds)}`,
+    `Properties that could not be decided (re-run): ${ids(result.unknownUnitIds)}`,
+  );
+  if (apply) {
+    lines.push(
+      `Properties skipped because they changed (re-run): ${ids(result.skippedUnitIds)}`,
+      `Properties whose write failed: ${ids(result.failedUnitIds)}`,
+    );
+  }
+  return lines;
 }

@@ -72,6 +72,13 @@ import {
   type UnitItem,
   type UnitsRepo,
 } from '../src/repos/unitsRepo.js';
+import {
+  parseStageArgs,
+  resolveStageClient,
+  type StageClient,
+  type StageClientOpts,
+  type StageTarget,
+} from './lib/stageClient.js';
 
 // ---------------------------------------------------------------------------
 // Planning (pure): what one unit needs
@@ -466,4 +473,93 @@ export function formatAssignSummary(result: AssignResult, apply: boolean): strin
     );
   }
   return lines;
+}
+
+// ---------------------------------------------------------------------------
+// The CLI
+// ---------------------------------------------------------------------------
+
+/** The argument names the CLI accepts beside --env and --lane (parseStageArgs refuses any other, and any repeat). */
+export const ASSIGN_ARGS = { values: [] as string[], flags: ['--apply'] };
+
+/** What a usage error prints (exit 2). */
+export const USAGE =
+  `Usage: npx tsx app/scripts/${SCRIPT_NAME}.ts --env local|dev|prod [--lane <L>] [--apply]\n` +
+  '  DRY RUN by default; --apply writes. Unknown or repeated arguments are refused.\n' +
+  '  --lane selects a hermetic e2e lane (local only).';
+
+/** The CLI's outside world - each member injectable, so the tests execute every exit code. */
+export interface AssignCliDeps {
+  /** --env/--lane -> the stage client (default: resolveStageClient; for dev/prod the account guard runs first). */
+  resolveStage: (target: StageTarget, opts: StageClientOpts) => Promise<StageClient>;
+  /** The run on that client (default: assignPrimaryContacts on buildAssignDeps(stage)). */
+  run: (stage: StageClient, opts: AssignOptions) => Promise<AssignResult>;
+  /** One line of the printed summary (default: console.log). */
+  print: (line: string) => void;
+  /** The usage text (default: console.error). */
+  printError: (text: string) => void;
+  logger: Logger;
+}
+
+/**
+ * The CLI (spec section 8). Resolves to the exit code: 2 a usage error
+ * (nothing resolved, nothing read); 1 the target could not be resolved
+ * (nothing read), the run aborted (the Scan failed - its PARTIAL line says
+ * so), or it completed with failures (reportAssignRun); 0 it completed. Once
+ * resolved, the stage client is destroyed whatever happens.
+ */
+export async function main(argv: readonly string[], cli: Partial<AssignCliDeps> = {}): Promise<0 | 1 | 2> {
+  const printError = cli.printError ?? ((text: string) => console.error(text));
+  const print = cli.print ?? ((line: string) => console.log(line));
+  const log = cli.logger ?? defaultLogger;
+  const resolveStage: AssignCliDeps['resolveStage'] =
+    cli.resolveStage ?? ((target, opts) => resolveStageClient(target, {}, opts));
+  const run: AssignCliDeps['run'] =
+    cli.run ?? ((stage, opts) => assignPrimaryContacts(buildAssignDeps(stage, log), opts));
+
+  const parsed = parseStageArgs([...argv], ASSIGN_ARGS);
+  if ('usage' in parsed) {
+    printError(USAGE);
+    return 2;
+  }
+  const apply = parsed.flags.has('--apply');
+
+  // STEP 1 - resolve the target on its own: a refusal here (account guard,
+  // STS, an ambient AWS_ENDPOINT_URL*) happens BEFORE any table is read.
+  let stage: StageClient;
+  try {
+    stage = await resolveStage(parsed.target, parsed.lane !== undefined ? { lane: parsed.lane } : {});
+  } catch (err) {
+    log.error({ err }, `${SCRIPT_NAME} - FAILED before the run started (no table was read or written)`);
+    return 1;
+  }
+  // STEP 2 - the run, then the summary and the exit code it earns.
+  try {
+    log.info(
+      { target: parsed.target, endpoint: stage.describe, prefix: stage.prefix, apply },
+      `${SCRIPT_NAME} - starting`,
+    );
+    const result = await run(stage, { apply, logger: log });
+    for (const line of formatAssignSummary(result, apply)) print(line);
+    return reportAssignRun(result, apply, log);
+  } catch (err) {
+    log.error({ err }, `${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  } finally {
+    stage.doc.destroy();
+  }
+}
+
+const invokedDirectly =
+  import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith(`${SCRIPT_NAME}.ts`);
+if (invokedDirectly) {
+  void main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err: unknown) => {
+      defaultLogger.error({ err }, `${SCRIPT_NAME} - FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    },
+  );
 }

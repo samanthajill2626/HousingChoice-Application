@@ -7,7 +7,7 @@ status: resolved
 resolved: 2026-10-12
 area: app
 created: 2026-10-12
-refs: app/src/repos/unitsRepo.ts:161, app/src/repos/unitsRepo.ts:883, app/src/routes/units.ts:1164, app/src/routes/units.ts:1167, app/test/helpers/twilioWebhookHarness.ts:2962, app/test/unitsRepoContactListRules.integration.test.ts, app/test/unitsApiRosterTypeChecks.test.ts:208, docs/superpowers/plans/2026-10-12-caseworker-integrity.md:9252
+refs: app/src/repos/unitsRepo.ts:162, app/src/repos/unitsRepo.ts:916, app/src/routes/units.ts:1207, app/src/routes/units.ts:1210, app/test/helpers/twilioWebhookHarness.ts:2963, app/test/unitsRepoContactListRules.integration.test.ts, app/test/unitsApiRosterTypeChecks.test.ts:265, docs/superpowers/plans/2026-10-12-caseworker-integrity.md:9252
 ---
 
 **Resolution (2026-10-12).** Fixed on `fix/caseworker-integrity`, fix wave 2
@@ -16,26 +16,27 @@ already put a contact-list rule inside the roster write's loop, and it widened
 both races below - the re-seated caseworker or the claiming tenant also became
 the property's primary contact). `unitsRepo.addContact` now takes the facts
 the route read about the contact, `ContactListFacts { caseworker,
-landlordTyped }` (`app/src/repos/unitsRepo.ts:161`), and decides both rules
+landlordTyped }` (`app/src/repos/unitsRepo.ts:162`), and decides both rules
 on EACH attempt's own read of the unit, before the reassignment refusal
-(`:883-884`): a NEW seat for a caseworker throws `ContactListCaseworkerError`,
+(`:916-917`): a NEW seat for a caseworker throws `ContactListCaseworkerError`,
 and a claim of the vacant landlord slot by a contact not typed landlord throws
 `LandlordClaimNotLandlordError`. The route keeps its pre-checks unchanged (the
 no-race answer, in the spec's order), passes `{ caseworker:
 isCaseworker(contact), landlordTyped: contact.type === 'landlord' }` from its
-consistent contact read (`app/src/routes/units.ts:1164`) and maps the two
+consistent contact read (`app/src/routes/units.ts:1207`) and maps the two
 errors to the same 409s, `contact_list_caseworker` and `landlord_not_landlord`
-(`:1167-1182`). The FakeWorld fake mirrors it
-(`app/test/helpers/twilioWebhookHarness.ts:2962-2963`). The write is
+(`:1210-1225`). The FakeWorld fake mirrors it
+(`app/test/helpers/twilioWebhookHarness.ts:2963-2964`). The write is
 conditioned on the roster and `landlordId` the attempt read, so the unit side
 of both rules is now atomic with the write; only the contact's TYPE is still a
 read before it (spec L1). Tests, each red with the fix reverted:
 `app/test/unitsRepoContactListRules.integration.test.ts` (DynamoDB Local: the
 I4 race in the route's window and in the add's own window - the second pins
 the per-attempt decision - and the I3 race) and the two route probes in
-`app/test/unitsApiRosterTypeChecks.test.ts:208` (FakeWorld, the race injected
-after the route's reads: 409 with the right code, nothing written). The line
-references below are as filed, before the fix.
+`app/test/unitsApiRosterTypeChecks.test.ts:265` (FakeWorld, the race injected
+after the route's reads: 409 with the right code, nothing written). Line
+references in this paragraph are at the end of fix wave 2 (534f971d); the ones
+below are as filed, before the fix.
 
 **Problem.** `POST /api/units/:unitId/contacts` refuses a caseworker taking a
 NEW seat (409 `contact_list_caseworker`, invariant I4) and a non-landlord

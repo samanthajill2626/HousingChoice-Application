@@ -3,7 +3,8 @@ id: claimed-suggestion-accept-after-caseworker-conversion
 title: A claimed housing-authority acceptance can commit after caseworker conversion
 type: bug
 severity: med
-status: open
+status: resolved
+resolved: 2026-10-12
 area: app/extraction
 created: 2026-10-08
 refs: app/src/services/suggestionResolution.ts:194, app/src/services/suggestionResolution.ts:341, app/src/repos/suggestionResolutionRepo.ts:638, app/src/repos/suggestionResolutionRepo.ts:798, app/src/services/caseworkerConversion.ts:390
@@ -57,3 +58,35 @@ contact (they fence `type === 'tenant'`). Exact results and limits are in
 `docs/superpowers/reviews/2026-10-07-caseworkers/planner-final-review.md`
 section 4. The "no runtime reproduction" limit above is superseded; severity,
 priority and the scope decision are unchanged and remain Cameron's call.
+
+**Resolution (2026-10-12).** Fixed on `fix/caseworker-integrity` (spec
+`docs/superpowers/specs/2026-10-12-caseworker-integrity-design.md`, D1;
+Cameron's rulings 2026-10-12). An accept now reads the contact consistently
+before it plans, and for a TENANT-ONLY target (`housingAuthority`,
+`voucherSize`, `pets`, `evictions`, `tenure`, `porting`, `status`): (1) on a
+contact not typed `tenant` it is refused before the claim with 409
+`suggestion_contact_not_tenant`, so the chip is kept and can be dismissed;
+(2) otherwise its guard also carries the contact's `classification_revision`,
+which the conversion and every contacts-PATCH type or role change bump in the
+same write, so a claim that spans a reclassification - resumed, recovered by
+`recoverAbandoned`, or finished by the journal sweep - ends superseded and
+writes nothing (`commitContactEffect` answers
+`superseded_by_reclassification`; the requester gets 409
+`suggestion_contact_reclassified`, and `suggestion.updated` is emitted because
+the chip is gone). A journal claimed by the old code has no revision key:
+`effectiveGuard` (`app/src/repos/suggestionResolutionRepo.ts`), used at all
+three real-repo guard sites and by the test fake, extends its guard with
+`caseworker_conversion: { exists: false }`, so such a claim recovered onto a
+converted contact also ends superseded instead of looping as stale. Neutral
+targets (`firstName`, `lastName`, `phone`, `address`) still commit across a
+reclassification. The R2-ADV-1 schedule - the paused claim and the
+crash-recovered claim, on the FakeWorld routes and on the real repositories
+over DynamoDB Local - is now a regression test, and it ends with no housing
+authority on the caseworker. Known limit (spec D1.4): a journal claimed before
+the deploy is not fenced against a GENERIC re-type. No repair step was built
+(spec D1.7, which assumed #19 was not live anywhere; #19 in fact went to dev
+and prod on 2026-10-12, release 1.5.1, ahead of this fix). An authority an
+accept wrote onto a converted caseworker before this fix deploys stays until
+it is cleared by hand: RUNBOOK.md, "What the conversion does not fence", has
+the console call and names what can still write a housing authority onto a
+caseworker - an extraction run in flight, and the importer.

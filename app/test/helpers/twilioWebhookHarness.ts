@@ -5,6 +5,7 @@
 // real, never mocked out.
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { isDeepStrictEqual } from 'node:util';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { Express, Router } from 'express';
 import request, { type Test } from 'supertest';
@@ -114,9 +115,12 @@ import {
 } from '../../src/repos/messagesRepo.js';
 import {
   CannotRemoveLandlordOfRecordError,
+  ContactListCaseworkerError,
   isDeleted as isUnitDeleted,
+  LandlordClaimNotLandlordError,
   LandlordReassignmentRequiredError,
   type ListUnitsOpts,
+  RosterWriteConflictError,
   unitContacts,
   type UnitContact,
   type UnitDisplayItem,
@@ -2937,10 +2941,11 @@ export function createFakeWorld(): FakeWorld {
         .slice(0, opts.limit ?? 50);
       return { items };
     },
-    async addContact(unitId, contact) {
+    async addContact(unitId, contact, facts) {
       // Mirror the real repo's invariants: seed from landlordId, upsert by
-      // contactId, exactly-one-primaryContact, and keep primary_contact
-      // consistent with the roster's ☎ primary.
+      // contactId, the contact-list rules on this read, auto-primary for a
+      // new seat on an ownerless primary-less unit, exactly-one-primaryContact,
+      // and keep primary_contact consistent with the roster's primary row.
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`addContact: no unit ${unitId}`);
       const hasLandlordId = Object.prototype.hasOwnProperty.call(unit, 'landlordId');
@@ -2949,6 +2954,14 @@ export function createFakeWorld(): FakeWorld {
           ? unit.landlordId
           : undefined;
       const claimsVacantLandlord = contact.role === 'landlord' && !hasLandlordId;
+      const roster = unitContacts(unit).map((c) => ({ ...c }));
+      const existing = roster.find((c) => c.contactId === contact.contactId);
+      // caseworker-integrity fix wave 2 FW2-1, exactly as the real repo decides
+      // it per attempt from the caller's facts: I4 (a caseworker never takes a
+      // NEW seat), then I3 (claiming the vacant landlord slot needs a contact
+      // typed landlord), then the reassignment refusal.
+      if (existing === undefined && facts.caseworker) throw new ContactListCaseworkerError();
+      if (claimsVacantLandlord && !facts.landlordTyped) throw new LandlordClaimNotLandlordError();
       if (
         contact.role === 'landlord' &&
         !claimsVacantLandlord &&
@@ -2956,9 +2969,20 @@ export function createFakeWorld(): FakeWorld {
       ) {
         throw new LandlordReassignmentRequiredError();
       }
-      const roster = unitContacts(unit).map((c) => ({ ...c }));
-      const existing = roster.find((c) => c.contactId === contact.contactId);
-      const primaryContact = contact.primaryContact === true;
+      // Auto-primary (caseworker-integrity spec revision 4 section 4), exactly
+      // as the real repo decides it per attempt: a NEW seat on a unit with no
+      // row marked primary and no landlordId attribute (before this add)
+      // becomes the primary contact, whatever its role, when the contact is
+      // eligible for automatic routing (the caller's autoPrimaryEligible -
+      // typed landlord, not soft-deleted, not a routing pointer; spec
+      // revisions 5 and 6); an upsert of a contact already on the list keeps
+      // the request's flag.
+      const autoPrimary =
+        facts.autoPrimaryEligible &&
+        existing === undefined &&
+        !hasLandlordId &&
+        !roster.some((c) => c.primaryContact === true);
+      const primaryContact = contact.primaryContact === true || autoPrimary;
       // FIX C: the owning landlord's role is structural — pinned to 'landlord'.
       const isLandlordOfRecord =
         claimsVacantLandlord || contact.contactId === landlordId;
@@ -3087,6 +3111,76 @@ export function createFakeWorld(): FakeWorld {
       if (!media.includes(entry)) throw conditionalCheckFailed(`makeCover: unit ${unitId} has no media entry`);
       if (media[0] === entry) return unit; // already the cover -> no-op success
       unit.media = [entry, ...media.filter((e) => e !== entry)];
+      unit.updated_at = new Date().toISOString();
+      return unit;
+    },
+    // caseworker-integrity (spec 2026-10-12 section 4 "Restore"): mirror the
+    // real repo - the unit must still be soft-deleted and the stored
+    // landlordId must still be the caller's expectation
+    // (RosterWriteConflictError otherwise); restore (drop deleted_at), swap or
+    // clear the landlord of record, drop the old landlord's row, upsert the new
+    // one with role pinned 'landlord', and keep primary_contact consistent -
+    // a clear only on the contact list the caller decided its sole-landlord
+    // promotion from, applying that promotion.
+    async restoreWithLandlord(unitId, input) {
+      const unit = units.get(unitId);
+      if (!unit) throw conditionalCheckFailed(`restoreWithLandlord: no unit ${unitId}`);
+      // The real repo's read check and its attribute_exists(deleted_at) write
+      // condition (R1 code review, backend finding 2): restore never swaps or
+      // clears the landlord of a LIVE unit.
+      if (!isUnitDeleted(unit)) throw new RosterWriteConflictError();
+      const current =
+        typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
+      if (current !== input.expectLandlordId) throw new RosterWriteConflictError();
+      // The real repo's contact-list check (spec revision 5, fix wave 2
+      // FW2-12): a restore without a landlord applies only to the contact list
+      // its sole-landlord promotion was decided from.
+      if (input.next === null && !isDeepStrictEqual(unit.contacts, input.expectContacts)) {
+        throw new RosterWriteConflictError();
+      }
+      const old = input.expectLandlordId;
+      const next = input.next;
+      const promote = input.next === null ? input.promote : null;
+      const keepsOld = next !== null && next.contactId === old;
+      const roster = unitContacts(unit).map((c) => ({ ...c }));
+      const oldRow = old !== undefined && !keepsOld ? roster.find((c) => c.contactId === old) : undefined;
+      const oldWasPrimary =
+        old !== undefined && !keepsOld && (oldRow?.primaryContact === true || unit.primary_contact === old);
+      const nextRoster: UnitContact[] =
+        old !== undefined && !keepsOld ? roster.filter((c) => c.contactId !== old) : roster;
+      if (next !== null) {
+        const seated = nextRoster.find((c) => c.contactId === next.contactId);
+        if (seated) {
+          seated.role = 'landlord';
+          if (next.name !== undefined) seated.name = next.name;
+          if (next.company !== undefined) seated.company = next.company;
+        } else {
+          nextRoster.push({
+            contactId: next.contactId,
+            role: 'landlord',
+            primaryContact: false,
+            ...(next.name !== undefined ? { name: next.name } : {}),
+            ...(next.company !== undefined ? { company: next.company } : {}),
+          });
+        }
+      }
+      if (oldWasPrimary) {
+        if (next !== null) {
+          for (const c of nextRoster) c.primaryContact = c.contactId === next.contactId;
+          unit.primary_contact = next.contactId;
+        } else {
+          // The caller's sole-landlord promotion when it names a remaining
+          // row; otherwise nobody (null -> REMOVE; never dangling).
+          const promoted = promote === null ? undefined : nextRoster.find((c) => c.contactId === promote);
+          for (const c of nextRoster) c.primaryContact = promoted !== undefined && c.contactId === promoted.contactId;
+          if (promoted !== undefined) unit.primary_contact = promoted.contactId;
+          else delete unit.primary_contact;
+        }
+      }
+      unit.contacts = nextRoster;
+      if (next !== null) unit.landlordId = next.contactId;
+      else delete (unit as Partial<UnitItem>).landlordId;
+      delete unit.deleted_at;
       unit.updated_at = new Date().toISOString();
       return unit;
     },
@@ -5433,6 +5527,11 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       conversationsRepo: world.conversationsRepo,
       unitsRepo: world.unitsRepo,
       auditRepo: world.auditRepo,
+      // join-housing-authority: the org list the public list read
+      // (GET /public/housing-authorities) and the sign-up's housing authority
+      // check read - the SAME fake the /api org routes use. app.ts hands it to
+      // both /public mounts.
+      orgListRepo: world.orgListRepo,
       // The housing-fair welcome reads the operator's welcomeText override (with
       // a constant fallback) — share the world's fake settings repo so a
       // welcomeText edit is reflected without touching DynamoDB.

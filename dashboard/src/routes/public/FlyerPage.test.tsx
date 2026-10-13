@@ -339,4 +339,43 @@ describe('FlyerPage', () => {
     expect(await screen.findByText(/reply to the text we sent you/i)).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /text us/i })).toBeNull();
   });
+
+  it('the flyer form has no housing authority select, never sends one, and keeps its error copy (join-housing-authority D8)', async () => {
+    const user = userEvent.setup();
+    getFlyer.mockResolvedValue(FLYER);
+    submitHousingFair
+      .mockRejectedValueOnce(new ApiError(429, 'rate_limited', 'rate_limited', { error: 'rate_limited' }))
+      .mockRejectedValueOnce(
+        new ApiError(400, 'housing_authority_not_listed', 'housing_authority_not_listed', {
+          error: 'housing_authority_not_listed',
+        }),
+      );
+    renderPage();
+
+    await user.type(await screen.findByLabelText(/first name/i), 'Ada');
+    await user.type(screen.getByLabelText(/last name/i), 'Lovelace');
+    await user.type(screen.getByLabelText(/phone number/i), '4045551234');
+    expect(document.querySelector('select')).toBeNull();
+    expect(screen.queryByLabelText(/housing authority/i)).toBeNull();
+    await user.click(screen.getByRole('checkbox', { name: /I agree to receive/i }));
+
+    // A 429: today's message, not the /join one.
+    await user.click(screen.getByRole('button', { name: /i'm interested/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "Sorry, we couldn't send that. Please try again.",
+    );
+
+    // A not-listed refusal: still today's message.
+    await user.click(screen.getByRole('button', { name: /i'm interested/i }));
+    await waitFor(() => expect(submitHousingFair).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "Sorry, we couldn't send that. Please try again.",
+    );
+    expect(screen.queryByText(/too many sign-ups/i)).toBeNull();
+    expect(screen.queryByText(/housing authority list was updated/i)).toBeNull();
+    for (const call of submitHousingFair.mock.calls) {
+      expect(call[0]).toMatchObject({ unitId: 'unit-1' });
+      expect(call[0]).not.toHaveProperty('housingAuthority');
+    }
+  });
 });

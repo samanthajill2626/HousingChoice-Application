@@ -179,9 +179,16 @@ test('housing fair · Tenant self-serves → RTA in hand → handoff', async ({ 
   const flow = new Scenario(page, request);
   const tenant = freshTenant('SelfServe');
 
-  // The public self-serve portal captures name + voucher size (no housing-authority
-  // field on POST /public/housing-fair), so we verify those — not housing authority.
-  await flow.tenantSelfServes(tenant, { firstName: 'Jamie', lastName: 'Lopez', voucherSize: 2 });
+  // The public self-serve portal is the /join form's endpoint, and it takes the
+  // housing authority too (join-housing-authority D3, 2026-10-12): an exact
+  // organization-list name. So the diagram's "full name, voucher size, and housing
+  // authority" are all verified below, plus the Onboarding start (D5).
+  await flow.tenantSelfServes(tenant, {
+    firstName: 'Jamie',
+    lastName: 'Lopez',
+    voucherSize: 2,
+    housingAuthority: 'Atlanta Housing Authority',
+  });
   // The welcome now carries opt-out language (the filed WELCOME_SMS default OR an
   // operator override — both must keep "Reply STOP" per the A2P template floor).
   // Assert that compliance invariant rather than a specific override copy so this
@@ -190,7 +197,13 @@ test('housing fair · Tenant self-serves → RTA in hand → handoff', async ({ 
   await flow.login();
   await flow.openSelfServedContact(tenant);
   await flow.expectTypedTenant();
-  await flow.expectTenantDetails({ firstName: 'Jamie', lastName: 'Lopez', voucherSize: 2 });
+  await flow.expectOnboarding();
+  await flow.expectTenantDetails({
+    firstName: 'Jamie',
+    lastName: 'Lopez',
+    voucherSize: 2,
+    housingAuthority: 'Atlanta Housing Authority',
+  });
 
   await intakeAndRtaTail(flow, { inHand: true });
 });

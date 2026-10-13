@@ -23,10 +23,13 @@
 // failure (inline error, dialog stays open). That error is SHARED for a 409 in
 // every dialog: TOUR_CHANGED_COPY ("reload and try again" - the tour closed or
 // changed while the dialog was open, so a retry cannot succeed; spec 9.2 /
-// D14). Any other failure keeps the dialog's own "Couldn't ... - please try
-// again." ScheduleTourForm is create-only and deliberately NOT reused.
+// D14) - unless it is a contact-type refusal, which reads its own sentence
+// (caseworker integrity; failureCopy). Any other failure keeps the dialog's
+// own "Couldn't ... - please try again." ScheduleTourForm is create-only and
+// deliberately NOT reused.
 import { useState } from 'react';
 import { ApiError, type StaffTourOutcome } from '../../api/index.js';
+import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import { REOPEN_BODY, type ReopenTarget } from './tourReopen.js';
@@ -38,10 +41,15 @@ import styles from './TourDetail.module.css';
  *  succeed - only a reload shows its real state. One constant, every dialog. */
 export const TOUR_CHANGED_COPY = 'This tour changed since the page loaded - reload and try again.';
 
-/** A writing dialog's inline error for a failed onConfirm: any ApiError 409
- *  (illegal_status_transition, illegal_exit_gate, tour_changed, a reopen
- *  refusal) reads TOUR_CHANGED_COPY; anything else the dialog's own copy. */
+/** A writing dialog's inline error for a failed onConfirm. A contact-type
+ *  refusal (caseworker integrity: a canceled tour rescheduled, or a closed
+ *  tour reopened, for a contact that is not a tenant or no longer exists)
+ *  reads its own sentence; any other ApiError 409 (illegal_status_transition,
+ *  illegal_exit_gate, tour_changed, a reopen refusal) reads TOUR_CHANGED_COPY;
+ *  anything else the dialog's own copy. */
 function failureCopy(err: unknown, retryCopy: string): string {
+  const typeCopy = contactTypeErrorMessage(err);
+  if (typeCopy !== null) return typeCopy;
   return err instanceof ApiError && err.status === 409 ? TOUR_CHANGED_COPY : retryCopy;
 }
 

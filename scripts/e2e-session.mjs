@@ -140,6 +140,14 @@ const childEnv = {
   // funnels + missing welcomes. Raise the ceiling for the hermetic suite ONLY
   // (this never touches a deployed env); an externally-set value still wins.
   PUBLIC_RATE_LIMIT_MAX: process.env.PUBLIC_RATE_LIMIT_MAX ?? '100000',
+  // NOT raised by that variable: GET /public/housing-authorities (the /join
+  // form's housing authority list) has its OWN hard-coded limit of 60 reads per
+  // minute per IP (join-housing-authority spec D2; PUBLIC_LIST_RATE_LIMIT in
+  // app/src/services/publicOrgList.ts) and no env override. The suite reads it a
+  // handful of times (each /join load, doubled by React StrictMode in this dev
+  // build, plus one raw read in public-pages.spec.ts), far under 60. A spec that
+  // loads /join in a loop must stay under it: past it the read is a 429 and the
+  // select offers only "Not sure" (the D8 failed state).
   // Same story for the per-USER limits on the authenticated send/call-cost
   // routes (manual send / broadcast send / originate / cell verify-start):
   // production defaults are right for humans, but the whole e2e suite drives

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { PlacementItem, Contact, UnitItem } from '../../api/index.js';
+import { ApiError } from '../../api/index.js';
 import type { PlacementsState } from './usePlacements.js';
 
 const usePlacements = vi.fn<() => PlacementsState>();
@@ -175,5 +176,48 @@ describe('PlacementsPage', () => {
     renderPage();
     await user.type(screen.getByRole('searchbox', { name: 'Search placements' }), 'zzz');
     expect(screen.getByText("No matches for 'zzz'.")).toBeInTheDocument();
+  });
+});
+
+// Caseworker integrity (spec 2026-10-12 section 4): a placement moved back out
+// of lost / moved_in for a contact that is not a tenant is refused 409
+// contact_not_tenant; the board says why instead of its generic copy.
+describe('PlacementsPage - contact-type refusals (caseworker integrity)', () => {
+  // The reachable path (R1 code review, dashboard finding 9): the server
+  // checks the tenant only when a placement LEAVES lost / moved_in, and the
+  // Closed view offers the stage menu on those rows.
+  it('a Lost placement moved back to an open stage from the Closed view, refused as contact_not_tenant, shows the contact-type sentence and stays Lost', async () => {
+    const user = userEvent.setup();
+    transitionPlacement.mockRejectedValue(
+      new ApiError(409, 'contact_not_tenant', 'contact_not_tenant', {
+        error: 'contact_not_tenant',
+        contactKind: 'landlord',
+      }),
+    );
+    usePlacements.mockReturnValue(baseState([mk({ placementId: 'a', stage: 'lost' })]));
+    renderPage('/placements?view=closed');
+    await user.click(screen.getByRole('button', { name: 'Actions for Tasha Nguyen' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Collect RTA' }));
+    await waitFor(() =>
+      expect(transitionPlacement).toHaveBeenCalledWith('a', { toStage: 'collect_rta', source: 'manual' }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'Tours and placements are for tenants. This contact is a landlord.',
+      ),
+    );
+    expect(screen.getByRole('link', { name: 'Tasha Nguyen - Lost' })).toBeInTheDocument();
+  });
+
+  it('(PIN) any other rejected move keeps the fixed copy', async () => {
+    const user = userEvent.setup();
+    transitionPlacement.mockRejectedValue(new ApiError(500, 'internal_error', 'internal_error'));
+    usePlacements.mockReturnValue(baseState([mk({ placementId: 'a', stage: 'collect_rta' })]));
+    renderPage();
+    await user.click(screen.getByRole('button', { name: 'Actions for Tasha Nguyen' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Review RTA' }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('That move was rejected. The placement kept its stage.'),
+    );
   });
 });

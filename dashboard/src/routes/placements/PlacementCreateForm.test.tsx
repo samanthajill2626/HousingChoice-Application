@@ -331,3 +331,46 @@ describe('PlacementCreateForm', () => {
     );
   });
 });
+
+// Caseworker integrity (spec 2026-10-12 section 4): POST /api/placements
+// refuses a contact that is not a tenant (409) or no longer exists (404); the
+// dialog says which, inline, and stays open.
+describe('PlacementCreateForm - contact-type refusals (caseworker integrity)', () => {
+  it('a 409 contact_not_tenant shows the contact-type sentence inline; onCreated is not called', async () => {
+    const user = userEvent.setup();
+    createPlacement.mockRejectedValue(
+      new ApiError(409, 'contact_not_tenant', 'contact_not_tenant', {
+        error: 'contact_not_tenant',
+        contactKind: 'caseworker',
+      }),
+    );
+    const { onCreated } = setup();
+
+    await pickTenant(user, 'Tasha', /Tasha Nguyen/);
+    await pickUnit(user, 'Sycamore', /88 Sycamore St/);
+    await user.click(screen.getByRole('button', { name: /^Create$/ }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'Tours and placements are for tenants. This contact is a caseworker.',
+      ),
+    );
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/Couldn't create the placement/);
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /^Create$/ })).toBeEnabled();
+  });
+
+  it('a 404 tenant_not_found says the contact no longer exists', async () => {
+    const user = userEvent.setup();
+    createPlacement.mockRejectedValue(
+      new ApiError(404, 'tenant_not_found', 'tenant_not_found', { error: 'tenant_not_found' }),
+    );
+    setup();
+
+    await pickTenant(user, 'Tasha', /Tasha Nguyen/);
+    await pickUnit(user, 'Sycamore', /88 Sycamore St/);
+    await user.click(screen.getByRole('button', { name: /^Create$/ }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('That contact no longer exists.'));
+  });
+});

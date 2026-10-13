@@ -30,6 +30,7 @@ import { MovePromptModal, type MovePromptResult } from './MovePromptModal.js';
 import { PlacementCreateForm } from './PlacementCreateForm.js';
 import { tenantName } from './placementsFormat.js';
 import { usePlacements } from './usePlacements.js';
+import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import styles from './PlacementsPage.module.css';
 
 /** A move awaiting its gate prompt and/or its in-flight transition. */
@@ -92,8 +93,9 @@ export function PlacementsPage(): React.JSX.Element {
       .then((updated) => {
         applyPlacement(updated);
       })
-      .catch(() => {
-        setError('That move was rejected. The placement kept its stage.');
+      .catch((err: unknown) => {
+        // Caseworker integrity: a contact-type refusal has its own sentence.
+        setError(contactTypeErrorMessage(err) ?? 'That move was rejected. The placement kept its stage.');
       })
       .finally(() => {
         setOptimistic((prev) => {

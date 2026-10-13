@@ -4,7 +4,7 @@
 > three core entities move through the HousingChoice process. It is **not** a dated
 > spec and must **not** be stamped HISTORICAL — expect tweaks and additions over time.
 > When the model changes, edit this file in place (like its sibling
-> [GLOSSARY.md](GLOSSARY.md)). Last substantive update: **2026-06-19**.
+> [GLOSSARY.md](GLOSSARY.md)). Last substantive update: **2026-10-12**.
 >
 > Naming follows the glossary: the dwelling is a **`unit`** in code/data, shown as
 > **home** to tenants and **property** to landlords/staff. The workflow record is a
@@ -158,8 +158,12 @@ Needs review → Onboarding → Searching → Placing → Placed
    overrides: On hold        terminal: Inactive        flag: porting
 ```
 
-- **`Needs review`** — the single front door. Every new contact lands here; there is
-  no separate triage state and no `new` status.
+- **`Needs review`** - the front door. Auto-captured contacts land here (a text from
+  an unknown number, a sign-up on a property's public flyer page `/p/:unitId`); there
+  is no separate triage state and no `new` status. Two ways in start a tenant at
+  **`Onboarding`** instead, because a person has said who the tenant is: a tenant
+  staff create by hand, and (since 2026-10-12) a sign-up on the public `/join` form,
+  which staff use at housing fairs and which also records the housing authority.
 - **`Onboarding` → `Searching`** — RTA-in-hand is a **business** prerequisite to move
   forward, but it is **not an app-enforced gate** (2026-06-19 decision). The app does not
   track an `rta_in_hand` boolean and does not block the transition; the **admin advances**
@@ -187,8 +191,10 @@ Needs review -> Interested -> Onboarding -> Active
    terminal branch: Parked (reachable from ANY state, park_reason required)
 ```
 
-- **`Needs review`** - the auto-capture/triage front door (same front door tenants and
-  untriaged contacts land at). A contact whose type is not yet resolved sits here.
+- **`Needs review`** - the auto-capture/triage front door (the same front door
+  auto-captured and untriaged contacts land at, flyer sign-ups included; a tenant from a
+  `/join` sign-up starts at `Onboarding` instead). A contact whose type is not yet
+  resolved sits here.
 - **`Interested`** - a landlord lead worth pursuing. Tagging/triaging a contact as a
   landlord (inbox triage, a plain re-type, or a manual create with no explicit status)
   lands them HERE, not `Active` - a freshly identified landlord is a LEAD, not an

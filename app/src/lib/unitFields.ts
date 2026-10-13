@@ -23,7 +23,8 @@ type FieldKind =
   | 'string[]'
   | 'pets'
   | 'address'
-  | 'tour_type';
+  | 'tour_type'
+  | 'clearable_number';
 
 /**
  * The writable unit fields and their kinds. `accepted_authorities` is the
@@ -88,11 +89,13 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   video_url: 'string',
   application_fee: 'number',
   same_day_rta: 'boolean',
-  // Landlord-onboarding: the voucher size the unit ACCEPTS — a stored, writable
-  // number (>= 0), DISTINCT from `beds` and from the derived read-only
-  // `voucher_size` flyer projection (a 3bd unit may accept a 2BR voucher). Feeds
-  // matching. INTERNAL for Phase-1 (NOT on the flyer projection).
-  voucher_size_accepted: 'number',
+  // Landlord-onboarding: the voucher size the unit ACCEPTS - a stored, writable
+  // number (>= 0), DISTINCT from `beds` (a 3bd unit may accept a 2BR voucher).
+  // Read it through `acceptedVoucherSizes`, which falls back to `beds`. The KEY
+  // never reaches the flyer; its VALUE drives the flyer's derived `voucher_size`.
+  // CLEARABLE (2026-10-12): null REMOVEs it, so a wrong recorded size can be
+  // taken off and the unit falls back to its beds again.
+  voucher_size_accepted: 'clearable_number',
   tour_process: 'string',
   // Structured tour type (self_guided / landlord_led / pm_team). A DEDICATED
   // kind (not plain 'string') because it must clear to ABSENT: ''/null map to
@@ -166,6 +169,17 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
         if (!isFiniteNumber(value)) return { ok: false, error: `${key} must be a number` };
         if (value < 0) return { ok: false, error: `${key} must be >= 0` };
         break;
+      case 'clearable_number':
+        // CLEAR-to-absent: null -> a null patch value, so update REMOVEs the
+        // attribute and create drops it (the tour_type precedent). Otherwise the
+        // plain 'number' rules apply.
+        if (value === null) {
+          fields[key] = null;
+          continue;
+        }
+        if (!isFiniteNumber(value)) return { ok: false, error: `${key} must be a number` };
+        if (value < 0) return { ok: false, error: `${key} must be >= 0` };
+        break;
       case 'boolean':
         if (typeof value !== 'boolean') return { ok: false, error: `${key} must be a boolean` };
         break;
@@ -234,6 +248,11 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
  * every pre-feature unit. Published on purpose: the line answers the tenant's
  * actual question ("will this home take MY voucher"). Do NOT "fix" this by
  * dropping the synthesis.
+ *
+ * `voucher_size_accepted` follows the same pattern: the KEY stays on the
+ * never-list, but its VALUE ships as the derived `voucher_size` (see
+ * `acceptedVoucherSizes`), because the flyer's "Fits a N-bedroom voucher" line
+ * must state the size the property actually takes, not its bedroom count.
  */
 export interface UnitFlyer {
   unitId: string;
@@ -242,7 +261,8 @@ export interface UnitFlyer {
   baths: number | null;
   area: string | null;
   subzone: string | null;
-  /** Voucher size the unit is sized for - derived from beds (shareable). */
+  /** The voucher size the unit takes - its recorded size, else its beds (see
+   *  acceptedVoucherSizes). Shareable. */
   voucher_size: number | null;
   /** The authorities whose vouchers this unit accepts (synthesized - see authoritiesOf). */
   accepted_authorities: string[];
@@ -290,20 +310,47 @@ export function authoritiesOf(unit: {
   return typeof legacy === 'string' && legacy.length > 0 ? [legacy] : [];
 }
 
+/**
+ * THE voucher (bedroom) sizes a unit takes (Cameron, 2026-10-04 - see
+ * documentation/GLOSSARY.md "voucher size of a property"):
+ *
+ *   1. its RECORDED `voucher_size_accepted`, when that holds at least one size -
+ *      ONE number today, or a LIST once tracker #12 makes the field a
+ *      multi-select (the `full` demo seed already stores `[2, 3]`). A recorded
+ *      size always wins: a 3-bed unit may take only a 2-BR voucher;
+ *   2. otherwise its bedroom count (`beds`) - the import never writes the
+ *      field, and a unit usually takes the voucher that matches its bedrooms;
+ *   3. otherwise nothing (`[]`).
+ *
+ * Only finite numbers count; anything else - absent, NaN, a string, an empty or
+ * junk list - records nothing at that step. Server code reads a unit's voucher
+ * size ONLY through this function.
+ *
+ * Hand-mirrored as `acceptedVoucherSizes` in
+ * dashboard/src/routes/listing/listingFormat.ts (no cross-workspace import
+ * exists); this copy is the source of truth and both suites carry the same cases.
+ */
+export function acceptedVoucherSizes(unit: { voucher_size_accepted?: unknown; beds?: unknown }): number[] {
+  const raw = unit.voucher_size_accepted;
+  const recorded = Array.isArray(raw) ? raw.filter(isFiniteNumber) : isFiniteNumber(raw) ? [raw] : [];
+  if (recorded.length > 0) return recorded;
+  return isFiniteNumber(unit.beds) ? [unit.beds] : [];
+}
+
 export function toUnitFlyer(unit: UnitItem): UnitFlyer {
-  // voucher_size: a unit's bedroom count IS the voucher size it serves. The
-  // address is re-validated through the SAME write-surface validator so the
+  // The address is re-validated through the SAME write-surface validator so the
   // projection carries ONLY allowlisted sub-fields, never a legacy string blob.
-  const beds = isFiniteNumber(unit.beds) ? unit.beds : null;
   const addr = validateAddress(unit.address, 'address');
   return {
     unitId: unit.unitId,
     media: isStringArray(unit.media) ? unit.media : [],
-    beds,
+    beds: isFiniteNumber(unit.beds) ? unit.beds : null,
     baths: isFiniteNumber(unit.baths) ? unit.baths : null,
     area: typeof unit.area === 'string' ? unit.area : null,
     subzone: typeof unit.subzone === 'string' ? unit.subzone : null,
-    voucher_size: beds,
+    // The flyer states ONE size. Only the demo seed can hold a list until #12
+    // adds the multi-select; that work decides how the flyer words several sizes.
+    voucher_size: acceptedVoucherSizes(unit)[0] ?? null,
     accepted_authorities: authoritiesOf(unit),
     listing_link: typeof unit.listing_link === 'string' ? unit.listing_link : null,
     rent_min: isFiniteNumber(unit.rent_min) ? unit.rent_min : null,

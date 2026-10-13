@@ -158,16 +158,31 @@ describe('BroadcastComposer - property-first step (spec 2026-07-13)', () => {
 });
 
 describe('BroadcastComposer — voucher size pre-fill from ?unitId', () => {
-  it('pre-fills the voucher size from the unit beds + tags the matching chip', async () => {
+  it('pre-fills the voucher size from the unit beds when none is recorded + tags the matching chip', async () => {
     renderComposer('?unitId=unit-0001');
-    // getUnit fetched the unit (beds 2) → the 2-BR chip is pressed + tagged.
+    // getUnit fetched the unit (beds 2, no recorded voucher size) -> the 2-BR
+    // chip is pressed + tagged.
     await waitFor(() => {
       const chip = screen.getByRole('button', { name: /2-BR/ });
       expect(chip).toHaveAttribute('aria-pressed', 'true');
     });
     expect(screen.getByText(/matches property/i)).toBeInTheDocument();
-    expect(screen.getByText(/Pre-filled to match this 2-bedroom property/i)).toBeInTheDocument();
+    expect(screen.getByText(/Pre-filled to the 2-bedroom voucher this property takes/i)).toBeInTheDocument();
     expect(getUnit).toHaveBeenCalledWith('unit-0001', expect.anything());
+  });
+
+  it('pre-fills the RECORDED voucher size over the bedroom count + tags that chip', async () => {
+    // The 2026-10-12 report: a property with its own voucher size was matched
+    // on its bedrooms. beds 2, recorded size 3 -> the 3-BR chip, not the 2-BR one.
+    getUnit.mockResolvedValue(unit({ voucher_size_accepted: 3 }));
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveAttribute('aria-pressed', 'true'),
+    );
+    expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveTextContent(/matches property/i);
+    expect(screen.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: /^2-BR/ })).not.toHaveTextContent(/matches property/i);
+    expect(screen.getByText(/Pre-filled to the 3-bedroom voucher this property takes/i)).toBeInTheDocument();
   });
 
   it('lets the operator override the pre-filled voucher size', async () => {

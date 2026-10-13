@@ -461,7 +461,10 @@ describe('GET /api/units/:id/related (BE3/C3)', () => {
   });
 
   it('propertyId is WRITABLE end-to-end: create + PATCH two units to the same property, then related → same_property (FIX A)', async () => {
-    const { app } = makeWebhookHarness();
+    const { app, world } = makeWebhookHarness();
+    // caseworker-integrity I3: both creates below name landlord-typed contacts.
+    seedContact(world, 'c-ll-prop');
+    seedContact(world, 'c-ll-other');
     // Create the target unit WITH a propertyId straight through the API
     // (proves propertyId passes the strict field allowlist on create).
     const createA = await request(app)

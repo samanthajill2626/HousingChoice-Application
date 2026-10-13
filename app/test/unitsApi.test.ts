@@ -7,6 +7,7 @@
 // the no-overwrite merge, and the requireAuth gate.
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
@@ -34,9 +35,22 @@ function seedUnit(
   return item;
 }
 
+/**
+ * caseworker-integrity I3 (spec 2026-10-12 section 4): POST /api/units needs
+ * its landlordId to name a contact typed `landlord`. Every harness in this
+ * file seeds the landlord ids its creates use.
+ */
+function landlordHarness(): ReturnType<typeof makeWebhookHarness> {
+  const harness = makeWebhookHarness();
+  for (const contactId of ['contact-ll-1', 'contact-ll-9', 'contact-ll-reg']) {
+    harness.world.contacts.push({ contactId, type: 'landlord' } as ContactItem);
+  }
+  return harness;
+}
+
 describe('POST /api/units — create', () => {
   it('creates a unit, defaults status to setup, returns 201 + audits unit_created', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     const res = await request(app)
       .post('/api/units')
       .set('x-origin-verify', SECRET)
@@ -74,7 +88,7 @@ describe('POST /api/units — create', () => {
   // 'derived' (a derivation-permitting value) — never 'manual', which would
   // block the first placement from ever driving the listing forward (§7/§8).
   it('stamps status_source to a derivation-PERMITTING value (derived, not manual)', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     const res = await request(app)
       .post('/api/units')
       .set('x-origin-verify', SECRET)
@@ -88,7 +102,7 @@ describe('POST /api/units — create', () => {
   });
 
   it('rejects a missing landlordId, unknown fields, bad numbers, and bad status', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     const bodies = [
       {}, // no landlordId
       { jurisdiction: 'DCA' }, // still no landlordId
@@ -117,7 +131,7 @@ describe('POST /api/units — create', () => {
     // Spec section 8: `jurisdiction` and `accepted_programs` are retired, but the
     // parser rejects unknown keys - so a stale cached dashboard bundle still
     // sending them must not fail its save. They are accepted and dropped.
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     const res = await request(app)
       .post('/api/units')
       .set('x-origin-verify', SECRET)
@@ -137,7 +151,7 @@ describe('POST /api/units — create', () => {
   });
 
   it('accepts voucher_size_accepted (a stored number, distinct from beds) and GET returns it', async () => {
-    const { app } = makeWebhookHarness();
+    const { app } = landlordHarness();
     const res = await request(app)
       .post('/api/units')
       .set('x-origin-verify', SECRET)
@@ -156,7 +170,7 @@ describe('POST /api/units — create', () => {
   });
 
   it('rejects a non-number voucher_size_accepted with 400', async () => {
-    const { app } = makeWebhookHarness();
+    const { app } = landlordHarness();
     const res = await request(app)
       .post('/api/units')
       .set('x-origin-verify', SECRET)
@@ -166,7 +180,7 @@ describe('POST /api/units — create', () => {
   });
 
   it('accepts the per-unit internal fields incl. primary_contact (CO1)', async () => {
-    const { app } = makeWebhookHarness();
+    const { app } = landlordHarness();
     const res = await request(app)
       .post('/api/units')
       .set('x-origin-verify', SECRET)
@@ -186,7 +200,7 @@ describe('POST /api/units — create', () => {
 
 describe('structured address (lib/address.ts)', () => {
   it('accepts a PARTIAL address and stores only the supplied fields', async () => {
-    const { app } = makeWebhookHarness();
+    const { app } = landlordHarness();
     const res = await request(app)
       .post('/api/units')
       .set('x-origin-verify', SECRET)
@@ -197,7 +211,7 @@ describe('structured address (lib/address.ts)', () => {
   });
 
   it('trims values and drops empty/whitespace-only sub-fields', async () => {
-    const { app } = makeWebhookHarness();
+    const { app } = landlordHarness();
     const res = await request(app)
       .post('/api/units')
       .set('x-origin-verify', SECRET)
@@ -211,7 +225,7 @@ describe('structured address (lib/address.ts)', () => {
   });
 
   it('PATCH replaces the address object with the supplied structured value', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     seedUnit(world, 'unit-addr', { address: { line1: '1 Old Rd', city: 'Atlanta' } });
     const res = await request(app)
       .patch('/api/units/unit-addr')
@@ -223,7 +237,7 @@ describe('structured address (lib/address.ts)', () => {
   });
 
   it('rejects a non-object, unknown keys, and non-string sub-fields with 400', async () => {
-    const { app } = makeWebhookHarness();
+    const { app } = landlordHarness();
     for (const address of ['123 Main St', ['123 Main St'], { line1: '1 Main', foo: 'x' }, { zip: 30303 }]) {
       const res = await request(app)
         .post('/api/units')
@@ -237,7 +251,7 @@ describe('structured address (lib/address.ts)', () => {
 
 describe('GET /api/units — list/filter', () => {
   it('filters by landlordId and status, else lists all', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     seedUnit(world, 'unit-1', { landlordId: 'll-A', status: 'available', jurisdiction: 'DCA' });
     seedUnit(world, 'unit-2', { landlordId: 'll-A', status: 'occupied', jurisdiction: 'Fulton' });
     seedUnit(world, 'unit-3', { landlordId: 'll-B', status: 'available', jurisdiction: 'DCA' });
@@ -264,7 +278,7 @@ describe('GET /api/units — list/filter', () => {
   });
 
   it('rejects bad limits and garbage cursors with 400', async () => {
-    const { app } = makeWebhookHarness();
+    const { app } = landlordHarness();
     for (const qs of ['limit=0', 'limit=101', 'limit=abc']) {
       const res = await request(app)
         .get(`/api/units?${qs}`)
@@ -284,7 +298,7 @@ describe('GET /api/units — list/filter', () => {
 
 describe('GET /api/units/:unitId', () => {
   it('returns the unit, 404 when unknown', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     seedUnit(world, 'unit-1');
     const ok = await request(app)
       .get('/api/units/unit-1')
@@ -302,7 +316,7 @@ describe('GET /api/units/:unitId', () => {
   });
 
   it('back-compat: reads a legacy plain-string address through untouched', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     // A dev unit created before the structured-address change still has a string
     // here. The validator only runs on WRITE; reads must not crash or migrate.
     seedUnit(world, 'unit-legacy', { address: '123 Legacy St' as unknown as UnitItem['address'] });
@@ -317,7 +331,7 @@ describe('GET /api/units/:unitId', () => {
 
 describe('PATCH /api/units/:unitId', () => {
   it('merges supplied fields, leaves the rest, audits unit_updated', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     seedUnit(world, 'unit-1', { beds: 2, rent_min: 1400, tour_process: 'keep me' });
 
     const res = await request(app)
@@ -340,7 +354,7 @@ describe('PATCH /api/units/:unitId', () => {
   });
 
   it('PATCH accepts voucher_size_accepted; GET returns it; a non-number is 400', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     seedUnit(world, 'unit-vsa', { beds: 3 });
 
     const ok = await request(app)
@@ -366,8 +380,31 @@ describe('PATCH /api/units/:unitId', () => {
     expect(bad.status).toBe(400);
   });
 
-  it('PATCH sets tour_type, then a "" clear REMOVEs it (GET shows the key ABSENT)', async () => {
+  it('PATCH null CLEARS a recorded voucher_size_accepted (GET shows the key ABSENT)', async () => {
+    // 2026-10-12: a wrong recorded size must be removable so the unit falls back
+    // to its beds again (acceptedVoucherSizes).
     const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-vsc', { beds: 3, voucher_size_accepted: 2 });
+
+    const clear = await request(app)
+      .patch('/api/units/unit-vsc')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ voucher_size_accepted: null });
+    expect(clear.status).toBe(200);
+    expect('voucher_size_accepted' in clear.body.unit).toBe(false);
+    expect(clear.body.unit.beds).toBe(3); // untouched
+
+    const got = await request(app)
+      .get('/api/units/unit-vsc')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect('voucher_size_accepted' in got.body.unit).toBe(false); // ABSENT, not null
+    expect(world.units.get('unit-vsc')).not.toHaveProperty('voucher_size_accepted');
+  });
+
+  it('PATCH sets tour_type, then a "" clear REMOVEs it (GET shows the key ABSENT)', async () => {
+    const { app, world } = landlordHarness();
     seedUnit(world, 'unit-tt', { beds: 2 });
 
     // Set a structured tour_type.
@@ -409,7 +446,7 @@ describe('PATCH /api/units/:unitId', () => {
   });
 
   it('CREATE stores a valid tour_type, and a "" clear-on-create leaves it ABSENT (not null)', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
 
     // A real tour_type on create is stored.
     const withType = await request(app)
@@ -433,7 +470,7 @@ describe('PATCH /api/units/:unitId', () => {
   });
 
   it('REFUSES status via CRUD PATCH (§8: status routes through listing-status)', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     seedUnit(world, 'unit-1', { status: 'available' });
     // status is not CRUD-writable — listing-status changes go through
     // PATCH /api/units/:unitId/listing-status.
@@ -448,7 +485,7 @@ describe('PATCH /api/units/:unitId', () => {
   });
 
   it('PATCH accepts final_rent — recordable in place at rent acceptance (still also written by the acceptance move)', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     seedUnit(world, 'unit-fr', { status: 'available' });
     const ok = await request(app)
       .patch('/api/units/unit-fr')
@@ -467,7 +504,7 @@ describe('PATCH /api/units/:unitId', () => {
   });
 
   it('404s an unknown unit and writes no audit event', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     const res = await request(app)
       .patch('/api/units/nope')
       .set('x-origin-verify', SECRET)
@@ -482,7 +519,7 @@ describe('PATCH /api/units/:unitId', () => {
     // Spec section 8: the retired keys validate ok with an EMPTY field set, so the
     // route must NOT call units.update - an update stamps updated_at and appends a
     // bare "Property updated" activity row for a save that changed nothing.
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     seedUnit(world, 'unit-noop');
 
     const res = await request(app)
@@ -502,7 +539,7 @@ describe('PATCH /api/units/:unitId', () => {
   });
 
   it('a tombstoned-only PATCH on an unknown unit still 404s (the no-op path keeps the 404)', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     const res = await request(app)
       .patch('/api/units/nope')
       .set('x-origin-verify', SECRET)
@@ -515,7 +552,7 @@ describe('PATCH /api/units/:unitId', () => {
   });
 
   it('rejects an empty patch and unknown fields with 400', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     seedUnit(world, 'unit-1');
     for (const body of [{}, { bogus: 1 }, { beds: -1 }]) {
       const res = await request(app)
@@ -540,7 +577,7 @@ describe('PATCH /api/units/:unitId', () => {
 // the route-created listing derives forward (to under_application).
 describe('REGRESSION: route-created unit derives forward on a placement transition', () => {
   it('unit created via POST /api/units derives to under_application (tenant → placing) when a placement enters Application', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = landlordHarness();
     const authedPost = (path: string, body: object) =>
       request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE).send(body);
 
@@ -595,7 +632,7 @@ describe('REGRESSION: route-created unit derives forward on a placement transiti
 
 describe('units routes stay behind requireAuth', () => {
   it('403s without the origin secret and 401s without a session', async () => {
-    const { app } = makeWebhookHarness();
+    const { app } = landlordHarness();
     // No origin secret → origin-secret validator 403 (locked chain stage 2).
     expect((await request(app).get('/api/units')).status).toBe(403);
     // Origin secret but no session cookie → requireAuth rejects.

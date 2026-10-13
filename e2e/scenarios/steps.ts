@@ -571,6 +571,9 @@ export class Scenario {
     firstName: string;
     lastName: string;
     voucherSize?: number;
+    /** An exact organization-list name, as the /join select sends it
+     *  (join-housing-authority D3); omit it for none, like "Not sure". */
+    housingAuthority?: string;
   }): Promise<void> {
     return step('Tenant self-serves via the public portal', async () => {
       this.activeTenant = t;
@@ -966,9 +969,16 @@ export class Scenario {
     return step('App: tenant parked (on_hold)', () => this.assertStatus('on_hold'));
   }
 
+  /** [App] A self-served /join sign-up starts the tenant at Onboarding, not at
+   *  the Needs review front door (join-housing-authority D5, 2026-10-12). */
+  expectOnboarding(): Promise<void> {
+    return step('App: tenant starts at Onboarding', () => this.assertStatus('onboarding'));
+  }
+
   /**
    * [Team→App] Open the contact created by the self-serve portal. The public form
-   * makes a `type:tenant, status:needs_review` contact (NOT an unknown), so resolve
+   * makes a `type:tenant, status:onboarding` contact (NOT an unknown; a /join
+   * sign-up starts at Onboarding since join-housing-authority D5), so resolve
    * it from the TENANT list by phone (paging through nextCursor — the seeded set plus
    * per-run contacts can exceed one page), record it active, and navigate to it.
    */

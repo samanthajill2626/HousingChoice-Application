@@ -68,9 +68,11 @@ function defaultStatusForType(type: ContactType, storedStatus: string): string {
 }
 import { Button } from '../../ui/index.js';
 import { consentAtFromDate } from '../../lib/consentCopy.js';
+import { typeChangeRefusalsFrom, type TypeChangeRefusal } from '../../lib/holdingRefusals.js';
 import { RelationshipsEditor } from './RelationshipsEditor.js';
 import { CustomFieldsEditor } from './CustomFieldsEditor.js';
 import { KindPicker, type KindPickerValue } from './KindPicker.js';
+import { TypeChangeRefusalList } from './TypeChangeRefusalList.js';
 import { isCaseworkerContact } from './caseworkerRole.js';
 import { useContactVocabulary } from './useContactVocabulary.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
@@ -176,6 +178,10 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     role: str(contact.role),
   });
   const [changingType, setChangingType] = useState(false);
+  // A refused type change's blocking records (409 type_change_refused, spec
+  // 2026-10-12 D2), shown beside the kind picker until the kind changes or
+  // the next save.
+  const [typeRefusals, setTypeRefusals] = useState<TypeChangeRefusal[] | null>(null);
   const isLandlord = kind.type === 'landlord';
   const isTenant = kind.type === 'tenant';
   // Partners (caseworkers included) edit their organization (spec D17).
@@ -259,6 +265,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   // we never carry a type-invalid status (e.g. landlord 'active' ? tenant).
   function handleKindChange(next: KindPickerValue): void {
     setKind(next);
+    setTypeRefusals(null);
     if (next.type !== null && !validStatusesForType(next.type).includes(status)) {
       setStatus(defaultStatusForType(next.type, str(contact.status)));
     }
@@ -488,6 +495,7 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     }
     setSaving(true);
     setError(null);
+    setTypeRefusals(null);
     try {
       // Field edits (name, notes, voucher, address, -) ride the plain PATCH.
       let updated: Contact = contact;
@@ -518,7 +526,11 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         // A save never makes a contact a caseworker (spec D16) - say where to go.
         setError(CASEWORKER_USE_CONVERSION);
       } else {
-        setError("Couldn't save - please try again.");
+        // A type change that would orphan open records (spec 2026-10-12 D2):
+        // keep the draft and show what blocks it beside the kind picker.
+        const typeRefused = typeChangeRefusalsFrom(err);
+        if (typeRefused !== null) setTypeRefusals(typeRefused);
+        else setError("Couldn't save - please try again.");
       }
       setSaving(false);
     }
@@ -591,6 +603,10 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               roleSuggestions={vocab.roles}
               offerCaseworker={isCaseworkerContact(contact)}
             />
+            {/* A refused type change (409 type_change_refused, spec
+                2026-10-12 D2): what blocks it, beside the picker. A type
+                change is only possible with this block open. */}
+            {typeRefusals !== null ? <TypeChangeRefusalList refusals={typeRefusals} /> : null}
           </div>
         ) : (
           <div className={styles.kindRow}>

@@ -47,16 +47,60 @@ import type { CreateTourInput, TourItem } from '../src/repos/toursRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
-import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import {
+  createFakeWorld,
+  makeWebhookHarness as makeBaseWebhookHarness,
+  ORIGIN_SECRET,
+  type FakeWorld,
+} from './helpers/twilioWebhookHarness.js';
 
 const SECRET = ORIGIN_SECRET;
 
 // ---- helpers ---------------------------------------------------------------
 
+// THE TENANT FIXTURE (caseworker integrity I2, spec 2026-10-12 section 4):
+// POST /api/tours reads the tenant and refuses a missing one (404
+// tenant_not_found) or one not typed tenant (409 contact_not_tenant). Most
+// tests in this file post tours for a tenant id they never put in the world,
+// so every harness built here records its world, and a POST /api/tours sent
+// through authed() first adds the posted tenantId to that world as a contact
+// typed `tenant` - UNLESS the test already put a contact with that id there,
+// which is then used exactly as the test wrote it (a non-tenant is refused,
+// as in production). The rule's own tests live in
+// toursCreateContactType.test.ts, which has no such fixture.
+const harnessWorlds = new WeakMap<object, FakeWorld>();
+
+function makeWebhookHarness(
+  opts?: Parameters<typeof makeBaseWebhookHarness>[0],
+): ReturnType<typeof makeBaseWebhookHarness> {
+  const harness = makeBaseWebhookHarness(opts);
+  harnessWorlds.set(harness.app, harness.world);
+  return harness;
+}
+
+/** Put the posted tenantId in the app's world as a typed tenant when absent. */
+function seedPostedTenant(app: object, body: unknown): void {
+  const world = harnessWorlds.get(app);
+  if (world === undefined || typeof body !== 'object' || body === null) return;
+  const tenantId = (body as { tenantId?: unknown }).tenantId;
+  if (typeof tenantId !== 'string' || tenantId.length === 0) return;
+  if (world.contacts.some((c) => c.contactId === tenantId)) return;
+  world.contacts.push({ contactId: tenantId, type: 'tenant' });
+}
+
 function authed(app: ReturnType<typeof makeWebhookHarness>['app']) {
   return {
-    post: (path: string) =>
-      request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
+    post: (path: string) => {
+      const req = request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+      if (path !== '/api/tours') return req;
+      // Seed at SEND time, after whatever the test itself put in the world.
+      const send = req.send.bind(req);
+      req.send = (data?: string | object) => {
+        seedPostedTenant(app, data);
+        return send(data);
+      };
+      return req;
+    },
     get: (path: string) =>
       request(app).get(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
     patch: (path: string) =>
@@ -72,6 +116,32 @@ const BASE_CREATE_BODY = {
   scheduledAt: '2026-07-15T10:00:00.000Z',
   tourType: 'self_guided',
 };
+
+// The file's tenant fixture (see the note above authed()), pinned so a later
+// edit cannot quietly drop it.
+describe('fixture: a tour posted through authed() has a typed tenant', () => {
+  it('seeds an absent tenantId as a contact typed tenant before the POST', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, tenantId: 'fixture-tenant' });
+    expect(res.status).toBe(201);
+    expect(world.contacts.filter((c) => c.contactId === 'fixture-tenant')).toEqual([
+      { contactId: 'fixture-tenant', type: 'tenant' },
+    ]);
+  });
+
+  it('leaves a contact the test already seeded exactly as the test wrote it', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'fixture-tenant', type: 'tenant', phone: '+15550200077' });
+    await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, tenantId: 'fixture-tenant' });
+    expect(world.contacts.filter((c) => c.contactId === 'fixture-tenant')).toEqual([
+      { contactId: 'fixture-tenant', type: 'tenant', phone: '+15550200077' },
+    ]);
+  });
+});
 
 // ============================================================================
 // POST /api/tours — create
@@ -2543,9 +2613,10 @@ describe('GET /api/tours/:tourId/no-show-checkin-draft', () => {
     // rewrite the copy is TENANT-SPECIFIC, so the route resolves the tenant and
     // goes through composeTourReminderBody (a bare resolveMessage would throw on
     // the missing {tenantFirstName}). BASE_CREATE_BODY's 'contact-tenant-1' is
-    // never seeded onto world.contacts, so the read finds nothing and the copy
-    // takes the ABSENCE fallback - the "greets by name" half is pinned in
-    // tourRemindersApi.test.ts, which seeds a named tenant.
+    // put in the world by this file's tenant fixture (see the note above
+    // authed()) WITHOUT a name, so the copy takes the no-name fallback - the
+    // "greets by name" half is pinned in tourRemindersApi.test.ts, which seeds
+    // a named tenant.
     const { app } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     expect(created.status).toBe(201);
@@ -3258,8 +3329,17 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
 
-    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
-    const tourId = created.body.tour.tourId as string;
+    // Created straight in the store, NOT through POST /api/tours: the route
+    // refuses a tenant that does not exist (caseworker integrity I2), and this
+    // test's first rung needs exactly that missing tenant.
+    const tourId = (
+      await world.toursRepo.create({
+        tenantId: BASE_CREATE_BODY.tenantId,
+        unitId: BASE_CREATE_BODY.unitId,
+        tourType: 'self_guided',
+        scheduledAt: BASE_CREATE_BODY.scheduledAt,
+      })
+    ).tourId;
 
     // Nothing seeded → the tenant contact is the first unresolvable member.
     const noTenant = await authed(app).post(`/api/tours/${tourId}/relay`).send({});

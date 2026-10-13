@@ -10,31 +10,46 @@
 // and NO PII is ever logged (names/phones are hashed/truncated to a marker).
 //
 // Routes:
-//   POST /public/housing-fair  { firstName, lastName, phone, voucherSize?, unitId? }
+//   POST /public/housing-fair  { firstName, lastName, phone, voucherSize?, unitId?, housingAuthority? }
 //        → 200 { ok: true }   (creates/dedupes a tenant contact, sends the
 //          welcome text on FIRST capture only; leaks NO internal IDs/PII. A
 //          present + shareable unitId stamps capture_source:'flyer' +
-//          unit_of_interest on the CREATED contact instead of 'housing_fair'.)
+//          unit_of_interest on the CREATED contact instead of 'housing_fair'.
+//          join-housing-authority: housingAuthority (absent/null = none) must
+//          be the exact name of a listed housing authority, else 400
+//          housing_authority_not_listed; sent WITH a unitId it is the generic
+//          400. A new contact from a request with NO unitId starts
+//          'onboarding' and holds the authority; WITH a unitId it starts
+//          'needs_review'. Every new contact carries housing_fair_signup_v2;
+//          an existing contact is never changed beyond the welcome flag.)
 //   GET  /public/units/:unitId/flyer
 //        -> 200 { flyer }   (the FULL public payload upfront + contact_number)
 //        -> 404 { error, contact_number }   (missing/deleted/not-shareable;
 //           flyer-full-info: the teaser/reveal split + the /details route are gone)
+//   GET  /public/housing-authorities   (join-housing-authority D1/D2; built by
+//        createPublicHousingAuthoritiesRouter below and mounted in app.ts AHEAD
+//        of this router, with its own 60-per-minute per-IP limit)
+//        -> 200 { names: string[] }   (the housing authority names on the org
+//           list, sorted; Cache-Control: no-store; never writes the list)
 //
 // Money note: housing-fair sends an SMS (real cost in prod). Idempotency +
 // rate limiting are what keep this from being an SMS-spend abuse vector.
 import { createHash } from 'node:crypto';
-import { Router, type Response } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { KINDS_FOR_FIELD, ORG_NAME_MAX, isOnListFor } from '../lib/orgNames.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { CONSENT_VERSION, WELCOME_SMS } from '../lib/smsCompliance.js';
 import { resolveWithSettings } from '../messages/index.js';
+import { createRateLimit } from '../middleware/rateLimit.js';
 import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer } from '../lib/unitFields.js';
 import { resolveUnitMedia } from '../lib/unitMedia.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
+import { createOrgListRepo, type OrgListRepo } from '../repos/orgListRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
@@ -42,6 +57,12 @@ import {
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
+import {
+  HOUSING_AUTHORITY_NOT_LISTED,
+  PUBLIC_LIST_RATE_LIMIT,
+  housingAuthorityNames,
+  loadPublicOrgEntries,
+} from '../services/publicOrgList.js';
 
 /**
  * The housing-fair "auto welcome text" DEFAULT copy — the FILED A2P welcome
@@ -76,13 +97,19 @@ interface HousingFairFields {
   voucherSize?: number;
   /** Optional flyer unit-of-interest (validated as shareable in the handler). */
   unitId?: string;
+  /** join-housing-authority D3: the /join form's choice; shape-checked here, list-checked in the handler. */
+  housingAuthority?: string;
 }
 
 /**
  * Validate the housing-fair body. Generic messages (never echo back which
  * field/why in detail beyond the field name) and strict shapes: names are
  * non-empty and length-capped, phone normalizes to valid E.164 or it's
- * rejected, voucherSize (optional) is an integer 0..12.
+ * rejected, voucherSize (optional) is an integer 0..12, housingAuthority
+ * (optional; join-housing-authority D3) is a string of 1 to ORG_NAME_MAX
+ * characters after the app-wide body trim - whether it is ON the list is the
+ * handler's check - and a request carrying both a unitId and a
+ * housingAuthority is refused outright (D4).
  *
  * do-not-remove — A2P/CTIA consent gate (server-side). The public form gates
  * submit on a required, unchecked-by-default consent checkbox (spec §3.1); the
@@ -139,12 +166,35 @@ function parseHousingFairBody(body: unknown): HousingFairFields | { error: strin
     unitId = u;
   }
 
+  // join-housing-authority D3: the optional housing authority the /join form
+  // chose. Absent or null = none. Present: a string of 1 to ORG_NAME_MAX
+  // characters AFTER the app-wide JSON body trim (app.ts trimJsonBody), else
+  // the generic error. Whether it is ON the list is decided in the handler,
+  // before any write - not here.
+  let housingAuthority: string | undefined;
+  if ('housingAuthority' in b && b['housingAuthority'] !== undefined && b['housingAuthority'] !== null) {
+    const h = b['housingAuthority'];
+    if (typeof h !== 'string' || h.length === 0 || h.length > ORG_NAME_MAX) {
+      return { error: 'invalid request' };
+    }
+    housingAuthority = h;
+  }
+
+  // D4: a flyer sign-up (a present, non-null unitId) never carries a housing
+  // authority - the flyer page shows no select. Refused with the generic error,
+  // keyed on the PRESENCE of unitId and decided before the unit is ever read,
+  // so the refusal reveals nothing about whether the unit exists or is shareable.
+  if (unitId !== undefined && housingAuthority !== undefined) {
+    return { error: 'invalid request' };
+  }
+
   return {
     firstName,
     lastName,
     phone,
     ...(voucherSize !== undefined && { voucherSize }),
     ...(unitId !== undefined && { unitId }),
+    ...(housingAuthority !== undefined && { housingAuthority }),
   };
 }
 
@@ -156,6 +206,16 @@ export interface PublicRouterDeps {
   auditRepo?: AuditRepo;
   settingsRepo?: SettingsRepo;
   sendMessageService?: SendMessageService;
+  /**
+   * join-housing-authority D1/D3: the organization list. The sign-up's housing
+   * authority check reads it (peek only - the public surface never creates
+   * it). Default createOrgListRepo(). When one is injected (deps.public in
+   * app.ts - the tests), app.ts hands that same repo to
+   * createPublicHousingAuthoritiesRouter too; otherwise each router builds its
+   * own default, which reads the same stored item the same way (one
+   * consistent read per call, nothing cached).
+   */
+  orgListRepo?: OrgListRepo;
   /**
    * flyer-full-info: the public-facing texting number shown on the flyer (the
    * "I'm interested - text us" CTA) - config.businessPhoneNumber, the SAME main
@@ -172,6 +232,9 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
+  // join-housing-authority D3: the list a sign-up's housing authority is checked
+  // against (read with peek() only - the public surface never creates it).
+  const orgList = deps.orgListRepo ?? createOrgListRepo({ logger: deps.logger });
   // flyer-full-info: config.businessPhoneNumber (or null when unconfigured). Rides
   // on the flyer payload AND every opaque 404 so the page's unavailable state can
   // still offer the text-us CTA (there is no flyer payload to read it from there).
@@ -218,9 +281,25 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
         .json({ error: parsed.error === 'consent_required' ? 'consent_required' : 'invalid request' });
       return;
     }
-    const { firstName, lastName, phone, voucherSize, unitId } = parsed;
+    const { firstName, lastName, phone, voucherSize, unitId, housingAuthority } = parsed;
     const marker = phoneMarker(phone);
     mergeContext({}); // keep this request's log lines correlated (no PII added)
+
+    // join-housing-authority D3: the list check, BEFORE the unit or contact
+    // reads and before any write, for a new and an existing phone alike. The
+    // list is read ONLY when an authority was sent, from the source the public
+    // list read serves (peek, else the starting list in memory - never a
+    // write). The value must be character-for-character the name of a
+    // housing_authority entry: no case, spelling or agency resolution. The
+    // distinct code lets the /join form recover; the list is public, so the
+    // code reveals nothing. A read failure propagates: the generic 500.
+    if (housingAuthority !== undefined) {
+      const entries = await loadPublicOrgEntries(orgList);
+      if (!isOnListFor(entries, housingAuthority, KINDS_FOR_FIELD.housingAuthority)) {
+        res.status(400).json({ error: HOUSING_AUTHORITY_NOT_LISTED });
+        return;
+      }
+    }
 
     // Flyer attribution: when the signup carries a unitId for a SHAREABLE unit,
     // stamp the created contact with capture_source:'flyer' + unit_of_interest so
@@ -249,18 +328,26 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       contactId = existing.contactId;
       alreadyWelcomed = existing['housing_fair_welcomed'] === true;
     } else {
-      // status 'needs_review' (review decision): fair signups go to the human
-      // triage queue (type=tenant, status=needs_review on byTypeStatus) — the
-      // team confirms before treating them as fully active. type 'tenant'
-      // (the fair is a tenant intake — this is asserted by the form, not a
-      // guess from an unknown inbound).
+      // Status (join-housing-authority D5). A request with NO unitId - the /join
+      // form, filled in by staff at housing fairs and by the public - starts the
+      // tenant lifecycle at 'onboarding', like a manual create in
+      // routes/contacts.ts (identity is asserted by the form). No status_source
+      // is stamped, so a later placement transition can still derive the
+      // lifecycle forward. A request WITH a unitId (the flyer's sign-up box)
+      // keeps 'needs_review' and stores no authority, even when the unit is
+      // missing or not shareable. type 'tenant': the form is a tenant intake,
+      // asserted by the form, not a guess from an unknown inbound.
       const created = await contacts.create({
         type: 'tenant',
-        status: 'needs_review',
+        status: unitId === undefined ? 'onboarding' : 'needs_review',
         phone,
         firstName,
         lastName,
         ...(voucherSize !== undefined && { voucherSize }),
+        // D5: the /join answer, on a create from a request with no unitId only
+        // (D4 already refused a request carrying both), exactly as the list
+        // check accepted it. Absent when none was chosen.
+        ...(unitId === undefined && housingAuthority !== undefined && { housingAuthority }),
         // Flyer signups are attributed to the originating home; a plain fair
         // signup (no/non-shareable unit) keeps the generic source. Only stamped
         // on CREATE (matching how capture_source is set), never on a deduped
@@ -269,6 +356,12 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
         ...(viaFlyer && unitId !== undefined && { unit_of_interest: unitId }),
         captured_at: new Date().toISOString(),
         housing_fair_welcomed: false,
+        // D5: EVERY contact this endpoint creates from now on - /join and flyer
+        // alike - carries the marker: "created after the housing authority
+        // question shipped" (not "saw the select"). The lead backfill
+        // (scripts/backfill-join-housing-authority.ts) never touches a contact
+        // holding it. Never written to an existing contact (D6).
+        housing_fair_signup_v2: true,
         // A2P/CTIA consent (spec §3.1): the required checkbox was checked (the
         // server gate above enforced it), so this signup carries a documented
         // web-form opt-in. consent_version pins the disclosure copy version.
@@ -319,16 +412,30 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
 
     // (4) Audit (no PII in the payload beyond the marker — the contactId is an
     // internal id, fine for the audit trail but NOT returned to the public).
+    // join-housing-authority D7: every event from now on carries
+    // signupVersion 2 (the lead backfill reads it: a pre-change lead who
+    // signed up again after the change is left alone) and the authority the
+    // REQUEST carried, else null - an organization name, not PII - recorded
+    // for an existing contact too, though D6 writes nothing to it.
     await audit.append(`contacts#${contactId}`, 'housing_fair_signup', {
       marker,
       isNew: existing === undefined,
       welcomeSent,
       viaFlyer,
+      signupVersion: 2,
+      housingAuthority: housingAuthority ?? null,
     });
     // Log a hashed marker only — NEVER the name or phone (doc §9 / kickoff).
-    // viaFlyer is a non-PII boolean (whether a shareable unit was attributed).
+    // viaFlyer is a non-PII boolean (whether a shareable unit was attributed);
+    // withAuthority (D7) is a boolean too - the name itself stays out of logs.
     log.info(
-      { marker, isNew: existing === undefined, welcomeSent, viaFlyer },
+      {
+        marker,
+        isNew: existing === undefined,
+        welcomeSent,
+        viaFlyer,
+        withAuthority: housingAuthority !== undefined,
+      },
       'housing-fair signup captured',
     );
 
@@ -356,5 +463,43 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     res.json({ flyer: { ...toUnitFlyer(unit), media, contact_number: contactNumber } });
   });
 
+  return router;
+}
+
+export interface PublicHousingAuthoritiesDeps {
+  logger?: Logger;
+  orgListRepo?: OrgListRepo;
+  /** Test seam: the limiter's client-key resolver. */
+  rateLimitKeyOf?: (req: Request) => string;
+}
+
+/**
+ * GET /public/housing-authorities (join-housing-authority D1, D2) - the /join
+ * form's housing authority dropdown. Its OWN router so app.ts can mount it
+ * IMMEDIATELY BEFORE the shared /public mount: it defines this one GET route,
+ * with a hard-coded 60-per-minute per-IP limiter on the route alone, so the
+ * read never consumes - and is never blocked by - the shared limiter in front
+ * of createPublicRouter. Every other request matches nothing here and falls
+ * through to that mount unchanged.
+ *
+ * 200 { names }: the exact stored names of the housing authority entries,
+ * sorted (services/publicOrgList.ts). Nothing else leaves: no ids, spellings,
+ * notes, audit fields or agencies. It never writes the list item (peek, else
+ * the starting list in memory). A read failure propagates to the app's error
+ * handler: the generic 500. no-store: nothing may cache a stale list.
+ */
+export function createPublicHousingAuthoritiesRouter(deps: PublicHousingAuthoritiesDeps = {}): Router {
+  const log = deps.logger ?? defaultLogger;
+  const orgList = deps.orgListRepo ?? createOrgListRepo({ logger: deps.logger });
+  const router = Router();
+  router.get(
+    '/housing-authorities',
+    createRateLimit({ ...PUBLIC_LIST_RATE_LIMIT, logger: log, keyOf: deps.rateLimitKeyOf }),
+    async (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const entries = await loadPublicOrgEntries(orgList);
+      res.json({ names: housingAuthorityNames(entries) });
+    },
+  );
   return router;
 }

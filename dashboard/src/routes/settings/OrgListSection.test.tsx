@@ -817,6 +817,87 @@ describe('OrgListSection - admin entry actions', () => {
   });
 });
 
+// join-housing-authority spec D12: every housing authority on the list is on
+// the public /join form. Each Settings surface that adds one, renames one or
+// turns an agency into one says so; an agency shows nothing new.
+describe('OrgListSection - the public sign-up note (join-housing-authority spec D12)', () => {
+  const PUBLIC_NOTE = 'Housing authority names appear on the public sign-up form.';
+  beforeEach(() => {
+    viewerIsAdmin = true;
+  });
+
+  it('Add housing authority says so under the Name field; Add agency does not', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(
+      within(await screen.findByRole('region', { name: 'Housing authorities' })).getByRole('button', {
+        name: 'Add housing authority',
+      }),
+    );
+    let dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    expect(within(dialog).getByRole('textbox', { name: 'Name' })).toHaveAccessibleDescription(PUBLIC_NOTE);
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await user.click(screen.getByRole('button', { name: /^Agencies/ }));
+    await user.click(within(region('Agencies')).getByRole('button', { name: 'Add agency' }));
+    dialog = screen.getByRole('dialog', { name: 'Is this really new?' });
+    expect(within(dialog).queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('textbox', { name: 'Name' })).not.toHaveAccessibleDescription();
+  });
+
+  it('renaming a housing authority says so under New name; renaming an agency does not', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    const atlanta = await openEntry(user, 'Housing authorities', 'Atlanta Housing Authority');
+    await user.click(within(atlanta).getByRole('button', { name: 'Rename Atlanta Housing Authority' }));
+    let dialog = screen.getByRole('dialog', { name: 'Rename Atlanta Housing Authority' });
+    expect(within(dialog).getByText(PUBLIC_NOTE)).toBeVisible();
+    expect(within(dialog).getByRole('textbox', { name: 'New name' })).toHaveAccessibleDescription(PUBLIC_NOTE);
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    const step = await openEntry(user, 'Agencies', 'Step Up');
+    await user.click(within(step).getByRole('button', { name: 'Rename Step Up' }));
+    dialog = screen.getByRole('dialog', { name: 'Rename Step Up' });
+    expect(within(dialog).queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('textbox', { name: 'New name' })).not.toHaveAccessibleDescription();
+  });
+
+  it('a kind change INTO Housing authorities says so, as the move button description', async () => {
+    const user = userEvent.setup();
+    // Nothing holds Step Up as an agency, so it can move.
+    getOrgUsage.mockResolvedValue({
+      ...USAGE,
+      'o-step': { ...USAGE['o-step'], tenants: 0, inUse: { active: 0, deleted: 0 }, kindLocked: { active: 0, deleted: 0 } },
+    });
+    renderSection();
+    const step = await openEntry(user, 'Agencies', 'Step Up');
+    await waitFor(() => expect(step).toHaveTextContent('Not used'));
+    await user.click(within(step).getByRole('button', { name: 'Change kind of Step Up' }));
+    const dialog = screen.getByRole('dialog', { name: 'Change kind of Step Up' });
+    const move = within(dialog).getByRole('button', { name: 'Move to Housing authorities' });
+    expect(move).toBeEnabled();
+    expect(within(dialog).getByText(PUBLIC_NOTE)).toBeVisible();
+    expect(move).toHaveAccessibleDescription(PUBLIC_NOTE);
+  });
+
+  it('a kind change out of Housing authorities, or a move into them that is blocked, shows nothing new', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    const dekalb = await openEntry(user, 'Housing authorities', 'DeKalb County Housing Authority');
+    await waitFor(() => expect(dekalb).toHaveTextContent('Not used'));
+    await user.click(within(dekalb).getByRole('button', { name: 'Change kind of DeKalb County Housing Authority' }));
+    let dialog = screen.getByRole('dialog', { name: 'Change kind of DeKalb County Housing Authority' });
+    expect(within(dialog).getByRole('button', { name: 'Move to Agencies' })).toBeEnabled();
+    expect(within(dialog).queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    // One tenant holds Step Up in its Agency field: the move cannot happen.
+    const step = await openEntry(user, 'Agencies', 'Step Up');
+    await waitFor(() => expect(step).toHaveTextContent('1 tenant'));
+    await user.click(within(step).getByRole('button', { name: 'Change kind of Step Up' }));
+    dialog = screen.getByRole('dialog', { name: 'Change kind of Step Up' });
+    expect(within(dialog).getByRole('button', { name: 'Move to Housing authorities' })).toBeDisabled();
+    expect(within(dialog).queryByText(PUBLIC_NOTE)).not.toBeInTheDocument();
+  });
+});
+
 // Code review R1-ADV-FE-6: a spelling typed into "New spelling" but never
 // added was dropped by the footer Save, which still PATCHed the old list and
 // closed as a success.

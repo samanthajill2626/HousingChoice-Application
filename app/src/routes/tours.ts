@@ -138,6 +138,8 @@ import { armRelayCloseNagIfOpen, clearRelayCloseNagOnReopen } from '../services/
 import { normalizeToE164 } from '../lib/phone.js';
 import { recordTourEvent as recordTourEventShared } from '../lib/tourEvents.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
+import { OPEN_TOUR_STATUSES } from '../services/contactHoldings.js';
+import { requireTenantContact, sendContactTypeError } from '../services/contactTypeGuards.js';
 
 /**
  * Validate that a string is a parseable ISO 8601 datetime.
@@ -343,6 +345,17 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     if (!isTourType(b['tourType'])) {
       res.status(400).json({ error: `tourType must be one of: ${TOUR_TYPES.join(', ')}` });
       return;
+    }
+
+    // Caseworker integrity I2 (spec 2026-10-12 section 4): a tour's tenant is a
+    // contact typed `tenant`. One CONSISTENT read after the body validation and
+    // before any write: 404 tenant_not_found when the contact is gone, 409
+    // { error: 'contact_not_tenant', contactKind } when it is not a tenant.
+    try {
+      await requireTenantContact(contacts, b['tenantId'] as string);
+    } catch (err) {
+      if (sendContactTypeError(err, res)) return;
+      throw err;
     }
 
     // Timeless create: OMIT scheduledAt entirely (never undefined/null) so the
@@ -1382,6 +1395,21 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     const rotation = randomUUID();
     if ((armable && rearmTrigger) || terminal) patch['currentLadderId'] = rotation;
 
+    // Caseworker integrity I2 (spec 2026-10-12 section 4): REVIVING a canceled
+    // tour - into scheduled (a new time alone auto-advances, or an explicit
+    // status), toured or no_show - needs a contact typed `tenant`. A move
+    // between open statuses, or into a closed one, is not checked. The
+    // transition guards above have already answered; no write or side effect
+    // has run yet.
+    if (currentStatus === 'canceled' && OPEN_TOUR_STATUSES.has(effectiveStatus)) {
+      try {
+        await requireTenantContact(contacts, current.tenantId);
+      } catch (err) {
+        if (sendContactTypeError(err, res)) return;
+        throw err;
+      }
+    }
+
     let tour: TourItem;
     try {
       // The precondition is the status the guards above ran on: a concurrent
@@ -1659,6 +1687,16 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     if (!decision.ok) {
       res.status(409).json({ error: decision.error });
       return;
+    }
+    // Caseworker integrity I2 (spec 2026-10-12 section 4): every reopen target
+    // (scheduled / toured / no_show) is an OPEN status, so the tenant must be a
+    // contact typed `tenant`. After the reopen decision (a tour that cannot
+    // reopen answers that first), before the conditional write.
+    try {
+      await requireTenantContact(contacts, current.tenantId);
+    } catch (err) {
+      if (sendContactTypeError(err, res)) return;
+      throw err;
     }
     const reopened = await tours.reopenIf(current, decision.target, getNow());
     if (reopened === undefined) {

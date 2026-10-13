@@ -16,6 +16,7 @@ import {
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import {
+  HOUSING_AUTHORITY_PUBLIC_NOTE,
   KIND_PLURAL_TITLE,
   orgErrorCopy,
   otherKindOf,
@@ -274,7 +275,9 @@ export function SpellingsDialog({ entry, onSaved, onClose }: EntryDialogProps & 
 
 /** "Rename <name>" (admin, spec D11/D12): ONE step - the new name, what it
  *  changes, Rename. A 202 starts the rewrite; the old name is kept as a
- *  spelling unless D12 skips it (the result names why). */
+ *  spelling unless D12 skips it (the result names why). A housing authority's
+ *  new name is on the public /join form, and the New name field says so
+ *  (join-housing-authority spec D12); an agency's says nothing new. */
 export function RenameDialog({
   entry,
   usage,
@@ -285,6 +288,8 @@ export function RenameDialog({
   onRenamed: (result: OrgPatchResult) => void;
 }): React.JSX.Element {
   const nameId = useId();
+  const publicNoteId = useId();
+  const publicNote = entry.kind === 'housing_authority';
   const [name, setName] = useState(entry.name);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -334,11 +339,17 @@ export function RenameDialog({
             maxLength={120}
             disabled={busy}
             autoComplete="off"
+            {...(publicNote && { 'aria-describedby': publicNoteId })}
             onChange={(e) => {
               setName(e.target.value);
               setError(null);
             }}
           />
+          {publicNote ? (
+            <p id={publicNoteId} className={styles.dialogMuted}>
+              {HOUSING_AUTHORITY_PUBLIC_NOTE}
+            </p>
+          ) : null}
         </div>
         <p className={styles.dialogText}>{`${changes} ${entry.name} is kept as a spelling, so it still finds the entry.`}</p>
         {error !== null ? (
@@ -442,7 +453,10 @@ export function MergeDialog({
 
 /** "Change kind of <name>" (admin, spec D10, D17): allowed only when no record -
  *  deleted ones included - holds the name in a field of its kind; organization
- *  holders never block it. Nothing is rewritten. */
+ *  holders never block it. Nothing is rewritten. A move INTO Housing
+ *  authorities puts the name on the public /join form, and the move button's
+ *  description says so (join-housing-authority spec D12) - not while the move
+ *  is blocked, when the entry cannot become one. */
 export function KindDialog({
   entry,
   usage,
@@ -450,9 +464,11 @@ export function KindDialog({
   onClose,
 }: EntryDialogProps & { usage: OrgUsageCounts | undefined; onChanged: () => void }): React.JSX.Element {
   const to = otherKindOf(entry.kind);
+  const publicNoteId = useId();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const blocked = (blockingUses(usage, 'kind') ?? 0) > 0;
+  const publicNote = to === 'housing_authority' && !blocked;
   // Organization-only holders: they keep the name, which stays valid under either kind.
   const organizationOnly = (blockingUses(usage, 'delete') ?? 0) > (blockingUses(usage, 'kind') ?? 0);
 
@@ -478,7 +494,14 @@ export function KindDialog({
           <Button variant="secondary" size="sm" type="button" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button variant="primary" size="sm" type="button" onClick={() => void move()} disabled={busy || blocked}>
+          <Button
+            variant="primary"
+            size="sm"
+            type="button"
+            onClick={() => void move()}
+            disabled={busy || blocked}
+            {...(publicNote && { 'aria-describedby': publicNoteId })}
+          >
             {`Move to ${KIND_PLURAL_TITLE[to]}`}
           </Button>
         </>
@@ -492,6 +515,11 @@ export function KindDialog({
                 organizationOnly ? ' Contacts holding it as their organization keep it.' : ''
               }`}
         </p>
+        {publicNote ? (
+          <p id={publicNoteId} className={styles.dialogMuted}>
+            {HOUSING_AUTHORITY_PUBLIC_NOTE}
+          </p>
+        ) : null}
         {error !== null ? (
           <p role="alert" className={styles.error}>
             {error}

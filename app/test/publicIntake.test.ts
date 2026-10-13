@@ -4,7 +4,8 @@
 // Plus the abuse fence: the per-IP rate limiter trips with 429, and NO PII
 // (name/phone) ever appears in a log line.
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { OrgEntry, OrgKind } from '../src/lib/orgNames.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { WELCOME_TEXT_TEMPLATE } from '../src/routes/public.js';
@@ -26,7 +27,7 @@ function signupBody(overrides: Record<string, unknown> = {}): Record<string, unk
 }
 
 describe('POST /public/housing-fair — intake + auto welcome text', () => {
-  it('captures a tenant (needs_review), sends ONE welcome text, returns only { ok: true }', async () => {
+  it('captures a tenant (onboarding, with the v2 marker), sends ONE welcome text, returns only { ok: true }', async () => {
     const { app, world } = makeWebhookHarness();
     const res = await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
 
@@ -34,18 +35,21 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
     // No internal IDs / PII leak — exactly { ok: true }.
     expect(res.body).toEqual({ ok: true });
 
-    // A tenant contact was captured for the normalized phone, to the triage queue,
+    // A tenant contact was captured for the normalized phone, as Onboarding with the
+    // v2 marker (join-housing-authority D5) and no housing authority (none was sent),
     // stamped with the web_form consent (spec §3.1) + the disclosure version.
     const contact = world.contacts.find((c) => c.phone === '+15550102000');
     expect(contact).toMatchObject({
       type: 'tenant',
-      status: 'needs_review',
+      status: 'onboarding',
+      housing_fair_signup_v2: true,
       firstName: 'Keisha',
       capture_source: 'housing_fair',
       consent_method: 'web_form',
       consent_version: 'ctia-2026-06',
     });
     expect(typeof contact?.consent_at).toBe('string');
+    expect(Object.keys(contact ?? {})).not.toContain('housingAuthority');
 
     // Exactly one welcome text went out, to that phone, with the rendered body.
     expect(world.sent).toHaveLength(1);
@@ -296,7 +300,8 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     expect(res.status).toBe(200);
     const { flyer } = res.body;
 
-    // The shareable set is present and correct (voucher_size derived from beds).
+    // The shareable set is present and correct (voucher_size falls back to beds:
+    // the fixture records no voucher size).
     // unit-photos: media is now the RESOLVED same-origin URL list (each stored
     // key becomes its stable /unit-media path), not a raw key pass-through.
     expect(flyer).toMatchObject({
@@ -363,6 +368,19 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     ]) {
       expect(serialized, secret).not.toContain(secret);
     }
+  });
+
+  it('states the RECORDED voucher size, not the bedroom count; the internal key stays off', async () => {
+    // The 2026-10-12 prod report: a property with its own voucher size showed
+    // the bedroom count on its public flyer.
+    const { app, world } = makeWebhookHarness();
+    seedFullUnit(world, { beds: 2, voucher_size_accepted: 3 });
+
+    const res = await request(app).get('/public/units/unit-1/flyer').set('x-origin-verify', SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body.flyer.voucher_size).toBe(3);
+    expect(res.body.flyer.beds).toBe(2);
+    expect(JSON.stringify(res.body)).not.toContain('voucher_size_accepted');
   });
 
   it('review F2: a foreign media key never reaches the PUBLIC flyer (omitted, no URL)', async () => {
@@ -621,5 +639,661 @@ describe('GET /public/units/:unitId/flyer - photo resolution + E1 gate', () => {
       '/unit-media/unit-photo/stored',
       'https://legacy.example/p.jpg',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// join-housing-authority D1/D2: GET /public/housing-authorities through the
+// FULL app - its mount ahead of the shared /public limiter, the origin-secret
+// chain, the generic 500, and the two independent limits.
+// ---------------------------------------------------------------------------
+
+const LIST = '/public/housing-authorities';
+
+describe('GET /public/housing-authorities - the public list read (D1)', () => {
+  /** The starting list's housing authority names in D1 order. */
+  const STARTING_AUTHORITY_NAMES = [
+    'Atlanta Housing Authority',
+    'Augusta Housing Authority',
+    'College Park Housing Authority',
+    'Decatur Housing Authority',
+    'DeKalb County Housing Authority',
+    'East Point Housing Authority',
+    'Fulton County Housing Authority',
+    'Georgia Department of Community Affairs',
+    'Georgia Housing Voucher Program (DBHDD)',
+    'Jonesboro Housing Authority',
+    'Macon-Bibb County Housing Authority',
+    'Marietta Housing Authority',
+  ];
+
+  function listEntry(kind: OrgKind, name: string): OrgEntry {
+    return {
+      orgId: `org-${name}`,
+      kind,
+      name,
+      spellings: [`${name} spelling`],
+      notes: 'internal note',
+      createdAt: '2026-10-12T00:00:00.000Z',
+      createdBy: 'test',
+      updatedAt: '2026-10-12T00:00:00.000Z',
+      updatedBy: 'test',
+    };
+  }
+
+  it('serves the starting list from memory on an empty store: authority names only, sorted, no-store, nothing written', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app).get(LIST).set('x-origin-verify', SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ names: STARTING_AUTHORITY_NAMES });
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(await world.orgListRepo.peek()).toBeNull();
+  });
+
+  it('serves the STORED list: housing_authority names only, case-insensitive order, no ids/spellings/notes/agencies', async () => {
+    const { app, world } = makeWebhookHarness();
+    await world.orgListRepo.putForSeed({
+      settingId: 'org-list',
+      version: 7,
+      entries: [
+        listEntry('housing_authority', 'zeta Housing Authority'),
+        listEntry('agency', 'Alpha Agency'),
+        listEntry('housing_authority', 'Banana Housing Authority'),
+        listEntry('housing_authority', 'apple Housing Authority'),
+      ],
+    });
+    const get = vi.spyOn(world.orgListRepo, 'get');
+    const mutate = vi.spyOn(world.orgListRepo, 'mutate');
+    const putForSeed = vi.spyOn(world.orgListRepo, 'putForSeed');
+
+    const res = await request(app).get(LIST).set('x-origin-verify', SECRET);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      names: ['apple Housing Authority', 'Banana Housing Authority', 'zeta Housing Authority'],
+    });
+    const serialized = JSON.stringify(res.body);
+    for (const leaked of ['org-', 'spelling', 'internal note', 'Alpha Agency', 'createdBy']) {
+      expect(serialized, leaked).not.toContain(leaked);
+    }
+    expect(get).not.toHaveBeenCalled();
+    expect(mutate).not.toHaveBeenCalled();
+    expect(putForSeed).not.toHaveBeenCalled();
+  });
+
+  it('a list read failure is the generic 500', async () => {
+    const { app, world } = makeWebhookHarness();
+    vi.spyOn(world.orgListRepo, 'peek').mockRejectedValue(new Error('settings table unavailable'));
+    const res = await request(app).get(LIST).set('x-origin-verify', SECRET);
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'internal server error' });
+  });
+
+  it('sits behind the origin-secret validator like every /public route', async () => {
+    const { app } = makeWebhookHarness();
+    expect((await request(app).get(LIST)).status).toBe(403);
+  });
+});
+
+describe('GET /public/housing-authorities - its own limit, independent of the shared /public limit (D2)', () => {
+  it('stays readable after the shared /public limit is exhausted, and does not touch that window', async () => {
+    const { app } = makeWebhookHarness({
+      env: { PUBLIC_RATE_LIMIT_MAX: '2', PUBLIC_RATE_LIMIT_WINDOW_MS: '60000' },
+    });
+    const bad = { firstName: 'A', lastName: 'B' }; // 400 at the handler
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(400);
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(400);
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(429);
+
+    for (let i = 0; i < 3; i += 1) {
+      const res = await request(app).get(LIST).set('x-origin-verify', SECRET);
+      expect(res.status, `list read ${i + 1}`).toBe(200);
+    }
+    // The shared window is still exhausted: the list reads neither reset nor used it.
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(429);
+  });
+
+  it('allows 60 reads per minute per IP, refuses the 61st, and never consumes or is blocked by the shared limit', async () => {
+    const { app } = makeWebhookHarness({
+      env: { PUBLIC_RATE_LIMIT_MAX: '2', PUBLIC_RATE_LIMIT_WINDOW_MS: '60000' },
+    });
+    for (let i = 0; i < 60; i += 1) {
+      const res = await request(app).get(LIST).set('x-origin-verify', SECRET);
+      expect(res.status, `list read ${i + 1}`).toBe(200);
+    }
+    const limited = await request(app).get(LIST).set('x-origin-verify', SECRET);
+    expect(limited.status).toBe(429);
+    expect(limited.body).toEqual({ error: 'rate_limited' });
+    expect(limited.headers['retry-after']).toBeDefined();
+
+    // The shared limit still has BOTH of its 2 slots: 61 list reads consumed
+    // none, and the exhausted list limit does not block the other routes.
+    const bad = { firstName: 'A', lastName: 'B' };
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(400);
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(400);
+    expect((await request(app).post(FAIR).set('x-origin-verify', SECRET).send(bad)).status).toBe(429);
+  });
+
+  it('(PIN) another method on the list path falls through to the shared /public mount and its limiter', async () => {
+    const { app } = makeWebhookHarness({
+      env: { PUBLIC_RATE_LIMIT_MAX: '1', PUBLIC_RATE_LIMIT_WINDOW_MS: '60000' },
+    });
+    // Not the list route: it passes the shared limiter (its single slot) and matches nothing.
+    const post = await request(app).post(LIST).set('x-origin-verify', SECRET).send({});
+    expect(post.status).toBe(404);
+    // Proof it went through the shared limiter: the flyer route is now limited.
+    const flyer = await request(app).get('/public/units/nope/flyer').set('x-origin-verify', SECRET);
+    expect(flyer.status).toBe(429);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// join-housing-authority D3-D7: the sign-up's housingAuthority.
+// ---------------------------------------------------------------------------
+
+describe('POST /public/housing-fair - housingAuthority shape and the flyer refusal (D3, D4)', () => {
+  function harness() {
+    return makeWebhookHarness({ env: { PUBLIC_RATE_LIMIT_MAX: '100' } });
+  }
+
+  it('refuses a non-string, an empty, a blank and an over-long housingAuthority with the generic 400, writing nothing', async () => {
+    const { app, world } = harness();
+    for (const bad of [
+      42,
+      true,
+      ['Atlanta Housing Authority'],
+      { name: 'Atlanta Housing Authority' },
+      '',
+      '   ', // trimmed to '' by the body trim
+      'A'.repeat(121), // ORG_NAME_MAX is 120
+    ]) {
+      const res = await request(app)
+        .post(FAIR)
+        .set('x-origin-verify', SECRET)
+        .send(signupBody({ housingAuthority: bad }));
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(res.body, JSON.stringify(bad)).toEqual({ error: 'invalid request' });
+    }
+    expect(world.contacts).toHaveLength(0);
+    expect(world.conversations.size).toBe(0);
+    expect(world.sent).toHaveLength(0);
+    expect(world.auditEvents).toHaveLength(0);
+  });
+
+  it('refuses unitId + housingAuthority with the generic 400 whatever the unit is, without reading the unit', async () => {
+    const { app, world } = harness();
+    world.units.set('unit-flyer', { unitId: 'unit-flyer', landlordId: 'll-1', status: 'available', beds: 2 });
+    world.units.set('unit-placed', { unitId: 'unit-placed', landlordId: 'll-1', status: 'placed', beds: 2 });
+    const getById = vi.spyOn(world.unitsRepo, 'getById');
+    const bodies: unknown[] = [];
+    for (const unitId of ['unit-flyer', 'no-such-unit', 'unit-placed']) {
+      const res = await request(app)
+        .post(FAIR)
+        .set('x-origin-verify', SECRET)
+        .send(signupBody({ unitId, housingAuthority: 'Atlanta Housing Authority' }));
+      expect(res.status, unitId).toBe(400);
+      bodies.push(res.body);
+    }
+    // Identical for a shareable, a missing and a non-shareable unit: no oracle.
+    expect(bodies).toEqual([
+      { error: 'invalid request' },
+      { error: 'invalid request' },
+      { error: 'invalid request' },
+    ]);
+    expect(world.contacts).toHaveLength(0);
+    expect(world.conversations.size).toBe(0);
+    expect(world.sent).toHaveLength(0);
+    expect(getById).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /public/housing-fair - the housing authority must be on the list (D3)', () => {
+  function harness() {
+    return makeWebhookHarness({ env: { PUBLIC_RATE_LIMIT_MAX: '100' } });
+  }
+
+  function orgEntry(kind: OrgKind, name: string): OrgEntry {
+    return {
+      orgId: `org-${name}`,
+      kind,
+      name,
+      spellings: [],
+      createdAt: '2026-10-12T00:00:00.000Z',
+      createdBy: 'test',
+      updatedAt: '2026-10-12T00:00:00.000Z',
+      updatedBy: 'test',
+    };
+  }
+
+  it('refuses an unlisted name, a spelling, another case and an agency name with housing_authority_not_listed, writing nothing', async () => {
+    const { app, world } = harness();
+    for (const value of [
+      'Springfield Housing Authority', // not on the list
+      'AHA', // a spelling of Atlanta Housing Authority
+      'atlanta housing authority', // the name in another case
+      'Step Up', // an agency, not a housing authority
+      'A'.repeat(120), // the longest shape accepted, still not a name
+    ]) {
+      const res = await request(app)
+        .post(FAIR)
+        .set('x-origin-verify', SECRET)
+        .send(signupBody({ housingAuthority: value }));
+      expect(res.status, value).toBe(400);
+      expect(res.body, value).toEqual({ error: 'housing_authority_not_listed' });
+    }
+    expect(world.contacts).toHaveLength(0);
+    expect(world.conversations.size).toBe(0);
+    expect(world.sent).toHaveLength(0);
+    expect(world.auditEvents).toHaveLength(0);
+    // The check read the list without creating it.
+    expect(await world.orgListRepo.peek()).toBeNull();
+  });
+
+  it('refuses an unlisted name for an EXISTING phone too, before any write (no thread, no welcome, no audit, no change)', async () => {
+    const { app, world } = harness();
+    world.contacts.push({
+      contactId: 'c-existing',
+      type: 'tenant',
+      status: 'searching',
+      phone: '+15550102000',
+      firstName: 'Keisha',
+      lastName: 'Jones',
+      housing_fair_welcomed: false,
+    } as ContactItem);
+    const before = structuredClone(world.contacts[0]);
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'Springfield Housing Authority' }));
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'housing_authority_not_listed' });
+    expect(world.contacts).toEqual([before]);
+    expect(world.conversations.size).toBe(0);
+    expect(world.sent).toHaveLength(0);
+    expect(world.auditEvents).toHaveLength(0);
+  });
+
+  it('checks against the STORED list when there is one (a renamed authority is no longer listed)', async () => {
+    const { app, world } = harness();
+    await world.orgListRepo.putForSeed({
+      settingId: 'org-list',
+      version: 4,
+      entries: [
+        orgEntry('housing_authority', 'Housing Authority of the City of Atlanta'),
+        orgEntry('agency', 'Step Up'),
+      ],
+    });
+
+    const stale = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'Atlanta Housing Authority' }));
+    expect(stale.status).toBe(400);
+    expect(stale.body).toEqual({ error: 'housing_authority_not_listed' });
+    expect(world.contacts).toHaveLength(0);
+
+    const current = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'Housing Authority of the City of Atlanta' }));
+    expect(current.status).toBe(200);
+    expect(current.body).toEqual({ ok: true });
+    expect(world.contacts).toHaveLength(1);
+  });
+
+  it('accepts a listed name, reading the list once with peek() and never creating the item', async () => {
+    const { app, world } = harness();
+    const peek = vi.spyOn(world.orgListRepo, 'peek');
+    const get = vi.spyOn(world.orgListRepo, 'get');
+    const mutate = vi.spyOn(world.orgListRepo, 'mutate');
+    const putForSeed = vi.spyOn(world.orgListRepo, 'putForSeed');
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'Atlanta Housing Authority' }));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(peek).toHaveBeenCalledTimes(1);
+    expect(get).not.toHaveBeenCalled();
+    expect(mutate).not.toHaveBeenCalled();
+    expect(putForSeed).not.toHaveBeenCalled();
+    peek.mockRestore();
+    expect(await world.orgListRepo.peek()).toBeNull();
+  });
+
+  it('a list read failure is the generic 500 and nothing is written', async () => {
+    const { app, world } = harness();
+    vi.spyOn(world.orgListRepo, 'peek').mockRejectedValue(new Error('settings table unavailable'));
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'Atlanta Housing Authority' }));
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ error: 'internal server error' });
+    expect(world.contacts).toHaveLength(0);
+    expect(world.conversations.size).toBe(0);
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('(PIN) reads no list when no housingAuthority is sent (absent or null)', async () => {
+    const { app, world } = harness();
+    const peekWithoutAuthority = vi.spyOn(world.orgListRepo, 'peek');
+    const absent = await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
+    const nulled = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ phone: '(555) 010-2001', housingAuthority: null }));
+    expect(absent.status).toBe(200);
+    expect(nulled.status).toBe(200);
+    expect(peekWithoutAuthority).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /public/housing-fair - new contacts start Onboarding with the marker; existing ones are untouched (D5, D6)', () => {
+  function harness() {
+    return makeWebhookHarness({ env: { PUBLIC_RATE_LIMIT_MAX: '100' } });
+  }
+
+  it('a /join sign-up with a listed authority creates an onboarding tenant holding it and the marker', async () => {
+    const { app, world } = harness();
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'DeKalb County Housing Authority' }));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+    expect(contact).toMatchObject({
+      type: 'tenant',
+      status: 'onboarding',
+      housingAuthority: 'DeKalb County Housing Authority',
+      housing_fair_signup_v2: true,
+      capture_source: 'housing_fair',
+      consent_method: 'web_form',
+      consent_version: 'ctia-2026-06',
+    });
+    expect(contact?.['unit_of_interest']).toBeUndefined();
+    // The welcome text is unchanged.
+    expect(world.sent).toHaveLength(1);
+    expect(world.sent[0]?.body).toBe(WELCOME_TEXT_TEMPLATE.replace('{firstName}', 'Keisha'));
+  });
+
+  it('a /join sign-up with no authority (absent or null) creates an onboarding tenant with the marker and no authority', async () => {
+    const { app, world } = harness();
+    await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
+    await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ phone: '(555) 010-2001', housingAuthority: null }));
+    for (const phone of ['+15550102000', '+15550102001']) {
+      const contact = world.contacts.find((c) => c.phone === phone);
+      expect(contact, phone).toMatchObject({
+        type: 'tenant',
+        status: 'onboarding',
+        housing_fair_signup_v2: true,
+        capture_source: 'housing_fair',
+      });
+      expect(Object.keys(contact ?? {}), phone).not.toContain('housingAuthority');
+    }
+  });
+
+  it('a null unitId is no unitId: the authority is kept and the contact starts onboarding', async () => {
+    const { app, world } = harness();
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: null, housingAuthority: 'Atlanta Housing Authority' }));
+    expect(res.status).toBe(200);
+    expect(world.contacts.find((c) => c.phone === '+15550102000')).toMatchObject({
+      status: 'onboarding',
+      housingAuthority: 'Atlanta Housing Authority',
+      housing_fair_signup_v2: true,
+      capture_source: 'housing_fair',
+    });
+  });
+
+  it('padded text is trimmed by the body trim and accepted as the listed name it becomes', async () => {
+    const { app, world } = harness();
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: '   Atlanta Housing Authority  ' }));
+    expect(res.status).toBe(200);
+    expect(world.contacts.find((c) => c.phone === '+15550102000')?.housingAuthority).toBe(
+      'Atlanta Housing Authority',
+    );
+  });
+
+  it('a flyer sign-up for a shareable unit behaves as today (needs_review, flyer, no authority) plus the marker', async () => {
+    const { app, world } = harness();
+    world.units.set('unit-flyer', { unitId: 'unit-flyer', landlordId: 'll-1', status: 'available', beds: 2 });
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 'unit-flyer' }));
+    expect(res.status).toBe(200);
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+    expect(contact).toMatchObject({
+      type: 'tenant',
+      status: 'needs_review',
+      capture_source: 'flyer',
+      unit_of_interest: 'unit-flyer',
+      housing_fair_signup_v2: true,
+    });
+    expect(Object.keys(contact ?? {})).not.toContain('housingAuthority');
+    expect(world.sent).toHaveLength(1);
+  });
+
+  it('a flyer sign-up for a missing or non-shareable unit keeps needs_review and housing_fair, plus the marker', async () => {
+    const { app, world } = harness();
+    world.units.set('unit-placed', { unitId: 'unit-placed', landlordId: 'll-1', status: 'placed', beds: 2 });
+    await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 'no-such-unit' }));
+    await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ phone: '(555) 010-2001', unitId: 'unit-placed' }));
+    for (const phone of ['+15550102000', '+15550102001']) {
+      const contact = world.contacts.find((c) => c.phone === phone);
+      expect(contact, phone).toMatchObject({
+        type: 'tenant',
+        status: 'needs_review',
+        capture_source: 'housing_fair',
+        housing_fair_signup_v2: true,
+      });
+      expect(contact?.['unit_of_interest'], phone).toBeUndefined();
+      expect(Object.keys(contact ?? {}), phone).not.toContain('housingAuthority');
+    }
+  });
+
+  it('a flyer unitId with housingAuthority null is a plain flyer sign-up (needs_review, no authority)', async () => {
+    const { app, world } = harness();
+    world.units.set('unit-flyer', { unitId: 'unit-flyer', landlordId: 'll-1', status: 'available', beds: 2 });
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 'unit-flyer', housingAuthority: null }));
+    expect(res.status).toBe(200);
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+    expect(contact).toMatchObject({ status: 'needs_review', capture_source: 'flyer', housing_fair_signup_v2: true });
+    expect(Object.keys(contact ?? {})).not.toContain('housingAuthority');
+  });
+
+  it('(PIN) an existing phone with a valid authority gets no authority, status or marker write (already welcomed: nothing changes)', async () => {
+    const { app, world } = harness();
+    world.contacts.push({
+      contactId: 'c-existing',
+      type: 'tenant',
+      status: 'searching',
+      phone: '+15550102000',
+      firstName: 'Keisha',
+      lastName: 'Jones',
+      housingAuthority: 'Decatur Housing Authority',
+      capture_source: 'housing_fair',
+      housing_fair_welcomed: true,
+    } as ContactItem);
+    const welcomed = structuredClone(world.contacts[0]);
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'Atlanta Housing Authority' }));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(world.contacts).toEqual([welcomed]);
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('(PIN) an existing phone never welcomed gets the welcome and its flag, and nothing else', async () => {
+    const { app, world } = harness();
+    world.contacts.push({
+      contactId: 'c-existing',
+      type: 'tenant',
+      status: 'needs_review',
+      phone: '+15550102000',
+      firstName: 'Keisha',
+      lastName: 'Jones',
+      capture_source: 'housing_fair',
+      housing_fair_welcomed: false,
+    } as ContactItem);
+    const neverWelcomed = structuredClone(world.contacts[0]);
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'Atlanta Housing Authority' }));
+    expect(res.status).toBe(200);
+    expect(world.sent).toHaveLength(1);
+    expect(world.contacts).toEqual([{ ...neverWelcomed, housing_fair_welcomed: true }]);
+  });
+});
+
+describe('POST /public/housing-fair - audit and log (D7)', () => {
+  function harness() {
+    return makeWebhookHarness({ env: { PUBLIC_RATE_LIMIT_MAX: '100' } });
+  }
+
+  it('a new /join contact with an authority: the audit records signupVersion 2 and the name; the log carries withAuthority only', async () => {
+    const { app, world, capture } = harness();
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'Atlanta Housing Authority' }));
+    expect(res.status).toBe(200);
+    const contact = world.contacts.find((c) => c.phone === '+15550102000');
+
+    expect(world.auditEvents.filter((e) => e.event_type === 'housing_fair_signup')).toEqual([
+      {
+        entityKey: `contacts#${contact?.contactId}`,
+        event_type: 'housing_fair_signup',
+        payload: {
+          marker: expect.any(String),
+          isNew: true,
+          welcomeSent: true,
+          viaFlyer: false,
+          signupVersion: 2,
+          housingAuthority: 'Atlanta Housing Authority',
+        },
+      },
+    ]);
+
+    const lines = capture.lines.filter((l) => l['msg'] === 'housing-fair signup captured');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ isNew: true, welcomeSent: true, viaFlyer: false, withAuthority: true });
+    expect(JSON.stringify(lines[0])).not.toContain('Atlanta Housing Authority');
+  });
+
+  it('no authority (absent or null): housingAuthority null in the audit, withAuthority false in the log', async () => {
+    const { app, world, capture } = harness();
+    await request(app).post(FAIR).set('x-origin-verify', SECRET).send(signupBody());
+    await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ phone: '(555) 010-2001', housingAuthority: null }));
+
+    const payloads = world.auditEvents
+      .filter((e) => e.event_type === 'housing_fair_signup')
+      .map((e) => e.payload);
+    expect(payloads).toEqual([
+      {
+        marker: expect.any(String),
+        isNew: true,
+        welcomeSent: true,
+        viaFlyer: false,
+        signupVersion: 2,
+        housingAuthority: null,
+      },
+      {
+        marker: expect.any(String),
+        isNew: true,
+        welcomeSent: true,
+        viaFlyer: false,
+        signupVersion: 2,
+        housingAuthority: null,
+      },
+    ]);
+    const lines = capture.lines.filter((l) => l['msg'] === 'housing-fair signup captured');
+    expect(lines.map((l) => l['withAuthority'])).toEqual([false, false]);
+  });
+
+  it('a flyer sign-up: viaFlyer true, signupVersion 2, housingAuthority null', async () => {
+    const { app, world, capture } = harness();
+    world.units.set('unit-flyer', { unitId: 'unit-flyer', landlordId: 'll-1', status: 'available', beds: 2 });
+    await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ unitId: 'unit-flyer' }));
+    expect(world.auditEvents.filter((e) => e.event_type === 'housing_fair_signup').map((e) => e.payload)).toEqual([
+      {
+        marker: expect.any(String),
+        isNew: true,
+        welcomeSent: true,
+        viaFlyer: true,
+        signupVersion: 2,
+        housingAuthority: null,
+      },
+    ]);
+    const lines = capture.lines.filter((l) => l['msg'] === 'housing-fair signup captured');
+    expect(lines[0]).toMatchObject({ viaFlyer: true, withAuthority: false });
+  });
+
+  it('an existing phone: the audit records the answer it was sent, though nothing is written to the contact', async () => {
+    const { app, world, capture } = harness();
+    world.contacts.push({
+      contactId: 'c-existing',
+      type: 'tenant',
+      status: 'searching',
+      phone: '+15550102000',
+      firstName: 'Keisha',
+      lastName: 'Jones',
+      housing_fair_welcomed: true,
+    } as ContactItem);
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ housingAuthority: 'Atlanta Housing Authority' }));
+    expect(res.status).toBe(200);
+    expect(world.contacts[0]?.housingAuthority).toBeUndefined();
+    expect(world.auditEvents.filter((e) => e.event_type === 'housing_fair_signup')).toEqual([
+      {
+        entityKey: 'contacts#c-existing',
+        event_type: 'housing_fair_signup',
+        payload: {
+          marker: expect.any(String),
+          isNew: false,
+          welcomeSent: false,
+          viaFlyer: false,
+          signupVersion: 2,
+          housingAuthority: 'Atlanta Housing Authority',
+        },
+      },
+    ]);
+    const lines = capture.lines.filter((l) => l['msg'] === 'housing-fair signup captured');
+    expect(lines[0]).toMatchObject({ isNew: false, withAuthority: true });
   });
 });

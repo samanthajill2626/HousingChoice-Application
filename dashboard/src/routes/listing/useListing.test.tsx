@@ -1,7 +1,17 @@
-import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { ApiError } from '../../api/index.js';
 import type { Contact, PlacementItem, UnitItem } from '../../api/index.js';
+
+// The property page's writes (the FW2-5 cases at the end render ListingDetail
+// with this real hook): the restore and the restore dialog's landlord list.
+const restoreUnit = vi.fn();
+const getAllContacts = vi.fn();
+// ListingDetail's contact lists (placement and tour names, the Add contact picker).
+const useContacts = vi.fn();
+vi.mock('../contacts/useContacts.js', () => ({ useContacts: (filter: string) => useContacts(filter) }));
 
 const getUnit = vi.fn();
 const getAllUnits = vi.fn();
@@ -26,10 +36,13 @@ vi.mock('../../api/index.js', async () => {
     getUnitSimilar: (...a: unknown[]) => getUnitSimilar(...a),
     getUnitActivity: (...a: unknown[]) => getUnitActivity(...a),
     getTours: (...a: unknown[]) => getTours(...a),
+    restoreUnit: (...a: unknown[]) => restoreUnit(...a),
+    getAllContacts: (...a: unknown[]) => getAllContacts(...a),
   };
 });
 
 import { sortToursForPanel, useListing } from './useListing.js';
+import { ListingDetail } from './ListingDetail.js';
 
 function Probe({ unitId }: { unitId: string }): React.JSX.Element {
   const s = useListing(unitId);
@@ -276,5 +289,106 @@ describe('useListing', () => {
 
     await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('ready'));
     expect(screen.getByTestId('roster').textContent).toBe('1');
+  });
+});
+
+// R2 code review, dashboard finding A1 (fix wave 2 FW2-5): the /listings/:unitId
+// element is not keyed, so a history move from property A to property B
+// re-renders the SAME page and this hook moves to B in place. A write started
+// on A (a restore, a status change, a roster write) that answers after the move
+// calls the setUnit it got for A. Bound to A, that setter must leave B's state
+// alone: stamping A's id over it left B deriving "loading" forever (the fetch
+// effect is keyed on the unitId and never re-runs) - the contact page's
+// useContact.setContact precedent.
+describe('useListing - a write that answers after a move to another property', () => {
+  const UNIT_A: UnitItem = { unitId: 'uA', landlordId: 'll1', status: 'available', address: { line1: '11 Oak Ave' } };
+  const UNIT_B: UnitItem = { unitId: 'uB', landlordId: 'll1', status: 'available', address: { line1: '22 Elm St' } };
+
+  /** Every read the hook makes, answered per property: `a` is A as stored. */
+  function answerReads(a: UnitItem): void {
+    getUnit.mockImplementation((id: string) => Promise.resolve(id === 'uB' ? UNIT_B : a));
+    getAllUnits.mockResolvedValue([a, UNIT_B]);
+    getAllPlacements.mockResolvedValue([]);
+    getContact.mockResolvedValue(LANDLORD);
+    getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitSimilar.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitActivity.mockRejectedValue(new ApiError(404, 'x', 'x'));
+  }
+
+  beforeEach(() => {
+    restoreUnit.mockReset();
+    getAllContacts.mockReset().mockResolvedValue([]);
+    useContacts.mockReset().mockReturnValue({ status: 'ready', contacts: [] });
+  });
+
+  it("the setter held for A is a no-op once the hook has moved to B - B stays ready and B's own", async () => {
+    answerReads(UNIT_A);
+    const { result, rerender } = renderHook(({ id }) => useListing(id), { initialProps: { id: 'uA' } });
+    await waitFor(() => expect(result.current.unit?.unitId).toBe('uA'));
+    const setUnitForA = result.current.setUnit;
+
+    rerender({ id: 'uB' });
+    await waitFor(() => expect(result.current.unit?.unitId).toBe('uB'));
+
+    // A's write answers now.
+    act(() => setUnitForA({ ...UNIT_A, status: 'occupied' }));
+    expect(result.current.status).toBe('ready');
+    expect(result.current.unit?.unitId).toBe('uB');
+
+    // Positive control: B's own setter still applies.
+    act(() => result.current.setUnit({ ...UNIT_B, status: 'occupied' }));
+    expect(result.current.status).toBe('ready');
+    expect(result.current.unit).toMatchObject({ unitId: 'uB', status: 'occupied' });
+  });
+
+  it("a restore through the landlord dialog that answers after Back to B leaves B's page rendered, not a spinner", async () => {
+    const user = userEvent.setup();
+    answerReads({ ...UNIT_A, deleted_at: '2026-06-19T00:00:00.000Z' });
+    let answerRestore: ((unit: UnitItem) => void) | undefined;
+    restoreUnit
+      .mockRejectedValueOnce(
+        new ApiError(409, 'restore_needs_landlord', 'restore_needs_landlord', { error: 'restore_needs_landlord' }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<UnitItem>((resolve) => {
+            answerRestore = resolve;
+          }),
+      );
+    let go: ((delta: number) => void) | undefined;
+    function HistoryProbe(): null {
+      const navigate = useNavigate();
+      go = (delta) => void navigate(delta);
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={['/listings/uB', '/listings/uA']} initialIndex={1}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+        </Routes>
+        <HistoryProbe />
+      </MemoryRouter>,
+    );
+
+    // On deleted A: the plain restore needs a landlord, so the dialog opens;
+    // "Restore without a landlord" is sent and left in flight.
+    await screen.findByRole('heading', { name: /11 Oak Ave/ });
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    const dialog = await screen.findByRole('dialog', { name: 'Restore property' });
+    await user.click(within(dialog).getByRole('button', { name: 'Restore without a landlord' }));
+    expect(restoreUnit).toHaveBeenLastCalledWith('uA', { landlordId: null });
+
+    // Back to B: the dialog closes (FW-11) and B loads.
+    act(() => go?.(-1));
+    expect(await screen.findByRole('heading', { name: /22 Elm St/ })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Restore property' })).not.toBeInTheDocument();
+
+    // A's restore answers now (A was restored): B's page stays.
+    await act(async () => {
+      answerRestore?.({ ...UNIT_A });
+    });
+    expect(screen.queryByRole('status', { name: 'Loading' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /22 Elm St/ })).toBeInTheDocument();
   });
 });

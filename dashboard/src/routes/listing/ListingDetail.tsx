@@ -45,14 +45,17 @@ import {
 import { BLANK, Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterRow, responseClass } from '../contact/Card.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { Modal } from '../contact/Modal.js';
+import { isCaseworkerContact } from '../contact/caseworkerRole.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { useListing } from './useListing.js';
+import { ROSTER_RETRY_COPY } from './rosterCopy.js';
 import { listingRoster, ROLE_LABEL, type RosterRow } from './buildListingFile.js';
 import { useContacts } from '../contacts/useContacts.js';
 import { tenantName } from '../placements/placementsFormat.js';
 import { ListingActionsMenu } from './ListingActionsMenu.js';
 import { ListingEditForm } from './ListingEditForm.js';
+import { RestoreLandlordDialog } from './RestoreLandlordDialog.js';
 import {
   authoritiesOf,
   buildListingFacts,
@@ -67,6 +70,7 @@ import {
 } from './listingFormat.js';
 import { formatDayDivider, formatTime } from '../contact/format.js';
 import { safeHttpUrl } from '../../lib/safeUrl.js';
+import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import styles from './ListingDetail.module.css';
 
 // Property-status -> the interactive status pill's tone. `available` is the one
@@ -119,8 +123,6 @@ const ROSTER_CONFLICT_COPY =
  *  actual landlordId. Point the operator to the explicit reassignment flow. */
 const LANDLORD_REASSIGNMENT_COPY =
   'This property already has a landlord of record - reassign it before choosing Landlord.';
-
-const ROSTER_RETRY_COPY = 'The property contacts changed - try that change again.';
 
 // Mirror of app/src/lib/unitMedia.ts UNIT_MEDIA_MAX (the dashboard has no import
 // path into the app lib). An abuse/runaway BACKSTOP, not a product limit; keep in
@@ -181,6 +183,22 @@ function photoUploadMessage(err: unknown): string {
   }
 }
 
+/** The stored landlord's name a 409 restore_needs_landlord carries, when it
+ *  names one (caseworker-integrity spec section 4 "Restore"). */
+function restoreLandlordName(err: ApiError): string | undefined {
+  const body = err.body;
+  if (body === null || typeof body !== 'object') return undefined;
+  const name = (body as Record<string, unknown>)['landlordName'];
+  return typeof name === 'string' && name.length > 0 ? name : undefined;
+}
+
+/** The deleted banner's sentence after the restore dialog's choice answered
+ *  409 restore_landlord_not_needed and the re-read property is still deleted
+ *  (caseworker-integrity spec revision 7 section 4 "Restore" and "Dashboard
+ *  copy for section 4"): the page's own sentence, not the shared helper's. */
+const RESTORE_LANDLORD_CHANGED_COPY =
+  "This property's landlord changed while you were choosing. Choose Restore again.";
+
 export function ListingDetail(): React.JSX.Element {
   const { unitId = '' } = useParams<{ unitId: string }>();
   const navigate = useNavigate();
@@ -202,6 +220,24 @@ export function ListingDetail(): React.JSX.Element {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // caseworker-integrity (spec section 4 "Restore"): set when a plain restore
+  // answered 409 restore_needs_landlord - opens the landlord dialog. It records
+  // the property it opened for and is RESET when the route's unitId moves on
+  // (R1 code review, dashboard finding 8): the /listings/:unitId element is not
+  // keyed, so a history move to another property re-renders this same
+  // instance, and the dialog must neither survive it nor post its choice
+  // against the other property. Reset during render (React's "adjust state
+  // when a prop changes"), so no frame shows the dialog over the wrong property.
+  const [restoreNeeds, setRestoreNeeds] = useState<{ unitId: string; landlordName?: string } | null>(null);
+  if (restoreNeeds !== null && restoreNeeds.unitId !== unitId) setRestoreNeeds(null);
+  // caseworker-integrity spec revision 7 section 4 "Restore" (final review
+  // round 2 R2-1): set when the dialog's choice answered 409
+  // restore_landlord_not_needed and the property is still deleted after the
+  // re-read - the deleted banner then says why the dialog closed. The next
+  // Restore press clears it; like restoreNeeds it records the property it was
+  // set for and is reset during render when the route's unitId moves on.
+  const [restoreNotice, setRestoreNotice] = useState<{ unitId: string } | null>(null);
+  if (restoreNotice !== null && restoreNotice.unitId !== unitId) setRestoreNotice(null);
   const [editing, setEditing] = useState(false);
   // The "Start placement" dialog, pre-filled+locked to this property's unit.
   const [startingPlacement, setStartingPlacement] = useState(false);
@@ -287,7 +323,11 @@ export function ListingDetail(): React.JSX.Element {
     contactsUnit !== null ? listingRoster(contactsUnit, state.landlord) : roster;
   /** Who OWNS the property (`unit.landlordId`) - never removable from the roster,
    *  and whoever inherits the primary-contact routing when the primary leaves. */
-  const landlordOfRecord = contactsUnit?.landlordId ?? unit.landlordId;
+  // An ownerless property (legacy, or restored without a landlord -
+  // caseworker-integrity section 4) has NO landlordId (UnitItem.landlordId is
+  // optional); read it as '' (the "no landlord" branch) so nothing below
+  // touches undefined.
+  const landlordOfRecord: string = contactsUnit?.landlordId ?? unit.landlordId ?? '';
   const landlordName = contactRows.find((r) => r.primaryContact)?.company ?? contactRows[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
   // The authorities whose vouchers this property accepts - ONE synthesized list
@@ -346,10 +386,20 @@ export function ListingDetail(): React.JSX.Element {
   const onRestore = (): void => {
     if (deleteBusy) return;
     setDeleteBusy(true);
+    // A new press answers for itself: the last landlord-changed sentence goes.
+    setRestoreNotice(null);
     void restoreUnit(unit.unitId)
       .then((updated) => setUnit(updated))
-      .catch(() => {
-        /* leave it deleted; the action re-enables for a retry */
+      .catch((err: unknown) => {
+        // The stored landlord can't stay this property's landlord (gone, or no
+        // longer a landlord): choose one - or none - in the dialog instead of
+        // a dead click (caseworker-integrity spec section 4 "Restore").
+        if (err instanceof ApiError && err.status === 409 && err.code === 'restore_needs_landlord') {
+          const landlordName = restoreLandlordName(err);
+          setRestoreNeeds({ unitId: unit.unitId, ...(landlordName !== undefined && { landlordName }) });
+          return;
+        }
+        /* any other failure: leave it deleted; the action re-enables for a retry */
       })
       .finally(() => setDeleteBusy(false));
   };
@@ -363,8 +413,12 @@ export function ListingDetail(): React.JSX.Element {
   const rosteredIds = new Set(contactRows.map((r) => r.contactId));
   /** Search candidates for "+ Add contact": every live contact NOT already on
    *  the roster (re-adding a rostered contact is a re-role, which the row's own
-   *  selector does). */
-  const addContactCandidates = contactsList.filter((c) => !rosteredIds.has(c.contactId));
+   *  selector does). Never a caseworker: a caseworker can't take a NEW seat on
+   *  a property's contact list (caseworker-integrity I4; the server refuses
+   *  with 409 contact_list_caseworker). */
+  const addContactCandidates = contactsList.filter(
+    (c) => !rosteredIds.has(c.contactId) && !isCaseworkerContact(c),
+  );
 
   /** The server's answer IS the new truth - apply it to the card AND the page. */
   const applyRosterUnit = (updated: UnitItem): void => {
@@ -399,6 +453,31 @@ export function ListingDetail(): React.JSX.Element {
         onSuccess?.();
       })
       .catch(async (err: unknown) => {
+        // The settle: re-read the property onto the card AND the page.
+        const settle = async (): Promise<void> => {
+          try {
+            applyRosterUnit(await getUnit(unit.unitId));
+          } catch {
+            /* the refetch is the settle; on failure the inline reason still stands */
+          }
+        };
+        // caseworker-integrity (spec section 4): a contact-type refusal
+        // (contact_list_caseworker, landlord_not_landlord) names its own reason.
+        // Mapped BEFORE the 409 catch-all below, whose copy would otherwise
+        // claim "landlord of record". It settles like the catch-all (final
+        // review A3, fix wave FWF-2): this request wrote nothing. These codes
+        // come from the route's own pre-checks with no race at all (an API
+        // caller, or a stale picker) as well as from the roster write, which
+        // answers them when the property changed after the route's read (a
+        // seat removed, the landlord cleared) - exactly when the card is
+        // stale. In the no-race case the extra re-read is harmless (final
+        // review round 2 R2-F5).
+        const typed = contactTypeErrorMessage(err);
+        if (typed !== null) {
+          setRosterError({ key, message: typed });
+          await settle();
+          return;
+        }
         const conflict = err instanceof ApiError && err.status === 409;
         setRosterError({
           key,
@@ -411,11 +490,7 @@ export function ListingDetail(): React.JSX.Element {
             : "Couldn't save that change - please try again.",
         });
         if (!conflict) return;
-        try {
-          applyRosterUnit(await getUnit(unit.unitId));
-        } catch {
-          /* the refetch is the settle; on failure the inline reason still stands */
-        }
+        await settle();
       })
       .finally(() => setRosterBusy(null));
   };
@@ -466,8 +541,26 @@ export function ListingDetail(): React.JSX.Element {
 
   /** Who the primary-contact routing lands on once `row` is gone: the landlord
    *  of record (the repo promotes them), or nobody when the property has no
-   *  landlordId - in which case tour/placement resolution falls back to the
-   *  landlord of record anyway (spec D3). */
+   *  landlordId. There is no further fallback: the server's property-contact
+   *  resolvers take the primary row, else the landlord of record, so with
+   *  neither they find no one and calls and new relay groups for the property
+   *  reach no one. On such a property (no primary contact, no landlord of
+   *  record) the routing comes back in one of three ways:
+   *  - a NEW contact typed landlord (a landlord, property manager or owner,
+   *    whatever its role) added to the contact list becomes its primary
+   *    contact automatically - the server decides it, while "+ Add contact"
+   *    still posts `primaryContact: false`. A new contact of any other type
+   *    (tenant, partner, unknown, team member) joins non-primary;
+   *  - a contact already on the list and typed landlord, re-roled to
+   *    Landlord, claims the empty landlord slot (it is not made primary; the
+   *    resolvers fall back to it as the landlord of record);
+   *  - otherwise only Make primary on someone on the list.
+   *  The sentence below is Cameron's ruled copy and stays as ruled: it names
+   *  the first and last ways, and its "a new contact is added" holds for a new
+   *  contact typed landlord only (caseworker-integrity spec section 4
+   *  "Contact list" auto-primary: revision 4, superseding planner rulings Q2
+   *  and Q3, narrowed by revision 5 - Cameron's Q4 ruling; R1 code review,
+   *  dashboard finding 1; R2 code review, dashboard finding A5). */
   const promotionNotice = (): string => {
     const promoted =
       landlordOfRecord.length > 0
@@ -475,7 +568,7 @@ export function ListingDetail(): React.JSX.Element {
         : undefined;
     return promoted !== undefined
       ? `${promoted} becomes the primary contact - calls and new relay groups for this property will go to them.`
-      : 'This property will have no primary contact - tours fall back to the landlord of record.';
+      : 'This property will have no primary contact and has no landlord of record, so calls and new relay groups for it will reach no one until someone on its contact list is made the primary contact or a new contact is added.';
   };
 
   const onAddContact = (): void => {
@@ -687,6 +780,12 @@ export function ListingDetail(): React.JSX.Element {
           <span>
             This property is <strong>deleted</strong> - hidden from the properties and the
             landlord&apos;s file. Its data is retained.
+            {restoreNotice !== null ? (
+              <>
+                {' '}
+                <span>{RESTORE_LANDLORD_CHANGED_COPY}</span>
+              </>
+            ) : null}
           </span>
           <Button variant="secondary" size="sm" type="button" onClick={onRestore} disabled={deleteBusy}>
             Restore
@@ -1348,6 +1447,56 @@ export function ListingDetail(): React.JSX.Element {
             </p>
           ) : null}
         </Modal>
+      ) : null}
+
+      {/* caseworker-integrity (spec section 4 "Restore"): the stored landlord
+          can't stay this property's landlord - choose one, or restore
+          without. The restored unit carries its enriched roster, so it is
+          applied to the Contacts card too. */}
+      {restoreNeeds !== null ? (
+        <RestoreLandlordDialog
+          unitId={unit.unitId}
+          {...(restoreNeeds.landlordName !== undefined && { landlordName: restoreNeeds.landlordName })}
+          onRestored={(updated) => {
+            setRestoreNeeds(null);
+            applyRosterUnit(updated);
+          }}
+          onConflict={() => {
+            void getUnit(unit.unitId)
+              .then((fresh) => {
+                // The re-read is the new truth for the page AND the Contacts
+                // card (its landlord row may have changed) - the same settle
+                // runRosterWrite's 409 path uses (plan review R1 row 5).
+                applyRosterUnit(fresh);
+                if (!(typeof fresh.deleted_at === 'string' && fresh.deleted_at.length > 0)) {
+                  setRestoreNeeds(null);
+                }
+              })
+              .catch(() => {
+                /* best-effort re-read; the dialog's retry message stands */
+              });
+          }}
+          onLandlordNotNeeded={() => {
+            // The plain restore applies now (spec revision 7; final review
+            // round 2 R2-1): close the dialog and re-read, the same settle as
+            // onConflict - and never re-run the plain restore from here, which
+            // would silently override the choice staff just made.
+            setRestoreNeeds(null);
+            void getUnit(unit.unitId)
+              .then((fresh) => {
+                applyRosterUnit(fresh);
+                if (typeof fresh.deleted_at === 'string' && fresh.deleted_at.length > 0) {
+                  setRestoreNotice({ unitId: unit.unitId });
+                }
+              })
+              .catch(() => {
+                // Best-effort re-read: the page still shows the property
+                // deleted, so the banner still says why the dialog closed.
+                setRestoreNotice({ unitId: unit.unitId });
+              });
+          }}
+          onClose={() => setRestoreNeeds(null)}
+        />
       ) : null}
 
       {/* Removing the primary contact re-points live routing, so it NAMES the

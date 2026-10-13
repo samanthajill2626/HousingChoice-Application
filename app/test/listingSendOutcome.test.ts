@@ -104,6 +104,13 @@ describe('deriveListingSendOutcome - precedence not_interested > interested > re
 // /api/tours does not). Now a tour CREATED after the decline keeps it superseded
 // whatever became of the tour, and a cancel / no-show / not-a-fit MARK never
 // supersedes on its own. Raised for Cameron as reversible (one function).
+// KNOWN LIMIT (spec 14.7, review round 3 A R3-1): only a tour's CREATION is
+// durable. A qualifying tour created BEFORE the decline and rescheduled or
+// reopened AFTER it supersedes the decline while it qualifies, but
+// `lastMarkedAt` is one field, so a later cancel / no-show / not-a-fit mark
+// overwrites the reschedule and the decline is effective again (the last
+// case below). A durable revival would need the tours PATCH to clear the
+// decline - a product call, not this function's.
 describe('tour supersession of a decline is durable (spec 14.7 PIN - replaces the round-1 ADV-1 PIN)', () => {
   const BEFORE_DECLINE = '2026-06-30T18:00:00.000Z'; // T0 < T1
   const DECLINED = '2026-07-01T12:00:00.000Z'; // T1
@@ -145,6 +152,16 @@ describe('tour supersession of a decline is durable (spec 14.7 PIN - replaces th
     const tours = [pairTour({ status: 'scheduled', createdAt: BEFORE_DECLINE, lastMarkedAt: MARKED, updatedAt: MARKED })];
     expect(effectiveDecline(row, deriveTourActivityAt(tours))).toBe(false);
     expect(outcomeWith(tours)).toBe('interested');
+  });
+
+  it('known limit (A R3-1): a tour created T0 < T1, rescheduled after T1 -> interested; then canceled -> not_interested (the cancel overwrites the one lastMarkedAt)', () => {
+    const RESCHEDULED = '2026-07-03T12:00:00.000Z'; // > T1
+    const rescheduled = [pairTour({ status: 'scheduled', createdAt: BEFORE_DECLINE, lastMarkedAt: RESCHEDULED, updatedAt: RESCHEDULED })];
+    expect(effectiveDecline(row, deriveTourActivityAt(rescheduled))).toBe(false);
+    expect(outcomeWith(rescheduled)).toBe('interested');
+    const canceled = [pairTour({ status: 'canceled', createdAt: BEFORE_DECLINE, lastMarkedAt: MARKED, updatedAt: MARKED })];
+    expect(effectiveDecline(row, deriveTourActivityAt(canceled))).toBe(true);
+    expect(outcomeWith(canceled)).toBe('not_interested');
   });
 });
 

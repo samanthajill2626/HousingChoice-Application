@@ -80,7 +80,7 @@ export interface UnmatchedEmailRouterDeps {
   unmatchedEmailRepo?: UnmatchedEmailRepo;
   contactsRepo?: Pick<
     ContactsRepo,
-    'getById' | 'findByEmail' | 'addEmail' | 'create' | 'touchEmailLastSeen'
+    'getById' | 'findByEmail' | 'addEmail' | 'create' | 'touchEmailLastSeen' | 'findByPhone' | 'touchLastHeardFrom'
   >;
   auditRepo?: Pick<AuditRepo, 'append'>;
   events?: EventBus;

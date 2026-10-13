@@ -66,6 +66,8 @@ import type { MediaStore } from '../adapters/mediaStore.js';
 import { contactEmails, contactPhones, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import type { ConversationItem, ConversationsRepo, ConversationType } from '../repos/conversationsRepo.js';
 import type { MediaAttachment, MessageAuthor, MessagesRepo, NewMessage } from '../repos/messagesRepo.js';
+import { splitTsMsgId } from '../repos/messagesRepo.js';
+import { attributeInbound, repoLookup } from '../lib/heardFrom.js';
 import type { ExtractionRepo } from '../repos/extractionRepo.js';
 import type { ContactCaptureService } from './contactCapture.js';
 import type { PushService } from './pushService.js';
@@ -209,7 +211,7 @@ export interface InboundEmailDeps {
     MessagesRepo,
     'append' | 'getByRfcMessageId' | 'putJobExecutionMarker' | 'getJobExecutionMarker'
   >;
-  contacts: Pick<ContactsRepo, 'findByEmail' | 'getById' | 'touchEmailLastSeen'>;
+  contacts: Pick<ContactsRepo, 'findByEmail' | 'findByPhone' | 'getById' | 'touchEmailLastSeen' | 'touchLastHeardFrom'>;
   extraction: Pick<ExtractionRepo, 'scheduleExtraction'>;
   events: EventBus;
   /**
@@ -808,6 +810,36 @@ export async function ingestInboundEmail(
           'inbound email lastSeen touch failed - stale',
         );
       }
+    }
+
+    // Last heard from (spec 5.1 / 14.2): the WINNER's side effects only (a
+    // deduped delivery returned above). An unverified address
+    // (`email_new_address`) touches nobody; a VERIFIED sender whose contact is
+    // an unknown-typed stub or a team member DOES count (author 'unknown' is
+    // not the test). Attribution runs on the persisted thread (the touch's
+    // snapshot, else a re-read). A reingest carries the mail's original time;
+    // the writer is forward-only. Best-effort: never fails the ingest.
+    try {
+      const heardThread = touched ?? (await deps.conversations.getById(conversationId));
+      const heardFromId =
+        heardThread === undefined
+          ? undefined
+          : await attributeInbound(
+              { direction: 'inbound', type: 'email', ...(flagNewAddress && { email_new_address: true }) },
+              heardThread,
+              repoLookup(deps.contacts, threadContact !== undefined ? new Map([[fromNorm, threadContact]]) : undefined),
+            );
+      if (heardFromId !== undefined) {
+        const outcome = await deps.contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+        if (outcome === 'failed') {
+          log.error({ bucket, key, conversationId }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+        }
+      }
+    } catch (err) {
+      log.error(
+        { bucket, key, conversationId, ...errFields(err) },
+        'last_heard_from touch failed - message persisted, last_heard_from stale',
+      );
     }
 
     // Conversation fact extraction: the EXACT twilio predicate - tenant/unknown

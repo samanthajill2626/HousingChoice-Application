@@ -283,8 +283,12 @@ The public flyer page (`/p/:unitId`) does not change (tracker #13 owns it).
     the one-time cleanup.
   - Safe to re-run at any time and in either order around the deploy: it
     never touches a contact holding an authority, the marker, a post-change
-    sign-up, a history of an authority, an earlier-run exclusion, or a
-    pending housing authority suggestion.
+    sign-up, a history of an authority, an earlier-run exclusion, a pending
+    housing authority suggestion, a suggestion accept or dismiss in
+    progress, or a staff dismissal of an Atlanta Housing Authority
+    suggestion. (Accepted edge, planner 2026-10-13: a staff claim that
+    commits in the milliseconds between the run's in-progress read and its
+    pending-suggestion read is not seen.)
   - Exit codes: 0 completed clean; 1 refused, completed with failures, or the
     target could not be resolved; 2 usage.
   - No agent runs it against dev or prod. An agent rehearses it only with

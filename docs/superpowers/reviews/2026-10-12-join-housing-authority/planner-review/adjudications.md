@@ -106,3 +106,26 @@ Fix wave 2 (backfill script, its test, RUNBOOK only):
 - FW2-3 (B4): leave out a candidate whose housingAuthority suggestion
   resolution record is active.
 - FW2-4 (B5): the post-write audit warning says "may not have been written".
+
+## Fix wave 2 handback and the main merge (planner, 2026-10-13)
+
+- Fix wave 2 (FW2-1..FW2-4) shipped @61d96320; its fresh review
+  (`fw2-review.md`) found 0 MEDIUM or higher. Outside docs/ it changed only
+  the backfill script, its test and RUNBOOK.md.
+- fw2 L1 (a staff claim committing in the milliseconds between the
+  in-progress read and the pending-suggestion read is missed; swapping the
+  two reads closes it): ACCEPTED AS AN EDGE, not fixed. The read order is
+  pinned by the test file's GetItem-order assertions and by the documented
+  reason precedence, so the swap is a wave of its own; the window is
+  milliseconds inside a one-time operator script. Recorded in spec D10.
+- fw2 INFO (the spec's "Safe to re-run" bullet listed only the revision-5
+  set): fixed in the spec.
+- Cameron merged fix/caseworker-integrity and fix/public-rate-limit-key into
+  main and asked for the merge: done @0a36e677 (0 behind). Conflicts were
+  docs only (the two issue files; both sides kept). Checked for meaning-level
+  clashes: main adds no contact audit event type and no new housingAuthority
+  writer (the backfill's audit list stays complete), the suggestion
+  resolution repo's `get` / `state: 'active'` API used by FW2-3 is
+  unchanged, and the list read's limiter inherits the new rate-limit key
+  through the default resolver. All five gates and the lane rehearsal
+  follow on the merged tip.

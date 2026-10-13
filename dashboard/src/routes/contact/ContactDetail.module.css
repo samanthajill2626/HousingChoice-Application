@@ -95,6 +95,14 @@
   white-space: nowrap;
 }
 
+/* "Last heard from" (spec 2026-10-12 5.7): its own span on the facts line,
+ * in the header facts token it inherits. The label never wraps internally;
+ * an over-long line is still clipped (with an ellipsis) at its END by
+ * .facts, so a very long facts string can hide this span on a narrow pane. */
+.heardFrom {
+  white-space: nowrap;
+}
+
 /* Soft-deleted header badge — a prominent red so the deleted state reads at a
  * glance (deletion is reversible, but this should not be easy to miss). */
 .deletedBadge {

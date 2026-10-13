@@ -15,6 +15,7 @@ import {
 } from '../../ui/imageViewer/ImageViewer.testUtils.js';
 import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
 import { TYPE_CHANGE_LANDLORD_SENTENCE } from '../../lib/holdingRefusals.js';
+import { formatInboxTimeFull } from '../inbox/inboxTime.js';
 
 const getContact = vi.fn();
 const getContactTimeline = vi.fn();
@@ -2854,6 +2855,27 @@ describe('ContactDetail - caseworkers (spec 2026-10-06 D16, D19, D21, D22)', () 
     expect(
       await within(header(second.container)).findByText('Voucher 1BR - Atlanta Housing Authority'),
     ).toBeInTheDocument();
+  });
+
+  it('header: Last heard from is its own span on the facts line, for every contact type (spec 2026-10-12 5.7, F6)', async () => {
+    const at = '2024-03-05T12:00:00.000Z';
+    getContact.mockResolvedValue({ ...TENANT, housingAuthority: 'Atlanta Housing Authority', last_heard_from_at: at });
+    const first = renderAt('k1');
+    await screen.findByText('Tasha Williams');
+    const band = within(header(first.container));
+    // buildFacts()'s pinned string is untouched (the Voucher 1BR pin's shape).
+    expect(band.getByText('Voucher 2BR - Atlanta Housing Authority')).toBeInTheDocument();
+    const heard = band.getByText('Last heard from Mar 5, 2024');
+    expect(heard.tagName).toBe('SPAN');
+    expect(heard).toHaveAttribute('title', formatInboxTimeFull(at));
+    first.unmount();
+
+    getContact.mockResolvedValue(PARTNER);
+    const second = renderAt('p1');
+    await screen.findByText('Renee Carter');
+    // Contract N1: "Never" renders with NO title attribute (never title="").
+    expect(within(header(second.container)).getByText('Last heard from Never')).not.toHaveAttribute('title');
+    expect(within(header(second.container)).getByText('Hope Atlanta')).toBeInTheDocument();
   });
 
   it.each([

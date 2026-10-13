@@ -72,6 +72,7 @@ import { UnitCreateForm } from '../listing/UnitCreateForm.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { orgErrorCopy } from '../orgs/orgCopy.js';
 import { typeChangeRefusalsFrom } from '../../lib/holdingRefusals.js';
+import { formatHeardFrom } from '../../lib/heardFrom.js';
 import { CallMenu } from './CallMenu.js';
 import { useMe } from '../../app/useMe.js';
 import { VOICE_TAB_PATH } from '../settings/settingsTabs.js';
@@ -981,7 +982,18 @@ export function ContactDetail(): React.JSX.Element {
               <span className={styles.doNotContact}>📵 Do Not Call</span>
             ) : null}
           </div>
-          {facts ? <div className={styles.facts}>{facts}</div> : null}
+          {/* The facts line always renders now: "Last heard from" (spec
+              2026-10-12 5.7) is its own span here for EVERY contact type -
+              never appended to buildFacts()'s string, which tests pin exactly. */}
+          <div className={styles.facts}>
+            {facts ? (
+              <>
+                <span>{facts}</span>
+                {' - '}
+              </>
+            ) : null}
+            <LastHeardFrom iso={contact.last_heard_from_at} />
+          </div>
           {nameChipFor('firstName')}
           {nameChipFor('lastName')}
         </div>
@@ -1593,4 +1605,17 @@ function extractionRefusalCopy(err: unknown): string {
     default:
       return 'Extraction could not be started - try again.';
   }
+}
+
+/** "Last heard from <label>" on the header facts line (spec 2026-10-12 5.7,
+ *  14.5 F5/F6). The header refreshes on NAVIGATION, never live (useContact
+ *  fetches once per id), so the clock is captured once per mount. */
+function LastHeardFrom({ iso }: { iso: string | undefined }): React.JSX.Element {
+  const [now] = useState(() => new Date());
+  const { label, title } = formatHeardFrom(iso, now);
+  return (
+    <span className={styles.heardFrom} {...(title !== '' && { title })}>
+      Last heard from {label}
+    </span>
+  );
 }

@@ -75,9 +75,12 @@ function FollowUpRow({
     setError(null);
     try {
       const { row } = await setListingSendOutcome(item.unitId, item.contactId, outcome);
-      if (outcome === 'clear') onUnresolve();
-      else if (outcome === 'not_interested') onResolve({ kind: 'not_interested' });
-      else onResolve({ kind: 'interested', ...(row.tour !== undefined && { tour: row.tour }) });
+      // Review B R2-4: the route re-projects the row so callers show the
+      // truth (another staff member's click may have landed meanwhile), so
+      // the row resolves from what it ANSWERED, never from what was asked.
+      if (row.outcome === 'interested') onResolve({ kind: 'interested', ...(row.tour !== undefined && { tour: row.tour }) });
+      else if (row.outcome === 'not_interested') onResolve({ kind: 'not_interested' });
+      else onUnresolve();
     } catch (err) {
       setError(outcomeErrorCopy(err));
     } finally {

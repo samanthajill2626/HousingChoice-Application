@@ -122,9 +122,14 @@ describe('FollowUpView - grouping and rows', () => {
 });
 
 describe('FollowUpView - actions', () => {
+  // Review B R2-4: the view resolves a row from the RETURNED row's outcome,
+  // so every answer below carries the outcome the route would re-project
+  // (knowing rewrite: these mocks used to answer a bare `{ row: {} }`).
   it('Not interested marks the row and drops the count; Undo clears it back', async () => {
     const u = userEvent.setup();
-    setListingSendOutcome.mockResolvedValue({ row: {} });
+    setListingSendOutcome
+      .mockResolvedValueOnce({ row: { outcome: 'not_interested' } })
+      .mockResolvedValueOnce({ row: { outcome: 'no_reply' } });
     renderView([item()]);
     await u.click(await screen.findByRole('button', { name: 'Mark Dario Vance not interested in 672 Cameron Alexander Blvd A' }));
     expect(setListingSendOutcome).toHaveBeenCalledWith('u1', 'c1', 'not_interested');
@@ -145,7 +150,7 @@ describe('FollowUpView - actions', () => {
 
   it('an actioned row stays IN PLACE for the session and leaves the list on the NEXT load', async () => {
     const u = userEvent.setup();
-    setListingSendOutcome.mockResolvedValue({ row: {} });
+    setListingSendOutcome.mockResolvedValue({ row: { outcome: 'not_interested' } });
     renderView([item(), MARCUS]);
     await u.click(await screen.findByRole('button', { name: /Mark Dario Vance not interested/ }));
     // In place: still listed, now with Undo; no refetch on an action.
@@ -162,7 +167,7 @@ describe('FollowUpView - actions', () => {
 
   it('Interested (route) records it and shows the tour chip', async () => {
     const u = userEvent.setup();
-    setListingSendOutcome.mockResolvedValue({ row: { tour: { tourId: 't1', state: 'requested' } } });
+    setListingSendOutcome.mockResolvedValue({ row: { outcome: 'interested', tour: { tourId: 't1', state: 'requested' } } });
     renderView([item()]);
     await u.click(await screen.findByRole('button', { name: 'Mark Dario Vance interested in 672 Cameron Alexander Blvd A' }));
     expect(setListingSendOutcome).toHaveBeenCalledWith('u1', 'c1', 'interested');
@@ -175,13 +180,50 @@ describe('FollowUpView - actions', () => {
 
   it('Interested (route) with no tour on the response shows the chip "Interested"', async () => {
     const u = userEvent.setup();
-    setListingSendOutcome.mockResolvedValue({ row: {} });
+    setListingSendOutcome.mockResolvedValue({ row: { outcome: 'interested' } });
     renderView([item()]);
     await u.click(await screen.findByRole('button', { name: 'Mark Dario Vance interested in 672 Cameron Alexander Blvd A' }));
     const row = rowOf('Dario Vance');
     await waitFor(() => expect(within(row).queryByRole('button', { name: /interested in/ })).toBeNull());
     expect(within(row).getByText('Interested')).toBeInTheDocument();
     expect(within(row).queryByRole('link', { name: /^Tour / })).toBeNull();
+  });
+
+  // Review B R2-4: the route re-projects the row so callers show the truth;
+  // the view resolves from what it ANSWERED, not from what the click asked.
+  it('Interested answered not_interested (another staff member re-declined meanwhile) shows Not interested + Undo', async () => {
+    const u = userEvent.setup();
+    setListingSendOutcome.mockResolvedValue({ row: { outcome: 'not_interested', declined: { at: '2026-10-12T14:00:00.000Z', by: 'staff' } } });
+    renderView([item()]);
+    await u.click(await screen.findByRole('button', { name: 'Mark Dario Vance interested in 672 Cameron Alexander Blvd A' }));
+    const row = rowOf('Dario Vance');
+    expect(await within(row).findByRole('button', { name: 'Undo not interested for Dario Vance' })).toBeInTheDocument();
+    expect(within(row).getByText('Not interested')).toBeInTheDocument();
+    expect(within(row).queryByText('Interested')).toBeNull();
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('0 waiting');
+  });
+
+  it('Not interested answered interested (a tour superseded it) shows the tour chip, no Undo', async () => {
+    const u = userEvent.setup();
+    setListingSendOutcome.mockResolvedValue({ row: { outcome: 'interested', tour: { tourId: 't9', state: 'scheduled' } } });
+    renderView([item()]);
+    await u.click(await screen.findByRole('button', { name: 'Mark Dario Vance not interested in 672 Cameron Alexander Blvd A' }));
+    const row = rowOf('Dario Vance');
+    expect(await within(row).findByRole('link', { name: 'Tour scheduled' })).toHaveAttribute('href', '/tours/t9');
+    expect(within(row).queryByRole('button', { name: /Undo/ })).toBeNull();
+  });
+
+  it('an action answered with a WAITING outcome leaves the row waiting (counted, with its actions)', async () => {
+    const u = userEvent.setup();
+    setListingSendOutcome.mockResolvedValue({ row: { outcome: 'no_reply' } });
+    renderView([item()]);
+    await u.click(await screen.findByRole('button', { name: 'Mark Dario Vance not interested in 672 Cameron Alexander Blvd A' }));
+    await waitFor(() => expect(setListingSendOutcome).toHaveBeenCalledTimes(1));
+    const row = rowOf('Dario Vance');
+    await waitFor(() => expect(within(row).getByRole('button', { name: 'Mark Dario Vance not interested in 672 Cameron Alexander Blvd A' })).toBeEnabled());
+    expect(within(row).queryByRole('button', { name: /Undo/ })).toBeNull();
+    expect(within(row).getByText('No reply yet, 10 days')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('1 waiting');
   });
 
   it('Interested (form - no tour type on the property) opens the tour form, no API call', async () => {
@@ -247,7 +289,7 @@ describe('FollowUpView - actions', () => {
     await u.click(await screen.findByRole('button', { name: /Mark Dario Vance not interested/ }));
     expect(screen.getByRole('button', { name: /Mark Dario Vance interested/ })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Text Dario Vance' })).toBeDisabled();
-    release({ row: {} });
+    release({ row: { outcome: 'not_interested' } });
     // Adjudication F10: the Undo button proves the resolution landed.
     expect(await within(rowOf('Dario Vance')).findByRole('button', { name: 'Undo not interested for Dario Vance' })).toBeEnabled();
   });

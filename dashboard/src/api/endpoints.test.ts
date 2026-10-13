@@ -48,6 +48,7 @@ import {
   setPlacementFollowUp,
   clearPlacementFollowUp,
   restoreUnit,
+  setListingSendOutcome,
   setListingStatus,
   setTenantStatus,
   transitionPlacement,
@@ -815,4 +816,14 @@ it('restoreUnit POSTs no body by default, and { landlordId } only when given (ca
     body: { landlordId: null },
   });
   expect(u).toEqual({ unitId: 'u1', status: 'available' });
+});
+
+it('setListingSendOutcome POSTs the outcome and returns the { row } body as-is (head 3.4 #4)', async () => {
+  vi.mocked(request).mockResolvedValueOnce({ row: { contactId: 'c 1', unitId: 'u1', outcome: 'not_interested' } });
+  const res = await setListingSendOutcome('u1', 'c 1', 'not_interested');
+  expect(request).toHaveBeenCalledWith('/api/units/u1/recipients/c%201/outcome', {
+    method: 'POST',
+    body: { outcome: 'not_interested' },
+  });
+  expect(res).toEqual({ row: { contactId: 'c 1', unitId: 'u1', outcome: 'not_interested' } });
 });

@@ -2959,6 +2959,10 @@ export interface TourSignal {
   tourId: string;
   state: TourSignalState;
 }
+/** last-heard-from spec 5.4 - hand-mirrored from app/src/lib/listingSendOutcome.ts
+ *  (independent types; the lockstep pin is each side's tsc plus the route tests). */
+export type ListingSendOutcome = 'no_reply' | 'replied' | 'interested' | 'not_interested';
+export type InterestedMode = 'route' | 'form';
 export interface ListingSendRow {
   contactId: string;
   /** Denormalized tenant display name (server contacts join). HONEST - absent
@@ -2969,7 +2973,8 @@ export interface ListingSendRow {
   via: 'broadcast' | 'individual';
   broadcastId?: string;
   /** The pairing's most-progressed tour, when one qualifies - powers the roster
-   *  tour chip. Absent when no qualifying tour exists (the row renders no chip). */
+   *  tour chip. Absent when no qualifying tour exists (the row renders no chip).
+   *  Never on a partner row (the server omits it, spec 14.3 B11). */
   tour?: TourSignal;
   /** caseworkers D20 (plan 3.7): the recipient's contact type - on the property
    *  "Sent to" rows ONLY (GET /api/units/:id/recipients), absent when the
@@ -2977,6 +2982,20 @@ export interface ListingSendRow {
   type?: ContactType;
   /** caseworkers D20: the recipient's role, when it holds text (same rules). */
   role?: string;
+  /** last-heard-from spec 5.4: the recipient's last inbound text/call/email. */
+  lastHeardFromAt?: string;
+  /** The derived send outcome; `interested` means `tour` is set. */
+  outcome: ListingSendOutcome;
+  /** Present only while the decline is effective; `engine` renders "(auto)". */
+  declined?: { at: string; by: 'staff' | 'engine' };
+  /** false on a non-tenant or missing recipient: no Interested action. */
+  interestedSupported: boolean;
+  /** Property "Sent to" rows only: 'route' = one click creates the tour. */
+  interestedMode?: InterestedMode;
+  /** Property "Sent to" rows only: the recipient can be texted (spec 5.5 grouping). */
+  eligible?: boolean;
+  /** The contact row is gone: no actions, the NOT ELIGIBLE group. */
+  recipientMissing?: boolean;
 }
 
 /** Result of POST /api/conversations/:id/messages (legacy reuse). */

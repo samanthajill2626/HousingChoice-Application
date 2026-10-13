@@ -166,7 +166,7 @@ describe('TenantFile', () => {
     renderIt({
       listingsSentPending: false,
       listingsSent: [
-        { contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast' },
+        { contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true },
       ],
     });
     // The sent row's identity links to the LISTING route (placements/tours link to
@@ -190,6 +190,8 @@ describe('TenantFile', () => {
           sentAt: '2026-06-30T10:00:00Z',
           via: 'broadcast',
           tour: { tourId: 'tour-77', state: 'scheduled' },
+          outcome: 'interested',
+          interestedSupported: true,
         },
       ],
     });
@@ -209,9 +211,9 @@ describe('TenantFile', () => {
         { unitId: 'u3', landlordId: 'L1', status: 'available', address: { line1: '3 Peachtree' } },
       ],
       listingsSent: [
-        { contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'individual', tour: { tourId: 't-a', state: 'requested' } },
-        { contactId: 'T1', unitId: 'u2', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tour: { tourId: 't-b', state: 'scheduled' } },
-        { contactId: 'T1', unitId: 'u3', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tour: { tourId: 't-c', state: 'toured' } },
+        { contactId: 'T1', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'individual', tour: { tourId: 't-a', state: 'requested' }, outcome: 'interested', interestedSupported: true },
+        { contactId: 'T1', unitId: 'u2', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tour: { tourId: 't-b', state: 'scheduled' }, outcome: 'interested', interestedSupported: true },
+        { contactId: 'T1', unitId: 'u3', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tour: { tourId: 't-c', state: 'toured' }, outcome: 'interested', interestedSupported: true },
       ],
     });
     expect(screen.getByRole('link', { name: 'Tour requested' })).toHaveAttribute('href', '/tours/t-a');
@@ -237,6 +239,8 @@ describe('TenantFile', () => {
       contactId: 'T1',
       via: 'broadcast',
       sentAt: '2026-07-01T12:00:00.000Z',
+      outcome: 'no_reply',
+      interestedSupported: true,
     });
     renderIt({
       listingsSentPending: false,
@@ -256,6 +260,8 @@ describe('TenantFile', () => {
       contactId: 'T1',
       via: 'broadcast',
       sentAt: '2026-07-01T12:00:00.000Z',
+      outcome: 'no_reply',
+      interestedSupported: true,
     });
     renderIt({ listingsSentPending: false, listingsSent: [send('u1'), send('u2')] });
     expect(screen.getByRole('heading', { name: /Properties sent/ })).toHaveTextContent(
@@ -709,8 +715,8 @@ describe('PartnerFile - Properties sent (caseworkers D20)', () => {
   it('lists each sent property linking to it, WITHOUT a tour chip even when the row carries one (ruling R3-F5)', () => {
     renderSent({
       listingsSent: [
-        { contactId: 'P2', unitId: 'u1', sentAt: '2026-07-01T12:00:00.000Z', via: 'broadcast', tour: { tourId: 't-old', state: 'toured' } },
-        { contactId: 'P2', unitId: 'u-missing', sentAt: '2026-06-30T12:00:00.000Z', via: 'broadcast' },
+        { contactId: 'P2', unitId: 'u1', sentAt: '2026-07-01T12:00:00.000Z', via: 'broadcast', tour: { tourId: 't-old', state: 'toured' }, outcome: 'no_reply', interestedSupported: false },
+        { contactId: 'P2', unitId: 'u-missing', sentAt: '2026-06-30T12:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: false },
       ],
     });
     expect(screen.getByRole('link', { name: '1450 Joseph Blvd, Atlanta, GA' })).toHaveAttribute('href', '/listings/u1');

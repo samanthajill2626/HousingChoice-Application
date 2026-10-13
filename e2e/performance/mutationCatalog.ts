@@ -81,6 +81,7 @@ export const DASHBOARD_MUTATION_CATALOG: readonly DashboardMutationCatalogEntry[
   entry(ENDPOINTS, 'restoreUnit', 'request:POST', '/api/units/:unitId/restore'),
   entry(ENDPOINTS, 'addUnitContact', 'request:POST', '/api/units/:unitId/contacts'),
   entry(ENDPOINTS, 'removeUnitContact', 'request:DELETE', '/api/units/:unitId/contacts/:contactId'),
+  entry(ENDPOINTS, 'setListingSendOutcome', 'request:POST', '/api/units/:unitId/recipients/:contactId/outcome'),
   entry(ENDPOINTS, 'presignUnitPhotos', 'request:POST', '/api/units/:unitId/photos/presign'),
   entry(ENDPOINTS, 'uploadToPresignedPost', 'xhr_open:POST', 'external_presigned_storage', 'workflow_only', 'outside_interception'),
   entry(ENDPOINTS, 'uploadToPresignedPost', 'fetch:POST', 'external_presigned_storage', 'workflow_only', 'outside_interception'),

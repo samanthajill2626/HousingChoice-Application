@@ -30,6 +30,9 @@ describe('request URL sanitization', () => {
     ['/api/placements/placement-123/history?limit=50', '/api/placements/:placementId/history', ['limit']],
     ['/api/conversations/conv-123/scheduled', '/api/conversations/:conversationId/scheduled', []],
     ['/api/broadcasts/bcast-123/results', '/api/broadcasts/:broadcastId/results', []],
+    // last-heard-from 5.6: the literal segment outranks /api/broadcasts/:broadcastId.
+    ['/api/broadcasts/follow-ups', '/api/broadcasts/follow-ups', []],
+    ['/api/broadcasts/bcast-123', '/api/broadcasts/:broadcastId', []],
     ['/api/inbox/contact-123/read', '/api/inbox/:contactId/read', []],
     ['/api/inbox/read', '/api/inbox/read', []],
     ['/api/unmatched-email/um-0123456789abcdef0123456789abcdef/read', '/api/unmatched-email/:unmatchedId/read', []],

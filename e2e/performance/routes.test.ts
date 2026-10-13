@@ -79,7 +79,9 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
   '/contacts/landlords': CONTACT_SHAPES,
   '/contacts/unknown': CONTACT_SHAPES,
   '/contacts/deleted': CONTACT_DELETED_SHAPES,
-  '/listings': UNIT_SHAPES,
+  // last-heard-from 5.6: the Active view's "<n> waiting" counts (useFollowUpCounts)
+  // read the follow-ups list on mount; the Deleted view never does.
+  '/listings': [...UNIT_SHAPES, '/api/broadcasts/follow-ups?#required'],
   '/listings/deleted': UNIT_DELETED_SHAPES,
   '/tours': [
     '/api/tours?from&to#required', '/api/tours?status#required', ...CONTACT_SHAPES,
@@ -106,7 +108,9 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
     '/api/unmatched-email?filter#required',
     ...CONTACT_SHAPES.map((value) => value.replace('#required', '#conditional')),
   ],
-  '/broadcasts': ['/api/broadcasts?limit#required'],
+  // last-heard-from 5.6: Matching reads the follow-ups list on mount whatever
+  // tab is active (the Follow up tab's count).
+  '/broadcasts': ['/api/broadcasts?limit#required', '/api/broadcasts/follow-ups?#required'],
   '/settings/team': ['/api/users?#required'],
   '/settings/templates': ['/api/settings?#required'],
   '/settings/notifications': [],

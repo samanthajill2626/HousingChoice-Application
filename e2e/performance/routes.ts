@@ -301,6 +301,14 @@ function inboxGets(requestClass: Extract<InboxRequestClass, `inbox_page_${string
 }
 const EMAIL_GETS = Object.freeze([required('/api/unmatched-email', ['filter']), ...CONTACT_LIVE_WALK]);
 const BROADCAST_LIST_GETS = Object.freeze([required('/api/broadcasts', ['limit'])]);
+// last-heard-from 5.6: the waiting list. Matching reads it on mount whatever
+// tab is active (the Follow up tab's count), and the Properties ACTIVE view
+// reads it for its "<n> waiting" pills - the Deleted view does not (the hook
+// is disabled there). UNIT_LIVE_WALK stays as it is (adjudication matching-F2):
+// the Tours and Placements surfaces share it and never read the list.
+const FOLLOW_UPS_GET = required('/api/broadcasts/follow-ups');
+const MATCHING_GETS = Object.freeze([...BROADCAST_LIST_GETS, FOLLOW_UPS_GET]);
+const UNIT_LIST_ACTIVE_GETS = Object.freeze([...UNIT_LIVE_WALK, FOLLOW_UPS_GET]);
 
 const TEAM_GETS = Object.freeze([required('/api/users')]);
 const TEMPLATE_GETS = Object.freeze([required('/api/settings')]);
@@ -617,7 +625,7 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ surfaceId: '/contacts/landlords', label: 'Landlords', source: CONTACT_SOURCE('/contacts/landlords', 'Landlords', CONTACT_LIVE_WALK), terminal: contactListTerminal('Landlords'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/contacts/unknown', label: 'Unknown', source: CONTACT_SOURCE('/contacts/unknown', 'Unknown', CONTACT_LIVE_WALK), terminal: contactListTerminal('Unknown'), gets: CONTACT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/contacts/deleted', label: 'Deleted contacts', source: CONTACT_SOURCE('/contacts/deleted', 'Deleted', CONTACT_LIVE_WALK), terminal: contactListTerminal('Deleted'), gets: CONTACT_DELETED_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ surfaceId: '/listings', label: 'Properties', source: NAV_TODAY('/listings', 'Properties', TODAY_GETS), terminal: unitListTerminal(false), gets: UNIT_LIVE_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/listings', label: 'Properties', source: NAV_TODAY('/listings', 'Properties', TODAY_GETS), terminal: unitListTerminal(false), gets: UNIT_LIST_ACTIVE_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/listings/deleted', label: 'Deleted properties', source: source('/listings', L.properties, link('/listings/deleted'), UNIT_LIVE_WALK), terminal: unitListTerminal(true), gets: UNIT_DELETED_WALK, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/tours', label: 'Tours', source: NAV_TODAY('/tours', 'Tours', TODAY_GETS), terminal: TOUR_ACTIVE_TERMINAL, gets: TOUR_LIST_ACTIVE_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/tours/closed', label: 'Closed tours', source: source('/tours', L.tours, link('/tours/closed'), TOUR_LIST_ACTIVE_GETS), terminal: TOUR_CLOSED_TERMINAL, gets: TOUR_LIST_CLOSED_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
@@ -647,7 +655,7 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ surfaceId: 'inbox-groups', label: 'Inbox: Groups', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=groups' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Groups', inboxGets('inbox_page_groups')), destinationSelected: inboxDestinationSelected('Groups'), terminal: inboxTerminal('No group texts yet'), gets: inboxGets('inbox_page_groups'), surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/email', label: 'Email', source: NAV_TODAY('/email', 'Email', TODAY_GETS), terminal: emailTerminal(false), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
   row({ surfaceId: '/email/quarantine', label: 'Quarantined email', source: source('/email', L.email, link('/email/quarantine'), EMAIL_GETS), terminal: emailTerminal(true), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
-  row({ surfaceId: '/broadcasts', label: 'Matching', source: NAV_TODAY('/broadcasts', 'Matching', TODAY_GETS), terminal: BROADCAST_TERMINAL, gets: BROADCAST_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: '/broadcasts', label: 'Matching', source: NAV_TODAY('/broadcasts', 'Matching', TODAY_GETS), terminal: BROADCAST_TERMINAL, gets: MATCHING_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/settings/team', label: 'Team', requiredRole: 'admin', source: SETTINGS_SOURCE('/settings/team', 'Team'), terminal: TEAM_TERMINAL, gets: TEAM_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
   row({ surfaceId: '/settings/templates', label: 'Templates', source: SETTINGS_SOURCE('/settings/templates', 'Templates', '/settings/team', TEAM_GETS), terminal: TEMPLATE_TERMINAL, gets: TEMPLATE_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
   row({ surfaceId: '/settings/notifications', label: 'Notifications', source: SETTINGS_SOURCE('/settings/notifications', 'Notifications'), terminal: NOTIFICATION_TERMINAL, gets: NOTIFICATION_GETS, surfaceScaleBearing: false, loadScaleBearing: false }),
@@ -759,7 +767,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/contacts/landlords': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/contacts/unknown': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
     '/contacts/deleted': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
-    '/listings': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
+    '/listings': { base: 'dashboard/src/routes/listings/useListings.ts:10-60; dashboard/src/routes/listings/useFollowUpCounts.ts:11-26' },
     '/listings/deleted': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
     '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:48-153; dashboard/src/routes/tours/ToursPage.tsx:662-671' },
     '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:48-153; dashboard/src/routes/tours/ToursPage.tsx:662-671' },
@@ -770,7 +778,7 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     'inbox-groups': { base: 'dashboard/src/routes/inbox/useInbox.ts:48-75,157-176' },
     '/email': { base: 'dashboard/src/routes/email/EmailTriage.tsx:237-238; dashboard/src/routes/email/useUnmatchedEmail.ts:69-158' },
     '/email/quarantine': { base: 'dashboard/src/routes/email/EmailTriage.tsx:237-238; dashboard/src/routes/email/useUnmatchedEmail.ts:69-158' },
-    '/broadcasts': { base: 'dashboard/src/routes/broadcasts/useBroadcastsList.ts:29-52,85-108' },
+    '/broadcasts': { base: 'dashboard/src/routes/broadcasts/useBroadcastsList.ts:29-52,85-108; dashboard/src/routes/broadcasts/useFollowUps.ts:45-64' },
     '/settings/team': { base: 'dashboard/src/routes/settings/useTeam.ts:16-37' },
     '/settings/templates': { base: 'dashboard/src/routes/settings/useSettings.ts:18-62' },
     '/settings/notifications': { base: 'dashboard/src/routes/settings/NotificationsSection.tsx:22-100' },

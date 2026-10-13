@@ -129,6 +129,8 @@ const ENDPOINT_TEMPLATES = Object.freeze([
   '/api/unmatched-email/:unmatchedId/read',
   '/api/unmatched-email/:unmatchedId',
   '/api/unmatched-email',
+  // last-heard-from 5.6: all-literal, so it outranks /api/broadcasts/:broadcastId.
+  '/api/broadcasts/follow-ups',
   '/api/broadcasts/:broadcastId/results',
   '/api/broadcasts/:broadcastId/preview',
   '/api/broadcasts/:broadcastId/send',

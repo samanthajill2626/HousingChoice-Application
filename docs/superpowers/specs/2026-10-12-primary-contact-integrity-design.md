@@ -820,9 +820,14 @@ P1 removes the property-contact route into this; the rest is filed as
 - Script tests: target selection (no primary; deleted primary + live landlord;
   off-roster landlord), dry run writes nothing, `skippedOnCondition` when the
   roster changed after the read, idempotent re-apply, counts.
-- E2E: the zero-primary state cannot be reached through the UI (property
-  create requires a landlord), and the byte-stable lean seed has none on
-  purpose (`docs/issues/tour-reminder-zero-primary-e2e-gap.md` item 1). A new
+- E2E: the UI can reach a property with no primary contact (Restore without
+  a landlord, then add only contacts not typed landlord) and can even
+  recreate the imported shape by classifying a seated contact as a property
+  manager (a type change promotes nobody, 4.4 / 4.7 known gap), but it cannot
+  build that shape directly (property create requires a landlord; an eligible
+  add on an ownerless property is promoted at once), and the byte-stable lean
+  seed has none on purpose (`docs/issues/tour-reminder-zero-primary-e2e-gap.md`
+  item 1; sentence corrected 2026-10-13 after code review R2-3). A new
   DEV-ONLY seam (hermetic-only, structurally absent in deployed envs like
   `/__dev/reseed`) CREATES a NEW property of its own in the imported shape -
   no landlord of record, a roster of one to five NON-primary rows naming

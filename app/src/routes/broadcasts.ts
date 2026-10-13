@@ -61,6 +61,10 @@ import {
 } from '../repos/contactsRepo.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
 import { createSendAttemptsRepo, type SendAttemptsRepo } from '../repos/sendAttemptsRepo.js';
+import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
+import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
+import { deriveTourActivityAt, deriveTourSignal } from '../lib/listingSendTour.js';
+import { deriveListingSendOutcome } from '../lib/listingSendOutcome.js';
 import {
   createAudienceResolutionService,
   type AudienceResolutionService,
@@ -115,6 +119,14 @@ export interface BroadcastsRouterDeps {
    */
   orgNamesService?: OrgNamesService;
   events?: EventBus;
+  /**
+   * last-heard-from (spec 5.3, 5.6, 14.4 A5): the listing-send record - the
+   * preview's not-interested labels and the follow-ups list. api.ts passes
+   * the SHARED instance (the one the units router reads).
+   */
+  listingSendsRepo?: ListingSendsRepo;
+  /** last-heard-from: the tours a decline (and a follow-up row) is measured against. */
+  toursRepo?: ToursRepo;
 }
 
 /**
@@ -428,9 +440,51 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   const resolveAudience =
     deps.audienceResolutionService ?? createAudienceResolutionService({ logger: deps.logger });
   const orgNames = deps.orgNamesService ?? createOrgNamesService({ logger: deps.logger });
+  const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
+  const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   // NOTE: broadcast.updated SSE events are emitted from the broadcast.send job
   // (on completion) and the delivery-callback rollup — NOT this router — so the
   // `events` dep is accepted for API symmetry but not used here.
+
+  /**
+   * last-heard-from (spec 5.3, D11): the contactIds whose decline of `unitId` is
+   * EFFECTIVE. Reads, in order: the unit's LISTED rows (listByUnit already drops
+   * un-counted rows, so a pair whose every share failed shows no label - "LISTED
+   * only"); then, ONLY when some row carries a `declined` record, the unit's
+   * tours (one byUnit read, grouped by tenant - the units recipients pattern)
+   * and those rows' contacts in one requireComplete batch (their type decides
+   * whether tours count, spec 5.4). Throws on any failed read; the caller turns
+   * that into the degraded flag - these are labels, not outcomes with buttons,
+   * so D12's 503 does not apply.
+   */
+  async function effectiveDeclines(unitId: string): Promise<Set<string>> {
+    const declinedRows = (await listingSends.listByUnit(unitId)).filter((r) => r.declined !== undefined);
+    const out = new Set<string>();
+    if (declinedRows.length === 0) return out;
+    const [unitTours, byId] = await Promise.all([
+      tours.listByUnit(unitId),
+      contacts.getManyByIds(declinedRows.map((r) => r.contactId), { requireComplete: true }),
+    ]);
+    const toursByTenant = new Map<string, TourItem[]>();
+    for (const t of unitTours) {
+      const arr = toursByTenant.get(t.tenantId);
+      if (arr === undefined) toursByTenant.set(t.tenantId, [t]);
+      else arr.push(t);
+    }
+    for (const row of declinedRows) {
+      const contact = byId.get(row.contactId);
+      const pairTours = toursByTenant.get(row.contactId) ?? [];
+      const outcome = deriveListingSendOutcome({
+        row,
+        recipientType: contact?.type,
+        lastHeardFromAt: contact?.last_heard_from_at,
+        tour: deriveTourSignal(pairTours),
+        tourActivityAt: deriveTourActivityAt(pairTours),
+      });
+      if (outcome === 'not_interested') out.add(row.contactId);
+    }
+    return out;
+  }
 
   /** Resolve seed contact ids to sendable recipients using the SAME fences as
    *  the explicit-selection send path: exists, type tenant OR partner
@@ -657,6 +711,7 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   // reached the tenant: the SAFE reading of share-sent-outcome D1's recipient
   // state, whatever that share's stored status). `priorRecipientContactIds`
   // lets the composer annotate MANUALLY-added tenants locally too.
+  // last-heard-from: per candidate status? / lastHeardFromAt? / declinedThisProperty, plus declinedContactIds + declineLabelsUnavailable.
   router.post('/broadcasts/:broadcastId/preview', async (req, res) => {
     const { broadcastId } = req.params;
     mergeContext({});
@@ -710,6 +765,19 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       broadcast.unitId !== undefined
         ? await priorRecipientKeys({ broadcasts, messages, attempts, log }, broadcast.unitId)
         : new Set<string>();
+    // last-heard-from (spec 5.3, D11): the not-interested labels. Both lists
+    // are empty without a property. A failed read serves the candidates with
+    // NO labels and says so (declineLabelsUnavailable) - never a 503 here.
+    let declinedIds = new Set<string>();
+    let declineLabelsUnavailable = false;
+    if (broadcast.unitId !== undefined) {
+      try {
+        declinedIds = await effectiveDeclines(broadcast.unitId);
+      } catch (err) {
+        declineLabelsUnavailable = true;
+        log.warn({ err, broadcastId, unitId: broadcast.unitId }, 'broadcast preview: decline labels unavailable - served without them');
+      }
+    }
     // The candidate list carries phones — authed/internal response only; the
     // log line below stays IDs/counts only (NEVER phones/names/bodies).
     const candidates = combined.slice(0, MAX_BROADCAST_RECIPIENTS).map((c) => ({
@@ -743,6 +811,8 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       // recipient, or the seeded 1:1 entry). A contact in BOTH audience and
       // seeds is ONE row flagged seeded.
       seeded: seedIdSet.has(c.contactId),
+      // last-heard-from D11: an EFFECTIVE decline of this property.
+      declinedThisProperty: declinedIds.has(c.contactId),
     }));
     // count/truncated derive from the post-union, pre-slice list (+ the audience
     // truncation flag) so the operator sees the true unioned reach.
@@ -761,6 +831,10 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       priorRecipientContactIds: [...priorRecipients],
       seedContactIds: seedIds,
       unresolvedSeedIds: seeds.unresolved,
+      // last-heard-from (spec 5.3): the analog of priorRecipientContactIds -
+      // annotates a hand-added row outside the audience client-side.
+      declinedContactIds: [...declinedIds],
+      declineLabelsUnavailable,
     });
   });
 

@@ -1105,6 +1105,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       orgNamesService: orgNames,
       auditRepo: audit,
       events,
+      // last-heard-from (spec 14.4 A5): the preview's decline labels and the
+      // follow-ups list read the SHARED listing-send record and tours (the
+      // instances built above, as the units mount passes them).
+      listingSendsRepo: listingSends,
+      toursRepo: tours,
     }),
   );
   // Placements + boards (M1.10; requireAuth — VAs run the boards, no admin gate).

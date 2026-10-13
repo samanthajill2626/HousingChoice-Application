@@ -3399,6 +3399,13 @@ export interface PreviewCandidate {
    *  hand-picked recipient, or the seeded 1:1/1:N entry) rather than the audience
    *  filter alone. A contact in BOTH audience and seeds is ONE row, flagged. */
   seeded: boolean;
+  /** last-heard-from (spec 5.3): the contact's lifecycle status - TENANT rows
+   *  only (a partner seed never carries one). */
+  status?: string;
+  /** last-heard-from: contact.last_heard_from_at (any type). */
+  lastHeardFromAt?: string;
+  /** last-heard-from D11: an EFFECTIVE decline of this property is recorded. */
+  declinedThisProperty: boolean;
 }
 
 /** POST /api/broadcasts/:id/preview response. `priorRecipientContactIds` is
@@ -3419,6 +3426,13 @@ export interface PreviewResponse {
   priorRecipientContactIds: string[];
   seedContactIds: string[];
   unresolvedSeedIds: string[];
+  /** last-heard-from (spec 5.3, D11): every contact whose decline of this
+   *  property is EFFECTIVE - annotates hand-added rows client-side, like
+   *  priorRecipientContactIds. Empty when the draft has no property. */
+  declinedContactIds: string[];
+  /** True when the decline reads failed: the candidates came back with NO
+   *  not-interested labels, so a declined tenant may start checked. */
+  declineLabelsUnavailable: boolean;
 }
 
 /** GET /api/events 'broadcast.updated' payload. The send job + delivery rollup

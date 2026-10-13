@@ -45,6 +45,7 @@ function candidate(over: Partial<PreviewResponse['candidates'][number]> = {}): P
     // Matching sends (Task 5 dashboard types): default un-seeded; Task 8 covers
     // the seeded-row rendering itself.
     seeded: false,
+    declinedThisProperty: false,
     ...over,
   };
 }
@@ -59,6 +60,8 @@ function previewOf(over: Partial<PreviewResponse> = {}): PreviewResponse {
     // the seeded-recipient banner/notice itself.
     seedContactIds: [],
     unresolvedSeedIds: [],
+    declinedContactIds: [],
+    declineLabelsUnavailable: false,
     ...over,
   };
 }

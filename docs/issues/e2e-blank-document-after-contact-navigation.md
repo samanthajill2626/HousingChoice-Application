@@ -92,3 +92,13 @@ another worktree's lane running at the same time (10411, 10401); they drained be
 within about 4.5 minutes. The signature is broader than the title: any dev-mode page load
 whose module graph loses one fetch to WSAENOBUFS goes blank. Retitling is left to whoever
 picks the issue up.
+
+**Seventh sighting - trace, same mechanism (2026-10-12, Windows, feat/join-housing-authority
+@7b0bc487, the next full gate run, 339 passed / 1 failed, 34.1m).**
+`tests/dashboard-next/contact-create-relay-group.spec.ts:365` waited out its whole 180 s
+budget at `devLogin` for "Continue as dev user": the trace shows `GET /@react-refresh`
+(Vite's HMR runtime, the first module of every dev page) failing with status -1 and
+`net::ERR_NO_BUFFER_SPACE`, so the page never rendered. The file passed alone right after
+(3/3, 33.3s). Three consecutive full runs on this host that evening each lost one or two
+tests this way (traces in that worktree under `.superpowers/sdd/e2e-results-fw1*/`), while
+other worktrees' suites ran on lanes 6 and 14 at the same time; every lost test passed alone.

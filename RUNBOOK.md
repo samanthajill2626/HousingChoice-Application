@@ -499,7 +499,7 @@ Cost: one consistent Scan of the contacts table, then per candidate (one named i
 
 ### Caseworkers (`feat/caseworkers`): DEPLOYED dev + prod 2026-10-12 (release 1.5.1) - nothing was owed; the conversion's repair, and putting a mistaken conversion back
 
-**DEPLOYED 2026-10-12: dev and prod run release `1.5.1` (main `e27868bc`), deployed by Cameron.** The follow-up `fix/caseworker-integrity` (R2-ADV-1 and the contact-type checks) was not yet merged at this deploy and ships separately. Until it is live, a caseworker converted while a housing authority suggestion accept was in flight can end up holding that authority (issue `claimed-suggestion-accept-after-caseworker-conversion`); "Make caseworker" again does not clear it - clear the authority by hand.
+**DEPLOYED 2026-10-12: dev and prod run release `1.5.1` (main `e27868bc`), deployed by Cameron.** The follow-up `fix/caseworker-integrity` (R2-ADV-1 and the contact-type checks) shipped in release `1.5.3`, deployed to dev and prod 2026-10-13. A caseworker converted between the two deploys while a housing authority suggestion accept was in flight could have kept that authority (issue `claimed-suggestion-accept-after-caseworker-conversion`); "Make caseworker" again does not clear it - clear any such authority by hand.
 
 **Deploy the app image (app + worker) and you are done: no Terraform, no secrets, no new table or index, no script, no backfill.** Spec: `docs/superpowers/specs/2026-10-06-clean-org-names-and-caseworkers-design.md`, D16-D22 and section 11. A caseworker is a `partner` contact with the role `Caseworker`; Contacts > Caseworkers lists them, with a "Possible caseworkers" list to review.
 

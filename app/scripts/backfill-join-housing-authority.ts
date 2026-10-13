@@ -320,7 +320,7 @@ export interface BackfillReport {
    * --skip lead whose exclusion append failed (it may not have been recorded).
    */
   failed: number;
-  /** Printed as WARNING lines: the post-apply list check, a missing audit event. */
+  /** Printed as WARNING lines: the post-apply list check, an audit event that may be missing. */
   warnings: string[];
   /**
    * --apply only (spec D10 revision 6, exclusions first): an exclusion append
@@ -781,10 +781,11 @@ async function writeOne(deps: BackfillDeps, contactId: string, report: BackfillR
   try {
     await deps.audit.append(`contacts#${contactId}`, BACKFILL_AUDIT_TYPE, { field: FIELD, from: '', to: BACKFILL_AUTHORITY });
   } catch (err) {
+    // An append can land and then error (a timeout), so the event MAY not have been written - never "could not".
     report.warnings.push(
-      `the ${BACKFILL_AUDIT_TYPE} audit event for contactId ${contactId} could not be written (its housing authority was set).`,
+      `the ${BACKFILL_AUDIT_TYPE} audit event for contactId ${contactId} may not have been written (its housing authority was set).`,
     );
-    deps.logger.warn({ err, contactId }, `${SCRIPT_NAME} - audit event could NOT be written (the write landed); continuing`);
+    deps.logger.warn({ err, contactId }, `${SCRIPT_NAME} - audit event may not have been written (the write landed); continuing`);
   }
   deps.logger.info({ contactId }, `${SCRIPT_NAME} - housing authority set`);
   return 'written';

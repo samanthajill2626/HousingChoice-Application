@@ -1305,7 +1305,7 @@ const REREAD_WARNING =
   'the organization list could not be read again after the apply, so the run could not confirm "Atlanta Housing ' +
   'Authority" is still on it - check Settings > Housing authorities & agencies > "Not on the list".';
 const AUDIT_WARNING = (contactId: string): string =>
-  `the housing_authority_backfill audit event for contactId ${contactId} could not be written (its housing authority was set).`;
+  `the housing_authority_backfill audit event for contactId ${contactId} may not have been written (its housing authority was set).`;
 /** The left-out line of c-skip when its exclusion append failed - it may have landed all the same (code review F4). */
 const SKIP_EXCLUSION_FAILED_LINE =
   '  Drew Dekalbson  signed up 2026-06-01  status needs_review  contactId c-skip  - named in --skip - FAILED: its exclusion may not have been recorded (an ERROR line names this contactId) - keep it in --skip and re-run the apply';
@@ -2249,10 +2249,11 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect(backfillExitCode(report)).toBe(1);
   }, 120_000);
 
-  it('an audit event that cannot be written after its write landed is a WARNING, not a failure: exit 0', async () => {
+  it('an audit event whose append fails after its write landed is a WARNING that says it MAY not have been written, not a failure: exit 0', async () => {
     const w = await newWorld();
     await seedLeads(w);
-    const base = w.deps();
+    const capture = createLogCapture();
+    const base = w.deps({ logger: createLogger({ level: 'info', destination: capture.stream }) });
     const deps: BackfillDeps = {
       ...base.deps,
       audit: {
@@ -2268,6 +2269,12 @@ describe.skipIf(!reachable)('runJoinAuthorityBackfill against DynamoDB Local (sp
     expect(await w.get('c-mid')).toMatchObject({ housingAuthority: 'Atlanta Housing Authority' });
     expect((await w.backfillEvents()).map((e) => e['entityKey']).sort()).toEqual(['contacts#c-new', 'contacts#c-old']);
     expect(base.printed).toContain(`WARNING: ${AUDIT_WARNING('c-mid')}`);
+    // An append can land and then error, so neither the warning nor its log line says "could not".
+    expect(capture.atLevel(40).map((l) => [l['contactId'], l['msg']])).toContainEqual([
+      'c-mid',
+      'backfill-join-housing-authority - audit event may not have been written (the write landed); continuing',
+    ]);
+    expect(JSON.stringify(capture.lines)).not.toMatch(/could not be written|could NOT be written/);
     expect(backfillExitCode(report)).toBe(0);
   }, 120_000);
 

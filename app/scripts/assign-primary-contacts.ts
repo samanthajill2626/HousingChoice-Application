@@ -27,9 +27,10 @@
 //     its primary is the DERIVED landlord row) is left alone.
 //   - COUNTED, never written: noHeir (no live contact and no live landlord of
 //     record), noEligible (live contacts, none eligible for automatic routing
-//     - only a tenant or a caseworker; listed by unit id so Sam can choose on
-//     the property page), unknown (the contact read failed - re-run),
-//     unchanged (nothing to do).
+//     - no live contact is typed landlord, only tenants or caseworkers;
+//     listed by unit id so Sam can add a property manager or owner on the
+//     property page, whose box says so and offers no one-click for a tenant),
+//     unknown (the contact read failed - re-run), unchanged (nothing to do).
 //
 // NO LOCK (spec section 8): every write is unitsRepo.assignPrimaryIfCurrent,
 // conditional on the contact list AND landlordId THIS run read - never
@@ -326,7 +327,7 @@ async function handleUnit(
       result.noEligibleUnitIds.push(unitId);
       log.info(
         { unitId, deleted },
-        `${SCRIPT_NAME} - no eligible contact: only a tenant or a caseworker is live (choose one on the property page)`,
+        `${SCRIPT_NAME} - no eligible contact: no live contact is typed landlord (add a property manager or owner on the property page)`,
       );
       return;
     case 'unknown':
@@ -449,7 +450,7 @@ export function formatAssignSummary(result: AssignResult, apply: boolean): strin
   lines.push(
     `  primary_contact field ${apply ? 'aligned' : 'would be aligned'} with the flagged primary: ${result.scalarAligned}`,
     `  No heir - no live contact and no live landlord of record (nothing to do): ${result.noHeir}`,
-    `  No eligible contact - only a tenant or a caseworker is live (choose one on the property page): ${result.noEligible}`,
+    `  No eligible contact - no live contact is typed landlord (add a property manager or owner): ${result.noEligible}`,
     `  Unknown - a contact read failed (re-run): ${result.unknown}`,
     `  Already fine: ${result.unchanged}`,
   );
@@ -463,7 +464,7 @@ export function formatAssignSummary(result: AssignResult, apply: boolean): strin
   lines.push(
     `${apply ? 'Properties planned for a primary contact' : 'Properties that would get a primary contact'}: ${ids(result.targetUnitIds)}`,
     `${apply ? 'Properties planned for a primary_contact field alignment' : 'Properties whose primary_contact field would be aligned'}: ${ids(result.alignedUnitIds)}`,
-    `Properties with no eligible contact (open each one and choose a primary contact): ${ids(result.noEligibleUnitIds)}`,
+    `Properties with no eligible contact (open each one and add a property manager or owner): ${ids(result.noEligibleUnitIds)}`,
     `Properties that could not be decided (re-run): ${ids(result.unknownUnitIds)}`,
   );
   if (apply) {

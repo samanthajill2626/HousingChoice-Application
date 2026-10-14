@@ -365,8 +365,19 @@ describe('assignPrimaryContacts - what it prints and logs', () => {
     expect(dryLines[0]).toBe('Primary contacts - DRY RUN, nothing written:');
     expect(dryLines).toContain('  Would get a primary contact: 3 (1 on soft-deleted properties)');
     expect(dryLines).toContain('Properties that would get a primary contact: u-bolton, u-deleted-primary, u-soft-deleted');
+    // noEligible steers to ADDING a property manager or owner - the property
+    // box offers no one-click for a tenant (planner fix wave F1).
     expect(dryLines).toContain(
-      'Properties with no eligible contact (open each one and choose a primary contact): u-only-tenant',
+      '  No eligible contact - no live contact is typed landlord (add a property manager or owner): 1',
+    );
+    expect(dryLines).toContain(
+      'Properties with no eligible contact (open each one and add a property manager or owner): u-only-tenant',
+    );
+    expect(h.capture.lines).toContainEqual(
+      expect.objectContaining({
+        unitId: 'u-only-tenant',
+        msg: 'assign-primary-contacts - no eligible contact: no live contact is typed landlord (add a property manager or owner on the property page)',
+      }),
     );
     expect(dryLines).toContain('Properties that could not be decided (re-run): none');
     const applied = await assignPrimaryContacts(h.deps, { apply: true, logger: h.logger });

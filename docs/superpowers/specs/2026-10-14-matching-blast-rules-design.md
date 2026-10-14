@@ -1,8 +1,8 @@
 # Matching blasts follow the audience rules - design
 
-Status: DRAFT revision 3 (2026-10-14) - review rounds 1 and 2 folded in,
-plus two rulings by Cameron (tenants with no housing authority; the reach
-count).
+Status: DRAFT revision 4 (2026-10-14) - review rounds 1-3 folded in (round
+3 terminal: precision only), plus two rulings by Cameron (tenants with no
+housing authority; the reach count). Awaiting Cameron's spec review.
 Review history: `docs/superpowers/reviews/2026-10-14-matching-blast-rules/design-review/adjudications.md`.
 Branch: `feat/matching-blast-rules` (worktree `W:\tmp\matching-blast-rules`, cut from main @a2b3d80d)
 Tracker: Improvements Tracker item #6 "Matching (blasts): housing authority and status" (Before WP1, item 5)
@@ -264,9 +264,11 @@ Staff can remove any prefilled member or add others.
 The prefill BELONGS TO THE PROPERTY. While the property stays the same, a
 filter staff have edited is never overwritten (an edit is any pick,
 removal or clear by staff, and a member removed after a 422, D3b). When
-staff CHANGE the property, both prefills (housing authorities and voucher
-size, D3a) are applied fresh from the new property and earlier edits are
-dropped, without a confirm: the filters were chosen for the old property,
+staff CHANGE the property to a different one, both filters (housing
+authorities and voucher size, D3a) are RESET TO EMPTY at once and then
+prefilled fresh from the new property when it loads, and earlier edits are
+dropped, without a confirm (choosing the same property again changes
+nothing): the filters were chosen for the old property,
 the same reason the composer resets an edited message on a property change
 (`BroadcastComposer.tsx:333-342`), and the new values are visible right
 there. Value and ownership are kept together and checked in the functional
@@ -281,9 +283,13 @@ filters show "Couldn't load the property, so its housing authorities and
 voucher size were not filled in." A failed list read counts as settled:
 nothing is prefilled and the filters show "Couldn't load the organization
 list, so housing authorities were not filled in from the property." (the
-picker shows its own error as today). A resumed draft (`?draftId=`, no
-property on the client) and a seeds-only send (filters off) are never
-gated.
+picker shows its own error as today). An ABORTED load (the request was
+cancelled - an unmount, a property change, React StrictMode's double mount;
+`AbortError`, `dashboard/src/api/client.ts:125`) is neither loaded nor
+failed: the gate keeps waiting and no notice shows. A failed state belongs
+to the property it was for and clears when that property loads or the
+property changes. A resumed draft (`?draftId=`, no property on the client)
+and a seeds-only send (filters off) are never gated.
 
 D3a. Voucher size keeps its current prefill value (the property's first
 accepted size) but gets the same belongs-to-the-property rule, because the
@@ -595,11 +601,12 @@ kind with and without a date; the literal accessible names; the Add a
 tenant note; the 503 Try again; the seeds-only notice; the caption (with and
 without its second sentence); the reach line; the multi picker prefill
 (exact names and unique spellings, off-list note, the not-limited line,
-edit ownership while the property stays, a property change replacing
-edited filters, a 422 removing one member, Preview disabled until settled
-only with a property and filters on, a failed property load and a failed
-list read each settling with their notice, a resumed draft and a seeds-only
-send never gated); the picker listing only
+edit ownership while the property stays, a property change emptying then
+replacing edited filters, the same property chosen again changing nothing,
+a 422 removing one member, Preview disabled until settled only with a
+property and filters on, a failed property load and a failed list read each
+settling with their notice, an aborted load neither settling nor showing a
+notice, a resumed draft and a seeds-only send never gated); the picker listing only
 Available properties on the bare and `?contactId=` entries, the `?unitId=`
 entry keeping a non-Available property, and the empty state; the truncation
 copy; `audienceSummary` for a list (names joined with ", ").
@@ -626,7 +633,7 @@ Server:
   function, `storedFilterRefusal`, preview, send path (c), results (`:393`)
   and list (`:421`) projections, the router header comment (`:6-28`), the
   `audience_too_large` messages (`:1010-1012`), and the "ALONE" comments on
-  the send-attempt record read (`:111-114`, `:757-760`).
+  the send-attempt record read (`:111-114`, `:757-760`, `:1108-1111`).
 - `audienceResolution.ts` (whole read; header comment; the truncation TODO;
   the `byHousingAuthority` log field).
 - `toursRepo.ts`: the open-tours read (the `requested` range condition).
@@ -667,7 +674,10 @@ an explicit status, recorded consent, and a RUN-UNIQUE on-list authority
 a shared authority such as Atlanta Housing Authority pulls in tenants other
 specs leave in the lane (for example
 `e2e/tests/scenarios/sending-unit.spec.ts:58-66`); no spec may depend on
-them:
+them. EXCEPTION: a tenant whose PURPOSE is to have no recorded consent keeps
+none - `a2p-compliance.spec.ts` section 8.3 test 1's `noConsent` tenant
+(`:331-333`) and the path (c) test that expects `skipped_no_consent === 1`
+(`:445-510`) - so the consent fence stays tested:
 
 - app: `app/test/audienceResolution.test.ts` (its `tenant()` helper defaults
   to status `active`, so most cases resolve nothing under D1),

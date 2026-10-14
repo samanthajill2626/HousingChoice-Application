@@ -65,3 +65,24 @@ still incomplete) and A10 (the settle gate).
 
 Round 2 changed decisions (R2-1, R2-2, R2-3, R2-7), so round 3 runs with the
 same reviewer continued. Hard cap is 4.
+
+## Spec round 3 (rev 3 @5893da21 -> rev 4) - TERMINAL
+
+Reviewer A continued. Report: `spec-r3-reviewer-a.md` (3 LOW + 1 nit). A
+conceded R2-3 and did not contest R2-7; it judged R2-1, R2-3, R2-4, R2-6,
+R2-8 correct, R2-2 and R2-5 correct but under-specified (findings 1-3).
+
+| # | Finding | Ruling | Decision changed? |
+|---|---|---|---|
+| R3-1 | A property change whose new property fails to load keeps the old property's filters; re-picking the same property drops edits | ACCEPT: a change to a DIFFERENT property empties both filters at once, then prefills on load; the same property chosen again changes nothing. Precision of the R2-7 ruling. | no |
+| R3-2 | An aborted property load (StrictMode double mount, AbortError) would read as a failure; the failed state needs an owner | ACCEPT: an aborted load is neither loaded nor failed; the failed state belongs to its property and clears on load or change. | no |
+| R3-3 | The e2e "record consent" ruling would neuter the two consent-fence tests | ACCEPT: explicit exception for the a2p no-consent tenants. | no |
+| nit | A third "ALONE" comment at `broadcasts.ts:1108-1111` | ACCEPT: added to section 7. | no |
+
+No decision changed: round 3 is the terminal round (stop rule). Spec
+revision 4 goes to Cameron's review gate.
+
+Totals: 3 rounds, 37 findings (26 + 8 + 3, plus 1 nit), 0 findings rejected
+outright; 3 sub-options rejected with reasons (A7a hold-clock redesign, A7b
+and B9 extra reads in the hold, R2-3 separate reach endpoint) - all three
+conceded by the reviewer in later rounds.

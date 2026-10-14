@@ -3105,13 +3105,14 @@ describe('ContactDetail - a partner page sends a property (caseworkers D20)', ()
 });
 
 // primary-contact-integrity spec 7.6: deleting a contact who is a property's
-// primary contact hands that property off (server, spec 4.6), and restoring
-// them does not take it back. The Delete dialog says so for every contact
-// that is not a tenant; a tenant-typed primary (a degenerate state) gets no
-// sentence - the dialog cannot know without the server's scan.
+// primary contact hands that property off (server, spec 4.6) - when someone
+// can take over: with no heir nothing changes (planner fix wave F5b) - and
+// restoring them does not take it back. The Delete dialog says so for every
+// contact that is not a tenant; a tenant-typed primary (a degenerate state)
+// gets no sentence - the dialog cannot know without the server's scan.
 describe('ContactDetail - the Delete dialog names the primary-contact handoff (primary-contact-integrity spec 7.6)', () => {
   const HANDOFF =
-    "If they're a property's primary contact, the landlord or another contact on that property takes over, and restoring them won't change that back.";
+    "If they're a property's primary contact, the landlord or another contact on that property takes over when someone can, and restoring them won't change that back.";
   const PARTNER_TO_DELETE: Contact = {
     contactId: 'p-del',
     type: 'partner',

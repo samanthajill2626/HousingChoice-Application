@@ -138,9 +138,13 @@ export const MARK_UNREAD_NO_THREAD =
   'No thread to mark unread yet - if this contact has messages, try again.';
 
 /** The Delete dialog's handoff sentence for a non-tenant contact
- *  (primary-contact-integrity spec 7.6), word for word. */
+ *  (primary-contact-integrity spec 7.6), word for word. The server hands each
+ *  property whose primary they are - the flagged row, or the landlord of record
+ *  when no row is flagged - to the landlord or the earliest eligible contact,
+ *  and changes NOTHING when nobody can take over (spec 4.6): hence "when
+ *  someone can" (planner fix wave F5b). */
 const DELETE_PRIMARY_HANDOFF_SENTENCE =
-  "If they're a property's primary contact, the landlord or another contact on that property takes over, and restoring them won't change that back.";
+  "If they're a property's primary contact, the landlord or another contact on that property takes over when someone can, and restoring them won't change that back.";
 
 /** The manual-run indicator's three states. `running` accumulates across the
  *  press's scheduled threads: it resolves only once EVERY one has reported, so

@@ -497,9 +497,11 @@ Cost: one consistent Scan of the contacts table, then per candidate (one named i
 
 **No agent runs it against dev or prod; an agent rehearses on a lane: `--env local --lane <L>`.** Never a bare `--env local` - that is the live local stack. No app path creates a candidate any more (every new sign-up gets the marker, and no seed writes `capture_source` `housing_fair`), so a rehearsal writes pre-change-shaped leads into the lane's contacts table directly.
 
-### Last heard from: the backfill (`feat/last-heard-from`) - owed on dev AND prod after this branch deploys
+### Last heard from: the backfill (`feat/last-heard-from`) - DONE on dev AND prod 2026-10-13 (release 1.5.4)
 
-**Owed on dev AND prod once this branch has deployed there; take dev all the way through before prod.** No Terraform, no secrets, no env var, no schema or index change (`last_heard_from_at` is a plain contact attribute, never an index key). Spec: `docs/superpowers/specs/2026-10-12-last-heard-from-follow-up-status-design.md`, sections 5.1, 5.2 and 14.2.
+**DONE 2026-10-13: release `1.5.4` (main `cd1b05ef`) is deployed to dev and prod, and Cameron applied the backfill on both, after the deploy.** Dry runs before the applies: dev planned 608 contacts (774 conversations, 10,221 inbound rows, 4 unattributed); prod planned 853 (1,141 conversations, 17,741 inbound rows, 87 unattributed - about 0.5%, the expected kinds listed in step 3); 0 unparseable, 0 failed on both. Nothing is owed. Re-running is safe and writes 0 (step 6); run it again only after a restore of the contacts table from a backup taken before 2026-10-13. The steps below stay as the reference.
+
+Originally owed on dev AND prod once this branch had deployed there, dev all the way through before prod. No Terraform, no secrets, no env var, no schema or index change (`last_heard_from_at` is a plain contact attribute, never an index key). Spec: `docs/superpowers/specs/2026-10-12-last-heard-from-follow-up-status-design.md`, sections 5.1, 5.2 and 14.2.
 
 What `app/scripts/backfill-last-heard-from.ts` does: from the deploy on, every inbound text, call and email moves its contact's "Last heard from" as it arrives. Contacts who last reached out BEFORE the deploy read "Never" until this backfill runs. The script walks every conversation's inbound history, attributes each row with the same rule the live paths use, keeps the latest instant per contact across all threads, and makes one conditional, forward-only write per contact. It never moves a value backward, so a contact who texted after the deploy keeps that newer value.
 

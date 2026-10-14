@@ -217,6 +217,10 @@ test('the Status facet hides inactive and placed by default; chips, the hint and
   await expect(page).toHaveURL(/[?&]status=inactive(&|$)/);
   await expect(page).toHaveURL(/[?&]status=placed(&|$)/);
   await search.fill('');
+  // With all seven lit and no search, the PLACED tenant is back on the list
+  // too - not just in the URL (planner review C3).
+  await expect(rows.filter({ hasText: placed.firstName })).toHaveCount(1);
+  await expect(rows.filter({ hasText: inactive.firstName })).toHaveCount(1);
 
   // Clear returns to the DEFAULT, not to empty.
   await clearStatus.click();
@@ -230,6 +234,15 @@ test('the Status facet hides inactive and placed by default; chips, the hint and
   await expect(rows.filter({ hasText: placed.firstName })).toHaveCount(0);
   await expect(page).toHaveURL(/[?&]status=inactive(&|$)/);
   await expect(page).not.toHaveURL(/[?&]status=placed(&|$)/);
+
+  // The Placed chip brings the placed tenant back on its own (C3), then off.
+  await placedChip.click();
+  await expect(placedChip).toHaveAttribute('aria-pressed', 'true');
+  await expect(rows.filter({ hasText: placed.firstName })).toHaveCount(1);
+  await expect(page).toHaveURL(/[?&]status=placed(&|$)/);
+  await placedChip.click();
+  await expect(placedChip).toHaveAttribute('aria-pressed', 'false');
+  await expect(rows.filter({ hasText: placed.firstName })).toHaveCount(0);
 
   // Sort by name + reload: the URL is the only state carrier for both.
   await page.getByLabel('Sort by').selectOption('name');

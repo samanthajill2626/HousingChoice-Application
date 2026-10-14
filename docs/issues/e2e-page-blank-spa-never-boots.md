@@ -34,3 +34,9 @@ the stuck navigation (or run with `trace: 'retain-on-failure'`).
 
 Artifacts of the sighting (gitignored, worktree-local):
 `W:\tmp\last-heard-from\.superpowers\sdd\e2e-runs\final-20261013-190830\`.
+
+**Artifacts moved (2026-10-13).** The feat/last-heard-from worktree was retired after
+its merge. The run cited above is preserved at
+`W:\tmp\_preserved-artifacts\last-heard-from-20261013\.superpowers\sdd\e2e-runs\final-20261013-190830\`,
+with a SHA-256 manifest at `W:\tmp\_preserved-artifacts\last-heard-from-20261013\MANIFEST.sha256`
+(13 files; paths relative to the run folder).

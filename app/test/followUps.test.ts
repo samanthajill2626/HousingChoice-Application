@@ -243,6 +243,39 @@ describe('buildFollowUps (last-heard-from 5.6)', () => {
     expect(calls.toursByUnit.sort()).toEqual(['u1', 'u2']);
   });
 
+  it('drops sends outside LOOKBACK before any join: no tours read and no contacts read for them (planner review A1)', async () => {
+    // A send older than LOOKBACK can never be waiting, so it must not widen the
+    // requireComplete contacts batch (one unread key 503s the whole list) or
+    // cost a tours read. u1 has only old sends; u2 mixes one recent and one old.
+    const w = emptyWorld();
+    w.units.push(unit('u1'), unit('u2'));
+    w.contacts.push(tenant('c-old1'), tenant('c-old2'), tenant('c-new'));
+    w.sends.push(
+      send('u1', 'c-old1', ago(20 * DAY)),
+      send('u2', 'c-new', ago(3 * DAY)),
+      send('u2', 'c-old2', ago(30 * DAY)),
+    );
+    const { deps, calls } = depsFor(w);
+    const out = await buildFollowUps(deps);
+    expect(out.items.map((i) => i.contactId)).toEqual(['c-new']);
+    expect(calls.toursByUnit).toEqual(['u2']);
+    expect(calls.batches).toHaveLength(1);
+    expect(calls.batches[0]!.ids).toEqual(['c-new']);
+  });
+
+  it('no contacts read at all when every send is outside LOOKBACK', async () => {
+    const w = emptyWorld();
+    w.units.push(unit('u1'));
+    w.contacts.push(tenant('c-old'));
+    w.sends.push(send('u1', 'c-old', ago(15 * DAY)));
+    const { deps, calls } = depsFor(w);
+    const out = await buildFollowUps(deps);
+    expect(out.items).toEqual([]);
+    expect(out.byUnit).toEqual({});
+    expect(calls.toursByUnit).toEqual([]);
+    expect(calls.batches).toEqual([]);
+  });
+
   it('walks byStatus pages on lastEvaluatedKey and skips soft-deleted properties', async () => {
     const w = emptyWorld();
     const del = { deleted_at: '2026-10-01T00:00:00.000Z' };

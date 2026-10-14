@@ -1,3 +1,13 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-10-13).** This document describes how
+> this work was *designed at the time of writing*. The work shipped to `main` (release 1.5.4,
+> deployed to dev and prod 2026-10-13) and its feature branch + worktree were deleted during
+> cleanup. **This file is NOT current documentation and the live code may have drifted from it -
+> do not treat it as authoritative guidance on how the system should be built or behaves today.**
+> For current truth read the code and the living docs (`RUNBOOK.md`, `documentation/GLOSSARY.md`,
+> `e2e/README.md`). Kept only as a point-in-time record of intent; the review record is in
+> `docs/superpowers/reviews/2026-10-12-last-heard-from/`.
+
 # Last heard from, follow-up status for shared properties, and the off-screen contact search
 
 Date: 2026-10-12

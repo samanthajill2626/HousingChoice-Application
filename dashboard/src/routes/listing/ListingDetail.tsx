@@ -147,8 +147,12 @@ const DELETED_CONTACT_LEAD = "This property's contact was deleted.";
 const NO_PRIMARY_EFFECT = "New tours won't include the landlord, and tour group texts use the general intro.";
 /** No eligible row to offer (no live contact, or only caseworkers). True: an
  *  eligible add on a property with no live primary and no live landlord of
- *  record is made primary by the server (spec 4.4). */
-const NO_ELIGIBLE_LINE = 'Add the landlord or property manager - they become the primary automatically.';
+ *  record is made primary by the server (spec 4.4). It names a property
+ *  manager or owner, not "the landlord": while a DELETED contact is still the
+ *  landlord of record, an add with the Landlord role is refused (409
+ *  landlord_reassignment_required), and a property manager or owner always
+ *  works (builder Q1, planner fix wave F3). */
+const NO_ELIGIBLE_LINE = 'Add a property manager or owner - they become the primary automatically.';
 
 /** The busy/error key for the box's one-click Make primary: its error renders
  *  IN the box, which shows outside edit mode too. */

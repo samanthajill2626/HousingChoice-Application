@@ -2694,13 +2694,13 @@ describe('ListingDetail - the no-primary box (primary-contact-integrity spec 7.4
     expect(addUnitContact).not.toHaveBeenCalled();
   });
 
-  it('no eligible row: no button, and the line says an added landlord or property manager becomes primary', () => {
+  it('no eligible row: no button, and the line asks for a property manager or owner to be added', () => {
     useListing.mockReturnValue(integrityState([GINA_DELETED, CASEY_CASEWORKER], NO_PRIMARY));
     renderAt();
     const box = within(contactsCard()).getByRole('status');
     expect(within(box).getByText('No primary contact.')).toBeInTheDocument();
     expect(
-      within(box).getByText('Add the landlord or property manager - they become the primary automatically.'),
+      within(box).getByText('Add a property manager or owner - they become the primary automatically.'),
     ).toBeInTheDocument();
     expect(within(box).queryByRole('button')).not.toBeInTheDocument();
   });

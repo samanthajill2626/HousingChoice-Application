@@ -1,8 +1,10 @@
 # Matching blasts follow the audience rules - design
 
-Status: DRAFT revision 4 (2026-10-14) - review rounds 1-3 folded in (round
-3 terminal: precision only), plus two rulings by Cameron (tenants with no
-housing authority; the reach count). Awaiting Cameron's spec review.
+Status: APPROVED revision 5 (2026-10-14). Revision 4 folded in review
+rounds 1-3 (round 3 terminal: precision only) and two rulings by Cameron
+(tenants with no housing authority; the reach count). Revision 5 is
+Cameron's approval amendment: the `byHousingAuthority` GSI and its repo
+method stay in place, unused by blasts (section 4).
 Review history: `docs/superpowers/reviews/2026-10-14-matching-blast-rules/design-review/adjudications.md`.
 Branch: `feat/matching-blast-rules` (worktree `W:\tmp\matching-blast-rules`, cut from main @a2b3d80d)
 Tracker: Improvements Tracker item #6 "Matching (blasts): housing authority and status" (Before WP1, item 5)
@@ -530,9 +532,11 @@ an explicitly checked row. Letting Add a tenant find caseworkers is deferred
   Resolve `broadcast-audience-truncation-drops-searching-tenants` with that
   note (the bound and the truncation refusal remain; within the wanted set
   the read order is searching first).
-- The `byHousingAuthority` GSI loses its only runtime caller. Removing it is
-  an infrastructure change (Terraform) and is NOT done here; file a low
-  `debt` issue.
+- The `byHousingAuthority` GSI loses its only runtime caller. It STAYS, on
+  purpose (Cameron 2026-10-14: keep it in case it is wanted later): the GSI,
+  `contactsRepo.listByHousingAuthority`, its tests and its fakes are left in
+  place, and no issue proposes removing them. Only comments that call it the
+  broadcast audience key are corrected.
 - A failed tours or decline read blocks a filter blast's preview (with Try
   again) instead of showing a list without Not interested labels; a direct
   send shows a notice instead.
@@ -554,7 +558,8 @@ an explicitly checked row. Letting Add a tenant find caseworkers is deferred
 - Voucher size as a list, and the "4+" exact-match issue
   (`broadcast-4plus-exact-match-underreach`) - tracker #12.
 - Add a tenant finding caseworkers (filed, deferred).
-- Dropping the `byHousingAuthority` GSI (infrastructure).
+- Removing the `byHousingAuthority` GSI, `listByHousingAuthority`, or their
+  tests and fakes (kept on purpose, section 4).
 - Server-side closing of a Not a fit tour (`tour-outcome-close-not-backend-enforced`).
 - Tour date time zone (`tour-times-assume-org-timezone`): the labels use
   the same browser-local dates as every other tour date.
@@ -646,9 +651,11 @@ Server:
 - Seeds: `app/src/lib/seed/matrix.ts:1224-1230`, `:1257-1263` (full profile,
   legacy string filters) - keep ONE legacy-shape broadcast so the full world
   exercises the normalizer, move the other to the list shape.
-- Comments naming `byHousingAuthority` as the broadcast key:
-  `contacts.ts:650`, `dev.ts:1263`, `lib/import/apply.ts:1208`,
-  `lib/seed/lean.ts:109`.
+- Comments naming `byHousingAuthority` as the broadcast key (correct them to
+  say the GSI is kept but no longer read by the blast audience; do not touch
+  the GSI or `listByHousingAuthority` itself): `contacts.ts:650`,
+  `dev.ts:1263`, `lib/import/apply.ts:1208`, `lib/seed/lean.ts:109`,
+  `contactsRepo.ts:770-775` (the `listByHousingAuthority` doc comment).
 
 Dashboard:
 
@@ -713,4 +720,4 @@ none - `a2p-compliance.spec.ts` section 8.3 test 1's `noConsent` tenant
 Docs: `documentation/GLOSSARY.md` (the Matching entry gains "left out of a
 blast: status, housing authority and tour holds"; the `byHousingAuthority`
 line at `:322`), `RUNBOOK.md:1457`, the issue registry (resolve the
-truncation issue, file the GSI debt issue).
+truncation issue; no GSI issue is filed).

@@ -549,19 +549,31 @@ least one row. Amber box, same style as 7.1. Mockup:
   `deleted`, "This property's contact was deleted." (it may have been the
   primary or the landlord of record) - followed by "New tours won't include
   the landlord, and tour group texts use the general intro."
-- Action, counting ELIGIBLE rows only (live and not a caseworker; 7.5 marks
-  both). This is a DELIBERATE click, so it is broader than the automatic
-  rule (4.3) - it can name a contact who is not typed landlord, and the
-  button names the person before Sam clicks (Cameron, 2026-10-13):
-  - exactly ONE eligible row: button "Make <Name> primary" - the same write as
-    the edit-mode "Make primary" (`onMakePrimaryContact`,
+- Action, counting rows ELIGIBLE FOR AUTOMATIC ROUTING only - the 7.5
+  `autoEligible` row flag (4.3: typed landlord, live, not a routing
+  pointer). The one-click therefore never names a tenant: a tenant made
+  primary would join other tenants' new people lists and intros, and
+  auto-primary could no longer heal it (Cameron, 2026-10-13, planner fix
+  wave F1). The button names the person before Sam clicks. Edit mode's
+  per-row "Make primary" stays type-agnostic - a deliberate pick with the
+  name on the row.
+  - exactly ONE `autoEligible` row: button "Make <Name> primary" - the same
+    write as the edit-mode "Make primary" (`onMakePrimaryContact`,
     `ListingDetail.tsx:437`).
-  - two or more eligible rows: button "Choose a primary" - enters the card's
-    edit mode.
-  - no eligible row (no live contact, or only caseworkers): no button; the
-    line reads "Add the landlord or property manager - they become the
-    primary automatically." (true: an eligible add on a property with no live
-    primary and no live landlord is promoted, 4.4).
+  - two or more `autoEligible` rows: button "Choose a primary" - enters the
+    card's edit mode.
+  - no `autoEligible` row, but at least one live row that is not a
+    caseworker (not `deleted`, not `caseworker` - a tenant, say): the line
+    "Add a property manager or owner - they become the primary
+    automatically." AND the "Choose a primary" button, so Sam can still pick
+    one by hand, deliberately.
+  - no live row that is not a caseworker (every row deleted, or only
+    caseworkers): the line only, no button.
+  - The line is true: an eligible add on a property with no live primary
+    and no live landlord is promoted (4.4). It names a property manager or
+    owner, not "the landlord": while a deleted contact is still the
+    landlord of record, an add with the Landlord role answers 409
+    `landlord_reassignment_required` (planner fix wave F3).
 - Not shown on a soft-deleted property (the card is read-only there), and not
   shown when the block is absent (could not tell).
 - Zero roster rows: no box. The existing empty state "No contacts on this
@@ -588,8 +600,12 @@ that carry the enriched roster (GET `/api/units/:id`, `units.ts:531`, and the
 two roster writes, `:1136`, `:1171`) gain:
 
 - per row: `deleted: true` when the row's contact is soft-deleted or missing,
-  and `caseworker: true` when it is a caseworker (`isCaseworker`) - each absent
-  otherwise, and both ONLY when the read was complete;
+  `caseworker: true` when it is a caseworker (`isCaseworker`), and
+  `autoEligible: true` when it is eligible for automatic routing
+  (`isAutoRoutingEligible`, 4.3: typed landlord, live, not a routing
+  pointer; the only row the 7.4 box offers in one click, planner fix wave
+  F1) - each absent otherwise, all three ONLY when the read was complete,
+  and never stored;
 - on the unit, ONLY when the read was complete (absent = could not tell):
 
 ```
@@ -658,8 +674,8 @@ every write is conditional, so concurrent runs cannot double-write.
 - Counted, not written: `noHeir` (no live contact and no live landlord),
   `noEligible` (live contacts exist but none is eligible for automatic routing
   - e.g. only a tenant or a caseworker; the heir function's
-  `no_eligible_candidate`, 4.3; listed by unit id so Sam can choose by hand
-  with the property box),
+  `no_eligible_candidate`, 4.3; listed by unit id so Sam can add a
+  property manager or owner (the property box says so)),
   `unknown` (a liveness read failed).
 - Also aligned, with the same conditional write and no audit event (it is not
   a primary change): a unit whose flagged primary is live but whose scalar is

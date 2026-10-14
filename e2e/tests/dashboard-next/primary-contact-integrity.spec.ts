@@ -272,7 +272,8 @@ test.describe('Primary contact integrity - a property with no primary contact', 
 
     await page.goto(`${NEXT}/listings/${unitId}`);
     const card = contactsCard(page);
-    // Three live, non-caseworker rows: the box asks for a deliberate choice.
+    // Two rows typed landlord (autoEligible; the tenant never counts): the
+    // box asks for a deliberate choice.
     await expect(card.getByText('No primary contact.')).toBeVisible({ timeout: 20_000 });
     await card.getByRole('button', { name: 'Choose a primary' }).click();
     // ...which is the card's edit mode.

@@ -137,3 +137,20 @@ handback review does not depend on the replay for them.
 - The tour-label dates are browser-local (same as all tour dates; the time
   zone issue is filed separately and out of scope).
 - Launch mode is pre-chosen: AUTO, watchdog checkpoint 55 min (3300 s).
+
+## State at Gate B (2026-10-14, plan closed, before compaction)
+
+- Spec APPROVED rev 5 (@33251384); spec review 3 rounds closed.
+- PLAN v2 FINAL (@09598963): plan review 3 rounds closed, 26 findings, 0
+  blocking/high, 0 rejected; rulings AR1-AR42 in plan section 4.
+- Mission block (final): `docs/superpowers/reviews/2026-10-14-matching-blast-rules/mission-block.md`
+  - dispatch it VERBATIM as the build-orchestrator prompt.
+- Launch: AUTO, chosen by Cameron in advance (19:30, 19:40) - no launch-gate
+  question. Agent type: the namespaced `abt:build-orchestrator` (the bare
+  `build-orchestrator` left the roster this session). Watchdog CHECKPOINT
+  3300 s (55 min), stall 1500 s; mirror via transcript-tail.mjs from the
+  skill's CURRENT base dir (`W:\AI Projects\claude-plugins\abt\skills\feature-mission`)
+  into `<worktree>/.superpowers/sdd/live.log`.
+- npm ci done in the worktree. No other mission is building.
+- At handback: replay the WHOLE conversation first, then read this file
+  (the replay misses the two inputs quoted above as R2 and N1).

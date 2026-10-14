@@ -73,10 +73,11 @@ property manager or owner - they become the primary automatically." and
 still offers "Choose a primary" while a live contact that is not a
 caseworker remains (spec 7.4, planner fix wave F1). The next roster write
 for an eligible contact promotes it (spec 4.4: a deleted landlord of record
-counts as absent), and the backfill repairs the unit. The contact Delete
-dialog's sentence, that the landlord or another contact takes over
-(`dashboard/src/routes/contact/ContactDetail.tsx:140-141`), does not hold
-for this shape.
+counts as absent), and the backfill repairs the unit. Before the fix, the
+contact Delete dialog's sentence, that the landlord or another contact takes
+over (`dashboard/src/routes/contact/ContactDetail.tsx`), did not hold for
+this shape; since the fix this shape hands off, and the sentence says "when
+someone can".
 
 **Suggested fix (the reviewer's recipe).** Reuse `landlordWasPrimary` in
 both places, restricted to the deleted contact being the landlord of record

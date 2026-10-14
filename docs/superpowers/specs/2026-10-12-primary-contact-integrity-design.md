@@ -12,6 +12,10 @@ landlord included (sections 4.3, 4.4, 4.6). Design review CLOSED after round
 4 (terminal, precision only; rounds 1-4 folded in;
 adjudications at
 `docs/superpowers/reviews/2026-10-12-primary-contact-integrity/design-review/adjudications.md`).
+Amended on-branch after the build: code review fix waves 1-2 and the planner
+fix wave of 2026-10-13 (Cameron's rulings F1-F5,
+`docs/superpowers/reviews/2026-10-12-primary-contact-integrity/planner-review/fix-wave-findings.md`);
+each amendment is dated inline.
 Branch: `feat/primary-contact-integrity` (worktree `W:\tmp\primary-contact-integrity`).
 Origin: Sam's tracker note "3." (2026-10-12) - tour groups at 470 Bolton open
 with "the old version" of the intro.
@@ -200,8 +204,10 @@ Contract:
   as the heir function's EXCLUDED contact (4.3), which counts as not live.
 - The restore paths' liveness read - "Restore without a landlord"'s heir pick
   and the landlord swap's hand-off (4.6) - is STRONGLY consistent
-  (`getManyByIds` with `consistentRead`, as the per-row consistent `getById`
-  it replaced was; planner fix wave F5a, Cameron 2026-10-13), while every
+  (`getManyByIds` with `consistentRead`; on `main` before this branch,
+  "Restore without a landlord" read each contact with a consistent `getById`
+  and the swap read no liveness at all; planner fix wave F5a, Cameron
+  2026-10-13), while every
   other caller's batch read stays eventually consistent
   (`docs/issues/roster-liveness-read-eventual-consistency.md`).
 - A failed or incomplete read means liveness UNKNOWN. Each path says what it
@@ -795,7 +801,9 @@ the primary when its row is flagged OR the scalar names it" - which let a
 stale scalar hand the primary away from a live flagged contact. Plan review
 R1-R3 replaced that with ONE shared rule, `landlordWasPrimary(roster,
 landlordId)` (`repos/unitsRepo.ts`; used by `restoreWithLandlord`, the restore
-route and the API-test fake): a restore hands off when the old landlord's row
+route and the API-test fake, and - through `contactIsPrimaryToHandOff` - by the
+contact-delete hand-off for a landlord of record, 4.6, planner fix wave F2):
+a restore hands off when the old landlord's row
 is the FLAGGED primary, or when NO row is flagged (the property has no
 primary; the heir function picks who). A live flagged row elsewhere is never
 displaced, the scalar is never read, and caseworker-integrity's no-flag cases
@@ -835,7 +843,10 @@ P1 removes the property-contact route into this; the rest is filed as
   write succeeds unpromoted; 409 only for a deleted contact not already
   primary); P3 per path (remove: heir / clear /
   503 on unknown; delete: move to heir / no heir unchanged / unknown skipped /
-  one unit failing does not fail the delete / delete-then-restore lossless);
+  one unit failing does not fail the delete / delete-then-restore lossless /
+  the landlord of record of a no-flag roster hands off, while a no-flag unit
+  whose landlord of record is someone else and a unit with another flagged row
+  are not targets / a retry re-checks the same rule, planner fix wave F2);
   the reasons (each alone, combinations, ordering, owner/unit failure alone,
   placement exclusions, ownerless absence, never-throw).
 - Parity: the real repo and the API-test fake give the same results for the

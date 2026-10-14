@@ -7,7 +7,7 @@ status: open
 area: app
 created: 2026-10-13
 updated: 2026-10-13
-refs: app/src/routes/units.ts:1747, app/src/routes/units.ts:1858, app/src/repos/unitsRepo.ts:1418, app/src/services/primaryHandoff.ts:110, app/src/repos/unitsRepo.ts:1789, app/scripts/assign-primary-contacts.ts:315, app/src/routes/units.ts:653, app/src/repos/unitsRepo.ts:876, app/src/repos/contactsRepo.ts:1018, app/src/lib/propertyContact.ts:92, app/src/routes/units.ts:708, app/src/routes/units.ts:2434
+refs: app/src/routes/units.ts:1747, app/src/routes/units.ts:1858, app/src/repos/unitsRepo.ts:1418, app/src/services/primaryHandoff.ts:110, app/src/repos/unitsRepo.ts:1789, app/scripts/assign-primary-contacts.ts:315, app/src/routes/units.ts:653, app/src/repos/unitsRepo.ts:876, app/src/repos/contactsRepo.ts:1018, app/src/lib/propertyContact.ts:92, app/src/routes/units.ts:708, app/src/routes/units.ts:2434, app/src/repos/unitsRepo.ts:900, app/src/lib/propertyContact.ts:164
 ---
 
 **Problem.** Since `feat/primary-contact-integrity`, every AUTOMATIC
@@ -130,3 +130,22 @@ contact-delete fan-out (`app/src/services/primaryHandoff.ts:110` ->
 (`enrichRosterView`, `app/src/routes/units.ts:653`) stays eventually
 consistent as the suggested fix above allowed. Making any of those
 consistent is now one option on its `readRosterContacts` call.
+
+**Update (2026-10-13, planner review round 2, adversarial R2-1): shape 3
+now covers the contact-delete hand-off too.** Planner fix wave F2 gave the
+delete fan-out the restore paths' flag rule (`contactIsPrimaryToHandOff`,
+`app/src/repos/unitsRepo.ts:900-911`, through `landlordWasPrimary`), so it
+reads FLAGS, not liveness, the same way: on a unit where a soft-deleted
+contact D is still flagged and the landlord of record L is not, the lookup
+already uses L (`app/src/lib/propertyContact.ts:164-171`), yet deleting L
+hands off nothing (D's flag is "a flagged row elsewhere", which always wins)
+and the property is left with no contact even when an eligible contact sits
+on the list. Accepted with shape 3 (spec 4.7: a deleted flagged row stays
+flagged until the next eligible write or the script). The main source is
+primaries deleted before this branch deployed (the old delete never handed
+off), so the window closes when the one-time backfill is applied (RUNBOOK
+"Primary contacts backfill"): apply it promptly after each deploy. The fix,
+if ever wanted, is shape 3's: decide "flagged elsewhere" from LIVE rows -
+target every unit whose landlord of record is the deleted contact and let
+`handOffPrimaryFrom`, which already reads liveness, back off only when a
+LIVE flagged row exists.

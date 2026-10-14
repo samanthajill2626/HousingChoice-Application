@@ -347,7 +347,8 @@ Order S1 -> S2 -> S3 -> S4. Each slice ends green on its own unit suites and
 mid-build breakage: after S2 the dashboard still sends the legacy
 `housing_authority` string, which the server accepts; it reads no tour
 holds yet; existing Matching e2e specs start failing on the status rule
-from S1 and on the prefill from S3 - S4 repairs them).
+from S1 and on the prefill from S3 - S4 repairs them; from S1 until Task
+3.1 the dashboard's `audienceSummary` shows no authority, AR5).
 
 - **S1 - App foundations** (Tasks 1.1-1.5): the pure rules module (2.1);
   `AudienceFilter` type (2.2); `toursRepo.listByStatus` option + every fake

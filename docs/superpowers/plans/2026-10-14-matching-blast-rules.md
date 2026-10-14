@@ -473,6 +473,71 @@ below as written). Rulings:
   same change ON TOP of it - never revert an earlier slice. Line numbers are
   hints; the quoted text is the anchor.
 
+### 4.1 Plan review round 1 rulings (BINDING; adjudications in
+### `docs/superpowers/reviews/2026-10-14-matching-blast-rules/plan-review/adjudications.md`)
+
+- **AR22 (R1-B1, R1-A5) The draft-delete e2e test.**
+  `e2e/tests/dashboard-next/broadcasts.spec.ts` "compose a draft, see it in
+  the Drafts list, delete it" (`:398-440`) joins Task 4.1's repair list
+  (and the F16-F21 inventory): it must not capture the FIRST
+  `POST /api/broadcasts`. Repair: wait until the `Preview recipients`
+  button is enabled (the settle gate plus a current draft), and take the
+  draft id from the LAST create response received by then (record every
+  create response with `page.on('response', ...)`, read the last). AR23
+  removes the race at the source; the repair keeps the test robust anyway.
+- **AR23 (R1-B2) No draft while the prefill is unsettled.** In Task 3.5,
+  while `prefillPending` is true (the gate's own scope: a property attached,
+  filters on, not a resumed draft), the composer creates NO draft: add a
+  `hold?: boolean` input to `useComposerDraft` that, when true, makes no
+  create (and deletes nothing) and reports `reachPending: true`, so the
+  reach line shows its existing pending hint. Add dashboard tests: with the
+  org list unresolved, `createBroadcast` is not called and the reach line is
+  pending; once the list resolves, exactly ONE create is made and it carries
+  the prefilled `housing_authorities`.
+- **AR24 (R1-B3) Picker empty state only once loaded.** Task 3.6 shows
+  `No Available properties. A property must be Available to send.` only
+  after the units read has settled (track a loaded flag beside
+  `unitCandidates`); while loading, today's loading behavior stays. The
+  Task 3.6 empty-state test waits for `getAllUnits` to resolve before
+  asserting, and a sibling assertion proves a non-Available unit is absent
+  AFTER load.
+- **AR25 (R1-B4, R1-A6) Clear the 503 alert on change.** The compose-step
+  `audience_rules_unavailable` alert (and its Try again) is cleared wherever
+  the other compose notices reset: any filter change, message change,
+  property pick or change, and whenever the draft key changes. Add a test:
+  after a 503, changing the voucher size removes the alert.
+- **AR26 (R1-B5) Late preview results.** While a Preview is in flight
+  (`previewBusy`), the `Change` property button is disabled (as the filters
+  already are). Belt: `rejectAuthority` ignores a 422 whose captured
+  property id no longer equals the current one. Add a test for the
+  disabled Change button during a pending preview.
+- **AR27 (R1-A1, R1-B6) Where the lint count update happens** (replaces
+  AR19's placement). It is the LAST step of Task 4.4, after gate 5: if the
+  gate-5 baseline comparison shows the branch removed pre-existing errors,
+  run `npm run lint` bare from the worktree root (a measurement, not a
+  gate; capture its output to `.superpowers/lint-repo.log` and read the
+  `N problems (N errors, M warnings)` summary), then edit ONLY the count,
+  file count and date in AGENTS.md's gate 5 sentence ("as of 2026-10-07
+  `npm run lint` reports 23 errors across 18 dashboard files") and the
+  matching count in `docs/issues/lint-backlog-repo-wide.md`, and commit
+  those two files alone (docs-only; the gates need not re-run). If nothing
+  was removed, skip it.
+- **AR28 (R1-A2) Sync before gates is MUST.** Task 4.4 Step 0 is not
+  optional: check `git rev-list --count HEAD..main` first; if main moved,
+  sync once per AR18 before any gate. The full gate script runs once.
+- **AR29 (R1-A3) DynamoDB Local.** S1's preflight "ask the human before
+  `npm run db:start`" is superseded by AR2: START it if it is not up; never
+  RESTART it. An unattended build must not stall on this.
+- **AR30 (R1-A4) S2's shell.** S2's command blocks are PowerShell
+  (`cd W:\...;`, `@'...'@` here-string commit messages): run them with the
+  PowerShell tool as written.
+- **AR31 (R1-B7) Task 4.1 Step 3's closing grep** prints the TWO comment
+  lines from steps 3b and 3h, not one.
+- **AR32 (R1-B8) Server truncation message** (amends 1.1 and AR8's note):
+  `audience resolution was truncated - the audience could not be read completely`
+  (no candidate count - the resolver's read bound is pages x page size, not
+  the recipient cap). Every test asserting it uses this exact string.
+
 ## 5. S1 - App foundations (Tasks 1.1-1.5)
 
 # S1 - App foundations (Tasks 1.1-1.5) - section draft

@@ -749,10 +749,16 @@ export interface ContactsRepo {
    * fetch every key (throttle/failure), rather than returning a short map. Pass
    * it when an absent key changes an OUTCOME rather than a label - a send that
    * silently skips tenants is not the same bug as a row without a name.
+   *
+   * `consistentRead` makes the read STRONGLY CONSISTENT (BatchGetItem's
+   * per-table ConsistentRead, on every request of the walk) at about twice
+   * the read cost; the default stays eventually consistent. Only the unit
+   * restore paths' liveness read asks for it today
+   * (primary-contact-integrity planner fix wave F5a).
    */
   getManyByIds(
     contactIds: string[],
-    opts?: { requireComplete?: boolean },
+    opts?: { requireComplete?: boolean; consistentRead?: boolean },
   ): Promise<Map<string, ContactItem>>;
   /**
    * List/filter via the byTypeStatus GSI (M1.5): all contacts of a type,
@@ -973,6 +979,9 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
    *   For callers where an absent key changes an outcome rather than a label -
    *   the broadcast send path, where it means a tenant never gets the message.
    *   A genuinely missing row is NOT incomplete and never throws.
+   * - `consistentRead`: `ConsistentRead: true` in the table's RequestItems
+   *   entry of EVERY request this walk sends (each chunk, each
+   *   UnprocessedKeys retry). Absent = eventually consistent, as before.
    *
    * NOTE: base-table primary keys ONLY. BatchGetItem cannot read a GSI, so this
    * is no help to findByPhone/findByEmail (see
@@ -984,6 +993,7 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       /** MUST project `contactId` - the returned map is keyed on it. */
       projection?: { ProjectionExpression: string; ExpressionAttributeNames: Record<string, string> };
       requireComplete?: boolean;
+      consistentRead?: boolean;
     } = {},
   ): Promise<Map<string, T>> => {
     const found = new Map<string, T>();
@@ -1000,7 +1010,15 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
             await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
           }
           const response = await doc.send(
-            new BatchGetCommand({ RequestItems: { [table]: { Keys: keys, ...opts.projection } } }),
+            new BatchGetCommand({
+              RequestItems: {
+                [table]: {
+                  Keys: keys,
+                  ...opts.projection,
+                  ...(opts.consistentRead === true && { ConsistentRead: true }),
+                },
+              },
+            }),
           );
           for (const item of (response.Responses?.[table] ?? []) as T[]) {
             found.set(item.contactId, item);
@@ -1319,7 +1337,10 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
     },
 
     async getManyByIds(contactIds, opts) {
-      return batchGetByIds<ContactItem>(contactIds, { requireComplete: opts?.requireComplete });
+      return batchGetByIds<ContactItem>(contactIds, {
+        requireComplete: opts?.requireComplete,
+        consistentRead: opts?.consistentRead,
+      });
     },
 
     async listByType(type, opts = {}) {

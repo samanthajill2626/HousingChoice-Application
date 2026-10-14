@@ -677,8 +677,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
    * earliest-added remaining contact eligible for automatic routing (typed
    * landlord, live, not a routing pointer); nobody when none is.
    * `{ kind: 'unknown' }` when the liveness read (ONE complete batch read,
-   * readRosterContacts) failed - the route then refuses with 503
-   * roster_read_failed and writes nothing.
+   * readRosterContacts, STRONGLY CONSISTENT - planner fix wave F5a, as the
+   * per-row consistent getById it replaced was) failed - the route then
+   * refuses with 503 roster_read_failed and writes nothing.
    * Decided from `listRead` - the contact list of the unit the route read
    * (its consistent read) taken ONCE, before the liveness read is awaited - which
    * is the very value the restore's write is then conditioned on
@@ -702,10 +703,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // eligible write or the script). It never reads the primary_contact scalar.
     const clearedWasPrimary = landlordWasPrimary(rows, clearedLandlordId);
     if (!clearedWasPrimary) return { kind: 'decided', promote: null };
+    // Consistent (planner fix wave F5a, Cameron 2026-10-13: the restore paths
+    // only): a contact deleted a moment ago must not read as a live heir.
     const read = await readRosterContacts(
       contacts,
       rows.filter((row) => row.contactId !== clearedLandlordId).map((row) => row.contactId),
       log,
+      { consistentRead: true },
     );
     const heir = chooseHeir({ roster: rows, landlordId: undefined, exclude: clearedLandlordId, read });
     if (heir.kind === 'unknown') return { kind: 'unknown' };
@@ -2410,7 +2414,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // replaces it on). Unknown liveness refuses with 503 roster_read_failed
     // before any write. The landlord SWAP decides its heir in the repo instead,
     // per attempt, from the liveness read passed below - its contacts-only
-    // races are retried, so a decision made here could go stale.
+    // races are retried, so a decision made here could go stale. BOTH liveness
+    // reads are STRONGLY CONSISTENT (planner fix wave F5a, Cameron 2026-10-13:
+    // the restore paths only; every other readRosterContacts caller stays
+    // eventually consistent).
     const listRead = stored.contacts;
     let promote: string | null = null;
     if (next === null) {
@@ -2424,7 +2431,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     }
     const reported: { handoff?: PrimaryHandoff } = {};
     const handoffOpts = {
-      readContacts: (ids: string[]) => readRosterContacts(contacts, ids, log),
+      readContacts: (ids: string[]) => readRosterContacts(contacts, ids, log, { consistentRead: true }),
       onPrimaryHandoff: (handoff: PrimaryHandoff) => {
         reported.handoff = handoff;
       },

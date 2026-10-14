@@ -185,6 +185,26 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     expect(await contacts.getManyByIds([])).toEqual(new Map());
   });
 
+  // primary-contact-integrity planner fix wave F5a: the restore paths' liveness
+  // read asks for a STRONGLY CONSISTENT BatchGet. DynamoDB accepts
+  // ConsistentRead in the table's RequestItems entry and answers the same
+  // whole items, a soft-deleted one included (the request shape itself is
+  // pinned in contactsRepoConsistentBatchRead.test.ts).
+  it('getManyByIds with consistentRead reads whole items through a consistent BatchGet, a soft delete included', async () => {
+    const live = await contacts.create({ type: 'landlord', firstName: 'Lena' });
+    const gone = await contacts.create({ type: 'landlord', firstName: 'Gus' });
+    await contacts.softDelete(gone.contactId, '2026-10-13T09:00:00.000Z');
+
+    const found = await contacts.getManyByIds([live.contactId, gone.contactId, 'contact-missing'], {
+      requireComplete: true,
+      consistentRead: true,
+    });
+
+    expect([...found.keys()].sort()).toEqual([live.contactId, gone.contactId].sort());
+    expect(found.get(live.contactId)).toMatchObject({ type: 'landlord', firstName: 'Lena' });
+    expect(found.get(gone.contactId)?.deleted_at).toBe('2026-10-13T09:00:00.000Z');
+  });
+
   it('addPhone seeds phones[] from the scalar, attaches a second number via a pointer, and findByPhone resolves the owner', async () => {
     const A = nextPhone();
     const B = nextPhone();

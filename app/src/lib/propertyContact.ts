@@ -82,18 +82,31 @@ export type RosterContactsRead =
  *
  * De-duplicates ids (BatchGetItem rejects duplicate keys), drops empty strings
  * and undefined, and reads nothing at all for an empty list. Never throws.
+ *
+ * `opts.consistentRead` asks for a STRONGLY CONSISTENT batch read
+ * (contactsRepo.getManyByIds `consistentRead`). Only the unit restore paths
+ * pass it - "Restore without a landlord"'s heir pick and the restore's
+ * hand-off read (planner fix wave F5a, Cameron 2026-10-13: restore paths
+ * only); every other caller reads eventually consistent, as before.
  */
 export async function readRosterContacts(
   contacts: Pick<ContactsRepo, 'getManyByIds'>,
   ids: Iterable<string | undefined>,
   logger?: Logger,
+  opts: { consistentRead?: boolean } = {},
 ): Promise<RosterContactsRead> {
   const unique = [
     ...new Set([...ids].filter((id): id is string => nonEmptyId(id) !== undefined)),
   ];
   if (unique.length === 0) return { ok: true, byId: new Map() };
   try {
-    return { ok: true, byId: await contacts.getManyByIds(unique, { requireComplete: true }) };
+    return {
+      ok: true,
+      byId: await contacts.getManyByIds(unique, {
+        requireComplete: true,
+        ...(opts.consistentRead === true && { consistentRead: true }),
+      }),
+    };
   } catch (err) {
     (logger ?? defaultLogger).warn(
       { err, requested: unique.length },

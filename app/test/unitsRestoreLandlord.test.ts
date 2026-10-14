@@ -153,8 +153,15 @@ describe('POST /api/units/:id/restore - with a landlord (I3)', () => {
     seedDeletedUnit(world, 'u-5');
     seedContact(world, 'c-old', { type: 'tenant' });
     seedContact(world, 'c-new', { type: 'landlord', firstName: 'Nora', lastName: 'Lane', company: 'Lane Homes' });
+    const batchRead = vi.spyOn(world.contactsRepo, 'getManyByIds');
     const res = await restore(app, 'u-5', { landlordId: 'c-new' });
     expect(res.status).toBe(200);
+    // The swap's hand-off reads liveness STRONGLY CONSISTENT (planner fix wave
+    // F5a): the remaining row and the new landlord, the old one excluded.
+    expect(batchRead).toHaveBeenCalledWith(['c-pm', 'c-new'], { requireComplete: true, consistentRead: true });
+    const livenessReads = batchRead.mock.calls.filter(([, opts]) => opts?.requireComplete === true);
+    expect(livenessReads).toHaveLength(1);
+    for (const [, opts] of livenessReads) expect(opts).toMatchObject({ consistentRead: true });
     const stored = world.units.get('u-5')!;
     expect(stored.deleted_at).toBeUndefined();
     expect(stored.landlordId).toBe('c-new');
@@ -571,8 +578,10 @@ describe('POST /api/units/:id/restore - without a landlord: the heir takes over'
   // primary-contact-integrity spec 4.2: the remaining contacts are read in ONE
   // complete batch read (readRosterContacts -> getManyByIds with
   // requireComplete), replacing the per-row consistent getById of the
-  // sole-landlord promotion (plan S2 contract issue 10).
-  it('(PIN) reads the remaining contacts in ONE complete batch read', async () => {
+  // sole-landlord promotion (plan S2 contract issue 10) - and, since planner
+  // fix wave F5a (Cameron 2026-10-13), STRONGLY CONSISTENT, as that getById
+  // was: `consistentRead: true` reaches the batch read.
+  it('(PIN) reads the remaining contacts in ONE complete, strongly consistent batch read', async () => {
     const { app, world } = makeWebhookHarness();
     seedClearedPrimary(world, 'u-p7', [{ contactId: 'c-pm', role: 'pm', primaryContact: false }]);
     seedContact(world, 'c-pm', { type: 'landlord' });
@@ -580,7 +589,11 @@ describe('POST /api/units/:id/restore - without a landlord: the heir takes over'
 
     expect((await restore(app, 'u-p7', { landlordId: null })).status).toBe(200);
 
-    expect(batchRead).toHaveBeenCalledWith(['c-pm'], { requireComplete: true });
+    expect(batchRead).toHaveBeenCalledWith(['c-pm'], { requireComplete: true, consistentRead: true });
+    // Every liveness (complete) read this restore made was consistent.
+    const livenessReads = batchRead.mock.calls.filter(([, opts]) => opts?.requireComplete === true);
+    expect(livenessReads).toHaveLength(1);
+    for (const [, opts] of livenessReads) expect(opts).toMatchObject({ consistentRead: true });
   });
 
   it('a contact-list change between the route read and the write: 409 unit_roster_conflict - nothing written, no audit', async () => {

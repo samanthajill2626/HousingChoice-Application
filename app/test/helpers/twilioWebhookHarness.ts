@@ -2299,7 +2299,11 @@ export function createFakeWorld(): FakeWorld {
           .map((contact) => [contact.contactId, projectRecipient(contact)] as const),
       );
     },
-    async getManyByIds(contactIds) {
+    // The real signature, `{ requireComplete?, consistentRead? }` (planner fix
+    // wave F5a), both IGNORED here: in memory every read is complete and
+    // strongly consistent (spec 10 - the failure paths are tested with an
+    // injected batch read that throws). Tests read the options off a spy.
+    async getManyByIds(contactIds, _opts) {
       const wanted = new Set(contactIds);
       return new Map(
         contacts

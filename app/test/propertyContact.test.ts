@@ -102,6 +102,25 @@ describe('readRosterContacts (spec 4.2 - ONE complete batch read; ANY throw = un
     expect(read).toEqual({ ok: true, byId: new Map([['c-ll', ll]]) });
   });
 
+  // Planner fix wave F5a (Cameron 2026-10-13): the restore paths ask for a
+  // STRONGLY CONSISTENT read; every other caller keeps the default above.
+  it('passes consistentRead to the batch read when asked - and only then', async () => {
+    const getManyByIds = vi.fn(
+      async (_ids: string[], _opts?: { requireComplete?: boolean; consistentRead?: boolean }) =>
+        new Map<string, ContactItem>(),
+    );
+    await readRosterContacts({ getManyByIds }, ['c-ll'], undefined, { consistentRead: true });
+    await readRosterContacts({ getManyByIds }, ['c-ll'], undefined, { consistentRead: false });
+    await readRosterContacts({ getManyByIds }, ['c-ll'], undefined, {});
+    await readRosterContacts({ getManyByIds }, ['c-ll']);
+    expect(getManyByIds.mock.calls).toStrictEqual([
+      [['c-ll'], { requireComplete: true, consistentRead: true }],
+      [['c-ll'], { requireComplete: true }],
+      [['c-ll'], { requireComplete: true }],
+      [['c-ll'], { requireComplete: true }],
+    ]);
+  });
+
   it('reads nothing at all for no usable ids', async () => {
     const getManyByIds = vi.fn(
       async (_ids: string[], _opts?: { requireComplete?: boolean }) => new Map<string, ContactItem>(),

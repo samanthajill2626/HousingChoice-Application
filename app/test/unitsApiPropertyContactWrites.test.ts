@@ -1,6 +1,7 @@
 // primary-contact-integrity spec 7.5 (plan S3.6): the two contact-list writes
 // (POST /api/units/:id/contacts and DELETE /api/units/:id/contacts/:contactId)
-// answer with the same row flags and propertyContact block as GET, decided
+// answer with the same row flags (`deleted` / `caseworker` / `autoEligible`,
+// the last from planner fix wave F1) and propertyContact block as GET, decided
 // from the WRITTEN roster - and with today's rows and NO block when the
 // complete read fails, in either shape.
 import type { Express } from 'express';
@@ -73,13 +74,31 @@ describe('contact-list writes carry the propertyContact block (spec 7.5)', () =>
 
     expect(res.status).toBe(200);
     expect(res.body.unit.contacts).toEqual([
-      { contactId: 'c-ll', role: 'landlord', primaryContact: true, name: 'Lee Lord' },
-      { contactId: 'c-pat', role: 'pm', primaryContact: false, name: 'Pat Manager' },
+      { contactId: 'c-ll', role: 'landlord', primaryContact: true, name: 'Lee Lord', autoEligible: true },
+      { contactId: 'c-pat', role: 'pm', primaryContact: false, name: 'Pat Manager', autoEligible: true },
     ]);
     expect(res.body.unit.propertyContact).toEqual({
       contactId: 'c-ll',
       heirIfPrimaryRemoved: { contactId: 'c-pat', name: 'Pat Manager' },
     });
+  });
+
+  it('POST add of a TENANT on a property with no primary: the rows mark the typed-landlord row autoEligible, never the tenant (planner fix wave F1)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnitWithoutLandlord(world, 'u-tenant-add', [{ contactId: 'c-pam', role: 'pm', primaryContact: false }]);
+    seedContact(world, 'c-pam', { firstName: 'Pam', lastName: 'Two' });
+    seedContact(world, 'c-ten', { type: 'tenant', firstName: 'Tia', lastName: 'Tenant' });
+
+    const res = await post(app, 'u-tenant-add').send({ contactId: 'c-ten', role: 'other' });
+
+    expect(res.status).toBe(200);
+    // A write for the tenant promotes nobody (spec 4.4): still no primary, and
+    // the box's one-click (7.4) can name Pam only.
+    expect(res.body.unit.contacts).toEqual([
+      { contactId: 'c-pam', role: 'pm', primaryContact: false, name: 'Pam Two', autoEligible: true },
+      { contactId: 'c-ten', role: 'other', primaryContact: false, name: 'Tia Tenant' },
+    ]);
+    expect(res.body.unit.propertyContact).toEqual({ contactId: null, reason: 'none', heirIfPrimaryRemoved: null });
   });
 
   it('DELETE of a NON-primary row: the block is decided from the written roster', async () => {
@@ -98,6 +117,10 @@ describe('contact-list writes carry the propertyContact block (spec 7.5)', () =>
     const res = await del(app, 'u-rm', 'c-pat');
 
     expect(res.status).toBe(200);
+    expect(res.body.unit.contacts).toEqual([
+      { contactId: 'c-ll', role: 'landlord', primaryContact: true, name: 'Lee Lord', autoEligible: true },
+      { contactId: 'c-pam', role: 'pm', primaryContact: false, name: 'Pam Two', autoEligible: true },
+    ]);
     expect(res.body.unit.propertyContact).toEqual({
       contactId: 'c-ll',
       heirIfPrimaryRemoved: { contactId: 'c-pam', name: 'Pam Two' },
@@ -117,7 +140,7 @@ describe('contact-list writes carry the propertyContact block (spec 7.5)', () =>
 
     expect(res.status).toBe(200);
     expect(res.body.unit.contacts).toEqual([
-      { contactId: 'c-pam', role: 'pm', primaryContact: true, name: 'Pam Two' },
+      { contactId: 'c-pam', role: 'pm', primaryContact: true, name: 'Pam Two', autoEligible: true },
     ]);
     expect(res.body.unit.propertyContact).toEqual({ contactId: 'c-pam', heirIfPrimaryRemoved: null });
   });
@@ -141,6 +164,11 @@ describe('contact-list writes carry the propertyContact block (spec 7.5)', () =>
         { contactId: 'c-ll', role: 'landlord', primaryContact: true, name: 'Lee Lord' },
         { contactId: 'c-pat', role: 'pm', primaryContact: false, name: 'Pat Manager' },
       ]);
+      // Both rows are live typed landlords - autoEligible on a COMPLETE read,
+      // absent here like every other flag (planner fix wave F1).
+      for (const row of res.body.unit.contacts as Array<Record<string, unknown>>) {
+        expect(row).not.toHaveProperty('autoEligible');
+      }
       expect(res.body.unit).not.toHaveProperty('propertyContact');
     });
 

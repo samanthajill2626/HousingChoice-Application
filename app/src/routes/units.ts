@@ -377,14 +377,19 @@ function toUnitActivityEvent(e: AuditEvent): UnitActivityEvent {
 
 /**
  * primary-contact-integrity spec 7.5: one roster row as the property page
- * receives it. The two flags are RESPONSE-only (never stored) and set ONLY from
- * a complete read of the roster's contacts: `deleted` when the row's contact is
- * soft-deleted or has no record, `caseworker` when it is a caseworker
- * (lib/caseworkers isCaseworker). Absent otherwise.
+ * receives it. The three flags are RESPONSE-only (never stored) and set ONLY
+ * from a complete read of the roster's contacts: `deleted` when the row's
+ * contact is soft-deleted or has no record, `caseworker` when it is a
+ * caseworker (lib/caseworkers isCaseworker), `autoEligible` when it is
+ * eligible for AUTOMATIC routing (lib/propertyContact isAutoRoutingEligible:
+ * typed landlord, live, not a phone/email routing pointer) - the only row the
+ * no-primary box offers in one click (spec 7.4, planner fix wave F1). Absent
+ * otherwise, and all three absent when the read was incomplete.
  */
 interface UnitContactView extends UnitContact {
   deleted?: true;
   caseworker?: true;
+  autoEligible?: true;
 }
 
 /**
@@ -631,12 +636,14 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
    * (requireComplete, lib/propertyContact readRosterContacts) of the roster's
    * contact ids AND landlordId - an off-roster landlord of record must not read
    * as missing. On that complete read every row gets `deleted: true` (contact
-   * soft-deleted or missing) and `caseworker: true` (isCaseworker), each only
-   * when it holds, and the unit gets the `propertyContact` block. When the read
-   * fails in EITHER shape (a raw chunk error or IncompleteBatchReadError -
-   * neither carries a partial map; readRosterContacts answers { ok: false }
-   * for both) the rows fall back to enrichRoster's best-effort read exactly as
-   * before and the block is ABSENT ("could not tell"). readRosterContacts never
+   * soft-deleted or missing), `caseworker: true` (isCaseworker) and
+   * `autoEligible: true` (isAutoRoutingEligible - the box's one-click rule,
+   * planner fix wave F1), each only when it holds, and the unit gets the
+   * `propertyContact` block. When the read fails in EITHER shape (a raw chunk
+   * error or IncompleteBatchReadError - neither carries a partial map;
+   * readRosterContacts answers { ok: false } for both) the rows fall back to
+   * enrichRoster's best-effort read exactly as before - no flag at all - and
+   * the block is ABSENT ("could not tell"). readRosterContacts never
    * throws and enrichRoster guards its own read, so the GET never 500s here.
    * enrichRoster itself is unchanged for the other caller (the unit restore).
    */
@@ -651,6 +658,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         ...enrichRow(row, contact),
         ...((contact === undefined || isContactDeleted(contact)) && { deleted: true as const }),
         ...(contact !== undefined && isCaseworker(contact) && { caseworker: true as const }),
+        ...(isAutoRoutingEligible(contact) && { autoEligible: true as const }),
       };
     });
     const block = propertyContactBlockOf(unit, read.byId);

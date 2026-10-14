@@ -55,9 +55,11 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
     expect(res.status).toBe(200);
     // Legacy fields intact (superset).
     expect(res.body.unit).toMatchObject({ unitId: 'u-1', landlordId: 'c-ll-9', status: 'available', beds: 2 });
-    // Back-compat roster: [{ contactId: landlordId, role: 'landlord', primaryContact: true }].
+    // Back-compat roster: [{ contactId: landlordId, role: 'landlord', primaryContact: true }]
+    // - plus the response-only autoEligible flag (a live typed landlord;
+    // primary-contact-integrity planner fix wave F1).
     expect(res.body.unit.contacts).toEqual([
-      { contactId: 'c-ll-9', role: 'landlord', primaryContact: true },
+      { contactId: 'c-ll-9', role: 'landlord', primaryContact: true, autoEligible: true },
     ]);
     expect(res.body.unit.propertyContact).toEqual({ contactId: 'c-ll-9', heirIfPrimaryRemoved: null });
   });
@@ -85,6 +87,7 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
       primaryContact: true,
       name: 'Pat M',
       company: 'Acme PM',
+      autoEligible: true,
     });
   });
 

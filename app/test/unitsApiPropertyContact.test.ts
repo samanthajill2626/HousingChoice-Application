@@ -1,9 +1,11 @@
 // primary-contact-integrity spec 7.5 (plan S3.5): GET /api/units/:id serves the
 // property page's contact facts ONLY from a COMPLETE read of the roster's
-// contact ids AND landlordId (spec 4.2): per-row `deleted` / `caseworker`, and
-// the unit's `propertyContact` block. Either failure shape of that read (a raw
-// chunk error or IncompleteBatchReadError) serves today's best-effort rows -
-// names, NO flags - and NO block. The GET never 500s.
+// contact ids AND landlordId (spec 4.2): per-row `deleted` / `caseworker` /
+// `autoEligible` (planner fix wave F1: eligible for AUTOMATIC routing - the
+// only row the 7.4 box offers in one click), and the unit's `propertyContact`
+// block. Either failure shape of that read (a raw chunk error or
+// IncompleteBatchReadError) serves today's best-effort rows - names, NO
+// flags - and NO block. The GET never 500s.
 import type { Express } from 'express';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -83,7 +85,7 @@ describe('GET /api/units/:id - row flags and the propertyContact block (complete
 
     expect(res.status).toBe(200);
     expect(res.body.unit.contacts).toEqual([
-      { contactId: 'c-ll', role: 'landlord', primaryContact: true, name: 'Lee Lord' },
+      { contactId: 'c-ll', role: 'landlord', primaryContact: true, name: 'Lee Lord', autoEligible: true },
     ]);
     expect(res.body.unit.propertyContact).toEqual({ contactId: 'c-ll', heirIfPrimaryRemoved: null });
   });
@@ -97,7 +99,7 @@ describe('GET /api/units/:id - row flags and the propertyContact block (complete
 
     expect(res.status).toBe(200);
     expect(res.body.unit.contacts).toEqual([
-      { contactId: 'c-mark', role: 'pm', primaryContact: false, name: 'Mark Passmore' },
+      { contactId: 'c-mark', role: 'pm', primaryContact: false, name: 'Mark Passmore', autoEligible: true },
     ]);
     expect(res.body.unit.propertyContact).toEqual({
       contactId: null,
@@ -126,7 +128,7 @@ describe('GET /api/units/:id - row flags and the propertyContact block (complete
       { contactId: 'c-gone', role: 'pm', primaryContact: true, name: 'Gail Gone', deleted: true },
       { contactId: 'c-cw', role: 'other', primaryContact: false, name: 'Casey Worker', caseworker: true },
       { contactId: 'c-ten', role: 'other', primaryContact: false, name: 'Tia Tenant' },
-      { contactId: 'c-pam', role: 'pm', primaryContact: false, name: 'Pam Two' },
+      { contactId: 'c-pam', role: 'pm', primaryContact: false, name: 'Pam Two', autoEligible: true },
     ]);
     expect(res.body.unit.propertyContact).toEqual({
       contactId: null,
@@ -188,7 +190,7 @@ describe('GET /api/units/:id - row flags and the propertyContact block (complete
 
     expect(res.status).toBe(200);
     expect(res.body.unit.contacts).toEqual([
-      { contactId: 'c-pat', role: 'pm', primaryContact: true, name: 'Pat Manager' },
+      { contactId: 'c-pat', role: 'pm', primaryContact: true, name: 'Pat Manager', autoEligible: true },
     ]);
     expect(res.body.unit.propertyContact).toEqual({
       contactId: 'c-pat',
@@ -271,6 +273,66 @@ describe('GET /api/units/:id - row flags and the propertyContact block (complete
   });
 });
 
+describe('GET /api/units/:id - the autoEligible row flag (planner fix wave F1; spec 7.4 / 7.5)', () => {
+  it('marks ONLY a live typed-landlord row - never a tenant, a caseworker, a deleted landlord-typed contact or a phone / email routing record', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnitWithoutLandlord(world, 'u-auto', [
+      { contactId: 'c-pam', role: 'pm', primaryContact: false },
+      { contactId: 'c-ten', role: 'other', primaryContact: false },
+      { contactId: 'c-cw', role: 'other', primaryContact: false },
+      { contactId: 'c-gone', role: 'owner', primaryContact: false },
+      { contactId: 'c-pref', role: 'other', primaryContact: false },
+      { contactId: 'c-eref', role: 'other', primaryContact: false },
+    ]);
+    seedContact(world, 'c-pam', { firstName: 'Pam', lastName: 'Two' });
+    seedContact(world, 'c-ten', { type: 'tenant', firstName: 'Tia', lastName: 'Tenant' });
+    seedContact(world, 'c-cw', { type: 'partner', role: 'Caseworker', firstName: 'Casey', lastName: 'Worker' });
+    seedContact(world, 'c-gone', { firstName: 'Gail', lastName: 'Gone', deleted_at: DELETED_AT });
+    // Routing pointers that even carry type landlord: the pointer test alone
+    // keeps them out (isAutoRoutingEligible).
+    seedContact(world, 'c-pref', { phone_ref: true, phone_ref_owner: 'c-pam' });
+    seedContact(world, 'c-eref', { email_ref: true, email_ref_owner: 'c-pam' });
+
+    const res = await getUnit(app, 'u-auto');
+
+    expect(res.status).toBe(200);
+    expect(res.body.unit.contacts).toEqual([
+      { contactId: 'c-pam', role: 'pm', primaryContact: false, name: 'Pam Two', autoEligible: true },
+      { contactId: 'c-ten', role: 'other', primaryContact: false, name: 'Tia Tenant' },
+      { contactId: 'c-cw', role: 'other', primaryContact: false, name: 'Casey Worker', caseworker: true },
+      { contactId: 'c-gone', role: 'owner', primaryContact: false, name: 'Gail Gone', deleted: true },
+      { contactId: 'c-pref', role: 'other', primaryContact: false },
+      { contactId: 'c-eref', role: 'other', primaryContact: false },
+    ]);
+  });
+
+  it('a soft-deleted landlord of record: its derived row is deleted, never autoEligible', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-ll-gone');
+    seedContact(world, 'c-ll', { firstName: 'Lee', lastName: 'Lord', deleted_at: DELETED_AT });
+
+    const res = await getUnit(app, 'u-ll-gone');
+
+    expect(res.status).toBe(200);
+    expect(res.body.unit.contacts).toEqual([
+      { contactId: 'c-ll', role: 'landlord', primaryContact: true, name: 'Lee Lord', deleted: true },
+    ]);
+  });
+
+  it('a live landlord of record whose contact is typed TENANT is not autoEligible (the flag reads the type, not the role)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-ll-tenant');
+    seedContact(world, 'c-ll', { type: 'tenant', firstName: 'Lee', lastName: 'Lord' });
+
+    const res = await getUnit(app, 'u-ll-tenant');
+
+    expect(res.status).toBe(200);
+    expect(res.body.unit.contacts).toEqual([
+      { contactId: 'c-ll', role: 'landlord', primaryContact: true, name: 'Lee Lord' },
+    ]);
+  });
+});
+
 describe("GET /api/units/:id - an incomplete read serves today's rows, no flags, no block, never a 500", () => {
   const shapes: [string, () => Error][] = [
     ['a raw chunk error', () => new Error('ProvisionedThroughputExceededException')],
@@ -290,6 +352,9 @@ describe("GET /api/units/:id - an incomplete read serves today's rows, no flags,
         { contactId: 'c-cw', role: 'other', primaryContact: false, name: 'Casey Worker' },
         { contactId: 'c-mark', role: 'pm', primaryContact: false, name: 'Mark Passmore' },
       ]);
+      // c-mark is a live typed landlord - autoEligible on a COMPLETE read, and
+      // absent here like every other flag (planner fix wave F1).
+      for (const row of res.body.unit.contacts as WireRow[]) expect(row).not.toHaveProperty('autoEligible');
       expect(res.body.unit).not.toHaveProperty('propertyContact');
     });
   }

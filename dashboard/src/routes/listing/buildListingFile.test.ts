@@ -46,6 +46,19 @@ describe('listingRoster', () => {
     expect(rows[2]).not.toHaveProperty('caseworker');
   });
 
+  it('carries the server row flag autoEligible through (planner fix wave F1), and nothing when absent', () => {
+    const u = unit({
+      contacts: [
+        { contactId: 'pm1', role: 'pm', primaryContact: false, name: 'Mark Passmore', autoEligible: true },
+        { contactId: 'tn1', role: 'other', primaryContact: false, name: 'Tia Tenant' },
+      ],
+    });
+    const rows = listingRoster(u, null);
+    expect(rows[0]).toMatchObject({ contactId: 'pm1', autoEligible: true });
+    expect(rows[1]).toMatchObject({ contactId: 'tn1' });
+    expect(rows[1]).not.toHaveProperty('autoEligible');
+  });
+
   it('falls back to a single landlord row from the resolved contact when contacts[] is absent', () => {
     const u = unit({ landlordId: 'll1' });
     const landlord: Contact = {

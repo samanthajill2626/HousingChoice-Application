@@ -2536,13 +2536,24 @@ describe('ListingDetail - Contacts card edit mode', () => {
 });
 
 // --- primary-contact-integrity (spec 7.3 / 7.4 / 7.5) ------------------------
-// The server marks each roster row `deleted` / `caseworker` and sends a
-// propertyContact block (7.5); the page renders them and never re-derives the
-// heir rule. 470 Bolton is the motivating shape: no landlord of record, one
-// contact (Mark, a property manager), nobody primary.
+// The server marks each roster row `deleted` / `caseworker` / `autoEligible`
+// and sends a propertyContact block (7.5); the page renders them and never
+// re-derives the heir rule or the automatic-routing rule. 470 Bolton is the
+// motivating shape: no landlord of record, one contact (Mark, a property
+// manager), nobody primary.
 
-/** Mark Passmore, the 470 Bolton property manager - live, not primary. */
-const MARK: UnitContact = { contactId: 'pm-mark', role: 'pm', primaryContact: false, name: 'Mark Passmore' };
+/** Mark Passmore, the 470 Bolton property manager - typed landlord (the
+ *  server's `autoEligible`), live, not primary. */
+const MARK: UnitContact = {
+  contactId: 'pm-mark',
+  role: 'pm',
+  primaryContact: false,
+  name: 'Mark Passmore',
+  autoEligible: true,
+};
+
+/** A TENANT on the contact list (live, not a caseworker, never autoEligible). */
+const TIA_TENANT: UnitContact = { contactId: 'tn-tia', role: 'other', primaryContact: false, name: 'Tia Tenant' };
 
 /** A row whose contact was soft-deleted (the server's `deleted: true`). */
 const GINA_DELETED: UnitContact = {
@@ -2631,7 +2642,15 @@ describe('ListingDetail - deleted contact rows (primary-contact-integrity spec 7
 describe('ListingDetail - the no-primary box (primary-contact-integrity spec 7.4)', () => {
   /** The server's block for a property with no property contact. */
   const NO_PRIMARY: UnitPropertyContact = { contactId: null, reason: 'none', heirIfPrimaryRemoved: null };
-  const DANA: UnitContact = { contactId: 'pm-dana', role: 'pm', primaryContact: false, name: 'Dana Reyes' };
+  /** The no-eligible line (spec 7.4; planner fix wave F3 copy). */
+  const NO_ELIGIBLE = 'Add a property manager or owner - they become the primary automatically.';
+  const DANA: UnitContact = {
+    contactId: 'pm-dana',
+    role: 'pm',
+    primaryContact: false,
+    name: 'Dana Reyes',
+    autoEligible: true,
+  };
   const CASEY_CASEWORKER: UnitContact = {
     contactId: 'cw-casey',
     role: 'other',
@@ -2645,7 +2664,7 @@ describe('ListingDetail - the no-primary box (primary-contact-integrity spec 7.4
     removeUnitContact.mockReset();
   });
 
-  it('exactly one eligible row: "Make <Name> primary" above the rows - the same write as Make primary', async () => {
+  it('exactly one autoEligible row: "Make <Name> primary" above the rows - the same write as Make primary', async () => {
     const user = userEvent.setup();
     useListing.mockReturnValue(integrityState([MARK], NO_PRIMARY));
     const { landlordId: _ownerless, ...base } = READY.unit!;
@@ -2674,7 +2693,7 @@ describe('ListingDetail - the no-primary box (primary-contact-integrity spec 7.4
     expect(within(card).getByRole('link', { name: /Mark Passmore/ })).toHaveTextContent('Mark Passmore (primary)');
   });
 
-  it('counts only ELIGIBLE rows: a deleted row and a caseworker row do not count', () => {
+  it('counts only autoEligible rows: a deleted row and a caseworker row do not count', () => {
     useListing.mockReturnValue(integrityState([MARK, GINA_DELETED, CASEY_CASEWORKER], NO_PRIMARY));
     renderAt();
     const box = within(contactsCard()).getByRole('status');
@@ -2682,19 +2701,44 @@ describe('ListingDetail - the no-primary box (primary-contact-integrity spec 7.4
     expect(within(box).queryByRole('button', { name: 'Choose a primary' })).not.toBeInTheDocument();
   });
 
-  it('two or more eligible rows: "Choose a primary" opens the edit mode', async () => {
+  it('one autoEligible row next to a TENANT: the one-click names the landlord-typed row, never the tenant (planner fix wave F1)', () => {
+    useListing.mockReturnValue(integrityState([TIA_TENANT, MARK], NO_PRIMARY));
+    renderAt();
+    const box = within(contactsCard()).getByRole('status');
+    expect(within(box).getByRole('button', { name: 'Make Mark Passmore primary' })).toBeInTheDocument();
+    expect(within(box).queryByRole('button', { name: 'Make Tia Tenant primary' })).not.toBeInTheDocument();
+    expect(within(box).queryByRole('button', { name: 'Choose a primary' })).not.toBeInTheDocument();
+    expect(within(box).queryByText(NO_ELIGIBLE)).not.toBeInTheDocument();
+  });
+
+  it('a TENANT the only live row: no one-click - the no-eligible line AND "Choose a primary", whose edit mode still offers the tenant by name (planner fix wave F1)', async () => {
     const user = userEvent.setup();
-    useListing.mockReturnValue(integrityState([MARK, DANA], NO_PRIMARY));
+    useListing.mockReturnValue(integrityState([TIA_TENANT], NO_PRIMARY));
+    renderAt();
+    const box = within(contactsCard()).getByRole('status');
+    expect(within(box).queryByRole('button', { name: 'Make Tia Tenant primary' })).not.toBeInTheDocument();
+    expect(within(box).getByText(NO_ELIGIBLE)).toBeInTheDocument();
+    await user.click(within(box).getByRole('button', { name: 'Choose a primary' }));
+    // Edit mode's per-row Make primary stays type-agnostic: a deliberate pick
+    // with the name on the row.
+    expect(screen.getByRole('button', { name: 'Make Tia Tenant the primary contact' })).toBeInTheDocument();
+    expect(addUnitContact).not.toHaveBeenCalled();
+  });
+
+  it('two or more autoEligible rows: "Choose a primary" opens the edit mode, and no no-eligible line', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(integrityState([MARK, TIA_TENANT, DANA], NO_PRIMARY));
     renderAt();
     const box = within(contactsCard()).getByRole('status');
     expect(within(box).queryByRole('button', { name: /^Make .* primary$/ })).not.toBeInTheDocument();
+    expect(within(box).queryByText(NO_ELIGIBLE)).not.toBeInTheDocument();
     await user.click(within(box).getByRole('button', { name: 'Choose a primary' }));
     expect(screen.getByRole('button', { name: 'Make Mark Passmore the primary contact' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Make Dana Reyes the primary contact' })).toBeInTheDocument();
     expect(addUnitContact).not.toHaveBeenCalled();
   });
 
-  it('no eligible row: no button, and the line asks for a property manager or owner to be added', () => {
+  it('no live row that is not a caseworker (a deleted row and a caseworker): the line only, no button', () => {
     useListing.mockReturnValue(integrityState([GINA_DELETED, CASEY_CASEWORKER], NO_PRIMARY));
     renderAt();
     const box = within(contactsCard()).getByRole('status');
@@ -2702,6 +2746,29 @@ describe('ListingDetail - the no-primary box (primary-contact-integrity spec 7.4
     expect(
       within(box).getByText('Add a property manager or owner - they become the primary automatically.'),
     ).toBeInTheDocument();
+    expect(within(box).queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('caseworkers only: the line only, no button', () => {
+    useListing.mockReturnValue(integrityState([CASEY_CASEWORKER], NO_PRIMARY));
+    renderAt();
+    const box = within(contactsCard()).getByRole('status');
+    expect(within(box).getByText(NO_ELIGIBLE)).toBeInTheDocument();
+    expect(within(box).queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('every row deleted: the line only, no button', () => {
+    const oscarDeleted: UnitContact = {
+      contactId: 'ow-oscar',
+      role: 'owner',
+      primaryContact: false,
+      name: 'Oscar Owner',
+      deleted: true,
+    };
+    useListing.mockReturnValue(integrityState([GINA_DELETED, oscarDeleted], NO_PRIMARY));
+    renderAt();
+    const box = within(contactsCard()).getByRole('status');
+    expect(within(box).getByText(NO_ELIGIBLE)).toBeInTheDocument();
     expect(within(box).queryByRole('button')).not.toBeInTheDocument();
   });
 

@@ -37,6 +37,11 @@ export interface RosterRow {
   /** The row's contact is a caseworker (spec 7.5). The server sets it only
    *  from a complete contact read. */
   caseworker?: true;
+  /** The row's contact is eligible for AUTOMATIC routing - typed landlord,
+   *  live, not a routing pointer (spec 7.5, planner fix wave F1): the only row
+   *  the no-primary box offers in one click (7.4). The server sets it only
+   *  from a complete contact read. */
+  autoEligible?: true;
   /** True when synthesized from `landlordId` (C3 not live), false from contacts[]. */
   fallback: boolean;
 }
@@ -66,6 +71,7 @@ export function listingRoster(unit: UnitItem, landlord: Contact | null): RosterR
         fallback: false,
         ...(c.deleted === true && { deleted: true as const }),
         ...(c.caseworker === true && { caseworker: true as const }),
+        ...(c.autoEligible === true && { autoEligible: true as const }),
       }));
   }
 

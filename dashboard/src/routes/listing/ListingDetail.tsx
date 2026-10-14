@@ -145,8 +145,9 @@ const LANDLORD_REASSIGNMENT_COPY =
 const NO_PRIMARY_LEAD = 'No primary contact.';
 const DELETED_CONTACT_LEAD = "This property's contact was deleted.";
 const NO_PRIMARY_EFFECT = "New tours won't include the landlord, and tour group texts use the general intro.";
-/** No eligible row to offer (no live contact, or only caseworkers). True: an
- *  eligible add on a property with no live primary and no live landlord of
+/** No row eligible for automatic routing to offer in one click (no live
+ *  contact typed landlord - only tenants, caseworkers or deleted rows). True:
+ *  an eligible add on a property with no live primary and no live landlord of
  *  record is made primary by the server (spec 4.4). It names a property
  *  manager or owner, not "the landlord": while a DELETED contact is still the
  *  landlord of record, an add with the Landlord role is refused (409
@@ -527,14 +528,20 @@ export function ListingDetail(): React.JSX.Element {
   // The no-primary box (spec 7.4). Shown only when the server TOLD us there
   // is no property contact (block present, contactId null), the property has
   // at least one row, and it is live (the card is read-only on a deleted
-  // property). Its action counts ELIGIBLE rows - live and not a caseworker,
-  // both from the server's row flags. That is broader than the server's
-  // AUTOMATIC rule (typed landlord) on purpose: this is a deliberate click,
-  // and the button names the person before it writes.
+  // property). Its one-click names a row ELIGIBLE FOR AUTOMATIC ROUTING only -
+  // the server's `autoEligible` row flag (typed landlord, live, not a routing
+  // pointer: the rule auto-primary and every hand-off use, spec 4.3) - so the
+  // box never makes a tenant the primary in one click (planner fix wave F1,
+  // Cameron 2026-10-13). Exactly one such row: "Make <Name> primary". Two or
+  // more: "Choose a primary" (the edit mode). None: the no-eligible line, and
+  // "Choose a primary" as well while a live row that is not a caseworker
+  // remains, so staff can still pick one by hand - edit mode's per-row Make
+  // primary stays type-agnostic, a deliberate pick with the name on the row.
   const showNoPrimaryBox =
     !deleted && propertyContact !== undefined && propertyContact.contactId === null && contactRows.length > 0;
-  const eligibleRows = contactRows.filter((r) => r.deleted !== true && r.caseworker !== true);
-  const soleEligible = eligibleRows.length === 1 ? eligibleRows[0] : undefined;
+  const autoEligibleRows = contactRows.filter((r) => r.autoEligible === true);
+  const soleAutoEligible = autoEligibleRows.length === 1 ? autoEligibleRows[0] : undefined;
+  const hasHandPickableRow = contactRows.some((r) => r.deleted !== true && r.caseworker !== true);
 
   /** The server's answer IS the new truth - apply it to the card AND the page. */
   const applyRosterUnit = (updated: UnitItem): void => {
@@ -1088,35 +1095,38 @@ export function ListingDetail(): React.JSX.Element {
                   </strong>{' '}
                   {NO_PRIMARY_EFFECT}
                 </p>
-                {soleEligible !== undefined ? (
+                {soleAutoEligible !== undefined ? (
                   <p>
                     <Button
                       variant="secondary"
                       size="sm"
                       type="button"
-                      onClick={() => onMakePrimaryContact(soleEligible, NO_PRIMARY_BOX_KEY)}
+                      onClick={() => onMakePrimaryContact(soleAutoEligible, NO_PRIMARY_BOX_KEY)}
                       disabled={rosterBusy !== null}
                     >
-                      {`Make ${soleEligible.name ?? soleEligible.contactId} primary`}
-                    </Button>
-                  </p>
-                ) : eligibleRows.length > 1 ? (
-                  <p>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      type="button"
-                      onClick={() => {
-                        setEditingContacts(true);
-                        setRosterError(null);
-                        closeAddContact();
-                      }}
-                    >
-                      Choose a primary
+                      {`Make ${soleAutoEligible.name ?? soleAutoEligible.contactId} primary`}
                     </Button>
                   </p>
                 ) : (
-                  <p>{NO_ELIGIBLE_LINE}</p>
+                  <>
+                    {autoEligibleRows.length === 0 ? <p>{NO_ELIGIBLE_LINE}</p> : null}
+                    {autoEligibleRows.length > 1 || hasHandPickableRow ? (
+                      <p>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          type="button"
+                          onClick={() => {
+                            setEditingContacts(true);
+                            setRosterError(null);
+                            closeAddContact();
+                          }}
+                        >
+                          Choose a primary
+                        </Button>
+                      </p>
+                    ) : null}
+                  </>
                 )}
                 {rosterError !== null && rosterError.key === NO_PRIMARY_BOX_KEY ? (
                   <p role="alert" className={styles.contactRowError}>

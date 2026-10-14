@@ -3168,6 +3168,12 @@ export interface UnitContact {
   /** RESPONSE ONLY (spec 7.5): the row's contact is a caseworker. Present only
    *  when the server's contact read was complete; never stored. */
   caseworker?: true;
+  /** RESPONSE ONLY (spec 7.5, planner fix wave F1): the row's contact is
+   *  eligible for AUTOMATIC routing - typed landlord, live, not a routing
+   *  pointer (the server's isAutoRoutingEligible). The no-primary box offers
+   *  its one-click "Make <Name> primary" for such a row only (spec 7.4).
+   *  Present only when the server's contact read was complete; never stored. */
+  autoEligible?: true;
 }
 
 /**

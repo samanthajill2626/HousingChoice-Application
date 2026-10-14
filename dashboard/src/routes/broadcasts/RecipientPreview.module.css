@@ -3,6 +3,9 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+  /* last-heard-from 5.3: the review rows switch to columns on the PANE's width. */
+  container-type: inline-size;
+  --recipient-cols: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1.2fr);
 }
 .toolbar {
   display: flex;
@@ -72,12 +75,13 @@
   padding: 0;
   max-height: 420px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   border: 1px solid var(--c-border);
   border-radius: var(--radius-md);
 }
 .row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--sp-3);
   padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--c-border);
@@ -102,12 +106,13 @@
   width: 16px;
   height: 16px;
 }
-/* Name + phone + tags — takes the flex slot the label used to hold (the name is
- * now a profile LINK outside the checkbox label, so clicking it never toggles). */
+/* Name + phone | status, authority, last heard from | tags. Stacked by default
+ * (three lines); a grid of columns at a 768px+ pane (the query below). The name
+ * is a profile LINK outside the checkbox label, so clicking it never toggles. */
 .rowBody {
   display: flex;
-  align-items: center;
-  gap: var(--sp-3);
+  flex-direction: column;
+  gap: var(--sp-1);
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -159,6 +164,107 @@
   color: var(--c-danger);
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
+}
+/* last-heard-from 5.3: "Not interested" - the same tone as "Already sent". */
+.declinedTag {
+  flex: 0 0 auto;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-evt-amber-border);
+  color: var(--c-evt-amber-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+.listFrame {
+  display: flex;
+  flex-direction: column;
+}
+.headerRow {
+  display: none;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-3) var(--sp-1);
+  /* The list's 1px side borders, so the columns start where the rows' do. */
+  border-left: 1px solid transparent;
+  border-right: 1px solid transparent;
+  /* The same reserved gutter as .rows, so a scrollbar never shifts the rows
+   * out from under the headers. */
+  overflow-y: hidden;
+  scrollbar-gutter: stable;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-muted);
+}
+.headerCheck {
+  flex: 0 0 16px;
+}
+.headerCols {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: var(--recipient-cols);
+  gap: var(--sp-3);
+}
+.cellName,
+.cellFacts,
+.cellTags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
+  min-width: 0;
+}
+.cellStatus,
+.cellAuthority,
+.cellHeard {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.cellAuthority,
+.cellHeard {
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+.cellStatus:empty,
+.cellAuthority:empty,
+.cellTags:empty {
+  display: none;
+}
+@container (min-width: 768px) {
+  .headerRow {
+    display: flex;
+  }
+  .row {
+    align-items: center;
+  }
+  .rowBody {
+    display: grid;
+    grid-template-columns: var(--recipient-cols);
+    align-items: center;
+    gap: var(--sp-3);
+  }
+  /* Status, authority and last heard from become the row grid's own cells. */
+  .cellFacts {
+    display: contents;
+  }
+  /* An empty cell keeps its column in the grid. */
+  .cellStatus:empty,
+  .cellAuthority:empty,
+  .cellTags:empty {
+    display: block;
+  }
+  .cellAuthority {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+/* The narrow (stacked) layout has no header row, so the last-heard-from cell
+ * names itself - as GENERATED content, so the cell's DOM text stays the bare
+ * label (plan review R1 #5). The wide layout's header names the column. */
+@container (max-width: 767.98px) {
+  .cellHeard::before {
+    content: 'Last heard from ';
+  }
 }
 .addRow {
   display: flex;

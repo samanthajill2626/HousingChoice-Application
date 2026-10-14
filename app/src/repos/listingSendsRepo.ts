@@ -11,9 +11,18 @@
 // re-send can never duplicate. The byContact GSI inverts it (PK contactId, SK
 // sentAt) for the reverse direction.
 //
-// NO-RESET INVARIANT: the one writer, putShareMemory, stamps created_at (and
-// via) only when absent, so a later share never rewrites the first-write
-// furniture. (share-sent-outcome T7 retired the old blind upsert writer.)
+// NO-RESET INVARIANT: the one share writer, putShareMemory, stamps created_at
+// (and via) only when absent, so a later share never rewrites the first-write
+// furniture. (share-sent-outcome T7 retired the old blind upsert writer.) It
+// extends to `declined` (last-heard-from spec 5.4): putShareMemory never SETs
+// or REMOVEs it, and NO writer resets it except clearDeclined. The outcome
+// route's two writers, setDeclined / clearDeclined, touch ONLY `declined` and
+// `updated_at`, conditioned on a COUNTED row. A cleared decline's history
+// lives in the activity / audit events, never on the row. The ONE accepted
+// exception is dev-only: the seed runner's full PutCommand (lib/seed/index.ts,
+// seedAll's Put loop) rewrites the seeded listing_sends rows (seed/cast.ts and
+// seed/matrix.ts) whole, so a NON-wiping re-seed drops `declined` on those
+// seeded pairs (/__dev/reseed clears the tables first, so it loses nothing).
 //
 // Items stay flexible documents; only the two key attrs + the byContact GSI key
 // attrs (contactId, sentAt) are contractual (lib/tables.ts).
@@ -37,6 +46,7 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { TourSignal } from '../lib/listingSendTour.js';
+import type { DeclineRecord, InterestedMode, ListingSendOutcome } from '../lib/listingSendOutcome.js';
 import type { ContactType } from './contactsRepo.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
@@ -93,6 +103,20 @@ export interface ListingSendItem {
   shares?: Record<string, ShareLedgerEntry>;
   /** share-sent-outcome D7: the change token every putShareMemory stamps (a random id, never a clock). */
   shares_op?: string;
+  /** last-heard-from spec 5.4: a recorded "not interested". Absent = not
+   *  declined. Written ONLY by setDeclined / clearDeclined. Supersession is
+   *  NOT stored: every read recomputes it (lib/listingSendOutcome.ts
+   *  effectiveDecline) from the row's sentAt and the pair's tour activity
+   *  (lib/listingSendTour.ts deriveTourActivityAt). Tour supersession is
+   *  DURABLE (spec 14.7, code review round 2 A R2-1): the createdAt of EVERY
+   *  tour for the pair counts, qualifying or not, so a record superseded by
+   *  a tour created after it stays superseded - simply ineffective, left on
+   *  the row - even once that tour is canceled, no_show or closed not a fit,
+   *  whichever path created it. A cancel / no-show / not-a-fit MARK (a
+   *  non-qualifying tour's lastMarkedAt) never supersedes on its own; only a
+   *  QUALIFYING tour's lastMarkedAt does. Pinned in
+   *  test/listingSendOutcome.test.ts (the spec 14.7 PIN). */
+  declined?: DeclineRecord;
   [key: string]: unknown;
 }
 
@@ -113,6 +137,7 @@ export interface ListingSendRow {
   sentAt: string;
   via: ListingSendVia;
   broadcastId?: string;
+  /** TENANT rows only - never on a partner or missing recipient's row (spec 14.3 B11). */
   tour?: TourSignal;
   /** caseworkers D20 (plan 3.7): the recipient's contact type - on the units
    *  recipients read ONLY, and only when the contact resolves (absent, never
@@ -120,6 +145,20 @@ export interface ListingSendRow {
   type?: ContactType;
   /** caseworkers D20: the recipient's role, when it holds text (same rules as `type`). */
   role?: string;
+  /** last-heard-from spec 5.4 - the recipient's own last_heard_from_at. */
+  lastHeardFromAt?: string;
+  /** The derived send outcome (lib/listingSendOutcome.ts). */
+  outcome: ListingSendOutcome;
+  /** Present ONLY while the stored decline is effective; never staffId. */
+  declined?: { at: string; by: 'staff' | 'engine' };
+  /** false on a non-tenant or missing recipient (partners never read a tour). */
+  interestedSupported: boolean;
+  /** Units route only (the unit is known): 'route' with a structured tour_type. */
+  interestedMode?: InterestedMode;
+  /** Units route only: isEligibleRecipient on the recipient. */
+  eligible?: boolean;
+  /** true when the contact row is gone (a hard-deleted contact behind a listed row). */
+  recipientMissing?: boolean;
 }
 
 /** caseworkers D20: the recipient facts the units recipients read attaches to a row. */
@@ -154,6 +193,22 @@ export interface ListingSendsRepo {
   listByUnit(unitId: string): Promise<ListingSendItem[]>;
   /** The contact's listings-sent (byContact GSI, newest-first by sentAt); a row no share counts is filtered out. */
   listByContact(contactId: string): Promise<ListingSendItem[]>;
+  /**
+   * last-heard-from spec 5.4: SET `declined` (and `updated_at`) on a COUNTED
+   * row - condition `attribute_exists(unitId) AND (attribute_not_exists(counted)
+   * OR counted <> :false)`. 'not_found' when the condition fails (no row, or no
+   * share counts); anything else throws. Never creates a row.
+   */
+  setDeclined(unitId: string, contactId: string, record: DeclineRecord): Promise<'ok' | 'not_found'>;
+  /**
+   * REMOVE `declined` (SET `updated_at`) under the same condition. Idempotent
+   * without `opts`. With `opts.expectedAt` it is a COMPARE-AND-CLEAR (spec
+   * 14.7, code review round 2 B R2-1): the condition also requires
+   * `declined.at = :readAt`, so it removes only the record the caller READ - a
+   * decline another staff member recorded meanwhile (or none at all) makes it
+   * answer 'not_found' and write nothing.
+   */
+  clearDeclined(unitId: string, contactId: string, opts?: { expectedAt?: string }): Promise<'ok' | 'not_found'>;
 }
 
 /** The key getByKeys answers under. */
@@ -170,18 +225,27 @@ function isListed(row: ListingSendItem): boolean {
   return row.counted !== false && typeof row.sentAt === 'string';
 }
 
+/** The options a GET projection (or the outcome route) passes to toListingSendRow. */
+export interface ListingSendRowOptions {
+  tour?: TourSignal;
+  tenantName?: string;
+  facts?: ListingSendRecipientFacts;
+  outcome: ListingSendOutcome;
+  lastHeardFromAt?: string;
+  declined?: { at: string; by: 'staff' | 'engine' };
+  interestedSupported: boolean;
+  interestedMode?: InterestedMode;
+  eligible?: boolean;
+  recipientMissing?: boolean;
+}
+
 /**
- * Pure serializer to the C4 wire shape. Drops the audit furniture
- * (created_at/updated_at); includes broadcastId only when present. The optional
- * `tour` chip signal (derived from the tours table by the caller) is attached
- * only when supplied - a row with no qualifying tour carries no `tour` field.
+ * Pure serializer to the C4 wire shape. Drops the audit furniture and the
+ * STORED decline (a caller passes `declined` only while it is effective -
+ * wireDecline); includes broadcastId only when present; every optional field
+ * only when supplied (absent, never null). `recipientMissing` only when true.
  */
-export function toListingSendRow(
-  item: ListingSendItem,
-  tour?: TourSignal,
-  tenantName?: string,
-  recipient?: ListingSendRecipientFacts,
-): ListingSendRow {
+export function toListingSendRow(item: ListingSendItem, opts: ListingSendRowOptions): ListingSendRow {
   // share-sent-outcome D7: only a counted row is projected (the readers filter
   // the rest), and a counted row always carries sentAt - the guard documents it.
   if (item.sentAt === undefined) {
@@ -189,14 +253,21 @@ export function toListingSendRow(
   }
   return {
     contactId: item.contactId,
-    ...(tenantName !== undefined && { tenantName }),
+    ...(opts.tenantName !== undefined && { tenantName: opts.tenantName }),
     unitId: item.unitId,
     sentAt: item.sentAt,
     via: item.via,
     ...(item.broadcastId !== undefined && { broadcastId: item.broadcastId }),
-    ...(tour !== undefined && { tour }),
-    ...(recipient?.type !== undefined && { type: recipient.type }),
-    ...(recipient?.role !== undefined && { role: recipient.role }),
+    ...(opts.tour !== undefined && { tour: opts.tour }),
+    ...(opts.facts?.type !== undefined && { type: opts.facts.type }),
+    ...(opts.facts?.role !== undefined && { role: opts.facts.role }),
+    ...(opts.lastHeardFromAt !== undefined && { lastHeardFromAt: opts.lastHeardFromAt }),
+    outcome: opts.outcome,
+    ...(opts.declined !== undefined && { declined: { at: opts.declined.at, by: opts.declined.by } }),
+    interestedSupported: opts.interestedSupported,
+    ...(opts.interestedMode !== undefined && { interestedMode: opts.interestedMode }),
+    ...(opts.eligible !== undefined && { eligible: opts.eligible }),
+    ...(opts.recipientMissing === true && { recipientMissing: true }),
   };
 }
 
@@ -292,6 +363,67 @@ export function createListingSendsRepo(deps: RepoDeps = {}): ListingSendsRepo {
         'listing send memory written',
       );
       return true;
+    },
+
+    async setDeclined(unitId, contactId, record) {
+      const now = new Date().toISOString();
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { unitId, contactId },
+            UpdateExpression: 'SET #declined = :declined, #updatedAt = :now',
+            ConditionExpression: 'attribute_exists(#unitId) AND (attribute_not_exists(#counted) OR #counted <> :false)',
+            ExpressionAttributeNames: {
+              '#declined': 'declined',
+              '#updatedAt': 'updated_at',
+              '#unitId': 'unitId',
+              '#counted': 'counted',
+            },
+            ExpressionAttributeValues: {
+              ':declined': { at: record.at, by: record.by, ...(record.staffId !== undefined && { staffId: record.staffId }) },
+              ':now': now,
+              ':false': false,
+            },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return 'not_found';
+        throw err;
+      }
+      log.info({ unitId, contactId, by: record.by }, 'listing send decline recorded');
+      return 'ok';
+    },
+
+    async clearDeclined(unitId, contactId, opts) {
+      const now = new Date().toISOString();
+      const expectedAt = opts?.expectedAt;
+      const counted = 'attribute_exists(#unitId) AND (attribute_not_exists(#counted) OR #counted <> :false)';
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { unitId, contactId },
+            UpdateExpression: 'SET #updatedAt = :now REMOVE #declined',
+            // Compare-and-clear (B R2-1): an absent `declined` fails the
+            // comparison too, so only the record the caller read is removed.
+            ConditionExpression: expectedAt !== undefined ? `${counted} AND #declined.#at = :readAt` : counted,
+            ExpressionAttributeNames: {
+              '#declined': 'declined',
+              '#updatedAt': 'updated_at',
+              '#unitId': 'unitId',
+              '#counted': 'counted',
+              ...(expectedAt !== undefined && { '#at': 'at' }),
+            },
+            ExpressionAttributeValues: { ':now': now, ':false': false, ...(expectedAt !== undefined && { ':readAt': expectedAt }) },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return 'not_found';
+        throw err;
+      }
+      log.info({ unitId, contactId }, 'listing send decline cleared');
+      return 'ok';
     },
 
     async getByKeys(pairs) {

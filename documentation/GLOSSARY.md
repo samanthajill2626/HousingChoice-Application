@@ -516,6 +516,42 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   date splits across every status, unlike the Active tab's Upcoming section
   and the Past tab (curated work lists).
 
+- **last heard from** (last-heard-from, 2026-10-12) - the most recent inbound
+  text, call or email FROM a contact, in any thread (one-to-one, relay group,
+  native group text). Staff copy: "Last heard from <date>" (the Tenants tab,
+  the contact header, Matching's Review recipients, the Sent to cards, the
+  Follow up tab); "Never" when there is none. Stored as `last_heard_from_at`
+  on the contact: forward-only, written ONLY by
+  `contactsRepo.touchLastHeardFrom` (refused from clients), and attributed by
+  ONE rule, `attributeInbound` (`app/src/lib/heardFrom.ts`), shared by every
+  live path, the importer, the seed and the backfill. A call counts at ring
+  time whatever its outcome; a STOP counts (it is not a consent signal); an
+  email from an address on no contact does not count until staff link the
+  address. Outbound and automated traffic never move it. Not a conversation's
+  `last_activity_at` (any direction) and not a phone's `lastSeenAt`.
+
+- **send outcome** (last-heard-from, 2026-10-12) - per property sent to a
+  contact: No reply yet / Replied / Interested / Not interested. Interested =
+  a qualifying tour exists for that tenant and property (tenants only - a
+  partner row never reads a tour); Not interested = a recorded decline not
+  superseded by a later send or later tour activity (a tour CREATED after the
+  decline, by any path - even if that tour is later canceled - or a qualifying
+  tour rescheduled / reopened after it; never a cancel or no-show mark); Replied = heard from
+  after the send; otherwise No reply yet. Precedence: Not interested >
+  Interested > Replied > No reply yet. DERIVED, never stored, except the
+  decline record (`listing_sends.declined`). "(auto)" marks an engine decline
+  on the cards only. Code: `ListingSendOutcome` in
+  `app/src/lib/listingSendOutcome.ts` - never `SendOutcome`, which is the
+  Twilio send-failure vocabulary.
+
+- **waiting on a reply** (last-heard-from, 2026-10-12) - a send at No reply
+  yet or Replied whose recipient can be texted (not deleted, not opted out,
+  not unreachable, has a phone, and not an inactive or placed tenant) and has
+  been quiet for 24 hours since the later of the send and their last heard
+  from, within 14 days of the send (`FOLLOW_UP_QUIET_MS`,
+  `FOLLOW_UP_LOOKBACK_MS`). Listed on Matching's "Follow up" tab, grouped by
+  property, and counted as "<n> waiting" on the Properties list.
+
 ---
 
 ## For the future AI layer

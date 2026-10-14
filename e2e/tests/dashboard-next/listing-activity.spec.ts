@@ -159,13 +159,14 @@ test.describe('Property detail — broadcast + tour Activity rows (activity cove
 });
 
 test.describe('Property detail - "Sent to" tour chip (listing-response-tour-chip)', () => {
-  test('sent rows carry no response chip until a tour lights exactly the toured recipient', async ({
+  test('sent rows carry the derived outcome, never the retired response label, until a tour lights exactly the toured recipient', async ({
     page,
   }) => {
-    // Proves the retired listing-send `response` label is GONE (no "No reply"
-    // anywhere) and the derived tour chip is TRUTHFUL: it appears only for the
-    // one recipient with a qualifying tour on THIS property, links to the tour,
-    // and leaves the other recipient's row chipless.
+    // Proves the retired listing-send `response` CONTROL stays gone (its bare
+    // labels were `No reply` / `Not a fit`, removed 2026-07-10), each row shows
+    // the DERIVED outcome chip instead (spec 2026-10-12 5.5), and the tour chip
+    // is TRUTHFUL: it appears only for the one recipient with a qualifying tour
+    // on THIS property.
     await devLogin(page);
     const req = page.request;
     const stamp = `${Date.now()}`.slice(-6);
@@ -208,9 +209,9 @@ test.describe('Property detail - "Sent to" tour chip (listing-response-tour-chip
       )
       .toBe(true);
 
-    // The "Sent to" card shows both recipients with NO tour chip, and the dead
-    // "No reply" label appears nowhere on the page. The heading's name carries
-    // its "Send this property" action too: match the prefix.
+    // The "Sent to" card shows both recipients with NO tour chip and the derived
+    // "No reply yet" outcome - never the retired bare "No reply" label. The
+    // heading's name carries its "Send this property" action too: match the prefix.
     await page.goto(`${NEXT}/listings/${unitId}`);
     const card = page.locator('section', {
       has: page.getByRole('heading', { name: /^Sent to\b/ }),
@@ -221,14 +222,22 @@ test.describe('Property detail - "Sent to" tour chip (listing-response-tour-chip
     // nameless contacts); scope a per-recipient row by that link.
     const t1Name = `Chipone${stamp} Actcov`;
     const t2Name = `Chiptwo${stamp} Actcov`;
+    // Markup R1 (spec 2026-10-12): every roster row is an <li>, and nothing
+    // else in the card is a listitem - never a div filter, which nests.
     const rowFor = (name: string) =>
-      card.locator('div').filter({ has: page.getByRole('link', { name, exact: true }) });
+      card.getByRole('listitem').filter({ has: page.getByRole('link', { name, exact: true }) });
     await expect(rowFor(t1Name)).toBeVisible();
     await expect(rowFor(t2Name)).toBeVisible();
     // The raw contact id never renders once the name is known.
     await expect(card.getByText(t1.contactId)).toHaveCount(0);
     await expect(card.getByRole('link', { name: /Tour requested|Tour scheduled|Toured/ })).toHaveCount(0);
-    await expect(page.getByText(/No reply/i)).toHaveCount(0);
+    // The retired response CONTROL stays gone: its labels were the BARE
+    // "No reply" / "Not a fit" (exact - "No reply yet" is the live derived
+    // chip, spec 2026-10-12 5.5, and must NOT be confused with it).
+    await expect(page.getByText('No reply', { exact: true })).toHaveCount(0);
+    await expect(page.getByText(/Not a fit/i)).toHaveCount(0);
+    await expect(rowFor(t1Name).getByText('No reply yet', { exact: true })).toBeVisible();
+    await expect(rowFor(t2Name).getByText('No reply yet', { exact: true })).toBeVisible();
 
     // Schedule a tour for ONE recipient (t1) on THIS property -> status 'scheduled'.
     const tourRes = await req.post(`${NEXT}/api/tours`, {
@@ -251,13 +260,17 @@ test.describe('Property detail - "Sent to" tour chip (listing-response-tour-chip
       await expect(chip).toHaveAttribute('href', `/tours/${tourId}`);
     }).toPass({ timeout: 20_000 });
 
-    // The OTHER recipient stays chipless; exactly one chip on the card; still no
-    // "No reply" text anywhere.
+    // The OTHER recipient stays chipless and still reads No reply yet; exactly
+    // one chip on the card; the retired label is still absent.
     await expect(
       rowFor(t2Name).getByRole('link', { name: /Tour requested|Tour scheduled|Toured/ }),
     ).toHaveCount(0);
     await expect(card.getByRole('link', { name: 'Tour scheduled' })).toHaveCount(1);
-    await expect(page.getByText(/No reply/i)).toHaveCount(0);
+    await expect(page.getByText('No reply', { exact: true })).toHaveCount(0);
+    await expect(page.getByText(/Not a fit/i)).toHaveCount(0);
+    // t1 is Interested now (the tour IS the signal - no second chip); t2 still waits.
+    await expect(rowFor(t1Name).getByText('No reply yet', { exact: true })).toHaveCount(0);
+    await expect(rowFor(t2Name).getByText('No reply yet', { exact: true })).toBeVisible();
   });
 });
 

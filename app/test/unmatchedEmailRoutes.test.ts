@@ -133,6 +133,8 @@ interface MemoryContacts {
   addEmail(contactId: string, opts: { email: string; label?: string }): Promise<ContactItem>;
   create(input: Partial<ContactItem> & { type: ContactItem['type'] }): Promise<ContactItem>;
   touchEmailLastSeen(contactId: string, email: string, atIso: string): Promise<void>;
+  findByPhone(phone: string): Promise<ContactItem | undefined>;
+  touchLastHeardFrom(contactId: string, at: string): Promise<'written' | 'skipped' | 'failed'>;
 }
 
 function createMemoryContacts(seed: ContactItem[] = []): MemoryContacts {
@@ -168,6 +170,14 @@ function createMemoryContacts(seed: ContactItem[] = []): MemoryContacts {
     },
     async touchEmailLastSeen() {
       // not exercised by the routes (the re-ingest service owns it)
+    },
+    async findByPhone() {
+      // not exercised by the routes (the re-ingest service owns it)
+      return undefined;
+    },
+    async touchLastHeardFrom() {
+      // not exercised by the routes (the re-ingest service owns it)
+      return 'skipped' as const;
     },
   };
 }

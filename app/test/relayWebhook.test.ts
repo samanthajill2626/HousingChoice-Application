@@ -21,6 +21,7 @@ import { registerRelayFanOutJobHandler } from '../src/jobs/relayFanOut.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
+import { splitTsMsgId } from '../src/repos/messagesRepo.js';
 import {
   createFakeWorld,
   makeWebhookHarness,
@@ -333,6 +334,105 @@ describe('relay inbound webhook (M1.7)', () => {
     const err = capture.atLevel(ERROR).find((l) => String(l['msg']).includes('unknown provider SID'));
     expect(err).toBeDefined();
     expect(err!['providerSid']).toBe('SM-never-persisted');
+  });
+
+  // Last heard from (spec 5.1 / 14.2) - path 2, the open relay group.
+  const relayRow = () => world.messages.find((m) => m.provider_sid === RELAY_INBOUND_SID)!;
+
+  it('last heard from: a member text touches that member at the relay row instant', async () => {
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/sms', relayInboundParams());
+
+    expect(res.status).toBe(200);
+    const at = splitTsMsgId(relayRow().tsMsgId).providerTs;
+    expect(world.heardFromTouches).toEqual([{ contactId: 'c-alice', at, outcome: 'written' }]);
+  });
+
+  it('last heard from: a phone-only member resolves through findByPhone', async () => {
+    seedRelay(world, {
+      participants: [
+        { contactId: '', phone: ALICE },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    world.contacts.push({ contactId: 'c-alice-row', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, '/webhooks/twilio/sms', relayInboundParams());
+
+    expect(relayRow().relay_sender_key).toBe(`phone#${ALICE}`);
+    expect(world.heardFromTouches.map((t) => t.contactId)).toEqual(['c-alice-row']);
+  });
+
+  it('last heard from: a NON-member text on an open group touches that contact (no fan-out)', async () => {
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-zara', type: 'tenant', phone: ZARA });
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ZARA, MessageSid: 'SMheard-nonmember' }),
+    );
+
+    expect(world.sent).toHaveLength(0);
+    expect(world.heardFromTouches.map((t) => t.contactId)).toEqual(['c-zara']);
+  });
+
+  it('last heard from: a redelivery touches again at the FIRST row instant', async () => {
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, '/webhooks/twilio/sms', relayInboundParams());
+    await signedTwilioPost(app, '/webhooks/twilio/sms', relayInboundParams());
+
+    const at = splitTsMsgId(relayRow().tsMsgId).providerTs;
+    expect(world.heardFromTouches.map((t) => t.at)).toEqual([at, at]);
+    expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
+  });
+
+  // Last heard from - path 3, a late text to a CLOSED relay group (filed on
+  // the sender's own 1:1).
+  it('last heard from: a closed-group late text touches the sender at the 1:1 row instant', async () => {
+    const group = seedRelay(world, { status: 'closed' });
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/sms', relayInboundParams());
+
+    expect(res.status).toBe(200);
+    const row = relayRow();
+    expect(row.conversationId).not.toBe(group.conversationId);
+    const at = splitTsMsgId(row.tsMsgId).providerTs;
+    expect(world.heardFromTouches).toEqual([{ contactId: 'c-alice', at, outcome: 'written' }]);
+  });
+
+  it('last heard from: a closed-group late text from a phone on no contact touches nobody', async () => {
+    seedRelay(world, { status: 'closed' });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/sms', relayInboundParams());
+
+    expect(res.status).toBe(200);
+    expect(relayRow()).toBeDefined();
+    expect(world.heardFromTouches).toEqual([]);
+  });
+
+  it('last heard from: a closed-group late text redelivery touches again at the FIRST row instant', async () => {
+    seedRelay(world, { status: 'closed' });
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE });
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, '/webhooks/twilio/sms', relayInboundParams());
+    await signedTwilioPost(app, '/webhooks/twilio/sms', relayInboundParams());
+
+    const at = splitTsMsgId(relayRow().tsMsgId).providerTs;
+    expect(world.heardFromTouches.map((t) => t.at)).toEqual([at, at]);
+    expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
   });
 });
 

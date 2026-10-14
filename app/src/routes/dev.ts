@@ -39,8 +39,10 @@ import { createTourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createToursRepo } from '../repos/toursRepo.js';
 import {
   createMessagesRepo,
+  splitTsMsgId,
   type DeliveryStatus,
   type MessageItem,
+  type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
 import { createSettingsRepo } from '../repos/settingsRepo.js';
@@ -54,6 +56,8 @@ import {
 } from '../repos/placementsRepo.js';
 import { createPlacementDeadlinesRepo } from '../repos/placementDeadlinesRepo.js';
 import { createUnitsRepo, type CreateUnitInput, type UnitContact, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
+import { INDIVIDUAL_ATTEMPT_KEY } from '../lib/shareAttemptOrder.js';
 import { runDuePlacementNudges, type RunDuePlacementNudgesDeps } from '../jobs/placementNudges.js';
 import {
   runDuePendingRosterActions,
@@ -64,7 +68,8 @@ import { createActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createPoolNumbersService } from '../services/poolNumbers.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import { RELAY_INTRO_JOB } from '../jobs/relayFanOut.js';
-import { createExtractionRepo } from '../repos/extractionRepo.js';
+import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
+import { attributeInbound, repoLookup, type HeardFromRow } from '../lib/heardFrom.js';
 import { createAiRunsRepo } from '../repos/aiRunsRepo.js';
 import { createAuditRepo } from '../repos/auditRepo.js';
 import { createExtractionDriver } from '../adapters/extraction.js';
@@ -145,6 +150,22 @@ export interface DevRouterDeps {
   /** Repos for POST /__dev/fixtures/zero-primary-property - injected in tests
    *  (the world fakes); default to the real contacts and units repos. */
   zeroPrimaryFixtureRepos?: { contactsRepo: ContactsRepo; unitsRepo: UnitsRepo };
+  /** Repo for POST /__dev/listing-send-fixture (last-heard-from: 201 { row } on a
+   *  fresh pair, 409 { error: 'send_exists' } when the pair already has a row) -
+   *  injected in tests (the world fake); defaults to the real listing-sends repo. */
+  listingSendsRepo?: ListingSendsRepo;
+  /** Repos for the last-heard-from touch in the two inbound fixture seams
+   *  (spec 5.1 / 14.2) - injected in tests; default to the real repos. */
+  heardFromRepos?: {
+    contactsRepo: Pick<ContactsRepo, 'findByPhone' | 'findByEmail' | 'touchLastHeardFrom'>;
+    conversationsRepo: Pick<ConversationsRepo, 'getById'>;
+  };
+  /** Repos for the transcript and message fixture APPENDS - injected in tests;
+   *  default to the real messages and extraction repos. */
+  voiceFixtureRepos?: {
+    messages: Pick<MessagesRepo, 'append' | 'setCallTranscript'>;
+    extraction: Pick<ExtractionRepo, 'scheduleExtraction'>;
+  };
 }
 
 export function isLoopbackRemoteAddress(remoteAddress: string | null): boolean {
@@ -784,15 +805,44 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   //   (the dev router only mounts behind lib/devRoutes.ts, structurally absent in
   //   every deployed env); json() is scoped to this route. PII: ids/counts/callSid
   //   ONLY - NEVER the sentence text.
-  let voiceFixtureRepos:
-    | { messages: ReturnType<typeof createMessagesRepo>; extraction: ReturnType<typeof createExtractionRepo> }
-    | undefined;
-  const transcriptFixtureRepos = () => {
+  let voiceFixtureRepos: NonNullable<DevRouterDeps['voiceFixtureRepos']> | undefined = deps.voiceFixtureRepos;
+  const transcriptFixtureRepos = (): NonNullable<DevRouterDeps['voiceFixtureRepos']> => {
     voiceFixtureRepos ??= {
       messages: createMessagesRepo({ logger: log }),
       extraction: createExtractionRepo({ logger: log }),
     };
     return voiceFixtureRepos;
+  };
+  // Last heard from for the two inbound fixture seams (spec 5.1 / 14.2): the
+  // same rule and the same writer as the live paths. Best-effort, like them:
+  // a failure is logged and the fixture still answers its normal response.
+  let heardFromRepos = deps.heardFromRepos;
+  const heardFromDeps = (): NonNullable<DevRouterDeps['heardFromRepos']> => {
+    heardFromRepos ??= {
+      contactsRepo: createContactsRepo({ logger: log }),
+      conversationsRepo: createConversationsRepo({ logger: log }),
+    };
+    return heardFromRepos;
+  };
+  const touchFixtureHeardFrom = async (
+    row: HeardFromRow,
+    persisted: { conversationId: string; tsMsgId: string },
+  ): Promise<void> => {
+    try {
+      const { contactsRepo, conversationsRepo } = heardFromDeps();
+      const thread = await conversationsRepo.getById(persisted.conversationId);
+      const heardFromId = thread === undefined ? undefined : await attributeInbound(row, thread, repoLookup(contactsRepo));
+      if (heardFromId === undefined) return;
+      const outcome = await contactsRepo.touchLastHeardFrom(heardFromId, splitTsMsgId(persisted.tsMsgId).providerTs);
+      if (outcome === 'failed') {
+        log.error({ conversationId: persisted.conversationId }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+      }
+    } catch (err) {
+      log.error(
+        { err, conversationId: persisted.conversationId },
+        'last_heard_from touch failed - message persisted, last_heard_from stale',
+      );
+    }
   };
   router.post('/__dev/voice/transcript-fixture', json(), async (req, res) => {
     const body = (req.body ?? {}) as {
@@ -851,7 +901,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     //    author 'unknown': the real founder-bridge append uses authorForContact(),
     //    whose fallback is 'unknown' ('contact' is NOT a MessageAuthor); the call's
     //    speaker attribution rides the transcript prefixes, not this cosmetic field.
-    await messages.append({
+    const appended = await messages.append({
       conversationId,
       providerSid: callSid,
       providerTs: nowIso,
@@ -864,6 +914,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       masked: false,
       ...(roles !== undefined && { transcriptChannelRoles: roles }),
     });
+    await touchFixtureHeardFrom({ direction, type: 'call' }, appended);
     // 2) Join sentences into the stored verbatim transcript (T1 role-aware join).
     const text = joinViSentences(sentences, roles);
     // 3) Stamp transcript + transcript_status='completed' atomically.
@@ -1087,6 +1138,14 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
           ),
         }),
       });
+      await touchFixtureHeardFrom(
+        {
+          direction,
+          type: 'sms',
+          ...(reqBody.relaySenderKey !== undefined && { relay_sender_key: reqBody.relaySenderKey }),
+        },
+        appended,
+      );
       log.info(
         { conversationId, tsMsgId: appended.tsMsgId, direction, createdAt, callbackAddressable: true },
         'dev extraction message-fixture planted',
@@ -1116,6 +1175,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       created_at: createdAt,
     }, declaration) as MessageItem;
     await doc.send(new PutCommand({ TableName: tableName('messages'), Item: item }));
+    await touchFixtureHeardFrom(item, item);
     log.info(
       { conversationId, tsMsgId: item.tsMsgId, direction, createdAt },
       'dev extraction message-fixture planted',
@@ -1348,6 +1408,78 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     } as unknown as CreateUnitInput);
     log.info({ unitId: unit.unitId, rows: contacts.length }, 'dev zero-primary-property fixture created');
     res.status(201).json({ unitId: unit.unitId });
+  });
+
+  // POST /__dev/listing-send-fixture { unitId, contactId, sentAt } - plant a
+  // LISTED, counted listing-send row with a chosen sentAt (last-heard-from
+  // spec 14.4, e2e (6)). A real send's sentAt is the provider instant (now), so
+  // nothing else can put a send older than the 24-hour QUIET threshold in front
+  // of the Follow up tab. Written through putShareMemory as ONE counted
+  // `individual` share entry (the shape shareLedger seeds for an individual
+  // send), so the readers list it exactly like a real send. Answers: 201
+  // { row } on a FRESH pair; 409 { error: 'send_exists' } when the pair
+  // already has a row (create-only); 400 bad body; 404 unit_not_found /
+  // contact_not_found. Never writes `declined` or any outcome (I2). No
+  // threshold override exists anywhere. Same hermetic-LOCAL-only construction
+  // as /__dev/reseed and the fixtures above (the dev router only mounts behind
+  // lib/devRoutes.ts: DEV_AUTH_ENABLED, not production, a DynamoDB Local
+  // endpoint); json() is scoped to this route. Logs ids only.
+  let listingSendFixtureRepo = deps.listingSendsRepo;
+  const listingSendFixtureDeps = (): ListingSendsRepo => {
+    listingSendFixtureRepo ??= createListingSendsRepo({ logger: log });
+    return listingSendFixtureRepo;
+  };
+  router.post('/__dev/listing-send-fixture', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { unitId?: unknown; contactId?: unknown; sentAt?: unknown };
+    const unitId = typeof body.unitId === 'string' && body.unitId !== '' ? body.unitId : undefined;
+    const contactId = typeof body.contactId === 'string' && body.contactId !== '' ? body.contactId : undefined;
+    if (unitId === undefined || contactId === undefined) {
+      res.status(400).json({ error: 'unitId and contactId are required' });
+      return;
+    }
+    const sentAtMs = typeof body.sentAt === 'string' ? Date.parse(body.sentAt) : Number.NaN;
+    if (Number.isNaN(sentAtMs)) {
+      res.status(400).json({ error: 'sentAt must be an ISO 8601 instant' });
+      return;
+    }
+    const sentAt = new Date(sentAtMs).toISOString();
+    const { contactsRepo, unitsRepo } = orgFixtureDeps();
+    if ((await unitsRepo.getById(unitId)) === undefined) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    if ((await contactsRepo.getById(contactId)) === undefined) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+    const listingSends = listingSendFixtureDeps();
+    // CREATE ONLY (plan review R1 #11): a pair that already has a row - listed
+    // or not - is refused, so the seam never overwrites a real share memory or
+    // moves a sentAt backward. A spec creates its own fresh pair per run.
+    if ((await listingSends.getByKeyConsistent(unitId, contactId)) !== undefined) {
+      res.status(409).json({ error: 'send_exists' });
+      return;
+    }
+    // token undefined = putShareMemory's `attribute_not_exists(shares_op)`
+    // condition; with the read above it can only lose to a concurrent create.
+    const written = await listingSends.putShareMemory(
+      unitId,
+      contactId,
+      {
+        shares: { individual: { attempt: INDIVIDUAL_ATTEMPT_KEY, state: 'counted', by: 'acceptance', countedAt: sentAt } },
+        counted: true,
+        sentAt,
+        broadcastId: undefined,
+      },
+      { token: undefined },
+    );
+    if (!written) {
+      res.status(409).json({ error: 'send_exists' });
+      return;
+    }
+    const row = await listingSends.getByKeyConsistent(unitId, contactId);
+    log.info({ unitId, contactId }, 'dev listing-send fixture written');
+    res.status(201).json({ row });
   });
 
   // POST /__dev/relay/replay-intros — re-fire the REAL relay.intro job for every

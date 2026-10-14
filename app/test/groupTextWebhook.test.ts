@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as groupConversations from '../src/adapters/groupConversations.js';
 import { conversationIdForGroup, contactIdForPhone } from '../src/lib/import/ids.js';
 import { GROUP_TEXT_STATUS, type ConversationItem } from '../src/repos/conversationsRepo.js';
+import { splitTsMsgId } from '../src/repos/messagesRepo.js';
 import { GROUP_RAILED_INBOUND_LAST_AT_ID } from '../src/repos/settingsRepo.js';
 import { STOP_CONFIRMATION } from '../src/lib/smsCompliance.js';
 import {
@@ -148,6 +149,10 @@ describe('group detection: branch placement (T3.2)', () => {
       'conversations.setParticipantsIfAbsent',
       // (3.6) multi-phone lastSeenAt
       'contacts.touchPhoneLastSeen',
+      // (3.7) last heard from (spec 5.1) - KNOWING rewrite: the touch is 1:1-path
+      // work, not a group-branch cost. It reuses the conversation and the
+      // captured contact as the lookup cache, so it adds no read.
+      'contacts.touchLastHeardFrom',
       // (4) keywords: plain inbound, contact already consented -> ZERO writes
       // (5) media: none
       // (6) inbox touch
@@ -1525,5 +1530,64 @@ describe('group detection: a REDELIVERY after a transient exclusion-set failure'
     // which is RESOLVED.
     expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
     expect(res.text).not.toMatch(/<Message>/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Last heard from (spec 5.1 / 14.2) - path 4, the native group text
+// ---------------------------------------------------------------------------
+describe('group detection: last heard from (spec 5.1)', () => {
+  const groupRowAt = (world: FakeWorld): string => {
+    const row = world.messages.find((m) => m.conversationId === GROUP_ID)!;
+    return splitTsMsgId(row.tsMsgId).providerTs;
+  };
+
+  it('a known sender is touched through the roster at the group row instant', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-known', type: 'tenant', phone: SENDER });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    expect(res.status).toBe(200);
+    const rosterId = groupThread(world)!.participants!.find((p) => p.phone === SENDER)!.contactId;
+    const at = groupRowAt(world);
+    expect(world.heardFromTouches).toEqual([{ contactId: rosterId, at, outcome: 'written' }]);
+    expect(world.contacts.find((c) => c.contactId === rosterId)!.last_heard_from_at).toBe(at);
+  });
+
+  it('a redelivery touches again at the FIRST row instant (written, then skipped)', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    expect(world.messages).toHaveLength(1);
+    const at = groupRowAt(world);
+    expect(world.heardFromTouches.map((t) => t.at)).toEqual([at, at]);
+    expect(world.heardFromTouches.map((t) => t.outcome)).toEqual(['written', 'skipped']);
+  });
+
+  it('an echo dedupe reads the PERSISTED row: our own outbound touches nobody', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+    world.messages[0]!.direction = 'outbound';
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    expect(world.heardFromTouches).toHaveLength(1);
+  });
+
+  it('an unreadable persisted row on a dedupe touches nobody', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+    world.messagesRepo.getByProviderSid = async () => undefined;
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    expect(world.heardFromTouches).toHaveLength(1);
   });
 });

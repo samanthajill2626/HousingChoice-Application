@@ -25,6 +25,7 @@ import {
 } from '../../src/adapters/messaging.js';
 import { DEV_SESSION_SECRET_DEFAULT, loadConfig, type AppConfig } from '../../src/lib/config.js';
 import { createEventBus, type AppEventName, type EventBus } from '../../src/lib/events.js';
+import { normalizeInstant } from '../../src/lib/heardFrom.js';
 import { createLogger } from '../../src/lib/logger.js';
 import {
   decideActualTransportWrite,
@@ -157,6 +158,7 @@ import {
   type ListingSendsRepo,
   type ShareLedgerEntry,
 } from '../../src/repos/listingSendsRepo.js';
+import type { DeclineRecord } from '../../src/lib/listingSendOutcome.js';
 import {
   type ContactVocabulary,
   type ContactVocabularyRepo,
@@ -525,6 +527,10 @@ export interface FakeWorld {
    * makes the two webhooks impossible to interleave wrongly.
    */
   crossCheckBalances: Map<string, CrossCheckPairState>;
+  /** Every contactsRepo.touchLastHeardFrom call, in order (spec 5.1): the raw
+   *  `at` the caller passed and the outcome the fake answered. A test that
+   *  replaces world.contactsRepo.touchLastHeardFrom bypasses this record. */
+  heardFromTouches: { contactId: string; at: string; outcome: 'written' | 'skipped' | 'failed' }[];
 }
 
 /** One pair's ledger balance in the fake world. See crossCheckBalances. */
@@ -559,6 +565,7 @@ export function createFakeWorld(): FakeWorld {
   // event_type values whose audit append throws (observability-failure tests).
   const failAuditAppendFor: FakeWorld['failAuditAppendFor'] = new Set<string>();
   const touches: FakeWorld['touches'] = [];
+  const heardFromTouches: FakeWorld['heardFromTouches'] = [];
   const contactCreates: string[] = [];
   const unreadIncrements: string[] = [];
   const unreadResets: string[] = [];
@@ -2222,10 +2229,11 @@ export function createFakeWorld(): FakeWorld {
 
   /**
    * MODELS THE REAL RECIPIENT PROJECTION (plan 3.3): projectDisplay plus
-   * `type` and `role` exactly as stored - nothing else, so a recipients caller
-   * reading another attribute fails here as it would against DynamoDB. (A fake
-   * pointer row would show its 'unknown' sentinel; recipients are never
-   * pointer ids.)
+   * `type` and `role` - and, for last-heard-from (spec 5.5), `status`,
+   * `last_heard_from_at`, `sms_opt_out` and `sms_unreachable` - exactly as
+   * stored, nothing else, so a recipients caller reading another attribute
+   * fails here as it would against DynamoDB. (A fake pointer row would show
+   * its 'unknown' sentinel; recipients are never pointer ids.)
    */
   const projectRecipient = (contact: ContactItem): RecipientDisplay => {
     const role = contact['role'];
@@ -2233,6 +2241,10 @@ export function createFakeWorld(): FakeWorld {
       ...projectDisplay(contact),
       ...(typeof contact.type === 'string' && { type: contact.type }),
       ...(typeof role === 'string' && { role }),
+      ...(typeof contact.status === 'string' && { status: contact.status }),
+      ...(typeof contact.last_heard_from_at === 'string' && { last_heard_from_at: contact.last_heard_from_at }),
+      ...(typeof contact.sms_opt_out === 'boolean' && { sms_opt_out: contact.sms_opt_out }),
+      ...(typeof contact.sms_unreachable === 'boolean' && { sms_unreachable: contact.sms_unreachable }),
     };
   };
 
@@ -2606,6 +2618,25 @@ export function createFakeWorld(): FakeWorld {
       if (next.organization === null) delete contact['organization'];
       else if (next.organization !== undefined) contact['organization'] = next.organization;
       return 'written';
+    },
+    // Last heard from (spec 5.1): the real conditional UpdateItem's outcomes -
+    // 'skipped' for no such contact, a stored value at or after `at`, or an
+    // unparseable `at`. Every call is recorded in world.heardFromTouches with
+    // the RAW `at` the caller passed.
+    async touchLastHeardFrom(contactId, at) {
+      const normalized = normalizeInstant(at);
+      const contact = contacts.find((c) => c.contactId === contactId);
+      let outcome: 'written' | 'skipped' = 'skipped';
+      if (
+        normalized !== undefined &&
+        contact !== undefined &&
+        !(typeof contact.last_heard_from_at === 'string' && contact.last_heard_from_at >= normalized)
+      ) {
+        contact.last_heard_from_at = normalized;
+        outcome = 'written';
+      }
+      heardFromTouches.push({ contactId, at, outcome });
+      return outcome;
     },
   };
 
@@ -3531,6 +3562,29 @@ export function createFakeWorld(): FakeWorld {
       if (next.broadcastId !== undefined) row.broadcastId = next.broadcastId;
       else delete row.broadcastId;
       return true;
+    },
+    // last-heard-from spec 5.4: the decline writers, modelled on the real
+    // conditional UpdateItem - a row must exist and count (`counted` absent on
+    // a legacy row reads as counted); otherwise 'not_found' and nothing is
+    // written. They touch ONLY `declined` + `updated_at`, so putShareMemory
+    // (which mutates its own fields in place) never clobbers a decline. Held
+    // to the real repo by twilioWebhookHarnessRepoAdditions.integration.test.ts.
+    async setDeclined(unitId, contactId, record) {
+      const row = findListingSend(unitId, contactId);
+      if (row === undefined || row.counted === false) return 'not_found';
+      row.declined = JSON.parse(JSON.stringify(record)) as DeclineRecord;
+      row.updated_at = new Date().toISOString();
+      return 'ok';
+    },
+    // `expectedAt` mirrors the real compare-and-clear (review B R2-1): the
+    // stored record's `at` must equal it, and an absent record never does.
+    async clearDeclined(unitId, contactId, opts) {
+      const row = findListingSend(unitId, contactId);
+      if (row === undefined || row.counted === false) return 'not_found';
+      if (opts?.expectedAt !== undefined && row.declined?.at !== opts.expectedAt) return 'not_found';
+      delete row.declined;
+      row.updated_at = new Date().toISOString();
+      return 'ok';
     },
     // share-sent-outcome T3 (spec D6): the BatchGet by pair - found rows only,
     // keyed `${unitId}|${contactId}`.
@@ -5325,6 +5379,7 @@ export function createFakeWorld(): FakeWorld {
     crossCheckClassicMarkers,
     crossCheckPending,
     crossCheckBalances,
+    heardFromTouches,
     groupRailEnqueuer,
   };
 }

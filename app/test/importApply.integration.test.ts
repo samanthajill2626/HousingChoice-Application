@@ -127,6 +127,27 @@ describe.skipIf(!reachable)('import:apply', () => {
     });
   });
 
+  it('stamps last_heard_from_at from the latest attributed inbound it wrote (spec 5.1)', async () => {
+    const dry = await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv, dryRun: true });
+    expect(dry.lastHeardFromStamps.written + dry.lastHeardFromStamps.skipped + dry.lastHeardFromStamps.failed).toBe(0);
+    const report = await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+    expect(report.lastHeardFromStamps.planned).toBe(dry.lastHeardFromStamps.planned);
+    expect(report.lastHeardFromStamps.failed).toBe(0);
+    const heard = async (phone: string) =>
+      (await doc.send(new GetCommand({ TableName: table('contacts'), Key: { contactId: contactIdForPhone(phone) } })))
+        .Item?.['last_heard_from_at'];
+    expect(await heard(PHONES.tenantBusy)).toBe('2026-07-03T10:00:00.000Z'); // the inbound CALL beats the 07-01 text
+    expect(await heard(PHONES.tenantConflict)).toBe('2026-07-20T10:00:00.000Z'); // the 07-20 text beats the 07-19 missed call
+    expect(await heard(PHONES.caseworker)).toBe('2026-07-23T10:00:00.000Z');
+    expect(await heard(PHONES.optedOut)).toBe('2026-06-01T10:00:00.000Z'); // a STOP counts
+    expect(await heard(PHONES.groupTenant)).toBe('2026-07-26T10:00:00.000Z'); // the GROUP inbound beats the 03-01 1:1
+    expect(await heard(PHONES.landlord)).toBeUndefined(); // only outbound and others' group texts
+    expect(await heard(PHONES.noTraffic)).toBeUndefined();
+    const again = await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+    expect(again.lastHeardFromStamps.written).toBe(0);
+    expect(again.lastHeardFromStamps.skipped).toBe(again.lastHeardFromStamps.planned);
+  });
+
   it('writes the name fields the app actually renders from', async () => {
     // REGRESSION. The import used to write a single `display_name`, which nothing
     // reads: routes/contacts.ts displayNameOf() joins firstName + lastName and

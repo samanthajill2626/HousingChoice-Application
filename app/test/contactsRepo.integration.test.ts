@@ -289,6 +289,30 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     expect(legacyRead?.phones).toBeUndefined();
   });
 
+  // Last heard from (spec 5.1): attribute_exists(contactId) is load-bearing -
+  // UpdateItem on an absent key would CREATE the item.
+  it('touchLastHeardFrom is guarded, forward-only and normalizing', async () => {
+    await expect(
+      contacts.touchLastHeardFrom('contact-never-existed-lhf', '2026-09-01T10:00:00.000Z'),
+    ).resolves.toBe('skipped');
+    expect(await contacts.getById('contact-never-existed-lhf')).toBeUndefined();
+
+    const c = await contacts.create({ type: 'tenant', phone: nextPhone() });
+    await expect(contacts.touchLastHeardFrom(c.contactId, '2026-09-01T10:00:00Z')).resolves.toBe('written');
+    expect((await contacts.getById(c.contactId))?.last_heard_from_at).toBe('2026-09-01T10:00:00.000Z');
+
+    // An EARLIER instant never moves it back.
+    await expect(contacts.touchLastHeardFrom(c.contactId, '2026-08-31T10:00:00.000Z')).resolves.toBe('skipped');
+    expect((await contacts.getById(c.contactId))?.last_heard_from_at).toBe('2026-09-01T10:00:00.000Z');
+
+    // The SAME instant is not a move.
+    await expect(contacts.touchLastHeardFrom(c.contactId, '2026-09-01T10:00:00.000Z')).resolves.toBe('skipped');
+
+    // A LATER instant moves it forward.
+    await expect(contacts.touchLastHeardFrom(c.contactId, '2026-09-02T10:00:00.000Z')).resolves.toBe('written');
+    expect((await contacts.getById(c.contactId))?.last_heard_from_at).toBe('2026-09-02T10:00:00.000Z');
+  });
+
   // Voice Phase 1 (spec §8): the voice_opt_out do-not-call flag routes through
   // the generic setFlag/clearFlag, INDEPENDENT of the sms flags.
   it('setFlag/clearFlag handle voice_opt_out independently of sms_opt_out', async () => {

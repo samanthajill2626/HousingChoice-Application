@@ -1,0 +1,183 @@
+/* FollowUpView - Matching's Follow up tab (last-heard-from 5.6). Tokens only.
+ * The row is the option A mockup's: who | when | chip + actions; it stacks on
+ * a tight pane (BroadcastsList's .page is the query container). */
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+.group {
+  display: flex;
+  flex-direction: column;
+}
+.groupTitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin: 0 0 var(--sp-1);
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--c-border);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+.groupSub {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-regular);
+  color: var(--c-text-muted);
+}
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.2fr) auto;
+  gap: var(--sp-1) var(--sp-3);
+  align-items: center;
+  padding: var(--sp-3) var(--sp-1);
+  border-bottom: 1px solid var(--c-border);
+}
+.row:last-child {
+  border-bottom: none;
+}
+.who {
+  min-width: 0;
+}
+.name {
+  font-weight: var(--fw-medium);
+  color: var(--c-brand);
+  text-decoration: none;
+}
+.name:hover {
+  text-decoration: underline;
+}
+.name:focus-visible,
+.link:focus-visible,
+.btn:focus-visible,
+.primaryBtn:focus-visible,
+.linkBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+.when {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+.date {
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+  font-variant-numeric: tabular-nums;
+}
+.act {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+.chip {
+  padding: 1px var(--sp-2);
+  border-radius: 10px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+.chipWait {
+  background: var(--c-evt-amber-bg);
+  color: var(--c-resp-wait);
+}
+.chipReplied {
+  background: var(--c-surface-2);
+  color: var(--c-resp-yes);
+}
+.chipNo {
+  background: var(--c-surface-2);
+  color: var(--c-resp-no);
+}
+.chipDone {
+  background: var(--c-brand-soft);
+  color: var(--c-brand-hover);
+}
+.btn,
+.primaryBtn {
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.primaryBtn {
+  border-color: var(--c-brand);
+  background: var(--c-brand);
+  color: var(--c-surface);
+}
+.btn:disabled,
+.primaryBtn:disabled,
+.linkBtn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.link,
+.linkBtn {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--c-brand);
+  font-size: var(--fs-sm);
+  text-decoration: none;
+  cursor: pointer;
+}
+.link:hover,
+.linkBtn:hover {
+  text-decoration: underline;
+}
+.rowError {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+.note {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+.error {
+  margin: var(--sp-4) 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+.empty {
+  margin-top: var(--sp-6);
+  padding: var(--sp-6);
+  text-align: center;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  background: var(--c-surface);
+}
+.emptyBody {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+@container (max-width: 560px) {
+  .row {
+    grid-template-columns: 1fr;
+  }
+  .act {
+    justify-content: flex-start;
+  }
+}

@@ -106,3 +106,15 @@ page.
 **Not urgent.** The Unknown tab is fully correct and unbounded without it. This
 buys back global newest-first ordering, which the human ruled 2026-08-26 is not
 what a triage queue wants in the first place.
+
+**Note (2026-10-13, feat/last-heard-from).** The contact now carries a
+recency attribute: `last_heard_from_at`, the latest INBOUND text, call or
+email from the contact (forward-only, written only by
+`contactsRepo.touchLastHeardFrom`, backfilled by
+`app/scripts/backfill-last-heard-from.ts`; spec
+`docs/superpowers/specs/2026-10-12-last-heard-from-follow-up-status-design.md`
+section 5.1). It answers the forward-only and best-effort questions above. It
+is deliberately NOT an index key and is inbound-only, so the paged-feed half
+of this issue - a GSI that lets a contact-side feed page in activity order -
+is still open; whoever builds it decides whether to index this attribute or
+add a both-directions one.

@@ -126,6 +126,8 @@ interface WorldOver {
   mediaStore?: null;
   putThrowsOnFirst?: boolean;
   touchEmailThrows?: boolean;
+  /** touchLastHeardFrom's answer (default 'written'). */
+  touchHeardFromResult?: 'written' | 'skipped' | 'failed';
 }
 
 function makeWorld(over: WorldOver = {}) {
@@ -258,6 +260,10 @@ function makeWorld(over: WorldOver = {}) {
   const touchEmailLastSeen = vi.fn(async () => {
     if (over.touchEmailThrows) throw new Error('touch boom');
   });
+  // Last heard from (spec 5.1): the phone lookup the attribution rule may
+  // use (no contact here is phone-resolved) and the one writer.
+  const findByPhone = vi.fn(async (_phone: string) => undefined as ContactItem | undefined);
+  const touchLastHeardFrom = vi.fn(async (_id: string, _at: string) => over.touchHeardFromResult ?? 'written');
 
   const scheduleExtraction = vi.fn(async () => {});
   const emit = vi.fn();
@@ -303,7 +309,7 @@ function makeWorld(over: WorldOver = {}) {
       touchLastActivity,
     },
     messages: { append, getByRfcMessageId, putJobExecutionMarker, getJobExecutionMarker },
-    contacts: { findByEmail, getById, touchEmailLastSeen },
+    contacts: { findByEmail, findByPhone, getById, touchEmailLastSeen, touchLastHeardFrom },
     extraction: { scheduleExtraction },
     events: { emit } as unknown as EventBus,
     pushService,
@@ -333,6 +339,7 @@ function makeWorld(over: WorldOver = {}) {
     getByRfcMessageId,
     findByEmail,
     touchEmailLastSeen,
+    touchLastHeardFrom,
     scheduleExtraction,
     emit,
     contactCapture,
@@ -855,6 +862,84 @@ describe('tier 6: known-contact threading', () => {
     const w = makeWorld({ env: { AI_EXTRACTION_ENABLED: 'false' } });
     await ingestInboundEmail(notice(), w.deps);
     expect(w.scheduleExtraction).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Last heard from (spec 5.1 / 14.2) - the winner's side effects only
+// ---------------------------------------------------------------------------
+
+describe('last heard from (spec 5.1) - inbound email', () => {
+  it('a tier-6 known tenant is touched once at the receipt instant', async () => {
+    const w = makeWorld({});
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('threaded');
+    expect(w.touchLastHeardFrom).toHaveBeenCalledTimes(1);
+    expect(w.touchLastHeardFrom).toHaveBeenCalledWith('c1', NOW);
+  });
+
+  it('an UNKNOWN-typed contact (author unknown) is still touched - author is not the test', async () => {
+    const w = makeWorld({ contact: { type: 'unknown' } });
+    await ingestInboundEmail(notice(), w.deps);
+    expect(w.appended[0]!.author).toBe('unknown');
+    expect(w.touchLastHeardFrom).toHaveBeenCalledTimes(1);
+    expect(w.touchLastHeardFrom).toHaveBeenCalledWith('c1', NOW);
+  });
+
+  it('a tier-5 NEW address (email_new_address) touches nobody', async () => {
+    const w = makeWorld({
+      contact: { emails: [{ email: 'other@person.test', primary: true }], email: 'other@person.test' },
+      raw: mime({ from: 'brand-new@else.test', to: 'relay+TOK1@mail.test' }),
+      conversations: [
+        {
+          conversationId: 'conv-tok',
+          email_reply_token: 'TOK1',
+          participants: [{ contactId: 'c1', phone: '' }],
+        } as Partial<ConversationItem>,
+      ],
+    });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('threaded');
+    expect(w.appended[0]!.email_new_address).toBe(true);
+    expect(w.touchLastHeardFrom).not.toHaveBeenCalled();
+  });
+
+  it('a tier-5 KNOWN address via token is touched', async () => {
+    const w = makeWorld({
+      contact: { type: 'landlord' },
+      raw: mime({ to: 'relay+TOK1@mail.test' }),
+      conversations: [
+        {
+          conversationId: 'conv-tok',
+          email_reply_token: 'TOK1',
+          participants: [{ contactId: 'c1', phone: '' }],
+          type: 'landlord_1to1',
+        } as Partial<ConversationItem>,
+      ],
+    });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('threaded');
+    expect(w.touchLastHeardFrom).toHaveBeenCalledTimes(1);
+    expect(w.touchLastHeardFrom).toHaveBeenCalledWith('c1', NOW);
+  });
+
+  it('a deduped append (the loser of a concurrent delivery) touches nobody', async () => {
+    const w = makeWorld({ appendDeduped: true });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('duplicate');
+    expect(w.touchLastHeardFrom).not.toHaveBeenCalled();
+  });
+
+  it('a failed touch is logged at error and the mail still threads', async () => {
+    const w = makeWorld({ touchHeardFromResult: 'failed' });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('threaded');
+    expect(w.touchLastHeardFrom).toHaveBeenCalledTimes(1);
+    expect(
+      w.capture
+        .atLevel(50)
+        .some((l) => l['msg'] === 'last_heard_from touch failed - message persisted, last_heard_from stale'),
+    ).toBe(true);
   });
 });
 

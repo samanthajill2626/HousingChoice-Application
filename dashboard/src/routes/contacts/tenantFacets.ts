@@ -4,7 +4,7 @@
 // Not-recorded sentinel, contextual counts, URL (de)serialization, and the row
 // facts line. No React, no hooks: TenantFilters renders what this returns and
 // ContactsList applies it.
-import type { Contact } from '../../api/index.js';
+import { TENANT_STATUSES, TENANT_STATUS_LABELS, type Contact, type TenantStatus } from '../../api/index.js';
 import { voucherSizeLabel } from '../broadcasts/broadcastFormat.js';
 
 /** URL + option key for the "nothing recorded" bucket of a value facet. */
@@ -54,11 +54,39 @@ export const VOUCHER_BUCKETS: ReadonlyArray<{ key: VoucherBucketKey; label: stri
 /** The literal voucher key set parseSelection validates against. */
 const VOUCHER_KEYS: ReadonlySet<string> = new Set<string>(VOUCHER_BUCKETS.map((b) => b.key));
 
-/** The active facet selection. Empty sets / false = unconstrained. */
+/** The status facet's URL sentinel for the EMPTY selection (spec 2026-10-12
+ *  5.7). Spelled unlike NONE_KEY on purpose: "no status chip lit" is not "no
+ *  value recorded". */
+export const STATUS_EMPTY_KEY = '_empty';
+
+const TENANT_STATUS_SET: ReadonlySet<string> = new Set<string>(TENANT_STATUSES);
+
+/** All seven statuses - the status facet's UNCONSTRAINED value (the probe's,
+ *  and what "Show all statuses" lights). */
+export const ALL_STATUS_SET: ReadonlySet<TenantStatus> = new Set<TenantStatus>(TENANT_STATUSES);
+
+/** The DEFAULT status selection, read when the URL carries no `status`: every
+ *  status except inactive and placed (spec 5.7, D1). */
+export const DEFAULT_STATUS_SET: ReadonlySet<TenantStatus> = new Set<TenantStatus>(
+  TENANT_STATUSES.filter((s) => s !== 'inactive' && s !== 'placed'),
+);
+
+/** The Tenants list order (`?sort=`): absent = 'heard'. */
+export type TenantSort = 'heard' | 'name';
+
+/**
+ * The active facet selection. voucher / ha / porting: empty sets and false
+ * are UNCONSTRAINED. `status` INVERTS that convention (spec 2026-10-12 5.7):
+ * it is the set of statuses SHOWN - empty shows no status-bearing tenant,
+ * ALL_STATUS_SET is unconstrained, and an absent URL param reads as
+ * DEFAULT_STATUS_SET. A tenant with no status or an off-list one is never
+ * hidden by it and counts under no chip (14.5 F1).
+ */
 export interface TenantSelection {
   voucher: ReadonlySet<string>;
   ha: ReadonlySet<string>;
   porting: boolean;
+  status: ReadonlySet<TenantStatus>;
 }
 
 /** One rendered chip: its URL key, its display label, its contextual count. */
@@ -68,7 +96,7 @@ export interface FacetOption {
   count: number;
 }
 
-/** Everything TenantFilters needs to render the three controls. */
+/** Everything TenantFilters needs to render the four controls. */
 export interface TenantFacetModel {
   /** The fixed five, then Not recorded - always present, whatever the counts. */
   voucher: FacetOption[];
@@ -82,6 +110,9 @@ export interface TenantFacetModel {
   showPorting: boolean;
   /** How many tenants the Porting toggle would keep, in the current context. */
   portingCount: number;
+  /** The seven tenant statuses in TENANT_STATUSES order, labelled as
+   *  StatusBadge labels them - always all seven, whatever the counts. */
+  status: FacetOption[];
 }
 
 /**
@@ -135,6 +166,31 @@ function authorityKeyOf(c: Contact): string | null {
   return raw === null ? null : normalizeAuthorityKey(raw);
 }
 
+/** The tenant's status when it is one of the seven, else null (absent or off-list). */
+function statusKeyOf(c: Contact): TenantStatus | null {
+  const s = c.status;
+  return typeof s === 'string' && TENANT_STATUS_SET.has(s) ? (s as TenantStatus) : null;
+}
+
+/** The status selection in the URL: valid values win (the sentinel is then
+ *  dropped); else the sentinel alone is the EMPTY selection; else - absent,
+ *  or every value invalid - the DEFAULT set (never empty: a stale link must
+ *  not blank the list). */
+function parseStatus(params: URLSearchParams): Set<TenantStatus> {
+  const raw = params.getAll('status');
+  const valid = new Set<TenantStatus>();
+  for (const v of raw) if (TENANT_STATUS_SET.has(v)) valid.add(v as TenantStatus);
+  if (valid.size > 0) return valid;
+  if (raw.includes(STATUS_EMPTY_KEY)) return new Set<TenantStatus>();
+  return new Set(DEFAULT_STATUS_SET);
+}
+
+function sameStatuses(a: ReadonlySet<TenantStatus>, b: ReadonlySet<TenantStatus>): boolean {
+  if (a.size !== b.size) return false;
+  for (const s of a) if (!b.has(s)) return false;
+  return true;
+}
+
 /** Read the facet selection out of the URL. */
 export function parseSelection(params: URLSearchParams): TenantSelection {
   const voucher = new Set<string>();
@@ -154,21 +210,40 @@ export function parseSelection(params: URLSearchParams): TenantSelection {
   // Presence-only, with the ONE documented exception: `?porting=false` reads as
   // absent (spec section 10) so an explicit off-state never filters.
   const porting = params.get('porting');
-  return { voucher, ha, porting: porting !== null && porting !== 'false' };
+  return { voucher, ha, porting: porting !== null && porting !== 'false', status: parseStatus(params) };
 }
 
 /**
- * Write the selection back onto `params` IN PLACE: the three facet keys are
- * deleted and re-added, and no other key is ever touched (`?phone=` must
- * survive). Porting writes as `porting=1`; the value is never read back.
+ * Write the selection back onto `params` IN PLACE: the four facet keys are
+ * deleted and re-added, and no other key is ever touched (`?phone=` and
+ * `?sort=` must survive). Porting writes as `porting=1`; the value is never
+ * read back. Status writes ONLY a non-default selection: the default removes
+ * the param, the empty selection writes `status=_empty`, anything else writes
+ * its values in TENANT_STATUSES order.
  */
 export function applyToParams(params: URLSearchParams, sel: TenantSelection): void {
   params.delete('voucher');
   params.delete('ha');
   params.delete('porting');
+  params.delete('status');
   for (const key of sel.voucher) params.append('voucher', key);
   for (const key of sel.ha) params.append('ha', key);
   if (sel.porting) params.set('porting', '1');
+  if (!sameStatuses(sel.status, DEFAULT_STATUS_SET)) {
+    if (sel.status.size === 0) params.append('status', STATUS_EMPTY_KEY);
+    else for (const s of TENANT_STATUSES) if (sel.status.has(s)) params.append('status', s);
+  }
+}
+
+/** `?sort=`: 'name', else the default 'heard' (absent or anything else). */
+export function parseSort(params: URLSearchParams): TenantSort {
+  return params.get('sort') === 'name' ? 'name' : 'heard';
+}
+
+/** Write the sort IN PLACE; the default writes nothing. No other key is touched. */
+export function applySortToParams(params: URLSearchParams, sort: TenantSort): void {
+  params.delete('sort');
+  if (sort === 'name') params.set('sort', 'name');
 }
 
 /** OR within the voucher facet; an empty selection is unconstrained. */
@@ -188,6 +263,24 @@ function matchesAuthority(c: Contact, keys: ReadonlySet<string>): boolean {
 /** The Porting toggle: presence of `porting === true`, never a falsy check. */
 function matchesPorting(c: Contact, on: boolean): boolean {
   return !on || c.porting === true;
+}
+
+/** The status facet - the set of statuses SHOWN (inverted, see TenantSelection).
+ *  No status or an off-list one always passes (F1). */
+function matchesStatus(c: Contact, keys: ReadonlySet<TenantStatus>): boolean {
+  const key = statusKeyOf(c);
+  return key === null || keys.has(key);
+}
+
+/** True when the status facet ALONE hides this tenant: voucher, authority and
+ *  porting pass, its status is not shown (the hidden-match hint, 14.5 F11). */
+export function hiddenByStatusOnly(c: Contact, sel: TenantSelection): boolean {
+  return (
+    matchesVoucher(c, sel.voucher) &&
+    matchesAuthority(c, sel.ha) &&
+    matchesPorting(c, sel.porting) &&
+    !matchesStatus(c, sel.status)
+  );
 }
 
 /**
@@ -215,14 +308,14 @@ export function displaySpelling(spellings: Map<string, number>): string {
 }
 
 /**
- * Options + contextual counts for the three controls.
+ * Options + contextual counts for the four controls.
  *
  * The OPTION LIST (and each option's display spelling) derives from the FULL
  * loaded set, never from the filtered rows, so chips cannot vanish or re-spell
  * mid-interaction. COUNTS are contextual with standard faceted-search
- * semantics: each facet sees the search query, the Porting toggle, and the OTHER
- * value facet - never its own selection, so a chip's number always states what
- * clicking it does.
+ * semantics: each facet sees the search query and the OTHER facets (Porting
+ * and Status included) - never its own selection, so a chip's number always
+ * states what clicking it does.
  */
 export function buildFacets(
   tenants: Contact[],
@@ -246,13 +339,16 @@ export function buildFacets(
 
   const queried = tenants.filter((c) => matchesQuery(c));
   const forVoucher = queried.filter(
-    (c) => matchesAuthority(c, sel.ha) && matchesPorting(c, sel.porting),
+    (c) => matchesAuthority(c, sel.ha) && matchesPorting(c, sel.porting) && matchesStatus(c, sel.status),
   );
   const forAuthority = queried.filter(
-    (c) => matchesVoucher(c, sel.voucher) && matchesPorting(c, sel.porting),
+    (c) => matchesVoucher(c, sel.voucher) && matchesPorting(c, sel.porting) && matchesStatus(c, sel.status),
   );
   const forPorting = queried.filter(
-    (c) => matchesVoucher(c, sel.voucher) && matchesAuthority(c, sel.ha),
+    (c) => matchesVoucher(c, sel.voucher) && matchesAuthority(c, sel.ha) && matchesStatus(c, sel.status),
+  );
+  const forStatus = queried.filter(
+    (c) => matchesVoucher(c, sel.voucher) && matchesAuthority(c, sel.ha) && matchesPorting(c, sel.porting),
   );
 
   const voucher: FacetOption[] = VOUCHER_BUCKETS.map((b) => ({
@@ -284,6 +380,14 @@ export function buildFacets(
     count: forAuthority.filter((c) => authorityKeyOf(c) === null).length,
   });
 
+  // Always all seven, in TENANT_STATUSES order. A tenant with no status or an
+  // off-list one counts under NO chip (statusKeyOf is null) - F1.
+  const status: FacetOption[] = TENANT_STATUSES.map((s) => ({
+    key: s,
+    label: TENANT_STATUS_LABELS[s],
+    count: forStatus.filter((c) => statusKeyOf(c) === s).length,
+  }));
+
   return {
     voucher,
     authority,
@@ -291,16 +395,18 @@ export function buildFacets(
     voucherEmpty: !anyVoucher,
     showPorting: anyPorting,
     portingCount: forPorting.filter((c) => c.porting === true).length,
+    status,
   };
 }
 
-/** Apply the selection: OR within each facet, AND across them. */
+/** Apply the selection: OR within each facet, AND across them (status is the set SHOWN). */
 export function applySelection(tenants: Contact[], sel: TenantSelection): Contact[] {
   return tenants.filter(
     (c) =>
       matchesVoucher(c, sel.voucher) &&
       matchesAuthority(c, sel.ha) &&
-      matchesPorting(c, sel.porting),
+      matchesPorting(c, sel.porting) &&
+      matchesStatus(c, sel.status),
   );
 }
 

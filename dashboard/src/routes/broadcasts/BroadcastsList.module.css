@@ -44,11 +44,15 @@
 
 .tabs {
   display: flex;
+  /* last-heard-from 5.6: six tabs (with the Follow up count) outgrow a phone
+   * pane - wrap rather than overflow it (the Settings tab row precedent). */
+  flex-wrap: wrap;
   gap: var(--sp-2);
   margin: var(--sp-4) 0 var(--sp-5);
   border-bottom: 1px solid var(--c-border);
 }
 .tab {
+  white-space: nowrap;
   padding: var(--sp-2) var(--sp-3);
   border: none;
   border-bottom: 2px solid transparent;
@@ -68,6 +72,19 @@
 .tab:focus-visible {
   outline: 2px solid var(--c-focus-ring);
   outline-offset: 2px;
+}
+/* last-heard-from 5.6: the Follow up tab's waiting count. */
+.tabCount {
+  display: inline-block;
+  min-width: 20px;
+  padding: 0 var(--sp-1);
+  border-radius: 10px;
+  background: var(--c-brand);
+  color: var(--c-surface);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  line-height: 20px;
+  text-align: center;
 }
 
 .rows {

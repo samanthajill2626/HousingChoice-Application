@@ -2311,6 +2311,9 @@ export interface Contact {
   evictions_source?: FieldSource;
   tenure_source?: FieldSource;
   porting_source?: FieldSource;
+  /** ISO 8601 - the most recent inbound text, call or email FROM this contact
+   *  (any thread). Absent = never heard from. Read-only: the server owns it. */
+  last_heard_from_at?: string;
   [key: string]: unknown;
 }
 
@@ -2776,7 +2779,11 @@ export type TimelineMilestoneType =
   // `group_text` conversation type, and they are PERSISTED on historical rows.
   // The dashboard reads them only to pick a milestone colour.
   | 'added_to_group_text'
-  | 'removed_from_group_text';
+  | 'removed_from_group_text'
+  // last-heard-from spec 5.4: mirrors the server union (activityEventsRepo.ts).
+  | 'listing_declined'
+  | 'listing_decline_cleared'
+  | 'listing_interested';
 
 interface TimelineBase {
   id: string;
@@ -2992,6 +2999,10 @@ export interface TourSignal {
   tourId: string;
   state: TourSignalState;
 }
+/** last-heard-from spec 5.4 - hand-mirrored from app/src/lib/listingSendOutcome.ts
+ *  (independent types; the lockstep pin is each side's tsc plus the route tests). */
+export type ListingSendOutcome = 'no_reply' | 'replied' | 'interested' | 'not_interested';
+export type InterestedMode = 'route' | 'form';
 export interface ListingSendRow {
   contactId: string;
   /** Denormalized tenant display name (server contacts join). HONEST - absent
@@ -3002,7 +3013,8 @@ export interface ListingSendRow {
   via: 'broadcast' | 'individual';
   broadcastId?: string;
   /** The pairing's most-progressed tour, when one qualifies - powers the roster
-   *  tour chip. Absent when no qualifying tour exists (the row renders no chip). */
+   *  tour chip. Absent when no qualifying tour exists (the row renders no chip).
+   *  Never on a partner row (the server omits it, spec 14.3 B11). */
   tour?: TourSignal;
   /** caseworkers D20 (plan 3.7): the recipient's contact type - on the property
    *  "Sent to" rows ONLY (GET /api/units/:id/recipients), absent when the
@@ -3010,6 +3022,20 @@ export interface ListingSendRow {
   type?: ContactType;
   /** caseworkers D20: the recipient's role, when it holds text (same rules). */
   role?: string;
+  /** last-heard-from spec 5.4: the recipient's last inbound text/call/email. */
+  lastHeardFromAt?: string;
+  /** The derived send outcome; `interested` means `tour` is set. */
+  outcome: ListingSendOutcome;
+  /** Present only while the decline is effective; `engine` renders "(auto)". */
+  declined?: { at: string; by: 'staff' | 'engine' };
+  /** false on a non-tenant or missing recipient: no Interested action. */
+  interestedSupported: boolean;
+  /** Property "Sent to" rows only: 'route' = one click creates the tour. */
+  interestedMode?: InterestedMode;
+  /** Property "Sent to" rows only: the recipient can be texted (spec 5.5 grouping). */
+  eligible?: boolean;
+  /** The contact row is gone: no actions, the NOT ELIGIBLE group. */
+  recipientMissing?: boolean;
 }
 
 /** Result of POST /api/conversations/:id/messages (legacy reuse). */
@@ -3192,7 +3218,8 @@ export interface SimilarUnit {
  *  listing_status_changed, unit_deleted, unit_restored,
  *  broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
  *  tour_no_show, tour_canceled, tour_outcome, tour_auto_closed,
- *  tour_reopened, unit_primary_contact_assigned.
+ *  tour_reopened, unit_primary_contact_assigned, listing_declined,
+ *  listing_decline_cleared, listing_interested.
  *  Unknown types must still render (humanized), never blank. */
 export interface UnitActivityEvent {
   /** The audit ts sort key — unique within the unit (a stable React key). */
@@ -3442,6 +3469,13 @@ export interface PreviewCandidate {
    *  hand-picked recipient, or the seeded 1:1/1:N entry) rather than the audience
    *  filter alone. A contact in BOTH audience and seeds is ONE row, flagged. */
   seeded: boolean;
+  /** last-heard-from (spec 5.3): the contact's lifecycle status - TENANT rows
+   *  only (a partner seed never carries one). */
+  status?: string;
+  /** last-heard-from: contact.last_heard_from_at (any type). */
+  lastHeardFromAt?: string;
+  /** last-heard-from D11: an EFFECTIVE decline of this property is recorded. */
+  declinedThisProperty: boolean;
 }
 
 /** POST /api/broadcasts/:id/preview response. `priorRecipientContactIds` is
@@ -3462,6 +3496,40 @@ export interface PreviewResponse {
   priorRecipientContactIds: string[];
   seedContactIds: string[];
   unresolvedSeedIds: string[];
+  /** last-heard-from (spec 5.3, D11): every contact whose decline of this
+   *  property is EFFECTIVE - annotates hand-added rows client-side, like
+   *  priorRecipientContactIds. Empty when the draft has no property. */
+  declinedContactIds: string[];
+  /** True when the decline reads failed: the candidates came back with NO
+   *  not-interested labels, so a declined tenant may start checked. */
+  declineLabelsUnavailable: boolean;
+}
+
+/** GET /api/broadcasts/follow-ups -> one waiting row (last-heard-from spec 5.6;
+ *  app/src/services/followUps.ts FollowUpItem, hand-mirrored). */
+export interface FollowUpItem {
+  unitId: string;
+  /** The property's short address (unitId when it has none). */
+  unitLabel: string;
+  contactId: string;
+  name: string;
+  type: ContactType;
+  role?: string;
+  sentAt: string;
+  lastHeardFromAt?: string;
+  outcome: ListingSendOutcome;
+  declined?: { at: string; by: 'staff' | 'engine' };
+  interestedSupported: boolean;
+  interestedMode: InterestedMode;
+  /** max(sentAt, lastHeardFromAt) - "N days" counts from here. */
+  waitingSince: string;
+}
+
+/** GET /api/broadcasts/follow-ups response; 503 outcome_unavailable on a failed join. */
+export interface FollowUpsResponse {
+  items: FollowUpItem[];
+  byUnit: Record<string, number>;
+  truncated: boolean;
 }
 
 /** GET /api/events 'broadcast.updated' payload. The send job + delivery rollup

@@ -238,6 +238,33 @@ describe('useListing', () => {
     expect(result.current.unit?.mediaDisplay).toBeUndefined();
   });
 
+  it('setRecipientRow replaces ONE row in place, bound to the unit it was called for', async () => {
+    const r1 = { contactId: 'c-1', unitId: 'u1', sentAt: '2026-10-01T10:00:00.000Z', via: 'broadcast' as const, outcome: 'no_reply' as const, interestedSupported: true };
+    const r2 = { ...r1, contactId: 'c-2' };
+    getUnit.mockResolvedValue(UNIT);
+    getAllUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
+    getContact.mockResolvedValue(LANDLORD);
+    getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitRecipients.mockResolvedValue([r1, r2]);
+    getUnitSimilar.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitActivity.mockRejectedValue(new ApiError(404, 'x', 'x'));
+
+    const { result } = renderHook(() => useListing('u1'));
+    await waitFor(() => expect(result.current.recipients.status).toBe('ready'));
+
+    const declined = { ...r1, outcome: 'not_interested' as const, declined: { at: '2026-10-02T10:00:00.000Z', by: 'staff' as const } };
+    act(() => result.current.setRecipientRow('u1', 'c-1', declined));
+    expect(result.current.recipients).toEqual({ status: 'ready', rows: [declined, r2] });
+
+    // A late answer for another property is a no-op (the setUnit forId guard).
+    act(() => result.current.setRecipientRow('u-other', 'c-2', { ...r2, outcome: 'replied' }));
+    expect(result.current.recipients).toEqual({ status: 'ready', rows: [declined, r2] });
+    // An unknown contact is a no-op (never an append).
+    act(() => result.current.setRecipientRow('u1', 'c-9', { ...r2, contactId: 'c-9' }));
+    expect(result.current.recipients.status === 'ready' && result.current.recipients.rows).toHaveLength(2);
+  });
+
   it('sortToursForPanel: unbooked requests lead, then booked tours newest-first', () => {
     const sorted = sortToursForPanel([
       { tourId: 'a', tenantId: 't', unitId: 'u', status: 'toured', scheduledAt: '2026-07-01T15:00:00.000Z' },

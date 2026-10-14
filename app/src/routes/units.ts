@@ -75,16 +75,18 @@ import {
 import {
   createListingSendsRepo,
   toListingSendRow,
+  type ListingSendItem,
   type ListingSendRecipientFacts,
+  type ListingSendRow,
   type ListingSendsRepo,
 } from '../repos/listingSendsRepo.js';
 import { createPlacementsRepo, type PlacementItem, type PlacementsRepo } from '../repos/placementsRepo.js';
-import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
-import { deriveTourSignal } from '../lib/listingSendTour.js';
+import { createToursRepo, type TourItem, type ToursRepo, type TourType } from '../repos/toursRepo.js';
+import { deriveTourActivityAt, deriveTourSignal } from '../lib/listingSendTour.js';
 import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { reachedCount } from '../services/shareRecipientState.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
-import { requireLandlordContact, sendContactTypeError } from '../services/contactTypeGuards.js';
+import { requireLandlordContact, requireTenantContact, sendContactTypeError } from '../services/contactTypeGuards.js';
 import { isCaseworker } from '../lib/caseworkers.js';
 // The ONE automatic-routing eligibility rule lives in lib/propertyContact.ts
 // (primary-contact-integrity spec 4.3), shared with the heir function.
@@ -95,11 +97,27 @@ import {
   readRosterContacts,
   rosterContactIds,
 } from '../lib/propertyContact.js';
+import {
+  deriveListingSendOutcome,
+  effectiveDecline,
+  interestedModeFor,
+  isEligibleRecipient,
+  wireDecline,
+  type DeclineRecord,
+} from '../lib/listingSendOutcome.js';
+import { recordListingOutcomeEvent } from '../lib/listingOutcomeEvents.js';
+import { formatAddress } from '../lib/address.js';
+import { ledgerRowCounted } from '../services/shareLedger.js';
+import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 
 export interface UnitsRouterDeps {
   logger?: Logger;
   unitsRepo?: UnitsRepo;
   auditRepo?: AuditRepo;
+  /** last-heard-from spec 5.4 / 14.3: the outcome route pins the contact
+   *  timeline (lib/listingOutcomeEvents.ts). auditRepo, contactsRepo and
+   *  toursRepo already exist and serve the same route. */
+  activityEventsRepo?: ActivityEventsRepo;
   /** BE3/C3: resolve a roster contact's display name/company for denormalization. */
   contactsRepo?: ContactsRepo;
   /** BE4/C4: the listing-send record (the "Sent to" recipients read). */
@@ -111,11 +129,9 @@ export interface UnitsRouterDeps {
    * tenant count from its share at read time (one projected batch read).
    */
   broadcastsRepo?: BroadcastsRepo;
-  /**
-   * listing-response-tour-chip: GET /:id/recipients derives a per-row tour chip
-   * from the unit's tours (byUnit GSI). Best-effort join - a query failure
-   * degrades to chipless rows, never a 500.
-   */
+  /** listing-response-tour-chip + last-heard-from D12: GET /:id/recipients and
+   *  the outcome route read the unit's tours (byUnit GSI) - a REQUIRED join: a
+   *  query failure is a 503 outcome_unavailable, never a guessed outcome. */
   toursRepo?: ToursRepo;
   /**
    * unit-photos: the media bucket store for photo upload (PUT) + display
@@ -179,6 +195,88 @@ function recipientFactsOf(contact: RecipientDisplay): ListingSendRecipientFacts 
   };
 }
 
+/** The joins every outcome-serving units read needs (last-heard-from D12):
+ *  the unit's tours grouped by tenant, and the recipients' display projection
+ *  read with requireComplete. Both REQUIRED. */
+interface RecipientJoin {
+  toursByTenant: Map<string, TourItem[]>;
+  displays: Map<string, RecipientDisplay>;
+}
+
+/** Group a unit's tours strictly by the pairing's tenant. */
+function groupToursByTenant(unitTours: TourItem[]): Map<string, TourItem[]> {
+  const byTenant = new Map<string, TourItem[]>();
+  for (const t of unitTours) {
+    const arr = byTenant.get(t.tenantId);
+    if (arr === undefined) byTenant.set(t.tenantId, [t]);
+    else arr.push(t);
+  }
+  return byTenant;
+}
+
+/**
+ * One "Sent to" row with its derived outcome (spec 5.4 / 5.5). A recipient
+ * whose contact row is GONE is not an incomplete read (requireComplete only
+ * throws on unread keys): it serves with the id as its name,
+ * recipientMissing, no type (so no tour signal and no reply can be known),
+ * interestedSupported false and eligible false. A non-tenant row reads no
+ * tours and carries no `tour` (B11).
+ */
+function projectRecipientRow(row: ListingSendItem, unit: UnitItem, join: RecipientJoin): ListingSendRow {
+  const interestedMode = interestedModeFor(unit);
+  const contact = join.displays.get(row.contactId);
+  if (contact === undefined) {
+    const outcome = deriveListingSendOutcome({
+      row,
+      recipientType: undefined,
+      lastHeardFromAt: undefined,
+      tour: undefined,
+      tourActivityAt: undefined,
+    });
+    const declined = wireDecline(row, outcome);
+    return toListingSendRow(row, {
+      outcome,
+      ...(declined !== undefined && { declined }),
+      interestedSupported: false,
+      interestedMode,
+      eligible: false,
+      recipientMissing: true,
+    });
+  }
+  const isTenant = contact.type === 'tenant';
+  const pairTours = isTenant ? (join.toursByTenant.get(row.contactId) ?? []) : [];
+  const tour = deriveTourSignal(pairTours);
+  const outcome = deriveListingSendOutcome({
+    row,
+    recipientType: contact.type,
+    lastHeardFromAt: contact.last_heard_from_at,
+    tour,
+    tourActivityAt: deriveTourActivityAt(pairTours),
+  });
+  const declined = wireDecline(row, outcome);
+  const tenantName = displayNameOfContact(contact);
+  return toListingSendRow(row, {
+    ...(tour !== undefined && { tour }),
+    ...(tenantName !== undefined && { tenantName }),
+    facts: recipientFactsOf(contact),
+    outcome,
+    ...(contact.last_heard_from_at !== undefined && { lastHeardFromAt: contact.last_heard_from_at }),
+    ...(declined !== undefined && { declined }),
+    interestedSupported: isTenant,
+    interestedMode,
+    eligible: isEligibleRecipient(contact),
+  });
+}
+
+/** The outcome route's body: exactly { outcome } with one of the three values. */
+function parseOutcomeBody(body: unknown): 'interested' | 'not_interested' | 'clear' | undefined {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return undefined;
+  const keys = Object.keys(body);
+  if (keys.length !== 1 || keys[0] !== 'outcome') return undefined;
+  const value = (body as Record<string, unknown>)['outcome'];
+  return value === 'interested' || value === 'not_interested' || value === 'clear' ? value : undefined;
+}
+
 /**
  * BE3/C3: project a unit onto the RelatedUnit wire shape (contract verbatim).
  * `address` reuses the legacy unit address field (structured or legacy string);
@@ -205,7 +303,8 @@ function toRelatedUnit(
  * listing_status_changed, unit_deleted, unit_restored,
  * broadcast_sent, tour_scheduled, tour_rescheduled, tour_took_place,
  * tour_no_show, tour_canceled, tour_outcome, tour_auto_closed,
- * tour_reopened, unit_primary_contact_assigned).
+ * tour_reopened, unit_primary_contact_assigned, listing_declined,
+ * listing_decline_cleared, listing_interested).
  * Details are a fixed-key whitelist lifted from the audit payload — NEVER the
  * raw payload document (a future payload field can't leak through here).
  */
@@ -427,6 +526,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
@@ -1199,10 +1299,14 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // records listing_sends per recipient. No separate individual-send route.
 
   // GET /api/units/:unitId/recipients - the property's "Sent to" list (BE4/C4).
-  // Returns { recipients: ListingSendRow[] } from listByUnit. Mirrors the units
-  // 404 posture: an unknown unit is a 404 (consistent with GET /:unitId); a real
-  // unit with zero recipients returns []. (`recipients` is a distinct segment
-  // from the bare :unitId routes, so there is no route collision.)
+  // Returns { recipients: ListingSendRow[] } from listByUnit, each row with its
+  // derived send outcome (last-heard-from spec 5.4). Mirrors the units 404
+  // posture: an unknown unit is a 404; a real unit with zero recipients
+  // returns []. D12: the tours join and the contacts join (read with
+  // requireComplete) are REQUIRED - an outcome drives buttons and a to-do
+  // list, so a failed join is a 503 outcome_unavailable, never a guessed row.
+  // (`recipients` is a distinct segment from the bare :unitId routes, so
+  // there is no route collision.)
   router.get('/:unitId/recipients', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const unit = await units.getById(unitId);
@@ -1211,52 +1315,275 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       return;
     }
     const rows = await listingSends.listByUnit(unitId);
-    // Derive the per-row tour chip from the unit's tours (ONE byUnit GSI query,
-    // grouped by tenantId). Best-effort (E3): a tours-query failure serves the
-    // rows WITHOUT any tour field and logs - the roster never 500s on the join.
-    let toursByTenant: Map<string, TourItem[]> | undefined;
+    let join: RecipientJoin;
     try {
-      const unitTours = await tours.listByUnit(unitId);
-      toursByTenant = new Map<string, TourItem[]>();
-      for (const t of unitTours) {
-        const arr = toursByTenant.get(t.tenantId);
-        if (arr === undefined) toursByTenant.set(t.tenantId, [t]);
-        else arr.push(t);
-      }
+      // ONE byUnit GSI query and ONE BatchGet of the recipient projection for
+      // the whole page (the batch de-dupes ids). caseworkers D20 (ruling
+      // R3-F4): the recipients-only projection carries type and role, so the
+      // dashboard can label a non-tenant row.
+      const [unitTours, displays] = await Promise.all([
+        tours.listByUnit(unitId),
+        contacts.getRecipientDisplaysByIds(rows.map((row) => row.contactId), { requireComplete: true }),
+      ]);
+      join = { toursByTenant: groupToursByTenant(unitTours), displays };
     } catch (err) {
-      log.warn({ err, unitId }, 'recipients tour-chip hydration failed (best-effort)');
+      log.warn({ err, unitId }, 'recipients outcome join failed - 503 outcome_unavailable');
+      res.status(503).json({ error: 'outcome_unavailable' });
+      return;
     }
-    // Denormalize each recipient's display name. ONE BatchGet of the display
-    // projection for the whole page (was one getById per unique recipient, with
-    // no route-level cap); the batch de-dupes ids, so a tenant sent to N times
-    // still costs one read. Best-effort like the tour join: a missing id is
-    // simply absent from the map and a failed batch leaves the map empty, so
-    // rows serve nameless (the dashboard falls back to the id) - never a 500.
-    const namesByContact = new Map<string, string | undefined>();
-    const factsByContact = new Map<string, ListingSendRecipientFacts>();
+    res.json({ recipients: rows.map((row) => projectRecipientRow(row, unit, join)) });
+  });
+
+  // POST /api/units/:unitId/recipients/:contactId/outcome - the ONE way a
+  // send outcome changes (last-heard-from spec 5.4 as amended by 14.3 and
+  // 14.7). Body { outcome: 'interested' | 'not_interested' | 'clear' }.
+  // Answers, in this order: 404 unit_not_found; 409 unit_deleted (every
+  // outcome, B10); 404 send_not_found (no COUNTED row - ledgerRowCounted,
+  // B5); 400 invalid_outcome; 503 outcome_unavailable when a required read
+  // fails BEFORE any write; interested only: 400 interested_unsupported (not
+  // a tenant on the recipient projection), 404 tenant_not_found / 409
+  // contact_not_tenant (requireTenantContact - the same CONSISTENT I2 guard
+  // POST /api/tours runs), 409 tour_type_required (no qualifying tour and no
+  // structured tour_type - the dashboard opens the form instead, D14);
+  // not_interested only: 404 send_not_found when the conditional write finds
+  // no counted row; then 200 { row } re-projected.
+  // INTERESTED (spec 14.7 - steps 3 and 4 of 5.4 reversed): it CREATES the
+  // tour (only when no qualifying tour exists) and records
+  // listing_interested FIRST, so a failed create leaves the decline and the
+  // timeline untouched. THEN it clears the decline record it READ, whatever
+  // its effectiveness (an explicit Interested overrides every earlier
+  // decline, and a retry repairs a clear that failed behind a create), as a
+  // COMPARE-AND-CLEAR on that record's `at` (review B R2-1): a decline
+  // another staff member records meanwhile survives, and a lost compare (or
+  // a row that stopped counting) records nothing and is never a 404 - the
+  // re-projection answers the truth. listing_decline_cleared is recorded
+  // only when the cleared decline was EFFECTIVE (review B R2-2). CLEAR (Undo)
+  // is the same COMPARE-AND-CLEAR (review B R3-1, spec 14.7): it removes the
+  // decline record it READ, conditioned on its `at`, and records
+  // listing_decline_cleared only when that clear answered 'ok'; when it read
+  // no decline it writes nothing (no clear at all), so it never removes a
+  // decline recorded meanwhile. A lost compare (a re-decline meanwhile, or a
+  // row that stopped counting) records nothing and is never a 404 - the
+  // re-projection answers the truth.
+  // SAVED (review A-3, B R2-2, B R2-3; spec 14.7): a failure AFTER a write -
+  // the re-read, or a throw such as the clear behind a create (logged at
+  // error, ids only) - answers 503 { error: 'outcome_unavailable', saved:
+  // true }, never a bare 500. The writes are setDeclined, a tour create and
+  // a clear that answered 'ok'; a click that wrote none of them (an
+  // Interested that found a tour and no stored decline, an Undo with nothing
+  // to undo, a lost compare) gets the plain 503, and a throw before any
+  // write is the generic 500. Audit events are best-effort (lib/listingOutcomeEvents.ts). A
+  // concurrent double click can still race two creates (no conditional write
+  // on the pair - I3; the dashboard disables the button in flight). PII: ids
+  // only in logs.
+  router.post('/:unitId/recipients/:contactId/outcome', async (req: AuthedRequest, res) => {
+    const unitId = String(req.params['unitId'] ?? '');
+    const contactId = String(req.params['contactId'] ?? '');
+    const unit = await units.getById(unitId);
+    if (!unit) {
+      res.status(404).json({ error: 'unit_not_found' });
+      return;
+    }
+    if (isDeleted(unit)) {
+      res.status(409).json({ error: 'unit_deleted' });
+      return;
+    }
+    const row = await listingSends.getByKeyConsistent(unitId, contactId);
+    if (row === undefined || !ledgerRowCounted(row)) {
+      res.status(404).json({ error: 'send_not_found' });
+      return;
+    }
+    const outcome = parseOutcomeBody(req.body);
+    if (outcome === undefined) {
+      res.status(400).json({ error: 'invalid_outcome' });
+      return;
+    }
+
+    // The recipient projection (requireComplete): the type for the
+    // interested check AND the name / type / reachability for the
+    // re-projection. A failure here has written nothing.
+    let recipient: RecipientDisplay | undefined;
     try {
-      // caseworkers D20 (ruling R3-F4): the recipients-only projection also
-      // carries type and role, so the dashboard can label a non-tenant row.
-      const displays = await contacts.getRecipientDisplaysByIds(rows.map((row) => row.contactId));
-      for (const [contactId, contact] of displays) {
-        namesByContact.set(contactId, displayNameOfContact(contact));
-        factsByContact.set(contactId, recipientFactsOf(contact));
-      }
+      recipient = (await contacts.getRecipientDisplaysByIds([contactId], { requireComplete: true })).get(contactId);
     } catch (err) {
-      log.warn({ err, unitId }, 'recipients name hydration failed (best-effort)');
+      log.warn({ err, unitId, contactId }, 'outcome: recipient read failed - nothing written');
+      res.status(503).json({ error: 'outcome_unavailable' });
+      return;
     }
-    res.json({
-      recipients: rows.map((row) => {
-        const pairing = toursByTenant?.get(row.contactId);
-        const signal = pairing !== undefined ? deriveTourSignal(pairing) : undefined;
-        return toListingSendRow(
-          row,
-          signal,
-          namesByContact.get(row.contactId),
-          factsByContact.get(row.contactId),
-        );
-      }),
-    });
+
+    const actor = req.user?.userId;
+    const at = new Date().toISOString();
+    const address = formatAddress(unit.address) || unitId;
+    const eventDeps = { activityEvents, audit, logger: log };
+    let createdTour: TourItem | undefined;
+    // Review A-3 / B R2-3 / B R3-1: `saved: true` on a late 503 only when THIS
+    // click wrote (setDeclined / a tour create / a clear that answered 'ok').
+    // An Interested click that found a tour and no stored decline, an Undo
+    // with nothing to undo, or a lost compare-and-clear writes nothing.
+    let wrote = false;
+
+    // Review B R2-2 part 2 / A R2-2 (spec 14.7): everything from here on runs
+    // under one guard. A throw BEFORE any write stays the generic 500 (nothing
+    // was saved, so a retry is right); a throw AFTER one (the Interested clear
+    // behind a create, the re-projection) is never a bare 500 - the click DID
+    // save, so it answers 503 saved:true and invites no retry.
+    try {
+      if (outcome === 'interested') {
+        if (recipient?.type !== 'tenant') {
+          res.status(400).json({ error: 'interested_unsupported' });
+          return;
+        }
+        try {
+          await requireTenantContact(contacts, contactId);
+        } catch (err) {
+          if (sendContactTypeError(err, res)) return;
+          throw err;
+        }
+        let pairTours: TourItem[];
+        try {
+          // Accepted (build adjudication F6): the unit's tours filtered to the
+          // tenant read the same pair set as spec 5.4's byTenant read.
+          pairTours = (await tours.listByUnit(unitId)).filter((t) => t.tenantId === contactId);
+        } catch (err) {
+          log.warn({ err, unitId, contactId }, 'outcome: tours read failed - nothing written');
+          res.status(503).json({ error: 'outcome_unavailable' });
+          return;
+        }
+        // (1) ANY qualifying tour (the chip's set) means no tour is created.
+        const existing = deriveTourSignal(pairTours) !== undefined;
+        // (2) interestedModeFor's rule: no structured tour_type -> the form
+        // path. The tour type is the unit's own field ONLY (D14) - never derived.
+        const tourType: TourType | undefined = unit.tour_type;
+        if (!existing && tourType === undefined) {
+          res.status(409).json({ error: 'tour_type_required' });
+          return;
+        }
+        // Whether a decline is EFFECTIVE is judged on the tours as read, before
+        // this click creates one (the new tour would supersede it).
+        const declineEffective = effectiveDecline(row, deriveTourActivityAt(pairTours));
+        // (4, run FIRST - review ADV-3) Create, and ONLY then record
+        // listing_interested (a click that found an existing tour writes no
+        // event; a retry is not re-recorded). A create failure throws here,
+        // before the decline or the timeline is touched.
+        if (!existing && tourType !== undefined) {
+          createdTour = await tours.create({ tenantId: contactId, unitId, tourType, status: 'requested' });
+          wrote = true;
+          await recordListingOutcomeEvent(eventDeps, {
+            type: 'listing_interested',
+            contactId,
+            unitId,
+            label: `Interested in ${address} - tour requested`,
+            ...(actor !== undefined && { actor }),
+            tourId: createdTour.tourId,
+            at,
+          });
+        }
+        // (3, run SECOND) The decline record this click READ is removed
+        // WHATEVER its effectiveness (review B R2-2: an explicit Interested
+        // overrides every earlier decline, and a retry repairs a clear that
+        // failed behind an earlier create); `listing_decline_cleared` is its
+        // history only when that decline was EFFECTIVE (a superseded record
+        // changed nothing visible). COMPARE-AND-CLEAR (review B R2-1): only the
+        // record whose `at` was read is removed, so a decline another staff
+        // member records meanwhile survives. A clear that answers 'not_found'
+        // (someone re-declined, or the row stopped counting) records nothing
+        // and is NEVER a 404 here - the row was counted when read - so it falls
+        // through to the re-projection, which answers the truth.
+        const readDecline = row.declined;
+        if (readDecline !== undefined) {
+          const cleared = await listingSends.clearDeclined(unitId, contactId, { expectedAt: readDecline.at });
+          if (cleared === 'ok') wrote = true;
+          if (cleared === 'ok' && declineEffective) {
+            await recordListingOutcomeEvent(eventDeps, {
+              type: 'listing_decline_cleared',
+              contactId,
+              unitId,
+              label: `Not interested cleared for ${address}`,
+              ...(actor !== undefined && { actor }),
+              at,
+            });
+          }
+        }
+      } else if (outcome === 'not_interested') {
+        const record: DeclineRecord = { at, by: 'staff', ...(actor !== undefined && { staffId: actor }) };
+        if ((await listingSends.setDeclined(unitId, contactId, record)) === 'not_found') {
+          res.status(404).json({ error: 'send_not_found' });
+          return;
+        }
+        wrote = true;
+        await recordListingOutcomeEvent(eventDeps, {
+          type: 'listing_declined',
+          contactId,
+          unitId,
+          label: `Not interested in ${address}`,
+          ...(actor !== undefined && { actor }),
+          at,
+        });
+      } else {
+        // CLEAR (Undo) - the same COMPARE-AND-CLEAR as Interested (review B
+        // R3-1, spec 14.7): only the decline record this click READ is
+        // removed (conditioned on its `at`), so a decline another staff member
+        // records while the Undo is in flight survives. An Undo that read NO
+        // decline writes nothing at all (no clear call, `wrote` stays false -
+        // review B R2-3) and records nothing (plan 3.4 #2), so it can never
+        // remove a decline recorded meanwhile. A clear that answers
+        // 'not_found' (someone re-declined, or the row stopped counting) is
+        // NEVER a 404 here - the row was counted when read, so send_not_found
+        // stays the pre-write ledger check's answer alone - it records
+        // nothing and falls through to the re-projection, which answers the
+        // truth (the re-declined row, or the plain 503 for a row that stopped
+        // counting). listing_decline_cleared only when the clear answered 'ok'.
+        const readDecline = row.declined;
+        if (readDecline !== undefined) {
+          const cleared = await listingSends.clearDeclined(unitId, contactId, { expectedAt: readDecline.at });
+          if (cleared === 'ok') {
+            wrote = true;
+            await recordListingOutcomeEvent(eventDeps, {
+              type: 'listing_decline_cleared',
+              contactId,
+              unitId,
+              label: `Not interested cleared for ${address}`,
+              ...(actor !== undefined && { actor }),
+              at,
+            });
+          }
+        }
+      }
+
+      // (5) Re-project (D12: the joins are required). The row is re-read
+      // CONSISTENTLY; the byUnit GSI may not yet show a tour created a moment
+      // ago, so the created item joins the read. A failure here carries
+      // `saved: true` only when this click wrote (review A-3).
+      const unavailable = wrote ? { error: 'outcome_unavailable', saved: true } : { error: 'outcome_unavailable' };
+      let after: ListingSendItem | undefined;
+      let unitTours: TourItem[];
+      try {
+        [after, unitTours] = await Promise.all([
+          listingSends.getByKeyConsistent(unitId, contactId),
+          tours.listByUnit(unitId),
+        ]);
+      } catch (err) {
+        log.warn({ err, unitId, contactId, wrote }, 'outcome: re-projection read failed - 503');
+        res.status(503).json(unavailable);
+        return;
+      }
+      if (after === undefined || !ledgerRowCounted(after)) {
+        res.status(503).json(unavailable);
+        return;
+      }
+      const created = createdTour;
+      const joinedTours = created === undefined ? unitTours : [...unitTours.filter((t) => t.tourId !== created.tourId), created];
+      const join: RecipientJoin = {
+        toursByTenant: groupToursByTenant(joinedTours),
+        displays: recipient !== undefined ? new Map([[contactId, recipient]]) : new Map(),
+      };
+      log.info({ unitId, contactId, outcome, tourCreated: created !== undefined }, 'listing send outcome recorded');
+      res.json({ row: projectRecipientRow(after, unit, join) });
+    } catch (err) {
+      if (!wrote) throw err;
+      log.error({ err, unitId, contactId, outcome, tourCreated: createdTour !== undefined }, 'outcome: failed after a write - 503 saved');
+      if (!res.headersSent) res.status(503).json({ error: 'outcome_unavailable', saved: true });
+    }
   });
 
   // POST /api/units/:unitId/contacts { contactId, role, primaryContact? } (BE3/C3).

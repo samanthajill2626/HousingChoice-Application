@@ -54,6 +54,7 @@ import { appEvents, toConversationUpdatedEvent, type EventBus } from '../../lib/
 import { callPreview } from '../../lib/callPreview.js';
 import { contactDisplayName } from '../../lib/contactName.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
+import { attributeInbound, repoLookup } from '../../lib/heardFrom.js';
 import { resolveMessage } from '../../messages/index.js';
 import {
   twilioSignatureMiddleware,
@@ -74,6 +75,7 @@ import {
 import {
   createMessagesRepo,
   relayMemberKey,
+  splitTsMsgId,
   type CallStatus,
   type CallStatusUpdate,
   type MessageItem,
@@ -744,8 +746,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // the Inbox row's contact deep-link. Idempotent + race-safe (the service's
     // conditional claims), so redelivered webhooks are no-ops. BEST-EFFORT: a
     // capture failure must never block the bridge (the call itself comes first).
+    let capturedCaller: ContactItem | undefined = callerContact;
     try {
-      await captureContact(conversation, callerContact, 'inbound_call');
+      capturedCaller = await captureContact(conversation, callerContact, 'inbound_call');
     } catch (err) {
       log.error(
         { err, callSid: CallSid, conversationId: conversation.conversationId },
@@ -809,6 +812,32 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           direction: 'inbound',
           deliveryStatus: 'delivered',
         });
+      }
+      // Last heard from (spec 5.1 / 14.2): a call touches at its ring instant
+      // whatever its outcome - fresh AND deduped (a redelivery repairs a crash
+      // here; voice drops a From equal to one of our numbers upstream, so no
+      // echo reaches this line). The captured caller feeds the lookup cache.
+      try {
+        const heardThread =
+          appended.conversationId === conversation.conversationId
+            ? conversation
+            : await conversations.getById(appended.conversationId);
+        const heardFromId =
+          heardThread === undefined
+            ? undefined
+            : await attributeInbound(
+                { direction: 'inbound', type: 'call' },
+                heardThread,
+                repoLookup(contacts, capturedCaller ? new Map([[From, capturedCaller]]) : undefined),
+              );
+        if (heardFromId !== undefined) {
+          const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+          if (outcome === 'failed') {
+            log.error({ callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+          }
+        }
+      } catch (err) {
+        log.error({ err, callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
       }
     } catch (err) {
       // Never 5xx a webhook on a persist failure — bridge regardless (a
@@ -1063,6 +1092,47 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
             deliveryStatus: 'delivered',
           });
         }
+        // Last heard from (spec 5.1 / 14.2): a refused call still means the
+        // caller reached out - every refusal reason, fresh AND deduped. A member
+        // is its roster key (a phone-only member resolves by phone); a
+        // non-member is its stored contact id, else findByPhone (the id is
+        // left unset for a soft-deleted match). Best-effort.
+        try {
+          const heardThread =
+            appended.conversationId === relay.conversationId
+              ? relay
+              : await conversations.getById(appended.conversationId);
+          const heardFromId =
+            heardThread === undefined
+              ? undefined
+              : await attributeInbound(
+                  {
+                    direction: 'inbound',
+                    type: 'call',
+                    ...(caller !== undefined && { relay_sender_key: relayMemberKey(caller) }),
+                    ...(relayExternalCallerPhone !== undefined && { relay_external_caller_phone: relayExternalCallerPhone }),
+                    ...(relayExternalCallerContactId !== undefined && {
+                      relay_external_caller_contact_id: relayExternalCallerContactId,
+                    }),
+                  },
+                  heardThread,
+                  repoLookup(contacts),
+                );
+          if (heardFromId !== undefined) {
+            const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+            if (outcome === 'failed') {
+              log.error({ callSid: CallSid, reason }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+            }
+          }
+        } catch (err) {
+          // The error NAME only, never the message: a failed phone lookup's
+          // text must not reach the logs on this path (the non-member lookup
+          // above logs none either - PII hygiene, pinned by its test).
+          log.error(
+            { callSid: CallSid, reason, errName: err instanceof Error ? err.name : typeof err },
+            'last_heard_from touch failed - message persisted, last_heard_from stale',
+          );
+        }
       } catch (err) {
         // Never 5xx a webhook on a persist failure — answer with the masked
         // refusal regardless (a redelivery dedupes at the append).
@@ -1130,6 +1200,35 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
           direction: 'inbound',
           deliveryStatus: 'delivered',
         });
+      }
+      // Last heard from (spec 5.1 / 14.2): fresh AND deduped; the member's
+      // roster key (a phone-only member resolves by phone). Best-effort.
+      try {
+        const heardThread =
+          appended.conversationId === relay.conversationId
+            ? relay
+            : await conversations.getById(appended.conversationId);
+        const heardFromId =
+          heardThread === undefined
+            ? undefined
+            : await attributeInbound(
+                { direction: 'inbound', type: 'call', relay_sender_key: relayMemberKey(caller) },
+                heardThread,
+                repoLookup(contacts),
+              );
+        if (heardFromId !== undefined) {
+          const outcome = await contacts.touchLastHeardFrom(heardFromId, splitTsMsgId(appended.tsMsgId).providerTs);
+          if (outcome === 'failed') {
+            log.error({ callSid: CallSid }, 'last_heard_from touch failed - message persisted, last_heard_from stale');
+          }
+        }
+      } catch (err) {
+        // The error NAME only (as on the refusal branch): a failed phone
+        // lookup's text must not reach the logs on the masked path.
+        log.error(
+          { callSid: CallSid, errName: err instanceof Error ? err.name : typeof err },
+          'last_heard_from touch failed - message persisted, last_heard_from stale',
+        );
       }
     } catch (err) {
       log.error({ err, callSid: CallSid }, 'masked call: persisting the call entry failed — bridging anyway');

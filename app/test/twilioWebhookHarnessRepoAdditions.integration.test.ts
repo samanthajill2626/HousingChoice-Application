@@ -995,6 +995,23 @@ const ledgerByKeys = (pairs: Array<[string, string]>): LsStep => ({
   },
 });
 
+/** setDeclined / clearDeclined (last-heard-from spec 5.4): 'ok' | 'not_found'. */
+const declineStep = (unit: string, contact: string, expected: 'ok' | 'not_found'): LsStep => ({
+  label: `setDeclined ${unit}/${contact}`,
+  run: async (repo, ctx) => repo.setDeclined(lsUnit(ctx, unit), lsContact(ctx, contact), { at: T1, by: 'staff', staffId: 'usr_parity' }),
+  expect: expected,
+});
+
+/** `expectedAt` (review B R2-1): the compare-and-clear form - only the record whose `at` it names. */
+const clearDeclineStep = (unit: string, contact: string, expected: 'ok' | 'not_found', expectedAt?: string): LsStep => ({
+  label: `clearDeclined ${unit}/${contact}${expectedAt !== undefined ? ` expectedAt=${expectedAt}` : ''}`,
+  run: async (repo, ctx) =>
+    expectedAt !== undefined
+      ? repo.clearDeclined(lsUnit(ctx, unit), lsContact(ctx, contact), { expectedAt })
+      : repo.clearDeclined(lsUnit(ctx, unit), lsContact(ctx, contact)),
+  expect: expected,
+});
+
 const LS_CASES: LsCase[] = [
   {
     name: 'putShareMemory creates the row when no token is expected and none exists; a second tokenless write loses',
@@ -1022,6 +1039,38 @@ const LS_CASES: LsCase[] = [
       ledgerByContact('c1'),
       ledgerByUnit('unit-1'),
       ledgerByKeys([['unit-1', 'c1'], ['unit-9', 'c9']]),
+    ],
+  },
+  {
+    name: 'declined: set on a counted row survives a later memory write; clear removes it; an uncounted or absent row is not_found',
+    watch: [['unit-1', 'c1'], ['unit-2', 'c2']],
+    steps: [
+      declineStep('unit-1', 'c1', 'not_found'),
+      shareMemory('unit-1', 'c1', LS_COUNTED, 'none', true),
+      declineStep('unit-1', 'c1', 'ok'),
+      shareMemory('unit-1', 'c1', LS_RECOUNTED, 'current', true),
+      clearDeclineStep('unit-1', 'c1', 'ok'),
+      clearDeclineStep('unit-1', 'c1', 'ok'),
+      shareMemory('unit-2', 'c2', LS_CLEARED, 'none', true),
+      declineStep('unit-2', 'c2', 'not_found'),
+      clearDeclineStep('unit-2', 'c2', 'not_found'),
+    ],
+  },
+  {
+    name: 'clearDeclined with expectedAt (compare-and-clear): an absent row, no record, a stale record or an uncounted row is not_found and writes nothing; the named record clears once',
+    watch: [['unit-1', 'c1'], ['unit-2', 'c2']],
+    steps: [
+      clearDeclineStep('unit-1', 'c1', 'not_found', T1),
+      shareMemory('unit-1', 'c1', LS_COUNTED, 'none', true),
+      clearDeclineStep('unit-1', 'c1', 'not_found', T1),
+      declineStep('unit-1', 'c1', 'ok'),
+      clearDeclineStep('unit-1', 'c1', 'not_found', T0),
+      clearDeclineStep('unit-1', 'c1', 'ok', T1),
+      clearDeclineStep('unit-1', 'c1', 'not_found', T1),
+      shareMemory('unit-2', 'c2', LS_COUNTED, 'none', true),
+      declineStep('unit-2', 'c2', 'ok'),
+      shareMemory('unit-2', 'c2', LS_CLEARED, 'current', true),
+      clearDeclineStep('unit-2', 'c2', 'not_found', T1),
     ],
   },
 ];

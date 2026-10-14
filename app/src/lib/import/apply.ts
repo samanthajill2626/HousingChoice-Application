@@ -50,7 +50,8 @@ import {
   TENANT_STATUSES,
   type TransitionSource,
 } from '../statusModel.js';
-import type { ContactType } from '../../repos/contactsRepo.js';
+import { createContactsRepo, type ContactType } from '../../repos/contactsRepo.js';
+import { attributeInbound, normalizeInstant, type HeardFromLookup, type HeardFromRow, type HeardFromThread } from '../heardFrom.js';
 import { GROUP_TEXT_STATUS } from '../../repos/conversationsRepo.js';
 import { groupMemberKey } from '../../services/groupMembers.js';
 import { conversationIdFor1to1, tsMsgId, unitIdForAddress } from './ids.js';
@@ -204,6 +205,12 @@ export interface ApplyReport {
   };
   messages: { written: number };
   calls: { written: number };
+  /**
+   * Last heard from (spec 5.1): one forward-only touchLastHeardFrom per
+   * contact, from the latest attributed inbound row this run wrote.
+   * `planned` is counted on a dry run too; the other three only on a write.
+   */
+  lastHeardFromStamps: { planned: number; written: number; skipped: number; failed: number };
   units: {
     written: number;
     skippedDropped: number;
@@ -284,6 +291,7 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
     },
     messages: { written: 0 },
     calls: { written: 0 },
+    lastHeardFromStamps: { planned: 0, written: 0, skipped: 0, failed: 0 },
     units: { written: 0, skippedDropped: 0, humanOwned: 0 },
     orgNotWritten: [],
     warnings,
@@ -357,6 +365,25 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
   const groupRowByConversationId = groupReviewRowsByConversationId(plan, review.groups);
 
   const messageBatch = new BatchWriter(doc, messagesTable, dryRun);
+
+  /** Last heard from (spec 5.1): contactId -> the latest attributed inbound
+   *  instant (normalized) this run writes. Stamped after the flush below. */
+  const heardFromLatest = new Map<string, string>();
+  /** Phones resolve through what THIS run wrote - never the lagging byPhone GSI. */
+  const heardFromLookup: HeardFromLookup = {
+    byPhone: (e164) => {
+      const contactId = contactIdByPhone.get(e164);
+      return contactId === undefined ? undefined : { contactId };
+    },
+    byEmail: () => undefined,
+  };
+  const noteHeardFrom = async (row: HeardFromRow, thread: HeardFromThread, createdAt: string): Promise<void> => {
+    const contactId = await attributeInbound(row, thread, heardFromLookup);
+    const at = normalizeInstant(createdAt);
+    if (contactId === undefined || at === undefined) return;
+    const prior = heardFromLatest.get(contactId);
+    if (prior === undefined || at > prior) heardFromLatest.set(contactId, at);
+  };
 
   let t = 0;
   for (const thread of plan.threads.threads) {
@@ -432,6 +459,13 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
     }
     report.conversations.written += 1;
     if (thread.isGroup) report.conversations.groups += 1;
+    // Last heard from: the thread as THIS run writes it (upsertConversation's
+    // type, participants and participant_phone).
+    const heardThread: HeardFromThread = {
+      type: thread.isGroup ? 'relay_group' : 'unknown_1to1',
+      participants: roster.map((phone) => ({ contactId: contactIdByPhone.get(phone) ?? '', phone })),
+      ...(!thread.isGroup && roster[0] !== undefined && { participant_phone: roster[0] }),
+    };
 
     for (const m of thread.messages) {
       const authorPhone = m.direction === 'incoming' ? normalizeFrom(m.from) : undefined;
@@ -460,6 +494,15 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
         ...(authorPhone && { imported_sender_phone: authorPhone }),
       });
       report.messages.written += 1;
+      await noteHeardFrom(
+        {
+          direction: m.direction === 'incoming' ? 'inbound' : 'outbound',
+          type: 'sms',
+          ...(senderKey !== undefined && { relay_sender_key: senderKey }),
+        },
+        heardThread,
+        m.createdAt,
+      );
     }
 
     for (const c of thread.calls) {
@@ -481,9 +524,29 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
         imported_at: importedAt,
       });
       report.calls.written += 1;
+      // A group call carries no sender key and stays unattributed - the rule.
+      await noteHeardFrom({ direction: c.direction === 'incoming' ? 'inbound' : 'outbound', type: 'call' }, heardThread, c.createdAt);
     }
   }
   await messageBatch.flush();
+
+  // Last heard from (spec 5.1 / 14.2): one stamp per contact, AFTER the flush
+  // (a stamp never names a row that is not stored), through the ONE writer
+  // (it normalizes and never moves a value backward). A dry run only plans.
+  report.lastHeardFromStamps.planned = heardFromLatest.size;
+  if (!dryRun && heardFromLatest.size > 0) {
+    const contactsRepo = createContactsRepo({ doc, env });
+    for (const [contactId, at] of heardFromLatest) {
+      const outcome = await contactsRepo.touchLastHeardFrom(contactId, at);
+      report.lastHeardFromStamps[outcome] += 1;
+    }
+    if (report.lastHeardFromStamps.failed > 0) {
+      warnings.push(
+        `last_heard_from: ${report.lastHeardFromStamps.failed} contact stamp(s) failed - re-run the apply ` +
+          '(idempotent) or the last-heard-from backfill.',
+      );
+    }
+  }
 
   if (ownNumbers.size > 1) {
     warnings.push(

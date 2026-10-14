@@ -134,6 +134,20 @@ describe.skipIf(!reachable)('seedAll profile contract (throwaway prefix)', () =>
     expect(typeof founderRow.Item!['cell_verified_at']).toBe('string');
   });
 
+  it('lean seedAll stamps the derived last_heard_from_at (spec I4)', async () => {
+    await seedAll(endpoint, 'lean', namespace);
+    const contactsTable = tn('contacts', prefix);
+    const tenant = await doc.send(
+      new GetCommand({ TableName: contactsTable, Key: { contactId: 'contact-tenant-0001' } }),
+    );
+    expect(tenant.Item?.['last_heard_from_at']).toBe('2026-06-01T14:02:10.000Z');
+    const hastaff = await doc.send(
+      new GetCommand({ TableName: contactsTable, Key: { contactId: 'contact-hastaff-0001' } }),
+    );
+    expect(hastaff.Item).toBeDefined();
+    expect(hastaff.Item).not.toHaveProperty('last_heard_from_at');
+  });
+
   it('full ⊇ lean: full profile count is >= lean count', async () => {
     // Run a second seedAll with full profile — items already written are
     // idempotently overwritten; stubs currently add nothing extra, so counts

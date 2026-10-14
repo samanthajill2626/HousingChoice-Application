@@ -6,14 +6,17 @@
 // kill a draft, since the composer can't rehydrate one yet); a sending/sent/
 // failed row opens its live Results view. A "Send a property" button starts a fresh
 // composer. Accessibility-first (real headings, a labeled filter, link rows).
-import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+// last-heard-from (spec 5.6, 14.4): a "Follow up" tab (FollowUpView) beside the status filters, with the waiting count, URL state ?tab=follow-up, and one tabpanel the tabs control.
+import { useId, useState } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Button, Spinner } from '../../ui/index.js';
 import { ApiError, deleteBroadcast, type BroadcastSummary } from '../../api/index.js';
 import { Modal } from '../contact/Modal.js';
 import { BroadcastStatusPill } from './BroadcastStatusPill.js';
 import { audienceSummary, formatBroadcastDate, sendReachLabel } from './broadcastFormat.js';
 import { useBroadcastsList, type BroadcastsFilter } from './useBroadcastsList.js';
+import { FollowUpView } from './FollowUpView.js';
+import { useFollowUps } from './useFollowUps.js';
 import styles from './BroadcastsList.module.css';
 
 /** The filter tabs (All + each lifecycle status). */
@@ -24,6 +27,11 @@ const FILTERS: ReadonlyArray<{ filter: BroadcastsFilter; label: string }> = [
   { filter: 'sent', label: 'Sent' },
   { filter: 'failed', label: 'Failed' },
 ];
+
+/** The Follow up tab's URL value (?tab=follow-up) - deep links and the e2e
+ *  land here. Not a BroadcastsFilter: useBroadcastsList sends every non-'all'
+ *  filter as ?status=, which the server 400s (spec 14.4). */
+const FOLLOW_UP_TAB = 'follow-up';
 
 /** A draft row routes to the composer (to finish review/send); every other
  *  status routes to the live Results view. */
@@ -44,6 +52,37 @@ export function BroadcastsList(): React.JSX.Element {
   const [filter, setFilter] = useState<BroadcastsFilter>('all');
   const navigate = useNavigate();
   const list = useBroadcastsList(filter);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const followUpActive = searchParams.get('tab') === FOLLOW_UP_TAB;
+  // The count fetch runs on mount whatever tab is active (spec 14.4).
+  const followUps = useFollowUps();
+  const tabIdBase = useId();
+  const panelId = `${tabIdBase}-panel`;
+  const tabId = (key: string): string => `${tabIdBase}-tab-${key}`;
+
+  function chooseFilter(next: BroadcastsFilter): void {
+    setFilter(next);
+    if (followUpActive) {
+      setSearchParams(
+        (prev) => {
+          const p = new URLSearchParams(prev);
+          p.delete('tab');
+          return p;
+        },
+        { replace: true },
+      );
+    }
+  }
+  function chooseFollowUp(): void {
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        p.set('tab', FOLLOW_UP_TAB);
+        return p;
+      },
+      { replace: true },
+    );
+  }
 
   // Draft delete — the row being confirmed (modal open while non-null).
   const [confirmDelete, setConfirmDelete] = useState<BroadcastSummary | null>(null);
@@ -100,87 +139,121 @@ export function BroadcastsList(): React.JSX.Element {
       </div>
 
       <div className={styles.tabs} role="tablist" aria-label="Send status filter">
-        {FILTERS.map((tab) => (
-          <button
-            key={tab.filter}
-            type="button"
-            role="tab"
-            aria-selected={filter === tab.filter}
-            className={`${styles.tab} ${filter === tab.filter ? styles.tabActive : ''}`}
-            onClick={() => setFilter(tab.filter)}
-          >
-            {tab.label}
-          </button>
-        ))}
+        {FILTERS.map((tab) => {
+          const selected = !followUpActive && filter === tab.filter;
+          return (
+            <button
+              key={tab.filter}
+              id={tabId(tab.filter)}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              aria-controls={panelId}
+              className={`${styles.tab} ${selected ? styles.tabActive : ''}`}
+              onClick={() => chooseFilter(tab.filter)}
+            >
+              {tab.label}
+            </button>
+          );
+        })}
+        <button
+          id={tabId(FOLLOW_UP_TAB)}
+          type="button"
+          role="tab"
+          aria-selected={followUpActive}
+          aria-controls={panelId}
+          className={`${styles.tab} ${followUpActive ? styles.tabActive : ''}`}
+          onClick={chooseFollowUp}
+        >
+          Follow up
+          {followUps.status === 'ready' && followUps.waitingCount > 0 ? (
+            <>
+              {' '}
+              <span className={styles.tabCount}>{followUps.waitingCount}</span>
+            </>
+          ) : null}
+        </button>
       </div>
 
-      {list.status === 'loading' ? <Spinner center /> : null}
+      <div
+        role="tabpanel"
+        id={panelId}
+        aria-labelledby={followUpActive ? tabId(FOLLOW_UP_TAB) : tabId(filter)}
+      >
+        {followUpActive ? (
+          <FollowUpView followUps={followUps} />
+        ) : (
+          <>
+            {list.status === 'loading' ? <Spinner center /> : null}
 
-      {list.status === 'error' ? (
-        <div className={styles.error} role="alert">
-          <p>We couldn&apos;t load your sends.</p>
-          <button type="button" className={styles.retry} onClick={() => list.retry()}>
-            Retry
-          </button>
-        </div>
-      ) : null}
+            {list.status === 'error' ? (
+              <div className={styles.error} role="alert">
+                <p>We couldn&apos;t load your sends.</p>
+                <button type="button" className={styles.retry} onClick={() => list.retry()}>
+                  Retry
+                </button>
+              </div>
+            ) : null}
 
-      {list.status === 'ready' && list.rows.length === 0 ? (
-        <div className={styles.empty}>
-          <p className={styles.emptyTitle}>No sends yet</p>
-          <p className={styles.emptyBody}>
-            Start one from a property&apos;s &ldquo;Send this property&rdquo;, from a contact&apos;s
-            &ldquo;Properties sent&rdquo;, or with &ldquo;Send a property&rdquo;.
-          </p>
-        </div>
-      ) : null}
+            {list.status === 'ready' && list.rows.length === 0 ? (
+              <div className={styles.empty}>
+                <p className={styles.emptyTitle}>No sends yet</p>
+                <p className={styles.emptyBody}>
+                  Start one from a property&apos;s &ldquo;Send this property&rdquo;, from a contact&apos;s
+                  &ldquo;Properties sent&rdquo;, or with &ldquo;Send a property&rdquo;.
+                </p>
+              </div>
+            ) : null}
 
-      {list.status === 'ready' && list.rows.length > 0 ? (
-        <>
-          <ul className={styles.rows} aria-label="Property sends">
-            {list.rows.map((row) => (
-              <li key={row.broadcastId} className={styles.rowItem}>
-                <Link to={rowHref(row)} className={styles.row}>
-                  <BroadcastStatusPill status={row.status} stats={row.stats} />
-                  <span className={styles.audience}>{rowAudienceLabel(row)}</span>
-                  {/* Meta (delivered + date) grouped so on a tight content pane it
-                   *  wraps to its own line below the audience instead of squeezing
-                   *  it into a narrow wrapped column (container query in CSS). */}
-                  <span className={styles.meta}>
-                    <span className={styles.delivered}>
-                      {row.stats.delivered}/{row.stats.audience} delivered
-                    </span>
-                    <span className={styles.date}>{formatBroadcastDate(row.created_at)}</span>
-                  </span>
-                </Link>
-                {row.status === 'draft' ? (
+            {list.status === 'ready' && list.rows.length > 0 ? (
+              <>
+                <ul className={styles.rows} aria-label="Property sends">
+                  {list.rows.map((row) => (
+                    <li key={row.broadcastId} className={styles.rowItem}>
+                      <Link to={rowHref(row)} className={styles.row}>
+                        <BroadcastStatusPill status={row.status} stats={row.stats} />
+                        <span className={styles.audience}>{rowAudienceLabel(row)}</span>
+                        {/* Meta (delivered + date) grouped so on a tight content pane it
+                         *  wraps to its own line below the audience instead of squeezing
+                         *  it into a narrow wrapped column (container query in CSS). */}
+                        <span className={styles.meta}>
+                          <span className={styles.delivered}>
+                            {row.stats.delivered}/{row.stats.audience} delivered
+                          </span>
+                          <span className={styles.date}>{formatBroadcastDate(row.created_at)}</span>
+                        </span>
+                      </Link>
+                      {row.status === 'draft' ? (
+                        <button
+                          type="button"
+                          className={styles.deleteBtn}
+                          aria-label={`Delete draft: ${rowAudienceLabel(row)}`}
+                          onClick={() => {
+                            setDeleteError(null);
+                            setConfirmDelete(row);
+                          }}
+                        >
+                          Delete
+                        </button>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+                {list.hasMore ? (
                   <button
                     type="button"
-                    className={styles.deleteBtn}
-                    aria-label={`Delete draft: ${rowAudienceLabel(row)}`}
-                    onClick={() => {
-                      setDeleteError(null);
-                      setConfirmDelete(row);
-                    }}
+                    className={styles.loadMore}
+                    onClick={() => list.loadMore()}
+                    disabled={list.loadingMore}
                   >
-                    Delete
+                    {list.loadingMore ? 'Loading...' : 'Load more'}
                   </button>
                 ) : null}
-              </li>
-            ))}
-          </ul>
-          {list.hasMore ? (
-            <button
-              type="button"
-              className={styles.loadMore}
-              onClick={() => list.loadMore()}
-              disabled={list.loadingMore}
-            >
-              {list.loadingMore ? 'Loading…' : 'Load more'}
-            </button>
-          ) : null}
-        </>
-      ) : null}
+              </>
+            ) : null}
+          </>
+        )}
+      </div>
 
       {confirmDelete !== null ? (
         <Modal

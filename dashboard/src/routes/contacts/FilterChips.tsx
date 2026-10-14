@@ -10,11 +10,20 @@ import { useId } from 'react';
 import { type FacetOption } from './tenantFacets.js';
 import styles from './TenantFilters.module.css';
 
+const EMPTY_KEYS: ReadonlySet<string> = new Set<string>();
+
+function sameKeys(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const k of a) if (!b.has(k)) return false;
+  return true;
+}
+
 /**
- * One chip group: the uppercase label, then either its chips (plus a Clear once
- * the facet is non-empty) or the muted "nothing recorded yet" line. The group
+ * One chip group: the uppercase label, then either its chips (plus a Clear while
+ * the selection differs from its baseline - empty unless the group says
+ * otherwise) or the muted "nothing recorded yet" line. The group
  * ALWAYS renders on the Tenants view - a promised control must not silently
- * vanish - and each group gets its OWN label id, or all three would collapse
+ * vanish - and each group gets its OWN label id, or they would all collapse
  * into one accessible name.
  */
 export function ChipGroup({
@@ -24,6 +33,7 @@ export function ChipGroup({
   selected,
   onToggle,
   onClear,
+  baseline,
 }: {
   label: string;
   /** Rendered instead of chips when the facet has zero recorded values. */
@@ -32,6 +42,12 @@ export function ChipGroup({
   selected: ReadonlySet<string>;
   onToggle: (key: string) => void;
   onClear: (() => void) | null;
+  /** The selection Clear returns to (spec 2026-10-12 5.7, the Tenants Status
+   *  group). Omitted = the empty set, as every other facet has always had.
+   *  Clear shows only while `selected` DIFFERS from it - for the empty
+   *  baseline that is exactly the old `selected.size > 0`, and an EMPTY
+   *  selection against a non-empty baseline still differs (14.5 F12). */
+  baseline?: ReadonlySet<string>;
 }): React.JSX.Element {
   const labelId = useId();
   return (
@@ -53,7 +69,7 @@ export function ChipGroup({
                 onClick={() => onToggle(o.key)}
               />
             ))}
-            {onClear !== null && selected.size > 0 ? (
+            {onClear !== null && !sameKeys(selected, baseline ?? EMPTY_KEYS) ? (
               <button
                 type="button"
                 className={styles.clear}

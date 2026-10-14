@@ -231,7 +231,7 @@ describe('BroadcastComposer — single draft / no orphan', () => {
 
 describe('BroadcastComposer — preview gate', () => {
   it('the property prefill enables Preview by itself, then advances to the recipient list', async () => {
-    previewBroadcast.mockResolvedValue({ count: 1, truncated: false, candidates: [{ contactId: 'c1', firstName: 'Tasha', phone: '+14040000001', alreadySentThisProperty: false, has_consent: true, seeded: false }], priorRecipientContactIds: [], seedContactIds: [], unresolvedSeedIds: [] });
+    previewBroadcast.mockResolvedValue({ count: 1, truncated: false, candidates: [{ contactId: 'c1', firstName: 'Tasha', phone: '+14040000001', alreadySentThisProperty: false, has_consent: true, seeded: false, declinedThisProperty: false }], priorRecipientContactIds: [], seedContactIds: [], unresolvedSeedIds: [], declinedContactIds: [], declineLabelsUnavailable: false });
     const u = userEvent.setup();
     renderComposer('?unitId=unit-0001');
     // The property's details prefill the message ([TenantName] preserved) —
@@ -488,10 +488,12 @@ describe('BroadcastComposer - Property picker (no ?unitId=)', () => {
     previewBroadcast.mockResolvedValue({
       count: 1,
       truncated: false,
-      candidates: [{ contactId: 'c-seed', firstName: 'Tasha', phone: '+14040000001', alreadySentThisProperty: false, has_consent: true, seeded: true }],
+      candidates: [{ contactId: 'c-seed', firstName: 'Tasha', phone: '+14040000001', alreadySentThisProperty: false, has_consent: true, seeded: true, declinedThisProperty: false }],
       priorRecipientContactIds: [],
       seedContactIds: ['c-seed'],
       unresolvedSeedIds: [],
+      declinedContactIds: [],
+      declineLabelsUnavailable: false,
     });
     const u = userEvent.setup();
     renderComposer('?contactId=c-seed');
@@ -814,6 +816,7 @@ describe('BroadcastComposer - the audience while a preview loads (code review R3
     alreadySentThisProperty: false,
     has_consent: true,
     seeded: false,
+    declinedThisProperty: false,
   };
   const previewOf = (candidates: (typeof DEKALB_TENANT)[]): unknown => ({
     count: candidates.length,
@@ -822,6 +825,8 @@ describe('BroadcastComposer - the audience while a preview loads (code review R3
     priorRecipientContactIds: [],
     seedContactIds: [],
     unresolvedSeedIds: [],
+    declinedContactIds: [],
+    declineLabelsUnavailable: false,
   });
   const previewButton = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
   const authority = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authority' });

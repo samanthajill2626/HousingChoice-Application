@@ -11,12 +11,14 @@
 // Organization is `contact.organization` (spec D17, edited in the edit form).
 // Unlike UnknownFile it carries NO "Needs triage" call-to-action - a partner is
 // already classified (A2, email-channel-v1).
+import { useState } from 'react';
 import type { Contact, ContactPhone, GroupThreadRow, ListingSendRow, UnitItem } from '../../api/index.js';
-import { BLANK, Card, CardAction, CardInlineAction, EmptyRow, KV, NotesText, PendingPanel, SendRosterRow } from './Card.js';
+import { BLANK, Card, CardAction, CardInlineAction, EmptyRow, KV, NotesText, PendingPanel, SendRosterList, SendRosterRow, interestedModeOf, type SendRowAction } from './Card.js';
 import { GroupThreadsCard } from './GroupThreadsCard.js';
 import { MediaGallery, type MediaGalleryPaging } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
-import { contactStatusLabel, formatAddress, formatPhone } from './format.js';
+import { contactDisplayName, contactStatusLabel, formatAddress, formatPhone } from './format.js';
+import type { Slice } from './useContactFile.js';
 import { CONTACT_TYPE_LABEL, displayKind } from './contactProfile.js';
 import { StaffNotesCard } from './StaffNotesCard.js';
 
@@ -39,10 +41,16 @@ export interface PartnerFileProps {
    *  - the Properties sent rows' address labels. REQUIRED for the same reason
    *  as the group-threads props: a forgotten wiring is a typecheck error. */
   units: UnitItem[];
-  /** C4 listings-sent slice status (the card degrades to pending). */
-  listingsSentPending: boolean;
+  /** C4 listings-sent slice status: 'ready' renders rows, 'error' the error
+   *  row (last-heard-from D12: a 503 is not "pending"), anything else the
+   *  pending panel. */
+  listingsSentStatus: Slice<ListingSendRow>['status'];
   /** C4 listings-sent rows - the properties shared with this partner. */
   listingsSent: ListingSendRow[];
+  /** Record / clear a send outcome on one Properties-sent row (Not interested
+   *  and Undo only - a partner never gets Interested); resolves once the page
+   *  applied the returned row, rejects on failure. Absent -> no actions. */
+  onListingOutcome?: (unitId: string, outcome: SendRowAction) => Promise<void>;
   /** Open the seeded composer for this partner (Properties sent "+ Send"). */
   onSendProperty?: () => void;
   /** Open the edit dialog. */
@@ -71,15 +79,20 @@ export function PartnerFile({
   groupThreads,
   groupThreadsTruncated,
   units,
-  listingsSentPending,
+  listingsSentStatus,
   listingsSent,
   onSendProperty,
+  onListingOutcome,
   onEdit,
   onManagePhones,
   onContactUpdated,
 }: PartnerFileProps): React.JSX.Element {
+  // The Properties sent rows' date labels read one clock per mount.
+  const [now] = useState(() => new Date());
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' - ');
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
+  // The Properties-sent rows' accessible names read the page contact's name.
+  const personName = contactDisplayName(contact.firstName, contact.lastName, contact.phone);
   const notes = typeof contact.notes === 'string' ? contact.notes.trim() : '';
 
   return (
@@ -154,7 +167,10 @@ export function PartnerFile({
       {/* caseworkers D20: a partner can be sent a property directly (the
           normal share, into the partner's own conversation). Rows show NO tour
           chip (ruling R3-F5): a converted caseworker's tenant-era sends stay
-          listed, but the partner page does not link that tenant history. */}
+          listed, but the partner page does not link that tenant history.
+          The server no longer sends tour on a partner row (spec 14.3 B11);
+          SendRosterRow renders the outcome chip, which for a partner is never
+          the tour chip. */}
       <Card
         title="Properties sent"
         aside={
@@ -165,18 +181,42 @@ export function PartnerFile({
           ) : undefined
         }
       >
-        {listingsSentPending ? (
+        {listingsSentStatus === 'error' ? (
+          <EmptyRow>We couldn&apos;t load properties sent.</EmptyRow>
+        ) : listingsSentStatus !== 'ready' ? (
           <PendingPanel />
         ) : listingsSent.length === 0 ? (
           <EmptyRow>No properties sent yet.</EmptyRow>
         ) : (
-          listingsSent.map((s) => (
-            <SendRosterRow
-              key={`${s.unitId}:${s.sentAt}`}
-              to={`/listings/${s.unitId}`}
-              identity={sentUnitLabel(unitMap, s.unitId)}
-            />
-          ))
+          // Markup R1: the rows are the only listitems in the card.
+          <SendRosterList label="Properties sent">
+            {listingsSent.map((s) => {
+              const unit = unitMap.get(s.unitId);
+              const label = sentUnitLabel(unitMap, s.unitId);
+              return (
+                <SendRosterRow
+                  key={`${s.unitId}:${s.sentAt}`}
+                  to={`/listings/${s.unitId}`}
+                  identity={label}
+                  row={s}
+                  address={label}
+                  name={personName}
+                  interestedMode={interestedModeOf(unit)}
+                  // An absent unit is a deleted property (the page loads live
+                  // units only): outcomes show, actions do not (B10).
+                  actionsDisabled={unit === undefined || onListingOutcome === undefined}
+                  onOutcome={(outcome) => (onListingOutcome ? onListingOutcome(s.unitId, outcome) : Promise.resolve())}
+                  // B8: "Request a tour" keys on the PAGE contact's type -
+                  // a partner (this file's only audience; the guard keeps it
+                  // honest if the file is ever reused).
+                  {...(contact.type === 'partner' && {
+                    requestTourTo: `/listings/${encodeURIComponent(s.unitId)}?tour=new`,
+                  })}
+                  now={now}
+                />
+              );
+            })}
+          </SendRosterList>
         )}
       </Card>
 

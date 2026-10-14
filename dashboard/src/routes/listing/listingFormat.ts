@@ -177,6 +177,16 @@ const PRIMARY_ASSIGNED_REASON: ReadonlyMap<string, string> = new Map([
   ['backfill', 'set by a one-time data repair'],
 ]);
 
+/** last-heard-from spec 5.4 / 14.3: the send-outcome rows the outcome route
+ *  appends to the unit audit (payload { contactId, actor } + tourId on
+ *  interested). Prefixed by the contact (`who`). "(auto)" never shows here -
+ *  `by` is not on the Activity wire. */
+const OUTCOME_LABELS: Record<string, string> = {
+  listing_declined: 'not interested',
+  listing_decline_cleared: 'not interested cleared',
+  listing_interested: 'interested - tour requested',
+};
+
 /** Staff copy per activity event (GLOSSARY: "property", never "listing"/"unit").
  *  `type` is an OPEN set — an unknown event humanizes (never a blank row). */
 export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescription {
@@ -199,6 +209,15 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
   const tourLabel = TOUR_LABELS[e.type];
   if (tourLabel !== undefined) {
     return { label: tourLabel, ...(e.tourId ? { to: `/tours/${e.tourId}` } : {}) };
+  }
+  const outcomeLabel = OUTCOME_LABELS[e.type];
+  if (outcomeLabel !== undefined) {
+    // `who` is always present in practice (the route writes contactId); the
+    // fallback keeps the open-set rule - never a blank or "undefined" row.
+    return {
+      label: `${who ?? 'A recipient'} ${outcomeLabel}`,
+      ...(e.type === 'listing_interested' && e.tourId ? { to: `/tours/${e.tourId}` } : contactLink),
+    };
   }
   switch (e.type) {
     case 'unit_created':
@@ -262,4 +281,39 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
 export function sendRowKindLabel(row: Pick<ListingSendRow, 'type' | 'role'>): string | undefined {
   if (row.type === undefined || row.type === 'tenant') return undefined;
   return displayKind({ type: row.type, role: row.role }, (t) => CONTACT_TYPE_LABEL[t]);
+}
+
+/** One property "Sent to" group (last-heard-from spec 5.5): its key and the
+ *  accessible name of its list (markup R1). */
+export interface SendRowGroup {
+  key: 'waiting' | 'interested' | 'not_interested' | 'not_eligible';
+  label: 'Waiting' | 'Interested' | 'Not interested' | 'Not eligible';
+  rows: ListingSendRow[];
+}
+
+/**
+ * last-heard-from spec 5.5: the property "Sent to" card's four groups, ALWAYS
+ * returned in this order (empty ones included; the host skips them), which
+ * together cover every row, each newest sentAt first: Waiting (no_reply /
+ * replied on an ELIGIBLE recipient - the eligibility half only, no
+ * lookback/quiet thresholds), Interested, Not interested, Not eligible (a
+ * waiting outcome on an ineligible recipient, and EVERY row whose contact is
+ * missing). `eligible` absent counts as not eligible.
+ */
+export function groupSendRows(rows: readonly ListingSendRow[]): SendRowGroup[] {
+  const groups: SendRowGroup[] = [
+    { key: 'waiting', label: 'Waiting', rows: [] },
+    { key: 'interested', label: 'Interested', rows: [] },
+    { key: 'not_interested', label: 'Not interested', rows: [] },
+    { key: 'not_eligible', label: 'Not eligible', rows: [] },
+  ];
+  const indexOf = (r: ListingSendRow): number => {
+    if (r.recipientMissing === true) return 3;
+    if (r.outcome === 'interested') return 1;
+    if (r.outcome === 'not_interested') return 2;
+    return r.eligible === true ? 0 : 3;
+  };
+  const newestFirst = [...rows].sort((a, b) => (a.sentAt < b.sentAt ? 1 : a.sentAt > b.sentAt ? -1 : 0));
+  for (const r of newestFirst) groups[indexOf(r)]!.rows.push(r);
+  return groups;
 }

@@ -47,6 +47,7 @@ import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 import { resolveMessage } from '../src/messages/index.js';
 import { pushCallerIdentity } from '../src/routes/webhooks/voice.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { splitTsMsgId } from '../src/repos/messagesRepo.js';
 
 const CALLER = '+15550177777'; // a tenant calling the business number
 // The inbound-voice-line HOLDER's verified cell — the number inbound calls ring.
@@ -427,6 +428,8 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     // No bogus call entry persisted, no pre-ring push fired.
     expect(world.messages.filter((m) => m.type === 'call')).toHaveLength(0);
     expect(world.pushSends).toHaveLength(0);
+    // Last heard from (spec 5.1): no row, so nobody is touched.
+    expect(world.heardFromTouches).toEqual([]);
   });
 
   it('no verified inbound-voice-line holder → ERROR log + text-us greeting, NO bridge, NO push, NO leak', async () => {
@@ -456,6 +459,9 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(noHolder!['hasBusinessNumber']).toBe(true);
     expect(noHolder!['hasVerifiedHolder']).toBe(false);
     expect(JSON.stringify(noHolder)).not.toContain(CALLER);
+    // Last heard from (spec 5.1): the refusal returns before any append - no
+    // row, so nobody is touched.
+    expect(world.heardFromTouches).toEqual([]);
   });
 
   it('FIX 2: a SLOW (never-resolving) pre-ring push does NOT gate the bridge TwiML', async () => {
@@ -505,6 +511,74 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(xml).toContain(`callerId="${OUR_NUMBER}"`);
     // The push WAS started (fire-and-forget), just not awaited.
     expect(pushStarted).toBe(true);
+  });
+
+  // Last heard from (spec 5.1 / 14.2): a call to the business line touches the
+  // caller at the persisted call row's instant, whatever its outcome.
+  it('last heard from: a KNOWN caller is touched at the call row instant', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER });
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+
+    expect(res.status).toBe(200);
+    const m = world.messages.find((row) => row.type === 'call')!;
+    expect(m).toBeDefined();
+    const at = splitTsMsgId(m.tsMsgId).providerTs;
+    expect(world.heardFromTouches).toEqual([{ contactId: 'c-caller', at, outcome: 'written' }]);
+  });
+
+  it('last heard from: an UNKNOWN caller touches the captured stub', async () => {
+    const world = createFakeWorld();
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+
+    expect(res.status).toBe(200);
+    expect(world.contacts).toHaveLength(1);
+    const m = world.messages.find((row) => row.type === 'call')!;
+    const at = splitTsMsgId(m.tsMsgId).providerTs;
+    expect(world.heardFromTouches).toEqual([{ contactId: world.contacts[0]!.contactId, at, outcome: 'written' }]);
+  });
+
+  it('last heard from: a REDELIVERED call touches again at the same instant', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER });
+    const { app } = founderHarness(world);
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+
+    expect(world.messages.filter((row) => row.type === 'call')).toHaveLength(1);
+    const at = splitTsMsgId(world.messages.find((row) => row.type === 'call')!.tsMsgId).providerTs;
+    expect(world.heardFromTouches.map((t) => t.contactId)).toEqual(['c-caller', 'c-caller']);
+    expect(world.heardFromTouches.map((t) => t.at)).toEqual([at, at]);
+  });
+
+  it('last heard from: a NON-member calling a pool number whose groups are ALL closed is triaged and touched on its own 1:1', async () => {
+    const world = createFakeWorld();
+    const relay = seedRelayGroup(world);
+    relay.status = 'closed';
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER });
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice',
+      bizVoiceParams({ To: POOL, CallSid: 'CAheard-closed-nonmember' }),
+    );
+
+    expect(res.status).toBe(200);
+    // The founder bridge, not the masked relay.
+    expect(res.text).toContain(HOLDER_CELL);
+    const calls = world.messages.filter((row) => row.type === 'call');
+    expect(calls).toHaveLength(1);
+    const m = calls[0]!;
+    expect(m.conversationId).not.toBe('conv-relay-voice-1');
+    expect(world.messages.filter((row) => row.conversationId === 'conv-relay-voice-1')).toEqual([]);
+    const at = splitTsMsgId(m.tsMsgId).providerTs;
+    expect(world.heardFromTouches).toEqual([{ contactId: 'c-caller', at, outcome: 'written' }]);
   });
 });
 

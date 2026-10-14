@@ -965,6 +965,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       listingSendsRepo: listingSends,
       // listing-response-tour-chip: derive the per-row tour chip (byUnit GSI).
       toursRepo: tours,
+      // last-heard-from spec 5.4: the outcome route pins the contact timeline
+      // (the shared activity-events repo built above).
+      activityEventsRepo: activityEvents,
       // FIX 3: GET /:id/placements lists the unit's placements (tenant-name enriched).
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       // share-sent-outcome D5: GET /:id/activity recounts "Sent to N tenants"
@@ -1102,6 +1105,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       orgNamesService: orgNames,
       auditRepo: audit,
       events,
+      // last-heard-from (spec 14.4 A5): the preview's decline labels and the
+      // follow-ups list read the SHARED listing-send record and tours (the
+      // instances built above, as the units mount passes them).
+      listingSendsRepo: listingSends,
+      toursRepo: tours,
     }),
   );
   // Placements + boards (M1.10; requireAuth — VAs run the boards, no admin gate).

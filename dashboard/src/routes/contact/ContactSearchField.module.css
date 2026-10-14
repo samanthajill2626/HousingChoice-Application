@@ -96,3 +96,11 @@
   color: var(--c-text-subtle);
   font-size: var(--fs-xs);
 }
+
+/* last-heard-from 5.3: a caller's note after the kind (e.g. "Already sent"). */
+.optionNote {
+  margin-left: var(--sp-2);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-style: italic;
+}

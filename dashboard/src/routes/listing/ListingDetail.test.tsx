@@ -34,6 +34,9 @@ const addUnitContact = vi.fn();
 const removeUnitContact = vi.fn();
 // The edit dialog's authorities picker reads the list (spec 2026-10-06 D6).
 const getOrgList = vi.fn();
+// last-heard-from 5.3: the "Sent to" outcome route and the tour form's create.
+const setListingSendOutcome = vi.fn();
+const createTour = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -55,6 +58,8 @@ vi.mock('../../api/index.js', async () => {
     addUnitContact: (...a: unknown[]) => addUnitContact(...a),
     removeUnitContact: (...a: unknown[]) => removeUnitContact(...a),
     getOrgList: (...a: unknown[]) => getOrgList(...a),
+    setListingSendOutcome: (...a: unknown[]) => setListingSendOutcome(...a),
+    createTour: (...a: unknown[]) => createTour(...a),
   };
 });
 
@@ -67,9 +72,9 @@ function LocationProbe(): React.JSX.Element {
   return <span data-testid="path">{`${loc.pathname}${loc.search}`}</span>;
 }
 
-function renderAt(unitId = 'u1'): void {
+function renderAt(unitId = 'u1', search = ''): void {
   render(
-    <MemoryRouter initialEntries={[`/listings/${unitId}`]}>
+    <MemoryRouter initialEntries={[`/listings/${unitId}${search}`]}>
       <Routes>
         <Route path="/listings/:unitId" element={<ListingDetail />} />
         <Route path="*" element={<div />} />
@@ -82,6 +87,7 @@ function renderAt(unitId = 'u1'): void {
 const READY: ListingState = {
   status: 'ready',
   setUnit: vi.fn(),
+  setRecipientRow: vi.fn(),
   unit: {
     unitId: 'u1',
     landlordId: 'll1',
@@ -506,7 +512,18 @@ describe('ListingDetail', () => {
       ...READY,
       recipients: {
         status: 'ready',
-        rows: [{ contactId: 'c-t9', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast' }],
+        rows: [
+          {
+            contactId: 'c-t9',
+            unitId: 'u1',
+            sentAt: '2026-06-30T10:00:00Z',
+            via: 'broadcast',
+            outcome: 'no_reply',
+            interestedSupported: true,
+            interestedMode: 'route',
+            eligible: true,
+          },
+        ],
       },
     });
     renderAt();
@@ -524,7 +541,17 @@ describe('ListingDetail', () => {
       recipients: {
         status: 'ready',
         rows: [
-          { contactId: 'c-t9', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', tenantName: 'Brianna Whitfield' },
+          {
+            contactId: 'c-t9',
+            unitId: 'u1',
+            sentAt: '2026-06-30T10:00:00Z',
+            via: 'broadcast',
+            tenantName: 'Brianna Whitfield',
+            outcome: 'no_reply',
+            interestedSupported: true,
+            interestedMode: 'route',
+            eligible: true,
+          },
         ],
       },
     });
@@ -541,11 +568,11 @@ describe('ListingDetail', () => {
       recipients: {
         status: 'ready',
         rows: [
-          { contactId: 'c-ten', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', tenantName: 'Tia Moss', type: 'tenant' },
-          { contactId: 'c-cw', unitId: 'u1', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tenantName: 'Cora Reyes', type: 'partner', role: 'Caseworker' },
-          { contactId: 'c-pt', unitId: 'u1', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tenantName: 'Pat Lin', type: 'partner' },
-          { contactId: 'c-ll', unitId: 'u1', sentAt: '2026-06-27T10:00:00Z', via: 'broadcast', tenantName: 'Lee Park', type: 'landlord' },
-          { contactId: 'c-gone', unitId: 'u1', sentAt: '2026-06-26T10:00:00Z', via: 'broadcast' },
+          { contactId: 'c-ten', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'broadcast', tenantName: 'Tia Moss', type: 'tenant', outcome: 'no_reply', interestedSupported: true, interestedMode: 'route', eligible: true },
+          { contactId: 'c-cw', unitId: 'u1', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tenantName: 'Cora Reyes', type: 'partner', role: 'Caseworker', outcome: 'no_reply', interestedSupported: false, interestedMode: 'route', eligible: true },
+          { contactId: 'c-pt', unitId: 'u1', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tenantName: 'Pat Lin', type: 'partner', outcome: 'no_reply', interestedSupported: false, interestedMode: 'route', eligible: true },
+          { contactId: 'c-ll', unitId: 'u1', sentAt: '2026-06-27T10:00:00Z', via: 'broadcast', tenantName: 'Lee Park', type: 'landlord', outcome: 'no_reply', interestedSupported: false, interestedMode: 'route', eligible: true },
+          { contactId: 'c-gone', unitId: 'u1', sentAt: '2026-06-26T10:00:00Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: false, eligible: false, recipientMissing: true },
         ],
       },
     });
@@ -557,8 +584,13 @@ describe('ListingDetail', () => {
     expect(within(rowOf('Cora Reyes')).getByText('Caseworker')).toBeInTheDocument();
     expect(within(rowOf('Pat Lin')).getByText('Partner')).toBeInTheDocument();
     expect(within(rowOf('Lee Park')).getByText('Landlord')).toBeInTheDocument();
-    expect(rowOf('Tia Moss').textContent).toBe('Tia Moss');
-    expect(rowOf('c-gone').textContent).toBe('c-gone');
+    // Tenant and unresolved rows carry NO kind label (rows grew dates and an
+    // outcome chip, so the old textContent-equals-name check was rewritten).
+    for (const name of ['Tia Moss', 'c-gone']) {
+      for (const label of ['Tenant', 'Partner', 'Caseworker', 'Landlord']) {
+        expect(within(rowOf(name)).queryByText(label)).not.toBeInTheDocument();
+      }
+    }
   });
 
   it('renders each tour-chip state on "Sent to" rows, linking to the tour', () => {
@@ -567,9 +599,9 @@ describe('ListingDetail', () => {
       recipients: {
         status: 'ready',
         rows: [
-          { contactId: 'c-r', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'individual', tour: { tourId: 't-a', state: 'requested' } },
-          { contactId: 'c-s', unitId: 'u1', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tour: { tourId: 't-b', state: 'scheduled' } },
-          { contactId: 'c-t', unitId: 'u1', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tour: { tourId: 't-c', state: 'toured' } },
+          { contactId: 'c-r', unitId: 'u1', sentAt: '2026-06-30T10:00:00Z', via: 'individual', tour: { tourId: 't-a', state: 'requested' }, outcome: 'interested', interestedSupported: true, interestedMode: 'route', eligible: true },
+          { contactId: 'c-s', unitId: 'u1', sentAt: '2026-06-29T10:00:00Z', via: 'broadcast', tour: { tourId: 't-b', state: 'scheduled' }, outcome: 'interested', interestedSupported: true, interestedMode: 'route', eligible: true },
+          { contactId: 'c-t', unitId: 'u1', sentAt: '2026-06-28T10:00:00Z', via: 'broadcast', tour: { tourId: 't-c', state: 'toured' }, outcome: 'interested', interestedSupported: true, interestedMode: 'route', eligible: true },
         ],
       },
     });
@@ -2836,5 +2868,235 @@ describe('ListingDetail - a restore re-reads the roster source (primary-contact-
         "This property will have no primary contact. New tours won't include a landlord, and tour group texts will use the general intro.",
       ),
     ).toBeInTheDocument();
+  });
+});
+
+describe('ListingDetail - "Sent to" outcomes (last-heard-from spec 5.5)', () => {
+  const unit = { ...READY.unit!, address: { line1: '12 Oak St' } };
+  const sent = (over: Record<string, unknown> = {}) => ({
+    contactId: 'c-1', unitId: 'u1', sentAt: '2026-10-01T10:00:00.000Z', via: 'broadcast', tenantName: 'Tia Moss',
+    outcome: 'no_reply', interestedSupported: true, interestedMode: 'route', eligible: true, ...over,
+  });
+  const card = (): HTMLElement => screen.getByRole('heading', { name: /^Sent to\b/ }).closest('section') as HTMLElement;
+
+  beforeEach(() => {
+    setListingSendOutcome.mockReset();
+    createTour.mockReset();
+    getAllContacts.mockResolvedValue([{ contactId: 'c-1', type: 'tenant', firstName: 'Tia', lastName: 'Moss' }]);
+    getAllUnits.mockResolvedValue([{ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '12 Oak St' } }]);
+  });
+
+  it('renders the rows as four named lists in order - Waiting, Interested, Not interested, Not eligible (R1)', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit,
+      recipients: {
+        status: 'ready',
+        rows: [
+          sent({ contactId: 'c-ne', tenantName: 'Ned Ineligible', eligible: false, sentAt: '2026-10-09T10:00:00.000Z' }),
+          sent({ contactId: 'c-ni', tenantName: 'Nia Declined', outcome: 'not_interested', declined: { at: '2026-10-03T10:00:00.000Z', by: 'staff' } }),
+          sent({ contactId: 'c-in', tenantName: 'Ian Toured', outcome: 'interested', tour: { tourId: 't-1', state: 'toured' } }),
+          sent({ contactId: 'c-w', tenantName: 'Wes Waiting', sentAt: '2026-10-05T10:00:00.000Z' }),
+          sent({ contactId: 'c-w2', tenantName: 'Wanda Older', sentAt: '2026-10-02T10:00:00.000Z' }),
+        ],
+      },
+    });
+    renderAt();
+    const lists = within(card()).getAllByRole('list');
+    expect(lists.map((l) => l.getAttribute('aria-label'))).toEqual(['Waiting', 'Interested', 'Not interested', 'Not eligible']);
+    // Every listitem in the card is one roster row - 5 rows, 5 listitems.
+    expect(within(card()).getAllByRole('listitem')).toHaveLength(5);
+    const namesIn = (label: string): Array<string | null> =>
+      within(within(card()).getByRole('list', { name: label }))
+        .getAllByRole('listitem')
+        .map((li) => within(li).getAllByRole('link').find((a) => a.getAttribute('href')?.startsWith('/contacts/'))?.textContent ?? null);
+    expect(namesIn('Waiting')).toEqual(['Wes Waiting', 'Wanda Older']);
+    expect(namesIn('Interested')).toEqual(['Ian Toured']);
+    expect(namesIn('Not interested')).toEqual(['Nia Declined']);
+    expect(namesIn('Not eligible')).toEqual(['Ned Ineligible']);
+  });
+
+  it('an empty group renders no list', () => {
+    useListing.mockReturnValue({ ...READY, unit, recipients: { status: 'ready', rows: [sent()] } });
+    renderAt();
+    expect(within(card()).getAllByRole('list').map((l) => l.getAttribute('aria-label'))).toEqual(['Waiting']);
+    expect(within(card()).getAllByRole('listitem')).toHaveLength(1);
+  });
+
+  it('Not interested calls the route and applies the returned { row } through setRecipientRow', async () => {
+    const setRecipientRow = vi.fn();
+    const returned = sent({ outcome: 'not_interested', declined: { at: '2026-10-13T10:00:00.000Z', by: 'staff' } });
+    setListingSendOutcome.mockResolvedValue({ row: returned });
+    useListing.mockReturnValue({ ...READY, unit, setRecipientRow, recipients: { status: 'ready', rows: [sent()] } });
+    renderAt();
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss not interested in 12 Oak St' }));
+    expect(setListingSendOutcome).toHaveBeenCalledWith('u1', 'c-1', 'not_interested');
+    await waitFor(() => expect(setRecipientRow).toHaveBeenCalledWith('u1', 'c-1', returned));
+  });
+
+  it("Interested in 'route' mode calls the route with interested", async () => {
+    setListingSendOutcome.mockResolvedValue({ row: sent({ outcome: 'interested', tour: { tourId: 't-new', state: 'requested' } }) });
+    useListing.mockReturnValue({ ...READY, unit, recipients: { status: 'ready', rows: [sent()] } });
+    renderAt();
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss interested in 12 Oak St' }));
+    expect(setListingSendOutcome).toHaveBeenCalledWith('u1', 'c-1', 'interested');
+  });
+
+  it("Interested in 'form' mode NAVIGATES to ?tour=new&tenantId=, the form opens with the tenant LOCKED, creates nothing, and Cancel clears both params (R4)", async () => {
+    useListing.mockReturnValue({ ...READY, unit, recipients: { status: 'ready', rows: [sent({ interestedMode: 'form' })] } });
+    renderAt();
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss interested in 12 Oak St' }));
+    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/listings/u1?tour=new&tenantId=c-1'));
+    const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    await waitFor(() => expect(within(dialog).getByRole('group', { name: 'Tenant' })).toHaveTextContent('Tia Moss'));
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Unit' })).toHaveValue('12 Oak St'));
+    expect(setListingSendOutcome).not.toHaveBeenCalled();
+    expect(createTour).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Schedule a tour' })).not.toBeInTheDocument());
+    expect(screen.getByTestId('path')).toHaveTextContent(/^\/listings\/u1$/);
+  });
+
+  it('a PARTNER row links "Request a tour" to ?tour=new on this page; the form opens with NO tenant, and Cancel clears the params', async () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit,
+      recipients: { status: 'ready', rows: [sent({ contactId: 'c-cw', tenantName: 'Cora Reyes', type: 'partner', role: 'Caseworker', interestedSupported: false })] },
+    });
+    renderAt();
+    const link = screen.getByRole('link', { name: 'Request a tour for Cora Reyes at 12 Oak St' });
+    expect(link).toHaveAttribute('href', '/listings/u1?tour=new');
+    await userEvent.click(link);
+    const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    expect(within(dialog).getByRole('combobox', { name: 'Tenant' })).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Schedule a tour' })).not.toBeInTheDocument());
+    expect(screen.getByTestId('path')).toHaveTextContent(/^\/listings\/u1$/);
+  });
+
+  it('a LANDLORD row gets NO "Request a tour" link and no Interested button - only Not interested (B8)', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit,
+      recipients: { status: 'ready', rows: [sent({ contactId: 'c-ll', tenantName: 'Lee Park', type: 'landlord', interestedSupported: false })] },
+    });
+    renderAt();
+    expect(screen.queryByRole('link', { name: /^Request a tour/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Mark Lee Park interested in 12 Oak St' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark Lee Park not interested in 12 Oak St' })).toBeInTheDocument();
+  });
+
+  it('the dialog adds NO history entry: open (Interested, + Tour or the partner link) then Cancel, and Back leaves the property page', async () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit,
+      recipients: {
+        status: 'ready',
+        rows: [
+          sent({ interestedMode: 'form' }),
+          sent({ contactId: 'c-cw', tenantName: 'Cora Reyes', type: 'partner', interestedSupported: false }),
+        ],
+      },
+    });
+    function Back(): React.JSX.Element {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => void navigate(-1)}>test-back</button>;
+    }
+    render(
+      <MemoryRouter initialEntries={['/elsewhere', '/listings/u1']} initialIndex={1}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+          <Route path="*" element={<div />} />
+        </Routes>
+        <LocationProbe />
+        <Back />
+      </MemoryRouter>,
+    );
+    const cancel = async (): Promise<void> => {
+      const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+      await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent(/^\/listings\/u1$/));
+    };
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss interested in 12 Oak St' }));
+    await cancel();
+    await userEvent.click(screen.getByRole('button', { name: 'Schedule a tour on this property' }));
+    await cancel();
+    await userEvent.click(screen.getByRole('link', { name: 'Request a tour for Cora Reyes at 12 Oak St' }));
+    await cancel();
+    // Three open/cancel cycles, still ONE entry for the property page.
+    await userEvent.click(screen.getByRole('button', { name: 'test-back' }));
+    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent(/^\/elsewhere$/));
+  });
+
+  it('the URL entry ?tour=new&tenantId= opens the form on load with that tenant locked', async () => {
+    useListing.mockReturnValue({ ...READY, unit, recipients: { status: 'ready', rows: [] } });
+    renderAt('u1', '?tour=new&tenantId=c-1');
+    const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    await waitFor(() => expect(within(dialog).getByRole('group', { name: 'Tenant' })).toHaveTextContent('Tia Moss'));
+  });
+
+  it('a tenantId change while the form is open re-locks it to the NEW tenant (no stale label)', async () => {
+    useListing.mockReturnValue({ ...READY, unit, recipients: { status: 'ready', rows: [] } });
+    function Go(): React.JSX.Element {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => void navigate('/listings/u1?tour=new&tenantId=c-2', { replace: true })}>test-go</button>;
+    }
+    render(
+      <MemoryRouter initialEntries={['/listings/u1?tour=new&tenantId=c-1']}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+          <Route path="*" element={<div />} />
+        </Routes>
+        <LocationProbe />
+        <Go />
+      </MemoryRouter>,
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    await waitFor(() => expect(within(dialog).getByRole('group', { name: 'Tenant' })).toHaveTextContent('Tia Moss'));
+    // c-2 is not in the candidate list (and getContact is unmocked), so the
+    // locked side falls back to the id - never the previous tenant's name.
+    fireEvent.click(screen.getByRole('button', { name: 'test-go', hidden: true }));
+    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/listings/u1?tour=new&tenantId=c-2'));
+    const reopened = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    await waitFor(() => expect(within(reopened).getByRole('group', { name: 'Tenant' })).toHaveTextContent('c-2'));
+    expect(within(reopened).getByRole('group', { name: 'Tenant' })).not.toHaveTextContent('Tia Moss');
+  });
+
+  it('after a create from the URL entry, Back returns to the card WITHOUT reopening the form', async () => {
+    createTour.mockResolvedValue({ tourId: 't-new', tenantId: 'c-1', unitId: 'u1', tourType: 'self_guided', status: 'requested' });
+    useListing.mockReturnValue({ ...READY, unit, recipients: { status: 'ready', rows: [] } });
+    function Back(): React.JSX.Element {
+      const navigate = useNavigate();
+      return <button type="button" onClick={() => void navigate(-1)}>test-back</button>;
+    }
+    render(
+      <MemoryRouter initialEntries={['/listings/u1?tour=new&tenantId=c-1']}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+          <Route path="*" element={<div />} />
+        </Routes>
+        <LocationProbe />
+        <Back />
+      </MemoryRouter>,
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: /^Schedule$/ })).toBeEnabled());
+    await userEvent.click(within(dialog).getByRole('button', { name: /^Schedule$/ }));
+    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/tours/t-new'));
+    await userEvent.click(screen.getByRole('button', { name: 'test-back' }));
+    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent(/^\/listings\/u1$/));
+    expect(screen.queryByRole('dialog', { name: 'Schedule a tour' })).not.toBeInTheDocument();
+  });
+
+  it('a deleted property shows the outcomes but no actions, and ?tour=new does not open the form', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...unit, deleted_at: '2026-10-01T00:00:00.000Z' },
+      recipients: { status: 'ready', rows: [sent()] },
+    });
+    renderAt('u1', '?tour=new');
+    expect(within(card()).getByText('No reply yet')).toBeInTheDocument();
+    expect(within(card()).queryByRole('button', { name: /^Mark / })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Schedule a tour' })).not.toBeInTheDocument();
   });
 });

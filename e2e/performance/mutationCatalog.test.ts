@@ -377,7 +377,9 @@ describe('dashboard mutation inventory', () => {
     // addOrg, patchOrg, mergeOrg, deleteOrg, resolveNotOnList, runOrgRewriteAgain).
     // + makeCaseworker and dismissPossibleCaseworker (caseworkers: POST
     // /api/contacts/:contactId/caseworker-review, one function per action).
-    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(120);
+    // + setListingSendOutcome (last-heard-from: POST
+    // /api/units/:unitId/recipients/:contactId/outcome).
+    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(121);
     expect(new Set(discoveredFingerprints).size).toBe(discoveredFingerprints.length);
     expect(new Set(checkedInFingerprints).size).toBe(checkedInFingerprints.length);
     expect(checkedInFingerprints).toEqual(discoveredFingerprints);

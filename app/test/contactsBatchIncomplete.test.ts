@@ -242,3 +242,43 @@ describe('broadcast send refuses a partial selection read', () => {
     await queueAdapter.settle();
   });
 });
+
+describe('contactsRepo.getRecipientDisplaysByIds - requireComplete (last-heard-from D12)', () => {
+  const logger = createLogger({ destination: createLogCapture().stream });
+
+  it('DROPS unprocessed keys by default (a label read)', async () => {
+    const { doc } = stubDoc({ withholdPerRequest: 1 });
+    const contacts = createContactsRepo({ doc, env: testEnv, logger });
+    expect((await contacts.getRecipientDisplaysByIds(['c-1', 'c-2', 'c-3'])).size).toBe(2);
+  });
+
+  it('THROWS IncompleteBatchReadError under requireComplete (an outcome read)', async () => {
+    const { doc } = stubDoc({ withholdPerRequest: 1 });
+    const contacts = createContactsRepo({ doc, env: testEnv, logger });
+    await expect(
+      contacts.getRecipientDisplaysByIds(['c-1', 'c-2', 'c-3'], { requireComplete: true }),
+    ).rejects.toBeInstanceOf(IncompleteBatchReadError);
+  });
+
+  it('asks for status through a placeholder (a DynamoDB reserved word) and the three new attributes', async () => {
+    const inputs: Array<Record<string, unknown>> = [];
+    const doc = {
+      async send(command: { input: Record<string, unknown> }) {
+        inputs.push(command.input);
+        const requestItems = command.input['RequestItems'] as Record<string, { Keys: Array<{ contactId: string }> }>;
+        const table = Object.keys(requestItems)[0]!;
+        return { Responses: { [table]: requestItems[table]!.Keys.map(({ contactId }) => ({ contactId })) } };
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const contacts = createContactsRepo({ doc, env: testEnv, logger });
+    await contacts.getRecipientDisplaysByIds(['c-1'], { requireComplete: true });
+    const req = Object.values(inputs[0]!['RequestItems'] as Record<string, Record<string, unknown>>)[0]!;
+    const projection = String(req['ProjectionExpression']);
+    const names = req['ExpressionAttributeNames'] as Record<string, string>;
+    expect(projection).toContain('#status');
+    expect(names['#status']).toBe('status');
+    expect(Object.values(names)).toEqual(
+      expect.arrayContaining(['last_heard_from_at', 'sms_opt_out', 'sms_unreachable', 'type', 'role', 'deleted_at', 'phone']),
+    );
+  });
+});

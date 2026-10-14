@@ -79,7 +79,9 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
   '/contacts/landlords': CONTACT_SHAPES,
   '/contacts/unknown': CONTACT_SHAPES,
   '/contacts/deleted': CONTACT_DELETED_SHAPES,
-  '/listings': UNIT_SHAPES,
+  // last-heard-from 5.6: the Active view's "<n> waiting" counts (useFollowUpCounts)
+  // read the follow-ups list on mount; the Deleted view never does.
+  '/listings': [...UNIT_SHAPES, '/api/broadcasts/follow-ups?#required'],
   '/listings/deleted': UNIT_DELETED_SHAPES,
   '/tours': [
     '/api/tours?from&to#required', '/api/tours?status#required', ...CONTACT_SHAPES,
@@ -106,7 +108,9 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
     '/api/unmatched-email?filter#required',
     ...CONTACT_SHAPES.map((value) => value.replace('#required', '#conditional')),
   ],
-  '/broadcasts': ['/api/broadcasts?limit#required'],
+  // last-heard-from 5.6: Matching reads the follow-ups list on mount whatever
+  // tab is active (the Follow up tab's count).
+  '/broadcasts': ['/api/broadcasts?limit#required', '/api/broadcasts/follow-ups?#required'],
   '/settings/team': ['/api/users?#required'],
   '/settings/templates': ['/api/settings?#required'],
   '/settings/notifications': [],
@@ -704,6 +708,24 @@ describe('representative resolvers', () => {
     expect(api.calls.every((call) => !call.includes('deleted=false'))).toBe(true);
   });
 
+  it('binds the first tenant the DEFAULT Tenants view renders - never an inactive or placed one', async () => {
+    const api = new FakeApi();
+    api.pages.set('/api/contacts?limit=100&type=tenant', [{
+      contacts: [
+        { contactId: 'contact-private-inactive', type: 'tenant', status: 'inactive' },
+        { contactId: 'contact-private-placed', type: 'tenant', status: 'placed' },
+        { contactId: 'contact-private-gone', type: 'tenant', status: 'searching', deleted_at: 'x' },
+        { contactId: 'contact-private-live', type: 'tenant', status: 'searching' },
+      ],
+      nextCursor: null,
+    }]);
+    await expect(resolveContactDetail(api, new FakeDom(new Set(['/contacts/contact-private-live'])))).resolves.toEqual({
+      kind: 'resolved', coldPath: '/contacts/contact-private-live',
+      warmTarget: { path: '/contacts/contact-private-live', query: { kind: 'absent' } },
+      branch: { kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0 },
+    });
+  });
+
   it('retains only sanitized conditional branch facts and maps closed skip reasons', () => {
     const branches: RouteContractBranch[] = [
       { kind: 'contact_detail', contactType: 'landlord', landlordUnitCount: 17 },
@@ -872,6 +894,36 @@ describe('Properties list terminal copy', () => {
         expect(['text', 'list'], `${surfaceId}: unexpected role ${contract.role}`).toContain(contract.role);
         expect(pageSource, `${surfaceId} waits for ${contract.role} "${name}"`).toContain(needle);
       }
+    }
+  });
+});
+
+describe('Tenants list terminal copy', () => {
+  // The Tenants view's Status facet HIDES inactive and placed tenants by default
+  // (spec 2026-10-12 5.7), so a world whose every tenant is inactive or placed
+  // renders neither the rows list nor "No tenants yet" - it renders the
+  // filter-miss line. The contract must accept it, or that world samples as a
+  // misattributed ready_timeout (build-research adjudication tenants-F2).
+  it('accepts the status-hidden empty state, a string the page actually renders', () => {
+    const tenants = ROUTES.find((candidate) => candidate.surfaceId === '/contacts/tenants')!;
+    expect(tenants.terminal.empty.map((contract) => contract.name)).toEqual([
+      'No tenants yet',
+      'No tenants match the selected filters.',
+    ]);
+    // Either empty state alone is ready (two single-locator alternatives).
+    expect(tenants.terminal.emptyAlternatives).toHaveLength(2);
+    expect(tenants.terminal.emptyAlternatives.every((alternative) => alternative.length === 1)).toBe(true);
+    const pageSource = readFileSync(
+      fileURLToPath(new URL('../../dashboard/src/routes/contacts/ContactsList.tsx', import.meta.url)),
+      'utf8',
+    );
+    expect(pageSource).toContain("'No tenants match the selected filters.'");
+  });
+
+  it('keeps the other contact lists on their single empty state (the facets are Tenants-only)', () => {
+    for (const surfaceId of ['/contacts', '/contacts/landlords', '/contacts/unknown', '/contacts/deleted']) {
+      const route = ROUTES.find((candidate) => candidate.surfaceId === surfaceId)!;
+      expect(route.terminal.empty, surfaceId).toHaveLength(1);
     }
   });
 });

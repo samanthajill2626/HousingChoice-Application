@@ -21,6 +21,7 @@ import { getTableSpec } from '../lib/tables.js';
 import type { ConsentMethod } from '../lib/smsCompliance.js';
 import type { TransitionSource } from '../lib/statusModel.js';
 import type { RepoDeps } from './conversationsRepo.js';
+import { normalizeInstant } from '../lib/heardFrom.js';
 
 /**
  * Suppression flags (doc §7.1 error-class handling + Voice Phase 1 §8):
@@ -221,6 +222,11 @@ export interface ContactItem {
   /** When auto-capture created the stub (ISO 8601). */
   captured_at?: string;
   created_at?: string;
+  /** ISO 8601 - the most recent inbound text, call or email FROM this contact
+   *  in any thread. Forward-only; outbound and automated traffic never moves it.
+   *  Absent = never heard from (or not yet backfilled). Written ONLY by
+   *  touchLastHeardFrom (and the seed derivation). NOT an index key. */
+  last_heard_from_at?: string;
   /**
    * A2P/CTIA consent model (spec §2). All OPTIONAL so a fast add stays fast; the
    * flexible-doc create/update path persists them without any special wiring.
@@ -358,8 +364,18 @@ export interface ContactDisplayItem {
  * fields plus the contact's `type` and `role`, so the units recipients route
  * can label a non-tenant row. A SECOND projection on purpose - the shared
  * display projection is not widened (R3-F4).
+ * last-heard-from (spec 5.5, B6/B7): plus status and the reachability facts,
+ * so the outcome reads can decide eligibility; read with requireComplete there.
  */
-export type RecipientDisplay = ContactDisplayItem & { type?: ContactType; role?: string };
+export type RecipientDisplay = ContactDisplayItem & {
+  type?: ContactType;
+  role?: string;
+  /** last-heard-from spec 5.5 (one eligibility rule, lib/listingSendOutcome.ts). */
+  status?: string;
+  last_heard_from_at?: string;
+  sms_opt_out?: boolean;
+  sms_unreachable?: boolean;
+};
 
 /**
  * A contact is soft-deleted when it carries a non-empty `deleted_at` stamp.
@@ -716,8 +732,11 @@ export interface ContactsRepo {
   /**
    * getDisplaysByIds plus `type` and `role` (plan 3.3) - for the units
    * recipients route ONLY (R3-F4). Missing ids are absent from the map.
+   * requireComplete: throw IncompleteBatchReadError on an unread key (an
+   * OUTCOME read - the outcome-serving routes, spec D12); a genuinely missing
+   * contact is still just absent.
    */
-  getRecipientDisplaysByIds(contactIds: string[]): Promise<Map<string, RecipientDisplay>>;
+  getRecipientDisplaysByIds(contactIds: string[], opts?: { requireComplete?: boolean }): Promise<Map<string, RecipientDisplay>>;
   /**
    * Batch-read WHOLE contacts by primary key - the `getById` fan-out killer for
    * callers that read attributes outside the display projection (roster
@@ -913,6 +932,11 @@ export interface ContactsRepo {
     expect: { housingAuthority?: string | null; agency?: string | null; organization?: string | null },
     next: { housingAuthority?: string | null; agency?: string; organization?: string | null },
   ): Promise<'written' | 'skipped'>;
+  /** Forward-only, best-effort bump of last_heard_from_at. 'skipped' when the
+   *  contact row does not exist, the stored value is already later, or `at`
+   *  is unparseable; 'failed' on any other error (logged by the CALLER); never
+   *  throws. */
+  touchLastHeardFrom(contactId: string, at: string): Promise<'written' | 'skipped' | 'failed'>;
 }
 
 export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
@@ -1013,14 +1037,20 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
 
   /**
    * The recipient projection (plan 3.3; R3-F4): the display fields plus `type`
-   * and `role` - both DynamoDB reserved words, hence placeholders.
+   * and `role` - both DynamoDB reserved words, hence placeholders - plus
+   * status (reserved - placeholder) and the last-heard-from reachability facts.
    */
   const RECIPIENT_PROJECTION = {
-    ProjectionExpression: '#contactId, #firstName, #lastName, #phone, #deletedAt, #type, #role',
+    ProjectionExpression:
+      '#contactId, #firstName, #lastName, #phone, #deletedAt, #type, #role, #status, #lastHeardFromAt, #smsOptOut, #smsUnreachable',
     ExpressionAttributeNames: {
       ...DISPLAY_PROJECTION.ExpressionAttributeNames,
       '#type': 'type',
       '#role': 'role',
+      '#status': 'status',
+      '#lastHeardFromAt': 'last_heard_from_at',
+      '#smsOptOut': 'sms_opt_out',
+      '#smsUnreachable': 'sms_unreachable',
     },
   } as const;
 
@@ -1281,8 +1311,11 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       return batchGetByIds<ContactDisplayItem>(contactIds, { projection: DISPLAY_PROJECTION });
     },
 
-    async getRecipientDisplaysByIds(contactIds) {
-      return batchGetByIds<RecipientDisplay>(contactIds, { projection: RECIPIENT_PROJECTION });
+    async getRecipientDisplaysByIds(contactIds, opts) {
+      return batchGetByIds<RecipientDisplay>(contactIds, {
+        projection: RECIPIENT_PROJECTION,
+        requireComplete: opts?.requireComplete,
+      });
     },
 
     async getManyByIds(contactIds, opts) {
@@ -1911,6 +1944,44 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       }
       log.info({ contactId, setFields: sets.length, removedFields: removes.length }, 'contact org fields rewritten');
       return 'written';
+    },
+
+    async touchLastHeardFrom(contactId, at) {
+      // Pointer rows exist, so attribute_exists alone would let one be stamped;
+      // they are never touch targets (spec 5.1).
+      if (contactId.startsWith(PHONE_REF_PREFIX) || contactId.startsWith(EMAIL_REF_PREFIX)) {
+        return 'skipped';
+      }
+      // The ONE writer normalizes: the condition compares stored strings
+      // lexically, and the importer hands over the export's raw createdAt.
+      const normalized = normalizeInstant(at);
+      if (normalized === undefined) {
+        log.warn({ contactId }, 'contacts: touchLastHeardFrom refused an unparseable instant - skipped');
+        return 'skipped';
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { contactId },
+            UpdateExpression: 'SET #lhf = :at',
+            // attribute_exists is LOAD-BEARING: UpdateItem on an absent key
+            // CREATES the item, and touch targets come from rosters and stored
+            // sender keys that can outlive a hard-deleted contact.
+            ConditionExpression: 'attribute_exists(contactId) AND (attribute_not_exists(#lhf) OR #lhf < :at)',
+            ExpressionAttributeNames: { '#lhf': 'last_heard_from_at' },
+            ExpressionAttributeValues: { ':at': normalized },
+          }),
+        );
+        return 'written';
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          // "No such contact" and "already as late" share one exception.
+          log.debug({ contactId }, 'contacts: last_heard_from_at not moved (no row, or already as late)');
+          return 'skipped';
+        }
+        return 'failed';
+      }
     },
   };
 }

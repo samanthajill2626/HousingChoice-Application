@@ -1,0 +1,333 @@
+<title>Follow-up List Mockups</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<style>
+  /* Layout: one column of stacked "screens", each option framed like a dashboard panel; the same example data in every option so the comparison is about place, not content. */
+  :root {
+    --bg: #f6f7f5;
+    --panel: #ffffff;
+    --fg: #1d2420;
+    --muted: #5d6a63;
+    --line: #d9dfdb;
+    --accent: #1f6f78;
+    --accent-soft: #e2f0f1;
+    --warn: #8a5a00;
+    --warn-soft: #fbefd6;
+    --good: #2f6b3a;
+    --good-soft: #e2f1e5;
+    --off: #6b6f6d;
+    --off-soft: #ececea;
+    --display: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --body: "IBM Plex Sans", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #151917; --panel: #1e2422; --fg: #e8ece9; --muted: #a3ada7; --line: #343c38;
+      --accent: #7fc4cb; --accent-soft: #1d3538; --warn: #e8b35a; --warn-soft: #3a2d12;
+      --good: #8fcf9a; --good-soft: #1e3523; --off: #a0a6a3; --off-soft: #2b302e;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #151917; --panel: #1e2422; --fg: #e8ece9; --muted: #a3ada7; --line: #343c38;
+    --accent: #7fc4cb; --accent-soft: #1d3538; --warn: #e8b35a; --warn-soft: #3a2d12;
+    --good: #8fcf9a; --good-soft: #1e3523; --off: #a0a6a3; --off-soft: #2b302e;
+    color-scheme: dark;
+  }
+  body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.5; }
+  .wrap { max-width: 960px; margin: 0 auto; padding-block: 32px 64px; padding-inline: 16px; display: grid; gap: 40px; }
+  h1, h2, h3 { font-family: var(--display); font-weight: 600; text-wrap: balance; margin: 0; }
+  h1 { font-size: 30px; line-height: 1.2; }
+  h2 { font-size: 22px; }
+  h3 { font-size: 17px; }
+  p { margin: 0; max-width: 68ch; }
+  .lede { color: var(--muted); font-size: 16px; }
+  .eyebrow { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); font-weight: 600; }
+  nav { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 14px; }
+  nav a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; }
+  nav a:hover, nav a:focus-visible { border-bottom-color: var(--accent); outline: none; }
+  section { display: grid; gap: 14px; }
+  .rules { display: grid; gap: 8px; padding: 14px 16px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 6px 6px 0; }
+  .rules li { margin-left: 18px; }
+  .rules ul { margin: 0; padding: 0; display: grid; gap: 4px; }
+
+  /* The framed "screen" */
+  .screen { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow: hidden; }
+  .chrome { display: flex; align-items: center; gap: 14px; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+  .chrome .crumb { font-weight: 600; color: var(--fg); }
+  .tabs { display: flex; gap: 2px; padding: 0 14px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .tab { padding: 10px 12px; font-size: 14px; color: var(--muted); border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tab.on { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+  .count { display: inline-block; min-width: 20px; padding: 0 6px; margin-left: 6px; border-radius: 10px; background: var(--accent); color: var(--panel); font-size: 12px; font-weight: 600; text-align: center; line-height: 20px; }
+  .body { padding: 14px; display: grid; gap: 16px; }
+  .group h3 { padding-bottom: 6px; border-bottom: 1px solid var(--line); margin-bottom: 4px; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .group h3 .sub { font-family: var(--body); font-weight: 400; font-size: 13px; color: var(--muted); }
+  .rows { display: grid; gap: 0; }
+  .row { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.2fr) auto; gap: 6px 14px; align-items: center; padding: 10px 4px; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: 0; }
+  .row .who { font-weight: 500; min-width: 0; }
+  .row .who .prop { color: var(--muted); font-weight: 400; font-size: 13px; display: block; }
+  .row .when { font-size: 13px; color: var(--muted); display: grid; gap: 2px; min-width: 0; }
+  .row .when b { color: var(--fg); font-weight: 500; }
+  .row .act { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: center; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+  .chip.wait { background: var(--warn-soft); color: var(--warn); }
+  .chip.replied { background: var(--good-soft); color: var(--good); }
+  .chip.tour { background: var(--accent-soft); color: var(--accent); }
+  .chip.no { background: var(--off-soft); color: var(--off); }
+  .btn { font: inherit; font-size: 13px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); cursor: default; white-space: nowrap; }
+  .btn.primary { border-color: var(--accent); color: var(--accent); }
+  .btn.quiet { color: var(--muted); }
+  .link { color: var(--accent); font-size: 13px; white-space: nowrap; }
+  .tnum { font-variant-numeric: tabular-nums; }
+  .legend { font-size: 13px; color: var(--muted); }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px 14px; display: grid; gap: 8px; }
+  .card h3 { font-size: 15px; }
+  .list { display: grid; }
+  .list .item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; padding: 8px 0; border-bottom: 1px solid var(--line); align-items: center; }
+  .list .item:last-child { border-bottom: 0; }
+  .list .item .meta { color: var(--muted); font-size: 13px; }
+  .pill { font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--good-soft); color: var(--good); font-weight: 600; margin-left: 6px; }
+  .pill.n { background: var(--warn-soft); color: var(--warn); }
+  .qa { display: grid; gap: 12px; counter-reset: q; }
+  .qa .q { display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
+  .qa .q::before { counter-increment: q; content: counter(q); font-family: var(--display); font-size: 20px; color: var(--accent); line-height: 1.1; }
+  .qa .q b { display: block; }
+  .qa .q span { color: var(--muted); font-size: 14px; }
+  .pro { font-size: 14px; color: var(--muted); }
+  .pro b { color: var(--fg); font-weight: 500; }
+  @media (max-width: 560px) {
+    .row { grid-template-columns: 1fr; }
+    .row .act { justify-content: flex-start; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header style="display:grid;gap:10px">
+    <span class="eyebrow">HousingChoice - for Sam, October 2026</span>
+    <h1>Where should the "waiting on a reply" list live?</h1>
+    <p class="lede">Every property sent to a tenant will get a status: No reply yet, Replied, Interested, or Not interested. One list will show the sends still waiting on a reply. The three mockups below show the same five tenants in three different places. The names and properties are examples.</p>
+    <nav aria-label="Sections">
+      <a href="#rules">The rules</a>
+      <a href="#a">Option A - Matching page</a>
+      <a href="#b">Option B - Today page</a>
+      <a href="#c">Option C - on each property</a>
+      <a href="#rows">What every property shows</a>
+      <a href="#questions">Five questions</a>
+    </nav>
+  </header>
+
+  <section id="rules">
+    <h2>The rules, in plain words</h2>
+    <div class="rules">
+      <ul>
+        <li><b>Last heard from</b> is the last time the tenant texted, called or emailed us, in any thread (one-to-one, relay or group). Texts we send, including blasts and reminders, do not count.</li>
+        <li><b>Replied</b> means the tenant was heard from after the property was sent, in any thread. It does not say what they said; it says go read the thread.</li>
+        <li><b>Interested</b> is one click that creates the tour request, so the tenant lands on Needs booking.</li>
+        <li><b>Not interested</b> is one click. That tenant then shows as "Not interested" when the same property is matched again, and comes unchecked.</li>
+        <li>A send shows on the waiting list after <b>2 days</b> of quiet (proposed), and drops off <b>14 days</b> after the send (proposed). Inactive and Placed tenants never show.</li>
+        <li>Blasts and one-to-one sends are treated the same.</li>
+      </ul>
+    </div>
+    <p class="legend">Example data in every mockup, as of Monday Oct 12: Tasha replied Oct 7 and has been quiet since; Marcus never replied; Dario was last heard from before the send; Jamal replied the day it was sent; Keisha replied yesterday (so she is not waiting yet); Lena asked for a tour; Rhonda said no.</p>
+  </section>
+
+  <section id="a">
+    <span class="eyebrow">Option A</span>
+    <h2>A "Follow up" tab on the Matching page</h2>
+    <p class="pro"><b>Why here:</b> this is the page where sends start. The list is grouped by property, like a sticky note per property, longest-waiting first.</p>
+    <div class="screen" aria-label="Option A mockup">
+      <div class="chrome"><span class="crumb">Matching</span><span>Send a property</span></div>
+      <div class="tabs">
+        <span class="tab">All</span><span class="tab">Drafts</span><span class="tab">Sent</span><span class="tab">Failed</span>
+        <span class="tab on">Follow up<span class="count">4</span></span>
+      </div>
+      <div class="body">
+        <div class="group">
+          <h3>672 Cameron Alexander Blvd A <span class="sub">1 waiting</span></h3>
+          <div class="rows">
+            <div class="row">
+              <span class="who">Dario Vance</span>
+              <span class="when"><span>Sent <b class="tnum">Oct 2</b></span><span>Last heard from <b class="tnum">Sep 30</b></span></span>
+              <span class="act"><span class="chip wait">No reply yet, 10 days</span><button class="btn primary">Interested</button><button class="btn">Not interested</button><a class="link">Text</a></span>
+            </div>
+          </div>
+        </div>
+        <div class="group">
+          <h3>1427 Griffin St, downstairs <span class="sub">2 waiting</span></h3>
+          <div class="rows">
+            <div class="row">
+              <span class="who">Marcus Dale</span>
+              <span class="when"><span>Sent <b class="tnum">Oct 6</b></span><span>Last heard from <b>Never</b></span></span>
+              <span class="act"><span class="chip wait">No reply yet, 6 days</span><button class="btn primary">Interested</button><button class="btn">Not interested</button><a class="link">Text</a></span>
+            </div>
+            <div class="row">
+              <span class="who">Tasha Reed</span>
+              <span class="when"><span>Sent <b class="tnum">Oct 6</b></span><span>Last heard from <b class="tnum">Oct 7</b></span></span>
+              <span class="act"><span class="chip replied">Replied, quiet 5 days</span><button class="btn primary">Interested</button><button class="btn">Not interested</button><a class="link">Text</a></span>
+            </div>
+          </div>
+        </div>
+        <div class="group">
+          <h3>88 Peachtree Pl 2B <span class="sub">1 waiting</span></h3>
+          <div class="rows">
+            <div class="row">
+              <span class="who">Jamal Whitfield</span>
+              <span class="when"><span>Sent <b class="tnum">Oct 8</b></span><span>Last heard from <b class="tnum">Oct 8</b></span></span>
+              <span class="act"><span class="chip replied">Replied, quiet 4 days</span><button class="btn primary">Interested</button><button class="btn">Not interested</button><a class="link">Text</a></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="b">
+    <span class="eyebrow">Option B</span>
+    <h2>A "Waiting on a reply" section on the Today page</h2>
+    <p class="pro"><b>Why here:</b> Today is the page for "what needs me now". The list reads as a to-do list, one flat list, longest-waiting first, next to Unreplied and Follow-ups due.</p>
+    <div class="screen" aria-label="Option B mockup">
+      <div class="chrome"><span class="crumb">Today</span><span>Monday, Oct 12</span></div>
+      <div class="body">
+        <div class="group">
+          <h3>Unreplied <span class="sub">3</span></h3>
+          <div class="rows">
+            <div class="row"><span class="who">Keisha Monroe<span class="prop">Texted yesterday, 4:12 PM</span></span><span class="when"></span><span class="act"><a class="link">Open</a></span></div>
+            <div class="row"><span class="who">Keystone PM (landlord)<span class="prop">Emailed today, 9:40 AM</span></span><span class="when"></span><span class="act"><a class="link">Open</a></span></div>
+          </div>
+        </div>
+        <div class="group">
+          <h3>Waiting on a reply <span class="sub">4 sends</span></h3>
+          <div class="rows">
+            <div class="row">
+              <span class="who">Dario Vance<span class="prop">672 Cameron Alexander Blvd A, sent Oct 2</span></span>
+              <span class="when"><span>Last heard from <b class="tnum">Sep 30</b></span></span>
+              <span class="act"><span class="chip wait">No reply yet, 10 days</span><button class="btn primary">Interested</button><button class="btn">Not interested</button><a class="link">Text</a></span>
+            </div>
+            <div class="row">
+              <span class="who">Marcus Dale<span class="prop">1427 Griffin St, downstairs, sent Oct 6</span></span>
+              <span class="when"><span>Last heard from <b>Never</b></span></span>
+              <span class="act"><span class="chip wait">No reply yet, 6 days</span><button class="btn primary">Interested</button><button class="btn">Not interested</button><a class="link">Text</a></span>
+            </div>
+            <div class="row">
+              <span class="who">Tasha Reed<span class="prop">1427 Griffin St, downstairs, sent Oct 6</span></span>
+              <span class="when"><span>Last heard from <b class="tnum">Oct 7</b></span></span>
+              <span class="act"><span class="chip replied">Replied, quiet 5 days</span><button class="btn primary">Interested</button><button class="btn">Not interested</button><a class="link">Text</a></span>
+            </div>
+            <div class="row">
+              <span class="who">Jamal Whitfield<span class="prop">88 Peachtree Pl 2B, sent Oct 8</span></span>
+              <span class="when"><span>Last heard from <b class="tnum">Oct 8</b></span></span>
+              <span class="act"><span class="chip replied">Replied, quiet 4 days</span><button class="btn primary">Interested</button><button class="btn">Not interested</button><a class="link">Text</a></span>
+            </div>
+          </div>
+        </div>
+        <div class="group">
+          <h3>Follow-ups due <span class="sub">1</span></h3>
+          <div class="rows">
+            <div class="row"><span class="who">Lena Ortiz<span class="prop">Placement - Touring, follow-up due today</span></span><span class="when"></span><span class="act"><a class="link">Open</a></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="c">
+    <span class="eyebrow">Option C</span>
+    <h2>No separate list: a count on each property, and the waiting rows first on the property page</h2>
+    <p class="pro"><b>Why here:</b> work property by property, as today. The Properties list says which property needs chasing; the property page puts the waiting rows at the top.</p>
+    <div class="cols">
+      <div class="screen" aria-label="Option C, the Properties list">
+        <div class="chrome"><span class="crumb">Properties</span><span>Available now</span></div>
+        <div class="body">
+          <div class="list">
+            <div class="item"><span>1427 Griffin St, downstairs<span class="meta"> 3 BR, Atlanta Housing Authority</span></span><span class="pill n">2 waiting</span></div>
+            <div class="item"><span>672 Cameron Alexander Blvd A<span class="meta"> 2 BR, Atlanta Housing Authority</span></span><span class="pill n">1 waiting</span></div>
+            <div class="item"><span>88 Peachtree Pl 2B<span class="meta"> 1 BR, DeKalb County</span></span><span class="pill n">1 waiting</span></div>
+            <div class="item"><span>301 Hollis Rd<span class="meta"> 3 BR, Marietta</span></span><span class="meta">Not sent yet</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="screen" aria-label="Option C, the property page Sent to card">
+        <div class="chrome"><span class="crumb">1427 Griffin St, downstairs</span><span>Sent to</span></div>
+        <div class="body">
+          <div class="rows">
+            <div class="row">
+              <span class="who">Marcus Dale</span>
+              <span class="when"><span>Sent <b class="tnum">Oct 6</b></span><span>Last heard from <b>Never</b></span></span>
+              <span class="act"><span class="chip wait">No reply yet</span><button class="btn primary">Interested</button><button class="btn">Not interested</button></span>
+            </div>
+            <div class="row">
+              <span class="who">Tasha Reed</span>
+              <span class="when"><span>Sent <b class="tnum">Oct 6</b></span><span>Last heard from <b class="tnum">Oct 7</b></span></span>
+              <span class="act"><span class="chip replied">Replied</span><button class="btn primary">Interested</button><button class="btn">Not interested</button></span>
+            </div>
+            <div class="row">
+              <span class="who">Keisha Monroe</span>
+              <span class="when"><span>Sent <b class="tnum">Oct 9</b></span><span>Last heard from <b class="tnum">Yesterday</b></span></span>
+              <span class="act"><span class="chip replied">Replied</span><button class="btn primary">Interested</button><button class="btn">Not interested</button></span>
+            </div>
+            <div class="row">
+              <span class="who">Lena Ortiz</span>
+              <span class="when"><span>Sent <b class="tnum">Oct 3</b></span><span>Last heard from <b class="tnum">Oct 5</b></span></span>
+              <span class="act"><span class="chip tour">Tour requested</span></span>
+            </div>
+            <div class="row">
+              <span class="who">Rhonda Pike</span>
+              <span class="when"><span>Sent <b class="tnum">Oct 3</b></span><span>Last heard from <b class="tnum">Oct 4</b></span></span>
+              <span class="act"><span class="chip no">Not interested</span><button class="btn quiet">Undo</button></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="rows">
+    <h2>What every property shows, whichever option wins</h2>
+    <p class="pro">The "Sent to" list on each property, and "Properties sent" on each tenant, show the same rows: when it was sent, when the tenant was last heard from, the status, and the two buttons. Interested creates the tour request and the row switches to "Tour requested". Not interested can be undone. A caseworker row has Not interested and a "Request a tour" link, since a caseworker's yes is a yes for one of their clients.</p>
+    <div class="screen" aria-label="Row states">
+      <div class="body">
+        <div class="rows">
+          <div class="row">
+            <span class="who">Marcus Dale</span>
+            <span class="when"><span>Sent <b class="tnum">Oct 6</b></span><span>Last heard from <b>Never</b></span></span>
+            <span class="act"><span class="chip wait">No reply yet</span><button class="btn primary">Interested</button><button class="btn">Not interested</button></span>
+          </div>
+          <div class="row">
+            <span class="who">Tasha Reed</span>
+            <span class="when"><span>Sent <b class="tnum">Oct 6</b></span><span>Last heard from <b class="tnum">Oct 7</b></span></span>
+            <span class="act"><span class="chip replied">Replied</span><button class="btn primary">Interested</button><button class="btn">Not interested</button></span>
+          </div>
+          <div class="row">
+            <span class="who">Lena Ortiz</span>
+            <span class="when"><span>Sent <b class="tnum">Oct 3</b></span><span>Last heard from <b class="tnum">Oct 5</b></span></span>
+            <span class="act"><span class="chip tour">Tour requested</span></span>
+          </div>
+          <div class="row">
+            <span class="who">Rhonda Pike</span>
+            <span class="when"><span>Sent <b class="tnum">Oct 3</b></span><span>Last heard from <b class="tnum">Oct 4</b></span></span>
+            <span class="act"><span class="chip no">Not interested</span><button class="btn quiet">Undo</button></span>
+          </div>
+          <div class="row">
+            <span class="who">Denise Carter <span class="prop">Caseworker, Hope Atlanta</span></span>
+            <span class="when"><span>Sent <b class="tnum">Oct 8</b></span><span>Last heard from <b class="tnum">Oct 9</b></span></span>
+            <span class="act"><span class="chip replied">Replied</span><a class="link">Request a tour</a><button class="btn">Not interested</button></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="pro">On the Tenants tab, each tenant will also show when they were last heard from, with the most recent first, and the Inactive and Placed tenants hidden unless turned on. On the Matching page, the Review recipients list shows each tenant's status, housing authority and last heard from, most recent first, and anyone who said no to that property shows unchecked with "Not interested".</p>
+  </section>
+
+  <section id="questions">
+    <h2>Five questions</h2>
+    <div class="qa">
+      <div class="q"><div><b>Where should the list live: A, B or C? (A and C can both be done.)</b><span>Proposed: A, the Follow up tab on Matching.</span></div></div>
+      <div class="q"><div><b>How long after a send with no reply should a tenant appear?</b><span>Proposed: 2 days of quiet. A tenant who replied on day 1 and then went quiet appears on day 3.</span></div></div>
+      <div class="q"><div><b>How far back should it look?</b><span>Proposed: 14 days. A send older than two weeks drops off the list, even with no reply.</span></div></div>
+      <div class="q"><div><b>Should a tenant who replied and then went quiet show too, or only tenants who never replied?</b><span>Proposed: yes, shown as Replied, since "replied, then went quiet" is the usual case.</span></div></div>
+      <div class="q"><div><b>Is anything missing from a row?</b><span>Proposed: name, property, sent date, last heard from, status, Interested, Not interested, Text.</span></div></div>
+    </div>
+  </section>
+</div>

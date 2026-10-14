@@ -13,6 +13,7 @@ import type {
   BroadcastsPage,
   BroadcastStatsView,
   BroadcastStatus,
+  FollowUpsResponse,
   PreviewResponse,
   SettingsPatch,
   SettingsResponse,
@@ -1175,6 +1176,22 @@ export async function getUnitRecipients(
   return res.recipients;
 }
 
+/** POST /api/units/:unitId/recipients/:contactId/outcome (last-heard-from spec
+ *  5.4) - record or clear a send outcome; answers `{ row }`, the re-projected
+ *  row (the shape EVERY caller destructures - plan head 3.4 #4; the Follow up
+ *  view in S7 uses it too). A 503 whose body carries `saved: true` means the
+ *  write landed but the re-read failed (lib/listingOutcomeErrors.ts reads it). */
+export async function setListingSendOutcome(
+  unitId: string,
+  contactId: string,
+  outcome: 'interested' | 'not_interested' | 'clear',
+): Promise<{ row: ListingSendRow }> {
+  return request<{ row: ListingSendRow }>(
+    `/api/units/${encodeURIComponent(unitId)}/recipients/${encodeURIComponent(contactId)}/outcome`,
+    { method: 'POST', body: { outcome } },
+  );
+}
+
 /** GET /api/units/:id/similar (C6) - available comps ranked by similarity.
  *  404s until BE6 lands ? the "Similar properties" panel renders a "pending
  *  backend" state. */
@@ -1949,6 +1966,14 @@ export function listBroadcasts(
 ): Promise<BroadcastsPage> {
   return request<BroadcastsPage>('/api/broadcasts', {
     query: { status: params.status, cursor: params.cursor, limit: params.limit },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/broadcasts/follow-ups - the waiting list (last-heard-from spec 5.6).
+ *  Throws ApiError 503 outcome_unavailable when a required read failed. */
+export function getFollowUps(signal?: AbortSignal): Promise<FollowUpsResponse> {
+  return request<FollowUpsResponse>('/api/broadcasts/follow-ups', {
     ...(signal !== undefined && { signal }),
   });
 }

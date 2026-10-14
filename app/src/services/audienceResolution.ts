@@ -46,6 +46,16 @@ export interface ResolvedContact {
    * per-candidate flag (not a pre-exclusion) so staff can see + fix them.
    */
   has_consent: boolean;
+  /**
+   * last-heard-from (spec 5.3): the contact's lifecycle status, for the review
+   * row's StatusBadge kind="tenant". TENANT rows only - the resolver is
+   * tenant-fenced and resolveSeeds omits it for a partner seed (a partner's
+   * needs_review | active is not a tenant status).
+   */
+  status?: string;
+  /** last-heard-from: contact.last_heard_from_at (any type), for the review
+   *  row's column and its order. */
+  lastHeardFromAt?: string;
 }
 
 export interface ResolvedAudience {
@@ -167,6 +177,9 @@ export function createAudienceResolutionService(
           ...(lastName !== undefined && { lastName }),
           ...(voucherSize !== undefined && { voucherSize }),
           ...(housingAuthority !== undefined && { housingAuthority }),
+          // last-heard-from (spec 5.3): projection only - no filter changes.
+          ...(typeof contact.status === 'string' && contact.status.length > 0 && { status: contact.status }),
+          ...(typeof contact.last_heard_from_at === 'string' && { lastHeardFromAt: contact.last_heard_from_at }),
           // A2P/CTIA: per-candidate consent flag (spec §4). NOT a pre-exclusion
           // here — the preview surfaces it and the fan-out fences on it.
           has_consent: hasSmsConsent(contact),

@@ -11,7 +11,7 @@
 // was removed 2026-07-08 ('scheduled' covers it) - so there is no 'confirmed'
 // bucket to adjudicate here; a booked tour is already 'scheduled'.
 import { describe, expect, it } from 'vitest';
-import { deriveTourSignal } from '../src/lib/listingSendTour.js';
+import { deriveTourActivityAt, deriveTourSignal } from '../src/lib/listingSendTour.js';
 import type { TourItem } from '../src/repos/toursRepo.js';
 
 /** Minimal TourItem builder for the pairing (unit-1, tenant-1). */
@@ -165,5 +165,93 @@ describe('deriveTourSignal - auto-closed tours', () => {
       tour({ tourId: 't-naf', status: 'closed', outcome: 'not_a_fit', moveForward: false, convertible: false }),
     ]);
     expect(signal).toBeUndefined();
+  });
+});
+
+describe('deriveTourActivityAt - the latest tour ACTIVITY instant (spec 5.4, D11, 14.7)', () => {
+  it('no tours -> undefined', () => {
+    expect(deriveTourActivityAt([])).toBeUndefined();
+  });
+
+  it('a fresh requested tour -> its createdAt (lastMarkedAt absent until a person acts)', () => {
+    expect(deriveTourActivityAt([tour({ tourId: 't1', status: 'requested', createdAt: '2026-08-01T00:00:00.000Z' })])).toBe(
+      '2026-08-01T00:00:00.000Z',
+    );
+  });
+
+  it('max over EVERY qualifying tour, not the chip winner: an older toured tour behind a newer request', () => {
+    const tours = [
+      tour({ tourId: 't-old', status: 'toured', createdAt: '2026-07-01T00:00:00.000Z', lastMarkedAt: '2026-07-05T00:00:00.000Z' }),
+      tour({ tourId: 't-new', status: 'requested', createdAt: '2026-08-01T00:00:00.000Z' }),
+    ];
+    // The chip is the most PROGRESSED tour (toured) ...
+    expect(deriveTourSignal(tours)).toEqual({ tourId: 't-old', state: 'toured' });
+    // ... but the activity is the request made after it.
+    expect(deriveTourActivityAt(tours)).toBe('2026-08-01T00:00:00.000Z');
+  });
+
+  it('a rescheduled or reopened tour counts from lastMarkedAt', () => {
+    expect(
+      deriveTourActivityAt([tour({ tourId: 't1', status: 'scheduled', createdAt: '2026-07-01T00:00:00.000Z', lastMarkedAt: '2026-09-01T00:00:00.000Z' })]),
+    ).toBe('2026-09-01T00:00:00.000Z');
+    // Reopened from an auto-close back to toured (reopenIf stamps lastMarkedAt).
+    expect(
+      deriveTourActivityAt([tour({ tourId: 't2', status: 'toured', createdAt: '2026-06-01T00:00:00.000Z', lastMarkedAt: '2026-09-10T00:00:00.000Z' })]),
+    ).toBe('2026-09-10T00:00:00.000Z');
+  });
+
+  it('NEVER updatedAt: a later automated touch (group open, conversion claim) moves nothing', () => {
+    expect(
+      deriveTourActivityAt([
+        tour({ tourId: 't1', status: 'scheduled', createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-12-01T00:00:00.000Z' }),
+      ]),
+    ).toBe('2026-07-01T00:00:00.000Z');
+  });
+
+  // Knowing rewrite (spec 14.7, review A R2-1): this case used to pin that a
+  // non-qualifying tour contributes NOTHING. Supersession is now durable - a
+  // tour's CREATION counts whatever became of it - while a cancel / no-show /
+  // not-a-fit MARK (its lastMarkedAt) never counts.
+  it('a non-qualifying tour contributes its createdAt, never its lastMarkedAt (canceled, no_show, a not-a-fit close, auto-closed from scheduled)', () => {
+    const dead = [
+      tour({ tourId: 'c', status: 'canceled', createdAt: '2026-11-01T00:00:00.000Z', lastMarkedAt: '2026-11-09T00:00:00.000Z' }),
+      tour({ tourId: 'n', status: 'no_show', createdAt: '2026-11-02T00:00:00.000Z', lastMarkedAt: '2026-11-08T00:00:00.000Z' }),
+      tour({ tourId: 'x', status: 'closed', outcome: 'not_a_fit', createdAt: '2026-11-03T00:00:00.000Z', lastMarkedAt: '2026-11-07T00:00:00.000Z' }),
+      tour({ tourId: 'a', status: 'closed', autoClosedFrom: 'scheduled', createdAt: '2026-11-04T00:00:00.000Z' }),
+    ];
+    // Each alone: its creation instant, not its later mark.
+    expect(deriveTourActivityAt([dead[0]!])).toBe('2026-11-01T00:00:00.000Z');
+    expect(deriveTourActivityAt([dead[1]!])).toBe('2026-11-02T00:00:00.000Z');
+    expect(deriveTourActivityAt([dead[2]!])).toBe('2026-11-03T00:00:00.000Z');
+    expect(deriveTourActivityAt([dead[3]!])).toBe('2026-11-04T00:00:00.000Z');
+    // Together: the latest creation; every mark (up to 11-09) is ignored.
+    expect(deriveTourActivityAt(dead)).toBe('2026-11-04T00:00:00.000Z');
+    // A QUALIFYING tour still contributes its lastMarkedAt.
+    expect(
+      deriveTourActivityAt([...dead, tour({ tourId: 'q', status: 'requested', createdAt: '2026-07-01T00:00:00.000Z', lastMarkedAt: '2026-11-10T00:00:00.000Z' })]),
+    ).toBe('2026-11-10T00:00:00.000Z');
+  });
+
+  it('a converted close and an auto-close FROM toured qualify, exactly as for the chip', () => {
+    expect(
+      deriveTourActivityAt([tour({ tourId: 'cv', status: 'closed', convertedPlacementId: 'pl-1', createdAt: '2026-07-02T00:00:00.000Z' })]),
+    ).toBe('2026-07-02T00:00:00.000Z');
+    expect(
+      deriveTourActivityAt([tour({ tourId: 'ac', status: 'closed', autoClosedFrom: 'toured', createdAt: '2026-07-03T00:00:00.000Z' })]),
+    ).toBe('2026-07-03T00:00:00.000Z');
+  });
+
+  it('compares instants and returns the stored string of the latest one', () => {
+    expect(
+      deriveTourActivityAt([
+        tour({ tourId: 'a', status: 'requested', createdAt: '2026-07-01T00:00:00Z' }),
+        tour({ tourId: 'b', status: 'requested', createdAt: '2026-06-30T23:59:59.999Z', lastMarkedAt: 'garbage' }),
+      ]),
+    ).toBe('2026-07-01T00:00:00Z');
+  });
+
+  it('(PIN) the wire chip stays exactly { tourId, state } - activity is a SEPARATE function (A4)', () => {
+    const signal = deriveTourSignal([tour({ tourId: 't1', status: 'scheduled', lastMarkedAt: '2026-09-01T00:00:00.000Z' })]);
+    expect(Object.keys(signal ?? {}).sort()).toEqual(['state', 'tourId']);
   });
 });

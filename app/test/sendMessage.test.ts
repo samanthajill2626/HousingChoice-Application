@@ -268,6 +268,9 @@ function makeFakes(
     findAllByEmail: async () => {
       throw new Error('findAllByEmail: not used in this suite');
     },
+    touchLastHeardFrom: async () => {
+      throw new Error('touchLastHeardFrom: not used in this suite');
+    },
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {

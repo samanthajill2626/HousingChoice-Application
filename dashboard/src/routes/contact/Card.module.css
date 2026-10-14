@@ -159,7 +159,7 @@ a.li:focus-visible {
 }
 
 /* The identity link in a send-roster row (SendRosterRow). The row itself is a
- * plain div (the tour chip is a second, separate link), so the identity carries
+ * plain <li> (the tour chip is a second, separate link), so the identity carries
  * its own text color + hover - matching the full-row-link idiom's look. */
 .rowLink {
   color: var(--c-text);
@@ -214,6 +214,116 @@ a.li:focus-visible {
   margin-left: var(--sp-2);
   color: var(--c-text-muted);
   font-size: var(--fs-xs);
+}
+
+/* last-heard-from markup R1: the roster list (SendRosterList) - a bare <ul>
+ * whose only children are SendRosterRow <li>s. */
+.sendList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* last-heard-from spec 5.5: the two-line send-roster row (SendRosterRow, an
+ * <li>). Line one: identity (+ kind) and the muted dates; line two: the
+ * outcome chip and its actions. Both lines wrap on a narrow card. */
+.sendRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-1) 0;
+  border-bottom: 1px solid var(--c-surface-2);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.sendRow:last-child {
+  border-bottom: none;
+}
+
+.sendRowLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  min-width: 0;
+}
+
+.sendRowDates {
+  margin-left: auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
+/* The outcome chip: a small pill (unlike the text-only response tones). */
+.outcomeChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--c-evt-neutral-border);
+  border-radius: var(--radius-pill);
+  background: var(--c-evt-neutral-bg);
+  color: var(--c-evt-neutral-text);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.chipPositive {
+  border-color: var(--c-evt-green-border);
+  background: var(--c-evt-green-bg);
+  color: var(--c-evt-green-text);
+}
+
+.chipMuted {
+  background: transparent;
+  color: var(--c-text-muted);
+}
+
+.rowActions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* The small row action buttons (Interested / Not interested / Undo). */
+.rowButton {
+  font: inherit;
+  font-size: var(--fs-xs);
+  line-height: 1.8;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  cursor: pointer;
+}
+
+.rowButton:hover:not(:disabled) {
+  border-color: var(--c-border-strong);
+}
+
+.rowButton:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.rowActionLink {
+  font-size: var(--fs-xs);
+  color: var(--c-brand);
+}
+
+.rowButton:focus-visible,
+.rowActionLink:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+/* The inline action error under a row. */
+.rowError {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-danger);
 }
 
 /* --- Status dots (unit availability) ------------------------------------- */

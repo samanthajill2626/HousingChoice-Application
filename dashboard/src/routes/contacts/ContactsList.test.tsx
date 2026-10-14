@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Contact } from '../../api/index.js';
 import { NONE_KEY } from './tenantFacets.js';
 import type { ContactsFilter, ContactsState } from './useContacts.js';
+import { formatInboxTimeFull } from '../inbox/inboxTime.js';
 
 // Drive the view through a mocked useContacts so these tests are independent of
 // fetching (covered separately) and assert the route → filter behavior, the
@@ -98,6 +99,22 @@ const TENANTS_NO_PORTING: Contact[] = [T_STUDIO, T_NONE];
 /** Nobody has a recorded voucher size, so that facet renders its muted line
  *  INSTEAD of all five chips plus Not recorded - and its Clear with them. */
 const TENANTS_NO_VOUCHER: Contact[] = [T_HA_ONLY, T_NONE];
+
+/** Status-facet fixtures (spec 2026-10-12 5.7). Sam/Rae are default-visible,
+ *  Ida/Pat are hidden by default, Nell has NO status (never hidden, F1). */
+const S_SAM: Contact = { contactId: 's1', type: 'tenant', firstName: 'Sam', lastName: 'Searching', phone: '+14040100011', status: 'searching', voucherSize: 2, last_heard_from_at: '2024-03-05T12:00:00.000Z' };
+const S_IDA: Contact = { contactId: 's2', type: 'tenant', firstName: 'Ida', lastName: 'Inactive', phone: '+14040100012', status: 'inactive', last_heard_from_at: '2024-04-01T12:00:00.000Z' };
+const S_PAT: Contact = { contactId: 's3', type: 'tenant', firstName: 'Pat', lastName: 'Placed', phone: '+14040100013', status: 'placed' };
+const S_NELL: Contact = { contactId: 's4', type: 'tenant', firstName: 'Nell', lastName: 'Nostatus', phone: '+14040100014' };
+const S_RAE: Contact = { contactId: 's5', type: 'tenant', firstName: 'Rae', lastName: 'Recent', phone: '+14040100015', status: 'onboarding', last_heard_from_at: '2024-06-01T12:00:00.000Z' };
+const STATUS_TENANTS: Contact[] = [S_SAM, S_IDA, S_PAT, S_NELL, S_RAE];
+
+/** The rows' display names in render order (the name span is the link's first child). */
+function tenantRowNames(): string[] {
+  return rowsOf('Tenants')
+    .getAllByRole('listitem')
+    .map((li: HTMLElement) => li.querySelector('a > span')?.textContent ?? '');
+}
 
 // The row separator is U+00B7 with spaces, built ONE way in source AND tests.
 const SEP = ' ' + String.fromCharCode(0xB7) + ' ';
@@ -454,5 +471,141 @@ describe('ContactsList - tenant facets, row facts, and URL state', () => {
     await userEvent.type(screen.getByRole('searchbox', { name: /search/i }), 'zzzzz');
     expect(screen.getByText(/No matches for/)).toBeInTheDocument();
     expect(screen.queryByText('No tenants match the selected filters.')).toBeNull();
+  });
+});
+
+describe('ContactsList - status facet (spec 2026-10-12 5.7)', () => {
+  it('the default hides inactive and placed tenants; a tenant with no status stays', () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants');
+    expect(tenantRowNames().sort()).toEqual(['Nell Nostatus', 'Rae Recent', 'Sam Searching']);
+    const group = screen.getByRole('group', { name: 'Status' });
+    expect(within(group).getByRole('button', { name: 'Inactive (1)' })).toHaveAttribute('aria-pressed', 'false');
+    expect(within(group).getByRole('button', { name: 'Placed (1)' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByRole('button', { name: 'Clear status filter' })).toBeNull();
+    expect(screen.getByTestId('loc').textContent).toBe('');
+  });
+
+  it('a chip brings a hidden status back and writes the non-default set; Clear returns to the default', async () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants');
+    await userEvent.click(screen.getByRole('button', { name: 'Inactive (1)' }));
+    expect(tenantRowNames()).toContain('Ida Inactive');
+    expect(tenantRowNames()).not.toContain('Pat Placed');
+    const search = screen.getByTestId('loc').textContent ?? '';
+    expect(search).toContain('status=inactive');
+    expect(search).toContain('status=needs_review');
+    expect(search).not.toContain('status=placed');
+    await userEvent.click(screen.getByRole('button', { name: 'Clear status filter' }));
+    expect(tenantRowNames()).not.toContain('Ida Inactive');
+    expect(screen.getByTestId('loc').textContent).not.toContain('status=');
+  });
+
+  it('?status=_empty lights no chip, keeps only the status-less tenant, and offers Clear', () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants?status=_empty');
+    expect(tenantRowNames()).toEqual(['Nell Nostatus']);
+    const group = screen.getByRole('group', { name: 'Status' });
+    for (const b of within(group).getAllByRole('button', { name: /\(\d+\)$/ })) {
+      expect(b).toHaveAttribute('aria-pressed', 'false');
+    }
+    expect(screen.getByRole('button', { name: 'Clear status filter' })).toBeInTheDocument();
+  });
+
+  it('status values beat the _empty sentinel', () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants?status=_empty&status=inactive');
+    expect(tenantRowNames().sort()).toEqual(['Ida Inactive', 'Nell Nostatus']);
+  });
+
+  it('an invalid-only ?status= reads as the default and the URL is not rewritten on mount', () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants?status=bogus');
+    expect(tenantRowNames().sort()).toEqual(['Nell Nostatus', 'Rae Recent', 'Sam Searching']);
+    expect(screen.getByTestId('loc').textContent).toBe('?status=bogus');
+  });
+
+  it('a query that matches only a status-hidden tenant offers "Show all statuses", which lights all seven', async () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants');
+    await userEvent.type(screen.getByRole('searchbox', { name: /search/i }), 'ida');
+    expect(screen.getByText(/No matches for .ida. among the statuses shown/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Show all statuses' }));
+    expect(tenantRowNames()).toEqual(['Ida Inactive']);
+    for (const b of within(screen.getByRole('group', { name: 'Status' })).getAllByRole('button', { name: /\(\d+\)$/ })) {
+      expect(b).toHaveAttribute('aria-pressed', 'true');
+    }
+    const search = screen.getByTestId('loc').textContent ?? '';
+    expect(search).toContain('status=placed');
+    expect(search).toContain('status=inactive');
+  });
+
+  it('no hint when nothing hidden by status matches, or when another facet hides the match', async () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants?voucher=3');
+    await userEvent.type(screen.getByRole('searchbox', { name: /search/i }), 'sam');
+    // Sam (2-BR, searching) is hidden by the VOUCHER facet, not by status.
+    expect(screen.getByText(/No matches for .sam.\./)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Show all statuses' })).toBeNull();
+  });
+});
+
+describe('ContactsList - sort and the last-heard line (spec 2026-10-12 5.7)', () => {
+  it('defaults to last heard from: most recent first, never-heard last', () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants');
+    expect(tenantRowNames()).toEqual(['Rae Recent', 'Sam Searching', 'Nell Nostatus']);
+    expect(screen.getByLabelText('Sort by')).toHaveValue('heard');
+  });
+
+  it('?sort=name orders by last name and round-trips through the select, merging the query string', async () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants?sort=name');
+    expect(tenantRowNames()).toEqual(['Nell Nostatus', 'Rae Recent', 'Sam Searching']);
+    expect(screen.getByLabelText('Sort by')).toHaveValue('name');
+    await userEvent.selectOptions(screen.getByLabelText('Sort by'), 'heard');
+    expect(screen.getByTestId('loc').textContent).not.toContain('sort=');
+    expect(tenantRowNames()).toEqual(['Rae Recent', 'Sam Searching', 'Nell Nostatus']);
+  });
+
+  it('a sort write keeps the facet params, and a facet write keeps the sort', async () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts/tenants?voucher=2');
+    await userEvent.selectOptions(screen.getByLabelText('Sort by'), 'name');
+    const afterSort = screen.getByTestId('loc').textContent ?? '';
+    expect(afterSort).toContain('voucher=2');
+    expect(afterSort).toContain('sort=name');
+    // Deselect the (pressed, so always clickable) 2-BR chip: the facet write keeps the sort.
+    await userEvent.click(screen.getByRole('button', { name: /^2-BR \(/ }));
+    const afterFacet = screen.getByTestId('loc').textContent ?? '';
+    expect(afterFacet).not.toContain('voucher=');
+    expect(afterFacet).toContain('sort=name');
+  });
+
+  it('Tenants rows end with "Last heard from <label>" (title = the full stamp), after the Porting chip', () => {
+    state = { status: 'ready', contacts: [...STATUS_TENANTS, T_SIX] };
+    renderAt('/contacts/tenants');
+    const sam = rowsOf('Tenants').getByRole('link', { name: /Sam Searching/ });
+    const line = within(sam).getByText('Last heard from Mar 5, 2024');
+    expect(line).toHaveAttribute('title', formatInboxTimeFull(S_SAM.last_heard_from_at as string));
+    const nell = rowsOf('Tenants').getByRole('link', { name: /Nell Nostatus/ });
+    expect(within(nell).getByText('Last heard from Never')).not.toHaveAttribute('title');
+    const six = rowsOf('Tenants').getByRole('link', { name: /Tessa Six/ });
+    const text = six.textContent ?? '';
+    expect(text.indexOf('Porting')).toBeLessThan(text.indexOf('Last heard from'));
+  });
+
+  it('other views: no sort control, no last-heard line, no status facet, list order untouched', () => {
+    state = { status: 'ready', contacts: STATUS_TENANTS };
+    renderAt('/contacts', 'all');
+    expect(screen.queryByLabelText('Sort by')).toBeNull();
+    expect(screen.queryByText(/Last heard from/)).toBeNull();
+    expect(rowsOf('Contacts').getAllByRole('listitem')).toHaveLength(5);
+  });
+
+  it('no sort control until the fetch is ready', () => {
+    state = { status: 'loading', contacts: [] };
+    renderAt('/contacts/tenants');
+    expect(screen.queryByLabelText('Sort by')).toBeNull();
   });
 });

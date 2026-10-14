@@ -277,6 +277,19 @@
   white-space: nowrap;
 }
 
+/* last-heard-from 5.6 (option C): "<n> waiting" on an available property. */
+.waiting {
+  flex: 0 0 auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-evt-amber-bg);
+  border: 1px solid var(--c-evt-amber-border);
+  color: var(--c-evt-amber-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
 .beds {
   flex: 0 0 auto;
   color: var(--c-text-muted);

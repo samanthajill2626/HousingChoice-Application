@@ -6,6 +6,7 @@
 // (/api/placements, /api/tours?tenantId=, /api/contacts/:id/listings-sent,
 // /api/contacts/:id/relay-groups); Preferences are manual-now (pending until the
 // gleaning slice). Each list row links to its detail route.
+import { useState } from 'react';
 import {
   STAGE_LABELS,
   tourStatusLabel,
@@ -31,8 +32,11 @@ import {
   KV,
   PendingPanel,
   Row,
+  SendRosterList,
   SendRosterRow,
+  interestedModeOf,
   responseClass,
+  type SendRowAction,
 } from './Card.js';
 import { DeadlineChip } from '../placements/DeadlineChip.js';
 import { AutoBadge } from './AutoBadge.js';
@@ -45,7 +49,8 @@ import { StaffNotesCard } from './StaffNotesCard.js';
 import { MediaGallery, type MediaGalleryPaging } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
-import { contactStatusLabel, formatAddress, formatPhone } from './format.js';
+import { contactDisplayName, contactStatusLabel, formatAddress, formatPhone } from './format.js';
+import type { Slice } from './useContactFile.js';
 
 export interface TenantFileProps {
   contact: Contact;
@@ -55,10 +60,19 @@ export interface TenantFileProps {
    *  Pass an empty array while loading or when none exist. */
   tours: Tour[];
   units: UnitItem[];
-  /** C4 listings-sent slice status (panel degrades to pending on 404). */
-  listingsSentPending: boolean;
-  /** C4 listings-sent rows — the properties broadcast/sent to this tenant. */
+  /** C4 listings-sent slice status: 'ready' renders rows, 'error' the error
+   *  row (last-heard-from D12: a 503 is not "pending"), anything else the
+   *  pending panel. */
+  listingsSentStatus: Slice<ListingSendRow>['status'];
+  /** C4 listings-sent rows - the properties broadcast/sent to this tenant. */
   listingsSent: ListingSendRow[];
+  /** Record / clear a send outcome on one Properties-sent row; resolves once
+   *  the page applied the returned row, rejects on failure (the row shows
+   *  its error). Absent -> the rows show outcomes with no actions. */
+  onListingOutcome?: (unitId: string, outcome: SendRowAction) => Promise<void>;
+  /** Interested on a property with no tour_type: open Schedule tour with
+   *  THIS row's property pre-committed. */
+  onOpenTourForm?: (unitId: string) => void;
   /** Relay-membership slice status (panel degrades to pending on 404). */
   relayGroupsPending: boolean;
   /** The relay groups (relay threads) this contact is a member of. */
@@ -117,7 +131,7 @@ export function TenantFile({
   placements,
   tours,
   units,
-  listingsSentPending,
+  listingsSentStatus,
   listingsSent,
   relayGroupsPending,
   relayGroups,
@@ -138,9 +152,15 @@ export function TenantFile({
   onStartPlacement,
   onScheduleTour,
   onSendProperty,
+  onListingOutcome,
+  onOpenTourForm,
   onCreateRelayGroup,
 }: TenantFileProps): React.JSX.Element {
+  // The Properties sent rows' date labels read one clock per mount.
+  const [now] = useState(() => new Date());
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
+  // The Properties-sent rows' accessible names read the page contact's name.
+  const personName = contactDisplayName(contact.firstName, contact.lastName, contact.phone);
   // A pending suggestion for `target` rendered as a review chip (or null). Shared
   // by the Details rows below and passed down to the Eligibility intake card.
   const chipFor = (target: string): React.JSX.Element | null => {
@@ -303,19 +323,40 @@ export function TenantFile({
           ) : undefined
         }
       >
-        {listingsSentPending ? (
+        {listingsSentStatus === 'error' ? (
+          <EmptyRow>We couldn&apos;t load properties sent.</EmptyRow>
+        ) : listingsSentStatus !== 'ready' ? (
           <PendingPanel />
         ) : listingsSent.length === 0 ? (
           <EmptyRow>No properties sent yet.</EmptyRow>
         ) : (
-          listingsSent.map((s) => (
-            <SendRosterRow
-              key={`${s.unitId}:${s.sentAt}`}
-              to={`/listings/${s.unitId}`}
-              identity={unitLabel(unitMap, s.unitId)}
-              {...(s.tour && { tour: s.tour })}
-            />
-          ))
+          // Markup R1: the rows are the only listitems in the card.
+          <SendRosterList label="Properties sent">
+            {listingsSent.map((s) => {
+              const unit = unitMap.get(s.unitId);
+              const label = unitLabel(unitMap, s.unitId);
+              return (
+                <SendRosterRow
+                  key={`${s.unitId}:${s.sentAt}`}
+                  to={`/listings/${s.unitId}`}
+                  identity={label}
+                  row={s}
+                  address={label}
+                  name={personName}
+                  interestedMode={interestedModeOf(unit)}
+                  // The page loads live units only (GET /api/units excludes
+                  // deleted), so an absent unit is a deleted property (B10).
+                  actionsDisabled={unit === undefined || onListingOutcome === undefined}
+                  onOutcome={(outcome) => (onListingOutcome ? onListingOutcome(s.unitId, outcome) : Promise.resolve())}
+                  // No requestTourTo here (B8): this file renders tenants and
+                  // team members, never a partner (ContactDetail routes
+                  // partners to PartnerFile).
+                  {...(onOpenTourForm !== undefined && { onOpenTourForm: () => onOpenTourForm(s.unitId) })}
+                  now={now}
+                />
+              );
+            })}
+          </SendRosterList>
         )}
       </Card>
 

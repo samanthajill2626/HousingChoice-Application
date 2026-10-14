@@ -13,7 +13,7 @@
 // honest "Arrives with the backend" pending state, and "Activity" serves the unit
 // audit trail (pending only on an older backend). Nothing is fabricated.
 import { useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   addUnitContact,
   ApiError,
@@ -24,9 +24,11 @@ import {
   removeUnitContact,
   removeUnitPhoto,
   restoreUnit,
+  setListingSendOutcome,
   setUnitPhotoCover,
   uploadToPresignedPost,
   type Contact,
+  type ListingSendRow,
   type UnitContact,
   type UnitItem,
   type UnitMediaDisplay,
@@ -42,7 +44,7 @@ import {
   undatedTourLabel,
   type ListingStatus,
 } from '../../api/index.js';
-import { BLANK, Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterRow, responseClass } from '../contact/Card.js';
+import { BLANK, Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterList, SendRosterRow, interestedModeOf, responseClass } from '../contact/Card.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { Modal } from '../contact/Modal.js';
 import { isCaseworkerContact } from '../contact/caseworkerRole.js';
@@ -63,6 +65,7 @@ import {
   formatBedsBaths,
   formatMoney,
   formatRent,
+  groupSendRows,
   isMediaUrl,
   sendRowKindLabel,
   shortAddress,
@@ -268,9 +271,20 @@ export function ListingDetail(): React.JSX.Element {
   const [editing, setEditing] = useState(false);
   // The "Start placement" dialog, pre-filled+locked to this property's unit.
   const [startingPlacement, setStartingPlacement] = useState(false);
-  // The "Schedule a tour" dialog, unit side pre-committed to this property.
-  const [schedulingTour, setSchedulingTour] = useState(false);
-  const { setUnit } = state;
+  // The "Schedule a tour" dialog (markup R4) opens ONLY from the URL:
+  // `?tour=new` (free tenant) or `?tour=new&tenantId=<id>` (that tenant
+  // pre-committed and LOCKED in the form, spec 14.3 B9), unit side
+  // pre-committed to this property. Every entry point NAVIGATES there - "+
+  // Tour", a form-mode Interested click, a partner row's "Request a tour"
+  // link, and the waiting list on another page - so a param change while this
+  // page is mounted opens it, and Cancel / create clear both params so Back
+  // and refresh never reopen it. On this page both the open and the close are
+  // REPLACE navigations: the dialog adds no history entry.
+  const [searchParams, setSearchParams] = useSearchParams();
+  // The "Sent to" rows' date labels read one clock per page mount (a lazy
+  // initializer keeps render pure).
+  const [now] = useState(() => new Date());
+  const { setUnit, setRecipientRow } = state;
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
@@ -404,6 +418,44 @@ export function ListingDetail(): React.JSX.Element {
   // Shared by both entry points to the send composer (the kebab item and the
   // "Sent to" card's "+ Send" action) - one URL, one place it's built.
   const goToSend = (): void => void navigate(`/broadcasts/new?unitId=${encodeURIComponent(unit.unitId)}`);
+  // The URL-driven tour form (never on a deleted property - "+ Tour" is hidden
+  // there too).
+  const tourFormOpen = !deleted && searchParams.get('tour') === 'new';
+  const tourFormTenant = searchParams.get('tenantId') ?? undefined;
+  /** Open the form by NAVIGATING in place (replace): the dialog adds NO
+   *  history entry, so open + Cancel leaves one entry and Back leaves the
+   *  property page as before (plan review round 2). */
+  const openTourForm = (tenantId?: string): void => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set('tour', 'new');
+        if (tenantId !== undefined) next.set('tenantId', tenantId);
+        else next.delete('tenantId');
+        return next;
+      },
+      { replace: true },
+    );
+  };
+  /** Close it: strip BOTH params in place (replace). */
+  const closeTourForm = (): void => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('tour');
+        next.delete('tenantId');
+        return next;
+      },
+      { replace: true },
+    );
+  };
+  // One outcome action on a "Sent to" row: the route answers { row } (plan
+  // head 3.4 #4), applied in place (no refetch). A rejection propagates to
+  // the row, which shows its inline error.
+  const onRecipientOutcome = async (contactId: string, outcome: 'interested' | 'not_interested' | 'clear'): Promise<void> => {
+    const { row } = await setListingSendOutcome(unit.unitId, contactId, outcome);
+    setRecipientRow(unit.unitId, contactId, row);
+  };
   const onConfirmDelete = (): void => {
     if (deleteBusy) return;
     setDeleteBusy(true);
@@ -1243,20 +1295,44 @@ export function ListingDetail(): React.JSX.Element {
               recipients.rows.length === 0 ? (
                 <EmptyRow>Not sent to anyone yet.</EmptyRow>
               ) : (
-                recipients.rows.map((row) => {
-                  // caseworkers D20/D22: a resolved non-tenant row is labelled by
-                  // its displayKind; tenant and unresolved rows are not.
-                  const kind = sendRowKindLabel(row);
-                  return (
-                    <SendRosterRow
-                      key={`${row.contactId}:${row.sentAt}`}
-                      to={`/contacts/${row.contactId}`}
-                      identity={row.tenantName ?? row.contactId}
-                      {...(kind !== undefined && { kind })}
-                      {...(row.tour && { tour: row.tour })}
-                    />
-                  );
-                })
+                groupSendRows(recipients.rows)
+                  .filter((group) => group.rows.length > 0)
+                  .map((group) => (
+                    // Markup R1: one named list per non-empty group; its
+                    // children are roster rows only.
+                    <SendRosterList key={group.key} label={group.label}>
+                      {group.rows.map((row: ListingSendRow) => {
+                        // caseworkers D20/D22: a resolved non-tenant row is labelled by
+                        // its displayKind; tenant and unresolved rows are not.
+                        const kind = sendRowKindLabel(row);
+                        const name = row.tenantName ?? row.contactId;
+                        return (
+                          <SendRosterRow
+                            key={`${row.contactId}:${row.sentAt}`}
+                            to={`/contacts/${row.contactId}`}
+                            identity={name}
+                            {...(kind !== undefined && { kind })}
+                            row={row}
+                            address={address}
+                            name={name}
+                            interestedMode={row.interestedMode ?? interestedModeOf(unit)}
+                            actionsDisabled={deleted}
+                            onOutcome={(outcome) => onRecipientOutcome(row.contactId, outcome)}
+                            // B8: only a PARTNER recipient gets "Request a tour"
+                            // (never a landlord / team-member row).
+                            // Same page: `replace`, so the dialog adds no history entry.
+                            {...(row.type === 'partner' && {
+                              requestTourReplace: true,
+                              requestTourTo: `/listings/${encodeURIComponent(unit.unitId)}?tour=new`,
+                            })}
+                            // R4: form mode NAVIGATES to ?tour=new&tenantId=.
+                            onOpenTourForm={() => openTourForm(row.contactId)}
+                            now={now}
+                          />
+                        );
+                      })}
+                    </SendRosterList>
+                  ))
               )
             ) : recipients.status === 'error' ? (
               <EmptyRow>We couldn&apos;t load recipients.</EmptyRow>
@@ -1272,7 +1348,7 @@ export function ListingDetail(): React.JSX.Element {
             aside={
               !deleted ? (
                 <CardAction
-                  onClick={() => setSchedulingTour(true)}
+                  onClick={() => openTourForm()}
                   label="Schedule a tour on this property"
                 >
                   + Tour
@@ -1506,12 +1582,18 @@ export function ListingDetail(): React.JSX.Element {
         />
       ) : null}
 
-      {schedulingTour ? (
+      {tourFormOpen ? (
         <ScheduleTourForm
+          // Remount on a tenant change while open (a param change while this
+          // page is mounted): the form resolves its locked label once per mount.
+          key={tourFormTenant ?? ''}
           initialUnitId={unit.unitId}
-          onClose={() => setSchedulingTour(false)}
+          {...(tourFormTenant !== undefined && { tenantId: tourFormTenant })}
+          onClose={closeTourForm}
           onCreated={(t) => {
-            setSchedulingTour(false);
+            // Strip the params FIRST (replace), then push the tour page, so
+            // Back lands on the bare property page.
+            closeTourForm();
             void navigate('/tours/' + t.tourId);
           }}
         />

@@ -245,6 +245,18 @@
   white-space: nowrap;
 }
 
+/* "Last heard from <label>" (spec 2026-10-12 5.7, 14.5 F13): Tenants view
+ * only, LAST in .meta, and unshrinkable like every other chip - .facts stays
+ * the ONE compressible child (the sacrifice order documented above). This
+ * widens the fixed chip set that
+ * docs/issues/tenant-row-longname-midpane-overflow.md measures. */
+.heardFrom {
+  flex: 0 0 auto;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
 /* NOTE: 55cqw measures the .page query container (the only container-type in this
  * file), i.e. roughly 57-58% of the row box - the starting value is tuned in live
  * QA. The @container block BELOW must stay after this rule: identical
@@ -337,6 +349,27 @@
   margin: var(--sp-4) 0;
   font-size: var(--fs-sm);
   color: var(--c-text-muted);
+}
+
+/* "Show all statuses" inside the no-match line (spec 2026-10-12 5.7): a quiet
+ * text button in the facet Clear's language (TenantFilters.module.css .clear). */
+.showAll {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--c-brand);
+  font: inherit;
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+
+.showAll:hover {
+  text-decoration: underline;
+}
+
+.showAll:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
 }
 
 .empty {

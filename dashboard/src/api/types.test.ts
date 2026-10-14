@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
+  type Contact,
   AI_RUN_DROP_REASON_LABELS,
   aiRunDropReasonLabel,
   MESSAGE_TRANSPORTS,
@@ -373,5 +374,11 @@ describe('AI run drop-reason labels', () => {
 
   it('humanizes a code this build has never heard of', () => {
     expect(aiRunDropReasonLabel('some_future_reason')).toBe('some future reason');
+  });
+});
+
+describe('Contact (last heard from, spec 5.1)', () => {
+  it('Contact carries last_heard_from_at as an optional ISO string', () => {
+    expectTypeOf<Contact['last_heard_from_at']>().toEqualTypeOf<string | undefined>();
   });
 });

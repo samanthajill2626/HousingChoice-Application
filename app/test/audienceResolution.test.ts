@@ -129,6 +129,9 @@ function fakeContacts(items: ContactItem[]): ContactsRepo & {
     findAllByEmail: async () => {
       throw new Error('findAllByEmail: not used in this suite');
     },
+    touchLastHeardFrom: async () => {
+      throw new Error('touchLastHeardFrom: not used in this suite');
+    },
   };
 }
 
@@ -210,7 +213,7 @@ describe('audience resolution (M1.8a)', () => {
     const out = await resolve({ contact_type: 'tenant', ...ALWAYS_EXCLUDE });
     // has_consent:false here — this tenant has no recorded consent (A2P §4).
     expect(out.contacts).toEqual([
-      { contactId: 'c-1', phone: '+15551230001', firstName: 'Ann', lastName: 'Osei', has_consent: false },
+      { contactId: 'c-1', phone: '+15551230001', firstName: 'Ann', lastName: 'Osei', has_consent: false, status: 'active' },
     ]);
   });
 
@@ -223,6 +226,19 @@ describe('audience resolution (M1.8a)', () => {
     const out = await resolve({ contact_type: 'tenant', ...ALWAYS_EXCLUDE });
     const byId = Object.fromEntries(out.contacts.map((c) => [c.contactId, c.has_consent]));
     expect(byId).toEqual({ with: true, without: false });
+  });
+
+  it('last-heard-from 5.3: carries the tenant status and lastHeardFromAt (absent when the contact has none)', async () => {
+    const items = [
+      tenant({ contactId: 'c-1', status: 'searching', last_heard_from_at: '2026-10-05T16:20:00.000Z' }),
+      tenant({ contactId: 'c-2', status: 'onboarding' }),
+    ];
+    const resolve = createAudienceResolutionService({ contactsRepo: fakeContacts(items), logger });
+    const out = await resolve({ contact_type: 'tenant', ...ALWAYS_EXCLUDE });
+    const byId = Object.fromEntries(out.contacts.map((c) => [c.contactId, c]));
+    expect(byId['c-1']).toMatchObject({ status: 'searching', lastHeardFromAt: '2026-10-05T16:20:00.000Z' });
+    expect(byId['c-2']).toMatchObject({ status: 'onboarding' });
+    expect(byId['c-2']).not.toHaveProperty('lastHeardFromAt');
   });
 
   // group-texting A8, consumer 5 of 6 (audienceResolution.ts - staff display 1).

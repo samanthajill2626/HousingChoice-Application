@@ -58,7 +58,12 @@ export type ActivityEventType =
   // switch (Timeline.tsx). Anything genuinely about a group_text thread gets
   // its own new kind.
   | 'added_to_group_text'
-  | 'removed_from_group_text';
+  | 'removed_from_group_text'
+  // last-heard-from spec 5.4: the send-outcome route's three events, written
+  // by lib/listingOutcomeEvents.ts (refType 'unit', the CONTACT's feed only).
+  | 'listing_declined'
+  | 'listing_decline_cleared'
+  | 'listing_interested';
 
 /** What a milestone can deep-link out to (C2 `TimelineMilestone.refType`). */
 export type ActivityEventRefType = 'placement' | 'unit' | 'conversation' | 'broadcast' | 'tour';

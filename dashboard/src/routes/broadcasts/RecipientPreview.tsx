@@ -14,7 +14,8 @@
 // A live selected count drives "Send to N recipients", which posts the EXACT
 // checked contactIds.
 // 400/409 are surfaced inline. A "Delete draft" button removes the unsent draft.
-import { useMemo, useRef, useState } from 'react';
+// last-heard-from (spec 5.3): columns at a 768px+ pane (Name, Status, Housing authority, Last heard from), the COMBINED list ordered by last heard from, and a "Not interested" row (declinedContactIds) that starts unchecked unless seeded and that Select all skips.
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   ApiError,
@@ -28,7 +29,8 @@ import {
   type ListingStatus,
   type PreviewResponse,
 } from '../../api/index.js';
-import { Button, Spinner } from '../../ui/index.js';
+import { Button, Spinner, StatusBadge } from '../../ui/index.js';
+import { formatHeardFrom, sortByHeardFrom } from '../../lib/heardFrom.js';
 import { Modal } from '../contact/Modal.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { contactDisplayName, formatPhone } from '../contact/format.js';
@@ -51,6 +53,18 @@ interface Row {
    *  added or picked in this session). Seeded rows start checked even when
    *  already sent, and "Select all" keeps them checked. */
   seeded: boolean;
+  /** last-heard-from (spec 5.3): split name parts for the shared name order
+   *  (sortByHeardFrom's tie-break) - `name` stays the rendered string. */
+  firstName?: string;
+  lastName?: string;
+  /** The contact's lifecycle status - TENANT rows only (StatusBadge kind="tenant"). */
+  status?: string;
+  /** Tenant housing authority (blank for a partner seed, spec 14.4 B6). */
+  housingAuthority?: string;
+  /** contact.last_heard_from_at - the column AND the list order. */
+  lastHeardFromAt?: string;
+  /** An EFFECTIVE decline of this property (declinedContactIds, D11). */
+  declined: boolean;
 }
 
 export interface RecipientPreviewProps {
@@ -70,26 +84,53 @@ export interface RecipientPreviewProps {
    *  exactly that tenant and nobody else. When set: the add-a-tenant search is
    *  hidden, and Send is blocked unless the checked set is exactly [contactId]. */
   resolvedFor?: { contactId: string; name: string };
+  /** The clock the Last heard from column formats against (tests pin it). */
+  now?: Date;
 }
 
-/** Build the initial rows from the preview candidates - an already-sent row
- *  starts UNCHECKED (soft opt-in to resend) unless it is SEEDED (a deliberate
- *  pick stays checked, share-skip-fix D5), a no-consent row is never checked,
- *  and everyone else starts checked. */
-function initialRows(preview: PreviewResponse): Row[] {
-  return preview.candidates.map((c) => ({
-    contactId: c.contactId,
-    // FULL name — first name alone doesn't identify a person at roster scale.
-    name: contactDisplayName(c.firstName, c.lastName, c.phone),
-    phone: c.phone,
-    alreadySentThisProperty: c.alreadySentThisProperty,
-    hasConsent: c.has_consent,
-    seeded: c.seeded,
-    // No-consent rows are a HARD fence — never checked. Already-sent rows start
-    // unchecked (soft opt-in) UNLESS they were hand-seeded: a seed is a
-    // deliberate choice, so pre-check it even when already sent this property.
-    checked: c.has_consent && (c.seeded || !c.alreadySentThisProperty),
-  }));
+/** The visible no-consent tag. Its em dash is PINNED by
+ *  e2e a2p-compliance.spec.ts (spec 14.4 B7 keeps the visible text), so it
+ *  is built from the code point and this source stays ASCII. */
+const NO_CONSENT_TAG_TEXT = `consent not recorded ${String.fromCharCode(0x2014)} fix before sending`;
+
+/** The ONE default-check rule - initial rows AND Select all (spec 14.4 B11):
+ *  a no-consent row never; a seeded row always (a pick is deliberate,
+ *  share-skip-fix D5); otherwise only a row neither already sent nor declined. */
+function defaultChecked(r: Pick<Row, 'hasConsent' | 'seeded' | 'alreadySentThisProperty' | 'declined'>): boolean {
+  return r.hasConsent && (r.seeded || (!r.alreadySentThisProperty && !r.declined));
+}
+
+/** The checkbox's accessible name: the person plus every cue, ASCII " - "
+ *  (spec 14.4 B7) - so getByRole('checkbox', { name }) resolves by the row. */
+function checkboxName(row: Row): string {
+  if (!row.hasConsent) return `${row.name} - consent not recorded`;
+  if (row.alreadySentThisProperty && row.declined) return `${row.name} - already sent, not interested`;
+  if (row.alreadySentThisProperty) return `${row.name} - already sent`;
+  if (row.declined) return `${row.name} - not interested`;
+  return row.name;
+}
+
+/** Build the initial rows from the preview candidates (FULL name - a first
+ *  name alone does not identify a person at roster scale). */
+function initialRows(preview: PreviewResponse, declinedIds: ReadonlySet<string>): Row[] {
+  return preview.candidates.map((c) => {
+    const row: Row = {
+      contactId: c.contactId,
+      name: contactDisplayName(c.firstName, c.lastName, c.phone),
+      ...(c.firstName !== undefined && { firstName: c.firstName }),
+      ...(c.lastName !== undefined && { lastName: c.lastName }),
+      phone: c.phone,
+      ...(c.status !== undefined && { status: c.status }),
+      ...(c.housingAuthority !== undefined && { housingAuthority: c.housingAuthority }),
+      ...(c.lastHeardFromAt !== undefined && { lastHeardFromAt: c.lastHeardFromAt }),
+      alreadySentThisProperty: c.alreadySentThisProperty,
+      declined: declinedIds.has(c.contactId),
+      hasConsent: c.has_consent,
+      seeded: c.seeded,
+      checked: false,
+    };
+    return { ...row, checked: defaultChecked(row) };
+  });
 }
 
 export function RecipientPreview({
@@ -99,13 +140,21 @@ export function RecipientPreview({
   candidatesLoading,
   unitId,
   resolvedFor,
+  now: nowProp,
 }: RecipientPreviewProps): React.JSX.Element {
   const navigate = useNavigate();
   const priorIds = useMemo(
     () => new Set(preview.priorRecipientContactIds),
     [preview.priorRecipientContactIds],
   );
-  const [rows, setRows] = useState<Row[]>(() => initialRows(preview));
+  const declinedIds = useMemo(() => new Set(preview.declinedContactIds), [preview.declinedContactIds]);
+  const [mountNow] = useState(() => new Date());
+  const now = nowProp ?? mountNow;
+  /** The rendered row elements, for the scroll-into-view on add. */
+  const rowEls = useRef(new Map<string, HTMLLIElement>());
+  /** The contactId an add just placed - scrolled into view after the commit. */
+  const pendingScrollRef = useRef<string | null>(null);
+  const [rows, setRows] = useState<Row[]>(() => initialRows(preview, declinedIds));
   // The draft's current hand-picked seed list — persisted best-effort on each
   // successful add-a-tenant so a hand-pick survives a reload of the review step.
   const seedsRef = useRef<string[]>(preview.seedContactIds);
@@ -139,15 +188,43 @@ export function RecipientPreview({
   // the send + surfaced so staff can resolve them — mirrors the skipped counts).
   const noConsentCount = rows.filter((r) => !r.hasConsent).length;
 
+  // last-heard-from (spec 5.3): the dashboard sorts the COMBINED list (audience,
+  // seeds and added rows alike) - most recently heard from first, never-heard
+  // last, ties by name; the server's order stops mattering.
+  const orderedRows = useMemo(
+    () =>
+      sortByHeardFrom(rows, {
+        heardAt: (r) => r.lastHeardFromAt,
+        name: (r) => ({
+          contactId: r.contactId,
+          ...(r.firstName !== undefined && { firstName: r.firstName }),
+          ...(r.lastName !== undefined && { lastName: r.lastName }),
+          phone: r.phone,
+        }),
+      }),
+    [rows],
+  );
+
+  // An added (or promoted) row is scrolled into view so a long list still
+  // confirms the pick. `block: 'nearest'` (the AllToursView precedent): a bare
+  // scrollIntoView scrolls every scrollable ancestor; nearest moves the list
+  // only as far as needed.
+  useLayoutEffect(() => {
+    const id = pendingScrollRef.current;
+    if (id === null) return;
+    pendingScrollRef.current = null;
+    rowEls.current.get(id)?.scrollIntoView({ block: 'nearest' });
+  }, [rows]);
+
   // Search-within-recipients: filter the visible rows by name/phone (the model
   // keeps every row's checked state; only the rendered set is filtered).
   const visibleRows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (q.length === 0) return rows;
-    return rows.filter(
+    if (q.length === 0) return orderedRows;
+    return orderedRows.filter(
       (r) => r.name.toLowerCase().includes(q) || r.phone.toLowerCase().includes(q),
     );
-  }, [rows, query]);
+  }, [orderedRows, query]);
 
   function toggle(contactId: string): void {
     setRows((prev) =>
@@ -161,11 +238,10 @@ export function RecipientPreview({
 
   /** Select all - but SKIP unseeded already-sent rows (opt-in only) AND
    *  no-consent rows (hard fence). A SEEDED row stays checked whatever its flag
-   *  (share-skip-fix D5): the operator picked them on purpose. */
+   *  (share-skip-fix D5): the operator picked them on purpose.
+   *  ... AND unseeded declined rows (spec 14.4 B11). */
   function selectAll(): void {
-    setRows((prev) =>
-      prev.map((r) => ({ ...r, checked: r.hasConsent && (r.seeded || !r.alreadySentThisProperty) })),
-    );
+    setRows((prev) => prev.map((r) => ({ ...r, checked: defaultChecked(r) })));
   }
   function deselectAll(): void {
     setRows((prev) => prev.map((r) => ({ ...r, checked: false })));
@@ -210,6 +286,7 @@ export function RecipientPreview({
       return;
     }
     setSearch({ name: '' });
+    pendingScrollRef.current = candidate.contactId;
     // Only a genuine add, or the promotion of a listed row that was not yet a
     // seed, persists to the draft's seed list (a repeat pick of a seed does not).
     const listed = rows.find((r) => r.contactId === candidate.contactId);
@@ -229,8 +306,17 @@ export function RecipientPreview({
         {
           contactId: candidate.contactId,
           name,
+          ...(candidate.firstName !== undefined && { firstName: candidate.firstName }),
+          ...(candidate.lastName !== undefined && { lastName: candidate.lastName }),
           phone,
+          // spec 14.4 B6: an added row's facts come from the raw contact.
+          ...(candidate.status !== undefined && { status: candidate.status }),
+          ...(candidate.housingAuthority !== undefined && { housingAuthority: candidate.housingAuthority }),
+          ...(candidate.last_heard_from_at !== undefined && { lastHeardFromAt: candidate.last_heard_from_at }),
           alreadySentThisProperty: already,
+          // Tagged, but CHECKED: a hand-pick is a seed (share-skip-fix D5,
+          // spec 14.4 G3 as amended); the annotate suffix warned before the pick.
+          declined: declinedIds.has(candidate.contactId),
           hasConsent: true,
           // share-skip-fix D5: a hand-pick is a seed from the moment it is added -
           // the same row the server returns as `seeded: true` after a re-preview,
@@ -346,6 +432,11 @@ export function RecipientPreview({
     }
   }
 
+  /** "Add a tenant" suffix (spec 5.3): warns BEFORE the pick. One suffix -
+   *  Not interested outranks Already sent. */
+  const annotateCandidate = (c: Contact): string | undefined =>
+    declinedIds.has(c.contactId) ? 'Not interested' : priorIds.has(c.contactId) ? 'Already sent' : undefined;
+
   return (
     <div className={styles.preview}>
       <div className={styles.toolbar}>
@@ -395,62 +486,110 @@ export function RecipientPreview({
         </p>
       ) : null}
 
+      {/* last-heard-from 5.3: the decline reads failed - say so rather than hide
+          it (a declined tenant who is not also already sent starts CHECKED). */}
+      {preview.declineLabelsUnavailable ? (
+        <p className={styles.seedNotice} role="status">
+          Couldn&apos;t load not-interested labels - a tenant who said no may be checked; sends still work
+        </p>
+      ) : null}
+
       {visibleRows.length === 0 ? (
         <p className={styles.emptyBody}>
           {rows.length === 0 ? 'No candidates — add a tenant below.' : 'No recipients match your search.'}
         </p>
       ) : (
-        <ul className={styles.rows} aria-label="Candidate recipients">
-          {visibleRows.map((row) => (
-            <li
-              key={row.contactId}
-              className={`${styles.row} ${!row.hasConsent ? styles.rowNoConsent : row.alreadySentThisProperty ? styles.rowAlready : ''}`.trim()}
-            >
-              <label className={styles.rowLabel}>
-                <input
-                  type="checkbox"
-                  className={styles.checkbox}
-                  // Explicit, clean accessible name (the tenant's name, plus a
-                  // status cue) so getByRole('checkbox',{name}) resolves by the
-                  // row's tenant — NOT the whole name+phone+tags blob. A no-consent
-                  // row is DISABLED (hard fence — can never be sent to).
-                  aria-label={
-                    !row.hasConsent
-                      ? `${row.name} — consent not recorded`
-                      : row.alreadySentThisProperty
-                        ? `${row.name} — already sent`
-                        : row.name
-                  }
-                  checked={row.checked}
-                  disabled={!row.hasConsent}
-                  onChange={() => toggle(row.contactId)}
-                />
-              </label>
-              {/* The name links to the profile in a NEW TAB — the curated list
-                  (checkbox state, added rows) lives in this page's memory, so
-                  in-tab navigation would lose it. Outside the checkbox label so
-                  clicking the link never toggles the row. */}
-              <span className={styles.rowBody}>
-                <Link
-                  className={styles.rowName}
-                  to={`/contacts/${encodeURIComponent(row.contactId)}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title="Open profile in a new tab — your recipient list stays put"
+        <div className={styles.listFrame}>
+          {/* Column headers (spec 5.3, 14.4 B8): OUTSIDE the list so every row
+              stays ONE listitem with ONE checkbox (the e2e li selectors and
+              partner-share's checkbox count hold). Shown at a 768px+ pane only;
+              the rows' column template and the list's stable scrollbar gutter
+              keep them aligned. Visual labels - every cell's text is in its row. */}
+          <div className={styles.headerRow} aria-hidden="true">
+            <span className={styles.headerCheck} />
+            <span className={styles.headerCols}>
+              <span>Name</span>
+              <span>Status</span>
+              <span>Housing authority</span>
+              <span>Last heard from</span>
+              <span />
+            </span>
+          </div>
+          <ul className={styles.rows} aria-label="Candidate recipients">
+            {visibleRows.map((row) => {
+              const heard = formatHeardFrom(row.lastHeardFromAt, now);
+              return (
+                <li
+                  key={row.contactId}
+                  ref={(el) => {
+                    if (el) rowEls.current.set(row.contactId, el);
+                    else rowEls.current.delete(row.contactId);
+                  }}
+                  className={`${styles.row} ${!row.hasConsent ? styles.rowNoConsent : row.alreadySentThisProperty || row.declined ? styles.rowAlready : ''}`.trim()}
                 >
-                  {row.name}
-                </Link>
-                <span className={styles.rowPhone}>{formatPhone(row.phone)}</span>
-                {!row.hasConsent ? (
-                  <span className={styles.noConsentTag}>consent not recorded — fix before sending</span>
-                ) : row.alreadySentThisProperty ? (
-                  <span className={styles.alreadyTag}>Already sent</span>
-                ) : null}
-                {row.added ? <span className={styles.addedTag}>Added</span> : null}
-              </span>
-            </li>
-          ))}
-        </ul>
+                  <label className={styles.rowLabel}>
+                    <input
+                      type="checkbox"
+                      className={styles.checkbox}
+                      // A clean accessible name (checkboxName) so a test or a
+                      // screen reader resolves the row by its person, not the
+                      // whole row text. A no-consent row is DISABLED (hard fence).
+                      aria-label={checkboxName(row)}
+                      checked={row.checked}
+                      disabled={!row.hasConsent}
+                      onChange={() => toggle(row.contactId)}
+                    />
+                  </label>
+                  {/* The name links to the profile in a NEW TAB - the curated list
+                      lives in this page's memory, so in-tab navigation would lose
+                      it. Outside the checkbox label so the link never toggles.
+                      Cells: name + phone | status, authority, last heard from |
+                      tags - columns at a 768px+ pane, three stacked lines below. */}
+                  <span className={styles.rowBody}>
+                    <span className={styles.cellName}>
+                      <Link
+                        className={styles.rowName}
+                        to={`/contacts/${encodeURIComponent(row.contactId)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Open profile in a new tab - your recipient list stays put"
+                      >
+                        {row.name}
+                      </Link>
+                      <span className={styles.rowPhone}>{formatPhone(row.phone)}</span>
+                    </span>
+                    <span className={styles.cellFacts}>
+                      <span className={styles.cellStatus}>
+                        {row.status !== undefined ? <StatusBadge kind="tenant" status={row.status} /> : null}
+                      </span>
+                      <span className={styles.cellAuthority}>{row.housingAuthority ?? null}</span>
+                      {/* The cell's DOM text is the bare label ("Never" or the
+                          formatted instant). The narrow layout's "Last heard
+                          from " prefix is CSS ::before content, never DOM text
+                          (plan review R1 #5: e2e 8.3 asserts the phrase is
+                          nowhere inside the list). An empty title is no title
+                          (contract N1). */}
+                      <span className={styles.cellHeard} {...(heard.title !== '' && { title: heard.title })}>
+                        {heard.label}
+                      </span>
+                    </span>
+                    <span className={styles.cellTags}>
+                      {!row.hasConsent ? (
+                        <span className={styles.noConsentTag}>{NO_CONSENT_TAG_TEXT}</span>
+                      ) : (
+                        <>
+                          {row.alreadySentThisProperty ? <span className={styles.alreadyTag}>Already sent</span> : null}
+                          {row.declined ? <span className={styles.declinedTag}>Not interested</span> : null}
+                        </>
+                      )}
+                      {row.added ? <span className={styles.addedTag}>Added</span> : null}
+                    </span>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       )}
 
       {/* Add a tenant the filter didn't catch. Hidden in resolved 1:1 mode: the
@@ -470,6 +609,7 @@ export function RecipientPreview({
                 }}
                 candidates={tenantCandidates}
                 inputLabel="Add a tenant"
+                annotate={annotateCandidate}
               />
             )}
           </div>

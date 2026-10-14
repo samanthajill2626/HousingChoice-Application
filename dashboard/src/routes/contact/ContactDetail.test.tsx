@@ -15,6 +15,7 @@ import {
 } from '../../ui/imageViewer/ImageViewer.testUtils.js';
 import { ImageViewerProvider } from '../../ui/imageViewer/ImageViewerProvider.js';
 import { TYPE_CHANGE_LANDLORD_SENTENCE } from '../../lib/holdingRefusals.js';
+import { formatInboxTimeFull } from '../inbox/inboxTime.js';
 
 const getContact = vi.fn();
 const getContactTimeline = vi.fn();
@@ -23,6 +24,8 @@ const getConversationMessages = vi.fn();
 const getAllPlacements = vi.fn();
 const getAllUnits = vi.fn();
 const getContactListingsSent = vi.fn();
+// last-heard-from 5.4: the Properties-sent outcome route.
+const setListingSendOutcome = vi.fn();
 const getContactMedia = vi.fn();
 const updateContact = vi.fn();
 const setTenantStatus = vi.fn();
@@ -111,6 +114,7 @@ vi.mock('../../api/index.js', async () => {
     getAllPlacements: (...a: unknown[]) => getAllPlacements(...a),
     getAllUnits: (...a: unknown[]) => getAllUnits(...a),
     getContactListingsSent: (...a: unknown[]) => getContactListingsSent(...a),
+    setListingSendOutcome: (...a: unknown[]) => setListingSendOutcome(...a),
     getContactMedia: (...a: unknown[]) => getContactMedia(...a),
     updateContact: (...a: unknown[]) => updateContact(...a),
     setTenantStatus: (...a: unknown[]) => setTenantStatus(...a),
@@ -317,6 +321,7 @@ beforeEach(() => {
   getAllPlacements.mockReset();
   getAllUnits.mockReset();
   getContactListingsSent.mockReset();
+  setListingSendOutcome.mockReset();
   getContactMedia.mockReset();
   getAllContacts.mockReset();
   sendMessage.mockReset();
@@ -1085,8 +1090,8 @@ describe('ContactDetail', () => {
     // The listings-sent wire order is newest-first by sentAt: u2 is the most
     // recent send, so the dialog should pre-commit to u2's address.
     getContactListingsSent.mockResolvedValue([
-      { contactId: 'k1', unitId: 'u2', sentAt: '2026-07-13T15:00:00.000Z', via: 'broadcast' },
-      { contactId: 'k1', unitId: 'u1', sentAt: '2026-07-01T15:00:00.000Z', via: 'broadcast' },
+      { contactId: 'k1', unitId: 'u2', sentAt: '2026-07-13T15:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true },
+      { contactId: 'k1', unitId: 'u1', sentAt: '2026-07-01T15:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true },
     ]);
     renderAt('k1');
 
@@ -1099,6 +1104,46 @@ describe('ContactDetail', () => {
     );
     // Committed like a hand pick — one Clear click returns to free search.
     expect(within(dialog).getByRole('button', { name: 'Clear Unit' })).toBeInTheDocument();
+  });
+
+  it("Interested in 'form' mode pre-commits the CLICKED row's property, not the latest send", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(TENANT);
+    getAllUnits.mockResolvedValue([
+      { unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' },
+      { unitId: 'u2', landlordId: 'L1', status: 'available', beds: 1, address: '88 Sycamore St' },
+    ]);
+    getContactListingsSent.mockResolvedValue([
+      { contactId: 'k1', unitId: 'u2', sentAt: '2026-07-13T15:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true },
+      { contactId: 'k1', unitId: 'u1', sentAt: '2026-07-01T15:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true },
+    ]);
+    renderAt('k1');
+    await user.click(await screen.findByRole('button', { name: 'Mark Tasha Williams interested in 1450 Joseph Blvd' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    await waitFor(() => expect(within(dialog).getByRole('combobox', { name: 'Unit' })).toHaveValue('1450 Joseph Blvd'));
+  });
+
+  it('Not interested calls the route for this contact and the row turns to Undo', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(TENANT);
+    getAllUnits.mockResolvedValue([{ unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd', tour_type: 'self_guided' }]);
+    const row = { contactId: 'k1', unitId: 'u1', sentAt: '2026-07-01T15:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true };
+    getContactListingsSent.mockResolvedValue([row]);
+    // The endpoint answers { row } (plan head 3.4 #4).
+    setListingSendOutcome.mockResolvedValue({ row: { ...row, outcome: 'not_interested', declined: { at: '2026-07-02T10:00:00.000Z', by: 'staff' } } });
+    renderAt('k1');
+    await user.click(await screen.findByRole('button', { name: 'Mark Tasha Williams not interested in 1450 Joseph Blvd' }));
+    expect(setListingSendOutcome).toHaveBeenCalledWith('u1', 'k1', 'not_interested');
+    expect(await screen.findByRole('button', { name: 'Undo not interested for Tasha Williams' })).toBeInTheDocument();
+  });
+
+  it("a failed listings-sent read shows \"We couldn't load properties sent.\" (not the pending panel)", async () => {
+    getContact.mockResolvedValue(TENANT);
+    getContactListingsSent.mockRejectedValue(new ApiError(503, 'outcome_unavailable', 'x', { error: 'outcome_unavailable' }));
+    renderAt('k1');
+    expect(await screen.findByText("We couldn't load properties sent.")).toBeInTheDocument();
   });
 
   it('the "Schedule a tour" action is NOT shown for a landlord contact', async () => {
@@ -2856,6 +2901,27 @@ describe('ContactDetail - caseworkers (spec 2026-10-06 D16, D19, D21, D22)', () 
     ).toBeInTheDocument();
   });
 
+  it('header: Last heard from is its own span on the facts line, for every contact type (spec 2026-10-12 5.7, F6)', async () => {
+    const at = '2024-03-05T12:00:00.000Z';
+    getContact.mockResolvedValue({ ...TENANT, housingAuthority: 'Atlanta Housing Authority', last_heard_from_at: at });
+    const first = renderAt('k1');
+    await screen.findByText('Tasha Williams');
+    const band = within(header(first.container));
+    // buildFacts()'s pinned string is untouched (the Voucher 1BR pin's shape).
+    expect(band.getByText('Voucher 2BR - Atlanta Housing Authority')).toBeInTheDocument();
+    const heard = band.getByText('Last heard from Mar 5, 2024');
+    expect(heard.tagName).toBe('SPAN');
+    expect(heard).toHaveAttribute('title', formatInboxTimeFull(at));
+    first.unmount();
+
+    getContact.mockResolvedValue(PARTNER);
+    const second = renderAt('p1');
+    await screen.findByText('Renee Carter');
+    // Contract N1: "Never" renders with NO title attribute (never title="").
+    expect(within(header(second.container)).getByText('Last heard from Never')).not.toHaveAttribute('title');
+    expect(within(header(second.container)).getByText('Hope Atlanta')).toBeInTheDocument();
+  });
+
   it.each([
     ['tenant', TENANT, 'k1'],
     ['landlord', LANDLORD, 'L1'],
@@ -3009,7 +3075,11 @@ describe('ContactDetail - a partner page sends a property (caseworkers D20)', ()
         unitId: 'u1',
         sentAt: '2026-07-01T12:00:00.000Z',
         via: 'broadcast',
+        // The server no longer sends `tour` on a partner row (spec 14.3 B11);
+        // it stays in the fixture to pin the client-side drop.
         tour: { tourId: 't-old', state: 'toured' },
+        outcome: 'no_reply',
+        interestedSupported: false,
       },
     ]);
     render(
@@ -3027,6 +3097,7 @@ describe('ContactDetail - a partner page sends a property (caseworkers D20)', ()
     const card = heading.closest('section') as HTMLElement;
     expect(await within(card).findByRole('link', { name: '1450 Joseph Blvd' })).toHaveAttribute('href', '/listings/u1');
     expect(within(card).queryByRole('link', { name: 'Toured' })).not.toBeInTheDocument();
+    expect(within(card).getByRole('link', { name: 'Request a tour for Cora Reyes at 1450 Joseph Blvd' })).toHaveAttribute('href', '/listings/u1?tour=new');
     await user.click(within(card).getByRole('button', { name: 'Send a property to this partner' }));
     expect(await screen.findByText('COMPOSER')).toBeInTheDocument();
     expect(screen.getByTestId('path')).toHaveTextContent('/broadcasts/new?contactId=p-send');

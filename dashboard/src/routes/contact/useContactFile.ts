@@ -102,6 +102,11 @@ export type ContactFile = ContactFileState & {
    *  this file." over rows that are still good. Only a load with nothing
    *  committed for this contact reports `'error'`. */
   refetch: () => void;
+  /** Replace ONE Properties-sent row in place after an outcome action - no
+   *  refetch. Bound to the contactId passed (a late answer for contact A
+   *  after a move to B is a no-op); an unknown unitId or a non-ready slice is
+   *  left alone. */
+  setListingSentRow: (contactId: string, unitId: string, row: ListingSendRow) => void;
 };
 
 export function useContactFile(contactId: string, opts: UseContactFileOpts = {}): ContactFile {
@@ -118,6 +123,16 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
   // effect, and pulling it out would change the abort/ordering shape.
   const [reloadNonce, setReloadNonce] = useState(0);
   const refetch = useCallback(() => setReloadNonce((n) => n + 1), []);
+  const setListingSentRow = useCallback((forContactId: string, unitId: string, row: ListingSendRow) => {
+    setState((prev) => {
+      if (prev.forId !== forContactId || prev.listingsSent.status !== 'ready') return prev;
+      const index = prev.listingsSent.rows.findIndex((r) => r.unitId === unitId);
+      if (index < 0) return prev;
+      const rows = prev.listingsSent.rows.slice();
+      rows[index] = row;
+      return { ...prev, listingsSent: { status: 'ready', rows } };
+    });
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -211,6 +226,6 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
   }, [contactId, opts.contactType, reloadNonce]);
 
   // Committed state is for the previous contactId → the new fetch is in flight.
-  if (state.forId !== contactId) return { ...FILE_LOADING, refetch };
-  return { ...state, refetch };
+  if (state.forId !== contactId) return { ...FILE_LOADING, refetch, setListingSentRow };
+  return { ...state, refetch, setListingSentRow };
 }

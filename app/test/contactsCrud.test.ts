@@ -552,6 +552,7 @@ describe('server-owned contact fields (caseworkers spec D21, D22)', () => {
     ['caseworker_review', 'dismissed'],
     ['caseworker_conversion', { at: '2026-10-07T00:00:00.000Z', by: 'x', fromType: 'tenant' }],
     ['type_source', 'manual'],
+    ['last_heard_from_at', '2030-01-01T00:00:00.000Z'],
   ] as const;
 
   for (const [key, value] of OWNED) {

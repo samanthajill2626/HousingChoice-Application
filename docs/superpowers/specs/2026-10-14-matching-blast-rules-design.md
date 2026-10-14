@@ -1,7 +1,8 @@
 # Matching blasts follow the audience rules - design
 
-Status: DRAFT revision 2 (2026-10-14) - round 1 review folded in, plus two
-rulings by Cameron (tenants with no housing authority; the reach count).
+Status: DRAFT revision 3 (2026-10-14) - review rounds 1 and 2 folded in,
+plus two rulings by Cameron (tenants with no housing authority; the reach
+count).
 Review history: `docs/superpowers/reviews/2026-10-14-matching-blast-rules/design-review/adjudications.md`.
 Branch: `feat/matching-blast-rules` (worktree `W:\tmp\matching-blast-rules`, cut from main @a2b3d80d)
 Tracker: Improvements Tracker item #6 "Matching (blasts): housing authority and status" (Before WP1, item 5)
@@ -21,8 +22,8 @@ and no one else by default:
 3. housing authority filled in from the property, which can accept several
    housing authorities;
 4. only Available properties offered in the property picker;
-5. the "Reaches N recipients" count equal to the number of recipients that
-   start checked.
+5. the "Reaches N recipients" count equal, when it is computed, to the
+   number of recipients that will start checked.
 
 A tenant picked by hand always gets the property. A tour never stops staff
 from sending a property to a tenant; it only keeps the tenant from being
@@ -162,8 +163,25 @@ Dashboard (`dashboard/src/routes/broadcasts/`):
   not interested` / `- already sent` / `- not interested` / the bare name.
   Add a tenant (tenant-only search, `:604`) annotates the option with ONE
   suffix, Not interested outranking Already sent (`:435-438`), and adds the
-  row checked and seeded (`:257-336`). Rows are ordered by last heard from
-  (`:194-206`).
+  row checked and seeded (`:257-336`); picking a tenant already in the list
+  PROMOTES that row to a seed and checks it (`:294-301`), and Select all
+  keeps it checked (pinned by `RecipientPreview.test.tsx:315-360`). Rows are
+  ordered by last heard from (`:194-206`).
+- A failed property load is swallowed: compose still works without the
+  prefill (`BroadcastComposer.tsx:212`). A resumed draft (`?draftId=`) has
+  no property on the client (`:417`). Changing the property resets an
+  edited message after a confirm, because the message was written for the
+  old property (`:333-342`).
+- The draft key covers the message body too (`useComposerDraft.ts:88-100`),
+  so every pause in typing recreates the draft. A draft's estimate is stored
+  as its `stats.audience` (`broadcastsRepo.ts:722`) and read by the Drafts
+  list ("To N recipients", `BroadcastsList.tsx:47`, `:221`), the results
+  header (`BroadcastResults.tsx:208`) and `StatChips.tsx:40`.
+- The already-sent read (`priorRecipientKeys`,
+  `app/src/services/shareRecipientState.ts:249-266`) never throws: a failed
+  page logs a warning and returns a partial set; it is a soft hint by
+  design. Only the preview reads a queued slot's send-attempt record
+  (`broadcasts.ts:111-114`, `:757-760`).
 - Truncation copy tells staff to narrow the filter
   (`AudienceFilters.tsx:191-193`, `RecipientPreview.tsx:650-655`).
 - Stored filters are summarized as text by `audienceSummary`
@@ -243,22 +261,32 @@ followed by "This blast is not limited by housing authority."
 The picker becomes `OrgPicker multiple`, labeled "Housing authorities".
 Staff can remove any prefilled member or add others.
 
-The prefill FOLLOWS THE PROPERTY until staff edit that filter: choosing or
-changing the property re-applies the authority prefill (and the voucher
-size prefill, D3a) unless that filter has been edited since the last
-prefill. An edit is any pick, removal or clear by staff, and a member
-removed after a 422 (below). Value and ownership are kept together and
-checked in the functional state update (the lesson in
+The prefill BELONGS TO THE PROPERTY. While the property stays the same, a
+filter staff have edited is never overwritten (an edit is any pick,
+removal or clear by staff, and a member removed after a 422, D3b). When
+staff CHANGE the property, both prefills (housing authorities and voucher
+size, D3a) are applied fresh from the new property and earlier edits are
+dropped, without a confirm: the filters were chosen for the old property,
+the same reason the composer resets an edited message on a property change
+(`BroadcastComposer.tsx:333-342`), and the new values are visible right
+there. Value and ownership are kept together and checked in the functional
+state update (the lesson in
 `docs/issues/broadcast-composer-prefill-overwrites-edit.md`).
 
-Timing: Preview stays disabled until the prefill has settled - the property
-is loaded and the organization list has loaded or failed. If the list read
-fails, nothing is prefilled and the filters show "Couldn't load the
-organization list, so housing authorities were not filled in from the
-property." (the picker shows its own error as today).
+Timing: ONLY while a property is attached and the filters are on, Preview
+stays disabled until the prefill has settled: the property has loaded or
+failed to load, and the organization list has loaded or failed. A failed
+property load counts as settled: nothing is prefilled from it and the
+filters show "Couldn't load the property, so its housing authorities and
+voucher size were not filled in." A failed list read counts as settled:
+nothing is prefilled and the filters show "Couldn't load the organization
+list, so housing authorities were not filled in from the property." (the
+picker shows its own error as today). A resumed draft (`?draftId=`, no
+property on the client) and a seeds-only send (filters off) are never
+gated.
 
 D3a. Voucher size keeps its current prefill value (the property's first
-accepted size) but gets the same follow-the-property rule, because the
+accepted size) but gets the same belongs-to-the-property rule, because the
 current effect never re-applies after a property change
 (`BroadcastComposer.tsx:261-272`, `:333-342`). Making voucher size a list
 is NOT part of this change (tracker #12).
@@ -314,9 +342,19 @@ ONE server function produces the review rows for a draft: the filter rows
   `checkedByDefault = hasConsent && (seeded || (!alreadySent && !declined && !tourHold))`
 
 Preview returns those rows; POST create counts them (D8). The dashboard
-uses `checkedByDefault` for the initial state and for Select all and no
-longer computes the rule itself; the only client-side default left is a row
-added with Add a tenant, which starts checked (a hand pick).
+uses the server's `checkedByDefault` for the initial state and for Select
+all and no longer computes the rule itself, with ONE client-side case: a
+row that becomes a hand pick on the review step - added by Add a tenant, or
+an existing row PROMOTED by picking it there (`RecipientPreview.tsx:294-301`)
+- takes `checkedByDefault = hasConsent` from that moment, so it starts
+checked and Select all keeps it checked, as today
+(`RecipientPreview.test.tsx:315-360` must keep passing).
+
+The already-sent input comes from `priorRecipientKeys`, which never throws
+and returns a partial set on a failed page (a soft hint by design, today's
+behavior). This change keeps that: a throttled already-sent read can leave
+an already-sent tenant checked. Only the tours and decline reads fail
+closed.
 
 The send ships exactly the list staff reviewed (path (a)), so preview and
 send cannot disagree.
@@ -407,8 +445,9 @@ labels couldn't be loaded." A direct send is never blocked by these reads.
 While the filters are on, under the filters (Cameron 2026-10-14):
 
   "Only tenants in Onboarding or Searching are included. While a housing
-  authority is selected, tenants with no housing authority recorded are
-  left out. Add any other tenant by hand when you review recipients."
+  authority is selected, tenants whose housing authority is missing or not
+  on the organization list are left out. Add any other tenant by hand when
+  you review recipients."
 
 The second sentence shows only while the housing authority list is
 non-empty.
@@ -416,12 +455,35 @@ non-empty.
 "Reaches N recipients" (Cameron 2026-10-14) shows the number of rows that
 will START CHECKED on the review step: POST create runs the D5 function and
 answers `estimatedCount` = the count of `checkedByDefault` rows (stored as
-`estimatedAudience`). It therefore leaves out held, declined, already-sent
-and no-consent rows, exactly as the review step does. If a rules read
-throws at create, the draft is still created, `estimatedCount` is omitted,
-and the line shows today's "Reach estimate unavailable". Rows staff check
-or uncheck, or add by hand, on the review step change the Send button's
-count, not this line.
+`estimatedAudience`, i.e. the draft's `stats.audience`). It therefore leaves
+out held, declined, already-sent and no-consent rows, exactly as the review
+step does. It is exact when computed; it is recomputed whenever the draft
+is recreated.
+
+- A `seeds_only` draft runs NO rules reads at create: every row is a seed,
+  so its count is the seeds with recorded consent.
+- A filter draft runs the open-tours, decline and already-sent reads at
+  create. Because the draft key includes the message body, a pause in typing
+  recreates the draft and repeats them; at today's volume these are a few
+  small Query pages per create, the same reads one Preview click makes.
+  The send-attempt record read inside `priorRecipientKeys` therefore moves
+  beyond the preview; the "ALONE" comments at `broadcasts.ts:111-114` and
+  `:757-760` are updated to say create reads it too.
+- If a rules read throws at create, the draft is still created,
+  `estimatedCount` is omitted, the line shows today's "Reach estimate
+  unavailable", and the stored `stats.audience` is 0; the Drafts list then
+  reads "To 0 recipients" for that draft until it is recreated.
+- Every reader of a draft's `stats.audience` now shows the default-checked
+  count: the Drafts list (`BroadcastsList.tsx:47`, `:221`), the results
+  header (`BroadcastResults.tsx:208`) and `StatChips.tsx:40`. A 1:1 draft to
+  a tenant without recorded consent reads "To 0 recipients", which is true
+  (that row cannot be checked).
+- A preview lists at most 1000 rows (`broadcasts.ts:785`) while create
+  counts them all; above 1000 the send is refused anyway (the recipient
+  cap).
+
+Rows staff check or uncheck, or add by hand, on the review step change the
+Send button's count, not this line.
 
 ### D9 Property picker: Available only
 
@@ -476,6 +538,10 @@ an explicitly checked row. Letting Add a tenant find caseworkers is deferred
   makes Interested create no new request, so that click holds nothing.
 - A direct send from a tenant's page to a tenant with a tour shows the tour
   label but the row stays checked.
+- Changing the property in the composer replaces edited filters with the new
+  property's prefill (no confirm).
+- A throttled already-sent read can still leave an already-sent tenant
+  checked (today's behavior, kept).
 
 ## 5. Out of scope
 
@@ -501,7 +567,9 @@ Unit (app):
 - The review-rows function: `checkedByDefault` for every flag combination;
   seeds checked whatever their flags; no-consent never.
 - The resolver: only `searching` and `onboarding` tenants; searching read
-  first; any-of authority list; a blank or non-member authority excluded
+  first (proved on `app/test/helpers/contactsPartitionFake.ts`, which models
+  range-key order - the harness fake returns seed order); any-of authority
+  list; a blank or non-member authority excluded
   while the list is non-empty and included while it is empty; legacy string;
   a partner with a matching authority and any status never resolves; the
   existing fences.
@@ -509,7 +577,8 @@ Unit (app):
   first off-list member's 422; more than 100 members 400; legacy string
   stored as a one-member list; both keys 400; `estimatedCount` equals the
   default-checked count (holds, declines, already sent, no consent left
-  out); a throwing rules read creates the draft without `estimatedCount`.
+  out); a seeds-only create makes no rules read and counts seeds with
+  consent; a throwing rules read creates the draft without `estimatedCount`.
 - Preview: rows with `tourHold`, `checkedByDefault`, `tourHolds`; 503 on a
   throwing tours or decline read for a filter draft; a seeds-only draft
   served with `audienceRulesUnavailable`; legacy stored filter previews and
@@ -520,19 +589,24 @@ Unit (app):
 - The open-tours read: the `requested` key condition; every page of the
   other three partitions.
 
-Unit (dashboard): rows use `checkedByDefault`; Select all; labels for every
+Unit (dashboard): rows use `checkedByDefault`; Select all; a row added or
+promoted by Add a tenant stays checked through Select all; labels for every
 kind with and without a date; the literal accessible names; the Add a
 tenant note; the 503 Try again; the seeds-only notice; the caption (with and
 without its second sentence); the reach line; the multi picker prefill
 (exact names and unique spellings, off-list note, the not-limited line,
-follow-the-property, edit ownership, a 422 removing one member, Preview
-disabled until settled, a failed list read); the picker listing only
+edit ownership while the property stays, a property change replacing
+edited filters, a 422 removing one member, Preview disabled until settled
+only with a property and filters on, a failed property load and a failed
+list read each settling with their notice, a resumed draft and a seeds-only
+send never gated); the picker listing only
 Available properties on the bare and `?contactId=` entries, the `?unitId=`
 entry keeping a non-Available property, and the empty state; the truncation
 copy; `audienceSummary` for a list (names joined with ", ").
 
-e2e (new spec): one property accepting two listed authorities; tenants, all
-with explicit statuses and authorities: Searching in authority A,
+e2e (new spec): one property accepting two run-unique listed authorities
+(created per run, as `org-lists.spec.ts` does with `addOrg`); tenants, all
+with explicit statuses, authorities and recorded consent: Searching in authority A,
 Onboarding in authority B, Placing in A, Searching in A with an upcoming
 tour, Searching in A with a fresh tour request, Searching in A whose only
 tour is closed Not a fit, Searching with no authority. Assert: both
@@ -551,13 +625,17 @@ Server:
   `parseAudienceFilter`, POST create (list check, estimate), the review-rows
   function, `storedFilterRefusal`, preview, send path (c), results (`:393`)
   and list (`:421`) projections, the router header comment (`:6-28`), the
-  `audience_too_large` messages (`:1010-1012`).
+  `audience_too_large` messages (`:1010-1012`), and the "ALONE" comments on
+  the send-attempt record read (`:111-114`, `:757-760`).
 - `audienceResolution.ts` (whole read; header comment; the truncation TODO;
   the `byHousingAuthority` log field).
 - `toursRepo.ts`: the open-tours read (the `requested` range condition).
 - The harness fake `toursRepo` (`app/test/helpers/twilioWebhookHarness.ts:3920`,
-  `listByStatus` at `:3964`) and its `listByType` status support, which
-  every `broadcastApi.test.ts` preview case runs against.
+  `listByStatus` at `:3964`), which every `broadcastApi.test.ts` preview
+  case runs against, must model the `requested` range condition. The
+  harness's contacts `listByType` already filters by status (`:2327`) but
+  returns seed order (`:2330-2341`); the searching-first order is tested on
+  `app/test/helpers/contactsPartitionFake.ts`.
 - Seeds: `app/src/lib/seed/matrix.ts:1224-1230`, `:1257-1263` (full profile,
   legacy string filters) - keep ONE legacy-shape broadcast so the full world
   exercises the normalizer, move the other to the list shape.
@@ -576,12 +654,20 @@ Dashboard:
   `BroadcastComposer.tsx` (prefill and its settling, picker list, 422
   removal of one member, 503 Try again), `RecipientPreview.tsx` (row model,
   `checkedByDefault`, tags, accessible name, Add a tenant, the seeds-only
-  notice, truncation alert, remove the decline-unavailable notice),
-  `broadcastFormat.ts` `audienceSummary`.
+  notice, truncation alert, remove the decline-unavailable notice, the
+  hand-pick `checkedByDefault` case), `broadcastFormat.ts` `audienceSummary`.
+- Readers of a draft's `stats.audience`, which now holds the default-checked
+  count (no code change expected; their tests and copy must agree):
+  `BroadcastsList.tsx:47`, `:221`, `BroadcastResults.tsx:208`,
+  `StatChips.tsx:40`.
 
 Tests that pin today's shape or behavior and must change. e2e tenants get
-an explicit on-list authority and status; no spec may depend on tenants
-another spec left in the lane:
+an explicit status, recorded consent, and a RUN-UNIQUE on-list authority
+(created per run with `addOrg`) wherever a spec asserts a count or a list -
+a shared authority such as Atlanta Housing Authority pulls in tenants other
+specs leave in the lane (for example
+`e2e/tests/scenarios/sending-unit.spec.ts:58-66`); no spec may depend on
+them:
 
 - app: `app/test/audienceResolution.test.ts` (its `tenant()` helper defaults
   to status `active`, so most cases resolve nothing under D1),
@@ -592,7 +678,8 @@ another spec left in the lane:
   copy at `:242`), `BroadcastComposer.test.tsx` (labels, filter objects,
   truncation copy at `:210`, the preview fixtures), 
   `BroadcastComposer.prefill.test.tsx` (the composer gains an org-list
-  read), `RecipientPreview.test.tsx` (`checkedByDefault`, `:982-988`),
+  read), `RecipientPreview.test.tsx` (`checkedByDefault`, `:982-988`;
+  `:315-360` - a promoted row kept by Select all - must KEEP passing),
   `broadcastFormat.test.ts:31`.
 - e2e: `broadcasts.spec.ts` test 1 (`:96-229` - the keep/drop tenants have no
   authority, and the lean seed's Tasha is `placing`) and "sending a
@@ -605,8 +692,10 @@ another spec left in the lane:
   `org-lists.spec.ts` (`draftAuthority` reads a string at `:183-194`; the
   composer tests at `:321-367` and `:450-480` pin "no authority before a
   pick" and an option that multi mode hides after the prefill; the
-  "Housing authority" label); `matching-entry-points.spec.ts:290,325`
-  (label).
+  "Housing authority" label; `:361` "Reaches 2 recipients" and `:477`
+  "Reaches 1 recipient" count tenants created without consent, so they read
+  0 under D8 unless the helper records consent);
+  `matching-entry-points.spec.ts:290,325` (label).
 - `e2e/support/selectors.md:132-134` (the composer filter contracts: the
   singular label, "changes its filter ONLY on a pick or a chip removal" -
   now also on a property prefill) and `:147` (checkbox names).

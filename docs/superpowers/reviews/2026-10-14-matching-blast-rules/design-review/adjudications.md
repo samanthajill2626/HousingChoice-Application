@@ -44,3 +44,24 @@ own copy of the rule. A throwing rules read at create omits the estimate
 Round 1 changed decisions (seeds-only availability, path (c) set, no read
 cap, wire normalization, prefill edges, the no-authority rule), so round 2
 runs: ONE reviewer, the same agent continued, with the re-review charge.
+
+## Spec round 2 (rev 2 @31930df2 -> rev 3)
+
+Reviewer A continued with the re-review charge (B's report handed over).
+Report: `spec-r2-reviewer-a.md` (8 findings: 2 MEDIUM, 6 LOW). A conceded
+A7a and A7b; it judged the other round-1 fixes correct except A2 (inventory,
+still incomplete) and A10 (the settle gate).
+
+| # | Finding | Ruling | Decision changed? |
+|---|---|---|---|
+| R2-1 | Select all on the server flag unchecks a row PROMOTED by Add a tenant (`RecipientPreview.tsx:294-301`), contradicting D4 and the kept note; pinned by `RecipientPreview.test.tsx:315-360` | ACCEPT. A row that becomes a hand pick on the review step (added or promoted) takes `checkedByDefault = hasConsent`; the pinned test must keep passing. | YES (client rule) |
+| R2-2 | The prefill settle gate has no exit on a failed property load and is unscoped (resumed drafts, seeds-only) | ACCEPT. Gate only with a property attached and filters on; a failed property load settles with a notice; resumed drafts and seeds-only sends are never gated. | YES (gate) |
+| R2-3 | Reach-at-create repeats the rules reads on every debounced message edit; moves the attempt-record read beyond preview; seeds-only creates read for nothing; equality only at create and below 1000 rows | ACCEPT: seeds-only creates make no rules read (count = seeds with consent); the per-keystroke cost is stated and accepted at today's volume (same reads as one Preview click); the ALONE comments are updated; goal 5 worded "equal when computed"; the 1000-row preview cap noted. REJECT a separate reach endpoint or skip-on-body-change protocol: more API for no measured cost. | YES (seeds-only) |
+| R2-4 | Draft `stats.audience` changes meaning for unlisted readers; "To 0 recipients" cases | ACCEPT: readers listed; the meaning (default-checked) stated; "To 0" for a no-consent 1:1 draft is true; a create during a read failure stores 0 until recreated - stated. | no |
+| R2-5 | Inventory: org-lists `:361`/`:477` count no-consent tenants; "explicit on-list authority" is not lane-independent unless run-unique; harness fake already filters status but has no order | ACCEPT all three: e2e tenants get consent and run-unique authorities where counts are asserted; the order test lives on `contactsPartitionFake.ts`. | no |
+| R2-6 | The already-sent input fails open (partial set) while two inputs fail closed | ACCEPT as a stated exposure (today's soft-hint behavior, kept). | no |
+| R2-7 | Edited filters silently carry over to a new property, while an edited message is reset | ACCEPT with a planner ruling: the prefill belongs to the property; changing the property applies the new property's prefill fresh and drops edits, no confirm (the filters are visible; mirrors the message reset rationale). | YES (behavior) |
+| R2-8 | The caption names only blank authorities; off-list values are also left out | ACCEPT: "whose housing authority is missing or not on the organization list". | no |
+
+Round 2 changed decisions (R2-1, R2-2, R2-3, R2-7), so round 3 runs with the
+same reviewer continued. Hard cap is 4.

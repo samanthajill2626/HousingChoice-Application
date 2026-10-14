@@ -77,3 +77,22 @@ both read-only while the planner's gate battery ran. Planner gates on 8bec5de1:
   broadcasts preview, follow-ups) with three copies of the group-by-tenant
   loop; `GROUP_THREAD_TYPES` and `TEAM_SENDER_KEY` are re-declared. DEFER -
   filed as `docs/issues/listing-outcome-join-duplication.md` (low).
+
+## Round 2 (re-review of the planner fix wave 8d365094 + 814cc258)
+
+- Conformance r2 (`conformance-r2.md`): nothing new; the lookback fix and the
+  e2e assertions conform (spec 5.6, section 8 (2)); no contested rulings.
+- Adversarial r2 (`adversarial-r2.md`): the fix is correct (same rule, clock
+  and parse as `isWaiting`; listed rows, `byUnit`, `truncated` and the pill
+  unchanged); all rulings conceded.
+  - R2-1 [LOW] A one-click Interested's new tour is missing from the same
+    page's Tours card until reload; "+ Tour" there could create a second
+    open tour (no dedupe). VERIFIED (`ListingDetail.tsx:420-423` applies the
+    row only; `useListing` has no tours reload). DEFER - filed as
+    `docs/issues/interested-tour-missing-from-tours-card-until-reload.md`:
+    the row's own chip shows and links the tour, so the state is right and
+    only the card is stale; the fix needs a tours reload on two pages.
+  - R2-2 [LOW] Wording: the fix bounds the tours reads and the contacts batch,
+    not `listByUnit` itself. ACCEPT as wording - no failure mode; noted here.
+
+Round 2 result: no decision changed; the planner review is CLOSED.

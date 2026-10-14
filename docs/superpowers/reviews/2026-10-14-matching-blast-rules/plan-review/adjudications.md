@@ -32,3 +32,24 @@ asserts. Three findings overlap (A5=B1, A6=B4, A1=B6).
 0 rejected. Round 1 changed decisions (AR22 surface, AR23 and AR26
 behavior), so round 2 runs: reviewer B continued (it landed more accepted
 findings) with A's report handed over and the re-review charge.
+
+## Plan round 2 (plan @fdda1242 -> rulings AR33-AR38, plan section 4.2)
+
+Reviewer B continued with the re-review charge (A's report handed over).
+Report: `plan-r2-reviewer-b.md` (7 findings: 2 MEDIUM, 5 LOW), all aimed at
+the round-1 rulings. B contested AR26's disable and AR27's count premise and
+conceded every other adjudication; it judged AR22, AR28-AR32 correct and
+found nothing new in a fresh read of S1/S2.
+
+| # | Finding | Ruling | Decision changed? |
+|---|---|---|---|
+| R2-1 | AR26's disabled Change breaks the existing deliberate test `BroadcastComposer.test.tsx:946-970` (Change during a held preview) | ACCEPT (contest upheld) -> AR33: Change stays enabled; the existing staleness check also governs a late 422/503; a new held-422 test | YES (reverts AR26's disable) |
+| R2-2 | AR23 contradicts two Task 3.5 tests that wait for "Reaches 5" while the gate is closed | ACCEPT -> AR34: both tests rewritten (no create, `Estimating reach`, then one create) | no |
+| R2-3 | AR23 does not say how `hold` fits the hook; a stored pending flag could stick | ACCEPT -> AR35: effect dependency, early return, derived `reachPending` | no |
+| R2-4 | AR25's "whenever the draft key changes" invites a set-state-in-effect lint error | ACCEPT -> AR36: derived alert keyed by the draft key | no |
+| R2-5 | AR26's belt needs a ref written during render | ACCEPT (moot) -> AR33 uses the existing staleness check | (folded) |
+| R2-6 | AR24 keeps the flash and says nothing about a failed units read | ACCEPT -> AR37 (`loading / loaded / failed`; failed copy `Couldn't load the properties.`) | no |
+| R2-7 | AR27's premise is stale: the issue already records 22/17 and says AGENTS.md is left as it is | ACCEPT (contest upheld) -> AR38: issue file only, new dated status paragraph, measured with `npx eslint .`; AGENTS.md untouched | no |
+
+0 rejected. R2-1 reverts the one behavior round 1 added (the disable), so
+by the stop rule round 3 runs on the AR33-AR38 text with the same reviewer.

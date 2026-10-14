@@ -538,6 +538,69 @@ below as written). Rulings:
   (no candidate count - the resolver's read bound is pages x page size, not
   the recipient cap). Every test asserting it uses this exact string.
 
+### 4.2 Plan review round 2 rulings (BINDING; they SUPERSEDE the parts of
+### AR23-AR27 they name)
+
+- **AR33 (R2-1) Change property stays ENABLED during a preview** -
+  supersedes AR26 entirely. Changing the property while a preview loads is
+  existing, deliberate behavior pinned by
+  `dashboard/src/routes/broadcasts/BroadcastComposer.test.tsx:946-970`
+  (code review R3-FE-1: the late result is never reviewed under the next
+  property); that test must keep passing unchanged. The composer's EXISTING
+  staleness check for a late preview result (the one that test exercises)
+  also governs a late 422 and a late 503: the 422 member removal (D3b) and
+  the 503 alert run ONLY when the result is for the current draft;
+  otherwise the result is discarded exactly as a late 200 is. No ref is
+  written during render. Add a test modeled on `:946-970` with a held 422:
+  after Change property and a new pick, the late 422 removes nothing and
+  shows no "is no longer on the organization list" notice.
+- **AR34 (R2-2) The two Task 3.5 tests that waited for a reach while the
+  gate was closed** are rewritten for AR23 (and their names keep their RED
+  list entries): "with a property and the filters on, Preview waits for the
+  organization list" asserts, while the list promise is pending, that
+  `createBroadcast` has NOT been called, the reach line shows
+  `Estimating reach` (the existing pending text, `AudienceFilters.tsx:181`)
+  and Preview is disabled; after the list resolves, exactly ONE create is
+  made, it carries `housing_authorities: ['Atlanta Housing Authority']`,
+  and Preview becomes enabled. "an ABORTED property load is neither loaded
+  nor failed" asserts no create, `Estimating reach`, Preview disabled, and
+  no property notice.
+- **AR35 (R2-3) How `hold` fits `useComposerDraft`** (refines AR23): `hold`
+  is a field of the hook's input and a dependency of its create effect; the
+  effect returns BEFORE scheduling a create (and before the no-message
+  exit) while `hold` is true, and deletes nothing. `reachPending` exposed
+  by the hook is DERIVED - `hold || <the existing pending state>` - never a
+  stored flag set from `hold`, so it can never stick after the gate
+  settles (a failed property load settles the gate and releases `hold`).
+- **AR36 (R2-4) The 503 alert is derived, not cleared by an effect**
+  (refines AR25): store the draft key the 503 answered
+  (`rulesUnavailableFor: string | null`, set in the preview's catch) and
+  render the alert only while it equals the current draft key. Any filter,
+  message or property change changes the key, so the alert disappears with
+  no `useEffect` (a `setState` in an effect would be a new
+  `react-hooks/set-state-in-effect` error, blocked by gate 5).
+- **AR37 (R2-6) Picker empty state** (refines AR24): while the units read is
+  in flight, the picker shows NO empty-state sentence; after a FAILED read
+  it shows `Couldn't load the properties.`; only after a SUCCESSFUL read
+  with no Available property does it show `No Available properties. A property must be Available to send.`
+  (the `No properties yet - add one from the Properties page.` line is
+  replaced by these). Track the read as `'loading' | 'loaded' | 'failed'`
+  set in the read's `.then` / `.catch` (not in an effect body).
+- **AR38 (R2-7) The lint count record** (supersedes AR19 and AR27's
+  targets): follow the issue file's own convention - do NOT edit AGENTS.md
+  (its "23 errors across 18 dashboard files" is a dated statement the issue
+  file says is left as it is). In the last step of Task 4.4, if the gate-5
+  baseline comparison shows the branch removed pre-existing errors, run
+  `npx eslint .` bare from the worktree root with output captured to
+  `.superpowers/lint-repo.log`, count errors, files and per-rule totals
+  from it, and ADD a new dated paragraph at the top of
+  `docs/issues/lint-backlog-repo-wide.md` in the same style as its
+  "Status 2026-10-13" paragraph ("**Status <date>
+  (`feat/matching-blast-rules`).** **N errors across F files, 0
+  warnings** ..." with the rule breakdown and which errors went away and
+  why). The base records 22 errors across 17 files, so the expected result
+  is 20 if S3 removes two. Commit that file alone.
+
 ## 5. S1 - App foundations (Tasks 1.1-1.5)
 
 # S1 - App foundations (Tasks 1.1-1.5) - section draft

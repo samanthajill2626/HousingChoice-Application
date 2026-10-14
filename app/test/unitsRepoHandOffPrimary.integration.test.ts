@@ -2,7 +2,8 @@
 // contact"; plan contract 2.2): the real unitsRepo.handOffPrimaryFrom and the
 // consistent Scan against DynamoDB Local. handOffPrimaryFrom(unit, deleted,
 // read) re-reads the unit CONSISTENTLY, re-checks that `deleted` is STILL the
-// flagged primary (else not_primary), runs the heir function with that
+// primary (its flagged row - or, with no row flagged, its landlord of record:
+// contactIsPrimaryToHandOff, fix wave F2; else not_primary), runs the heir function with that
 // contact EXCLUDED and never read, and: heir -> moves the flag AND the scalar
 // in one conditional write (moved); no heir -> nothing changes (unchanged);
 // failed read -> nothing changes (unknown). A lost conditional write re-reads,
@@ -383,6 +384,55 @@ describe.skipIf(!reachable)('unitsRepo.handOffPrimaryFrom + list({ consistentRea
     const stored = await units.getById(unitId, { consistentRead: true });
     expect(stored?.primary_contact).toBe('c-d');
     expect(stored?.contacts?.find((c) => c.contactId === 'c-d')?.primaryContact).toBe(true);
+  });
+
+  // Planner fix wave F2 (Cameron 2026-10-13): on a stored list with NO flagged
+  // row the landlord of record IS the property's contact
+  // (contactIsPrimaryToHandOff), so its delete hands off - and the retry's
+  // re-check asks the same question of the re-read unit.
+  it('moved: the landlord of record of a NO-flag roster - the earliest eligible contact takes over, landlordId kept', async () => {
+    const unitId = await ownedUnit('c-ll', [
+      { contactId: 'c-ll', role: 'landlord', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+    ]);
+    const liveness = livenessFrom([person('c-pm')]);
+
+    const result = await units.handOffPrimaryFrom(unitId, 'c-ll', liveness.read);
+
+    expect(result).toMatchObject({ outcome: 'moved', to: 'c-pm' });
+    const stored = await units.getById(unitId, { consistentRead: true });
+    expect(stored?.contacts).toEqual([
+      { contactId: 'c-ll', role: 'landlord', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+    ]);
+    expect(stored?.primary_contact).toBe('c-pm');
+    expect(stored?.landlordId).toBe('c-ll');
+    // The deleted landlord is EXCLUDED and never read (spec 4.2).
+    expect(liveness.calls.flat()).not.toContain('c-ll');
+  });
+
+  it('a lost write re-checks with the same rule: the NO-flag roster gained a flagged row -> not_primary, nothing more written', async () => {
+    const unitId = await ownedUnit('c-ll', [
+      { contactId: 'c-ll', role: 'landlord', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+    ]);
+    const flagged: UnitContact[] = [
+      { contactId: 'c-ll', role: 'landlord', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      { contactId: 'c-new', role: 'pm', primaryContact: true },
+    ];
+    const { repo, counter } = racingRepo(unitId, () => rawRosterWrite(unitId, flagged, 'c-new'));
+
+    const result = await repo.handOffPrimaryFrom(unitId, 'c-ll', livenessFrom([person('c-pm'), person('c-new')]).read);
+
+    expect(result).toEqual({ outcome: 'not_primary' });
+    // The first attempt targeted it and lost its write; the re-read re-checked.
+    expect(counter.writes).toBe(1);
+    expect(counter.unitReads).toEqual([true, true]);
+    const stored = await units.getById(unitId, { consistentRead: true });
+    expect(stored?.contacts).toEqual(flagged);
+    expect(stored?.primary_contact).toBe('c-new');
+    expect(stored?.landlordId).toBe('c-ll');
   });
 
   it('list({ consistentRead: true }) sends a consistent Scan; the default Scan does not', async () => {

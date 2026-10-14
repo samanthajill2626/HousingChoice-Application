@@ -117,6 +117,7 @@ import {
 import {
   autoPrimaryLivenessIds,
   CannotRemoveLandlordOfRecordError,
+  contactIsPrimaryToHandOff,
   ContactListCaseworkerError,
   decideAutoPrimary,
   isDeleted as isUnitDeleted,
@@ -3294,17 +3295,18 @@ export function createFakeWorld(): FakeWorld {
       return unit;
     },
     // primary-contact-integrity (spec 2026-10-12 section 4.6, contact delete):
-    // mirror the real repo - re-check that `fromContactId` is STILL the
-    // flagged primary (else not_primary), read liveness WITHOUT that contact,
-    // and run the SAME pure chooseHeir / applyPrimary with it excluded:
-    // heir -> moved (flag and scalar), none -> unchanged, unknown -> unknown.
+    // mirror the real repo - re-check with the SAME shared rule
+    // (contactIsPrimaryToHandOff: `fromContactId` is the flagged primary, or
+    // - with no row flagged - the landlord of record; planner fix wave F2;
+    // else not_primary), read liveness WITHOUT that contact, and run the SAME
+    // pure chooseHeir / applyPrimary with it excluded: heir -> moved (flag
+    // and scalar), none -> unchanged, unknown -> unknown.
     // (The fake's list() ignores `consistentRead`: in memory is consistent.)
     async handOffPrimaryFrom(unitId, fromContactId, readContacts) {
       const unit = units.get(unitId);
       if (!unit) return { outcome: 'not_primary' };
+      if (!contactIsPrimaryToHandOff(unit, fromContactId)) return { outcome: 'not_primary' };
       const roster = unitContacts(unit).map((c) => ({ ...c }));
-      const flagged = roster.find((c) => c.primaryContact === true);
-      if (flagged === undefined || flagged.contactId !== fromContactId) return { outcome: 'not_primary' };
       const landlordOfRecord =
         typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
       const read = await readContacts(rosterContactIds(unit).filter((id) => id !== fromContactId));

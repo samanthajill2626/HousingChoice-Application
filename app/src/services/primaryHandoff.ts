@@ -5,21 +5,27 @@
 //
 // ONE strongly consistent Scan of the units table - live AND soft-deleted
 // units (`deleted: 'any'`), `consistentRead` (unitsRepo.list's Scan is
-// eventually consistent by default) - finds every unit whose unitContacts()
-// primary row is the deleted contact. There is no roster index; the
-// caseworker conversion accepts the same Scan (services/contactHoldings.ts
+// eventually consistent by default) - finds every unit whose primary is the
+// deleted contact by ONE shared rule, unitsRepo.contactIsPrimaryToHandOff:
+// its unitContacts() flagged row is the contact, or - on a list with NO
+// flagged row - the contact is its landlord of record, who is then the
+// property's contact (planner fix wave F2, Cameron 2026-10-13: restore and
+// delete agree, landlordWasPrimary). A contact merely sitting unflagged on a
+// no-flag list it does not own is never a target. There is no roster index;
+// the caseworker conversion accepts the same Scan (services/contactHoldings.ts
 // rosterUnitIds). Each target is handed off by unitsRepo.handOffPrimaryFrom:
-// a consistent re-read, a re-check that the contact is STILL the flagged
-// primary, the heir function with the deleted contact EXCLUDED - and never
-// read: the batch read is eventually consistent and could still answer it
-// live (spec 4.2) - and the bounded conditional retries. Per unit:
+// a consistent re-read, a re-check by the same rule, the heir function with
+// the deleted contact EXCLUDED - and never read: the batch read is eventually
+// consistent and could still answer it live (spec 4.2) - and the bounded
+// conditional retries. The landlord of record is never changed. Per unit:
 //   moved       -> unit_primary_contact_assigned { contactId: <heir>,
 //                  reason: 'handoff_on_delete', from: <deleted contact> };
 //   unchanged   -> nothing: no heir, so the deleted contact stays flagged
-//                  (P1 skips it, the property box says so, the next eligible
-//                  add promotes) - and restoring the contact then leaves the
-//                  property exactly as it was;
-//   not_primary -> nothing: someone already moved it;
+//                  (or stays the unflagged landlord of record) - P1 skips it,
+//                  the property box says so, the next eligible add promotes -
+//                  and restoring the contact then leaves the property exactly
+//                  as it was;
+//   not_primary -> nothing: someone already moved it, or flagged a row;
 //   unknown     -> skipped with a WARN (the liveness read failed).
 //
 // BEST-EFFORT AS A WHOLE, the posture of the delete's presence fan-out
@@ -32,7 +38,7 @@ import { readRosterContacts } from '../lib/propertyContact.js';
 import type { Logger } from '../lib/logger.js';
 import type { AuditRepo } from '../repos/auditRepo.js';
 import type { ContactsRepo } from '../repos/contactsRepo.js';
-import { unitContacts, type PrimaryHandOffResult, type UnitsRepo } from '../repos/unitsRepo.js';
+import { contactIsPrimaryToHandOff, type PrimaryHandOffResult, type UnitsRepo } from '../repos/unitsRepo.js';
 
 export interface PrimaryHandoffDeps {
   units: Pick<UnitsRepo, 'list' | 'handOffPrimaryFrom'>;
@@ -43,7 +49,11 @@ export interface PrimaryHandoffDeps {
 
 /** What one delete hand-off did, by unit id (ids only - spec section 9 PII). */
 export interface DeletedContactHandoffSummary {
-  /** Units whose flagged primary was the contact when the Scan read them, in Scan order. */
+  /**
+   * Units whose primary was the contact when the Scan read them, in Scan
+   * order - contactIsPrimaryToHandOff: the flagged row, or (no row flagged)
+   * the landlord of record.
+   */
   targets: string[];
   moved: string[];
   unchanged: string[];
@@ -84,8 +94,7 @@ export async function handOffPrimariesOfDeletedContact(
         ...(key !== undefined && { exclusiveStartKey: key }),
       });
       for (const unit of page.items) {
-        const primary = unitContacts(unit).find((row) => row.primaryContact === true);
-        if (primary !== undefined && primary.contactId === contactId) summary.targets.push(unit.unitId);
+        if (contactIsPrimaryToHandOff(unit, contactId)) summary.targets.push(unit.unitId);
       }
       key = page.lastEvaluatedKey;
     } while (key !== undefined);

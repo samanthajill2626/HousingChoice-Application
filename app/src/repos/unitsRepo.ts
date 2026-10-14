@@ -295,7 +295,12 @@ export interface RosterHandoffOpts {
   onPrimaryHandoff?: (handoff: PrimaryHandoff) => void;
 }
 
-/** handOffPrimaryFrom's answer (spec 4.6, contact delete). */
+/**
+ * handOffPrimaryFrom's answer (spec 4.6, contact delete). `not_primary`: the
+ * consistent re-read shows the deleted contact is no longer the unit's
+ * primary by contactIsPrimaryToHandOff (its flagged row, or - with no row
+ * flagged - the landlord of record; planner fix wave F2), or the unit is gone.
+ */
 export type PrimaryHandOffResult =
   | { outcome: 'moved'; unit: UnitItem; to: string }
   | { outcome: 'unchanged' | 'not_primary' | 'unknown' };
@@ -823,9 +828,11 @@ export interface UnitsRepo {
    * primary-contact-integrity (spec 2026-10-12 section 4.6, "Delete the
    * contact"): hand a unit's primary away from `fromContactId`, a contact the
    * caller has just soft-deleted. Reads the unit CONSISTENTLY and first
-   * re-checks that `fromContactId` is STILL its flagged primary
-   * (unitContacts(); else 'not_primary', nothing read or written - a unit
-   * that no longer exists answers the same). Then the heir function
+   * re-checks that `fromContactId` is STILL its primary by the delete
+   * fan-out's own rule, contactIsPrimaryToHandOff: its flagged row, or - when
+   * no row is flagged - the landlord of record (planner fix wave F2); else
+   * 'not_primary', nothing read or written - a unit that no longer exists
+   * answers the same. Then the heir function
    * (lib/propertyContact.ts chooseHeir) with `fromContactId` EXCLUDED - its id
    * is left out of the ids passed to `readContacts`, so the eventually
    * consistent batch read never answers it live (spec 4.2):
@@ -833,7 +840,8 @@ export interface UnitsRepo {
    *              landlordId and contacts[] read) moves the flag AND the scalar
    *              to it (applyPrimary; an off-roster landlord heir gets its
    *              row): { outcome: 'moved', unit, to };
-   *   none    -> nothing changes - the deleted contact stays flagged, so a
+   *   none    -> nothing changes - the deleted contact stays flagged (or, on
+   *              a no-flag roster, the unflagged landlord of record), so a
    *              later restore of the contact leaves the unit as it was:
    *              { outcome: 'unchanged' };
    *   unknown -> nothing changes: { outcome: 'unknown' }.
@@ -852,19 +860,54 @@ export interface UnitsRepo {
  * primary-contact-integrity (plan review R2/R3; spec 3 / 4.6 / 4.7): does a
  * restore that removes `landlordId`'s row need a primary hand-off? ONE pure
  * rule for the real restoreWithLandlord, the restore route's heir pick and the
- * API-test fake. True when the landlord's row is the FLAGGED primary, or when
- * NO row is flagged at all (the property has no primary, so the hand-off is
- * how it gets one - the heir function picks who). Never reads the
- * `primary_contact` scalar: a stale scalar can neither move the primary off a
- * live flagged row nor decide anything when nothing is flagged. (This keeps
- * caseworker-integrity's R1 backend finding 4 cases - a no-flag unit whose
- * scalar named the old landlord - handing off, without reading the scalar.)
+ * API-test fake - and, through contactIsPrimaryToHandOff below, for the
+ * contact-delete hand-off of a landlord of record (planner fix wave F2), so
+ * restore and delete agree. True when the landlord's row is the FLAGGED
+ * primary, or when NO row is flagged at all (the property has no primary,
+ * so the hand-off is how it gets one - the heir function picks who). Never
+ * reads the `primary_contact` scalar: a stale scalar can neither move the
+ * primary off a live flagged row nor decide anything when nothing is
+ * flagged. (This keeps caseworker-integrity's R1 backend finding 4 cases - a
+ * no-flag unit whose scalar named the old landlord - handing off, without
+ * reading the scalar.)
  * `roster` is unitContacts(unit), so a landlord-only unit's DERIVED landlord
  * row counts as flagged.
  */
 export function landlordWasPrimary(roster: readonly UnitContact[], landlordId: string): boolean {
   if (!roster.some((c) => c.primaryContact === true)) return true;
   return roster.some((c) => c.contactId === landlordId && c.primaryContact === true);
+}
+
+/**
+ * primary-contact-integrity (spec 4.6 "Delete the contact"; planner fix wave
+ * F2, Cameron 2026-10-13): is `contactId` - a contact just soft-deleted - the
+ * PRIMARY this unit's delete hand-off must move? ONE pure rule for the delete
+ * fan-out's Scan (services/primaryHandoff.ts), handOffPrimaryFrom's re-check
+ * on its consistent re-read (so a retry re-checks it too) and the API-test
+ * fake that mirrors the repo:
+ *   - `contactId` is the unit's landlord of record (a non-empty landlordId):
+ *     landlordWasPrimary - its row is the flagged primary, OR no row is
+ *     flagged at all (on a no-flag roster the landlord of record IS the
+ *     property's contact, so its delete hands off exactly as a restore that
+ *     removes it does);
+ *   - anyone else: only when THEIR row is the flagged primary.
+ * The landlord-of-record test is what keeps one delete from targeting every
+ * no-flag unit - landlordWasPrimary alone is true for all of them. A flagged
+ * row elsewhere always wins. Reads unitContacts(), so a landlord-only unit's
+ * DERIVED landlord row counts as flagged (a target for its landlord only, as
+ * before). Never reads the primary_contact scalar.
+ */
+export function contactIsPrimaryToHandOff(
+  unit: Pick<UnitItem, 'contacts' | 'landlordId'>,
+  contactId: string,
+): boolean {
+  const roster = unitContacts(unit);
+  const landlordOfRecord =
+    typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
+  if (landlordOfRecord !== undefined && contactId === landlordOfRecord) {
+    return landlordWasPrimary(roster, contactId);
+  }
+  return roster.find((row) => row.primaryContact === true)?.contactId === contactId;
 }
 
 export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
@@ -1735,10 +1778,11 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         // the write is fenced on it.
         const unit = await this.getById(unitId, { consistentRead: true });
         if (!unit) return { outcome: 'not_primary' };
+        // Re-check first, with the Scan's own rule (contactIsPrimaryToHandOff:
+        // the flagged row, or - with none flagged - the landlord of record):
+        // someone may already have moved it, or flagged another row (done).
+        if (!contactIsPrimaryToHandOff(unit, fromContactId)) return { outcome: 'not_primary' };
         const roster = unitContacts(unit).map((c) => ({ ...c }));
-        const flagged = roster.find((c) => c.primaryContact === true);
-        // Re-check first: someone may already have moved it (done).
-        if (flagged === undefined || flagged.contactId !== fromContactId) return { outcome: 'not_primary' };
         const landlordOfRecord =
           typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined;
         // The deleted contact is EXCLUDED and never read (spec 4.2).

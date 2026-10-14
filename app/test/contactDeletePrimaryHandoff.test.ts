@@ -221,6 +221,57 @@ describe('DELETE /api/contacts/:id - the primary hand-off (spec 4.6)', () => {
     for (const [ids] of livenessReads) expect(ids).not.toContain('c-d');
   });
 
+  // Planner fix wave F2 (Cameron 2026-10-13): on a stored list with NO flagged
+  // row the landlord of record IS the property's contact, so deleting it hands
+  // off as a restore does (repos/unitsRepo.ts contactIsPrimaryToHandOff). Only
+  // the unit whose landlord of record it is: the same contact sitting
+  // unflagged on ANOTHER no-flag unit's list is not that unit's primary.
+  it('the landlord of record of a NO-flag roster: the eligible contact takes over, landlordId kept, audited - and only that unit', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, 'c-ll');
+    seedContact(world, 'c-pm');
+    seedContact(world, 'c-other');
+    seedUnit(world, 'u-ll', {
+      landlordId: 'c-ll',
+      contacts: [
+        { contactId: 'c-ll', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: false },
+      ],
+    });
+    seedUnit(world, 'u-seat', {
+      landlordId: 'c-other',
+      contacts: [
+        { contactId: 'c-other', role: 'landlord', primaryContact: false },
+        { contactId: 'c-ll', role: 'pm', primaryContact: false },
+      ],
+    });
+    const seatBefore = structuredClone(world.units.get('u-seat'));
+
+    const del = await auth(request(app).delete('/api/contacts/c-ll'));
+
+    expect(del.status).toBe(200);
+    expect(world.units.get('u-ll')?.contacts).toEqual([
+      { contactId: 'c-ll', role: 'landlord', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+    ]);
+    expect(world.units.get('u-ll')?.primary_contact).toBe('c-pm');
+    expect(world.units.get('u-ll')?.landlordId).toBe('c-ll');
+    expect(world.units.get('u-seat')).toEqual(seatBefore);
+    expect(assigned(world)).toEqual([
+      {
+        entityKey: 'units#u-ll',
+        event_type: 'unit_primary_contact_assigned',
+        actorId: TEST_SESSION_USER.userId,
+        payload: {
+          actor: TEST_SESSION_USER.userId,
+          contactId: 'c-pm',
+          reason: 'handoff_on_delete',
+          from: 'c-ll',
+        },
+      },
+    ]);
+  });
+
   it('(PIN) a contact who is the primary of no property: no unit is written', async () => {
     const { app, world } = makeWebhookHarness();
     seedContact(world, 'c-d');

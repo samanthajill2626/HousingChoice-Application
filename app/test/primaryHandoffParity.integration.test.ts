@@ -180,6 +180,38 @@ const CASES: Array<[string, ParityCase]> = [
       expected: { contacts: [row('c-d', 'pm', true), row('c-ten', 'other', false)], primary: 'c-d' },
     },
   ],
+  // Planner fix wave F2: the shared contactIsPrimaryToHandOff on both sides.
+  [
+    'delete hand-off: NO row flagged - the deleted landlord of record hands off, landlordId kept',
+    {
+      shape: { landlordId: 'c-ll', contacts: [row('c-ll', 'landlord', false), row('c-pm', 'pm', false)] },
+      people: [person('c-pm')],
+      act: (repo, unitId, read) => repo.handOffPrimaryFrom(unitId, 'c-ll', read),
+      expected: { contacts: [row('c-ll', 'landlord', false), row('c-pm', 'pm', true)], primary: 'c-pm' },
+    },
+  ],
+  [
+    'delete hand-off: NO row flagged and the deleted contact is not the landlord of record - unchanged',
+    {
+      shape: { landlordId: 'c-other', contacts: [row('c-other', 'landlord', false), row('c-d', 'pm', false)] },
+      people: [person('c-other')],
+      act: (repo, unitId, read) => repo.handOffPrimaryFrom(unitId, 'c-d', read),
+      expected: { contacts: [row('c-other', 'landlord', false), row('c-d', 'pm', false)], primary: null },
+    },
+  ],
+  [
+    'delete hand-off: a flagged row elsewhere wins over the deleted landlord of record - unchanged',
+    {
+      shape: {
+        landlordId: 'c-ll',
+        contacts: [row('c-ll', 'landlord', false), row('c-pm', 'pm', true)],
+        primary: 'c-pm',
+      },
+      people: [person('c-pm')],
+      act: (repo, unitId, read) => repo.handOffPrimaryFrom(unitId, 'c-ll', read),
+      expected: { contacts: [row('c-ll', 'landlord', false), row('c-pm', 'pm', true)], primary: 'c-pm' },
+    },
+  ],
   [
     'restore swap: a soft-deleted new landlord is skipped for the earliest eligible contact',
     {

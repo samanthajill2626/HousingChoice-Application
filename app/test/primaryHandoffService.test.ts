@@ -1,7 +1,8 @@
 // primary-contact-integrity (spec 2026-10-12 section 4.6, "Delete the
 // contact"): services/primaryHandoff.ts on the FakeWorld repos. ONE
 // consistent Scan over live AND soft-deleted units finds every unit whose
-// flagged primary is the deleted contact; each is handed off through
+// primary is the deleted contact (its flagged row - or, with no row flagged,
+// its landlord of record: fix wave F2 below); each is handed off through
 // unitsRepo.handOffPrimaryFrom with the deleted contact excluded and never
 // read: moved -> unit_primary_contact_assigned { reason: 'handoff_on_delete',
 // from }; unchanged / not_primary -> nothing; unknown -> skipped with a WARN.
@@ -267,6 +268,123 @@ describe('handOffPrimariesOfDeletedContact (spec 4.6)', () => {
 
     expect(summary.targets).toEqual(['u-1']);
     expect(summary.notPrimary).toEqual(['u-1']);
+    expect(world.units.get('u-1')?.primary_contact).toBe('c-other');
+    expect(assigned(world)).toEqual([]);
+  });
+});
+
+// Planner fix wave F2 (Cameron 2026-10-13; docs/issues/primary-handoff-no-flag-landlord-delete-gap.md):
+// on a stored list with NO flagged row the landlord of record IS the
+// property's contact, so deleting it hands off - the same rule the restore
+// paths use (landlordWasPrimary), restricted to the landlord of record by
+// unitsRepo.contactIsPrimaryToHandOff: the Scan's target test and
+// handOffPrimaryFrom's re-check alike.
+describe('handOffPrimariesOfDeletedContact - the landlord of record of a NO-flag roster (fix wave F2)', () => {
+  /** c-ll is the landlord of record; NO row is flagged; c-pm is a property manager typed landlord. */
+  const NO_FLAG: UnitContact[] = [
+    { contactId: 'c-ll', role: 'landlord', primaryContact: false },
+    { contactId: 'c-pm', role: 'pm', primaryContact: false },
+  ];
+
+  it('deleting it hands off: the earliest eligible contact is flagged and the scalar set, landlordId kept, ONE audit row', async () => {
+    const { world, deps } = setup();
+    seedContact(world, 'c-ll', { deleted_at: GONE });
+    seedContact(world, 'c-pm');
+    seedUnit(world, 'u-1', { landlordId: 'c-ll', contacts: NO_FLAG });
+
+    const summary = await handOffPrimariesOfDeletedContact(deps, 'c-ll', ACTOR);
+
+    expect(summary).toEqual({
+      targets: ['u-1'],
+      moved: ['u-1'],
+      unchanged: [],
+      notPrimary: [],
+      unknown: [],
+      failed: [],
+      scanFailed: false,
+    });
+    const unit = world.units.get('u-1');
+    expect(unit?.contacts).toEqual([
+      { contactId: 'c-ll', role: 'landlord', primaryContact: false },
+      { contactId: 'c-pm', role: 'pm', primaryContact: true },
+    ]);
+    expect(unit?.primary_contact).toBe('c-pm');
+    expect(unit?.landlordId).toBe('c-ll');
+    expect(assigned(world)).toEqual([
+      {
+        entityKey: 'units#u-1',
+        event_type: 'unit_primary_contact_assigned',
+        actorId: ACTOR,
+        payload: { actor: ACTOR, contactId: 'c-pm', reason: 'handoff_on_delete', from: 'c-ll' },
+      },
+    ]);
+  });
+
+  it('a no-flag unit whose landlord of record is SOMEONE ELSE is not a target when a contact on its list is deleted', async () => {
+    const { world, deps } = setup();
+    seedContact(world, 'c-d', { deleted_at: GONE });
+    seedContact(world, 'c-other');
+    seedUnit(world, 'u-x', {
+      landlordId: 'c-other',
+      contacts: [
+        { contactId: 'c-other', role: 'landlord', primaryContact: false },
+        { contactId: 'c-d', role: 'pm', primaryContact: false },
+      ],
+    });
+    const before = structuredClone(world.units.get('u-x'));
+
+    const summary = await handOffPrimariesOfDeletedContact(deps, 'c-d', ACTOR);
+
+    expect(summary.targets).toEqual([]);
+    expect(world.units.get('u-x')).toEqual(before);
+    expect(assigned(world)).toEqual([]);
+  });
+
+  it('a FLAGGED row other than the deleted landlord of record wins: not a target, untouched', async () => {
+    const { world, deps } = setup();
+    seedContact(world, 'c-ll', { deleted_at: GONE });
+    seedContact(world, 'c-pm');
+    seedUnit(world, 'u-f', {
+      landlordId: 'c-ll',
+      contacts: [
+        { contactId: 'c-ll', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      ],
+      primary_contact: 'c-pm',
+    });
+    const before = structuredClone(world.units.get('u-f'));
+
+    const summary = await handOffPrimariesOfDeletedContact(deps, 'c-ll', ACTOR);
+
+    expect(summary.targets).toEqual([]);
+    expect(world.units.get('u-f')).toEqual(before);
+    expect(assigned(world)).toEqual([]);
+  });
+
+  it('the unit gained a flagged row between the Scan and the hand-off: the re-check answers not_primary - nothing written', async () => {
+    const { world, deps } = setup();
+    seedContact(world, 'c-ll', { deleted_at: GONE });
+    seedContact(world, 'c-pm');
+    seedContact(world, 'c-other');
+    seedUnit(world, 'u-1', { landlordId: 'c-ll', contacts: NO_FLAG });
+    const flagged: UnitContact[] = [...NO_FLAG, { contactId: 'c-other', role: 'pm', primaryContact: true }];
+    const realList = world.unitsRepo.list.bind(world.unitsRepo);
+    vi.spyOn(world.unitsRepo, 'list').mockImplementation(async (options) => {
+      const page = await realList(options);
+      // Staff B makes c-other the primary after the Scan read the unit (a NEW
+      // array, so the Scan's copy still shows no flagged row).
+      const live = world.units.get('u-1')!;
+      live.contacts = structuredClone(flagged);
+      live.primary_contact = 'c-other';
+      return page;
+    });
+
+    const summary = await handOffPrimariesOfDeletedContact(deps, 'c-ll', ACTOR);
+
+    expect(summary.targets).toEqual(['u-1']);
+    expect(summary.notPrimary).toEqual(['u-1']);
+    expect(summary.moved).toEqual([]);
+    expect(world.units.get('u-1')?.contacts).toEqual(flagged);
     expect(world.units.get('u-1')?.primary_contact).toBe('c-other');
     expect(assigned(world)).toEqual([]);
   });

@@ -20,6 +20,7 @@ import type { Logger } from '../lib/logger.js';
 import { deriveTourActivityAt, deriveTourSignal } from '../lib/listingSendTour.js';
 import {
   deriveListingSendOutcome,
+  FOLLOW_UP_LOOKBACK_MS,
   interestedModeFor,
   isEligibleRecipient,
   isWaiting,
@@ -124,13 +125,21 @@ export async function buildFollowUps(deps: FollowUpsDeps): Promise<FollowUpsResp
     deps.log.warn({ cap: FOLLOW_UPS_UNIT_CAP }, 'follow-ups: available-property walk hit the cap - list truncated');
   }
 
-  // 2. Per-unit reads (each unit once per request), bounded fan-out. A unit
-  //    with no listed sends costs no tours read.
+  // 2. Per-unit reads (each unit once per request), bounded fan-out. Sends
+  //    outside LOOKBACK are dropped HERE, before any join: isWaiting can never
+  //    keep them, and carrying them would widen the requireComplete contacts
+  //    batch below (one unread key 503s the whole list) and cost tours reads
+  //    that grow with every send ever made (planner review A1). A unit with no
+  //    recent sends costs no tours read.
+  const lookbackFloor = deps.now - FOLLOW_UP_LOOKBACK_MS;
   const perUnit: Array<{ unit: UnitItem; rows: ListingSendItem[]; toursByTenant: Map<string, TourItem[]> }> = [];
   for (let i = 0; i < kept.length; i += PER_UNIT_CONCURRENCY) {
     const loaded = await Promise.all(
       kept.slice(i, i + PER_UNIT_CONCURRENCY).map(async (unit) => {
-        const rows = await deps.listingSends.listByUnit(unit.unitId);
+        const rows = (await deps.listingSends.listByUnit(unit.unitId)).filter((row) => {
+          const sentMs = typeof row.sentAt === 'string' ? Date.parse(row.sentAt) : Number.NaN;
+          return Number.isFinite(sentMs) && sentMs >= lookbackFloor;
+        });
         const unitTours = rows.length > 0 ? await deps.tours.listByUnit(unit.unitId) : [];
         return { unit, rows, toursByTenant: groupByTenant(unitTours) };
       }),

@@ -6,7 +6,8 @@ severity: low
 status: open
 area: app
 created: 2026-10-13
-refs: app/src/repos/contactsRepo.ts:978-980, app/src/repos/contactsRepo.ts:1288-1290, app/src/lib/propertyContact.ts:86-104, app/src/routes/units.ts:1408, app/src/routes/units.ts:597, app/src/repos/unitsRepo.ts:1375, app/src/repos/unitsRepo.ts:1664, app/src/repos/unitsRepo.ts:1745, app/src/services/primaryHandoff.ts:100-105, app/scripts/assign-primary-contacts.ts:314, app/src/repos/unitsRepo.ts:865-868
+updated: 2026-10-13
+refs: app/src/routes/units.ts:1747, app/src/routes/units.ts:1858, app/src/repos/unitsRepo.ts:1418, app/src/services/primaryHandoff.ts:110, app/src/repos/unitsRepo.ts:1789, app/scripts/assign-primary-contacts.ts:315, app/src/routes/units.ts:653, app/src/repos/unitsRepo.ts:876, app/src/repos/contactsRepo.ts:1018, app/src/lib/propertyContact.ts:92, app/src/routes/units.ts:708, app/src/routes/units.ts:2434
 ---
 
 **Problem.** Since `feat/primary-contact-integrity`, every AUTOMATIC
@@ -96,3 +97,36 @@ adjudicated them accepted; they are filed together here.
   (`primaryHandoff.ts:138-141`): re-run `handOffPrimaryFrom` once or twice
   after a short backoff before logging and skipping, so a throttled read
   does not leave a deleted contact flagged until the next backfill.
+
+**Update (2026-10-13, `feat/primary-contact-integrity` planner fix wave 3
+F5a, commit `fc7607de`): the restore paths read consistently again; the
+issue stays OPEN, narrowed to the other callers.** Cameron ruled "restore
+paths only". `contactsRepo.getManyByIds(ids, { requireComplete?,
+consistentRead? })` now puts `ConsistentRead: true` in the contacts table's
+`RequestItems` entry of every request its walk sends when asked
+(`app/src/repos/contactsRepo.ts:1018`; the default is unchanged), and
+`readRosterContacts(contacts, ids, logger?, opts?)`
+(`app/src/lib/propertyContact.ts:92`) passes it through only when asked. The
+restore route asks for it in BOTH of its reads: "Restore without a
+landlord"'s heir pick (`clearedLandlordHeir`,
+`app/src/routes/units.ts:708`) and the `readContacts` it hands
+`restoreWithLandlord` for the landlord swap's hand-off
+(`app/src/routes/units.ts:2434`). The regression against `main` is
+therefore CLOSED: caseworker-integrity's per-row consistent `getById`,
+which plan ruling R13 had relaxed into an eventually consistent batch read,
+is consistent again as a batch read - the replaced pin
+(`app/test/unitsRestoreLandlord.test.ts` "(PIN) reads the remaining
+contacts in ONE complete, strongly consistent batch read") and the swap case
+now assert `consistentRead: true`. On the restore paths that closes shape
+1's stale image (the issue's own example) and shape 2's stale miss at the
+read; a delete landing AFTER the read (F4's interleaving, spec 4.2's
+accepted race) is unchanged, and so is shape 3. Still eventually
+consistent, by the same ruling - what this issue now tracks: auto-primary
+on an add or edit (`app/src/routes/units.ts:1747`), the remove hand-off
+(`app/src/routes/units.ts:1858` -> `app/src/repos/unitsRepo.ts:1418`), the
+contact-delete fan-out (`app/src/services/primaryHandoff.ts:110` ->
+`app/src/repos/unitsRepo.ts:1789`) and the one-time backfill
+(`app/scripts/assign-primary-contacts.ts:315`); the display read
+(`enrichRosterView`, `app/src/routes/units.ts:653`) stays eventually
+consistent as the suggested fix above allowed. Making any of those
+consistent is now one option on its `readRosterContacts` call.

@@ -198,6 +198,12 @@ Contract:
   batch read is eventually consistent (`contactsRepo.ts:979`, no
   `ConsistentRead`) and could return it as live. The delete fan-out passes it
   as the heir function's EXCLUDED contact (4.3), which counts as not live.
+- The restore paths' liveness read - "Restore without a landlord"'s heir pick
+  and the landlord swap's hand-off (4.6) - is STRONGLY consistent
+  (`getManyByIds` with `consistentRead`, as the per-row consistent `getById`
+  it replaced was; planner fix wave F5a, Cameron 2026-10-13), while every
+  other caller's batch read stays eventually consistent
+  (`docs/issues/roster-liveness-read-eventual-consistency.md`).
 - A failed or incomplete read means liveness UNKNOWN. Each path says what it
   does then (P2, P3, section 8). An unknown candidate is never skipped as
   deleted.
@@ -285,7 +291,9 @@ of record comes from the 4.2 read (X's own facts are already read by the route).
 
 In the 470 Bolton case (no landlord, Mark the only contact, typed landlord)
 an add or an edit of Mark makes Mark the primary; if Mark is not typed
-landlord, nothing is automatic and the property box offers the click.
+landlord, nothing is automatic and the property box shows its no-eligible
+line plus "Choose a primary" (the line alone if Mark is a caseworker) - its
+one-click names an `autoEligible` row only (7.4, planner fix wave F1).
 Properties with a live landlord of record are never touched by P2.
 
 Making a contact primary that is NOT already primary, when that contact is
@@ -323,14 +331,23 @@ Paths (all through the heir function, 4.3):
   table (`ConsistentRead`; today's `unitsRepo.list` Scan is eventually
   consistent, `unitsRepo.ts:1026-1043`; live and soft-deleted units; there is
   no roster index - `caseworkerConversion.ts:243` accepts the same Scan; one or
-  two pages at today's few hundred units) finds every unit whose
-  `unitContacts()` primary is this contact. For each, with the deleted contact
-  EXCLUDED (4.3): heir -> the flag (and scalar) MOVES to the heir; no heir ->
-  NOTHING changes (the deleted contact stays flagged; P1 skips it, the property
-  box says so, and the next add promotes, 4.4); unknown -> that unit is skipped
-  with a WARN log. A conditional-write failure (the unit changed since the
-  Scan) re-reads that unit consistently, first re-checks that the deleted
-  contact is STILL its flagged primary (if not, someone already moved it: done),
+  two pages at today's few hundred units) finds every unit whose primary is
+  this contact: its `unitContacts()` FLAGGED row is this contact, OR - when no
+  row is flagged - this contact is its landlord of record, who is then the
+  property's contact (`landlordWasPrimary`, 9.2; ONE shared predicate,
+  `unitsRepo.contactIsPrimaryToHandOff`, for the Scan, the re-check below and
+  the API-test fake; planner fix wave F2, Cameron 2026-10-13). The
+  landlord-of-record test is what keeps one delete from targeting every
+  no-flag unit: a contact merely seated, unflagged, on a no-flag list it does
+  not own is not that unit's primary. For each, with the deleted contact
+  EXCLUDED (4.3): heir -> the flag (and scalar) MOVES to the heir (the
+  landlord of record is never changed); no heir -> NOTHING changes (the
+  deleted contact stays flagged, or stays the unflagged landlord of record;
+  P1 skips it, the property box says so, and the next add promotes, 4.4);
+  unknown -> that unit is skipped with a WARN log. A conditional-write failure
+  (the unit changed since the Scan) re-reads that unit consistently, first
+  re-checks by the same predicate that the deleted contact is STILL its
+  primary (if not, someone already moved it or flagged a row: done),
   and otherwise re-decides, with the same bounded
   retries as the roster writes; only exhausting them logs and skips. The
   deleted contact stays on the roster as a row. Best-effort and in-request,
@@ -356,15 +373,17 @@ Paths (all through the heir function, 4.3):
   of flagging the new landlord unconditionally - so a soft-deleted new
   landlord is not made primary. `main`'s tests that assert "nobody promoted
   with two or more" change; the plan updates them.
-- **Restore vs. contact delete on a roster with NO flagged row** - different
-  on purpose. A restore REMOVES the landlord's row (and, on a swap, changes
-  the landlord of record), so with nobody flagged it hands off: the heir
-  function decides who the property's primary is from here. The contact-
-  DELETE fan-out matches only a FLAGGED primary (`unitContacts()`), so
-  deleting the landlord of a no-flag roster hands off nothing: nobody was
-  primary before or after, P1 skips the deleted landlord, the property box
-  shows it, and the next eligible write (4.4) or the script (section 8)
-  assigns one. Neither side is a bug to "fix" toward the other.
+- **Restore vs. contact delete on a roster with NO flagged row** - they
+  AGREE (planner fix wave F2, Cameron 2026-10-13; until then this bullet made
+  the two differ on purpose). On a no-flag roster the landlord of record IS
+  the property's primary (`landlordWasPrimary`, 9.2): a restore that removes
+  the landlord's row (or swaps the landlord) hands off, and deleting that
+  landlord hands off too - the heir function decides who the property's
+  primary is from here, the deleted landlord EXCLUDED (step 1 skips it, step
+  2 takes the earliest-added eligible contact), and the landlord of record
+  stays as it is. Deleting a contact who is NOT the landlord of record of a
+  no-flag roster hands off nothing there: nobody was its primary. Resolved
+  `docs/issues/primary-handoff-no-flag-landlord-delete-gap.md`.
 
 ### 4.7 P4 - what holds afterwards
 
@@ -646,8 +665,10 @@ labeled "primary contact".
 The Delete confirmation (`ContactDetail.tsx:1358-1362`) says "Nothing is
 erased - you can restore them". For a contact whose type is not `tenant` it
 gains one sentence: "If they're a property's primary contact, the landlord or
-another contact on that property takes over, and restoring them won't change
-that back." Known gap, accepted: a tenant-typed contact who is some property's
+another contact on that property takes over when someone can, and restoring
+them won't change that back." ("when someone can": with no heir the delete
+changes nothing, 4.6; planner fix wave F5b, Cameron 2026-10-13.) Known gap,
+accepted: a tenant-typed contact who is some property's
 primary (a degenerate state) gets no sentence - the dialog cannot know without
 the Scan.
 
@@ -822,8 +843,10 @@ P1 removes the property-contact route into this; the rest is filed as
   ignores `requireComplete`, so the 503 / unknown paths are tested with an
   injected contacts repo whose batch read throws - in BOTH shapes (a raw error
   and `IncompleteBatchReadError`), on add, remove, the unit GET and the delete
-  fan-out. The 7.4 box's eligible-row count (live, not a caseworker) is
-  pinned separately from the heir function's automatic rule.
+  fan-out. The 7.4 box's one-click is pinned to the `autoEligible` row flag
+  (the heir function's automatic rule, 7.5): it names such a row only, and a
+  sole contact not typed landlord gets the no-eligible line plus "Choose a
+  primary" (a caseworker: the line alone; planner fix wave F1).
 - App API tests: the 7.5 block (complete read, incomplete read -> absent,
   deleted rows), the preview `introFallback`, the contact DELETE handoff, P2b's
   refusal, the Activity projection's `reason`.

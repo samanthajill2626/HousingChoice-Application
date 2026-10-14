@@ -3,10 +3,11 @@ id: primary-handoff-no-flag-landlord-delete-gap
 title: Deleting the landlord of record of a property with NO flagged primary hands it to nobody - the contact-delete hand-off matches a flagged row only
 type: decision
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-10-13
-refs: app/src/services/primaryHandoff.ts:86-89, app/src/repos/unitsRepo.ts:1739-1741, app/src/repos/unitsRepo.ts:865-868, app/src/lib/propertyContact.ts:151-158, app/src/routes/contacts.ts:2275-2279, dashboard/src/routes/contact/ContactDetail.tsx:140-141
+resolved: 2026-10-13
+refs: app/src/repos/unitsRepo.ts:900, app/src/repos/unitsRepo.ts:876, app/src/services/primaryHandoff.ts:97, app/src/repos/unitsRepo.ts:1784, app/test/helpers/twilioWebhookHarness.ts:3312, app/src/lib/propertyContact.ts:164, app/src/routes/contacts.ts:2293, dashboard/src/routes/contact/ContactDetail.tsx:146
 ---
 
 **Problem.** The contact-DELETE hand-off (`DELETE /api/contacts/:id`,
@@ -65,13 +66,17 @@ landlord of record that is then deleted):
    on a no-flag list.
 
 **What staff see meanwhile.** The property page's box leads "This
-property's contact was deleted." (spec 7.4) and, when an eligible row
-exists, offers its one-click fix ("Make <Name> primary" or "Choose a
-primary"). The next roster write for an eligible contact promotes it (spec
-4.4: a deleted landlord of record counts as absent), and the backfill repairs
-the unit. The contact Delete dialog's sentence, that the landlord or another
-contact takes over (`dashboard/src/routes/contact/ContactDetail.tsx:140-141`),
-does not hold for this shape.
+property's contact was deleted." (spec 7.4) and offers "Make <Name> primary"
+when exactly one live contact typed landlord remains (the `autoEligible` row
+flag) or "Choose a primary" when two or more do; with none, it shows "Add a
+property manager or owner - they become the primary automatically." and
+still offers "Choose a primary" while a live contact that is not a
+caseworker remains (spec 7.4, planner fix wave F1). The next roster write
+for an eligible contact promotes it (spec 4.4: a deleted landlord of record
+counts as absent), and the backfill repairs the unit. The contact Delete
+dialog's sentence, that the landlord or another contact takes over
+(`dashboard/src/routes/contact/ContactDetail.tsx:140-141`), does not hold
+for this shape.
 
 **Suggested fix (the reviewer's recipe).** Reuse `landlordWasPrimary` in
 both places, restricted to the deleted contact being the landlord of record
@@ -102,3 +107,34 @@ whole unit items (media arrays, addresses, notes). A `ProjectionExpression`
 of `unitId`, `contacts` and `landlordId` on that Scan would cut its read
 cost; a cheap future optimization (spec 4.6 accepts the Scan at today's
 size).
+
+**Resolution (2026-10-13, `feat/primary-contact-integrity` planner fix wave
+3 F2, commit `f18ac75f`).** Cameron took the spec amendment before the
+merge (planner fix-wave findings F2): the suggested fix above, as written.
+ONE shared, exported pure predicate, `contactIsPrimaryToHandOff(unit,
+contactId)` (`app/src/repos/unitsRepo.ts:900`, next to `landlordWasPrimary`):
+the landlord of record (a non-empty `landlordId`) ->
+`landlordWasPrimary(unitContacts(unit), contactId)`; anyone else -> their
+row is the flagged primary. It is used in all three places, with no copies:
+the Scan's target test (`app/src/services/primaryHandoff.ts:97`),
+`handOffPrimaryFrom`'s re-check on its consistent re-read - so a lost
+write's retry re-checks it too (`app/src/repos/unitsRepo.ts:1784`) - and the
+FakeWorld mirror (`app/test/helpers/twilioWebhookHarness.ts:3312`).
+Unchanged: `chooseHeir` with the deleted landlord EXCLUDED and never read
+(step 1 skips it, step 2 takes the earliest-added eligible contact),
+`applyPrimary` flags the heir and sets the scalar, `landlordId` is not
+changed, the audit row is `unit_primary_contact_assigned { reason:
+'handoff_on_delete', from: <deleted landlord> }`, no heir changes nothing,
+unknown is logged and skipped. A landlord-only unit with no stored list
+behaves as before. Pinned: the round-1 repro on the FakeWorld (route and
+service), a DynamoDB Local case beside
+`app/test/unitsRepoHandOffPrimary.integration.test.ts` (plus a lost write
+whose retry re-checks into `not_primary`), three rows in the fake-vs-real
+parity table, and the two guards - a no-flag unit whose landlord of record
+is someone else is not a target; a flagged row elsewhere wins - each shown
+to fail against a deliberately wrong predicate. Spec 4.6's "Delete the
+contact" bullet and its last bullet now say restore and delete AGREE. The
+Delete dialog's sentence now holds for this shape too, and since fix wave
+F5b (commit `b5561c2c`) it says the landlord or another contact takes over
+"when someone can". Records:
+`docs/superpowers/reviews/2026-10-12-primary-contact-integrity/code-review/fix-wave-3B-report.md`.

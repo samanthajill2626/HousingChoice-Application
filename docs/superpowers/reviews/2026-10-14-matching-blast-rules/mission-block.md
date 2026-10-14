@@ -2,8 +2,8 @@
 Worktree: W:\tmp\matching-blast-rules  Branch: feat/matching-blast-rules  (cut from main @a2b3d80d)
 Profile: W:\AI Projects\Housing Choice\HC Application\.claude\feature-mission.profile.md
 Spec: W:\tmp\matching-blast-rules\docs\superpowers\specs\2026-10-14-matching-blast-rules-design.md (APPROVED rev 5)
-Plan: W:\tmp\matching-blast-rules\docs\superpowers\plans\2026-10-14-matching-blast-rules.md (sections 0-4 + 4.1 BINDING; 4/4.1 rulings AR1-AR32 win over slice text)
-Design review: spec R3 (terminal), plan R<see adjudications> - adjudications at
+Plan: W:\tmp\matching-blast-rules\docs\superpowers\plans\2026-10-14-matching-blast-rules.md (PLAN v2 FINAL; sections 0-4 incl. 4.1-4.3 BINDING; rulings AR1-AR42 win over slice text, and a later ruling supersedes the parts of an earlier one it names)
+Design review: spec R3 (terminal), plan R3 (terminal) - adjudications at
   docs/superpowers/reviews/2026-10-14-matching-blast-rules/design-review/adjudications.md and
   docs/superpowers/reviews/2026-10-14-matching-blast-rules/plan-review/adjudications.md
 Records: docs/superpowers/reviews/2026-10-14-matching-blast-rules/ (commit records as produced; intent.md is the planner's, do not edit it)
@@ -11,8 +11,8 @@ Records: docs/superpowers/reviews/2026-10-14-matching-blast-rules/ (commit recor
 Work map:
 - S1 App foundations (Tasks 1.1-1.5): blastAudienceRules.ts (holds, checkedByDefault, filter normalizer, wire shape); AudienceFilter list type; toursRepo.listByStatus createdAtFrom + fakes; resolver reads searching then onboarding, authorities in memory; create list check + legacy body; storedFilterRefusal per member; wire projections.
 - S2 App rules in routes (Tasks 2.1-2.5): readOpenTourHolds / readAudienceRules / buildReviewRows; preview fields + tourHolds + 503 + seeds-only degrade; estimate = default-checked count; send path (c) exclusions; matrix seed (one legacy, one list); comments (GSI kept, never deleted).
-- S3 Dashboard (Tasks 3.1-3.6): types/endpoints/audienceSummary; tourHoldLabel + RecipientPreview; AudienceFilters multi picker + caption; prefillAuthorities; composer prefill/ownership/property change/settle gate/no draft until settled (AR23)/422 one member/503 Try again/Change frozen in preview (AR26); Available-only picker.
-- S4 e2e, docs, completion (Tasks 4.1-4.5): repair the existing Matching specs (incl. AR22's draft-delete test); new e2e spec; GLOSSARY/RUNBOOK/resolve the truncation issue; main sync FIRST then the five gates once; lint count step (AR27); handback.
+- S3 Dashboard (Tasks 3.1-3.6): types/endpoints/audienceSummary; tourHoldLabel + RecipientPreview; AudienceFilters multi picker + caption; prefillAuthorities; composer prefill/ownership/property change/settle gate/no draft until settled (AR23, AR35)/422 one member + late-refusal handling (AR39)/503 Try again (AR39); Change property stays enabled during a preview (AR33); Available-only picker with loading/failed/aborted states (AR37, AR41).
+- S4 e2e, docs, completion (Tasks 4.1-4.5): repair the existing Matching specs (incl. AR22's draft-delete test); new e2e spec; GLOSSARY/RUNBOOK/resolve the truncation issue; main sync FIRST then the five gates once (AR28); lint count recorded in the lint-backlog issue only, AGENTS.md untouched (AR38, AR42); handback.
 
 Watch items:
 - Every slice re-anchors on quoted text, never line numbers; never revert an earlier slice (AR21).

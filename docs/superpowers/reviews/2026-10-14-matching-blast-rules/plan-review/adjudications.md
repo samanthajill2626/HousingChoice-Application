@@ -53,3 +53,22 @@ found nothing new in a fresh read of S1/S2.
 
 0 rejected. R2-1 reverts the one behavior round 1 added (the disable), so
 by the stop rule round 3 runs on the AR33-AR38 text with the same reviewer.
+
+## Plan round 3 (plan @9f0d7520 -> rulings AR39-AR42, plan section 4.3) - TERMINAL
+
+Reviewer B continued. Report: `plan-r3-reviewer-b.md` (5 findings: 2
+MEDIUM, 3 LOW), all precision on the round-2 rulings.
+
+| # | Finding | Ruling | Decision changed? |
+|---|---|---|---|
+| R3-1 | AR33 names no mechanism: the staleness check runs at render, the catch closes over a stale render, a D3b removal changes the key; "discarded as a late 200" is ambiguous | ACCEPT -> AR39: record the refusal with `{ draftId, key, unitId }` like a result; 503 alert on the `currentPreview` predicate; 422 removal as a functional update on S3's `FilterEdits` keyed by `unitKey`; notice keyed by property; a late refusal shows nothing; a precise test | no (mechanism for an existing decision) |
+| R3-2 | AR34's test fixture has no accepted authorities, so its assertion is red as written | ACCEPT -> AR40 | no |
+| R3-3 | AR36's "current draft key" is ambiguous (`key` vs `draftKey`) | ACCEPT -> folded into AR39 (`draft.key` + the full predicate) | no |
+| R3-4 | AR37's `.catch` also catches StrictMode's aborted read; no tests for loading/failed | ACCEPT -> AR41 (AbortError stays loading; three tests) | no |
+| R3-5 | AR38 omits the convention's frontmatter title/updated edits and placement | ACCEPT -> AR42 | no |
+
+0 rejected. No accepted finding changed a decision, so round 3 is the
+TERMINAL round (stop rule). Plan review CLOSED.
+
+Totals: 3 rounds, 26 findings (14 + 7 + 5), 0 BLOCKING, 0 HIGH, 0 rejected;
+reviewer contests upheld twice (round 2).

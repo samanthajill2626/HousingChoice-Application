@@ -9,9 +9,10 @@
   `docs/superpowers/reviews/2026-10-14-matching-blast-rules/`.
 - Spec review: 3 rounds, CLOSED (round 3 terminal) -
   `docs/superpowers/reviews/2026-10-14-matching-blast-rules/design-review/adjudications.md`.
-- Status: PLAN v1 (assembled 2026-10-14). Sections 0-4 are BINDING; slice sections 5-8 are
+- Status: PLAN v2 FINAL (2026-10-14; plan review 3 rounds, CLOSED). Sections 0-4 (incl. 4.1-4.3) are BINDING; slice sections 5-8 are
   the four opus section drafts, verbatim; section 4 (assembly rulings) wins over
-  any slice text it contradicts. The drafts themselves (gitignored, under
+  any slice text it contradicts, and within section 4 a later ruling (4.3 > 4.2 > 4.1 > AR1-AR21)
+  supersedes the parts of an earlier one it names. The drafts themselves (gitignored, under
   `.superpowers/sdd/plan-drafts/`) are never the authority.
 
 ## 0. Ground rules for this plan
@@ -600,6 +601,63 @@ below as written). Rulings:
   warnings** ..." with the rule breakdown and which errors went away and
   why). The base records 22 errors across 17 files, so the expected result
   is 20 if S3 removes two. Commit that file alone.
+
+### 4.3 Plan review round 3 rulings (BINDING; TERMINAL round - precision
+### only; they SUPERSEDE the parts of AR33-AR38 they name)
+
+- **AR39 (R3-1, R3-3) The mechanism for a late 422 / 503** - replaces
+  AR33's "existing staleness check" wording and AR36's
+  `rulesUnavailableFor`. A preview REFUSAL is recorded as data with the
+  identity it was for, exactly like a preview result
+  (`BroadcastComposer.tsx:119`, `{ draftId, key, result }`): in
+  `onPreview`'s catch, using the `previewed` object it already captures
+  (`{ draftId: draft.draftId, key: draft.key }`, `:358`) plus the property id
+  the clicking render had (S3's `unitKey`, the key `FilterEdits.unitId` is
+  compared with):
+  - 503 `audience_rules_unavailable` -> `setRefusal({ ...previewed, unitId,
+    kind: 'rules_unavailable' })`. The compose-step alert and its Try again
+    render ONLY while the SAME predicate as `currentPreview` (`:404-410`)
+    holds for the refusal: `refusal.draftId === draft.draftId &&
+    refusal.key === draft.key && draft.draftKey === draft.key`. Any filter,
+    message or property change fails the predicate, so the alert disappears
+    with no effect (the key is `draft.key`, never `draft.draftKey`).
+  - 422 `org_not_on_list` -> the member removal is a FUNCTIONAL update on
+    the per-property edits state (AR16):
+    `setEdits(prev => prev.unitId === unitId ? { ...prev, authorities: <the
+    clicking render's authority list minus the member equal to err.text> } : prev)`
+    (S3's `FilterEdits`; a present `authorities` means "edited").
+    The property pick handler replaces the edits slot on a change to a
+    different property (AR16), so a late 422 for the old property leaves the
+    new property's slot untouched. The notice is stored as
+    `{ unitId, text }` and rendered only while `unitId` equals the
+    composer's current property id; `onFilterChange` clears it as today.
+  - A late refusal therefore shows NOTHING (no alert, no notice, no edit).
+    It does not show the late-200 "audience changed" alert either (that
+    alert is about a late RESULT; a refusal sets no `preview`).
+  - Required test (replaces AR33's): hold a preview on property A whose
+    authorities include X; click Change property and pick property B; land
+    a 422 with `text: X`. Assert B's authority chips equal B's prefill, no
+    `X is no longer on the organization list` notice shows, and no create
+    for B omits B's prefilled authorities. Control (already in Task 3.5's
+    D3b test): a 422 for the CURRENT draft removes X and shows the notice.
+- **AR40 (R3-2) The AR34 test fixture.** The rewritten "Preview waits for
+  the organization list" test sets
+  `getUnit.mockResolvedValue(unit({ accepted_authorities: ['Atlanta Housing Authority'] }))`
+  before rendering and resolves the list with the `ATLANTA` entry, so the
+  one create carries `housing_authorities: ['Atlanta Housing Authority']`.
+- **AR41 (R3-4) Aborted vs failed units read** (refines AR37): the units
+  read's `.catch` treats an `AbortError` (`name === 'AbortError'`, as
+  `useOrgList.ts:91-92`) as neither loaded nor failed - the state stays
+  `'loading'` and the next mount's read settles it - so React StrictMode's
+  aborted first read never flashes `Couldn't load the properties.`. Task 3.6
+  adds three tests: no sentence while the read is pending; a rejected
+  `ApiError` shows `Couldn't load the properties.`; a rejected `AbortError`
+  shows no sentence.
+- **AR42 (R3-5) The lint record follows the whole convention** (refines
+  AR38): besides the new dated status paragraph - placed right after the
+  frontmatter, before the existing "Status 2026-10-13" paragraph - update
+  the frontmatter `title` counts and set `updated:` to the date, as commit
+  3454a0ee did. AGENTS.md stays untouched.
 
 ## 5. S1 - App foundations (Tasks 1.1-1.5)
 

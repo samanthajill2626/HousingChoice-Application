@@ -2233,15 +2233,22 @@ describe('share-broadcast API (M1.8a)', () => {
       return refs.map((r) => r.name).sort();
     }
 
-    it('POST stores an exact list name, and the 201 echoes the stored filter', async () => {
+    it('POST (LEGACY body string) stores an exact list name as a one-member list, and the 201 echoes the wire filter', async () => {
       seedUnit(world);
       const { app } = makeWebhookHarness({ world });
       const res = await postDraft(app, 'Atlanta Housing Authority');
       expect(res.status).toBe(201);
-      expect(res.body.audience_filter).toEqual(filterFor('Atlanta Housing Authority'));
-      expect(world.broadcasts.get(res.body.broadcastId)?.audience_filter).toEqual(
-        filterFor('Atlanta Housing Authority'),
-      );
+      const wire = {
+        contact_type: 'tenant',
+        housing_authorities: ['Atlanta Housing Authority'],
+        excludeOptedOut: true,
+        excludeUnreachable: true,
+      };
+      expect(res.body.audience_filter).toEqual(wire);
+      expect(res.body.audience_filter).not.toHaveProperty('housing_authority');
+      const stored = world.broadcasts.get(res.body.broadcastId)?.audience_filter;
+      expect(stored).toEqual(wire);
+      expect(stored).not.toHaveProperty('housing_authority');
     });
 
     it('POST stores a unique spelling as the exact name, and the estimate counts holders of the NAME', async () => {
@@ -2252,12 +2259,12 @@ describe('share-broadcast API (M1.8a)', () => {
       const { app } = makeWebhookHarness({ world });
       const res = await postDraft(app, 'atlanta_housing');
       expect(res.status).toBe(201);
-      expect(res.body.audience_filter.housing_authority).toBe('Atlanta Housing Authority');
+      expect(res.body.audience_filter.housing_authorities).toEqual(['Atlanta Housing Authority']);
       // The estimate resolved the NAME (two holders), not the slug (one holder).
       expect(res.body.estimatedCount).toBe(2);
-      expect(world.broadcasts.get(res.body.broadcastId)?.audience_filter.housing_authority).toBe(
+      expect(world.broadcasts.get(res.body.broadcastId)?.audience_filter.housing_authorities).toEqual([
         'Atlanta Housing Authority',
-      );
+      ]);
     });
 
     it('POST refuses an ambiguous spelling: 422 (field audience_filter), no row, no audit', async () => {
@@ -2286,7 +2293,7 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(world.broadcasts.size).toBe(0);
     });
 
-    it('(PIN) every 400 and the unit 404 still come before the 422', async () => {
+    it('(PIN) every 400 and the unit 404 still come before the 422 (legacy string and list alike)', async () => {
       seedUnit(world);
       const { app } = makeWebhookHarness({ world });
       const create = (body: Record<string, unknown>) =>
@@ -2295,14 +2302,19 @@ describe('share-broadcast API (M1.8a)', () => {
           .set('x-origin-verify', ORIGIN_SECRET)
           .set('cookie', TEST_SESSION_COOKIE)
           .send(body);
-      const filter = { contact_type: 'tenant', housing_authority: 'AHA' };
-      const noTemplate = await create({ audience_filter: filter });
-      expect(noTemplate.status).toBe(400);
-      const badSeeds = await create({ body_template: 'hi', audience_filter: filter, seedContactIds: 'c-1' });
-      expect(badSeeds.status).toBe(400);
-      const badUnit = await create({ unitId: 'unit-nope', body_template: 'hi', audience_filter: filter });
-      expect(badUnit.status).toBe(404);
-      expect(badUnit.body).toEqual({ error: 'unit_not_found' });
+      const filters = [
+        { contact_type: 'tenant', housing_authority: 'AHA' },
+        { contact_type: 'tenant', housing_authorities: ['Atlanta Housing Authority', 'AHA'] },
+      ];
+      for (const filter of filters) {
+        const noTemplate = await create({ audience_filter: filter });
+        expect(noTemplate.status).toBe(400);
+        const badSeeds = await create({ body_template: 'hi', audience_filter: filter, seedContactIds: 'c-1' });
+        expect(badSeeds.status).toBe(400);
+        const badUnit = await create({ unitId: 'unit-nope', body_template: 'hi', audience_filter: filter });
+        expect(badUnit.status).toBe(404);
+        expect(badUnit.body).toEqual({ error: 'unit_not_found' });
+      }
     });
 
     function act(
@@ -2402,6 +2414,222 @@ describe('share-broadcast API (M1.8a)', () => {
       const { app } = makeWebhookHarness({ world });
       const res = await act(app, 'bcast-org-sent', 'preview');
       expect(res.status).toBe(200);
+    });
+  });
+
+  // --- matching-blast-rules D2 (plan Task 1.4): the housing authority LIST at
+  // draft create - the shape 400s, the legacy one-string body, the org-list
+  // check (the FIRST failing member is the 422) and the stored + echoed
+  // list. The estimate here is still today's math (S2 replaces it). ---------
+  describe('matching-blast-rules D2: housing_authorities at draft create', () => {
+    function postFilter(app: import('express').Express, audience_filter: Record<string, unknown>) {
+      return request(app)
+        .post('/api/broadcasts')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ unitId: 'unit-1', body_template: 'hi', audience_filter });
+    }
+
+    /** The names of a 422's candidate / otherKind refs, sorted (order is not the contract). */
+    function names(refs: Array<{ name: string }>): string[] {
+      return refs.map((r) => r.name).sort();
+    }
+
+    it('stores exact names and unique spellings as entry NAMES - trimmed, blanks dropped, de-duplicated - and echoes the wire filter', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postFilter(app, {
+        contact_type: 'tenant',
+        housing_authorities: ['Atlanta Housing Authority', ' DCA ', 'atlanta_housing', '', '   '],
+      });
+      expect(res.status).toBe(201);
+      const wire = {
+        contact_type: 'tenant',
+        housing_authorities: ['Atlanta Housing Authority', 'Georgia Department of Community Affairs'],
+        excludeOptedOut: true,
+        excludeUnreachable: true,
+      };
+      expect(res.body.audience_filter).toEqual(wire);
+      const stored = world.broadcasts.get(res.body.broadcastId)?.audience_filter;
+      expect(stored).toEqual(wire);
+      expect(stored).not.toHaveProperty('housing_authority');
+    });
+
+    it('LEGACY body: a housing_authority string is a one-member list, stored as housing_authorities', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postFilter(app, { contact_type: 'tenant', housing_authority: 'atlanta_housing' });
+      expect(res.status).toBe(201);
+      expect(res.body.audience_filter).toEqual({
+        contact_type: 'tenant',
+        housing_authorities: ['Atlanta Housing Authority'],
+        excludeOptedOut: true,
+        excludeUnreachable: true,
+      });
+      const stored = world.broadcasts.get(res.body.broadcastId)!.audience_filter;
+      expect(stored.housing_authorities).toEqual(['Atlanta Housing Authority']);
+      expect(stored).not.toHaveProperty('housing_authority');
+    });
+
+    it('both keys at once is a 400, and nothing is stored', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postFilter(app, {
+        contact_type: 'tenant',
+        housing_authorities: ['Atlanta Housing Authority'],
+        housing_authority: 'Atlanta Housing Authority',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'audience_filter: use housing_authorities only' });
+      expect(world.broadcasts.size).toBe(0);
+    });
+
+    it('a list that is not an array of at most 100 strings is a 400, and nothing is stored', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const bad: unknown[] = [
+        'Atlanta Housing Authority',
+        { name: 'Atlanta Housing Authority' },
+        ['Atlanta Housing Authority', 7],
+        Array.from({ length: 101 }, () => 'Atlanta Housing Authority'),
+      ];
+      for (const housing_authorities of bad) {
+        const res = await postFilter(app, { contact_type: 'tenant', housing_authorities });
+        expect(res.status).toBe(400);
+        expect(res.body).toEqual({
+          error: 'audience_filter.housing_authorities must be an array of at most 100 strings',
+        });
+      }
+      expect(world.broadcasts.size).toBe(0);
+    });
+
+    it('exactly 100 members passes the shape guard (and duplicates collapse)', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postFilter(app, {
+        contact_type: 'tenant',
+        housing_authorities: Array.from({ length: 100 }, () => 'Atlanta Housing Authority'),
+      });
+      expect(res.status).toBe(201);
+      expect(world.broadcasts.get(res.body.broadcastId)?.audience_filter.housing_authorities).toEqual([
+        'Atlanta Housing Authority',
+      ]);
+    });
+
+    it('the FIRST failing member is the 422 (field audience_filter, text = that member); no row, no audit', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postFilter(app, {
+        contact_type: 'tenant',
+        housing_authorities: ['Atlanta Housing Authority', 'AHA', 'Step Up'],
+      });
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({ error: 'org_not_on_list', field: 'audience_filter', text: 'AHA', close: [] });
+      expect(names(res.body.candidates)).toEqual(['Atlanta Housing Authority', 'Augusta Housing Authority']);
+      expect(res.body).not.toHaveProperty('otherKind');
+      expect(world.broadcasts.size).toBe(0);
+      expect(world.auditEvents.filter((e) => e.event_type === 'broadcast_created')).toHaveLength(0);
+    });
+
+    it('a LATER member that fails is refused too, naming that member (an agency names otherKind)', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postFilter(app, { contact_type: 'tenant', housing_authorities: ['DCA', 'Step Up'] });
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({ error: 'org_not_on_list', field: 'audience_filter', text: 'Step Up', candidates: [] });
+      expect(names(res.body.otherKind)).toEqual(['Step Up']);
+      expect(world.broadcasts.size).toBe(0);
+    });
+
+    it('(PIN) an empty or all-blank list is no authority filter: no key stored, the org list not read', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      // Spied AFTER the harness is built: the org-names service holds this
+      // same object and calls list.get() per request.
+      const read = vi.spyOn(world.orgListRepo, 'get');
+      for (const housing_authorities of [[], ['  ', '']]) {
+        const res = await postFilter(app, { contact_type: 'tenant', housing_authorities });
+        expect(res.status).toBe(201);
+        expect(res.body.audience_filter).toEqual({ contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true });
+        expect(world.broadcasts.get(res.body.broadcastId)?.audience_filter).not.toHaveProperty('housing_authorities');
+      }
+      expect(read).not.toHaveBeenCalled();
+    });
+
+    it('the estimate counts tenants holding ANY listed authority; no authority and a Placing tenant are left out', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-aha', housingAuthority: 'Atlanta Housing Authority' } as Partial<ContactItem>);
+      seedTenant(world, {
+        contactId: 'c-dca',
+        status: 'onboarding',
+        housingAuthority: 'Georgia Department of Community Affairs',
+      } as Partial<ContactItem>);
+      seedTenant(world, { contactId: 'c-dekalb', housingAuthority: 'DeKalb County Housing Authority' } as Partial<ContactItem>);
+      seedTenant(world, { contactId: 'c-none' });
+      seedTenant(world, {
+        contactId: 'c-placing',
+        status: 'placing',
+        housingAuthority: 'Atlanta Housing Authority',
+      } as Partial<ContactItem>);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postFilter(app, {
+        contact_type: 'tenant',
+        housing_authorities: ['Atlanta Housing Authority', 'DCA'],
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.estimatedCount).toBe(2);
+    });
+
+    // OR-S1-3 (plan AR3): the three ruled parse edges, one row each - null
+    // reads as ABSENT for both keys, the LEGACY key keeps its own 400, and
+    // "both keys" is decided BEFORE either value's shape.
+    interface ParseEdge {
+      filter: Record<string, unknown>;
+      status: number;
+      error?: string;
+      stored?: string[];
+    }
+    const LEGACY_400 = 'audience_filter.housing_authority must be a non-empty string';
+    const PARSE_EDGES: Array<[string, ParseEdge]> = [
+      [
+        'housing_authorities null reads as absent, so the legacy spelling is stored as a one-member list',
+        {
+          filter: { contact_type: 'tenant', housing_authorities: null, housing_authority: 'atlanta_housing' },
+          status: 201,
+          stored: ['Atlanta Housing Authority'],
+        },
+      ],
+      [
+        'a blank legacy string keeps the legacy 400',
+        { filter: { contact_type: 'tenant', housing_authority: '  ' }, status: 400, error: LEGACY_400 },
+      ],
+      [
+        'a non-string legacy value keeps the legacy 400',
+        { filter: { contact_type: 'tenant', housing_authority: 7 }, status: 400, error: LEGACY_400 },
+      ],
+      [
+        'both keys is the both-keys 400 before either value is shape-checked',
+        {
+          filter: { contact_type: 'tenant', housing_authorities: 'x', housing_authority: 'y' },
+          status: 400,
+          error: 'audience_filter: use housing_authorities only',
+        },
+      ],
+    ];
+    it.each(PARSE_EDGES)('AR3 parse edge: %s', async (_name, { filter, status, error, stored }) => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postFilter(app, filter);
+      expect(res.status).toBe(status);
+      if (error !== undefined) {
+        expect(res.body).toEqual({ error });
+        expect(world.broadcasts.size).toBe(0);
+      }
+      if (stored !== undefined) {
+        const row = world.broadcasts.get(res.body.broadcastId)?.audience_filter;
+        expect(row?.housing_authorities).toEqual(stored);
+        expect(row).not.toHaveProperty('housing_authority');
+      }
     });
   });
 

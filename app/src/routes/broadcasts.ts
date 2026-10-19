@@ -80,6 +80,7 @@ import {
 } from '../services/shareRecipientState.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { checkScalarWrite, isOnListFor, KINDS_FOR_FIELD, type OrgNotOnList } from '../lib/orgNames.js';
+import { authoritiesOfFilter, MAX_FILTER_AUTHORITIES, wireAudienceFilter } from '../lib/blastAudienceRules.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
 import { buildFollowUps } from '../services/followUps.js';
 
@@ -134,8 +135,15 @@ export interface BroadcastsRouterDeps {
 /**
  * Parse + validate an audience_filter from the request body. contact_type is
  * fixed 'tenant' for M1.8 (any other value is rejected — never relay rosters);
- * housing_authority/bedroomSize are optional narrowers; opt-out + unreachable
- * are ALWAYS excluded regardless of the request.
+ * housing_authorities (matching-blast-rules D2: any-of, an array of at most
+ * MAX_FILTER_AUTHORITIES strings; the LEGACY one-string housing_authority is
+ * read as a one-member list while the list is absent, and both keys at once
+ * is a 400; null reads as absent) and bedroomSize are optional narrowers;
+ * opt-out + unreachable are ALWAYS excluded regardless of the request.
+ * Members are trimmed, blanks dropped and de-duplicated here
+ * (authoritiesOfFilter); the route then checks them against the org list.
+ * The result NEVER carries housing_authority, and carries housing_authorities
+ * only when non-empty.
  */
 function parseAudienceFilter(raw: unknown): AudienceFilter | { error: string } {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
@@ -146,13 +154,32 @@ function parseAudienceFilter(raw: unknown): AudienceFilter | { error: string } {
   if (f['contact_type'] !== undefined && f['contact_type'] !== 'tenant') {
     return { error: 'audience_filter.contact_type must be "tenant" (M1.8 targets tenants only)' };
   }
-  let housing_authority: string | undefined;
-  if (f['housing_authority'] !== undefined && f['housing_authority'] !== null) {
-    if (typeof f['housing_authority'] !== 'string' || f['housing_authority'].trim().length === 0) {
+  const rawList = f['housing_authorities'];
+  const rawLegacy = f['housing_authority'];
+  const listGiven = rawList !== undefined && rawList !== null;
+  const legacyGiven = rawLegacy !== undefined && rawLegacy !== null;
+  if (listGiven && legacyGiven) {
+    return { error: 'audience_filter: use housing_authorities only' };
+  }
+  let given: string[] | undefined;
+  if (listGiven) {
+    const listError = `audience_filter.housing_authorities must be an array of at most ${MAX_FILTER_AUTHORITIES} strings`;
+    if (!Array.isArray(rawList) || rawList.length > MAX_FILTER_AUTHORITIES) return { error: listError };
+    given = [];
+    for (const member of rawList as unknown[]) {
+      if (typeof member !== 'string') return { error: listError };
+      given.push(member);
+    }
+  } else if (legacyGiven) {
+    // LEGACY body (an old open dashboard tab or an API client): today's rule.
+    if (typeof rawLegacy !== 'string' || rawLegacy.trim().length === 0) {
       return { error: 'audience_filter.housing_authority must be a non-empty string' };
     }
-    housing_authority = f['housing_authority'].trim();
+    given = [rawLegacy];
   }
+  // Trimmed, blanks dropped, de-duplicated (first wins) - the ONE normalizer.
+  // An empty result is no housing authority filter: no key is stored.
+  const housing_authorities = authoritiesOfFilter({ housing_authorities: given });
   let bedroomSize: number | undefined;
   if (f['bedroomSize'] !== undefined && f['bedroomSize'] !== null) {
     const v = f['bedroomSize'];
@@ -163,7 +190,7 @@ function parseAudienceFilter(raw: unknown): AudienceFilter | { error: string } {
   }
   return {
     contact_type: 'tenant',
-    ...(housing_authority !== undefined && { housing_authority }),
+    ...(housing_authorities.length > 0 && { housing_authorities }),
     ...(bedroomSize !== undefined && { bedroomSize }),
     excludeOptedOut: true,
     excludeUnreachable: true,
@@ -632,21 +659,24 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     const audienceMode: BroadcastAudienceMode =
       seedContactIds !== undefined && !rawFilterProvided ? 'seeds_only' : 'filter';
 
-    // ORGANIZATION NAMES (spec 2026-10-06 D5): a housing authority filter must
-    // name a housing authority on the stored org list. Checked AFTER every 400
-    // shape check and the unit 404 above, and BEFORE the estimate, so the
-    // estimate and the stored row both use the entry's exact name (a unique
-    // spelling is stored as the name). Anything else is a 422 (field
-    // `audience_filter`) with no row and no audit. A seeds_only draft parsed
-    // `{}` and never carries a housing authority.
-    if (filter.housing_authority !== undefined) {
-      const check = await orgNames.checkScalar('audience_filter', filter.housing_authority, undefined);
+    // ORGANIZATION NAMES (spec 2026-10-06 D5; matching-blast-rules D2): EVERY
+    // member of the housing authority list must name a housing authority on
+    // the stored org list (orgNames.checkList: trimmed, blanks dropped,
+    // de-duplicated, a unique spelling stored as the entry's exact name).
+    // Checked AFTER every 400 shape check and the unit 404 above, and BEFORE
+    // the estimate, so the estimate and the stored row both use the entries'
+    // exact names. The FIRST member that is not on the list is the 422 (field
+    // `audience_filter`, `text` = that member) with no row and no audit. One
+    // list read, and only when the parsed list is non-empty. A seeds_only
+    // draft parsed `{}` and never carries a housing authority.
+    if (filter.housing_authorities !== undefined) {
+      const check = await orgNames.checkList('audience_filter', filter.housing_authorities, undefined, undefined);
       if (!check.ok) {
-        log.info({ actor }, 'broadcast draft refused: housing authority filter not on the list');
+        log.info({ actor }, 'broadcast draft refused: a housing authority filter member is not on the list');
         res.status(422).json(check.error);
         return;
       }
-      if (check.value !== null) filter.housing_authority = check.value;
+      filter.housing_authorities = check.value;
     }
 
     // Estimate the audience now (save-for-later shows the operator the reach).
@@ -695,8 +725,10 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       status: 'draft',
       estimatedCount: estimatedAudience,
       // Spec 2026-10-06 D5 (ruling R2 decision 5): echo the STORED filter, so a
-      // caller that sent a spelling sees the list name it was stored as.
-      audience_filter: created.audience_filter,
+      // caller that sent a spelling sees the list name it was stored as - in
+      // the wire shape (matching-blast-rules D2: housing_authorities, never
+      // housing_authority).
+      audience_filter: wireAudienceFilter(created.audience_filter),
       // FIX 3+4: surface whether the estimate was truncated (page cap hit) so
       // the operator knows the draft's reach is incomplete before sending.
       truncated,

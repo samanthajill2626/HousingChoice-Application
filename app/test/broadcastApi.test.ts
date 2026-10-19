@@ -40,6 +40,7 @@ import type { UnitItem } from '../src/repos/unitsRepo.js';
 import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
 import type { TourItem } from '../src/repos/toursRepo.js';
 import { SEED } from '../src/lib/seed/lean.js';
+import { TOUR_REQUEST_HOLD_MS } from '../src/lib/blastAudienceRules.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -335,11 +336,17 @@ describe('share-broadcast API (M1.8a)', () => {
         seeded: false,
         status: 'searching',
         declinedThisProperty: false,
+        // matching-blast-rules D5: the server's default-check rule (no tour
+        // hold here, so no tourHold key).
+        checkedByDefault: true,
       },
     ]);
     expect(res.body.priorRecipientContactIds).toEqual([]);
     expect(res.body.declinedContactIds).toEqual([]);
-    expect(res.body.declineLabelsUnavailable).toBe(false);
+    expect(res.body.tourHolds).toEqual([]);
+    // D5/D7: the decline-only degrade flag is gone; the seeds_only flag is absent on success.
+    expect(res.body).not.toHaveProperty('declineLabelsUnavailable');
+    expect(res.body).not.toHaveProperty('audienceRulesUnavailable');
   });
 
   it('draft → send transitions, fans out, and reports the count', async () => {
@@ -2977,7 +2984,7 @@ describe('share-broadcast API (M1.8a)', () => {
       const res = await previewDraft(app, await createDraft(app));
       expect(res.status).toBe(200);
       expect(res.body.declinedContactIds).toEqual(['c-1']);
-      expect(res.body.declineLabelsUnavailable).toBe(false);
+      expect(res.body).not.toHaveProperty('declineLabelsUnavailable');
       expect(declinedById(res.body)).toEqual({ 'c-1': true, 'c-2': false });
     });
 
@@ -3018,7 +3025,7 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(res.body.declinedContactIds).toEqual(['c-out']);
     });
 
-    it('a draft with no property reads nothing: both lists empty, no degraded flag', async () => {
+    it('a draft with no property reads no declines: both lists empty, no unavailable flag', async () => {
       seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
       const listSpy = vi.spyOn(world.listingSendsRepo, 'listByUnit');
       const { app } = makeWebhookHarness({ world });
@@ -3026,7 +3033,8 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(res.status).toBe(200);
       expect(listSpy).not.toHaveBeenCalled();
       expect(res.body.declinedContactIds).toEqual([]);
-      expect(res.body.declineLabelsUnavailable).toBe(false);
+      expect(res.body).not.toHaveProperty('declineLabelsUnavailable');
+      expect(res.body).not.toHaveProperty('audienceRulesUnavailable');
       expect(declinedById(res.body)).toEqual({ 'c-1': false });
     });
 
@@ -3043,9 +3051,12 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(batchSpy).not.toHaveBeenCalled();
     });
 
-    // B13: the harness getManyByIds ignores requireComplete, so the degraded
-    // branch is driven by making each read REJECT.
-    async function expectDegraded(arm: () => void): Promise<void> {
+    // B13: the harness getManyByIds ignores requireComplete, so the failed
+    // read is driven by making each read REJECT. matching-blast-rules D5: a
+    // filter draft whose decline read fails is no longer served without its
+    // labels - the preview fails CLOSED (503, no list), because a list
+    // without them would check tenants who said Not interested.
+    async function expectRulesUnavailable(arm: () => void): Promise<void> {
       seedUnit(world);
       seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
       world.listingSends.push(declinedRow('c-1'));
@@ -3053,26 +3064,388 @@ describe('share-broadcast API (M1.8a)', () => {
       const id = await createDraft(app);
       arm();
       const res = await previewDraft(app, id);
-      expect(res.status).toBe(200);
-      expect(res.body.candidates).toHaveLength(1);
-      expect(declinedById(res.body)).toEqual({ 'c-1': false });
-      expect(res.body.declinedContactIds).toEqual([]);
-      expect(res.body.declineLabelsUnavailable).toBe(true);
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: 'audience_rules_unavailable' });
     }
-    it('a failed listing-sends read serves the candidates with NO labels and declineLabelsUnavailable', async () => {
-      await expectDegraded(() => {
+    it('a failed listing-sends read fails the filter preview closed: 503 audience_rules_unavailable, no list', async () => {
+      await expectRulesUnavailable(() => {
         vi.spyOn(world.listingSendsRepo, 'listByUnit').mockRejectedValueOnce(new Error('throttled'));
       });
     });
-    it('a failed tours read serves the candidates with NO labels and declineLabelsUnavailable', async () => {
-      await expectDegraded(() => {
+    it('a failed tours read (the decline supersession read) fails the filter preview closed', async () => {
+      await expectRulesUnavailable(() => {
         vi.spyOn(world.toursRepo, 'listByUnit').mockRejectedValueOnce(new Error('throttled'));
       });
     });
-    it('a failed (or incomplete) contacts batch serves the candidates with NO labels and declineLabelsUnavailable', async () => {
-      await expectDegraded(() => {
+    it('a failed (or incomplete) contacts batch fails the filter preview closed', async () => {
+      await expectRulesUnavailable(() => {
         vi.spyOn(world.contactsRepo, 'getManyByIds').mockRejectedValueOnce(new Error('IncompleteBatchReadError'));
       });
+    });
+  });
+
+  // --- matching-blast-rules D4/D5/D7: the preview's review rows -------------
+  describe('matching-blast-rules D4/D5/D7: the preview review rows', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const SENT = '2026-10-01T12:00:00.000Z';
+    const DECLINED_AT = '2026-10-02T12:00:00.000Z';
+    type Row = Record<string, unknown>;
+
+    /** A tour written straight into the world. unitId defaults to ANOTHER
+     *  property: a hold counts an unresolved tour for ANY property (D4). */
+    function seedTour(t: {
+      tourId: string;
+      tenantId: string;
+      status: string;
+      unitId?: string;
+      createdAt?: string;
+      scheduledAt?: string;
+      outcome?: TourItem['outcome'];
+      moveForward?: boolean;
+      convertible?: boolean;
+    }): TourItem {
+      const createdAt = t.createdAt ?? isoFromNow(-10 * DAY);
+      const item: TourItem = {
+        tourId: t.tourId,
+        tenantId: t.tenantId,
+        unitId: t.unitId ?? 'unit-2',
+        _schedPartition: 'tours',
+        tourType: 'self_guided',
+        status: t.status,
+        createdAt,
+        updatedAt: createdAt,
+        ...(t.scheduledAt !== undefined && { scheduledAt: t.scheduledAt }),
+        ...(t.outcome !== undefined && { outcome: t.outcome }),
+        ...(t.moveForward !== undefined && { moveForward: t.moveForward }),
+        ...(t.convertible !== undefined && { convertible: t.convertible }),
+      };
+      world.toursMap.set(item.tourId, item);
+      return item;
+    }
+
+    /** An EFFECTIVE #27 decline of unit-1 (listed, then declined; no later send or tour). */
+    function declinedRow(contactId: string): ListingSendItem {
+      return {
+        unitId: 'unit-1',
+        contactId,
+        sentAt: SENT,
+        via: 'individual',
+        counted: true,
+        created_at: SENT,
+        updated_at: SENT,
+        declined: { at: DECLINED_AT, by: 'staff', staffId: 'user-0002' },
+      };
+    }
+
+    function preview(app: import('express').Express, id: string) {
+      return request(app)
+        .post(`/api/broadcasts/${id}/preview`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({});
+    }
+
+    /** A seeds_only draft: the direct send from a tenant's or caseworker's page. */
+    async function createSeedsOnly(app: import('express').Express, seedContactIds: string[]): Promise<string> {
+      const res = await request(app)
+        .post('/api/broadcasts')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ unitId: 'unit-1', body_template: 'hi', seedContactIds });
+      expect(res.status).toBe(201);
+      return res.body.broadcastId as string;
+    }
+
+    function rowsById(body: { candidates: Row[] }): Map<string, Row> {
+      return new Map(body.candidates.map((c) => [c['contactId'] as string, c]));
+    }
+
+    function sortedHolds(body: { tourHolds: Array<{ contactId: string }> }): Array<{ contactId: string }> {
+      return [...body.tourHolds].sort((a, b) => (a.contactId < b.contactId ? -1 : 1));
+    }
+
+    it('every D4 hold kind reaches its candidate as tourHold and unchecks it; a resolved or stale tour holds nothing', async () => {
+      seedUnit(world);
+      const ids = [
+        'c-up', 'c-unmarked', 'c-needs-placement', 'c-needs-outcome', 'c-noshow', 'c-req',
+        'c-old-req', 'c-closed', 'c-canceled', 'c-done', 'c-free',
+      ];
+      ids.forEach((contactId, i) => seedTenant(world, { contactId, phone: `+1555030${String(i + 1).padStart(4, '0')}` }));
+      const upAt = isoFromNow(3 * DAY);
+      const pastAt = isoFromNow(-2 * DAY);
+      const reqAt = isoFromNow(-1 * DAY);
+      seedTour({ tourId: 't-up', tenantId: 'c-up', status: 'scheduled', scheduledAt: upAt });
+      seedTour({ tourId: 't-unmarked', tenantId: 'c-unmarked', status: 'scheduled', scheduledAt: pastAt });
+      seedTour({
+        tourId: 't-needs-placement',
+        tenantId: 'c-needs-placement',
+        status: 'toured',
+        scheduledAt: pastAt,
+        outcome: 'move_forward',
+        moveForward: true,
+        convertible: true,
+      });
+      seedTour({ tourId: 't-needs-outcome', tenantId: 'c-needs-outcome', status: 'toured', scheduledAt: pastAt });
+      seedTour({ tourId: 't-noshow', tenantId: 'c-noshow', status: 'no_show', scheduledAt: pastAt });
+      seedTour({ tourId: 't-req', tenantId: 'c-req', status: 'requested', createdAt: reqAt });
+      seedTour({ tourId: 't-old-req', tenantId: 'c-old-req', status: 'requested', createdAt: isoFromNow(-15 * DAY) });
+      seedTour({ tourId: 't-closed', tenantId: 'c-closed', status: 'closed', scheduledAt: pastAt, outcome: 'not_a_fit', convertible: false });
+      seedTour({ tourId: 't-canceled', tenantId: 'c-canceled', status: 'canceled', scheduledAt: upAt });
+      seedTour({
+        tourId: 't-done',
+        tenantId: 'c-done',
+        status: 'toured',
+        scheduledAt: pastAt,
+        outcome: 'not_a_fit',
+        moveForward: false,
+        convertible: false,
+      });
+      const { app } = makeWebhookHarness({ world });
+      const res = await preview(app, await createDraft(app));
+      expect(res.status).toBe(200);
+      const byId = rowsById(res.body);
+      expect(byId.get('c-up')?.['tourHold']).toEqual({ kind: 'upcoming', tourId: 't-up', at: upAt });
+      expect(byId.get('c-unmarked')?.['tourHold']).toEqual({ kind: 'not_marked', tourId: 't-unmarked', at: pastAt });
+      expect(byId.get('c-needs-placement')?.['tourHold']).toEqual({
+        kind: 'needs_placement',
+        tourId: 't-needs-placement',
+        at: pastAt,
+      });
+      expect(byId.get('c-needs-outcome')?.['tourHold']).toEqual({ kind: 'needs_outcome', tourId: 't-needs-outcome', at: pastAt });
+      expect(byId.get('c-noshow')?.['tourHold']).toEqual({ kind: 'no_show', tourId: 't-noshow', at: pastAt });
+      expect(byId.get('c-req')?.['tourHold']).toEqual({ kind: 'requested', tourId: 't-req', at: reqAt });
+      for (const id of ['c-up', 'c-unmarked', 'c-needs-placement', 'c-needs-outcome', 'c-noshow', 'c-req']) {
+        expect(byId.get(id)?.['checkedByDefault'], id).toBe(false);
+      }
+      for (const id of ['c-old-req', 'c-closed', 'c-canceled', 'c-done', 'c-free']) {
+        expect(byId.has(id), id).toBe(true);
+        expect(byId.get(id), id).not.toHaveProperty('tourHold');
+        expect(byId.get(id)?.['checkedByDefault'], id).toBe(true);
+      }
+      expect(sortedHolds(res.body)).toEqual([
+        { contactId: 'c-needs-outcome', kind: 'needs_outcome', tourId: 't-needs-outcome', at: pastAt },
+        { contactId: 'c-needs-placement', kind: 'needs_placement', tourId: 't-needs-placement', at: pastAt },
+        { contactId: 'c-noshow', kind: 'no_show', tourId: 't-noshow', at: pastAt },
+        { contactId: 'c-req', kind: 'requested', tourId: 't-req', at: reqAt },
+        { contactId: 'c-unmarked', kind: 'not_marked', tourId: 't-unmarked', at: pastAt },
+        { contactId: 'c-up', kind: 'upcoming', tourId: 't-up', at: upAt },
+      ]);
+      expect(res.body).not.toHaveProperty('declineLabelsUnavailable');
+      expect(res.body).not.toHaveProperty('audienceRulesUnavailable');
+    });
+
+    it('checkedByDefault is the ONE server rule: a seed is checked whatever its flags; a held, declined, already-sent or no-consent filter row is not; tourHolds lists EVERY held contact, in the rows or not', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-plain', phone: '+15550301001' });
+      seedTenant(world, { contactId: 'c-held', phone: '+15550301002' });
+      seedTenant(world, { contactId: 'c-held-seed', phone: '+15550301003' });
+      seedTenant(world, { contactId: 'c-declined', phone: '+15550301004' });
+      seedTenant(world, { contactId: 'c-declined-seed', phone: '+15550301005' });
+      seedTenant(world, { contactId: 'c-sent', phone: '+15550301006' });
+      seedTenant(world, { contactId: 'c-nocons', phone: '+15550301007', consent_method: undefined });
+      seedTenant(world, { contactId: 'c-nocons-seed', phone: '+15550301008', consent_method: undefined });
+      // Held but never a filter row: a Placing tenant (D1 leaves them out) and
+      // a caseworker seed (D10: a filter never resolves partners; a hand pick may).
+      seedTenant(world, { contactId: 'c-placing', phone: '+15550301009', status: 'placing' });
+      seedTenant(world, { contactId: 'c-cw-seed', phone: '+15550301010', type: 'partner', status: 'active' });
+      // An older tour whose tenantId names a LANDLORD still holds: the hold is
+      // keyed on the tour's tenantId with no assumption about type (D4).
+      world.contacts.push({ contactId: 'c-ll-tour', type: 'landlord', status: 'active', phone: '+15550301011' });
+      const at = isoFromNow(3 * DAY);
+      for (const tenantId of ['c-held', 'c-held-seed', 'c-placing', 'c-cw-seed', 'c-ll-tour']) {
+        seedTour({ tourId: `t-${tenantId}`, tenantId, status: 'scheduled', scheduledAt: at });
+      }
+      world.listingSends.push(declinedRow('c-declined'), declinedRow('c-declined-seed'));
+      seedShare(world, 'bcast-prior', 'sent', { 'c-sent': { status: 'delivered' } });
+      const { app } = makeWebhookHarness({ world });
+      const id = await createDraft(app, {
+        seedContactIds: ['c-held-seed', 'c-declined-seed', 'c-nocons-seed', 'c-cw-seed'],
+      });
+      const res = await preview(app, id);
+      expect(res.status).toBe(200);
+      const byId = rowsById(res.body);
+      expect(Object.fromEntries([...byId].map(([cid, r]) => [cid, r['checkedByDefault']]))).toEqual({
+        'c-plain': true,
+        'c-held': false,
+        'c-held-seed': true,
+        'c-declined': false,
+        'c-declined-seed': true,
+        'c-sent': false,
+        'c-nocons': false,
+        'c-nocons-seed': false,
+        'c-cw-seed': true,
+      });
+      // A hand pick is never held: it starts checked AND keeps its label (D4).
+      expect(byId.get('c-held-seed')).toMatchObject({
+        seeded: true,
+        tourHold: { kind: 'upcoming', tourId: 't-c-held-seed', at },
+      });
+      expect(byId.get('c-cw-seed')).toMatchObject({
+        seeded: true,
+        tourHold: { kind: 'upcoming', tourId: 't-c-cw-seed', at },
+      });
+      expect(byId.get('c-declined-seed')).toMatchObject({ seeded: true, declinedThisProperty: true });
+      expect(byId.get('c-sent')).toMatchObject({ alreadySentThisProperty: true });
+      expect(byId.get('c-nocons')).toMatchObject({ has_consent: false });
+      expect(byId.has('c-placing')).toBe(false);
+      expect(sortedHolds(res.body).map((h) => h.contactId)).toEqual([
+        'c-cw-seed',
+        'c-held',
+        'c-held-seed',
+        'c-ll-tour',
+        'c-placing',
+      ]);
+    });
+
+    it('the open-tours read is ONE read per preview: scheduled, toured and no_show to the end, requested from now minus 14 days (D5)', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-1', phone: '+15550301101' });
+      const { app } = makeWebhookHarness({ world });
+      const id = await createDraft(app);
+      const spy = vi.spyOn(world.toursRepo, 'listByStatus');
+      const before = Date.now();
+      const res = await preview(app, id);
+      const after = Date.now();
+      expect(res.status).toBe(200);
+      expect(spy).toHaveBeenCalledTimes(4);
+      expect(spy.mock.calls.map((c) => c[0]).sort()).toEqual(['no_show', 'requested', 'scheduled', 'toured']);
+      for (const call of spy.mock.calls) {
+        if (call[0] !== 'requested') expect(call[1], call[0]).toBeUndefined();
+      }
+      const requestedCall = spy.mock.calls.find((c) => c[0] === 'requested')!;
+      const from = Date.parse(requestedCall[1]!.createdAtFrom!);
+      expect(from).toBeGreaterThanOrEqual(before - TOUR_REQUEST_HOLD_MS);
+      expect(from).toBeLessThanOrEqual(after - TOUR_REQUEST_HOLD_MS);
+    });
+
+    it('several unresolved tours: ONE hold is shown, by kind order, then the earliest upcoming date', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-multi', phone: '+15550301201' });
+      seedTenant(world, { contactId: 'c-place', phone: '+15550301202' });
+      const soon = isoFromNow(2 * DAY);
+      const pastAt = isoFromNow(-3 * DAY);
+      seedTour({ tourId: 't-late', tenantId: 'c-multi', status: 'scheduled', scheduledAt: isoFromNow(5 * DAY) });
+      seedTour({ tourId: 't-soon', tenantId: 'c-multi', status: 'scheduled', scheduledAt: soon });
+      seedTour({ tourId: 't-ask', tenantId: 'c-multi', status: 'requested', createdAt: isoFromNow(-1 * DAY) });
+      seedTour({
+        tourId: 't-np',
+        tenantId: 'c-place',
+        status: 'toured',
+        scheduledAt: pastAt,
+        outcome: 'move_forward',
+        moveForward: true,
+        convertible: true,
+      });
+      seedTour({ tourId: 't-next', tenantId: 'c-place', status: 'scheduled', scheduledAt: isoFromNow(1 * DAY) });
+      const { app } = makeWebhookHarness({ world });
+      const res = await preview(app, await createDraft(app));
+      expect(res.status).toBe(200);
+      const byId = rowsById(res.body);
+      expect(byId.get('c-multi')?.['tourHold']).toEqual({ kind: 'upcoming', tourId: 't-soon', at: soon });
+      expect(byId.get('c-place')?.['tourHold']).toEqual({ kind: 'needs_placement', tourId: 't-np', at: pastAt });
+    });
+
+    it('a draft stored with the LEGACY one-string filter previews through the normalizer, rows carrying checkedByDefault', async () => {
+      seedUnit(world);
+      seedTenant(world, {
+        contactId: 'c-aha',
+        phone: '+15550301301',
+        housingAuthority: 'Atlanta Housing Authority',
+      } as Partial<ContactItem>);
+      seedTenant(world, {
+        contactId: 'c-dekalb',
+        phone: '+15550301302',
+        housingAuthority: 'DeKalb County Housing Authority',
+      } as Partial<ContactItem>);
+      seedTenant(world, { contactId: 'c-blank', phone: '+15550301303' });
+      seedShare(world, 'bcast-legacy', 'draft', {}, {
+        audience_filter: {
+          contact_type: 'tenant',
+          housing_authority: 'Atlanta Housing Authority',
+          excludeOptedOut: true,
+          excludeUnreachable: true,
+        },
+      });
+      const { app } = makeWebhookHarness({ world });
+      const res = await preview(app, 'bcast-legacy');
+      expect(res.status).toBe(200);
+      expect(res.body.candidates.map((c: Row) => [c['contactId'], c['checkedByDefault']])).toEqual([['c-aha', true]]);
+    });
+
+    it('a FILTER draft whose tours read throws is 503 audience_rules_unavailable with NO list (D5 fail closed)', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-1', phone: '+15550301401' });
+      const { app } = makeWebhookHarness({ world });
+      const id = await createDraft(app);
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValueOnce(new Error('throttled'));
+      const res = await preview(app, id);
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: 'audience_rules_unavailable' });
+    });
+
+    it('a filter draft with NO property still reads tours: a throwing tours read is 503 there too', async () => {
+      seedTenant(world, { contactId: 'c-1', phone: '+15550301501' });
+      const { app } = makeWebhookHarness({ world });
+      const id = await createDraft(app, { unitId: undefined });
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValueOnce(new Error('throttled'));
+      const res = await preview(app, id);
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: 'audience_rules_unavailable' });
+    });
+
+    it('a seeds_only draft (a direct send): the seed keeps its tour label and stays checked; when the tours read throws it is served WITHOUT labels and says so', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-1', phone: '+15550301601' });
+      const at = isoFromNow(2 * DAY);
+      seedTour({ tourId: 't-1', tenantId: 'c-1', status: 'scheduled', scheduledAt: at });
+      const { app } = makeWebhookHarness({ world });
+      const id = await createSeedsOnly(app, ['c-1']);
+      const ok = await preview(app, id);
+      expect(ok.status).toBe(200);
+      expect(ok.body.candidates).toHaveLength(1);
+      expect(ok.body.candidates[0]).toMatchObject({
+        contactId: 'c-1',
+        seeded: true,
+        checkedByDefault: true,
+        tourHold: { kind: 'upcoming', tourId: 't-1', at },
+      });
+      expect(ok.body).not.toHaveProperty('audienceRulesUnavailable');
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValueOnce(new Error('throttled'));
+      const degraded = await preview(app, id);
+      expect(degraded.status).toBe(200);
+      expect(degraded.body.candidates).toHaveLength(1);
+      expect(degraded.body.candidates[0]).toMatchObject({
+        contactId: 'c-1',
+        seeded: true,
+        checkedByDefault: true,
+        declinedThisProperty: false,
+      });
+      expect(degraded.body.candidates[0]).not.toHaveProperty('tourHold');
+      expect(degraded.body.tourHolds).toEqual([]);
+      expect(degraded.body.declinedContactIds).toEqual([]);
+      expect(degraded.body.audienceRulesUnavailable).toBe(true);
+    });
+
+    it('a seeds_only draft whose decline read throws is served without the Not interested label, still checked, audienceRulesUnavailable', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-1', phone: '+15550301701' });
+      world.listingSends.push(declinedRow('c-1'));
+      const { app } = makeWebhookHarness({ world });
+      const id = await createSeedsOnly(app, ['c-1']);
+      const ok = await preview(app, id);
+      expect(ok.status).toBe(200);
+      expect(ok.body.candidates[0]).toMatchObject({ declinedThisProperty: true, checkedByDefault: true });
+      expect(ok.body.declinedContactIds).toEqual(['c-1']);
+      vi.spyOn(world.listingSendsRepo, 'listByUnit').mockRejectedValueOnce(new Error('throttled'));
+      const degraded = await preview(app, id);
+      expect(degraded.status).toBe(200);
+      expect(degraded.body.candidates[0]).toMatchObject({
+        contactId: 'c-1',
+        declinedThisProperty: false,
+        checkedByDefault: true,
+      });
+      expect(degraded.body.declinedContactIds).toEqual([]);
+      expect(degraded.body.audienceRulesUnavailable).toBe(true);
     });
   });
 });

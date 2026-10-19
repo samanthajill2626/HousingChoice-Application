@@ -87,7 +87,15 @@ import {
 } from '../services/shareRecipientState.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { checkScalarWrite, isOnListFor, KINDS_FOR_FIELD, type OrgNotOnList } from '../lib/orgNames.js';
-import { authoritiesOfFilter, MAX_FILTER_AUTHORITIES, wireAudienceFilter } from '../lib/blastAudienceRules.js';
+import {
+  authoritiesOfFilter,
+  checkedByDefault as isCheckedByDefault,
+  MAX_FILTER_AUTHORITIES,
+  TOUR_REQUEST_HOLD_MS,
+  tourHoldsByTenant,
+  type TourHold,
+  wireAudienceFilter,
+} from '../lib/blastAudienceRules.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
 import { buildFollowUps } from '../services/followUps.js';
 
@@ -467,6 +475,54 @@ function toBroadcastSummary(b: BroadcastItem, stats: BroadcastStats): Record<str
   };
 }
 
+/**
+ * matching-blast-rules D5/D6/D8: thrown by buildReviewRows when the open-tours
+ * read or the #27 decline read fails for a FILTER draft. The preview answers
+ * 503 audience_rules_unavailable; draft create omits its estimate. `truncated`
+ * carries the audience resolution's flag (the resolution ran before the
+ * failed read), so create still reports it.
+ */
+class AudienceRulesUnavailableError extends Error {
+  readonly truncated: boolean;
+  constructor(truncated: boolean, options?: ErrorOptions) {
+    super('audience rules unavailable: a tours or decline read failed', options);
+    this.name = 'AudienceRulesUnavailableError';
+    this.truncated = truncated;
+  }
+}
+
+/** What buildReviewRows needs from a draft (or from POST create's body). */
+interface ReviewInput {
+  audienceMode: BroadcastAudienceMode;
+  filter: AudienceFilter;
+  seedContactIds: string[];
+  unitId?: string;
+}
+
+/** One review row: a resolved contact plus its D5 flags. */
+interface ReviewRow extends ResolvedContact {
+  seeded: boolean;
+  alreadySent: boolean;
+  declined: boolean;
+  tourHold?: TourHold;
+  checkedByDefault: boolean;
+}
+
+interface ReviewRowsResult {
+  /** Audience rows first (resolver order), then seeds not already present. */
+  rows: ReviewRow[];
+  truncated: boolean;
+  unresolvedSeedIds: string[];
+  /** contactKeys (contactId or phone#<E164>) that MAY have received this property. */
+  priorRecipients: Set<string>;
+  /** Effective #27 declines of the property (empty without one). */
+  declinedIds: Set<string>;
+  /** EVERY held contact, in the rows or not (tourHolds on the wire). */
+  tourHolds: Map<string, TourHold>;
+  /** True only for a seeds_only preview whose rules reads threw. */
+  rulesUnavailable: boolean;
+}
+
 export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const config = deps.config ?? loadConfig();
@@ -492,9 +548,11 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
    * only"); then, ONLY when some row carries a `declined` record, the unit's
    * tours (one byUnit read, grouped by tenant - the units recipients pattern)
    * and those rows' contacts in one requireComplete batch (their type decides
-   * whether tours count, spec 5.4). Throws on any failed read; the caller turns
-   * that into the degraded flag - these are labels, not outcomes with buttons,
-   * so D12's 503 does not apply.
+   * whether tours count, spec 5.4). Throws on any failed read. Since
+   * matching-blast-rules D5 a decline UNCHECKS a filter row by default, so its
+   * callers fail closed (readAudienceRules): a filter preview and the no-body
+   * filter send answer 503 audience_rules_unavailable, draft create omits its
+   * estimate, and only a seeds_only preview is served without the labels.
    */
   async function effectiveDeclines(unitId: string): Promise<Set<string>> {
     const declinedRows = (await listingSends.listByUnit(unitId)).filter((r) => r.declined !== undefined);
@@ -606,6 +664,157 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       };
     }
     return undefined;
+  }
+
+  /**
+   * matching-blast-rules D5: the open-tours read - ONE read per call,
+   * independent of audience size. The byStatus partitions `scheduled`,
+   * `toured` and `no_show` are walked to the end (the same unbounded reads the
+   * auto-close sweep makes every 15 minutes, jobs/tourAutoClose.ts); the
+   * `requested` partition is bounded by its range key to the requests created
+   * in the last 14 days - the only ones that can hold (D4) - because it grows
+   * with every unbooked request. Grouped by tenantId in memory, one picked
+   * hold per contact (any contact type: older tours may name a non-tenant).
+   * Throws on any failed read; the caller decides what that means.
+   */
+  async function readOpenTourHolds(nowMs: number): Promise<Map<string, TourHold>> {
+    const requestedFrom = new Date(nowMs - TOUR_REQUEST_HOLD_MS).toISOString();
+    const [scheduled, toured, noShow, requested] = await Promise.all([
+      tours.listByStatus('scheduled'),
+      tours.listByStatus('toured'),
+      tours.listByStatus('no_show'),
+      tours.listByStatus('requested', { createdAtFrom: requestedFrom }),
+    ]);
+    return tourHoldsByTenant([...scheduled, ...toured, ...noShow, ...requested], nowMs);
+  }
+
+  /**
+   * matching-blast-rules D5/D6: the two reads that fail CLOSED - the open-tour
+   * holds and, with a property, its effective #27 declines - in parallel.
+   * Throws the first failure as it came; callers decide (503 for a filter
+   * preview and send path (c), no estimate at create, a label-less seeds_only
+   * preview).
+   */
+  async function readAudienceRules(
+    unitId: string | undefined,
+    nowMs: number,
+  ): Promise<{ tourHolds: Map<string, TourHold>; declinedIds: Set<string> }> {
+    const [tourHolds, declinedIds] = await Promise.all([
+      readOpenTourHolds(nowMs),
+      unitId !== undefined ? effectiveDeclines(unitId) : Promise.resolve(new Set<string>()),
+    ]);
+    return { tourHolds, declinedIds };
+  }
+
+  /**
+   * matching-blast-rules D5 (and D8): the ONE rule that builds a draft's review
+   * rows - the preview serves them, POST create counts the checkedByDefault
+   * ones as "Reaches N recipients".
+   *  - filter draft: the resolved audience (D1, D2) united with the seeds
+   *    (audience rows first, then seeds not already present; a contact in both
+   *    is ONE row flagged seeded), the rules reads (readAudienceRules), then
+   *    the already-sent set. A thrown tours or decline read throws
+   *    AudienceRulesUnavailableError - never a list the rules did not check.
+   *  - seeds_only + 'preview': the seeds alone, the same reads; a thrown rules
+   *    read serves the rows WITHOUT tour or decline flags and sets
+   *    rulesUnavailable (a direct send is never blocked by these reads).
+   *  - seeds_only + 'estimate': NO rules or already-sent reads - every row is a
+   *    seed, so checkedByDefault is has_consent (D8).
+   * checkedByDefault = has_consent && (seeded || (!alreadySent && !declined && !held)).
+   * The already-sent set (priorRecipientKeys) never throws: a failed page keeps
+   * what it resolved - a soft hint by design, so a throttled read can leave an
+   * already-sent tenant checked. It reads a queued slot's send-attempt record
+   * (in flight vs stranded) with `recordReads: true`; this function is the ONLY
+   * place those records are read - the preview and draft create call it, no
+   * other route does (share-sent-outcome D1).
+   */
+  async function buildReviewRows(input: ReviewInput, mode: 'preview' | 'estimate'): Promise<ReviewRowsResult> {
+    const seeds =
+      input.seedContactIds.length > 0
+        ? await resolveSeeds(input.seedContactIds)
+        : { contacts: [], unresolved: [] };
+    const seedIdSet = new Set(seeds.contacts.map((c) => c.contactId));
+    const seedsOnly = input.audienceMode === 'seeds_only';
+    if (seedsOnly && mode === 'estimate') {
+      const seedRows: ReviewRow[] = seeds.contacts.map((c) => ({
+        ...c,
+        seeded: true,
+        alreadySent: false,
+        declined: false,
+        checkedByDefault: isCheckedByDefault({
+          hasConsent: c.has_consent,
+          seeded: true,
+          alreadySent: false,
+          declined: false,
+          held: false,
+        }),
+      }));
+      return {
+        rows: seedRows,
+        truncated: false,
+        unresolvedSeedIds: seeds.unresolved,
+        priorRecipients: new Set<string>(),
+        declinedIds: new Set<string>(),
+        tourHolds: new Map<string, TourHold>(),
+        rulesUnavailable: false,
+      };
+    }
+    const audience: { contacts: ResolvedContact[]; truncated: boolean } = seedsOnly
+      ? { contacts: [], truncated: false }
+      : await resolveAudience(input.filter);
+    const combined = [...audience.contacts.filter((c) => !seedIdSet.has(c.contactId)), ...seeds.contacts];
+    let tourHolds = new Map<string, TourHold>();
+    let declinedIds = new Set<string>();
+    let rulesUnavailable = false;
+    try {
+      const rules = await readAudienceRules(input.unitId, Date.now());
+      tourHolds = rules.tourHolds;
+      declinedIds = rules.declinedIds;
+    } catch (err) {
+      log.warn(
+        { err, audienceMode: input.audienceMode, mode, ...(input.unitId !== undefined && { unitId: input.unitId }) },
+        'broadcast audience rules unavailable: a tours or decline read failed',
+      );
+      if (!seedsOnly) throw new AudienceRulesUnavailableError(audience.truncated, { cause: err });
+      rulesUnavailable = true;
+    }
+    const priorRecipients =
+      input.unitId !== undefined
+        ? await priorRecipientKeys({ broadcasts, messages, attempts, log }, input.unitId)
+        : new Set<string>();
+    const rows: ReviewRow[] = combined.map((c) => {
+      const seeded = seedIdSet.has(c.contactId);
+      // The set is contactKeys - contactId OR `phone#<E164>` (a phone-only
+      // recipient at the prior share's send time) - so match on EITHER key.
+      const alreadySent =
+        input.unitId !== undefined &&
+        (priorRecipients.has(c.contactId) || priorRecipients.has(`phone#${c.phone}`));
+      const declined = declinedIds.has(c.contactId);
+      const tourHold = tourHolds.get(c.contactId);
+      return {
+        ...c,
+        seeded,
+        alreadySent,
+        declined,
+        ...(tourHold !== undefined && { tourHold }),
+        checkedByDefault: isCheckedByDefault({
+          hasConsent: c.has_consent,
+          seeded,
+          alreadySent,
+          declined,
+          held: tourHold !== undefined,
+        }),
+      };
+    });
+    return {
+      rows,
+      truncated: audience.truncated,
+      unresolvedSeedIds: seeds.unresolved,
+      priorRecipients,
+      declinedIds,
+      tourHolds,
+      rulesUnavailable,
+    };
   }
 
   const router = Router();
@@ -760,7 +969,10 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   // reached the tenant: the SAFE reading of share-sent-outcome D1's recipient
   // state, whatever that share's stored status). `priorRecipientContactIds`
   // lets the composer annotate MANUALLY-added tenants locally too.
-  // last-heard-from: per candidate status? / lastHeardFromAt? / declinedThisProperty, plus declinedContactIds + declineLabelsUnavailable.
+  // last-heard-from: per candidate status? / lastHeardFromAt? / declinedThisProperty, plus declinedContactIds.
+  // matching-blast-rules D5/D7: per candidate tourHold? / checkedByDefault, plus tourHolds and, for a
+  // seeds_only draft whose rules reads failed, audienceRulesUnavailable; a filter draft whose tours or
+  // decline read fails is 503 audience_rules_unavailable.
   router.post('/broadcasts/:broadcastId/preview', async (req, res) => {
     const { broadcastId } = req.params;
     mergeContext({});
@@ -781,109 +993,104 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
         return;
       }
     }
-    // Seeded recipients attached to the draft: resolve them (same fences as the
-    // send path), then UNION into the previewed candidate list. A seeds_only
-    // draft (the seeded 1:1 entry) skips the audience filter entirely so preview
-    // returns ONLY the seeds, never the whole tenant base.
+    // matching-blast-rules D5: ONE server function builds the review rows (the
+    // filter rows united with the hand-picked seeds - a seeds_only draft, the
+    // seeded 1:1 entry, skips the filter so preview returns ONLY its seeds),
+    // each flagged with the one checkedByDefault rule the composer applies.
+    // A filter draft whose tours or decline read throws is 503
+    // audience_rules_unavailable with NO list - serving one would check people
+    // the rules leave out; a seeds_only draft is served without those labels
+    // and says so (audienceRulesUnavailable).
     const seedIds = broadcast.seed_contact_ids ?? [];
-    const seeds =
-      seedIds.length > 0 ? await resolveSeeds(seedIds) : { contacts: [], unresolved: [] };
-    const audience =
-      broadcast.audience_mode === 'seeds_only'
-        ? { contacts: [], contactIds: [], count: 0, truncated: false }
-        : await resolveAudience(broadcast.audience_filter);
-    const seedIdSet = new Set(seeds.contacts.map((c) => c.contactId));
-    // Union: audience rows first (stable order), then seeds not already present.
-    // A contact in BOTH audience and seeds is ONE row, flagged seeded.
-    const combined = [
-      ...audience.contacts.filter((c) => !seedIdSet.has(c.contactId)),
-      ...seeds.contacts,
-    ];
-    // Prior-recipients for this unit (already-sent annotation). Only meaningful
-    // with a unitId. share-sent-outcome D1: the set is every slot of every
-    // share of the unit whose state MAY have reached the tenant - reached,
-    // pending a live retry, Not confirmed, or in flight (the send-attempt
-    // record tells a queued slot of a finished share in flight from stranded;
-    // this is the ONLY route that reads it). A final failure, a skip and a
-    // strand never flag. The service owns the rule (priorRecipientKeys) and
-    // never throws: a failed read keeps the recipient on the safe side, a
-    // failed byUnit page keeps what was resolved. The set is contactKeys -
-    // contactId OR `phone#<E164>` (a phone-only recipient at the prior
-    // share's send time), so a candidate must be matched on EITHER key.
-    const priorRecipients =
-      broadcast.unitId !== undefined
-        ? await priorRecipientKeys({ broadcasts, messages, attempts, log }, broadcast.unitId)
-        : new Set<string>();
-    // last-heard-from (spec 5.3, D11): the not-interested labels. Both lists
-    // are empty without a property. A failed read serves the candidates with
-    // NO labels and says so (declineLabelsUnavailable) - never a 503 here.
-    let declinedIds = new Set<string>();
-    let declineLabelsUnavailable = false;
-    if (broadcast.unitId !== undefined) {
-      try {
-        declinedIds = await effectiveDeclines(broadcast.unitId);
-      } catch (err) {
-        declineLabelsUnavailable = true;
-        log.warn({ err, broadcastId, unitId: broadcast.unitId }, 'broadcast preview: decline labels unavailable - served without them');
-      }
+    let review: ReviewRowsResult;
+    try {
+      review = await buildReviewRows(
+        {
+          audienceMode: broadcast.audience_mode ?? 'filter',
+          filter: broadcast.audience_filter,
+          seedContactIds: seedIds,
+          ...(broadcast.unitId !== undefined && { unitId: broadcast.unitId }),
+        },
+        'preview',
+      );
+    } catch (err) {
+      if (!(err instanceof AudienceRulesUnavailableError)) throw err;
+      log.info({ broadcastId }, 'broadcast preview refused: audience rules unavailable - 503');
+      res.status(503).json({ error: 'audience_rules_unavailable' });
+      return;
     }
-    // The candidate list carries phones — authed/internal response only; the
+    // The candidate list carries phones - authed/internal response only; the
     // log line below stays IDs/counts only (NEVER phones/names/bodies).
-    const candidates = combined.slice(0, MAX_BROADCAST_RECIPIENTS).map((c) => ({
-      contactId: c.contactId,
-      ...(c.firstName !== undefined && { firstName: c.firstName }),
+    const candidates = review.rows.slice(0, MAX_BROADCAST_RECIPIENTS).map((r) => ({
+      contactId: r.contactId,
+      ...(r.firstName !== undefined && { firstName: r.firstName }),
       // Full name for the review rows (same authed/internal PII class as
-      // firstName + phone above).
-      ...(c.lastName !== undefined && { lastName: c.lastName }),
-      phone: c.phone,
-      ...(c.voucherSize !== undefined && { voucherSize: c.voucherSize }),
-      ...(c.housingAuthority !== undefined && { housingAuthority: c.housingAuthority }),
+      // firstName + phone).
+      ...(r.lastName !== undefined && { lastName: r.lastName }),
+      phone: r.phone,
+      ...(r.voucherSize !== undefined && { voucherSize: r.voucherSize }),
+      ...(r.housingAuthority !== undefined && { housingAuthority: r.housingAuthority }),
       // last-heard-from (spec 5.3): tenant status (absent for a partner seed)
       // and last heard from, for the review row's columns and order.
-      ...(c.status !== undefined && { status: c.status }),
-      ...(c.lastHeardFromAt !== undefined && { lastHeardFromAt: c.lastHeardFromAt }),
+      ...(r.status !== undefined && { status: r.status }),
+      ...(r.lastHeardFromAt !== undefined && { lastHeardFromAt: r.lastHeardFromAt }),
       // A2P/CTIA (LOCKED CONTRACT 3): whether this candidate has recorded SMS
       // consent. The composer surfaces "consent not recorded" for `false` +
       // a count; the fan-out EXCLUDES !has_consent recipients (broadcastFanOut).
-      has_consent: c.has_consent,
-      // Match on contactId OR the `phone#<E164>` key (same prefix the recipients
-      // map uses) so a tenant previously texted under a phone-only key (who
-      // later gained a contactId) is still flagged. SOFT hint — never excludes.
+      has_consent: r.has_consent,
+      // SOFT - an earlier share of this unit MAY have reached the tenant
+      // (share-sent-outcome D1's safe reading), matched on contactId OR the
+      // `phone#<E164>` key.
       // TODO(broadcasts): the manually-added-tenant client-side annotation (the
       // dashboard matches `priorRecipientContactIds` by contactId) has the same
-      // rare phone-only edge — a manually-added tenant prior-texted under a
-      // `phone#…` key won't be flagged client-side. Not addressed here.
-      alreadySentThisProperty:
-        broadcast.unitId !== undefined &&
-        (priorRecipients.has(c.contactId) || priorRecipients.has(`phone#${c.phone}`)),
+      // rare phone-only edge - a manually-added tenant prior-texted under a
+      // `phone#<E164>` key won't be flagged client-side. Not addressed here.
+      alreadySentThisProperty: r.alreadySent,
       // Whether this row came from the draft's seed_contact_ids (a hand-picked
       // recipient, or the seeded 1:1 entry). A contact in BOTH audience and
       // seeds is ONE row flagged seeded.
-      seeded: seedIdSet.has(c.contactId),
+      seeded: r.seeded,
       // last-heard-from D11: an EFFECTIVE decline of this property.
-      declinedThisProperty: declinedIds.has(c.contactId),
+      declinedThisProperty: r.declined,
+      // matching-blast-rules D4/D7: the ONE unresolved tour shown for this
+      // contact (any property), when there is one.
+      ...(r.tourHold !== undefined && { tourHold: r.tourHold }),
+      // D5: whether the review step starts this row checked (Select all
+      // re-applies it); the dashboard reads it instead of computing a rule.
+      checkedByDefault: r.checkedByDefault,
     }));
     // count/truncated derive from the post-union, pre-slice list (+ the audience
     // truncation flag) so the operator sees the true unioned reach.
-    const combinedCount = combined.length;
     log.info(
-      { broadcastId, count: combinedCount, truncated: audience.truncated },
+      {
+        broadcastId,
+        count: review.rows.length,
+        truncated: review.truncated,
+        checkedByDefault: review.rows.filter((r) => r.checkedByDefault).length,
+        heldContacts: review.tourHolds.size,
+        rulesUnavailable: review.rulesUnavailable,
+      },
       'broadcast audience previewed',
     );
     // Surface `truncated` (FIX 3+4) so the operator sees an incomplete/over-cap
     // audience BEFORE sending (and the dashboard can warn). seedContactIds (as
     // stored) + unresolvedSeedIds let the composer show which seeds dropped.
     res.json({
-      count: combinedCount,
-      truncated: audience.truncated,
+      count: review.rows.length,
+      truncated: review.truncated,
       candidates,
-      priorRecipientContactIds: [...priorRecipients],
+      priorRecipientContactIds: [...review.priorRecipients],
       seedContactIds: seedIds,
-      unresolvedSeedIds: seeds.unresolved,
+      unresolvedSeedIds: review.unresolvedSeedIds,
       // last-heard-from (spec 5.3): the analog of priorRecipientContactIds -
       // annotates a hand-added row outside the audience client-side.
-      declinedContactIds: [...declinedIds],
-      declineLabelsUnavailable,
+      declinedContactIds: [...review.declinedIds],
+      // matching-blast-rules D7: EVERY held contact (the same analog), so Add a
+      // tenant can label a tenant outside the candidates.
+      tourHolds: [...review.tourHolds].map(([contactId, hold]) => ({ contactId, ...hold })),
+      // D5: a seeds_only draft whose rules reads threw - served without the
+      // tour and Not interested labels. Absent otherwise.
+      ...(review.rulesUnavailable && { audienceRulesUnavailable: true as const }),
     });
   });
 

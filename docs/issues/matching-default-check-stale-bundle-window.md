@@ -41,7 +41,15 @@ rule to the server. It is the already-loaded-bundle class recorded in
 [optional-call-outcome-breaks-already-loaded-bundles](./optional-call-outcome-breaks-already-loaded-bundles.md).
 
 Post-merge mitigation (in the branch's handback post-merge notes): reload
-every open dashboard tab after the deploy.
+every open dashboard tab after the deploy, AND relaunch every installed
+dashboard app (phones and desktop) - the dashboard is an installable PWA
+(`dashboard/src/main.tsx:34` registers `/sw.js`; `dashboard/index.html:11`
+links the manifest), and an installed app window is rarely reloaded, so it can
+run the old bundle for days (code review R2's widening of this note). The old
+bundle against the new server is never worse than before the deploy: it sees
+the narrower Onboarding/Searching audience, its legacy one-string
+`housing_authority` body is still accepted, and a 503 shows as its existing
+raw error line.
 
 Code review R1 ADV-1
 (`docs/superpowers/reviews/2026-10-14-matching-blast-rules/code-review/r1-adversarial.md`),

@@ -1,12 +1,12 @@
 ---
 id: matching-prefill-org-list-failure-fails-open
-title: A failed organization-list read lets a property's blast go out unfiltered by housing authority, and staff cannot put the filter back
+title: The blast composer's property prefill fails OPEN - a failed organization-list read, a failed property load, or a list read before an authority was added leaves a property's blast unfiltered by housing authority (DECIDE BEFORE MERGING feat/matching-blast-rules)
 type: decision
 severity: med
 status: open
 area: dashboard/broadcasts
 created: 2026-10-19
-refs: dashboard/src/routes/broadcasts/BroadcastComposer.tsx:229, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:232, dashboard/src/routes/broadcasts/authorityPrefill.ts:18, dashboard/src/routes/broadcasts/AudienceFilters.tsx:199, dashboard/src/routes/orgs/useOrgList.ts:111, dashboard/src/routes/broadcasts/BroadcastComposer.test.tsx:976, docs/superpowers/specs/2026-10-14-matching-blast-rules-design.md:283-297
+refs: dashboard/src/routes/broadcasts/BroadcastComposer.tsx:229, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:231, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:232, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:363-379, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:490, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:752, dashboard/src/routes/broadcasts/authorityPrefill.ts:18, dashboard/src/routes/broadcasts/AudienceFilters.tsx:199, dashboard/src/routes/orgs/useOrgList.ts:107, dashboard/src/routes/orgs/useOrgList.ts:111, dashboard/src/routes/broadcasts/BroadcastComposer.test.tsx:976, docs/superpowers/specs/2026-10-14-matching-blast-rules-design.md:283-297
 ---
 
 **Problem.** With a property attached and the filters on, the blast composer
@@ -48,7 +48,30 @@ and each review row's housing authority column. Code review R1 ADV-2
 ruled FILE in `r1-adjudications.md` (same folder) as Cameron's call: changing
 it in the build would have silently departed from the approved contract.
 
-**Suggested fix (Cameron decides).** The review's two options:
+**Two siblings settle on the same decision** (code review R2,
+`code-review/r2-review.md` section 3, same folder):
+
+- A FAILED PROPERTY LOAD also counts as settled (spec D3;
+  `BroadcastComposer.tsx:231`, the load at `:363-379`). The draft then carries
+  neither housing authorities NOR a voucher size - wider than the list case -
+  and a `?unitId=` entry (the property page's "+ Send") offers no retry:
+  `pickProperty`'s reset (`:490`) serves picker entries only, and the Change
+  control renders only without `?unitId=` (`:752`), so the remedy is a page
+  reload nobody offers. The pickers stay usable there, so staff CAN rebuild the
+  filters by hand after reading the notice.
+- A STALE LIST: the composer reads the organization list ONCE per mount
+  (`useOrgList.ts:107`; it never calls `reload`), so an authority added to the
+  list after the composer mounted maps to "Not used (not on the organization
+  list)" and, when it is the property's only one, the blast is "not limited by
+  housing authority".
+
+Severity read: once a staff member sends past the visible notice, the outcome
+is the review's worst class (people outside the property's housing
+authorities texted by default). Code review R2 asked that Cameron decide this
+BEFORE `feat/matching-blast-rules` merges; one decision covers all three paths.
+
+**Suggested fix (Cameron decides).** The review's two options (option 2 also
+closes the stale-list path; option 1 does not):
 
 1. Hold: keep the prefill gate closed while the list read has failed with
    nothing in hand (no draft, Preview disabled), and show "Couldn't load the

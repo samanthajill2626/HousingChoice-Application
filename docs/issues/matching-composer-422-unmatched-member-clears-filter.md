@@ -51,8 +51,13 @@ fallback:
   a recreate from it - the server re-resolves each on-screen name at create,
   so the stale stored name is replaced (needs a way to force a recreate with
   unchanged inputs).
-- Or use the 422's `candidates` to map the stored name back to the on-screen
-  member it came from, and remove only that one.
+- Or, safe but stuck: on a refusal whose text is not on screen, keep the
+  on-screen list (never widen) and show the notice; staff remove a chip by
+  hand, which recreates the draft. (Mapping the stored name back through the
+  422's `candidates` does NOT work for this trigger: `storedFilterRefusal`
+  lists the entry the STORED text resolves to - forward, never back to the
+  on-screen name - so a deleted Y gives `candidates: []` and a Y renamed to Z
+  gives `[Z]`; code review R2 FW-1.)
 
 Either way drop the "never expected" comment and add the review's regression
 test (ADV-422-fallback): a Preview 422 for a stored name the screen does not

@@ -286,6 +286,26 @@ test('a Matching blast follows the audience rules: status, housing authorities, 
   await expect(requestingBox).not.toBeChecked();
   await expect(requestingBox).toBeEnabled();
 
+  // Self-QA QA-L1: in the wide layout (a 768px+ review pane) a hold label wider
+  // than the tags column wraps INSIDE the column. The tags were flex: 0 0 auto,
+  // so this label ran past its row: the list scrolled sideways and cut it off
+  // (34px past the list's visible right edge at 1280 wide, where it is measured).
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const requestedTag = list.getByText(requestedLabel, { exact: true });
+  await expect(requestedTag).toBeVisible();
+  const tagRight = await requestedTag.evaluate((el) => el.getBoundingClientRect().right);
+  const listBox = await list.evaluate((el) => ({
+    visibleRight: el.getBoundingClientRect().left + el.clientWidth,
+    scrollWidth: el.scrollWidth,
+    clientWidth: el.clientWidth,
+  }));
+  expect(tagRight, 'the tour-request tag stays inside the visible list').toBeLessThanOrEqual(
+    listBox.visibleRight + 1,
+  );
+  expect(listBox.scrollWidth, 'the candidate list does not scroll sideways').toBeLessThanOrEqual(
+    listBox.clientWidth + 1,
+  );
+
   // The reach line equals the rows that start checked.
   await expect(list.getByRole('checkbox', { checked: true })).toHaveCount(startChecked.length);
 

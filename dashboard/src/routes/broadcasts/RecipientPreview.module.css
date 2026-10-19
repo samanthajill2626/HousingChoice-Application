@@ -138,8 +138,13 @@
   font-size: var(--fs-sm);
   color: var(--c-text-muted);
 }
+/* The four tags may shrink (flex: 0 1 auto; min-width: 0): a tag wider than
+ * its cell - the wide layout's tags column - takes its own line and wraps its
+ * text instead of running past the row and scrolling the list sideways
+ * (self-QA QA-L1). Short tags lay out as before. */
 .alreadyTag {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   padding: 0 var(--sp-2);
   border-radius: var(--radius-sm);
   background: var(--c-evt-amber-border);
@@ -148,7 +153,8 @@
   font-weight: var(--fw-medium);
 }
 .addedTag {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   padding: 0 var(--sp-2);
   border-radius: var(--radius-sm);
   background: var(--c-brand-soft);
@@ -157,7 +163,8 @@
   font-weight: var(--fw-medium);
 }
 .noConsentTag {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   padding: 0 var(--sp-2);
   border-radius: var(--radius-sm);
   background: var(--c-danger-surface, var(--c-evt-amber-border));
@@ -167,7 +174,8 @@
 }
 /* last-heard-from 5.3: "Not interested" - the same tone as "Already sent". */
 .declinedTag {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   padding: 0 var(--sp-2);
   border-radius: var(--radius-sm);
   background: var(--c-evt-amber-border);

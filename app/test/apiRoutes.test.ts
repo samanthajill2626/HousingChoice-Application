@@ -21,8 +21,10 @@ import {
   ContactOptedOutError,
   ConversationNotFoundError,
   createSendMessageService,
+  ProviderSendFailedError,
   type SendMessageInput,
 } from '../src/services/sendMessage.js';
+import { classifySendFailure } from '../src/lib/sendOutcome.js';
 import type { ConversationItem, ConversationsRepo } from '../src/repos/conversationsRepo.js';
 import type { ContactsRepo } from '../src/repos/contactsRepo.js';
 import type { MessageItem, MessagesRepo, RetryChildPointer } from '../src/repos/messagesRepo.js';
@@ -171,6 +173,96 @@ describe('POST /api/conversations/:conversationId/messages - a post-append failu
     const errors = capture.atLevel(50).filter((l) => String(l['msg']).includes('post-append step failed'));
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatchObject({ step: 'touchLastActivity', providerSid: sid });
+  });
+});
+
+/** A twilio-node RestException's shape: the numeric code, the HTTP status, a message that can name the number. */
+function twilioRestError(status: number, code: number, message: string): Error {
+  return Object.assign(new Error(message), { status, code });
+}
+
+// prod 2026-10-16 (docs/issues/phone-number-quality.md): a send to a number
+// that cannot exist made Twilio answer 400 / 21211, the route let the typed
+// error fall through to the error handler, and staff read a 500 as "try
+// again". The REAL send wrapper runs here, so the provider throw is wrapped
+// and classified exactly as in production before the route sees it.
+describe('POST /api/conversations/:conversationId/messages - a provider rejection (nothing was sent)', () => {
+  const PHONE = '+15550100001';
+
+  async function setup(providerError: Error) {
+    const world = createFakeWorld();
+    const conversation = await world.conversationsRepo.createOrGetByParticipantPhone(PHONE, 'tenant_1to1');
+    world.contacts.push({ contactId: 'c-1', type: 'tenant', phone: PHONE, consent_method: 'inbound_text' });
+    world.adapter.sendPreparedMessage = async () => {
+      throw providerError;
+    };
+    const config = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET });
+    const capture = createLogCapture();
+    const logger = createLogger({ level: 'info', destination: capture.stream });
+    const app = buildApp({
+      config,
+      logger,
+      auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
+      api: {
+        conversationsRepo: world.conversationsRepo,
+        sendMessageService: createSendMessageService({
+          config,
+          logger,
+          adapter: world.adapter,
+          conversationsRepo: world.conversationsRepo,
+          messagesRepo: world.messagesRepo,
+          contactsRepo: world.contactsRepo,
+          auditRepo: world.auditRepo,
+          events: world.events,
+        }),
+      },
+    });
+    const send = () =>
+      request(app)
+        .post(`/api/conversations/${conversation.conversationId}/messages`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ body: 'hello' });
+    const rejectionLines = () =>
+      capture.lines.filter((l) => String(l['msg']).startsWith('outbound send: the provider rejected'));
+    return { world, conversation, capture, send, rejectionLines };
+  }
+
+  it('answers 422 provider_rejected with the Twilio code for an invalid number (21211), logs WARN, records nothing', async () => {
+    const { world, conversation, capture, send, rejectionLines } = await setup(
+      twilioRestError(400, 21211, `The 'To' number ${PHONE} is not a valid phone number.`),
+    );
+
+    const res = await send();
+
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ error: 'provider_rejected', providerCode: '21211' });
+    expect(world.messages.filter((m) => m.conversationId === conversation.conversationId)).toHaveLength(0);
+    const lines = rejectionLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ level: 40, providerCode: '21211', providerStatus: 400 });
+    // Never the error handler's line, and the provider's text (which names the number) is not logged.
+    expect(capture.atLevel(50)).toHaveLength(0);
+    expect(JSON.stringify(lines[0])).not.toContain(PHONE);
+  });
+
+  it('logs a rejection that is NOT about the destination (20003 auth) at ERROR, so the alarms still see it', async () => {
+    const { send, rejectionLines } = await setup(twilioRestError(401, 20003, 'Authenticate'));
+
+    const res = await send();
+
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ error: 'provider_rejected', providerCode: '20003' });
+    expect(rejectionLines()).toEqual([expect.objectContaining({ level: 50, providerCode: '20003' })]);
+  });
+
+  it('leaves an UNKNOWN outcome (a provider 5xx) to the error handler: it may have been sent', async () => {
+    const { send, rejectionLines } = await setup(twilioRestError(503, 20500, 'Service unavailable'));
+
+    const res = await send();
+
+    expect(res.status).toBe(500);
+    expect(rejectionLines()).toHaveLength(0);
   });
 });
 
@@ -458,6 +550,8 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
     conversation?: Partial<ConversationItem> | null;
     /** R6: the world whose send-attempt fake holds the seeded records. */
     world?: FakeWorld;
+    /** What the send service throws instead of answering (a provider rejection). */
+    sendError?: unknown;
   }
 
   function makeRetryApp(original: unknown, opts: RetryAppOptions = {}) {
@@ -504,6 +598,7 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
         }),
         sendMessageService: async (input) => {
           calls.push(input);
+          if (opts.sendError !== undefined) throw opts.sendError;
           return {
             conversationId: input.conversationId,
             providerSid: 'SMretry',
@@ -622,6 +717,25 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
         retryRoot: '2026-06-12T09:00:00.000Z#SMorig',
       },
     ]);
+  });
+
+  // prod 2026-10-16: the Retry route had the send route's gap - a provider
+  // rejection fell through to a 500. It answers the same 422 now.
+  it('answers 422 provider_rejected when the provider rejects the re-send (nothing was sent)', async () => {
+    const cause = twilioRestError(400, 21211, "The 'To' number +15550100001 is not a valid phone number.");
+    const sendError = new ProviderSendFailedError({
+      classification: classifySendFailure(cause),
+      cause,
+      facts: { recipientDigest: 'digest-test', bodyHash: 'hash-test', bodyShort: false, mediaCount: 0 },
+      attemptedAt: '2026-06-12T10:00:00.000Z',
+    });
+    const { app, calls } = makeRetryApp(FAILED_ORIGINAL, { sendError });
+
+    const res = await press(app);
+
+    expect(calls).toHaveLength(1);
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ error: 'provider_rejected', providerCode: '21211' });
   });
 
   it('404s when the message is unknown or belongs to another conversation', async () => {

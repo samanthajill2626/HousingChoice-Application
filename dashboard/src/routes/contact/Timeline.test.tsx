@@ -593,6 +593,49 @@ describe('Timeline', () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
   });
 
+  // prod 2026-10-16: a 21211 used to read as "Couldn't send - please try again"
+  // and staff pressed Send four times. A provider rejection names the reason and
+  // never invites the same doomed send again.
+  it.each([
+    ['21211', { providerCode: '21211' }, "Not sent - this phone number isn't valid. Check the contact's number."],
+    ['21614', { providerCode: '21614' }, "Not sent - this number can't receive texts (it may be a landline)."],
+    ['an unmapped code', { providerCode: '20003' }, 'Not sent - our messaging provider refused this text (error 20003).'],
+    ['no code', {}, 'Not sent - our messaging provider refused this text.'],
+    ['an inherited key', { providerCode: 'toString' }, 'Not sent - our messaging provider refused this text (error toString).'],
+  ])('a 422 provider_rejected with %s reads its own sentence and keeps the draft', async (_label, extra, sentence) => {
+    const body = { error: 'provider_rejected', ...extra };
+    const onSend = vi.fn().mockRejectedValue(new ApiError(422, 'provider_rejected', 'provider_rejected', body));
+    renderTimeline({ items: [MESSAGE_IN], canSend: true, onSend });
+    const box = screen.getByRole('textbox', { name: /reply/i });
+    fireEvent.change(box, { target: { value: 'Hello there' } });
+    fireEvent.click(screen.getByRole('button', { name: /Send/i }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(sentence);
+    expect(alert).not.toHaveTextContent(/try again/i);
+    expect(alert.textContent ?? '').toMatch(/^[ -~]+$/);
+    expect(box).toHaveValue('Hello there'); // draft preserved
+  });
+
+  it('a 422 provider_rejected on the manual Retry lands in the same error slot with its reason', async () => {
+    const failed: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-fail',
+      tsMsgId: 'm-fail',
+      delivery_status: 'failed',
+      error_code: '30007',
+      body: 'This one failed',
+    };
+    const rejection = new ApiError(422, 'provider_rejected', 'provider_rejected', {
+      error: 'provider_rejected',
+      providerCode: '21211',
+    });
+    const onRetry = vi.fn().mockRejectedValue(rejection);
+    renderTimeline({ items: [failed], onRetry });
+    fireEvent.click(screen.getByRole('button', { name: /Retry sending/i }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("Not sent - this phone number isn't valid. Check the contact's number.");
+  });
+
   it('shows a standing Do-Not-Contact note at the composer when the contact is opted out', () => {
     renderTimeline({ items: [MESSAGE_IN], optedOut: true });
     expect(screen.getByRole('note')).toHaveTextContent(/Do-Not-Contact/i);

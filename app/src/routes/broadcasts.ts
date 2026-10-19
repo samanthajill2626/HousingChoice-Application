@@ -125,7 +125,9 @@ export interface BroadcastsRouterDeps {
   messagesRepo?: MessagesRepo;
   /**
    * share-sent-outcome D1: the composer flag ALONE reads a queued slot's
-   * send-attempt record (in flight vs stranded); no other route reads it.
+   * send-attempt record (in flight vs stranded) - through buildReviewRows,
+   * which the preview and, since matching-blast-rules D8, draft create both
+   * call; no other route reads it.
    */
   sendAttemptsRepo?: SendAttemptsRepo;
   auditRepo?: AuditRepo;
@@ -903,21 +905,35 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       filter.housing_authorities = check.value;
     }
 
-    // Estimate the audience now (save-for-later shows the operator the reach).
-    const seeds =
-      seedContactIds !== undefined
-        ? await resolveSeeds(seedContactIds)
-        : { contacts: [], unresolved: [] };
-    let estimatedAudience: number;
+    // matching-blast-rules D8: "Reaches N recipients" is the number of rows that
+    // will START CHECKED on the review step - the SAME buildReviewRows the
+    // preview serves, counted by checkedByDefault (held, declined, already-sent
+    // and no-consent rows are left out; seeds with recorded consent count). A
+    // seeds_only draft makes NO rules reads (every row is a seed). A filter
+    // draft reads tours, declines and the already-sent set on every create -
+    // the draft key includes the message body, so a pause in typing repeats
+    // them (a few small Query pages, the same reads as one Preview click). A
+    // thrown tours or decline read never blocks the draft: the estimate is
+    // omitted (stats.audience stays 0) and the composer shows "Reach estimate
+    // unavailable" until the draft is recreated. The preview lists at most
+    // MAX_BROADCAST_RECIPIENTS rows; this counts them all.
+    let estimatedAudience: number | undefined;
     let truncated = false;
-    if (audienceMode === 'seeds_only') {
-      estimatedAudience = seeds.contacts.length;
-    } else {
-      const audience = await resolveAudience(filter);
-      const union = new Set(audience.contactIds);
-      for (const s of seeds.contacts) union.add(s.contactId);
-      estimatedAudience = union.size;
-      truncated = audience.truncated;
+    try {
+      const review = await buildReviewRows(
+        {
+          audienceMode,
+          filter,
+          seedContactIds: seedContactIds ?? [],
+          ...(unitId !== undefined && { unitId }),
+        },
+        'estimate',
+      );
+      estimatedAudience = review.rows.filter((r) => r.checkedByDefault).length;
+      truncated = review.truncated;
+    } catch (err) {
+      if (!(err instanceof AudienceRulesUnavailableError)) throw err;
+      truncated = err.truncated;
     }
 
     const created = await broadcasts.create({
@@ -929,7 +945,7 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       createdVia: 'dashboard',
       audience_filter: filter,
       body_template: template,
-      estimatedAudience,
+      ...(estimatedAudience !== undefined && { estimatedAudience }),
       audienceMode,
       ...(unitId !== undefined && { unitId }),
       ...(flyer_url !== undefined && { flyer_url }),
@@ -938,16 +954,17 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     await audit.append(`broadcasts#${created.broadcastId}`, 'broadcast_created', {
       actor,
       ...(unitId !== undefined && { unitId }),
-      estimatedCount: estimatedAudience,
+      ...(estimatedAudience !== undefined && { estimatedCount: estimatedAudience }),
     });
     log.info(
-      { broadcastId: created.broadcastId, estimatedCount: estimatedAudience, actor },
+      { broadcastId: created.broadcastId, estimatedCount: estimatedAudience ?? null, actor },
       'broadcast draft created via api',
     );
     res.status(201).json({
       broadcastId: created.broadcastId,
       status: 'draft',
-      estimatedCount: estimatedAudience,
+      // matching-blast-rules D8: omitted when a rules read threw.
+      ...(estimatedAudience !== undefined && { estimatedCount: estimatedAudience }),
       // Spec 2026-10-06 D5 (ruling R2 decision 5): echo the STORED filter, so a
       // caller that sent a spelling sees the list name it was stored as - in
       // the wire shape (matching-blast-rules D2: housing_authorities, never
@@ -1361,8 +1378,9 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     }
     // share-sent-outcome D1/D3: each recipient's state, WITHOUT record reads
     // (deviation 12 - the record only tells in flight from stranded, which this
-    // page does not show; the composer flag alone reads it). Only a young
-    // failed-30003 slot reads its newest attempt's row, 8 at a time.
+    // page does not show; the composer flag alone reads it, through
+    // buildReviewRows at preview and draft create). Only a young failed-30003
+    // slot reads its newest attempt's row, 8 at a time.
     const states = await resolveRecipientStates({ messages, attempts, log }, broadcast);
     const stats = statsWithStates(broadcast, states);
     if (view === 'stats') {

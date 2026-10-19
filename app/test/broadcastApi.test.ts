@@ -3448,4 +3448,180 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(degraded.body.audienceRulesUnavailable).toBe(true);
     });
   });
+
+  // --- matching-blast-rules D8: "Reaches N recipients" = the default-checked rows ---
+  describe('matching-blast-rules D8: POST create estimates the default-checked rows', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const SENT = '2026-10-01T12:00:00.000Z';
+    const DECLINED_AT = '2026-10-02T12:00:00.000Z';
+
+    /** An upcoming tour on ANOTHER property: holds the tenant (D4). */
+    function seedUpcomingTour(tourId: string, tenantId: string): TourItem {
+      const createdAt = isoFromNow(-5 * DAY);
+      const item: TourItem = {
+        tourId,
+        tenantId,
+        unitId: 'unit-2',
+        _schedPartition: 'tours',
+        tourType: 'self_guided',
+        status: 'scheduled',
+        scheduledAt: isoFromNow(3 * DAY),
+        createdAt,
+        updatedAt: createdAt,
+      };
+      world.toursMap.set(tourId, item);
+      return item;
+    }
+
+    /** An EFFECTIVE #27 decline of unit-1. */
+    function declinedRow(contactId: string): ListingSendItem {
+      return {
+        unitId: 'unit-1',
+        contactId,
+        sentAt: SENT,
+        via: 'individual',
+        counted: true,
+        created_at: SENT,
+        updated_at: SENT,
+        declined: { at: DECLINED_AT, by: 'staff', staffId: 'user-0002' },
+      };
+    }
+
+    function postDraft(app: import('express').Express, body: Record<string, unknown>) {
+      return request(app)
+        .post('/api/broadcasts')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send(body);
+    }
+
+    const FILTER_BODY = { unitId: 'unit-1', body_template: 'hi', audience_filter: { contact_type: 'tenant' } };
+
+    it('estimatedCount (stored as stats.audience) counts ONLY the rows that start checked: held, declined, already-sent and no-consent rows are left out; a held seed counts', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-plain', phone: '+15550305001' });
+      seedTenant(world, { contactId: 'c-held', phone: '+15550305002' });
+      seedTenant(world, { contactId: 'c-held-seed', phone: '+15550305003' });
+      seedTenant(world, { contactId: 'c-declined', phone: '+15550305004' });
+      seedTenant(world, { contactId: 'c-sent', phone: '+15550305005' });
+      seedTenant(world, { contactId: 'c-nocons', phone: '+15550305006', consent_method: undefined });
+      seedUpcomingTour('t-held', 'c-held');
+      seedUpcomingTour('t-held-seed', 'c-held-seed');
+      world.listingSends.push(declinedRow('c-declined'));
+      seedShare(world, 'bcast-prior', 'sent', { 'c-sent': { status: 'delivered' } });
+      const { app } = makeWebhookHarness({ world });
+      const res = await postDraft(app, { ...FILTER_BODY, seedContactIds: ['c-held-seed'] });
+      expect(res.status).toBe(201);
+      expect(res.body.estimatedCount).toBe(2); // c-plain + the hand-picked c-held-seed
+      expect(res.body.truncated).toBe(false);
+      expect(world.broadcasts.get(res.body.broadcastId)?.stats.audience).toBe(2);
+      // The preview agrees: the same two rows start checked (one rule, D5).
+      const preview = await request(app)
+        .post(`/api/broadcasts/${res.body.broadcastId}/preview`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({});
+      expect(preview.status).toBe(200);
+      const checked = (preview.body.candidates as Array<{ contactId: string; checkedByDefault: boolean }>)
+        .filter((c) => c.checkedByDefault)
+        .map((c) => c.contactId)
+        .sort();
+      expect(checked).toEqual(['c-held-seed', 'c-plain']);
+    });
+
+    it('a seeds_only create makes NO rules or already-sent reads and counts the seeds WITH recorded consent', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-seed-yes', phone: '+15550305101' });
+      seedTenant(world, { contactId: 'c-seed-no', phone: '+15550305102', consent_method: undefined });
+      seedUpcomingTour('t-yes', 'c-seed-yes'); // a hand pick is never held anyway
+      const toursRead = vi.spyOn(world.toursRepo, 'listByStatus');
+      const declinesRead = vi.spyOn(world.listingSendsRepo, 'listByUnit');
+      const priorRead = vi.spyOn(world.broadcastsRepo, 'listByUnit');
+      const { app } = makeWebhookHarness({ world });
+      const res = await postDraft(app, { unitId: 'unit-1', body_template: 'hi', seedContactIds: ['c-seed-yes', 'c-seed-no'] });
+      expect(res.status).toBe(201);
+      expect(world.broadcasts.get(res.body.broadcastId)?.audience_mode).toBe('seeds_only');
+      expect(res.body.estimatedCount).toBe(1);
+      expect(toursRead).not.toHaveBeenCalled();
+      expect(declinesRead).not.toHaveBeenCalled();
+      expect(priorRead).not.toHaveBeenCalled();
+    });
+
+    it('a throwing tours read never blocks the draft: 201 WITHOUT estimatedCount, stats.audience 0, no estimate in the audit', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-1', phone: '+15550305201' });
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValueOnce(new Error('throttled'));
+      const { app } = makeWebhookHarness({ world });
+      const res = await postDraft(app, FILTER_BODY);
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('draft');
+      expect(res.body).not.toHaveProperty('estimatedCount');
+      expect(res.body.truncated).toBe(false);
+      const stored = world.broadcasts.get(res.body.broadcastId);
+      expect(stored?.status).toBe('draft');
+      expect(stored?.stats.audience).toBe(0);
+      const audit = world.auditEvents.find((e) => e.event_type === 'broadcast_created');
+      expect(audit).toBeDefined();
+      expect(audit?.payload).not.toHaveProperty('estimatedCount');
+    });
+
+    it('a throwing decline read omits the estimate the same way', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-1', phone: '+15550305301' });
+      vi.spyOn(world.listingSendsRepo, 'listByUnit').mockRejectedValueOnce(new Error('throttled'));
+      const { app } = makeWebhookHarness({ world });
+      const res = await postDraft(app, FILTER_BODY);
+      expect(res.status).toBe(201);
+      expect(res.body).not.toHaveProperty('estimatedCount');
+      expect(world.broadcasts.get(res.body.broadcastId)?.stats.audience).toBe(0);
+    });
+
+    it('an omitted estimate still reports a truncated resolution', async () => {
+      seedUnit(world);
+      const truncatedAudience = {
+        contactIds: ['c-t1'],
+        contacts: [{ contactId: 'c-t1', phone: '+15550305401', has_consent: true }],
+        count: 1,
+        truncated: true,
+      };
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValueOnce(new Error('throttled'));
+      const { app } = makeWebhookHarness({ world, audienceResolutionService: async () => truncatedAudience });
+      const res = await postDraft(app, FILTER_BODY);
+      expect(res.status).toBe(201);
+      expect(res.body).not.toHaveProperty('estimatedCount');
+      expect(res.body.truncated).toBe(true);
+    });
+
+    it('create reads the send-attempt record (the already-sent input of the estimate): a queued slot of a failed share with a live record counts as already sent', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-live', phone: '+15550305501' });
+      seedTenant(world, { contactId: 'c-other', phone: '+15550305502' });
+      seedShare(world, 'bcast-failed', 'failed', { 'c-live': { status: 'queued' } }, { last_error: 'enqueue failed' });
+      await world.sendAttemptsRepo.claim(
+        { kind: 'broadcast', broadcastId: 'bcast-failed', contactKey: 'c-live' },
+        SEED_ATTEMPT_FACTS,
+        new Date().toISOString(),
+      );
+      const recordReads = vi.spyOn(world.sendAttemptsRepo, 'get');
+      const { app } = makeWebhookHarness({ world });
+      const res = await postDraft(app, FILTER_BODY);
+      expect(res.status).toBe(201);
+      expect(recordReads).toHaveBeenCalled();
+      expect(res.body.estimatedCount).toBe(1); // c-other only
+    });
+
+    it('(PIN) create counts every default-checked row, past the preview list bound of MAX_BROADCAST_RECIPIENTS', async () => {
+      seedUnit(world);
+      const contacts = Array.from({ length: MAX_BROADCAST_RECIPIENTS + 1 }, (_, i) => ({
+        contactId: `c-big-${i}`,
+        phone: `+1556${String(i).padStart(7, '0')}`,
+        has_consent: true,
+      }));
+      const big = { contactIds: contacts.map((c) => c.contactId), contacts, count: contacts.length, truncated: false };
+      const { app } = makeWebhookHarness({ world, audienceResolutionService: async () => big });
+      const res = await postDraft(app, FILTER_BODY);
+      expect(res.status).toBe(201);
+      expect(res.body.estimatedCount).toBe(MAX_BROADCAST_RECIPIENTS + 1);
+    });
+  });
 });

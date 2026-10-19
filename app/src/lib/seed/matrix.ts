@@ -1258,7 +1258,9 @@ function buildBroadcasts(): Record<string, unknown>[] {
       _listPartition: 'broadcasts', // byCreated GSI membership
       unitId: 'unit-mx-tourable-02',
       // matching-blast-rules D2: a draft saved since 2026-10-14 carries the
-      // housing authority LIST (any-of) - here the 2BR in DeKalb.
+      // housing authority LIST (any-of) - here the 2BR in DeKalb, for tenants
+      // of the Georgia Department of Community Affairs (DCA) or the DeKalb
+      // County Housing Authority.
       audience_filter: {
         contact_type: 'tenant',
         housing_authorities: [SEED_AUTHORITY.dca, SEED_AUTHORITY.dekalb],

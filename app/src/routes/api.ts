@@ -11,7 +11,7 @@
 // LOG LINES never do — logs are IDs/counts only, correlated via the pino mixin.
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import {
   createMediaStore,
   type MediaStore,
@@ -97,9 +97,11 @@ import {
 import { createUsersRepo, displayNameOf, type UsersRepo } from '../repos/usersRepo.js';
 import {
   createSendMessageService,
+  ProviderSendFailedError,
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
+import { isProviderCode, SMS_SENDING_DISABLED_CODE } from '../lib/sendOutcome.js';
 import {
   createGroupSendService,
   type GroupSendService,
@@ -214,6 +216,45 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   // provisioning kill-switch's 503 posture).
   sms_sending_disabled: 503,
 };
+
+/**
+ * Twilio codes that reject a 1:1 send because of the DESTINATION number, so
+ * nothing is wrong on our side: 21211 not a valid number, 21612 not reachable
+ * by text, 21614 not a mobile number. These log at WARN. Every other rejection
+ * (an auth failure, an unregistered sender, ...) is ours to fix and stays at
+ * ERROR, so the error-log alarms still see it.
+ */
+const DESTINATION_REJECTION_CODES = new Set(['21211', '21612', '21614']);
+
+/**
+ * A 1:1 send the provider REJECTED (send-outcome spec D1 `rejected`: Twilio
+ * answered and refused, so nothing was sent) answers 422
+ * { error: 'provider_rejected', providerCode } instead of falling through to
+ * the error handler's 500. Before this, a contact holding a number that cannot
+ * exist (Twilio 21211) read as a server crash and the dashboard told staff to
+ * try again - four times in 11 s in prod on 2026-10-16
+ * (docs/issues/phone-number-quality.md). The adapter's own kill-switch error
+ * also classifies `rejected` and keeps the refusal contract (503
+ * sms_sending_disabled). `retryable` and `unknown` are left to the error
+ * handler: an `unknown` send may have reached the provider, so it must never
+ * read as a clean refusal. Returns true when it answered.
+ */
+function answerProviderRejection(err: unknown, res: Response, log: Logger): boolean {
+  if (!(err instanceof ProviderSendFailedError) || err.classification.kind !== 'rejected') return false;
+  const code = err.classification.code;
+  if (code === SMS_SENDING_DISABLED_CODE) {
+    res.status(REFUSAL_STATUS.sms_sending_disabled).json({ error: 'sms_sending_disabled' });
+    return true;
+  }
+  const providerCode = isProviderCode(code) ? code : undefined;
+  // The provider's message can name the number: log the code and status only.
+  const fields = { providerCode, providerStatus: err.classification.status };
+  const msg = 'outbound send: the provider rejected the message - nothing was sent';
+  if (providerCode !== undefined && DESTINATION_REJECTION_CODES.has(providerCode)) log.warn(fields, msg);
+  else log.error(fields, msg);
+  res.status(422).json({ error: 'provider_rejected', ...(providerCode !== undefined && { providerCode }) });
+  return true;
+}
 
 /**
  * Email refusal code -> HTTP status for POST /api/conversations/:id/email.
@@ -1551,6 +1592,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
           res.status(REFUSAL_STATUS[err.code]).json({ error: err.code });
           return;
         }
+        if (answerProviderRejection(err, res, log)) return;
         throw err; // Express 5 forwards async throws to the error handler.
       }
     }
@@ -1850,6 +1892,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         res.status(REFUSAL_STATUS[err.code]).json({ error: err.code });
         return;
       }
+      if (answerProviderRejection(err, res, log)) return;
       throw err;
     }
   });

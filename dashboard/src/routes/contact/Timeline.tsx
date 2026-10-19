@@ -140,9 +140,32 @@ function sendFailureMessage(err: unknown): string {
         return 'A newer attempt already exists for this message.';
       case 'retry_unresolved':
         return "This retry couldn't be confirmed - send a new message instead.";
+      // The provider refused the text outright, so nothing was sent and the
+      // same send would fail the same way: never the generic "try again",
+      // which in prod (2026-10-16) had staff press Send four times.
+      case 'provider_rejected':
+        return providerRejectedMessage(err.body);
     }
   }
   return "Couldn't send — please try again.";
+}
+
+/** The destination codes a navigator can act on, by the 422's `providerCode`. */
+const PROVIDER_REJECTED_REASONS: Record<string, string> = {
+  '21211': "Not sent - this phone number isn't valid. Check the contact's number.",
+  '21612': "Not sent - this number can't be reached by text.",
+  '21614': "Not sent - this number can't receive texts (it may be a landline).",
+};
+
+function providerRejectedMessage(body: unknown): string {
+  const code =
+    body !== null && typeof body === 'object' ? (body as Record<string, unknown>)['providerCode'] : undefined;
+  if (typeof code !== 'string') return 'Not sent - our messaging provider refused this text.';
+  // Own-property lookup: the code is wire data, never a trusted key.
+  if (Object.prototype.hasOwnProperty.call(PROVIDER_REJECTED_REASONS, code)) {
+    return PROVIDER_REJECTED_REASONS[code]!;
+  }
+  return `Not sent - our messaging provider refused this text (error ${code}).`;
 }
 
 // Outbound MMS composer limits - MIRROR the server caps (spec Sec 9) so a file

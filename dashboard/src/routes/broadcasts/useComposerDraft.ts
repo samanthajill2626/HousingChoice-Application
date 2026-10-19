@@ -92,7 +92,7 @@ function materialKey(input: ComposerDraftInput): string {
       input.filter === undefined
         ? null
         : {
-            h: input.filter.housing_authority ?? null,
+            h: input.filter.housing_authorities ?? null,
             s: input.filter.bedroomSize ?? null,
           },
     s: input.seedContactIds?.join(',') ?? null,

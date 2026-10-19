@@ -106,3 +106,15 @@
 .truncated {
   color: var(--c-warning);
 }
+/* matching-blast-rules D8: who the filters include (under the filters). */
+.caption {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+/* matching-blast-rules D3: why the property prefill filled nothing in. */
+.prefillNotice {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-warning);
+}

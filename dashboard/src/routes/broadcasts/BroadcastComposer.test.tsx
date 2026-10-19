@@ -104,7 +104,7 @@ describe('BroadcastComposer - property-first step (spec 2026-07-13)', () => {
     expect(await screen.findByRole('button', { name: /77 Peachtree St/ })).toBeInTheDocument();
     // Compose-step sections are NOT on this screen yet.
     expect(screen.queryByRole('textbox', { name: 'Message' })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Housing authority')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Housing authorities')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Preview recipients/ })).not.toBeInTheDocument();
   });
 
@@ -128,7 +128,7 @@ describe('BroadcastComposer - property-first step (spec 2026-07-13)', () => {
       );
     });
     // Audience section arrives with compose.
-    expect(screen.getByLabelText('Housing authority')).toBeInTheDocument();
+    expect(screen.getByLabelText('Housing authorities')).toBeInTheDocument();
   });
 
   it('a seeded entry goes through the property step too, showing the recipient context', async () => {
@@ -207,7 +207,7 @@ describe('BroadcastComposer — reach count + truncated', () => {
   it('shows the truncated/capped warning when the estimate is truncated', async () => {
     createBroadcast.mockResolvedValue({ broadcastId: 'draft_1', status: 'draft', estimatedCount: 500, truncated: true });
     renderComposer('?unitId=unit-0001');
-    await waitFor(() => expect(screen.getByText(/list is capped/i)).toBeInTheDocument(), { timeout: 4000 });
+    await waitFor(() => expect(screen.getByText(/the list is incomplete/)).toBeInTheDocument(), { timeout: 4000 });
   });
 });
 
@@ -346,9 +346,9 @@ describe('BroadcastComposer - ?contactId= seeding', () => {
     // The banner resolves the tenant name via getContact.
     expect(await screen.findByText('Tasha Green')).toBeInTheDocument();
     // AudienceFilters is hidden until the operator opts into filters.
-    expect(screen.queryByLabelText('Housing authority')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Housing authorities')).not.toBeInTheDocument();
     await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
-    expect(await screen.findByLabelText('Housing authority')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Housing authorities')).toBeInTheDocument();
   });
 
   it('(PIN) caseworkers D20: a PARTNER ?contactId= seeds the draft and the banner names the partner (no type gate)', async () => {
@@ -430,7 +430,7 @@ describe('BroadcastComposer - resolved message mode (single recipient)', () => {
     // survive into the broader audience - the blast default takes over.
     await u.click(screen.getByRole('button', { name: 'Add more tenants by filters' }));
     expect(confirmSpy).not.toHaveBeenCalled();
-    expect(await screen.findByLabelText('Housing authority')).toBeInTheDocument();
+    expect(await screen.findByLabelText('Housing authorities')).toBeInTheDocument();
     // Token mode's starting point - the property-details prefill with
     // [TenantName] as a token (never the resolved single-tenant text).
     await waitFor(() => {
@@ -452,7 +452,7 @@ describe('BroadcastComposer - resolved message mode (single recipient)', () => {
       'Switching the audience resets the message to the template. Discard your edits?',
     );
     // Cancelled -> the flip did NOT happen (still seeds-only, filters hidden).
-    expect(screen.queryByLabelText('Housing authority')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Housing authorities')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add more tenants by filters' })).toBeInTheDocument();
   });
 });
@@ -674,7 +674,7 @@ describe('BroadcastComposer - a housing authority that left the list', () => {
     });
 
   async function pickAtlanta(u: ReturnType<typeof userEvent.setup>): Promise<void> {
-    await u.type(screen.getByRole('combobox', { name: 'Housing authority' }), 'AHA');
+    await u.type(screen.getByRole('combobox', { name: 'Housing authorities' }), 'AHA');
     await u.click(await screen.findByRole('option', { name: /^Atlanta Housing Authority/ }));
   }
 
@@ -684,8 +684,8 @@ describe('BroadcastComposer - a housing authority that left the list', () => {
 
   it('a refused draft create clears the pick and says so - and Preview works again', async () => {
     const u = userEvent.setup();
-    createBroadcast.mockImplementation(async (body: { audience_filter?: { housing_authority?: string } }) => {
-      if (body.audience_filter?.housing_authority !== undefined) throw refused();
+    createBroadcast.mockImplementation(async (body: { audience_filter?: { housing_authorities?: string[] } }) => {
+      if (body.audience_filter?.housing_authorities !== undefined) throw refused();
       return { broadcastId: 'draft_1', status: 'draft', estimatedCount: 5, truncated: false };
     });
     renderComposer('?unitId=unit-0001');
@@ -738,10 +738,10 @@ describe('BroadcastComposer - text typed in the housing authority filter', () =>
   };
   const HINT = 'Pick the housing authority from the list, or clear the text.';
   const preview = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
-  const authority = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authority' });
+  const authority = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authorities' });
   const draftAuthorities = (): unknown[] =>
     createBroadcast.mock.calls.map(
-      ([body]) => (body as { audience_filter?: { housing_authority?: string } } | undefined)?.audience_filter?.housing_authority,
+      ([body]) => (body as { audience_filter?: { housing_authorities?: string[] } } | undefined)?.audience_filter?.housing_authorities,
     );
 
   beforeEach(() => {
@@ -762,7 +762,7 @@ describe('BroadcastComposer - text typed in the housing authority filter', () =>
     await u.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
     await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
     expect(screen.queryByText(HINT)).not.toBeInTheDocument();
-    expect(draftAuthorities().at(-1)).toBe('Atlanta Housing Authority');
+    expect(draftAuthorities().at(-1)).toEqual(['Atlanta Housing Authority']);
   });
 
   it('clearing the text lets Preview go again - with no new draft', async () => {
@@ -781,7 +781,7 @@ describe('BroadcastComposer - text typed in the housing authority filter', () =>
     const u = userEvent.setup();
     renderComposer();
     await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
-    await u.type(await screen.findByRole('combobox', { name: 'Housing authority' }), 'Atl');
+    await u.type(await screen.findByRole('combobox', { name: 'Housing authorities' }), 'Atl');
     await u.click(screen.getByRole('button', { name: 'Change property' }));
     await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
     await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
@@ -830,11 +830,11 @@ describe('BroadcastComposer - the audience while a preview loads (code review R3
     tourHolds: [],
   });
   const previewButton = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
-  const authority = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authority' });
+  const authority = (): HTMLElement => screen.getByRole('combobox', { name: 'Housing authorities' });
   const reviewHeading = (): HTMLElement | null => screen.queryByRole('heading', { name: 'Review recipients' });
   const draftAuthorities = (): unknown[] =>
     createBroadcast.mock.calls.map(
-      ([body]) => (body as { audience_filter?: { housing_authority?: string } } | undefined)?.audience_filter?.housing_authority,
+      ([body]) => (body as { audience_filter?: { housing_authorities?: string[] } } | undefined)?.audience_filter?.housing_authorities,
     );
 
   /** The next Preview stays in flight until the test lands it. */

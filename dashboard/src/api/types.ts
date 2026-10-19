@@ -3276,9 +3276,6 @@ export interface AudienceFilter {
    *  the legacy one-string `housing_authority` - the server normalizes stored
    *  legacy rows, so the dashboard reads ONE shape. */
   housing_authorities?: string[];
-  /** TRANSITIONAL: the old one-string filter, still read by AudienceFilters
-   *  until Task 3.3 moves it to the list and deletes this field. */
-  housing_authority?: string;
   /** Approved bedroom size to match against the tenant's voucherSize (0=Studio). */
   bedroomSize?: number;
 }

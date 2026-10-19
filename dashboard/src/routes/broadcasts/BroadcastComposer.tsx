@@ -33,6 +33,7 @@ import {
 import { Spinner } from '../../ui/index.js';
 import { contactDisplayName } from '../contact/format.js';
 import { ORG_FILTER_TYPED_HINT } from '../orgs/orgCopy.js';
+import { useOrgList } from '../orgs/useOrgList.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { acceptedVoucherSizes, shortAddress } from '../listing/listingFormat.js';
 import { AudienceFilters } from './AudienceFilters.js';
@@ -92,6 +93,11 @@ export function BroadcastComposer(): React.JSX.Element {
   // operator opts in ("Add more tenants by filters" - a one-way flip).
   const [audienceEnabled, setAudienceEnabled] = useState(seedContactIds.length === 0);
   const [seedContact, setSeedContact] = useState<Contact | null>(null);
+  // The housing authority list behind the filters' picker - read ONCE here
+  // (one GET /api/organizations per mount), not in AudienceFilters: the
+  // property prefill and the Preview gate read the same answer
+  // (matching-blast-rules D3).
+  const orgList = useOrgList();
 
   // Property picker state - only used when the entry point did NOT fix a unit.
   const [unitCandidates, setUnitCandidates] = useState<UnitItem[]>([]);
@@ -540,6 +546,7 @@ export function BroadcastComposer(): React.JSX.Element {
             <AudienceFilters
               filter={filter}
               onChange={onFilterChange}
+              orgList={orgList}
               onAuthorityTextChange={setAuthorityText}
               authorityError={authorityNotice}
               disabled={previewBusy}

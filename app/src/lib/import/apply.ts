@@ -1205,8 +1205,10 @@ async function upsertContact(
     sets.push('notes = :notes');
     values[':notes'] = resolved.notes;
   }
-  // Contact-side housing authority (the byHousingAuthority GSI that broadcast
-  // audience resolution queries). FILL-ONLY since the org lists (spec D9): a
+  // Contact-side housing authority (the byHousingAuthority GSI hash key; the GSI
+  // is kept, but blast audiences match the housing authority in memory since
+  // matching-blast-rules D2 and no longer query it). FILL-ONLY since the org
+  // lists (spec D9): a
   // re-import never replaces a value staff set or settled, and a staff clear
   // (a REMOVE) lets a later re-import fill it again - accepted. The value is
   // always an exact list name (resolveImportedAuthority).

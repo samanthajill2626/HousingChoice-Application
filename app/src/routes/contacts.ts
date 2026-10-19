@@ -648,7 +648,9 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     changedFields.push('company');
   }
   // Tenant housing authority (edit form). camelCase — it's the byHousingAuthority
-  // GSI hash key, so writing it re-indexes the contact for broadcast targeting.
+  // GSI hash key, so writing it re-indexes the contact (the GSI is kept, but
+  // blast audiences no longer read it - matching-blast-rules D2 matches the
+  // housing authority in memory).
   //
   // Being an INDEX KEY is also why this field cannot use the ''-clears-it
   // convention the plain text fields above use: DynamoDB rejects an empty

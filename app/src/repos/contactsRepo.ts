@@ -768,7 +768,11 @@ export interface ContactsRepo {
   listByType(type: ContactType, opts?: ListContactsOpts): Promise<ContactsPage>;
   /**
    * List tenants administered by a housing authority via the byHousingAuthority
-   * GSI (M1.8a share-broadcast audience resolution). A voucher is administered
+   * GSI. Built for M1.8a share-broadcast audience resolution; since
+   * matching-blast-rules (2026-10-14) a blast audience reads byTypeStatus and
+   * matches the housing authority in memory, so this has no runtime caller -
+   * it and the GSI are KEPT on purpose (Cameron 2026-10-14), not dead code to
+   * remove. A voucher is administered
    * by exactly one authority at a time (doc §5), so this GSI is single-attribute
    * and tenant-sparse — ONE Query per page, never a Scan. The caller applies any
    * further in-memory filtering (bedroom size, opt-out/unreachable).
@@ -1394,8 +1398,8 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         TableName: table,
         IndexName: 'byHousingAuthority',
         KeyConditionExpression: 'housingAuthority = :ha',
-        // Broadcast targeting must never reach a soft-deleted contact — always
-        // exclude them here (no "deleted" view on this index).
+        // A soft-deleted contact is never listed - always exclude them here
+        // (no "deleted" view on this index).
         FilterExpression: 'attribute_not_exists(#del)',
         ExpressionAttributeNames: { '#del': 'deleted_at' },
         ExpressionAttributeValues: { ':ha': housingAuthority },

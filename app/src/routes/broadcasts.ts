@@ -3,9 +3,9 @@
 // broadcasts day-to-day, so NO admin gate (same posture as contacts/units/
 // relay-groups).
 //
-//   POST /api/broadcasts                 { unitId?, body_template, audience_filter } → 201 { broadcastId, status:'draft', estimatedCount }
-//   POST /api/broadcasts/:id/preview                                                 → { count, sample:[{contactId, firstName?, phone}] }
-//   POST /api/broadcasts/:id/send                                                    → { broadcastId, status:'sending', count } | 400 empty audience
+//   POST /api/broadcasts                 { unitId?, body_template, audience_filter?, seedContactIds? } -> 201 { broadcastId, status:'draft', estimatedCount?, audience_filter, truncated, flyerUrl? }
+//   POST /api/broadcasts/:id/preview                                                 -> { count, truncated, candidates, priorRecipientContactIds, seedContactIds, unresolvedSeedIds, declinedContactIds, tourHolds, audienceRulesUnavailable? } | 503 audience_rules_unavailable
+//   POST /api/broadcasts/:id/send        { recipientContactIds? }                    -> { broadcastId, status:'sending', count } | 400 empty_audience | 503 audience_rules_unavailable
 //   GET  /api/broadcasts/:id/results                                                 → { broadcastId, status, stats, recipients }
 //   GET  /api/broadcasts/:id/results?view=stats                                      -> { broadcastId, status, unitId, stats, created_at }
 //   GET  /api/broadcasts?status=&limit=                                              → { broadcasts:[...], nextCursor }
@@ -16,7 +16,11 @@
 // D1), narrowed by ANY of a list of housing authorities (D2) and/or exact
 // bedroom size; hand-picked seeds and an explicit recipient list may also
 // name PARTNERS, of any status (spec 2026-10-06 D20).
-// Opted-out + unreachable are ALWAYS excluded. The send fans out through the
+// Opted-out + unreachable are ALWAYS excluded. A tenant with an unresolved
+// tour (D4) or a #27 decline is listed for review but not checked by default
+// (checkedByDefault, D5), and the no-body filter send (c) leaves them out
+// (D6); a failed tours or decline read fails a filter preview and that send
+// closed (503 audience_rules_unavailable). The send fans out through the
 // SHARED A2P throttle (the broadcast.send job + worker a2pBucket).
 //
 // Organization names (spec 2026-10-06 D5; matching-blast-rules D2): POST
@@ -141,11 +145,17 @@ export interface BroadcastsRouterDeps {
   events?: EventBus;
   /**
    * last-heard-from (spec 5.3, 5.6, 14.4 A5): the listing-send record - the
-   * preview's not-interested labels and the follow-ups list. api.ts passes
-   * the SHARED instance (the one the units router reads).
+   * preview's not-interested labels and the follow-ups list; since
+   * matching-blast-rules also the #27 decline read of buildReviewRows (preview
+   * and the create estimate) and send path (c). api.ts passes the SHARED
+   * instance (the one the units router reads).
    */
   listingSendsRepo?: ListingSendsRepo;
-  /** last-heard-from: the tours a decline (and a follow-up row) is measured against. */
+  /**
+   * last-heard-from: the tours a decline (and a follow-up row) is measured
+   * against; since matching-blast-rules also the open-tour holds (D4) read by
+   * buildReviewRows (preview and the create estimate) and send path (c).
+   */
   toursRepo?: ToursRepo;
 }
 

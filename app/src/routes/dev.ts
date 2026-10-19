@@ -1261,7 +1261,8 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   //   contact: SET `housingAuthority` | `agency` | `organization` (branch B) to the value
   //   unit:    APPEND the value to `accepted_authorities` (never twice)
   // The value must be non-empty: `housingAuthority` is the byHousingAuthority
-  // GSI key and can never hold ''. Same triple-gate/hermetic-LOCAL-only
+  // GSI key (the GSI is kept; blast audiences no longer read it) and can never
+  // hold ''. Same triple-gate/hermetic-LOCAL-only
   // construction as the fixtures above (the dev router only mounts behind
   // lib/devRoutes.ts, structurally absent in every deployed env); json() is
   // scoped to this route. Logs ids and the field only - never the value.

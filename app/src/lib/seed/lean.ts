@@ -106,7 +106,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       // ASCII + stable so re-runs stay byte-identical.
       email: 'tasha.nguyen@example.com', // byEmail
       emails: [{ email: 'tasha.nguyen@example.com', primary: true }],
-      housingAuthority: SEED_AUTHORITY.atlanta, // byHousingAuthority (any contact type)
+      housingAuthority: SEED_AUTHORITY.atlanta, // byHousingAuthority GSI key, any contact type (kept; blasts no longer read it)
       // Name, voucher size, and housingAuthority are camelCase EVERYWHERE the app
       // reads them (contactFullName / displayNameOf / audienceResolution.voucherSizeOf;
       // the byHousingAuthority GSI hash key is `housingAuthority`); the flexible-doc

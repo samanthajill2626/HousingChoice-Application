@@ -89,3 +89,14 @@ rendered in 15 s; the screenshot is an entirely white page. No `net::ERR_*` line
 log; 2127 TIME_WAIT sockets right after the run. The file passed in isolation (5/5; with
 `settings.spec.ts` in the same isolation run, 8/8 in 57.7 s), and the full re-run of the same commit passed 363/363.
 Artifacts: `W:\tmp\matching-blast-rules\.superpowers\gates\final\e2e-artifacts\`.
+
+**Fifth and sixth sightings (2026-10-19, Windows, `feat/matching-blast-rules`, lane 10).**
+Run `fw2` on e1c2bbe8 (09:46-10:14 EDT; 1 failed / 362 passed, 24.9 min, overlapping a
+reviewer's single-file vitest runs): `tests/tour-roster.spec.ts:183` waited 3 min for
+"Continue as dev user" on an entirely white page. Run `final2-e2e-2` on 4f608a40 (11:04-11:30
+EDT, `E2E_TRACE=1`): `tests/scenarios/tenant-onboarding.spec.ts:159` waited 100 s for the
+same button, white page. Both are the sign-in face of the port-exhaustion mechanism the
+contact-navigation twin's twelfth/thirteenth sightings caught in the log (`[vite] http proxy
+error ... connect EADDRINUSE 127.0.0.1:10001`). The next full run of 4f608a40 passed 364/364.
+Artifacts: `W:\tmp\matching-blast-rules\.superpowers\gates\fw2\e2e-artifacts\`,
+`...\final2-e2e-2\e2e-artifacts\` (with a trace).

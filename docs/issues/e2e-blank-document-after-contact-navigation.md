@@ -161,3 +161,27 @@ and a full re-run of the same commit with `E2E_TRACE=1` passed 363/363 (23.0 min
 2091 at its start, 2738 at its end). Artifacts (gitignored, that worktree):
 `W:\tmp\matching-blast-rules\.superpowers\gates\final\e2e-artifacts\`; record:
 `docs/superpowers/reviews/2026-10-14-matching-blast-rules/handback.md`.
+
+**Twelfth and thirteenth sightings - THE API-READ VARIANT, MECHANISM CAUGHT IN THE LOG
+(2026-10-19 10:35-11:30 EDT, Windows, `feat/matching-blast-rules` @4f608a40, lane 10).**
+Run `final2`: 2 failed / 362 passed (21.7 min) - `tests/scenarios/landlord-onboarding.spec.ts:146`
+stopped on a contact page reading "We couldn't load this contact." and
+`tests/scenarios/post-tour-application.spec.ts:105` on "We couldn't load this placement."
+(the app rendered; one API read failed); 3170 TIME_WAIT sockets after the run. The re-run of
+the SAME commit with `E2E_TRACE=1` (`final2-e2e-2`, 2 failed / 362 passed, 26.4 min) failed
+`tests/scenarios/landlord-onboarding.spec.ts:230` - this issue's original scenario - at
+"Edit contact details", and its TRACE shows `GET /api/contacts/<id>` answered **500** while
+every sibling read answered 200; the run log has, at that same second,
+`[vite] http proxy error: /api/contacts/<id>` followed by
+`Error: connect EADDRINUSE 127.0.0.1:10001` - the dev server's proxy could not open a
+connection to the app (Windows ephemeral-port exhaustion; this host's dynamic range is
+49152 + 16384 ports). The same `connect EADDRINUSE` proxy line appears once in the
+intermediate run `fw2` (`/api/tours?status=toured`) and once in a later GREEN run. So the
+"couldn't load" variant is proven to be the proxy's outbound connect failing under port
+exhaustion; the white-document variant (a failed MODULE fetch) is the same pressure on the
+browser -> Vite side. A third full run of 4f608a40 passed 364/364 (22.7 min; TIME_WAIT 215 at
+its start, 3181 at its end). Every failing file passed alone (12/12, 1.3 min). Traces and
+screenshots (gitignored): `W:\tmp\matching-blast-rules\.superpowers\gates\final2\e2e-artifacts\`,
+`...\final2-e2e-2\e2e-artifacts\`. Direction this points to: fewer proxy connections per run
+(keep-alive on the Vite proxy agent - see the vite-proxy-keepalive history) or a wider
+dynamic port range / shorter TIME_WAIT on the test host.

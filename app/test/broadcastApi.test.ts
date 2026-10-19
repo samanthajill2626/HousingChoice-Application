@@ -3736,6 +3736,48 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(world.broadcasts.get(id)?.status).toBe('draft');
     });
 
+    // AR12: path (c) reads the rules even for an empty or a truncated
+    // resolution, so a failed read outranks both refusals (review R1 CONF-2).
+    it('(AR12) an EMPTY resolution with a throwing tours read is 503, not 400 empty_audience: still a draft, nothing marked sending or enqueued', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({
+        world,
+        audienceResolutionService: async () => ({ contactIds: [], contacts: [], count: 0, truncated: false }),
+      });
+      const id = await createDraft(app);
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValueOnce(new Error('throttled'));
+      const markSending = vi.spyOn(world.broadcastsRepo, 'markSending');
+      const enqueue = vi.spyOn(queueAdapter, 'enqueue');
+      const res = await send(app, id);
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: 'audience_rules_unavailable' });
+      expect(markSending).not.toHaveBeenCalled();
+      expect(enqueue).not.toHaveBeenCalled();
+      await queueAdapter.settle();
+      expect(world.broadcasts.get(id)?.status).toBe('draft');
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('(AR12) a TRUNCATED resolution (one consented tenant) with a throwing tours read is 503, not 400 audience_too_large', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({
+        world,
+        audienceResolutionService: async () => ({ ...capAudience(1), truncated: true }),
+      });
+      const id = await createDraft(app);
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValueOnce(new Error('throttled'));
+      const markSending = vi.spyOn(world.broadcastsRepo, 'markSending');
+      const enqueue = vi.spyOn(queueAdapter, 'enqueue');
+      const res = await send(app, id);
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: 'audience_rules_unavailable' });
+      expect(markSending).not.toHaveBeenCalled();
+      expect(enqueue).not.toHaveBeenCalled();
+      await queueAdapter.settle();
+      expect(world.broadcasts.get(id)?.status).toBe('draft');
+      expect(world.sent).toHaveLength(0);
+    });
+
     it('every resolved tenant excluded is 400 empty_audience, still a draft', async () => {
       seedUnit(world);
       seedTenant(world, { contactId: 'c-held', phone: '+15550306301' });

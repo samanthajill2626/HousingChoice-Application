@@ -56,6 +56,30 @@ describe('toursRepo.listByStatus createdAtFrom (plan 2.3)', () => {
     });
   });
 
+  it('(PIN) without opts it walks EVERY page: the unbounded key condition on each, ExclusiveStartKey on the second', async () => {
+    // The open-tours read walks scheduled, toured and no_show this way (spec
+    // D5 "every page of the other three partitions"; review R1 CONF-3).
+    const { doc, inputs } = recordingDoc([
+      { Items: [{ tourId: 't1' }], LastEvaluatedKey: { k: 1 } },
+      { Items: [{ tourId: 't2' }] },
+    ]);
+    const repo = createToursRepo({ doc, logger });
+    const rows = await repo.listByStatus('scheduled');
+    expect(rows.map((r) => r.tourId)).toEqual(['t1', 't2']);
+    expect(inputs).toHaveLength(2);
+    expect(inputs[0]!['ExclusiveStartKey']).toBeUndefined();
+    const { TableName, ...second } = inputs[1]!;
+    expect(typeof TableName).toBe('string');
+    // Exactly the unbounded read plus the cursor - no createdAt condition.
+    expect(second).toEqual({
+      IndexName: 'byStatus',
+      KeyConditionExpression: '#st = :st',
+      ExpressionAttributeNames: { '#st': 'status' },
+      ExpressionAttributeValues: { ':st': 'scheduled' },
+      ExclusiveStartKey: { k: 1 },
+    });
+  });
+
   it('with createdAtFrom the KEY condition bounds the range key: createdAt >= from', async () => {
     const { doc, inputs } = recordingDoc([{ Items: [{ tourId: 't1' }] }]);
     const repo = createToursRepo({ doc, logger });

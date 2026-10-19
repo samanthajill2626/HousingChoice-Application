@@ -59,9 +59,12 @@ export function bedroomPhrase(beds: number): string {
  *  summarizes the FILTER, which reaches tenants only (hand-picked partner
  *  seeds are not summarized here - D22); appends the size + authority narrowers when set.
  *  matching-blast-rules D2: the housing authorities are a LIST, joined with
- *  ", " ("Tenants - 2-BR - Atlanta Housing Authority, DeKalb Housing Authority"). */
-export function audienceSummary(filter: AudienceFilter): string {
+ *  ", " ("Tenants - 2-BR - Atlanta Housing Authority, DeKalb Housing Authority").
+ *  A row the server answers with NO filter (one stored without it - planner
+ *  review PA-5) has nothing to narrow it: plain "Tenants". */
+export function audienceSummary(filter: AudienceFilter | undefined): string {
   const parts: string[] = ['Tenants'];
+  if (filter === undefined) return parts.join(' - ');
   if (filter.bedroomSize !== undefined) parts.push(voucherSizeLabel(filter.bedroomSize));
   const authorities = (filter.housing_authorities ?? []).filter((name) => name.length > 0);
   if (authorities.length > 0) parts.push(authorities.join(', '));

@@ -46,6 +46,10 @@ describe('audienceSummary', () => {
     // An empty list is no housing authority filter.
     expect(audienceSummary({ contact_type: 'tenant', housing_authorities: [] })).toBe('Tenants');
   });
+
+  it('planner review PA-5: a row with NO stored filter (the field absent) reads "Tenants" - never a crash', () => {
+    expect(audienceSummary(undefined)).toBe('Tenants');
+  });
 });
 
 describe('sendReachLabel', () => {

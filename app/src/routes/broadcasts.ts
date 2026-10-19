@@ -445,7 +445,8 @@ function toBroadcastResults(
     status: b.status,
     unitId: b.unitId ?? null,
     // matching-blast-rules D2: the wire shape (a legacy row's string becomes
-    // a one-member housing_authorities; never housing_authority).
+    // a one-member housing_authorities; never housing_authority). A stored
+    // row with no filter omits the field, as main did (PA-5).
     audience_filter: wireAudienceFilter(b.audience_filter),
     // Matching sends: surface the draft's audience mode when set so the composer
     // can render the seeds_only (1:1) vs filter (1:N) affordances.
@@ -474,7 +475,8 @@ function toBroadcastSummary(b: BroadcastItem, stats: BroadcastStats): Record<str
     broadcastId: b.broadcastId,
     status: b.status,
     unitId: b.unitId ?? null,
-    // matching-blast-rules D2: the wire shape, as on the results view.
+    // matching-blast-rules D2: the wire shape, as on the results view (a row
+    // with no stored filter omits it - one such row never fails the list, PA-5).
     audience_filter: wireAudienceFilter(b.audience_filter),
     // Matching sends: pass the audience mode through on list rows too (dashboard
     // Task 5 reads it on BroadcastSummary).

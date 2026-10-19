@@ -215,8 +215,14 @@ export interface WireAudienceFilter {
 /** D2: the filter every response carries (the create echo, the results and
  *  list projections) - normalized through authoritiesOfFilter, so a legacy
  *  row answers its string as a one-member list and the dashboard reads ONE
- *  shape. The booleans pass through as stored. */
-export function wireAudienceFilter(filter: AudienceFilter): WireAudienceFilter {
+ *  shape. The booleans pass through as stored. A stored row WITHOUT a filter
+ *  (a hand repair, an old row - the type says every row has one, but one
+ *  row must never 500 the whole list) answers undefined, so the response
+ *  omits the field as main's pass-through did (planner review PA-5). */
+export function wireAudienceFilter(filter: AudienceFilter): WireAudienceFilter;
+export function wireAudienceFilter(filter: AudienceFilter | undefined): WireAudienceFilter | undefined;
+export function wireAudienceFilter(filter: AudienceFilter | undefined): WireAudienceFilter | undefined {
+  if (filter === undefined) return undefined;
   const housing_authorities = authoritiesOfFilter(filter);
   return {
     contact_type: 'tenant',

@@ -2804,6 +2804,40 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(byId['bcast-row-none']).toEqual({ contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true });
       expect(byId['bcast-row-none']).not.toHaveProperty('housing_authorities');
     });
+
+    // Planner review PA-5: a stored row with NO audience_filter (a hand
+    // repair, an old row) must not 500 the whole Matching list - the
+    // projections answer it without the field, as main passed it through.
+    it('GET /api/broadcasts and GET results answer a stored row with NO audience_filter - 200, the field absent', async () => {
+      seedUnit(world);
+      const bare = seedShare(world, 'bcast-row-unfiltered', 'sent', { 'c-1': { status: 'delivered' } });
+      delete (bare as Partial<BroadcastItem>).audience_filter;
+      seedShare(world, 'bcast-row-list', 'draft', {}, { audience_filter: listFilter('DeKalb County Housing Authority') });
+      const { app } = makeWebhookHarness({ world });
+      const list = await request(app)
+        .get('/api/broadcasts')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE);
+      expect(list.status).toBe(200);
+      const rows = list.body.broadcasts as Array<Record<string, unknown>>;
+      const row = rows.find((b) => b.broadcastId === 'bcast-row-unfiltered');
+      expect(row).toBeDefined();
+      expect(row).not.toHaveProperty('audience_filter');
+      // The other rows keep their wire filter.
+      expect(rows.find((b) => b.broadcastId === 'bcast-row-list')?.audience_filter).toEqual({
+        contact_type: 'tenant',
+        housing_authorities: ['DeKalb County Housing Authority'],
+        excludeOptedOut: true,
+        excludeUnreachable: true,
+      });
+      const results = await request(app)
+        .get('/api/broadcasts/bcast-row-unfiltered/results')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE);
+      expect(results.status).toBe(200);
+      expect(results.body.broadcastId).toBe('bcast-row-unfiltered');
+      expect(results.body).not.toHaveProperty('audience_filter');
+    });
   });
 
   // --- caseworkers (spec 2026-10-06 D20, plan 3.7): a seed or an explicit

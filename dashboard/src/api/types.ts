@@ -3337,7 +3337,8 @@ export interface BroadcastSummary {
   status: BroadcastStatus;
   /** The property this broadcast is about, or null (audience-only broadcast). */
   unitId: string | null;
-  audience_filter: AudienceFilter;
+  /** Absent only for a row stored without one (planner review PA-5). */
+  audience_filter?: AudienceFilter;
   /** Matching sends: 'seeds_only' when the draft was created from a hand-picked
    *  seed list with no explicit filter (the seeded 1:1/1:N entry); absent/'filter'
    *  is the ordinary filter-driven audience. */
@@ -3417,7 +3418,8 @@ export interface BroadcastResults {
   broadcastId: string;
   status: BroadcastStatus;
   unitId: string | null;
-  audience_filter: AudienceFilter;
+  /** Absent only for a row stored without one (planner review PA-5). */
+  audience_filter?: AudienceFilter;
   /** Matching sends: 'seeds_only' when the draft was created from a hand-picked
    *  seed list with no explicit filter (the seeded 1:1/1:N entry); absent/'filter'
    *  is the ordinary filter-driven audience. */

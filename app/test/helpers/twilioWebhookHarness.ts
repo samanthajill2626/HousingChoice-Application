@@ -3961,9 +3961,15 @@ export function createFakeWorld(): FakeWorld {
         .filter((t) => typeof t.scheduledAt === 'string' && t.scheduledAt >= from && t.scheduledAt <= to)
         .map((t) => ({ ...t }));
     },
-    async listByStatus(status) {
+    async listByStatus(status, opts) {
+      // byStatus GSI mirror: hash `status`, range `createdAt` (ascending, the
+      // Query's order). createdAtFrom is a KEY condition on the range key
+      // (createdAt >= from), as toursRepo.listByStatus sends it; ISO strings
+      // compare the way DynamoDB compares S keys (matching-blast-rules 2.3).
+      const from = opts?.createdAtFrom;
       return [...toursMap.values()]
         .filter((t) => t.status === status)
+        .filter((t) => from === undefined || t.createdAt >= from)
         .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
         .map((t) => ({ ...t }));
     },

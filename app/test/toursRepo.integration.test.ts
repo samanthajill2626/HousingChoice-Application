@@ -443,6 +443,24 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     expect(Array.isArray(result)).toBe(true);
   });
 
+  it('listByStatus with createdAtFrom reads only rows at or after the bound (matching-blast-rules plan 2.3)', async () => {
+    // The fake twin is in toursRepoListByStatusRange.test.ts - keep them in step.
+    const from = '2026-09-30T12:00:00.000Z';
+    const make = (createdAt: string) =>
+      tours.create({ tenantId: 'contact-range-1', unitId: 'unit-range-1', tourType: 'self_guided', createdAt });
+    const before = await make('2026-09-30T11:59:59.999Z');
+    const atBound = await make(from);
+    const after = await make('2026-10-05T12:00:00.000Z');
+
+    const bounded = (await tours.listByStatus('requested', { createdAtFrom: from })).map((t) => t.tourId);
+    expect(bounded).toContain(atBound.tourId);
+    expect(bounded).toContain(after.tourId);
+    expect(bounded).not.toContain(before.tourId);
+
+    const unbounded = (await tours.listByStatus('requested')).map((t) => t.tourId);
+    expect(unbounded).toEqual(expect.arrayContaining([before.tourId, atBound.tourId, after.tourId]));
+  });
+
   // -------------------------------------------------------------------------
   // Atomic conversion claim (Post-Tour double-create race guard) — mirrors the
   // claimGroupThread/releaseGroupThreadClaim conditional-write idiom.

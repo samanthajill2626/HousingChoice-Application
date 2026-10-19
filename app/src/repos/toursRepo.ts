@@ -215,8 +215,14 @@ export interface ToursRepo {
    * All tours with the given status via the byStatus GSI (hash=status,
    * range=createdAt). Returns all pages concatenated (no cursor — dashboard
    * use; volumes are expected to remain low in Phase 1).
+   *
+   * `opts.createdAtFrom` (matching-blast-rules D5) adds the RANGE condition
+   * `createdAt >= createdAtFrom` to the KEY condition, so the index itself
+   * bounds the read - the open-tours read uses it on the `requested`
+   * partition, the one that grows with every unbooked request. Without it the
+   * Query is byte-for-byte the unbounded one. Every page is still walked.
    */
-  listByStatus(status: string): Promise<TourItem[]>;
+  listByStatus(status: string, opts?: { createdAtFrom?: string }): Promise<TourItem[]>;
   /**
    * SET-merge patch: only supplied fields are written; omitted fields are LEFT as
    * stored (no-overwrite contract). updatedAt is always bumped. Throws
@@ -433,18 +439,22 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
       );
     },
 
-    async listByStatus(status) {
+    async listByStatus(status, opts) {
       // Paginate the byStatus GSI (hash=status, range=createdAt). DynamoDB
       // returns at most 1 MB per page; follow ExclusiveStartKey until exhausted.
+      // createdAtFrom (matching-blast-rules D5) adds `createdAt >= :from` to
+      // the KEY condition; without it the input is exactly the unbounded one.
+      const from = opts?.createdAtFrom;
       const all: TourItem[] = [];
       let lastKey: Record<string, unknown> | undefined;
       do {
         const input: QueryCommandInput = {
           TableName: table,
           IndexName: 'byStatus',
-          KeyConditionExpression: '#st = :st',
-          ExpressionAttributeNames: { '#st': 'status' },
-          ExpressionAttributeValues: { ':st': status },
+          KeyConditionExpression: from === undefined ? '#st = :st' : '#st = :st AND #ca >= :from',
+          ExpressionAttributeNames:
+            from === undefined ? { '#st': 'status' } : { '#st': 'status', '#ca': 'createdAt' },
+          ExpressionAttributeValues: from === undefined ? { ':st': status } : { ':st': status, ':from': from },
           ...(lastKey !== undefined && { ExclusiveStartKey: lastKey }),
         };
         const { Items, LastEvaluatedKey } = await doc.send(new QueryCommand(input));

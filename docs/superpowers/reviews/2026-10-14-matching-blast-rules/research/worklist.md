@@ -216,3 +216,15 @@ slice briefs and commit messages.
   S3b = Tasks 3.5-3.6 (BroadcastComposer + useComposerDraft; the picker),
   where OR-S3-1..5 land. OR-S3-6's counts are per task; OR-S3-7 and OR-S3-8
   apply to both.
+- **S3 -> S4** (S3a tip 70b0f8e6, S3b tip c59a03d2; tree clean; broadcasts
+  folder 16 files / 311, whole dashboard 250 files / 4811, typecheck 0, lint
+  3 errors all pre-existing per `build/S3a-report.md` and `build/S3b-report.md`).
+  S4 consumes the S3b report's "Contract S3b shipped": every copy string and
+  accessible name, and the draft-create timing (with a property attached and
+  the filters on, NO `POST /api/broadcasts` until both the property load and
+  the org-list read settle; the first create follows 600 ms later and already
+  carries the prefill - which is why AR22's repair reads the LAST create once
+  `Preview recipients` is enabled). Two S3b facts an e2e must respect: while
+  the reach is pending a Spinner `role="status"` named `Loading` sits beside
+  Preview (an unnamed `getByRole('status')` is ambiguous then - match the
+  reach text); `Couldn't load the properties.` is `role="alert"`.

@@ -1221,6 +1221,9 @@ function buildBroadcasts(): Record<string, unknown>[] {
       created_at: D.T4,
       _listPartition: 'broadcasts', // byCreated GSI membership
       unitId: 'unit-mx-tourable-01',
+      // LEGACY shape on purpose (matching-blast-rules D2): a share sent before
+      // 2026-10-14 stored ONE housing_authority string, and every server reader
+      // goes through authoritiesOfFilter. Kept so the full world exercises it.
       audience_filter: {
         contact_type: 'tenant',
         housing_authority: SEED_AUTHORITY.atlanta,
@@ -1254,9 +1257,11 @@ function buildBroadcasts(): Record<string, unknown>[] {
       created_at: D.T5,
       _listPartition: 'broadcasts', // byCreated GSI membership
       unitId: 'unit-mx-tourable-02',
+      // matching-blast-rules D2: a draft saved since 2026-10-14 carries the
+      // housing authority LIST (any-of) - here the 2BR in DeKalb.
       audience_filter: {
         contact_type: 'tenant',
-        housing_authority: SEED_AUTHORITY.dca,
+        housing_authorities: [SEED_AUTHORITY.dca, SEED_AUTHORITY.dekalb],
         bedroomSize: 2,
         excludeOptedOut: true,
         excludeUnreachable: false,

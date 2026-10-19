@@ -13,6 +13,8 @@ import { buildLiveStaticItems } from '../src/lib/seed/live.js';
 import { matrixItems } from '../src/lib/seed/matrix.js';
 import { generatePerformanceSeed, resolvePerformanceSeedConfig } from '../src/lib/seed/performance.js';
 import { ORG_LIST_SETTING_ID } from '../src/repos/orgListRepo.js';
+import { authoritiesOfFilter } from '../src/lib/blastAudienceRules.js';
+import type { AudienceFilter } from '../src/repos/broadcastsRepo.js';
 
 /** The seeded list: every seeded value must be an exact name on it. */
 const ENTRIES = seedOrgListItem().entries;
@@ -82,10 +84,15 @@ function orgValues(tables: object): Array<{ field: OrgValueField; value: unknown
     if (u['jurisdiction'] !== undefined) out.push({ field: 'jurisdiction', value: u['jurisdiction'] });
   }
   for (const b of rowsOf(tables, 'broadcasts')) {
-    const filter = b['audience_filter'] as { housing_authority?: unknown } | undefined;
+    // matching-blast-rules D2: the LEGACY one-string filter and the list
+    // (housing_authorities) are both checked, member by member.
+    const filter = b['audience_filter'] as
+      | { housing_authority?: unknown; housing_authorities?: unknown }
+      | undefined;
     if (filter?.housing_authority !== undefined) {
       out.push({ field: 'audience_filter', value: filter.housing_authority });
     }
+    for (const v of listOf(filter?.housing_authorities)) out.push({ field: 'audience_filter', value: v });
   }
   return out;
 }
@@ -138,11 +145,18 @@ describe('the matrix holds list names only, broadcast filters included', () => {
     expect(JSON.stringify(items)).not.toMatch(RETIRED_SLUG);
   });
 
-  it('the seeded broadcasts filter on list names (the draft is re-checked at preview - spec D7)', () => {
-    const filters = rowsOf(items, 'broadcasts').map(
-      (b) => (b['audience_filter'] as { housing_authority?: unknown } | undefined)?.housing_authority,
-    );
-    expect(filters).toEqual([SEED_AUTHORITY.atlanta, SEED_AUTHORITY.dca]);
+  it('the seeded broadcasts filter on list names: the sent share keeps the LEGACY string, the draft holds a list (matching-blast-rules D2)', () => {
+    const filters = rowsOf(items, 'broadcasts').map((b) => b['audience_filter'] as AudienceFilter);
+    expect(filters.map((f) => f.housing_authority)).toEqual([SEED_AUTHORITY.atlanta, undefined]);
+    expect(filters.map((f) => f.housing_authorities)).toEqual([
+      undefined,
+      [SEED_AUTHORITY.dca, SEED_AUTHORITY.dekalb],
+    ]);
+    // ONE server normalizer reads both shapes (spec D2).
+    expect(filters.map((f) => authoritiesOfFilter(f))).toEqual([
+      [SEED_AUTHORITY.atlanta],
+      [SEED_AUTHORITY.dca, SEED_AUTHORITY.dekalb],
+    ]);
   });
 });
 

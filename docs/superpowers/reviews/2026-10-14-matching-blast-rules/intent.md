@@ -169,3 +169,17 @@ handback review does not depend on the replay for them.
   rule changes." -> spec revision 6 (D7), plan AR43 (section 4.4). Check at
   handback: the requested label and its cue read exactly so; nothing else
   about holds changed.
+
+## Handback-review entry (2026-10-19)
+
+- The build handed back MERGE-READY at b1bb9dc9. The planner's review
+  (replay read in full, gates re-run, two independent reviewers) is in
+  `planner-review/`.
+- Cameron's decision on the decide-before-merge issue
+  `matching-prefill-org-list-failure-fails-open`, picked in the question
+  widget: "Hold + Try again (Recommended)" (the other options were
+  "Prefill as written" and "Ship as-is, follow up"). A failed property load,
+  or a failed organization-list read while the property accepts an
+  authority, holds the prefill with Try again; the stale-list case keeps its
+  visible note. -> spec revision 7, plan AR44, fix wave 2. Check at the
+  verdict: no draft and no send can go out unfiltered after a failed read.

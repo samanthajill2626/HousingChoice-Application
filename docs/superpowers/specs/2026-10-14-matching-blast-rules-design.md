@@ -1,6 +1,7 @@
 # Matching blasts follow the audience rules - design
 
-Status: APPROVED revision 5 (2026-10-14). Revision 4 folded in review
+Status: APPROVED revision 5 (2026-10-14), amended by Cameron in revision 6
+(2026-10-18) and revision 7 (2026-10-19). Revision 4 folded in review
 rounds 1-3 (round 3 terminal: precision only) and two rulings by Cameron
 (tenants with no housing authority; the reach count). Revision 5 is
 Cameron's approval amendment: the `byHousingAuthority` GSI and its repo
@@ -8,6 +9,10 @@ method stay in place, unused by blasts (section 4).
 Revision 6 (2026-10-18) is Cameron's copy amendment during the build: the
 `requested` tour label makes clear the tour has no date yet (D7). Label
 text only; no rule changes. Plan ruling AR43.
+Revision 7 (2026-10-19) is Cameron's decision at the handback review: a
+failed property load or organization-list read HOLDS the prefill with "Try
+again" instead of letting the blast go out unfiltered by housing authority
+(D3, Timing); and the "Not used" note ends with a period. Plan ruling AR44.
 Review history: `docs/superpowers/reviews/2026-10-14-matching-blast-rules/design-review/adjudications.md`.
 Branch: `feat/matching-blast-rules` (worktree `W:\tmp\matching-blast-rules`, cut from main @a2b3d80d)
 Tracker: Improvements Tracker item #6 "Matching (blasts): housing authority and status" (Before WP1, item 5)
@@ -260,8 +265,9 @@ each mapped to its entry name when it is the exact name, or a spelling of
 exactly one, housing authority entry (the server's rule), in the property's
 order, de-duplicated. Names that map to no entry are not put in the filter;
 the picker shows "Not used (not on the organization list): <names, comma
-separated>". When NONE of the property's authorities map, the same note is
-followed by "This blast is not limited by housing authority."
+separated>." (revision 7: the note ends with a period). When NONE of the
+property's authorities map, the same note is followed by "This blast is not
+limited by housing authority."
 
 The picker becomes `OrgPicker multiple`, labeled "Housing authorities".
 Staff can remove any prefilled member or add others.
@@ -281,20 +287,41 @@ state update (the lesson in
 `docs/issues/broadcast-composer-prefill-overwrites-edit.md`).
 
 Timing: ONLY while a property is attached and the filters are on, Preview
-stays disabled until the prefill has settled: the property has loaded or
-failed to load, and the organization list has loaded or failed. A failed
-property load counts as settled: nothing is prefilled from it and the
-filters show "Couldn't load the property, so its housing authorities and
-voucher size were not filled in." A failed list read counts as settled:
-nothing is prefilled and the filters show "Couldn't load the organization
-list, so housing authorities were not filled in from the property." (the
-picker shows its own error as today). An ABORTED load (the request was
-cancelled - an unmount, a property change, React StrictMode's double mount;
-`AbortError`, `dashboard/src/api/client.ts:125`) is neither loaded nor
-failed: the gate keeps waiting and no notice shows. A failed state belongs
-to the property it was for and clears when that property loads or the
-property changes. A resumed draft (`?draftId=`, no property on the client)
-and a seeds-only send (filters off) are never gated.
+stays disabled until the prefill has settled: the property has loaded, and
+the organization list has loaded.
+
+A FAILED READ HOLDS instead of settling (revision 7, Cameron 2026-10-19,
+replacing revision 6's "a failed read counts as settled"). A filter blast
+with no authority filter would check every authority's tenants, which is
+the same harm a failed tours read avoids by failing closed (D5), so the
+prefill fails closed the same way:
+- A failed property load: no draft is created, Preview stays disabled, and
+  the filters show "Couldn't load the property, so its housing authorities
+  and voucher size can't be filled in yet." with a "Try again" button that
+  loads the property again.
+- A failed organization-list read, when the property accepts at least one
+  housing authority: no draft is created, Preview stays disabled, and the
+  filters show "Couldn't load the organization list, so housing authorities
+  can't be filled in from the property yet." with a "Try again" button that
+  reads the list again (the picker shows its own error as today). When the
+  property accepts NO housing authority there is nothing to fill in, so a
+  failed list read does not hold.
+- "Try again" re-runs only the failed read. While it runs, the notice and
+  the hold stay; on success the prefill settles as usual and the notice
+  goes; on another failure the notice stays.
+- The voucher size still fills in from a loaded property while a failed
+  list read holds.
+
+An ABORTED load (the request was cancelled - an unmount, a property change,
+React StrictMode's double mount; `AbortError`,
+`dashboard/src/api/client.ts:125`) is neither loaded nor failed: the gate
+keeps waiting and no notice shows. A failed state belongs to the property it
+was for and clears when that property loads or the property changes. A
+resumed draft (`?draftId=`, no property on the client) and a seeds-only send
+(filters off) are never gated. An organization list read before an
+authority was added to the list (the composer reads it once per page load)
+is NOT a failure: that authority shows in the "Not used" note as above (a
+known, visible gap; `docs/issues/matching-prefill-org-list-failure-fails-open.md`).
 
 D3a. Voucher size keeps its current prefill value (the property's first
 accepted size) but gets the same belongs-to-the-property rule, because the

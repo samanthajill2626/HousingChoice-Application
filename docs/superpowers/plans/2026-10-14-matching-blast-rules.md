@@ -114,10 +114,10 @@
   1. `Only tenants in Onboarding or Searching are included.`
   2. `While a housing authority is selected, tenants whose housing authority is missing or not on the organization list are left out.`
   3. `Add any other tenant by hand when you review recipients.`
-- Prefill notes: `Not used (not on the organization list): <names joined by ", ">`
-  and, when none mapped, followed by ` This blast is not limited by housing authority.`
-- Property load failed: `Couldn't load the property, so its housing authorities and voucher size were not filled in.`
-- Org list failed: `Couldn't load the organization list, so housing authorities were not filled in from the property.`
+- Prefill notes: `Not used (not on the organization list): <names joined by ", ">.`
+  (ends with a period - AR44) and, when none mapped, followed by ` This blast is not limited by housing authority.`
+- Property load failed (AR44, a HOLD with a `Try again` button): `Couldn't load the property, so its housing authorities and voucher size can't be filled in yet.`
+- Org list failed (AR44, a HOLD with a `Try again` button, only when the property accepts at least one authority): `Couldn't load the organization list, so housing authorities can't be filled in from the property yet.`
 - 422 member removed: `<text> is no longer on the organization list, so it was removed from the filter.`
 - 503 on compose: `Couldn't check tours and Not interested replies, so the recipient list can't be shown yet.` + button `Try again`.
 - Seeds-only notice: `Tour and Not interested labels couldn't be loaded.`
@@ -678,6 +678,28 @@ below as written). Rulings:
   `tourHoldLabel` and its tests, Task 3.3's Add a tenant test, S4's
   selectors.md text, the e2e `requestedLabel`) are already edited to
   match; this ruling is the authority if any copy disagrees.
+- **AR44 A failed prefill read HOLDS with Try again** (spec revision 7, D3
+  Timing; Cameron 2026-10-19 at the planner's handback review, deciding
+  `docs/issues/matching-prefill-org-list-failure-fails-open.md`). Replaces
+  "a failed property load / list read counts as settled". With a property
+  attached and the filters on: a failed property load, or a failed
+  organization-list read while the property accepts at least one housing
+  authority, keeps the prefill gate CLOSED (no draft create, Preview
+  disabled, the reach line pending as for any unsettled prefill) and shows
+  the section 1.1 notice with a `Try again` button that re-runs ONLY the
+  failed read (the property load, or `orgList.reload()`). The notice and the
+  hold stay while the retry runs and after another failure; success settles
+  the prefill as usual. A property accepting no authority is not held by a
+  failed list read. An aborted read stays "loading" (AR41). The failed state
+  still belongs to the property it was for (a property change clears it).
+  The stale-list case (an authority added after the list was read) is NOT
+  a failure and keeps the "Not used" note. The "Not used" note ends with a
+  period before the optional " This blast is not limited by housing
+  authority." sentence. Tests: rewrite the "failed organization list read
+  settles" test and the failed-property-load tests to the hold (no
+  `createBroadcast` call, Preview disabled, notice + Try again; Try again
+  then success -> exactly one create carrying the prefilled authorities);
+  add a list-failure-with-no-accepted-authority case (not held).
 
 ## 5. S1 - App foundations (Tasks 1.1-1.5)
 

@@ -10,25 +10,111 @@ reports), `code-review/` (round 1 conformance + plan-blind adversarial, round 1
 adjudications, fix-wave-1 report, round 2 fresh review + adjudications),
 `self-qa/` (self-QA record + the QA-L1 fix report).
 
-## Verdict
+## Verdict (updated after fix wave 2, 2026-10-19)
 
-**MERGE-READY on feat/matching-blast-rules (W:\tmp\matching-blast-rules) - final
-code commit 994be540, branch tip = the commit that adds this handback; 0 behind
-main (a2b3d80d); UNMERGED (human gate).** All five gates are green on 994be540;
-everything after it is docs only (766182f2: two `docs/issues/` sighting
-appends; then this handback).
+**MERGE-READY on feat/matching-blast-rules (W:\tmp\matching-blast-rules) - gated
+commit 4f608a40, branch tip = the commit that updates this handback (docs
+only); 0 behind main (a2b3d80d); UNMERGED (human gate).** All five gates are
+green on 4f608a40 (gate 4 decided by a full re-run of the same commit - see
+"Fix wave 2" below). The first handback (gated at 994be540) is kept below as
+history.
+
+**Cameron's decision is built:** a failed prefill read now HOLDS the composer
+with Try again (spec revision 7 D3, plan AR44; f0b33c94, 6636816c, e2e
+104d4083). Only the stale-list case of
+`docs/issues/matching-prefill-org-list-failure-fails-open.md` stays open (low).
+
+## Fix wave 2 (planner handback review round 1, 2026-10-19)
+
+Ordered by the planner (records `planner-review/`, commit 619af70a: spec
+revision 7, AR44). Every FIX has a test that fails without it.
+
+| Item | Commit | RED -> GREEN |
+|---|---|---|
+| AR44 the prefill HOLD with Try again (failed property load; failed list read while the property accepts an authority; a property with no authority not held; retry keeps the notice and hold; AbortError stays loading; the failed property state clears on a property change - conformance R27; voucher size still fills in) | f0b33c94 | 9 failed / 95 passed -> 104/104 (the rewritten "failed list read settles" and failed-property-load tests now assert the hold); the implementer's mutants M1-M6 and the reviewer's MX1/MX2 all killed |
+| I2 the "Not used" note ends with a period | da45d910 | 5 failed / 99 -> 104/104; selectors.md updated |
+| PA-5 a stored broadcast with no `audience_filter` no longer 500s the Matching list (the projection omits the field as main did; `audienceSummary` renders `Tenants`) | 088a12f8 | app `expected 500 to be 200` (TypeError reading `bedroomSize`) -> app 205/205; dashboard TypeError -> 79/79 |
+| R55 a held review row carries the amber row class (test only) | 44a0263a | mutant copy: `Expected the element to have class: _rowAlready_... / Received: _row_...`; real module 57/57 |
+| I6 the seed comment names DCA and DeKalb | c0a3bc9c | comment only |
+| FILE PA-1 / PA-3; the fail-open issue narrowed to the stale list (low) | 9b0bea63 | `tour-hold-reading-disagrees-with-tours-page` (low), `already-sent-read-fails-open-in-default-check` (low) |
+
+Fresh review of the wave (`code-review/fw2-review.md`, adjudications
+`fw2-adjudications.md`): AR44 implemented exactly (12 interleavings), 0
+blocking/high/medium; 5 LOW, 3 INFO. Micro-wave 3 fixed FW2-1 (a failure hold
+showed "Write a message to enable the preview." and then "Sizing the
+audience..." beside a never-ending spinner - now no hint or spinner while a
+hold notice shows), FW2-2 (the hold notices are `role="alert"`), FW2-6
+(comments), FW2-7 (no double period) in 6636816c - unit RED 6 failed / 102 ->
+108/108, every line read by the orchestrator; FW2-5 (an e2e for the hold: a
+routed 500 on `GET /api/organizations` -> the alert with Try again, Preview
+disabled, no draft; Try again -> the chip fills and the draft carries it) and
+FW2-4 (selectors.md) in 104d4083 - e2e RED by mutation (`mw3-red` failed at the
+flipped no-draft line; restored byte-identical), `mw3-green` 2 passed; FW2-3
+(pre-existing on main: a one-tenant message typed while the property failed
+to load becomes the filter blast's body after "Add more tenants by filters")
+FILED as `matching-enable-filters-keeps-one-tenant-message` (07cdafef); FW2-8
+spec clarification (a failed list read is not tied to a property) in
+8f651ecf.
+
+Gates on 4f608a40 (run `final2`, bare; no `AWS_*`; main still a2b3d80d, so no
+sync):
+
+```
+gate1 typecheck exit=0
+gate2 test exit=0
+gate3 smoke exit=0
+gate4 e2e exit=1
+gate5 lint exit=1
+```
+
+- Gate 2: app `509 passed (509)`, `10455 passed | 1 skipped (10456)`;
+  dashboard `250 passed (250)`, `4824 passed (4824)`; e2e workspace `22 / 508`;
+  fake-twilio `34 / 275`; fake-twilio-web `13 / 111`; no `[dynamoAdmin]` line.
+- Gate 3: `smoke-dist: OK - 1707 import specifier(s) across 297 emitted file(s)`.
+- Gate 4, run 1: `2 failed`, `362 passed (21.7m)` - `landlord-onboarding.spec.ts:146`
+  ("We couldn't load this contact.") and `post-tour-application.spec.ts:105`
+  ("We couldn't load this placement."): API reads that failed under socket
+  pressure (3170 TIME_WAIT sockets right after the run), neither near the
+  Matching code. Isolation (`final2-isolate`): `12 passed (1.3m)`, `EXIT:0`.
+  Run 2 - the full suite again on the SAME commit with `E2E_TRACE=1`
+  (`final2-e2e-2`): `2 failed`, `362 passed (26.4m)` - `landlord-onboarding.spec.ts:230`
+  (its trace: `GET /api/contacts/<id>` answered 500 while every sibling read
+  answered 200; the log at that second: `[vite] http proxy error:
+  /api/contacts/<id>` + `Error: connect EADDRINUSE 127.0.0.1:10001` - the dev
+  proxy could not open a connection: ephemeral-port exhaustion, MECHANISM
+  CAUGHT) and `tenant-onboarding.spec.ts:159` (white page at sign-in).
+  **Run 3 - the full suite again on the SAME commit 4f608a40 (`final2-e2e-3`,
+  TIME_WAIT drained to 215 first): `EXIT:0`, `364 passed (22.7m)`, 0 failed,
+  0 flaky** (364 = the earlier 363 + the new hold test). Gate 4 is GREEN on
+  4f608a40 by run 3; all three runs reported. Sightings with the mechanism
+  appended to `e2e-blank-document-after-contact-navigation` and
+  `e2e-blank-first-paint-at-sign-in`.
+- Gate 5: `3 problems (3 errors, 0 warnings)` over 39 files; by rule id vs the
+  merge base: `BroadcastComposer.tsx | react-hooks/set-state-in-effect | head 2 | base 4 | removed by branch`,
+  `useComposerDraft.ts | react-hooks/refs | head 1 | base 1 | pre-existing`,
+  `branch-attributed: 0`.
+- Intermediate run `fw2` on e1c2bbe8 (fix wave 2 before micro-wave 3,
+  overlapping the reviewer's single-file test runs): typecheck, npm test and
+  smoke 0; e2e 1 failed / 362 passed (`tour-roster.spec.ts:183`, an entirely
+  white page at sign-in); lint 3 pre-existing.
+- This session's e2e environment record: four full runs (overnight and this
+  morning) each had 1-2 failures of the same environmental class (a white
+  page, or a page whose API read failed) in specs far from this branch, every
+  failing file green alone, and every re-run of the same commit green. The
+  sightings are recorded in `e2e-blank-document-after-contact-navigation` and
+  `e2e-blank-first-paint-at-sign-in`.
+
+Net vs base, excluding `docs/superpowers/`: 60 files, +6595 / -882.
+
+## First handback (gated at 994be540; superseded by the verdict above)
 
 **Decide BEFORE merging (code review R2 ask; built exactly as the approved spec
-says):** `docs/issues/matching-prefill-org-list-failure-fails-open.md`. Spec D3
-makes three prefill failures fail OPEN with a notice: a failed organization-list
+says) - NOW DECIDED (hold + Try again) AND BUILT, see "Fix wave 2":**
+`docs/issues/matching-prefill-org-list-failure-fails-open.md`. Spec D3 (revision
+6) made three prefill failures fail OPEN with a notice: a failed organization-list
 read, a failed property load (which also drops the voucher size, and a
 `?unitId=` entry offers no retry), and a list read made before an authority was
-added (the composer reads the list once per mount). The draft then carries no
-housing authority filter, so the review lists - and checks - tenants of every
-authority. The issue gives two options: (1) hold Preview with Try again (does
-not cover the stale list), or (2) prefill the property's accepted authorities
-verbatim and let the create's list check plus D3b remove an off-list one
-(covers all three). Neither was built: it would silently amend D3.
+added (the composer reads the list once per mount).
 
 **Post-merge (deploy is Cameron's): NO infra, NO backfill, NO data migration, NO
 new dependency, no env change.** After the deploy, reload every open dashboard

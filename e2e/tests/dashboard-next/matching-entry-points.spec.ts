@@ -290,6 +290,16 @@ test.describe('Matching entry points - tenant file + property page', () => {
     // authorities" (tracker #6 D3); exact, since the property forms share it.
     await expect(page.getByRole('combobox', { name: 'Housing authorities', exact: true })).toHaveCount(0);
 
+    // WAIT FOR THE PROPERTY LIST TO LOAD before typing. The typeahead filters
+    // the composer's property list client-side, and its Escape only dismisses
+    // a list that is ALREADY shown (UnitSearchField handleKeyDown returns early
+    // otherwise). Typed and dismissed before the list landed, the suggestions
+    // open the moment it lands - after the "options gone" check below - and
+    // intercept the row click (the 2026-10-19 mechanism of
+    // docs/issues/matching-entry-points-property-first-e2e-flake.md, proven
+    // by delaying GET /api/units). A browsable row means the list is in.
+    await expect(page.getByRole('list', { name: 'Properties' }).getByRole('button').first()).toBeVisible();
+
     // Search narrows the BROWSABLE list; click the fresh unit's row (a button,
     // distinct from the typeahead's role=option entries).
     await page.getByRole('combobox', { name: 'Property' }).fill(line1);

@@ -3,12 +3,12 @@ id: matching-entry-points-property-first-e2e-flake
 title: matching-entry-points "Send a property" spec flakes - typeahead dropdown intercepts the unit-row click
 type: bug
 severity: med
-status: open
+status: resolved
 area: e2e
 created: 2026-07-21
-resolved: 2026-08-21
-updated: 2026-09-26
-refs: e2e/tests/dashboard-next/matching-entry-points.spec.ts:265, dashboard/src/routes/broadcasts/BroadcastComposer.tsx
+resolved: 2026-10-19
+updated: 2026-10-19
+refs: e2e/tests/dashboard-next/matching-entry-points.spec.ts:293, dashboard/src/routes/contact/UnitSearchField.tsx:176, dashboard/src/routes/broadcasts/BroadcastComposer.tsx
 ---
 
 <!--
@@ -137,3 +137,29 @@ spec-side stopgap that also works: after the assertion, wait for the search
 request to settle (`page.waitForResponse` on the units search, or
 `toHaveCount(0)` re-checked after a short settle) before the click.
 
+
+**Resolution (2026-10-19, `feat/matching-blast-rules` planner review) - the
+real mechanism, proven, and closed in the spec.** The planner's final gate
+run hit the exact signature (the `toHaveCount(0)` precondition passed, then
+a `<li role=option>` intercepted the row click for 60s), and the file then
+failed 2 of 3 `--repeat-each=3` repeats ALONE on a machine fresh from a full
+suite. The "late search response" in the entries above is NOT the
+mechanism: the typeahead makes no request - it filters the composer's
+property list (`getAllUnits`) client-side - and its Escape only dismisses a
+list that is ALREADY shown (`UnitSearchField.tsx:176`, `handleKeyDown`
+returns early when `!isListShown`). So when the spec types and presses
+Escape before the property list has landed, Escape is a no-op, "no options"
+holds, and the suggestions open the moment the list lands, over the row.
+
+Proof: a throwaway copy of the spec that delays `GET /api/units` by 2.5 s
+failed 4 of 4 with the exact intercept signature; the same probe with the
+fix passed 3 of 3; the real file then passed `--repeat-each=5` (15 of 15).
+Fix (spec only): wait for a browsable row in the "Properties" list (the list
+has landed) before typing (`matching-entry-points.spec.ts:293`).
+
+Left as is (product behavior, not a test defect): a user who types and
+presses Escape before the property list loads sees the suggestions open
+when it lands. The component-side change - Escape sets `dismissed` even
+while the list is hidden - would change a shared field (`UnitSearchField`
+serves other forms too) and is not needed for this spec; reopen as an
+improvement if staff ever notice it.

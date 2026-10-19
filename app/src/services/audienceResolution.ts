@@ -147,6 +147,8 @@ export function createAudienceResolutionService(
     const authorities = new Set(authoritiesOfFilter(filter));
 
     const resolved: ResolvedContact[] = [];
+    // contactIds already resolved - the de-duplication below.
+    const seen = new Set<string>();
     let pages = 0;
     let truncated = false;
     // D1: one Query walk per wanted status partition, in read order.
@@ -172,8 +174,9 @@ export function createAudienceResolutionService(
           // matching-blast-rules D10). The partition is type-keyed; this belt
           // keeps a caseworker out even if an index ever hands one back.
           if (contact.type !== 'tenant') continue;
-          // D1: only the partition's own status (the same belt for status;
-          // it also keeps a row from resolving twice across partitions).
+          // D1: only the partition's own status - the same belt for status
+          // (an index that hands back a row of another status). It does NOT
+          // stop a row resolving twice: see `seen` below.
           if (contact.status !== status) continue;
           // Always exclude STOP'd / unreachable contacts (first TCPA fence). A
           // missing phone is unsendable - drop it.
@@ -193,6 +196,15 @@ export function createAudienceResolutionService(
           ) {
             continue;
           }
+          // The two partition reads are NOT a snapshot. A tenant moved from
+          // searching to onboarding between them comes back from BOTH reads,
+          // each time with that partition's status, so the belt above keeps
+          // both rows: de-duplicate by contactId, first row wins (the
+          // searching one - it is read first). The opposite move (onboarding
+          // to searching mid-walk) can miss a tenant in both reads; staff
+          // add them by hand (Add a tenant).
+          if (seen.has(contact.contactId)) continue;
+          seen.add(contact.contactId);
           const firstName = firstNameOf(contact);
           const lastName = lastNameOf(contact);
           const voucherSize = voucherSizeOf(contact);

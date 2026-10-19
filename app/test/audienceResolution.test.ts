@@ -247,6 +247,33 @@ describe('audience resolution - D1: only searching and onboarding, searching fir
     expect(out.truncated).toBe(false);
   });
 
+  it('ADV-5: a tenant moved searching -> onboarding between the two partition reads resolves ONCE, the searching row', async () => {
+    // The two partition reads are not a snapshot. The searching walk returns
+    // the mover; a staff PATCH then moves them to onboarding; the onboarding
+    // walk returns them AGAIN, now with that partition's own status, so the
+    // status belt keeps that row too.
+    const items = [
+      tenant({ contactId: 'c-mover', status: 'searching' }),
+      tenant({ contactId: 'c-o1', status: 'onboarding' }),
+    ];
+    const contacts = fakeContacts(items);
+    const read = contacts.listByType;
+    contacts.listByType = async (type, listOpts) => {
+      const page = await read(type, listOpts);
+      // The PATCH lands right after the searching read.
+      if (listOpts?.status === 'searching') items[0] = { ...items[0]!, status: 'onboarding' };
+      return page;
+    };
+    const resolve = createAudienceResolutionService({ contactsRepo: contacts, logger });
+    const out = await resolve(TENANTS);
+    expect(contacts.typeQueries.map((q) => q.status)).toEqual(['searching', 'onboarding']);
+    expect(out.contactIds).toEqual(['c-mover', 'c-o1']);
+    expect(out.count).toBe(2);
+    expect(out.contacts).toHaveLength(2);
+    // First row wins: the searching read's row, read first.
+    expect(out.contacts[0]).toMatchObject({ contactId: 'c-mover', status: 'searching' });
+  });
+
   it('(PIN) a soft-deleted tenant stays hidden (listByType default scope)', async () => {
     const items = [
       tenant({ contactId: 'c-live' }),

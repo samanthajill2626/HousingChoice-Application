@@ -60,8 +60,10 @@ function seedTenant(world: FakeWorld, overrides: Partial<ContactItem>): ContactI
     contactId: `c-${world.contacts.length + 1}`,
     type: 'tenant',
     // A tenant's `status` is its §5 lifecycle (status-model unification — one
-    // field). 'searching' is a valid lifecycle value; audience resolution does
-    // NOT filter on status (services/audienceResolution.ts), so any value works.
+    // field). 'searching' is a valid lifecycle value AND one a filter audience
+    // reads: matching-blast-rules D1 resolves only searching and onboarding
+    // tenants (services/audienceResolution.ts), so a tenant that must be IN a
+    // filter audience keeps this default or uses 'onboarding'.
     status: 'searching',
     phone: `+1555010${String(world.contacts.length + 1).padStart(4, '0')}`,
     // A2P/CTIA: a real broadcast audience carries recorded consent; default it so
@@ -243,6 +245,43 @@ describe('share-broadcast API (M1.8a)', () => {
     const stored = world.broadcasts.get(res.body.broadcastId)!;
     expect(stored.status).toBe('draft');
     expect(stored.flyer_url).toBe(`${PUBLIC_BASE_URL}/p/unit-1?cta=text`);
+  });
+
+  it('matching-blast-rules D1: a filter draft reaches ONLY searching and onboarding tenants, searching first (estimate, preview, no-body send)', async () => {
+    seedUnit(world);
+    seedTenant(world, { contactId: 'c-onb', status: 'onboarding' });
+    seedTenant(world, { contactId: 'c-sea', status: 'searching' });
+    for (const status of ['needs_review', 'placing', 'placed', 'on_hold', 'inactive']) {
+      seedTenant(world, { contactId: `c-${status}`, status });
+    }
+    const { app } = makeWebhookHarness({ world });
+    const create = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId: 'unit-1', body_template: 'hi', audience_filter: { contact_type: 'tenant' } });
+    expect(create.status).toBe(201);
+    expect(create.body.estimatedCount).toBe(2);
+
+    const preview = await request(app)
+      .post(`/api/broadcasts/${create.body.broadcastId}/preview`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(preview.status).toBe(200);
+    expect(preview.body.candidates.map((c: { contactId: string }) => c.contactId)).toEqual(['c-sea', 'c-onb']);
+
+    const send = await request(app)
+      .post(`/api/broadcasts/${create.body.broadcastId}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(send.status).toBe(200);
+    expect(send.body.count).toBe(2);
+    expect(Object.keys(world.broadcasts.get(create.body.broadcastId)!.recipients).sort()).toEqual([
+      'c-onb',
+      'c-sea',
+    ]);
   });
 
   it('share-skip-fix D4: a draft created through the dashboard route records created_via dashboard', async () => {

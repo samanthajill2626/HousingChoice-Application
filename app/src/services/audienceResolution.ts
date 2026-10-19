@@ -1,23 +1,42 @@
-// Audience resolution (M1.8a) — turn a filtered-share audience filter into the
-// concrete set of tenant contacts to text.
+// Audience resolution (M1.8a; matching-blast-rules 2026-10-14 D1, D2, D10) -
+// turn a filtered-share (Matching blast) audience filter into the concrete
+// set of tenant contacts to text.
 //
-// The share-broadcast targets TENANT 1:1 contacts ONLY (never relay-group
-// rosters) — filtered by housing authority and/or exact bedroom (voucher) size.
-// Opted-out (STOP) and unreachable contacts are ALWAYS excluded here, at
-// audience resolution, as the first TCPA fence (sendMessage's opt-out gate is
-// the second fence per recipient).
+// A FILTER audience is TENANT 1:1 contacts ONLY (never relay-group rosters,
+// and never caseworkers - D10: a partner joins a share only as a seed or an
+// explicitly checked recipient), and only tenants whose status is
+// `searching` or `onboarding` (D1). Opted-out (STOP) and unreachable contacts
+// are ALWAYS excluded here, at audience resolution, as the first TCPA fence
+// (sendMessage's opt-out gate is the second fence per recipient).
 //
-// SCAN-BOUND ASSUMPTION (Phase-1 volumes, doc §5.1): when a housing authority
-// is set we Query the byHousingAuthority GSI (tenant-sparse, single authority);
-// otherwise we Query byTypeStatus (type='tenant'). Either way the candidate set
-// is the active tenant working set — hundreds to low thousands of small items —
-// so paginating the Query and filtering bedroom-size/opt-out in memory is fine.
-// The upgrade path if tenants ever exceed tens of thousands is the same as the
-// matching engine's (§5.1): a stream-fed materialized audience index.
+// THE READ (D1): exactly two byTypeStatus partitions, (tenant, searching) and
+// then (tenant, onboarding) - BLAST_TENANT_STATUSES order, searching FIRST -
+// under ONE page bound (maxPages counts the pages of both). A cut therefore
+// drops onboarding tenants before any searching one, and no other status is
+// ever read. (The old un-narrowed walk ascended the status range key and cut
+// `searching` tenants first - docs/issues/
+// broadcast-audience-truncation-drops-searching-tenants.md, resolved by D1.)
+// `truncated` is true when the bound stops the walk with any page still
+// unread, in the current partition or a later one.
 //
-// PII (doc §9): NEVER log phones/names — counts only. The RESULT carries phones
-// (the send job + the authed preview need them) but the service itself logs
-// only the resolved count.
+// HOUSING AUTHORITIES (D2) are an in-memory any-of filter. The list comes
+// from authoritiesOfFilter (the ONE reader of a stored filter - a legacy
+// one-string row is its one member); a tenant matches when its trimmed
+// housingAuthority is a member. While the list is non-empty, a tenant with no
+// housing authority, or one that is not on the list, does not match. The
+// byHousingAuthority GSI and contactsRepo.listByHousingAuthority are KEPT
+// (Cameron 2026-10-14) but no longer read here.
+//
+// SCAN-BOUND ASSUMPTION (Phase-1 volumes, doc section 5.1): the two
+// partitions are the active tenant working set - hundreds to low thousands of
+// small items - so paginating the Query and filtering in memory is fine. The
+// upgrade path if tenants ever exceed tens of thousands is the matching
+// engine's (section 5.1): a stream-fed materialized audience index.
+//
+// PII (doc section 9): NEVER log phones/names - counts only. The RESULT
+// carries phones (the send job + the authed preview need them) but the
+// service itself logs only counts.
+import { authoritiesOfFilter, BLAST_TENANT_STATUSES } from '../lib/blastAudienceRules.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import {
@@ -35,15 +54,16 @@ export interface ResolvedContact {
   /** For the review-recipients rows, which show the FULL name (people are not
    *  identifiable by first name alone at roster scale). */
   lastName?: string;
-  /** The tenant's approved bedroom (voucher) size — for the preview row display. */
+  /** The tenant's approved bedroom (voucher) size - for the preview row display. */
   voucherSize?: number;
-  /** The administering housing authority — for the preview row display. */
+  /** The administering housing authority (trimmed) - for the preview row display. */
   housingAuthority?: string;
   /**
-   * A2P/CTIA (spec §4, LOCKED CONTRACT 3): whether this contact has recorded SMS
-   * consent (hasSmsConsent). The composer preview surfaces "consent not
-   * recorded" for `false`, and the broadcast fan-out EXCLUDES them. Kept as a
-   * per-candidate flag (not a pre-exclusion) so staff can see + fix them.
+   * A2P/CTIA (spec section 4, LOCKED CONTRACT 3): whether this contact has
+   * recorded SMS consent (hasSmsConsent). The composer preview surfaces
+   * "consent not recorded" for `false`, and the broadcast fan-out EXCLUDES
+   * them. Kept as a per-candidate flag (not a pre-exclusion) so staff can see
+   * + fix them.
    */
   has_consent: boolean;
   /**
@@ -63,9 +83,10 @@ export interface ResolvedAudience {
   contacts: ResolvedContact[];
   count: number;
   /**
-   * True when the page walk hit its maxPages cap with more candidates still
-   * unread — the resolved set is INCOMPLETE. The /send route refuses on this
-   * (no silent under-delivery); the preview surfaces it to the operator.
+   * True when the page walk hit its maxPages cap with a page still unread
+   * (in the current status partition or a later one) - the resolved set is
+   * INCOMPLETE. The /send route refuses on this (no silent under-delivery);
+   * the preview surfaces it to the operator.
    */
   truncated: boolean;
 }
@@ -74,9 +95,10 @@ export interface AudienceResolutionDeps {
   contactsRepo?: ContactsRepo;
   logger?: Logger;
   /**
-   * Safety cap on the number of Query pages walked (each page is up to the
-   * GSI's natural page size). Bounds the scan even if the working set grows
-   * unexpectedly; the comment above is the design assumption, this is the fence.
+   * Safety cap on the number of Query pages walked, counted ACROSS both
+   * status partitions (each page is up to the GSI's natural page size).
+   * Bounds the scan even if the working set grows unexpectedly; the header
+   * comment is the design assumption, this is the fence.
    */
   maxPages?: number;
   /** Per-page Limit handed to the Query (bounds each round-trip). */
@@ -88,7 +110,7 @@ export type AudienceResolutionService = (filter: AudienceFilter) => Promise<Reso
 const DEFAULT_MAX_PAGES = 50;
 const DEFAULT_PAGE_SIZE = 200;
 
-/** A tenant's bedroom (voucher) size — the FLEXIBLE `voucherSize` field, not indexed. */
+/** A tenant's bedroom (voucher) size - the FLEXIBLE `voucherSize` field, not indexed. */
 function voucherSizeOf(contact: ContactItem): number | undefined {
   const v = contact['voucherSize'];
   return typeof v === 'number' && Number.isInteger(v) ? v : undefined;
@@ -106,7 +128,7 @@ function lastNameOf(contact: ContactItem): string | undefined {
   return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
 }
 
-/** The administering housing authority for the preview row, or undefined. */
+/** The administering housing authority, trimmed, or undefined when blank. */
 function housingAuthorityOf(contact: ContactItem): string | undefined {
   const v = contact['housingAuthority'];
   return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
@@ -121,91 +143,93 @@ export function createAudienceResolutionService(
   const pageSize = deps.pageSize ?? DEFAULT_PAGE_SIZE;
 
   return async function resolve(filter) {
-    // Candidate page source: housing-authority Query when set (tenant-sparse,
-    // narrowest), else all tenants via byTypeStatus. Both are Queries — never a
-    // Scan — paginated and bounded by maxPages.
-    const useHousingAuthority =
-      typeof filter.housing_authority === 'string' && filter.housing_authority.length > 0;
+    // D2: the any-of list, read through the ONE normalizer (legacy rows too).
+    const authorities = new Set(authoritiesOfFilter(filter));
 
     const resolved: ResolvedContact[] = [];
-    let exclusiveStartKey: Record<string, unknown> | undefined;
     let pages = 0;
-    do {
-      const page = useHousingAuthority
-        ? await contacts.listByHousingAuthority(filter.housing_authority!, {
-            limit: pageSize,
-            ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
-          })
-        // TODO(broadcast-audience-truncation-drops-searching-tenants): this
-        // walk is bounded (maxPages x pageSize) and byTypeStatus's RANGE KEY is
-        // `status`, which listByType reads ASCENDING (no ScanIndexForward). So
-        // a truncated audience does not drop a random tail: TENANT_STATUSES
-        // ascending starts at `inactive` and ends at `searching`, so the cut
-        // keeps inactive tenants and drops SEARCHING ones first - the exact
-        // population a property-match send is for. Latent only today (10,000
-        // bound vs ~641 tenants, so the partition exhausts every run); the
-        // byHousingAuthority branch above is hash-only and has no ordering at
-        // all. Do NOT lower these bounds believing the cut is arbitrary.
-        : await contacts.listByType('tenant', {
-            limit: pageSize,
-            ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
-          });
-
-      for (const contact of page.items) {
-        // The byHousingAuthority GSI holds every contact type, so this fence is
-        // load-bearing: a FILTER-resolved audience is tenants only (spec
-        // 2026-10-06 D20 - partners join a share only as seeds or explicit
-        // recipients; never relay rosters).
-        if (contact.type !== 'tenant') continue;
-        // Always exclude STOP'd / unreachable contacts (first TCPA fence). A
-        // missing phone is unsendable — drop it.
-        if (filter.excludeOptedOut !== false && contact.sms_opt_out === true) continue;
-        if (filter.excludeUnreachable !== false && contact.sms_unreachable === true) continue;
-        if (typeof contact.phone !== 'string' || contact.phone.length === 0) continue;
-        // Bedroom-size filter: exact match on the contact's voucherSize.
-        if (filter.bedroomSize !== undefined && voucherSizeOf(contact) !== filter.bedroomSize) {
-          continue;
+    let truncated = false;
+    // D1: one Query walk per wanted status partition, in read order.
+    for (const status of BLAST_TENANT_STATUSES) {
+      if (truncated) break;
+      let exclusiveStartKey: Record<string, unknown> | undefined;
+      do {
+        if (pages >= maxPages) {
+          // The bound stops the walk with a page still unread - the next page
+          // of this partition, or the first page of a later one.
+          truncated = true;
+          break;
         }
-        const firstName = firstNameOf(contact);
-        const lastName = lastNameOf(contact);
-        const voucherSize = voucherSizeOf(contact);
-        const housingAuthority = housingAuthorityOf(contact);
-        resolved.push({
-          contactId: contact.contactId,
-          phone: contact.phone,
-          ...(firstName !== undefined && { firstName }),
-          ...(lastName !== undefined && { lastName }),
-          ...(voucherSize !== undefined && { voucherSize }),
-          ...(housingAuthority !== undefined && { housingAuthority }),
-          // last-heard-from (spec 5.3): projection only - no filter changes.
-          ...(typeof contact.status === 'string' && contact.status.length > 0 && { status: contact.status }),
-          ...(typeof contact.last_heard_from_at === 'string' && { lastHeardFromAt: contact.last_heard_from_at }),
-          // A2P/CTIA: per-candidate consent flag (spec §4). NOT a pre-exclusion
-          // here — the preview surfaces it and the fan-out fences on it.
-          has_consent: hasSmsConsent(contact),
+        const page = await contacts.listByType('tenant', {
+          status,
+          limit: pageSize,
+          ...(exclusiveStartKey !== undefined && { exclusiveStartKey }),
         });
-      }
+        pages += 1;
 
-      exclusiveStartKey = page.lastEvaluatedKey;
-      pages += 1;
-    } while (exclusiveStartKey !== undefined && pages < maxPages);
+        for (const contact of page.items) {
+          // A FILTER-resolved audience is tenants only (spec 2026-10-06 D20,
+          // matching-blast-rules D10). The partition is type-keyed; this belt
+          // keeps a caseworker out even if an index ever hands one back.
+          if (contact.type !== 'tenant') continue;
+          // D1: only the partition's own status (the same belt for status;
+          // it also keeps a row from resolving twice across partitions).
+          if (contact.status !== status) continue;
+          // Always exclude STOP'd / unreachable contacts (first TCPA fence). A
+          // missing phone is unsendable - drop it.
+          if (filter.excludeOptedOut !== false && contact.sms_opt_out === true) continue;
+          if (filter.excludeUnreachable !== false && contact.sms_unreachable === true) continue;
+          if (typeof contact.phone !== 'string' || contact.phone.length === 0) continue;
+          // Bedroom-size filter: exact match on the contact's voucherSize.
+          if (filter.bedroomSize !== undefined && voucherSizeOf(contact) !== filter.bedroomSize) {
+            continue;
+          }
+          const housingAuthority = housingAuthorityOf(contact);
+          // D2: any-of on the trimmed value; an empty list filters nothing,
+          // a non-empty one leaves out a missing or non-member authority.
+          if (
+            authorities.size > 0 &&
+            (housingAuthority === undefined || !authorities.has(housingAuthority))
+          ) {
+            continue;
+          }
+          const firstName = firstNameOf(contact);
+          const lastName = lastNameOf(contact);
+          const voucherSize = voucherSizeOf(contact);
+          resolved.push({
+            contactId: contact.contactId,
+            phone: contact.phone,
+            ...(firstName !== undefined && { firstName }),
+            ...(lastName !== undefined && { lastName }),
+            ...(voucherSize !== undefined && { voucherSize }),
+            ...(housingAuthority !== undefined && { housingAuthority }),
+            // last-heard-from (spec 5.3): projection only.
+            ...(typeof contact.status === 'string' && contact.status.length > 0 && { status: contact.status }),
+            ...(typeof contact.last_heard_from_at === 'string' && { lastHeardFromAt: contact.last_heard_from_at }),
+            // A2P/CTIA: per-candidate consent flag (spec section 4). NOT a
+            // pre-exclusion here - the preview surfaces it and the fan-out
+            // fences on it.
+            has_consent: hasSmsConsent(contact),
+          });
+        }
 
-    // Truncated when the loop stopped on the page cap (not on exhausting the
-    // candidate pages) with more candidates still unread.
-    const truncated = exclusiveStartKey !== undefined;
+        exclusiveStartKey = page.lastEvaluatedKey;
+      } while (exclusiveStartKey !== undefined);
+    }
+
     if (truncated) {
       // Hit the page cap with more candidates remaining: surface it loudly so
       // the operator knows the audience was truncated (and the bound revisited).
       log.warn(
         { maxPages, resolved: resolved.length },
-        'audience resolution hit the page cap — audience may be truncated',
+        'audience resolution hit the page cap - audience may be truncated',
       );
     }
 
     log.info(
       {
         count: resolved.length,
-        byHousingAuthority: useHousingAuthority,
+        authorities: authorities.size,
         bedroomSizeFilter: filter.bedroomSize ?? null,
         truncated,
       },

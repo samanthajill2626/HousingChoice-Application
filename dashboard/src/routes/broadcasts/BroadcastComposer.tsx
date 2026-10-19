@@ -3,8 +3,8 @@
 //      there is no property-less send), so until one is attached the ONLY thing
 //      on screen is the property choice: a browsable candidate list + search.
 //      ?unitId= entries arrive with the property fixed and skip this step.
-//   1. COMPOSE — AudienceFilters (voucher size + housing authority, pre-filled
-//      from the property) + MessageEditor, pre-filled with the property's REAL
+//   1. COMPOSE - AudienceFilters (voucher size + housing authorities, pre-filled
+//      from the property and owned by it - matching-blast-rules D3) + MessageEditor, pre-filled with the property's REAL
 //      details ([Beds]/[Address]/[Rent]/[FlyerLink] resolved; [TenantName]
 //      stays a per-recipient token), with a LIVE reach backed by a single
 //      throwaway draft (useComposerDraft). "Preview" resolves the candidates.
@@ -32,11 +32,12 @@ import {
 } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { contactDisplayName } from '../contact/format.js';
-import { ORG_FILTER_TYPED_HINT } from '../orgs/orgCopy.js';
+import { ORG_FILTER_TYPED_HINT, orgListUnknown, orgNotOnListBody } from '../orgs/orgCopy.js';
 import { useOrgList } from '../orgs/useOrgList.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
-import { acceptedVoucherSizes, shortAddress } from '../listing/listingFormat.js';
+import { acceptedVoucherSizes, authoritiesOf, shortAddress } from '../listing/listingFormat.js';
 import { AudienceFilters } from './AudienceFilters.js';
+import { prefillAuthorities } from './authorityPrefill.js';
 import { MessageEditor } from './MessageEditor.js';
 import { RecipientPreview } from './RecipientPreview.js';
 import {
@@ -58,8 +59,63 @@ function flyerLinkFor(unitId: string): string {
   return `${window.location.origin}/p/${encodeURIComponent(unitId)}`;
 }
 
-/** R2 ruling F1's copy for both composer 422s. */
-const AUTHORITY_LEFT_THE_LIST = 'That housing authority is no longer on the list - pick it again';
+/** matching-blast-rules D3b: a 422 org_not_on_list from the draft create or
+ *  from Preview named ONE member of the housing authority filter; that member
+ *  alone is removed. */
+function authorityLeftTheList(text: string): string {
+  return `${text} is no longer on the organization list, so it was removed from the filter.`;
+}
+
+/** D3: the property did not load, so nothing was prefilled from it. */
+const PROPERTY_LOAD_FAILED =
+  "Couldn't load the property, so its housing authorities and voucher size were not filled in.";
+/** D3: the organization list did not load, so no authority was prefilled. */
+const ORG_LIST_FAILED =
+  "Couldn't load the organization list, so housing authorities were not filled in from the property.";
+/** D7: a filter draft's Preview was refused 503 audience_rules_unavailable. */
+const RULES_UNAVAILABLE =
+  "Couldn't check tours and Not interested replies, so the recipient list can't be shown yet.";
+
+/** D3: the property load, kept with the id it was for - a failed state
+ *  belongs to that property and clears when it loads or the property changes. */
+type UnitLoad = { unitId: string; status: 'loaded'; unit: UnitItem } | { unitId: string; status: 'failed' };
+
+/** D3: staff's edits to the audience filters, OWNED by one property. An
+ *  absent field is not edited (the property's prefill shows); a present one
+ *  is staff's, and the prefill never overwrites it while the property stays.
+ *  Value and ownership live in this ONE state and every write is a functional
+ *  update (docs/issues/broadcast-composer-prefill-overwrites-edit.md). */
+interface FilterEdits {
+  /** The property these edits belong to (null: none - a resumed draft). */
+  unitId: string | null;
+  /** Staff's housing authority list ([] = staff emptied it). */
+  authorities?: string[];
+  /** Staff's voucher size (null = staff cleared it). */
+  size?: number | null;
+}
+
+/** No authority prefill (no property loaded) - ONE shared value, so the
+ *  derived filter keeps its identity. */
+const NO_AUTHORITY_PREFILL: { names: string[]; unused: string[] } = { names: [], unused: [] };
+
+/** matching-blast-rules D7 (AR39): a Preview REFUSAL, kept as data with the
+ *  identity it answered - exactly like a preview result: the draft it read,
+ *  the inputs that draft was made for (`key`), and the property on screen at
+ *  the click. It is shown only while that draft is still the one on screen. */
+interface PreviewRefusal {
+  draftId: string;
+  key: string;
+  unitId: string | null;
+  kind: 'rules_unavailable';
+}
+
+/** D3b (AR39): the "no longer on the organization list" notice, kept with
+ *  the property its refusal was for - shown only while that property is on
+ *  screen. */
+interface AuthorityNotice {
+  unitId: string | null;
+  text: string;
+}
 
 /** Code review R3-FE-1: a Preview that landed after the audience or the
  *  message changed is dropped - its candidates belong to another draft. */
@@ -75,8 +131,7 @@ export function BroadcastComposer(): React.JSX.Element {
     [seedContactId],
   );
 
-  const [unit, setUnit] = useState<UnitItem | null>(null);
-  const [filter, setFilter] = useState<AudienceFilter>({ contact_type: 'tenant' });
+  const [unitLoad, setUnitLoad] = useState<UnitLoad | null>(null);
   // The message starts EMPTY everywhere: compose is unreachable until a
   // property is attached (the property step), and the moment one loads the
   // auto-fill effects below seed the REAL prefill (unit tokens resolved;
@@ -120,30 +175,109 @@ export function BroadcastComposer(): React.JSX.Element {
   // token template - there is no per-recipient variance to preserve.
   const resolvedMode = seedContactIds.length === 1 && !audienceEnabled;
 
+  // matching-blast-rules D3: the property on screen and its load - a load for
+  // another id (the previous pick, or one still in flight) is not this one's.
+  const loaded = unitLoad !== null && unitLoad.unitId === effectiveUnitId ? unitLoad : null;
+  const unit = loaded !== null && loaded.status === 'loaded' ? loaded.unit : null;
+
+  // D3 prefill - DERIVED, never written by an effect: the property's accepted
+  // authorities mapped to list names (authorityPrefill), and the voucher size
+  // it takes (acceptedVoucherSizes, the one reader; the filter holds ONE size
+  // until tracker #12, so the first, as the public flyer does - D3a).
+  const { entries: orgEntries, loading: orgLoading, error: orgError } = orgList;
+  const authorityPrefill = useMemo(
+    () =>
+      unit === null
+        ? NO_AUTHORITY_PREFILL
+        : prefillAuthorities(authoritiesOf(unit), { entries: orgEntries, loading: orgLoading, error: orgError }),
+    [unit, orgEntries, orgLoading, orgError],
+  );
+  const propertyVoucherSize = unit === null ? undefined : acceptedVoucherSizes(unit)[0];
+
+  // D3 ownership: staff's edits for THIS property win; a filter not edited
+  // shows the prefill. A DIFFERENT property resets the edits (pickProperty).
+  const [edits, setEdits] = useState<FilterEdits>(() => ({ unitId: unitId ?? null }));
+  const unitKey = effectiveUnitId ?? null;
+  const ownEdits: FilterEdits = edits.unitId === unitKey ? edits : { unitId: unitKey };
+  const authorities = ownEdits.authorities ?? authorityPrefill.names;
+  const size = ownEdits.size !== undefined ? (ownEdits.size ?? undefined) : propertyVoucherSize;
+  // The filter keeps its identity while its content stays (the draft hook
+  // re-runs on a new filter object): keyed on the names joined by a line
+  // break, which no organization name can hold.
+  const authoritiesKey = authorities.join('\n');
+  const filter = useMemo<AudienceFilter>(() => {
+    const names = authoritiesKey === '' ? [] : authoritiesKey.split('\n');
+    return {
+      contact_type: 'tenant',
+      ...(names.length > 0 && { housing_authorities: names }),
+      ...(size !== undefined && { bedroomSize: size }),
+    };
+  }, [authoritiesKey, size]);
+
+  // D3 timing: ONLY with a property attached and the filters on (never on a
+  // resumed draft, which has no property here) does Preview wait for the
+  // prefill to settle - the property loaded or failed, AND the organization
+  // list loaded or failed. An ABORTED load is neither (the load effect).
+  // While it waits the draft hook makes NO draft (`hold`, AR23): a draft made
+  // now would carry a filter the prefill is about to change.
+  const prefillGated = audienceEnabled && effectiveUnitId !== undefined && resumeDraftId === undefined;
+  const prefillPending = prefillGated && (loaded === null || orgLoading);
+  const prefillNotices: string[] = [];
+  if (prefillGated && loaded !== null && loaded.status === 'failed') prefillNotices.push(PROPERTY_LOAD_FAILED);
+  if (prefillGated && orgError && orgListUnknown(orgList)) prefillNotices.push(ORG_LIST_FAILED);
+
   // Preview step state. A result is kept with the draft it previewed and the
   // inputs that draft was made for: those candidates belong to that draft
   // alone (code review R3-FE-1 - see currentPreview below).
   const [preview, setPreview] = useState<{ draftId: string; key: string; result: PreviewResponse } | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  // matching-blast-rules D7 (AR39): the last Preview was refused 503
+  // audience_rules_unavailable - kept with the draft it read, like a result;
+  // compose says why, with Try again, while that draft is the one on screen.
+  const [refusal, setRefusal] = useState<PreviewRefusal | null>(null);
 
-  // Spec 2026-10-06 D7: a 422 org_not_on_list from the draft create or from
-  // Preview means the picked housing authority left the list. The pick is
-  // cleared and this message stays under the picker until the operator next
-  // changes a filter (a recreate clears the draft hook's own error, so the
-  // composer owns this one).
-  const [authorityNotice, setAuthorityNotice] = useState<string | null>(null);
-  function rejectAuthorityPick(): void {
-    setFilter((prev) => {
-      const next: AudienceFilter = { contact_type: 'tenant' };
-      if (prev.bedroomSize !== undefined) next.bedroomSize = prev.bedroomSize;
-      return next;
-    });
-    setAuthorityNotice(AUTHORITY_LEFT_THE_LIST);
+  // Spec 2026-10-06 D7, matching-blast-rules D3b: a 422 org_not_on_list from
+  // the draft create or from Preview names the member of the housing
+  // authority filter that left the list. THAT member alone is removed (an
+  // edit: the prefill never puts it back while the property stays) and this
+  // message stays under the picker until the operator next changes a filter
+  // (a recreate clears the draft hook's own error, so the composer owns this
+  // one). AR39: both belong to the property the refused request was made for
+  // - the removal applies only while the edits are still that property's,
+  // and the notice shows only while that property is on screen - so a refusal
+  // that lands after a change to a DIFFERENT property changes and says nothing.
+  const [authorityNotice, setAuthorityNotice] = useState<AuthorityNotice | null>(null);
+  function rejectAuthority(text: string | null): void {
+    // This render's property and list: the ones the refused request carried
+    // (Preview: the clicking render; a create: the render whose inputs it was
+    // made for - a later change supersedes it in the draft hook).
+    const owner = unitKey;
+    const current = authorities;
+    const kept = text === null ? current : current.filter((name) => name.trim() !== text.trim());
+    // A refusal that names no member we hold (never expected) empties the
+    // list, so the composer is never left holding a filter the server refuses.
+    const next = kept.length < current.length ? kept : [];
+    setEdits((prev) => (prev.unitId === owner ? { ...prev, authorities: next } : prev));
+    setAuthorityNotice({ unitId: owner, text: authorityLeftTheList(text ?? 'That housing authority') });
   }
+  /** A filter change from AudienceFilters: each filter that differs from the
+   *  one on screen becomes staff's edit for this property (D3). */
   function onFilterChange(next: AudienceFilter): void {
     setAuthorityNotice(null);
-    setFilter(next);
+    const nextAuthorities = next.housing_authorities ?? [];
+    const nextSize = next.bedroomSize ?? null;
+    const authoritiesEdited = nextAuthorities.join('\n') !== authoritiesKey;
+    const sizeEdited = nextSize !== (size ?? null);
+    if (!authoritiesEdited && !sizeEdited) return;
+    setEdits((prev) => {
+      const own: FilterEdits = prev.unitId === unitKey ? prev : { unitId: unitKey };
+      return {
+        ...own,
+        ...(authoritiesEdited && { authorities: nextAuthorities }),
+        ...(sizeEdited && { size: nextSize }),
+      };
+    });
   }
   // Code review R2-FE-3: text typed in the housing authority filter but never
   // picked is NOT a filter (D7 - the draft changes only on a pick or a clear,
@@ -162,7 +296,9 @@ export function BroadcastComposer(): React.JSX.Element {
     bodyTemplate,
     ...(audienceEnabled && { filter }),
     ...(seedContactIds.length > 0 && { seedContactIds }),
-    onOrgNotOnList: rejectAuthorityPick,
+    onOrgNotOnList: (err) => rejectAuthority(orgNotOnListBody(err)?.text ?? null),
+    // matching-blast-rules D3 (AR23, AR35): no draft until the prefill settles.
+    hold: prefillPending,
     // Untouched pre-fill/auto-seed = zero operator work: the draft is deleted
     // on unmount instead of littering the Matching list. A resumed draft is
     // the operator's saved work — never disposable.
@@ -204,18 +340,24 @@ export function BroadcastComposer(): React.JSX.Element {
     return () => controller.abort();
   }, [unitId]);
 
-  // Load the property (address -> property label; its voucher size feeds the
-  // pre-fill below).
+  // Load the property (address -> property label; its authorities and voucher
+  // size feed the prefill above). The result is kept WITH the id it was for,
+  // so a stale property never shows for a new pick and no reset is needed when
+  // the picker clears.
   useEffect(() => {
-    if (effectiveUnitId === undefined) {
-      setUnit(null); // picker cleared - drop the stale property context
-      return;
-    }
+    if (effectiveUnitId === undefined) return;
+    const id = effectiveUnitId;
     const controller = new AbortController();
-    getUnit(effectiveUnitId, controller.signal)
-      .then(setUnit)
-      .catch(() => {
-        /* property load failed — compose still works without the pre-fill */
+    getUnit(id, controller.signal)
+      .then((loadedUnit) => setUnitLoad({ unitId: id, status: 'loaded', unit: loadedUnit }))
+      .catch((err: unknown) => {
+        // matching-blast-rules D3: an ABORTED load (an unmount, a property
+        // change, StrictMode's double mount - api/client.ts rethrows the
+        // AbortError) is neither loaded nor failed: the gate keeps waiting and
+        // no notice shows. A real failure settles the prefill with its notice;
+        // compose still works without it.
+        if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
+        setUnitLoad({ unitId: id, status: 'failed' });
       });
     return () => controller.abort();
   }, [effectiveUnitId]);
@@ -259,23 +401,6 @@ export function BroadcastComposer(): React.JSX.Element {
       },
     );
   }, [resolvedMode, unit, bodyEdited, resumeDraftId, draft.flyerUrl, effectiveUnitId]);
-
-  // The voucher size the property takes - its recorded size, else its beds
-  // (acceptedVoucherSizes, the one reader). The audience filter holds ONE size;
-  // only the demo seed can record a list until tracker #12, so take the first,
-  // as the public flyer does.
-  const propertyVoucherSize = unit === null ? undefined : acceptedVoucherSizes(unit)[0];
-
-  // Pre-fill the voucher size the property takes (overridable), only while the
-  // filters are ACTIVE (hidden filters have no state to pre-fill) and only when
-  // the operator hasn't already set a size. Enabling the filters with a
-  // property attached applies the pre-fill at that moment.
-  useEffect(() => {
-    if (!audienceEnabled || unit === null) return;
-    const size = acceptedVoucherSizes(unit)[0];
-    if (size === undefined) return;
-    setFilter((prev) => (prev.bedroomSize === undefined ? { ...prev, bedroomSize: size } : prev));
-  }, [audienceEnabled, unit]);
 
   // Load tenant candidates once. EVERY page, for the same reason the property
   // picker above walks them: the search filters this array CLIENT-side, so a
@@ -333,9 +458,26 @@ export function BroadcastComposer(): React.JSX.Element {
     setAudienceEnabled(true);
   }
 
+  /** The property step's pick (a browse row, or the search field - which also
+   *  reports plain typing, with no unitId). matching-blast-rules D3: a
+   *  DIFFERENT property empties both filters at once - its prefill fills them
+   *  when it loads, and the old property's edits are dropped, with no confirm
+   *  (they were chosen for the old property, as the message was); the same
+   *  property again changes nothing. A failed load of the picked property is
+   *  retried by the pick, so the gate waits for the new attempt. */
+  function pickProperty(next: UnitSearchValue): void {
+    setUnitPick(next);
+    const id = next.unitId;
+    if (id === undefined) return;
+    if (edits.unitId !== id) setAuthorityNotice(null);
+    setEdits((prev) => (prev.unitId === id ? prev : { unitId: id }));
+    setUnitLoad((prev) => (prev !== null && prev.unitId === id && prev.status === 'failed' ? null : prev));
+  }
+
   // "Change property" (picked entries only) - back to the property step. An
   // edited message was written for THIS property, so confirm the discard; an
-  // untouched prefill just refills for the next pick.
+  // untouched prefill just refills for the next pick. The filters wait for
+  // the next pick (pickProperty): the same property keeps them.
   function onChangeProperty(): void {
     if (bodyEdited) {
       const ok = window.confirm(
@@ -366,15 +508,23 @@ export function BroadcastComposer(): React.JSX.Element {
     const previewed = { draftId: draft.draftId, key: draft.key };
     setPreviewBusy(true);
     setPreviewError(null);
+    setRefusal(null);
     setPreview(null);
     try {
       const result = await previewBroadcast(previewed.draftId);
       setPreview({ ...previewed, result });
     } catch (err) {
       if (err instanceof ApiError && err.status === 422 && err.code === 'org_not_on_list') {
-        // Spec D7: the stored filter's housing authority left the list after
-        // the draft was made - the same answer as the create's.
-        rejectAuthorityPick();
+        // Spec D7, matching-blast-rules D3b: a member of the stored filter
+        // left the list after the draft was made - the create's answer. This
+        // is the clicking render's rejectAuthority (its property and list,
+        // AR39): a property changed meanwhile keeps its own filter.
+        rejectAuthority(orgNotOnListBody(err)?.text ?? null);
+      } else if (err instanceof ApiError && err.status === 503 && err.code === 'audience_rules_unavailable') {
+        // matching-blast-rules D5, D7: the tours or decline read failed, so no
+        // list is served (it would check people the rules leave out). Compose
+        // stays, with Try again - kept with the draft this Preview read (AR39).
+        setRefusal({ ...previewed, unitId: unitKey, kind: 'rules_unavailable' });
       } else if (err instanceof ApiError) {
         setPreviewError(err.message);
       } else {
@@ -390,14 +540,16 @@ export function BroadcastComposer(): React.JSX.Element {
   // must not Preview/Send against it. Editing again retries the recreate. The
   // draft must have been made for what is on screen (draftKey === key) from
   // the very render a change lands in, before its recreate starts (R3-FE-1).
-  // And while the housing authority filter holds typed text (R2-FE-3, above).
+  // And while the housing authority filter holds typed text (R2-FE-3, above),
+  // and while the property prefill settles (matching-blast-rules D3).
   const canPreview =
     bodyTemplate.trim().length > 0 &&
     draft.draftId !== null &&
     draft.draftKey === draft.key &&
     !draft.reachPending &&
     !draft.stale &&
-    !authorityTyped;
+    !authorityTyped &&
+    !prefillPending;
 
   // Code review R3-FE-1: a Preview's candidates belong to the draft it
   // previewed. They are reviewed - and Send posts them - only while that
@@ -413,6 +565,19 @@ export function BroadcastComposer(): React.JSX.Element {
     preview.key === draft.key &&
     draft.draftKey === draft.key
       ? preview
+      : null;
+
+  // matching-blast-rules D7 (AR39): a 503 refusal is shown - the alert and its
+  // Try again - only under the SAME rule as a result: while the draft it read
+  // is still the current one and still made for what is on screen. Any filter,
+  // message or property change fails it, so the alert goes with no effect;
+  // a refusal that lands late shows nothing.
+  const currentRefusal =
+    refusal !== null &&
+    refusal.draftId === draft.draftId &&
+    refusal.key === draft.key &&
+    draft.draftKey === draft.key
+      ? refusal
       : null;
 
   // PROPERTY step - a Matching send ALWAYS carries a property, so until one is
@@ -447,7 +612,7 @@ export function BroadcastComposer(): React.JSX.Element {
           <span className={styles.pickerLabel}>Property</span>
           <UnitSearchField
             value={unitPick}
-            onChange={setUnitPick}
+            onChange={pickProperty}
             candidates={unitCandidates}
             inputLabel="Property"
           />
@@ -459,7 +624,7 @@ export function BroadcastComposer(): React.JSX.Element {
                 type="button"
                 className={styles.unitRow}
                 onClick={() =>
-                  setUnitPick({ label: shortAddress(u.address, u.unitId), unitId: u.unitId })
+                  pickProperty({ label: shortAddress(u.address, u.unitId), unitId: u.unitId })
                 }
               >
                 <span>{shortAddress(u.address, u.unitId)}</span>
@@ -548,9 +713,14 @@ export function BroadcastComposer(): React.JSX.Element {
               onChange={onFilterChange}
               orgList={orgList}
               onAuthorityTextChange={setAuthorityText}
-              authorityError={authorityNotice}
+              authorityError={
+                authorityNotice !== null && authorityNotice.unitId === unitKey ? authorityNotice.text : null
+              }
               disabled={previewBusy}
               {...(propertyVoucherSize !== undefined && { propertyVoucherSize })}
+              unusedAuthorities={authorityPrefill.unused}
+              noAuthorityMapped={authorityPrefill.names.length === 0 && authorityPrefill.unused.length > 0}
+              prefillNotices={prefillNotices}
               {...(draft.reachCount !== undefined && { reachCount: draft.reachCount })}
               reachPending={draft.reachPending}
               truncated={draft.truncated}
@@ -590,6 +760,19 @@ export function BroadcastComposer(): React.JSX.Element {
           {previewError}
         </p>
       ) : null}
+      {currentRefusal !== null ? (
+        <p className={styles.error} role="alert">
+          {RULES_UNAVAILABLE}{' '}
+          <button
+            type="button"
+            className={styles.retryBtn}
+            disabled={!canPreview || previewBusy}
+            onClick={() => void onPreview()}
+          >
+            Try again
+          </button>
+        </p>
+      ) : null}
       {preview !== null && currentPreview === null ? (
         <p className={styles.error} role="alert">
           {AUDIENCE_CHANGED}
@@ -615,7 +798,7 @@ export function BroadcastComposer(): React.JSX.Element {
             <span className={styles.previewHint}>Write a message to enable the preview.</span>
           ) : authorityTyped ? (
             <span className={styles.previewHint}>{ORG_FILTER_TYPED_HINT}</span>
-          ) : draft.reachPending || draft.draftId === null ? (
+          ) : draft.reachPending || draft.draftId === null || prefillPending ? (
             <span className={styles.previewHint}>Sizing the audience…</span>
           ) : null
         ) : null}

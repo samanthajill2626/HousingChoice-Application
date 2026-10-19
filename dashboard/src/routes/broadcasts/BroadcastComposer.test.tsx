@@ -4,11 +4,11 @@
 // count updates from createBroadcast (estimatedCount/truncated) + the truncated
 // warning; the single-draft/no-orphan behavior (a material audience change
 // recreates the draft and deleteBroadcasts the prior id).
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { Contact, EventStreamHandlers, UnitItem } from '../../api/index.js';
+import type { Contact, EventStreamHandlers, OrgEntry, UnitItem } from '../../api/index.js';
 import { ApiError } from '../../api/index.js';
 
 const getUnit = vi.fn();
@@ -69,6 +69,44 @@ const pickableUnits: UnitItem[] = [
       address: { line1: '77 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30303' },
     }),
   ];
+
+/** A housing authority entry of the organization list. */
+function orgEntry(orgId: string, name: string, spellings: string[] = []): OrgEntry {
+  return {
+    orgId,
+    kind: 'housing_authority',
+    name,
+    spellings,
+    createdAt: '2026-10-06T00:00:00.000Z',
+    createdBy: 'system',
+    updatedAt: '2026-10-06T00:00:00.000Z',
+    updatedBy: 'system',
+  };
+}
+
+/** A promise the test settles by hand - resolved, or rejected (a refusal
+ *  that lands late, matching-blast-rules AR39). */
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
+  let resolve: (value: T) => void = () => {};
+  let reject: (reason: unknown) => void = () => {};
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Outlast the composer's 600 ms create debounce: a draft that could be made
+ *  has been made by now. */
+async function outlastCreateDebounce(): Promise<void> {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 800));
+  });
+}
 
 function renderComposer(search = ''): ReturnType<typeof render> {
   return render(
@@ -650,73 +688,414 @@ describe('BroadcastComposer — property picker at portfolio scale', () => {
   });
 });
 
-// Spec 2026-10-06 D7: a picked housing authority can leave the list between
-// the pick and the server's check (the draft create, or Preview).
-describe('BroadcastComposer - a housing authority that left the list', () => {
-  const ATLANTA = {
-    orgId: 'o-atl',
-    kind: 'housing_authority',
-    name: 'Atlanta Housing Authority',
-    spellings: ['AHA'],
-    createdAt: '2026-10-06T00:00:00.000Z',
-    createdBy: 'system',
-    updatedAt: '2026-10-06T00:00:00.000Z',
-    updatedBy: 'system',
-  };
-  const GONE = 'That housing authority is no longer on the list - pick it again';
-  const refused = (): ApiError =>
+// Spec 2026-10-06 D7, matching-blast-rules D3b: a member of the housing
+// authority filter can leave the list between the pick and the server's check
+// (the draft create, or Preview). THAT member alone is removed; the others
+// stay, and the removal is an edit (the prefill never puts it back).
+describe('BroadcastComposer - a housing authority that left the list (matching-blast-rules D3b)', () => {
+  const ATLANTA = orgEntry('o-atl', 'Atlanta Housing Authority', ['AHA']);
+  const DEKALB = orgEntry('o-dek', 'DeKalb County Housing Authority', ['HADC']);
+  const GONE = 'DeKalb County Housing Authority is no longer on the organization list, so it was removed from the filter.';
+  const refused = (text: string): ApiError =>
     new ApiError(422, 'org_not_on_list', 'org_not_on_list', {
       error: 'org_not_on_list',
       field: 'audience_filter',
-      text: 'Atlanta Housing Authority',
+      text,
       candidates: [],
       close: [],
     });
-
-  async function pickAtlanta(u: ReturnType<typeof userEvent.setup>): Promise<void> {
-    await u.type(screen.getByRole('combobox', { name: 'Housing authorities' }), 'AHA');
-    await u.click(await screen.findByRole('option', { name: /^Atlanta Housing Authority/ }));
-  }
+  const preview = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
 
   beforeEach(() => {
-    getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA] });
+    getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA, DEKALB] });
+    getUnit.mockResolvedValue(
+      unit({ accepted_authorities: ['Atlanta Housing Authority', 'DeKalb County Housing Authority'] }),
+    );
   });
 
-  it('a refused draft create clears the pick and says so - and Preview works again', async () => {
+  it('a refused draft create removes ONLY the named member, says so, and the next draft keeps the others', async () => {
     const u = userEvent.setup();
     createBroadcast.mockImplementation(async (body: { audience_filter?: { housing_authorities?: string[] } }) => {
-      if (body.audience_filter?.housing_authorities !== undefined) throw refused();
+      if (body.audience_filter?.housing_authorities?.includes('DeKalb County Housing Authority') === true) {
+        throw refused('DeKalb County Housing Authority');
+      }
       return { broadcastId: 'draft_1', status: 'draft', estimatedCount: 5, truncated: false };
     });
     renderComposer('?unitId=unit-0001');
-    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(1), { timeout: 4000 });
-    await pickAtlanta(u);
     expect(await screen.findByText(GONE, {}, { timeout: 4000 })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Remove Atlanta Housing Authority' })).not.toBeInTheDocument();
-    // The cleared filter is the first draft's again: no recreate needed, and
-    // the draft is not stale.
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled());
-    expect(createBroadcast).toHaveBeenCalledTimes(2);
-    // The next filter change clears the message.
-    await u.click(screen.getByRole('button', { name: /^3-BR/ }));
-    expect(screen.queryByText(GONE)).not.toBeInTheDocument();
-  });
-
-  it('a refused Preview clears the pick, says so, and recreates the draft without it', async () => {
-    const u = userEvent.setup();
-    previewBroadcast.mockRejectedValue(refused());
-    renderComposer('?unitId=unit-0001');
-    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(1), { timeout: 4000 });
-    await pickAtlanta(u);
-    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(2), { timeout: 4000 });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled());
-    await u.click(screen.getByRole('button', { name: 'Preview recipients' }));
-    expect(await screen.findByText(GONE)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Remove Atlanta Housing Authority' })).not.toBeInTheDocument();
-    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(3), { timeout: 4000 });
-    expect(createBroadcast.mock.calls[2]?.[0]?.audience_filter).toEqual({ contact_type: 'tenant', bedroomSize: 2 });
+    expect(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove DeKalb County Housing Authority' })).not.toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(createBroadcast.mock.calls.at(-1)?.[0]?.audience_filter).toEqual({
+      contact_type: 'tenant',
+      housing_authorities: ['Atlanta Housing Authority'],
+      bedroomSize: 2,
+    });
     // Never the raw code.
     expect(screen.queryByText(/org_not_on_list/)).not.toBeInTheDocument();
+    // The next filter change clears the message; DeKalb stays out (an edit).
+    await u.click(screen.getByRole('button', { name: /^3-BR/ }));
+    expect(screen.queryByText(GONE)).not.toBeInTheDocument();
+    await waitFor(
+      () =>
+        expect(createBroadcast.mock.calls.at(-1)?.[0]?.audience_filter).toEqual({
+          contact_type: 'tenant',
+          housing_authorities: ['Atlanta Housing Authority'],
+          bedroomSize: 3,
+        }),
+      { timeout: 4000 },
+    );
+  });
+
+  it('a refused Preview removes ONLY the named member, says so, and recreates the draft without it', async () => {
+    const u = userEvent.setup();
+    previewBroadcast.mockRejectedValue(refused('DeKalb County Housing Authority'));
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(createBroadcast).toHaveBeenCalledTimes(1);
+    expect(createBroadcast.mock.calls[0]?.[0]?.audience_filter).toEqual({
+      contact_type: 'tenant',
+      housing_authorities: ['Atlanta Housing Authority', 'DeKalb County Housing Authority'],
+      bedroomSize: 2,
+    });
+    await u.click(preview());
+    expect(await screen.findByText(GONE)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove DeKalb County Housing Authority' })).not.toBeInTheDocument();
+    await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(2), { timeout: 4000 });
+    expect(createBroadcast.mock.calls[1]?.[0]?.audience_filter).toEqual({
+      contact_type: 'tenant',
+      housing_authorities: ['Atlanta Housing Authority'],
+      bedroomSize: 2,
+    });
+    expect(screen.queryByText(/org_not_on_list/)).not.toBeInTheDocument();
+  });
+
+  // matching-blast-rules AR39: a refusal belongs to the property its Preview
+  // was made for. Change property stays enabled while a Preview loads (AR33),
+  // so a 422 can land after staff picked ANOTHER property: it removes nothing
+  // from that property's filter and says nothing there.
+  it('a refused Preview that lands after a change to a DIFFERENT property changes nothing there and says nothing', async () => {
+    const u = userEvent.setup();
+    const peach = unit({
+      unitId: 'u-1',
+      address: { line1: '77 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      accepted_authorities: ['DeKalb County Housing Authority'],
+    });
+    const oak = unit({
+      unitId: 'u-2',
+      address: { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      accepted_authorities: ['Atlanta Housing Authority'],
+    });
+    getAllUnits.mockResolvedValue([peach, oak]);
+    getUnit.mockImplementation(async (id: string) => (id === 'u-2' ? oak : peach));
+    renderComposer();
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    expect(await screen.findByRole('button', { name: 'Remove DeKalb County Housing Authority' })).toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    const held = deferred<unknown>();
+    previewBroadcast.mockReturnValueOnce(held.promise);
+    await u.click(preview());
+    // Change stays enabled while the Preview loads: staff move on to 12 Oak St.
+    await u.click(screen.getByRole('button', { name: 'Change property' }));
+    await u.click(await screen.findByRole('button', { name: /12 Oak St/ }));
+    expect(await screen.findByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
+    // Only now is 77 Peachtree's Preview refused - for DeKalb.
+    await act(async () => held.reject(refused('DeKalb County Housing Authority')));
+    // 12 Oak St keeps exactly its own prefill, and nothing is said.
+    expect(screen.getAllByRole('button', { name: /^Remove / }).map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Remove Atlanta Housing Authority',
+    ]);
+    expect(screen.queryByText(/is no longer on the organization list/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    // Every draft made for 12 Oak St carries its prefill.
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    const oakDrafts = createBroadcast.mock.calls
+      .map(([body]) => body as { unitId?: string; audience_filter?: { housing_authorities?: string[] } })
+      .filter((body) => body.unitId === 'u-2');
+    expect(oakDrafts.length).toBeGreaterThan(0);
+    for (const body of oakDrafts) {
+      expect(body.audience_filter?.housing_authorities).toEqual(['Atlanta Housing Authority']);
+    }
+  });
+});
+
+// matching-blast-rules D3: the composer fills the housing authorities (and the
+// voucher size, D3a) from the property. The prefill BELONGS TO THE PROPERTY:
+// staff edits win while it stays; a DIFFERENT property empties both filters at
+// once and its prefill fills them when it loads. Preview waits for the prefill
+// ONLY with a property attached and the filters on - and no draft is made
+// while it waits (AR23).
+describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', () => {
+  const ATLANTA = orgEntry('o-atl', 'Atlanta Housing Authority', ['AHA']);
+  const DEKALB = orgEntry('o-dek', 'DeKalb County Housing Authority', ['HADC']);
+  const preview = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
+  const lastDraftFilter = (): unknown =>
+    (createBroadcast.mock.calls.at(-1)?.[0] as { audience_filter?: unknown } | undefined)?.audience_filter;
+
+  beforeEach(() => {
+    getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA, DEKALB] });
+  });
+
+  it('fills the housing authorities from the property - exact names and unique spellings, in its order - and notes names off the list', async () => {
+    getUnit.mockResolvedValue(unit({ accepted_authorities: ['HADC', 'Atlanta Housing Authority', 'Nowhere Board'] }));
+    renderComposer('?unitId=unit-0001');
+    expect(await screen.findByRole('button', { name: 'Remove DeKalb County Housing Authority' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
+    expect(screen.getByText('Not used (not on the organization list): Nowhere Board')).toBeInTheDocument();
+    // The caption's housing authority sentence shows while the list is non-empty.
+    expect(screen.getByText(/While a housing authority is selected/)).toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(lastDraftFilter()).toEqual({
+      contact_type: 'tenant',
+      housing_authorities: ['DeKalb County Housing Authority', 'Atlanta Housing Authority'],
+      bedroomSize: 2,
+    });
+  });
+
+  it('when none of the property authorities map, says the blast is not limited by housing authority', async () => {
+    getUnit.mockResolvedValue(unit({ accepted_authorities: ['Nowhere Board'] }));
+    renderComposer('?unitId=unit-0001');
+    expect(
+      await screen.findByText(
+        'Not used (not on the organization list): Nowhere Board This blast is not limited by housing authority.',
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSize: 2 });
+  });
+
+  it('staff edits win while the property stays: a size picked before the list lands is kept, and the authorities still fill in', async () => {
+    const u = userEvent.setup();
+    const list = deferred<unknown>();
+    getOrgList.mockReturnValue(list.promise);
+    getUnit.mockResolvedValue(unit({ accepted_authorities: ['Atlanta Housing Authority'] }));
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(screen.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'true'));
+    await u.click(screen.getByRole('button', { name: /^3-BR/ }));
+    await act(async () => list.resolve({ version: 1, entries: [ATLANTA, DEKALB] }));
+    expect(await screen.findByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(lastDraftFilter()).toEqual({
+      contact_type: 'tenant',
+      housing_authorities: ['Atlanta Housing Authority'],
+      bedroomSize: 3,
+    });
+  });
+
+  it('the same property again changes nothing; a DIFFERENT one empties both filters at once - no confirm - then its prefill fills them', async () => {
+    const u = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, 'confirm');
+    const peach = unit({
+      unitId: 'u-1',
+      address: { line1: '77 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      accepted_authorities: ['Atlanta Housing Authority'],
+    });
+    const oak = unit({
+      unitId: 'u-2',
+      beds: 3,
+      address: { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      accepted_authorities: ['DeKalb County Housing Authority'],
+    });
+    getAllUnits.mockResolvedValue([peach, oak]);
+    const oakLoad = deferred<UnitItem>();
+    getUnit.mockImplementation((id: string) => (id === 'u-2' ? oakLoad.promise : Promise.resolve(peach)));
+    renderComposer();
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    // Staff edit both of Peachtree's prefilled filters.
+    await u.click(await screen.findByRole('button', { name: 'Remove Atlanta Housing Authority' }));
+    await u.click(screen.getByRole('button', { name: /^4\+ BR/ }));
+    // The same property again: the edits stay.
+    await u.click(screen.getByRole('button', { name: 'Change property' }));
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    await screen.findByRole('combobox', { name: 'Housing authorities' });
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(screen.queryByRole('button', { name: 'Remove Atlanta Housing Authority' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^4\+ BR/ })).toHaveAttribute('aria-pressed', 'true');
+    // A DIFFERENT property: both filters are empty at once, before it loads.
+    await u.click(screen.getByRole('button', { name: 'Change property' }));
+    await u.click(await screen.findByRole('button', { name: /12 Oak St/ }));
+    const chips = within(await screen.findByRole('group', { name: 'Voucher size' })).getAllByRole('button');
+    for (const chip of chips) expect(chip).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByRole('button', { name: /^Remove / })).not.toBeInTheDocument();
+    // ...and its prefill fills them when it loads.
+    await act(async () => oakLoad.resolve(oak));
+    expect(await screen.findByRole('button', { name: 'Remove DeKalb County Housing Authority' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(lastDraftFilter()).toEqual({
+      contact_type: 'tenant',
+      housing_authorities: ['DeKalb County Housing Authority'],
+      bedroomSize: 3,
+    });
+    expect(confirmSpy).not.toHaveBeenCalled();
+  });
+
+  // AR34/AR40 (AR23): while the prefill is unsettled NO draft is made - the
+  // reach line reads pending - and the one draft made once it settles carries
+  // the prefill.
+  it('with a property and the filters on, Preview waits for the organization list - the draft alone does not enable it', async () => {
+    const list = deferred<unknown>();
+    getOrgList.mockReturnValue(list.promise);
+    getUnit.mockResolvedValue(unit({ accepted_authorities: ['Atlanta Housing Authority'] }));
+    renderComposer('?unitId=unit-0001');
+    // The property and its message are in, but the list has not loaded.
+    await waitFor(() => expect(screen.getByLabelText('Message')).not.toHaveValue(''));
+    await outlastCreateDebounce();
+    expect(createBroadcast).not.toHaveBeenCalled();
+    // The reach line reads pending (the spinner beside Preview is another
+    // role="status", so match the reach line's own text).
+    expect(screen.getByText(/Estimating reach/)).toBeInTheDocument();
+    expect(preview()).toBeDisabled();
+    expect(screen.getByText(/Sizing the audience/)).toBeInTheDocument();
+    await act(async () => list.resolve({ version: 1, entries: [ATLANTA] }));
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(createBroadcast).toHaveBeenCalledTimes(1);
+    expect(lastDraftFilter()).toEqual({
+      contact_type: 'tenant',
+      housing_authorities: ['Atlanta Housing Authority'],
+      bedroomSize: 2,
+    });
+  });
+
+  it('a failed property load settles the prefill with its notice - Preview works once a message is written', async () => {
+    const u = userEvent.setup();
+    getUnit.mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));
+    renderComposer('?unitId=unit-0001');
+    expect(
+      await screen.findByText(
+        "Couldn't load the property, so its housing authorities and voucher size were not filled in.",
+      ),
+    ).toBeInTheDocument();
+    await u.type(screen.getByLabelText('Message'), 'Hello there');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant' });
+  });
+
+  it('a failed organization list read settles the prefill with its notice; the voucher size still fills in', async () => {
+    getOrgList.mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));
+    getUnit.mockResolvedValue(unit({ accepted_authorities: ['Atlanta Housing Authority'] }));
+    renderComposer('?unitId=unit-0001');
+    expect(
+      await screen.findByText(
+        "Couldn't load the organization list, so housing authorities were not filled in from the property.",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSize: 2 });
+  });
+
+  // AR34 (AR23): typing proves the HOLD - with a message there would be a
+  // draft, were the prefill not waiting.
+  it('an ABORTED property load is neither loaded nor failed: no notice, and Preview keeps waiting', async () => {
+    const u = userEvent.setup();
+    getUnit.mockRejectedValue(new DOMException('The operation was aborted.', 'AbortError'));
+    renderComposer('?unitId=unit-0001');
+    await u.type(await screen.findByLabelText('Message'), 'Hello there');
+    await outlastCreateDebounce();
+    expect(createBroadcast).not.toHaveBeenCalled();
+    expect(screen.getByText(/Estimating reach/)).toBeInTheDocument();
+    expect(preview()).toBeDisabled();
+    expect(screen.getByText(/Sizing the audience/)).toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't load the property/)).not.toBeInTheDocument();
+  });
+
+  it('(PIN) a resumed draft is never gated: the list never loads, and Preview still works once a message is written', async () => {
+    const u = userEvent.setup();
+    getOrgList.mockReturnValue(new Promise(() => {}));
+    renderComposer('?draftId=bcast_resume');
+    await u.type(screen.getByLabelText('Message'), 'Hello there');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+  });
+
+  it('(PIN) a seeds-only send is never gated: the list never loads, and Preview still works', async () => {
+    getOrgList.mockReturnValue(new Promise(() => {}));
+    renderComposer('?unitId=unit-0001&contactId=c-seed');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+  });
+});
+
+// matching-blast-rules D7, D8: the rules reads behind a filter draft's preview
+// and reach.
+describe('BroadcastComposer - tour and Not interested reads (matching-blast-rules D7, D8)', () => {
+  it('a 503 audience_rules_unavailable keeps compose with the message, and Try again re-runs the preview', async () => {
+    const u = userEvent.setup();
+    previewBroadcast
+      .mockRejectedValueOnce(
+        new ApiError(503, 'audience_rules_unavailable', 'audience_rules_unavailable', {
+          error: 'audience_rules_unavailable',
+        }),
+      )
+      .mockResolvedValueOnce({
+        count: 1,
+        truncated: false,
+        candidates: [
+          {
+            contactId: 'c1',
+            firstName: 'Tasha',
+            phone: '+14040000001',
+            alreadySentThisProperty: false,
+            has_consent: true,
+            seeded: false,
+            declinedThisProperty: false,
+            checkedByDefault: true,
+          },
+        ],
+        priorRecipientContactIds: [],
+        seedContactIds: [],
+        unresolvedSeedIds: [],
+        declinedContactIds: [],
+        tourHolds: [],
+      });
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled(), {
+      timeout: 4000,
+    });
+    await u.click(screen.getByRole('button', { name: 'Preview recipients' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      "Couldn't check tours and Not interested replies, so the recipient list can't be shown yet.",
+    );
+    // Still on compose, never the raw code.
+    expect(screen.queryByRole('heading', { name: 'Review recipients' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/audience_rules_unavailable/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Message')).not.toHaveValue('');
+    await u.click(within(alert).getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('heading', { name: 'Review recipients' })).toBeInTheDocument();
+    expect(previewBroadcast).toHaveBeenCalledTimes(2);
+  });
+
+  it('(PIN) a draft whose reach could not be computed (no estimatedCount) reads "Reach estimate unavailable"', async () => {
+    createBroadcast.mockResolvedValue({ broadcastId: 'draft_1', status: 'draft', truncated: false });
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled(), {
+      timeout: 4000,
+    });
+    expect(screen.getByRole('status')).toHaveTextContent('Reach estimate unavailable');
+  });
+
+  // AR25 (its mechanism is AR39's): the alert belongs to the draft its
+  // Preview read, so a filter change takes it away - no effect clears it.
+  it('after a 503, changing the voucher size removes the alert', async () => {
+    const RULES_UNAVAILABLE =
+      "Couldn't check tours and Not interested replies, so the recipient list can't be shown yet.";
+    const u = userEvent.setup();
+    previewBroadcast.mockRejectedValue(
+      new ApiError(503, 'audience_rules_unavailable', 'audience_rules_unavailable', {
+        error: 'audience_rules_unavailable',
+      }),
+    );
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Preview recipients' })).toBeEnabled(), {
+      timeout: 4000,
+    });
+    await u.click(screen.getByRole('button', { name: 'Preview recipients' }));
+    expect(await screen.findByText(RULES_UNAVAILABLE)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    await u.click(screen.getByRole('button', { name: /^3-BR/ }));
+    expect(screen.queryByText(RULES_UNAVAILABLE)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
   });
 });
 

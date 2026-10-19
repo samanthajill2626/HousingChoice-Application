@@ -42,21 +42,32 @@ export interface ComposerDraftInput {
    *  keep the stays-in-the-list behavior. A delete racing a just-sent broadcast
    *  is harmless: the DELETE route is draft-guarded (409, no side effects). */
   disposable?: boolean;
-  /** Called when a (re)create is refused 422 org_not_on_list - the picked
-   *  housing authority left the list (spec 2026-10-06 D7). The composer clears
-   *  the pick and owns the message, so this draft is NOT marked stale: the
-   *  cleared filter either matches the current draft again or recreates it. */
-  onOrgNotOnList?: () => void;
+  /** Called when a (re)create is refused 422 org_not_on_list - a member of
+   *  the housing authority filter left the list (spec 2026-10-06 D7). The
+   *  composer reads the refused member from the error's body, removes it and
+   *  owns the message (matching-blast-rules D3b), so this draft is NOT marked
+   *  stale: the changed filter either matches the current draft again or
+   *  recreates it. */
+  onOrgNotOnList?: (err: ApiError) => void;
+  /** matching-blast-rules D3 (AR23, AR35): true while the composer's property
+   *  prefill is unsettled (a property attached, the filters on, the property
+   *  or the organization list not loaded or failed yet). While it holds, NO
+   *  draft is created and none is deleted - a draft made now would carry a
+   *  filter the prefill is about to change - and `reachPending` reads true. */
+  hold?: boolean;
 }
 
 export interface ComposerDraftState {
   /** The current draft id (the Preview/Send target), or null when none yet. */
   draftId: string | null;
-  /** The live reach estimate from the latest draft, or undefined when none. */
+  /** The live reach from the latest draft - how many review rows will start
+   *  checked (matching-blast-rules D8) - or undefined when none, or when the
+   *  server could not compute it (estimatedCount omitted: a rules read failed). */
   reachCount?: number;
   /** The latest draft's truncated flag. */
   truncated: boolean;
-  /** True while a draft (re)creation is in flight. */
+  /** True while a draft (re)creation is in flight - or while the input holds
+   *  the draft (`hold`, matching-blast-rules AR23). */
   reachPending: boolean;
   /** The flyer link for the draft's unit from the latest create response, or
    *  null when none (no unit / no flyer). Task 7's resolved editor uses it. */
@@ -156,6 +167,13 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
   const clearedRef = useRef(true);
 
   useEffect(() => {
+    // matching-blast-rules D3 (AR23, AR35): while the composer's property
+    // prefill is unsettled, make NO draft (and so delete none) - before the
+    // no-message exit too. The previous run's cleanup already dropped any
+    // pending debounce and any create in flight; the returned reachPending
+    // reads true (derived from `hold`, below), and the run after the hold
+    // lifts makes the one draft for the settled inputs.
+    if (input.hold === true) return;
     // No message yet → nothing to estimate (the backend rejects an empty body).
     if (!hasBody) {
       if (!clearedRef.current) {
@@ -230,9 +248,10 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
             err.status === 422 &&
             err.code === 'org_not_on_list'
           ) {
-            // Spec 2026-10-06 D7: the composer clears the pick and says so.
+            // Spec 2026-10-06 D7, matching-blast-rules D3b: the composer removes
+            // the refused member and says so.
             setError(null);
-            onOrgNotOnList();
+            onOrgNotOnList(err);
             return;
           }
           // The recreate FAILED, so currentIdRef still points at the PRIOR draft
@@ -255,13 +274,15 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
       // on an unmounted component (no React warning, no leaked orphan).
       genRef.current += 1;
     };
-  }, [key, hasBody, input.unitId, input.bodyTemplate, input.filter, input.seedContactIds]);
+  }, [key, hasBody, input.hold, input.unitId, input.bodyTemplate, input.filter, input.seedContactIds]);
 
   return {
     draftId,
     reachCount,
     truncated,
-    reachPending,
+    // AR35: DERIVED, never a flag stored from `hold` - it cannot stick once
+    // the prefill settles (a failed property load settles it too).
+    reachPending: input.hold === true || reachPending,
     flyerUrl,
     error,
     stale,

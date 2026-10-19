@@ -1,14 +1,29 @@
 ---
 id: lint-backlog-repo-wide
-title: 22 pre-existing react-hooks lint errors across 17 files keep `npm run lint` from being a bare completion gate
+title: 20 pre-existing react-hooks lint errors across 17 files keep `npm run lint` from being a bare completion gate
 type: debt
 severity: med
 status: open
 area: repo
 created: 2026-08-24
-updated: 2026-10-13
+updated: 2026-10-19
 refs: eslint.config.mjs, AGENTS.md
 ---
+
+**Status 2026-10-19 (`feat/matching-blast-rules`).** **20 errors across 17
+files, 0 warnings**, every one still a `react-hooks/*` rule in
+`dashboard/src` (12 `set-state-in-effect`, 4 `refs`, 2 `purity`, 2
+`immutability`; `npx eslint .` on the branch). Two fewer than below, both
+`react-hooks/set-state-in-effect` in
+`dashboard/src/routes/broadcasts/BroadcastComposer.tsx`: the property-load
+effect's `setUnit(null)` reset and the voucher-size prefill effect are gone -
+the load is now kept with the id it was for (set only in its `.then` /
+`.catch`) and the housing authority and voucher size prefill is DERIVED
+during render from the property and the organization list, with staff edits
+kept per property (matching-blast-rules plan ruling AR16). The file keeps its
+two `setMessage` effects; `useComposerDraft.ts` keeps its `react-hooks/refs`.
+`AGENTS.md`'s "23 errors across 18 dashboard files" is a dated (2026-10-07)
+statement and is left as it is.
 
 **Status 2026-10-13 (`feat/primary-contact-integrity`).** **22 errors across
 17 files, 0 warnings**, every one still a `react-hooks/*` rule in

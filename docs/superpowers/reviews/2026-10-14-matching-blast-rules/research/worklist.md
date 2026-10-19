@@ -141,6 +141,15 @@ slice briefs and commit messages.
   (`BroadcastComposer.tsx`: the two `setMessage` set-state-in-effect effects;
   `useComposerDraft.ts`: the pre-existing refs error) and no new error of any
   rule (count rule ids from `--format json`, severity 2 - see OR-S4-4).
+- **OR-S3-8 (AR43, Cameron 2026-10-18, planner commit f62cc62f).** The
+  `requested` tour label is `Tour requested <d>, no date yet` (no `at`:
+  `Tour requested, no date yet`); `tourHoldLabel` returns
+  `` `Tour requested${at}, no date yet` ``; its accessible-name cue is the label
+  lower-cased (`tour requested oct 12, no date yet`); the Add a tenant note
+  shows it as displayed. Plan section 1.1, Task 3.2's `tourHoldLabel` code and
+  tests and Task 3.3's Add a tenant test are already edited; AR43 (plan
+  section 4.4) is the authority if any copy disagrees. Label text only - no
+  rule, kind, order or wire change.
 
 ### S4
 
@@ -164,9 +173,27 @@ slice briefs and commit messages.
   "<text> is no longer on the organization list, so it was removed from the
   filter."), keep the still-open "offer the renamed entry" improvement, set
   `updated:`.
+- **OR-S4-5 (AR43).** S4's copy follows AR43: `e2e/support/selectors.md`'s
+  tour-label text and the new spec's `requestedLabel`
+  (`` `Tour requested ${date}, no date yet` ``, its checkbox cue lower-cased)
+  are already edited in the plan (f62cc62f); AR43 is the authority.
 - **OR-S4-4 (R4-1, R4-4, AR18/AR27/AR28/AR38/AR42).** Tasks 4.4 and 4.5 (sync,
   gates, gate-5 comparison, lint record, handback) are the ORCHESTRATOR's.
   Gate 5 is compared per rule id from `--format json` (severity 2) on BOTH
   sides, so bare core rules (`no-var`, `prefer-const`, `prefer-rest-params`,
   `prefer-spread`, `no-restricted-syntax`) are seen; the lint record counts
   files from JSON `errorCount > 0`, never from stylish path lines.
+
+## Slice hand-downs (orchestrator-verified against git)
+
+- **S1 -> S2/S3** (S1 tip 28b600a3; tree clean; S1 set 343/343, typecheck 0,
+  smoke 0 per `build/S1-report.md`). The shipped contract is the report's
+  "Contract S1 shipped" section (blastAudienceRules exports at binding 2.1
+  exactly; `AudienceRulesUnavailableError` is S2's, AR6; wire filter
+  `{ contact_type, housing_authorities? (non-empty only), bedroomSize?,
+  excludeOptedOut, excludeUnreachable }`, never `housing_authority`). S2
+  anchors verified by the orchestrator on the S1 tip: the import S2 merges
+  into is `app/src/routes/broadcasts.ts:90`; OR-S2-2's two lines are `:19-20`
+  (each unique); the 201 anchors `estimatedCount: estimatedAudience,` are
+  `:732` (log), `:735` (audit) and `:741` (the 201 body). The router header
+  S1 wrote is `:14-35` (AR9: S2 only inserts).

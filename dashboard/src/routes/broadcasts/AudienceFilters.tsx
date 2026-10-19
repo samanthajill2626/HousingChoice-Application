@@ -59,8 +59,9 @@ export interface AudienceFiltersProps {
   filter: AudienceFilter;
   onChange: (next: AudienceFilter) => void;
   /** The organization list behind the housing authorities picker. The
-   *  composer reads it ONCE (useOrgList) and passes it down: its property
-   *  prefill and its Preview gate read the same answer (matching-blast-rules D3). */
+   *  composer reads it (useOrgList: once per mount, and again only by a failed
+   *  read's Try again - AR44) and passes it down: its property prefill and its
+   *  Preview gate read the same answer (matching-blast-rules D3). */
   orgList: OrgListView;
   /** The voucher size the composed-from property takes (its recorded size, else
    *  its beds - acceptedVoucherSizes); drives the "matches property" tag on the
@@ -124,7 +125,8 @@ export function AudienceFilters({
   // forms keep a picker holding text usable the same way (useTypedOrgText,
   // R3-FE-3): nothing ever waits on a field staff cannot use. An empty field
   // follows their rule too (R4-3): only a failed read with no list in hand
-  // disables it - this list is read once per mount, so its failed read never
+  // disables it - this list is read once per mount and again only by the hold
+  // notice's Try again after a failed read (AR44), so a failed read here never
   // has one.
   const [typed, setTyped] = useState('');
 
@@ -148,6 +150,11 @@ export function AudienceFilters({
   // The chip that matches the property's voucher size (capped at the top "4+" chip).
   const matchedChipValue =
     propertyVoucherSize !== undefined ? Math.max(0, Math.min(4, propertyVoucherSize)) : undefined;
+
+  // D3 (AR44): the "Not used" names end with ONE period - none is added when
+  // the last name already ends with one (fix-wave-2 review FW2-7).
+  const unusedNames = unusedAuthorities.join(', ');
+  const unusedNote = `${NOT_USED_PREFIX}${unusedNames}${unusedNames.endsWith('.') ? '' : '.'}`;
 
   return (
     <section className={styles.filters} aria-labelledby={`${uid}-heading`}>
@@ -222,12 +229,15 @@ export function AudienceFilters({
           <p className={styles.matchNote}>
             {/* The names end with a period (spec revision 7, AR44); the
                 not-limited sentence follows it. */}
-            {`${NOT_USED_PREFIX}${unusedAuthorities.join(', ')}.`}
+            {unusedNote}
             {noAuthorityMapped && authorities.length === 0 ? NOT_LIMITED : null}
           </p>
         ) : null}
+        {/* AR44: a hold notice is the one thing that says why Preview is
+            disabled, so it is announced - an alert with its Try again inside,
+            as the compose step's 503 notice is (fix-wave-2 review FW2-2). */}
         {prefillNotices.map((notice) => (
-          <p key={notice.text} className={styles.prefillNotice}>
+          <p key={notice.text} className={styles.prefillNotice} role="alert">
             {notice.text}{' '}
             <button type="button" className={styles.prefillRetry} onClick={notice.onRetry}>
               Try again

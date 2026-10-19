@@ -847,6 +847,16 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     // The spinner beside Preview is another role="status": match the text.
     expect(screen.getByText(/Estimating reach/)).toBeInTheDocument();
   }
+  /** FW2-1: while a failed read's notice holds the prefill, the Preview area
+   *  offers no remedy - no hint under Preview (writing a message, clearing
+   *  typed text or waiting does not end a hold; Try again does) and no
+   *  spinner beside it (the Spinner is the role="status" named Loading). */
+  function expectNoPreviewHint(): void {
+    expect(screen.queryByText('Write a message to enable the preview.')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Sizing the audience/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Pick the housing authority from the list, or clear the text.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('status', { name: 'Loading' })).not.toBeInTheDocument();
+  }
 
   beforeEach(() => {
     getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA, DEKALB] });
@@ -963,7 +973,10 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     // role="status", so match the reach line's own text).
     expect(screen.getByText(/Estimating reach/)).toBeInTheDocument();
     expect(preview()).toBeDisabled();
+    // A prefill still LOADING settles by itself: the hint and the spinner
+    // say so (FW2-1 leaves them to this case).
     expect(screen.getByText(/Sizing the audience/)).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Loading' })).toBeInTheDocument();
     await act(async () => list.resolve({ version: 1, entries: [ATLANTA] }));
     await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
     expect(createBroadcast).toHaveBeenCalledTimes(1);
@@ -976,15 +989,25 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
 
   // AR44: typing proves the HOLD - with a message there would be a draft,
   // were the prefill not held. The ?unitId= entry has no other way back.
-  it('a failed property load HOLDS the prefill: no draft, Preview disabled, its notice with Try again (AR44)', async () => {
+  // FW2-1: the notice alone explains it - writing a message, or clearing text
+  // typed in the picker, is no remedy, so nothing beside Preview says it is.
+  it('a failed property load HOLDS the prefill: no draft, Preview disabled, its notice an alert with Try again (AR44) - and no hint or spinner beside Preview (FW2-1)', async () => {
     const u = userEvent.setup();
     getUnit.mockRejectedValue(failed500());
     renderComposer('?unitId=unit-0001');
     const notice = await screen.findByText(PROPERTY_HOLD);
     expect(within(notice).getByRole('button', { name: 'Try again' })).toBeEnabled();
+    expectNoPreviewHint();
+    // FW2-2: the notice is announced.
+    expect(screen.getByRole('alert')).toBe(notice);
     await u.type(screen.getByLabelText('Message'), 'Hello there');
     await expectHeld();
-    expect(screen.getByText(/Sizing the audience/)).toBeInTheDocument();
+    expectNoPreviewHint();
+    // Text typed in the housing authority filter (the list loaded) is no
+    // remedy either while the hold stands.
+    await u.type(screen.getByRole('combobox', { name: 'Housing authorities' }), 'Atl');
+    expect(preview()).toBeDisabled();
+    expectNoPreviewHint();
   });
 
   it('a failed organization list read HOLDS the prefill of a property that accepts an authority - notice and Try again; the voucher size still fills in (AR44)', async () => {
@@ -993,13 +1016,37 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     renderComposer('?unitId=unit-0001');
     const notice = await screen.findByText(LIST_HOLD);
     expect(within(notice).getByRole('button', { name: 'Try again' })).toBeEnabled();
-    // The picker says its own error, as before.
-    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load housing authorities");
+    // The picker says its own error, as before, in an alert of its own; the
+    // hold notice is the other alert (FW2-2).
+    const alerts = screen.getAllByRole('alert');
+    expect(alerts).toHaveLength(2);
+    expect(alerts[0]).toHaveTextContent("Couldn't load housing authorities");
+    expect(alerts[1]).toBe(notice);
     // The voucher size fills in from the loaded property while the list holds.
     expect(screen.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'true');
     // The message prefill landed with the property: only the hold stops a draft.
     expect(screen.getByLabelText('Message')).not.toHaveValue('');
     await expectHeld();
+  });
+
+  // FW2-1: the list hold, too, is explained by its notice alone - typing more
+  // or emptying the message is no remedy, so nothing beside Preview says it is.
+  it('a failed organization list read shows no hint and no spinner beside Preview - not after typing, not with the message emptied (FW2-1)', async () => {
+    const u = userEvent.setup();
+    getOrgList.mockRejectedValue(failed500());
+    getUnit.mockResolvedValue(unit({ accepted_authorities: ['Atlanta Housing Authority'] }));
+    renderComposer('?unitId=unit-0001');
+    await screen.findByText(LIST_HOLD);
+    const message = screen.getByLabelText('Message');
+    await waitFor(() => expect(message).not.toHaveValue(''));
+    expectNoPreviewHint();
+    await u.type(message, ' See you soon.');
+    await expectHeld();
+    expectNoPreviewHint();
+    await u.clear(message);
+    expect(preview()).toBeDisabled();
+    expectNoPreviewHint();
+    expect(screen.getByText(LIST_HOLD)).toBeInTheDocument();
   });
 
   // AR34 (AR23), AR41: typing proves the HOLD - with a message there would be
@@ -1013,7 +1060,9 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     expect(createBroadcast).not.toHaveBeenCalled();
     expect(screen.getByText(/Estimating reach/)).toBeInTheDocument();
     expect(preview()).toBeDisabled();
+    // Still loading (no notice): the hint and the spinner stay (FW2-1).
     expect(screen.getByText(/Sizing the audience/)).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Loading' })).toBeInTheDocument();
     expect(screen.queryByText(/Couldn't load the property/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
   });

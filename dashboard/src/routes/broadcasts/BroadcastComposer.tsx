@@ -153,10 +153,10 @@ export function BroadcastComposer(): React.JSX.Element {
   // operator opts in ("Add more tenants by filters" - a one-way flip).
   const [audienceEnabled, setAudienceEnabled] = useState(seedContactIds.length === 0);
   const [seedContact, setSeedContact] = useState<Contact | null>(null);
-  // The housing authority list behind the filters' picker - read ONCE here
-  // (one GET /api/organizations per mount), not in AudienceFilters: the
-  // property prefill and the Preview gate read the same answer
-  // (matching-blast-rules D3).
+  // The housing authority list behind the filters' picker - read here, once
+  // per mount (one GET /api/organizations; again only by the failed-read
+  // notice's Try again, AR44), not in AudienceFilters: the property prefill
+  // and the Preview gate read the same answer (matching-blast-rules D3).
   const orgList = useOrgList();
 
   // Property picker state - only used when the entry point did NOT fix a unit.
@@ -249,6 +249,11 @@ export function BroadcastComposer(): React.JSX.Element {
     prefillNotices.push({ text: PROPERTY_LOAD_FAILED, onRetry: () => setUnitRetry((n) => n + 1) });
   }
   if (prefillGated && orgListHold) prefillNotices.push({ text: ORG_LIST_FAILED, onRetry: orgList.reload });
+  // Every notice is a hold (each needs `prefillPending`): one ended only by
+  // its Try again - not by time, a message or any filter - so while one shows
+  // it is the explanation, and the Preview area adds no hint and no spinner
+  // (fix-wave-2 review FW2-1).
+  const heldOnFailedRead = prefillNotices.length > 0;
 
   // Preview step state. A result is kept with the draft it previewed and the
   // inputs that draft was made for: those candidates belong to that draft
@@ -831,12 +836,16 @@ export function BroadcastComposer(): React.JSX.Element {
         >
           {previewBusy ? 'Loading…' : 'Preview recipients'}
         </button>
-        {draft.reachPending ? <Spinner /> : null}
+        {draft.reachPending && !heldOnFailedRead ? <Spinner /> : null}
         {/* A disabled button must say WHY: the operator-actionable gates are
             the empty message and text typed in the housing authority filter;
-            the settling draft/reach is transient (spinner). A stale draft's
-            failure already renders in the error alert above. */}
-        {!previewBusy && !canPreview ? (
+            a draft, reach or prefill still loading settles by itself (the
+            spinner). A prefill HELD on a failed read (AR44) is neither: only
+            its notice's Try again ends it, and that notice (an alert under
+            the picker) says so - so while it shows there is no hint and no
+            spinner here (FW2-1); the reach line stays pending (AR44). A stale
+            draft's failure already renders in the error alert above. */}
+        {!previewBusy && !canPreview && !heldOnFailedRead ? (
           bodyTemplate.trim().length === 0 ? (
             <span className={styles.previewHint}>Write a message to enable the preview.</span>
           ) : authorityTyped ? (

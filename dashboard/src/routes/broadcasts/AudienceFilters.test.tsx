@@ -264,6 +264,11 @@ describe('AudienceFilters - housing authorities (matching-blast-rules D2)', () =
 });
 
 describe('AudienceFilters - the property prefill notes (matching-blast-rules D3)', () => {
+  const PROPERTY_HOLD =
+    "Couldn't load the property, so its housing authorities and voucher size can't be filled in yet.";
+  const LIST_HOLD =
+    "Couldn't load the organization list, so housing authorities can't be filled in from the property yet.";
+
   it('names the property authorities that are not on the organization list', () => {
     render(
       <Harness
@@ -292,12 +297,51 @@ describe('AudienceFilters - the property prefill notes (matching-blast-rules D3)
     expect(screen.getByText('Not used (not on the organization list): Nowhere Board.')).toBeInTheDocument();
   });
 
+  // FW2-7: one period ends the names, even when the last already has one.
+  it('a last name that already ends with a period gets no second one (FW2-7)', () => {
+    render(
+      <Harness
+        unusedAuthorities={['Nowhere Board', 'Housing Auth. of Fulton Co.']}
+        initialFilter={{ contact_type: 'tenant', housing_authorities: ['Atlanta Housing Authority'] }}
+      />,
+    );
+    expect(
+      screen.getByText('Not used (not on the organization list): Nowhere Board, Housing Auth. of Fulton Co.'),
+    ).toBeInTheDocument();
+  });
+
+  it('the not-limited sentence follows that one period (FW2-7)', () => {
+    render(<Harness unusedAuthorities={['Housing Auth. of Fulton Co.']} noAuthorityMapped />);
+    expect(
+      screen.getByText(
+        'Not used (not on the organization list): Housing Auth. of Fulton Co. This blast is not limited by housing authority.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // FW2-2: a hold notice is the one thing that says why Preview is disabled,
+  // so it is announced - an alert, as the compose step's 503 notice is.
+  it('each hold notice is an alert: its exact text, with its Try again inside (FW2-2)', () => {
+    render(
+      <Harness
+        prefillNotices={[
+          { text: PROPERTY_HOLD, onRetry: vi.fn() },
+          { text: LIST_HOLD, onRetry: vi.fn() },
+        ]}
+      />,
+    );
+    const alerts = screen.getAllByRole('alert');
+    expect(alerts.map((alert) => alert.textContent)).toEqual([
+      `${PROPERTY_HOLD} Try again`,
+      `${LIST_HOLD} Try again`,
+    ]);
+    for (const alert of alerts) {
+      expect(within(alert).getByRole('button', { name: 'Try again' })).toBeEnabled();
+    }
+  });
+
   it('shows each hold notice the composer passes with a Try again that re-runs only its own read (AR44)', async () => {
     const u = userEvent.setup();
-    const PROPERTY_HOLD =
-      "Couldn't load the property, so its housing authorities and voucher size can't be filled in yet.";
-    const LIST_HOLD =
-      "Couldn't load the organization list, so housing authorities can't be filled in from the property yet.";
     const retryProperty = vi.fn();
     const retryList = vi.fn();
     render(

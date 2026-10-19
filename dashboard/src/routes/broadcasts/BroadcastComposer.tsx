@@ -156,6 +156,11 @@ export function BroadcastComposer(): React.JSX.Element {
 
   // Property picker state - only used when the entry point did NOT fix a unit.
   const [unitCandidates, setUnitCandidates] = useState<UnitItem[]>([]);
+  // matching-blast-rules D9 (AR37, AR41): where the candidates read stands -
+  // set ONLY when it settles (its .then / .catch, never in an effect body), so
+  // the picker says nothing while it is in flight, and an ABORTED read
+  // (StrictMode's first mount) leaves it 'loading' for the next read to settle.
+  const [unitsRead, setUnitsRead] = useState<'loading' | 'loaded' | 'failed'>('loading');
   const [unitPick, setUnitPick] = useState<UnitSearchValue>({ label: '' });
   const effectiveUnitId = unitId ?? unitPick.unitId;
   // How many browse rows are revealed, and which query that reveal belongs to.
@@ -328,14 +333,25 @@ export function BroadcastComposer(): React.JSX.Element {
   // EVERY page is walked (getAllUnits): the server pages at 50, and a
   // one-shot first page left the rest of a real portfolio unpickable - not just
   // unbrowsable, but unfindable by search too, since the search filters this
-  // array client-side.
+  // array client-side. matching-blast-rules D9: only AVAILABLE properties are
+  // offered, on the bare entry and the ?contactId= entry alike (every send
+  // requires Available); a ?unitId= preselection keeps any status, with the
+  // banner and the Make Available dialog.
   useEffect(() => {
     if (unitId !== undefined) return; // fixed by the entry point
     const controller = new AbortController();
     getAllUnits({}, controller.signal)
-      .then(setUnitCandidates)
-      .catch(() => {
-        /* candidate load failed - the picker just has nothing to suggest */
+      .then((units) => {
+        setUnitCandidates(units.filter((u) => u.status === 'available'));
+        setUnitsRead('loaded');
+      })
+      .catch((err: unknown) => {
+        // AR41: an ABORTED read (an unmount, StrictMode's double mount -
+        // api/paging.ts propagates the AbortError) is neither loaded nor
+        // failed: the read that replaces it settles the picker. A real
+        // failure says so (the picker has nothing to offer).
+        if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
+        setUnitsRead('failed');
       });
     return () => controller.abort();
   }, [unitId]);
@@ -650,8 +666,15 @@ export function BroadcastComposer(): React.JSX.Element {
             </span>
           </div>
         ) : null}
-        {unitCandidates.length === 0 ? (
-          <p className={styles.pickerHint}>No properties yet - add one from the Properties page.</p>
+        {/* matching-blast-rules D9 (AR37): nothing while the read is in
+            flight; a failed read says so; only a read that LANDED with no
+            Available property says why the list is empty. */}
+        {unitsRead === 'failed' ? (
+          <p className={styles.pickerHint} role="alert">
+            Couldn't load the properties.
+          </p>
+        ) : unitsRead === 'loaded' && unitCandidates.length === 0 ? (
+          <p className={styles.pickerHint}>No Available properties. A property must be Available to send.</p>
         ) : null}
         {unitCandidates.length > 0 && matching.length === 0 ? (
           <p className={styles.pickerHint}>

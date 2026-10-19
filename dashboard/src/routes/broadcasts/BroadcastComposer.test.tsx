@@ -1392,3 +1392,108 @@ describe('BroadcastComposer - a change undone before its draft lands (code revie
     expect(createBroadcast).toHaveBeenCalledTimes(2);
   });
 });
+
+// matching-blast-rules D9: the property picker offers only Available
+// properties, on every entry that shows it (the bare Matching entry and the
+// ?contactId= entry). A ?unitId= preselection (the property page's "+ Send")
+// keeps its property whatever the status, with the banner and the Make
+// Available dialog.
+describe('BroadcastComposer - Available properties only (matching-blast-rules D9)', () => {
+  const peach = unit({
+    unitId: 'u-1',
+    address: { line1: '77 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30303' },
+  });
+  const oak = unit({
+    unitId: 'u-2',
+    status: 'on_hold',
+    address: { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' },
+  });
+  const elm = unit({
+    unitId: 'u-3',
+    status: 'setup',
+    address: { line1: '5 Elm St', city: 'Atlanta', state: 'GA', zip: '30303' },
+  });
+
+  it('the bare entry lists and searches only Available properties', async () => {
+    const u = userEvent.setup();
+    getAllUnits.mockResolvedValue([peach, oak, elm]);
+    renderComposer();
+    expect(await screen.findByRole('button', { name: /77 Peachtree St/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /12 Oak St/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /5 Elm St/ })).not.toBeInTheDocument();
+    // The search finds nothing that is not Available either.
+    await u.type(screen.getByRole('combobox', { name: 'Property' }), 'Oak');
+    expect(screen.queryByRole('option', { name: /12 Oak St/ })).not.toBeInTheDocument();
+    expect(screen.getByText('No properties match that search - clear it to browse them all.')).toBeInTheDocument();
+  });
+
+  it('the ?contactId= entry (a tenant or caseworker page) lists only Available properties too', async () => {
+    getAllUnits.mockResolvedValue([peach, oak, elm]);
+    renderComposer('?contactId=c-seed');
+    expect(await screen.findByRole('button', { name: /77 Peachtree St/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /12 Oak St/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /5 Elm St/ })).not.toBeInTheDocument();
+  });
+
+  it('with no Available property the picker says why', async () => {
+    getAllUnits.mockResolvedValue([oak, elm]);
+    renderComposer();
+    await waitFor(() => expect(getAllUnits).toHaveBeenCalled());
+    expect(
+      await screen.findByText('No Available properties. A property must be Available to send.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /12 Oak St/ })).not.toBeInTheDocument();
+  });
+
+  it('(PIN) a ?unitId= preselection keeps a non-Available property, with the banner', async () => {
+    getUnit.mockResolvedValue(oak);
+    renderComposer('?unitId=u-2');
+    expect(await screen.findByText(/flyer link won't work/)).toHaveTextContent(/This property is On hold/);
+    expect(screen.getByRole('textbox', { name: 'Message' })).toBeInTheDocument();
+    expect(getAllUnits).not.toHaveBeenCalled();
+  });
+
+  // AR37, AR41: the picker's empty-state sentence follows the properties
+  // read - none while it is in flight, one for a failed read, and an ABORTED
+  // read (React StrictMode's first mount) is neither.
+  const NONE_AVAILABLE = 'No Available properties. A property must be Available to send.';
+  const READ_FAILED = "Couldn't load the properties.";
+  const OLD_EMPTY = 'No properties yet - add one from the Properties page.';
+
+  /** Let a settled read reach the composer: past every pending microtask. */
+  async function flushRead(): Promise<void> {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+  }
+
+  it('while the properties are still loading the picker shows no empty-state sentence', async () => {
+    getAllUnits.mockReturnValue(new Promise(() => {}));
+    renderComposer();
+    await screen.findByRole('combobox', { name: 'Property' });
+    await waitFor(() => expect(getAllUnits).toHaveBeenCalled());
+    await flushRead();
+    expect(screen.queryByText(NONE_AVAILABLE)).not.toBeInTheDocument();
+    expect(screen.queryByText(READ_FAILED)).not.toBeInTheDocument();
+    expect(screen.queryByText(OLD_EMPTY)).not.toBeInTheDocument();
+  });
+
+  it('a failed properties read says the properties could not be loaded', async () => {
+    getAllUnits.mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));
+    renderComposer();
+    expect(await screen.findByText(READ_FAILED)).toBeInTheDocument();
+    expect(screen.queryByText(NONE_AVAILABLE)).not.toBeInTheDocument();
+    expect(screen.queryByText(OLD_EMPTY)).not.toBeInTheDocument();
+  });
+
+  it('an ABORTED properties read is neither loaded nor failed: no sentence', async () => {
+    getAllUnits.mockRejectedValue(new DOMException('The operation was aborted.', 'AbortError'));
+    renderComposer();
+    await screen.findByRole('combobox', { name: 'Property' });
+    await waitFor(() => expect(getAllUnits).toHaveBeenCalled());
+    await flushRead();
+    expect(screen.queryByText(READ_FAILED)).not.toBeInTheDocument();
+    expect(screen.queryByText(NONE_AVAILABLE)).not.toBeInTheDocument();
+    expect(screen.queryByText(OLD_EMPTY)).not.toBeInTheDocument();
+  });
+});

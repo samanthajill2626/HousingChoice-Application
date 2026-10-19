@@ -26,6 +26,7 @@ on the tab exactly as before. Only the ORDER changed.
 `listByType` was NOT reversed (suggested fix 1), so the sibling
 `broadcast-audience-truncation-drops-searching-tenants` is untouched and still
 open on its own terms.
+(Later: that sibling was resolved on 2026-10-18 by `feat/matching-blast-rules` - the blast now reads only Searching and Onboarding, searching first.)
 
 **What replaced the cap:** a per-request SCAN BUDGET on raw index rows
 (`UNKNOWN_QUEUE_SCAN_BUDGET`, 1000). Spending it returns the rows found so far

@@ -197,3 +197,22 @@ slice briefs and commit messages.
   (each unique); the 201 anchors `estimatedCount: estimatedAudience,` are
   `:732` (log), `:735` (audit) and `:741` (the 201 body). The router header
   S1 wrote is `:14-35` (AR9: S2 only inserts).
+- **S2 -> S3** (S2 tip e2cbd2a8; tree clean; slice-end + S1 set +
+  seedMatrix 418/418, typecheck 0, smoke 0 per `build/S2-report.md`). The wire
+  contract S3 consumes is the report's "Contract S2 shipped" section and
+  matches what S3's text assumes (R3 reference section 8): every candidate
+  carries `checkedByDefault` (always) and `tourHold?`; top-level `tourHolds`
+  is ALWAYS present (maybe `[]`) and lists every held contact org-wide;
+  `audienceRulesUnavailable: true` only for a seeds_only draft whose reads
+  threw (then `tourHolds: []`, `declinedContactIds: []`, no `tourHold`,
+  `checkedByDefault = has_consent`); `declineLabelsUnavailable` is never sent;
+  503 `{ error: 'audience_rules_unavailable' }` on a filter preview (a stored
+  filter 422 runs first and wins) and on send path (c), NEVER on create;
+  201 `estimatedCount` omitted only when a rules read threw on a filter draft;
+  create's 422 `text` = the first failing member, trimmed (AR20).
+- **S3 is built in two sequential children** (orchestrator call, context
+  safety): S3a = Tasks 3.1-3.4 (types/endpoints/audienceSummary,
+  tourHoldLabel + RecipientPreview, AudienceFilters, prefillAuthorities);
+  S3b = Tasks 3.5-3.6 (BroadcastComposer + useComposerDraft; the picker),
+  where OR-S3-1..5 land. OR-S3-6's counts are per task; OR-S3-7 and OR-S3-8
+  apply to both.

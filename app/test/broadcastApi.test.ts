@@ -726,7 +726,10 @@ describe('share-broadcast API (M1.8a)', () => {
       .send({});
     expect(send.status).toBe(400);
     expect(send.body.error).toBe('audience_too_large');
-    expect(send.body.message).toMatch(/narrow/);
+    // matching-blast-rules D7: no filter narrows the read any more, so the
+    // truncation message gives no narrowing advice (plan AR32: no count).
+    expect(send.body.message).toBe('audience resolution was truncated - the audience could not be read completely');
+    expect(send.body.truncated).toBe(true);
     // Stays a draft, nothing enqueued, no sends.
     expect(world.broadcasts.get(id)!.status).toBe('draft');
     expect(world.sent).toHaveLength(0);
@@ -3622,6 +3625,202 @@ describe('share-broadcast API (M1.8a)', () => {
       const res = await postDraft(app, FILTER_BODY);
       expect(res.status).toBe(201);
       expect(res.body.estimatedCount).toBe(MAX_BROADCAST_RECIPIENTS + 1);
+    });
+  });
+
+  // --- matching-blast-rules D6: the no-body filter send (path c) -------------
+  describe('matching-blast-rules D6: send path (c) leaves out held and declined tenants', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const SENT = '2026-10-01T12:00:00.000Z';
+    const DECLINED_AT = '2026-10-02T12:00:00.000Z';
+
+    /** An upcoming tour on ANOTHER property: holds the tenant (D4). */
+    function seedUpcomingTour(tourId: string, tenantId: string): TourItem {
+      const createdAt = isoFromNow(-5 * DAY);
+      const item: TourItem = {
+        tourId,
+        tenantId,
+        unitId: 'unit-2',
+        _schedPartition: 'tours',
+        tourType: 'self_guided',
+        status: 'scheduled',
+        scheduledAt: isoFromNow(3 * DAY),
+        createdAt,
+        updatedAt: createdAt,
+      };
+      world.toursMap.set(tourId, item);
+      return item;
+    }
+
+    /** An EFFECTIVE #27 decline of unit-1. */
+    function declinedRow(contactId: string): ListingSendItem {
+      return {
+        unitId: 'unit-1',
+        contactId,
+        sentAt: SENT,
+        via: 'individual',
+        counted: true,
+        created_at: SENT,
+        updated_at: SENT,
+        declined: { at: DECLINED_AT, by: 'staff', staffId: 'user-0002' },
+      };
+    }
+
+    function send(app: import('express').Express, id: string, body: Record<string, unknown> = {}) {
+      return request(app)
+        .post(`/api/broadcasts/${id}/send`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send(body);
+    }
+
+    /** A resolver result of `n` consented tenants c-cap-0 .. c-cap-(n-1). */
+    function capAudience(n: number) {
+      const contacts = Array.from({ length: n }, (_, i) => ({
+        contactId: `c-cap-${i}`,
+        phone: `+1556${String(i).padStart(7, '0')}`,
+        has_consent: true,
+      }));
+      return { contactIds: contacts.map((c) => c.contactId), contacts, count: contacts.length, truncated: false };
+    }
+
+    it('the recipients are the resolved audience MINUS held MINUS declined; already-sent and no-consent tenants stay (the fan-out counts skipped_no_consent); seeds stay out', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-plain', phone: '+15550306001' });
+      seedTenant(world, { contactId: 'c-held', phone: '+15550306002' });
+      seedTenant(world, { contactId: 'c-declined', phone: '+15550306003' });
+      seedTenant(world, { contactId: 'c-sent', phone: '+15550306004' });
+      seedTenant(world, { contactId: 'c-nocons', phone: '+15550306005', consent_method: undefined });
+      seedTenant(world, { contactId: 'c-seed-out', phone: '+15550306006', status: 'placing' });
+      seedUpcomingTour('t-held', 'c-held');
+      world.listingSends.push(declinedRow('c-declined'));
+      seedShare(world, 'bcast-prior', 'sent', { 'c-sent': { status: 'delivered' } });
+      const { app } = makeWebhookHarness({ world });
+      const id = await createDraft(app, { seedContactIds: ['c-seed-out'] });
+      const res = await send(app, id);
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(3);
+      expect(Object.keys(world.broadcasts.get(id)!.recipients).sort()).toEqual(['c-nocons', 'c-plain', 'c-sent']);
+      await queueAdapter.settle();
+      expect(world.sent.map((s) => s.to).sort()).toEqual(['+15550306001', '+15550306004']);
+      const results = await authedGet(app, `/api/broadcasts/${id}/results`);
+      expect(results.status).toBe(200);
+      expect(results.body.stats.skipped_no_consent).toBe(1);
+    });
+
+    it('a throwing tours read is 503 audience_rules_unavailable: still a draft, nothing marked sending, nothing sent', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-1', phone: '+15550306101' });
+      const { app } = makeWebhookHarness({ world });
+      const id = await createDraft(app);
+      vi.spyOn(world.toursRepo, 'listByStatus').mockRejectedValueOnce(new Error('throttled'));
+      const markSending = vi.spyOn(world.broadcastsRepo, 'markSending');
+      const res = await send(app, id);
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: 'audience_rules_unavailable' });
+      expect(markSending).not.toHaveBeenCalled();
+      await queueAdapter.settle();
+      expect(world.broadcasts.get(id)?.status).toBe('draft');
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('a throwing decline read is 503 audience_rules_unavailable too', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-1', phone: '+15550306201' });
+      const { app } = makeWebhookHarness({ world });
+      const id = await createDraft(app);
+      vi.spyOn(world.listingSendsRepo, 'listByUnit').mockRejectedValueOnce(new Error('throttled'));
+      const res = await send(app, id);
+      expect(res.status).toBe(503);
+      expect(res.body).toEqual({ error: 'audience_rules_unavailable' });
+      expect(world.broadcasts.get(id)?.status).toBe('draft');
+    });
+
+    it('every resolved tenant excluded is 400 empty_audience, still a draft', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-held', phone: '+15550306301' });
+      seedTenant(world, { contactId: 'c-declined', phone: '+15550306302' });
+      seedUpcomingTour('t-held', 'c-held');
+      world.listingSends.push(declinedRow('c-declined'));
+      const { app } = makeWebhookHarness({ world });
+      const id = await createDraft(app);
+      const res = await send(app, id);
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: 'empty_audience' });
+      expect(world.broadcasts.get(id)?.status).toBe('draft');
+    });
+
+    it('the recipient cap counts the FINAL set: 1002 resolved minus 2 held is 1000 and passes the cap', async () => {
+      seedUnit(world);
+      seedUpcomingTour('t-cap-0', 'c-cap-0');
+      seedUpcomingTour('t-cap-1', 'c-cap-1');
+      const { app } = makeWebhookHarness({
+        world,
+        audienceResolutionService: async () => capAudience(MAX_BROADCAST_RECIPIENTS + 2),
+      });
+      const id = await createDraft(app);
+      // Stop at markSending (a lost conditional write answers 409) so no
+      // 1000-recipient fan-out runs in a unit test.
+      const markSending = vi
+        .spyOn(world.broadcastsRepo, 'markSending')
+        .mockRejectedValueOnce(new ConditionalCheckFailedException({ message: 'stop before the fan-out', $metadata: {} }));
+      const res = await send(app, id);
+      expect(res.status).toBe(409);
+      expect(markSending).toHaveBeenCalledTimes(1);
+      const recipients = markSending.mock.calls[0]![1];
+      expect(Object.keys(recipients)).toHaveLength(MAX_BROADCAST_RECIPIENTS);
+      expect(recipients).not.toHaveProperty('c-cap-0');
+      expect(recipients).not.toHaveProperty('c-cap-1');
+      expect(world.broadcasts.get(id)?.status).toBe('draft');
+    });
+
+    it('one held of 1002 leaves 1001: 400 audience_too_large with the FINAL count', async () => {
+      seedUnit(world);
+      seedUpcomingTour('t-cap-0', 'c-cap-0');
+      const { app } = makeWebhookHarness({
+        world,
+        audienceResolutionService: async () => capAudience(MAX_BROADCAST_RECIPIENTS + 2),
+      });
+      const id = await createDraft(app);
+      const res = await send(app, id);
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'audience_too_large',
+        message: `audience of ${MAX_BROADCAST_RECIPIENTS + 1} exceeds the ${MAX_BROADCAST_RECIPIENTS} recipient cap - narrow the housing authority and/or bedroom-size filter`,
+        count: MAX_BROADCAST_RECIPIENTS + 1,
+        truncated: false,
+      });
+      expect(world.broadcasts.get(id)?.status).toBe('draft');
+    });
+
+    it('(PIN) path (a), the explicit list the dashboard sends, is unchanged: a checked held or declined tenant is sent', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-held', phone: '+15550306601' });
+      seedTenant(world, { contactId: 'c-declined', phone: '+15550306602' });
+      seedUpcomingTour('t-held', 'c-held');
+      world.listingSends.push(declinedRow('c-declined'));
+      const { app } = makeWebhookHarness({ world });
+      const id = await createDraft(app);
+      const res = await send(app, id, { recipientContactIds: ['c-held', 'c-declined'] });
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(2);
+      expect(Object.keys(world.broadcasts.get(id)!.recipients).sort()).toEqual(['c-declined', 'c-held']);
+    });
+
+    it('(PIN) path (b), a seeds_only no-body send, is unchanged: a held seed is sent', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-held', phone: '+15550306701' });
+      seedUpcomingTour('t-held', 'c-held');
+      const { app } = makeWebhookHarness({ world });
+      const created = await request(app)
+        .post('/api/broadcasts')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ unitId: 'unit-1', body_template: 'hi', seedContactIds: ['c-held'] });
+      expect(created.status).toBe(201);
+      const res = await send(app, created.body.broadcastId as string);
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(1);
     });
   });
 });

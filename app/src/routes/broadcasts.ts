@@ -1166,7 +1166,8 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
     //  (b) seeds_only no-body - a seeded 1:1/1:N draft (the seeded entry): the
     //      draft carries seed_contact_ids and audience_mode 'seeds_only', so
     //      resolve THOSE seeds (same fences) instead of the default filter.
-    //  (c) filter-resolve (back-compat - no body): the existing snapshot path.
+    //  (c) filter-resolve (API only - no body): the resolved audience minus
+    //      tour holds and #27 declines (matching-blast-rules D6).
     let recipients: Record<string, BroadcastRecipient> = {};
     let count: number;
 
@@ -1244,15 +1245,22 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
       recipients = buildRecipientsFrom(seeds.contacts);
       count = Object.keys(recipients).length;
     } else {
-      // (c) Re-resolve the audience snapshot at send time (the source of truth -
-      // the draft estimate may be stale). Build the recipients map keyed by
-      // contactKey (contactId else phone#<E164>, the shared convention),
-      // all 'queued'.
+      // (c) Filter draft, no body (API only - the dashboard always posts an
+      // explicit list, path (a)). Re-resolve the audience at send time (the
+      // source of truth - the draft estimate may be stale), then apply
+      // matching-blast-rules D6: the resolved audience (D1 status, D2 housing
+      // authorities) MINUS tenants held by an unresolved tour (D4, evaluated
+      // now) MINUS effective #27 declines of this property. Already-sent
+      // tenants and tenants without recorded consent are NOT subtracted (the
+      // fan-out skips a no-consent recipient and counts it skipped_no_consent),
+      // and seeds stay out of this path, as before. The recipients map is keyed
+      // by contactKey (contactId else phone#<E164>, the shared convention), all
+      // 'queued'.
       // Spec 2026-10-06 D7: re-check the stored housing authority filter HERE,
       // inside the one branch that re-resolves it - an explicit selection (a)
       // and a seeds_only draft (b) never read the filter, so they are never
-      // refused for it. A refusal leaves the draft a draft: nothing is marked
-      // sending and nothing is enqueued.
+      // refused for it. Every refusal below leaves the draft a draft: nothing
+      // is marked sending and nothing is enqueued.
       const refusal = await storedFilterRefusal(broadcast.audience_filter);
       if (refusal !== undefined) {
         log.info({ broadcastId }, 'broadcast send refused: stored housing authority filter not on the list');
@@ -1260,37 +1268,56 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
         return;
       }
       const audience = await resolveAudience(broadcast.audience_filter);
-      if (audience.count === 0) {
-        // Empty audience: refuse clearly (no point marking a broadcast sending
-        // with nobody to send to). Leave it a draft so the operator can adjust.
+      // D6: the tours and decline reads fail CLOSED - sending without them
+      // would text tenants the rules leave out.
+      let rules: { tourHolds: Map<string, TourHold>; declinedIds: Set<string> };
+      try {
+        rules = await readAudienceRules(broadcast.unitId, Date.now());
+      } catch (err) {
+        log.warn({ err, broadcastId }, 'broadcast send refused: audience rules unavailable - 503');
+        res.status(503).json({ error: 'audience_rules_unavailable' });
+        return;
+      }
+      const finalContacts = audience.contacts.filter(
+        (c) => !rules.tourHolds.has(c.contactId) && !rules.declinedIds.has(c.contactId),
+      );
+      if (finalContacts.length === 0) {
+        // Nobody left to send to: refuse clearly, leave it a draft.
         res.status(400).json({ error: 'empty_audience' });
         return;
       }
-      // Bound the audience (FIX 3+4): refuse when the resolved set exceeds the
-      // recipients-map item-size cap, OR when resolution was truncated (page cap
-      // hit → the set is INCOMPLETE; sending would silently under-deliver).
-      // Either way leave the broadcast a DRAFT and do NOT enqueue — the operator
-      // must narrow the bedroom/housing-authority filter.
-      if (audience.count > MAX_BROADCAST_RECIPIENTS || audience.truncated) {
+      // Bound the audience (FIX 3+4): refuse when the FINAL set (after the D6
+      // exclusions) exceeds the recipients-map item-size cap, OR when the
+      // resolution was truncated (page cap hit - the set is INCOMPLETE and
+      // sending would silently under-deliver). Either way leave the broadcast a
+      // DRAFT and do NOT enqueue.
+      if (finalContacts.length > MAX_BROADCAST_RECIPIENTS || audience.truncated) {
         log.warn(
-          { broadcastId, count: audience.count, truncated: audience.truncated, cap: MAX_BROADCAST_RECIPIENTS },
+          {
+            broadcastId,
+            count: finalContacts.length,
+            resolved: audience.contacts.length,
+            truncated: audience.truncated,
+            cap: MAX_BROADCAST_RECIPIENTS,
+          },
           'broadcast send refused: audience too large',
         );
         res.status(400).json({
           error: 'audience_too_large',
           message: audience.truncated
-            ? `audience resolution was truncated (more than ${MAX_BROADCAST_RECIPIENTS} candidates) — narrow the housing authority and/or bedroom-size filter`
-            : `audience of ${audience.count} exceeds the ${MAX_BROADCAST_RECIPIENTS} recipient cap — narrow the housing authority and/or bedroom-size filter`,
-          count: audience.count,
+            ? 'audience resolution was truncated - the audience could not be read completely'
+            : `audience of ${finalContacts.length} exceeds the ${MAX_BROADCAST_RECIPIENTS} recipient cap - narrow the housing authority and/or bedroom-size filter`,
+          count: finalContacts.length,
           truncated: audience.truncated,
         });
         return;
       }
-      for (const c of audience.contacts) {
-        const contactKey = c.contactId && c.contactId.length > 0 ? c.contactId : `phone#${c.phone}`;
-        recipients[contactKey] = { status: 'queued' };
-      }
-      count = audience.count;
+      log.info(
+        { broadcastId, resolved: audience.contacts.length, sending: finalContacts.length },
+        'broadcast filter send: held and declined tenants left out',
+      );
+      recipients = buildRecipientsFrom(finalContacts);
+      count = Object.keys(recipients).length;
     }
 
     let sending: BroadcastItem;

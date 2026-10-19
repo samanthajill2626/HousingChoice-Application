@@ -248,3 +248,192 @@ empties the whole filter, the stale-bundle default-check window, the
   lean spec.
 - Item size: up to 100 x 120-char authority names (~12 KB) still fits beside
   the 1000-slot recipients map and 1000 seed ids under the 400 KB item cap.
+
+## Round 2
+
+Re-review of fix wave 2 and micro-wave 3: `git diff b1bb9dc9..dc073cc7`
+excluding docs/superpowers (code commits f0b33c94, da45d910, 088a12f8,
+44a0263a, c0a3bc9c, 6636816c, 104d4083). Line numbers below are at
+dc073cc7. Read-only as before; no suite, typecheck, lint or e2e was run (the
+planner's e2e:session lane owns the worktree). Beyond this file, the only
+docs/superpowers file read is `planner-review/adjudications.md`.
+
+### Summary
+
+| Severity | Count | IDs |
+|----------|-------|-----|
+| blocking | 0 | - |
+| high     | 0 | - |
+| medium   | 0 | - |
+| low      | 1 | R2-1 |
+| info     | 5 | R2-2, R2-3, R2-4, R2-5, R2-6 |
+
+Contested round-1 adjudications: none (PA-1, PA-2, PA-3 and the PA-9 fold
+are conceded, one line each below).
+
+The hold is sound on the questions asked. It does not stick after a
+successful retry, it does not leak an unfiltered draft or send, and it does
+not block what it must not (details under "Hold - checked and sound"). The
+findings are about how the hold READS while it lasts.
+
+### Findings
+
+#### R2-1 (low) - "Try again" gives no in-flight state and no failed-again signal, and a second click restarts the read
+
+- Where: `dashboard/src/routes/broadcasts/AudienceFilters.tsx:239-245` (the
+  notice and its button: never disabled, no busy text);
+  `dashboard/src/routes/broadcasts/BroadcastComposer.tsx:248-251` (the
+  property retry bumps `unitRetry`; the list retry is `orgList.reload`),
+  `:403-404` (the load effect's cleanup aborts the read in flight when
+  `unitRetry` changes); `dashboard/src/routes/orgs/useOrgList.ts:77-78`
+  (`load()` aborts the read in flight first).
+- Scenario 1 (failed again): staff click Try again and the read fails again.
+  For the list, `setError(true)` / `setLoading(false)` set values that are
+  already set, so React bails out and nothing re-renders. For the property,
+  a new `{status: 'failed'}` object re-renders the same `<p key={text}>`.
+  Either way the alert node and its text are unchanged. Nothing moves on
+  screen, and a screen reader does not re-announce an unchanged alert.
+  "Clicked, it failed again" cannot be told from "the click did nothing".
+- Scenario 2 (slow network): a retry takes 8 s. Nothing shows it is in
+  flight, so staff click again at 4 s. That click aborts the first read and
+  starts afresh, and so does every click after it. A read slower than the
+  user's patience never lands. That is the R1-ADV-FE-5 failure `useOrgList`
+  documents (its `poll()` exists to avoid it), now reached through clicks.
+- Contrast: the compose step's own 503 Try again
+  (`BroadcastComposer.tsx:520-552`, `:817`, `:837`) is disabled with
+  "Loading..." while busy. It also clears and re-sets its refusal, so a
+  repeat failure remounts the alert. The new hold follows neither pattern,
+  and the unit tests pin only that the notice "stays"
+  (BroadcastComposer.test.tsx, the two "fails again" cases).
+- Direction: keep a per-notice `retrying` flag (button disabled and reading
+  "Trying again..." while the read runs), and give a repeat failure a new
+  identity (for example a failure counter in the key, or clear-then-set) so
+  the alert re-announces. A list retry could skip `reload()` while a read
+  is already in flight.
+
+#### R2-2 (info) - During a failure hold the reach line still says "Estimating reach..."
+
+- Where: `dashboard/src/routes/broadcasts/AudienceFilters.tsx:273-274`;
+  `dashboard/src/routes/broadcasts/useComposerDraft.ts` (`reachPending:
+  input.hold === true || reachPending`).
+- The FW2-1 change removed the spinner and the "Sizing the audience" hint
+  beside Preview, because only Try again ends a failure hold. The same
+  reasoning applies to the reach line, which keeps reading as progress
+  ("Estimating reach...") for as long as the hold lasts, directly above the
+  alert that says nothing will happen until Try again. The composer comment
+  above the Preview hint (`BroadcastComposer.tsx:840-847`) records it as
+  intended ("the reach line stays pending"). This entry records that it
+  contradicts FW2-1's own rationale.
+- Direction: while `heldOnFailedRead`, have the reach line read "Reach
+  estimate unavailable" (the existing copy) or nothing.
+
+#### R2-3 (info) - A stale draft error from an earlier property stays on screen beside the hold
+
+- Where: `dashboard/src/routes/broadcasts/useComposerDraft.ts:177` (the hold
+  returns before any reset), `:179-189` (the no-message reset clears reach,
+  truncated, stale and draftKey, but not `error`);
+  `BroadcastComposer.tsx:801-804` (the error alert).
+- Scenario: pick property A; its draft create fails on the network and shows
+  "Couldn't estimate the audience - try again.". Click Change and pick B,
+  whose load fails. Compose now shows two alerts with different remedies:
+  the hold notice ("Couldn't load the property ... Try again") and A's stale
+  estimate error. The error survives because the no-message branch never
+  clears it, and the hold then keeps the effect from reaching
+  `setError(null)`.
+- This needs two consecutive failures. The leftover error is pre-existing;
+  the hold only extends how long it shows.
+- Direction: clear `error` in the no-message branch, or hide the draft error
+  while `heldOnFailedRead`.
+
+#### R2-4 (info) - "Add more tenants by filters" during an outage turns a working direct send into a hold with no way back
+
+- Where: `BroadcastComposer.tsx:489-499` (`onEnableFilters`, a one-way flip),
+  `:246` (the hold).
+- Scenario: staff open "Send a property" from a tenant's or caseworker's
+  page (`?contactId=`) while GET /api/organizations is failing. The 1:1 send
+  works, since seeds-only is never held. They click "Add more tenants by
+  filters". The composer holds until the list loads, and the flip cannot be
+  undone, so the 1:1 send they came for is unreachable until a page reload.
+  Not a leak (it fails closed as decided), just a dead end staff can walk
+  into.
+- Direction: none required. If revisited, a "Back to sending to <name> only"
+  control while a hold shows would cover it.
+
+#### R2-5 (info) - A `?unitId=` that does not exist now holds with a Try again that can never succeed
+
+- Where: `BroadcastComposer.tsx:393-401` (any non-abort error is "failed"),
+  `:70-71` ("... can't be filled in yet."); `app/src/routes/units.ts:845-847`
+  (404 `unit_not_found` for a hard-missing id; soft-deleted units still load).
+- Scenario: a stale link or a hand-edited URL with an id that does not exist.
+  The notice says the property could not be loaded "yet" and offers Try
+  again, which answers 404 every time. Before AR44 this reached a dead end
+  too (the create's 404 became "Couldn't estimate the audience - try
+  again."), so this is no regression. The new copy just promises a retry
+  that cannot help.
+- Direction: on an `ApiError` 404, say "This property was not found." with
+  no Try again.
+
+#### R2-6 (info) - The PA-5 guard covers the list and results only
+
+- Where: `app/src/lib/blastAudienceRules.ts:222-225` (overloads; the
+  `AudienceFilter`-typed overload claims a defined result for a value that is
+  undefined at runtime); `app/src/routes/broadcasts.ts` preview and path (c)
+  still pass `broadcast.audience_filter` into `resolveAudience`, which reads
+  `filter.excludeOptedOut` (`audienceResolution.ts:183`).
+- Effect: a stored draft with no filter still 500s on its own Preview or
+  no-body Send. Main threw there too, and only that one row is affected, so
+  the page-wide failure PA-5 named is fixed. Recorded so nobody reads the
+  overload as "every reader tolerates a missing filter".
+- Direction: none required.
+
+### Contested adjudications
+
+- PA-1 (FILE, low): conceded. Label-only, and the filed issue carries the
+  shared-helper direction.
+- PA-2 (NOTE): conceded. It is a spec-gate cost decision Cameron approved,
+  and nothing in this wave changes its inputs.
+- PA-3 (FILE, low): conceded. The severity rule (a double text is high at
+  most, fix only if small) fits, and the fix touches the prior-recipient
+  walk.
+- PA-9 (folded into AR44): conceded. A stalled read now ends in the same
+  hold once the edge times out. R2-1 covers what is still missing (no
+  in-flight state once Try again runs).
+- PA-4, PA-6, PA-7, PA-8 (NOTE): no contest.
+
+### Hold - checked and sound
+
+- Sticking. A successful property retry writes `{unitId: id, loaded}` for
+  the id the effect ran with, so `unit` is non-null and `prefillPending`
+  drops. A successful list retry sets `error: false`, so `orgListHold` drops.
+  The draft hook re-runs on `input.hold` and makes exactly one draft (the
+  key differs from `lastKeyRef`). Preview re-enables once that draft lands.
+  The message prefill effect needs only `unit`, so a property retry also
+  fills the body.
+- Retry racing a property change. Change and a new pick abort the retried
+  read in the effect cleanup, and its catch returns on `signal.aborted`. A
+  different pick derives `loaded` as null (id mismatch), so the hold waits
+  with no stale notice. Picking the same failed property again resets it
+  (`pickProperty`) and re-fetches.
+- StrictMode and AbortError. Aborted reads settle nothing (both effects and
+  `useOrgList` check `signal.aborted` / AbortError). The `setUnitRetry`
+  updater is pure. A list reload in flight at unmount is aborted by the
+  mount effect's cleanup, which reads `abortRef` at cleanup time.
+- No leak. While held the hook makes no draft, and its previous run's
+  cleanup bumped the generation, so an in-flight create is discarded and
+  deleted. An older draft for another property cannot be previewed: Preview
+  needs both `!prefillPending` and `draftKey === key`, and a late preview
+  result fails `currentPreview`. The review step and Send are reachable
+  only through a preview. Seeds-only drafts carry no filter and are never
+  held, which is correct.
+- Not over-blocking. `?contactId=` seeds-only, `?draftId=` resume and the
+  property step are outside `prefillGated`. A property with no accepted
+  authority is held only by its own failed load, never by a failed list
+  read. The two holds show in sequence (the list hold needs a loaded unit),
+  each with its own notice.
+- Reachable on `?unitId=`: `prefillGated` is true there (effectiveUnitId is
+  the param), and the new e2e drives exactly that entry with a routed 500.
+- PA-5 consumers. `audienceSummary(undefined)` is the only dashboard reader
+  of the now-optional `audience_filter` (BroadcastsList row label and delete
+  aria-label, BroadcastResults header). The create echo always has a filter.
+- "Not used" period: `endsWith('.')` avoids a doubled period, and
+  `NOT_LIMITED` keeps its leading space.

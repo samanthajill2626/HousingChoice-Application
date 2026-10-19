@@ -255,3 +255,126 @@ E2E = `e2e/tests/dashboard-next/matching-blast-rules.spec.ts`.
 | R91 | Comments naming `byHousingAuthority` as the broadcast key corrected; GSI untouched | "`contacts.ts:650`, `dev.ts:1263`, `lib/import/apply.ts:1208`, `lib/seed/lean.ts:109`, `contactsRepo.ts:770-775`" | CONFORMS | `app/src/routes/contacts.ts:650-653`; `app/src/routes/dev.ts:1263-1265`; `app/src/lib/import/apply.ts:1208-1211`; `app/src/lib/seed/lean.ts:109`; `contactsRepo.ts:770-777`; also `dashboard/src/api/types.ts:2273-2275` | n/a (comments) |
 | R92 | Dashboard inventory: types, endpoints, hook, AudienceFilters, composer, RecipientPreview, `audienceSummary` | "`api/types.ts` ..., `endpoints.ts` `createBroadcast`, `useComposerDraft.ts` (draft key, create body, 422 handling, the reach count), `AudienceFilters.tsx` ..., `BroadcastComposer.tsx` ..., `RecipientPreview.tsx` ..., `broadcastFormat.ts` `audienceSummary`." | CONFORMS | `types.ts:3271-3281`, `:3494-3551`; `endpoints.ts:1981-2011`; `useComposerDraft.ts:45-58`, `:106`, `:176`, `:254`, `:285`; AF:1-262; BC (above); RP (above); `broadcastFormat.ts:63-69` | see D3, D7, D8 rows; `broadcastFormat.test.ts:35` |
 | R93 | Tests pinning today's shape updated; e2e tenants explicit status, consent and run-unique authority; no-consent exception kept; selectors and docs updated | "e2e tenants get an explicit status, recorded consent, and a RUN-UNIQUE on-list authority ... EXCEPTION: a tenant whose PURPOSE is to have no recorded consent keeps none" | CONFORMS | `broadcasts.spec.ts`, `review-recipients-heard-from.spec.ts`, `a2p-compliance.spec.ts:352-369`, `:495-541`, `org-lists.spec.ts`, `matching-entry-points.spec.ts:289-291`, `:326`; `e2e/support/selectors.md:132-134`, `:147-148`; `documentation/GLOSSARY.md:125-142`, `:341-344`; `RUNBOOK.md:1456-1459`; truncation issue resolved; `BroadcastComposer.prefill.test.tsx` already mocks `getOrgList` (`:13`, `:59`) | the specs themselves; RPT:325 keeps the `:315-360` promoted-row pin |
+
+
+## Round 2
+
+Re-review at dc073cc7 against spec REVISION 7 (D3 Timing rewritten: a failed
+read HOLDS with "Try again"; the "Not used" note ends with a period; build
+clarification 8f651ecf: a failed list read is not tied to a property). Fix
+diff reviewed cold: `git diff b1bb9dc9..dc073cc7 -- . ':(exclude)docs/superpowers'`
+(22 files). Read-only; no suites run. Only the planner's `adjudications.md`
+was read under `docs/superpowers/reviews/`.
+
+### Counts
+
+| Set | CONFORMS | PARTIAL | DEVIATES | MISSING |
+|---|---|---|---|---|
+| Revision 7 D3 and round-1 closures (R2-1..R2-18) | 17 | 1 | 0 | 0 |
+| Fix-diff findings (not spec rows) | - | - | - | - |
+
+Fix-diff findings: 1 low (F1), 6 info (N1-N6). Adjudications: 0 contested,
+all conceded (one with a caveat, C1).
+
+Round-1 table status after this pass: R27 and R55 now CONFORMS (pinned);
+R23, R24 and R25 are superseded by R2-1..R2-9 (revision 7); R26's list half
+is R2-11 (PARTIAL, a round-1 miss of mine). Net over the round-1 rows plus
+R2-11: 0 DEVIATES, 0 MISSING, 1 PARTIAL.
+
+### Non-CONFORMS and findings, by severity
+
+| # | Item | Severity | Why |
+|---|---|---|---|
+| F1 | PA-5 fix covers an ABSENT stored filter but not a NULL one | low | `wireAudienceFilter` returns early only for `undefined` (`app/src/lib/blastAudienceRules.ts:225`); a stored `audience_filter: null` (a DynamoDB NULL attribute - as likely from a hand repair as an absent one) reaches `authoritiesOfFilter`, which also checks only `=== undefined` (`:189`) and then reads `filter.housing_authorities` (`:190`): a TypeError, so one such row still 500s the whole Matching list (`app/src/routes/broadcasts.ts:450`, `:480`) - the exact failure PA-5 was fixed to remove. The dashboard twin has the same gap (`dashboard/src/routes/broadcasts/broadcastFormat.ts:67`). The new test seeds only a deleted key (`app/test/broadcastApi.test.ts:2811`). Fix: `== null` in both guards and one null row in that test. |
+| R2-11 | D3 "An ABORTED load ... is neither loaded nor failed: the gate keeps waiting and no notice shows." - for the ORGANIZATION LIST read | low (PARTIAL) | Implemented (`dashboard/src/routes/orgs/useOrgList.ts:91` returns without touching `loading` or `error`, so `orgListHold` stays false and the gate waits), but unpinned: the only aborted-read test is the property's (`BroadcastComposer.test.tsx:1054`), and `useOrgList`'s tests cover abort only for the poll path. Under revision 7 a mis-handled list abort would now raise a HOLD notice (StrictMode's first mount in dev, a double Try again), not just settle. I missed this in round 1 (R26 cited the property test alone). |
+| N1 | The reach line says "Estimating reach..." for as long as a failure hold stands | info | `reachPending` is true whenever `hold` is (`useComposerDraft.ts:287`), and the reach line renders it as an in-progress `role="status"` (`AudienceFilters.tsx:274`). During a FAILURE hold nothing is estimating - FW2-1 removed the hint and spinner beside Preview for exactly this reason (`BroadcastComposer.tsx:839`, `:848`), but the reach line keeps the same misleading-progress signal. Deliberate (the code comment cites AR44; `expectHeld` pins it, `BroadcastComposer.test.tsx:843-851`), so a note, not a defect. Suggest the reach line read nothing (or "Reach estimate unavailable") while `heldOnFailedRead`. |
+| N2 | "Try again" gives no feedback | info | No busy state while the retry runs, and a repeat failure leaves the identical alert in place (`AudienceFilters.tsx:239-245`; same key, same text), so neither sighted users nor assistive tech can tell a failed retry from a click that did nothing. Spec-conformant ("on another failure the notice stays"). |
+| N3 | A permanent property failure holds forever | info | A 404 for a mistyped or removed `?unitId=` now shows "can't be filled in yet" with a Try again that can never succeed (`BroadcastComposer.tsx:71-72`, `:248-249`); revision 6 let staff compose without the prefill. No send is lost (a send of a missing property is refused `unit_not_available` anyway, `broadcasts.ts:1163-1169`); copy only. |
+| N4 | Spec text left behind by revision 7 | info | Section 6 still lists "a failed property load and a failed list read each settling with their notice" (spec :645-647), and D3's first Timing sentence (spec :290) requires the list to "have loaded" while the no-authority bullet lets a failed list read settle. The code follows the bullets. |
+| N5 | The e2e hold proves "no draft" with a fixed sleep | info | `page.waitForTimeout(1_500)` to outlast the 600 ms debounce (`e2e/tests/dashboard-next/matching-blast-rules.spec.ts:419`). Acceptable: the hold is also unit-pinned (`BroadcastComposer.test.tsx:1013`, `:1109`). |
+| N6 | A filter draft stored without a filter still 500s its own preview and no-body send | info | The resolver reads `filter.excludeOptedOut` (`app/src/services/audienceResolution.ts:183`). Per-row, not page-wide, and main crashed there too; PA-5's scope was the list. |
+
+### Revision 7 D3, re-checked with fresh eyes
+
+Abbreviations as in round 1 (BC = `BroadcastComposer.tsx`, AF =
+`AudienceFilters.tsx`, BCT / AFT their tests, E2E the new spec).
+
+| # | Requirement | Spec quote (revision 7) | Verdict | Code | Test |
+|---|---|---|---|---|---|
+| R2-1 | Gate: Preview waits until the property LOADED and the list LOADED, only with a property and the filters on | "Preview stays disabled until the prefill has settled: the property has loaded, and the organization list has loaded." | CONFORMS (N4) | BC:228, :243-246 (`unit === null` now covers loading AND failed) | BCT:938 (list still loading: hint and spinner shown), :994, :1013 |
+| R2-2 | Failed property load holds: no draft, Preview disabled, exact notice, Try again loads the property again | "the filters show "Couldn't load the property, so its housing authorities and voucher size can't be filled in yet." with a "Try again" button that loads the property again." | CONFORMS | BC:71-72 (copy matches character for character), :139, :243, :248-249, :386-404 (`unitRetry` dependency); AF:52-56, :239-245 | BCT:994, :1070; AFT:324, :343 |
+| R2-3 | Failed list read holds when the property accepts an authority: exact notice, Try again re-reads the list, the picker keeps its own error | "the filters show "Couldn't load the organization list, so housing authorities can't be filled in from the property yet." with a "Try again" button that reads the list again (the picker shows its own error as today)." | CONFORMS | BC:75-76 (copy exact), :244-246, :251 (`orgList.reload`); AF:216 (picker disabled), picker error `orgCopy.ts:150-152` | BCT:1013 (two alerts: the picker's "Couldn't load housing authorities" and the hold), :1109; AFT:324; E2E:377-441 (routed 500) |
+| R2-4 | No-authority exception: a failed list read does not hold a property accepting none | "When the property accepts NO housing authority there is nothing to fill in, so a failed list read does not hold." | CONFORMS | BC:244-245 (blank names do not count; reads `authoritiesOf`, the prefill's own reader, so a legacy `jurisdiction` counts as accepted) | BCT:1145 |
+| R2-5 | Try again re-runs ONLY the failed read | ""Try again" re-runs only the failed read." | CONFORMS | BC:249 (bumps `unitRetry`, a dependency of the load effect alone), :251 | BCT:1070 (`getOrgList` stays at 1 call), :1109 (`getUnit` stays at 1); AFT:343 |
+| R2-6 | While it runs, the notice and the hold stay | "While it runs, the notice and the hold stay" | CONFORMS | property: the failed result stays in `unitLoad` until the retry's own result lands (BC:388-404); list: `reload` never resets `error`, which stays true until a read succeeds (`useOrgList.ts:77-99`) | BCT:1070, :1109 (deferred retry; `expectHeld` while pending) |
+| R2-7 | On success the prefill settles and the notice goes | "on success the prefill settles as usual and the notice goes" | CONFORMS | as R2-6 | BCT:1070, :1109 (exactly one draft, with the prefill); E2E:427-441 |
+| R2-8 | On another failure the notice stays | "on another failure the notice stays." | CONFORMS (N2) | as R2-6 | BCT:1095, :1134 |
+| R2-9 | The voucher size still fills in while a failed list read holds | "The voucher size still fills in from a loaded property while a failed list read holds." | CONFORMS | BC:205 (derived from the loaded `unit`, independent of the list) | BCT:1013 (2-BR pressed during the hold), :1109 (`bedroomSize: 2` in the draft after the retry) |
+| R2-10 | An aborted PROPERTY load is neither: gate waits, no notice, no Try again | "An ABORTED load ... is neither loaded nor failed: the gate keeps waiting and no notice shows." | CONFORMS | BC:394-401 | BCT:1054 |
+| R2-11 | An aborted ORGANIZATION LIST read is neither | (same sentence) | PARTIAL (low) | `useOrgList.ts:91` | none (see the findings table) |
+| R2-12 | A failed property load belongs to its property: clears when it loads or the property changes | "A failed PROPERTY LOAD belongs to the property it was for and clears when that property loads or the property changes." | CONFORMS (round-1 R27 closed) | BC:185-186 (id-keyed), :515 (a re-pick of the same failed property resets it) | BCT:1070 (clears on load), :1175 (clears at once on a change, before the new property loads) |
+| R2-13 | A failed list read is not tied to a property: it holds every property that accepts an authority until a read succeeds | "A failed organization-list read is not tied to a property: it holds every property that accepts a housing authority until a list read succeeds" | CONFORMS | BC:245 (no property in the condition) | BCT:1145 (no hold on 12 Oak St, then a hold on 77 Peachtree St from the same failed read, no draft for it) |
+| R2-14 | Resumed draft and seeds-only send never gated | "A resumed draft ... and a seeds-only send (filters off) are never gated." | CONFORMS | BC:228 (`prefillGated` is in every hold and every notice condition, BC:246, :248, :251) | BCT:1210, :1218 |
+| R2-15 | A stale list (read before an authority was added) is not a failure: the name shows in "Not used" | "An organization list read before an authority was added to the list ... is NOT a failure: that authority shows in the "Not used" note as above" | CONFORMS | `authorityPrefill.ts:14-32` (loaded list, unmatched name -> unused) | `authorityPrefill.test.ts:44`; BCT:840 |
+| R2-16 | "Not used" note ends with ONE period; the not-limited sentence follows | ""Not used (not on the organization list): <names, comma separated>." (revision 7: the note ends with a period)" | CONFORMS (round-1 I2 closed) | AF:155-157 (no second period after a name already ending in one), :231-233 | AFT:267, :278, :287, :301, :313; BCT:840, :856 |
+| R2-17 | The held row gets the amber row class | "the row gets the same amber row class" | CONFORMS (round-1 R55 closed) | RP:571 | RPT:1042 (held row has it, a plain row does not) |
+| R2-18 | Seed comment names both authorities of the list-shape draft | (section 7 seeds) | CONFORMS (round-1 I6 closed) | `app/src/lib/seed/matrix.ts:1260-1263` | n/a (comment) |
+
+### The fix diff, reviewed cold
+
+- Hold condition (BC:243-251): traced every interleaving I could construct -
+  property loading / failed / loaded x list loading / failed / loaded x
+  property accepts or not; a property and a list failure together (mutually
+  exclusive notices: the list hold needs a loaded property, so the property
+  notice shows first and the list notice follows its successful retry -
+  sequential, conforming); a retry racing a property change (the effect
+  cleanup aborts it; the abort is ignored); a double Try again (the second
+  aborts the first, both reads); a create in flight when a hold begins (the
+  hook's generation bump deletes it on landing). No defect found. At most one
+  hold notice can show, so at most one "Try again" sits under the picker, and
+  the 503 refusal's "Try again" cannot coexist with a hold (a hold makes no
+  draft, so no current refusal).
+- `heldOnFailedRead` (BC:256, :839, :848) implies `prefillPending` (each
+  notice is pushed only under a condition `prefillPending` includes), so
+  hiding the hint and spinner never hides them while Preview could run.
+- The draft hook's `hold` (`useComposerDraft.ts:177`) returns before the
+  no-message exit, so a hold neither creates nor deletes a draft; an older
+  draft left in place cannot be previewed because `canPreview` also requires
+  `!prefillPending` (BC:586-593). Sound.
+- Rewritten tests versus the ones they replaced: the two old "settles" tests
+  pinned the notice copy, Preview enabling after a message, and the exact
+  draft filter (none, or `bedroomSize: 2`). Revision 7 reverses the second;
+  the copy is re-pinned verbatim, and the draft filter is now pinned AFTER a
+  successful retry (`BroadcastComposer.test.tsx:1070`, `:1109`), including
+  the voucher size. The aborted-load test kept its assertions and gained the
+  spinner and no-Try-again checks. The AudienceFilters notice test went from
+  plain text to alert role plus a per-notice retry spy (AFT:324, :343).
+  Nothing the old tests pinned was dropped except the revision 6 behavior.
+  Mutations I checked by reading: dropping `unitAcceptsAuthority` fails
+  BCT:1145; dropping `orgListHold` from the gate fails BCT:1013 / :1109;
+  reverting to `loaded === null` fails BCT:994; dropping `heldOnFailedRead`
+  fails `expectNoPreviewHint`; a retry that also re-read the other source
+  fails the call-count asserts in BCT:1070 / :1109.
+- The R55 test reads the CSS-module class (`styles.rowAlready!`) under the
+  dashboard's `css: false` vitest config (`dashboard/vite.config.ts:139`); the
+  same pattern already pins classes elsewhere (`AppFrame.test.tsx:115-116`),
+  so I accept it as a real pin.
+- PA-5 (`wireAudienceFilter` overloads, BAR:222-225; dashboard types made
+  optional, `dashboard/src/api/types.ts` BroadcastSummary / BroadcastResults;
+  `audienceSummary(undefined)`): correct for an absent field; see F1 for null.
+
+### Adjudications (contest or concede)
+
+- R27, R55, I2, I6 (FIX): verified closed above. Agree.
+- I1, I3 (NOTE): concede.
+- I4 (NOTE, already filed): concede.
+- I5 -> Cameron's decision: implemented as revision 7 says (R2-1..R2-13).
+- C1, the planner's "PA-9 needs nothing further: a stalled read ends in an
+  error": concede, with a caveat for the record - the dashboard client sets
+  no request timeout (`dashboard/src/api/client.ts:117-127`), so a stalled
+  read ends only when something upstream gives up (in deployed environments
+  CloudFront or the load balancer answers 504; locally possibly never).
+  Until then the composer shows the loading hint and spinner with no Try
+  again. Fine to leave.
+
+Nothing contested.

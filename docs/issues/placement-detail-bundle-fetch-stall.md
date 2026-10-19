@@ -98,3 +98,12 @@ max=34ms over 80 loads; Vite event-loop stalls across two 24m suites: one, at
   an aborted hunt contaminates the next run.
 - **Counting requests "received but never completed" is not a signal** - a green
   suite has ~5000, mostly normal navigation aborts.
+
+**Sighting (2026-10-19, `feat/matching-blast-rules` planner gate run on
+dc073cc7).** `approval-and-move-in.spec.ts:337` (LIF non-eligible branch)
+failed with "the placement page did not finish loading (waited 20007ms of a
+20s budget)" in a full `npm run e2e` that took 32.0m (the same tree's runs
+took 21.7-23m) and ended with ~3,100 sockets in TIME_WAIT - the
+port-exhaustion conditions recorded in `e2e-blank-document-after-contact-navigation`.
+The file passed 5 of 5 alone right after. The branch touches nothing on the
+placement path.

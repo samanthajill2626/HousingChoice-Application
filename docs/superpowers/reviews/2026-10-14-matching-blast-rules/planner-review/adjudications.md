@@ -83,3 +83,65 @@ after fix wave 2).
 | C18 | Requested label "Tour requested Oct 12, no date yet", cue lower case (Oct 18) | delivered (character-exact per conformance) |
 | C19 | Do not edit the tracker; 2-3 sentence third-person #6 note | delivered (handback note; tracker untouched) |
 | C20 | Voucher size as a list left to #12 | delivered (unchanged) |
+
+## Round 2 (after fix wave 2 and micro-wave 3; fix diff b1bb9dc9..dc073cc7)
+
+Both reviewers CONTINUED with the re-review charge (round-2 sections
+appended to `conformance.md` and `adversarial.md`). Planner live QA on the
+hermetic lane: `live-qa.md` (12 scenarios, all PASS, incl. Cameron's AR44
+hold on the `?unitId=` entry and a deliberate send to a held tenant).
+
+- Conformance: revision 7 D3 plus the round-1 closures, 18 rows: 17
+  CONFORMS, 1 PARTIAL (low test gap), 0 DEVIATES, 0 MISSING; 1 new low
+  (F1); 6 info. Concedes every round-1 ruling.
+- Adversarial: 0 blocking/high/medium; 1 low (R2-1), 5 info. Concedes every
+  round-1 ruling. Confirms the hold never sticks after a successful retry,
+  never lets an unfiltered draft or send out, and does not block direct
+  sends, resumed drafts, seeds-only sends or a no-authority property.
+
+| Finding | Sev | Ruling | Why |
+|---|---|---|---|
+| Conformance F1 - the PA-5 guard checks only `undefined`; a stored `audience_filter: null` still fails the list | low | FILE (`broadcast-null-audience-filter-guard`) | No app writer stores NULL (only a hand repair could); a fix needs another full gate cycle for a hypothetical shape. Small and filed with the exact fix. |
+| Conformance R2-11 - an aborted organization-list read is untested | low | FILE (in `matching-prefill-hold-retry-feedback`) | The code is right (`useOrgList.ts:91`); test-only. |
+| Adversarial R2-1 - Try again has no in-flight state, no failed-again signal; a second click restarts a slow read | low | FILE (`matching-prefill-hold-retry-feedback`) | Feedback on a rare failure path; the hold itself is correct. Not worth a fourth fix wave and gate cycle before merge. |
+| Adversarial R2-2 / conformance N1 - "Estimating reach..." during a failure hold | info | FILE (same issue) | Deliberate per AR44 ("reach pending as for any unsettled prefill"), but misleading; fold into the feedback fix. |
+| Adversarial R2-3 - an older "Couldn't estimate the audience" error beside the hold | info | FILE (same issue) | Needs two failures in a row. |
+| Adversarial R2-4 - "Add more tenants by filters" during an outage has no way back | info | FILE (same issue) | Related to the pre-existing `matching-enable-filters-keeps-one-tenant-message`. |
+| Adversarial R2-5 / conformance N3 - a 404 `?unitId=` holds behind "can't be filled in yet" | info | FILE (same issue) | No regression (a dead end before); copy only. |
+| Adversarial R2-6 / conformance N6 - a filter draft stored with no filter 500s its own preview and send | info | FILE (in `broadcast-null-audience-filter-guard`) | As on main; one row only. |
+| Conformance N4 - spec section 6 still says a failed read "settles"; the first Timing sentence conflicts with the no-authority exception | info | FIXED (spec text, planner) | The planner's own revision 7 slip; section 6 and the Timing sentence now match. |
+| Conformance N2 | info | (same as R2-1) | |
+| Conformance N5 - the e2e proves "no draft" with a fixed 1.5 s wait | info | NOTE | It outlasts the 600 ms create debounce; the unit tests pin the hold exactly. |
+| Conformance PA-9 caveat - the dashboard client sets no request timeout, so a stalled read may never end locally | info | NOTE | Deployed reads end at the edge's timeout (504) and then hold with Try again; locally a stall shows the loading state. Not this branch's change. |
+
+No round-2 finding changed what gets built or moved an invariant, so the
+planner review closes at round 2. Final gates: the planner's own run on
+dc073cc7 (run `planner-final`), quoted in the verdict.
+
+## Planner gate run `planner-final` on dc073cc7, and the e2e fix
+
+typecheck 0; npm test 0 (app 509 files / 10455 passed + 1 skipped,
+dashboard 250 / 4824, e2e unit 22 / 508, fake-twilio 34 / 275,
+fake-twilio-web 13 / 111, no `[dynamoAdmin]` line); smoke 0; lint 3 errors,
+all pre-existing (BroadcastComposer.tsx 2 set-state-in-effect, the two
+message-prefill effects; useComposerDraft.ts 1 refs); e2e EXIT 1 = 2 failed
+/ 362 passed (32.0m, ~3,100 TIME_WAIT at the end):
+
+- `matching-entry-points.spec.ts:272` (the property-first "Send a property"
+  test) - the open `matching-entry-points-property-first-e2e-flake`
+  signature, and ALONE it then failed 2 of 3 repeats. Diagnosed rather than
+  re-run away: Escape in `UnitSearchField` dismisses only a list already
+  shown (`:176`), so a type-and-Escape before the property list lands is a
+  no-op and the suggestions open over the row when it lands. Proven with a
+  throwaway probe delaying `GET /api/units` 2.5 s (4 of 4 RED with the exact
+  signature; 3 of 3 GREEN with the fix); fixed in the spec (wait for a
+  browsable row before typing); the real file then 15 of 15 with
+  `--repeat-each=5`. Pre-existing mechanism (unchanged component and test
+  lines), fixed here because it sits in this feature's spec. Issue resolved
+  with the mechanism.
+- `approval-and-move-in.spec.ts:337` - "the placement page did not finish
+  loading", the open `placement-detail-bundle-fetch-stall` family under port
+  exhaustion; 5 of 5 alone right after. Sighting recorded. Not this branch's
+  path.
+
+A full gate run on the new tip follows; its exit codes are the verdict's.

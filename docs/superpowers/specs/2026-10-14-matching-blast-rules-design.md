@@ -288,7 +288,8 @@ state update (the lesson in
 
 Timing: ONLY while a property is attached and the filters are on, Preview
 stays disabled until the prefill has settled: the property has loaded, and
-the organization list has loaded.
+the organization list has loaded (or, when the property accepts no housing
+authority, the list read has ended either way - see the exception below).
 
 A FAILED READ HOLDS instead of settling (revision 7, Cameron 2026-10-19,
 replacing revision 6's "a failed read counts as settled"). A filter blast
@@ -644,8 +645,11 @@ edit ownership while the property stays, a property change emptying then
 replacing edited filters, the same property chosen again changing nothing,
 a 422 removing one member, Preview disabled until settled only with a
 property and filters on, a failed property load and a failed list read each
-settling with their notice, an aborted load neither settling nor showing a
-notice, a resumed draft and a seeds-only send never gated); the picker listing only
+HOLDING with their notice and Try again (revision 7: no draft, a retry that
+fails keeps the hold, a retry that succeeds settles; a property accepting
+no authority not held by a failed list read), an aborted load neither
+settling nor showing a notice, a resumed draft and a seeds-only send never
+gated); the picker listing only
 Available properties on the bare and `?contactId=` entries, the `?unitId=`
 entry keeping a non-Available property, and the empty state; the truncation
 copy; `audienceSummary` for a list (names joined with ", ").

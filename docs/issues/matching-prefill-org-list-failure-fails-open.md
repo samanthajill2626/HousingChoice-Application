@@ -1,15 +1,59 @@
 ---
 id: matching-prefill-org-list-failure-fails-open
-title: The blast composer's property prefill fails OPEN - a failed organization-list read, a failed property load, or a list read before an authority was added leaves a property's blast unfiltered by housing authority (DECIDE BEFORE MERGING feat/matching-blast-rules)
+title: The blast composer reads the organization list once per page load - a housing authority added to the list after that read is not prefilled from the property (shown as "Not used"; the blast is not limited by housing authority when it was the property's only one)
 type: decision
-severity: med
+severity: low
 status: open
 area: dashboard/broadcasts
 created: 2026-10-19
-refs: dashboard/src/routes/broadcasts/BroadcastComposer.tsx:229, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:231, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:232, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:363-379, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:490, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:752, dashboard/src/routes/broadcasts/authorityPrefill.ts:18, dashboard/src/routes/broadcasts/AudienceFilters.tsx:199, dashboard/src/routes/orgs/useOrgList.ts:107, dashboard/src/routes/orgs/useOrgList.ts:111, dashboard/src/routes/broadcasts/BroadcastComposer.test.tsx:976, docs/superpowers/specs/2026-10-14-matching-blast-rules-design.md:283-297
+updated: 2026-10-19
+refs: dashboard/src/routes/orgs/useOrgList.ts:102-109, dashboard/src/routes/broadcasts/authorityPrefill.ts:14-32, dashboard/src/routes/broadcasts/AudienceFilters.tsx:220-227, dashboard/src/routes/broadcasts/BroadcastComposer.tsx:242-251, docs/superpowers/specs/2026-10-14-matching-blast-rules-design.md:321-324
 ---
 
-**Problem.** With a property attached and the filters on, the blast composer
+**Status 2026-10-19 - the failed reads are DECIDED and FIXED; only the
+stale list stays open.** Cameron decided this issue at the planner's
+handback review of `feat/matching-blast-rules`: "Hold + Try again". Spec
+revision 7 (D3 Timing) and plan ruling AR44 record it, and commit `f0b33c94`
+built it: with a property attached and the filters on, a FAILED property
+load, or a FAILED organization-list read while the property accepts a
+housing authority, no longer settles the prefill - no draft is created,
+Preview stays disabled, and the filters show "Couldn't load the property, so
+its housing authorities and voucher size can't be filled in yet." or
+"Couldn't load the organization list, so housing authorities can't be filled
+in from the property yet." with a Try again that re-runs only that read
+(`dashboard/src/routes/broadcasts/BroadcastComposer.tsx:242-251`). That
+closes the failed-list path and the failed-property-load sibling below
+(including the `?unitId=` entry, which had no retry), and the stalled-read
+form (adversarial PA-9: a stalled read ends in an error, which now holds
+with Try again). Severity lowered from med to low: what remains is visible
+and needs an authority added while a composer is open.
+
+**Open: the stale list.** The composer reads the organization list ONCE per
+page load (`dashboard/src/routes/orgs/useOrgList.ts:102-109`; it re-reads
+only on the failed-read Try again). An authority added to the list AFTER
+that read - by another staff member, or in another tab - is not on the list
+the prefill maps against (`dashboard/src/routes/broadcasts/authorityPrefill.ts:14-32`),
+so a property that accepts it shows it as "Not used (not on the organization
+list): <names>." and, when it is the property's only accepted authority,
+"This blast is not limited by housing authority."
+(`dashboard/src/routes/broadcasts/AudienceFilters.tsx:220-227`) - the draft
+carries no housing authority filter. Spec D3
+(`docs/superpowers/specs/2026-10-14-matching-blast-rules-design.md:321-324`)
+keeps this case on purpose as NOT a failure: a known, visible gap. The
+picker cannot offer the new name either (its list is the same read); a page
+reload fixes it.
+
+**Suggested fix (Cameron decides, if ever).** Re-read the list when a
+property is picked (or before the first draft of a property) so the prefill
+maps against a fresh list; or prefill the property's own accepted names
+verbatim (the review's option 2 below - the draft create's `checkList` maps
+or refuses each, and D3b removes only a refused member). Either changes the
+D3 sentence quoted above.
+
+**History (as filed 2026-10-19, before the decision; line numbers as of
+994be540).**
+
+With a property attached and the filters on, the blast composer
 prefills the housing authority filter from the property's accepted
 authorities (matching-blast-rules D3) and holds Preview until the prefill
 settles. A failed organization-list read (`GET /api/organizations`) counts as

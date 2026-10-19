@@ -9,9 +9,10 @@
   `docs/superpowers/reviews/2026-10-14-matching-blast-rules/`.
 - Spec review: 3 rounds, CLOSED (round 3 terminal) -
   `docs/superpowers/reviews/2026-10-14-matching-blast-rules/design-review/adjudications.md`.
-- Status: PLAN v2 FINAL (2026-10-14; plan review 3 rounds, CLOSED). Sections 0-4 (incl. 4.1-4.3) are BINDING; slice sections 5-8 are
-  the four opus section drafts, verbatim; section 4 (assembly rulings) wins over
-  any slice text it contradicts, and within section 4 a later ruling (4.3 > 4.2 > 4.1 > AR1-AR21)
+- Status: PLAN v2 FINAL (2026-10-14; plan review 3 rounds, CLOSED); amended
+  2026-10-18 by Cameron's label copy change (AR43, section 4.4; spec revision 6). Sections 0-4 (incl. 4.1-4.4) are BINDING; slice sections 5-8 are
+  the four opus section drafts, verbatim except where AR43 edited the requested-tour label; section 4 (assembly rulings) wins over
+  any slice text it contradicts, and within section 4 a later ruling (4.4 > 4.3 > 4.2 > 4.1 > AR1-AR21)
   supersedes the parts of an earlier one it names. The drafts themselves (gitignored, under
   `.superpowers/sdd/plan-drafts/`) are never the authority.
 
@@ -129,7 +130,8 @@
   `upcoming` `Tour <d>`; `not_marked` `Tour <d>, not marked`;
   `needs_outcome` `Toured <d>, needs outcome`; `needs_placement`
   `Toured <d>, needs placement`; `no_show` `No show <d>`; `requested`
-  `Tour requested <d>`.
+  `Tour requested <d>, no date yet` (no `at`: `Tour requested, no date yet`;
+  AR43, Cameron 2026-10-18).
 - Checkbox accessible name: no-consent row `<name> - consent not recorded`
   (unchanged); otherwise `<name>` plus, when any cue applies, ` - ` and the
   cues joined by `, ` in order `already sent`, `not interested`, then the
@@ -658,6 +660,24 @@ below as written). Rulings:
   frontmatter, before the existing "Status 2026-10-13" paragraph - update
   the frontmatter `title` counts and set `updated:` to the date, as commit
   3454a0ee did. AGENTS.md stays untouched.
+
+### 4.4 Cameron's amendment during the build (BINDING; 2026-10-18)
+
+- **AR43 The `requested` tour label says the tour has no date yet** (spec
+  revision 6, D7). Cameron 2026-10-18: "the requested-tour label should
+  make clear the tour has no date yet." Label TEXT only - no rule, hold,
+  order, kind or wire change. The `requested` label is
+  `Tour requested <d>, no date yet` (e.g. `Tour requested Oct 12, no date
+  yet`; `<d>` is still `shortDate` of the request's `createdAt`); with no
+  `at` (defensive only - a request with no `createdAt` holds no one) it is
+  `Tour requested, no date yet`. The accessible-name cue is that label
+  lower-cased as for every tour label: `tour requested oct 12, no date yet`
+  (e.g. `Zia Both - already sent, not interested, tour requested oct 12,
+  no date yet`). The Add a tenant option note shows the label as
+  displayed. Section 1.1 and every slice occurrence (Task 3.2's
+  `tourHoldLabel` and its tests, Task 3.3's Add a tenant test, S4's
+  selectors.md text, the e2e `requestedLabel`) are already edited to
+  match; this ruling is the authority if any copy disagrees.
 
 ## 5. S1 - App foundations (Tasks 1.1-1.5)
 
@@ -7044,7 +7064,7 @@ describe('tourHoldLabel', () => {
     );
     expect(tourHoldLabel({ kind: 'no_show', tourId: 't1', at: '2026-10-09T12:00:00.000Z' })).toBe('No show Oct 9');
     expect(tourHoldLabel({ kind: 'requested', tourId: 't1', at: '2026-10-12T12:00:00.000Z' })).toBe(
-      'Tour requested Oct 12',
+      'Tour requested Oct 12, no date yet',
     );
   });
 
@@ -7054,7 +7074,7 @@ describe('tourHoldLabel', () => {
     expect(tourHoldLabel({ kind: 'needs_outcome', tourId: 't1' })).toBe('Toured, needs outcome');
     expect(tourHoldLabel({ kind: 'needs_placement', tourId: 't1' })).toBe('Toured, needs placement');
     expect(tourHoldLabel({ kind: 'no_show', tourId: 't1' })).toBe('No show');
-    expect(tourHoldLabel({ kind: 'requested', tourId: 't1' })).toBe('Tour requested');
+    expect(tourHoldLabel({ kind: 'requested', tourId: 't1' })).toBe('Tour requested, no date yet');
   });
 });
 ```
@@ -7248,13 +7268,13 @@ describe('RecipientPreview - tour holds and the server default (matching-blast-r
     });
     await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Zia');
     const option = await screen.findByRole('option', { name: /Zia Both/ });
-    expect(option).toHaveTextContent('Not interested, Already sent, Tour requested Oct 12');
+    expect(option).toHaveTextContent('Not interested, Already sent, Tour requested Oct 12, no date yet');
     await u.click(option);
     const box = within(listEl()).getByRole('checkbox', {
-      name: 'Zia Both - already sent, not interested, tour requested oct 12',
+      name: 'Zia Both - already sent, not interested, tour requested oct 12, no date yet',
     });
     expect(box).toBeChecked();
-    expect(within(rowOf('Zia Both')).getByText('Tour requested Oct 12')).toBeInTheDocument();
+    expect(within(rowOf('Zia Both')).getByText('Tour requested Oct 12, no date yet')).toBeInTheDocument();
     // A hand pick stays checked through Select all.
     await u.click(screen.getByRole('button', { name: 'Deselect all' }));
     await u.click(screen.getByRole('button', { name: 'Select all' }));
@@ -7441,7 +7461,7 @@ export function tourHoldLabel(hold: TourHold): string {
     case 'no_show':
       return `No show${at}`;
     case 'requested':
-      return `Tour requested${at}`;
+      return `Tour requested${at}, no date yet`;
     default:
       // A kind this dashboard does not know yet (a newer server): still a tour.
       return `Tour${at}`;
@@ -10642,7 +10662,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 - **503 copy** (compose, `role="alert"`): `Couldn't check tours and Not interested replies, so the recipient list can't be shown yet.` with `getByRole('button', { name: 'Try again' })` inside it.
 - **Failure notices** (plain text under the picker, no role): `Couldn't load the property, so its housing authorities and voucher size were not filled in.` / `Couldn't load the organization list, so housing authorities were not filled in from the property.`
 - **Property picker**: the bare and `?contactId=` entries list ONLY Available properties (browse buttons and the search); a non-Available property cannot be picked there - a spec must make it Available first or enter through `?unitId=` (the property page's "+ Send"), which keeps the banner and the Make Available dialog. Empty state: `No Available properties. A property must be Available to send.` (replaces `No properties yet - add one from the Properties page.`; no e2e uses either; `e2e/performance/routes.ts` excludes `/broadcasts/new`).
-- **Review step** (`list` `Candidate recipients`): a held row starts UNCHECKED and Select all skips it; its tag text is the tour label (`Tour Oct 20`, `Tour Oct 9, not marked`, `Toured Oct 9, needs outcome`, `Toured Oct 9, needs placement`, `No show Oct 9`, `Tour requested Oct 12`; no date -> no date and no space before it), after `Not interested`. Checkbox names: `<name> - consent not recorded` (no-consent, unchanged), else `<name>` + ` - ` + cues joined by `, ` in the order `already sent`, `not interested`, then the tour label LOWER-CASED (`Ana Diaz - already sent, not interested, tour oct 20`). The date is the BROWSER-LOCAL `toLocaleDateString('en-US', { month: 'short', day: 'numeric' })` of the hold's `at`: compute the expectation in the page (or match with a regex such as `/ - tour [a-z]{3} \d{1,2}$/`) - never from the Node clock's zone. Update `e2e/support/selectors.md:147`.
+- **Review step** (`list` `Candidate recipients`): a held row starts UNCHECKED and Select all skips it; its tag text is the tour label (`Tour Oct 20`, `Tour Oct 9, not marked`, `Toured Oct 9, needs outcome`, `Toured Oct 9, needs placement`, `No show Oct 9`, `Tour requested Oct 12, no date yet`; no date -> no date and no space before it), after `Not interested`. Checkbox names: `<name> - consent not recorded` (no-consent, unchanged), else `<name>` + ` - ` + cues joined by `, ` in the order `already sent`, `not interested`, then the tour label LOWER-CASED (`Ana Diaz - already sent, not interested, tour oct 20`). The date is the BROWSER-LOCAL `toLocaleDateString('en-US', { month: 'short', day: 'numeric' })` of the hold's `at`: compute the expectation in the page (or match with a regex such as `/ - tour [a-z]{3} \d{1,2}$/`) - never from the Node clock's zone. Update `e2e/support/selectors.md:147`.
 - **Add a tenant** option text appends every cue joined by `, ` (`Not interested, Already sent, Tour Oct 20`); the added row is checked and carries its tags.
 - **Seeds-only** review notice (`role="status"`): `Tour and Not interested labels couldn't be loaded.`
 - **Lint gate 5 baseline**: S3 removes two pre-existing `react-hooks/set-state-in-effect` errors from BroadcastComposer.tsx (4 -> 2) and adds none; the repo count AGENTS.md quotes ("23 errors across 18 dashboard files", `docs/issues/lint-backlog-repo-wide.md`) becomes 21 across the same 18 files - update it in S4's docs pass if the count is kept current. Attribute gate 5 by baseline comparison against the merge base, as AGENTS.md says.
@@ -11921,7 +11941,7 @@ A declined row carries the tag `Not interested` beside `Already sent`; its check
 new:
 
 ```
-A declined row carries the tag `Not interested` beside `Already sent`. A TOUR HOLD (tracker #6 D4: an unresolved tour for ANY property) adds one more amber tag after them: `Tour Oct 20` (upcoming), `Tour Oct 9, not marked`, `Toured Oct 9, needs outcome`, `Toured Oct 9, needs placement`, `No show Oct 9` or `Tour requested Oct 12`; the date is the dashboard's browser-local `shortDate` (with no date the date and its space are dropped), so build the expected label IN THE BROWSER with `page.evaluate` and `toLocaleDateString('en-US', { month: 'short', day: 'numeric' })`, never on the Node side. The checkbox name is `<name>`, plus ` - ` and the cues joined by `, ` in the order `already sent`, `not interested`, then the tour label LOWER-CASED (`<name> - not interested`, `<name> - already sent, not interested`, `<name> - tour oct 20`, `<name> - already sent, tour requested oct 12`); a no-consent row is `<name> - consent not recorded` whatever else applies (ASCII " - " on every name; the VISIBLE no-consent tag keeps its em dash). Which rows START checked is the server's `checkedByDefault` (recorded consent, and seeded or neither already sent, declined nor held): a filter-proposed declined or held row starts unchecked and Select all skips it; a hand-added or hand-promoted one (Add a tenant) stays checked, through Select all too. `Select all` needs `exact: true` (a substring name also matches `Deselect all`). The `Add a tenant` option shows a muted note inside its name: every cue that applies, in the order `Not interested`, `Already sent`, then the tour label, joined by `, `. A tenant the filters leave out (a status other than Onboarding or Searching; while a housing authority is selected, a missing or other authority) is NOT listed at all - add them by hand |
+A declined row carries the tag `Not interested` beside `Already sent`. A TOUR HOLD (tracker #6 D4: an unresolved tour for ANY property) adds one more amber tag after them: `Tour Oct 20` (upcoming), `Tour Oct 9, not marked`, `Toured Oct 9, needs outcome`, `Toured Oct 9, needs placement`, `No show Oct 9` or `Tour requested Oct 12, no date yet`; the date is the dashboard's browser-local `shortDate` (with no date the date and its space are dropped), so build the expected label IN THE BROWSER with `page.evaluate` and `toLocaleDateString('en-US', { month: 'short', day: 'numeric' })`, never on the Node side. The checkbox name is `<name>`, plus ` - ` and the cues joined by `, ` in the order `already sent`, `not interested`, then the tour label LOWER-CASED (`<name> - not interested`, `<name> - already sent, not interested`, `<name> - tour oct 20`, `<name> - already sent, tour requested oct 12, no date yet`); a no-consent row is `<name> - consent not recorded` whatever else applies (ASCII " - " on every name; the VISIBLE no-consent tag keeps its em dash). Which rows START checked is the server's `checkedByDefault` (recorded consent, and seeded or neither already sent, declined nor held): a filter-proposed declined or held row starts unchecked and Select all skips it; a hand-added or hand-promoted one (Add a tenant) stays checked, through Select all too. `Select all` needs `exact: true` (a substring name also matches `Deselect all`). The `Add a tenant` option shows a muted note inside its name: every cue that applies, in the order `Not interested`, `Already sent`, then the tour label, joined by `, `. A tenant the filters leave out (a status other than Onboarding or Searching; while a housing authority is selected, a missing or other authority) is NOT listed at all - add them by hand |
 ```
 
 8e. Insert ONE new row directly after the line-147 row (before the
@@ -12272,7 +12292,7 @@ test('a Matching blast follows the audience rules: status, housing authorities, 
 
   // Listed, UNCHECKED and labeled: the tour holds (a tour for ANY property, D4, D7).
   const upcomingLabel = `Tour ${await browserShortDate(page, upcoming.scheduledAt as string)}`;
-  const requestedLabel = `Tour requested ${await browserShortDate(page, tourRequest.createdAt)}`;
+  const requestedLabel = `Tour requested ${await browserShortDate(page, tourRequest.createdAt)}, no date yet`;
   await expect(rowOf(touring).getByText(upcomingLabel, { exact: true })).toBeVisible();
   await expect(rowOf(requesting).getByText(requestedLabel, { exact: true })).toBeVisible();
   const touringBox = boxOf(touring, ` - ${upcomingLabel.toLowerCase()}`);

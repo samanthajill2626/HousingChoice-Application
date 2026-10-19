@@ -5,6 +5,9 @@ rounds 1-3 (round 3 terminal: precision only) and two rulings by Cameron
 (tenants with no housing authority; the reach count). Revision 5 is
 Cameron's approval amendment: the `byHousingAuthority` GSI and its repo
 method stay in place, unused by blasts (section 4).
+Revision 6 (2026-10-18) is Cameron's copy amendment during the build: the
+`requested` tour label makes clear the tour has no date yet (D7). Label
+text only; no rule changes. Plan ruling AR43.
 Review history: `docs/superpowers/reviews/2026-10-14-matching-blast-rules/design-review/adjudications.md`.
 Branch: `feat/matching-blast-rules` (worktree `W:\tmp\matching-blast-rules`, cut from main @a2b3d80d)
 Tracker: Improvements Tracker item #6 "Matching (blasts): housing authority and status" (Before WP1, item 5)
@@ -424,7 +427,8 @@ labels couldn't be loaded." A direct send is never blocked by these reads.
   - `needs_outcome`: "Toured Oct 9, needs outcome"
   - `needs_placement`: "Toured Oct 9, needs placement"
   - `no_show`: "No show Oct 9"
-  - `requested`: "Tour requested Oct 12"
+  - `requested`: "Tour requested Oct 12, no date yet" (revision 6; with no
+    date: "Tour requested, no date yet"; cue `tour requested oct 12, no date yet`)
 - Checkbox accessible name, literal format: a no-consent row stays
   `<name> - consent not recorded` (unchanged). Otherwise `<name>` followed,
   when any cue applies, by ` - ` and the cues joined with `, ` in this

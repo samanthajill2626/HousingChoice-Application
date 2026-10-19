@@ -154,3 +154,18 @@ handback review does not depend on the replay for them.
 - npm ci done in the worktree. No other mission is building.
 - At handback: replay the WHOLE conversation first, then read this file
   (the replay misses the two inputs quoted above as R2 and N1).
+
+## Build-time entry (2026-10-18, AUTO build running, S1 in flight)
+
+- 2026-10-14 ~17:45 EDT Cameron asked to pause at a good stopping point;
+  the weekly usage limit then killed the build in P1 research (nothing
+  built). 2026-10-18: "Resume 6, I asked for a pause only because we were
+  going to hit our limit. You can continue working." -> fresh dispatch from
+  P1 research; the pause was never a design hold.
+- 2026-10-18 copy change, verbatim: "Copy change from Cameron (Oct 18), spec
+  D7 tour label: the requested-tour label should make clear the tour has no
+  date yet. Use "Tour requested Oct 12, no date yet" (accessible-name cue in
+  lower case: "tour requested oct 12, no date yet"). Label text only; no
+  rule changes." -> spec revision 6 (D7), plan AR43 (section 4.4). Check at
+  handback: the requested label and its cue read exactly so; nothing else
+  about holds changed.

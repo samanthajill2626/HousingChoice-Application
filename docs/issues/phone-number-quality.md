@@ -34,17 +34,33 @@ design. Two findings point here:
 
 Cameron's call (2026-10-19): bundle both as one "phone number quality"
 feature at low severity, run it as a feature mission later, and drop it from
-the immediate work. A read-only prod scan for other impossible numbers runs
-separately, after the fix; its results stay out of the repo (they are names
-and numbers).
+the immediate work.
+
+**Scan result (2026-10-19, read-only, `hc-prod-contacts`).** 965 contacts, 4
+stored numbers that cannot exist. The numbers and ids stay out of the repo;
+the shapes are what matter here:
+
+- 2 with an exchange starting 0 or 1 (one is the 10-16 contact above);
+- 1 `+1` number with only 9 digits after the country code - the
+  explicit-`+` branch of `normalizeToE164` checks the E.164 shape (2-15
+  digits) but never the NANP length for `+1`;
+- 1 auto-captured caller stub whose `phone` is the literal string
+  `Anonymous` (a blocked caller ID), already soft-deleted.
+
+The three live ones are unnamed tenants with the importer's `uuidv5` id
+shape. So the existing-data side is a handful of rows staff can fix by hand;
+the mission's weight is the entry-side check and the flag.
 
 **Problem A - the phone check is shape-only.** `normalizeToE164`
 (`app/src/lib/phone.ts:32`, mirrored in `dashboard/src/lib/phone.ts:35`)
 accepts any 10 digits as `+1` plus those digits. That is deliberate and
 documented (no libphonenumber), but it means an area code or exchange that
-starts with 0 or 1 is stored as valid. The importer (`quoSource.ts:185`,
+starts with 0 or 1 is stored as valid, and an explicit `+1` value of the wrong
+length passes the bare E.164 shape check. The importer (`quoSource.ts:185`,
 `airtableSource.ts:130`) and the contact routes (`contacts.ts:876`) use the
-same check.
+same check. Separately, the scan found a caller stub whose `phone` is the
+literal `Anonymous`: whatever auto-captures a blocked caller ID wrote it
+without normalizing, which the mission should trace.
 
 Tightening the shared function is NOT the fix. It is called from about 23
 server files and 6 dashboard files, including the inbound SMS and voice

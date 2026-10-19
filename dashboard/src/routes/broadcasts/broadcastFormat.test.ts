@@ -28,8 +28,23 @@ describe('audienceSummary', () => {
   it('leads with Tenants and appends size + authority when set', () => {
     expect(audienceSummary({ contact_type: 'tenant' })).toBe('Tenants');
     expect(
-      audienceSummary({ contact_type: 'tenant', bedroomSize: 2, housing_authority: 'Atlanta' }),
+      audienceSummary({ contact_type: 'tenant', bedroomSize: 2, housing_authorities: ['Atlanta'] }),
     ).toBe('Tenants - 2-BR - Atlanta');
+  });
+
+  it('matching-blast-rules D2: joins a housing authority LIST with ", "', () => {
+    expect(
+      audienceSummary({
+        contact_type: 'tenant',
+        bedroomSize: 2,
+        housing_authorities: ['Atlanta Housing Authority', 'DeKalb County Housing Authority'],
+      }),
+    ).toBe('Tenants - 2-BR - Atlanta Housing Authority, DeKalb County Housing Authority');
+    expect(audienceSummary({ contact_type: 'tenant', housing_authorities: ['Atlanta Housing Authority'] })).toBe(
+      'Tenants - Atlanta Housing Authority',
+    );
+    // An empty list is no housing authority filter.
+    expect(audienceSummary({ contact_type: 'tenant', housing_authorities: [] })).toBe('Tenants');
   });
 });
 

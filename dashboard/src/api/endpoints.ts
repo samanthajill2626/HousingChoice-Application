@@ -1981,7 +1981,7 @@ export function getFollowUps(signal?: AbortSignal): Promise<FollowUpsResponse> {
 /** POST /api/broadcasts — create a DRAFT + estimate the audience reach. Returns
  *  the new draft's id, the estimated reach, and `truncated` (the estimate hit
  *  the page cap → incomplete). The client sends the `audience_filter` client
- *  shape (contact_type/housing_authority?/bedroomSize?); the server adds the
+ *  shape (contact_type/housing_authorities?/bedroomSize?); the server adds the
  *  always-on opt-out/unreachable fences. Matching sends: `audience_filter` is
  *  now OPTIONAL — omitting it while passing `seedContactIds` creates a
  *  seeds_only draft (the seeded 1:1/1:N entry) instead of the whole tenant
@@ -1994,14 +1994,18 @@ export function createBroadcast(body: {
 }): Promise<{
   broadcastId: string;
   status: 'draft';
-  estimatedCount: number;
+  /** matching-blast-rules D8: how many review rows will START CHECKED (the
+   *  default-checked count, stored as the draft's stats.audience). OMITTED
+   *  when a rules read failed at create - the composer then reads "Reach
+   *  estimate unavailable". */
+  estimatedCount?: number;
   truncated: boolean;
   flyerUrl?: string;
 }> {
   return request<{
     broadcastId: string;
     status: 'draft';
-    estimatedCount: number;
+    estimatedCount?: number;
     truncated: boolean;
     flyerUrl?: string;
   }>('/api/broadcasts', { method: 'POST', body });

@@ -57,13 +57,14 @@ export function bedroomPhrase(beds: number): string {
 /** A human audience summary for a list row / results header, e.g.
  *  "Tenants - 2-BR - Atlanta Housing". Always leads with "Tenants": it
  *  summarizes the FILTER, which reaches tenants only (hand-picked partner
- *  seeds are not summarized here - D22); appends the size + authority narrowers when set. */
+ *  seeds are not summarized here - D22); appends the size + authority narrowers when set.
+ *  matching-blast-rules D2: the housing authorities are a LIST, joined with
+ *  ", " ("Tenants - 2-BR - Atlanta Housing Authority, DeKalb Housing Authority"). */
 export function audienceSummary(filter: AudienceFilter): string {
   const parts: string[] = ['Tenants'];
   if (filter.bedroomSize !== undefined) parts.push(voucherSizeLabel(filter.bedroomSize));
-  if (filter.housing_authority !== undefined && filter.housing_authority.length > 0) {
-    parts.push(filter.housing_authority);
-  }
+  const authorities = (filter.housing_authorities ?? []).filter((name) => name.length > 0);
+  if (authorities.length > 0) parts.push(authorities.join(', '));
   return parts.join(' - ');
 }
 

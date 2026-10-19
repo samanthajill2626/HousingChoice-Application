@@ -2270,7 +2270,9 @@ export interface Contact {
   emails?: ContactEmail[];
   /** Landlord/PM company name (editable). */
   company?: string;
-  /** Tenant housing authority (camelCase — the byHousingAuthority GSI key). */
+  /** Tenant housing authority (camelCase). The byHousingAuthority GSI is keyed
+   *  on it and KEPT, but a Matching blast no longer reads that GSI: its housing
+   *  authority filter matches this field in memory (matching-blast-rules D2). */
   housingAuthority?: string;
   /** The helper organization a tenant works with (Hope Atlanta, HUD VASH, ...) -
    *  NOT a housing authority. Distinct dimension; no GSI, no facet. Declared
@@ -3263,12 +3265,19 @@ export interface UnitActivityEvent {
 // console.log a phone/name/body (rendering them in the UI is fine).
 
 /** The CLIENT send shape for an audience filter — contact_type is fixed
- *  'tenant' (M1.8 targets tenants only); housing_authority/bedroomSize are
+ *  'tenant' (M1.8 targets tenants only); housing_authorities/bedroomSize are
  *  optional narrowers. The server FILLS excludeOptedOut/excludeUnreachable
  *  (always-on hard fences) — the client never sends them. */
 export interface AudienceFilter {
   contact_type: 'tenant';
-  /** Tenant housing authority (the byHousingAuthority GSI key). */
+  /** matching-blast-rules D2: any-of housing authorities (exact organization
+   *  list names); absent = no housing authority filter. Every response that
+   *  carries a filter uses this list (present only when non-empty) and never
+   *  the legacy one-string `housing_authority` - the server normalizes stored
+   *  legacy rows, so the dashboard reads ONE shape. */
+  housing_authorities?: string[];
+  /** TRANSITIONAL: the old one-string filter, still read by AudienceFilters
+   *  until Task 3.3 moves it to the list and deletes this field. */
   housing_authority?: string;
   /** Approved bedroom size to match against the tenant's voucherSize (0=Studio). */
   bedroomSize?: number;
@@ -3482,6 +3491,35 @@ export interface PreviewCandidate {
   lastHeardFromAt?: string;
   /** last-heard-from D11: an EFFECTIVE decline of this property is recorded. */
   declinedThisProperty: boolean;
+  /** matching-blast-rules D4: the unresolved tour (for ANY property) that
+   *  holds this tenant out of the default selection - absent when none, and on
+   *  a seeds-only preview whose rules reads failed (audienceRulesUnavailable). */
+  tourHold?: TourHold;
+  /** matching-blast-rules D5: the server's ONE default-check rule -
+   *  has_consent && (seeded || (!alreadySent && !declined && !tourHold)). The
+   *  review starts each row with it and "Select all" re-applies it; the
+   *  dashboard never recomputes it. */
+  checkedByDefault: boolean;
+}
+
+/** matching-blast-rules D4: why a tenant is held out of a blast's default
+ *  selection - an unresolved tour for ANY property. MIRRORS
+ *  app/src/lib/blastAudienceRules.ts TourHoldKind. */
+export type TourHoldKind =
+  | 'needs_placement'
+  | 'upcoming'
+  | 'needs_outcome'
+  | 'not_marked'
+  | 'no_show'
+  | 'requested';
+
+/** One tenant's shown tour hold: `at` is the tour's date (an ISO instant),
+ *  absent when the tour has none. MIRRORS app/src/lib/blastAudienceRules.ts
+ *  TourHold. */
+export interface TourHold {
+  kind: TourHoldKind;
+  tourId: string;
+  at?: string;
 }
 
 /** POST /api/broadcasts/:id/preview response. `priorRecipientContactIds` is
@@ -3506,9 +3544,17 @@ export interface PreviewResponse {
    *  property is EFFECTIVE - annotates hand-added rows client-side, like
    *  priorRecipientContactIds. Empty when the draft has no property. */
   declinedContactIds: string[];
-  /** True when the decline reads failed: the candidates came back with NO
-   *  not-interested labels, so a declined tenant may start checked. */
-  declineLabelsUnavailable: boolean;
+  /** matching-blast-rules D7: EVERY held contact's tour hold (the analog of
+   *  declinedContactIds), so Add a tenant can label a tenant who is not among
+   *  the candidates. */
+  tourHolds: Array<{ contactId: string } & TourHold>;
+  /** matching-blast-rules D5: a SEEDS-ONLY draft's tour or decline read
+   *  failed - its rows came back without those labels (a filter draft's
+   *  preview answers 503 audience_rules_unavailable instead). */
+  audienceRulesUnavailable?: true;
+  /** TRANSITIONAL: the removed degrade flag, still read by RecipientPreview
+   *  until Task 3.2 deletes its notice and this field. */
+  declineLabelsUnavailable?: boolean;
 }
 
 /** GET /api/broadcasts/follow-ups -> one waiting row (last-heard-from spec 5.6;

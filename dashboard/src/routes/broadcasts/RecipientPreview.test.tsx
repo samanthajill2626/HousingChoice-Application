@@ -36,7 +36,7 @@ vi.mock('../../api/index.js', async () => {
 import { RecipientPreview } from './RecipientPreview.js';
 
 function candidate(over: Partial<PreviewResponse['candidates'][number]> = {}): PreviewResponse['candidates'][number] {
-  return {
+  const row = {
     contactId: 'c1',
     firstName: 'Tasha',
     phone: '+14040000001',
@@ -48,6 +48,16 @@ function candidate(over: Partial<PreviewResponse['candidates'][number]> = {}): P
     seeded: false,
     declinedThisProperty: false,
     ...over,
+  };
+  // matching-blast-rules D5: the server's ONE default-check rule, as fixture
+  // data - so a fixture reads like a real preview. A test that needs the
+  // server to say something else passes checkedByDefault itself.
+  return {
+    ...row,
+    checkedByDefault:
+      over.checkedByDefault ??
+      (row.has_consent &&
+        (row.seeded || (!row.alreadySentThisProperty && !row.declinedThisProperty && row.tourHold === undefined))),
   };
 }
 
@@ -63,6 +73,7 @@ function previewOf(over: Partial<PreviewResponse> = {}): PreviewResponse {
     unresolvedSeedIds: [],
     declinedContactIds: [],
     declineLabelsUnavailable: false,
+    tourHolds: [],
     ...over,
   };
 }

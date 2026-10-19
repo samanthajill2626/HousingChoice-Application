@@ -34,6 +34,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import { RecipientPreview } from './RecipientPreview.js';
+import styles from './RecipientPreview.module.css';
 
 function candidate(over: Partial<PreviewResponse['candidates'][number]> = {}): PreviewResponse['candidates'][number] {
   const row = {
@@ -1035,6 +1036,21 @@ describe('RecipientPreview - tour holds and the server default (matching-blast-r
     await u.click(held);
     expect(held).toBeChecked();
     expect(screen.getByRole('button', { name: 'Send to 2 recipients' })).toBeInTheDocument();
+  });
+
+  // Conformance R55 (D7): "the row gets the same amber row class".
+  it('a held row carries the amber row class - a plain row does not (D7, R55)', () => {
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Held', tourHold: UPCOMING }),
+          candidate({ contactId: 'c2', firstName: 'Bo', phone: '+14040000002' }),
+        ],
+        tourHolds: [{ contactId: 'c1', ...UPCOMING }],
+      }),
+    });
+    expect(rowOf('Held')).toHaveClass(styles.rowAlready!);
+    expect(rowOf('Bo')).not.toHaveClass(styles.rowAlready!);
   });
 
   it('the checkbox name lists every cue in order - already sent, not interested, then the tour label in lower case', () => {

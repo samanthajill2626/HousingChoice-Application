@@ -1453,8 +1453,10 @@ construction (a `speakerRoles` pair per `Speaker N` label on top of the all-requ
 truncate first.
 
 **Housing authority: why an extracted one sometimes arrives as a suggestion.** The field holds only
-names from the organization list (Settings > Housing authorities & agencies), because broadcast
-audience resolution is an exact hash match on the `byHousingAuthority` GSI. The AI's apply layer
+names from the organization list (Settings > Housing authorities & agencies), because a Matching
+blast's housing authority filter matches a tenant's stored value against list names exactly (any
+of the names the filter holds; since tracker #6, 2026-10-14, the blast no longer reads the
+`byHousingAuthority` GSI, which is kept). The AI's apply layer
 resolves what the model heard against that list: a listed name, or a spelling that belongs to ONE
 listed name, is treated as a known authority (written or suggested exactly as the model's op says,
 always as the listed name); an abbreviation several names share (AHA, MHA) or a name the list does

@@ -3,9 +3,10 @@ id: broadcast-audience-truncation-drops-searching-tenants
 title: A truncated broadcast audience drops `searching` tenants first and keeps `inactive` ones
 type: bug
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-26
+resolved: 2026-10-18
 refs: app/src/services/audienceResolution.ts:129-136, app/src/services/audienceResolution.ts:78-79, app/src/services/audienceResolution.ts:170-179, app/src/repos/contactsRepo.ts, app/src/lib/statusModel.ts:140-148
 ---
 
@@ -81,3 +82,21 @@ to move behaviour.
 **Reopen / escalate** when the tenant count approaches the 10,000 bound, when
 anyone lowers `maxPages` or `pageSize`, or the moment a broadcast is reported as
 having missed tenants who should have received it.
+
+**Resolution (2026-10-18, feat/matching-blast-rules, tracker #6).** The resolver no
+longer reads the unwanted statuses at all, which is suggested fix 2 (a
+status-aware cut). A Matching blast's filter audience is now tenants in
+`searching` or `onboarding` only (spec
+`docs/superpowers/specs/2026-10-14-matching-blast-rules-design.md` D1), read
+as two explicit `byTypeStatus` partitions - `searching` FIRST, then
+`onboarding` - under the same `maxPages` x `pageSize` bound and the same
+truncation flag. A cut can therefore no longer keep `inactive` (or any other
+unwanted status) in place of `searching` tenants: within the wanted set the
+read order is searching first. The housing authority became an in-memory
+filter over those two partitions, so the `byHousingAuthority` read is gone
+from this path (the GSI itself is kept, unused by blasts). The bound and the
+truncation refusal remain: a truncated filter send is still refused, and the
+review step says the list is incomplete. The
+`TODO(broadcast-audience-truncation-drops-searching-tenants)` marker in
+`app/src/services/audienceResolution.ts` went with the rewrite.
+`listByType`'s shared ascending order is unchanged.

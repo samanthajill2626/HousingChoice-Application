@@ -122,6 +122,24 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   Internal identifiers are unchanged: the `broadcast` entity, `/broadcasts`
   routes, jobs, tables, and log fields all keep their names - only displayed
   copy follows the audience rule.
+  **Who a blast reaches** (tracker #6, 2026-10-14): the filters reach only
+  tenants in Onboarding or Searching; the housing authority filter is a LIST
+  prefilled from the property's **accepted authorities** - a tenant matches ANY
+  of them, and while it holds a name a tenant whose housing authority is
+  missing or not one of them is left out; and a tenant with an unresolved tour
+  for ANY property (an upcoming tour, a past tour not marked, a toured tour
+  waiting on an outcome or a placement, a no-show, or a tour request under 14
+  days old) is a **tour hold**: listed on Review recipients with a label such
+  as "Tour Oct 20", but left unchecked. Tenants left out by status or housing
+  authority are not listed at all. A tenant picked by hand skips these rules
+  (a held one keeps its label but starts checked), and caseworkers are never
+  added by the filters. "Reaches N recipients" counts the recipients that will
+  start checked, and the property picker offers Available properties only.
+  If tours or Not interested replies cannot be read, a filter blast's review
+  waits with Try again (and the API's no-body filter send answers 503
+  `audience_rules_unavailable`), while a direct send from a contact's page
+  goes ahead with a notice that the labels could not be loaded.
+  Design: `docs/superpowers/specs/2026-10-14-matching-blast-rules-design.md`.
 
 - **`utilities` = TENANT-PAID utilities** (2026-07-08). The unit's `utilities`
   field records **which utilities the tenant must pay** (free-form, e.g.
@@ -320,7 +338,10 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   that administers the voucher where they lease - **porting** is that voucher
   moving between authorities (the informational `contact.porting` flag). A tenant
   has EXACTLY ONE (`contact.housingAuthority`, the `byHousingAuthority` GSI
-  hash); a property lists the ones it accepts (**accepted authorities**, below).
+  hash - the GSI is kept, but since tracker #6 (2026-10-14) a Matching blast no
+  longer reads it: the blast reads Searching and Onboarding tenants and compares
+  this value with the filter's names in memory); a property lists the ones it
+  accepts (**accepted authorities**, below).
   Values are NAMES from the housing authority list (**organization list**,
   below): a record stores the entry's exact name text, never an id, and every
   writer checks a changed value against the list (a unique **alternate

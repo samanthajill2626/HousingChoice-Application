@@ -271,7 +271,7 @@ describe('AudienceFilters - the property prefill notes (matching-blast-rules D3)
         initialFilter={{ contact_type: 'tenant', housing_authorities: ['Atlanta Housing Authority'] }}
       />,
     );
-    expect(screen.getByText('Not used (not on the organization list): Nowhere Board, Old Name HA')).toBeInTheDocument();
+    expect(screen.getByText('Not used (not on the organization list): Nowhere Board, Old Name HA.')).toBeInTheDocument();
     expect(screen.queryByText(/This blast is not limited by housing authority/)).not.toBeInTheDocument();
   });
 
@@ -279,7 +279,7 @@ describe('AudienceFilters - the property prefill notes (matching-blast-rules D3)
     render(<Harness unusedAuthorities={['Nowhere Board']} noAuthorityMapped />);
     expect(
       screen.getByText(
-        'Not used (not on the organization list): Nowhere Board This blast is not limited by housing authority.',
+        'Not used (not on the organization list): Nowhere Board. This blast is not limited by housing authority.',
       ),
     ).toBeInTheDocument();
   });
@@ -289,7 +289,7 @@ describe('AudienceFilters - the property prefill notes (matching-blast-rules D3)
     render(<Harness unusedAuthorities={['Nowhere Board']} noAuthorityMapped />);
     await u.type(screen.getByRole('combobox', { name: 'Housing authorities' }), 'AHA');
     await u.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
-    expect(screen.getByText('Not used (not on the organization list): Nowhere Board')).toBeInTheDocument();
+    expect(screen.getByText('Not used (not on the organization list): Nowhere Board.')).toBeInTheDocument();
   });
 
   it('shows each hold notice the composer passes with a Try again that re-runs only its own read (AR44)', async () => {

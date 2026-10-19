@@ -67,7 +67,7 @@ export interface AudienceFiltersProps {
    *  matching chip. Undefined when not unit-scoped or nothing is recorded. */
   propertyVoucherSize?: number;
   /** D3: the property's accepted authorities that map to no list entry -
-   *  "Not used (not on the organization list): <names>". */
+   *  "Not used (not on the organization list): <names>." */
   unusedAuthorities?: readonly string[];
   /** D3: the property lists authorities and NONE of them mapped - while no
    *  authority is selected the note adds "This blast is not limited by
@@ -220,8 +220,9 @@ export function AudienceFilters({
         />
         {unusedAuthorities.length > 0 ? (
           <p className={styles.matchNote}>
-            {NOT_USED_PREFIX}
-            {unusedAuthorities.join(', ')}
+            {/* The names end with a period (spec revision 7, AR44); the
+                not-limited sentence follows it. */}
+            {`${NOT_USED_PREFIX}${unusedAuthorities.join(', ')}.`}
             {noAuthorityMapped && authorities.length === 0 ? NOT_LIMITED : null}
           </p>
         ) : null}

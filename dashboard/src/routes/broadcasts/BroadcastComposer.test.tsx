@@ -857,7 +857,7 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     renderComposer('?unitId=unit-0001');
     expect(await screen.findByRole('button', { name: 'Remove DeKalb County Housing Authority' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
-    expect(screen.getByText('Not used (not on the organization list): Nowhere Board')).toBeInTheDocument();
+    expect(screen.getByText('Not used (not on the organization list): Nowhere Board.')).toBeInTheDocument();
     // The caption's housing authority sentence shows while the list is non-empty.
     expect(screen.getByText(/While a housing authority is selected/)).toBeInTheDocument();
     await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
@@ -873,7 +873,7 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     renderComposer('?unitId=unit-0001');
     expect(
       await screen.findByText(
-        'Not used (not on the organization list): Nowhere Board This blast is not limited by housing authority.',
+        'Not used (not on the organization list): Nowhere Board. This blast is not limited by housing authority.',
       ),
     ).toBeInTheDocument();
     await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });

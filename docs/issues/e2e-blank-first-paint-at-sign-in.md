@@ -79,3 +79,13 @@ document. Socket table right after: 2672 TIME_WAIT, 302 established (dynamic poo
 any re-run: `W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p6-e2e-artifacts\`
 (screenshots, videos, error contexts). Isolation and the clean re-run are recorded in
 `docs/superpowers/reviews/2026-10-12-caseworker-integrity/handback.md`.
+
+**Fourth sighting (2026-10-19 ~01:45 EDT, Windows, `feat/matching-blast-rules` @994be540,
+lane 10).** Same final gate run as the contact-navigation twin's eleventh sighting (361
+passed / 2 failed, 21.9 min): `tests/scenarios/post-tour-application.spec.ts:270`, step
+"App: the voucher deadline surfaces on the Today board", stopped in `expectTodayReady`
+(`e2e/support/today.ts:44`, via `e2e/scenarios/steps.ts:3118`) - the Today heading never
+rendered in 15 s; the screenshot is an entirely white page. No `net::ERR_*` line in the run
+log; 2127 TIME_WAIT sockets right after the run. The file passed in isolation (5/5; with
+`settings.spec.ts` in the same isolation run, 8/8 in 57.7 s), and the full re-run of the same commit passed 363/363.
+Artifacts: `W:\tmp\matching-blast-rules\.superpowers\gates\final\e2e-artifacts\`.

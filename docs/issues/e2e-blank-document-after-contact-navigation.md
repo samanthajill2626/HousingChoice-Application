@@ -148,3 +148,16 @@ its merge. Its artifacts cited above (`.superpowers/sdd/e2e-results-run1/`,
 `e2e-results-fw1/`, `e2e-results-fw1-run2/`, `e2e-results-fw1-run3/` with the traces, and
 `planner-e2e-results-1/` for the eighth sighting) are preserved with a SHA-256 manifest at
 `W:\tmp\_preserved-artifacts\join-housing-authority-20261013\.superpowers\sdd\`.
+
+**Eleventh sighting (2026-10-19 ~01:40 EDT, Windows, `feat/matching-blast-rules` @994be540,
+lane 10).** The branch's final full gate run (the host's second full e2e of the night)
+finished 361 passed / 2 failed in 21.9 min: `tests/dashboard-next/settings.spec.ts:27`
+waited 15 s in `page.waitForURL(/\/settings\/team$/)` right after `page.goto('/settings')`
+(`:30`, `:37`); the screenshot is an entirely white document - a settings page this time.
+The run's other failure was the sign-in twin (`e2e-blank-first-paint-at-sign-in`). No
+`net::ERR_*` line in the run log; that run had no trace (retries 0, `E2E_TRACE` unset);
+2127 sockets in TIME_WAIT right after it. Both failing files passed alone (8/8, 57.7 s),
+and a full re-run of the same commit with `E2E_TRACE=1` passed 363/363 (23.0 min; TIME_WAIT
+2091 at its start, 2738 at its end). Artifacts (gitignored, that worktree):
+`W:\tmp\matching-blast-rules\.superpowers\gates\final\e2e-artifacts\`; record:
+`docs/superpowers/reviews/2026-10-14-matching-blast-rules/handback.md`.

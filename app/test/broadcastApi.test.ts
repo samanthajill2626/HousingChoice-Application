@@ -2208,7 +2208,10 @@ describe('share-broadcast API (M1.8a)', () => {
   // --- Organization names on the housing authority filter (spec 2026-10-06:
   // D5 at draft create; D7 at preview and at the filter-resolving send) -----
   describe('organization names on the housing authority filter (spec D5, D7)', () => {
-    /** A stored audience filter holding `housing_authority` exactly as written. */
+    /** A LEGACY stored audience filter (saved before matching-blast-rules D2)
+     *  holding `housing_authority` exactly as written. Kept as legacy
+     *  coverage: storedFilterRefusal and the resolver read it through
+     *  authoritiesOfFilter as a one-member list. */
     const filterFor = (housing_authority: string): BroadcastItem['audience_filter'] => ({
       contact_type: 'tenant',
       housing_authority,
@@ -2630,6 +2633,166 @@ describe('share-broadcast API (M1.8a)', () => {
         expect(row?.housing_authorities).toEqual(stored);
         expect(row).not.toHaveProperty('housing_authority');
       }
+    });
+  });
+
+  // --- matching-blast-rules D2 (plan Task 1.5): a STORED list is re-checked
+  // member by member at preview and at the filter-resolving send, and every
+  // response that carries a filter answers the wire shape - a legacy row's
+  // string as a one-member housing_authorities, never housing_authority. ----
+  describe('matching-blast-rules D2: stored lists at preview, send and the projections', () => {
+    /** A stored LIST-shaped filter (what draft create writes since D2). */
+    const listFilter = (...housing_authorities: string[]): BroadcastItem['audience_filter'] => ({
+      contact_type: 'tenant',
+      housing_authorities,
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    });
+    /** A LEGACY stored filter (drafts and shares saved before D2). */
+    const legacyFilter = (housing_authority: string): BroadcastItem['audience_filter'] => ({
+      contact_type: 'tenant',
+      housing_authority,
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    });
+
+    function act(
+      app: import('express').Express,
+      broadcastId: string,
+      verb: 'preview' | 'send',
+      body: Record<string, unknown> = {},
+    ) {
+      return request(app)
+        .post(`/api/broadcasts/${broadcastId}/${verb}`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send(body);
+    }
+
+    /** The names of a 422's candidate / otherKind refs, sorted (order is not the contract). */
+    function names(refs: Array<{ name: string }>): string[] {
+      return refs.map((r) => r.name).sort();
+    }
+
+    it('preview re-checks EVERY member in order: the first not exactly listed is the 422 (one list read)', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-1', housingAuthority: 'Atlanta Housing Authority' } as Partial<ContactItem>);
+      seedShare(world, 'bcast-list-spelling', 'draft', {}, {
+        audience_filter: listFilter('Atlanta Housing Authority', 'DCA', 'Step Up'),
+      });
+      const { app } = makeWebhookHarness({ world });
+      // Spied AFTER the harness is built (the service calls list.get() per request).
+      const read = vi.spyOn(world.orgListRepo, 'get');
+      const res = await act(app, 'bcast-list-spelling', 'preview');
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({ error: 'org_not_on_list', field: 'audience_filter', text: 'DCA', close: [] });
+      expect(res.body.candidates).toEqual([
+        expect.objectContaining({ kind: 'housing_authority', name: 'Georgia Department of Community Affairs' }),
+      ]);
+      expect(read).toHaveBeenCalledTimes(1);
+    });
+
+    it('preview: a stored agency member is the 422 with otherKind', async () => {
+      seedUnit(world);
+      seedShare(world, 'bcast-list-agency', 'draft', {}, { audience_filter: listFilter('Step Up', 'DCA') });
+      const { app } = makeWebhookHarness({ world });
+      const res = await act(app, 'bcast-list-agency', 'preview');
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({ error: 'org_not_on_list', field: 'audience_filter', text: 'Step Up' });
+      expect(names(res.body.otherKind)).toEqual(['Step Up']);
+    });
+
+    it('the filter-resolving send re-checks every member of the stored list: 422, still a draft, nothing sent', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-1', housingAuthority: 'Atlanta Housing Authority' } as Partial<ContactItem>);
+      seedShare(world, 'bcast-list-send', 'draft', {}, {
+        audience_filter: listFilter('Atlanta Housing Authority', 'Nowhere Housing Authority'),
+      });
+      const { app } = makeWebhookHarness({ world });
+      const res = await act(app, 'bcast-list-send', 'send');
+      expect(res.status).toBe(422);
+      expect(res.body).toMatchObject({
+        error: 'org_not_on_list',
+        field: 'audience_filter',
+        text: 'Nowhere Housing Authority',
+      });
+      await queueAdapter.settle();
+      expect(world.broadcasts.get('bcast-list-send')?.status).toBe('draft');
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('(PIN) a stored list of exact names previews and sends to holders of ANY member', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-aha', housingAuthority: 'Atlanta Housing Authority' } as Partial<ContactItem>);
+      seedTenant(world, {
+        contactId: 'c-dca',
+        housingAuthority: 'Georgia Department of Community Affairs',
+      } as Partial<ContactItem>);
+      seedTenant(world, { contactId: 'c-dekalb', housingAuthority: 'DeKalb County Housing Authority' } as Partial<ContactItem>);
+      seedShare(world, 'bcast-list-exact', 'draft', {}, {
+        audience_filter: listFilter('Atlanta Housing Authority', 'Georgia Department of Community Affairs'),
+      });
+      const { app } = makeWebhookHarness({ world });
+      const preview = await act(app, 'bcast-list-exact', 'preview');
+      expect(preview.status).toBe(200);
+      expect(preview.body.count).toBe(2);
+      const send = await act(app, 'bcast-list-exact', 'send');
+      expect(send.status).toBe(200);
+      expect(send.body.count).toBe(2);
+    });
+
+    it('GET results answers the wire filter: a LEGACY row reads housing_authorities, never housing_authority', async () => {
+      seedUnit(world);
+      seedShare(world, 'bcast-legacy-sent', 'sent', { 'c-1': { status: 'delivered' } }, {
+        audience_filter: { ...legacyFilter('Atlanta Housing Authority'), bedroomSize: 2 },
+      });
+      const { app } = makeWebhookHarness({ world });
+      const res = await request(app)
+        .get('/api/broadcasts/bcast-legacy-sent/results')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE);
+      expect(res.status).toBe(200);
+      expect(res.body.audience_filter).toEqual({
+        contact_type: 'tenant',
+        housing_authorities: ['Atlanta Housing Authority'],
+        bedroomSize: 2,
+        excludeOptedOut: true,
+        excludeUnreachable: true,
+      });
+      expect(res.body.audience_filter).not.toHaveProperty('housing_authority');
+    });
+
+    it('GET /api/broadcasts rows answer the wire filter too - legacy, list and no-authority rows', async () => {
+      seedUnit(world);
+      seedShare(world, 'bcast-row-legacy', 'sent', {}, { audience_filter: legacyFilter('Atlanta Housing Authority') });
+      seedShare(world, 'bcast-row-list', 'draft', {}, { audience_filter: listFilter('DeKalb County Housing Authority') });
+      seedShare(world, 'bcast-row-none', 'draft', {});
+      const { app } = makeWebhookHarness({ world });
+      const res = await request(app)
+        .get('/api/broadcasts')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE);
+      expect(res.status).toBe(200);
+      const byId = Object.fromEntries(
+        (res.body.broadcasts as Array<{ broadcastId: string; audience_filter: Record<string, unknown> }>).map(
+          (b) => [b.broadcastId, b.audience_filter],
+        ),
+      );
+      expect(byId['bcast-row-legacy']).toEqual({
+        contact_type: 'tenant',
+        housing_authorities: ['Atlanta Housing Authority'],
+        excludeOptedOut: true,
+        excludeUnreachable: true,
+      });
+      expect(byId['bcast-row-legacy']).not.toHaveProperty('housing_authority');
+      expect(byId['bcast-row-list']).toEqual({
+        contact_type: 'tenant',
+        housing_authorities: ['DeKalb County Housing Authority'],
+        excludeOptedOut: true,
+        excludeUnreachable: true,
+      });
+      expect(byId['bcast-row-none']).toEqual({ contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true });
+      expect(byId['bcast-row-none']).not.toHaveProperty('housing_authorities');
     });
   });
 

@@ -12,20 +12,27 @@
 //   GET  /api/broadcasts/follow-ups                                                  -> { items, byUnit, truncated } | 503 outcome_unavailable
 //
 // Audience: a FILTER resolves TENANT 1:1 contacts ONLY (never relay-group
-// rosters), by housing authority and/or exact bedroom size; hand-picked seeds
-// and an explicit recipient list may also name PARTNERS (spec 2026-10-06 D20).
+// rosters), and only tenants in Onboarding or Searching (matching-blast-rules
+// D1), narrowed by ANY of a list of housing authorities (D2) and/or exact
+// bedroom size; hand-picked seeds and an explicit recipient list may also
+// name PARTNERS, of any status (spec 2026-10-06 D20).
 // Opted-out + unreachable are ALWAYS excluded. The send fans out through the
 // SHARED A2P throttle (the broadcast.send job + worker a2pBucket).
 //
-// Organization names (spec 2026-10-06 D5): POST answers 422 org_not_on_list
-// (field `audience_filter`) when audience_filter.housing_authority is not a
-// housing authority on the stored org list; a unique spelling is stored as the
-// entry's exact name, and the 201 echoes the stored audience_filter.
-// Preview of a DRAFT and the filter-resolving send (no recipientContactIds, not
-// seeds_only) re-check the STORED value (D7): it must be EXACTLY a listed name,
-// else the same 422, where a stored spelling names its entry as the one
-// candidate. The curated send, seeds_only drafts and non-draft previews are
-// never re-checked; nothing rewrites a broadcast.
+// Organization names (spec 2026-10-06 D5; matching-blast-rules D2): POST
+// answers 422 org_not_on_list (field `audience_filter`, `text` = the FIRST
+// failing member) when a member of audience_filter.housing_authorities - or
+// the LEGACY one-string housing_authority, read as a one-member list - is not
+// a housing authority on the stored org list; a unique spelling is stored as
+// the entry's exact name, and the 201 echoes the stored filter in the wire
+// shape (wireAudienceFilter: housing_authorities, never housing_authority),
+// as do the results and list views. Preview of a DRAFT and the
+// filter-resolving send (no recipientContactIds, not seeds_only) re-check
+// EVERY member of the STORED list (D7; authoritiesOfFilter, so a legacy row's
+// string is its one member): each must be EXACTLY a listed name, else the
+// same 422 for the first that is not, where a stored spelling names its entry
+// as the one candidate. The curated send, seeds_only drafts and non-draft
+// previews are never re-checked; nothing rewrites a broadcast.
 //
 // PII (doc §9): the preview RESPONSE carries phones (authed/internal — the
 // operator needs to see who's in the audience), but LOG LINES never do — IDs/
@@ -417,7 +424,9 @@ function toBroadcastResults(
     broadcastId: b.broadcastId,
     status: b.status,
     unitId: b.unitId ?? null,
-    audience_filter: b.audience_filter,
+    // matching-blast-rules D2: the wire shape (a legacy row's string becomes
+    // a one-member housing_authorities; never housing_authority).
+    audience_filter: wireAudienceFilter(b.audience_filter),
     // Matching sends: surface the draft's audience mode when set so the composer
     // can render the seeds_only (1:1) vs filter (1:N) affordances.
     ...(b.audience_mode !== undefined && { audience_mode: b.audience_mode }),
@@ -445,7 +454,8 @@ function toBroadcastSummary(b: BroadcastItem, stats: BroadcastStats): Record<str
     broadcastId: b.broadcastId,
     status: b.status,
     unitId: b.unitId ?? null,
-    audience_filter: b.audience_filter,
+    // matching-blast-rules D2: the wire shape, as on the results view.
+    audience_filter: wireAudienceFilter(b.audience_filter),
     // Matching sends: pass the audience mode through on list rows too (dashboard
     // Task 5 reads it on BroadcastSummary).
     ...(b.audience_mode !== undefined && { audience_mode: b.audience_mode }),
@@ -561,36 +571,41 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
   }
 
   /**
-   * Spec 2026-10-06 D7: the STORED housing authority filter of a draft is
-   * re-checked before it is resolved - at preview of a DRAFT and in the send
-   * branch that re-resolves the filter. The value must be EXACTLY the name of
-   * a housing authority entry (D3); nothing rewrites a broadcast, so a stored
-   * spelling or slug that resolves to one entry is still refused, naming that
-   * entry as the one candidate so the composer can offer it (ruling R2
-   * decision 2). Returns the 422 body, or undefined when the filter names no
-   * housing authority or names one exactly. One list read, and only when a
-   * housing authority is present.
+   * Spec 2026-10-06 D7 (matching-blast-rules D2): the STORED housing authority
+   * filter of a draft is re-checked before it is resolved - at preview of a
+   * DRAFT and in the send branch that re-resolves the filter. EVERY member of
+   * the stored list (authoritiesOfFilter - a legacy row's one string is its
+   * one member) must be EXACTLY the name of a housing authority entry (D3),
+   * checked in order; the first that is not is answered. Nothing rewrites a
+   * broadcast, so a stored spelling or slug that resolves to one entry is
+   * still refused, naming that entry as the one candidate so the composer can
+   * offer it (ruling R2 decision 2). Returns the 422 body, or undefined when
+   * the filter names no housing authority or only exact names. One list read,
+   * and only when the list is non-empty.
    */
   async function storedFilterRefusal(
     filter: AudienceFilter | undefined,
   ): Promise<OrgNotOnList | undefined> {
-    const text = filter?.housing_authority;
-    if (typeof text !== 'string' || text.length === 0) return undefined;
+    const members = authoritiesOfFilter(filter);
+    if (members.length === 0) return undefined;
     const { entries } = await orgNames.read();
     const kinds = KINDS_FOR_FIELD.audience_filter;
-    if (isOnListFor(entries, text, kinds)) return undefined;
-    const check = checkScalarWrite(entries, 'audience_filter', text, undefined);
-    if (!check.ok) return check.error;
-    // The one entry the stored text resolves to (a spelling or slug of it).
-    const resolvedName = check.value;
-    const match = entries.find((e) => kinds.includes(e.kind) && e.name === resolvedName);
-    return {
-      error: 'org_not_on_list',
-      field: 'audience_filter',
-      text,
-      candidates: match === undefined ? [] : [{ orgId: match.orgId, kind: match.kind, name: match.name }],
-      close: [],
-    };
+    for (const text of members) {
+      if (isOnListFor(entries, text, kinds)) continue;
+      const check = checkScalarWrite(entries, 'audience_filter', text, undefined);
+      if (!check.ok) return check.error;
+      // The one entry the stored text resolves to (a spelling or slug of it).
+      const resolvedName = check.value;
+      const match = entries.find((e) => kinds.includes(e.kind) && e.name === resolvedName);
+      return {
+        error: 'org_not_on_list',
+        field: 'audience_filter',
+        text,
+        candidates: match === undefined ? [] : [{ orgId: match.orgId, kind: match.kind, name: match.name }],
+        close: [],
+      };
+    }
+    return undefined;
   }
 
   const router = Router();

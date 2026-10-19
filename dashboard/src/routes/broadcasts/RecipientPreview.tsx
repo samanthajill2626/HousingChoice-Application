@@ -136,9 +136,11 @@ function initialRows(preview: PreviewResponse, declinedIds: ReadonlySet<string>)
       ...(c.tourHold !== undefined && { tourHold: c.tourHold }),
       hasConsent: c.has_consent,
       seeded: c.seeded,
-      // matching-blast-rules D5: the server's verdict, as is.
-      checkedByDefault: c.checkedByDefault,
-      checked: c.checkedByDefault,
+      // matching-blast-rules D5: the server's verdict, as is. Only an explicit
+      // true checks a row: an older server (the rollback window) sends no flag,
+      // and a missing one never checks a row (fail safe, no client-side rule).
+      checkedByDefault: c.checkedByDefault === true,
+      checked: c.checkedByDefault === true,
     };
     return row;
   });
@@ -164,7 +166,8 @@ export function RecipientPreview({
   const tourHoldsById = useMemo(
     () =>
       new Map<string, TourHold>(
-        preview.tourHolds.map((h) => [
+        // Rollback window: an older server sends no tourHolds - read it as none.
+        (preview.tourHolds ?? []).map((h) => [
           h.contactId,
           h.at !== undefined ? { kind: h.kind, tourId: h.tourId, at: h.at } : { kind: h.kind, tourId: h.tourId },
         ]),

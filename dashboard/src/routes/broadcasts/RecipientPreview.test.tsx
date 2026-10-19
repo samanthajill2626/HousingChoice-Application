@@ -1157,4 +1157,60 @@ describe('RecipientPreview - tour holds and the server default (matching-blast-r
     );
     expect(screen.queryByText(/Narrow the filter/)).toBeNull();
   });
+
+  it('ADV-3 rollback window: an OLDER server preview (no tourHolds, no checkedByDefault) renders, and no row starts checked', async () => {
+    const u = userEvent.setup();
+    // The pre-#6 server's body, as a tab running this bundle gets it after a
+    // rollback: no tourHold or checkedByDefault on a candidate, and
+    // declineLabelsUnavailable where tourHolds now is.
+    const oldServer = {
+      count: 2,
+      truncated: false,
+      candidates: [
+        {
+          contactId: 'c1',
+          firstName: 'Plain',
+          phone: '+14040000001',
+          alreadySentThisProperty: false,
+          has_consent: true,
+          seeded: false,
+          declinedThisProperty: false,
+        },
+        {
+          contactId: 'c2',
+          firstName: 'Seed',
+          phone: '+14040000002',
+          alreadySentThisProperty: false,
+          has_consent: true,
+          seeded: true,
+          declinedThisProperty: false,
+        },
+      ],
+      priorRecipientContactIds: [],
+      seedContactIds: ['c2'],
+      unresolvedSeedIds: [],
+      declinedContactIds: [],
+      declineLabelsUnavailable: false,
+    } as unknown as PreviewResponse;
+    renderPreview({ preview: oldServer, tenantCandidates: [tenant({ contactId: 'cX', firstName: 'Zia', lastName: 'Added' })] });
+    const plain = within(listEl()).getByRole('checkbox', { name: 'Plain' });
+    const seed = within(listEl()).getByRole('checkbox', { name: 'Seed' });
+    // Fail safe: a missing flag never checks a row - not even a seed (the
+    // dashboard has no default rule of its own to fall back to).
+    expect(plain).not.toBeChecked();
+    expect(seed).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Send to 0 recipients' })).toBeDisabled();
+    // Staff may check a row by hand; Select all puts every row back to its
+    // default, and a missing flag is unchecked.
+    await u.click(plain);
+    expect(plain).toBeChecked();
+    await u.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(plain).not.toBeChecked();
+    expect(seed).not.toBeChecked();
+    // Add a tenant still works without tourHolds: no tour label, checked.
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Zia');
+    await u.click(await screen.findByRole('option', { name: /Zia Added/ }));
+    expect(within(listEl()).getByRole('checkbox', { name: 'Zia Added' })).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Send to 1 recipient' })).toBeEnabled();
+  });
 });

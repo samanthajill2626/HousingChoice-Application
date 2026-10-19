@@ -112,9 +112,19 @@
   font-size: var(--fs-sm);
   color: var(--c-text-muted);
 }
-/* matching-blast-rules D3: why the property prefill filled nothing in. */
+/* matching-blast-rules D3 (AR44): why the property prefill is held. */
 .prefillNotice {
   margin: 0;
   font-size: var(--fs-xs);
   color: var(--c-warning);
+}
+/* AR44: the notice's Try again (the composer's retryBtn look). */
+.prefillRetry {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--c-brand);
+  font-size: var(--fs-xs);
+  text-decoration: underline;
+  cursor: pointer;
 }

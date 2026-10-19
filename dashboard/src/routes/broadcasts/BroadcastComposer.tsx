@@ -36,7 +36,7 @@ import { ORG_FILTER_TYPED_HINT, orgListUnknown, orgNotOnListBody } from '../orgs
 import { useOrgList } from '../orgs/useOrgList.js';
 import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchField.js';
 import { acceptedVoucherSizes, authoritiesOf, shortAddress } from '../listing/listingFormat.js';
-import { AudienceFilters } from './AudienceFilters.js';
+import { AudienceFilters, type PrefillNotice } from './AudienceFilters.js';
 import { prefillAuthorities } from './authorityPrefill.js';
 import { MessageEditor } from './MessageEditor.js';
 import { RecipientPreview } from './RecipientPreview.js';
@@ -66,12 +66,14 @@ function authorityLeftTheList(text: string): string {
   return `${text} is no longer on the organization list, so it was removed from the filter.`;
 }
 
-/** D3: the property did not load, so nothing was prefilled from it. */
+/** D3 (AR44): the property did not load, so the prefill is HELD - no draft,
+ *  no Preview - until Try again loads it. */
 const PROPERTY_LOAD_FAILED =
-  "Couldn't load the property, so its housing authorities and voucher size were not filled in.";
-/** D3: the organization list did not load, so no authority was prefilled. */
+  "Couldn't load the property, so its housing authorities and voucher size can't be filled in yet.";
+/** D3 (AR44): the organization list did not load and the property accepts a
+ *  housing authority, so the prefill is HELD until Try again reads the list. */
 const ORG_LIST_FAILED =
-  "Couldn't load the organization list, so housing authorities were not filled in from the property.";
+  "Couldn't load the organization list, so housing authorities can't be filled in from the property yet.";
 /** D7: a filter draft's Preview was refused 503 audience_rules_unavailable. */
 const RULES_UNAVAILABLE =
   "Couldn't check tours and Not interested replies, so the recipient list can't be shown yet.";
@@ -132,6 +134,9 @@ export function BroadcastComposer(): React.JSX.Element {
   );
 
   const [unitLoad, setUnitLoad] = useState<UnitLoad | null>(null);
+  // matching-blast-rules D3 (AR44): bumped by the property notice's Try again
+  // - a dependency of the load effect, so the click re-runs THAT read alone.
+  const [unitRetry, setUnitRetry] = useState(0);
   // The message starts EMPTY everywhere: compose is unreachable until a
   // property is attached (the property step), and the moment one loads the
   // auto-fill effects below seed the REAL prefill (unit tokens resolved;
@@ -221,15 +226,29 @@ export function BroadcastComposer(): React.JSX.Element {
 
   // D3 timing: ONLY with a property attached and the filters on (never on a
   // resumed draft, which has no property here) does Preview wait for the
-  // prefill to settle - the property loaded or failed, AND the organization
-  // list loaded or failed. An ABORTED load is neither (the load effect).
+  // prefill to settle - the property LOADED, AND the organization list
+  // loaded. A FAILED read does not settle it (AR44, spec revision 7): a blast
+  // with no authority filter would check every authority's tenants, so the
+  // prefill fails closed as the tours read does (D5) and HOLDS, with a notice
+  // and a Try again that re-runs only that read. A failed list read holds
+  // only a property that accepts a housing authority - otherwise there is
+  // nothing to fill in. The list's Try again is `orgList.reload()`, whose
+  // `error` stays true until a read succeeds, so the hold and the notice stay
+  // while it runs and after another failure; the property's failed load stays
+  // in `unitLoad` until its retry lands, the same. An ABORTED load is neither
+  // loaded nor failed (the load effect): the gate waits, with no notice.
   // While it waits the draft hook makes NO draft (`hold`, AR23): a draft made
   // now would carry a filter the prefill is about to change.
   const prefillGated = audienceEnabled && effectiveUnitId !== undefined && resumeDraftId === undefined;
-  const prefillPending = prefillGated && (loaded === null || orgLoading);
-  const prefillNotices: string[] = [];
-  if (prefillGated && loaded !== null && loaded.status === 'failed') prefillNotices.push(PROPERTY_LOAD_FAILED);
-  if (prefillGated && orgError && orgListUnknown(orgList)) prefillNotices.push(ORG_LIST_FAILED);
+  const unitFailed = loaded !== null && loaded.status === 'failed';
+  const unitAcceptsAuthority = unit !== null && authoritiesOf(unit).some((name) => name.trim() !== '');
+  const orgListHold = orgError && orgListUnknown(orgList) && unitAcceptsAuthority;
+  const prefillPending = prefillGated && (unit === null || orgLoading || orgListHold);
+  const prefillNotices: PrefillNotice[] = [];
+  if (prefillGated && unitFailed) {
+    prefillNotices.push({ text: PROPERTY_LOAD_FAILED, onRetry: () => setUnitRetry((n) => n + 1) });
+  }
+  if (prefillGated && orgListHold) prefillNotices.push({ text: ORG_LIST_FAILED, onRetry: orgList.reload });
 
   // Preview step state. A result is kept with the draft it previewed and the
   // inputs that draft was made for: those candidates belong to that draft
@@ -359,7 +378,8 @@ export function BroadcastComposer(): React.JSX.Element {
   // Load the property (address -> property label; its authorities and voucher
   // size feed the prefill above). The result is kept WITH the id it was for,
   // so a stale property never shows for a new pick and no reset is needed when
-  // the picker clears.
+  // the picker clears. `unitRetry` (AR44): the notice's Try again re-runs this
+  // read alone; the failed result stays until the retry's own result lands.
   useEffect(() => {
     if (effectiveUnitId === undefined) return;
     const id = effectiveUnitId;
@@ -370,13 +390,13 @@ export function BroadcastComposer(): React.JSX.Element {
         // matching-blast-rules D3: an ABORTED load (an unmount, a property
         // change, StrictMode's double mount - api/client.ts rethrows the
         // AbortError) is neither loaded nor failed: the gate keeps waiting and
-        // no notice shows. A real failure settles the prefill with its notice;
-        // compose still works without it.
+        // no notice shows. A real failure HOLDS the prefill with its notice
+        // and Try again (AR44).
         if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
         setUnitLoad({ unitId: id, status: 'failed' });
       });
     return () => controller.abort();
-  }, [effectiveUnitId]);
+  }, [effectiveUnitId, unitRetry]);
 
   // Auto-seed the one-to-one default for the single recipient (share-skip-fix
   // D8): the property's one-line address, one space, the flyer link - no name,

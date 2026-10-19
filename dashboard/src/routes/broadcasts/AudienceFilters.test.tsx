@@ -5,12 +5,12 @@
 // (D3), the caption (D8), the disabled "+ Add filter" seam, the always-excluded
 // note, and the live reach count + incomplete-list suffix (D7).
 import { useState } from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { AudienceFilter, OrgEntry } from '../../api/index.js';
 import type { OrgListView } from '../orgs/orgCopy.js';
-import { AudienceFilters } from './AudienceFilters.js';
+import { AudienceFilters, type PrefillNotice } from './AudienceFilters.js';
 
 function entry(orgId: string, name: string, spellings: string[] = []): OrgEntry {
   return {
@@ -67,7 +67,7 @@ function Harness({
   orgList?: OrgListView;
   unusedAuthorities?: string[];
   noAuthorityMapped?: boolean;
-  prefillNotices?: string[];
+  prefillNotices?: PrefillNotice[];
 }): React.JSX.Element {
   const [filter, setFilter] = useState<AudienceFilter>(initialFilter);
   return (
@@ -292,21 +292,28 @@ describe('AudienceFilters - the property prefill notes (matching-blast-rules D3)
     expect(screen.getByText('Not used (not on the organization list): Nowhere Board')).toBeInTheDocument();
   });
 
-  it('shows the settle notices the composer passes', () => {
+  it('shows each hold notice the composer passes with a Try again that re-runs only its own read (AR44)', async () => {
+    const u = userEvent.setup();
+    const PROPERTY_HOLD =
+      "Couldn't load the property, so its housing authorities and voucher size can't be filled in yet.";
+    const LIST_HOLD =
+      "Couldn't load the organization list, so housing authorities can't be filled in from the property yet.";
+    const retryProperty = vi.fn();
+    const retryList = vi.fn();
     render(
       <Harness
         prefillNotices={[
-          "Couldn't load the property, so its housing authorities and voucher size were not filled in.",
-          "Couldn't load the organization list, so housing authorities were not filled in from the property.",
+          { text: PROPERTY_HOLD, onRetry: retryProperty },
+          { text: LIST_HOLD, onRetry: retryList },
         ]}
       />,
     );
-    expect(
-      screen.getByText("Couldn't load the property, so its housing authorities and voucher size were not filled in."),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("Couldn't load the organization list, so housing authorities were not filled in from the property."),
-    ).toBeInTheDocument();
+    await u.click(within(screen.getByText(PROPERTY_HOLD)).getByRole('button', { name: 'Try again' }));
+    expect(retryProperty).toHaveBeenCalledTimes(1);
+    expect(retryList).not.toHaveBeenCalled();
+    await u.click(within(screen.getByText(LIST_HOLD)).getByRole('button', { name: 'Try again' }));
+    expect(retryList).toHaveBeenCalledTimes(1);
+    expect(retryProperty).toHaveBeenCalledTimes(1);
   });
 
   it('no notes without a prefill', () => {

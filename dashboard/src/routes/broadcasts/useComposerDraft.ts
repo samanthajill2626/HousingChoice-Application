@@ -49,11 +49,12 @@ export interface ComposerDraftInput {
    *  stale: the changed filter either matches the current draft again or
    *  recreates it. */
   onOrgNotOnList?: (err: ApiError) => void;
-  /** matching-blast-rules D3 (AR23, AR35): true while the composer's property
-   *  prefill is unsettled (a property attached, the filters on, the property
-   *  or the organization list not loaded or failed yet). While it holds, NO
-   *  draft is created and none is deleted - a draft made now would carry a
-   *  filter the prefill is about to change - and `reachPending` reads true. */
+  /** matching-blast-rules D3 (AR23, AR35, AR44): true while the composer's
+   *  property prefill is unsettled (a property attached, the filters on, the
+   *  property or the organization list not loaded yet - or FAILED, until its
+   *  Try again succeeds). While it holds, NO draft is created and none is
+   *  deleted - a draft made now would carry a filter the prefill is about to
+   *  change - and `reachPending` reads true. */
   hold?: boolean;
 }
 
@@ -281,7 +282,8 @@ export function useComposerDraft(input: ComposerDraftInput): ComposerDraftState 
     reachCount,
     truncated,
     // AR35: DERIVED, never a flag stored from `hold` - it cannot stick once
-    // the prefill settles (a failed property load settles it too).
+    // the prefill settles (a failed read settles it only once its Try again
+    // succeeds, AR44).
     reachPending: input.hold === true || reachPending,
     flyerUrl,
     error,

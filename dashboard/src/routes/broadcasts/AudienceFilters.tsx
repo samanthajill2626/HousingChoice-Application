@@ -14,8 +14,9 @@
 // a unit, shown with a "matches property" tag (overridable - a home may suit
 // other sizes). The composer prefills the housing authorities from the
 // property too (D3) and owns that prefill; this component shows its notes:
-// the property's names that are not on the organization list, and why nothing
-// was filled in (a failed property load or list read).
+// the property's names that are not on the organization list, and why the
+// prefill is held (a failed property load or list read), each with a Try
+// again that re-runs only that read (AR44).
 import { useId, useState } from 'react';
 import type { AudienceFilter } from '../../api/index.js';
 import { OrgPicker } from '../orgs/OrgPicker.js';
@@ -45,6 +46,14 @@ const NOT_LIMITED = ' This blast is not limited by housing authority.';
 /** D7: the reach line's suffix while the audience read was truncated. */
 const REACH_INCOMPLETE = ' - the list is incomplete';
 
+/** D3 (AR44): a failed read the prefill is held on - the composer's notice
+ *  and the retry of THAT read alone (the property load, or the organization
+ *  list read), shown under the picker with a "Try again" button. */
+export interface PrefillNotice {
+  text: string;
+  onRetry: () => void;
+}
+
 export interface AudienceFiltersProps {
   /** The current client-shape filter (contact_type fixed 'tenant'). */
   filter: AudienceFilter;
@@ -64,9 +73,10 @@ export interface AudienceFiltersProps {
    *  authority is selected the note adds "This blast is not limited by
    *  housing authority." */
   noAuthorityMapped?: boolean;
-  /** D3: why the prefill filled nothing in (a failed property load, a failed
-   *  organization list read) - shown under the picker. */
-  prefillNotices?: readonly string[];
+  /** D3 (AR44): why the prefill is held (a failed property load, a failed
+   *  organization list read) - shown under the picker, each with a "Try
+   *  again" that calls its own `onRetry`. */
+  prefillNotices?: readonly PrefillNotice[];
   /** The live reach: how many review rows will start checked
    *  (matching-blast-rules D8), or undefined while the debounced estimate is
    *  pending / not yet computed / not computable (a rules read failed). */
@@ -216,8 +226,11 @@ export function AudienceFilters({
           </p>
         ) : null}
         {prefillNotices.map((notice) => (
-          <p key={notice} className={styles.prefillNotice}>
-            {notice}
+          <p key={notice.text} className={styles.prefillNotice}>
+            {notice.text}{' '}
+            <button type="button" className={styles.prefillRetry} onClick={notice.onRetry}>
+              Try again
+            </button>
           </p>
         ))}
       </div>

@@ -825,13 +825,28 @@ describe('BroadcastComposer - a housing authority that left the list (matching-b
 // staff edits win while it stays; a DIFFERENT property empties both filters at
 // once and its prefill fills them when it loads. Preview waits for the prefill
 // ONLY with a property attached and the filters on - and no draft is made
-// while it waits (AR23).
+// while it waits (AR23). A FAILED read holds it too, with a notice and a Try
+// again that re-runs only that read (AR44, spec revision 7).
 describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', () => {
   const ATLANTA = orgEntry('o-atl', 'Atlanta Housing Authority', ['AHA']);
   const DEKALB = orgEntry('o-dek', 'DeKalb County Housing Authority', ['HADC']);
+  const PROPERTY_HOLD =
+    "Couldn't load the property, so its housing authorities and voucher size can't be filled in yet.";
+  const LIST_HOLD =
+    "Couldn't load the organization list, so housing authorities can't be filled in from the property yet.";
+  const failed500 = (): ApiError => new ApiError(500, 'http_500', 'Request failed (500)');
   const preview = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
   const lastDraftFilter = (): unknown =>
     (createBroadcast.mock.calls.at(-1)?.[0] as { audience_filter?: unknown } | undefined)?.audience_filter;
+  /** The prefill holds: no draft was made (one that could be made has been
+   *  made by now), Preview is disabled, and the reach line reads pending. */
+  async function expectHeld(): Promise<void> {
+    await outlastCreateDebounce();
+    expect(createBroadcast).not.toHaveBeenCalled();
+    expect(preview()).toBeDisabled();
+    // The spinner beside Preview is another role="status": match the text.
+    expect(screen.getByText(/Estimating reach/)).toBeInTheDocument();
+  }
 
   beforeEach(() => {
     getOrgList.mockResolvedValue({ version: 1, entries: [ATLANTA, DEKALB] });
@@ -959,36 +974,37 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     });
   });
 
-  it('a failed property load settles the prefill with its notice - Preview works once a message is written', async () => {
+  // AR44: typing proves the HOLD - with a message there would be a draft,
+  // were the prefill not held. The ?unitId= entry has no other way back.
+  it('a failed property load HOLDS the prefill: no draft, Preview disabled, its notice with Try again (AR44)', async () => {
     const u = userEvent.setup();
-    getUnit.mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));
+    getUnit.mockRejectedValue(failed500());
     renderComposer('?unitId=unit-0001');
-    expect(
-      await screen.findByText(
-        "Couldn't load the property, so its housing authorities and voucher size were not filled in.",
-      ),
-    ).toBeInTheDocument();
+    const notice = await screen.findByText(PROPERTY_HOLD);
+    expect(within(notice).getByRole('button', { name: 'Try again' })).toBeEnabled();
     await u.type(screen.getByLabelText('Message'), 'Hello there');
-    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
-    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant' });
+    await expectHeld();
+    expect(screen.getByText(/Sizing the audience/)).toBeInTheDocument();
   });
 
-  it('a failed organization list read settles the prefill with its notice; the voucher size still fills in', async () => {
-    getOrgList.mockRejectedValue(new ApiError(500, 'http_500', 'Request failed (500)'));
+  it('a failed organization list read HOLDS the prefill of a property that accepts an authority - notice and Try again; the voucher size still fills in (AR44)', async () => {
+    getOrgList.mockRejectedValue(failed500());
     getUnit.mockResolvedValue(unit({ accepted_authorities: ['Atlanta Housing Authority'] }));
     renderComposer('?unitId=unit-0001');
-    expect(
-      await screen.findByText(
-        "Couldn't load the organization list, so housing authorities were not filled in from the property.",
-      ),
-    ).toBeInTheDocument();
-    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
-    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSize: 2 });
+    const notice = await screen.findByText(LIST_HOLD);
+    expect(within(notice).getByRole('button', { name: 'Try again' })).toBeEnabled();
+    // The picker says its own error, as before.
+    expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load housing authorities");
+    // The voucher size fills in from the loaded property while the list holds.
+    expect(screen.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'true');
+    // The message prefill landed with the property: only the hold stops a draft.
+    expect(screen.getByLabelText('Message')).not.toHaveValue('');
+    await expectHeld();
   });
 
-  // AR34 (AR23): typing proves the HOLD - with a message there would be a
-  // draft, were the prefill not waiting.
-  it('an ABORTED property load is neither loaded nor failed: no notice, and Preview keeps waiting', async () => {
+  // AR34 (AR23), AR41: typing proves the HOLD - with a message there would be
+  // a draft, were the prefill not waiting.
+  it('an ABORTED property load is neither loaded nor failed: no notice and no Try again, and Preview keeps waiting', async () => {
     const u = userEvent.setup();
     getUnit.mockRejectedValue(new DOMException('The operation was aborted.', 'AbortError'));
     renderComposer('?unitId=unit-0001');
@@ -999,6 +1015,147 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     expect(preview()).toBeDisabled();
     expect(screen.getByText(/Sizing the audience/)).toBeInTheDocument();
     expect(screen.queryByText(/Couldn't load the property/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+  });
+
+  it('Try again re-reads ONLY the property: the notice and the hold stay while it runs, and success makes exactly one draft with the prefill (AR44)', async () => {
+    const u = userEvent.setup();
+    const retry = deferred<UnitItem>();
+    getUnit.mockRejectedValueOnce(failed500()).mockReturnValueOnce(retry.promise);
+    renderComposer('?unitId=unit-0001');
+    const notice = await screen.findByText(PROPERTY_HOLD);
+    await u.type(screen.getByLabelText('Message'), 'Hello there');
+    await u.click(within(notice).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(getUnit).toHaveBeenCalledTimes(2));
+    expect(getOrgList).toHaveBeenCalledTimes(1);
+    // While the retry runs: the notice and the hold stay.
+    expect(screen.getByText(PROPERTY_HOLD)).toBeInTheDocument();
+    await expectHeld();
+    await act(async () => retry.resolve(unit({ accepted_authorities: ['Atlanta Housing Authority'] })));
+    expect(await screen.findByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
+    expect(screen.queryByText(PROPERTY_HOLD)).not.toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(createBroadcast).toHaveBeenCalledTimes(1);
+    expect(lastDraftFilter()).toEqual({
+      contact_type: 'tenant',
+      housing_authorities: ['Atlanta Housing Authority'],
+      bedroomSize: 2,
+    });
+  });
+
+  it('a property Try again that fails again keeps the notice, its Try again and the hold (AR44)', async () => {
+    const u = userEvent.setup();
+    const retry = deferred<UnitItem>();
+    getUnit.mockRejectedValueOnce(failed500()).mockReturnValueOnce(retry.promise);
+    renderComposer('?unitId=unit-0001');
+    const notice = await screen.findByText(PROPERTY_HOLD);
+    await u.type(screen.getByLabelText('Message'), 'Hello there');
+    await u.click(within(notice).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(getUnit).toHaveBeenCalledTimes(2));
+    await act(async () => retry.reject(failed500()));
+    await expectHeld();
+    expect(within(screen.getByText(PROPERTY_HOLD)).getByRole('button', { name: 'Try again' })).toBeEnabled();
+  });
+
+  it('Try again re-reads ONLY the organization list: the notice and the hold stay while it runs, and success makes exactly one draft with the prefill (AR44)', async () => {
+    const u = userEvent.setup();
+    const retry = deferred<unknown>();
+    getOrgList.mockRejectedValueOnce(failed500()).mockReturnValueOnce(retry.promise);
+    getUnit.mockResolvedValue(unit({ accepted_authorities: ['Atlanta Housing Authority'] }));
+    renderComposer('?unitId=unit-0001');
+    const notice = await screen.findByText(LIST_HOLD);
+    await u.click(within(notice).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(getOrgList).toHaveBeenCalledTimes(2));
+    expect(getUnit).toHaveBeenCalledTimes(1);
+    // While the retry runs: the notice and the hold stay.
+    expect(screen.getByText(LIST_HOLD)).toBeInTheDocument();
+    await expectHeld();
+    await act(async () => retry.resolve({ version: 1, entries: [ATLANTA, DEKALB] }));
+    expect(await screen.findByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
+    expect(screen.queryByText(LIST_HOLD)).not.toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(createBroadcast).toHaveBeenCalledTimes(1);
+    expect(lastDraftFilter()).toEqual({
+      contact_type: 'tenant',
+      housing_authorities: ['Atlanta Housing Authority'],
+      bedroomSize: 2,
+    });
+  });
+
+  it('a list Try again that fails again keeps the notice, its Try again and the hold (AR44)', async () => {
+    const u = userEvent.setup();
+    getOrgList.mockRejectedValue(failed500());
+    getUnit.mockResolvedValue(unit({ accepted_authorities: ['Atlanta Housing Authority'] }));
+    renderComposer('?unitId=unit-0001');
+    await u.click(within(await screen.findByText(LIST_HOLD)).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(getOrgList).toHaveBeenCalledTimes(2));
+    await expectHeld();
+    expect(within(screen.getByText(LIST_HOLD)).getByRole('button', { name: 'Try again' })).toBeEnabled();
+  });
+
+  it('a failed list read does not hold a property that accepts NO housing authority - and holds the next one that accepts one (AR44)', async () => {
+    const u = userEvent.setup();
+    getOrgList.mockRejectedValue(failed500());
+    const oak = unit({ unitId: 'u-2', address: { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' } });
+    const peach = unit({
+      unitId: 'u-1',
+      address: { line1: '77 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      accepted_authorities: ['Atlanta Housing Authority'],
+    });
+    getAllUnits.mockResolvedValue([peach, oak]);
+    getUnit.mockImplementation(async (id: string) => (id === 'u-2' ? oak : peach));
+    renderComposer();
+    await u.click(await screen.findByRole('button', { name: /12 Oak St/ }));
+    // Nothing to fill in from 12 Oak St: no hold and no notice.
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(screen.queryByText(/Couldn't load the organization list/)).not.toBeInTheDocument();
+    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSize: 2 });
+    // 77 Peachtree St accepts one: the same failed read holds it.
+    await u.click(screen.getByRole('button', { name: 'Change property' }));
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    expect(await screen.findByText(LIST_HOLD)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText('Message')).not.toHaveValue(''));
+    await outlastCreateDebounce();
+    const peachDrafts = createBroadcast.mock.calls.filter(([body]) => (body as { unitId?: string }).unitId === 'u-1');
+    expect(peachDrafts).toHaveLength(0);
+    expect(preview()).toBeDisabled();
+  });
+
+  // Conformance R27: a failed state belongs to the property it was for - it
+  // is gone the moment another is picked, before that one even loads.
+  it('a failed property load belongs to that property: picking another clears its notice at once, and the other prefills when it loads (R27)', async () => {
+    const u = userEvent.setup();
+    const peach = unit({
+      unitId: 'u-1',
+      address: { line1: '77 Peachtree St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      accepted_authorities: ['DeKalb County Housing Authority'],
+    });
+    const oak = unit({
+      unitId: 'u-2',
+      address: { line1: '12 Oak St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      accepted_authorities: ['Atlanta Housing Authority'],
+    });
+    getAllUnits.mockResolvedValue([peach, oak]);
+    const oakLoad = deferred<UnitItem>();
+    getUnit.mockImplementation((id: string) => (id === 'u-1' ? Promise.reject(failed500()) : oakLoad.promise));
+    renderComposer();
+    await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
+    expect(await screen.findByText(PROPERTY_HOLD)).toBeInTheDocument();
+    await u.click(screen.getByRole('button', { name: 'Change property' }));
+    await u.click(await screen.findByRole('button', { name: /12 Oak St/ }));
+    // 12 Oak St is still loading: no notice and no Try again - only the wait.
+    await screen.findByRole('combobox', { name: 'Housing authorities' });
+    expect(screen.queryByText(PROPERTY_HOLD)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+    await act(async () => oakLoad.resolve(oak));
+    expect(await screen.findByRole('button', { name: 'Remove Atlanta Housing Authority' })).toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(createBroadcast).toHaveBeenCalledTimes(1);
+    expect(lastDraftFilter()).toEqual({
+      contact_type: 'tenant',
+      housing_authorities: ['Atlanta Housing Authority'],
+      bedroomSize: 2,
+    });
   });
 
   it('(PIN) a resumed draft is never gated: the list never loads, and Preview still works once a message is written', async () => {

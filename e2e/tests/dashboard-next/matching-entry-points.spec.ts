@@ -286,8 +286,9 @@ test.describe('Matching entry points - tenant file + property page', () => {
 
     // The property step shows ONLY the choice: no message, no audience filters.
     await expect(page.getByRole('textbox', { name: 'Message' })).toHaveCount(0);
-    // exact: the org picker's listbox and chip buttons may carry this text too.
-    await expect(page.getByLabel('Housing authority', { exact: true })).toHaveCount(0);
+    // The composer's housing authority filter is the multi picker "Housing
+    // authorities" (tracker #6 D3); exact, since the property forms share it.
+    await expect(page.getByRole('combobox', { name: 'Housing authorities', exact: true })).toHaveCount(0);
 
     // Search narrows the BROWSABLE list; click the fresh unit's row (a button,
     // distinct from the typeahead's role=option entries).
@@ -322,7 +323,7 @@ test.describe('Matching entry points - tenant file + property page', () => {
       .poll(() => box.inputValue())
       .toContain(`Hi [TenantName], a 2-bedroom home at ${stamp} Matching Entry Ave`);
     await expect.poll(() => box.inputValue()).toContain(`/p/${unitId}`);
-    await expect(page.getByLabel('Housing authority', { exact: true })).toBeVisible();
+    await expect(page.getByRole('combobox', { name: 'Housing authorities', exact: true })).toBeVisible();
 
     // "Change" returns to the property step (message gone again).
     await page.getByRole('button', { name: 'Change property' }).click();

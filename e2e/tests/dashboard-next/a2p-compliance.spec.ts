@@ -69,7 +69,17 @@ function uniqueSid(tag: string): string {
  *  what the JIT gate + broadcast fence key on. Returns id + phone + first name. */
 async function createContact(
   request: APIRequestContext,
-  opts: { type?: 'tenant' | 'landlord'; firstName: string; voucherSize?: number },
+  opts: {
+    type?: 'tenant' | 'landlord';
+    firstName: string;
+    voucherSize?: number;
+    /** Explicit status (a Matching blast reads Searching and Onboarding
+     *  tenants only, tracker #6 D1); the create defaults a tenant to Onboarding. */
+    status?: 'searching' | 'onboarding';
+    /** Must already be an organization-list name: the PATCH checks it (the
+     *  create ignores the field). */
+    housingAuthority?: string;
+  },
 ): Promise<{ contactId: string; firstName: string; phone: string }> {
   const phone = uniquePhone();
   const res = await request.post(`${NEXT}/api/contacts`, {
@@ -79,10 +89,17 @@ async function createContact(
       lastName: 'A2Ptest',
       phone,
       ...(opts.voucherSize !== undefined && { voucherSize: opts.voucherSize }),
+      ...(opts.status !== undefined && { status: opts.status }),
     },
   });
   expect(res.ok(), `create contact ${opts.firstName}`).toBeTruthy();
   const contactId = (await res.json()).contact.contactId as string;
+  if (opts.housingAuthority !== undefined) {
+    const patch = await request.patch(`${NEXT}/api/contacts/${contactId}`, {
+      data: { housingAuthority: opts.housingAuthority },
+    });
+    expect(patch.ok(), `set the housing authority of ${opts.firstName}`).toBeTruthy();
+  }
   return { contactId, firstName: opts.firstName, phone };
 }
 
@@ -328,9 +345,28 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
     await devLogin(page);
     const stamp = `${Date.now()}`.slice(-6);
 
-    // Two 2-BR tenants: one WITH consent (via a JIT-style PATCH) and one WITHOUT.
-    const consented = await createContact(page.request, { firstName: `Yes${stamp}`, voucherSize: 2 });
-    const noConsent = await createContact(page.request, { firstName: `No${stamp}`, voucherSize: 2 });
+    // A run-unique housing authority (tracker #6): the composer prefills the
+    // property's authorities and the blast reads Searching and Onboarding
+    // tenants in them only, so a shared authority would pull in every earlier
+    // spec's tenants.
+    const authority = `A2P Consent Authority ${stamp}`;
+    await addOrg(page.request, { kind: 'housing_authority', name: authority });
+
+    // Two 2-BR Searching tenants in it: one WITH consent (via a JIT-style PATCH)
+    // and one WITHOUT. The no-consent one keeps none ON PURPOSE - it is what
+    // this test proves is fenced (spec section 7 exception).
+    const consented = await createContact(page.request, {
+      firstName: `Yes${stamp}`,
+      voucherSize: 2,
+      status: 'searching',
+      housingAuthority: authority,
+    });
+    const noConsent = await createContact(page.request, {
+      firstName: `No${stamp}`,
+      voucherSize: 2,
+      status: 'searching',
+      housingAuthority: authority,
+    });
     await registerParty(request, { label: consented.firstName, role: 'tenant', number: consented.phone });
     await registerParty(request, { label: noConsent.firstName, role: 'tenant', number: noConsent.phone });
     // Record consent on the "consented" tenant via the contacts PATCH (human method).
@@ -339,13 +375,14 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
     });
     expect(patch.ok()).toBeTruthy();
 
-    // Seed an AVAILABLE 2-BR property to broadcast from (so the composer pre-fills a
-    // 2-BR audience that catches both tenants).
+    // Seed an AVAILABLE 2-BR property to broadcast from, accepting the run-unique
+    // authority (so the composer pre-fills a 2-BR audience in that authority that
+    // catches both tenants).
     const landlord = 'contact-landlord-0001';
     const created = await page.request.post(`${NEXT}/api/units`, {
       data: {
         landlordId: landlord,
-        accepted_authorities: ['atlanta_housing'],
+        accepted_authorities: [authority],
         beds: 2,
         rent_min: 1500,
         rent_max: 1600,
@@ -458,8 +495,18 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
     // the filter-resolved send's re-check (D7) then all see an exact list name.
     const authority = `A2P Fence Authority ${stamp}`;
     await addOrg(page.request, { kind: 'housing_authority', name: authority });
-    const consented = await createContact(page.request, { firstName: `FenceYes${stamp}`, voucherSize: 2 });
-    const noConsent = await createContact(page.request, { firstName: `FenceNo${stamp}`, voucherSize: 2 });
+    // Explicit Searching (tracker #6 D1); the no-consent tenant keeps no consent
+    // on purpose - the fan-out's skipped_no_consent is what this test proves.
+    const consented = await createContact(page.request, {
+      firstName: `FenceYes${stamp}`,
+      voucherSize: 2,
+      status: 'searching',
+    });
+    const noConsent = await createContact(page.request, {
+      firstName: `FenceNo${stamp}`,
+      voucherSize: 2,
+      status: 'searching',
+    });
     await registerParty(request, { label: consented.firstName, role: 'tenant', number: consented.phone });
     await registerParty(request, { label: noConsent.firstName, role: 'tenant', number: noConsent.phone });
     // Put both tenants in the unique housing authority + consent only the first.
@@ -477,11 +524,21 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
     const draft = await page.request.post(`${NEXT}/api/broadcasts`, {
       data: {
         body_template: `Fence check ${stamp} — [TenantName]`,
+        // LEGACY body shape, kept on purpose as the e2e coverage of it (tracker
+        // #6 D2): a one-string `housing_authority` is accepted and stored as a
+        // one-member `housing_authorities` list (asserted on the echo below).
         audience_filter: { contact_type: 'tenant', housing_authority: authority, bedroomSize: 2 },
       },
     });
-    expect(draft.ok()).toBeTruthy();
-    const broadcastId = (await draft.json()).broadcastId as string;
+    expect(draft.ok(), await draft.text()).toBeTruthy();
+    const draftJson = (await draft.json()) as {
+      broadcastId: string;
+      audience_filter: { housing_authorities?: string[]; housing_authority?: string };
+    };
+    // The echo is the normalized wire shape: the list, never the legacy key (D2).
+    expect(draftJson.audience_filter.housing_authorities).toEqual([authority]);
+    expect(draftJson.audience_filter.housing_authority).toBeUndefined();
+    const broadcastId = draftJson.broadcastId;
     const send = await page.request.post(`${NEXT}/api/broadcasts/${broadcastId}/send`, { data: {} });
     expect(send.ok()).toBeTruthy();
 

@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { APP_NUMBER, getOutboundTo, registerParty, sendAsParty } from '../../fixtures/fakeTwilio.js';
+import { addOrg } from '../../fixtures/orgFixture.js';
 import { expectTodayReady } from '../../support/today.js';
 
 // Review recipients (spec 2026-10-12 section 8 (3), 5.3, 14.4 B7/B8/B11, D4,
@@ -30,22 +31,30 @@ async function devLogin(page: Page): Promise<void> {
   await expectTodayReady(page);
 }
 
-/** A consented, run-unique tenant (consent so a send reaches them). */
+/** A consented, run-unique tenant (consent so a send reaches them), explicitly
+ *  Onboarding: a Matching blast reads Onboarding and Searching tenants only
+ *  (tracker #6 D1). `housingAuthority`, when given, must already be a list
+ *  name - the PATCH checks it (the create ignores the field). */
 async function createTenant(
   api: APIRequestContext,
   firstName: string,
   voucherSize = 2,
+  housingAuthority?: string,
 ): Promise<{ contactId: string; firstName: string; name: string; phone: string }> {
   // The house idiom (matching-entry-points.spec.ts): 7 random digits.
   const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
   const lastName = 'Heardtest';
   const res = await api.post(`${NEXT}/api/contacts`, {
-    data: { type: 'tenant', firstName, lastName, phone, voucherSize },
+    data: { type: 'tenant', firstName, lastName, phone, voucherSize, status: 'onboarding' },
   });
   expect(res.status(), await res.text()).toBe(201);
   const contactId = ((await res.json()) as { contact: { contactId: string } }).contact.contactId;
   const consent = await api.patch(`${NEXT}/api/contacts/${contactId}`, {
-    data: { consent_method: 'verbal_in_person', consent_at: new Date().toISOString() },
+    data: {
+      consent_method: 'verbal_in_person',
+      consent_at: new Date().toISOString(),
+      ...(housingAuthority !== undefined && { housingAuthority }),
+    },
   });
   expect(consent.ok(), await consent.text()).toBeTruthy();
   return { contactId, firstName, name: `${firstName} ${lastName}`, phone };
@@ -57,14 +66,19 @@ async function heardAt(api: APIRequestContext, contactId: string): Promise<strin
   return ((await res.json()) as { contact: { last_heard_from_at?: string } }).contact.last_heard_from_at;
 }
 
-/** An Available 2-BR property (no tour type - the review step does not read it). */
-async function createUnitViaApi(api: APIRequestContext, stamp: string): Promise<{ unitId: string; line1: string }> {
+/** An Available 2-BR property (no tour type - the review step does not read it)
+ *  accepting one housing authority, which must be a list name. */
+async function createUnitViaApi(
+  api: APIRequestContext,
+  stamp: string,
+  authority: string,
+): Promise<{ unitId: string; line1: string }> {
   const line1 = `${stamp}${Math.floor(Math.random() * 90) + 10} Heardfrom Ave`;
   const res = await api.post(`${NEXT}/api/units`, {
     data: {
       landlordId: 'contact-landlord-0001',
       beds: 2,
-      accepted_authorities: ['Atlanta Housing Authority'],
+      accepted_authorities: [authority],
       address: { line1, city: 'Atlanta', state: 'GA', zip: '30314' },
       rent_min: 1500,
       rent_max: 1600,
@@ -126,12 +140,17 @@ test('Review recipients: columns, last-heard order, declined rows unchecked unle
   const stamp = `${Date.now()}`.slice(-6);
 
   // --- Setup: a property, four 2-BR tenants and one 3-BR (outside the audience,
-  // so it must be hand-added). ---
-  const { unitId } = await createUnitViaApi(api, stamp);
-  const older = await createTenant(api, `Older${stamp}`);
-  const recent = await createTenant(api, `Recent${stamp}`);
-  const never = await createTenant(api, `Never${stamp}`);
-  const declined = await createTenant(api, `Declined${stamp}`);
+  // so it must be hand-added). The property and the four share a RUN-UNIQUE
+  // housing authority (tracker #6): the composer prefills the property's
+  // authorities and the blast leaves out a tenant outside them, so a shared
+  // name would also pull in every earlier spec's tenants. ---
+  const authority = `Heard Review Authority ${stamp}`;
+  await addOrg(api, { kind: 'housing_authority', name: authority });
+  const { unitId } = await createUnitViaApi(api, stamp, authority);
+  const older = await createTenant(api, `Older${stamp}`, 2, authority);
+  const recent = await createTenant(api, `Recent${stamp}`, 2, authority);
+  const never = await createTenant(api, `Never${stamp}`, 2, authority);
+  const declined = await createTenant(api, `Declined${stamp}`, 2, authority);
   const declinedAdded = await createTenant(api, `Declinedadd${stamp}`, 3);
 
   // Two distinct heard-from instants, `recent` the later.

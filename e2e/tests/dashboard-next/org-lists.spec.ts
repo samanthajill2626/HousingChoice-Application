@@ -6,8 +6,9 @@
 //   1. the pickers (D6, D7): the tenant form's Housing authority and Agency
 //      pickers with "Is this really new?"; a stored value that is not on the
 //      list, kept as a chip through an unrelated save; the property form's
-//      multi-picker; the blast composer's picker (no add step, and the filter
-//      changes only on a pick); text typed but never picked (code review
+//      multi-picker; the blast composer's multi-picker (prefilled from the
+//      property, no add step, and the filter changes only on a pick or a chip
+//      removal); text typed but never picked (code review
 //      R1-ADV-FE-1, R2-FE-9): a form's Save commits a list name and refuses
 //      anything else, the composer's Preview waits for a pick;
 //   2. Settings > Housing authorities & agencies (D10-D13), a list beside a
@@ -109,10 +110,19 @@ function uniquePhone(): string {
 }
 
 /** A tenant through the real routes. `housingAuthority` must already be a list
- *  name: the PATCH applies the D5 check (the POST ignores the field). */
+ *  name: the PATCH applies the D5 check (the POST ignores the field). A blast
+ *  tenant passes `status` (a Matching blast reads Searching and Onboarding
+ *  tenants only) and `consent: true` (the reach counts only the recipients that
+ *  start checked, which needs recorded consent) - tracker #6 D1, D8. */
 async function createTenant(
   request: APIRequestContext,
-  opts: { firstName: string; voucherSize?: number; housingAuthority?: string },
+  opts: {
+    firstName: string;
+    voucherSize?: number;
+    housingAuthority?: string;
+    status?: 'searching' | 'onboarding';
+    consent?: boolean;
+  },
 ): Promise<{ contactId: string; phone: string }> {
   const phone = uniquePhone();
   const res = await request.post(`${NEXT}/api/contacts`, {
@@ -122,6 +132,11 @@ async function createTenant(
       lastName: 'Orglist',
       phone,
       ...(opts.voucherSize !== undefined && { voucherSize: opts.voucherSize }),
+      ...(opts.status !== undefined && { status: opts.status }),
+      ...(opts.consent === true && {
+        consent_method: 'verbal_in_person',
+        consent_at: new Date().toISOString(),
+      }),
     },
   });
   expect(res.ok(), await res.text()).toBeTruthy();
@@ -181,7 +196,7 @@ async function getUnitAuthorities(request: APIRequestContext, unitId: string): P
 }
 
 interface DraftBody {
-  audience_filter?: { housing_authority?: string };
+  audience_filter?: { housing_authorities?: string[] };
 }
 
 /** A blast-draft create: the composer's estimate engine, one per material change. */
@@ -189,8 +204,16 @@ function isDraftCreate(r: Request): boolean {
   return r.method() === 'POST' && new URL(r.url()).pathname === '/api/broadcasts';
 }
 
-function draftAuthority(r: Request): string | undefined {
-  return (r.postDataJSON() as DraftBody | null)?.audience_filter?.housing_authority;
+/** The housing authorities a draft create carried (tracker #6 D2: a list);
+ *  undefined = no authority filter (the key absent or the list empty). */
+function draftAuthorities(r: Request): string[] | undefined {
+  const list = (r.postDataJSON() as DraftBody | null)?.audience_filter?.housing_authorities;
+  return list !== undefined && list.length > 0 ? list : undefined;
+}
+
+/** The same names, in any order. */
+function sameNames(actual: readonly string[] | undefined, expected: readonly string[]): boolean {
+  return actual !== undefined && [...actual].sort().join('\n') === [...expected].sort().join('\n');
 }
 
 test.describe('Org pickers (spec D6, D7)', () => {
@@ -318,7 +341,9 @@ test.describe('Org pickers (spec D6, D7)', () => {
     expect((await getUnitAuthorities(req, unitId)).sort()).toEqual(['Atlanta Housing Authority', osprey].sort());
   });
 
-  test('blast composer: the picker has no add step and changes the filter only on a pick', async ({ page }) => {
+  test('blast composer: the picker is prefilled from the property, has no add step, and changes the filter only on a pick or a chip removal', async ({
+    page,
+  }) => {
     await devLogin(page);
     const req = page.request;
     const stamp = `${Date.now()}`.slice(-6);
@@ -326,23 +351,38 @@ test.describe('Org pickers (spec D6, D7)', () => {
     const first = `PloverA${stamp}`;
     const second = `PloverB${stamp}`;
     await addOrg(req, { kind: 'housing_authority', name: plover });
+    // Searching with recorded consent: the reach counts the recipients that
+    // will start checked (tracker #6 D1, D8).
     for (const firstName of [first, second]) {
-      await createTenant(req, { firstName, voucherSize: 2, housingAuthority: plover });
+      await createTenant(req, { firstName, voucherSize: 2, housingAuthority: plover, status: 'searching', consent: true });
     }
     const unitId = await createUnit(req, { line1: `${stamp} Plover Way`, authorities: [plover], available: true });
 
-    // The housing authority every draft create carried (undefined = no filter).
-    const sent: Array<string | undefined> = [];
+    // The housing authorities every draft create carried (undefined = no filter).
+    const sent: Array<string[] | undefined> = [];
     page.on('request', (r) => {
-      if (isDraftCreate(r)) sent.push(draftAuthority(r));
+      if (isDraftCreate(r)) sent.push(draftAuthorities(r));
     });
 
     await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
     await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
     await page.getByRole('textbox', { name: 'Message' }).fill(`Plover check ${stamp}`);
-    const box = page.getByRole('combobox', { name: 'Housing authority', exact: true });
+
+    // The property prefills its authority (tracker #6 D3): one chip, and the
+    // reach counts exactly the two tenants.
+    const chip = page.getByRole('button', { name: ORG_PICKER.removeChip(plover), exact: true });
+    await expect(chip).toBeVisible();
+    await expect(page.getByText('Reaches 2 recipients', { exact: true })).toBeVisible();
+    expect(sent.filter((a) => a !== undefined).every((a) => sameNames(a, [plover]))).toBe(true);
+
+    // Removing the chip is a filter change: the next draft carries no authority.
+    const cleared = page.waitForRequest((r) => isDraftCreate(r) && draftAuthorities(r) === undefined);
+    await chip.click();
+    await cleared;
+    const mark = sent.length;
 
     // Names are offered; the add option never is (D7: filters name list entries only).
+    const box = page.getByRole('combobox', { name: 'Housing authorities', exact: true });
     await box.fill('Plover');
     await expect(page.getByRole('option', { name: ORG_PICKER.option(plover) })).toBeVisible();
     await expect(page.getByRole('option', { name: ORG_PICKER.addOption })).toHaveCount(0);
@@ -350,16 +390,15 @@ test.describe('Org pickers (spec D6, D7)', () => {
     await expect(page.getByRole('option', { name: ORG_PICKER.option(plover) })).toHaveCount(0);
     await expect(page.getByRole('option', { name: ORG_PICKER.addOption })).toHaveCount(0);
     // Typing is never a filter change: outlast the 600 ms create debounce, then
-    // no draft has carried a housing authority.
+    // no draft since the removal has carried a housing authority.
     await page.waitForTimeout(1_500);
-    expect(sent.filter((a) => a !== undefined)).toEqual([]);
+    expect(sent.slice(mark).filter((a) => a !== undefined)).toEqual([]);
 
-    // A pick commits the filter, and the reach counts exactly the two tenants.
-    const committed = page.waitForRequest((r) => isDraftCreate(r) && draftAuthority(r) === plover);
-    await pickOrgName(page, page, 'Housing authority', plover, { query: 'Plover' });
+    // A pick commits the filter again, and the reach counts exactly the two tenants.
+    const committed = page.waitForRequest((r) => isDraftCreate(r) && sameNames(draftAuthorities(r), [plover]));
+    await pickOrgName(page, page, 'Housing authorities', plover, { query: 'Plover' });
     await committed;
     await expect(page.getByText('Reaches 2 recipients', { exact: true })).toBeVisible();
-    expect(sent.filter((a) => a !== undefined).every((a) => a === plover)).toBe(true);
 
     // The server resolves that exact name: Preview lists both tenants.
     await page.getByRole('button', { name: 'Preview recipients' }).click();
@@ -447,13 +486,22 @@ test.describe('Org pickers: text typed but never picked', () => {
     expect(saved.housingAuthority).toBeUndefined();
   });
 
-  test('blast composer: Preview waits while the housing authority filter holds typed text', async ({ page }) => {
+  test('blast composer: Preview waits while the housing authorities filter holds typed text', async ({ page }) => {
     await devLogin(page);
     const req = page.request;
     const stamp = `${Date.now()}`.slice(-6);
     const pipit = `Pipit Housing Authority ${stamp}`;
+    // A second list name the property does NOT accept: typed, it is no filter.
+    const wagtail = `Wagtail Housing Authority ${stamp}`;
     await addOrg(req, { kind: 'housing_authority', name: pipit });
-    await createTenant(req, { firstName: `PipitA${stamp}`, voucherSize: 2, housingAuthority: pipit });
+    await addOrg(req, { kind: 'housing_authority', name: wagtail });
+    await createTenant(req, {
+      firstName: `PipitA${stamp}`,
+      voucherSize: 2,
+      housingAuthority: pipit,
+      status: 'searching',
+      consent: true,
+    });
     const unitId = await createUnit(req, { line1: `${stamp} Pipit Way`, authorities: [pipit], available: true });
 
     await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
@@ -461,17 +509,26 @@ test.describe('Org pickers: text typed but never picked', () => {
     await page.getByRole('textbox', { name: 'Message' }).fill(`Pipit check ${stamp}`);
     const previewButton = page.getByRole('button', { name: 'Preview recipients' });
     await expect(previewButton).toBeEnabled();
+    // The property's authority is prefilled (tracker #6 D3) and reaches the one tenant.
+    await expect(page.getByRole('button', { name: ORG_PICKER.removeChip(pipit), exact: true })).toBeVisible();
+    await expect(page.getByText('Reaches 1 recipient', { exact: true })).toBeVisible();
 
-    // The exact name typed, its option showing, but not picked: it is no
-    // filter (D7), so Preview waits and says why.
-    const box = page.getByRole('combobox', { name: 'Housing authority', exact: true });
-    await box.fill(pipit);
-    await expect(page.getByRole('option', { name: ORG_PICKER.option(pipit) })).toBeVisible();
+    // Another list name typed in full, its option showing, but not picked: it
+    // is no filter (D7), so Preview waits and says why.
+    const box = page.getByRole('combobox', { name: 'Housing authorities', exact: true });
+    await box.fill(wagtail);
+    await expect(page.getByRole('option', { name: ORG_PICKER.option(wagtail) })).toBeVisible();
     await expect(previewButton).toBeDisabled();
     await expect(page.getByText(PREVIEW_HINT, { exact: true })).toBeVisible();
 
-    // A pick makes it the filter: Preview goes, and the reach is the filtered one.
-    await pickOrgName(page, page, 'Housing authority', pipit);
+    // A pick makes it a member: Preview goes, and the reach is any-of (pipit OR
+    // wagtail) - still the one tenant.
+    const committed = page.waitForResponse(
+      (r) => isDraftCreate(r.request()) && sameNames(draftAuthorities(r.request()), [pipit, wagtail]),
+    );
+    await pickOrgName(page, page, 'Housing authorities', wagtail);
+    const created = (await (await committed).json()) as { estimatedCount?: number };
+    expect(created.estimatedCount).toBe(1);
     await expect(previewButton).toBeEnabled();
     await expect(page.getByText(PREVIEW_HINT, { exact: true })).toHaveCount(0);
     await expect(page.getByText('Reaches 1 recipient', { exact: true })).toBeVisible();

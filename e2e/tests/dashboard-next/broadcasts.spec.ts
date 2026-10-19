@@ -1,5 +1,6 @@
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page, type Response } from '@playwright/test';
 import { listThreads } from '../../fixtures/fakeTwilio.js';
+import { addOrg } from '../../fixtures/orgFixture.js';
 import { statValue, statusPill } from '../../support/broadcastSelectors.js';
 import { expectTodayReady } from '../../support/today.js';
 
@@ -16,18 +17,19 @@ import { expectTodayReady } from '../../support/today.js';
 //   - delete an unsent draft from the list (create a draft, see it, delete it,
 //     confirm it's gone).
 //
-// Seeded data (app/src/lib/seedData.ts):
-//   - unit-0001 = 1450 Joseph E. Boone Blvd NW (beds 2, Atlanta Housing Authority)
-//   - contact-tenant-0001 = Tasha Nguyen (voucherSize 2) → matches unit-0001's
-//     2-BR audience. We seed a PRIOR sent broadcast for unit-0001 that includes
-//     Tasha so the next preview flags her "already sent" (the byUnit GSI resolves
-//     this on the local DynamoDB).
+// Seeded data (app/src/lib/seedData.ts): unit-0001 = 1450 Joseph E. Boone Blvd
+// NW (beds 2, Atlanta Housing Authority) - only the draft-delete test uses it.
+// The first two tests build their audience per run (tracker #6): a Matching blast
+// reads Searching and Onboarding tenants only and limits them to the property's
+// housing authorities, so each adds a RUN-UNIQUE housing authority, gives the
+// property and its tenants that name, and (the first test) plants a PRIOR send
+// to one of its own tenants so the next preview flags them "already sent" (the
+// lean seed's Tasha is Placing, so the filters leave her out).
 // To get a multi-candidate, order-independent audience we create our OWN tenants
 // (voucherSize 2, unique per-run phones) via the API. Sends are asserted via the
 // fake-twilio thread store — never real SMS. Served on :5174 (the suite baseURL).
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const SEEDED_UNIT = 'unit-0001'; // 1450 Joseph E. Boone Blvd NW, beds 2
-const TASHA = 'contact-tenant-0001';
 
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
@@ -38,22 +40,38 @@ async function devLogin(page: Page): Promise<void> {
 /** Create a tenant via the API (camelCase voucherSize so the resolver matches).
  *  `voucherSize` defaults to 2 (the unit-0001 audience); pass 3 for a tenant the
  *  2-BR filter will NOT catch (so it must be added manually via search).
+ *  The status is EXPLICIT (default Searching): a Matching blast reads Searching
+ *  and Onboarding tenants only (tracker #6 D1). `housingAuthority`, when given,
+ *  must already be an organization-list name (the PATCH below checks it; the
+ *  create ignores the field).
  *  Returns the new contactId + the display name we can search/assert on. */
 async function createTenant(
   request: APIRequestContext,
   firstName: string,
   voucherSize = 2,
+  opts: { housingAuthority?: string; status?: 'searching' | 'onboarding' } = {},
 ): Promise<{ contactId: string; firstName: string; name: string; phone: string }> {
   const phone = `+1555${Math.floor(Math.random() * 9000000 + 1000000)}`;
   const res = await request.post(`${NEXT}/api/contacts`, {
-    data: { type: 'tenant', firstName, lastName: 'Bcastest', phone, voucherSize },
+    data: {
+      type: 'tenant',
+      firstName,
+      lastName: 'Bcastest',
+      phone,
+      voucherSize,
+      status: opts.status ?? 'searching',
+    },
   });
   expect(res.ok()).toBeTruthy();
   const contactId = (await res.json()).contact.contactId as string;
   // A2P/CTIA (spec §4): a no-consent tenant is fenced out of broadcasts (its preview
   // row is disabled). These test tenants are meant to be SENDABLE, so record consent.
   const consentRes = await request.patch(`${NEXT}/api/contacts/${contactId}`, {
-    data: { consent_method: 'verbal_in_person', consent_at: new Date().toISOString() },
+    data: {
+      consent_method: 'verbal_in_person',
+      consent_at: new Date().toISOString(),
+      ...(opts.housingAuthority !== undefined && { housingAuthority: opts.housingAuthority }),
+    },
   });
   expect(consentRes.ok()).toBeTruthy();
   // Preview rows from the resolver show the FIRST name only (no lastName); the
@@ -69,13 +87,17 @@ async function createTenant(
 async function createUnitViaApi(
   request: APIRequestContext,
   stamp: string,
-  opts: { available: boolean },
+  opts: { available: boolean; authorities?: string[] },
 ): Promise<string> {
   const res = await request.post(`${NEXT}/api/units`, {
     data: {
       landlordId: 'contact-landlord-0001',
       beds: 2,
-      accepted_authorities: ['atlanta_housing'],
+      // List names or unique spellings (the default `atlanta_housing` is a
+      // spelling of Atlanta Housing Authority). A test whose audience is
+      // asserted passes its own run-unique name: the composer prefills its
+      // housing authority filter from this list (tracker #6 D3).
+      accepted_authorities: opts.authorities ?? ['atlanta_housing'],
       address: { line1: `${stamp} Broadcast Guard Ave`, city: 'Atlanta', state: 'GA', zip: '30314' },
       rent_min: 1500,
       rent_max: 1600,
@@ -101,28 +123,28 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     // authenticated /api setup calls below (the bare `request` fixture has none).
     await devLogin(page);
 
-    // A2P/CTIA (spec §4): seeded Tasha (contact-tenant-0001) now carries inbound_text
-    // consent from her seeded inbound reply, so she's already a normal already-sent
-    // candidate row (not badged no-consent). This PATCH is now a redundant no-op —
-    // kept so the test stays robust regardless of the seed's consent state.
-    const tashaConsent = await page.request.patch(`${NEXT}/api/contacts/${TASHA}`, {
-      data: { consent_method: 'verbal_in_person', consent_at: new Date().toISOString() },
-    });
-    expect(tashaConsent.ok()).toBeTruthy();
-
-    // --- Set up the audience: two fresh 2-BR tenants we control (unique names). ---
+    // --- Set up the audience: three fresh 2-BR Searching tenants we control
+    // (unique names) in a RUN-UNIQUE housing authority (tracker #6: the
+    // composer prefills the property's authorities and the blast reads
+    // Searching and Onboarding tenants in them only, so a shared authority
+    // would pull in every earlier spec's tenants). ---
     const stamp = `${Date.now()}`.slice(-6);
+    const authority = `Bcast Compose Authority ${stamp}`;
+    await addOrg(page.request, { kind: 'housing_authority', name: authority });
     // Per-run Available property (spec 2026-07-10): with the send guard live,
     // sending against seeded unit-0001 would 400 (it is under_application, kept
     // that way for public-pages.spec.ts). Create + publish our own.
-    const unitId = await createUnitViaApi(page.request, stamp, { available: true });
-    const keep = await createTenant(page.request, `Keepme${stamp}`);
-    const drop = await createTenant(page.request, `Dropme${stamp}`);
+    const unitId = await createUnitViaApi(page.request, stamp, { available: true, authorities: [authority] });
+    const keep = await createTenant(page.request, `Keepme${stamp}`, 2, { housingAuthority: authority });
+    const drop = await createTenant(page.request, `Dropme${stamp}`, 2, { housingAuthority: authority });
+    // The already-sent tenant is ours, not the lean seed's Tasha: she is
+    // Placing, so the filters leave her out (tracker #6 D1).
+    const prior = await createTenant(page.request, `Priorsent${stamp}`, 2, { housingAuthority: authority });
     // A 3-BR tenant: NOT caught by the 2-BR filter → must be added via search.
     const added = await createTenant(page.request, `Addme${stamp}`, 3);
 
-    // --- Seed a PRIOR sent broadcast for unit-0001 that includes Tasha, so the
-    // next preview flags her "already sent". Built straight through the API. ---
+    // --- Seed a PRIOR send of this property to `prior`, so the next preview
+    // flags them "already sent". Built straight through the API. ---
     const draftRes = await page.request.post(`${NEXT}/api/broadcasts`, {
       data: {
         unitId,
@@ -133,7 +155,7 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     expect(draftRes.ok()).toBeTruthy();
     const priorId = (await draftRes.json()).broadcastId as string;
     const sentRes = await page.request.post(`${NEXT}/api/broadcasts/${priorId}/send`, {
-      data: { recipientContactIds: [TASHA] },
+      data: { recipientContactIds: [prior.contactId] },
     });
     expect(sentRes.ok()).toBeTruthy();
 
@@ -150,6 +172,17 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     await expect(twoBr).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByText(/matches property/i)).toBeVisible();
 
+    // The housing authority filter is PRE-FILLED with the property's run-unique
+    // authority (tracker #6 D3): one chip in the "Housing authorities" picker.
+    await expect(page.getByRole('button', { name: `Remove ${authority}`, exact: true })).toBeVisible();
+
+    // Let the message prefill settle before typing: it is written on property
+    // load, then again with the server's ?cta=text link
+    // (docs/issues/a2p-consent-reinclude-fill-races-prefill.md).
+    await expect(page.getByLabel('Message')).toHaveValue(new RegExp(`/p/${unitId}\\?cta=text$`), {
+      timeout: 15_000,
+    });
+
     // Write a message (unique so its outbound copy is assertable in the fake).
     const body = `Open house ${stamp} — a 2BR home is available.`;
     await page.getByLabel('Message').fill(body);
@@ -164,15 +197,17 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     const list = page.getByRole('list', { name: 'Candidate recipients' });
     await expect(list).toBeVisible();
 
-    // Our two 2-BR tenants are filter-matched candidates (preview rows show the
-    // FIRST name only). Tasha is too (already-sent).
+    // Our three 2-BR tenants are filter-matched candidates; `prior` is the
+    // already-sent one.
     await expect(list.getByText(keep.firstName)).toBeVisible();
     await expect(list.getByText(drop.firstName)).toBeVisible();
 
-    // Tasha is flagged "already sent" and starts UNCHECKED (soft opt-in to resend).
-    const tashaRow = list.locator('li', { hasText: 'Tasha' });
-    await expect(tashaRow.getByText('Already sent')).toBeVisible();
-    await expect(tashaRow.getByRole('checkbox')).not.toBeChecked();
+    // `prior` is flagged "already sent" and starts UNCHECKED (soft opt-in to resend).
+    const priorRow = list.locator('li', { hasText: prior.name });
+    await expect(priorRow.getByText('Already sent')).toBeVisible();
+    await expect(
+      list.getByRole('checkbox', { name: `${prior.name} - already sent`, exact: true }),
+    ).not.toBeChecked();
 
     // Uncheck one candidate (drop) so it is excluded from the send.
     const dropRow = list.locator('li', { hasText: drop.firstName });
@@ -187,8 +222,9 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     await expect(addedRow.getByText('Added')).toBeVisible();
     await expect(addedRow.getByRole('checkbox')).toBeChecked();
 
-    // Send to the curated selection.
-    await page.getByRole('button', { name: /^Send to/ }).click();
+    // Send to the curated selection: keep + the hand-added tenant (drop was
+    // unchecked by hand, prior starts unchecked).
+    await page.getByRole('button', { name: 'Send to 2 recipients', exact: true }).click();
 
     // --- Lands on Results for this broadcast (the send POST resolves, then the
     // composer navigates). Allow headroom for the send round-trip. ---
@@ -233,10 +269,14 @@ test.describe('Broadcasts — compose from a property → curate → send → re
   }) => {
     await devLogin(page);
     const stamp = `${Date.now()}`.slice(-6);
-    // A sendable 2-BR tenant the default audience will catch.
-    await createTenant(page.request, `Warnme${stamp}`);
+    // A sendable 2-BR Searching tenant in a RUN-UNIQUE housing authority the
+    // property accepts, so the prefilled audience is exactly this tenant
+    // (tracker #6: a shared authority would pull in other specs' tenants).
+    const authority = `Bcast Warn Authority ${stamp}`;
+    await addOrg(page.request, { kind: 'housing_authority', name: authority });
+    await createTenant(page.request, `Warnme${stamp}`, 2, { housingAuthority: authority });
     // Fresh unit left in 'setup' - NOT shareable, so the flyer link is dead.
-    const unitId = await createUnitViaApi(page.request, stamp, { available: false });
+    const unitId = await createUnitViaApi(page.request, stamp, { available: false, authorities: [authority] });
 
     await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
     // The early banner names the coming ask.
@@ -244,7 +284,7 @@ test.describe('Broadcasts — compose from a property → curate → send → re
 
     await page.getByLabel('Message').fill(`Warn flow ${stamp} - see [FlyerLink]`);
     await page.getByRole('button', { name: 'Preview recipients' }).click();
-    await page.getByRole('button', { name: /^Send to \d+ recipients?$/ }).click();
+    await page.getByRole('button', { name: 'Send to 1 recipient', exact: true }).click();
 
     // The blocking dialog - nothing sent yet.
     const dialog = page.getByRole('dialog', { name: "Property isn't Available" });
@@ -402,18 +442,29 @@ test.describe('Broadcasts — delete an unsent draft', () => {
     const stamp = `${Date.now()}`.slice(-6);
 
     // Compose a fresh draft through the UI. Capture its id from the create
-    // response so we can assert it leaves the Drafts list after deletion. (The
-    // composer's throwaway draft is (re)created on a debounced material change;
-    // the LAST create for this compose is the one Preview/Delete acts on.)
+    // response so we can assert it leaves the Drafts list after deletion. The
+    // composer makes no draft until the property prefill settles (tracker #6),
+    // then (re)creates its throwaway draft on a debounced material change and
+    // deletes the superseded one - so record EVERY create of this compose, wait
+    // until Preview is enabled (the current draft is then made for what is on
+    // screen) and take the LAST create made for the typed message.
+    const message = `Draft to delete ${stamp}`;
+    const creates: Response[] = [];
+    page.on('response', (r) => {
+      if (r.request().method() === 'POST' && new URL(r.url()).pathname === '/api/broadcasts') creates.push(r);
+    });
     await page.goto(`${NEXT}/broadcasts/new?unitId=${SEEDED_UNIT}`);
     await expect(page.getByRole('heading', { name: 'Send a property' })).toBeVisible();
-
-    const createResp = page.waitForResponse(
-      (r) => r.url().endsWith('/api/broadcasts') && r.request().method() === 'POST',
-    );
-    await page.getByLabel('Message').fill(`Draft to delete ${stamp}`);
-    const created = await createResp;
-    const draftId = (await created.json()).broadcastId as string;
+    await page.getByLabel('Message').fill(message);
+    await expect(page.getByRole('button', { name: 'Preview recipients' })).toBeEnabled({ timeout: 15_000 });
+    const created = creates
+      .filter((r) =>
+        ((r.request().postDataJSON() as { body_template?: string } | null)?.body_template ?? '').includes(message),
+      )
+      .at(-1);
+    expect(created, 'a draft create for the typed message').toBeDefined();
+    // Read before navigating away (the response body goes with the page).
+    const draftId = ((await created?.json()) as { broadcastId: string }).broadcastId;
 
     // It shows in the Drafts list (resume link carries ?draftId=).
     await page.goto(`${NEXT}/broadcasts`);

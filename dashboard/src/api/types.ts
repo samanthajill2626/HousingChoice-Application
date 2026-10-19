@@ -3552,9 +3552,6 @@ export interface PreviewResponse {
    *  failed - its rows came back without those labels (a filter draft's
    *  preview answers 503 audience_rules_unavailable instead). */
   audienceRulesUnavailable?: true;
-  /** TRANSITIONAL: the removed degrade flag, still read by RecipientPreview
-   *  until Task 3.2 deletes its notice and this field. */
-  declineLabelsUnavailable?: boolean;
 }
 
 /** GET /api/broadcasts/follow-ups -> one waiting row (last-heard-from spec 5.6;

@@ -72,7 +72,6 @@ function previewOf(over: Partial<PreviewResponse> = {}): PreviewResponse {
     seedContactIds: [],
     unresolvedSeedIds: [],
     declinedContactIds: [],
-    declineLabelsUnavailable: false,
     tourHolds: [],
     ...over,
   };
@@ -973,7 +972,7 @@ describe('RecipientPreview - columns, order and not-interested rows (last-heard-
     expect(within(rowOf('Dee Clined')).getByText('Not interested')).toBeInTheDocument();
   });
 
-  it('annotates the Add-a-tenant options: "Not interested" beats "Already sent"', async () => {
+  it('annotates the Add-a-tenant options with every cue, in order: Not interested, Already sent', async () => {
     const u = userEvent.setup();
     renderPreview({
       preview: previewOf({ candidates: [], priorRecipientContactIds: ['cA', 'cB'], declinedContactIds: ['cB'] }),
@@ -985,17 +984,177 @@ describe('RecipientPreview - columns, order and not-interested rows (last-heard-
     });
     await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Z');
     expect(await screen.findByRole('option', { name: /Zoe Prior.*Already sent/ })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /Zia Both.*Not interested/ })).not.toHaveTextContent('Already sent');
+    // matching-blast-rules D7: both cues, Not interested first (was one suffix).
+    expect(screen.getByRole('option', { name: /Zia Both/ })).toHaveTextContent('Not interested, Already sent');
     expect(screen.getByRole('option', { name: /Zed Fresh/ })).not.toHaveTextContent(/Already sent|Not interested/);
   });
+});
 
-  it('shows the degraded line when the decline labels could not load, and not otherwise', () => {
-    const LINE = "Couldn't load not-interested labels - a tenant who said no may be checked; sends still work";
-    renderPreview({ preview: previewOf({ candidates: [candidate()], declineLabelsUnavailable: true }) });
-    expect(screen.getByText(LINE)).toBeInTheDocument();
+// matching-blast-rules D4, D5, D7: rows start from the server's
+// checkedByDefault (the dashboard never recomputes the rule), a held tenant is
+// listed unchecked with its tour label, and a hand pick here is checked.
+describe('RecipientPreview - tour holds and the server default (matching-blast-rules)', () => {
+  const listEl = (): HTMLElement => screen.getByRole('list', { name: 'Candidate recipients' });
+  const rowOf = (text: string): HTMLElement => within(listEl()).getByText(text).closest('li') as HTMLElement;
+  const UPCOMING = { kind: 'upcoming', tourId: 't-1', at: '2026-10-20T12:00:00.000Z' } as const;
+
+  it('a row starts as the server checkedByDefault says - never recomputed from the flags', () => {
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Plain', checkedByDefault: false }),
+          candidate({ contactId: 'c2', firstName: 'Bo', phone: '+14040000002' }),
+        ],
+      }),
+    });
+    expect(within(listEl()).getByRole('checkbox', { name: 'Plain' })).not.toBeChecked();
+    expect(within(listEl()).getByRole('checkbox', { name: 'Bo' })).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Send to 1 recipient' })).toBeInTheDocument();
   });
-  it('no degraded line on a healthy preview', () => {
+
+  it('a held row starts UNCHECKED with its tour tag; Select all skips it; staff may still check it', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c1', firstName: 'Held', tourHold: UPCOMING }),
+          candidate({ contactId: 'c2', firstName: 'Bo', phone: '+14040000002' }),
+        ],
+        tourHolds: [{ contactId: 'c1', ...UPCOMING }],
+      }),
+    });
+    const held = within(listEl()).getByRole('checkbox', { name: 'Held - tour oct 20' });
+    expect(held).not.toBeChecked();
+    expect(held).toBeEnabled();
+    expect(within(rowOf('Held')).getByText('Tour Oct 20')).toBeInTheDocument();
+    await u.click(screen.getByRole('button', { name: 'Deselect all' }));
+    await u.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(held).not.toBeChecked();
+    expect(within(listEl()).getByRole('checkbox', { name: 'Bo' })).toBeChecked();
+    // A tour never stops staff from sending: the held row can be checked.
+    await u.click(held);
+    expect(held).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Send to 2 recipients' })).toBeInTheDocument();
+  });
+
+  it('the checkbox name lists every cue in order - already sent, not interested, then the tour label in lower case', () => {
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({
+            contactId: 'c1',
+            firstName: 'Ana',
+            lastName: 'Diaz',
+            alreadySentThisProperty: true,
+            declinedThisProperty: true,
+            tourHold: UPCOMING,
+          }),
+          candidate({
+            contactId: 'c2',
+            firstName: 'Bo',
+            phone: '+14040000002',
+            tourHold: { kind: 'needs_outcome', tourId: 't-2', at: '2026-10-09T12:00:00.000Z' },
+          }),
+          candidate({ contactId: 'c3', firstName: 'Cy', phone: '+14040000003', tourHold: { kind: 'not_marked', tourId: 't-3' } }),
+          candidate({ contactId: 'c4', firstName: 'Di', phone: '+14040000004', has_consent: false, tourHold: UPCOMING }),
+        ],
+        priorRecipientContactIds: ['c1'],
+        declinedContactIds: ['c1'],
+      }),
+    });
+    expect(
+      within(listEl()).getByRole('checkbox', { name: 'Ana Diaz - already sent, not interested, tour oct 20' }),
+    ).not.toBeChecked();
+    expect(within(listEl()).getByRole('checkbox', { name: 'Bo - toured oct 9, needs outcome' })).not.toBeChecked();
+    expect(within(listEl()).getByRole('checkbox', { name: 'Cy - tour, not marked' })).not.toBeChecked();
+    // A no-consent row keeps its consent-only name (unchanged).
+    expect(within(listEl()).getByRole('checkbox', { name: 'Di - consent not recorded' })).toBeDisabled();
+    const ana = rowOf('Ana Diaz');
+    expect(within(ana).getByText('Already sent')).toBeInTheDocument();
+    expect(within(ana).getByText('Not interested')).toBeInTheDocument();
+    expect(within(ana).getByText('Tour Oct 20')).toBeInTheDocument();
+    expect(within(rowOf('Cy')).getByText('Tour, not marked')).toBeInTheDocument();
+  });
+
+  it('a SEEDED held row starts checked and still shows its label (a hand pick is never held)', () => {
+    renderPreview({
+      preview: previewOf({
+        candidates: [candidate({ contactId: 'c1', firstName: 'Picked', seeded: true, tourHold: UPCOMING })],
+        seedContactIds: ['c1'],
+        tourHolds: [{ contactId: 'c1', ...UPCOMING }],
+      }),
+    });
+    expect(screen.getByRole('checkbox', { name: 'Picked - tour oct 20' })).toBeChecked();
+    expect(within(rowOf('Picked')).getByText('Tour Oct 20')).toBeInTheDocument();
+  });
+
+  it('Add a tenant: the option lists every cue, and the added tenant starts checked with its tour label from tourHolds', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({
+        candidates: [candidate({ contactId: 'c1', firstName: 'Tasha' })],
+        priorRecipientContactIds: ['cX'],
+        declinedContactIds: ['cX'],
+        tourHolds: [{ contactId: 'cX', kind: 'requested', tourId: 't-9', at: '2026-10-12T12:00:00.000Z' }],
+      }),
+      tenantCandidates: [tenant({ contactId: 'cX', firstName: 'Zia', lastName: 'Both' })],
+    });
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Zia');
+    const option = await screen.findByRole('option', { name: /Zia Both/ });
+    expect(option).toHaveTextContent('Not interested, Already sent, Tour requested Oct 12, no date yet');
+    await u.click(option);
+    const box = within(listEl()).getByRole('checkbox', {
+      name: 'Zia Both - already sent, not interested, tour requested oct 12, no date yet',
+    });
+    expect(box).toBeChecked();
+    expect(within(rowOf('Zia Both')).getByText('Tour requested Oct 12, no date yet')).toBeInTheDocument();
+    // A hand pick stays checked through Select all.
+    await u.click(screen.getByRole('button', { name: 'Deselect all' }));
+    await u.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(box).toBeChecked();
+  });
+
+  it('picking a HELD filter row in Add a tenant promotes it: checked, still labeled, kept by Select all', async () => {
+    const u = userEvent.setup();
+    renderPreview({
+      preview: previewOf({
+        candidates: [
+          candidate({ contactId: 'c2', firstName: 'Bo', lastName: 'Held', phone: '+14040000002', tourHold: UPCOMING }),
+        ],
+        tourHolds: [{ contactId: 'c2', ...UPCOMING }],
+      }),
+      tenantCandidates: [tenant({ contactId: 'c2', firstName: 'Bo', lastName: 'Held', phone: '+14040000002' })],
+    });
+    const box = within(listEl()).getByRole('checkbox', { name: 'Bo Held - tour oct 20' });
+    expect(box).not.toBeChecked();
+    await u.type(screen.getByRole('combobox', { name: 'Add a tenant' }), 'Bo');
+    await u.click(await screen.findByRole('option', { name: /Bo Held/ }));
+    expect(box).toBeChecked();
+    expect(within(listEl()).getAllByText('Bo Held')).toHaveLength(1);
+    await u.click(screen.getByRole('button', { name: 'Deselect all' }));
+    await u.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(box).toBeChecked();
+    await waitFor(() => expect(updateBroadcastSeeds).toHaveBeenCalledWith('bcast_1', ['c2']));
+  });
+
+  it('a seeds-only preview whose rules reads failed says so', () => {
+    renderPreview({
+      preview: previewOf({ candidates: [candidate({ seeded: true })], seedContactIds: ['c1'], audienceRulesUnavailable: true }),
+    });
+    expect(screen.getByText("Tour and Not interested labels couldn't be loaded.")).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Tasha' })).toBeChecked();
+  });
+
+  it('no rules notice on a healthy preview', () => {
     renderPreview({ preview: previewOf({ candidates: [candidate()] }) });
-    expect(screen.queryByText(/Couldn't load not-interested labels/)).toBeNull();
+    expect(screen.queryByText(/labels couldn't be loaded/)).toBeNull();
+  });
+
+  it('a truncated preview says the list may be incomplete - and never asks to narrow a filter', () => {
+    renderPreview({ preview: previewOf({ candidates: [candidate()], truncated: true }) });
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Too many tenants to read - some matches may be missing from this list.',
+    );
+    expect(screen.queryByText(/Narrow the filter/)).toBeNull();
   });
 });

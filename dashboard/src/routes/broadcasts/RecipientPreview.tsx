@@ -6,11 +6,13 @@
 // didn't catch (tenant search → append), search-within-recipients (filter by
 // name/phone), and bulk Select all / Deselect all. Excluded rows stay VISIBLE
 // (auditable: staff can see who's left out and re-check them).
-// Already-sent-this-property rows render amber and start UNCHECKED (a SOFT
-// opt-in-to-resend flag, never a hard gate) - UNLESS the row is SEEDED: a seed
-// (the one-to-one tenant, a preview-returned hand-pick, or a tenant added right
-// here) is a deliberate choice and stays checked, through "Select all" too
-// (share-skip-fix D5 / I4). "Select all" skips UNSEEDED already-sent rows.
+// Flagged rows (already sent, Not interested, a tour hold) render amber. Each
+// row starts as the server's checkedByDefault says (matching-blast-rules D5:
+// has_consent && (seeded || (!alreadySent && !declined && !tourHold))) and
+// "Select all" re-applies it - the dashboard never recomputes the rule. ONE
+// client-side case: a row added or PROMOTED by Add a tenant here is a hand
+// pick from that moment (checkedByDefault = hasConsent), so it starts checked
+// and "Select all" keeps it (share-skip-fix D5 / I4).
 // A live selected count drives "Send to N recipients", which posts the EXACT
 // checked contactIds.
 // 400/409 are surfaced inline. A "Delete draft" button removes the unsent draft.
@@ -28,12 +30,14 @@ import {
   type Contact,
   type ListingStatus,
   type PreviewResponse,
+  type TourHold,
 } from '../../api/index.js';
 import { Button, Spinner, StatusBadge } from '../../ui/index.js';
 import { formatHeardFrom, sortByHeardFrom } from '../../lib/heardFrom.js';
 import { Modal } from '../contact/Modal.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { contactDisplayName, formatPhone } from '../contact/format.js';
+import { tourHoldLabel } from './tourHoldLabel.js';
 import styles from './RecipientPreview.module.css';
 
 /** One row in the curated list (a preview candidate or a manually-added tenant). */
@@ -65,6 +69,12 @@ interface Row {
   lastHeardFromAt?: string;
   /** An EFFECTIVE decline of this property (declinedContactIds, D11). */
   declined: boolean;
+  /** matching-blast-rules D4: the unresolved tour that holds this tenant. */
+  tourHold?: TourHold;
+  /** matching-blast-rules D5: the row's default - the server's verdict for a
+   *  preview row, hasConsent for a hand pick made here. The initial state
+   *  AND "Select all" read it. */
+  checkedByDefault: boolean;
 }
 
 export interface RecipientPreviewProps {
@@ -93,21 +103,19 @@ export interface RecipientPreviewProps {
  *  is built from the code point and this source stays ASCII. */
 const NO_CONSENT_TAG_TEXT = `consent not recorded ${String.fromCharCode(0x2014)} fix before sending`;
 
-/** The ONE default-check rule - initial rows AND Select all (spec 14.4 B11):
- *  a no-consent row never; a seeded row always (a pick is deliberate,
- *  share-skip-fix D5); otherwise only a row neither already sent nor declined. */
-function defaultChecked(r: Pick<Row, 'hasConsent' | 'seeded' | 'alreadySentThisProperty' | 'declined'>): boolean {
-  return r.hasConsent && (r.seeded || (!r.alreadySentThisProperty && !r.declined));
-}
-
 /** The checkbox's accessible name: the person plus every cue, ASCII " - "
- *  (spec 14.4 B7) - so getByRole('checkbox', { name }) resolves by the row. */
+ *  (spec 14.4 B7) - so getByRole('checkbox', { name }) resolves by the row.
+ *  matching-blast-rules D7: the cues joined with ", " in the order already
+ *  sent, not interested, then the tour label in lower case
+ *  ("Ana Diaz - already sent, not interested, tour oct 20"). A no-consent row
+ *  names its fence alone. */
 function checkboxName(row: Row): string {
   if (!row.hasConsent) return `${row.name} - consent not recorded`;
-  if (row.alreadySentThisProperty && row.declined) return `${row.name} - already sent, not interested`;
-  if (row.alreadySentThisProperty) return `${row.name} - already sent`;
-  if (row.declined) return `${row.name} - not interested`;
-  return row.name;
+  const cues: string[] = [];
+  if (row.alreadySentThisProperty) cues.push('already sent');
+  if (row.declined) cues.push('not interested');
+  if (row.tourHold !== undefined) cues.push(tourHoldLabel(row.tourHold).toLowerCase());
+  return cues.length > 0 ? `${row.name} - ${cues.join(', ')}` : row.name;
 }
 
 /** Build the initial rows from the preview candidates (FULL name - a first
@@ -125,11 +133,14 @@ function initialRows(preview: PreviewResponse, declinedIds: ReadonlySet<string>)
       ...(c.lastHeardFromAt !== undefined && { lastHeardFromAt: c.lastHeardFromAt }),
       alreadySentThisProperty: c.alreadySentThisProperty,
       declined: declinedIds.has(c.contactId),
+      ...(c.tourHold !== undefined && { tourHold: c.tourHold }),
       hasConsent: c.has_consent,
       seeded: c.seeded,
-      checked: false,
+      // matching-blast-rules D5: the server's verdict, as is.
+      checkedByDefault: c.checkedByDefault,
+      checked: c.checkedByDefault,
     };
-    return { ...row, checked: defaultChecked(row) };
+    return row;
   });
 }
 
@@ -148,6 +159,18 @@ export function RecipientPreview({
     [preview.priorRecipientContactIds],
   );
   const declinedIds = useMemo(() => new Set(preview.declinedContactIds), [preview.declinedContactIds]);
+  /** matching-blast-rules D7: EVERY held contact's tour hold - labels a
+   *  tenant Add a tenant brings in from outside the candidates. */
+  const tourHoldsById = useMemo(
+    () =>
+      new Map<string, TourHold>(
+        preview.tourHolds.map((h) => [
+          h.contactId,
+          h.at !== undefined ? { kind: h.kind, tourId: h.tourId, at: h.at } : { kind: h.kind, tourId: h.tourId },
+        ]),
+      ),
+    [preview.tourHolds],
+  );
   const [mountNow] = useState(() => new Date());
   const now = nowProp ?? mountNow;
   /** The rendered row elements, for the scroll-into-view on add. */
@@ -236,12 +259,12 @@ export function RecipientPreview({
     );
   }
 
-  /** Select all - but SKIP unseeded already-sent rows (opt-in only) AND
-   *  no-consent rows (hard fence). A SEEDED row stays checked whatever its flag
-   *  (share-skip-fix D5): the operator picked them on purpose.
-   *  ... AND unseeded declined rows (spec 14.4 B11). */
+  /** Select all = every row back to its default (matching-blast-rules D5):
+   *  the server's checkedByDefault skips unseeded already-sent, declined and
+   *  held rows and every no-consent row (hard fence); a hand pick made here
+   *  defaults to checked (share-skip-fix D5). */
   function selectAll(): void {
-    setRows((prev) => prev.map((r) => ({ ...r, checked: defaultChecked(r) })));
+    setRows((prev) => prev.map((r) => ({ ...r, checked: r.checkedByDefault })));
   }
   function deselectAll(): void {
     setRows((prev) => prev.map((r) => ({ ...r, checked: false })));
@@ -296,11 +319,16 @@ export function RecipientPreview({
         // filter-proposed row flagged "Already sent", so unchecked) is a
         // deliberate pick too - promote that row to a seed and check it, never
         // discard the pick. A no-consent row stays unchecked (hard fence).
+        // matching-blast-rules D5: from this pick on the row is a hand pick,
+        // so its default is hasConsent - Select all keeps it checked.
         return prev.map((r) =>
-          r.contactId === candidate.contactId ? { ...r, seeded: true, checked: r.hasConsent } : r,
+          r.contactId === candidate.contactId
+            ? { ...r, seeded: true, checkedByDefault: r.hasConsent, checked: r.hasConsent }
+            : r,
         );
       }
       const already = priorIds.has(candidate.contactId);
+      const hold = tourHoldsById.get(candidate.contactId);
       return [
         ...prev,
         {
@@ -317,10 +345,14 @@ export function RecipientPreview({
           // Tagged, but CHECKED: a hand-pick is a seed (share-skip-fix D5,
           // spec 14.4 G3 as amended); the annotate suffix warned before the pick.
           declined: declinedIds.has(candidate.contactId),
+          // matching-blast-rules D7: a tenant from outside the candidates is
+          // labeled from the top-level tourHolds list.
+          ...(hold !== undefined && { tourHold: hold }),
           hasConsent: true,
           // share-skip-fix D5: a hand-pick is a seed from the moment it is added -
           // the same row the server returns as `seeded: true` after a re-preview,
           // so it must not start unchecked here and checked there.
+          checkedByDefault: true,
           checked: true,
           added: true,
           seeded: true,
@@ -432,10 +464,17 @@ export function RecipientPreview({
     }
   }
 
-  /** "Add a tenant" suffix (spec 5.3): warns BEFORE the pick. One suffix -
-   *  Not interested outranks Already sent. */
-  const annotateCandidate = (c: Contact): string | undefined =>
-    declinedIds.has(c.contactId) ? 'Not interested' : priorIds.has(c.contactId) ? 'Already sent' : undefined;
+  /** "Add a tenant" note (spec 5.3; matching-blast-rules D7): warns BEFORE
+   *  the pick with every cue that applies, in the order Not interested,
+   *  Already sent, then the tour label - joined with ", ". */
+  const annotateCandidate = (c: Contact): string | undefined => {
+    const cues: string[] = [];
+    if (declinedIds.has(c.contactId)) cues.push('Not interested');
+    if (priorIds.has(c.contactId)) cues.push('Already sent');
+    const hold = tourHoldsById.get(c.contactId);
+    if (hold !== undefined) cues.push(tourHoldLabel(hold));
+    return cues.length > 0 ? cues.join(', ') : undefined;
+  };
 
   return (
     <div className={styles.preview}>
@@ -486,11 +525,12 @@ export function RecipientPreview({
         </p>
       ) : null}
 
-      {/* last-heard-from 5.3: the decline reads failed - say so rather than hide
-          it (a declined tenant who is not also already sent starts CHECKED). */}
-      {preview.declineLabelsUnavailable ? (
+      {/* matching-blast-rules D5: a SEEDS-ONLY draft's tour or decline reads
+          failed - its rows came back without those labels (seeds stay
+          checked). A filter draft's preview is refused instead (503). */}
+      {preview.audienceRulesUnavailable === true ? (
         <p className={styles.seedNotice} role="status">
-          Couldn&apos;t load not-interested labels - a tenant who said no may be checked; sends still work
+          Tour and Not interested labels couldn&apos;t be loaded.
         </p>
       ) : null}
 
@@ -525,7 +565,7 @@ export function RecipientPreview({
                     if (el) rowEls.current.set(row.contactId, el);
                     else rowEls.current.delete(row.contactId);
                   }}
-                  className={`${styles.row} ${!row.hasConsent ? styles.rowNoConsent : row.alreadySentThisProperty || row.declined ? styles.rowAlready : ''}`.trim()}
+                  className={`${styles.row} ${!row.hasConsent ? styles.rowNoConsent : row.alreadySentThisProperty || row.declined || row.tourHold !== undefined ? styles.rowAlready : ''}`.trim()}
                 >
                   <label className={styles.rowLabel}>
                     <input
@@ -580,6 +620,11 @@ export function RecipientPreview({
                         <>
                           {row.alreadySentThisProperty ? <span className={styles.alreadyTag}>Already sent</span> : null}
                           {row.declined ? <span className={styles.declinedTag}>Not interested</span> : null}
+                          {/* matching-blast-rules D7: the tour hold, after Not
+                              interested, in the same amber tag. */}
+                          {row.tourHold !== undefined ? (
+                            <span className={styles.declinedTag}>{tourHoldLabel(row.tourHold)}</span>
+                          ) : null}
                         </>
                       )}
                       {row.added ? <span className={styles.addedTag}>Added</span> : null}
@@ -651,8 +696,7 @@ export function RecipientPreview({
         // role="alert" (announces on insertion) — the warning mounts WITH content,
         // so role="status" wouldn't reliably announce.
         <p className={styles.truncated} role="alert">
-          The audience hit the cap — some matches may be missing. Narrow the filter for a complete
-          list.
+          Too many tenants to read - some matches may be missing from this list.
         </p>
       ) : null}
 

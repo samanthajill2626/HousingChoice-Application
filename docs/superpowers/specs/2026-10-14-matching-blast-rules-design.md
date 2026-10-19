@@ -315,9 +315,12 @@ prefill fails closed the same way:
 An ABORTED load (the request was cancelled - an unmount, a property change,
 React StrictMode's double mount; `AbortError`,
 `dashboard/src/api/client.ts:125`) is neither loaded nor failed: the gate
-keeps waiting and no notice shows. A failed state belongs to the property it
-was for and clears when that property loads or the property changes. A
-resumed draft (`?draftId=`, no property on the client) and a seeds-only send
+keeps waiting and no notice shows. A failed PROPERTY LOAD belongs to the
+property it was for and clears when that property loads or the property
+changes. A failed organization-list read is not tied to a property: it holds
+every property that accepts a housing authority until a list read succeeds
+(build clarification 2026-10-19, fix-wave-2 review FW2-8; the code already
+works this way). A resumed draft (`?draftId=`, no property on the client) and a seeds-only send
 (filters off) are never gated. An organization list read before an
 authority was added to the list (the composer reads it once per page load)
 is NOT a failure: that authority shows in the "Not used" note as above (a

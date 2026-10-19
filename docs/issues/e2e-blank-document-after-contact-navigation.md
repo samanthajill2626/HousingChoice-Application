@@ -185,3 +185,12 @@ screenshots (gitignored): `W:\tmp\matching-blast-rules\.superpowers\gates\final2
 `...\final2-e2e-2\e2e-artifacts\`. Direction this points to: fewer proxy connections per run
 (keep-alive on the Vite proxy agent - see the vite-proxy-keepalive history) or a wider
 dynamic port range / shorter TIME_WAIT on the test host.
+
+**Sighting (2026-10-19, `feat/matching-blast-rules` planner final gate run on
+60c8bda1).** `landlord-onboarding.spec.ts:119` ("App relays the lead to
+Team (Unknown tab, by phone)") - the failure screenshot is an entirely
+white page; the lead's link never appeared. Full run 1 failed / 363 passed
+(31.5m) with TIME_WAIT rising from 321 at the start to 2,862 at the end
+(the run itself exhausts the ephemeral range). The file passed 14 of 14
+alone (`--repeat-each=2`) right after. Artifacts:
+`W:\tmp\matching-blast-rules\.superpowers\gates\planner-final2\artifacts\landlord-onboarding`.

@@ -145,3 +145,22 @@ message-prefill effects; useComposerDraft.ts 1 refs); e2e EXIT 1 = 2 failed
   path.
 
 A full gate run on the new tip follows; its exit codes are the verdict's.
+
+## Final planner gate run `planner-final2` on 60c8bda1 (the verdict's)
+
+Started with TIME_WAIT 321 (after waiting for the drain); main still
+a2b3d80d (0 behind).
+
+| Gate | Exit | Result |
+|---|---|---|
+| typecheck | 0 | |
+| npm test | 0 | app 509 / 10455 + 1 skipped; dashboard 250 / 4824; e2e unit 22 / 508; fake-twilio 34 / 275; fake-twilio-web 13 / 111; no `[dynamoAdmin]` line |
+| smoke | 0 | 1707 specifiers / 297 files |
+| e2e (timeout 2700) | 1 | 1 failed / 363 passed (31.5m): `landlord-onboarding.spec.ts:119`, an entirely white page (screenshot), TIME_WAIT 2,862 at the end - the open blank-document family, not this branch's path; the file then 14 of 14 alone. The repaired Matching spec passed. |
+| eslint, main...HEAD files (39) | 1 | 3 errors, all pre-existing (BroadcastComposer.tsx 2 set-state-in-effect - the two message-prefill effects; useComposerDraft.ts 1 refs) |
+
+Full e2e runs of this code across the review: b1bb9dc9 363/363 (planner);
+4f608a40 2 env / 2 env / 364/364 (build); dc073cc7 2 failed (planner: the
+Matching race, now fixed, + one placement stall); 60c8bda1 1 env. Every
+failure outside the fixed race is the blank-page / port-exhaustion family
+in a non-Matching spec that passes alone.

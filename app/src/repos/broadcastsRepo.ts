@@ -76,13 +76,21 @@ export const MAX_BROADCAST_RECIPIENTS = 1000;
 
 /**
  * The audience filter SNAPSHOT persisted on the broadcast (M1.8a): tenant
- * contacts, optionally narrowed by housing authority and exact bedroom size.
- * contact_type is fixed 'tenant' for M1.8 (never relay-group rosters); opt-out
- * + unreachable are ALWAYS excluded (the booleans record the intent for the
- * audit trail / future flexibility).
+ * contacts - only those in Onboarding or Searching (matching-blast-rules D1,
+ * applied by the resolver, not stored here) - optionally narrowed by ANY of a
+ * list of housing authorities (D2) and exact bedroom size. contact_type is
+ * fixed 'tenant' for M1.8 (never relay-group rosters); opt-out + unreachable
+ * are ALWAYS excluded (the booleans record the intent for the audit trail /
+ * future flexibility). Read a filter's authorities ONLY through
+ * authoritiesOfFilter (lib/blastAudienceRules.ts), which also reads the
+ * legacy one-string shape.
  */
 export interface AudienceFilter {
   contact_type: 'tenant';
+  /** D2 (2026-10-14): any-of housing authorities; absent/empty = no filter. */
+  housing_authorities?: string[];
+  /** @deprecated LEGACY stored shape (drafts saved before 2026-10-14). Read
+   *  ONLY through authoritiesOfFilter; never written by new code. */
   housing_authority?: string;
   bedroomSize?: number;
   excludeOptedOut: boolean;

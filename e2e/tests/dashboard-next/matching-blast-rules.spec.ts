@@ -15,16 +15,20 @@
 //     holds nothing;
 //   - "Reaches N recipients" equals the rows that start checked (D8);
 //   - Add a tenant adds the Placing tenant checked (a hand pick skips the rules);
-//   - the send reaches exactly the checked tenants (fake-twilio thread store).
+//   - the send reaches exactly the checked tenants (fake-twilio thread store);
+//   - a failed organization-list read HOLDS the prefill (AR44): an alert with
+//     Try again, Preview disabled and no draft, until Try again reads the list
+//     (the read fails through a routed 500; the second test).
 //
 // ISOLATION: the lane keeps every earlier spec's tenants, so everything here is
 // RUN-UNIQUE: two housing authorities added through POST /api/organizations,
 // seven tenants, two properties and three tours created through the real
-// routes. Nothing is reseeded and nothing seeded is changed. The tours sit on a
+// routes (the hold test adds one more authority and property of its own).
+// Nothing is reseeded and nothing seeded is changed. The tours sit on a
 // second property left in Setup (a hold counts a tour for ANY property), which
 // is also the non-Available property the picker must leave out. The 14-day
 // tour-request boundary is unit-tested; no backdating seam exists, by design.
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page, type Request } from '@playwright/test';
 import { getOutboundTo } from '../../fixtures/fakeTwilio.js';
 import { addOrg } from '../../fixtures/orgFixture.js';
 import { ORG_PICKER } from '../../scenarios/steps.js';
@@ -39,6 +43,25 @@ const CAPTION = [
   'While a housing authority is selected, tenants whose housing authority is missing or not on the organization list are left out.',
   'Add any other tenant by hand when you review recipients.',
 ].join(' ');
+
+/** AR44: the notice of a failed organization-list read (plan 1.1). */
+const LIST_HOLD =
+  "Couldn't load the organization list, so housing authorities can't be filled in from the property yet.";
+
+interface DraftBody {
+  audience_filter?: { housing_authorities?: string[] };
+}
+
+/** A draft create - the composer's POST /api/broadcasts (Preview and Send post
+ *  to sub-paths). */
+function isDraftCreate(r: Request): boolean {
+  return r.method() === 'POST' && new URL(r.url()).pathname === '/api/broadcasts';
+}
+
+/** The housing authorities a draft create carried (undefined = no filter). */
+function draftAuthorities(r: Request): string[] | undefined {
+  return (r.postDataJSON() as DraftBody | null)?.audience_filter?.housing_authorities;
+}
 
 interface Tenant {
   contactId: string;
@@ -344,4 +367,75 @@ test('a Matching blast follows the audience rules: status, housing authorities, 
   for (const t of [touring, requesting, noAuthority]) {
     expect(await hits(t), `${t.firstName} must not receive the blast`).toBe(0);
   }
+});
+
+// AR44 (spec revision 7, D3 Timing; fix-wave-2 review FW2-5): a blast with no
+// authority filter would check every authority's tenants, so a failed
+// organization-list read HOLDS the prefill of a property that accepts an
+// authority - an alert with Try again, Preview disabled, no draft - and Try
+// again, once the list answers, fills the authority in.
+test('a failed organization list read holds the prefill until Try again reads the list (AR44)', async ({ page }) => {
+  await devLogin(page);
+  const api = page.request;
+  const stamp = `${Date.now()}`.slice(-6);
+
+  // --- A run-unique listed authority and an Available property accepting it. ---
+  const authority = `Heron Hold Authority ${stamp}`;
+  await addOrg(api, { kind: 'housing_authority', name: authority });
+  const unitId = await createUnit(api, { line1: `${stamp} Holdrule Way`, authorities: [authority], available: true });
+
+  // GET /api/organizations answers 500 while the flag is set. A FLAG, not a
+  // one-shot: the dev lane mounts under React StrictMode, so the first read may
+  // be aborted and sent again.
+  let failOrgList = true;
+  await page.route(
+    (url: URL): boolean => url.pathname === '/api/organizations',
+    async (route) => {
+      if (failOrgList && route.request().method() === 'GET') {
+        await route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' });
+        return;
+      }
+      await route.continue();
+    },
+  );
+  // Every draft create the composer makes, with the authorities it carried.
+  const creates: Array<string[] | undefined> = [];
+  page.on('request', (r) => {
+    if (isDraftCreate(r)) creates.push(draftAuthorities(r));
+  });
+
+  // --- The hold: its alert (the picker shows its own list error beside it)
+  // with Try again, and Preview disabled. ---
+  await page.goto(`${NEXT}/broadcasts/new?unitId=${unitId}`);
+  const hold = page.getByRole('alert').filter({ hasText: LIST_HOLD });
+  await expect(hold).toBeVisible();
+  const tryAgain = hold.getByRole('button', { name: 'Try again', exact: true });
+  await expect(tryAgain).toBeVisible();
+  const previewBtn = page.getByRole('button', { name: 'Preview recipients' });
+  await expect(previewBtn).toBeDisabled();
+  // The property loaded (its message prefill is in), so only the hold stops a
+  // draft: outlast the 600 ms create debounce, then none was made.
+  await expect(page.getByLabel('Message')).not.toHaveValue('');
+  await page.waitForTimeout(1_500);
+  expect(creates, 'no draft is created while the prefill is held').toEqual([]);
+  await expect(previewBtn).toBeDisabled();
+  // FW2-1: the alert is the explanation - no "Sizing the audience" hint.
+  await expect(page.getByText(/Sizing the audience/)).toHaveCount(0);
+
+  // --- Try again, with the list answering: the authority fills in, the alert
+  // goes, and the draft carries it. ---
+  failOrgList = false;
+  const created = page.waitForRequest(
+    (r) => isDraftCreate(r) && JSON.stringify(draftAuthorities(r)) === JSON.stringify([authority]),
+  );
+  await tryAgain.click();
+  await expect(page.getByRole('button', { name: ORG_PICKER.removeChip(authority), exact: true })).toBeVisible();
+  await expect(hold).toHaveCount(0);
+  await created;
+  await expect(previewBtn).toBeEnabled();
+  // Every draft made carried the authority: none was made without it.
+  expect(
+    creates.every((list) => JSON.stringify(list) === JSON.stringify([authority])),
+    `the draft creates carried ${JSON.stringify(creates)}`,
+  ).toBe(true);
 });

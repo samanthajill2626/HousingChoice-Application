@@ -521,7 +521,9 @@ interface ReviewRow extends ResolvedContact {
 }
 
 interface ReviewRowsResult {
-  /** Audience rows first (resolver order), then seeds not already present. */
+  /** The resolved audience minus seeded contacts (resolver order), then every
+   *  resolved seed (seed order): a contact in both sits at the seed position,
+   *  with the seed's fields, flagged seeded. */
   rows: ReviewRow[];
   truncated: boolean;
   unresolvedSeedIds: string[];
@@ -723,8 +725,9 @@ export function createBroadcastsRouter(deps: BroadcastsRouterDeps = {}): Router 
    * rows - the preview serves them, POST create counts the checkedByDefault
    * ones as "Reaches N recipients".
    *  - filter draft: the resolved audience (D1, D2) united with the seeds
-   *    (audience rows first, then seeds not already present; a contact in both
-   *    is ONE row flagged seeded), the rules reads (readAudienceRules), then
+   *    (the audience minus seeded contacts, then every resolved seed; a
+   *    contact in both is ONE row, at the seed position with the seed's
+   *    fields, flagged seeded), the rules reads (readAudienceRules), then
    *    the already-sent set. A thrown tours or decline read throws
    *    AudienceRulesUnavailableError - never a list the rules did not check.
    *  - seeds_only + 'preview': the seeds alone, the same reads; a thrown rules

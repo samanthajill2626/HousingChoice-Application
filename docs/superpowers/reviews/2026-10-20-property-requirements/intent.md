@@ -2,27 +2,31 @@
 
 ## STATE (replace on every move)
 
-- Phase: HUMAN SPEC GATE. Review rounds 1-4 done (round 4 = cap) and
-  adjudicated in `design-review/adjudications.md`. Two decisions OPEN for
-  Cameron: O1 (pets coupling in Apply; proposal: one Pets item) and O2 (tags
-  against a blank landlord item; revision 4 departed from his "blank counts
-  as differing" call - planner self-correction recorded).
+- Phase: SPEC APPROVED (Cameron, 2026-10-20) -> COMPACTION GATE A -> PLAN.
 - Spec: `docs/superpowers/specs/2026-10-20-property-requirements-design.md`
-  revision 5, commit ceab211e on `feat/property-requirements`
+  revision 6 APPROVED, commit c41b9b90 on `feat/property-requirements`
   (worktree `W:\tmp\property-requirements`, cut from main @1d7a4667).
+  Review: 4 rounds (cap), 62 findings, adjudications in
+  `design-review/adjudications.md` (incl. the spec-gate decisions O1/O2).
 - Launch mode: not chosen yet (launch gate comes after the plan).
-- In flight: nothing (reviewer A idle, agent a8cb23799391f4617, kept for
-  continuation). Context ~500k: offer compaction at gate A.
+- In flight: nothing. The spec reviewer (agent a8cb23799391f4617) is done;
+  the plan gets its own fresh pair of plan reviewers (round 1), then the
+  better one continues.
 - Side artifacts: Sam's preview of the property edit form,
   https://claude.ai/artifact/5R3RhAD2BbALdMH2qc7ZTZ (shared with anyone with
   the link by Cameron; a sticky note carries 5 questions for Sam, incl. where
   subzone codes come from). Brainstorm mockups (local, ignored):
   `W:\AI Projects\Housing Choice\HC Application\.superpowers\brainstorm\626-1792507721\`.
-- NEXT STEP: get Cameron's O1/O2 answers and spec approval; fold them into
-  revision 6 (remove the OPEN block, set Status APPROVED); commit; then
-  COMPACTION GATE A (intent refresh, prove replay, register --persist,
-  watcher, offer /compact); then write the TDD plan and run its adversarial
-  doc review.
+- NEXT STEP: write the detailed TDD implementation plan at
+  `docs/superpowers/plans/2026-10-20-property-requirements.md` (zero-context
+  builder; slices app -> dashboard -> e2e; INVARIANT RULE: enumerate every
+  mutation surface AND every reader of the requirement keys,
+  `requirement_sources`, `voucher_size_accepted` and the audience
+  `bedroomSizes` as tasks or watch items - the spec's section 7 is the
+  starting list); then plan design review (two opus reviewers with the
+  spec, PLAN brief from design-review-briefs.md; rounds 2+ continue the
+  better one; cap 4); then the mission block and the LAUNCH GATE
+  (AskUserQuestion: Go AUTO / Go MANUAL / Revise), compaction gate B, dispatch.
 
 ## What Cameron asked for (2026-10-20, quoted where wording matters)
 
@@ -97,6 +101,25 @@ Decisions in the conversation:
 - Subzone: "subzone should be staff only. Add that as a question in the
   artifact notes ... about where those subzones came from." (Done.)
 
+Spec-gate decisions (2026-10-20, after review round 4 hit the cap):
+
+- Pets coupling: "I agree with your point about pets. There are probably
+  other areas where details are added in a free text field, but maybe not
+  those that apply on the flyer. If they don't apply on the flyer, then maybe
+  we need to look at them anyway because we may still have an internal
+  situation (like the no pets but cats okay issue that you point out, just
+  not on the flyer). It'll be shown on the property." -> every checkbox or
+  choice plus its details is ONE item (Evictions, Pets, Deposit, Touring).
+- Blank landlord tags: "I still want the original call for the tags when the
+  landlord field is blank. Right now, that'll continue to help us identify
+  which landlords probably need to be updated. If it says 'set on this
+  property' and the landlord is blank, that's sort of a subtle hint that we
+  need to go back to the landlord and add that data in." (Planner lesson:
+  round 3's R3-6 adjudication narrowed an explicit Cameron call without
+  asking; a reviewer's UX concern about a human decision goes back to the
+  human.)
+- "Other than that, the spec looks good, and we should be able to move on."
+
 ## Why
 
 These records feed Work Package 1's AI ranking (decided Oct 18: AI ranking
@@ -122,6 +145,12 @@ must protect them by default.
 - Existing values counted as out of date (rejected: they are set on this
   property).
 - Studio..6 limit on property sizes; Area on the forms; subzone on the flyer.
+- No tag against a blank landlord item (round-3 planner change; reversed by
+  Cameron at the spec gate).
+- Separate items for a checkbox/choice and its details (No pets vs details
+  vs pet fee; No evictions vs details; tour type vs tour process).
+- Select all in the Apply dialog (planner addition, removed in review).
+- Per-property, per-item choices in Apply (the grid, C).
 
 ## Explicit NOs
 

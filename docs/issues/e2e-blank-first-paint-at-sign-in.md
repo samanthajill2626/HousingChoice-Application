@@ -112,3 +112,11 @@ prompt text, a CLI script and unit tests - the e2e stack runs the fake extractio
 which takes only the prompt's fingerprint, never its text, and the failure came before
 any extraction step. The file passed in isolation (4/4, this test 964 ms).
 Artifacts: `W:\tmp\voucher-size-prompt\.superpowers\gates\e2e-artifacts\`.
+The full re-run of 452189c0 (Cameron asked for `db:stop`/`db:start` and
+`s3:stop`/`s3:start` first; 1110 TIME_WAIT at its start, no other test runner on the
+machine) passed 365/365 in 19.5 min - yet still logged one `[vite] http proxy error:
+/api/tours/<id>/activity` with `connect EADDRINUSE 127.0.0.1:9701` about 17 min in (that
+test recovered and passed), and 3687 TIME_WAIT right after. So the connect failures come
+from churn WITHIN one run, not from state left by earlier runs or the containers: a
+restart cannot prevent them. The residual browser -> Vite and Vite -> app connection churn
+the 2026-09-30 proxy keep-alive fix left unchased is the lead.

@@ -2,15 +2,23 @@
 
 ## STATE (replace on every move)
 
-- Phase: AT THE LAUNCH GATE. Plan v3 FINAL; plan review CLOSED after 2
-  rounds (12 unique findings: 11 accepted, 1 rejected; round 2 terminal;
-  PR2-3 cents fix folded in). Mission block at `<records>/mission-block.md`.
-  Launch mode: not chosen yet - ask Cameron with AskUserQuestion (Go - AUTO
-  dispatch / Go - MANUAL / Revise). On a Go: compaction gate B (confirm the
-  registration with --show, start the watcher, offer /compact), then
-  dispatch `abt:build-orchestrator` with the mission block verbatim, arm the
-  watchdog (30-min checkpoints, ceiling 55 min), start the live mirror.
-  Reviewer A (ab45379e71f894ef4) and the slice writers are done; they are
+- Phase: LAUNCH GATE PASSED - Cameron picked AUTO (2026-10-20: "Go auto
+  with 55 minute watchdog timers"). Now at COMPACTION GATE B (nothing
+  dispatched yet). Plan v3 FINAL @687f3a14; plan review CLOSED after 2 rounds
+  (12 unique findings: 11 accepted, 1 rejected). Mission block at
+  `<records>/mission-block.md`.
+- NEXT STEP (after the compaction, or on skip): dispatch the agent
+  `abt:build-orchestrator` (Agent tool, run_in_background true, prompt = the
+  mission block file's content VERBATIM; model from its definition). Then arm
+  the watchdog with the CHECKPOINT at 3300 s (Cameron's 55-minute timer;
+  the 25-minute quiet STALL rule stays) and start the live mirror
+  (transcript-tail.mjs from the skill's CURRENT base dir; source =
+  ~/.claude/projects/<project-slug>/<session-id>/subagents/agent-<id>.jsonl,
+  NOT the temp dir; verify live.log grows within a minute) into
+  `W:\tmp\property-requirements\.superpowers\sdd\live.log`. Every
+  checkpoint status starts with **Checkpoint:**. Failure budget 2
+  (budget-consuming tier); infra misfires get one free correction each.
+- Reviewer A (ab45379e71f894ef4) and the slice writers are done; they are
   not needed after dispatch (the orchestrator runs its own children).
 - (previous) PLAN REVIEW round 2 (round 1 closed: 10 unique findings, all
   accepted, 3 changed decisions; plan v2 @51893e3a).

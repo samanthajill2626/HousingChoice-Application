@@ -673,6 +673,27 @@ export interface UnitsRepo {
    */
   update(unitId: string, patch: Record<string, unknown>): Promise<UnitItem>;
   /**
+   * property requirements (spec 2026-10-20 D5; plan 2.3): the PATCH fence.
+   * SET each non-null / REMOVE each null field of `patch` (an EMPTY
+   * requirement_sources map REMOVEs the attribute - it is never stored empty)
+   * and stamp updated_at, in ONE update conditioned on the unit existing with
+   * the landlordId AND the requirement_sources map exactly as in `read`
+   * (attribute_not_exists when `read` has none; the map compared whole, the
+   * updateRosterIfCurrent precedent). Any lost condition throws
+   * ConditionalCheckFailedException; the CALLER re-reads to tell a missing
+   * unit (404) from a race (retry). `read` must be the caller's OWN copy of a
+   * consistent read (the API-test fake hands out its live object). ALL_NEW.
+   */
+  updateIfRequirementsCurrent(read: UnitItem, patch: Record<string, unknown>): Promise<UnitItem>;
+  /**
+   * property requirements (spec 2026-10-20 D8; plan 2.3): the Apply write -
+   * updateIfRequirementsCurrent's fence plus "not deleted" exactly as
+   * isDeleted reads it: deleted_at absent OR '' (a non-empty stamp is a
+   * deleted property), so a property deleted after the caller's read is never
+   * written and a blank stamp is never mistaken for one. ALL_NEW.
+   */
+  applyRequirements(read: UnitItem, patch: Record<string, unknown>): Promise<UnitItem>;
+  /**
    * Soft-delete: stamp `deleted_at` (ISO 8601 `at`) so the property is hidden from
    * the lists / landlord card / related / similar while every field is retained.
    * ConditionExpression guards existence (route → 404). Returns ALL_NEW.
@@ -964,6 +985,21 @@ export function contactIsPrimaryToHandOff(
   return roster.find((row) => row.primaryContact === true)?.contactId === contactId;
 }
 
+/**
+ * property requirements (spec 2026-10-20 D5): the requirement_sources map is
+ * never stored EMPTY - an empty map in a patch REMOVEs the attribute, in the
+ * fenced writes below and in the API-test fake.
+ */
+function isEmptySourcesMap(key: string, value: unknown): boolean {
+  return (
+    key === 'requirement_sources' &&
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 0
+  );
+}
+
 export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
   const doc = deps.doc ?? getDocumentClient();
   const table = tableName('units', deps.env);
@@ -1066,6 +1102,84 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         ExpressionAttributeValues: values,
         ReturnValues: 'ALL_NEW',
       }),
+    );
+    return Attributes as UnitItem;
+  }
+
+  /**
+   * property requirements (spec 2026-10-20 D5 / D8; plan 2.3): ONE update
+   * fenced on what the caller READ - the unit exists, its landlordId and its
+   * requirement_sources are exactly `read`'s (attribute_not_exists when absent
+   * there), and with `requireLive` it is not deleted as isDeleted reads it
+   * (deleted_at absent or ''; plan review PR1-8). The SET/REMOVE build is
+   * updateRosterIfCurrent's; an empty requirement_sources map REMOVEs. A lost
+   * condition throws ConditionalCheckFailedException.
+   */
+  async function updateIfRequirementsFenced(
+    read: UnitItem,
+    patch: Record<string, unknown>,
+    opts: { requireLive: boolean },
+  ): Promise<UnitItem> {
+    const sets: string[] = [];
+    const removes: string[] = [];
+    const names: Record<string, string> = {};
+    const values: Record<string, unknown> = {};
+    let i = 0;
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) continue;
+      const nameKey = `#k${i}`;
+      names[nameKey] = key;
+      if (value === null || isEmptySourcesMap(key, value)) {
+        removes.push(nameKey);
+      } else {
+        const valueKey = `:v${i}`;
+        values[valueKey] = value;
+        sets.push(`${nameKey} = ${valueKey}`);
+      }
+      i += 1;
+    }
+    names['#updatedAt'] = 'updated_at';
+    values[':updatedAt'] = new Date().toISOString();
+    sets.push('#updatedAt = :updatedAt');
+
+    const conditions = ['attribute_exists(unitId)'];
+    names['#expectedLandlordId'] = 'landlordId';
+    if (Object.prototype.hasOwnProperty.call(read, 'landlordId')) {
+      values[':expectedLandlordId'] = read.landlordId;
+      conditions.push('#expectedLandlordId = :expectedLandlordId');
+    } else {
+      conditions.push('attribute_not_exists(#expectedLandlordId)');
+    }
+    names['#expectedSources'] = 'requirement_sources';
+    if (Object.prototype.hasOwnProperty.call(read, 'requirement_sources')) {
+      values[':expectedSources'] = read.requirement_sources;
+      conditions.push('#expectedSources = :expectedSources');
+    } else {
+      conditions.push('attribute_not_exists(#expectedSources)');
+    }
+    if (opts.requireLive) {
+      // isDeleted (above) counts only a NON-EMPTY deleted_at as deleted.
+      names['#expectedDeletedAt'] = 'deleted_at';
+      values[':blankDeletedAt'] = '';
+      conditions.push('(attribute_not_exists(#expectedDeletedAt) OR #expectedDeletedAt = :blankDeletedAt)');
+    }
+
+    const clauses = [`SET ${sets.join(', ')}`];
+    if (removes.length > 0) clauses.push(`REMOVE ${removes.join(', ')}`);
+    const { Attributes } = await doc.send(
+      new UpdateCommand({
+        TableName: table,
+        Key: { unitId: read.unitId },
+        UpdateExpression: clauses.join(' '),
+        ConditionExpression: conditions.join(' AND '),
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    log.info(
+      { unitId: read.unitId, fields: sets.length - 1 + removes.length, live: opts.requireLive },
+      'unit updated (requirements fence)',
     );
     return Attributes as UnitItem;
   }
@@ -1198,6 +1312,14 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       );
       log.info({ unitId, fields: sets.length - 1 + removes.length }, 'unit updated');
       return Attributes as UnitItem;
+    },
+
+    async updateIfRequirementsCurrent(read, patch) {
+      return updateIfRequirementsFenced(read, patch, { requireLive: false });
+    },
+
+    async applyRequirements(read, patch) {
+      return updateIfRequirementsFenced(read, patch, { requireLive: true });
     },
 
     async softDelete(unitId, at) {

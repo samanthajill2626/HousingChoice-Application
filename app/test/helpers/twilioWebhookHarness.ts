@@ -2864,6 +2864,51 @@ export function createFakeWorld(): FakeWorld {
     if (scope === 'any') return true;
     return scope === true ? isUnitDeleted(u) : !isUnitDeleted(u);
   };
+  /**
+   * property requirements (spec 2026-10-20 D5 / D8; plan 2.3): the real
+   * repo's fenced write - the unit exists, its landlordId and
+   * requirement_sources equal what the caller READ (absent on both sides
+   * included), and with `requireLive` not deleted as isUnitDeleted reads it
+   * (the real `attribute_not_exists OR = ''`); then SET / REMOVE (an empty
+   * map REMOVEs) and stamp updated_at. The caller must pass
+   * its OWN copy of the read: getById below hands out the live stored object,
+   * which a concurrent write mutates in place.
+   */
+  const ownsKey = (record: object, key: string): boolean =>
+    Object.prototype.hasOwnProperty.call(record, key);
+  const sameAsRead = (stored: UnitItem, read: UnitItem, key: string): boolean =>
+    ownsKey(read, key)
+      ? ownsKey(stored, key) && isDeepStrictEqual(stored[key], read[key])
+      : !ownsKey(stored, key);
+  const fencedRequirementsWrite = (
+    method: string,
+    read: UnitItem,
+    patch: Record<string, unknown>,
+    requireLive: boolean,
+  ): UnitItem => {
+    const unit = units.get(read.unitId);
+    if (
+      !unit ||
+      !sameAsRead(unit, read, 'landlordId') ||
+      !sameAsRead(unit, read, 'requirement_sources') ||
+      (requireLive && isUnitDeleted(unit))
+    ) {
+      throw conditionalCheckFailed(`${method}: unit ${read.unitId} changed since the read`);
+    }
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) continue;
+      const emptySources =
+        key === 'requirement_sources' &&
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value) &&
+        Object.keys(value).length === 0;
+      if (value === null || emptySources) delete unit[key];
+      else unit[key] = structuredClone(value);
+    }
+    unit.updated_at = new Date().toISOString();
+    return unit;
+  };
   const unitsRepo: UnitsRepo = {
     async create(input) {
       const now = new Date().toISOString();
@@ -2911,6 +2956,13 @@ export function createFakeWorld(): FakeWorld {
       }
       unit.updated_at = new Date().toISOString();
       return unit;
+    },
+    // property requirements (plan 2.3): the fenced writes (see fencedRequirementsWrite).
+    async updateIfRequirementsCurrent(read, patch) {
+      return fencedRequirementsWrite('updateIfRequirementsCurrent', read, patch, false);
+    },
+    async applyRequirements(read, patch) {
+      return fencedRequirementsWrite('applyRequirements', read, patch, true);
     },
     // Soft-delete: default excludes deleted; deleted:true shows ONLY deleted.
     async softDelete(unitId, at) {

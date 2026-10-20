@@ -22,6 +22,11 @@ import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { validateUnitBody } from '../lib/unitFields.js';
+import {
+  depositConflictAfter,
+  planRequirementWrite,
+  splitRequirementsSnapshot,
+} from '../lib/unitRequirementWrite.js';
 import { rankSimilarUnits } from '../lib/similarUnits.js';
 import { isImageMediaType } from '../lib/mediaTypes.js';
 import { transcodeForUnitPhoto } from '../adapters/mediaTranscode.js';
@@ -768,9 +773,30 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
   // POST /api/units — create a unit.
   router.post('/', async (req: AuthedRequest, res) => {
-    const validation = validateUnitBody(req.body, 'create');
+    // property requirements (spec 2026-10-20 D5; plan 2.4): the New form's
+    // `requirements_snapshot` - the landlord's values it filled in - comes OFF
+    // the body before the field allowlist sees it and is never stored. A
+    // malformed snapshot is a 400 ahead of the validator's.
+    const split = splitRequirementsSnapshot(req.body);
+    if (!split.ok) {
+      res.status(400).json({ error: split.error });
+      return;
+    }
+    const validation = validateUnitBody(split.body, 'create');
     if (!validation.ok) {
       res.status(400).json({ error: validation.error });
+      return;
+    }
+    // D5: the snapshot must have been taken from the landlord this property is
+    // created for.
+    if (split.snapshot !== undefined && split.snapshot.landlordId !== validation.fields['landlordId']) {
+      res.status(400).json({ error: 'requirements_snapshot.landlordId does not match landlordId' });
+      return;
+    }
+    // D1: "One month's rent" and a fixed amount are alternatives - a new
+    // property holding both is a 400, with the other 400s.
+    if (depositConflictAfter(undefined, validation.fields)) {
+      res.status(400).json({ error: 'deposit_conflict' });
       return;
     }
     // ORGANIZATION NAMES (spec 2026-10-06 D5): a new unit holds nothing yet,
@@ -799,8 +825,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // exists, 409 landlord_not_landlord otherwise. A consistent read. It runs
     // after the validator's 400s and the org-list 422, and nothing is created
     // on a refusal. landlordId is guaranteed by validation.
+    let landlord: ContactItem;
     try {
-      await requireLandlordContact(contacts, validation.fields['landlordId'] as string);
+      landlord = await requireLandlordContact(contacts, validation.fields['landlordId'] as string);
     } catch (err) {
       if (sendContactTypeError(err, res)) {
         log.info({ actor: req.user?.userId }, 'unit create refused: landlordId is not a landlord');
@@ -818,11 +845,26 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // and a committed placement then derives it onward to under_application/
     // finalizing/occupied (§7). landlordId is guaranteed by validation.
     const fields = validation.fields;
+    // property requirements (spec 2026-10-20 D5): where each requirement value
+    // came from - against the snapshot for every item it names, else against
+    // the landlord just read (only items written non-blank). The map rides in
+    // the same Put as the item keys.
+    const requirementWrite = planRequirementWrite({
+      stored: undefined,
+      fields,
+      landlord,
+      landlordChanged: false,
+      ...(split.snapshot !== undefined && { snapshot: split.snapshot }),
+    });
+    if (!requirementWrite.ok) {
+      res.status(400).json({ error: requirementWrite.error });
+      return;
+    }
     const unit = await units.create({
       landlordId: fields['landlordId'] as string,
       status: 'setup',
       status_source: 'derived',
-      ...fields,
+      ...requirementWrite.patch,
     });
     mergeContext({});
     await audit.append(`units#${unit.unitId}`, 'unit_created', {

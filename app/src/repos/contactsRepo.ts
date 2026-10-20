@@ -20,6 +20,7 @@ import { logger as defaultLogger } from '../lib/logger.js';
 import { getTableSpec } from '../lib/tables.js';
 import type { ConsentMethod } from '../lib/smsCompliance.js';
 import type { TransitionSource } from '../lib/statusModel.js';
+import type { TourType } from '../lib/toursModel.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import { normalizeInstant } from '../lib/heardFrom.js';
 
@@ -341,6 +342,32 @@ export interface ContactItem {
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
+  /*
+   * Landlord requirements (spec 2026-10-20 D2, tracker #11): the 15 'req_' +
+   * unit-key fields of the eight requirement items (registry:
+   * lib/requirements.ts). Prefixed because the bare `pets` / `evictions`
+   * above are the TENANT's AI-provenance answers. COPY-ONLY defaults: a
+   * property keeps its own copy (UnitItem) and changes only through Apply to
+   * properties. Written by the contacts PATCH on a landlord-typed contact
+   * only; never a boolean `req_pets`; a checkbox is stored only as `true`.
+   * For pets this supersedes the 2026-07-10 note below: pets now ALSO live on
+   * the landlord, as copy-only defaults.
+   */
+  req_no_evictions_on_program?: true;
+  req_evictions_notes?: string;
+  req_credit_requirements?: string;
+  req_income_requirements?: string;
+  req_qualifications?: string;
+  req_no_pets?: true;
+  req_pets?: string;
+  req_pet_fee?: string;
+  req_deposit_one_month?: true;
+  req_deposit?: number;
+  req_deposit_flexible?: true;
+  req_deposit_notes?: string;
+  req_application_fee?: number;
+  req_tour_type?: TourType;
+  req_tour_process?: string;
   // NOTE (2026-07-10): expected_rent + the landlord preference defaults
   // (accepts_programs / lease_terms / pet_policy) MOVED to the UNIT — they are
   // per-property facts (rent_min-rent_max / accepted_authorities / lease_terms /

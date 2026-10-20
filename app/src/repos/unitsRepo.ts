@@ -409,10 +409,17 @@ export interface UnitItem {
   baths?: number;
   /** Sub-market / neighborhood label (free text). */
   area?: string;
+  /**
+   * Staff-only sub-market code (Sam's codes, e.g. E8 or SE11; spec 2026-10-20
+   * D3). Never on the public flyer; feeds the similar-properties score
+   * (lib/similarUnits.ts).
+   */
   subzone?: string;
   rent_min?: number;
   rent_max?: number;
   payment_standard?: number;
+  /** The Deposit item's fixed amount in dollars (spec 2026-10-20 D1; an
+   *  alternative to `deposit_one_month`). PUBLIC on the flyer. */
   deposit?: number;
   /** Landlord incentive fee (LIF). */
   lif?: number;
@@ -440,12 +447,18 @@ export interface UnitItem {
    */
   notes?: string;
   /**
-   * Lease terms — free-form per-unit fact ("12-month minimum, month-to-month
-   * after"). Moved off the landlord contact 2026-07-10 (GLOSSARY). Internal
-   * only — never on the flyer projections.
+   * Lease terms - free-form per-unit fact ("12-month minimum, month-to-month
+   * after"). Moved off the landlord contact 2026-07-10 (GLOSSARY). PUBLIC on
+   * the flyer projection (flyer-full-info 2026-07-16; lib/unitFields.ts
+   * toUnitFlyer).
    */
   lease_terms?: string;
-  /** Pets policy — free-form (string or boolean). */
+  /**
+   * The Pets item's details text (spec 2026-10-20 D1). Old data may still hold
+   * a legacy bare boolean: read it through lib/requirements.ts unitItemValue
+   * (false = No pets, details blank; true = details "Allowed"). A write never
+   * stores a boolean any more (lib/unitFields.ts validateUnitBody).
+   */
   pets?: string | boolean;
   /** Property priority — free-form. */
   priority?: string;
@@ -460,13 +473,15 @@ export interface UnitItem {
   /** Public flyer details (public-pages §3): same-day RTA available. Shareable. */
   same_day_rta?: boolean;
   /**
-   * Landlord-onboarding: the voucher size (bedroom size) this unit ACCEPTS —
-   * a stored, writable number (>= 0), DISTINCT from `beds` (a 3bd unit may
-   * accept a 2BR voucher). Read it through `acceptedVoucherSizes`
-   * (lib/unitFields.ts), which falls back to `beds`. The key is never on the
-   * public flyer; its value drives the flyer's derived `voucher_size`.
+   * Landlord-onboarding: the voucher (bedroom) sizes this unit ACCEPTS - a
+   * stored LIST of integers 0..12 since tracker #12 (spec 2026-10-20 D4), or
+   * ONE number written before it (never backfilled). DISTINCT from `beds` (a
+   * 3bd unit may accept only a 2BR voucher). Read it ONLY through
+   * `acceptedVoucherSizes` (lib/unitFields.ts), which reads both shapes and
+   * falls back to `beds`. The key is never on the public flyer; its value
+   * drives the flyer's derived `voucher_sizes` / `voucher_size`.
    */
-  voucher_size_accepted?: number;
+  voucher_size_accepted?: number | number[];
   /** The never-standardized per-unit tour process (free text). INTERNAL. */
   tour_process?: string;
   /**
@@ -478,6 +493,45 @@ export interface UnitItem {
   tour_type?: TourType;
   /** The never-standardized per-unit application process (free text). INTERNAL. */
   application_process?: string;
+  /*
+   * Landlord requirements copied onto this property (spec 2026-10-20 D1/D2,
+   * tracker #11). The registry - items, kinds, flyer visibility - is
+   * lib/requirements.ts. A checkbox is stored only as `true` (unchecked =
+   * absent); text is trimmed and never ''. `deposit`, `pets`,
+   * `application_fee`, `tour_type` and `tour_process` above are requirement
+   * keys too. Staff only unless marked PUBLIC.
+   */
+  /** Evictions item: "No evictions while on the program". */
+  no_evictions_on_program?: true;
+  /** Evictions item: "Evictions (details)". */
+  evictions_notes?: string;
+  /** Credit score item (free text; nothing matches on it). */
+  credit_requirements?: string;
+  /** Income requirements item (free text; nothing matches on it). */
+  income_requirements?: string;
+  /** Qualifications item (long free text). Staff only (Cameron, 2026-10-20). */
+  qualifications?: string;
+  /** Pets item: "No pets". PUBLIC on the flyer. */
+  no_pets?: true;
+  /** Pets item: "Pet fee" (free text). PUBLIC on the flyer. */
+  pet_fee?: string;
+  /** Deposit item: "One month's rent" (an alternative to `deposit`). PUBLIC on the flyer. */
+  deposit_one_month?: true;
+  /** Deposit item: "Flexible / payment terms available". PUBLIC on the flyer. */
+  deposit_flexible?: true;
+  /** Deposit item: "Deposit notes". Staff only. */
+  deposit_notes?: string;
+  /** Washer / dryer (spec 2026-10-20 D3); absent = Not recorded. PUBLIC on the flyer. */
+  washer_dryer?: 'hookups' | 'included' | 'none';
+  /**
+   * Where each requirement item's current value came from (spec 2026-10-20
+   * D5): `copied` from the landlord, or `set_here` on this property; an item
+   * absent from the map was never touched. A plain map (a DynamoDB string set
+   * would reach the dashboard as `{}`), written ONLY by the server, always
+   * WHOLE in the same update as the item keys; an empty map is REMOVEd. Read
+   * it through lib/requirements.ts readRequirementSources. Never on the flyer.
+   */
+  requirement_sources?: Record<string, 'copied' | 'set_here'>;
   /**
    * The unit's primary contact (CO1), kept consistent with the contact-list
    * row marked primary by the roster writes (unitsRepo.addContact,

@@ -1,14 +1,32 @@
 # Landlord requirements and property fields - design
 
-Status: DRAFT revision 4 (2026-10-20), for design review round 4 (the cap).
-Revision 2 folded in review round 1 (two reviewers), revision 3 round 2 and
-revision 4 round 3 (one reviewer, continued); adjudications in
+Status: DRAFT revision 5 (2026-10-20), at Cameron's spec gate. Revision 2
+folded in review round 1 (two reviewers), revisions 3-5 rounds 2-4 (one
+reviewer, continued; round 4 was the cap); adjudications in
 `docs/superpowers/reviews/2026-10-20-property-requirements/design-review/adjudications.md`.
 Branch: `feat/property-requirements` (worktree `W:\tmp\property-requirements`, cut from main @1d7a4667)
 Tracker: Improvements Tracker items #12 "Property page fields" and #11
 "Landlord requirements and qualifications" (Before WP1, item 6), built
 together.
 Review records: `docs/superpowers/reviews/2026-10-20-property-requirements/`
+
+OPEN FOR CAMERON (review round 4 hit the cap with these; the spec is
+otherwise final as revision 5):
+
+- O1 Pets coupling in Apply (R4-1): No pets, Pets (details) and Pet fee are
+  separate items, so the default Apply of a landlord's "No pets" onto a
+  property whose details say "Cats OK" publishes "No pets (Cats OK)" on the
+  flyer, unmarked. Proposed: make the three one "Pets" item for copying,
+  comparing and tagging (as Deposit already is); the form keeps three
+  fields.
+- O2 Tags against a blank landlord item (R4-2, and the round-3 change
+  R3-6): revision 4 shows NO tag when the landlord's item is blank and the
+  property's value was never touched, which departs from Cameron's
+  2026-10-20 call that "a blank landlord value does count as differing";
+  and it still shows purple for values typed later (`set_here`). Choose:
+  tag against a blank landlord everywhere (his call; every existing value is
+  purple until each landlord is filled in), or no tag against a blank
+  landlord item for any own value (only `copied` shows orange there).
 
 Vocabulary: a `unit` in code is a "property" in staff copy and a "home" in
 tenant copy (documentation/GLOSSARY.md). This spec says "property" for the
@@ -364,11 +382,12 @@ that writes the item keys; an empty map REMOVEs the attribute. Every route
 that returns a unit returns it as stored, so the dashboard reads it
 directly.
 
-The server classifies every item whose STORED keys a write actually
-changes (after the D1 normalizations, so a pets partner key or a cleared
-deposit amount counts), by comparing the property's RESULTING value of the
-item with the landlord's value (D1 equality): equal -> `copied`; different
--> `set_here`. "The landlord's value" is:
+The server classifies every item whose INTERPRETED value (D1) a write
+actually changes - after the D1 normalizations, so a cleared deposit amount
+counts, while a legacy pets key rewritten into the new shape with the same
+meaning does not - by comparing the property's RESULTING value of the item
+with the landlord's value (D1 equality): equal -> `copied`; different ->
+`set_here`. "The landlord's value" is:
 
 - POST create FROM THE FORM: the body carries `requirements_snapshot`, the
   landlord's values the form pre-filled (`{ <item id>: { <unit key>: <value
@@ -377,9 +396,11 @@ item with the landlord's value (D1 equality): equal -> `copied`; different
   staff left as pre-filled is `copied` (it WAS copied from the landlord,
   even if the landlord changed while the form was open - the property then
   shows Landlord updated, which is the truth), and a field staff changed or
-  cleared is `set_here`. The snapshot is TRUSTED, not verified: the New
-  form is its only producer and it is a staff tool; it is accepted only
-  together with a `landlordId`. An item the snapshot does not name (a form
+  cleared is `set_here`. The snapshot's values are TRUSTED, not verified
+  (the New form is their only producer and it is a staff tool), but the
+  snapshot names the landlord it was taken from (`requirements_snapshot.
+  landlordId`), and a create whose snapshot names a different landlord than
+  the body's `landlordId` is a 400. An item the snapshot does not name (a form
   open across a later registry change) is classified as if there were no
   snapshot (next bullet); a key it does not name counts as blank; unknown
   items are ignored.
@@ -529,7 +550,9 @@ ones staff accepted by checking the row; empty for a row with none).
   the updated list and press Update again."
 - For each unit, in order: a consistent read; skip it with a reason when it
   does not exist (`not_found`), is deleted (`deleted`), or its `landlordId`
-  is not this contact (`landlord_changed`); compute its changing items and,
+  is not this contact (`landlord_changed`); compute its changing items (by
+  INTERPRETED value, D1: a legacy pets key the write merely rewrites into
+  the new shape is not a changing item and keeps its record) and,
   from its own `requirement_sources` and values, which of those are own
   values (the D6 definition); skip it as `changed_since_opened` when one is an own value the
   request did not list in that unit's `ownItems` (an exception set after the
@@ -552,7 +575,8 @@ ones staff accepted by checking the row; empty for a row with none).
   properties, and says "Updated N properties before this stopped. Review
   the rest and press Update again." (N from the responses that landed; the
   re-read shows the true state). Otherwise it closes; the landlord page re-reads its properties (the
-  existing refetch) and shows "Updated N properties" plus, when any were
+  existing refetch) and takes the landlord contact the dialog last read, so
+  its Requirements card matches what was applied, and shows "Updated N properties" plus, when any were
   skipped, "M skipped" with each address and a plain reason ("changed since
   you opened this - review it again" for `changed_since_opened` and
   `changed_during_apply`).

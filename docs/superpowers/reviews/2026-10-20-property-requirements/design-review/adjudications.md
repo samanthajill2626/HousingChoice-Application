@@ -85,6 +85,25 @@ Cameron as a decision instead of a round 5.
 
 Rejections in round 3: R3-4's verification half (see the table).
 
+## Round 4 (spec revision 4 -> revision 5) - the cap
+
+Reviewer A continued (`R4-reviewer-a.md`, R4-1 to R4-5). Round-3 fixes hold
+(R3-1 clarified: outside the `<label>` element; R3-6 closed only for existing
+values).
+
+| Finding | Ruling | What changed in revision 5 | Decision changed |
+|---|---|---|---|
+| R4-1 [MED] Apply copies No pets and Pets (details) independently: default flow publishes "No pets (Cats OK)" | OPEN -> Cameron (O1) | none yet; proposal: one Pets item | yes (pending) |
+| R4-2 [LOW] the landlord-blank no-tag row covers only never-touched values | OPEN -> Cameron (O2) | none yet; it also exposes that round 3's R3-6 change departed from Cameron's "a blank landlord value does count as differing" | yes (pending) |
+| R4-3 [LOW] pets normalization fits neither changing-items rule | ACCEPT | D5 and D8: changing items and classification by INTERPRETED value; a legacy pets key merely rewritten keeps its record | no (precision) |
+| R4-4 [LOW] "only with a landlordId" is vacuous; snapshot identity unchecked | ACCEPT (contest upheld, identity half) | D5: the snapshot names its landlord; a mismatch with the body's `landlordId` is a 400 | no (precision) |
+| R4-5 [LOW] landlord card shows old values after an Apply that followed a re-read | ACCEPT | D8: the page takes the contact the dialog last read | no (precision) |
+
+Round 4 is the cap and changes a decision (R4-1), so per the stop rule the
+open findings go to Cameron as decisions O1 and O2 instead of a round 5.
+Planner self-correction recorded: R3-6's adjudication should have gone to
+Cameron, because it narrowed a call he made in the conversation.
+
 Rejections in round 1 (for the human spec gate):
 
 1. Per-property, per-item choices in Apply (B7 second half): rejected -

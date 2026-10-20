@@ -120,3 +120,19 @@ test recovered and passed), and 3687 TIME_WAIT right after. So the connect failu
 from churn WITHIN one run, not from state left by earlier runs or the containers: a
 restart cannot prevent them. The residual browser -> Vite and Vite -> app connection churn
 the 2026-09-30 proxy keep-alive fix left unchased is the lead.
+
+**Measured diagnosis (2026-10-20).** The churn is measured and attributed in
+`docs/superpowers/reviews/2026-10-20-e2e-connection-churn/diagnosis.md`: 96% of a full
+run's ~24,000 short-lived loopback connections are browser -> Vite and Vite -> app, each
+closed because the browser cancelled an API request that was already on the wire, and 81%
+of those cancels are React StrictMode's dev double mount. A NetLog of a green 70-test run
+caught a browser connect failing with WSAEADDRINUSE at only 2,890 TIME_WAIT, so these
+failures need no exhausted pool. Proposed fix (awaiting Cameron's go): defer a signalled
+fetch's dispatch one microtask in `dashboard/src/api/client.ts`.
+**Eighth sighting**, in that work (full `npm run e2e` with the measurement hook, main
+1d7a4667, lane 4, 364 passed / 1 failed, 20.9 min):
+`tests/dashboard-next/maintenance-page.spec.ts:22` "502 GET recovers with GET home at width
+320" waited 15 s for "Sign in with Google" after the maintenance page's home link; entirely
+white page. Vite served the document and 9 modules in 15 ms, then the browser never asked
+for `react-dom_client.js` and the app saw no request; ~2,000 TIME_WAIT at that moment. That
+spec intercepts requests with `page.route`, which cannot be excluded for this one.

@@ -798,6 +798,15 @@ describe('toUnitFlyer - the merged public allowlist', () => {
     expect(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }).application_fee).toBeNull();
   });
 
+  it('reads both money fields through the D1 read: a stored negative amount projects null (D1, D11)', () => {
+    // A negative amount was never writable (the validator's >= 0), so only bad
+    // raw data can hold one. The registry read (unitItemValue) treats it as
+    // blank, so the flyer must not publish it as "$-50".
+    const flyer = toUnitFlyer(fullUnit({ application_fee: -50, deposit: -1400 }));
+    expect(flyer.application_fee).toBeNull();
+    expect(flyer.deposit).toBeNull();
+  });
+
   it('projects the pet fee trimmed, null when blank (D11)', () => {
     expect(toUnitFlyer(fullUnit({ pet_fee: '  $300 one-time ' })).pet_fee).toBe('$300 one-time');
     expect(toUnitFlyer(fullUnit({ pet_fee: '  ' })).pet_fee).toBeNull();

@@ -1452,6 +1452,13 @@ After any model change, watch the AI run log for `driver` and `truncated` failur
 construction (a `speakerRoles` pair per `Speaker N` label on top of the all-required object), so they
 truncate first.
 
+**Checking a prompt or model change against the real model.** `app/scripts/extraction-prompt-probe.ts`
+sends invented conversations through the production driver, prompt and schema and scores what the
+model did with each case's field (ok / missed / wrong). It reads and writes no data; it does call the
+Anthropic API (one extraction-sized call per case per run). Measure before and after a change by
+running it once with `--repo <a checkout of main>` and once from the branch; `--dry-run` prints the
+plan without a key. Usage is in the script's header.
+
 **Housing authority: why an extracted one sometimes arrives as a suggestion.** The field holds only
 names from the organization list (Settings > Housing authorities & agencies), because a Matching
 blast's housing authority filter matches a tenant's stored value against list names exactly (any

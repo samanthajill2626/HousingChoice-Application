@@ -36,6 +36,31 @@ landlord-change surfaces, the deposit rule, the tag mechanism, Select all),
 so round 2 runs. Reviewer A landed slightly more unique accepted findings
 (A4, A6 framing, A13 scope, A14, A16) and continues; it gets B's report.
 
+## Round 2 (spec revision 2 -> revision 3)
+
+Reviewer A continued (`R2-reviewer-a.md`, findings R2-1 to R2-12). It
+confirmed the round-1 fixes A1-A9 and A11-A17 against the code and conceded
+A10's second half and both round-1 rejections.
+
+| Finding | Ruling | What changed in revision 3 | Decision changed |
+|---|---|---|---|
+| R2-1 [MED] Apply runs on hours-old page state; server never enforces Goal 3; 409 retry loops | ACCEPT | D8: the dialog re-reads the landlord and its properties on open and after a 409 (and says so); the request carries per-unit `ownItems`; the server skips `changed_since_opened` when a changing own value was not shown | yes (server enforcement) |
+| R2-2 [MED] a hand-checked row keeps its check after gaining an own value | ACCEPT | D8: a hand-checked row resets to unchecked when it gains an own-value item; hand unchecks stay | yes |
+| R2-3 [LOW] whole-map rewrite unfenced; stale PATCH can write a removed map back | ACCEPT | D5: PATCH writes the map conditioned on the `requirement_sources` and `landlordId` it read, retries up to 3 times (the `updateRosterIfCurrent` pattern), then 409 `property_changed`; Apply's write carries the same condition; the accepted residual race is stated precisely (landlord values only) | yes (mechanism) |
+| R2-4 [LOW] create classifying all items marks API creates and stale-form fields as exceptions | ACCEPT | D5/D7: the form sends `requirements_snapshot`; with it, all items classify against the snapshot (a copy stays a copy even if the landlord changed meanwhile); without it, only body items classify and the rest stay never touched. D7's failed-load case now saves without a snapshot instead of blocking Save | yes |
+| R2-5 [LOW] "Deposit notes" collides with `getByLabel('Notes')` | ACCEPT (selector fix) | D1 names the label "Deposit notes" (Sam's term, kept); section 7 switches `steps.ts:1515` and `listing-activity.spec.ts:293` to `{ exact: true }` | no |
+| R2-6 [LOW] raw boolean `pets` write self-contradicts; server-changed item not classified | ACCEPT | D1 separates a WRITTEN boolean (means the read interpretation, both items change) from a STORED one met by a one-item write (partner keeps its value); D5 classifies every item whose stored keys the write actually changes, after normalization | no (precision) |
+| R2-7 [LOW] deposit edges | ACCEPT | D1: conflict check on a consistent read; forms always send the amount as null with One month's rent. D8: 409 `deposit_conflict` when the landlord holds both. D11: wording for flexible alone; no row for notes alone | no (precision) |
+| R2-8 [LOW] Apply write is a new repo method; cap has no dialog behavior | ACCEPT | D8 names `unitsRepo.applyRequirements`; cap 100 per request, the dialog batches; section 7 lists the method | no (precision) |
+| R2-9 [LOW] day one: every property purple against empty landlords | ACCEPT | D6: when the landlord has no requirement recorded at all, no tags or landlord lines, only "<Landlord> has no requirements recorded yet." | yes (display rule) |
+| R2-10 [LOW] Goal 6 overpromises landlord-form tags | ACCEPT | Goal 6 narrowed to property forms + the landlord's requirements; other landlord fields never reach a flyer | no (wording) |
+| R2-11 [LOW] an open older composer narrows a multi-size draft | ACCEPT | D12 states and accepts it (until reload) | no |
+| R2-12 [LOW] audit field list undefined for server-added keys | ACCEPT | D13: changed unit keys including server-changed partner keys; never `requirement_sources` | no (precision) |
+
+Round 2 changed decisions (Apply server enforcement and re-read, hand-check
+reset, the PATCH fence, the create snapshot, the day-one display rule), so
+round 3 runs with the same reviewer. No rejections in round 2.
+
 Rejections in round 1 (for the human spec gate):
 
 1. Per-property, per-item choices in Apply (B7 second half): rejected -

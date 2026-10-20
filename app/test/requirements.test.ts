@@ -267,6 +267,13 @@ describe('itemValuesEqual / isItemBlank - D1 equality', () => {
     expect(itemValuesEqual(raw({ pets: '   ' }), raw({ pets: null }))).toBe(true);
   });
 
+  it('a key missing on either side is blank, so equality is symmetric', () => {
+    expect(itemValuesEqual(raw({}), raw({ pets: 'Cats OK' }))).toBe(false);
+    expect(itemValuesEqual(raw({ pets: 'Cats OK' }), raw({}))).toBe(false);
+    expect(itemValuesEqual(raw({ no_pets: true }), raw({ no_pets: true, pet_fee: '$300' }))).toBe(false);
+    expect(itemValuesEqual(raw({ no_pets: true, pet_fee: '$300' }), raw({ no_pets: true }))).toBe(false);
+  });
+
   it('text compares after trimming, case-sensitive', () => {
     expect(itemValuesEqual(raw({ pets: ' Cats OK ' }), raw({ pets: 'Cats OK' }))).toBe(true);
     expect(itemValuesEqual(raw({ pets: 'cats ok' }), raw({ pets: 'Cats OK' }))).toBe(false);

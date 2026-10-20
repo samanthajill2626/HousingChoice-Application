@@ -475,3 +475,65 @@ export function planUnitApply(input: {
   patch['requirement_sources'] = Object.keys(nextSources).length > 0 ? nextSources : null;
   return { kind: 'write', patch, changedKeys, changedItems: changing.map(({ item }) => item.id) };
 }
+
+// --- The property-form flyer tag table (D10, D10a) ------------------------------
+
+/** D10a: one field on the New / Edit property forms and whether tenants see it on the flyer. */
+export interface FormFieldVisibility {
+  /** The field's form label (plan 1.1 and the forms' existing labels). */
+  label: string;
+  /** The unit key(s) the field writes. */
+  keys: readonly string[];
+  flyer: FlyerVisibility;
+}
+
+function formField(label: string, keys: readonly string[], flyer: FlyerVisibility): FormFieldVisibility {
+  return Object.freeze({ label, keys: Object.freeze([...keys]), flyer });
+}
+
+/**
+ * The Requirements section's fields, item then field order. "No application
+ * fee" is the checkbox above the amount (D10): checked, it records 0, so it
+ * writes application_fee and shares its tag.
+ */
+const REQUIREMENT_FORM_FIELDS: readonly FormFieldVisibility[] = REQUIREMENT_ITEMS.flatMap((item) =>
+  item.fields.flatMap((field) => {
+    const own = formField(field.label, [field.key], field.flyer);
+    return field.key === 'application_fee'
+      ? [formField('No application fee', [field.key], field.flyer), own]
+      : [own];
+  }),
+);
+
+/**
+ * D10a: every field on the New / Edit property forms, in D10 form order
+ * (the New form's landlord picker, then Property details, then Requirements,
+ * then Application process and Notes), with its tag - 35 rows. The first row,
+ * "Owning landlord", is on the New form only (plan AR1); the Edit form has no
+ * landlord field. The app-side parity walk
+ * (app/test/propertyFormFlyerParity.test.ts) fails when a tag disagrees with
+ * what lib/unitFields.ts toUnitFlyer publishes; the dashboard mirror carries
+ * the same table, and its drift test imports this one and compares.
+ */
+export const PROPERTY_FORM_FIELDS: readonly FormFieldVisibility[] = Object.freeze([
+  formField('Owning landlord', ['landlordId'], 'staff_only'),
+  formField('Housing authorities', ['accepted_authorities'], 'on_flyer'),
+  formField('Beds', ['beds'], 'on_flyer'),
+  formField('Baths', ['baths'], 'on_flyer'),
+  formField('Voucher sizes accepted', ['voucher_size_accepted'], 'on_flyer'),
+  formField('Rent min', ['rent_min'], 'on_flyer'),
+  formField('Rent max', ['rent_max'], 'on_flyer'),
+  formField('Payment standard', ['payment_standard'], 'staff_only'),
+  formField('Address', ['address'], 'on_flyer'),
+  formField('Subzone', ['subzone'], 'staff_only'),
+  formField('Washer / dryer', ['washer_dryer'], 'on_flyer'),
+  formField('Tenant-paid utilities', ['utilities'], 'on_flyer'),
+  formField('Accessibility', ['accessibility'], 'on_flyer'),
+  formField('Lease terms', ['lease_terms'], 'on_flyer'),
+  formField('Public listing link', ['listing_link'], 'on_flyer'),
+  formField('Video URL', ['video_url'], 'on_flyer'),
+  formField('Same-day RTA', ['same_day_rta'], 'on_flyer'),
+  ...REQUIREMENT_FORM_FIELDS,
+  formField('Application process', ['application_process'], 'staff_only'),
+  formField('Notes', ['notes'], 'staff_only'),
+]);

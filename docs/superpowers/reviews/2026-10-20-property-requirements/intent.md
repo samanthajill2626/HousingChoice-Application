@@ -2,7 +2,16 @@
 
 ## STATE (replace on every move)
 
-- Phase: SPEC APPROVED (Cameron, 2026-10-20) -> COMPACTION GATE A -> PLAN.
+- Phase: PLAN being written (compaction A done 2026-10-20, 558k -> 18k).
+  Plan head (sections 0-3: ground rules, global constraints, exact copy
+  1.1, binding interfaces 2.x, slices S1-S7 + invariant table 3.1) is at
+  `docs/superpowers/plans/2026-10-20-property-requirements.md`; seven opus
+  section writers draft S1-S7 into `.superpowers/sdd/plan-drafts/S<n>.md`
+  (gitignored), raising CONTRACT ISSUES; the planner then writes section 4
+  (assembly rulings), appends the drafts as sections 5-11 verbatim, commits,
+  and runs the plan review (two fresh opus reviewers, PLAN brief).
+  `npm ci` done in the worktree (exit 0).
+- (previous) SPEC APPROVED (Cameron, 2026-10-20) -> COMPACTION GATE A -> PLAN.
 - Spec: `docs/superpowers/specs/2026-10-20-property-requirements-design.md`
   revision 6 APPROVED, commit c41b9b90 on `feat/property-requirements`
   (worktree `W:\tmp\property-requirements`, cut from main @1d7a4667).

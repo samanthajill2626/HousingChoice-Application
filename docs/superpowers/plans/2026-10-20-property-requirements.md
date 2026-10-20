@@ -11,9 +11,13 @@
   `docs/superpowers/reviews/2026-10-20-property-requirements/design-review/adjudications.md`.
 - Status: PLAN v2 (2026-10-20), plan review round 1 folded in. Sections 0-4
   are BINDING; slice sections 5-11 are the seven opus section drafts,
-  verbatim; section 4 (assembly rulings AR1-AR48) wins over any slice text it
-  contradicts. The drafts themselves (gitignored, under
-  `.superpowers/sdd/plan-drafts/`) are never the authority.
+  verbatim (edited by their writers for the round-1 rulings); section 4
+  (assembly rulings AR1-AR48 and the round-1 rulings in 4.1) wins over any
+  slice text it contradicts. Headings INSIDE a slice ("## 4. Spec coverage
+  map", "## 1. CONTRACT ISSUES") are numbered within that slice; "plan
+  section N" always means this file's top-level sections 0-11. The drafts
+  themselves (gitignored, under `.superpowers/sdd/plan-drafts/`) are never
+  the authority.
 
 ## 0. Ground rules for this plan
 

@@ -2,14 +2,17 @@
 
 ## STATE (replace on every move)
 
-- Phase: PLAN being written (compaction A done 2026-10-20, 558k -> 18k).
-  Plan head (sections 0-3: ground rules, global constraints, exact copy
-  1.1, binding interfaces 2.x, slices S1-S7 + invariant table 3.1) is at
-  `docs/superpowers/plans/2026-10-20-property-requirements.md`; seven opus
-  section writers draft S1-S7 into `.superpowers/sdd/plan-drafts/S<n>.md`
-  (gitignored), raising CONTRACT ISSUES; the planner then writes section 4
-  (assembly rulings), appends the drafts as sections 5-11 verbatim, commits,
-  and runs the plan review (two fresh opus reviewers, PLAN brief).
+- Phase: PLAN REVIEW round 1 (compaction A done 2026-10-20, 558k -> 18k).
+  Plan v1 assembled at `docs/superpowers/plans/2026-10-20-property-requirements.md`
+  (26k lines: sections 0-3 planner-written, section 4 = assembly rulings
+  AR1-AR48 over the drafts' contract issues, sections 5-11 = the seven opus
+  slice drafts S1-S7 verbatim; drafts also under `.superpowers/sdd/plan-drafts/`).
+  One infra failure during drafting: all seven drafters died on a network
+  ENOTFOUND and were resumed by SendMessage (free INFRA correction).
+  In flight: two fresh opus plan reviewers (PLAN brief), reports to
+  `<records>/plan-review/R1-reviewer-{a,b}.md`. Then adjudicate into
+  `<records>/plan-review/adjudications.md` + plan section 4.1; rounds 2+
+  continue the better reviewer; cap 4. Then mission block + LAUNCH GATE.
   `npm ci` done in the worktree (exit 0).
 - (previous) SPEC APPROVED (Cameron, 2026-10-20) -> COMPACTION GATE A -> PLAN.
 - Spec: `docs/superpowers/specs/2026-10-20-property-requirements-design.md`

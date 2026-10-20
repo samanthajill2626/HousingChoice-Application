@@ -2,7 +2,13 @@
 
 ## STATE (replace on every move)
 
-- Phase: PLAN REVIEW round 1 (compaction A done 2026-10-20, 558k -> 18k).
+- Phase: PLAN REVIEW round 2 (round 1 closed: 10 unique findings, all
+  accepted, 3 changed decisions; plan v2 @51893e3a). Reviewer A continued
+  (agent ab45379e71f894ef4) with the RE-REVIEW CHARGE -> `plan-review/R2-reviewer-a.md`.
+  Slice writers (agents S1 af9d3ed2.., S2 a4768abc.., S3 a507e961.., S4
+  aa7f5ebb.., S5 a64316dd.., S6 aea5cdbe.., S7 acf77144..) stay alive to
+  fix their own drafts; the plan is rebuilt from the drafts.
+- (previous) PLAN REVIEW round 1 (compaction A done 2026-10-20, 558k -> 18k).
   Plan v1 assembled at `docs/superpowers/plans/2026-10-20-property-requirements.md`
   (26k lines: sections 0-3 planner-written, section 4 = assembly rulings
   AR1-AR48 over the drafts' contract issues, sections 5-11 = the seven opus

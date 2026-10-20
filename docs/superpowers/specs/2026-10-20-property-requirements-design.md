@@ -1,6 +1,8 @@
 # Landlord requirements and property fields - design
 
-Status: DRAFT revision 1 (2026-10-20), for design review.
+Status: DRAFT revision 2 (2026-10-20), for design review round 2.
+Revision 2 folds in review round 1 (two reviewers; adjudications in
+`docs/superpowers/reviews/2026-10-20-property-requirements/design-review/adjudications.md`).
 Branch: `feat/property-requirements` (worktree `W:\tmp\property-requirements`, cut from main @1d7a4667)
 Tracker: Improvements Tracker items #12 "Property page fields" and #11
 "Landlord requirements and qualifications" (Before WP1, item 6), built
@@ -21,8 +23,10 @@ staff-facing behavior and `unit` for code.
    Apply to properties and choose what to copy where.
 3. Staff can always see, on a property, which requirement values were set on
    the property itself (a deliberate exception) and which are out of date
-   because the landlord changed after they were copied - so Apply never
-   overwrites an exception by accident.
+   because the landlord changed after they were copied. In Apply, a property
+   holding a value set on the property for an item being copied starts
+   UNCHECKED and names that item, so an exception is overwritten only when
+   staff check that property on purpose.
 4. A property can accept SEVERAL voucher sizes (Studio through 12), and every
    place that reads a property's voucher size handles the list: the flyer,
    Matching's pre-fill and blast audience, the Properties page, and the
@@ -32,7 +36,8 @@ staff-facing behavior and `unit` for code.
    application fee".
 6. Every field on the property and landlord forms says whether tenants see it
    on the public flyer, so staff do not put something damaging in a public
-   box by accident.
+   box by accident. A test fails if a form tag disagrees with what the flyer
+   actually publishes.
 
 Why: these are the inputs Work Package 1's AI ranking reads (decided
 Oct 18: the AI ranking only, no rule-based scorer), and they are what Sam
@@ -50,9 +55,10 @@ Property (unit) record and API:
   cleared, `:171-174`); `pets` is `'pets'`, a string OR a bare boolean
   (`:192-196`); `tour_type` clears on ''/null (`:197-212`); `tour_process`,
   `subzone`, `area`, `notes`, `lease_terms` are `'string'` (null is a 400,
-  '' is stored as '', `:168-170`); `voucher_size_accepted` is
-  `'clearable_number'`, ONE number >= 0 (not limited to integers), null
-  REMOVEs it, an array is a 400 (`:175-185`).
+  '' is stored as '', `:168-170`); `same_day_rta` is `'boolean'`
+  (`:186-188`); `voucher_size_accepted` is `'clearable_number'`, ONE number
+  >= 0 (not limited to integers), null REMOVEs it, an array is a 400
+  (`:175-185`).
 - `acceptedVoucherSizes(unit)` (`unitFields.ts:336-341`, hand-mirrored in
   `dashboard/src/routes/listing/listingFormat.ts:103-109`) already reads a
   number OR a list and falls back to `beds`. The full demo seed already
@@ -61,80 +67,103 @@ Property (unit) record and API:
 - Create: `POST /api/units` (`app/src/routes/units.ts:770-835`) validates,
   checks the landlord is a landlord contact (`:802-810`), creates with status
   `setup`, audits `unit_created` with no field list. Update: `PATCH
-  /api/units/:unitId` (`units.ts:2115-2258`) audits `unit_updated` with the
-  changed field NAMES only (`:2249-2252`). There is no version check on a
-  unit PATCH (`unitsRepo.ts:1139`, `attribute_exists(unitId)` only), and no
-  bulk unit route anywhere.
+  /api/units/:unitId` (`units.ts:2115-2258`) reads the stored unit only for
+  authorities, landlord or media changes (`:2152-2229`) and audits
+  `unit_updated` with the changed field NAMES only (`:2249-2252`). There is
+  no version check on a unit PATCH (`unitsRepo.ts:1139`,
+  `attribute_exists(unitId)` only), and no bulk unit route anywhere.
+- Every unit route answers with the raw stored item
+  (`units.ts:762-766,834,854,2257`); there is no JSON replacer, so a stored
+  DynamoDB string SET would reach the dashboard as `{}`.
+- `landlordId` is written by: create; PATCH (`units.ts:2184-2206`, no
+  dashboard form uses it - `dashboard/src/lib/holdingRefusals.ts:29-35`);
+  restore-with-landlord (`POST /api/units/:unitId/restore`,
+  `unitsRepo.restoreWithLandlord`, `unitsRepo.ts:790-826,1618`, used by
+  `RestoreLandlordDialog.tsx:77-81`); a roster claim of the landlord slot on
+  an ownerless unit (`unitsRepo.ts:666-668,1324`); and the importer, which
+  fills an absent `landlordId` (`app/src/lib/import/apply.ts:1583-1597,
+  1615-1619`).
 - `unitsRepo.update` SETs non-null, REMOVEs null and always stamps
   `updated_at` (`app/src/repos/unitsRepo.ts:1101-1147`). A stamped
   `updated_at` is the importer's "human-owned" signal: the import then writes
-  facts only `if_not_exists` (`app/src/lib/import/apply.ts:1456-1475`).
-- The import writes address, beds, baths, accepted authorities, notes and the
-  landlord link; it never writes deposit, pets, application fee, tour fields,
+  facts only `if_not_exists` (`apply.ts:1456-1475`).
+- The import never writes deposit, pets, application fee, tour fields,
   subzone, area or voucher size (`apply.ts:1476-1621`). No seed, dev route or
-  form writes `subzone` or `area` (`app/src/routes/dev.ts`,
-  `app/src/lib/seed/*`); only the API can.
+  form writes `subzone` or `area`; only the API can.
 - The public flyer projection `toUnitFlyer` (`unitFields.ts:343-371`) is an
-  allowlist. Public today: beds, baths, area, SUBZONE, `voucher_size` (the
-  FIRST of `acceptedVoucherSizes`, `:356`), accepted authorities, listing
-  link, rent, address, utilities, video, application fee, same-day RTA, pets,
-  accessibility, deposit, lease terms. Never public: notes, tour type, tour
-  process, application process, payment standard, `voucher_size_accepted`
-  (the key). Served at `GET /public/units/:unitId/flyer`
+  allowlist keyed by OUTPUT field. Public today: beds, baths, area, SUBZONE,
+  `voucher_size` (the FIRST of `acceptedVoucherSizes`, `:356`, a value
+  DERIVED from the never-public key `voucher_size_accepted` and from `beds`),
+  accepted authorities, listing link, rent, address, utilities, video,
+  application fee, same-day RTA, pets, accessibility, deposit, lease terms.
+  Never public: notes, tour type, tour process, application process, payment
+  standard. Served at `GET /public/units/:unitId/flyer`
   (`app/src/routes/public.ts:451-464`).
-- `FlyerPage.tsx` (`dashboard/src/routes/public/FlyerPage.tsx`) shows
-  "subzone, area" as the neighborhood line (`:54-56`), "Fits a
-  <strong>N-bedroom</strong> voucher" from the single `voucher_size`
+- `FlyerPage.tsx` shows "subzone, area" as the neighborhood line (`:54-56`),
+  "Fits a <strong>N-bedroom</strong> voucher" from the single `voucher_size`
   (`:265-268`), and Deposit / Application fee as "$N" - a $0 fee renders
   "$0" (`:298-331`); pets via `petsLabel` (true "Allowed", false "Not
   allowed", `:110-115`).
+- The unit Activity feed projects audit rows through `toUnitActivityEvent`
+  (`units.ts:311-376`), which lifts `reason` only for
+  `unit_primary_contact_assigned`, on purpose: `listing_status_changed`
+  stores free text under the same key (`:369-374`). The dashboard labels
+  `unit_updated` "Property updated" plus field names
+  (`listingFormat.ts:225-228`).
+- Route tests use a hand-written in-memory units repo
+  (`app/test/helpers/twilioWebhookHarness.ts:2857-2925`).
 
 Property page and forms (dashboard):
 
 - `ListingDetail.tsx` "Property details" card (`:948-989`) shows Deposit,
   Pets (`unit.pets ?? '-'`: a boolean renders blank, `:966`), Lease terms,
-  Application fee, and "Voucher size accepted" only when the stored value is
-  a NUMBER (`:973-975`, so a list shows nothing). No Area or Subzone row. A
-  "Tour & application process" card (`:1012-1034`) shows tour type, tour
-  process and application process. The page already loads the landlord
-  contact, best effort (`useListing.ts:129-140`, `state.landlord`).
-- `ListingEditForm.tsx` (edit) and `UnitCreateForm.tsx` (new) have no Area
-  or Subzone input; Voucher size accepted is one number input
-  (`ListingEditForm.tsx:105,532-538`, `UnitCreateForm.tsx:556-562`); a blank
-  number input means "untouched" except for the clearable voucher size
-  (`ListingEditForm.tsx:127-151,195-206`). The edit form's one hint line says
+  Application fee, Same-day RTA (Yes / No / -, `:969-972`), and "Voucher
+  size accepted" only when the stored value is a NUMBER (`:973-975`). No Area
+  or Subzone row. A "Tour & application process" card (`:1012-1034`) shows
+  tour type, tour process and application process. The page loads the
+  landlord contact once from `unit.landlordId`, best effort
+  (`useListing.ts:129-143,212`).
+- `ListingEditForm.tsx` and `UnitCreateForm.tsx` have no Area or Subzone
+  input; Voucher size accepted is one number input; a blank number input
+  means "untouched" except for the clearable voucher size
+  (`ListingEditForm.tsx:127-151,195-206`). The edit form writes
+  `same_day_rta: false` when unticked (`:159`) and turns a legacy boolean
+  `pets` into 'Yes'/'No' text (`:87-95,180`). Its one hint line says
   "Address, rent, deposit, fees, utilities, pets, accessibility, and lease
-  terms are shown on the public flyer." (`ListingEditForm.tsx:279-282`).
-- `UnitCreateForm` has two entry points: the landlord page's "+ Add a
-  property" with the landlord LOCKED (`ContactDetail.tsx:1412-1420`), and
-  the Properties list's "+ New property" with a landlord PICKER
-  (`ListingsList.tsx:464-472`). It loads every landlord contact
-  (`UnitCreateForm.tsx:136-169`) but keeps only the label.
+  terms are shown on the public flyer." (`:279-282`).
+- `UnitCreateForm` sends only NON-EMPTY fields (`:173-222`). It has two entry
+  points: the landlord page's "+ Add a property" with the landlord LOCKED
+  (`ContactDetail.tsx:1412-1420`), and the Properties list's "+ New
+  property" with a landlord PICKER (`ListingsList.tsx:464-472`). It loads the
+  full list of landlord contacts into state (`UnitCreateForm.tsx:62,136-169`);
+  the locked-landlord fallback keeps only a label (`:157-166`), and a failed
+  load is silent (`:150-153`).
+- No current dashboard form writes a boolean `pets`; booleans come from old
+  data and raw API calls.
 
 Landlord record:
 
-- A landlord is a contact (`type: 'landlord'`). Its structured fields today
-  are `contract_status`, `registered_landlord`, `rta_within_48h`,
+- A landlord is a contact (`type: 'landlord'`; a property manager is a
+  landlord-typed contact with a role, `units.ts:797`). Its structured fields
+  today are `contract_status`, `registered_landlord`, `rta_within_48h`,
   `pass_inspection_first_try`, `income_includes_voucher`
   (`app/src/routes/contacts.ts:388-400`), shown in the "Landlord onboarding"
-  card (`dashboard/src/routes/contact/LandlordOnboardingCard.tsx`) and edited
-  in the landlord section of `ContactEditForm.tsx` (`:871-973`). Pets and
-  lease terms moved from landlords to properties in July
-  (`contacts.ts:402-406`).
+  card and edited in the landlord section of `ContactEditForm.tsx`
+  (`:871-973`), which sends only the fields that changed (`:327-350`).
 - The contacts table already uses top-level `pets` and `evictions` for
   TENANTS (`contactsRepo.ts:327-331`); they are not type-gated, and they are
   AI-provenance fields: a PATCH of `pets` clears `pets_source` and consumes
   pending AI suggestions (`contacts.ts:1760-1792`). Contacts PATCH ignores
-  unknown top-level keys (`contacts.ts:402-406`); units return 400.
-- A contact has no `updated_at` (`contactsRepo.ts`; only
-  `staff_notes_updated_at`).
+  unknown top-level keys (`contacts.ts:402-406`); units return 400. A contact
+  has no `updated_at`.
 - The landlord page (`LandlordFile.tsx`) cards, in order: Details, Landlord
   onboarding, Notes (whose empty-state copy says "(Programs, lease terms, and
   pet policy live on each property.)", asserted by
   `e2e/tests/dashboard-next/contact-detail.spec.ts:134-155`), Properties,
   Tours, Placements, group texts, group threads, media. It loads all units
-  and keeps those whose `landlordId` is this contact
-  (`useContactFile.ts:158`, `buildContactFile.ts:18-20`).
+  once and keeps those whose `landlordId` is this contact
+  (`useContactFile.ts:149-158`, refetch at `:124-125`;
+  `buildContactFile.ts:18-20`).
 
 Matching (blasts):
 
@@ -143,17 +172,17 @@ Matching (blasts):
   `app/src/routes/broadcasts.ts:210-217`). The resolver matches it EXACTLY
   (`app/src/services/audienceResolution.ts:186-189`). The "4+ BR" chip sends
   4 (`dashboard/src/routes/broadcasts/broadcastFormat.ts:33-39`), so tenants
-  holding a 5- to 12-bedroom voucher never match it.
+  holding a 5- to 12-bedroom voucher never match it (open issue
+  `docs/issues/broadcast-4plus-exact-match-underreach.md`).
 - The composer pre-fills the FIRST of the property's sizes
   (`BroadcastComposer.tsx:205`), not capped at 4 (`:213`): a 5-bedroom
   property pre-fills 5, which no chip shows as pressed
-  (`AudienceFilters.tsx:150-152,175`).
+  (`AudienceFilters.tsx:150-152,175`). So stored filters of 5..12 can exist.
 - The stored filter is re-read at preview and send
   (`broadcasts.ts:1042,1285`) and projected by `wireAudienceFilter`, which
   copies `bedroomSize` only when it is a number
-  (`app/src/lib/blastAudienceRules.ts:222-234`). Stored drafts and sent
-  blasts with a number exist in the full seed (`matrix.ts:1227-1233,
-  1264-1270`) and in production.
+  (`app/src/lib/blastAudienceRules.ts:222-234`). `voucherSizeLabel` already
+  labels any size of 4 or more "4+ BR" (`broadcastFormat.ts:44-48`).
 
 Tenant voucher size: an integer 0..12 everywhere it is written
 (`contacts.ts:581-588,851-857`; `public.ts:146-152`; extraction
@@ -167,48 +196,71 @@ already list-ready).
 
 There are twelve requirement ITEMS. An item is the unit of copying,
 comparing and tagging. Every item exists on both the landlord and the
-property. Order and grouping are the display order everywhere.
+property. Order and grouping are the display order everywhere. Item ids are
+their own namespace (stored in `requirement_sources`, sent in the Apply
+API); keys are the stored attribute names on the unit.
 
-| Group | Item (label) | Key(s) | Kind | Flyer |
-|---|---|---|---|---|
-| Screening | No evictions while on the program | `no_evictions_on_program` | checkbox | Staff only |
-| Screening | Evictions (details) | `evictions_notes` | text | Staff only |
-| Screening | Credit score | `credit_requirements` | text | Staff only |
-| Screening | Income requirements | `income_requirements` | text | Staff only |
-| Screening | Qualifications | `qualifications` | long text | Staff only |
-| Pets | No pets | `no_pets` | checkbox | On flyer |
-| Pets | Pets (details) | `pets` (existing key) | text | On flyer |
-| Pets | Pet fee | `pet_fee` | text | On flyer |
-| Move-in costs | Deposit | `deposit_one_month` (checkbox "One month's rent"), `deposit_flexible` (checkbox "Flexible / payment terms available"), `deposit` (existing, fixed amount in dollars), `deposit_notes` (text) | group | On flyer, except the notes (Staff only) |
-| Move-in costs | Application fee | `application_fee` (existing, dollars; 0 = "No application fee") | money | On flyer |
-| Touring | Tour type | `tour_type` (existing enum) | select | Staff only |
-| Touring | Tour process | `tour_process` (existing) | text | Staff only |
+| Group | Item id | Label | Unit key(s) | Kind | Flyer |
+|---|---|---|---|---|---|
+| Screening | `no_evictions_on_program` | No evictions while on the program | `no_evictions_on_program` | checkbox | Staff only |
+| Screening | `evictions_notes` | Evictions (details) | `evictions_notes` | text | Staff only |
+| Screening | `credit_requirements` | Credit score | `credit_requirements` | text | Staff only |
+| Screening | `income_requirements` | Income requirements | `income_requirements` | text | Staff only |
+| Screening | `qualifications` | Qualifications | `qualifications` | long text | Staff only |
+| Pets | `no_pets` | No pets | `no_pets` | checkbox | On flyer |
+| Pets | `pets` | Pets (details) | `pets` (existing) | text | On flyer |
+| Pets | `pet_fee` | Pet fee | `pet_fee` | text | On flyer |
+| Move-in costs | `deposit` | Deposit | `deposit_one_month` (checkbox "One month's rent"), `deposit` (existing, fixed amount in dollars), `deposit_flexible` (checkbox "Flexible / payment terms available"), `deposit_notes` (text) | group | On flyer, except the notes (Staff only) |
+| Move-in costs | `application_fee` | Application fee | `application_fee` (existing, dollars; 0 = "No application fee") | money | On flyer |
+| Touring | `tour_type` | Tour type | `tour_type` (existing enum) | select | Staff only |
+| Touring | `tour_process` | Tour process | `tour_process` (existing) | text | Staff only |
 
 The checkbox label stays exactly "No evictions while on the program".
 Credit and income stay notes only: nothing matches on them (fair-housing
 question still open, tracker #11). A tenant's eviction history stays the
 tenant's existing free-text field; the Work Package 1 AI ranking weighs it
-against this checkbox and the details.
+against this checkbox and the details. Qualifications are staff only
+(Cameron, 2026-10-20), which reverses the older intent in
+`docs/issues/unit-onboarding-fields.md` and
+`documentation/landlord-onboarding-sequence.mermaid:82` that qualifications
+go on the shareable listing; both are updated (section 7).
 
-ONE registry module defines the items, their keys, kinds, labels, groups and
+ONE registry module defines the items: id, label, group, keys, kinds and
 flyer visibility, shared by validation, copying, comparing and the UI (an
 app module plus its hand mirror in the dashboard, the `acceptedVoucherSizes`
 pattern, with the same test cases in both suites).
 
-Values, per kind:
+Values, per kind (these rules apply to the requirement keys; existing
+non-requirement fields such as `same_day_rta` keep their kinds):
 
-- checkbox: `true` or absent. Writing `false` or null REMOVEs the key, so an
-  unchecked box has one representation.
+- checkbox: `true` or absent. Writing `false` or null REMOVEs the key: for a
+  requirement checkbox, unchecked means "not a rule", and "No" and "not
+  recorded" are deliberately the same value.
 - text: a string, trimmed; '' or null REMOVEs the key.
 - money (`deposit`, `application_fee`): a finite number >= 0, or null to
   REMOVE. Both become clearable (today they are not).
 - `tour_type`: unchanged (`self_guided` / `landlord_led` / `pm_team`, ''/null
   REMOVEs).
-- `pets` keeps accepting a bare boolean on WRITE, for a stale cached
-  dashboard bundle, but the new forms always write text plus `no_pets`. On
-  READ a legacy boolean is interpreted: `false` = No pets checked, details
-  blank; `true` = No pets unchecked, details "Allowed". Nothing is
-  backfilled; the next save from the form writes the new shape.
+- Deposit: "One month's rent" and a fixed amount are ALTERNATIVES. A write
+  whose resulting property (or landlord) would hold both
+  `deposit_one_month` and `deposit` is a 400 `deposit_conflict`; the forms
+  clear the amount when "One month's rent" is checked (as "No application
+  fee" sets the amount, below). No property holds `deposit_one_month` today,
+  so no stored record conflicts.
+
+Legacy `pets` booleans (old data and raw API callers only):
+
+- READ interpretation: `pets: false` = No pets checked and details blank;
+  `pets: true` = No pets unchecked and details "Allowed". Free text such as
+  "No pets" is NOT parsed: it stays details text (so the seeds' and most live
+  properties' "No pets" text differs from a landlord's No pets checkbox, and
+  those properties show as set on this property - expected).
+- WRITE: the unit `pets` key still accepts a boolean (raw API callers) and
+  stores it in the new shape at once. ANY write that touches the `no_pets` or
+  `pets` item (PATCH, Apply) writes BOTH keys in the new shape, so a legacy
+  boolean is replaced by `no_pets` plus details text that keep the other
+  item's interpreted value unchanged. The landlord side never accepts a
+  boolean.
 
 Item equality (used by copying, tags and Apply): two values of an item are
 EQUAL when every key of the item is equal after the read interpretation
@@ -223,16 +275,23 @@ equal only when all four of its keys are equal.
   existing values, the flyer projection and every existing reader
   (`TourDetail` guidance card, `ScheduleTourForm` prefill,
   `listingSendOutcome`, `contact/Card.tsx`) keep working.
-- On the LANDLORD: ONE map attribute `requirements` on the contact, holding
-  the same keys with the same kinds. A map, not top-level keys, because
-  `pets` and `evictions` already mean the TENANT's answers on the contacts
-  table and carry AI provenance (section 2). Contacts PATCH accepts
-  `requirements` only for a contact whose (resulting) type is `landlord`;
-  for any other type it is a 400. The body's `requirements` REPLACES the
-  stored map as a whole (the form always sends the whole section); each key
-  is validated by the registry; an unknown key inside it is a 400. The audit
-  `contact_updated` lists `requirements` in its fields. Contact CREATE does
-  not take `requirements` (the new-landlord form has Company only today).
+- On the LANDLORD: flat keys on the contact with a `req_` prefix
+  (`req_no_evictions_on_program`, `req_evictions_notes`,
+  `req_credit_requirements`, `req_income_requirements`, `req_qualifications`,
+  `req_no_pets`, `req_pets`, `req_pet_fee`, `req_deposit_one_month`,
+  `req_deposit`, `req_deposit_flexible`, `req_deposit_notes`,
+  `req_application_fee`, `req_tour_type`, `req_tour_process`), with the D1
+  kinds (no boolean `req_pets`). Prefixed, not bare, because `pets` and
+  `evictions` already mean the TENANT's answers on the contacts table and
+  carry AI provenance (section 2). Contacts PATCH accepts them one by one,
+  like every other contact field (the edit form keeps sending only what
+  changed, so two staff editing different items do not overwrite each
+  other); each is a 400 on a contact whose resulting type is not
+  `landlord`. The audit `contact_updated` lists the changed `req_` keys.
+  Contact CREATE does not take them (the new-landlord form has Company only).
+- Every landlord-typed contact can hold requirements, property managers
+  included; requirements reach a property only from its landlord of record
+  (`landlordId`).
 
 ### D3 Property-only fields: subzone, washer/dryer
 
@@ -242,7 +301,8 @@ equal only when all four of its keys are equal.
   `area` alone). Nothing holds a subzone today (section 2), so no tenant has
   ever seen one. It keeps feeding the similar-properties score
   (`app/src/lib/similarUnits.ts:52-65`). Where the codes come from is an
-  open question for Sam (it does not change the build).
+  open question for Sam (it does not change the build). Its kind becomes
+  clearable text ('' or null REMOVEs).
 - `area` is NOT added to any form (Cameron, 2026-10-20: not requested, and a
   free-text area per property would have to be renamed property by
   property). It keeps its current readers.
@@ -254,11 +314,12 @@ equal only when all four of its keys are equal.
 
 - `voucher_size_accepted` becomes a list. The write kind accepts: null or
   `[]` (REMOVE - the property falls back to its bedrooms, as today); an
-  integer 0..12 (a stale bundle; stored as a one-item list); or an array of
-  integers 0..12 (stored de-duplicated, ascending). Anything else is a 400
-  (this also stops non-integer sizes, which the tenant side never allowed).
-  Stored single numbers are not backfilled; `acceptedVoucherSizes` already
-  reads both shapes and stays the ONE reader (GLOSSARY).
+  integer 0..12 (a raw caller or an older bundle; stored as a one-item list);
+  or an array of integers 0..12 (stored de-duplicated, ascending). Anything
+  else is a 400 (this also stops non-integer sizes, which the tenant side
+  never allowed). Stored single numbers are not backfilled;
+  `acceptedVoucherSizes` already reads both shapes and stays the ONE reader
+  (GLOSSARY).
 - The New and Edit forms use picker B: chips Studio, 1, 2, 3, 4, and a "More
   sizes (5-12)" control that shows chips 5 through 12. The larger chips show
   automatically when the property already records a size of 5 or more; a
@@ -267,6 +328,10 @@ equal only when all four of its keys are equal.
   recorded" when empty). Emptying the picker sends null (as clearing does
   today). The picker is a group of toggle buttons with `aria-pressed`, under
   the label "Voucher sizes accepted".
+- A stored value the picker has no chip for (a non-integer or a size above
+  12, possible under today's rule) is listed under the chips as "Not a
+  valid size, removed when you save: 2.5"; saving sends the list without
+  it.
 - The property page row "Voucher sizes accepted" lists the RECORDED sizes
   ("Studio, 2 BR, 3 BR") and stays empty when none is recorded (Cameron's
   2026-10-12 decision stands: never the bedrooms fallback on that row).
@@ -279,54 +344,68 @@ equal only when all four of its keys are equal.
 A property never reads its landlord's requirements at render time to fill
 its own: it shows and serves only its own stored values. To tell an
 exception from an out-of-date copy, each property records, per item, where
-the current value came from, in two string-set attributes on the unit:
+its current value came from, in ONE map attribute on the unit,
+`requirement_sources: { <item id>: 'copied' | 'set_here' }`, a plain map
+(JSON-safe; a DynamoDB string set would reach the dashboard as `{}`,
+section 2). An item absent from the map is NEVER TOUCHED (every item on
+every property that exists today). The map is written only by the server
+(it is not in `WRITABLE_FIELDS`), always WHOLE, as part of the same update
+that writes the item keys; an empty map REMOVEs the attribute. Every route
+that returns a unit returns it as stored, so the dashboard reads it
+directly.
 
-- `requirements_copied`: items whose value was copied from, or matches, the
-  landlord.
-- `requirements_set_here`: items whose value was set on the property and
-  differs from the landlord.
-
-An item in neither set is NEVER TOUCHED (every item on every property that
-exists today). The server classifies on EVERY write that touches an item,
-by comparing the property's resulting value with the landlord's CURRENT
+The server classifies on every write that touches an item, by comparing
+the property's RESULTING value of the item with its landlord's CURRENT
 value (D1 equality):
 
-- POST create, and PATCH (any key of the item in the body): equal -> the
-  item goes to `requirements_copied` (and out of `requirements_set_here`);
-  different -> into `requirements_set_here` (and out of
-  `requirements_copied`). So a field staff change on the New form before
-  saving, or edit later, counts as set on this property; editing it back to
-  the landlord's value makes it a copy again.
-- Apply (D8): every applied item goes to `requirements_copied`.
-- A PATCH that CHANGES the property's landlord (`landlordId`) empties both
-  sets: every item becomes never touched against the new landlord.
+- POST create classifies ALL twelve items, whatever the body carries (a key
+  left out is blank): equal -> `copied`; different -> `set_here`. So a
+  pre-filled value staff clear on the New form before saving is recorded as
+  set on this property.
+- PATCH classifies every item ANY of whose keys is in the body, the same
+  way. So an edit that makes a value differ makes it set on this property,
+  and editing it back to the landlord's value makes it a copy again.
+- Apply (D8): every applied item becomes `copied`.
+- Whenever a property's landlord of record CHANGES - PATCH `landlordId`,
+  restore with a different landlord (`restoreWithLandlord`), or a roster
+  claim of the landlord slot (`addContact`) - the map is REMOVEd in the same
+  write: every item becomes never touched against the new landlord. A PATCH
+  that changes `landlordId` AND touches items first resets, then classifies
+  the touched items against the NEW landlord.
+- The importer's fill of an absent `landlordId` does not touch the map. A
+  property with no landlord classifies every touched item as `set_here`, so
+  after the importer gives it a landlord, those items read as set on this
+  property - which is what they were. Accepted.
 - The landlord's own edits never touch any property.
 
-Classification needs the landlord's current requirements. Create already
-reads the landlord contact (`units.ts:802-810`); PATCH reads it when the
-body touches an item. A property with no landlord classifies every touched
-item as set here.
-
-Client-supplied source sets are not accepted: both attributes are written
-only by the server (they are not in `WRITABLE_FIELDS`).
+Reads: create already reads the landlord contact (`units.ts:802-810`).
+PATCH, when the body touches an item or changes the landlord, reads the
+stored unit (consistent read: its landlord, the other keys of a multi-key
+item, a legacy `pets` boolean, the current map) and the landlord contact,
+then writes. The read and the write are not fenced, like every unit PATCH
+today: a concurrent edit of the same property or landlord in that gap can
+leave one item misclassified until its next write. Accepted (two staff
+editing the same requirement of the same property at the same second).
 
 ### D6 How a property shows each requirement (layout A)
 
 For each item, comparing the property's value with the landlord's current
 value:
 
-| Property vs landlord | Item record | Shows |
+| Property vs landlord | `requirement_sources[item]` | Shows |
 |---|---|---|
 | equal | any | the value, no tag |
-| different | `requirements_copied` | the value + orange tag **Landlord updated** + a small line "Landlord now: <value>" |
-| different | `requirements_set_here` | the value + purple tag **Set on this property** + "Landlord: <value>" |
-| different, property value not blank | never touched | as `requirements_set_here` (an existing value counts as set on this property - Cameron, 2026-10-20) |
-| property blank, landlord not blank | never touched | blank + "Landlord: <value>", no tag |
+| different | `copied` | the value + orange tag **Landlord updated** + a small line "Landlord now: <value>" |
+| different | `set_here` | the value + purple tag **Set on this property** + "Landlord: <value>" |
+| different, property value not blank | absent (never touched) | as `set_here` (an existing value counts as set on this property - Cameron, 2026-10-20) |
+| property blank, landlord not blank | absent (never touched) | blank + "Landlord: <value>", no tag |
 
 A blank landlord value prints as "blank". When the property has no landlord,
 or the landlord contact fails to load, no tags or landlord lines show. The
 two tags differ in lightness as well as hue (accessibility), and each
-carries its text, not color alone.
+carries its text, not color alone. The property page re-reads the landlord
+contact whenever the unit's `landlordId` changes (a roster claim or restore
+without a reload).
 
 ### D7 A new property starts filled in from its landlord
 
@@ -335,13 +414,18 @@ landlord's requirements as soon as the landlord is known (locked from the
 landlord page, or picked), with a note "Filled in from <landlord name>'s
 requirements. Change anything that is different for this property." Picking
 a DIFFERENT landlord refills the section from the new landlord, replacing
-anything typed there. Staff can change any field before saving. The create
-body carries the values; the server classifies (D5), so an unchanged field
-is a copy and a changed one is set on this property. When the landlord has
-no requirements, the section starts blank.
+anything typed there. Staff can change any field before saving. The server
+classifies all twelve items (D5), so an unchanged field is a copy and a
+changed or cleared one is set on this property. When the landlord has no
+requirements, the section starts blank.
 
-The form keeps the landlord Contact it already loads
-(`UnitCreateForm.tsx:136-169`) instead of only its label.
+The form keeps the chosen landlord's full Contact (the picker list already
+holds them; the locked path loads the contact itself instead of only its
+label). While the landlord's record is loading, or after it fails to load,
+the Requirements section shows "Loading <landlord>'s requirements..." or
+"Couldn't load <landlord>'s requirements." with Try again, and Save stays
+disabled: a property saved without the landlord's values would record every
+blank as an exception.
 
 ### D8 Apply to properties (dialog B)
 
@@ -356,49 +440,57 @@ properties (Cameron, 2026-10-20).
 
 Right, "Which properties": the landlord's properties (landlord of record,
 not deleted, any status), each with its address and status. Each row lists,
-live, the checked items that would CHANGE on it. A row:
+live, the checked items that would CHANGE on it, and marks each of those
+that is set on this property on that row (the D6 purple cases, including
+existing values never touched) as "own value". A row:
 
 - with no changes reads "Already matches" and cannot be checked;
-- starts UNCHECKED, marked "Has its own value", when any changing item is
-  set on this property on that row (the D6 purple cases, including existing
-  values never touched);
+- starts UNCHECKED when any changing item is an own value;
 - otherwise starts CHECKED.
 
-A "Select all" box heads the column (it checks every row that has a
-change). The button reads "Update N properties" (N = checked rows; disabled
-at 0). Changing the left column recomputes every row's changes, starts and
-"Already matches" states; it does not re-check a row staff unchecked by
-hand unless that row's state changes.
+There is no Select all. To copy some items while keeping properties' own
+values for others, staff uncheck those items on the left: every row
+recomputes, and a row whose only own-value changes were in the unchecked
+items starts checked. A row with its own values is updated only when staff
+check it. Changing the left column recomputes every row's changes, starting
+state and "Already matches"; a row staff checked or unchecked by hand keeps
+the hand choice unless it becomes "Already matches". The button reads
+"Update N properties" (N = checked rows; disabled at 0).
 
 Server: `POST /api/contacts/:contactId/requirements/apply` with
-`{ unitIds: string[], items: string[], expected: { <item>: <landlord value
-the dialog showed> } }`.
+`{ unitIds: string[], items: string[], expected: { <item id>: { <unit key>: <value or null>, ... } } }`
+- `expected` holds, for every listed item, every one of its keys as the
+dialog showed the landlord's value (null for blank).
 
 - 404 when the contact does not exist; 400 when it is not a landlord, when
-  `items` is empty or names an unknown item, or when `unitIds` is empty or
-  over 200.
+  `items` is empty or names an unknown item, when `expected` does not cover
+  exactly the listed items and their keys, or when `unitIds` is empty, has
+  duplicates or is over 200.
 - 409 `requirements_changed` when the landlord's current value of any listed
   item is not EQUAL (D1) to `expected`; the dialog says "This landlord's
   requirements changed since you opened this. Close and try again." and
-  applies nothing.
-- For each unit id, in order, one conditional write: the unit exists, is not
-  deleted, and its `landlordId` is still this contact; it SETs or REMOVEs the
-  item's keys to the landlord's values, adds the items to
-  `requirements_copied` and removes them from `requirements_set_here`, and
-  stamps `updated_at` (through the repo, like any staff edit). A unit that
-  fails the condition is skipped with a reason (`not_found`, `deleted`,
-  `landlord_changed`); the rest still apply. Per updated unit, one audit
-  `unit_updated` with the changed field names plus `reason:
+  nothing is applied.
+- For each unit id, in order: a consistent read of the unit; skip it with a
+  reason when it does not exist (`not_found`), is deleted (`deleted`), or its
+  `landlordId` is not this contact (`landlord_changed`); otherwise compute
+  the keys that change, and write them (SET, or REMOVE for blank, the pets
+  pair normalized per D1) together with the whole new `requirement_sources`
+  map (listed items `copied`), conditioned on the unit still existing, not
+  deleted, and still having this `landlordId`. A condition failure after a
+  passing read is skipped as `changed_during_apply`. A unit with no changing
+  key is skipped as `already_matches` and not written. Each written unit
+  gets `updated_at` (through the repo, like any staff edit) and one audit
+  `unit_updated` with the changed field names, `reason:
   'requirements_applied'` and the `landlordId`.
 - Response: `{ updated: string[], skipped: [{ unitId, reason }] }`. The
-  dialog closes on success and the landlord page shows "Updated N
-  properties" (plus "M skipped: <addresses and reasons>" when any were
-  skipped).
+  dialog closes; the landlord page re-reads its properties (the existing
+  refetch) and shows "Updated N properties" plus, when any were skipped, "M
+  skipped" with each address and reason.
 
 The writes are not one transaction (no unit write is today); a failure part
 way leaves earlier units applied, and the response says which. A property
-edited between opening the dialog and pressing Update is overwritten for the
-checked items: pressing Update on that row is the staff decision.
+edited between opening the dialog and pressing Update is overwritten for
+the checked items: pressing Update on that row is the staff decision.
 
 ### D9 Landlord page and landlord edit form
 
@@ -410,12 +502,14 @@ checked items: pressing Update on that row is the staff decision.
   landlords, after the Landlord onboarding fieldset, using the same shared
   Requirements fields component as the property forms. Its tags read **On
   property flyers** / **Staff only**, because these values reach flyers only
-  through properties.
+  through properties. It sends only the `req_` keys that changed.
 - The existing "Voucher counts as income" checkbox stays in Landlord
   onboarding, unchanged.
-- The Notes empty state changes to "No notes yet - use + Add." (programs and
-  lease terms still live on each property, but pets now also live here); the
-  e2e assertion moves with it.
+- The Notes empty state changes to "No notes yet - use + Add." (pets now
+  also live on the landlord's requirements); the e2e assertion moves with
+  it, and the assertion that the landlord edit form has no pet fields
+  (`contact-detail.spec.ts:134-155`) is replaced by one for the new
+  fieldset.
 
 ### D10 Property page and property forms
 
@@ -437,22 +531,45 @@ New and Edit property forms:
   utilities, accessibility, lease terms, listing link, video URL, same-day
   RTA), then Requirements (the shared component), then Application process
   and Notes.
-- EVERY field carries a tag beside its label: **On flyer** (tenants see it on
-  the public flyer) or **Staff only** (never leaves the dashboard). A legend
-  under the form title explains both, replacing today's single hint line.
-  Public free-text boxes (pets details, pet fee, utilities, accessibility,
-  lease terms) also show "Tenants see this on the public flyer." under the
-  box. The tag for each field comes from the same allowlist as the flyer
-  projection, so the form cannot claim "Staff only" for a field the flyer
-  publishes. (This applies to the property's own fields and to the twelve
-  items.)
-- "No application fee" is a checkbox above the amount; checked, it records
-  0 and disables the amount; unchecked, the amount is editable and blank
-  means no fee recorded. "One month's rent" disables the fixed deposit
-  amount the same way (they are alternatives; the stored fixed amount is
-  kept, not cleared, so unchecking restores it).
-- Booleans become recordable as "No": every checkbox writes `true` or
-  REMOVE (D1), so there is no "unanswered" versus "No" ambiguity on these.
+- EVERY field carries a tag beside its label, from the D10a table: **On
+  flyer** (tenants see it on the public flyer) or **Staff only** (never
+  leaves the dashboard). A legend under the form title explains both,
+  replacing today's single hint line. Public free-text boxes (pets details,
+  pet fee, utilities, accessibility, lease terms) also show "Tenants see
+  this on the public flyer." under the box.
+- "No application fee" is a checkbox above the amount; checked, it records 0
+  and disables the amount; unchecked, the amount is editable and blank means
+  no fee recorded. "One month's rent" likewise clears and disables the fixed
+  deposit amount (D1: they are alternatives).
+- Same-day RTA keeps its kind and its Yes / No / - display.
+
+### D10a Which fields are public (the tag table)
+
+| Form field | Tag | Reaches the flyer as |
+|---|---|---|
+| Housing authorities | On flyer | `accepted_authorities` ("Accepts:") |
+| Beds, Baths | On flyer | `beds`, `baths` (beds also feeds the voucher-size fallback) |
+| Voucher sizes accepted | On flyer | `voucher_sizes` / `voucher_size` (derived) |
+| Rent min, Rent max | On flyer | `rent_min`, `rent_max` |
+| Payment standard | Staff only | - |
+| Address (every part) | On flyer | `address` |
+| Subzone | Staff only | - |
+| Washer / dryer | On flyer | `washer_dryer` |
+| Tenant-paid utilities | On flyer | `utilities` |
+| Accessibility | On flyer | `accessibility` |
+| Lease terms | On flyer | `lease_terms` |
+| Public listing link | On flyer | `listing_link` |
+| Video URL | On flyer | `video_url` |
+| Same-day RTA | On flyer | `same_day_rta` |
+| The twelve items | per D1 | per D11 |
+| Application process | Staff only | - |
+| Notes | Staff only | - |
+
+The table lives in the registry module (app and dashboard mirror). An
+app-side test walks it: for each field, two units differing only in that
+field must produce DIFFERENT `toUnitFlyer` output when the field is On
+flyer and IDENTICAL output when it is Staff only. The dashboard mirror
+carries the same table with a parity test of the same cases.
 
 ### D11 Public flyer
 
@@ -460,14 +577,14 @@ New and Edit property forms:
   2-bedroom voucher"; studio "Fits a studio voucher"; mixed "Fits a studio or
   1-bedroom voucher"; three or more "Fits a 1-, 2-, or 3-bedroom voucher".
   The projection adds `voucher_sizes: number[]` (all of
-  `acceptedVoucherSizes`, ascending) and keeps `voucher_size` (the first) for
-  a cached older flyer bundle.
+  `acceptedVoucherSizes`, ascending).
 - Pets: "No pets" when checked, followed by the details in parentheses when
   there are any ("No pets (service animals only)"); otherwise the details;
   a legacy boolean reads as in D1. The pet fee is its own row.
 - Deposit: "One month's rent" when checked, else the fixed amount "$N";
-  then ", flexible / payment plan available" when flexible is checked.
-  Deposit notes never appear.
+  then ", flexible / payment plan available" when flexible is checked (the
+  tenant-facing wording Cameron approved; the form checkbox keeps Sam's
+  label "Flexible / payment terms available"). Deposit notes never appear.
 - Application fee: "No application fee" for 0, "$N" otherwise, no row when
   absent.
 - Washer / dryer: a row with its label, only when recorded.
@@ -475,22 +592,29 @@ New and Edit property forms:
 - Staff-only items (screening, deposit notes, tour type, tour process) are
   never in the projection. The projection stays an allowlist.
 
+Older bundles: a flyer page already open in a browser keeps reading the old
+fields until it reloads. The projection keeps every existing key it can
+fill (`voucher_size` = the first size, `deposit`, `application_fee`, `pets`)
+and only ADDS keys; an old page may show "$0" for no fee or omit the No
+pets flag until reloaded. Accepted (the page reloads on the next visit).
+
 ### D12 Matching: several voucher sizes
 
 - The audience filter's voucher size becomes a list, `bedroomSizes:
   number[]`, of CHIP values 0..4 where 4 means "4 or more" (the chip already
   reads "4+ BR"). A tenant matches when its voucher size equals a chosen
-  value below 4, or is 4 or more when 4 is chosen. This fixes the 4+ chip.
+  value below 4, or is 4 or more when 4 is chosen. This fixes the 4+ chip and
+  closes `broadcast-4plus-exact-match-underreach`.
 - Old shape: a stored or posted `bedroomSize: n` reads as `bedroomSizes:
   [min(n, 4)]`, through ONE normalizer used by validation, preview, send and
   the projections (the `authoritiesOfFilter` pattern,
   `blastAudienceRules.ts:182-204`). New drafts store `bedroomSizes`; stored
-  records are not rewritten. POST accepts either key (a stale bundle);
-  `bedroomSizes` wins when both are sent. Values must be integers 0..12 (as
-  today) and are clamped to 4, de-duplicated, ascending; an empty list is no
-  size filter.
+  records are not rewritten. POST accepts either key; `bedroomSizes` wins
+  when both are sent. Values must be integers 0..12 (as today) and are
+  clamped to 4, de-duplicated, ascending; an empty list is no size filter.
 - The projection (`wireAudienceFilter`) returns `bedroomSizes` for every
-  record, old or new, so the list, results and summary show the sizes.
+  record, old or new, and also `bedroomSize` (the first size) when there is
+  one, so a dashboard page open from before the deploy still shows a size.
 - The composer's voucher-size chips become multi-select toggles. With a
   property, the filter pre-fills one chip per accepted size
   (`acceptedVoucherSizes`, so a property with no recorded size still
@@ -510,11 +634,12 @@ New and Edit property forms:
 
 - A staff edit keeps `unit_updated` with field names (the Activity feed shows
   "Property updated: Pets, Pet fee").
-- An Apply writes `unit_updated` with `reason: 'requirements_applied'`; the
-  Activity feed shows "Requirements applied from the landlord" with the
-  field names.
-- A landlord edit writes `contact_updated` with `requirements` in its
-  fields.
+- An Apply writes `unit_updated` with `reason: 'requirements_applied'`. The
+  Activity projection (`toUnitActivityEvent`) lifts `reason` for
+  `unit_updated` ONLY when it is exactly `requirements_applied` (the
+  free-text `listing_status_changed` guard stays); the feed shows
+  "Requirements applied from the landlord" with the field names.
+- A landlord edit writes `contact_updated` with the changed `req_` keys.
 
 ## 4. Consequences to know
 
@@ -524,15 +649,21 @@ New and Edit property forms:
   (`ScheduleTourForm.tsx:247-253`). Applying a landlord's tour type to a
   property with none makes those paths work for it; applying a blank tour
   type removes it (409 `tour_type_required` comes back for that property).
-- Apply stamps `updated_at` on each property, which makes an import-owned
-  property human-owned for the importer, exactly as any staff edit does.
+- Apply stamps `updated_at` on each property it writes, which makes an
+  import-owned property human-owned for the importer, exactly as any staff
+  edit does.
 - Existing deposit, pets, application fee, tour type and tour process values
-  count as set on this property, so the first Apply on a landlord starts
-  most rows UNCHECKED where those differ; Select all is the shortcut.
+  count as set on this property. On a landlord's first Apply, rows with
+  those values start unchecked for those items; staff either uncheck those
+  items on the left (to fill only the new items, such as credit and
+  qualifications) or check each property whose values should be replaced.
 - The flyer stops showing subzone; no flyer has shown one, since nothing
   ever recorded it.
-- The 4+ fix widens existing filters: a stored blast with `bedroomSize: 4`
-  now also reaches 5- to 12-bedroom holders if previewed or sent again.
+- The 4+ fix widens stored filters: a stored `bedroomSize` of 4 now also
+  reaches 5- to 12-bedroom holders, and a stored 5 to 12 (possible from the
+  uncapped pre-fill) now reaches every holder of 4 or more, if that draft is
+  previewed or sent. Sent blasts already display any size of 4 or more as
+  "4+ BR" (`voucherSizeLabel`), so their history reads the same.
 
 ## 5. Out of scope
 
@@ -542,9 +673,11 @@ New and Edit property forms:
 - The #13 flyer changes (heading, rent, same-day tour) and the #26 printable
   flyer.
 - Area on the forms; a subzone-to-area name list.
-- Requirements on the NEW-landlord form; requirements for property managers
-  or owners on a property's roster (only the landlord of record).
-- Any backfill or migration; the importer.
+- Requirements on the NEW-landlord form; copying from roster members other
+  than the landlord of record.
+- Per-property, per-item choices in Apply (one item list applies to every
+  checked property; Cameron chose dialog B over the grid).
+- Any backfill or migration; changes to the importer.
 - The tenant's eviction history (stays free text).
 
 ## 6. Testing
@@ -552,37 +685,49 @@ New and Edit property forms:
 App (vitest):
 
 - Registry and validation: each kind (checkbox REMOVE on false/null; text
-  trim and REMOVE on ''; money clearable; legacy `pets` boolean accepted on
-  write and interpreted on read); `voucher_size_accepted` accepts null, [],
-  an integer, an integer list (de-duplicated, sorted) and rejects 13, -1,
-  2.5, strings, mixed lists; item equality including the Deposit group.
-- Contacts PATCH `requirements`: landlord only (400 for other types),
-  whole-map replace, unknown key 400, and a landlord `pets` key inside the
-  map does NOT touch a tenant-style `pets_source` or AI suggestions.
-- Classification on create, PATCH and landlord change (D5), against a
-  landlord with and without requirements and with no landlord.
-- Apply route: 404/400/409 cases; per-unit skip reasons
-  (deleted, landlord changed); keys SET and REMOVEd (a blank item clears);
-  source sets updated; audit per unit; unitIds cap.
-- Flyer projection: `voucher_sizes`, `voucher_size` kept, subzone gone,
-  new public keys present, staff-only keys absent.
+  trim and REMOVE on ''; money clearable; `deposit_conflict`; legacy `pets`
+  boolean accepted on the unit write and stored in the new shape; no boolean
+  on `req_pets`); `voucher_size_accepted` accepts null, [], an integer, an
+  integer list (de-duplicated, sorted) and rejects 13, -1, 2.5, strings,
+  mixed lists; item equality including the Deposit group and legacy pets.
+- Contacts PATCH `req_` keys: landlord only (400 for other types), one key
+  at a time, unknown `req_` key ignored like any unknown key, and a landlord
+  `req_pets` does NOT touch `pets_source` or AI suggestions.
+- Classification (D5): create with a cleared pre-filled item -> `set_here`;
+  create with the landlord's values -> all `copied`; PATCH to differ, PATCH
+  back to equal; PATCH of one Deposit key; the pets pair; landlord change by
+  PATCH, restore-with-landlord and roster claim REMOVEs the map; no landlord.
+  Assert `requirement_sources` on the HTTP response, not only the repo
+  return value.
+- Apply route: 404/400/409 cases; skip reasons (`not_found`, `deleted`,
+  `landlord_changed`, `already_matches`, `changed_during_apply`); keys SET
+  and REMOVEd (a blank item clears); the pets pair normalized; the sources
+  map; audit per written unit; the 200 cap.
+- Flyer projection: the D10a parity walk; `voucher_sizes`; `voucher_size`
+  kept; subzone gone; staff-only keys absent.
+- Activity projection: `reason` lifted for `unit_updated` /
+  `requirements_applied` only; `listing_status_changed` reason still not
+  served.
 - Audience: the normalizer (old number, list, clamp, both keys), any-of
-  matching with 4 = 4 or more, projection of old records.
+  matching with 4 = 4 or more, projection of old records (`bedroomSizes` and
+  `bedroomSize`).
 
 Dashboard (vitest + testing-library): the shared Requirements component
-(tags, disabling, "Clears"), picker B (expand rules, aria-pressed, summary,
-empty sends null), D6 tag computation table, the Apply dialog defaults and
-live recompute, the create-form prefill and refill-on-landlord-change,
-composer multi-select pre-fill and the 4+ mapping, flyer wording cases.
+(tags from the table, disabling, "Clears"), picker B (expand rules,
+aria-pressed, summary, empty sends null, off-chip stored values), the D6 tag
+table, the Apply dialog defaults, own-value marks and live recompute, the
+create-form prefill, refill on landlord change and the Save hold, composer
+multi-select pre-fill and the 4+ mapping, flyer wording cases, the D10a
+mirror parity.
 
 E2E (Playwright, new spec): a landlord with requirements; "+ Add a
-property" pre-fills them; edit one field on the property -> "Set on this
-property"; change the landlord's pets -> another property shows "Landlord
-updated"; Apply dialog starts the exception row unchecked and the
-out-of-date row checked; Update; the property pages show the new values and
-the Activity line; the flyer shows the public items and none of the staff
-ones; a Matching blast from a two-size property pre-fills two chips, and a
-6-bedroom tenant matches 4+.
+property" pre-fills them; clear one item before saving -> the property shows
+"Set on this property"; change the landlord's pets -> another property
+shows "Landlord updated"; Apply dialog starts the exception row unchecked
+(own value marked) and the out-of-date row checked; Update; the property
+pages show the new values and the Activity line; the flyer shows the public
+items and none of the staff ones; a Matching blast from a two-size property
+pre-fills two chips, and a 6-bedroom tenant matches 4+.
 
 ## 7. Places the build must also update
 
@@ -590,11 +735,15 @@ App:
 
 - `app/src/lib/unitFields.ts` (`WRITABLE_FIELDS`, kinds, `UnitFlyer`,
   `toUnitFlyer`, the never-public comment) and the new registry module;
-  `app/src/repos/unitsRepo.ts` (`UnitItem`, the stale `lease_terms` comment at
-  `:443-446`, string-set ADD/DELETE support in `update`);
-  `app/src/routes/units.ts` (create and PATCH classification; landlord
-  change); `app/src/routes/contacts.ts` (PATCH `requirements`; the apply
-  route); `app/src/repos/contactsRepo.ts` (type).
+  `app/src/repos/unitsRepo.ts` (`UnitItem`; the stale `lease_terms` comment
+  at `:443-446`; the map written with the item keys; `restoreWithLandlord`
+  and the `addContact` landlord claim REMOVE the map when the landlord
+  changes); `app/src/routes/units.ts` (create and PATCH classification and
+  reads; landlord change; `toUnitActivityEvent` `:311-376`);
+  `app/src/routes/contacts.ts` (PATCH `req_` keys; the apply route);
+  `app/src/repos/contactsRepo.ts` (type).
+- The in-memory units repo in `app/test/helpers/twilioWebhookHarness.ts:2857-2925`
+  mirrors the map write, the landlord-change REMOVE and the Apply condition.
 - Matching: `broadcastsRepo.ts` (type), `broadcasts.ts`
   (`parseAudienceFilter`, preview, send, projections, router header
   comment), `blastAudienceRules.ts` (normalizer, `wireAudienceFilter`),
@@ -608,13 +757,17 @@ App:
 
 Dashboard:
 
-- `api/types.ts` (`UnitItem`, `Contact`, `ContactPatch`, `AudienceFilter`,
-  the stale `lease_terms` comment `:2527`), `api/endpoints.ts` (apply call).
-- `routes/listing/`: `ListingDetail.tsx`, `ListingEditForm.tsx`,
+- `api/types.ts` (`UnitItem` incl. `requirement_sources`, `Contact`,
+  `ContactPatch`, `AudienceFilter`, the stale `lease_terms` comment `:2527`,
+  the "Internal (not on the public flyer)" comment on
+  `voucher_size_accepted` `:2545-2548`), `api/endpoints.ts` (apply call).
+- `routes/listing/`: `ListingDetail.tsx`, `useListing.ts` (re-read the
+  landlord on a `landlordId` change), `ListingEditForm.tsx`,
   `UnitCreateForm.tsx`, `listingFormat.ts` (mirror, sizes formatting,
   Activity label), the shared Requirements component and picker.
 - `routes/contact/`: `LandlordFile.tsx`, the new Requirements card and Apply
-  dialog, `ContactEditForm.tsx`, `ContactDetail.tsx` (wiring).
+  dialog, `ContactEditForm.tsx`, `ContactDetail.tsx` (wiring),
+  `useContactFile.ts` (refetch after Apply).
 - `routes/public/FlyerPage.tsx`, `publicApi.ts`.
 - `routes/broadcasts/`: `AudienceFilters.tsx`, `BroadcastComposer.tsx`,
   `broadcastFormat.ts`, `useComposerDraft.ts`, `BroadcastsList.tsx`,
@@ -629,9 +782,19 @@ E2E specs and steps that assert the old shapes: `e2e/scenarios/steps.ts`
 accepted), `contact-detail.spec.ts:134-155` (landlord edit form, Notes copy),
 `matching-blast-rules.spec.ts:269`.
 
-Docs: `documentation/GLOSSARY.md` - add "requirements (landlord and
-property)", "Set on this property" / "Landlord updated", "copy only"; update
-"voucher size of a property" (a list, 0..12, picker B); note subzone is
-staff only. Close `docs/issues/unit-voucher-size-readers-diverge.md` and the
-voucher/W-D/qualifications parts of `docs/issues/unit-onboarding-fields.md`
-(king-bed fit and square footage stay open there).
+Docs:
+
+- `documentation/GLOSSARY.md`: add "requirements (landlord and property)",
+  "Set on this property" / "Landlord updated", "copy only"; update "voucher
+  size of a property" (a list, 0..12, picker B); rewrite "Landlord
+  preferences + expected rent live on the UNIT" (`:176-187`): pets and the
+  other requirements now ALSO live on the landlord as copy-only defaults,
+  and `lease_terms` is public (the entry wrongly says internal-only); note
+  subzone is staff only.
+- `documentation/landlord-onboarding-sequence.mermaid:82`: qualifications
+  are staff only, not in the shareable listing.
+- Close `docs/issues/unit-voucher-size-readers-diverge.md` and
+  `docs/issues/broadcast-4plus-exact-match-underreach.md`; close the
+  voucher, washer/dryer and qualifications parts of
+  `docs/issues/unit-onboarding-fields.md` (king-bed fit and square footage
+  stay open there).

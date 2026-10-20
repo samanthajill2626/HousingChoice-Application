@@ -739,7 +739,9 @@ export interface UnitsRepo {
    * a contact typed landlord (LandlordClaimNotLandlordError). A refusal
    * writes nothing.
    * Adding role `landlord` to an ownerless legacy unit claims `landlordId` in
-   * the same conditional write as contacts[]; a different existing or racing
+   * the same conditional write as contacts[] - and REMOVEs requirement_sources,
+   * a new landlord of record (property requirements spec 2026-10-20 D5); a
+   * different existing or racing
    * owner throws LandlordReassignmentRequiredError instead of being replaced.
    * All roster writes optimistically compare landlordId + contacts[], retry up
    * to three times, then throw RosterWriteConflictError under sustained races.
@@ -869,7 +871,9 @@ export interface UnitsRepo {
    * soft-deleted (restore never reassigns a LIVE property's landlord), or its
    * landlordId is no longer `expectLandlordId` (undefined = ownerless), throws
    * RosterWriteConflictError and writes nothing. Otherwise REMOVEs deleted_at,
-   * sets landlordId to `next.contactId` (or REMOVEs it for `next` null), drops
+   * sets landlordId to `next.contactId` (or REMOVEs it for `next` null) -
+   * REMOVing requirement_sources too whenever that changes the landlord of
+   * record (property requirements spec 2026-10-20 D5) - drops
    * the old landlord's contact-list row, upserts `next` with role pinned
    * 'landlord' (kept when already seated; name/company updated when supplied),
    * and keeps `primary_contact` consistent: when the restore needs a hand-off
@@ -1497,7 +1501,14 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           contacts: roster,
           primary_contact: primary !== undefined ? primary.contactId : null,
         };
-        if (claimsVacantLandlord) patch['landlordId'] = contact.contactId;
+        // A claim of the vacant landlord slot CHANGES the landlord of record:
+        // property requirements (spec 2026-10-20 D5) REMOVE requirement_sources
+        // in this same write - every item becomes never touched against the
+        // new landlord.
+        if (claimsVacantLandlord) {
+          patch['landlordId'] = contact.contactId;
+          patch['requirement_sources'] = null;
+        }
 
         let updated: UnitItem;
         try {
@@ -1865,6 +1876,11 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           landlordId: next !== null ? next.contactId : null, // null -> REMOVE
           deleted_at: null, // null -> REMOVE: the restore itself
         };
+        // property requirements (spec 2026-10-20 D5): a restore that CHANGES the
+        // landlord of record - another landlord, or none - REMOVEs
+        // requirement_sources in this same write (a `keepsOld` restore changes
+        // nothing and keeps it).
+        if ((next !== null ? next.contactId : undefined) !== old) patch['requirement_sources'] = null;
         let heirId: string | undefined;
         if (oldWasPrimary) {
           if (next !== null) {

@@ -10,6 +10,7 @@
 // Self-skipping like the other integration suites when nothing answers at
 // DYNAMODB_ENDPOINT (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -75,6 +76,8 @@ interface Shape {
   contacts: UnitContact[];
   primary?: string;
   deleted?: boolean;
+  /** property requirements (spec 2026-10-20 D5): the stored requirement_sources map. */
+  sources?: UnitItem['requirement_sources'];
 }
 
 interface ParityCase {
@@ -82,7 +85,12 @@ interface ParityCase {
   people: ContactItem[];
   act: (repo: UnitsRepo, unitId: string, read: ReadRosterContacts) => Promise<unknown>;
   /** The outcome, when the case pins it (an ADDED landlord row's position is applyPrimary's choice). */
-  expected?: { contacts: UnitContact[]; primary: string | null };
+  expected?: {
+    contacts: UnitContact[];
+    primary: string | null;
+    /** The requirement_sources the write leaves; null = REMOVEd; undefined = not pinned. */
+    sources?: UnitItem['requirement_sources'] | null;
+  };
 }
 
 const remove =
@@ -241,6 +249,138 @@ const CASES: Array<[string, ParityCase]> = [
       expected: { contacts: [row('c-dead', 'pm', false), row('c-new', 'pm', true)], primary: 'c-new' },
     },
   ],
+  // property requirements (spec 2026-10-20 D5): a change of the landlord of
+  // record REMOVEs requirement_sources in the same write; a roster write that
+  // keeps the landlord leaves it alone; and a fenced write read BEFORE the
+  // change can never write its map back.
+  [
+    'restore swap (requirements): the map is removed',
+    {
+      shape: {
+        landlordId: 'c-old',
+        contacts: [row('c-old', 'landlord', false), row('c-pm', 'pm', true)],
+        primary: 'c-pm',
+        deleted: true,
+        sources: { pets: 'set_here' },
+      },
+      people: [person('c-new'), person('c-pm')],
+      act: (repo, unitId, read) =>
+        repo.restoreWithLandlord(
+          unitId,
+          { expectLandlordId: 'c-old', next: { contactId: 'c-new' } },
+          { readContacts: read },
+        ),
+      expected: { contacts: [row('c-pm', 'pm', true), row('c-new', 'landlord', false)], primary: 'c-pm', sources: null },
+    },
+  ],
+  [
+    'restore clear (requirements): the map is removed',
+    {
+      shape: {
+        landlordId: 'c-old',
+        contacts: [row('c-old', 'landlord', false), row('c-pm', 'pm', true)],
+        primary: 'c-pm',
+        deleted: true,
+        sources: { pets: 'set_here' },
+      },
+      people: [person('c-pm')],
+      act: (repo, unitId, read) =>
+        repo.restoreWithLandlord(
+          unitId,
+          {
+            expectLandlordId: 'c-old',
+            next: null,
+            expectContacts: [row('c-old', 'landlord', false), row('c-pm', 'pm', true)],
+            promote: null,
+          },
+          { readContacts: read },
+        ),
+      expected: { contacts: [row('c-pm', 'pm', true)], primary: 'c-pm', sources: null },
+    },
+  ],
+  [
+    'add (requirements): a claim of the vacant landlord slot removes the map',
+    {
+      shape: { contacts: [row('c-pm', 'pm', true)], primary: 'c-pm', sources: { credit_requirements: 'set_here' } },
+      people: [person('c-pm'), person('c-new')],
+      act: (repo, unitId, read) =>
+        repo.addContact(unitId, { contactId: 'c-new', role: 'landlord' }, LANDLORD_FACTS, { readContacts: read }),
+      expected: { contacts: [row('c-pm', 'pm', true), row('c-new', 'landlord', false)], primary: 'c-pm', sources: null },
+    },
+  ],
+  [
+    '(PIN) add (requirements): a row that is not a claim leaves the map alone',
+    {
+      shape: { landlordId: 'c-ll', contacts: [row('c-ll', 'landlord', true)], primary: 'c-ll', sources: { pets: 'copied' } },
+      people: [person('c-ll'), person('c-pm')],
+      act: (repo, unitId, read) =>
+        repo.addContact(unitId, { contactId: 'c-pm', role: 'pm' }, LANDLORD_FACTS, { readContacts: read }),
+      expected: {
+        contacts: [row('c-ll', 'landlord', true), row('c-pm', 'pm', false)],
+        primary: 'c-ll',
+        sources: { pets: 'copied' },
+      },
+    },
+  ],
+  [
+    '(PIN) remove (requirements): a non-primary removal leaves the map alone',
+    {
+      shape: {
+        landlordId: 'c-ll',
+        contacts: [row('c-ll', 'landlord', true), row('c-pm', 'pm', false)],
+        primary: 'c-ll',
+        sources: { pets: 'copied' },
+      },
+      people: [person('c-ll')],
+      act: remove('c-pm'),
+      expected: { contacts: [row('c-ll', 'landlord', true)], primary: 'c-ll', sources: { pets: 'copied' } },
+    },
+  ],
+  [
+    'slow fenced write (requirements): a read taken before a restore swap never writes its map back',
+    {
+      shape: {
+        landlordId: 'c-old',
+        contacts: [row('c-old', 'landlord', false), row('c-pm', 'pm', true)],
+        primary: 'c-pm',
+        deleted: true,
+        sources: { pets: 'set_here' },
+      },
+      people: [person('c-new'), person('c-pm')],
+      act: async (repo, unitId, read) => {
+        const before = structuredClone(await repo.getById(unitId, { consistentRead: true })) as UnitItem;
+        await repo.restoreWithLandlord(
+          unitId,
+          { expectLandlordId: 'c-old', next: { contactId: 'c-new' } },
+          { readContacts: read },
+        );
+        await expect(
+          repo.updateIfRequirementsCurrent(before, { pet_fee: '$300', requirement_sources: { pets: 'set_here' } }),
+        ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+        expect((await repo.getById(unitId, { consistentRead: true }))?.['pet_fee']).toBeUndefined();
+      },
+      expected: { contacts: [row('c-pm', 'pm', true), row('c-new', 'landlord', false)], primary: 'c-pm', sources: null },
+    },
+  ],
+  [
+    'slow fenced write (requirements): a read taken before a landlord claim never writes its map back',
+    {
+      shape: { contacts: [row('c-pm', 'pm', true)], primary: 'c-pm', sources: { credit_requirements: 'set_here' } },
+      people: [person('c-pm'), person('c-new')],
+      act: async (repo, unitId, read) => {
+        const before = structuredClone(await repo.getById(unitId, { consistentRead: true })) as UnitItem;
+        await repo.addContact(unitId, { contactId: 'c-new', role: 'landlord' }, LANDLORD_FACTS, { readContacts: read });
+        await expect(
+          repo.updateIfRequirementsCurrent(before, {
+            credit_requirements: 'Score 600+',
+            requirement_sources: { credit_requirements: 'set_here' },
+          }),
+        ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+        expect((await repo.getById(unitId, { consistentRead: true }))?.['credit_requirements']).toBeUndefined();
+      },
+      expected: { contacts: [row('c-pm', 'pm', true), row('c-new', 'landlord', false)], primary: 'c-pm', sources: null },
+    },
+  ],
 ];
 
 /** The fields a roster write decides. */
@@ -250,6 +390,7 @@ function observe(unit: UnitItem | undefined) {
     primary: unit?.primary_contact ?? null,
     landlordId: unit?.landlordId ?? null,
     deleted: typeof unit?.deleted_at === 'string',
+    sources: unit?.requirement_sources ?? null,
   };
 }
 
@@ -276,6 +417,7 @@ describe.skipIf(!reachable)('heir parity: the real unitsRepo and the API-test fa
       status: 'available',
       contacts: structuredClone(shape.contacts),
       ...(shape.primary !== undefined && { primary_contact: shape.primary }),
+      ...(shape.sources !== undefined && { requirement_sources: structuredClone(shape.sources) }),
     });
     if (shape.landlordId === undefined) await units.update(created.unitId, { landlordId: null });
     if (shape.deleted === true) await units.softDelete(created.unitId, GONE);
@@ -295,6 +437,7 @@ describe.skipIf(!reachable)('heir parity: the real unitsRepo and the API-test fa
       ...(c.shape.landlordId !== undefined && { landlordId: c.shape.landlordId }),
       ...(c.shape.primary !== undefined && { primary_contact: c.shape.primary }),
       ...(c.shape.deleted === true && { deleted_at: GONE }),
+      ...(c.shape.sources !== undefined && { requirement_sources: structuredClone(c.shape.sources) }),
     } as UnitItem);
     await c.act(world.unitsRepo, 'u-parity', liveness(c.people));
     const fake = observe(world.units.get('u-parity'));
@@ -303,6 +446,7 @@ describe.skipIf(!reachable)('heir parity: the real unitsRepo and the API-test fa
     if (c.expected !== undefined) {
       expect(real.contacts).toEqual(c.expected.contacts);
       expect(real.primary).toBe(c.expected.primary);
+      if (c.expected.sources !== undefined) expect(real.sources).toEqual(c.expected.sources);
     }
   });
 });

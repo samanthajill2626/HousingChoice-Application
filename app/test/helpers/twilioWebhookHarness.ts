@@ -3112,7 +3112,13 @@ export function createFakeWorld(): FakeWorld {
         for (const c of roster) c.primaryContact = c.contactId === contact.contactId;
       }
       unit.contacts = roster;
-      if (claimsVacantLandlord) unit.landlordId = contact.contactId;
+      if (claimsVacantLandlord) {
+        unit.landlordId = contact.contactId;
+        // property requirements (spec 2026-10-20 D5): the claim changes the
+        // landlord of record - the real repo REMOVEs requirement_sources in
+        // the same write.
+        delete unit.requirement_sources;
+      }
       const primary = roster.find((c) => c.primaryContact);
       if (primary !== undefined) unit.primary_contact = primary.contactId;
       else delete unit.primary_contact; // null -> REMOVE, exactly as the real repo
@@ -3345,6 +3351,10 @@ export function createFakeWorld(): FakeWorld {
       else if (scalar !== undefined) unit.primary_contact = scalar;
       if (next !== null) unit.landlordId = next.contactId;
       else delete (unit as Partial<UnitItem>).landlordId;
+      // property requirements (spec 2026-10-20 D5): the real repo REMOVEs
+      // requirement_sources when the restore changes the landlord of record
+      // (a swap or a clear) - mirror it.
+      if ((next !== null ? next.contactId : undefined) !== old) delete unit.requirement_sources;
       delete unit.deleted_at;
       unit.updated_at = new Date().toISOString();
       if (heirId !== undefined && old !== undefined) opts?.onPrimaryHandoff?.({ from: old, to: heirId });

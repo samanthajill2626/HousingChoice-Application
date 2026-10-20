@@ -9,7 +9,7 @@
   `docs/superpowers/reviews/2026-10-20-property-requirements/`.
 - Spec review: 4 rounds (the cap) + Cameron's two gate decisions -
   `docs/superpowers/reviews/2026-10-20-property-requirements/design-review/adjudications.md`.
-- Status: PLAN v1 (2026-10-20), assembled, before plan review. Sections 0-4
+- Status: PLAN v2 (2026-10-20), plan review round 1 folded in. Sections 0-4
   are BINDING; slice sections 5-11 are the seven opus section drafts,
   verbatim; section 4 (assembly rulings AR1-AR48) wins over any slice text it
   contradicts. The drafts themselves (gitignored, under
@@ -600,6 +600,7 @@ Slices:
 | Audience `bedroomSizes` | `parseAudienceFilter` (4.x); composer (4.x); matrix seed (4.x) | resolver (4.x); `wireAudienceFilter` (create echo, results, list) (4.x); preview / send re-read (`broadcasts.ts:1042,1285`) (4.x); dashboard summary, composer, list, results (4.x) |
 | `subzone` | validator (1.x); both forms (5.x) | `toUnitFlyer` drops it (1.x); `FlyerPage` neighborhood line (6.x); `ListingDetail` row (6.x); `similarUnits.ts:52-65` (WATCH: unchanged) |
 | `washer_dryer` | validator (1.x); both forms (5.x) | `toUnitFlyer` (1.x); `FlyerPage` (6.x); `ListingDetail` (6.x) |
+| `landlordId` vs `requirement_sources` (PR1-9) | WATCH: the importer's import-owned branch REPLACES `landlordId` (`app/src/lib/import/apply.ts:1604-1609`) without touching the map. Safe because every writer of the map (API create, PATCH, Apply) stamps `updated_at`, which makes the unit human-owned, so an import-owned unit never holds a map. Do not add a map writer that skips `updated_at`. | - |
 
 ### 3.2 Watch items for every slice
 
@@ -835,6 +836,54 @@ All slices
   tree wins: stop, record the difference in the slice report, and raise a
   QUESTION when it changes a decision.
 
+### 4.1 Plan review round 1 rulings (BINDING; adjudications in
+### `docs/superpowers/reviews/2026-10-20-property-requirements/plan-review/adjudications.md`)
+
+Two fresh reviewers, 10 unique findings, all accepted. Rulings whose
+substance was a slice's verbatim code were fixed IN the slice text (the
+slice writers edited their own drafts and sections 5-11 were rebuilt), so
+the slice text and these rulings agree; where they ever disagree, this
+section wins.
+
+- **PR1-1 (AR32 delivered).** Task 5.8 (ListingEditForm) and Task 6.9
+  (ContactEditForm) render the bound `deposit_conflict` copy on a 400
+  `{ error: 'deposit_conflict' }`, keep the form open with what staff typed,
+  and test it.
+- **PR1-2 (AR1 delivered).** Task 1.7's `PROPERTY_FORM_FIELDS` is the 35-row
+  list, Owning landlord first, equal row for row to Task 5.2's.
+- **PR1-3.** The dashboard mirror reads `tour_type` through the dashboard's
+  tour type list: a value outside the enum reads as blank, as in the app.
+- **PR1-4, PR1-5.** Task 7.4's mutants: M1's liveness check runs the file that
+  holds the `planUnitApply` cases; M3 targets `rowIsChecked` in
+  `applyRequirementsModel.ts`; the revert covers every mutated file.
+- **PR1-6 (AR6 delivered).** Task 3.2's route passes a `structuredClone` of
+  its consistent read to both `planUnitApply` and `applyRequirements`, with a
+  harness-level race test.
+- **PR1-7 (AR36, AR39, AR46 delivered).** Task 6.9 uses S5's
+  `requirementFormValuesFromLandlord` / `buildRequirementPatch` /
+  `toLandlordPatch` and tests the `ok: false` branch; Task 6.2 imports
+  `WASHER_DRYER_LABELS` from `./requirements.js`; Task 7.9 does not edit
+  AGENTS.md.
+- **PR1-8 (decision).** The Apply write's not-deleted condition follows
+  `isDeleted`: `(attribute_not_exists(deleted_at) OR deleted_at = '')`; the
+  harness repo mirrors it with `isDeleted`. Amends plan 2.3.
+- **PR1-9.** WATCH row added to 3.1 (the importer replaces `landlordId` only on
+  import-owned units, which never hold a map).
+- **PR1-10 (decision; supersedes AR8).** On the fenced PATCH path,
+  `unit_updated.fields` = the unit keys whose STORED value the write changes
+  (a SET to a different value, or a REMOVE of a held key), computed from the
+  read and the final patch, never `requirement_sources` - D13's "actually
+  changed". The plain path keeps `Object.keys(validation.fields)`. Amends
+  plan 2.4.
+- **PR1-10a (planner, from the S2 writer's open item).** A fenced PATCH whose
+  `fields` list comes out EMPTY (every key re-sent unchanged) still writes
+  (stamps `updated_at`, as any staff save does) but appends NO `unit_updated`
+  row (the tombstone no-op reasoning, `units.ts:2122-2129`).
+- **S6 follow-on (accepted).** `FlyerPage.tsx` imports `WASHER_DRYER_LABELS`
+  from `../listing/requirements.js` instead of keeping a private copy (the
+  dashboard has no route-level code splitting, so the public page loads the
+  module anyway).
+
 ## 5. S1 - App foundations (Tasks 1.1-1.7)
 
 # S1 - App foundations (Tasks 1.1 - 1.7) - section draft
@@ -847,7 +896,10 @@ sections 0-3 (BINDING). Worktree `W:\tmp\property-requirements`
 
 ## A. CONTRACT ISSUES (for the planner to rule)
 
-CI-1. "Owning landlord" has no tag row. D10 says EVERY field on the New and
+CI-1 - RULED (plan AR1, ACCEPT): Task 1.7 now carries the `Owning landlord`
+row as its FIRST row (35 rows, equal to S5 Task 5.2's list) and the walk's
+SAMPLE carries a `landlordId`. Original issue text follows.
+"Owning landlord" has no tag row. D10 says EVERY field on the New and
 Edit forms carries a tag from the D10a table, and plan 2.1 defines
 `PROPERTY_FORM_FIELDS` as "every field on the New / Edit property forms",
 but the New form's first field is the landlord picker
@@ -1066,6 +1118,12 @@ alternatives), D2 (the `req_` keys; no boolean `req_pets`), D3 / D4
 constants.
 
 Files: `app/src/lib/requirements.ts` (NEW), `app/test/requirements.test.ts` (NEW).
+
+Plan AR28 (binding): `requirements.ts` stays a LEAF - its ONLY import is
+`import { isTourType } from './toursModel.js';` (toursModel itself imports
+nothing) and it uses no Node globals (`Object.hasOwn`, `Object.freeze`,
+`Map`, `Set` are ECMAScript built-ins). Tasks 1.2, 1.3 and 1.7 only APPEND
+code and add no import.
 
 ### Step 1 - tests (write first)
 
@@ -4533,7 +4591,10 @@ table lives in the registry; for each field, two units differing only in
 that field give DIFFERENT flyers when On flyer and IDENTICAL when Staff
 only), spec section 6's "the D10a parity walk over more than one base unit
 (a base whose recorded sizes equal its beds would hide the voucher-size
-field)". See CI-1 (Owning landlord) and CI-2 (No application fee row).
+field)". Per plan AR1 the table's FIRST row is `Owning landlord`
+(`landlordId`, Staff only; New form only), 35 rows in all, and the list must
+equal S5 Task 5.2's mirror row for row (S5's drift test imports this module).
+CI-2 (the No application fee row) stands as drafted.
 
 Files: `app/src/lib/requirements.ts` (append),
 `app/test/propertyFormFlyerParity.test.ts` (NEW).
@@ -4572,6 +4633,9 @@ import type { UnitItem } from '../src/repos/unitsRepo.js';
  * cleared field falls back to (no base has 7 beds or sizes 9 / 11).
  */
 const SAMPLE: Readonly<Record<string, unknown>> = {
+  // plan AR1: the Owning landlord row. Staff only - two units differing only in
+  // their landlord of record give identical toUnitFlyer output.
+  landlordId: 'contact-ll-parity',
   accepted_authorities: ['Parity Housing Authority'],
   beds: 7,
   baths: 4.5,
@@ -4713,8 +4777,11 @@ function flyerTagMismatches(fields: readonly FormFieldVisibility[], bases: reado
 }
 
 describe('PROPERTY_FORM_FIELDS - the D10a tag table', () => {
-  it('lists every property-form field in form order with its tag (D10, D10a)', () => {
+  it('lists every property-form field in form order with its tag (D10, D10a, plan AR1) - 35 rows', () => {
+    expect(PROPERTY_FORM_FIELDS).toHaveLength(35);
     expect(PROPERTY_FORM_FIELDS.map((f) => [f.label, [...f.keys], f.flyer])).toEqual([
+      // New form only (plan AR1): the landlord picker; landlordId never reaches the flyer.
+      ['Owning landlord', ['landlordId'], 'staff_only'],
       ['Housing authorities', ['accepted_authorities'], 'on_flyer'],
       ['Beds', ['beds'], 'on_flyer'],
       ['Baths', ['baths'], 'on_flyer'],
@@ -4772,6 +4839,12 @@ describe('PROPERTY_FORM_FIELDS - the D10a tag table', () => {
     }
   });
 
+  it('names landlordId on the Owning landlord row only, tagged Staff only (plan AR1)', () => {
+    const rows = PROPERTY_FORM_FIELDS.filter((f) => f.keys.includes('landlordId'));
+    expect(rows.map((f) => [f.label, f.flyer])).toEqual([['Owning landlord', 'staff_only']]);
+    expect(PROPERTY_FORM_FIELDS[0]?.label).toBe('Owning landlord');
+  });
+
   it('is frozen', () => {
     expect(Object.isFrozen(PROPERTY_FORM_FIELDS)).toBe(true);
     expect(Object.isFrozen(PROPERTY_FORM_FIELDS[0])).toBe(true);
@@ -4818,7 +4891,7 @@ the loader reports the missing export). The two `(PIN)` cases ("walks more
 than one base" and the trap pin) pass already - they pin the bases, not the
 table. `npm run typecheck -w @housingchoice/app` fails with TS2305 for
 `PROPERTY_FORM_FIELDS` and `FormFieldVisibility`. Section-writer check on a
-scratch copy: 6 fail, 2 pass.
+scratch copy: 7 fail, 2 pass.
 
 ### Step 3 - implementation
 
@@ -4856,12 +4929,16 @@ const REQUIREMENT_FORM_FIELDS: readonly FormFieldVisibility[] = REQUIREMENT_ITEM
 
 /**
  * D10a: every field on the New / Edit property forms, in D10 form order
- * (Property details, then Requirements, then Application process and Notes),
- * with its tag. The app-side parity walk (app/test/propertyFormFlyerParity.test.ts)
- * fails when a tag disagrees with what lib/unitFields.ts toUnitFlyer
- * publishes; the dashboard mirror carries the same table.
+ * (the New form's landlord picker, then Property details, then Requirements,
+ * then Application process and Notes), with its tag - 35 rows. The first row,
+ * "Owning landlord", is on the New form only (plan AR1); the Edit form has no
+ * landlord field. The app-side parity walk
+ * (app/test/propertyFormFlyerParity.test.ts) fails when a tag disagrees with
+ * what lib/unitFields.ts toUnitFlyer publishes; the dashboard mirror carries
+ * the same table, and its drift test imports this one and compares.
  */
 export const PROPERTY_FORM_FIELDS: readonly FormFieldVisibility[] = Object.freeze([
+  formField('Owning landlord', ['landlordId'], 'staff_only'),
   formField('Housing authorities', ['accepted_authorities'], 'on_flyer'),
   formField('Beds', ['beds'], 'on_flyer'),
   formField('Baths', ['baths'], 'on_flyer'),
@@ -4946,7 +5023,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 | D5 snapshot parse and its 400s (shape, item not an object) | 1.2; landlordId mismatch 400 = S2 |
 | D6 OWN VALUE definition | 1.2 (`isOwnValue`); display = S6 |
 | D8 per-unit Apply decision, skip order, whole-item writes, sources map, Clears | 1.3; route = S3 |
-| D10a tag table in the registry + app parity walk over more than one base | 1.7 |
+| D10a tag table in the registry (35 rows incl. the AR1 `Owning landlord` row) + app parity walk over more than one base | 1.7 |
+| AR28: `requirements.ts` stays a leaf (only import `./toursModel.js`, no Node globals) | 1.1 (the module's single import), kept by 1.2, 1.3, 1.7 (append-only, no new imports) |
 | D11 projection: `voucher_sizes`, `voucher_size` kept, pets / no_pets / pet_fee, deposit trio, application fee 0, washer_dryer, subzone gone, staff-only keys absent | 1.6 (wording = S6) |
 | D13 Apply audit field names (changed keys, never the map) | 1.3 (`changedKeys`); audit write = S3 |
 | Section 6 App: registry and validation; voucher list accept / reject; item equality | 1.1, 1.5 |
@@ -4998,7 +5076,8 @@ is S4's own constant.
 S5 (dashboard forms + mirror):
 - The mirror must carry the same names AND the same error strings (CI-3) and
   the same `PROPERTY_FORM_FIELDS` rows / labels / order (1.7), including the
-  `No application fee` row (CI-2) and whatever CI-1 rules.
+  `No application fee` row (CI-2) and the `Owning landlord` first row (plan
+  AR1) - 35 rows, equal to S5 Task 5.2's literal list.
 - The server now stores `voucher_size_accepted` as a list; a stored list
   reads as blank in today's edit form input (B facts), so nothing breaks
   before S5 replaces it with the picker.
@@ -5056,16 +5135,28 @@ S1 is assumed DONE exactly as plan 2.1 / 2.2 bind it.
   property's landlord of record CHANGES"). Proposed ruling: REMOVE
   `requirement_sources` whenever `(next === null ? undefined : next.contactId) !== expectLandlordId`
   (a swap or a clear; the `keepsOld` race path at `unitsRepo.ts:1656` keeps it).
-- **CI-3 Audit field list: D13 "actually changed" vs plan 2.4 "SETs or
-  REMOVEs".** D13 says the names are "the unit keys the write actually
-  changed"; plan 2.4 says "the unit keys the write SETs or REMOVEs (body keys
-  after normalization plus keys the server added)". They differ for a body key
-  re-sent with its stored value (today's list is `Object.keys(validation.fields)`,
-  `units.ts:2249-2252`, which lists it). Proposed ruling: plan 2.4 - every
-  normalized body key is listed; the legacy-pets partner keys are added ONLY
-  when they change the stored value. "A cleared deposit amount" (D13) is the
-  form's own `deposit: null` body key: the server never clears an amount
-  itself (it answers `deposit_conflict`), so no server-added deposit key exists.
+- **CI-3 Audit field list - RULED (plan review round 1, PR1-10; supersedes
+  this draft's first proposal).** D13 "the unit keys the write actually
+  changed" wins over plan 2.4's "SETs or REMOVEs". On the FENCED path (a
+  requirement key touched, or the landlord of record changed)
+  `unit_updated.fields` = the keys whose STORED value the write changes - a
+  SET to a value different from the read (or of a key the read lacked), or a
+  REMOVE of a key the read held - computed from the read and the final patch
+  (partner keys included), never `requirement_sources`. A body key re-sent
+  with its stored value is NOT listed; a raw `pets: true` on a unit with no
+  `no_pets` does not list `no_pets`. The PLAIN path (no requirement key, no
+  landlord change - including a body re-sending the stored landlordId) keeps
+  today's `Object.keys(validation.fields)` (`units.ts:2249-2252`). "A cleared
+  deposit amount" (D13) is the form's own `deposit: null` body key: the server
+  never clears an amount itself (it answers `deposit_conflict`). Implemented
+  in Task 2.3 (`changedKeys`) and Task 2.5 (path choice).
+- **CI-3b `applyRequirements` and a blank `deleted_at` - RULED (PR1-8).**
+  `isDeleted` treats only a NON-EMPTY `deleted_at` as deleted
+  (`unitsRepo.ts:532-534`) and S1's `planUnitApply` follows it, so the Apply
+  write's not-deleted condition is
+  `(attribute_not_exists(#expectedDeletedAt) OR #expectedDeletedAt = :blankDeletedAt)`
+  with `:blankDeletedAt = ''`, and the fake refuses exactly when
+  `isUnitDeleted(unit)`. Implemented in Task 2.1 with a parity case each way.
 - **CI-4 Which landlord contact a PATCH classifies against is unspecified for
   an unusual landlord of record.** Proposed ruling: the landlord of record
   AFTER the write (the new one on a change, which must pass
@@ -5200,7 +5291,8 @@ command.
 **Goal.** Plan 2.3's two methods on the real repo and the API-test fake, with
 the same conditions: write only while the unit exists and its `landlordId`
 and `requirement_sources` are exactly what the caller read (absent included);
-`applyRequirements` also needs `attribute_not_exists(deleted_at)`. SET
+`applyRequirements` also needs the unit NOT deleted as `isDeleted` reads it
+(`unitsRepo.ts:532-534`: `deleted_at` absent or '' - PR1-8). SET
 non-null, REMOVE null, an EMPTY map REMOVEs, stamp `updated_at`, ALL_NEW.
 Delivers D5 (the fence), D8 (the Apply write S3 calls), spec section 7 (the
 harness mirrors the map write and the Apply condition).
@@ -5221,8 +5313,10 @@ harness mirrors the map write and the Apply condition).
 // (DynamoDB Local) and the API-test fake (test/helpers/twilioWebhookHarness.ts
 // createFakeWorld), which the route suites run on. Each writes only while the
 // unit exists with the landlordId and requirement_sources the caller READ
-// (absent included); applyRequirements also refuses a soft-deleted unit. A
-// lost condition throws ConditionalCheckFailedException and writes nothing.
+// (absent included); applyRequirements also refuses a soft-deleted unit - a
+// NON-EMPTY deleted_at, exactly as unitsRepo.isDeleted reads it (a blank
+// deleted_at is live). A lost condition throws
+// ConditionalCheckFailedException and writes nothing.
 // An empty map REMOVEs the attribute (it is never stored empty). The fake half
 // runs without Docker; the real half self-skips.
 import { randomUUID } from 'node:crypto';
@@ -5481,13 +5575,22 @@ describe('unitsRepo.applyRequirements - the Apply write (D8)', () => {
     expect(written).toEqual(stored);
   });
 
-  parity('applyRequirements refuses a soft-deleted unit - nothing written', async (w, id) => {
+  parity('applyRequirements refuses a soft-deleted unit (a non-empty deleted_at) - nothing written', async (w, id) => {
     await w.putUnit(unitRow(id, { deleted_at: STAMP }));
     const read = await readBack(w, id);
     await expect(
       w.units.applyRequirements(read, { credit_requirements: 'Score 600+' }),
     ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
     expect(await readBack(w, id)).not.toHaveProperty('credit_requirements');
+  });
+
+  parity('applyRequirements writes a unit whose deleted_at is BLANK - live, as isDeleted reads it', async (w, id) => {
+    await w.putUnit(unitRow(id, { deleted_at: '' }));
+    const read = await readBack(w, id);
+    await w.units.applyRequirements(read, { credit_requirements: 'Score 600+' });
+    const stored = await readBack(w, id);
+    expect(stored['credit_requirements']).toBe('Score 600+');
+    expect(stored.deleted_at).toBe('');
   });
 
   parity('applyRequirements refuses when the map changed since the read', async (w, id) => {
@@ -5549,8 +5652,10 @@ Replace with:
   updateIfRequirementsCurrent(read: UnitItem, patch: Record<string, unknown>): Promise<UnitItem>;
   /**
    * property requirements (spec 2026-10-20 D8; plan 2.3): the Apply write -
-   * updateIfRequirementsCurrent's fence plus attribute_not_exists(deleted_at),
-   * so a property deleted after the caller's read is never written. ALL_NEW.
+   * updateIfRequirementsCurrent's fence plus "not deleted" exactly as
+   * isDeleted reads it: deleted_at absent OR '' (a non-empty stamp is a
+   * deleted property), so a property deleted after the caller's read is never
+   * written and a blank stamp is never mistaken for one. ALL_NEW.
    */
   applyRequirements(read: UnitItem, patch: Record<string, unknown>): Promise<UnitItem>;
 ```
@@ -5603,9 +5708,10 @@ Replace with:
    * property requirements (spec 2026-10-20 D5 / D8; plan 2.3): ONE update
    * fenced on what the caller READ - the unit exists, its landlordId and its
    * requirement_sources are exactly `read`'s (attribute_not_exists when absent
-   * there), and with `requireLive` it carries no deleted_at. The SET/REMOVE
-   * build is updateRosterIfCurrent's; an empty requirement_sources map
-   * REMOVEs. A lost condition throws ConditionalCheckFailedException.
+   * there), and with `requireLive` it is not deleted as isDeleted reads it
+   * (deleted_at absent or ''; plan review PR1-8). The SET/REMOVE build is
+   * updateRosterIfCurrent's; an empty requirement_sources map REMOVEs. A lost
+   * condition throws ConditionalCheckFailedException.
    */
   async function updateIfRequirementsFenced(
     read: UnitItem,
@@ -5650,8 +5756,10 @@ Replace with:
       conditions.push('attribute_not_exists(#expectedSources)');
     }
     if (opts.requireLive) {
+      // isDeleted (above) counts only a NON-EMPTY deleted_at as deleted.
       names['#expectedDeletedAt'] = 'deleted_at';
-      conditions.push('attribute_not_exists(#expectedDeletedAt)');
+      values[':blankDeletedAt'] = '';
+      conditions.push('(attribute_not_exists(#expectedDeletedAt) OR #expectedDeletedAt = :blankDeletedAt)');
     }
 
     const clauses = [`SET ${sets.join(', ')}`];
@@ -5717,8 +5825,9 @@ Replace with:
    * property requirements (spec 2026-10-20 D5 / D8; plan 2.3): the real
    * repo's fenced write - the unit exists, its landlordId and
    * requirement_sources equal what the caller READ (absent on both sides
-   * included), and with `requireLive` no deleted_at attribute; then SET /
-   * REMOVE (an empty map REMOVEs) and stamp updated_at. The caller must pass
+   * included), and with `requireLive` not deleted as isUnitDeleted reads it
+   * (the real `attribute_not_exists OR = ''`); then SET / REMOVE (an empty
+   * map REMOVEs) and stamp updated_at. The caller must pass
    * its OWN copy of the read: getById below hands out the live stored object,
    * which a concurrent write mutates in place.
    */
@@ -5739,7 +5848,7 @@ Replace with:
       !unit ||
       !sameAsRead(unit, read, 'landlordId') ||
       !sameAsRead(unit, read, 'requirement_sources') ||
-      (requireLive && ownsKey(unit, 'deleted_at'))
+      (requireLive && isUnitDeleted(unit))
     ) {
       throw conditionalCheckFailed(`${method}: unit ${read.unitId} changed since the read`);
     }
@@ -5784,7 +5893,7 @@ Replace with:
 
 **Step 4 - run GREEN.**
 - `npx vitest run test/unitsRepoRequirementsFence.integration.test.ts` - all
-  28 cases (14 x 2) pass; confirm the `[DynamoDB Local]` half RAN (not skipped).
+  30 cases (15 x 2) pass; confirm the `[DynamoDB Local]` half RAN (not skipped).
 - `npx vitest run test/unitsRepo test/primaryHandoffParity.integration.test.ts test/caseworkerRepoParity.integration.test.ts test/unitsApi.test.ts`
 - From `W:\tmp\property-requirements`: `npm run typecheck`
 
@@ -5802,7 +5911,7 @@ feat(units): fenced requirement writes on the units repo and the API-test fake
 
 property requirements (spec 2026-10-20 D5, D8; plan 2.3):
 updateIfRequirementsCurrent (the PATCH fence) and applyRequirements (the
-Apply write, also attribute_not_exists(deleted_at)) write only while the
+Apply write, also not deleted as isDeleted reads it) write only while the
 unit's landlordId and requirement_sources are exactly what the caller read;
 an empty map REMOVEs. Real/fake parity suite against DynamoDB Local.
 
@@ -6456,8 +6565,9 @@ requirement items, so both routes (2.4, 2.5) and every fenced attempt share
 it: the legacy `pets` partner (D1), `deposit_conflict` against the stored
 record merged with the body (D1), the classification sequence with the reset
 on a landlord change (D5, via S1's `nextRequirementSources`), the map written
-WHOLE and only when it changes (D5), and the audit field list (D13 / plan 2.4,
-CI-3). Also the create-body snapshot split (D5 / plan 2.4).
+WHOLE and only when it changes (D5), and the audit field list (D13 as ruled in
+PR1-10, CI-3: the keys whose STORED value the write changes, from the read and
+the final patch). Also the create-body snapshot split (D5 / plan 2.4).
 
 **Files.**
 - `app/src/lib/unitRequirementWrite.ts` (NEW)
@@ -6476,6 +6586,7 @@ import { describe, expect, it } from 'vitest';
 import { REQUIREMENT_ITEM_IDS, REQUIREMENT_UNIT_KEYS, type RequirementsSnapshot } from '../src/lib/requirements.js';
 import {
   applyUnitPatch,
+  changedKeys,
   depositConflictAfter,
   planRequirementWrite,
   splitRequirementsSnapshot,
@@ -6521,6 +6632,27 @@ describe('applyUnitPatch', () => {
     expect(applyUnitPatch(record, patch)).toEqual({ unitId: 'u-1', no_pets: true, beds: 2 });
     expect(record).toEqual({ unitId: 'u-1', pets: 'Cats OK', beds: 2 });
     expect(patch).toEqual({ pets: null, no_pets: true, beds: undefined });
+  });
+});
+
+describe('changedKeys (D13, plan review PR1-10)', () => {
+  it('lists a SET to a new value and a SET of a key the read lacked; not a key re-sent with its stored value', () => {
+    expect(
+      changedKeys(
+        { beds: 2, income_requirements: '2x rent', address: { line1: '1 Main' } },
+        { beds: 2, income_requirements: '3x rent', address: { line1: '1 Main' }, pet_fee: '$50' },
+      ),
+    ).toEqual(['income_requirements', 'pet_fee']);
+  });
+
+  it('lists a REMOVE of a key the read held; not a REMOVE of a key it lacked', () => {
+    expect(changedKeys({ deposit: 1200 }, { deposit: null, no_pets: null })).toEqual(['deposit']);
+  });
+
+  it('never lists requirement_sources, and skips undefined', () => {
+    expect(changedKeys({}, { requirement_sources: { pets: 'copied' }, beds: undefined, no_pets: true })).toEqual([
+      'no_pets',
+    ]);
   });
 });
 
@@ -6673,6 +6805,32 @@ describe('planRequirementWrite - PATCH (D5, D1, D13)', () => {
     );
     expect(plan.patch).toEqual({ income_requirements: '3x rent' });
     expect(plan.sources).toEqual({ income_requirements: 'copied' });
+    // D13 (PR1-10): a key re-sent with its stored value is not an audit field.
+    expect(plan.auditFields).toEqual([]);
+  });
+
+  it('audit fields: a re-sent unchanged key is left out, the changed one listed', () => {
+    const plan = written(
+      planRequirementWrite({
+        stored: { unitId: 'u-1', landlordId: 'c-ll', beds: 2, income_requirements: '2x rent' },
+        fields: { beds: 2, income_requirements: '3x rent' },
+        landlord: landlord({ req_income_requirements: '3x rent' }),
+        landlordChanged: false,
+      }),
+    );
+    expect(plan.auditFields).toEqual(['income_requirements']);
+  });
+
+  it('audit fields: clearing an amount the unit never held is not listed', () => {
+    const plan = written(
+      planRequirementWrite({
+        stored: { unitId: 'u-1', landlordId: 'c-ll' },
+        fields: { deposit_one_month: true, deposit: null },
+        landlord: landlord(),
+        landlordChanged: false,
+      }),
+    );
+    expect(plan.auditFields).toEqual(['deposit_one_month']);
   });
 
   it('a landlord change with no item REMOVEs the map', () => {
@@ -6774,7 +6932,8 @@ describe('planRequirementWrite - PATCH (D5, D1, D13)', () => {
     expect(Object.keys(plan.patch).sort()).toEqual(['pet_fee', 'requirement_sources']);
   });
 
-  it('a legacy pets key rewritten with the same meaning is not a change: no map write', () => {
+  it('a legacy pets key rewritten with the same meaning is not a change: no map write; no_pets (never held) not an audit field', () => {
+    // { no_pets: null, pets: 'Allowed' } is what S1's validator makes of a raw `pets: true`.
     const plan = written(
       planRequirementWrite({
         stored: { unitId: 'u-1', landlordId: 'c-ll', pets: true },
@@ -6784,7 +6943,7 @@ describe('planRequirementWrite - PATCH (D5, D1, D13)', () => {
       }),
     );
     expect(plan.patch).toEqual({ no_pets: null, pets: 'Allowed' });
-    expect(plan.auditFields).toEqual(['no_pets', 'pets']);
+    expect(plan.auditFields).toEqual(['pets']);
   });
 
   it('deposit_conflict against the stored record', () => {
@@ -6838,10 +6997,15 @@ not exist, so every case is red. (This file is pure; if DynamoDB Local is down,
 //   3. the classification (D5, nextRequirementSources): after a landlord
 //      change the map starts EMPTY - every item never touched against the new
 //      landlord - before this write's own items are classified;
-//   4. the audit field list (D13, plan 2.4): every unit key the write SETs or
-//      REMOVEs, the partner keys included, never requirement_sources.
+//   4. the audit field list (D13; plan review PR1-10): the unit keys whose
+//      STORED value the write changes - a SET to a value different from the
+//      read (or of a key the read lacked), or a REMOVE of a key the read held
+//      - partner keys included, never requirement_sources. A body key re-sent
+//      with its stored value is not listed. (The route uses it on the fenced
+//      path only; the plain path keeps Object.keys(validation.fields).)
 // The map is written WHOLE and only when it changes (an empty map REMOVEs);
 // on create it rides in the Put when non-empty.
+import { isDeepStrictEqual } from 'node:util';
 import {
   hasDepositConflict,
   nextRequirementSources,
@@ -6940,6 +7104,22 @@ function sameSources(a: RequirementSources, b: RequirementSources): boolean {
   return ids.length === Object.keys(b).length && ids.every((id) => a[id] === b[id]);
 }
 
+/**
+ * D13 (plan review PR1-10): the keys of `patch` whose STORED value the write
+ * changes - a SET to a value different from `before` (or of a key `before`
+ * lacks), or a REMOVE (null) of a key `before` holds. Patch order;
+ * requirement_sources never listed.
+ */
+export function changedKeys(before: Record<string, unknown>, patch: Record<string, unknown>): string[] {
+  return Object.entries(patch)
+    .filter(([key, value]) => {
+      if (key === 'requirement_sources' || value === undefined) return false;
+      if (value === null) return hasKey(before, key);
+      return !hasKey(before, key) || !isDeepStrictEqual(before[key], value);
+    })
+    .map(([key]) => key);
+}
+
 export interface RequirementWriteInput {
   /** The consistent read of the stored unit (the caller's copy); undefined on create. */
   stored: Record<string, unknown> | undefined;
@@ -6958,7 +7138,7 @@ export type RequirementWritePlan =
       ok: true;
       /** What the repo writes: the body, the partner keys, and requirement_sources (map, or null = REMOVE) when it changes. */
       patch: Record<string, unknown>;
-      /** D13: the unit keys SET or REMOVEd, in body order then partner order; never requirement_sources. */
+      /** D13 (PR1-10): the unit keys whose stored value this write changes (changedKeys), body order then partner order; never requirement_sources. */
       auditFields: string[];
       /** The whole map after this write (what the property will hold). */
       sources: RequirementSources;
@@ -6969,7 +7149,7 @@ export function planRequirementWrite(input: RequirementWriteInput): RequirementW
   const before = input.stored ?? {};
   if (depositConflictAfter(input.stored, input.fields)) return { ok: false, error: 'deposit_conflict' };
   const patch: Record<string, unknown> = { ...input.fields, ...legacyPetsPartner(before, input.fields) };
-  const auditFields = Object.keys(patch);
+  const auditFields = changedKeys(before, patch);
   const after = applyUnitPatch(before, patch);
   const held = readRequirementSources(before['requirement_sources']);
   const sources = nextRequirementSources({
@@ -7373,8 +7553,13 @@ classification against the NEW landlord, audit fields), and writes through
 `updateIfRequirementsCurrent`; a lost condition re-reads and recomputes, at
 most 3 attempts, then 409 `property_changed`; a vanished unit answers 404.
 So a slow PATCH can never write a map back over a landlord-change REMOVE.
-Audit `unit_updated` fields per plan 2.4 / D13 (CI-3). Every other body keeps
-today's plain `units.update`.
+Audit `unit_updated` fields per D13 as ruled in PR1-10 (CI-3): on the fenced
+path (a requirement key touched or the landlord changed) only the keys whose
+STORED value the write changes; a body re-sending an unchanged landlordId with
+no requirement key keeps the plain list. A fenced write that changes NO stored
+value still writes (stamps `updated_at`) but appends no `unit_updated` row
+(PR1-10a). Every other body keeps today's plain `units.update` and
+`Object.keys(validation.fields)`.
 
 **Files.**
 - `app/src/routes/units.ts`
@@ -7476,7 +7661,7 @@ describe('PATCH /api/units/:id - where each requirement value came from (D5)', (
     expect(auditFieldsOf(world)).toEqual(['pet_fee', 'pets']);
   });
 
-  it('(PIN) a legacy pets key rewritten with the same meaning is not a change: the item stays never touched', async () => {
+  it('a raw pets:true on a legacy pets:true property is not a change: the item stays never touched, and no_pets (never held) is not an audit field', async () => {
     const { app, world } = makeWebhookHarness();
     seedLandlord(world, 'c-ll', { req_no_pets: true });
     seedUnit(world, 'u-1', { pets: true });
@@ -7484,6 +7669,35 @@ describe('PATCH /api/units/:id - where each requirement value came from (D5)', (
     expect(res.status).toBe(200);
     expect(res.body.unit.pets).toBe('Allowed');
     expect(res.body.unit).not.toHaveProperty('requirement_sources');
+    expect(auditFieldsOf(world)).toEqual(['pets']);
+  });
+
+  it('audit fields: a key re-sent with its stored value is not listed (D13, PR1-10)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedLandlord(world, 'c-ll', { req_income_requirements: '3x rent' });
+    seedUnit(world, 'u-1', { beds: 2, income_requirements: '2x rent' });
+    const res = await patchUnit(app, 'u-1', { beds: 2, income_requirements: '3x rent' });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.requirement_sources).toEqual({ income_requirements: 'copied' });
+    expect(auditFieldsOf(world)).toEqual(['income_requirements']);
+  });
+
+  it('every key re-sent unchanged on the fenced path: 200, updated_at stamped, but no unit_updated row (PR1-10a)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedLandlord(world, 'c-ll', { req_income_requirements: '3x rent' });
+    seedUnit(world, 'u-1', {
+      beds: 2,
+      income_requirements: '3x rent',
+      requirement_sources: { income_requirements: 'copied' },
+    });
+    const fenced = vi.spyOn(world.unitsRepo, 'updateIfRequirementsCurrent');
+    const res = await patchUnit(app, 'u-1', { beds: 2, income_requirements: '3x rent' });
+    expect(res.status).toBe(200);
+    expect(fenced).toHaveBeenCalledTimes(1);
+    expect(res.body.unit.requirement_sources).toEqual({ income_requirements: 'copied' });
+    expect(res.body.unit.updated_at).not.toBe(REQ_STAMP);
+    expect(world.units.get('u-1')?.updated_at).not.toBe(REQ_STAMP);
+    expect(unitUpdatedEvents(world)).toHaveLength(0);
   });
 
   it('deposit_conflict is decided against the STORED record; sending the amount as null in the same save clears it', async () => {
@@ -7554,6 +7768,8 @@ describe('PATCH /api/units/:id - where each requirement value came from (D5)', (
     expect(res.status).toBe(200);
     expect(res.body.unit.beds).toBe(3);
     expect(res.body.unit.requirement_sources).toEqual({ pets: 'set_here' });
+    // No requirement key and no landlord change: the PLAIN path's audit list (PR1-10).
+    expect(auditFieldsOf(world)).toEqual(['landlordId', 'beds']);
   });
 
   it('(PIN) a plain PATCH never reads the landlord and keeps the map', async () => {
@@ -7719,6 +7935,13 @@ describe('PATCH /api/units/:id - the requirements fence (D5)', () => {
 - The two legacy-pets partner cases fail: the plain update writes only
   `pet_fee`, so the stored boolean stays and `no_pets` / `pets: 'Allowed'`
   are missing, and the audit lists only `pet_fee`.
+- The raw `pets: true` case and the re-sent-key case fail on the audit list:
+  the plain path lists every body key (`units.ts:2251`), so they get
+  `['no_pets', 'pets']` and `['beds', 'income_requirements']` (the re-sent
+  case also lacks `requirement_sources`).
+- The every-key-unchanged case fails: the plain `units.update` runs (the
+  fence spy is never called) and a `unit_updated` row with
+  `['beds', 'income_requirements']` is appended (`units.ts:2249-2252`).
 - `deposit_conflict` gets 200 (nothing checks the stored record).
 - "changing landlordId REMOVEs the map" keeps the map.
 - The consistent-read case fails: a body without `landlordId` /
@@ -7850,7 +8073,14 @@ Replace with:
       try {
         const unit = await units.updateIfRequirementsCurrent(read, plan.patch);
         if (attempt > 1) log.info({ unitId, attempts: attempt }, 'unit patch: requirements fence held on a retry');
-        return { kind: 'written', unit, auditFields: plan.auditFields };
+        // D13 (plan review PR1-10): a write that touches a requirement key or
+        // changes the landlord lists the keys whose STORED value it changed
+        // (plan.auditFields: from this attempt's read and the final patch). A
+        // body with neither - only an unchanged landlordId re-sent beside
+        // other fields - keeps the plain path's list, Object.keys(fields).
+        const auditFields =
+          changedTo !== undefined || touchesRequirements(fields) ? plan.auditFields : Object.keys(fields);
+        return { kind: 'written', unit, auditFields };
       } catch (err) {
         if (!(err instanceof ConditionalCheckFailedException)) throw err;
         // The unit changed (or vanished) since this attempt's read: the next
@@ -7992,13 +8222,21 @@ Replace with:
 Replace with:
 
 ```ts
-    // D13 (plan 2.4): the unit keys this write SET or REMOVEd - on the fenced
-    // path including the keys the server added (the legacy pets partner);
-    // never requirement_sources.
-    await audit.append(`units#${unitId}`, 'unit_updated', {
-      actor: req.user?.userId,
-      fields: auditFields,
-    });
+    // D13 (plan review PR1-10): on the fenced path the keys whose STORED value
+    // this write changed, the server-added legacy pets partner included (a key
+    // re-sent with its stored value is not listed); on the plain path today's
+    // body keys. Never requirement_sources. PR1-10a: a fenced write that
+    // changed NO stored value (every key re-sent unchanged) still wrote - it
+    // stamped updated_at like any staff save - but appends no unit_updated row:
+    // an empty "Property updated" line is noise (the tombstone no-op reasoning
+    // above). The plain path's list is never empty (the validator refuses an
+    // empty body, and the tombstone-only no-op returned earlier).
+    if (auditFields.length > 0) {
+      await audit.append(`units#${unitId}`, 'unit_updated', {
+        actor: req.user?.userId,
+        fields: auditFields,
+      });
+    }
     log.info(
       { unitId, fields: auditFields.length, actor: req.user?.userId },
       'unit updated via api',
@@ -8033,8 +8271,9 @@ landlord consistently, rewrites a stored legacy pets boolean with its
 meaning, answers deposit_conflict against the stored record, resets the map
 on a landlord change and classifies against the new landlord, and writes
 through updateIfRequirementsCurrent - re-read and recomputed on a race, 409
-property_changed after three attempts, 404 for a vanished unit. The audit
-lists the keys written, partner keys included, never the map.
+property_changed after three attempts, 404 for a vanished unit. On that
+path the audit lists only the keys whose stored value changed (partner keys
+included, a re-sent unchanged key left out), never the map.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ```
@@ -8228,7 +8467,7 @@ that unit create / PATCH responses carry `requirement_sources`.
 | D5 snapshot names another landlord -> 400; unnamed item -> as without a snapshot; unknown items ignored | 2.4 |
 | D5 create without snapshot: only items written non-blank, vs current landlord | 2.3, 2.4 |
 | D5 PATCH vs current landlord: differ -> `set_here`, back to equal -> `copied` | 2.3, 2.5 |
-| D5 classify by INTERPRETED value (a legacy pets rewrite with the same meaning is not a change) | 2.3, 2.5 (PIN) |
+| D5 classify by INTERPRETED value (a legacy pets rewrite with the same meaning is not a change) | 2.3, 2.5 |
 | D5 landlord change by PATCH REMOVEs; change + touched items: reset then classify vs the NEW landlord | 2.3, 2.5 |
 | D5 landlord change by `restoreWithLandlord` (swap or clear, CI-2) and the `addContact` claim REMOVEs | 2.2 |
 | D5 no landlord -> every touched item `set_here` | 2.3, 2.5 |
@@ -8237,8 +8476,8 @@ that unit create / PATCH responses carry `requirement_sources`.
 | D1 `deposit_conflict` against a consistent read of the stored record (PATCH) and on create | 2.3, 2.4, 2.5 |
 | D1 legacy pets: stored boolean met by a partial Pets write -> new shape, meaning kept | 2.3, 2.5 |
 | D1 a raw boolean `pets` write classifies the Pets item | 2.5 (the conversion itself is S1's validator) |
-| D8 `unitsRepo.applyRequirements` conditional write (exists, not deleted, landlordId, map) | 2.1 (S3 calls it) |
-| D13 `unit_updated` field names = keys the write changed incl. server-added; never `requirement_sources` | 2.3, 2.5 (CI-3) |
+| D8 `unitsRepo.applyRequirements` conditional write (exists, not deleted as `isDeleted` reads it - a blank `deleted_at` is live, PR1-8 - landlordId, map) | 2.1 (S3 calls it) |
+| D13 `unit_updated` field names = keys whose STORED value the write changed (fenced path; partner keys included; a re-sent unchanged key and a never-held `no_pets` not listed), plain path unchanged; never `requirement_sources` (PR1-10); an empty fenced list appends no row, the write still stamps `updated_at` (PR1-10a) | 2.3 (`changedKeys`), 2.5 (CI-3) |
 | D13 Activity lifts `reason` for `unit_updated` / `requirements_applied` only; `listing_status_changed` guard stays | 2.6 |
 | Spec 6 "Assert requirement_sources on the HTTP response" | 2.2, 2.4, 2.5 |
 | Spec 7 harness mirrors the map write, the landlord-change REMOVE and the Apply condition | 2.1, 2.2 |
@@ -8251,6 +8490,11 @@ that unit create / PATCH responses carry `requirement_sources`.
   `getById` result itself can never lose the condition. A
   `ConditionalCheckFailedException` is `changed_during_apply`. Both
   `requirement_sources: null` and `{}` in the patch REMOVE the attribute.
+  `applyRequirements` treats a blank `deleted_at` as live, like `isDeleted`
+  and `planUnitApply` (PR1-8). `changedKeys(read, patch)`
+  (`app/src/lib/unitRequirementWrite.ts`) computes D13's "keys the write
+  actually changed" if S3's audit should list them the same way (plan 2.1's
+  `planUnitApply.changedKeys` is S1's and stays the binding source there).
   `applyRequirements` stamps `updated_at`. `toUnitActivityEvent` already
   serves `reason: 'requirements_applied'` on `unit_updated` (2.6), not
   `landlordId`. The fixtures `app/test/helpers/requirementsFixtures.ts`
@@ -8273,6 +8517,12 @@ that unit create / PATCH responses carry `requirement_sources`.
 - **S7 (e2e).** No e2e change is expected from S2 itself. A unit PATCH that
   touches a requirement key or names a `landlordId` now does one more
   consistent unit read and one consistent landlord read per attempt.
+- **RULED (PR1-10a).** A fenced PATCH whose every key is re-sent unchanged
+  (for example a raw `pets: true` on a unit already holding
+  `pets: 'Allowed'`) still writes (stamps `updated_at`, today's semantics) but
+  appends NO `unit_updated` row - the tombstone no-op reasoning at
+  `units.ts:2122-2129`. Implemented in Task 2.5 step 3f and its
+  every-key-unchanged test. S6: such a save shows no Activity line.
 - **Plan watch (CI-6).** If the planner prefers to fence on the touched
   items' keys too, the change is local to `updateIfRequirementsFenced` /
   `fencedRequirementsWrite` (one more condition per key) plus 2.1 cases, and
@@ -9604,24 +9854,32 @@ describe('skip reasons', () => {
     const { app, world } = makeWebhookHarness();
     seedLandlord(world);
     seedUnit(world, 'u-race');
-    const realGet = world.unitsRepo.getById.bind(world.unitsRepo);
-    // The route's read sees the unit as seeded; a colleague then sets an
-    // exception on the stored unit before the write lands.
-    vi.spyOn(world.unitsRepo, 'getById').mockImplementationOnce(async (unitId, opts) => {
-      const read = await realGet(unitId, opts);
-      const snapshot = read === undefined ? undefined : structuredClone(read);
-      const live = world.units.get(unitId);
+    // The harness getById is NOT mocked: it hands the route the LIVE stored
+    // object (twilioWebhookHarness.ts:2886-2888). A colleague's write then lands
+    // on the stored unit after the route's read and before its write: the
+    // wrapper mutates the stored unit, then calls the real fenced write with
+    // exactly what the route passed. Only a route that fences against its OWN
+    // copy of the read (ruling AR6) sees the race; a route passing the live
+    // object would compare the mutated unit with itself and overwrite the
+    // exception.
+    const realApply = world.unitsRepo.applyRequirements.bind(world.unitsRepo);
+    let passedRead: UnitItem | undefined;
+    vi.spyOn(world.unitsRepo, 'applyRequirements').mockImplementationOnce(async (read, patch) => {
+      passedRead = read;
+      const live = world.units.get(read.unitId);
       if (live !== undefined) {
         live.pets = 'Dogs OK';
         live.requirement_sources = { pets: 'set_here' };
       }
-      return snapshot;
+      return realApply(read, patch);
     });
     const res = await postApply(app, applyBody(['pets'], EXPECTED_PETS, ['u-race']));
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ updated: [], skipped: [{ unitId: 'u-race', reason: 'changed_during_apply' }] });
+    expect(passedRead).not.toBe(world.units.get('u-race'));
     expect(unitOf(world, 'u-race')?.pets).toBe('Dogs OK');
     expect(unitOf(world, 'u-race')?.no_pets).toBeUndefined();
+    expect(unitOf(world, 'u-race')?.requirement_sources).toEqual({ pets: 'set_here' });
     expect(unitAudits(world)).toEqual([]);
   });
 });
@@ -9854,18 +10112,23 @@ export function registerRequirementsApplyRoute(router: Router, deps: Requirement
     const updated: string[] = [];
     const skipped: Array<{ unitId: string; reason: ApplySkipReason }> = [];
     for (const { unitId, ownItems } of body.units) {
-      const unit = await deps.units.getById(unitId, { consistentRead: true });
-      const plan = planUnitApply({ unit, landlordId: contactId, items: body.items, landlordValues, ownItems });
-      // planUnitApply skips an unread unit as not_found; the `unit` test only
+      const raw = await deps.units.getById(unitId, { consistentRead: true });
+      // The route's OWN copy of the consistent read (ruling AR6): a repo may
+      // hand out its live stored object (the harness does), and the fence must
+      // compare the stored unit with what was READ, not with whatever that
+      // object has become by the time the write runs.
+      const read = raw === undefined ? undefined : structuredClone(raw);
+      const plan = planUnitApply({ unit: read, landlordId: contactId, items: body.items, landlordValues, ownItems });
+      // planUnitApply skips an unread unit as not_found; the `read` test only
       // narrows the type for the write below.
-      if (plan.kind === 'skip' || unit === undefined) {
+      if (plan.kind === 'skip' || read === undefined) {
         skipped.push({ unitId, reason: plan.kind === 'skip' ? plan.reason : 'not_found' });
         continue;
       }
       try {
         // Conditioned on the unit still existing, not deleted, with this
         // landlordId and the requirement_sources it was read with (plan 2.3).
-        await deps.units.applyRequirements(unit, plan.patch);
+        await deps.units.applyRequirements(read, plan.patch);
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
           skipped.push({ unitId, reason: 'changed_during_apply' });
@@ -10292,11 +10555,16 @@ S4); `toUnitActivityEvent` lifting `requirements_applied` (S2); the
   listed; a legacy boolean `pets` that is REMOVEd is), never
   `requirement_sources`; (5) `parseLandlordRequirementPatch(held)` round-trips the
   seed's stored values unchanged (3.3).
-- **S2.** (1) `applyRequirements` stamps `updated_at` (CI-6). (2) The harness
-  `getById` returns the LIVE stored object, so the fake `applyRequirements` must
-  compare the passed `read`'s `landlordId` and `requirement_sources` against the
-  stored unit BY VALUE (absent vs present included); 3.2's race case hands it a
-  `structuredClone` read and mutates the stored unit. (3) It must throw a real
+- **S2.** (1) `applyRequirements` stamps `updated_at` (CI-6). (2) Per ruling
+  AR6 the Apply route passes its OWN `structuredClone` of the consistent read to
+  both `planUnitApply` and `applyRequirements` (the harness `getById` hands out
+  the LIVE stored object), so the fake `applyRequirements` must compare the
+  passed `read`'s `landlordId` and `requirement_sources` against the stored unit
+  BY VALUE (absent vs present included). 3.2's race case leaves `getById`
+  unmocked, mutates the stored unit inside an `applyRequirements` wrapper, then
+  calls the real fake with the route's arguments and expects
+  `changed_during_apply`. A `deleted_at: ''` unit is live for both the fake and
+  `planUnitApply` (matching `isDeleted`); 3.2 seeds only a non-empty stamp. (3) It must throw a real
   `ConditionalCheckFailedException` (the harness `conditionalCheckFailed` helper,
   `twilioWebhookHarness.ts:625-626`); the route tests `instanceof`. (4) It must
   REMOVE the null keys of the patch and SET the map whole. (5) The Apply audit row
@@ -13373,10 +13641,11 @@ with `npx vitest run src/<path>` (plan 0); they need no DynamoDB (jsdom only,
 - **C9. A 400 `deposit_conflict` on the Edit form has no copy.** A colleague
   can tick One month's rent after this form opened with it unticked; a save
   that then sends only `deposit: N` is a 400 `deposit_conflict` (D1; plan
-  2.4), and saving again repeats it. 1.1 binds no sentence; Task 5.8 shows the
-  generic "Couldn't save - please try again." Proposed ruling: accept, or bind
-  a sentence (suggestion: "This property's deposit changed while you were
-  editing. Close and reopen it to see the change.").
+  2.4), and saving again repeats it. RULED (planner PR1-1, 2026-10-20): a 400
+  whose body error is `deposit_conflict` shows exactly "A deposit can be one
+  month's rent or a fixed amount, not both. Reload the property and try
+  again.", keeps the form open with what staff typed, and never falls through
+  to the generic save error - Task 5.8 implements and tests it.
 - **C10. Where the shared wire types live.** 2.6 puts
   `requirement_sources?: Partial<Record<RequirementItemId, ...>>` in
   `api/types.ts`, while `RequirementItemId`'s natural home is the mirror under
@@ -14167,6 +14436,17 @@ describe('the requirement items (D1)', () => {
     expect(itemOfUnitKey('notes')).toBeUndefined();
     expect(itemOfUnitKey('req_pets')).toBeUndefined();
   });
+
+  it('is frozen - no caller can edit the registry (the app suite case)', () => {
+    expect(Object.isFrozen(REQUIREMENT_ITEMS)).toBe(true);
+    expect(Object.isFrozen(REQUIREMENT_ITEMS[0])).toBe(true);
+    expect(Object.isFrozen(REQUIREMENT_ITEMS[0]?.fields)).toBe(true);
+    expect(Object.isFrozen(REQUIREMENT_ITEMS[0]?.fields[0])).toBe(true);
+    expect(Object.isFrozen(REQUIREMENT_UNIT_KEYS)).toBe(true);
+    expect(Object.isFrozen(REQUIREMENT_ITEM_IDS)).toBe(true);
+    expect(Object.isFrozen(REQUIREMENT_LANDLORD_KEYS)).toBe(true);
+    expect(Object.isFrozen(WASHER_DRYER_VALUES)).toBe(true);
+  });
 });
 
 describe('unitItemValue (the D1 read interpretation)', () => {
@@ -14209,6 +14489,15 @@ describe('unitItemValue (the D1 read interpretation)', () => {
       tour_process: 'Call first.',
     });
     expect(unitItemValue({ tour_type: '' }, 'touring')).toEqual({ tour_type: null, tour_process: null });
+  });
+
+  it('a tour type outside the three known ones reads as blank, exactly as the app (isTourType)', () => {
+    expect(unitItemValue({ tour_type: 'bogus' }, 'touring')).toEqual({ tour_type: null, tour_process: null });
+    // Exact match, never trimmed - the app's isTourType does not trim either.
+    expect(unitItemValue({ tour_type: ' pm_team ' }, 'touring')['tour_type']).toBeNull();
+    expect(unitItemValue({ tour_type: 7 }, 'touring')['tour_type']).toBeNull();
+    expect(landlordItemValue({ req_tour_type: 'bogus' }, 'touring')['tour_type']).toBeNull();
+    expect(landlordItemValue({ req_tour_type: 'pm_team' }, 'touring')['tour_type']).toBe('pm_team');
   });
 });
 
@@ -14358,6 +14647,12 @@ describe('PROPERTY_FORM_FIELDS (the D10a tag table)', () => {
     }
   });
 
+  it('is frozen (the app suite case)', () => {
+    expect(Object.isFrozen(PROPERTY_FORM_FIELDS)).toBe(true);
+    expect(Object.isFrozen(PROPERTY_FORM_FIELDS[0])).toBe(true);
+    expect(Object.isFrozen(PROPERTY_FORM_FIELDS[0]?.keys)).toBe(true);
+  });
+
   it('has one row per label (the forms look tags up by label)', () => {
     const labels = PROPERTY_FORM_FIELDS.map((f) => f.label);
     expect(new Set(labels).size).toBe(labels.length);
@@ -14381,7 +14676,13 @@ For every `it` there that exercises a function this mirror exports
 `itemValuesEqual`, `isItemBlank`, `readRequirementSources`, `isOwnValue`, the
 constants, `PROPERTY_FORM_FIELDS`) whose INPUT this file does not already
 cover, add it here under the same `it` name with the same inputs and expected
-values, importing from `./requirements.js`. Never edit the app test.
+values, importing from `./requirements.js`. Never edit the app test. The app
+suite's two "is frozen" cases (S1 draft: registry, and `PROPERTY_FORM_FIELDS`)
+are ALREADY copied above and pass against this mirror, because the mirror
+freezes the same objects (PR1-3 ruling: fixed, not dropped). Any app case that
+reads a `tour_type` passes too: the mirror reads it through
+`TOUR_TYPE_LABELS`' keys exactly as the app's `isTourType` (no trim, enum
+only).
 
 `dashboard/src/routes/listing/requirementsMirror.test.ts`:
 
@@ -14428,7 +14729,11 @@ const UNIT_RECORDS: Record<string, unknown>[] = [
   { application_fee: 40 },
   { tour_type: 'landlord_led', tour_process: 'Call first.' },
   { tour_type: '', tour_process: '   ' },
+  // Outside the enum: blank on BOTH sides (the app reads tour_type through
+  // isTourType, the mirror through TOUR_TYPE_LABELS' keys - exact, untrimmed).
   { tour_type: 'bogus' },
+  { tour_type: ' pm_team ' },
+  { tour_type: 7 },
 ];
 
 const LANDLORD_RECORDS: Record<string, unknown>[] = [
@@ -14441,6 +14746,8 @@ const LANDLORD_RECORDS: Record<string, unknown>[] = [
   { req_deposit: 500, req_deposit_notes: 'Half up front' },
   { req_application_fee: 0 },
   { req_tour_type: 'pm_team', req_tour_process: 'Text the PM.' },
+  { req_tour_type: 'bogus' },
+  { req_tour_type: ' landlord_led' },
   { pets: 'Cats OK', evictions: 'One in 2019', no_pets: true },
 ];
 
@@ -14473,6 +14780,21 @@ describe('dashboard requirements registry mirrors app/src/lib/requirements.ts', 
   it('the washer / dryer values and the voucher size cap are identical', () => {
     expect(mirror.WASHER_DRYER_VALUES).toEqual(app.WASHER_DRYER_VALUES);
     expect(mirror.VOUCHER_SIZE_MAX).toBe(app.VOUCHER_SIZE_MAX);
+  });
+
+  it('both copies are frozen alike (the app suite\'s "is frozen" cases hold for the mirror)', () => {
+    const frozen = (m: typeof mirror | typeof app): boolean[] => [
+      Object.isFrozen(m.REQUIREMENT_ITEMS),
+      Object.isFrozen(m.REQUIREMENT_ITEMS[0]),
+      Object.isFrozen(m.REQUIREMENT_ITEMS[0]?.fields),
+      Object.isFrozen(m.REQUIREMENT_ITEMS[0]?.fields[0]),
+      Object.isFrozen(m.REQUIREMENT_UNIT_KEYS),
+      Object.isFrozen(m.PROPERTY_FORM_FIELDS),
+      Object.isFrozen(m.PROPERTY_FORM_FIELDS[0]),
+      Object.isFrozen(m.PROPERTY_FORM_FIELDS[0]?.keys),
+    ];
+    expect(frozen(mirror)).toEqual(frozen(app));
+    expect(frozen(mirror).every(Boolean)).toBe(true);
   });
 
   it('isRequirementItemId and itemOfUnitKey agree', () => {
@@ -14574,10 +14896,22 @@ NEW `dashboard/src/routes/listing/requirements.ts`:
 //
 // Drift guard: requirementsMirror.test.ts imports BOTH copies and compares
 // their answers; requirements.test.ts carries the app suite's cases. When the
-// two disagree, the APP module is the source of truth.
-import type { RequirementItemId, RequirementSource, WasherDryer } from '../../api/index.js';
+// two disagree, the APP module is the source of truth. Like the app's, the
+// registry is frozen, and a tour type reads only when it is one of the known
+// tour types (the app's isTourType, app/src/lib/toursModel.ts:125-127; here
+// the keys of TOUR_TYPE_LABELS, api/types.ts:907-911 - the dashboard has no
+// tour-type guard, and ScheduleTourForm.tsx:79 lists the types the same way).
+import {
+  TOUR_TYPE_LABELS,
+  type RequirementItemId,
+  type RequirementSource,
+  type WasherDryer,
+} from '../../api/index.js';
 
 export type { RequirementItemId, RequirementSource } from '../../api/index.js';
+
+/** The known tour types (exact match, as the app's isTourType). */
+const TOUR_TYPE_SET: ReadonlySet<string> = new Set(Object.keys(TOUR_TYPE_LABELS));
 
 export type RequirementGroup = 'Screening' | 'Pets' | 'Move-in costs' | 'Touring';
 export type RequirementFieldKind = 'checkbox' | 'text' | 'long_text' | 'money' | 'tour_type';
@@ -14602,11 +14936,15 @@ export interface RequirementItem {
 }
 
 function field(key: string, label: string, kind: RequirementFieldKind, flyer: FlyerVisibility): RequirementField {
-  return { key, landlordKey: `req_${key}`, label, kind, flyer };
+  return Object.freeze({ key, landlordKey: `req_${key}`, label, kind, flyer });
 }
 
-/** D1, in display order. */
-export const REQUIREMENT_ITEMS: readonly RequirementItem[] = [
+function freezeItem(item: RequirementItem): RequirementItem {
+  return Object.freeze({ ...item, fields: Object.freeze([...item.fields]) });
+}
+
+/** D1, in display order (frozen below as REQUIREMENT_ITEMS). */
+const ITEM_LIST: RequirementItem[] = [
   {
     id: 'evictions',
     label: 'Evictions',
@@ -14672,12 +15010,17 @@ export const REQUIREMENT_ITEMS: readonly RequirementItem[] = [
   },
 ];
 
-export const REQUIREMENT_ITEM_IDS: readonly RequirementItemId[] = REQUIREMENT_ITEMS.map((item) => item.id);
+/** D1, in display order - frozen, as the app's: no caller can edit the registry. */
+export const REQUIREMENT_ITEMS: readonly RequirementItem[] = Object.freeze(ITEM_LIST.map(freezeItem));
+
+export const REQUIREMENT_ITEM_IDS: readonly RequirementItemId[] = Object.freeze(REQUIREMENT_ITEMS.map((item) => item.id));
 /** The 15 unit keys, item order then field order. */
-export const REQUIREMENT_UNIT_KEYS: readonly string[] = REQUIREMENT_ITEMS.flatMap((item) => item.fields.map((f) => f.key));
+export const REQUIREMENT_UNIT_KEYS: readonly string[] = Object.freeze(
+  REQUIREMENT_ITEMS.flatMap((item) => item.fields.map((f) => f.key)),
+);
 /** The 15 'req_' landlord keys, same order. */
-export const REQUIREMENT_LANDLORD_KEYS: readonly string[] = REQUIREMENT_ITEMS.flatMap((item) =>
-  item.fields.map((f) => f.landlordKey),
+export const REQUIREMENT_LANDLORD_KEYS: readonly string[] = Object.freeze(
+  REQUIREMENT_ITEMS.flatMap((item) => item.fields.map((f) => f.landlordKey)),
 );
 
 export function isRequirementItemId(v: unknown): v is RequirementItemId {
@@ -14697,11 +15040,14 @@ function itemById(id: RequirementItemId): RequirementItem {
 /** One item's value: every key of the item -> its interpreted value; null = blank. */
 export type ItemValue = Record<string, string | number | true | null>;
 
-/** D1 kinds, read side: a checkbox is true or blank; money a finite number of
- *  0 or more; text and tour type a trimmed non-empty string. */
+/** D1 kinds, read side (the app's readField): a checkbox is true or blank;
+ *  money a finite number of 0 or more; a tour type one of the known tour types,
+ *  exactly (anything else - 'bogus', ' pm_team ' - reads as blank, as the app's
+ *  isTourType); text a trimmed non-empty string. */
 function readField(f: RequirementField, raw: unknown): string | number | true | null {
   if (f.kind === 'checkbox') return raw === true ? true : null;
   if (f.kind === 'money') return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : null;
+  if (f.kind === 'tour_type') return typeof raw === 'string' && TOUR_TYPE_SET.has(raw) ? raw : null;
   if (typeof raw !== 'string') return null;
   const t = raw.trim();
   return t === '' ? null : t;
@@ -14784,8 +15130,9 @@ export interface FormFieldVisibility {
  *  with the unit key(s) it writes and whether it reaches the public flyer. The
  *  forms tag each field from this table by its label (requirementForm.ts
  *  formFieldVisibility). The first row, the owning landlord, is on the New
- *  form only (the Edit form has no landlord field). */
-export const PROPERTY_FORM_FIELDS: readonly FormFieldVisibility[] = [
+ *  form only (the Edit form has no landlord field). Frozen below as
+ *  PROPERTY_FORM_FIELDS, rows and key lists included (as the app's). */
+const FORM_FIELD_LIST: FormFieldVisibility[] = [
   { label: 'Owning landlord', keys: ['landlordId'], flyer: 'staff_only' },
   { label: 'Housing authorities', keys: ['accepted_authorities'], flyer: 'on_flyer' },
   { label: 'Beds', keys: ['beds'], flyer: 'on_flyer' },
@@ -14823,15 +15170,19 @@ export const PROPERTY_FORM_FIELDS: readonly FormFieldVisibility[] = [
   { label: 'Notes', keys: ['notes'], flyer: 'staff_only' },
 ];
 
+export const PROPERTY_FORM_FIELDS: readonly FormFieldVisibility[] = Object.freeze(
+  FORM_FIELD_LIST.map((f) => Object.freeze({ ...f, keys: Object.freeze([...f.keys]) })),
+);
+
 /** D3 washer / dryer values. */
-export const WASHER_DRYER_VALUES = ['hookups', 'included', 'none'] as const;
+export const WASHER_DRYER_VALUES = Object.freeze(['hookups', 'included', 'none'] as const);
 
 /** D3 labels (dashboard only): the forms' select, and the property page / flyer rows. */
-export const WASHER_DRYER_LABELS: Readonly<Record<WasherDryer, string>> = {
+export const WASHER_DRYER_LABELS: Readonly<Record<WasherDryer, string>> = Object.freeze({
   hookups: 'Hookups',
   included: 'Washer and dryer included',
   none: 'No hookups',
-};
+});
 
 /** D4: the largest voucher size a property records. */
 export const VOUCHER_SIZE_MAX = 12 as const;
@@ -16939,8 +17290,10 @@ items through `RequirementsFields`; the legacy `pets` boolean read per D1 and
 never re-sent untouched; deposit and application fee clearable; the save that
 CHECKS One month's rent sends `deposit: null`; No application fee records 0),
 D5 (a 409 `property_changed` keeps the form open with what staff typed and
-says "This property changed while you were saving. Save again."). Dirty
-tracking stays: a patch of changed keys only.
+says "This property changed while you were saving. Save again."), and the
+planner's PR1-1 ruling (a 400 `deposit_conflict` keeps the form open and says
+"A deposit can be one month's rent or a fixed amount, not both. Reload the
+property and try again."). Dirty tracking stays: a patch of changed keys only.
 
 **Files.** `dashboard/src/routes/listing/ListingEditForm.tsx` (full
 replacement), `dashboard/src/routes/listing/ListingEditForm.module.css`,
@@ -17332,6 +17685,27 @@ describe('ListingEditForm - property requirements and fields (spec 2026-10-20)',
     expect(updateUnit).toHaveBeenCalledTimes(2);
     expect(updateUnit).toHaveBeenNthCalledWith(2, 'u1', { credit_requirements: '600+' });
   });
+
+  it('a 400 deposit_conflict says why, keeps the form open with what staff typed, and is not the generic error (D1)', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    updateUnit.mockRejectedValueOnce(
+      new ApiError(400, 'deposit_conflict', 'deposit_conflict', { error: 'deposit_conflict' }),
+    );
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={onSaved} />);
+    fireEvent.change(screen.getByLabelText('Fixed amount'), { target: { value: '1200' } });
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { deposit: 1200 });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      "A deposit can be one month's rent or a fixed amount, not both. Reload the property and try again.",
+    );
+    expect(alert).not.toHaveTextContent(/couldn.t save/i);
+    expect(screen.getByRole('dialog', { name: 'Edit property' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Fixed amount')).toHaveValue(1200);
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(save()).toBeEnabled();
+  });
 });
 ```
 
@@ -17355,7 +17729,9 @@ Why each new / changed case fails on the unchanged form:
   "Income requirements", "Qualifications", "Flexible / payment terms
   available", "Deposit notes" do not exist; the order case fails on the first
   missing control; the 409 case shows "Couldn't save" instead of the D5
-  sentence; the legacy `pets: false` case fails ("No pets" missing) and today
+  sentence; the 400 `deposit_conflict` case fails twice over - no "Fixed
+  amount" field, and today any rejection falls through to the generic
+  "Couldn't save" (`ListingEditForm.tsx:258`); the legacy `pets: false` case fails ("No pets" missing) and today
   would also re-send `pets: 'No'`-style text on change (`:171-180`).
 - T3 and the Tour type tests stay green (PIN).
 
@@ -17421,6 +17797,11 @@ export interface ListingEditFormProps {
 
 /** Spec 2026-10-20 D5: the PATCH's 409 after its fenced retries. */
 const PROPERTY_CHANGED = 'This property changed while you were saving. Save again.';
+
+/** Spec 2026-10-20 D1 (planner ruling PR1-1): the 400 deposit_conflict - the
+ *  property would hold one month's rent AND a fixed amount. */
+const DEPOSIT_CONFLICT =
+  "A deposit can be one month's rent or a fixed amount, not both. Reload the property and try again.";
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
@@ -17633,6 +18014,14 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
       // the patch holds only the changed keys, so saving again is safe.
       if (err instanceof ApiError && err.status === 409 && err.code === 'property_changed') {
         setError(PROPERTY_CHANGED);
+        setSaving(false);
+        return;
+      }
+      // D1: the save would leave one month's rent AND a fixed amount (a
+      // colleague ticked One month's rent after this form opened, and this save
+      // sent an amount). Say so; the form stays open with what staff typed.
+      if (err instanceof ApiError && err.status === 400 && err.code === 'deposit_conflict') {
+        setError(DEPOSIT_CONFLICT);
         setSaving(false);
         return;
       }
@@ -18068,7 +18457,7 @@ All print 0 (the rewritten `ListingEditForm.tsx` is all-ASCII as a whole).
 git -C W:/tmp/property-requirements status
 test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/property-requirements/MERGE_HEAD" && echo no-merge-in-progress
 git -C W:/tmp/property-requirements add dashboard/src/routes/listing/ListingEditForm.tsx dashboard/src/routes/listing/ListingEditForm.module.css dashboard/src/routes/listing/ListingEditForm.test.tsx
-git -C W:/tmp/property-requirements commit -m "feat(dashboard): Edit property form - D10 order, a flyer tag on every field, subzone, washer/dryer, voucher picker B and the Requirements section (S5 5.8)" -m "Legacy pets read per D1 and never re-sent untouched; deposit and application fee clearable; checking One month's rent sends the amount as null; a 409 property_changed keeps the form open (spec 2026-10-20 D1, D3, D4, D5, D10)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C W:/tmp/property-requirements commit -m "feat(dashboard): Edit property form - D10 order, a flyer tag on every field, subzone, washer/dryer, voucher picker B and the Requirements section (S5 5.8)" -m "Legacy pets read per D1 and never re-sent untouched; deposit and application fee clearable; checking One month's rent sends the amount as null; a 409 property_changed and a 400 deposit_conflict each keep the form open with their own sentence (spec 2026-10-20 D1, D3, D4, D5, D10)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -19486,6 +19875,8 @@ git -C W:/tmp/property-requirements commit -m "feat(dashboard): New property for
 | D4 picker B: chips, More / Fewer rules, aria-pressed, group label, summary, empty sends null, off-chip values listed and dropped | 5.5, 5.3, 5.8, 5.9 |
 | D5 `requirement_sources` type; create `requirements_snapshot`; no snapshot after a failed load; a cleared pre-filled field classifies | 5.1, 5.3, 5.9 |
 | D5 409 `property_changed` message, form stays open with what staff typed | 5.8 |
+| D1 400 `deposit_conflict` message on the Edit form (planner PR1-1) | 5.8 |
+| D1 tour type read as the app's `isTourType` (enum only, exact) in the mirror (planner PR1-3) | 5.2 |
 | D6 own value / sources read (mirror, for S6) | 5.2 |
 | D7 prefill from the landlord's full Contact; locked path loads it; refill on a different pick; note; loading / failure / Try again; Save waits; snapshot with landlordId | 5.9 |
 | D8 `applyLandlordRequirements` endpoint + wire types (+ e2e mutation catalog, C13) | 5.1 |
@@ -19510,8 +19901,10 @@ the property page, flyer page, landlord page, Apply dialog, `ContactEditForm`
   identical output). (b) C3: keep `app/src/lib/requirements.ts` a leaf - the
   dashboard drift test imports it. (c) The mirror reads a legacy boolean `pets`
   as overriding a stored `no_pets` for both keys, money as finite and `>= 0`,
-  and `tour_type` as trimmed text (no enum check); if the app differs, the
-  drift test fails and S5's builder changes the mirror (the app wins).
+  and `tour_type` as one of the three known values, exactly (the app's
+  `isTourType`; PR1-3), and freezes the same objects the app freezes; if the
+  app differs, the drift test fails and S5's builder changes the mirror (the
+  app wins).
 - **S6.** (a) `routes/listing/requirements.ts` exists: append
   `requirementDisplay`, `formatItemValue`, `landlordHasNoRequirements` there;
   reuse `unitItemValue`, `landlordItemValue`, `itemValuesEqual`, `isItemBlank`,
@@ -19589,33 +19982,20 @@ the read happens only when staff open the dialog, never on a page load the
 perf harness measures) and the dialog reads `getAllUnits({ landlordId }, signal)`,
 still filtering `landlordId === contactId` and not deleted client-side.
 
-CI-2. Plan 2.6 binds `RequirementFormValues` by name only ("keyed by UNIT key
-(the landlord form maps req_ keys in and out)"). The landlord edit form (S6)
-needs (a) a converter from a contact's `req_` keys to form values and (b) the
-diff back to a PATCH that sends only changed `req_` keys and, on the save that
-CHECKS One month's rent, `req_deposit: null` (D1). `ListingEditForm` (S5) needs
-the same two functions on the unit side. Proposed ruling: S5 exports, from
-`dashboard/src/routes/listing/RequirementsFields.tsx`,
-`requirementFormValuesFrom(record: Record<string, unknown>, side: 'unit' | 'landlord'): RequirementFormValues`
-and
-`requirementPatch(initial: RequirementFormValues, next: RequirementFormValues, side: 'unit' | 'landlord'): Record<string, string | number | true | false | null>`
-(only changed keys, keyed `req_<key>` for side 'landlord'; when
-`deposit_one_month` goes from unchecked to checked the deposit amount key is
-included as null), and both forms use them. Task 6.9 is written against these
-two names; if S5 shipped other names, substitute them (the behavior the 6.9
-tests pin is the spec's, not S5's).
+CI-2. RULED (AR36: S5's helper names win). The landlord form uses S5's
+`dashboard/src/routes/listing/requirementForm.ts` exactly:
+`requirementFormValuesFromLandlord(contact)`,
+`buildRequirementPatch(initial, current): { ok: true; patch } | { ok: false; error }`
+(it already adds `deposit: null` on the save that checks One month's rent) and
+`toLandlordPatch(patch)` (prefixes `req_`). Task 6.9's code and tests use
+these; an `ok: false` shows its `error` in the form's error line and sends
+nothing. (Was: a proposal for `requirementFormValuesFrom` / `requirementPatch`,
+withdrawn.)
 
-CI-3. Plan 1.1 says "Section heading on every form: `Requirements`; on the
-landlord form the fieldset legend is `Requirements / Qualifications`", but 2.6
-does not say whether `RequirementsFields` renders that heading and the
-`FlyerLegend` itself. S6 assumes `RequirementsFields` renders ONLY the four
-group headings and the fields (with their tags and under-box notes) and that
-the HOST renders the section heading and the legend: the property forms render
-`Requirements` (S5), the landlord form renders a `<fieldset>` whose
-`<legend>` is `Requirements / Qualifications` plus `<FlyerLegend audience="landlord" />`
-(Task 6.9). If S5 instead renders the heading inside `RequirementsFields`
-for audience 'landlord', drop the `<legend>` / `FlyerLegend` lines from 6.9
-and keep the tests (they query the group by its name).
+CI-3. RESOLVED by S5's draft: `RequirementsFields` renders the four group
+fieldsets and the fields only (no section heading, no legend). The landlord
+form renders the `<fieldset>` whose `<legend>` is `Requirements / Qualifications`
+plus `<FlyerLegend audience="landlord" />` (Task 6.9).
 
 CI-4. Plan 2.6 names `ApplyRequirementsBody` / `ApplyRequirementsResult` but not
 their fields. S6 assumes the 2.4 wire exactly:
@@ -19639,15 +20019,12 @@ CI-6. Copy: 1.1 gives the stopped message only as
 the done message's rule (1.1: `Updated 1 property`), so N = 1 reads
 `Updated 1 property before this stopped. Review the rest and press Update again.`
 
-CI-7. Owner of the sizes formatter: plan section 3 puts "listingFormat (sizes
-formatting)" in S6, but S5's picker summary line
-(`Accepts: Studio, 2 BR, 3 BR`, 1.1) needs the same formatting first, and S5
-also needs the washer / dryer labels for its select. Proposed ruling: S5 adds
-`formatVoucherSizes(sizes: readonly number[]): string` and
-`WASHER_DRYER_LABELS` to `listingFormat.ts`; S6 Task 6.2 then adds only
-`recordedVoucherSizes` / `washerDryerLabel` and the Activity label. Task 6.2
-is written to ADD the formatter and the label map, with a Step 0 that skips
-each one S5 already exported under the same name.
+CI-7. RULED (AR39): S5 defines `WASHER_DRYER_LABELS` in
+`dashboard/src/routes/listing/requirements.ts`; Task 6.2 IMPORTS it (no second
+copy in `listingFormat.ts`, no Step 0), and Task 6.6's flyer row reads the
+same map. `formatVoucherSizes`, `recordedVoucherSizes` and `washerDryerLabel`
+stay S6's, in `listingFormat.ts` (S5's picker summary is its own
+`acceptsSummary`, per S5's note).
 
 CI-8. D8 "Otherwise it closes; the landlord page re-reads its properties ...
 and shows `Updated N properties`": S6 reads "shows" as the LANDLORD PAGE
@@ -20222,14 +20599,14 @@ Step 6 - commit `dashboard/src/routes/listing/requirements.ts dashboard/src/rout
 Goal: D4's property-page row value (the RECORDED sizes, never the bedrooms
 fallback, "Studio, 2 BR, 3 BR"), D3's washer / dryer label, and D13's Activity
 label "Requirements applied from the landlord" with the field names.
+Ruling AR39: the washer / dryer labels are S5's `WASHER_DRYER_LABELS` in
+`dashboard/src/routes/listing/requirements.ts`; this task IMPORTS it and never
+defines a second copy. `formatVoucherSizes`, `recordedVoucherSizes` and
+`washerDryerLabel` are S6's, in `listingFormat.ts`.
 
 Files:
 - `dashboard/src/routes/listing/listingFormat.ts`
 - `dashboard/src/routes/listing/listingFormat.test.ts`
-
-Step 0 (CI-7): `grep -n "export function formatVoucherSizes\|export const WASHER_DRYER_LABELS" W:/tmp/property-requirements/dashboard/src/routes/listing/listingFormat.ts`.
-For each name already exported by S5, skip its block in Step 3 (keep the
-tests: they pin the 1.1 copy either way).
 
 Step 1 - tests. In `listingFormat.test.ts`:
 
@@ -20304,10 +20681,14 @@ describe('recordedVoucherSizes + formatVoucherSizes (D4: the property page row)'
 });
 
 describe('washerDryerLabel (D3)', () => {
-  it('labels the three recorded values and nothing else', () => {
+  it('labels the three recorded values from the ONE label map, and nothing else', () => {
     expect(washerDryerLabel('hookups')).toBe('Hookups');
     expect(washerDryerLabel('included')).toBe('Washer and dryer included');
     expect(washerDryerLabel('none')).toBe('No hookups');
+    // AR39: the labels are S5's map in requirements.ts, never a second copy.
+    for (const value of ['hookups', 'included', 'none'] as const) {
+      expect(washerDryerLabel(value)).toBe(WASHER_DRYER_LABELS[value]);
+    }
     expect(washerDryerLabel(undefined)).toBeNull();
     expect(washerDryerLabel('')).toBeNull();
     expect(washerDryerLabel('stacked')).toBeNull();
@@ -20315,14 +20696,31 @@ describe('washerDryerLabel (D3)', () => {
 });
 ```
 
+and add, right after the `} from './listingFormat.js';` import line of the
+test file:
+
+```ts
+import { WASHER_DRYER_LABELS } from './requirements.js';
+```
+
 Step 2 - run RED:
 `cd W:/tmp/property-requirements/dashboard && npx vitest run src/routes/listing/listingFormat.test.ts`
 The new D13 case fails (the label stays "Property updated" -
-`listingFormat.ts:225-228` ignores `reason`); `recordedVoucherSizes` and
-`washerDryerLabel` (and `formatVoucherSizes` unless S5 added it) are not
-exported, so their cases throw. Every existing case stays green (PIN).
+`listingFormat.ts:225-228` ignores `reason`); `recordedVoucherSizes`,
+`formatVoucherSizes` and `washerDryerLabel` are not exported, so their cases
+throw. Every existing case stays green (PIN).
 
 Step 3 - implementation in `dashboard/src/routes/listing/listingFormat.ts`:
+
+(a0) After the line `import { ROLE_LABEL } from './buildListingFile.js';` add:
+
+```ts
+import { WASHER_DRYER_LABELS } from './requirements.js';
+```
+
+`requirements.ts` imports `formatMoney` from this file (Task 6.1), so the two
+modules import each other; both use the other's exports only inside function
+bodies, so the cycle is harmless - keep it that way (no top-level use).
 
 (a) Right AFTER the function `acceptedVoucherSizes` (it ends
 `  return isSize(unit.beds) ? [unit.beds] : [];\n}`), insert:
@@ -20349,14 +20747,9 @@ export function formatVoucherSizes(sizes: readonly number[]): string {
   return sizes.map((n) => (n === 0 ? 'Studio' : `${n} BR`)).join(', ');
 }
 
-/** D3: the washer / dryer values and their staff labels (plan 1.1). */
-export const WASHER_DRYER_LABELS: Readonly<Record<'hookups' | 'included' | 'none', string>> = {
-  hookups: 'Hookups',
-  included: 'Washer and dryer included',
-  none: 'No hookups',
-};
-
-/** The label of a stored washer / dryer value, or null when none is recorded. */
+/** D3: the label of a stored washer / dryer value (S5's WASHER_DRYER_LABELS,
+ *  requirements.ts - the one label map, ruling AR39), or null when none is
+ *  recorded. */
 export function washerDryerLabel(value: unknown): string | null {
   return value === 'hookups' || value === 'included' || value === 'none' ? WASHER_DRYER_LABELS[value] : null;
 }
@@ -21588,18 +21981,20 @@ function applicationFeeLabel(fee: number | null): string | null {
   if (fee === null) return null;
   return fee === 0 ? 'No application fee' : `$${fee}`;
 }
-
-/** D11: the washer / dryer row (tenant copy; the same words as the staff
- *  labels in routes/listing/listingFormat.ts, kept here so the public bundle
- *  does not import a staff module). */
-const WASHER_DRYER_FLYER_LABELS: Readonly<Record<'hookups' | 'included' | 'none', string>> = {
-  hookups: 'Hookups',
-  included: 'Washer and dryer included',
-  none: 'No hookups',
-};
 ```
 
 `textOrNull` is declared above `petsLabel` (`:106-108`), so the call is in scope.
+
+The washer / dryer row reads S5's one label map (ruling AR39; plan 1.1 gives
+the flyer the same three words). After `import { safeHttpUrl } from '../../lib/safeUrl.js';` add:
+
+```ts
+import { WASHER_DRYER_LABELS } from '../listing/requirements.js';
+```
+
+(The dashboard has no route-level code splitting - no `lazy(` anywhere in
+`dashboard/src` - so the public page importing the registry module adds
+nothing to what it already loads.)
 
 Replace `  const pets = petsLabel(flyer.pets);` with:
 
@@ -21608,7 +22003,7 @@ Replace `  const pets = petsLabel(flyer.pets);` with:
   const petFee = textOrNull(flyer.pet_fee);
   const deposit = depositLabel(flyer);
   const applicationFee = applicationFeeLabel(flyer.application_fee);
-  const washerDryer = flyer.washer_dryer !== null ? WASHER_DRYER_FLYER_LABELS[flyer.washer_dryer] : null;
+  const washerDryer = flyer.washer_dryer !== null ? WASHER_DRYER_LABELS[flyer.washer_dryer] : null;
   const voucher = voucherPhrase(flyer.voucher_sizes);
 ```
 
@@ -22711,7 +23106,17 @@ for landlords, after Landlord onboarding, using the shared
 only, the landlord legend); it sends only the `req_` keys that changed, and on
 the save that CHECKS One month's rent it sends `req_deposit: null` (D1). A
 contact retyped away from landlord sends no `req_` key (the server 400s them,
-plan 2.4). Written against CI-2 / CI-3.
+plan 2.4). Uses S5's helpers exactly (ruling AR36,
+`dashboard/src/routes/listing/requirementForm.ts`):
+`requirementFormValuesFromLandlord(contact)` for the starting values,
+`buildRequirementPatch(initial, current)` (`{ ok: true; patch } | { ok: false; error }`;
+it already adds `deposit: null` on the save that checks One month's rent) and
+`toLandlordPatch(patch)` (prefixes `req_`). An `ok: false` shows its `error` in
+the form's error line and sends nothing. A 400 `deposit_conflict` (ruling AR32)
+shows `A deposit can be one month's rent or a fixed amount, not both. Reload the landlord and try again.`,
+keeps the form open with what staff typed, and never falls through to the
+generic save error. `RequirementsFields` renders no section heading (S5), so
+the form renders the fieldset legend and `FlyerLegend` itself.
 
 Files:
 - `dashboard/src/routes/contact/ContactEditForm.tsx`
@@ -22774,16 +23179,13 @@ describe('ContactEditForm - landlord Requirements / Qualifications', () => {
     await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { req_pet_fee: '$300' }));
   });
 
-  it('unchecking a requirement checkbox sends just that key, as not-a-rule (false or null)', async () => {
+  it('unchecking a requirement checkbox sends just that key as null (not a rule, D1)', async () => {
     const user = userEvent.setup();
     updateContact.mockResolvedValue({ ...WITH_REQUIREMENTS });
     render(<ContactEditForm contact={WITH_REQUIREMENTS} onClose={vi.fn()} onSaved={vi.fn()} />);
     await user.click(within(fieldset()).getByRole('checkbox', { name: 'No pets' }));
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    await waitFor(() => expect(updateContact).toHaveBeenCalled());
-    const patch = updateContact.mock.calls[0]![1] as Record<string, unknown>;
-    expect(Object.keys(patch)).toEqual(['req_no_pets']);
-    expect([false, null]).toContain(patch['req_no_pets']);
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { req_no_pets: null }));
   });
 
   it.each<[string, Contact]>([
@@ -22809,6 +23211,42 @@ describe('ContactEditForm - landlord Requirements / Qualifications', () => {
     await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { park_reason: 'Declined' }));
   });
 
+  it('an invalid amount shows its error in the form and sends nothing (buildRequirementPatch ok: false)', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={onSaved} />);
+    // The amount is a number input, which drops letters ("abc" reads back as
+    // empty in the DOM), so the invalid amount is a negative one - the case
+    // requirementForm.test.ts pins for the same message.
+    fireEvent.change(within(fieldset()).getByLabelText('Fixed amount'), { target: { value: '-5' } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Fixed amount must be a number 0 or greater.');
+    expect(updateContact).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(within(fieldset()).getByLabelText('Fixed amount')).toHaveDisplayValue('-5');
+  });
+
+  it('a 400 deposit_conflict says why, keeps the form open with what staff typed, and is not the generic error (AR32)', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    const onClose = vi.fn();
+    updateContact.mockRejectedValue(
+      new ApiError(400, 'deposit_conflict', 'deposit_conflict', { error: 'deposit_conflict' }),
+    );
+    render(<ContactEditForm contact={LANDLORD} onClose={onClose} onSaved={onSaved} />);
+    fireEvent.change(within(fieldset()).getByLabelText('Fixed amount'), { target: { value: '1400' } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "A deposit can be one month's rent or a fixed amount, not both. Reload the landlord and try again.",
+    );
+    expect(updateContact).toHaveBeenCalledWith('L1', { req_deposit: 1400 });
+    expect(screen.queryByText("Couldn't save - please try again.")).toBeNull();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(within(fieldset()).getByLabelText('Fixed amount')).toHaveDisplayValue('1400');
+    expect(screen.getByRole('button', { name: /^Save$/i })).toBeEnabled();
+  });
+
   it('a landlord retyped to a tenant sends no req_ key, even after a requirement was edited', async () => {
     const user = userEvent.setup();
     setTenantStatus.mockResolvedValue({ ...LANDLORD, type: 'tenant', status: 'needs_review' });
@@ -22830,8 +23268,11 @@ Step 2 - RED:
 `cd W:/tmp/property-requirements/dashboard && npx vitest run src/routes/contact/ContactEditForm.test.tsx`
 Every new case fails: the form has no "Requirements / Qualifications" group
 (`ContactEditForm.tsx:871-973` ends with Park reason), so `fieldset()` throws,
-and the patch never carries a `req_` key. The tenant case is a PIN. All
-existing cases stay green (PIN).
+and the patch never carries a `req_` key; with no fieldset there is no
+"Fixed amount" input for the `ok: false` and `deposit_conflict` cases either
+(and on unchanged code a 400 lands in the generic "Couldn't save - please try
+again.", `ContactEditForm.tsx:533`). The tenant case is a PIN. All existing
+cases stay green (PIN).
 
 Step 3 - implementation in `dashboard/src/routes/contact/ContactEditForm.tsx`:
 
@@ -22839,22 +23280,36 @@ Step 3 - implementation in `dashboard/src/routes/contact/ContactEditForm.tsx`:
 
 ```ts
 import { FlyerLegend } from '../listing/FlyerTag.js';
+import { RequirementsFields } from '../listing/RequirementsFields.js';
 import {
-  RequirementsFields,
-  requirementFormValuesFrom,
-  requirementPatch,
+  buildRequirementPatch,
+  requirementFormValuesFromLandlord,
+  toLandlordPatch,
   type RequirementFormValues,
-} from '../listing/RequirementsFields.js';
+} from '../listing/requirementForm.js';
+```
+
+After the `CASEWORKER_USE_CONVERSION` constant (it ends
+`export const CASEWORKER_USE_CONVERSION = 'To make this contact a caseworker, use More actions > Make caseworker.';`), add:
+
+```ts
+
+/** Ruling AR32 (property requirements D1): a landlord save the server refuses
+ *  with 400 deposit_conflict - the resulting record would hold both a
+ *  one-month deposit and a fixed amount (a colleague's save landed first). */
+export const DEPOSIT_CONFLICT_COPY =
+  "A deposit can be one month's rent or a fixed amount, not both. Reload the landlord and try again.";
 ```
 
 (b) After `  const [parkReason, setParkReason] = useState(str(contact.park_reason));` add:
 
 ```ts
   // Property requirements D9: the landlord's requirements as form values keyed
-  // by UNIT key - the shared RequirementsFields maps the req_ keys in
-  // (requirementFormValuesFrom) and requirementPatch maps the changed ones out.
+  // by UNIT key (S5's requirementForm.ts maps the req_ keys in with
+  // requirementFormValuesFromLandlord, and toLandlordPatch maps the changed
+  // ones back out).
   const [requirements, setRequirements] = useState<RequirementFormValues>(() =>
-    requirementFormValuesFrom(contact, 'landlord'),
+    requirementFormValuesFromLandlord(contact),
   );
 ```
 
@@ -22870,12 +23325,44 @@ with:
 ```ts
       if (parkReason !== str(contact.park_reason)) patch.park_reason = parkReason;
       // D9: only the req_ keys that changed - and, on the save that CHECKS One
-      // month's rent, req_deposit null (D1) - by the same helper the property
-      // forms use, so the two cannot drift. Gated on the LIVE kind: a contact
-      // retyped away from landlord sends none (the server refuses them).
-      Object.assign(patch, requirementPatch(requirementFormValuesFrom(contact, 'landlord'), requirements, 'landlord'));
+      // month's rent, req_deposit null (D1; buildRequirementPatch adds it) - by
+      // the same helper the property forms use, so the two cannot drift. An
+      // invalid amount refuses the save with its message (onSubmit shows it
+      // and sends nothing). Gated on the LIVE kind: a contact retyped away
+      // from landlord sends no req_ key (the server refuses them).
+      const req = buildRequirementPatch(requirementFormValuesFromLandlord(contact), requirements);
+      if (!req.ok) return { error: req.error };
+      Object.assign(patch, toLandlordPatch(req.patch));
     }
 ```
+
+(`onSubmit` already handles a `{ error }` result: it shows it in the error
+line and returns before any request, `ContactEditForm.tsx:479-483`.)
+
+(c2) In `onSubmit`'s `catch`, replace
+
+```ts
+      } else if (err instanceof ApiError && err.status === 409 && err.code === 'caseworker_use_conversion') {
+        // A save never makes a contact a caseworker (spec D16) - say where to go.
+        setError(CASEWORKER_USE_CONVERSION);
+      } else {
+```
+
+with:
+
+```ts
+      } else if (err instanceof ApiError && err.status === 409 && err.code === 'caseworker_use_conversion') {
+        // A save never makes a contact a caseworker (spec D16) - say where to go.
+        setError(CASEWORKER_USE_CONVERSION);
+      } else if (err instanceof ApiError && err.status === 400 && err.code === 'deposit_conflict') {
+        // AR32: say why, and keep the form open with what staff typed - never
+        // the generic save error below.
+        setError(DEPOSIT_CONFLICT_COPY);
+      } else {
+```
+
+(The `catch` ends with `setSaving(false)` and never closes the form, so the
+typed values stay.)
 
 (d) After the Landlord onboarding fieldset - replace
 
@@ -22914,9 +23401,8 @@ with:
         ) : null}
 ```
 
-(If S5's `RequirementsFields` renders its own legend / FlyerLegend for audience
-'landlord' - CI-3 - keep the `<fieldset>` and drop the two inner lines that
-would duplicate it.)
+(`RequirementsFields` renders no section heading and no legend of its own -
+S5's note to S6 - so these two lines are the only ones.)
 
 (e) `dashboard/src/routes/contact/ContactEditForm.module.css` - after the
 `.fieldset { ... }` rule (it ends `  gap: var(--sp-2);\n}` before `.stateField`), insert:
@@ -22943,7 +23429,7 @@ would duplicate it.)
 ```
 
 Step 4 - GREEN:
-- `cd W:/tmp/property-requirements/dashboard && npx vitest run src/routes/contact/ContactEditForm.test.tsx src/routes/contact/ContactDetail.test.tsx src/routes/listing/RequirementsFields.test.tsx`
+- `cd W:/tmp/property-requirements/dashboard && npx vitest run src/routes/contact/ContactEditForm.test.tsx src/routes/contact/ContactDetail.test.tsx src/routes/listing/RequirementsFields.test.tsx src/routes/listing/requirementForm.test.ts`
 - `cd W:/tmp/property-requirements && npm run typecheck`
 - `cd W:/tmp/property-requirements && npx eslint dashboard/src/routes/contact/ContactEditForm.tsx dashboard/src/routes/contact/ContactEditForm.test.tsx`
 
@@ -24217,16 +24703,16 @@ Step 6 - commit both files:
 
 ## 5. Notes for other slices
 
-- S5 (CI-2): export `requirementFormValuesFrom` / `requirementPatch` from
-  `RequirementsFields.tsx` and use them in `ListingEditForm` too; the
-  One-month rule (amount null on the save that checks it) belongs in
-  `requirementPatch` for both sides.
-- S5 (CI-3): `RequirementsFields` renders the four groups and fields only; the
-  host renders the section heading and the `FlyerLegend` (S6's landlord form
-  renders `<fieldset><legend>Requirements / Qualifications</legend><FlyerLegend audience="landlord" />`).
-- S5 (CI-7): if S5 adds `formatVoucherSizes` / `WASHER_DRYER_LABELS` to
-  `listingFormat.ts` for the picker summary and the select, use exactly those
-  names and copy (6.2 then skips them).
+- S5 (AR36, ruled): S6's landlord form consumes `requirementForm.ts`'s
+  `requirementFormValuesFromLandlord`, `buildRequirementPatch` (its
+  `ok: false` messages are shown verbatim, e.g.
+  `Fixed amount must be a number 0 or greater.`) and `toLandlordPatch`; keep
+  those names and shapes.
+- S5 (CI-3, resolved): `RequirementsFields` keeps rendering no section heading
+  or legend; S6's landlord form renders
+  `<fieldset><legend>Requirements / Qualifications</legend><FlyerLegend audience="landlord" />`.
+- S5 (AR39, ruled): `WASHER_DRYER_LABELS` in `requirements.ts` is the one
+  label map; S6's `washerDryerLabel` (listingFormat.ts) and the flyer row read it.
 - S5: `<L>` on the create form - S6 uses
   `contactDisplayName(firstName, lastName, phone)` (`format.ts:138-147`, the
   contact page header's rule) on the property page; use the same rule so the
@@ -24387,8 +24873,8 @@ when gate 5's baseline shows removed pre-existing errors, update the count in
 (number and date only). The last two missions deliberately left AGENTS.md's
 "23 errors across 18 dashboard files" as a dated statement
 (`docs/issues/lint-backlog-repo-wide.md:23-24,33-34`; matching-blast-rules
-handback, AR38/AR42). Proposed ruling: follow the brief (Task 7.9 Step 8);
-the planner may strike the AGENTS.md half.
+handback, AR38/AR42). RULED (planner, AR46): the AGENTS.md half is struck;
+Task 7.9 Step 8 updates only `docs/issues/lint-backlog-repo-wide.md`.
 
 ---
 
@@ -25451,23 +25937,34 @@ test('Matching: a two-size property pre-fills two voucher chips, and a 6-bedroom
 5. RED-by-mutation, run R1 (two server-side mutants, one cold run). Precondition:
    `git status --porcelain` shows ONLY the new spec file (untracked); no e2e
    run in flight; lane check clean.
-   - M1 (O1 coupling, D8): in `app/src/lib/requirements.ts` find the statement
-     inside `planUnitApply` that writes each key of a changing item into the
-     patch as the landlord's value or `null` (`grep -n "patch\[" app/src/lib/requirements.ts`
-     within the `planUnitApply` body). Wrap it so a `null` value is NOT written
-     (`if (<value> !== null) <the same statement>`) - blank keys are then never
-     REMOVEd.
-   - M2 (4+ = 4 or more, D12): in `app/src/lib/blastAudienceRules.ts` replace the
-     body of `voucherSizeMatches(sizes, tenantSize)` (plan 2.5) with
-     `return sizes.length === 0 || (tenantSize !== undefined && sizes.includes(tenantSize));`
-     (exact match, today's rule).
-   - Prove both mutants are live in the unit suites (pure files):
-     `cd /w/tmp/property-requirements/app && ALLOW_SKIP_DYNAMO_TESTS=1 npx vitest run test/requirements.test.ts test/blastAudienceRules.test.ts`
-     -> at least one failure in EACH file (a blank-item clear in the Apply
-     plan; a tenant of 5+ under the 4 chip). If either file has no failure,
-     the mutant is not on the tested path: fix the mutant, never the test. (If
-     S1/S4 named the files differently, find them with
-     `grep -rl "planUnitApply\|voucherSizeMatches" app/test`.)
+   - M1 (O1 coupling, D8): in `app/src/lib/requirements.ts`, inside
+     `planUnitApply` (S1 Task 1.3), the anchor (exact, 2 lines):
+     ```ts
+           const next = canonical(target[field.key]);
+           patch[field.key] = next;
+     ```
+     becomes
+     ```ts
+           const next = canonical(target[field.key]);
+           if (next !== null) patch[field.key] = next;
+     ```
+     so a blank key of a changing item is never REMOVEd.
+   - M2 (4+ = 4 or more, D12): in `app/src/lib/blastAudienceRules.ts`, inside
+     `voucherSizeMatches` (S4), DELETE the line (exact):
+     ```ts
+       if (tenantSize >= VOUCHER_CHIP_MAX) return sizes.includes(VOUCHER_CHIP_MAX);
+     ```
+     so matching is exact again (today's rule).
+   - Prove both mutants are live in the unit suites that hold their cases
+     (pure files): the `planUnitApply` cases are in
+     `app/test/requirementsApply.test.ts` (S1 Task 1.3, including
+     `a blank landlord item ("Clears") REMOVEs the item on the unit`) and the
+     `voucherSizeMatches` cases in `app/test/blastAudienceRules.test.ts` (S4,
+     `describe('voucherSizeMatches - any-of, the 4 chip is 4 or more (D12)'`):
+     `cd /w/tmp/property-requirements/app && ALLOW_SKIP_DYNAMO_TESTS=1 npx vitest run test/requirementsApply.test.ts test/blastAudienceRules.test.ts`
+     -> at least one failure in EACH file (a blank-item clear; a tenant of 5+
+     under the 4 chip). If either file has no failure, the mutant is not on the
+     tested path: fix the mutant, never the test.
    - Run:
      ```bash
      cd /w/tmp/property-requirements && timeout 1200 npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/property-requirements.spec.ts > .superpowers/sdd/s7/7.4-red-r1.log 2>&1
@@ -25482,14 +25979,22 @@ test('Matching: a two-size property pre-fills two voucher chips, and a 6-bedroom
    - Revert: `cd /w/tmp/property-requirements && git checkout -- app/src/lib/requirements.ts app/src/lib/blastAudienceRules.ts`, then
      `git diff --exit-code -- app/src/lib/requirements.ts app/src/lib/blastAudienceRules.ts`
      on the next line -> exit 0. Lane check clean (the mutated stack is gone).
-6. RED-by-mutation, run R2 (the dialog's starting state, D8). Same precondition.
-   - M3: in `dashboard/src/routes/contact/ApplyRequirementsDialog.tsx` find where
-     a row's STARTING checked state is computed (the D8 rule: unchecked when any
-     changing item is an own value, otherwise checked) and make it always
-     `true` for a row with changes.
-   - Prove it live: `cd /w/tmp/property-requirements/dashboard && npx vitest run src/routes/contact/ApplyRequirementsDialog.test.tsx`
-     -> at least one failure (the own-value default). (If S6 named the test
-     differently, find it with `grep -rl "ApplyRequirementsDialog" dashboard/src --include=*.test.tsx`.)
+6. RED-by-mutation, run R2 (the Apply row's starting state, D8). Same
+   precondition (only the new spec untracked; R1's reverts proven).
+   - M3: the D8 starting-state rule is `rowIsChecked` in
+     `dashboard/src/routes/contact/applyRequirementsModel.ts` (S6 Task 6.7; the
+     dialog only calls it). Its anchor line (exact):
+     ```ts
+       return row.own.length === 0;
+     ```
+     becomes
+     ```ts
+       return true;
+     ```
+     so a row with an own value among its changes starts CHECKED.
+   - Prove it live: `cd /w/tmp/property-requirements/dashboard && npx vitest run src/routes/contact/applyRequirementsModel.test.ts`
+     -> at least one failure (`describe('rowIsChecked'` - "starts checked
+     without own values, unchecked with one, never when Already matches").
    - Run (cold, lane check first):
      ```bash
      cd /w/tmp/property-requirements && timeout 1200 npm run e2e -w @housingchoice/e2e -- tests/dashboard-next/property-requirements.spec.ts > .superpowers/sdd/s7/7.4-red-r2.log 2>&1
@@ -25497,11 +26002,15 @@ test('Matching: a two-size property pre-fills two voucher chips, and a 6-bedroom
      ```
      Expected: exit 1, `1 failed` + `1 passed`; test 1 fails at
      `expect(rowOf(lineA).getByRole('checkbox')).not.toBeChecked()`.
-   - Revert: `git checkout -- dashboard/src/routes/contact/ApplyRequirementsDialog.tsx`, then
-     `git diff --exit-code -- dashboard/src/routes/contact/ApplyRequirementsDialog.tsx`
+   - Revert: `cd /w/tmp/property-requirements && git checkout -- dashboard/src/routes/contact/applyRequirementsModel.ts`, then
+     `git diff --exit-code -- dashboard/src/routes/contact/applyRequirementsModel.ts`
      on the next line -> exit 0. Lane check clean.
-7. GREEN after the reverts: the Step 4 command again (log `7.4-green.log`) ->
-   exit 0, `2 passed`.
+7. GREEN after the reverts. First prove EVERY file any mutant touched is back
+   to its committed bytes, in one command:
+   `cd /w/tmp/property-requirements && git diff --exit-code -- app/src/lib/requirements.ts app/src/lib/blastAudienceRules.ts dashboard/src/routes/contact/applyRequirementsModel.ts`
+   then on the next line `echo "revert exit=$?"` -> `0`, and
+   `git status --porcelain` shows only the new spec file. Then the Step 4
+   command again (log `7.4-green.log`) -> exit 0, `2 passed`.
 8. Write the record
    `docs/superpowers/reviews/2026-10-20-property-requirements/build/S7-new-spec-red-by-mutation.md`
    (ASCII; a record, not reference - cite, do not paste code): a title line
@@ -25511,7 +26020,8 @@ test('Matching: a two-size property pre-fills two voucher chips, and a 6-bedroom
    confirmation line (`Tests  N failed | M passed`), and from the e2e log
    VERBATIM the summary lines (`N failed` / `N passed (Xm)`) and, per failing
    test, its title and first `Error:` line plus the spec line it points at;
-   then the revert proof (`git diff --exit-code` exit 0 for each file). If a
+   then the revert proof (each run's `git diff --exit-code` exit 0, and Step
+   7's single check over all three mutated files exit 0). If a
    copied line carries non-ASCII (Playwright's glyphs), keep it verbatim and say
    so in one line above it (FEATURE-DEVELOPMENT-WORKFLOW.md section 8:
    captured tool output is preserved verbatim).
@@ -25877,7 +26387,7 @@ background task's notification exit code carries no information). Gate 5 is
 "no new lint errors in the files you touched", decided by baseline comparison.
 
 Files: run state only (`.superpowers/gates/`, gitignored); if Step 8 applies,
-`docs/issues/lint-backlog-repo-wide.md` and `AGENTS.md`.
+`docs/issues/lint-backlog-repo-wide.md` (never `AGENTS.md`, AR46).
 
 Steps:
 1. Preconditions: Task 7.8 done; `git status` clean; no edit or commit until
@@ -26048,13 +26558,12 @@ Steps:
      (E errors across F files, W warnings), then names, per file the branch
      cleaned, the rule id and the count removed (from the compare rows), and
      states that no error was added (`branch-attributed: 0`).
-   - `AGENTS.md` gate 5 paragraph, number and date ONLY (CI-7): the date in
-     "as of 2026-10-07" becomes D; in "reports 23 errors across 18 dashboard
-     files" 23 becomes E and 18 becomes F; in "to those 18 files" 18 becomes F.
-     Nothing else in AGENTS.md changes.
-   - ASCII check on both (both files are all-ASCII today: `tr ... < FILE | wc -c` -> `0`).
-   - Commit: `git add docs/issues/lint-backlog-repo-wide.md AGENTS.md`;
-     `git commit -m "docs(lint): backlog now <E> errors across <F> files after feat/property-requirements (number and date only in AGENTS.md)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
+   - `AGENTS.md` is NOT touched (planner ruling AR46): its "23 errors across 18
+     dashboard files" stays a dated (2026-10-07) statement, as the last two
+     missions left it.
+   - ASCII check (the file is all-ASCII today): `tr -d '\11\12\15\40-\176' < docs/issues/lint-backlog-repo-wide.md | wc -c` -> `0`.
+   - Commit: `git add docs/issues/lint-backlog-repo-wide.md`;
+     `git commit -m "docs(lint): backlog now <E> errors across <F> files after feat/property-requirements" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
      (a docs-only commit after the gated commit; the handback names the gated
      sha and says the tip adds docs only).
    When `removed-by-branch` is 0, skip this step and say so in the handback.
@@ -26159,7 +26668,7 @@ Steps:
 | s7 Docs: close two issues; partly close `unit-onboarding-fields` | 7.7 |
 | AGENTS: single main sync before handback | 7.8 |
 | AGENTS: five gates, bare, gate 5 scoped + baseline | 7.9 |
-| Brief: lint backlog count rule | 7.9 Step 8 |
+| Brief: lint backlog count rule (AR46: the issue file only, never AGENTS.md) | 7.9 Step 8 |
 | Workflow/profile: handback record | 7.10 |
 | Gate 2 health for S5's new endpoint (CI-3) | 7.1 |
 | Harness selector contract (CI-6) | 7.5 |

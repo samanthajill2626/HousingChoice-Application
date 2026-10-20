@@ -11,6 +11,7 @@ import {
   validateUnitBody,
   type UnitFlyer,
 } from '../src/lib/unitFields.js';
+import { REQUIREMENT_UNIT_KEYS } from '../src/lib/requirements.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 
 describe('validateUnitBody — new public-flyer fields', () => {
@@ -62,48 +63,65 @@ describe('validateUnitBody — new public-flyer fields', () => {
 });
 
 describe('validateUnitBody — voucher_size_accepted (landlord-onboarding)', () => {
-  // A writable, STORED voucher size the unit accepts - DISTINCT from beds. A 3bd
-  // unit may accept a 2BR voucher, so this is its own number field; readers go
-  // through acceptedVoucherSizes (below), which falls back to beds.
-  it('accepts voucher_size_accepted (a number >= 0)', () => {
+  // A writable, STORED LIST of the voucher sizes the unit accepts (spec
+  // 2026-10-20 D4) - DISTINCT from beds. A 3bd unit may accept only a 2BR
+  // voucher; readers go through acceptedVoucherSizes (below), which falls
+  // back to beds.
+  it('a bare integer 0..12 is stored as a one-item list (a raw caller or an older bundle)', () => {
     expect(validateUnitBody({ voucher_size_accepted: 2 }, 'update')).toEqual({
       ok: true,
-      fields: { voucher_size_accepted: 2 },
+      fields: { voucher_size_accepted: [2] },
     });
-    // 0 is allowed (an efficiency/SRO voucher).
+    // 0 is allowed (an efficiency/SRO voucher), and so is the largest size.
     expect(validateUnitBody({ voucher_size_accepted: 0 }, 'update')).toEqual({
       ok: true,
-      fields: { voucher_size_accepted: 0 },
+      fields: { voucher_size_accepted: [0] },
+    });
+    expect(validateUnitBody({ voucher_size_accepted: 12 }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: [12] },
     });
   });
 
-  it('rejects a non-number voucher_size_accepted', () => {
-    expect(validateUnitBody({ voucher_size_accepted: 'two' }, 'update')).toEqual({
-      ok: false,
-      error: 'voucher_size_accepted must be a number',
+  it('a list is stored de-duplicated and ascending', () => {
+    expect(validateUnitBody({ voucher_size_accepted: [3, 2, 3] }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: [2, 3] },
+    });
+    expect(validateUnitBody({ voucher_size_accepted: [12, 0, 5] }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: [0, 5, 12] },
     });
   });
 
-  it('rejects a negative voucher_size_accepted', () => {
-    expect(validateUnitBody({ voucher_size_accepted: -1 }, 'update')).toEqual({
-      ok: false,
-      error: 'voucher_size_accepted must be >= 0',
-    });
-  });
-
-  it('null CLEARS voucher_size_accepted (a null patch value -> REMOVE), so beds decide again', () => {
+  it('null and [] CLEAR it (a null patch value -> REMOVE), so beds decide again', () => {
     expect(validateUnitBody({ voucher_size_accepted: null }, 'update')).toEqual({
       ok: true,
       fields: { voucher_size_accepted: null },
     });
-    // An empty string is not a clear - only null is.
-    expect(validateUnitBody({ voucher_size_accepted: '' }, 'update')).toEqual({
-      ok: false,
-      error: 'voucher_size_accepted must be a number',
+    expect(validateUnitBody({ voucher_size_accepted: [] }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: null },
     });
   });
 
-  it('other number fields still reject null (only the voucher size is clearable)', () => {
+  it('rejects 13, -1, 2.5, strings, mixed and nested lists - anything but integers 0..12', () => {
+    for (const bad of [13, -1, 2.5, Number.NaN, '2', 'two', '', true, {}, [2, '3'], [2, 13], [2.5], [-1], [[2]], [null]]) {
+      expect(validateUnitBody({ voucher_size_accepted: bad }, 'update'), JSON.stringify(bad)).toEqual({
+        ok: false,
+        error: 'voucher_size_accepted must be an integer 0..12 or a list of them',
+      });
+    }
+  });
+
+  it('accepts the list on create as well as update', () => {
+    expect(validateUnitBody({ landlordId: 'contact-ll', voucher_size_accepted: [3, 2] }, 'create')).toEqual({
+      ok: true,
+      fields: { landlordId: 'contact-ll', voucher_size_accepted: [2, 3] },
+    });
+  });
+
+  it('(PIN) beds still rejects null (only the voucher sizes and the requirement money fields clear)', () => {
     expect(validateUnitBody({ beds: null }, 'update')).toEqual({
       ok: false,
       error: 'beds must be a number',
@@ -292,6 +310,212 @@ describe('validateUnitBody - accepted_authorities consolidation (spec section 8)
       accepted_programs: ['HCV'],
     });
     expect(stale.accepted_authorities).toEqual([]);
+  });
+});
+
+describe('validateUnitBody - the requirement keys (spec 2026-10-20 D1, D2)', () => {
+  it('accepts every requirement key with its kind', () => {
+    expect(
+      validateUnitBody(
+        {
+          no_evictions_on_program: true,
+          evictions_notes: 'None in the last 5 years',
+          credit_requirements: '600+',
+          income_requirements: '2.5x the tenant portion',
+          qualifications: 'Background check\nNo prior landlord debt',
+          no_pets: true,
+          pets: 'Service animals only',
+          pet_fee: '$300 one-time',
+          deposit_one_month: true,
+          deposit_flexible: true,
+          deposit_notes: 'Can split over two months',
+          application_fee: 0,
+          tour_type: 'landlord_led',
+          tour_process: 'Text Ana a day ahead',
+        },
+        'update',
+      ),
+    ).toEqual({
+      ok: true,
+      fields: {
+        no_evictions_on_program: true,
+        evictions_notes: 'None in the last 5 years',
+        credit_requirements: '600+',
+        income_requirements: '2.5x the tenant portion',
+        qualifications: 'Background check\nNo prior landlord debt',
+        no_pets: true,
+        pets: 'Service animals only',
+        pet_fee: '$300 one-time',
+        deposit_one_month: true,
+        deposit_flexible: true,
+        deposit_notes: 'Can split over two months',
+        application_fee: 0,
+        tour_type: 'landlord_led',
+        tour_process: 'Text Ana a day ahead',
+      },
+    });
+  });
+
+  it('a checkbox stores true; false and null REMOVE (a null patch value); anything else is a 400', () => {
+    for (const key of ['no_evictions_on_program', 'no_pets', 'deposit_one_month', 'deposit_flexible']) {
+      expect(validateUnitBody({ [key]: true }, 'update'), key).toEqual({ ok: true, fields: { [key]: true } });
+      expect(validateUnitBody({ [key]: false }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: null }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: 'yes' }, 'update'), key).toEqual({
+        ok: false,
+        error: `${key} must be true, false or null`,
+      });
+    }
+  });
+
+  it('text is trimmed; "", whitespace and null REMOVE; a non-string is a 400', () => {
+    for (const key of [
+      'evictions_notes',
+      'credit_requirements',
+      'income_requirements',
+      'qualifications',
+      'pet_fee',
+      'deposit_notes',
+      'tour_process',
+    ]) {
+      expect(validateUnitBody({ [key]: '  Call first  ' }, 'update'), key).toEqual({
+        ok: true,
+        fields: { [key]: 'Call first' },
+      });
+      expect(validateUnitBody({ [key]: '' }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: '   ' }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: null }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: 42 }, 'update'), key).toEqual({
+        ok: false,
+        error: `${key} must be a string or null`,
+      });
+    }
+  });
+
+  it('money: deposit and application_fee now CLEAR on null; 0 stays a value', () => {
+    for (const key of ['deposit', 'application_fee']) {
+      expect(validateUnitBody({ [key]: 1400 }, 'update'), key).toEqual({ ok: true, fields: { [key]: 1400 } });
+      expect(validateUnitBody({ [key]: 0 }, 'update'), key).toEqual({ ok: true, fields: { [key]: 0 } });
+      expect(validateUnitBody({ [key]: null }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: '1400' }, 'update'), key).toEqual({ ok: false, error: `${key} must be a number` });
+      expect(validateUnitBody({ [key]: -1 }, 'update'), key).toEqual({ ok: false, error: `${key} must be >= 0` });
+    }
+  });
+
+  it('does NOT check the deposit conflict - that needs the stored record (the route does it)', () => {
+    expect(validateUnitBody({ deposit_one_month: true, deposit: 1400 }, 'update')).toEqual({
+      ok: true,
+      fields: { deposit_one_month: true, deposit: 1400 },
+    });
+  });
+
+  it('requirement keys are writable on create too', () => {
+    expect(validateUnitBody({ landlordId: 'contact-ll', no_pets: true, pet_fee: ' $300 ' }, 'create')).toEqual({
+      ok: true,
+      fields: { landlordId: 'contact-ll', no_pets: true, pet_fee: '$300' },
+    });
+  });
+
+  it('every registry unit key is writable (the allowlist and the registry agree)', () => {
+    for (const key of REQUIREMENT_UNIT_KEYS) {
+      expect(validateUnitBody({ [key]: null }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+    }
+  });
+
+  it('(PIN) requirement_sources is server-written only - a body carrying it is refused', () => {
+    expect(validateUnitBody({ requirement_sources: { pets: 'copied' } }, 'update')).toEqual({
+      ok: false,
+      error: 'unknown field: requirement_sources',
+    });
+  });
+});
+
+describe('validateUnitBody - pets: the details text and the legacy boolean (spec 2026-10-20 D1)', () => {
+  it('a string is the details text: trimmed; "" and null REMOVE', () => {
+    expect(validateUnitBody({ pets: '  Cats OK ' }, 'update')).toEqual({ ok: true, fields: { pets: 'Cats OK' } });
+    expect(validateUnitBody({ pets: '' }, 'update')).toEqual({ ok: true, fields: { pets: null } });
+    expect(validateUnitBody({ pets: null }, 'update')).toEqual({ ok: true, fields: { pets: null } });
+    // Free text is never parsed: "No pets" stays details text.
+    expect(validateUnitBody({ pets: 'No pets' }, 'update')).toEqual({ ok: true, fields: { pets: 'No pets' } });
+  });
+
+  it('pets: false MEANS No pets checked and details blank - stored in the new shape at once', () => {
+    expect(validateUnitBody({ pets: false }, 'update')).toEqual({ ok: true, fields: { no_pets: true, pets: null } });
+  });
+
+  it('pets: true MEANS No pets unchecked and details "Allowed"', () => {
+    expect(validateUnitBody({ pets: true }, 'update')).toEqual({ ok: true, fields: { no_pets: null, pets: 'Allowed' } });
+  });
+
+  it('a boolean beside pet_fee keeps the fee', () => {
+    expect(validateUnitBody({ pets: false, pet_fee: ' $300 ' }, 'update')).toEqual({
+      ok: true,
+      fields: { no_pets: true, pets: null, pet_fee: '$300' },
+    });
+  });
+
+  it('a boolean pets beside no_pets is a 400, in either key order and for a null no_pets', () => {
+    for (const body of [{ pets: false, no_pets: true }, { no_pets: null, pets: true }, { no_pets: false, pets: false }]) {
+      expect(validateUnitBody(body, 'update'), JSON.stringify(body)).toEqual({
+        ok: false,
+        error: 'pets: a boolean pets cannot be combined with no_pets',
+      });
+    }
+  });
+
+  it('a string pets beside no_pets is the new shape and fine', () => {
+    expect(validateUnitBody({ no_pets: true, pets: 'Service animals only' }, 'update')).toEqual({
+      ok: true,
+      fields: { no_pets: true, pets: 'Service animals only' },
+    });
+  });
+
+  it('rejects a pets that is not a string, a boolean or null', () => {
+    for (const bad of [42, {}, ['cats']]) {
+      expect(validateUnitBody({ pets: bad }, 'update')).toEqual({
+        ok: false,
+        error: 'pets must be a string, a boolean or null',
+      });
+    }
+  });
+});
+
+describe('validateUnitBody - subzone and washer_dryer (spec 2026-10-20 D3)', () => {
+  it('subzone is clearable text: trimmed; "", whitespace and null REMOVE', () => {
+    expect(validateUnitBody({ subzone: ' SE11 ' }, 'update')).toEqual({ ok: true, fields: { subzone: 'SE11' } });
+    expect(validateUnitBody({ subzone: '' }, 'update')).toEqual({ ok: true, fields: { subzone: null } });
+    expect(validateUnitBody({ subzone: '  ' }, 'update')).toEqual({ ok: true, fields: { subzone: null } });
+    expect(validateUnitBody({ subzone: null }, 'update')).toEqual({ ok: true, fields: { subzone: null } });
+  });
+
+  it('subzone rejects a non-string', () => {
+    expect(validateUnitBody({ subzone: 11 }, 'update')).toEqual({ ok: false, error: 'subzone must be a string or null' });
+  });
+
+  it('washer_dryer takes hookups, included or none; "" and null REMOVE', () => {
+    for (const v of ['hookups', 'included', 'none']) {
+      expect(validateUnitBody({ washer_dryer: v }, 'update')).toEqual({ ok: true, fields: { washer_dryer: v } });
+    }
+    expect(validateUnitBody({ washer_dryer: '' }, 'update')).toEqual({ ok: true, fields: { washer_dryer: null } });
+    expect(validateUnitBody({ washer_dryer: null }, 'update')).toEqual({ ok: true, fields: { washer_dryer: null } });
+  });
+
+  it('washer_dryer rejects anything else', () => {
+    for (const bad of ['yes', 'Hookups', 'in-unit', true, 1, {}]) {
+      expect(validateUnitBody({ washer_dryer: bad }, 'update')).toEqual({
+        ok: false,
+        error: 'washer_dryer must be one of: hookups, included, none',
+      });
+    }
+  });
+});
+
+describe('validateUnitBody - the other kinds are unchanged', () => {
+  it('(PIN) area, notes, lease_terms, utilities and accessibility keep the plain string kind', () => {
+    for (const key of ['area', 'notes', 'lease_terms', 'utilities', 'accessibility']) {
+      expect(validateUnitBody({ [key]: '' }, 'update'), key).toEqual({ ok: true, fields: { [key]: '' } });
+      expect(validateUnitBody({ [key]: null }, 'update'), key).toEqual({ ok: false, error: `${key} must be a string` });
+    }
   });
 });
 

@@ -8,7 +8,14 @@
 // caller can never inject `tour_process` through an unexpected key or set a GSI
 // key (status) to a non-string that would poison the index.
 import { type Address, validateAddress } from './address.js';
-import { isTourType } from './toursModel.js';
+import {
+  REQUIREMENT_ITEMS,
+  VOUCHER_SIZE_MAX,
+  WASHER_DRYER_VALUES,
+  normalizeRequirementValue,
+  unitItemValue,
+  type RequirementField,
+} from './requirements.js';
 import { type UnitItem } from '../repos/unitsRepo.js';
 
 /** Result of validating a units request body. */
@@ -23,8 +30,15 @@ type FieldKind =
   | 'string[]'
   | 'pets'
   | 'address'
-  | 'tour_type'
-  | 'clearable_number';
+  // spec 2026-10-20 D1: a requirement key, validated through its registry
+  // kind (lib/requirements.ts normalizeRequirementValue).
+  | 'requirement'
+  // D3: trimmed text where '' or null REMOVEs (subzone).
+  | 'clearable_string'
+  // D3: one of WASHER_DRYER_VALUES; '' or null REMOVEs.
+  | 'washer_dryer'
+  // D4: the voucher sizes a property accepts, a list of integers 0..12.
+  | 'voucher_sizes';
 
 /**
  * The writable unit fields and their kinds. `accepted_authorities` is the
@@ -53,7 +67,9 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   beds: 'number',
   baths: 'number',
   area: 'string',
-  subzone: 'string',
+  // Staff-only sub-market code (Sam's codes, e.g. E8 or SE11; spec 2026-10-20
+  // D3). NEVER on the flyer projection below; feeds the similar-properties score.
+  subzone: 'clearable_string',
   rent_min: 'number',
   rent_max: 'number',
   // The accepted contract rent (Approval & Move-in). Writable in place at rent
@@ -61,8 +77,9 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   // enforces finite & >= 0.
   final_rent: 'number',
   payment_standard: 'number',
-  // Security deposit in dollars. PUBLIC on the flyer projection (flyer-full-info).
-  deposit: 'number',
+  // Security deposit: the Deposit item's fixed amount in dollars (spec
+  // 2026-10-20 D1: clearable money, null REMOVEs). PUBLIC on the flyer.
+  deposit: 'requirement',
   lif: 'number',
   // TENANT-PAID utilities (which utilities the tenant must pay) — free-form.
   utilities: 'string',
@@ -76,34 +93,54 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   // accepted programs / expected rent - see GLOSSARY). PUBLIC on the flyer
   // projection below (flyer-full-info 2026-07-16).
   lease_terms: 'string',
-  // Pet policy - a free-form string or a bare boolean. PUBLIC on the flyer
-  // projection below (flyer-full-info 2026-07-16).
+  // The Pets item's details text (spec 2026-10-20 D1; trimmed, ''/null
+  // REMOVE). A raw caller may still send a legacy bare boolean: it is stored
+  // in the new shape at once (the 'pets' case below). PUBLIC on the flyer.
   pets: 'pets',
   priority: 'string',
   media: 'string[]',
   listing_link: 'string',
   // Public flyer fields (flyer-full-info): tenant-useful facts shown upfront on
   // the flyer projection. video_url is a tour video link; application_fee is a
-  // dollar amount (the 'number' kind already enforces >= 0); same_day_rta is a
-  // boolean badge ("same-day RTA available").
+  // requirement key (spec 2026-10-20 D1: clearable money in dollars, 0 = "No
+  // application fee"); same_day_rta is a boolean badge ("same-day RTA
+  // available") and keeps its strict boolean kind.
   video_url: 'string',
-  application_fee: 'number',
+  application_fee: 'requirement',
   same_day_rta: 'boolean',
-  // Landlord-onboarding: the voucher size the unit ACCEPTS - a stored, writable
-  // number (>= 0), DISTINCT from `beds` (a 3bd unit may accept a 2BR voucher).
-  // Read it through `acceptedVoucherSizes`, which falls back to `beds`. The KEY
-  // never reaches the flyer; its VALUE drives the flyer's derived `voucher_size`.
-  // CLEARABLE (2026-10-12): null REMOVEs it, so a wrong recorded size can be
-  // taken off and the unit falls back to its beds again.
-  voucher_size_accepted: 'clearable_number',
-  tour_process: 'string',
-  // Structured tour type (self_guided / landlord_led / pm_team). A DEDICATED
-  // kind (not plain 'string') because it must clear to ABSENT: ''/null map to
-  // a null patch value so the repo's null->REMOVE path fires (a plain 'string'
-  // would reject null and store a stray empty-string enum). INTERNAL - not on
-  // the flyer projections below.
-  tour_type: 'tour_type',
+  // Landlord-onboarding: the voucher sizes the unit ACCEPTS - a stored LIST of
+  // integer sizes 0..12 (spec 2026-10-20 D4), DISTINCT from `beds` (a 3bd unit
+  // may accept only a 2BR voucher). Read it through `acceptedVoucherSizes`,
+  // which reads a list or an older single number and falls back to `beds`.
+  // The KEY never reaches the flyer; its VALUE drives the flyer's derived
+  // `voucher_sizes` / `voucher_size`. null or [] REMOVEs it, so the unit falls
+  // back to its beds again.
+  voucher_size_accepted: 'voucher_sizes',
+  // The Touring item (spec 2026-10-20 D1): tour process is trimmed text
+  // (''/null REMOVE); tour type keeps its enum (self_guided / landlord_led /
+  // pm_team; ''/null REMOVE, so no stray empty-string enum is stored). Both
+  // INTERNAL - not on the flyer projections below.
+  tour_process: 'requirement',
+  tour_type: 'requirement',
   application_process: 'string',
+  // The other requirement keys of the eight items (spec 2026-10-20 D1/D2;
+  // deposit, pets, application_fee, tour_type and tour_process above are
+  // requirement keys too). Kinds and flyer visibility live in the registry,
+  // lib/requirements.ts: a checkbox stores true or REMOVEs on false/null, text
+  // is trimmed and REMOVEs on ''/null.
+  no_evictions_on_program: 'requirement',
+  evictions_notes: 'requirement',
+  credit_requirements: 'requirement',
+  income_requirements: 'requirement',
+  qualifications: 'requirement',
+  no_pets: 'requirement',
+  pet_fee: 'requirement',
+  deposit_one_month: 'requirement',
+  deposit_flexible: 'requirement',
+  deposit_notes: 'requirement',
+  // D3: hookups / included / none; '' or null REMOVEs (absent = Not recorded).
+  // PUBLIC on the flyer.
+  washer_dryer: 'washer_dryer',
   // primary_contact is deliberately NOT writable (primary-contact-integrity
   // spec 4.5, P2b): only the roster writes (unitsRepo addContact /
   // removeContact / restoreWithLandlord / handOffPrimaryFrom) set the scalar,
@@ -134,6 +171,27 @@ function isFiniteNumber(v: unknown): v is number {
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((s) => typeof s === 'string');
+}
+
+/** D4: one voucher size a property can record - an integer 0..VOUCHER_SIZE_MAX. */
+function isVoucherSize(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= VOUCHER_SIZE_MAX;
+}
+
+/** D3: a recorded washer / dryer value. */
+function isWasherDryer(v: unknown): v is (typeof WASHER_DRYER_VALUES)[number] {
+  return typeof v === 'string' && (WASHER_DRYER_VALUES as readonly string[]).includes(v);
+}
+
+/** The registry field behind a 'requirement' / 'pets' key (lib/requirements.ts). */
+const REQUIREMENT_FIELD_BY_KEY: ReadonlyMap<string, RequirementField> = new Map(
+  REQUIREMENT_ITEMS.flatMap((item) => item.fields.map((field) => [field.key, field] as const)),
+);
+
+function requirementField(key: string): RequirementField {
+  const field = REQUIREMENT_FIELD_BY_KEY.get(key);
+  if (field === undefined) throw new Error(`unitFields: ${key} is not a requirement key`);
+  return field;
 }
 
 /**
@@ -172,44 +230,90 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
         if (!isFiniteNumber(value)) return { ok: false, error: `${key} must be a number` };
         if (value < 0) return { ok: false, error: `${key} must be >= 0` };
         break;
-      case 'clearable_number':
-        // CLEAR-to-absent: null -> a null patch value, so update REMOVEs the
-        // attribute and create drops it (the tour_type precedent). Otherwise the
-        // plain 'number' rules apply.
+      case 'voucher_sizes': {
+        // spec 2026-10-20 D4: null or [] -> a null patch value (update REMOVEs,
+        // create drops it), so the unit falls back to its beds; a bare integer
+        // (a raw caller or an older dashboard bundle) is stored as a one-item
+        // list; a list is stored de-duplicated and ascending. Anything else - a
+        // non-integer, a size above 12, a string, a mixed or nested list - is a
+        // 400 (which also stops the non-integer sizes the old number kind took).
         if (value === null) {
           fields[key] = null;
           continue;
         }
-        if (!isFiniteNumber(value)) return { ok: false, error: `${key} must be a number` };
-        if (value < 0) return { ok: false, error: `${key} must be >= 0` };
-        break;
+        const sizes: number[] = [];
+        for (const size of Array.isArray(value) ? value : [value]) {
+          if (!isVoucherSize(size)) {
+            return { ok: false, error: `${key} must be an integer 0..${VOUCHER_SIZE_MAX} or a list of them` };
+          }
+          sizes.push(size);
+        }
+        const unique = [...new Set(sizes)].sort((x, y) => x - y);
+        fields[key] = unique.length > 0 ? unique : null;
+        continue;
+      }
       case 'boolean':
         if (typeof value !== 'boolean') return { ok: false, error: `${key} must be a boolean` };
         break;
       case 'string[]':
         if (!isStringArray(value)) return { ok: false, error: `${key} must be an array of strings` };
         break;
-      case 'pets':
-        if (typeof value !== 'string' && typeof value !== 'boolean') {
-          return { ok: false, error: 'pets must be a string or boolean' };
+      case 'pets': {
+        // spec 2026-10-20 D1. A string (or null) is the Pets item's details
+        // text. A LEGACY bare boolean (raw API callers only) MEANS what the read
+        // interpretation says (lib/requirements.ts unitItemValue) and is stored
+        // in the new shape at once: false -> no_pets true + details REMOVEd;
+        // true -> no_pets REMOVEd + details "Allowed". Beside an explicit
+        // no_pets the two could disagree, so that is a 400.
+        if (typeof value === 'boolean') {
+          if (b['no_pets'] !== undefined) {
+            return { ok: false, error: 'pets: a boolean pets cannot be combined with no_pets' };
+          }
+          const meaning = unitItemValue({ pets: value }, 'pets');
+          fields['no_pets'] = meaning['no_pets'] ?? null;
+          fields['pets'] = meaning['pets'] ?? null;
+          continue;
         }
-        break;
-      case 'tour_type': {
-        // CLEAR-to-absent: '' or null -> null patch value so the repo REMOVEs
-        // the attribute (no stray empty-string enum left behind). A real value
-        // must be in the TourType union; anything else is a 400.
+        if (value !== null && typeof value !== 'string') {
+          return { ok: false, error: 'pets must be a string, a boolean or null' };
+        }
+        const result = normalizeRequirementValue(requirementField(key), value, key);
+        if (!result.ok) return result;
+        fields[key] = result.value;
+        continue;
+      }
+      case 'requirement': {
+        // spec 2026-10-20 D1: the registry kind - a checkbox stores true or
+        // REMOVEs on false/null; text is trimmed and REMOVEs on ''/null; money
+        // is a finite number >= 0 or null (REMOVE); tour_type is the enum
+        // (''/null REMOVE). The deposit conflict needs the stored record, so
+        // the route checks it, not this pure validator.
+        const result = normalizeRequirementValue(requirementField(key), value, key);
+        if (!result.ok) return result;
+        fields[key] = result.value;
+        continue;
+      }
+      case 'clearable_string': {
+        // spec 2026-10-20 D3 (subzone): trimmed text; '' or null REMOVEs.
+        if (value === null) {
+          fields[key] = null;
+          continue;
+        }
+        if (typeof value !== 'string') return { ok: false, error: `${key} must be a string or null` };
+        const trimmed = value.trim();
+        fields[key] = trimmed.length > 0 ? trimmed : null;
+        continue;
+      }
+      case 'washer_dryer':
+        // spec 2026-10-20 D3: a recorded value; '' or null REMOVEs.
         if (value === '' || value === null) {
           fields[key] = null;
           continue;
         }
-        if (!isTourType(value)) {
-          return {
-            ok: false,
-            error: `${key} must be one of: self_guided, landlord_led, pm_team`,
-          };
+        if (!isWasherDryer(value)) {
+          return { ok: false, error: `${key} must be one of: ${WASHER_DRYER_VALUES.join(', ')}` };
         }
         break;
-      }
       case 'address': {
         // Structured Address object: only line1/line2/city/state/zip, each an
         // optional string within caps. Unknown keys / non-strings → 400. The
@@ -318,9 +422,9 @@ export function authoritiesOf(unit: {
  * documentation/GLOSSARY.md "voucher size of a property"):
  *
  *   1. its RECORDED `voucher_size_accepted`, when that holds at least one size -
- *      ONE number today, or a LIST once tracker #12 makes the field a
- *      multi-select (the `full` demo seed already stores `[2, 3]`). A recorded
- *      size always wins: a 3-bed unit may take only a 2-BR voucher;
+ *      a LIST since tracker #12 (spec 2026-10-20 D4), or ONE number stored
+ *      before it (never backfilled). A recorded size always wins: a 3-bed unit
+ *      may take only a 2-BR voucher;
  *   2. otherwise its bedroom count (`beds`) - the import never writes the
  *      field, and a unit usually takes the voucher that matches its bedrooms;
  *   3. otherwise nothing (`[]`).

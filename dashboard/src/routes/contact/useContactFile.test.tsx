@@ -7,6 +7,8 @@ const getAllPlacements = vi.fn();
 const getAllUnits = vi.fn();
 const getContactListingsSent = vi.fn();
 const getContactRelayGroups = vi.fn();
+const getContactGroupThreads = vi.fn();
+const getTours = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -16,6 +18,8 @@ vi.mock('../../api/index.js', async () => {
     getAllUnits: (...a: unknown[]) => getAllUnits(...a),
     getContactListingsSent: (...a: unknown[]) => getContactListingsSent(...a),
     getContactRelayGroups: (...a: unknown[]) => getContactRelayGroups(...a),
+    getContactGroupThreads: (...a: unknown[]) => getContactGroupThreads(...a),
+    getTours: (...a: unknown[]) => getTours(...a),
   };
 });
 
@@ -48,10 +52,129 @@ beforeEach(() => {
   getAllUnits.mockReset();
   getContactListingsSent.mockReset();
   getContactRelayGroups.mockReset();
+  getContactGroupThreads.mockReset();
+  getContactGroupThreads.mockResolvedValue({ groups: [], truncated: false });
+  getTours.mockReset();
 });
+
+/** A promise the test resolves by hand, so a read can be held in flight. */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
 afterEach(() => vi.restoreAllMocks());
 
 describe('useContactFile', () => {
+  it('a contactType that arrives after mount does not re-read the slices (one read each)', async () => {
+    // ContactDetail passes { contactType: contact?.type }, and the contact
+    // header loads separately, so the type is undefined on the first render and
+    // set a moment later. Only the tours fan-out needs it: the placements, units
+    // and the three slice reads must not be aborted and re-sent when it arrives.
+    // One full e2e run counted 585 such cancel-and-resend pairs (relay-groups
+    // 209, group-threads 194, listings-sent 182) - a production double fetch,
+    // not an e2e artifact (reviews/2026-10-20-e2e-connection-churn, section 4).
+    const gate = deferred<void>();
+    getAllPlacements.mockImplementation(() => gate.promise.then(() => CASES));
+    getAllUnits.mockImplementation(() => gate.promise.then(() => UNITS));
+    getContactListingsSent.mockImplementation(() => gate.promise.then(() => []));
+    getContactRelayGroups.mockImplementation(() => gate.promise.then(() => []));
+    getContactGroupThreads.mockImplementation(() =>
+      gate.promise.then(() => ({ groups: [], truncated: false })),
+    );
+    getTours.mockResolvedValue([]);
+
+    const { result, rerender } = renderHook(
+      ({ contactType }: { contactType?: string }) =>
+        useContactFile('k1', contactType === undefined ? {} : { contactType }),
+      { initialProps: {} },
+    );
+    expect(getContactRelayGroups).toHaveBeenCalledTimes(1);
+
+    // The header lands while the slice reads are still in flight.
+    rerender({ contactType: 'tenant' });
+    await act(async () => {
+      gate.resolve();
+    });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    expect(getAllPlacements).toHaveBeenCalledTimes(1);
+    expect(getAllUnits).toHaveBeenCalledTimes(1);
+    expect(getContactListingsSent).toHaveBeenCalledTimes(1);
+    expect(getContactRelayGroups).toHaveBeenCalledTimes(1);
+    expect(getContactGroupThreads).toHaveBeenCalledTimes(1);
+    // The tours fan-out still runs, once, now that the type is known.
+    expect(getTours).toHaveBeenCalledTimes(1);
+    expect(getTours).toHaveBeenCalledWith({ tenantId: 'k1' }, expect.anything());
+  });
+
+  it('a contactType that arrives AFTER the file committed reads tours alone, keeping the committed rows', async () => {
+    // The slow-header case: the five reads landed first, so the file is ready
+    // with no tours. The type then lands. Tours are read on their own and
+    // patched in; the slices are not re-read, and the pane never flashes.
+    getAllPlacements.mockResolvedValue(CASES);
+    getAllUnits.mockResolvedValue(UNITS);
+    getContactListingsSent.mockResolvedValue([]);
+    getContactRelayGroups.mockResolvedValue([]);
+    const tour = { tourId: 't1', tenantId: 'k1', unitId: 'u1', tourType: 'landlord_led', status: 'scheduled' };
+    getTours.mockResolvedValue([tour]);
+
+    const { result, rerender } = renderHook(
+      ({ contactType }: { contactType?: string }) =>
+        useContactFile('k1', contactType === undefined ? {} : { contactType }),
+      { initialProps: {} },
+    );
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.tours).toEqual([]);
+    expect(getTours).not.toHaveBeenCalled();
+
+    rerender({ contactType: 'tenant' });
+    await waitFor(() => expect(result.current.tours).toEqual([tour]));
+
+    expect(result.current.status).toBe('ready');
+    expect(result.current.placements).toEqual(CASES);
+    expect(getTours).toHaveBeenCalledTimes(1);
+    expect(getAllPlacements).toHaveBeenCalledTimes(1);
+    expect(getContactListingsSent).toHaveBeenCalledTimes(1);
+    expect(getContactRelayGroups).toHaveBeenCalledTimes(1);
+    expect(getContactGroupThreads).toHaveBeenCalledTimes(1);
+  });
+
+  it('a landlord type that arrives in flight fans tours out per owned unit, once, from the units just read', async () => {
+    const gate = deferred<void>();
+    getAllPlacements.mockImplementation(() => gate.promise.then(() => CASES));
+    getAllUnits.mockImplementation(() =>
+      gate.promise.then(() => [
+        { unitId: 'u1', landlordId: 'k1', status: 'available' },
+        { unitId: 'u2', landlordId: 'k1', status: 'available' },
+        { unitId: 'u9', landlordId: 'someone-else', status: 'available' },
+      ]),
+    );
+    getContactListingsSent.mockImplementation(() => gate.promise.then(() => []));
+    getContactRelayGroups.mockImplementation(() => gate.promise.then(() => []));
+    getTours.mockImplementation((q: { unitId: string }) =>
+      Promise.resolve([{ tourId: `t-${q.unitId}`, tenantId: 'x', unitId: q.unitId, tourType: 'landlord_led', status: 'scheduled' }]),
+    );
+
+    const { result, rerender } = renderHook(
+      ({ contactType }: { contactType?: string }) =>
+        useContactFile('k1', contactType === undefined ? {} : { contactType }),
+      { initialProps: {} },
+    );
+    rerender({ contactType: 'landlord' });
+    await act(async () => {
+      gate.resolve();
+    });
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+
+    expect(result.current.tours.map((t) => t.tourId)).toEqual(['t-u1', 't-u2']);
+    expect(getTours).toHaveBeenCalledTimes(2);
+    expect(getAllUnits).toHaveBeenCalledTimes(1);
+    expect(getContactRelayGroups).toHaveBeenCalledTimes(1);
+  });
+
   it('loads placements + units and marks C4/C5 + relay-groups pending on a 404', async () => {
     getAllPlacements.mockResolvedValue(CASES);
     getAllUnits.mockResolvedValue(UNITS);

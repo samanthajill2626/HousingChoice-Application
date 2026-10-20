@@ -4,7 +4,7 @@
 // always load; the C4/C5 calls resolve to a 'pending' marker on a 404 so their
 // panels render an honest "arrives with the backend" state rather than an error.
 // The page derives the per-pane lists with buildContactFile's pure helpers.
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ApiError,
   getAllPlacements,
@@ -75,13 +75,45 @@ const FILE_LOADING: ContactFileState = {
   groupThreadsTruncated: false,
 };
 
+/** The tours fan-out - the ONE part of the file that needs the contact type.
+ *  Tenant: GET /api/tours?tenantId=contactId (all tours for this tenant).
+ *  Landlord: GET /api/tours?unitId= per owned unit, concatenated; the caller
+ *  hands over the units it already has. Anything else (unknown, not yet known):
+ *  no fetch, empty. Best-effort: tours degrade to empty if the API is
+ *  unavailable, and an aborted read lands as empty too - callers check the
+ *  signal before committing. */
+async function fetchTours(
+  contactType: string | undefined,
+  contactId: string,
+  units: UnitItem[],
+  signal: AbortSignal,
+): Promise<Tour[]> {
+  try {
+    if (contactType === 'tenant') return await getTours({ tenantId: contactId }, signal);
+    if (contactType === 'landlord') {
+      const myUnitIds = units.filter((u) => u.landlordId === contactId).map((u) => u.unitId);
+      const tourArrays = await Promise.all(
+        myUnitIds.map((uid) => getTours({ unitId: uid }, signal)),
+      );
+      return tourArrays.flat();
+    }
+  } catch {
+    // Best-effort - tours degrade to empty if the API is unavailable
+  }
+  return [];
+}
+
 /**
  * Options for useContactFile. Pass `contactType` to enable the tours fetch:
- * - `'tenant'` → GET /api/tours?tenantId=contactId
- * - `'landlord'` → tours are fetched per owned unit after units load; pass
- *   an empty array until the unit IDs are known (the landlord case is deferred
- *   to a follow-up — file loads units first, then a useEffect re-fetches tours).
- * - `undefined` → tours are not fetched (unknown file type or not yet known).
+ * - `'tenant'` -> GET /api/tours?tenantId=contactId
+ * - `'landlord'` -> tours are fetched per owned unit once the units are known
+ * - `undefined` -> tours are not fetched (unknown file type or not yet known)
+ *
+ * The type may ARRIVE LATE: ContactDetail passes `contact?.type`, which is
+ * undefined until the contact header loads. Only the tours fan-out waits for
+ * it; the placements, units and the three slices load once regardless, and a
+ * type that lands after they committed reads tours alone (see the catch-up
+ * effect in the hook).
  */
 export interface UseContactFileOpts {
   /** Contact type hint — drives which tours query to use. */
@@ -114,9 +146,15 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
   // change we DERIVE loading during render until the new fetch commits, rather
   // than resetting with a synchronous setState in the effect (which the React
   // Compiler flags as a cascading render — set-state-in-effect).
-  const [state, setState] = useState<ContactFileState & { forId: string }>({
+  // `toursForType` records which contact type the committed `tours` were read
+  // under, so the catch-up effect below can tell a late-arriving type from one
+  // the fetch already honored.
+  const [state, setState] = useState<
+    ContactFileState & { forId: string; toursForType: string | undefined }
+  >({
     ...FILE_LOADING,
     forId: contactId,
+    toursForType: undefined,
   });
   // Bumping this re-runs the fetch effect for the SAME contactId - a nonce
   // rather than an extracted async function because the whole fetch body is the
@@ -133,6 +171,18 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
       return { ...prev, listingsSent: { status: 'ready', rows } };
     });
   }, []);
+
+  // The LATEST contact type, read when the five reads land rather than listed
+  // as a dependency of the fetch effect. As a dependency it re-ran the whole
+  // effect when the contact header landed, aborting and re-sending every
+  // in-flight slice read - 585 cancel-and-resend pairs in one full e2e run
+  // (reviews/2026-10-20-e2e-connection-churn, section 4), and a production
+  // double fetch, not an e2e artifact. Kept current by the effect below, the
+  // pattern useEventStream uses for its handlers.
+  const contactTypeRef = useRef(opts.contactType);
+  useEffect(() => {
+    contactTypeRef.current = opts.contactType;
+  });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -166,31 +216,11 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
         ]);
         if (signal.aborted) return;
 
-        // Fetch tours based on contact type.
-        // Tenant: GET /api/tours?tenantId= (all tours for this tenant).
-        // Landlord: GET /api/tours?unitId= per owned unit, then concatenate.
-        //   We have the units at this point so we can fan out.
-        // Unknown / other: no tours fetch (empty).
-        let tours: import('../../api/index.js').Tour[] = [];
-        if (opts.contactType === 'tenant') {
-          try {
-            tours = await getTours({ tenantId: contactId }, signal);
-          } catch {
-            // Best-effort — tours degrade to empty if the API is unavailable
-          }
-        } else if (opts.contactType === 'landlord') {
-          const myUnitIds = units
-            .filter((u) => u.landlordId === contactId)
-            .map((u) => u.unitId);
-          try {
-            const tourArrays = await Promise.all(
-              myUnitIds.map((uid) => getTours({ unitId: uid }, signal)),
-            );
-            tours = tourArrays.flat();
-          } catch {
-            // Best-effort
-          }
-        }
+        // Tours ride the same commit when the type is known by now - the common
+        // case, since the header is one read and the units walk every page.
+        // Otherwise they are read alone by the catch-up effect once it lands.
+        const toursForType = contactTypeRef.current;
+        const tours = await fetchTours(toursForType, contactId, units, signal);
 
         if (signal.aborted) return;
         setState({
@@ -203,6 +233,7 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
           groupThreads,
           groupThreadsTruncated,
           forId: contactId,
+          toursForType,
         });
       } catch (err) {
         if (signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
@@ -223,7 +254,29 @@ export function useContactFile(contactId: string, opts: UseContactFileOpts = {})
     })();
 
     return () => controller.abort();
-  }, [contactId, opts.contactType, reloadNonce]);
+  }, [contactId, reloadNonce]);
+
+  // The late-header case: the five reads committed while the type was still
+  // unknown (or the type changed on the page), so the committed tours were read
+  // under a different type than the one now known. Read tours ALONE and patch
+  // them in; the slices stay committed and on screen, as they do under refetch.
+  // Keyed on the committed state so it runs after each commit and never while a
+  // load for this contact is in flight (the fetch effect honors the type then).
+  useEffect(() => {
+    if (state.forId !== contactId || state.status !== 'ready') return undefined;
+    if (state.toursForType === opts.contactType) return undefined;
+    const toursForType = opts.contactType;
+    const controller = new AbortController();
+    const { signal } = controller;
+    (async () => {
+      const tours = await fetchTours(toursForType, contactId, state.units, signal);
+      if (signal.aborted) return;
+      setState((prev) =>
+        prev.forId === contactId && prev.status === 'ready' ? { ...prev, tours, toursForType } : prev,
+      );
+    })();
+    return () => controller.abort();
+  }, [contactId, opts.contactType, state]);
 
   // Committed state is for the previous contactId → the new fetch is in flight.
   if (state.forId !== contactId) return { ...FILE_LOADING, refetch, setListingSentRow };

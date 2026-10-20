@@ -20,5 +20,6 @@ sampler; hermetic lanes only (never the live :5174 / :8080 stack).
 | `ab-tour.js` | The fix A/B, as a Playwright MCP `browser_run_code_unsafe` body. |
 | `selftest.mjs` | Known workload (50 close + 50 keep-alive requests) to validate the sampler and the hook. |
 
-`full-run.ps1` and `subset-run.ps1` name the worktree they ran in
-(`$wt = ...`); point that at the worktree under test.
+`full-run.ps1` and `subset-run.ps1` run against the worktree they are
+committed in (`$wt` resolves five levels up from the script), so run the copy
+in the worktree under test.

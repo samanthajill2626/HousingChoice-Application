@@ -5,7 +5,9 @@ param(
 # One full `npm run e2e` (bare, from the worktree) under the passive sampler,
 # optionally with the churn hook preloaded into every node process.
 $tools = $PSScriptRoot
-$wt = 'W:\AI Projects\Housing Choice\HC Application\.claude\worktrees\reverent-jang-0c0c1d'
+# The worktree these tools are committed in: tools -> review dir -> reviews ->
+# superpowers -> docs -> worktree root.
+$wt = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..\..')).Path
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 $ports = @()
 foreach ($l in 1..16) { $b = 9001 + $l * 100; $ports += $b, ($b + 10), ($b + 20), ($b + 30) }
@@ -20,6 +22,8 @@ if ($Hook) {
 }
 [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() | Out-File -Encoding ascii (Join-Path $RunDir 'run.start')
 $p = Start-Process -FilePath 'npm.cmd' -ArgumentList @('run', 'e2e') -WorkingDirectory $wt -RedirectStandardOutput (Join-Path $RunDir 'e2e.out') -RedirectStandardError (Join-Path $RunDir 'e2e.err') -WindowStyle Hidden -PassThru
+# Touch the handle first, or ExitCode reads back empty after WaitForExit.
+$null = $p.Handle
 $p.WaitForExit()
 "EXIT=$($p.ExitCode)" | Out-File -Encoding ascii (Join-Path $RunDir 'run.exit')
 [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() | Out-File -Encoding ascii (Join-Path $RunDir 'run.end')

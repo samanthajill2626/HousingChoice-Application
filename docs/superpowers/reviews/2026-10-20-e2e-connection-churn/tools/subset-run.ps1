@@ -8,7 +8,9 @@ param(
 # One filtered run against THIS worktree's live e2e:session (playwright.config
 # reuses it), under the passive sampler; optional Chromium NetLog + trace.
 $tools = $PSScriptRoot
-$wt = 'W:\AI Projects\Housing Choice\HC Application\.claude\worktrees\reverent-jang-0c0c1d'
+# The worktree these tools are committed in: tools -> review dir -> reviews ->
+# superpowers -> docs -> worktree root.
+$wt = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..\..')).Path
 $lane = Get-Content -Raw (Join-Path $wt 'e2e\.artifacts\lane.json') | ConvertFrom-Json
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 Copy-Item (Join-Path $wt 'e2e\.artifacts\lane.json') (Join-Path $RunDir 'lane.json')

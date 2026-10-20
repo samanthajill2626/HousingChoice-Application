@@ -565,7 +565,6 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       beds: 2,
       baths: 1,
       area: 'Westside',
-      subzone: 'Zone 4',
       rent_min: 1400,
       rent_max: 1600,
       media: ['s3://photo1.jpg'],
@@ -579,7 +578,21 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       accessibility: 'Ground floor, no stairs',
       lease_terms: '12-month minimum',
       pets: 'Cats only',
+      // spec 2026-10-20 D1/D3/D11: public requirement keys and washer / dryer
+      pet_fee: '$300 one-time',
+      deposit_flexible: true,
+      washer_dryer: 'hookups',
       // still INTERNAL - SECRET markers prove they never serialize
+      // (spec 2026-10-20: subzone is staff only now, D3; so are the screening
+      // items and the deposit notes, D1; the sources map is server-owned, D5)
+      subzone: 'SECRET subzone E8',
+      no_evictions_on_program: true,
+      evictions_notes: 'SECRET evictions note',
+      credit_requirements: 'SECRET credit 600+',
+      income_requirements: 'SECRET income 3x rent',
+      qualifications: 'SECRET background check',
+      deposit_notes: 'SECRET deposit split',
+      requirement_sources: { pets: 'set_here', deposit: 'copied' },
       payment_standard: 1700,
       lif: 500,
       notes: 'SECRET in-unit washer note',
@@ -604,8 +617,8 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       beds: 2,
       baths: 1,
       area: 'Westside',
-      subzone: 'Zone 4',
       voucher_size: 2,
+      voucher_sizes: [2],
       // SYNTHESIZED from the fixture's legacy `jurisdiction: 'DCA'` (spec section
       // 8): the fixture no longer sets accepted_programs at all, since that field
       // is retired and never folded into the new one.
@@ -619,9 +632,14 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       application_fee: 50,
       same_day_rta: true,
       pets: 'Cats only',
+      no_pets: false,
+      pet_fee: '$300 one-time',
       accessibility: 'Ground floor, no stairs',
       deposit: 1400,
+      deposit_one_month: false,
+      deposit_flexible: true,
       lease_terms: '12-month minimum',
+      washer_dryer: 'hookups',
     });
   });
 
@@ -639,12 +657,17 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       'application_process', 'status', 'status_source', 'notes',
       'payment_standard', 'lif', 'propertyId', 'jurisdiction', 'priority',
       'final_rent', 'voucher_size_accepted',
+      // spec 2026-10-20: staff only (D3, D1) and server-owned (D5)
+      'subzone', 'requirement_sources', 'no_evictions_on_program', 'evictions_notes',
+      'credit_requirements', 'income_requirements', 'qualifications', 'deposit_notes',
     ]) {
       expect(keys, forbidden).not.toContain(forbidden);
     }
     // And no SECRET value (carried on internal fields) reaches the serialization.
     expect(JSON.stringify(flyer)).not.toContain('SECRET');
     expect(JSON.stringify(flyer)).not.toContain('contact-ll-secret');
+    // The sources map's values never serialize either.
+    expect(JSON.stringify(flyer)).not.toContain('set_here');
   });
 
   it('falls each absent field to null (not undefined) and address to {}', () => {
@@ -662,13 +685,32 @@ describe('toUnitFlyer - the merged public allowlist', () => {
     expect(flyer.accessibility).toBeNull();
     expect(flyer.deposit).toBeNull();
     expect(flyer.lease_terms).toBeNull();
+    // spec 2026-10-20 D11: the added keys - checkboxes read false, the list [].
+    expect(flyer.voucher_sizes).toEqual([]);
+    expect(flyer.voucher_size).toBeNull();
+    expect(flyer.no_pets).toBe(false);
+    expect(flyer.pet_fee).toBeNull();
+    expect(flyer.deposit_one_month).toBe(false);
+    expect(flyer.deposit_flexible).toBe(false);
+    expect(flyer.washer_dryer).toBeNull();
   });
 
-  it('passes pets through as string or boolean; null when absent', () => {
-    expect(toUnitFlyer(fullUnit({ pets: true })).pets).toBe(true);
-    expect(toUnitFlyer(fullUnit({ pets: false })).pets).toBe(false);
-    expect(toUnitFlyer(fullUnit({ pets: 'Cats only' })).pets).toBe('Cats only');
-    expect(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }).pets).toBeNull();
+  it('reads pets through the D1 interpretation (spec 2026-10-20): details text + No pets', () => {
+    const pick = (f: UnitFlyer): { pets: string | null; no_pets: boolean } => ({ pets: f.pets, no_pets: f.no_pets });
+    // A legacy true reads "Allowed"; a legacy false reads No pets with no details.
+    expect(pick(toUnitFlyer(fullUnit({ pets: true })))).toEqual({ pets: 'Allowed', no_pets: false });
+    expect(pick(toUnitFlyer(fullUnit({ pets: false })))).toEqual({ pets: null, no_pets: true });
+    // Free text is never parsed: "No pets" stays details text.
+    expect(pick(toUnitFlyer(fullUnit({ pets: 'No pets' })))).toEqual({ pets: 'No pets', no_pets: false });
+    expect(pick(toUnitFlyer(fullUnit({ no_pets: true, pets: ' service animals only ' })))).toEqual({
+      pets: 'service animals only',
+      no_pets: true,
+    });
+    expect(pick(toUnitFlyer(fullUnit({ pets: '   ' })))).toEqual({ pets: null, no_pets: false });
+    expect(pick(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }))).toEqual({
+      pets: null,
+      no_pets: false,
+    });
   });
 
   it('voucher_size states the RECORDED size over the bedroom count; the key stays off', () => {
@@ -690,9 +732,19 @@ describe('toUnitFlyer - the merged public allowlist', () => {
     ).toBe(1);
   });
 
-  it('voucher_size takes the first size of a recorded list (demo seed only until #12)', () => {
-    const listed = fullUnit({ beds: 4, voucher_size_accepted: [2, 3] as unknown as number });
-    expect(toUnitFlyer(listed).voucher_size).toBe(2);
+  it('voucher_sizes lists every recorded size ascending; voucher_size keeps the first (spec 2026-10-20 D11)', () => {
+    const listed = toUnitFlyer(fullUnit({ beds: 4, voucher_size_accepted: [2, 3] }));
+    expect(listed.voucher_sizes).toEqual([2, 3]);
+    expect(listed.voucher_size).toBe(2);
+    // A legacy stored list may be unsorted or repeat a size.
+    const messy = toUnitFlyer(fullUnit({ voucher_size_accepted: [3, 2, 3] }));
+    expect(messy.voucher_sizes).toEqual([2, 3]);
+    expect(messy.voucher_size).toBe(2);
+    // A single number stored before #12 still reads (never backfilled).
+    expect(toUnitFlyer(fullUnit({ beds: 2, voucher_size_accepted: 3 })).voucher_sizes).toEqual([3]);
+    // No recorded size -> the beds; neither -> [].
+    expect(toUnitFlyer(fullUnit({ beds: 3 })).voucher_sizes).toEqual([3]);
+    expect(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }).voucher_sizes).toEqual([]);
   });
 
   it('drops a legacy plain-string address (only structured sub-fields survive)', () => {
@@ -705,5 +757,56 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       address: '123 Legacy St' as unknown as UnitItem['address'],
     });
     expect(flyer.address).toEqual({});
+  });
+
+  it('never projects subzone (staff only since spec 2026-10-20 D3)', () => {
+    const flyer = toUnitFlyer(fullUnit({ subzone: 'E8' }));
+    expect(Object.keys(flyer)).not.toContain('subzone');
+    expect(JSON.stringify(flyer)).not.toContain('E8');
+  });
+
+  it('projects the Deposit item: one month, a fixed amount, flexible - never its notes (D11)', () => {
+    const bare: UnitItem = { unitId: 'd', landlordId: 'll', status: 'available' };
+    const pick = (u: UnitItem) => {
+      const f = toUnitFlyer(u);
+      return { deposit: f.deposit, deposit_one_month: f.deposit_one_month, deposit_flexible: f.deposit_flexible };
+    };
+    expect(pick({ ...bare, deposit_one_month: true })).toEqual({
+      deposit: null,
+      deposit_one_month: true,
+      deposit_flexible: false,
+    });
+    expect(pick({ ...bare, deposit: 1400, deposit_flexible: true })).toEqual({
+      deposit: 1400,
+      deposit_one_month: false,
+      deposit_flexible: true,
+    });
+    // Flexible alone is data the page shows as its own deposit row.
+    expect(pick({ ...bare, deposit_flexible: true })).toEqual({
+      deposit: null,
+      deposit_one_month: false,
+      deposit_flexible: true,
+    });
+    // Notes alone give the page nothing to show - and the notes never ship.
+    const notesOnly: UnitItem = { ...bare, deposit_notes: 'SECRET split it' };
+    expect(pick(notesOnly)).toEqual({ deposit: null, deposit_one_month: false, deposit_flexible: false });
+    expect(JSON.stringify(toUnitFlyer(notesOnly))).not.toContain('SECRET');
+  });
+
+  it('(PIN) projects the application fee: 0 is "No application fee", absent is null (D11)', () => {
+    expect(toUnitFlyer(fullUnit({ application_fee: 0 })).application_fee).toBe(0);
+    expect(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }).application_fee).toBeNull();
+  });
+
+  it('projects the pet fee trimmed, null when blank (D11)', () => {
+    expect(toUnitFlyer(fullUnit({ pet_fee: '  $300 one-time ' })).pet_fee).toBe('$300 one-time');
+    expect(toUnitFlyer(fullUnit({ pet_fee: '  ' })).pet_fee).toBeNull();
+  });
+
+  it('projects washer / dryer only when it holds a recorded value (D3, D11)', () => {
+    for (const v of ['hookups', 'included', 'none'] as const) {
+      expect(toUnitFlyer(fullUnit({ washer_dryer: v })).washer_dryer).toBe(v);
+    }
+    expect(toUnitFlyer(fullUnit({ washer_dryer: 'in-unit' as unknown as 'hookups' })).washer_dryer).toBeNull();
   });
 });

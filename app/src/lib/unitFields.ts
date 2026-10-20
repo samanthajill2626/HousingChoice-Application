@@ -346,7 +346,13 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
  * added to UnitItem can NEVER leak, because it simply won't be copied here.
  * NEVER include tour_process, tour_type, application_process, landlordId,
  * primary_contact, notes, internal status/status_source, payment_standard,
- * lif, priority, propertyId, final_rent, voucher_size_accepted.
+ * lif, priority, propertyId, final_rent, voucher_size_accepted, subzone (staff
+ * only since spec 2026-10-20 D3), requirement_sources (server-owned, D5), or
+ * the staff-only requirement keys no_evictions_on_program, evictions_notes,
+ * credit_requirements, income_requirements, qualifications and deposit_notes.
+ * lib/requirements.ts records each requirement field's flyer visibility, and
+ * the D10a parity walk (app/test/propertyFormFlyerParity.test.ts) fails when a
+ * property-form tag disagrees with this projection.
  *
  * `jurisdiction` is DELIBERATELY off that never-list now (spec section 8). The
  * KEY is still absent, but on a legacy unit its VALUE ships as the single entry
@@ -357,9 +363,14 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
  * dropping the synthesis.
  *
  * `voucher_size_accepted` follows the same pattern: the KEY stays on the
- * never-list, but its VALUE ships as the derived `voucher_size` (see
- * `acceptedVoucherSizes`), because the flyer's "Fits a N-bedroom voucher" line
- * must state the size the property actually takes, not its bedroom count.
+ * never-list, but its VALUE ships as the derived `voucher_sizes` (and its
+ * first size as `voucher_size`; see `acceptedVoucherSizes`), because the
+ * flyer's "Fits a ... voucher" line must state the sizes the property actually
+ * takes, not its bedroom count.
+ *
+ * Older bundles (spec 2026-10-20 D11): a flyer page loaded before #12 keeps
+ * reading `voucher_size`, `deposit`, `application_fee` and `pets`, so the
+ * projection keeps those keys and only ADDS keys.
  */
 export interface UnitFlyer {
   unitId: string;
@@ -367,10 +378,12 @@ export interface UnitFlyer {
   beds: number | null;
   baths: number | null;
   area: string | null;
-  subzone: string | null;
-  /** The voucher size the unit takes - its recorded size, else its beds (see
-   *  acceptedVoucherSizes). Shareable. */
+  /** The FIRST of `voucher_sizes`, or null. Kept for a flyer page loaded
+   *  before #12 (spec 2026-10-20 D11), which reads this one size. */
   voucher_size: number | null;
+  /** Every voucher size the unit takes, ascending (spec 2026-10-20 D11): its
+   *  recorded sizes, else its beds (see acceptedVoucherSizes). Shareable. */
+  voucher_sizes: number[];
   /** The authorities whose vouchers this unit accepts (synthesized - see authoritiesOf). */
   accepted_authorities: string[];
   listing_link: string | null;
@@ -382,18 +395,29 @@ export interface UnitFlyer {
   utilities: string | null;
   /** Tour video link. */
   video_url: string | null;
-  /** Application fee in dollars. */
+  /** Application fee in dollars; 0 = "No application fee" (spec D11). */
   application_fee: number | null;
   /** Same-day RTA available. */
   same_day_rta: boolean | null;
-  /** Pet policy - free-form string, or a bare boolean (allowed / not allowed). */
-  pets: string | boolean | null;
+  /** The Pets item's details text, read per spec D1: a legacy `true` reads
+   *  "Allowed"; a legacy `false` reads null with `no_pets` true. */
+  pets: string | null;
+  /** The Pets item's "No pets" checkbox. */
+  no_pets: boolean;
+  /** The Pets item's pet fee (free text). */
+  pet_fee: string | null;
   /** Accessibility notes (tenant-useful, staff-authored). */
   accessibility: string | null;
-  /** Security deposit in dollars. */
+  /** The Deposit item's fixed amount in dollars. */
   deposit: number | null;
+  /** The Deposit item's "One month's rent" (an alternative to the amount). */
+  deposit_one_month: boolean;
+  /** The Deposit item's "Flexible / payment terms available". Its notes are staff only. */
+  deposit_flexible: boolean;
   /** Lease terms - free-form ("12-month minimum, month-to-month after"). */
   lease_terms: string | null;
+  /** Washer / dryer (spec D3): hookups, included or none; null when not recorded. */
+  washer_dryer: (typeof WASHER_DRYER_VALUES)[number] | null;
 }
 
 /**
@@ -448,16 +472,25 @@ export function toUnitFlyer(unit: UnitItem): UnitFlyer {
   // The address is re-validated through the SAME write-surface validator so the
   // projection carries ONLY allowlisted sub-fields, never a legacy string blob.
   const addr = validateAddress(unit.address, 'address');
+  // spec 2026-10-20 D11: every size, ascending and de-duplicated (a legacy
+  // stored list may be neither); voucher_size keeps the first for old pages.
+  const voucherSizes = [...new Set(acceptedVoucherSizes(unit))].sort((x, y) => x - y);
+  // The requirement items through the D1 read interpretation (legacy pets
+  // boolean, trimmed text, blank -> null). Only their ON-FLYER keys are copied.
+  const pets = unitItemValue(unit, 'pets');
+  const deposit = unitItemValue(unit, 'deposit');
+  const fee = unitItemValue(unit, 'application_fee')['application_fee'];
+  const petsDetails = pets['pets'];
+  const petFee = pets['pet_fee'];
+  const depositAmount = deposit['deposit'];
   return {
     unitId: unit.unitId,
     media: isStringArray(unit.media) ? unit.media : [],
     beds: isFiniteNumber(unit.beds) ? unit.beds : null,
     baths: isFiniteNumber(unit.baths) ? unit.baths : null,
     area: typeof unit.area === 'string' ? unit.area : null,
-    subzone: typeof unit.subzone === 'string' ? unit.subzone : null,
-    // The flyer states ONE size. Only the demo seed can hold a list until #12
-    // adds the multi-select; that work decides how the flyer words several sizes.
-    voucher_size: acceptedVoucherSizes(unit)[0] ?? null,
+    voucher_size: voucherSizes[0] ?? null,
+    voucher_sizes: voucherSizes,
     accepted_authorities: authoritiesOf(unit),
     listing_link: typeof unit.listing_link === 'string' ? unit.listing_link : null,
     rent_min: isFiniteNumber(unit.rent_min) ? unit.rent_min : null,
@@ -465,11 +498,16 @@ export function toUnitFlyer(unit: UnitItem): UnitFlyer {
     address: addr.ok ? addr.address : {},
     utilities: typeof unit.utilities === 'string' ? unit.utilities : null,
     video_url: typeof unit.video_url === 'string' ? unit.video_url : null,
-    application_fee: isFiniteNumber(unit.application_fee) ? unit.application_fee : null,
+    application_fee: typeof fee === 'number' ? fee : null,
     same_day_rta: typeof unit.same_day_rta === 'boolean' ? unit.same_day_rta : null,
-    pets: typeof unit.pets === 'string' || typeof unit.pets === 'boolean' ? unit.pets : null,
+    pets: typeof petsDetails === 'string' ? petsDetails : null,
+    no_pets: pets['no_pets'] === true,
+    pet_fee: typeof petFee === 'string' ? petFee : null,
     accessibility: typeof unit.accessibility === 'string' ? unit.accessibility : null,
-    deposit: isFiniteNumber(unit.deposit) ? unit.deposit : null,
+    deposit: typeof depositAmount === 'number' ? depositAmount : null,
+    deposit_one_month: deposit['deposit_one_month'] === true,
+    deposit_flexible: deposit['deposit_flexible'] === true,
     lease_terms: typeof unit.lease_terms === 'string' ? unit.lease_terms : null,
+    washer_dryer: isWasherDryer(unit.washer_dryer) ? unit.washer_dryer : null,
   };
 }

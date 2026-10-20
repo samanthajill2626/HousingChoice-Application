@@ -396,3 +396,82 @@ export function nextRequirementSources(input: {
   }
   return next;
 }
+
+// --- Apply to properties: the per-unit decision (D8) ---------------------------
+
+export type ApplySkipReason =
+  | 'not_found'
+  | 'deleted'
+  | 'landlord_changed'
+  | 'changed_since_opened'
+  | 'already_matches'
+  | 'changed_during_apply';
+
+/** True when writing `next` (null = REMOVE) changes the STORED value of `key`. */
+function storedValueChanges(unit: Record<string, unknown>, key: string, next: StoredValue): boolean {
+  const stored = Object.hasOwn(unit, key) ? unit[key] : undefined;
+  if (next === null) return stored !== undefined;
+  return stored !== next;
+}
+
+/**
+ * D8 per-unit Apply decision (pure). `landlordValues` = landlordItemValue for
+ * every listed item (the route already checked them equal to `expected`).
+ * Check order: not found, deleted, landlord changed, then the changing items
+ * by INTERPRETED value (D1); nothing changing -> already_matches; a changing
+ * item that is an own value (D6) and not in `ownItems` -> changed_since_opened.
+ * A write sets EVERY key of each changing item to the landlord's value (null =
+ * REMOVE), so a legacy boolean `pets` is rewritten into the new shape with the
+ * Pets item; `requirement_sources` is the stored map (read defensively) with
+ * each changing item 'copied' - a listed item that already equaled the
+ * landlord keeps its record. `changedKeys` lists the unit keys whose STORED
+ * value the write changes (the D13 audit), never `requirement_sources`. The
+ * route's conditional write turns a race into changed_during_apply.
+ */
+export function planUnitApply(input: {
+  unit: Record<string, unknown> | undefined;
+  landlordId: string;
+  items: readonly RequirementItemId[];
+  landlordValues: Partial<Record<RequirementItemId, ItemValue>>;
+  ownItems: readonly RequirementItemId[];
+}):
+  | { kind: 'skip'; reason: Exclude<ApplySkipReason, 'changed_during_apply'> }
+  | { kind: 'write'; patch: Record<string, unknown>; changedKeys: string[]; changedItems: RequirementItemId[] } {
+  const { unit } = input;
+  if (unit === undefined) return { kind: 'skip', reason: 'not_found' };
+  const deletedAt = unit['deleted_at'];
+  if (typeof deletedAt === 'string' && deletedAt.length > 0) return { kind: 'skip', reason: 'deleted' };
+  if (unit['landlordId'] !== input.landlordId) return { kind: 'skip', reason: 'landlord_changed' };
+
+  const listed = new Set<RequirementItemId>(input.items);
+  const changing: Array<{ item: RequirementItem; target: ItemValue }> = [];
+  for (const item of REQUIREMENT_ITEMS) {
+    if (!listed.has(item.id)) continue;
+    const target = input.landlordValues[item.id];
+    if (target === undefined) throw new Error(`planUnitApply: no landlord value for item ${item.id}`);
+    if (!itemValuesEqual(unitItemValue(unit, item.id), target)) changing.push({ item, target });
+  }
+  if (changing.length === 0) return { kind: 'skip', reason: 'already_matches' };
+
+  const sources = readRequirementSources(unit['requirement_sources']);
+  const own = new Set<RequirementItemId>(input.ownItems);
+  for (const { item } of changing) {
+    if (isOwnValue(sources, item.id, unitItemValue(unit, item.id)) && !own.has(item.id)) {
+      return { kind: 'skip', reason: 'changed_since_opened' };
+    }
+  }
+
+  const patch: Record<string, unknown> = {};
+  const changedKeys: string[] = [];
+  const nextSources: RequirementSources = { ...sources };
+  for (const { item, target } of changing) {
+    for (const field of item.fields) {
+      const next = canonical(target[field.key]);
+      patch[field.key] = next;
+      if (storedValueChanges(unit, field.key, next)) changedKeys.push(field.key);
+    }
+    nextSources[item.id] = 'copied';
+  }
+  patch['requirement_sources'] = Object.keys(nextSources).length > 0 ? nextSources : null;
+  return { kind: 'write', patch, changedKeys, changedItems: changing.map(({ item }) => item.id) };
+}

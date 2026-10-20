@@ -2,28 +2,27 @@
 
 ## STATE (replace on every move)
 
-- Phase: SPEC DESIGN REVIEW, round 3 (reviewer A continued via SendMessage,
-  agent a8cb23799391f4617, writing `design-review/R3-reviewer-a.md`).
-  Rounds 1-2 adjudicated in `design-review/adjudications.md`; both changed
-  decisions. Hard cap: round 4.
+- Phase: HUMAN SPEC GATE. Review rounds 1-4 done (round 4 = cap) and
+  adjudicated in `design-review/adjudications.md`. Two decisions OPEN for
+  Cameron: O1 (pets coupling in Apply; proposal: one Pets item) and O2 (tags
+  against a blank landlord item; revision 4 departed from his "blank counts
+  as differing" call - planner self-correction recorded).
 - Spec: `docs/superpowers/specs/2026-10-20-property-requirements-design.md`
-  revision 3, commit 41c92e88 on `feat/property-requirements`
+  revision 5, commit ceab211e on `feat/property-requirements`
   (worktree `W:\tmp\property-requirements`, cut from main @1d7a4667).
 - Launch mode: not chosen yet (launch gate comes after the plan).
-- In flight: the R3 reviewer. No orchestrator, watchdog or mirror.
+- In flight: nothing (reviewer A idle, agent a8cb23799391f4617, kept for
+  continuation). Context ~500k: offer compaction at gate A.
 - Side artifacts: Sam's preview of the property edit form,
   https://claude.ai/artifact/5R3RhAD2BbALdMH2qc7ZTZ (shared with anyone with
   the link by Cameron; a sticky note carries 5 questions for Sam, incl. where
   subzone codes come from). Brainstorm mockups (local, ignored):
   `W:\AI Projects\Housing Choice\HC Application\.superpowers\brainstorm\626-1792507721\`.
-- NEXT STEP: adjudicate R3 into `design-review/adjudications.md`, revise the
-  spec; if R3 changed a decision run R4 (the cap - still changing at R4 means
-  put it to Cameron); otherwise the human spec gate (show counts + every
-  REJECT with its reason, and flag the planner calls Cameron has not seen:
-  create snapshot, Apply server-side own-value skip, hand-check reset, the
-  "no requirements recorded yet" display rule, Select all removed, One
-  month's rent clears the fixed amount, failed landlord load saves without
-  requirements).
+- NEXT STEP: get Cameron's O1/O2 answers and spec approval; fold them into
+  revision 6 (remove the OPEN block, set Status APPROVED); commit; then
+  COMPACTION GATE A (intent refresh, prove replay, register --persist,
+  watcher, offer /compact); then write the TDD plan and run its adversarial
+  doc review.
 
 ## What Cameron asked for (2026-10-20, quoted where wording matters)
 

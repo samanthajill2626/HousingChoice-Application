@@ -2,23 +2,28 @@
 
 ## STATE (replace on every move)
 
-- Phase: SPEC DESIGN REVIEW, round 1 (two opus reviewers, background, writing
-  `design-review/R1-reviewer-a.md` and `R1-reviewer-b.md`).
+- Phase: SPEC DESIGN REVIEW, round 3 (reviewer A continued via SendMessage,
+  agent a8cb23799391f4617, writing `design-review/R3-reviewer-a.md`).
+  Rounds 1-2 adjudicated in `design-review/adjudications.md`; both changed
+  decisions. Hard cap: round 4.
 - Spec: `docs/superpowers/specs/2026-10-20-property-requirements-design.md`
-  revision 1, commit 53757846 on `feat/property-requirements`
+  revision 3, commit 41c92e88 on `feat/property-requirements`
   (worktree `W:\tmp\property-requirements`, cut from main @1d7a4667).
 - Launch mode: not chosen yet (launch gate comes after the plan).
-- In flight: the two R1 spec reviewers. No orchestrator, watchdog or mirror.
+- In flight: the R3 reviewer. No orchestrator, watchdog or mirror.
 - Side artifacts: Sam's preview of the property edit form,
   https://claude.ai/artifact/5R3RhAD2BbALdMH2qc7ZTZ (shared with anyone with
   the link by Cameron; a sticky note carries 5 questions for Sam, incl. where
   subzone codes come from). Brainstorm mockups (local, ignored):
   `W:\AI Projects\Housing Choice\HC Application\.superpowers\brainstorm\626-1792507721\`.
-- NEXT STEP: adjudicate both R1 reports into
-  `design-review/adjudications.md`, revise the spec, run round 2 with the
-  reviewer that landed more accepted findings (SendMessage, RE-REVIEW CHARGE),
-  stop when a round changes no decision (cap 4), then the human spec gate
-  (show counts + every REJECT with its reason).
+- NEXT STEP: adjudicate R3 into `design-review/adjudications.md`, revise the
+  spec; if R3 changed a decision run R4 (the cap - still changing at R4 means
+  put it to Cameron); otherwise the human spec gate (show counts + every
+  REJECT with its reason, and flag the planner calls Cameron has not seen:
+  create snapshot, Apply server-side own-value skip, hand-check reset, the
+  "no requirements recorded yet" display rule, Select all removed, One
+  month's rent clears the fixed amount, failed landlord load saves without
+  requirements).
 
 ## What Cameron asked for (2026-10-20, quoted where wording matters)
 

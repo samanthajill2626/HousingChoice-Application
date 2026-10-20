@@ -100,3 +100,15 @@ contact-navigation twin's twelfth/thirteenth sightings caught in the log (`[vite
 error ... connect EADDRINUSE 127.0.0.1:10001`). The next full run of 4f608a40 passed 364/364.
 Artifacts: `W:\tmp\matching-blast-rules\.superpowers\gates\fw2\e2e-artifacts\`,
 `...\final2-e2e-2\e2e-artifacts\` (with a trace).
+
+**Seventh sighting (2026-10-20 ~10:51 EDT, Windows, `fix/voucher-size-prompt` @1c8d2380,
+lane 7).** The branch's first full gate run, after a full `npm test` on the same machine:
+364 passed / 1 failed in 20.4 min. `tests/flows/voice-extraction.spec.ts:155` waited the
+whole 60 s test budget for "Continue as dev user"; the screenshot is an entirely white
+page. The test before it in the same file had signed in and passed 815 ms earlier. No
+`net::ERR_*` or EADDRINUSE line in the run log (only the routine startup `/__dev/ping` proxy
+error); 2541 TIME_WAIT sockets right after the run. The branch changes only extraction
+prompt text, a CLI script and unit tests - the e2e stack runs the fake extraction driver,
+which takes only the prompt's fingerprint, never its text, and the failure came before
+any extraction step. The file passed in isolation (4/4, this test 964 ms).
+Artifacts: `W:\tmp\voucher-size-prompt\.superpowers\gates\e2e-artifacts\`.

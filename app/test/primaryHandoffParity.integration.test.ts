@@ -298,6 +298,32 @@ const CASES: Array<[string, ParityCase]> = [
       expected: { contacts: [row('c-pm', 'pm', true)], primary: 'c-pm', sources: null },
     },
   ],
+  // The keepsOld restore (plan CI-2 / AR7): `next` names the landlord the
+  // restore read, so the landlord of record does not change and the map stays.
+  [
+    '(PIN) restore onto the SAME landlord (requirements): a keepsOld restore leaves the map alone',
+    {
+      shape: {
+        landlordId: 'c-old',
+        contacts: [row('c-old', 'landlord', false), row('c-pm', 'pm', true)],
+        primary: 'c-pm',
+        deleted: true,
+        sources: { pets: 'set_here' },
+      },
+      people: [person('c-old'), person('c-pm')],
+      act: (repo, unitId, read) =>
+        repo.restoreWithLandlord(
+          unitId,
+          { expectLandlordId: 'c-old', next: { contactId: 'c-old' } },
+          { readContacts: read },
+        ),
+      expected: {
+        contacts: [row('c-old', 'landlord', false), row('c-pm', 'pm', true)],
+        primary: 'c-pm',
+        sources: { pets: 'set_here' },
+      },
+    },
+  ],
   [
     'add (requirements): a claim of the vacant landlord slot removes the map',
     {

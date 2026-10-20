@@ -1,8 +1,9 @@
 # Landlord requirements and property fields - design
 
-Status: DRAFT revision 5 (2026-10-20), at Cameron's spec gate. Revision 2
-folded in review round 1 (two reviewers), revisions 3-5 rounds 2-4 (one
-reviewer, continued; round 4 was the cap); adjudications in
+Status: APPROVED revision 6 (2026-10-20, Cameron at the spec gate). Revision
+2 folded in review round 1 (two reviewers), revisions 3-5 rounds 2-4 (one
+reviewer, continued; round 4 was the cap), revision 6 Cameron's two
+decisions at the gate; adjudications in
 `docs/superpowers/reviews/2026-10-20-property-requirements/design-review/adjudications.md`.
 Branch: `feat/property-requirements` (worktree `W:\tmp\property-requirements`, cut from main @1d7a4667)
 Tracker: Improvements Tracker items #12 "Property page fields" and #11
@@ -10,23 +11,19 @@ Tracker: Improvements Tracker items #12 "Property page fields" and #11
 together.
 Review records: `docs/superpowers/reviews/2026-10-20-property-requirements/`
 
-OPEN FOR CAMERON (review round 4 hit the cap with these; the spec is
-otherwise final as revision 5):
+Decided at the spec gate (Cameron, 2026-10-20), after review round 4 hit the
+cap:
 
-- O1 Pets coupling in Apply (R4-1): No pets, Pets (details) and Pet fee are
-  separate items, so the default Apply of a landlord's "No pets" onto a
-  property whose details say "Cats OK" publishes "No pets (Cats OK)" on the
-  flyer, unmarked. Proposed: make the three one "Pets" item for copying,
-  comparing and tagging (as Deposit already is); the form keeps three
-  fields.
-- O2 Tags against a blank landlord item (R4-2, and the round-3 change
-  R3-6): revision 4 shows NO tag when the landlord's item is blank and the
-  property's value was never touched, which departs from Cameron's
-  2026-10-20 call that "a blank landlord value does count as differing";
-  and it still shows purple for values typed later (`set_here`). Choose:
-  tag against a blank landlord everywhere (his call; every existing value is
-  purple until each landlord is filled in), or no tag against a blank
-  landlord item for any own value (only `copied` shows orange there).
+- O1: a checkbox or choice and the free text that details it are ONE item,
+  copied, compared and tagged together, whether or not the item is on the
+  flyer - so Apply can never leave "No pets (Cats OK)" on a flyer, or the
+  internal equivalent (a "No evictions" box beside contradicting details,
+  a Self-guided tour type beside a landlord-led tour process) on a property
+  page. Hence the eight items in D1.
+- O2: a blank landlord value DOES count as differing everywhere (Cameron's
+  original call): an own value against a blank landlord item shows purple
+  "Set on this property / Landlord: blank". That is wanted as a hint that
+  the landlord's record still needs filling in.
 
 Vocabulary: a `unit` in code is a "property" in staff copy and a "home" in
 tenant copy (documentation/GLOSSARY.md). This spec says "property" for the
@@ -215,26 +212,30 @@ already list-ready).
 
 ### D1 The requirement items
 
-There are twelve requirement ITEMS. An item is the unit of copying,
+There are eight requirement ITEMS. An item is the unit of copying,
 comparing and tagging. Every item exists on both the landlord and the
 property. Order and grouping are the display order everywhere. Item ids are
 their own namespace (stored in `requirement_sources`, sent in the Apply
-API); keys are the stored attribute names on the unit.
+API); keys are the stored attribute names on the unit; each key is one
+FIELD on the forms.
 
-| Group | Item id | Label | Unit key(s) | Kind | Flyer |
-|---|---|---|---|---|---|
-| Screening | `no_evictions_on_program` | No evictions while on the program | `no_evictions_on_program` | checkbox | Staff only |
-| Screening | `evictions_notes` | Evictions (details) | `evictions_notes` | text | Staff only |
-| Screening | `credit_requirements` | Credit score | `credit_requirements` | text | Staff only |
-| Screening | `income_requirements` | Income requirements | `income_requirements` | text | Staff only |
-| Screening | `qualifications` | Qualifications | `qualifications` | long text | Staff only |
-| Pets | `no_pets` | No pets | `no_pets` | checkbox | On flyer |
-| Pets | `pets` | Pets (details) | `pets` (existing) | text | On flyer |
-| Pets | `pet_fee` | Pet fee | `pet_fee` | text | On flyer |
-| Move-in costs | `deposit` | Deposit | `deposit_one_month` (checkbox "One month's rent"), `deposit` (existing, "Fixed amount" in dollars), `deposit_flexible` (checkbox "Flexible / payment terms available"), `deposit_notes` (text, labeled "Deposit notes") | group | On flyer, except the notes (Staff only) |
-| Move-in costs | `application_fee` | Application fee | `application_fee` (existing, dollars; 0 = "No application fee") | money | On flyer |
-| Touring | `tour_type` | Tour type | `tour_type` (existing enum) | select | Staff only |
-| Touring | `tour_process` | Tour process | `tour_process` (existing) | text | Staff only |
+A checkbox or choice and the free text that details it are ONE item
+(Cameron, 2026-10-20), on or off the flyer, so copying one can never leave
+the other contradicting it.
+
+| Group | Item id | Item label | Fields (unit keys) | Flyer |
+|---|---|---|---|---|
+| Screening | `evictions` | Evictions | checkbox "No evictions while on the program" (`no_evictions_on_program`); text "Evictions (details)" (`evictions_notes`) | Staff only |
+| Screening | `credit_requirements` | Credit score | text (`credit_requirements`) | Staff only |
+| Screening | `income_requirements` | Income requirements | text (`income_requirements`) | Staff only |
+| Screening | `qualifications` | Qualifications | long text (`qualifications`) | Staff only |
+| Pets | `pets` | Pets | checkbox "No pets" (`no_pets`); text "Pets (details)" (`pets`, existing); text "Pet fee" (`pet_fee`) | On flyer |
+| Move-in costs | `deposit` | Deposit | checkbox "One month's rent" (`deposit_one_month`); money "Fixed amount" (`deposit`, existing, dollars); checkbox "Flexible / payment terms available" (`deposit_flexible`); text "Deposit notes" (`deposit_notes`) | On flyer, except the notes (Staff only) |
+| Move-in costs | `application_fee` | Application fee | money (`application_fee`, existing, dollars; 0 = "No application fee") | On flyer |
+| Touring | `touring` | Touring | select "Tour type" (`tour_type`, existing enum); text "Tour process" (`tour_process`, existing) | Staff only |
+
+Credit score, income requirements and qualifications are free text with no
+checkbox, so they stand alone.
 
 The checkbox label stays exactly "No evictions while on the program".
 Credit and income stay notes only: nothing matches on them (fair-housing
@@ -282,19 +283,19 @@ Legacy `pets` booleans (old data and raw API callers only):
 - WRITE of a boolean: the unit `pets` key still accepts a boolean (raw API
   callers). A written boolean MEANS what the read interpretation says
   (`false` = No pets checked and details blank; `true` = No pets unchecked
-  and details "Allowed") and is stored in the new shape at once: both keys
-  change, so both items are classified (D5). The landlord side never
-  accepts a boolean.
-- A STORED legacy boolean met by a write that touches only one pets item
-  (a text PATCH of `pets`, a PATCH of `no_pets`, or Apply of one item):
-  the write stores BOTH keys in the new shape, with the untouched item
-  keeping its interpreted value, so the other item does not change.
+  and details "Allowed") and is stored in the new shape at once (the Pets
+  item is classified, D5). The landlord side never accepts a boolean.
+- A STORED legacy boolean met by a write that changes only some keys of
+  the Pets item (for example a PATCH of `pet_fee` alone): the write also
+  stores `no_pets` and `pets` in the new shape with their interpreted
+  values, so nothing else in the item changes.
 
 Item equality (used by copying, tags and Apply): two values of an item are
 EQUAL when every key of the item is equal after the read interpretation
 above, where absent, '' and `false` are all "blank", text compares after
-trimming (case-sensitive), and numbers compare exactly. The Deposit item is
-equal only when all four of its keys are equal.
+trimming (case-sensitive), and numbers compare exactly. A multi-field item
+(Evictions, Pets, Deposit, Touring) is equal only when all its keys are
+equal.
 
 ### D2 Where the requirements are stored
 
@@ -391,7 +392,7 @@ with the landlord's value (D1 equality): equal -> `copied`; different ->
 
 - POST create FROM THE FORM: the body carries `requirements_snapshot`, the
   landlord's values the form pre-filled (`{ <item id>: { <unit key>: <value
-  or null> } }`, every item). The server classifies ALL twelve items, a key
+  or null> } }`, every item). The server classifies ALL eight items, a key
   left out of the body counting as blank, against that SNAPSHOT: a field
   staff left as pre-filled is `copied` (it WAS copied from the landlord,
   even if the landlord changed while the form was open - the property then
@@ -454,24 +455,28 @@ value:
 | equal | any | the value, no tag |
 | different | `copied` | the value + orange tag **Landlord updated** + a small line "Landlord now: <value>" |
 | different | `set_here` | the value + purple tag **Set on this property** + "Landlord: <value>" |
-| different, property value not blank, landlord not blank | absent (never touched) | as `set_here` (an existing value counts as set on this property - Cameron, 2026-10-20) |
-| property value not blank, landlord blank | absent (never touched) | the value, no tag (the landlord has said nothing about this item; still an own value for Apply, D8) |
+| different, property value not blank | absent (never touched) | as `set_here` (an existing value counts as set on this property - Cameron, 2026-10-20) |
 | property blank, landlord not blank | absent (never touched) | blank + "Landlord: <value>", no tag |
 
-A blank landlord value prints as "blank". When the property has no landlord,
-or the landlord contact fails to load, no tags or landlord lines show. When
-the landlord of record has no requirement recorded at all, the card also
-says "<Landlord name> has no requirements recorded yet." (the tags still
-follow the table: on the day this ships, existing values show no tag
-because every landlord item is blank, and a landlord recording one item
-does not make every other existing value purple).
+A blank landlord value prints as "blank", and it COUNTS as differing
+(Cameron, 2026-10-20): an own value against a blank landlord item shows
+purple "Set on this property / Landlord: blank". On the day this ships every
+existing value shows that, because no landlord has requirements yet; that is
+intended - it points staff at landlords whose records still need filling
+in. When the landlord of record has no requirement recorded at all, the card
+also says "<Landlord name> has no requirements recorded yet." When the
+property has no landlord, or the landlord contact fails to load, no tags or
+landlord lines show.
+
+A multi-field item (Evictions, Pets, Deposit, Touring) shows its fields
+together and carries ONE tag and ONE landlord line for the item, giving the
+landlord's whole item value (for example "Landlord: No pets; pet fee $300").
 
 OWN VALUE (used by Apply, D8) is defined by this table, never by what the
 card happens to display: an item is an own value on a property when its
 record is `set_here`, or it is never touched and the property's value is not
-blank - whatever the landlord holds. The
-two tags differ in lightness as well as hue (accessibility), and each
-carries its text, not color alone. The property page re-reads the landlord
+blank - whatever the landlord holds. The two tags differ in lightness as
+well as hue (accessibility), and each carries its text, not color alone. The property page re-reads the landlord
 contact whenever the unit's `landlordId` changes (a roster claim or restore
 without a reload).
 
@@ -506,8 +511,9 @@ its properties (the landlord page may have been open for hours); the
 dialog shows a loading state until both reads land, and an error with Try
 again if either fails.
 
-Left, "What to copy": every item, with the landlord's value. Items with a
-value start CHECKED; blank items start UNCHECKED and are marked "Clears";
+Left, "What to copy": every item, with the landlord's value (a multi-field
+item is one row showing all its fields, so Pets copies No pets, the details
+and the pet fee together). Items with a value start CHECKED; blank items start UNCHECKED and are marked "Clears";
 checking a blank item copies the blank, clearing that item on the chosen
 properties (Cameron, 2026-10-20).
 
@@ -590,7 +596,7 @@ UNLESS the edit created an own value the dialog did not show
 ### D9 Landlord page and landlord edit form
 
 - A new card **Requirements / Qualifications** sits right after "Landlord
-  onboarding" on the landlord page: the twelve items in their groups, blank
+  onboarding" on the landlord page: the eight items in their groups, blank
   ones as "-", with **Apply to properties** and **Edit** actions. Edit opens
   the existing landlord edit form.
 - `ContactEditForm` gets a "Requirements / Qualifications" fieldset for
@@ -614,7 +620,7 @@ Property page (`ListingDetail`):
   authorities, utilities, accessibility, lease terms, same-day RTA, video,
   and gains **Subzone**, **Washer / dryer** and **Voucher sizes accepted**
   (D4). Deposit, Pets and Application fee move out to Requirements.
-- A new **Requirements** card (D6, layout A) shows the twelve items in their
+- A new **Requirements** card (D6, layout A) shows the eight items in their
   groups. Its Edit opens the existing property edit form.
 - "Tour & application process" keeps Application process; tour type and tour
   process move to Requirements.
@@ -659,7 +665,7 @@ New and Edit property forms:
 | Public listing link | On flyer | `listing_link` |
 | Video URL | On flyer | `video_url` |
 | Same-day RTA | On flyer | `same_day_rta` |
-| The twelve items | per D1 | per D11 |
+| The fields of the eight items | per D1 | per D11 |
 | Application process | Staff only | - |
 | Notes | Staff only | - |
 
@@ -760,7 +766,9 @@ pets flag until reloaded. Accepted (the page reloads on the next visit).
   import-owned property human-owned for the importer, exactly as any staff
   edit does.
 - Existing deposit, pets, application fee, tour type and tour process values
-  count as set on this property. On a landlord's first Apply, rows with
+  count as set on this property, and on the day this ships every one of them
+  shows purple "Set on this property / Landlord: blank" until its landlord
+  is filled in (intended, D6). On a landlord's first Apply, rows with
   those values start unchecked for those items; staff either uncheck those
   items on the left (to fill only the new items, such as credit and
   qualifications) or check each property whose values should be replaced.
@@ -805,7 +813,9 @@ App (vitest):
   also when the landlord changed after the snapshot; create without a
   snapshot -> only body items classified, against the current landlord; a
   malformed snapshot -> 400; PATCH to differ, PATCH back to equal; PATCH of
-  one Deposit key; a raw boolean `pets` write classifies both pets items;
+  one Deposit key (the whole Deposit item is classified); a raw boolean
+  `pets` write classifies the Pets item; a PATCH of `pet_fee` alone on a
+  legacy boolean property keeps No pets and the details as they read;
   landlord change by PATCH, restore-with-landlord and roster claim REMOVEs
   the map; no landlord; the PATCH map write retries on a changed map and
   answers 409 `property_changed` after 3 attempts, and cannot write a map
@@ -835,7 +845,8 @@ App (vitest):
 Dashboard (vitest + testing-library): the shared Requirements component
 (tags from the table, disabling, "Clears"), picker B (expand rules,
 aria-pressed, summary, empty sends null, off-chip stored values), the D6 tag
-table (incl. a never-touched value against a blank landlord item: no tag)
+table (incl. an own value against a blank landlord item: purple with
+"Landlord: blank"; one tag and one landlord line per multi-field item)
 and the no-requirements note, the Apply dialog (re-read on open, defaults,
 own-value marks from the D6 definition also for an all-blank landlord, live
 recompute, a hand-checked row resetting only when it gains an own value,
@@ -854,7 +865,10 @@ shows "Landlord updated"; Apply dialog starts the exception row unchecked
 (own value marked) and the out-of-date row checked; Update; the property
 pages show the new values and the Activity line; the flyer shows the public
 items and none of the staff ones; a Matching blast from a two-size property
-pre-fills two chips, and a 6-bedroom tenant matches 4+.
+pre-fills two chips, and a 6-bedroom tenant matches 4+. A landlord with "No
+pets" and blank details applied onto a property whose details say "Cats OK"
+marks that row's Pets as an own value and starts it unchecked; checked and
+updated, the flyer reads "No pets", never "No pets (Cats OK)".
 
 ## 7. Places the build must also update
 

@@ -104,6 +104,24 @@ open findings go to Cameron as decisions O1 and O2 instead of a round 5.
 Planner self-correction recorded: R3-6's adjudication should have gone to
 Cameron, because it narrowed a call he made in the conversation.
 
+## Spec gate (Cameron, 2026-10-20) - revision 6, APPROVED
+
+- O1 (R4-1): agreed, and widened: "There are probably other areas where
+  details are added in a free text field ... If they don't apply on the
+  flyer, then maybe we need to look at them anyway because we may still have
+  an internal situation ... It'll be shown on the property." Revision 6 makes
+  every checkbox-or-choice plus its details ONE item: Evictions (checkbox +
+  details), Pets (No pets + details + pet fee), Deposit (unchanged), Touring
+  (tour type + tour process). Eight items instead of twelve. Credit, income
+  and qualifications stay standalone (no checkbox to contradict).
+- O2 (R4-2, and it reverses round 3's R3-6 no-tag row): "I still want the
+  original call for the tags when the landlord field is blank ... If it says
+  'set on this property' and the landlord is blank, that's sort of a subtle
+  hint that we need to go back to the landlord and add that data in." An own
+  value against a blank landlord item shows purple with "Landlord: blank",
+  existing values included, from day one.
+- "Other than that, the spec looks good, and we should be able to move on."
+
 Rejections in round 1 (for the human spec gate):
 
 1. Per-property, per-item choices in Apply (B7 second half): rejected -

@@ -2,12 +2,18 @@
 
 ## STATE (replace on every move)
 
-- Phase: PLAN REVIEW round 2 (round 1 closed: 10 unique findings, all
-  accepted, 3 changed decisions; plan v2 @51893e3a). Reviewer A continued
-  (agent ab45379e71f894ef4) with the RE-REVIEW CHARGE -> `plan-review/R2-reviewer-a.md`.
-  Slice writers (agents S1 af9d3ed2.., S2 a4768abc.., S3 a507e961.., S4
-  aa7f5ebb.., S5 a64316dd.., S6 aea5cdbe.., S7 acf77144..) stay alive to
-  fix their own drafts; the plan is rebuilt from the drafts.
+- Phase: AT THE LAUNCH GATE. Plan v3 FINAL; plan review CLOSED after 2
+  rounds (12 unique findings: 11 accepted, 1 rejected; round 2 terminal;
+  PR2-3 cents fix folded in). Mission block at `<records>/mission-block.md`.
+  Launch mode: not chosen yet - ask Cameron with AskUserQuestion (Go - AUTO
+  dispatch / Go - MANUAL / Revise). On a Go: compaction gate B (confirm the
+  registration with --show, start the watcher, offer /compact), then
+  dispatch `abt:build-orchestrator` with the mission block verbatim, arm the
+  watchdog (30-min checkpoints, ceiling 55 min), start the live mirror.
+  Reviewer A (ab45379e71f894ef4) and the slice writers are done; they are
+  not needed after dispatch (the orchestrator runs its own children).
+- (previous) PLAN REVIEW round 2 (round 1 closed: 10 unique findings, all
+  accepted, 3 changed decisions; plan v2 @51893e3a).
 - (previous) PLAN REVIEW round 1 (compaction A done 2026-10-20, 558k -> 18k).
   Plan v1 assembled at `docs/superpowers/plans/2026-10-20-property-requirements.md`
   (26k lines: sections 0-3 planner-written, section 4 = assembly rulings

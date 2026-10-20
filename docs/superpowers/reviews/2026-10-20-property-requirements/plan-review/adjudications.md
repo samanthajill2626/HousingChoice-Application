@@ -35,3 +35,25 @@ Reviewer to continue in rounds 2+: A (9 accepted vs 8; B's report path is
 handed to A).
 
 Round 1 changed decisions (PR1-1, PR1-8, PR1-10), so round 2 runs.
+
+## Round 2 (2026-10-20) - reviewer A continued, RE-REVIEW CHARGE
+
+Plan v2 @51893e3a. Report: `R2-reviewer-a.md` (2 findings). The reviewer
+also had round 1's reviewer-B report.
+
+| # | Finding | Severity (reviewer) | Ruling | Decision changed? |
+|---|---|---|---|---|
+| PR2-1 | Task 6.9's new `ok: false` UI test can never pass: the Fixed amount input has `min={0}` and the form has no `noValidate`, so Save stops at native constraint validation before `onSubmit`; contests PR1-7's "the `ok: false` branch gets a test" | MEDIUM | ACCEPT: the UI test is removed; the branch stays as a defensive path, pinned at the helper level (`buildRequirementPatch`'s `ok: false`, S5 Task 5.3); S5 and S6 scanned their own UI tests for the same native-validation trap | no (test design) |
+| PR2-2 | PR1-10 / PR1-10a make the audit depend on the path: a no-change save is audited with every body key on the plain path and not at all on the fenced path; PR1-10a's cited precedent (`units.ts:2122-2129`) argues against stamping `updated_at` too | LOW | REJECT. The plain path is today's behavior and this mission does not change it; the fenced path follows D13 literally ("the keys the write actually changed"). A no-change fenced save is reachable only from a raw API call (the edit form sends only changed keys), so the asymmetry costs nothing a person sees. The `updated_at` stamp stays because every staff save stamps it today (it is the importer's human-owned signal); dropping it for this one case would change ownership semantics for no user-visible gain. Conceded in part: the tombstone citation supports dropping the empty row, not keeping the write; the write is kept for consistency with the plain path. | no |
+
+Round 2 changed no decision: it is the TERMINAL round. PR2-1 is folded in
+and the plan review closes (2 rounds, 12 unique findings, 11 accepted, 1
+rejected).
+
+Addendum (round 2 fold-in): while scanning for PR2-1's trap, the S5 writer
+found a related risk - the money inputs keep today's `step={1}`
+(`ListingEditForm.tsx:378,525`), so a stored or landlord-prefilled deposit
+with cents (1250.50; D1 allows any finite amount >= 0) fails native step
+validation and silently blocks Save / Create. PR2-3 ACCEPTED as precision:
+`step="any"` on "Fixed amount" and "Application fee", tested in Tasks 5.8
+and 5.9. No decision changed; round 2 stays terminal.

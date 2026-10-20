@@ -9,10 +9,10 @@
   `docs/superpowers/reviews/2026-10-20-property-requirements/`.
 - Spec review: 4 rounds (the cap) + Cameron's two gate decisions -
   `docs/superpowers/reviews/2026-10-20-property-requirements/design-review/adjudications.md`.
-- Status: PLAN v2 (2026-10-20), plan review round 1 folded in. Sections 0-4
+- Status: PLAN v3 FINAL (2026-10-20), plan review CLOSED (2 rounds). Sections 0-4
   are BINDING; slice sections 5-11 are the seven opus section drafts,
-  verbatim (edited by their writers for the round-1 rulings); section 4
-  (assembly rulings AR1-AR48 and the round-1 rulings in 4.1) wins over any
+  verbatim (edited by their writers for the review rulings); section 4
+  (assembly rulings AR1-AR48, round-1 rulings 4.1, round-2 rulings 4.2) wins over any
   slice text it contradicts. Headings INSIDE a slice ("## 4. Spec coverage
   map", "## 1. CONTRACT ISSUES") are numbered within that slice; "plan
   section N" always means this file's top-level sections 0-11. The drafts
@@ -887,6 +887,29 @@ section wins.
   from `../listing/requirements.js` instead of keeping a private copy (the
   dashboard has no route-level code splitting, so the public page loads the
   module anyway).
+
+### 4.2 Plan review round 2 rulings (BINDING; TERMINAL round)
+
+Reviewer A continued with the re-review charge; 2 findings. The round changed
+no decision, so the plan review is closed (2 rounds, 12 unique findings, 11
+accepted, 1 rejected).
+
+- **PR2-1 (precision).** Task 6.9's `ok: false` UI test is removed: the Fixed
+  amount input's `min={0}` makes native validation stop the submit first, in
+  jsdom and in a browser. The `if (!req.ok)` branch stays as a defensive path;
+  `buildRequirementPatch`'s `ok: false` is pinned at the helper level (S5 Task
+  5.3). S5 and S6 scanned their UI tests for the same native-validation trap.
+- **PR2-2 (rejected).** The audit asymmetry between the plain path (today's
+  body keys, unchanged by this mission) and the fenced path (D13's keys
+  actually changed; no row when none) stands. A no-change fenced save is
+  reachable only from a raw API call. Its write still stamps `updated_at`,
+  as every staff save does.
+- **PR2-3 (precision, from the S5 writer's scan).** The two money inputs in
+  `RequirementsFields` ("Fixed amount", "Application fee") use `step="any"`
+  (with `min={0}`), so an amount with cents (1250.5), stored or pre-filled
+  from the landlord, never trips native step validation and silently blocks
+  Save or Create; Tasks 5.8 and 5.9 each test it. Other number inputs are
+  unchanged.
 
 ## 5. S1 - App foundations (Tasks 1.1-1.7)
 
@@ -16817,7 +16840,11 @@ export function RequirementsFields({
                 className={formStyles.input}
                 type="number"
                 min={0}
-                step={1}
+                // Planner ruling PR2-3: any amount, cents included (D1 money is
+                // any finite number >= 0) - a stored or landlord-prefilled
+                // 1250.5 must never trip native step validation and silently
+                // block Save / Create.
+                step="any"
                 value={text(field.key)}
                 disabled={disabled || (isFee ? noFee : oneMonth)}
                 onChange={(e) => set(field.key, e.target.value)}
@@ -17710,6 +17737,23 @@ describe('ListingEditForm - property requirements and fields (spec 2026-10-20)',
     expect(onSaved).not.toHaveBeenCalled();
     expect(save()).toBeEnabled();
   });
+
+  it('a stored deposit with cents (1250.5) never blocks Save: another field changed, the patch is sent (planner PR2-3)', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    updateUnit.mockResolvedValue({ ...UNIT, deposit: 1250.5, utilities: 'Gas only' });
+    render(<ListingEditForm unit={{ ...UNIT, deposit: 1250.5 }} onClose={vi.fn()} onSaved={onSaved} />);
+    const amount = screen.getByLabelText('Fixed amount');
+    expect(amount).toHaveValue(1250.5);
+    // step="any": a number input's default step is 1, which would mark 1250.5 a
+    // step mismatch and stop the submit before onSubmit runs.
+    expect(amount).toHaveAttribute('step', 'any');
+    await user.clear(screen.getByLabelText('Tenant-paid utilities'));
+    await user.type(screen.getByLabelText('Tenant-paid utilities'), 'Gas only');
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { utilities: 'Gas only' });
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  });
 });
 ```
 
@@ -17727,6 +17771,9 @@ Why each new / changed case fails on the unchanged form:
   the first case is green on old code (a pin of the non-clearable numbers).
 - T6: the legend text is absent and the old hint is present (`:279-282`).
 - T7: the description has no " On flyer" (OrgPicker gets no tag today).
+- T8 cents case (PR2-3): no "Fixed amount" field today (and today's Deposit
+  input is `step={1}`, `ListingEditForm.tsx:378-379`, so a 1250.5 deposit is a
+  step mismatch).
 - T8 tag cases: no tags anywhere; "Subzone", "Washer / dryer", "No pets",
   "Pets (details)", "Pet fee", "Fixed amount", "One month's rent", "No
   application fee", "No evictions...", "Credit score", "Evictions (details)",
@@ -18876,6 +18923,32 @@ describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", ()
       requirements_snapshot: blankSnapshot('contact-landlord-0001'),
     });
   });
+
+  it('a landlord deposit with cents (1250.5) pre-fills and Create sends it - native validation never blocks it (planner PR2-3)', async () => {
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({
+      contactId: 'contact-landlord-0001',
+      type: 'landlord',
+      firstName: 'Rosa',
+      lastName: 'Kim',
+      req_deposit: 1250.5,
+    });
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    expect(await screen.findByText(FILLED)).toBeInTheDocument();
+    const amount = screen.getByLabelText('Fixed amount');
+    expect(amount).toHaveValue(1250.5);
+    // step="any": the default step of 1 would mark 1250.5 a step mismatch and
+    // stop the submit before onSubmit runs.
+    expect(amount).toHaveAttribute('step', 'any');
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()['deposit']).toBe(1250.5);
+    expect(sentBody()['requirements_snapshot']).toMatchObject({
+      landlordId: 'contact-landlord-0001',
+      deposit: { deposit_one_month: null, deposit: 1250.5, deposit_flexible: null, deposit_notes: null },
+    });
+  });
 });
 
 // --- Spec 2026-10-20 D10, D10a: the flyer tags and the D10 order ------------
@@ -18967,7 +19040,9 @@ Why each new / changed case fails on the unchanged form:
   rent" fields, no "Filled in from" note, no "Loading" / "Couldn't load" lines
   or Try again (today a failed read is silent, `:162-164`), `getContact` is
   called only for a label and Create is never disabled by it; the picker case
-  finds no requirement fields to refill.
+  finds no requirement fields to refill; the cents case (PR2-3) finds no
+  "Fixed amount" field and no `deposit` in the body (today's Deposit input
+  also has the default step 1, `UnitCreateForm.tsx:453-462`).
 - U9 tag cases: no tags; "Subzone", "Washer / dryer" and the requirement
   fields do not exist; the order case fails at Address (today directly under
   the owner, `:305-361`).
@@ -19993,7 +20068,8 @@ CI-2. RULED (AR36: S5's helper names win). The landlord form uses S5's
 (it already adds `deposit: null` on the save that checks One month's rent) and
 `toLandlordPatch(patch)` (prefixes `req_`). Task 6.9's code and tests use
 these; an `ok: false` shows its `error` in the form's error line and sends
-nothing. (Was: a proposal for `requirementFormValuesFrom` / `requirementPatch`,
+nothing (a defensive branch with no UI test - ruling PR2-1; it is pinned in
+S5 Task 5.3's `requirementForm.test.ts`). (Was: a proposal for `requirementFormValuesFrom` / `requirementPatch`,
 withdrawn.)
 
 CI-3. RESOLVED by S5's draft: `RequirementsFields` renders the four group
@@ -23116,7 +23192,10 @@ plan 2.4). Uses S5's helpers exactly (ruling AR36,
 `buildRequirementPatch(initial, current)` (`{ ok: true; patch } | { ok: false; error }`;
 it already adds `deposit: null` on the save that checks One month's rent) and
 `toLandlordPatch(patch)` (prefixes `req_`). An `ok: false` shows its `error` in
-the form's error line and sends nothing. A 400 `deposit_conflict` (ruling AR32)
+the form's error line and sends nothing - a DEFENSIVE branch with no UI test
+(ruling PR2-1: the amount inputs' `min={0}` and the form's native validation
+stop a bad amount before `onSubmit`; `ok: false` is pinned in S5 Task 5.3's
+`requirementForm.test.ts`). A 400 `deposit_conflict` (ruling AR32)
 shows `A deposit can be one month's rent or a fixed amount, not both. Reload the landlord and try again.`,
 keeps the form open with what staff typed, and never falls through to the
 generic save error. `RequirementsFields` renders no section heading (S5), so
@@ -23215,21 +23294,6 @@ describe('ContactEditForm - landlord Requirements / Qualifications', () => {
     await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { park_reason: 'Declined' }));
   });
 
-  it('an invalid amount shows its error in the form and sends nothing (buildRequirementPatch ok: false)', async () => {
-    const user = userEvent.setup();
-    const onSaved = vi.fn();
-    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={onSaved} />);
-    // The amount is a number input, which drops letters ("abc" reads back as
-    // empty in the DOM), so the invalid amount is a negative one - the case
-    // requirementForm.test.ts pins for the same message.
-    fireEvent.change(within(fieldset()).getByLabelText('Fixed amount'), { target: { value: '-5' } });
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('Fixed amount must be a number 0 or greater.');
-    expect(updateContact).not.toHaveBeenCalled();
-    expect(onSaved).not.toHaveBeenCalled();
-    expect(within(fieldset()).getByLabelText('Fixed amount')).toHaveDisplayValue('-5');
-  });
-
   it('a 400 deposit_conflict says why, keeps the form open with what staff typed, and is not the generic error (AR32)', async () => {
     const user = userEvent.setup();
     const onSaved = vi.fn();
@@ -23273,10 +23337,13 @@ Step 2 - RED:
 Every new case fails: the form has no "Requirements / Qualifications" group
 (`ContactEditForm.tsx:871-973` ends with Park reason), so `fieldset()` throws,
 and the patch never carries a `req_` key; with no fieldset there is no
-"Fixed amount" input for the `ok: false` and `deposit_conflict` cases either
-(and on unchanged code a 400 lands in the generic "Couldn't save - please try
-again.", `ContactEditForm.tsx:533`). The tenant case is a PIN. All existing
-cases stay green (PIN).
+"Fixed amount" input for the `deposit_conflict` case either (and on unchanged
+code a 400 lands in the generic "Couldn't save - please try again.",
+`ContactEditForm.tsx:533`). The tenant case is a PIN. All existing cases stay
+green (PIN). No UI test drives `buildRequirementPatch`'s `ok: false` (ruling
+PR2-1): the amount input carries `min={0}` and the form has no `noValidate`,
+so Save stops at native constraint validation before `onSubmit` runs; that
+branch is pinned at the unit level in S5 Task 5.3's `requirementForm.test.ts`.
 
 Step 3 - implementation in `dashboard/src/routes/contact/ContactEditForm.tsx`:
 
@@ -23330,11 +23397,12 @@ with:
       if (parkReason !== str(contact.park_reason)) patch.park_reason = parkReason;
       // D9: only the req_ keys that changed - and, on the save that CHECKS One
       // month's rent, req_deposit null (D1; buildRequirementPatch adds it) - by
-      // the same helper the property forms use, so the two cannot drift. An
-      // invalid amount refuses the save with its message (onSubmit shows it
-      // and sends nothing). Gated on the LIVE kind: a contact retyped away
-      // from landlord sends no req_ key (the server refuses them).
+      // the same helper the property forms use, so the two cannot drift.
+      // Gated on the LIVE kind: a contact retyped away from landlord sends no
+      // req_ key (the server refuses them).
       const req = buildRequirementPatch(requirementFormValuesFromLandlord(contact), requirements);
+      // Defensive: the amount inputs' min={0} stops a bad amount at native
+      // validation first; ok: false is pinned in requirementForm.test.ts (S5 Task 5.3).
       if (!req.ok) return { error: req.error };
       Object.assign(patch, toLandlordPatch(req.patch));
     }
@@ -24709,9 +24777,15 @@ Step 6 - commit both files:
 
 - S5 (AR36, ruled): S6's landlord form consumes `requirementForm.ts`'s
   `requirementFormValuesFromLandlord`, `buildRequirementPatch` (its
-  `ok: false` messages are shown verbatim, e.g.
-  `Fixed amount must be a number 0 or greater.`) and `toLandlordPatch`; keep
-  those names and shapes.
+  `ok: false` messages are shown verbatim when reached, e.g.
+  `Fixed amount must be a number 0 or greater.` - a defensive path that S6
+  does not UI-test, PR2-1) and `toLandlordPatch`; keep those names and shapes.
+- S5 (observation from the PR2-1 scan, no S6 change): the money inputs carry
+  `min={0}` AND `step={1}` with no `noValidate`, so native validation also
+  blocks Save when a STORED amount is not a whole number (D1 allows any finite
+  number >= 0, e.g. a 1400.5 deposit on a landlord or a property) - the whole
+  form then cannot save until staff edit that field. `step="any"` would avoid
+  it; S6's fixtures use whole numbers, so no S6 test depends on either.
 - S5 (CI-3, resolved): `RequirementsFields` keeps rendering no section heading
   or legend; S6's landlord form renders
   `<fieldset><legend>Requirements / Qualifications</legend><FlyerLegend audience="landlord" />`.

@@ -2,12 +2,25 @@
 
 ## STATE (replace on every move)
 
-- Phase: LAUNCH GATE PASSED - Cameron picked AUTO (2026-10-20: "Go auto
-  with 55 minute watchdog timers"). Now at COMPACTION GATE B (nothing
-  dispatched yet). Plan v3 FINAL @687f3a14; plan review CLOSED after 2 rounds
+- Phase: BUILD (AUTO) - dispatched 2026-10-20 ~21:32 UTC after compaction
+  gate B (441k -> 23k). In flight: the build-orchestrator (background
+  agent af0697670f3a44739, prompt = mission-block.md verbatim), the
+  watchdog (CHECKPOINT 3300 s, STALL 1500 s quiet; exactly one), and the
+  live mirror into `.superpowers/sdd/live.log`. Failure budget: 0 of 2
+  consumed (one free INFRA correction already used: the drafters' ENOTFOUND).
+- NEXT STEP: supervise. On each watchdog wake: CHECKPOINT -> ledger tail,
+  one **Checkpoint:** line, re-arm; STALL -> ladder rung 0 (transcript
+  probe); TERMINAL -> DONE = handback review (replay the WHOLE
+  conversation, build the conversation checklist, run the 5 gates myself on
+  a quiet tree, two read-only opus reviewers: spec-conformance + plan-blind
+  adversarial), QUESTION = relay to Cameron, BLOCKED = investigate. On a
+  re-dispatch, start a new mirror appending to the same live.log.
+- (previous) LAUNCH GATE PASSED - Cameron picked AUTO (2026-10-20: "Go auto
+  with 55 minute watchdog timers"). Then COMPACTION GATE B. Plan v3 FINAL
+  @687f3a14; plan review CLOSED after 2 rounds
   (12 unique findings: 11 accepted, 1 rejected). Mission block at
   `<records>/mission-block.md`.
-- NEXT STEP (after the compaction, or on skip): dispatch the agent
+- (previous NEXT STEP, done) after the compaction, or on skip: dispatch the agent
   `abt:build-orchestrator` (Agent tool, run_in_background true, prompt = the
   mission block file's content VERBATIM; model from its definition). Then arm
   the watchdog with the CHECKPOINT at 3300 s (Cameron's 55-minute timer;

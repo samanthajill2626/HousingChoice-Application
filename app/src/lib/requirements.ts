@@ -289,3 +289,110 @@ export function hasDepositConflict(record: Record<string, unknown>, side: 'unit'
     record[`${prefix}deposit_one_month`] === true && typeof amount === 'number' && Number.isFinite(amount)
   );
 }
+
+// --- Where each value came from (D5) and own values (D6) ------------------------
+
+export type RequirementSource = 'copied' | 'set_here';
+export type RequirementSources = Partial<Record<RequirementItemId, RequirementSource>>;
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Defensive read of the stored `requirement_sources` map: non-object -> {}; unknown ids / values dropped. */
+export function readRequirementSources(raw: unknown): RequirementSources {
+  const sources: RequirementSources = {};
+  if (!isPlainObject(raw)) return sources;
+  for (const id of REQUIREMENT_ITEM_IDS) {
+    if (!Object.hasOwn(raw, id)) continue;
+    const source = raw[id];
+    if (source === 'copied' || source === 'set_here') sources[id] = source;
+  }
+  return sources;
+}
+
+/**
+ * D6 OWN VALUE: the item's record is `set_here`, or the item was never
+ * touched and the property's value is not blank - whatever the landlord holds.
+ */
+export function isOwnValue(sources: RequirementSources, id: RequirementItemId, unitValue: ItemValue): boolean {
+  const source = sources[id];
+  if (source === 'set_here') return true;
+  if (source === 'copied') return false;
+  return !isItemBlank(unitValue);
+}
+
+/** D5 create snapshot, as parsed from the wire (plan 2.4). */
+export interface RequirementsSnapshot {
+  landlordId: string;
+  /** Keys are UNIT keys; a missing key is blank. */
+  items: Partial<Record<RequirementItemId, ItemValue>>;
+}
+
+const SNAPSHOT_SHAPE_ERROR = 'requirements_snapshot must be an object with a landlordId';
+
+/**
+ * D5: parse `requirements_snapshot` from a POST /api/units body. The values
+ * are TRUSTED, not verified: each is read through its field's kind, and a
+ * value that fails the kind counts as blank. Unknown item ids and unknown
+ * keys inside an item are ignored. The landlordId match against the body's
+ * landlordId is the route's check (it needs the body).
+ */
+export function parseRequirementsSnapshot(
+  raw: unknown,
+): { ok: true; snapshot: RequirementsSnapshot } | { ok: false; error: string } {
+  if (!isPlainObject(raw)) return { ok: false, error: SNAPSHOT_SHAPE_ERROR };
+  const landlordId = raw['landlordId'];
+  if (typeof landlordId !== 'string' || landlordId.length === 0) {
+    return { ok: false, error: SNAPSHOT_SHAPE_ERROR };
+  }
+  const items: Partial<Record<RequirementItemId, ItemValue>> = {};
+  for (const item of REQUIREMENT_ITEMS) {
+    if (!Object.hasOwn(raw, item.id)) continue;
+    const rawItem = raw[item.id];
+    if (rawItem === undefined) continue;
+    if (!isPlainObject(rawItem)) {
+      return { ok: false, error: `requirements_snapshot.${item.id} must be an object` };
+    }
+    const value: ItemValue = {};
+    for (const field of item.fields) {
+      const rawValue = rawItem[field.key];
+      const read = rawValue === undefined ? undefined : normalizeRequirementValue(field, rawValue, field.key);
+      value[field.key] = read !== undefined && read.ok ? read.value : null;
+    }
+    items[item.id] = value;
+  }
+  return { ok: true, snapshot: { landlordId, items } };
+}
+
+/**
+ * D5 classification - the ONE rule for create and PATCH.
+ * changed = items whose interpreted value differs between `before` and
+ * `after` (null in `after` reads as blank, so a caller may pass the stored
+ * record merged with the validated fields); classified = changed, plus
+ * (create with a snapshot) every item the snapshot names. Target per
+ * classified item: the snapshot's item when named, else
+ * landlordItemValue(landlord, id); no landlord -> 'set_here'. Equal ->
+ * 'copied', different -> 'set_here'. Returns the WHOLE next map: `current`
+ * with the classified items overwritten (pass {} on create and after a
+ * landlord-change reset).
+ */
+export function nextRequirementSources(input: {
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  current: RequirementSources;
+  landlord: Record<string, unknown> | undefined;
+  snapshot?: RequirementsSnapshot;
+}): RequirementSources {
+  const next: RequirementSources = { ...input.current };
+  for (const item of REQUIREMENT_ITEMS) {
+    const after = unitItemValue(input.after, item.id);
+    const changed = !itemValuesEqual(unitItemValue(input.before, item.id), after);
+    const fromSnapshot = input.snapshot?.items[item.id];
+    if (!changed && fromSnapshot === undefined) continue;
+    const target =
+      fromSnapshot ?? (input.landlord === undefined ? undefined : landlordItemValue(input.landlord, item.id));
+    next[item.id] = target !== undefined && itemValuesEqual(after, target) ? 'copied' : 'set_here';
+  }
+  return next;
+}

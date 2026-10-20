@@ -16,6 +16,7 @@ sampler; hermetic lanes only (never the live :5174 / :8080 stack).
 | `analyze.mjs` | Per-hop table from the sampler, joined with the hook when present. |
 | `pertest.mjs` | Hook: cancelled proxied requests split by cause (StrictMode / SSE / other), per spec file. |
 | `osperfile.mjs`, `oswindow.mjs` | Sampler only: connections per spec file / per time window. |
+| `lanepeak.mjs` | Sampler only: peak TIME_WAIT over the run window for the whole machine, all loopback, and the lane's own ports (+ 8000 / 9000) - the last is the before/after figure a busy neighbour cannot inflate. Added for `../fix-results.md`. |
 | `aborts.mjs`, `sse.mjs`, `window.mjs`, `portalloc.mjs` | Narrow follow-ups used in the diagnosis (abort lifetimes, SSE lifetimes, one window's requests, ephemeral-port order). |
 | `ab-tour.js` | The fix A/B, as a Playwright MCP `browser_run_code_unsafe` body. |
 | `selftest.mjs` | Known workload (50 close + 50 keep-alive requests) to validate the sampler and the hook. |

@@ -136,3 +136,13 @@ fetch's dispatch one microtask in `dashboard/src/api/client.ts`.
 white page. Vite served the document and 9 modules in 15 ms, then the browser never asked
 for `react-dom_client.js` and the app saw no request; ~2,000 TIME_WAIT at that moment. That
 spec intercepts requests with `page.route`, which cannot be excluded for this one.
+
+**Fix measured (2026-10-20), unmerged.** Branch `fix/e2e-strictmode-aborts` (`b222a4ac`)
+makes that change; before/after in
+`docs/superpowers/reviews/2026-10-20-e2e-connection-churn/fix-results.md`. Two full runs
+(one bare, one with the hook) went 365/365; browser -> Vite connections fell 57%, Vite -> app
+73%, cancelled proxied requests 74% (the StrictMode signature 91%), and peak TIME_WAIT
+4,784 -> ~1,800. The NetLog subset went 70/70 with 67% fewer browser connects, none failing.
+That lowers the rate rather than ruling the white page out (no safe threshold; the full
+runs still peak near 1,800), so this stays open until the merged fix has a run of clean
+gate runs behind it.

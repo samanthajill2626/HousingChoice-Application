@@ -84,7 +84,7 @@ describe('parseExtractionText', () => {
     const payload = {
       fields: {
         firstName: { op: 'write', value: 'Maria', reason: 'client gave name' },
-        voucherSize: { op: 'suggest', value: '3', reason: 'said 3 bedrooms' },
+        voucherSize: { op: 'suggest', value: '3', reason: 'said the voucher is for 3 bedrooms' },
         pets: { op: 'none' },
       },
       statusAdvance: { suggest: true, reason: 'voucher in hand' },
@@ -163,7 +163,7 @@ describe('parseExtractionText', () => {
       fields: {
         firstName: { op: 'write', value: 'Maria', reason: '' },
         lastName: { op: 'none', value: '', reason: '' },
-        voucherSize: { op: 'suggest', value: '', reason: 'said bigger' },
+        voucherSize: { op: 'suggest', value: '', reason: 'said the voucher changed' },
         housingAuthority: { op: 'none', value: '', reason: '' },
         pets: { op: 'none', value: '', reason: '' },
         evictions: { op: 'none', value: '', reason: '' },
@@ -358,6 +358,30 @@ describe('prompt builders', () => {
       'unless other current-transcript evidence clearly establishes an outside service, program, or navigation role',
     );
     expect(sys).toContain('value "none"');
+  });
+
+  it('defines voucherSize as the size on the voucher, never the bedrooms of a home the client wants', () => {
+    // Tracker #32: the old definition ("the bedroom count") said nothing about
+    // WHOSE bedrooms, and the model recorded the bedrooms a tenant asked for -
+    // a one-bedroom voucher holder asking about two-bedroom homes became a 2.
+    const sys = buildExtractionSystemPrompt();
+    expect(sys).not.toContain('voucherSize is the bedroom count');
+    // C3: every asserted phrase lives INSIDE one prompt line.
+    expect(sys).toContain('voucherSize is the bedroom size the client\'s voucher is issued for');
+    expect(sys).toContain('A home\'s bedrooms are never the voucher size');
+    expect(sys).toContain('for, wants, tours, or applies to');
+    expect(sys).toContain('bigger or smaller than their voucher');
+    const examples = [
+      ['"I have a 2-bedroom voucher"', 'voucherSize "2"'],
+      ['"I have a 1-bedroom voucher and want a two-bedroom home"', 'voucherSize "1"'],
+      ['"Do you have any 3-bedroom homes?"', 'voucherSize op "none"'],
+      ['"My voucher was reissued as a 3-bedroom"', 'voucherSize "3"'],
+    ] as const;
+    for (const [said, expected] of examples) {
+      const line = sys.split('\n').find((candidate) => candidate.includes(said));
+      expect(line, said).toBeDefined();
+      expect(line).toContain(`-> ${expected}.`);
+    }
   });
 
   it('requires current-transcript evidence and preserves concise role notes', () => {

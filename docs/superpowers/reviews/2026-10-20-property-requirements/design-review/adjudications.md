@@ -61,6 +61,30 @@ Round 2 changed decisions (Apply server enforcement and re-read, hand-check
 reset, the PATCH fence, the create snapshot, the day-one display rule), so
 round 3 runs with the same reviewer. No rejections in round 2.
 
+## Round 3 (spec revision 3 -> revision 4)
+
+Reviewer A continued (`R3-reviewer-a.md`, R3-1 to R3-10): no BLOCKING, HIGH or
+MEDIUM; every round-2 fix holds except R2-5 (incomplete) and R2-9 (partial).
+
+| Finding | Ruling | What changed in revision 4 | Decision changed |
+|---|---|---|---|
+| R3-1 [LOW] a tag inside the `<label>` breaks exact label selectors | ACCEPT | D10: the tag stays out of the accessible name (outside the label text, `aria-describedby`) | no (precision) |
+| R3-2 [LOW] D6 display vs D8 own values disagree for an all-blank landlord | ACCEPT | D6 defines OWN VALUE by the table, never by the display; D8 uses that definition; test added | no (precision) |
+| R3-3 [LOW] Apply marks unchanged listed items `copied`, relabeling an exception | ACCEPT | D5/D8: only items whose keys the Apply wrote become `copied` | no (aligns with the D5 rule) |
+| R3-4 [LOW] snapshot is an unchecked client claim; all-or-400 is brittle | ACCEPT in part | D5 states the snapshot is TRUSTED (staff tool, only the New form produces it, only with a `landlordId`); missing items fall back to the no-snapshot rule, missing keys count as blank, unknown items ignored. Verifying against the current landlord with a 409 REJECTED: it would undo R2-4's point (a field copied from the landlord stays a copy even when the landlord changed while the form was open) | no |
+| R3-5 [LOW] no-snapshot rule contradicts the general rule for blank body values | ACCEPT | D5: without a snapshot, only items the create actually writes (non-blank) are classified | no (precision) |
+| R3-6 [LOW] the landlord-wide "no requirements yet" rule only fixes day one and hides stale copies | ACCEPT | D6: per-item rule - a never-touched value against a BLANK landlord item shows no tag (still an own value for Apply); the landlord-wide suppression is removed, the note stays informational | yes (display rule) |
+| R3-7 [LOW] hand-check reset rule worded two ways | ACCEPT | D8: resets only when an own-value item is ADDED | no (wording) |
+| R3-8 [LOW] batching: mid-run 409 or failure undefined | ACCEPT | D8: stop, re-read, report "Updated N properties before this stopped" | no (precision) |
+| R3-9 [LOW] `property_changed` copy discards typed edits | ACCEPT | D5: the form stays open, "Save again." | no (copy) |
+| R3-10 [LOW] the null amount on every landlord save logs `req_deposit` | ACCEPT | D1: null only on the save that CHECKS One month's rent | no (precision) |
+
+Round 3 changed one decision (the D6 per-item display rule), so round 4 -
+the cap - runs. If round 4 changes a decision, the open findings go to
+Cameron as a decision instead of a round 5.
+
+Rejections in round 3: R3-4's verification half (see the table).
+
 Rejections in round 1 (for the human spec gate):
 
 1. Per-property, per-item choices in Apply (B7 second half): rejected -

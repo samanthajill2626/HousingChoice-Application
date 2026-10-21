@@ -57,6 +57,17 @@
 - Whitespace (D10, Cameron's standing rule): typed input is trimmed before
   it is stored or compared. A builder who finds an untrimmed path in a
   surface this plan touches reports it in its slice report.
+- Slice reports (plan review R1 #2): a "slice report" is the file
+  `docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S<n>-report.md`,
+  ASCII, findings only (what the tree held that the plan got wrong, risks,
+  untrimmed paths), citing code by `file:line`. Commit it with explicit paths
+  when the slice ends. A slice with nothing to report writes one line saying
+  so.
+- Code blocks under list bullets (R1 #13) carry the bullet's indent in this
+  file. Strip that indent before using a block as an Edit anchor or as
+  replacement text; the target file's own indentation is the authority.
+- Commit messages (R1 #15): use repeated `-m` arguments, or a message file
+  OUTSIDE the worktree (never inside it - it would show in `git status`).
 
 ## 1. Global constraints (from the spec; the spec wins on any doubt)
 
@@ -266,8 +277,9 @@ The wire field stays `outcome`.
  * after `sinceIso` whose refId is `refId` (undefined = an event with NO
  * refId). Query PK contactId, KeyCondition `tsEventId > :since` (sinceIso as
  * the bound), FilterExpression on `#type = :type` and on the ref
- * (`refId = :ref` or `attribute_not_exists(refId)`), paginated to the end of
- * the window (lib/dynamoPaging queryAll). Throws on a DynamoDB error.
+ * (`refId = :ref` or `attribute_not_exists(refId)`), `ConsistentRead: true`
+ * (AR12 - two quick sign-ups must see each other's pin), paginated to the end
+ * of the window (lib/dynamoPaging queryAll). Throws on a DynamoDB error.
  */
 hasEventSince(contactId: string, type: ActivityEventType, sinceIso: string, refId: string | undefined): Promise<boolean>;
 ```
@@ -326,7 +338,8 @@ Audit `housing_fair_signup` payload = today's fields (`marker`, `isNew`,
 written), `sentRecorded` (ledger `'written'`), `sentSkipped` (absent when
 written; else `not_flyer` = no unitId, `not_shareable` = unitId but not
 `viaFlyer`, `not_tenant`, `declined`, `refused` (AR2), `lost`, `error`;
-for the deleted path `sentSkipped` is absent and `sentRecorded: false`),
+for the deleted path `sentSkipped: 'deleted'` and `sentRecorded: false` -
+AR11),
 `consentVersion: CONSENT_VERSION`. `app/scripts/backfill-join-housing-authority.ts:226`
 keeps working (pinned).
 
@@ -489,6 +502,32 @@ Slice contract issues, ruled at assembly (2026-10-21):
   re-runs the gates without a second sync and reports newer main drift. 3:
   the GLOSSARY documents all five fields leaving the flyer (rent,
   accessibility, lease terms, pets, deposit).
+
+Plan review round 1 rulings (adjudications:
+`docs/superpowers/reviews/2026-10-21-flyer-leads/plan-review/adjudications.md`):
+
+- AR11. (R1 #11) The deleted path's audit records `recorded: false`,
+  `sentRecorded: false` and `sentSkipped: 'deleted'`, so `sentSkipped` is
+  absent ONLY when an entry was written (the spec's own rule).
+- AR12. (R1 #5) `hasEventSince` reads with `ConsistentRead: true` (plan
+  2.5); a test asserts the Query command carries it.
+- AR13. (R1 #1) The units recipients projection (`routes/units.ts`, the
+  `tenantName` it attaches) labels a RESOLVED contact that has no first or
+  last name by its formatted phone - `formatPhoneForDisplay(phone) ?? phone`
+  from `app/src/lib/phone.ts`, the `groupTitle.ts:56` precedent - so the
+  property "Sent to" card never shows a raw contactId for a contact that
+  exists. `tenantName` stays absent for an unresolved / missing contact (the
+  dashboard's existing contactId fallback is unchanged for those). The wire
+  comment on `ListingSendRow.tenantName` is updated to say so. S3 owns it.
+- AR14. (R1 #4) AR5's two outcomes are drafted as CONDITIONAL work: S1 Task
+  1.3 (trim the plain-string unit fields in the validator) is built ONLY if
+  Cameron answers "fix here"; S6 Task 6.4's issue-file step
+  (`docs/issues/unit-plain-string-fields-untrimmed.md`) is built ONLY if he
+  answers "file it". The launch gate records his answer here and the
+  unchosen one is skipped.
+- AR15. (R1 #9) The S3 and S4 exit checks each run the FULL app suite
+  (`cd app; npx vitest run`), because both slices edit shared test helpers
+  (the harness fakes, `listingSendSeed.ts`).
 
 ## 5. S1 - App: the public projection (D1), the tag tables (D2, app side), subzone matching (D9)
 

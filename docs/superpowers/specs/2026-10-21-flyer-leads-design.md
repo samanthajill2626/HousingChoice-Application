@@ -728,3 +728,25 @@ not; blank never matches.
   both ship together, and tenants never see the pets / deposit flyer rows
   #12 added.
 - Sam reviews the sign-up copy after the build.
+
+## 7. Plan-time amendments (planner, 2026-10-21)
+
+Precision amendments made while planning, each inside an approved decision.
+They are recorded here so the spec and the plan agree; the reasoning is in
+`docs/superpowers/reviews/2026-10-21-flyer-leads/plan-review/adjudications.md`
+and plan section 4.
+
+- D8 (AR1): the ONE "latest counted entry" helper lives in a new pure leaf,
+  `app/src/lib/shareLedgerKeys.ts`, not beside `summarize` in
+  `services/shareLedger.ts`, because `lib/` never imports `services/`. Both
+  `summarize` and `deriveListingSendOutcome` call it, so there is still one
+  rule.
+- D6 audit (AR2, AR11): `sentSkipped` gains two values. `refused` means the
+  ledger's order rule kept a NEWER stored flyer entry (two sign-ups within
+  the clock skew of two app instances). `deleted` is the deleted path, so
+  `sentSkipped` is absent only when an entry was written.
+- D6 repeat check (AR12): `hasEventSince` reads with `ConsistentRead: true`,
+  so two sign-ups seconds apart see each other's pin.
+- D7 (AR13): an existing `unknown` contact with no name, never renamed by a
+  sign-up (D4), is labelled on the property's Sent to card by its formatted
+  phone, never by its raw contactId.

@@ -1,6 +1,6 @@
 # Flyer trim and flyer / join leads - design
 
-Status: DRAFT revision 6 (2026-10-21), at Cameron's spec gate.
+Status: APPROVED revision 6 (2026-10-21, Cameron at the spec gate: "Yes, I do").
 - Rev 2 folded in review round 1: two reviewers, 18 merged findings, all
   accepted.
 - Rev 3 folds in round 2: one continued reviewer, 12 findings, all

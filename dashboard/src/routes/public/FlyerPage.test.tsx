@@ -407,6 +407,9 @@ describe('FlyerPage - D11 wording', () => {
     [[0, 1], 'Fits a studio or 1-bedroom voucher'],
     [[1, 2, 3], 'Fits a 1-, 2-, or 3-bedroom voucher'],
     [[3, 2, 2], 'Fits a 2- or 3-bedroom voucher'],
+    // Code review RC-11: plan 1.1's general rule with a studio inside three
+    // or more sizes - studio as "studio", the other non-final sizes as "<n>-".
+    [[0, 2, 3], 'Fits a studio, 2-, or 3-bedroom voucher'],
   ])('voucher sizes %j read "%s"', async (sizes, text) => {
     await renderFlyer({ voucher_sizes: sizes, voucher_size: sizes[0] ?? null });
     expect(fact(text)).not.toBeNull();

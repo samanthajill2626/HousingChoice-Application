@@ -24,19 +24,22 @@ deployed.
   rounds: 21 distinct findings, 20 accepted (one only as a watch item), 1
   rejected (a client-sent consent version; its wording half accepted in R2).
   Mission block committed at `mission-block.md`.
-- Phase: LAUNCH GATE PASSED - Cameron picked "Go - AUTO dispatch" (2026-10-21).
-  Compaction gate B is being offered. Nothing is dispatched yet.
-- NEXT STEP after the compaction (or a skip): dispatch `abt:build-orchestrator`
-  in the background with `mission-block.md` VERBATIM as the prompt. Then arm
-  the watchdog: one at a time, checkpoint ceiling 55 minutes (memory
+- Phase: BUILD IN FLIGHT (AUTO). Compaction gate B done 2026-10-21 20:18
+  (474k -> 27k); replay re-read in full. `abt:build-orchestrator` dispatched
+  in the background on 2026-10-21 with `mission-block.md` VERBATIM as the
+  prompt; its agent id, the watchdog task id and the mirror task id are in
+  `.superpowers/sdd/agents.md` (gitignored run state).
+- SUPERVISION: one watchdog at a time, checkpoint ceiling 55 minutes (memory
   watchdog-30min-checkpoints), a 25-minute stall, terminal on
-  DONE/QUESTION/BLOCKED in `.superpowers/sdd/progress.md`. Start the live
-  mirror from the CURRENT skill base dir's transcript-tail.mjs, on
+  DONE/QUESTION/BLOCKED in `.superpowers/sdd/progress.md`; re-arm at every
+  wake. Live mirror: the CURRENT skill base dir's transcript-tail.mjs on
   `~/.claude/projects/<slug>/<session>/subagents/agent-<id>.jsonl` (NOT the
-  temp dir) -> `.superpowers/sdd/live.log`, and verify it grows. Tell Cameron
-  about the three surfaces (chat checkpoints, live.log, IDE activity pane).
-  Then supervise; at the handback, replay the whole conversation before
-  reviewing.
+  temp dir) -> `.superpowers/sdd/live.log`. Failure budget 2 (none used).
+- NEXT STEP if resumed after an automatic compaction: read
+  `.superpowers/sdd/agents.md` and the ledger tail, run a rung-0 transcript
+  probe, re-arm the watchdog (TaskStop any stale one first), check the mirror
+  is still growing, and post one "**Checkpoint:**" line. At the handback,
+  replay the whole conversation before reviewing (Handback section).
 - Gate answers in rev 6:
   - O1 closed: the decline writers stamp `shares_op`;
   - the repeat limit is per contact per PROPERTY per 24 hours, with /join and

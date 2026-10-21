@@ -323,7 +323,8 @@ export interface RequirementDisplay {
  *  evictions: 'No evictions while on the program', details;
  *  credit / income / qualifications: the text;
  *  pets: 'No pets', details, 'pet fee ' + fee;
- *  deposit: "One month's rent" or '$N', 'flexible', notes;
+ *  deposit: "One month's rent" and / or '$N' (both when both are recorded -
+ *  worklist OR-31), 'flexible', notes;
  *  application_fee: 0 -> 'No application fee', else '$N';
  *  touring: the tour type's dashboard label, tour process.
  *  '$N' is the property page's money format (formatMoney). */
@@ -359,9 +360,13 @@ export function formatItemValue(id: RequirementItemId, value: ItemValue): string
       break;
     }
     case 'deposit':
-      // "One month's rent" and a fixed amount are alternatives (D1).
+      // "One month's rent" and a fixed amount are alternatives (D1), yet a
+      // record holding BOTH (only a direct data edit can, worklist OR-30)
+      // shows both: the server refuses an Apply from such a landlord (409
+      // deposit_conflict), and the landlord card and the Apply dialog must show
+      // what it refuses (code review RD-1, worklist OR-31).
       if (checked('deposit_one_month')) add("One month's rent");
-      else add(money('deposit'));
+      add(money('deposit'));
       if (checked('deposit_flexible')) add('flexible');
       add(text('deposit_notes'));
       break;

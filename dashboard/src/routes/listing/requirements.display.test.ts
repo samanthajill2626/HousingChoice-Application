@@ -190,6 +190,19 @@ describe('formatItemValue - one item value as one line', () => {
     );
     expect(formatItemValue('touring', { tour_type: 'pm_team', tour_process: null })).toBe('PM team');
   });
+
+  // Code review RD-1 (worklist OR-31): the two deposit forms are alternatives
+  // (D1), but a record holding both (only a direct data edit can, OR-30) shows
+  // both, so the landlord card and the Apply dialog show what the server
+  // refuses (409 deposit_conflict).
+  it('a deposit holding BOTH forms shows both, then flexible and the notes', () => {
+    expect(formatItemValue('deposit', { deposit_one_month: true, deposit: 1400, deposit_flexible: null, deposit_notes: null })).toBe(
+      "One month's rent; $1,400",
+    );
+    expect(
+      formatItemValue('deposit', { deposit_one_month: true, deposit: 1400, deposit_flexible: true, deposit_notes: 'Half at signing' }),
+    ).toBe("One month's rent; $1,400; flexible; Half at signing");
+  });
 });
 
 describe('landlordHasNoRequirements', () => {

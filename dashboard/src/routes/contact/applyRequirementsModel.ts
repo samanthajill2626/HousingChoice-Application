@@ -210,6 +210,12 @@ export const REQUIREMENTS_CHANGED_NOTICE =
   "This landlord's requirements changed. Review the updated list and press Update again.";
 /** CI-5 (proposed): the first request failed any other way. */
 export const APPLY_FAILED_NOTICE = "Couldn't update the properties. Review the list and press Update again.";
+/** Worklist OR-31 (code review RD-1): ANY request answered 409
+ *  deposit_conflict - the landlord record holds both deposit forms, so every
+ *  further request would be refused the same way until the landlord's
+ *  requirements are fixed. */
+export const DEPOSIT_CONFLICT_NOTICE =
+  "This landlord's deposit is set to both one month's rent and a fixed amount. Fix it with Edit requirements, then press Update again.";
 /** Plan 1.1: the dialog's load error. */
 export const APPLY_LOAD_ERROR = "Couldn't load this landlord's properties.";
 /** Plan 1.1: why Apply to properties is disabled. */

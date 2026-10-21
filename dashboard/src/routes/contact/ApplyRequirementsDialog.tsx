@@ -15,8 +15,10 @@
 // Update sends the checked rows in batches of 100, one after another. A first
 // request answering 409 requirements_changed (or failing) re-reads and asks
 // for another look; a LATER one that answers 409 or fails stops the run,
-// re-reads and says how many landed. When every batch lands the page gets the
-// summary (onDone) and closes the dialog.
+// re-reads and says how many landed. ANY request answering 409
+// deposit_conflict (the landlord holds both deposit forms) stops the run,
+// re-reads and says what to fix (worklist OR-31). When every batch lands the
+// page gets the summary (onDone) and closes the dialog.
 //
 // Worklist OR-17: the re-read after a STOPPED run, or after a first request
 // that failed other than with 409 requirements_changed, continues the same
@@ -50,6 +52,7 @@ import {
   APPLY_FAILED_NOTICE,
   APPLY_LOAD_ERROR,
   APPLY_NO_PROPERTIES_REASON,
+  DEPOSIT_CONFLICT_NOTICE,
   REQUIREMENTS_CHANGED_NOTICE,
   applyRequestBody,
   applyRows,
@@ -208,7 +211,13 @@ export function ApplyRequirementsDialog({
       } catch (err) {
         if (!liveRef.current) return;
         setSending(false);
-        if (index > 0) {
+        if (err instanceof ApiError && err.status === 409 && err.code === 'deposit_conflict') {
+          // OR-31: on ANY batch - the landlord holds both deposit forms, so
+          // the next batch (and pressing Update alone) would be refused the
+          // same way. Say what to fix; the re-read shows both forms.
+          setNotice(DEPOSIT_CONFLICT_NOTICE);
+          carryRef.current = checkedItems; // OR-17: the same Apply goes on
+        } else if (index > 0) {
           setNotice(stoppedNotice(summarizeApply(results, units).updated));
           carryRef.current = checkedItems; // OR-17: the same Apply goes on
         } else if (err instanceof ApiError && err.status === 409 && err.code === 'requirements_changed') {

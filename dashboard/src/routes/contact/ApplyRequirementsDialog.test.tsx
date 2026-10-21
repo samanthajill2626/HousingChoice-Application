@@ -447,3 +447,60 @@ describe('ApplyRequirementsDialog - the left column across a re-read (worklist O
     expect(box(after, 'Pets')).toBeChecked();
   });
 });
+
+// Code review RD-1 (worklist OR-31): the server refuses every Apply with 409
+// deposit_conflict while the LANDLORD record holds both one month's rent and a
+// fixed amount (only a direct data edit can store both since OR-30), so
+// pressing Update again alone can never work. On ANY batch the dialog sends
+// no more, re-reads, and says what to fix; the left column shows both forms,
+// so the refusal is visible.
+describe('ApplyRequirementsDialog - a landlord deposit holding both forms (code review RD-1, worklist OR-31)', () => {
+  const DEPOSIT_CONFLICT =
+    "This landlord's deposit is set to both one month's rent and a fixed amount. Fix it with Edit requirements, then press Update again.";
+  const BOTH: Contact = { ...LANDLORD, req_deposit_one_month: true, req_deposit: 1400 };
+  const refusal = (): ApiError => new ApiError(409, 'deposit_conflict', 'deposit_conflict', { error: 'deposit_conflict' });
+  const depositBox = (copy: HTMLElement): HTMLElement => within(copy).getByRole('checkbox', { name: 'Deposit' });
+
+  it('a first request answering 409 deposit_conflict says what to fix, sends no further batch and re-reads', async () => {
+    const user = userEvent.setup();
+    const units = many(150);
+    getContact.mockReset().mockResolvedValue(BOTH);
+    getAllUnits.mockReset().mockResolvedValue(units);
+    applyLandlordRequirements.mockRejectedValue(refusal());
+    const { onDone } = renderDialog();
+    const { copy } = await columns();
+    // What the server refuses is on screen: both forms, never one of them.
+    expect(depositBox(copy)).toHaveAccessibleDescription("One month's rent; $1,400");
+    await user.click(screen.getByRole('button', { name: 'Update 150 properties' }));
+    // The notice role the dialog's other notices use.
+    expect(await screen.findByText(DEPOSIT_CONFLICT)).toHaveAttribute('role', 'alert');
+    expect(screen.queryByText("Couldn't update the properties. Review the list and press Update again.")).toBeNull();
+    await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
+    expect(getAllUnits).toHaveBeenCalledTimes(2);
+    expect(applyLandlordRequirements).toHaveBeenCalledTimes(1); // the second batch is never sent
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it('a later batch answering 409 deposit_conflict says the same, sends no further batch and re-reads', async () => {
+    const user = userEvent.setup();
+    const units = many(250);
+    // The landlord gained the second form between the open and the second batch.
+    getContact.mockReset().mockResolvedValueOnce(LANDLORD).mockResolvedValue(BOTH);
+    getAllUnits.mockReset().mockResolvedValue(units);
+    applyLandlordRequirements
+      .mockResolvedValueOnce({ updated: units.slice(0, 100).map((u) => u.unitId), skipped: [] })
+      .mockRejectedValueOnce(refusal());
+    const { onDone } = renderDialog();
+    await columns();
+    await user.click(screen.getByRole('button', { name: 'Update 250 properties' }));
+    expect(await screen.findByText(DEPOSIT_CONFLICT)).toHaveAttribute('role', 'alert');
+    expect(screen.queryByText(/before this stopped/)).toBeNull();
+    await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
+    expect(getAllUnits).toHaveBeenCalledTimes(2);
+    expect(applyLandlordRequirements).toHaveBeenCalledTimes(2); // no third batch
+    expect(onDone).not.toHaveBeenCalled();
+    // The re-read landlord's deposit shows both forms.
+    const { copy: after } = await columns();
+    await waitFor(() => expect(depositBox(after)).toHaveAccessibleDescription("One month's rent; $1,400"));
+  });
+});

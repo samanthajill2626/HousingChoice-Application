@@ -92,3 +92,26 @@ is required:
 Concession received: reviewer B withdrew its R1 #6 claim that only caseworker
 conversion re-types a thread (`contacts.ts:537-543,1658` also does). The
 `conversationTypeFor` fix stands.
+
+## Round 3 (2026-10-21) - reviewer B continued, re-review charge
+
+- Report: `R3-reviewer-b.md` (7 findings), run against rev 3 @845d427a.
+- The reviewer conceded R2-1 and R2-2, contested R2-4 (finding 2), and confirmed:
+  - a newer `<ISO>#flyer` attempt always replaces the old one (`shareLedger.ts:78-90`);
+  - `summarize` drops `broadcastId` for the flyer key;
+  - all five outcome callers hold full rows with `shares`;
+  - the event splice matches `toConversationUpdatedEvent`.
+
+Result: 7 findings, 7 ACCEPT, 0 REJECT. **Decisions changed: YES (one)**: a
+sign-up never clears a decline. So round 4 runs. It is the CAP: if it still
+changes a decision, the open findings go to Cameron as decisions.
+
+| # | Sev (reviewer) | Ruling | What changed in rev 4 |
+|---|---|---|---|
+| R3-1 | MEDIUM | ACCEPT | Uncapped repeat flyer writes undid every later staff decline, and "harmless" was false; the sign-up copy ("this home and others") is not proof of interest in a declined home. Rev 4: NO flyer entry while the pair holds a current decline (decline at or after `sentAt`), refused inside the conditional write beside `mayReplace`. The pin and unread mark still tell staff. Rev 3's supersession is REVERSED. Test: decline after a sign-up, then a second sign-up, and the decline holds. |
+| R3-2 | LOW | ACCEPT (residual) | The consent prompt has no web-form method. Rev 4 states it: staff record the basis they hold, and the audit keeps the form evidence. Cameron's 2026-10-21 rule (no welcome for contacts "already part of it") rules out the stamp-plus-welcome alternative; it is mentioned at the gate. |
+| R3-3 | LOW | ACCEPT | A dangling first pointer means `findByPhone` returns nothing, so create and welcome, as today. Added to D4's residual. |
+| R3-4 | LOW | ACCEPT | A lost flyer write is never repaired (the repair walks broadcast slots). Rev 4 states it; the flyer path's log does not claim repair; `sentRecorded` is false. |
+| R3-5 | LOW | ACCEPT | A failed touch means no increment and no event. Stated. |
+| R3-6 | LOW | ACCEPT | Whole-second vs millisecond ordering within about 1 s is arbitrary. Stated as cosmetic. |
+| R3-7 | LOW | ACCEPT | "Request a tour" is partner-only, so it never shows on these rows; eligibility decides between Interested and Not eligible. D8 and the tests corrected. |

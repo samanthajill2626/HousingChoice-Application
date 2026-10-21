@@ -1,12 +1,14 @@
 # Flyer trim and flyer / join leads - design
 
-Status: DRAFT revision 3 (2026-10-21).
+Status: DRAFT revision 4 (2026-10-21).
 - Rev 2 folded in review round 1: two reviewers, 18 merged findings, all
   accepted.
 - Rev 3 folds in round 2: one continued reviewer, 12 findings, all
   accepted. It reverses two rev 2 calls - the phone-holder ranking and the
   consent stamp - and replaces "first sight only".
-- Next: round 3, then Cameron's spec gate.
+- Rev 4 folds in round 3: 7 findings, all accepted. A sign-up never clears a
+  decline.
+- Next: round 4, the cap, then Cameron's spec gate.
 
 Adjudications:
 `docs/superpowers/reviews/2026-10-21-flyer-leads/design-review/adjudications.md`.
@@ -210,8 +212,12 @@ the SAME contact.
 
 Residual, the app-wide accepted risk documented at `contactsRepo.ts:1288`: on
 a phone shared by several contacts, the first index hit decides, as it does
-everywhere else. In particular, a deleted first holder sends the sign-up down
-the deleted path even when a live contact shares the phone. *(Rev 2's ranked
+everywhere else. In particular:
+- a deleted first holder sends the sign-up down the deleted path even when
+  a live contact shares the phone;
+- a dangling phone pointer that sorts first makes `findByPhone` return
+  nothing, so the sign-up creates a new contact and sends the welcome, as
+  it does today. *(Rev 2's ranked
 `findAllByPhone` choice was reverted: `findAllByPhone` excludes deleted
 holders, and a ranked choice would put the pin on a contact the inbox does
 not show.)*
@@ -222,6 +228,9 @@ voucher size, housing authority or consent.
 - An existing contact with no recorded consent keeps none. Staff's first
   hand-written text to them goes through the existing consent prompt
   (`ConsentCaptureModal`, the JIT gate's dashboard side), exactly as today.
+  Residual: that prompt offers only staff-held methods (inbound, verbal,
+  paper, imported - `smsCompliance.ts:75-87`) and no web-form choice. So the
+  basis staff record can differ from the form evidence the audit keeps.
 - The sign-up's consent version is kept as evidence on the audit event
   (D6).
 - *(Rev 2's consent stamp was reverted. The repo's A2P design pairs every
@@ -310,6 +319,7 @@ For an existing contact (D4), on both forms, in this order.
      returns.
    - If the increment fails, the event still goes out from the touched image
      as it is, so open dashboards still re-sort the bumped row.
+   - If the touch fails, there is no increment and no event.
    - Touching first means a failure can never leave a closed thread flagged
      unread but invisible.
    - The thread is resolved with
@@ -362,31 +372,47 @@ was sent to them before.
 - **`summarize` maps the key `flyer` like `individual`**, so the pair gets
   no `broadcastId` from it. `via` is untouched: it stays the first-write
   value, which nothing renders.
-- **Always written; the newest counted entry wins.** The flyer entry is the
-  pair's newest counted entry, so `sentAt` moves to the sign-up and the pair
-  reads `signed_up` (D8). For a pair that was already sent:
-  - no reply or replied: it becomes `signed_up`, which is the point. A
-    person who signs up for the home they were texted is not someone to
-    chase on Follow up;
-  - an earlier "Not interested" (staff or engine) is superseded, because
-    the sign-up is newer interest in that home. The decline record stays on
-    the row, and staff can decline again;
-  - a tour signal keeps the pair "Interested" (D8 order).
+- **Written unless a decline is current; the newest counted entry wins.**
+  The flyer entry becomes the pair's newest counted entry, so `sentAt` moves
+  to the sign-up and the pair reads `signed_up` (D8).
+  - For a pair already sent with no reply, or a reply, it becomes
+    `signed_up`, which is the point: a person who signs up for the home they
+    were texted is not someone to chase on Follow up.
+  - A tour signal keeps the pair "Interested" (D8 order).
+- **A sign-up never clears a decline.** When the pair holds a decline at or
+  after its current `sentAt` (a decline the ledger still counts, whether
+  recorded by staff or the engine, and whether recorded before or after an
+  earlier sign-up), NO flyer entry is written. The pair stays "Not
+  interested", and the pin and unread mark (D6) tell staff the person signed
+  up, so staff decide.
+  - Reason: the sign-up box asks for alerts about "this home and others", so
+    a sign-up is not proof of renewed interest in a home they turned down.
+    It also means a public request can never undo a staff decision.
+  - The test is made inside the ledger's conditional write, on the same
+    consistent read the token write is conditioned on: a predicate beside
+    `mayReplace` that returns `'refused'`. So a decline recorded
+    concurrently is never raced past.
   - *(Rev 2's "first sight only" was dropped. It left an already-sent pair
-    at "No reply yet" on Follow up after the person signed up for that
-    home, and it could not be enforced inside the ledger's conditional
-    write.)*
-- **Repeat flyer sign-ups** for the same pair write a newer attempt key, so
-  `sentAt` moves forward. That is harmless.
+    at "No reply yet" on Follow up after the person signed up, and it could
+    not be enforced inside the conditional write. Rev 3's "supersede a
+    decline" was dropped: repeat sign-ups would undo every later staff
+    decline.)*
+- **Repeat flyer sign-ups** for a pair with no current decline write a newer
+  attempt key and move `sentAt` forward. A pair that reads `signed_up` keeps
+  reading `signed_up`.
 - **Residuals, stated.**
-  - Someone who knows a tenant's phone can, through the public form,
-    resurface a declined pair as `signed_up` for a shareable property.
-    Staff can decline again; the per-IP rate limit applies.
   - An UNCOUNTED pair (a text that failed) becomes counted, and its old
     "Property text failed" pin reads "Property sent"
     (`contactTimeline.ts:732`).
   - The repair script's census (`app/scripts/repair-share-outcomes.ts`)
     sees the new entries and must not mis-forecast them.
+  - A LOST flyer write (the ledger's token retries exhausted) is NOT repaired
+    later: the repair walks broadcast slots only. The flyer path's log line
+    says so, rather than the shared "the repair heals it" wording
+    (`shareLedger.ts:190-193`), and the audit's `sentRecorded` is false.
+  - "Newest counted entry" compares a broadcast's whole-second Twilio
+    timestamp with the app's millisecond clock, so two writes within about
+    one second order arbitrarily. Cosmetic.
 - **No "Property sent" milestone** is written for it. The `signed_up` pin
   names the flyer, except when the D6 cap skipped the pin.
 - **An `unknown` contact's entry** shows on the property's Sent to card at
@@ -427,13 +453,16 @@ stored field is added.
     the property page) reads "Signed up from the flyer <date>" in place of
     "Sent <date>";
   - the outcome chip reads "Signed up";
-  - **the row offers the same actions as a waiting row** - Interested,
-    Request a tour, Not interested - so staff can move the lead on. The
-    action gate in `Card.tsx` (today `no_reply` or `replied`) adds
-    `signed_up`. The outcome route already accepts any counted row
+  - **the row offers the same actions a waiting row offers** (Interested
+    and Not interested; "Request a tour" stays as today's partner-only
+    rule, so it does not appear on these tenant / unknown rows). The action
+    gate in `Card.tsx` (today `no_reply` or `replied`) adds `signed_up`.
+    The outcome route already accepts any counted row
     (`units.ts:1553-1556`).
-  - **the property's Sent to card files a `signed_up` row under
-    "Interested"**, not "Waiting" (`listingFormat.ts` `groupSendRows`);
+  - **the property's Sent to card files a `signed_up` row** under
+    "Interested" when the recipient is eligible, and under "Not eligible"
+    otherwise (opted out, placed, missing), like a waiting outcome
+    (`listingFormat.ts` `groupSendRows`);
   - the Matching blast for that property keeps the tenant checked by
     default (`blastAudienceRules.ts` excludes only `not_interested`).
 
@@ -516,8 +545,9 @@ reports it.
 - `contactTimeline.ts`: the timeline mapper for the new type.
 - The dashboard: the activity-type union and `MilestonePin`.
 - The ledger: `shareLedger.ts` (`summarize` key mapping, the `flyer` key
-  beside `INDIVIDUAL_KEY`, and the exported `latestCountedShareKey`
-  helper), `shareAttemptOrder.ts` (the attempt-key form) and
+  beside `INDIVIDUAL_KEY`, the exported `latestCountedShareKey` helper, the
+  current-decline refusal inside the conditional write, and the flyer
+  path's lost-write log line), `shareAttemptOrder.ts` (the attempt-key form) and
   `putShareMemory`. Its signature is unchanged, so the dev listing-send
   fixture (`dev.ts:1433-1484`) and the seeds are unchanged.
 - Outcome readers (D8):
@@ -579,8 +609,12 @@ reports it.
   and emitted once, with the new count; a counted `flyer` entry.
 - The same tenant with the pair already sent:
   - no reply, or replied: it reads `signed_up`;
-  - declined: the decline is superseded, and the pair reads `signed_up`;
+  - declined (a current decline): no flyer entry is written, it stays
+    `not_interested`, and the pin and unread mark are still recorded;
   - a tour: it stays `interested`.
+- A decline recorded AFTER a sign-up, then a second sign-up: the decline
+  holds, and no flyer entry is written. This includes the decline landing
+  concurrently with the write.
 - /join: the join label, and no ledger write.
 - An existing landlord with no thread: a `landlord_1to1` thread, the pin,
   unread, and no welcome or ledger write.
@@ -607,8 +641,9 @@ reports it.
 - all five callers derive the same outcome through the one helper;
 - the dashboard row and chip read "Signed up from the flyer <date>" and
   "Signed up";
-- the row offers Interested / Request a tour / Not interested;
-- the property card files it under Interested.
+- the row offers Interested / Not interested;
+- the property card files it under Interested when the recipient is
+  eligible, and under Not eligible when not.
 
 **Subzone:** case, outer spaces and inner spaces match; "SE1" vs "SE11" do
 not; blank never matches.

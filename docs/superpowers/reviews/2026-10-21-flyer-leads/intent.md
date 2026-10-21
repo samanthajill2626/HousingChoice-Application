@@ -16,21 +16,18 @@ deployed.
   deleted-path audit, AR12 consistent read, AR13 phone label for a nameless
   contact on the Sent to card). The spec got a section 7 "Plan-time
   amendments" note.
-- In flight: the six drafters are applying their slices' round-1 fixes to
-  their drafts (live agent ids in `.superpowers/sdd/agents.md`).
-- NEXT STEP: when all six reply, re-assemble with
-  `node .superpowers/sdd/assemble-plan.cjs docs/superpowers/plans/2026-10-21-flyer-leads-plan.md .superpowers/sdd/plan-drafts`,
-  commit as plan v2, then continue reviewer B (it found the mediums) for R2
-  with the RE-REVIEW CHARGE, giving it reviewer A's report (cap 4). Then the
-  mission block, the launch gate (AUTO / MANUAL / Revise) with the AR5/AR14
-  question, and compaction gate B.
-- OPEN FOR CAMERON at the launch gate (AR5): the property save stores plain
-  text fields untrimmed (area, utilities, accessibility, lease_terms, notes,
-  listing_link, video_url, application_process, priority; the Edit form sends
-  several raw). Fix in this mission, or file an issue? Planner's
-  recommendation: fix it here as one small S1 task (trim in the validator,
-  so every save path is covered), since it is his standing rule and these
-  are the fields this mission re-tags.
+- Plan v2 committed @444e0f86 (round 1 folded into the slices; S3 gained
+  Task 3.5 for AR13). AR16 WITHDREW the AR5 whitespace question: app.ts:146
+  trimJsonBody deep-trims every JSON body, so no HTTP save stores those unit
+  fields untrimmed. Nothing is owed to Cameron on it; tell him it was moot.
+- In flight: plan review round 2, reviewer B continued with the RE-REVIEW
+  CHARGE, writing `plan-review/R2-reviewer-b.md` (diff v1->v2 at
+  `.superpowers/sdd/plan-v1-to-v2.diff`; agent ids in `.superpowers/sdd/agents.md`).
+- NEXT STEP: adjudicate R2 (append to `plan-review/adjudications.md`); if it
+  changes no decision, fold the precision edits and STOP the review;
+  otherwise send fixes to the drafters, re-assemble, commit, and run R3
+  (cap 4). Then write the mission block, ask the launch gate (AUTO / MANUAL /
+  Revise), and run compaction gate B on a Go.
 - Gate answers in rev 6:
   - O1 closed: the decline writers stamp `shares_op`;
   - the repeat limit is per contact per PROPERTY per 24 hours, with /join and

@@ -140,6 +140,19 @@ describe('RequirementsFields', () => {
     expect(screen.getByLabelText('Application fee')).toBeDisabled();
   });
 
+  // Mutant follow-up (U9 M7; planner ruling PR2-3): both amounts take any
+  // amount of 0 or more, cents included - a stored or landlord-prefilled 1250.5
+  // must never trip native step validation and silently block Save / Create.
+  it('the two amounts take any amount of 0 or more, cents included', () => {
+    render(<Harness initial={{ ...emptyRequirementFormValues(), deposit: '1250.5', application_fee: '35.75' }} />);
+    for (const label of ['Fixed amount', 'Application fee']) {
+      const amount = screen.getByLabelText(label);
+      expect(amount, label).toHaveAttribute('min', '0');
+      expect(amount, label).toHaveAttribute('step', 'any');
+      expect(amount, label).toBeValid();
+    }
+  });
+
   it('Tour type offers Not set and the three tour types', () => {
     render(<Harness />);
     const select = screen.getByLabelText('Tour type');

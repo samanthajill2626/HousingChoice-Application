@@ -100,11 +100,35 @@ describe('VoucherSizePicker', () => {
     expect(screen.getByText('Accepts: 2 BR, 7 BR')).toBeInTheDocument();
   });
 
+  // Mutant follow-up (U9 M1): the larger chips opened for a STORED 5+ stay open
+  // once it is unselected - only Fewer sizes hides them (D4), so the chip just
+  // pressed never vanishes from under the pointer.
+  it('unselecting the stored 5+ size keeps the larger chips open, with Fewer sizes to hide them', async () => {
+    const user = userEvent.setup();
+    const spy = vi.fn();
+    render(<Harness initial={[2, 7]} spy={spy} />);
+    await user.click(chip('7'));
+    expect(spy).toHaveBeenLastCalledWith([2]);
+    expect(chip('7')).toHaveAttribute('aria-pressed', 'false');
+    await user.click(screen.getByRole('button', { name: 'Fewer sizes' }));
+    expect(chipNames()).toEqual(['Studio', '1', '2', '3', '4']);
+  });
+
   it('lists stored values it has no chip for as not valid, removed when you save', () => {
     render(<Harness invalid={[2.5, 13]} />);
     expect(screen.getByText('Not a valid size, removed when you save: 2.5, 13')).toBeInTheDocument();
     expect(group()).toHaveAccessibleDescription(
       'On flyer Accepts: none recorded Not a valid size, removed when you save: 2.5, 13',
+    );
+  });
+
+  // Mutant follow-up (U9 M6): ONE off-chip value - the likeliest legacy shape, a
+  // single stored number such as 2.5 (D4's own example) - is listed too.
+  it('lists a single stored value it has no chip for, beside the recorded sizes', () => {
+    render(<Harness initial={[3]} invalid={[2.5]} />);
+    expect(screen.getByText('Not a valid size, removed when you save: 2.5')).toBeInTheDocument();
+    expect(group()).toHaveAccessibleDescription(
+      'On flyer Accepts: 3 BR Not a valid size, removed when you save: 2.5',
     );
   });
 

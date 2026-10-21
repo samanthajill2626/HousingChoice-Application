@@ -6,6 +6,8 @@
 //   GET   /api/contacts/:contactId   → { contact }                                          (M1.4)
 //   PATCH /api/contacts/:contactId   { type?, firstName?, lastName?, voucherSize?, status?, notes?, staff_notes?, staff_notes_expected_updated_at? }
 //                                    → { contact }                                          (M1.4)
+//                                    + the 15 landlord requirement keys req_* (landlords only;
+//                                      lib/requirements.ts, property-requirements spec D2)
 //
 // THE M1.5 SEAM the honest-identity deviation left (README 2026-06-12):
 // resolving a contact's type to tenant/landlord PROPAGATES that to the linked
@@ -99,6 +101,12 @@ import {
 } from '../repos/extractionRepo.js';
 import { createAiRunsRepo, type AiRunsRepo } from '../repos/aiRunsRepo.js';
 import { PROVENANCE_FIELDS, normalizeSuggestionValue } from '../services/extraction/schema.js';
+import {
+  hasDepositConflict,
+  parseLandlordRequirementPatch,
+  REQUIREMENT_ITEMS,
+  REQUIREMENT_LANDLORD_KEYS,
+} from '../lib/requirements.js';
 import {
   contactAddressToParts,
   formatAddressParts,
@@ -404,6 +412,9 @@ const LANDLORD_BOOLEAN_FIELDS = [
 // they are per-property facts: accepted_authorities / lease_terms / pets /
 // rent_min-rent_max on UnitItem). The contact parsers no longer accept them;
 // unknown keys are ignored, so a stale client sending them simply no-ops.
+// (2026-10-20, property-requirements D2: a landlord's copy-only requirement
+// defaults DO live on the contact, as the 15 `req_` keys parsed by
+// lib/requirements.ts - never these bare names.)
 
 // The type-scoped status allowlist (a TENANT's §5 lifecycle, a LANDLORD's lead
 // lifecycle, else needs_review|active) is centralized in lib/statusModel.ts
@@ -763,6 +774,18 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     }
   }
 
+  // Landlord requirements (property-requirements spec D2): the 15 `req_` keys,
+  // each validated by the ONE registry (lib/requirements.ts) in its D1 kind;
+  // null REMOVEs. Type-gated in the route (it needs the stored type). Unknown
+  // `req_` keys are ignored like every unknown key. Deliberately NOT the tenant
+  // `pets` / `evictions` answers above, and never in PROVENANCE_FIELDS.
+  const requirements = parseLandlordRequirementPatch(b);
+  if (!requirements.ok) return { error: requirements.error };
+  for (const [key, value] of Object.entries(requirements.fields)) {
+    patch[key] = value;
+    changedFields.push(key);
+  }
+
   // A2P/CTIA consent (spec §3.4): the JIT record-consent PATCH carries the four
   // HUMAN consent fields. Validated here; consent_captured_by is stamped by the
   // route (session user), never trusted from the client.
@@ -1039,6 +1062,13 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   // a human edit clears - the eight AI-extractable scalars plus the compound
   // `address` (address-extraction slice 3).
   const PROVENANCE = new Set<string>(PROVENANCE_FIELDS);
+  // property-requirements D2: the landlord requirement keys a PATCH may carry,
+  // and the Deposit item's keys (D1 deposit_conflict is checked only when the
+  // body carries one of them).
+  const REQUIREMENT_KEYS = new Set<string>(REQUIREMENT_LANDLORD_KEYS);
+  const DEPOSIT_REQUIREMENT_KEYS = new Set<string>(
+    REQUIREMENT_ITEMS.find((item) => item.id === 'deposit')?.fields.map((field) => field.landlordKey) ?? [],
+  );
 
   // GET /api/contacts?type=&status=&phone=&limit=&cursor= — list/filter (M1.5).
   // ?phone= is an exact byPhone lookup (returns 0 or 1) and takes priority;
@@ -1550,9 +1580,14 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // CONSISTENT too when the patch classifies (type or role): the caseworker
     // 409 below decides "already a caseworker" from this read (R1-F11).
     const changesClassification = 'type' in parsed.patch || 'role' in parsed.patch;
+    // CONSISTENT too when the patch carries a landlord requirement key: the
+    // landlord-only 400 and the deposit_conflict 400 below are decided against
+    // this read (property-requirements D2, D1).
+    const requirementKeys = Object.keys(parsed.patch).filter((key) => REQUIREMENT_KEYS.has(key));
+    const touchesRequirements = requirementKeys.length > 0;
     const stored = await contacts.getById(
       contactId,
-      touchesOrgField || changesClassification ? { consistentRead: true } : undefined,
+      touchesOrgField || changesClassification || touchesRequirements ? { consistentRead: true } : undefined,
     );
     // A phone or email pointer is an INTERNAL routing record, not a contact:
     // never write one, or a typed pointer surfaces on lists like Possible
@@ -1588,6 +1623,39 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       if (!allow.includes(String(parsed.patch['status']))) {
         res.status(400).json({ error: `status must be one of: ${allow.join(', ')}` });
         return;
+      }
+    }
+
+    // LANDLORD REQUIREMENTS (property-requirements spec D2, D1). The `req_` keys
+    // are a landlord's copy-only defaults: refused on a contact whose RESULTING
+    // type (the body's type over the stored one) is not `landlord`, and - when
+    // the body carries a Deposit key - refused when the stored record merged
+    // with the body would hold both a one-month deposit and a fixed amount.
+    // Both decided on the consistent read above; a refusal writes nothing. A
+    // landlord edit never touches a property (D5): nothing here reads a unit.
+    if (touchesRequirements) {
+      if (!stored) {
+        res.status(404).json({ error: 'contact_not_found' });
+        return;
+      }
+      const resultType = 'type' in parsed.patch ? parsed.patch['type'] : stored.type;
+      if (resultType !== 'landlord') {
+        log.info({ contactId }, 'contact patch refused: requirements on a non-landlord');
+        res.status(400).json({ error: 'requirements can only be set on a landlord' });
+        return;
+      }
+      if (requirementKeys.some((key) => DEPOSIT_REQUIREMENT_KEYS.has(key))) {
+        const merged: Record<string, unknown> = { ...stored };
+        for (const key of requirementKeys) {
+          const value = parsed.patch[key];
+          if (value === null) delete merged[key];
+          else merged[key] = value;
+        }
+        if (hasDepositConflict(merged, 'landlord')) {
+          log.info({ contactId }, 'contact patch refused: deposit_conflict');
+          res.status(400).json({ error: 'deposit_conflict' });
+          return;
+        }
       }
     }
 
@@ -1784,6 +1852,9 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     const pendingByField = new Map<string, SuggestionItem>();
     for (const f of parsed.changedFields) {
       if (f === 'type') continue;
+      // No AI suggestion ever targets a landlord requirement key (D2); the
+      // tenant `pets` / `evictions` targets are other fields, left untouched.
+      if (REQUIREMENT_KEYS.has(f)) continue;
       try {
         const pending = await extraction.getSuggestion(contactId, f);
         if (pending !== undefined) pendingByField.set(f, pending);

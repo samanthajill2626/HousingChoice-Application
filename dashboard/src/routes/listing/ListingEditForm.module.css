@@ -110,9 +110,17 @@
   font-size: var(--fs-xs);
 }
 
-/* Public-visibility note - which staff-entered facts render on the public flyer. */
+/* A muted one-line note - the New property form's Requirements status lines (spec 2026-10-20 D7). */
 .hint {
   margin: 0;
   font-size: var(--fs-sm);
   color: var(--c-text-muted);
+}
+
+/* A form section heading - the Requirements section (spec 2026-10-20 D10). */
+.sectionHeading {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
 }

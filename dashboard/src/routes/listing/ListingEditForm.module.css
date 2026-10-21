@@ -124,3 +124,11 @@
   font-weight: var(--fw-semibold);
   color: var(--c-text);
 }
+
+/* The New property form's "Couldn't load" line with its Try again button (D7). */
+.loadFailed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}

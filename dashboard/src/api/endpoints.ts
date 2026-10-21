@@ -25,6 +25,7 @@ import type {
   PoolNumberRow,
   ApplyRequirementsBody,
   ApplyRequirementsResult,
+  CreateUnitBody,
   Contact,
   ContactCreate,
   ContactMediaPage,
@@ -972,7 +973,7 @@ export function markConversationUnread(conversationId: string, signal?: AbortSig
  *  landlord's values the form filled in (spec 2026-10-20 D5) - which the server
  *  classifies against and never stores. Returns the created unit (unwrapped
  *  from { unit }). */
-export async function createUnit(body: Record<string, unknown>): Promise<UnitItem> {
+export async function createUnit(body: CreateUnitBody): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>('/api/units', { method: 'POST', body });
   return res.unit;
 }

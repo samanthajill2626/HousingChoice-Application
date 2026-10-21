@@ -29,6 +29,7 @@ vi.mock('../../api/index.js', async () => {
 
 // Import AFTER mocking.
 import { UnitCreateForm } from './UnitCreateForm.js';
+import { PROPERTY_FORM_FIELDS } from './requirements.js';
 
 const LANDLORDS: Contact[] = [
   { contactId: 'contact-landlord-0001', type: 'landlord', firstName: 'Rosa', lastName: 'Kim', company: 'Kim Realty' },
@@ -87,6 +88,29 @@ async function fill(user: ReturnType<typeof userEvent.setup>, name: RegExp | str
   await user.type(screen.getByLabelText(name), value);
 }
 
+/** Spec 2026-10-20 D5 / D7: the snapshot the form sends for a landlord with no
+ *  requirements - every item, every key, null. */
+function blankSnapshot(landlordId: string): Record<string, unknown> {
+  return {
+    landlordId,
+    evictions: { no_evictions_on_program: null, evictions_notes: null },
+    credit_requirements: { credit_requirements: null },
+    income_requirements: { income_requirements: null },
+    qualifications: { qualifications: null },
+    pets: { no_pets: null, pets: null, pet_fee: null },
+    deposit: { deposit_one_month: null, deposit: null, deposit_flexible: null, deposit_notes: null },
+    application_fee: { application_fee: null },
+    touring: { tour_type: null, tour_process: null },
+  };
+}
+
+/** The dialog is open and the locked landlord's record has landed: Create is
+ *  enabled (spec 2026-10-20 D7 - Create waits while it loads). */
+async function dialogReady(): Promise<void> {
+  await screen.findByRole('dialog', { name: /^New property$/ });
+  await waitFor(() => expect(screen.getByRole('button', { name: /^Create$/ })).toBeEnabled());
+}
+
 describe('UnitCreateForm', () => {
   // ── 1: renders the dialog + the key intake fields ──
   it('renders the dialog with the core property-intake fields', async () => {
@@ -96,7 +120,7 @@ describe('UnitCreateForm', () => {
     expect(screen.getByLabelText('Baths')).toBeInTheDocument();
     expect(screen.getByLabelText('Rent min')).toBeInTheDocument();
     expect(screen.getByLabelText('Rent max')).toBeInTheDocument();
-    expect(screen.getByLabelText('Voucher size accepted')).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Voucher sizes accepted' })).toBeInTheDocument();
     expect(screen.getByLabelText('Public listing link')).toBeInTheDocument();
     expect(screen.getByLabelText('Street address')).toBeInTheDocument();
     // The housing authorities picker (spec 2026-10-06 D6) replaces the retired
@@ -136,12 +160,12 @@ describe('UnitCreateForm', () => {
     createUnit.mockResolvedValue(created);
     const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
 
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     await fill(user, 'Beds', '3');
     await fill(user, 'Baths', '2');
     await fill(user, 'Rent min', '1400');
     await fill(user, 'Rent max', '1500');
-    await fill(user, 'Voucher size accepted', '2');
+    await user.click(within(screen.getByRole('group', { name: 'Voucher sizes accepted' })).getByRole('button', { name: '2' }));
     await fill(user, 'Public listing link', 'https://example.com/x');
     await fill(user, 'Street address', '55 Elm Ct NW');
     await user.click(screen.getByRole('button', { name: /^Create$/ }));
@@ -154,7 +178,7 @@ describe('UnitCreateForm', () => {
       baths: 2,
       rent_min: 1400,
       rent_max: 1500,
-      voucher_size_accepted: 2,
+      voucher_size_accepted: [2],
       listing_link: 'https://example.com/x',
     });
     expect(body['address']).toMatchObject({ line1: '55 Elm Ct NW' });
@@ -167,7 +191,7 @@ describe('UnitCreateForm', () => {
     createUnit.mockResolvedValue(newUnit());
     setup({ landlordId: 'contact-landlord-0001' });
 
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     const picker = screen.getByRole('combobox', { name: 'Housing authorities' });
     await user.type(picker, 'AHA');
     await user.click(await screen.findByRole('option', { name: /^Atlanta Housing Authority/ }));
@@ -180,6 +204,7 @@ describe('UnitCreateForm', () => {
     expect(body).toEqual({
       landlordId: 'contact-landlord-0001',
       accepted_authorities: ['Atlanta Housing Authority', 'Georgia Department of Community Affairs'],
+      requirements_snapshot: blankSnapshot('contact-landlord-0001'),
     });
     expect(body).not.toHaveProperty('jurisdiction');
     expect(body).not.toHaveProperty('accepted_programs');
@@ -191,7 +216,7 @@ describe('UnitCreateForm', () => {
     addOrg.mockResolvedValue(orgEntry('Metro Housing Board'));
     setup({ landlordId: 'contact-landlord-0001' });
 
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     const picker = screen.getByRole('combobox', { name: 'Housing authorities' });
     await user.type(picker, 'Step Up');
     // An agency is not offered here (the add option is, as for any unknown text).
@@ -217,17 +242,20 @@ describe('UnitCreateForm', () => {
   });
 
   // ── 5: empty optional fields are omitted from the body ──
-  it('omits empty fields — a bare create sends only landlordId', async () => {
+  it('omits empty fields - a bare create sends landlordId and the all-blank requirements_snapshot', async () => {
     const user = userEvent.setup();
     createUnit.mockResolvedValue(newUnit());
     setup({ landlordId: 'contact-landlord-0001' });
 
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     await user.click(screen.getByRole('button', { name: /^Create$/ }));
 
     await waitFor(() => expect(createUnit).toHaveBeenCalled());
     const body = createUnit.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(body).toEqual({ landlordId: 'contact-landlord-0001' });
+    expect(body).toEqual({
+      landlordId: 'contact-landlord-0001',
+      requirements_snapshot: blankSnapshot('contact-landlord-0001'),
+    });
   });
 
   // -- 5b: a chosen Tour type rides the create body; "Not set" is omitted --
@@ -236,7 +264,7 @@ describe('UnitCreateForm', () => {
     createUnit.mockResolvedValue(newUnit());
     setup({ landlordId: 'contact-landlord-0001' });
 
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     const select = screen.getByLabelText('Tour type');
     expect(select).toHaveValue(''); // defaults to "Not set"
     await user.selectOptions(select, 'pm_team');
@@ -244,7 +272,11 @@ describe('UnitCreateForm', () => {
 
     await waitFor(() => expect(createUnit).toHaveBeenCalled());
     const body = createUnit.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(body).toEqual({ landlordId: 'contact-landlord-0001', tour_type: 'pm_team' });
+    expect(body).toEqual({
+      landlordId: 'contact-landlord-0001',
+      tour_type: 'pm_team',
+      requirements_snapshot: blankSnapshot('contact-landlord-0001'),
+    });
   });
 
   // ── 6: an invalid (below-minimum) number blocks creation ──
@@ -255,7 +287,7 @@ describe('UnitCreateForm', () => {
     const user = userEvent.setup();
     setup({ landlordId: 'contact-landlord-0001' });
 
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     fireEvent.change(screen.getByLabelText('Beds'), { target: { value: '-4' } });
     await user.click(screen.getByRole('button', { name: /^Create$/ }));
 
@@ -271,7 +303,7 @@ describe('UnitCreateForm', () => {
     createUnit.mockRejectedValue(new ApiError(400, 'bad_request', 'bad_request', {}));
     const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
 
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     await user.click(screen.getByRole('button', { name: /^Create$/ }));
 
     await waitFor(() =>
@@ -296,7 +328,7 @@ describe('UnitCreateForm', () => {
     );
     const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
 
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     await user.type(screen.getByRole('combobox', { name: 'Housing authorities' }), 'AHA');
     await user.click(await screen.findByRole('option', { name: /^Atlanta Housing Authority/ }));
     await user.click(screen.getByRole('button', { name: /^Create$/ }));
@@ -320,7 +352,7 @@ describe('UnitCreateForm', () => {
       createUnit.mockRejectedValue(new ApiError(status, code, code, { error: code }));
       const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
 
-      await screen.findByRole('dialog', { name: 'New property' });
+      await dialogReady();
       await user.click(screen.getByRole('button', { name: /^Create$/ }));
 
       expect(await screen.findByRole('alert')).toHaveTextContent(sentence);
@@ -339,7 +371,7 @@ describe('UnitCreateForm - a name the server confirmed counts as on the list at 
     const metro = { orgId: 'o-metro', kind: 'housing_authority' as const, name: 'Metro Housing Authority' };
     checkOrgText.mockResolvedValue({ match: metro, candidates: [], close: [], nameProblem: 'org_name_taken' });
     setup({ landlordId: 'contact-landlord-0001' });
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     await user.type(screen.getByRole('combobox', { name: 'Housing authorities' }), 'Metro HA');
     await user.click(await screen.findByRole('option', { name: 'Add Metro HA as a new housing authority' }));
     const isNew = screen.getByRole('dialog', { name: 'Is this really new?' });
@@ -373,7 +405,7 @@ describe('UnitCreateForm - text typed in the picker but never picked', () => {
     const user = userEvent.setup();
     createUnit.mockResolvedValue(newUnit());
     setup({ landlordId: 'contact-landlord-0001' });
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     await user.type(authorities(), 'Atlanta Housing Authority');
     await screen.findByRole('option', { name: /^Atlanta Housing Authority/ });
     await user.click(create());
@@ -381,6 +413,7 @@ describe('UnitCreateForm - text typed in the picker but never picked', () => {
     expect(createUnit.mock.calls[0]?.[0]).toEqual({
       landlordId: 'contact-landlord-0001',
       accepted_authorities: ['Atlanta Housing Authority'],
+      requirements_snapshot: blankSnapshot('contact-landlord-0001'),
     });
   });
 
@@ -388,7 +421,7 @@ describe('UnitCreateForm - text typed in the picker but never picked', () => {
     const user = userEvent.setup();
     createUnit.mockResolvedValue(newUnit());
     const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     await user.type(authorities(), 'DCA');
     await screen.findByRole('option', { name: /^Georgia Department of Community Affairs/ });
     await fill(user, 'Beds', '2');
@@ -398,6 +431,7 @@ describe('UnitCreateForm - text typed in the picker but never picked', () => {
       landlordId: 'contact-landlord-0001',
       beds: 2,
       accepted_authorities: ['Georgia Department of Community Affairs'],
+      requirements_snapshot: blankSnapshot('contact-landlord-0001'),
     });
     await waitFor(() => expect(onCreated).toHaveBeenCalled());
   });
@@ -408,11 +442,12 @@ describe('UnitCreateForm - text typed in the picker but never picked', () => {
   ])('the note under the field says what Create will do with %s (R2-FE-6)', async (text, note) => {
     const user = userEvent.setup();
     setup({ landlordId: 'contact-landlord-0001' });
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     await user.type(authorities(), text);
     await screen.findAllByRole('option');
     await user.tab();
-    expect(authorities()).toHaveAccessibleDescription(note);
+    // The field's flyer tag joins the description after the note (spec 2026-10-20 D10).
+    expect(authorities()).toHaveAccessibleDescription(`${note} On flyer`);
   });
 
   it.each([
@@ -421,7 +456,7 @@ describe('UnitCreateForm - text typed in the picker but never picked', () => {
   ])('%s stops Create: nothing is sent, the picker says why and takes focus', async (_case, text) => {
     const user = userEvent.setup();
     const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     await user.type(authorities(), text);
     await screen.findAllByRole('option');
     await user.click(create());
@@ -455,7 +490,7 @@ describe('UnitCreateForm - a picker whose list is not there', () => {
     );
     createUnit.mockResolvedValue(newUnit());
     const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     await user.type(authorities(), 'DCA');
     await act(async () => held.reject(new ApiError(503, 'org_list_busy', 'org_list_busy')));
     expect(screen.getByText("Couldn't load housing authorities")).toBeInTheDocument();
@@ -475,19 +510,328 @@ describe('UnitCreateForm - a picker whose list is not there', () => {
     expect(authorities()).toBeDisabled();
     await user.click(create());
     await waitFor(() => expect(createUnit).toHaveBeenCalled());
-    expect(createUnit.mock.calls[0]?.[0]).toEqual({ landlordId: 'contact-landlord-0001' });
+    expect(createUnit.mock.calls[0]?.[0]).toEqual({
+      landlordId: 'contact-landlord-0001',
+      requirements_snapshot: blankSnapshot('contact-landlord-0001'),
+    });
   });
 
   it('Create before the list loads says it is still loading - nothing is created', async () => {
     const user = userEvent.setup();
     getOrgList.mockReturnValueOnce(new Promise(() => {}));
     const { onCreated } = setup({ landlordId: 'contact-landlord-0001' });
-    await screen.findByRole('dialog', { name: 'New property' });
+    await dialogReady();
     await user.type(authorities(), 'DCA');
     await user.click(create());
     expect(await screen.findByRole('alert')).toHaveTextContent('Still loading the list - try again in a moment.');
     expect(authorities()).toHaveFocus();
     expect(createUnit).not.toHaveBeenCalled();
     expect(onCreated).not.toHaveBeenCalled();
+  });
+});
+
+// --- Spec 2026-10-20 D7: the New form starts filled in from its landlord ----
+describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", () => {
+  const ROSA_WITH_REQS: Contact = {
+    contactId: 'contact-landlord-0001',
+    type: 'landlord',
+    firstName: 'Rosa',
+    lastName: 'Kim',
+    company: 'Kim Realty',
+    req_credit_requirements: '600+',
+    req_no_pets: true,
+    req_pets: 'Service animals only',
+    req_pet_fee: '$300',
+    req_deposit_one_month: true,
+    req_application_fee: 0,
+    req_tour_type: 'landlord_led',
+    req_tour_process: 'Call the office first.',
+  };
+  const GENE: Contact = { contactId: 'contact-landlord-0002', type: 'landlord', firstName: 'Gene', lastName: 'Park' };
+  const ROSA_SNAPSHOT = {
+    landlordId: 'contact-landlord-0001',
+    evictions: { no_evictions_on_program: null, evictions_notes: null },
+    credit_requirements: { credit_requirements: '600+' },
+    income_requirements: { income_requirements: null },
+    qualifications: { qualifications: null },
+    pets: { no_pets: true, pets: 'Service animals only', pet_fee: '$300' },
+    deposit: { deposit_one_month: true, deposit: null, deposit_flexible: null, deposit_notes: null },
+    application_fee: { application_fee: 0 },
+    touring: { tour_type: 'landlord_led', tour_process: 'Call the office first.' },
+  };
+  const FILLED = "Filled in from Rosa Kim's requirements. Change anything that is different for this property.";
+  const LOADING = "Loading Rosa Kim's requirements...";
+  const FAILED =
+    "Couldn't load Rosa Kim's requirements, so this property starts without them. You can apply them from the landlord page later.";
+  const create = (): HTMLElement => screen.getByRole('button', { name: /^Create$/ });
+  const sentBody = (): Record<string, unknown> => createUnit.mock.calls[0]?.[0] as Record<string, unknown>;
+
+  it('locked: reads the landlord record and fills the section in from its requirements, saying so', async () => {
+    getContact.mockResolvedValue(ROSA_WITH_REQS);
+    setup({ landlordId: 'contact-landlord-0001' });
+    expect(await screen.findByText(FILLED)).toBeInTheDocument();
+    expect(getContact).toHaveBeenCalledWith('contact-landlord-0001', expect.any(AbortSignal));
+    expect(screen.getByLabelText('Credit score')).toHaveValue('600+');
+    expect(screen.getByLabelText('No pets')).toBeChecked();
+    expect(screen.getByLabelText('Pets (details)')).toHaveValue('Service animals only');
+    expect(screen.getByLabelText('Pet fee')).toHaveValue('$300');
+    expect(screen.getByLabelText("One month's rent")).toBeChecked();
+    expect(screen.getByLabelText('Fixed amount')).toBeDisabled();
+    expect(screen.getByLabelText('No application fee')).toBeChecked();
+    expect(screen.getByLabelText('Tour type')).toHaveValue('landlord_led');
+    expect(screen.getByLabelText('Tour process')).toHaveValue('Call the office first.');
+  });
+
+  it('an untouched prefill is sent as those values plus requirements_snapshot naming the landlord (D5)', async () => {
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(ROSA_WITH_REQS);
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByText(FILLED);
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()).toEqual({
+      landlordId: 'contact-landlord-0001',
+      credit_requirements: '600+',
+      no_pets: true,
+      pets: 'Service animals only',
+      pet_fee: '$300',
+      deposit_one_month: true,
+      application_fee: 0,
+      tour_type: 'landlord_led',
+      tour_process: 'Call the office first.',
+      requirements_snapshot: ROSA_SNAPSHOT,
+    });
+  });
+
+  it('a pre-filled field cleared before saving is left out while the snapshot keeps the landlord value (so it reads as set on this property)', async () => {
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(ROSA_WITH_REQS);
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByText(FILLED);
+    await user.click(screen.getByLabelText('No pets'));
+    await user.clear(screen.getByLabelText('Pets (details)'));
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()).not.toHaveProperty('no_pets');
+    expect(sentBody()).not.toHaveProperty('pets');
+    expect(sentBody()).toHaveProperty('pet_fee', '$300');
+    expect(sentBody()['requirements_snapshot']).toEqual(ROSA_SNAPSHOT);
+  });
+
+  it('the picker: a pick fills from its list record; a different pick refills, replacing what was typed', async () => {
+    const user = userEvent.setup();
+    getAllContacts.mockResolvedValue([ROSA_WITH_REQS, GENE]);
+    createUnit.mockResolvedValue(newUnit({ landlordId: 'contact-landlord-0002' }));
+    setup();
+    const owner = screen.getByRole('combobox', { name: 'Owning landlord' });
+    await user.type(owner, 'Rosa');
+    await user.click(await screen.findByRole('option', { name: /Rosa Kim/ }));
+    expect(await screen.findByText(FILLED)).toBeInTheDocument();
+    expect(screen.getByLabelText('Pets (details)')).toHaveValue('Service animals only');
+    await user.type(screen.getByLabelText('Income requirements'), '3x rent');
+    await user.click(screen.getByRole('button', { name: 'Clear Owning landlord' }));
+    await user.type(owner, 'Gene');
+    await user.click(await screen.findByRole('option', { name: /Gene Park/ }));
+    expect(screen.getByLabelText('Pets (details)')).toHaveValue('');
+    expect(screen.getByLabelText('Income requirements')).toHaveValue('');
+    expect(screen.getByLabelText('No pets')).not.toBeChecked();
+    // Gene holds no requirements: the section starts blank, with no note (C7).
+    expect(screen.queryByText(/^Filled in from/)).toBeNull();
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()).toEqual({
+      landlordId: 'contact-landlord-0002',
+      requirements_snapshot: blankSnapshot('contact-landlord-0002'),
+    });
+    // The picker list already holds full contacts (F11): no record read.
+    expect(getContact).not.toHaveBeenCalled();
+  });
+
+  it('while the locked landlord loads: the section says so, shows no fields, and Create waits', async () => {
+    const held = { resolve: (_c: Contact): void => {} };
+    getContact.mockReturnValueOnce(
+      new Promise<Contact>((resolve) => {
+        held.resolve = resolve;
+      }),
+    );
+    setup({ landlordId: 'contact-landlord-0001' });
+    expect(await screen.findByText(LOADING)).toBeInTheDocument();
+    expect(create()).toBeDisabled();
+    expect(screen.queryByLabelText('Pets (details)')).toBeNull();
+    await act(async () => held.resolve(ROSA_WITH_REQS));
+    expect(await screen.findByText(FILLED)).toBeInTheDocument();
+    expect(screen.queryByText(LOADING)).toBeNull();
+    expect(create()).toBeEnabled();
+  });
+
+  it('a failed read: the section says so with Try again; Create still works and sends no snapshot', async () => {
+    const user = userEvent.setup();
+    getContact.mockRejectedValue(new ApiError(503, 'unavailable', 'unavailable'));
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    expect(await screen.findByText(FAILED)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    expect(create()).toBeEnabled();
+    await user.type(screen.getByLabelText('Credit score'), '650');
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()).toEqual({ landlordId: 'contact-landlord-0001', credit_requirements: '650' });
+  });
+
+  it('Try again reads the landlord again and fills the section in', async () => {
+    const user = userEvent.setup();
+    getContact
+      .mockRejectedValueOnce(new ApiError(503, 'unavailable', 'unavailable'))
+      .mockResolvedValueOnce(ROSA_WITH_REQS);
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByText(FAILED);
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(FILLED)).toBeInTheDocument();
+    expect(screen.queryByText(FAILED)).toBeNull();
+    expect(getContact).toHaveBeenCalledTimes(2);
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()['requirements_snapshot']).toEqual(ROSA_SNAPSHOT);
+  });
+
+  it('a landlord with no requirements: the section starts blank, with no note (C7)', async () => {
+    setup({ landlordId: 'contact-landlord-0001' });
+    await dialogReady();
+    expect(screen.getByLabelText('Pets (details)')).toHaveValue('');
+    expect(screen.getByLabelText('No pets')).not.toBeChecked();
+    expect(screen.queryByText(/^Filled in from/)).toBeNull();
+  });
+
+  it('sends the voucher sizes picked as a list, the subzone and washer / dryer (D3, D4)', async () => {
+    const user = userEvent.setup();
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await dialogReady();
+    const sizes = screen.getByRole('group', { name: 'Voucher sizes accepted' });
+    await user.click(within(sizes).getByRole('button', { name: '3' }));
+    await user.click(within(sizes).getByRole('button', { name: '2' }));
+    await user.type(screen.getByLabelText('Subzone'), 'E8');
+    await user.selectOptions(screen.getByLabelText('Washer / dryer'), 'hookups');
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()).toMatchObject({ voucher_size_accepted: [2, 3], subzone: 'E8', washer_dryer: 'hookups' });
+  });
+
+  it("One month's rent sends the box and never an amount; No application fee sends 0 (D1)", async () => {
+    const user = userEvent.setup();
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await dialogReady();
+    await user.type(screen.getByLabelText('Fixed amount'), '1200');
+    await user.click(screen.getByLabelText("One month's rent"));
+    expect(screen.getByLabelText('Fixed amount')).toBeDisabled();
+    await user.click(screen.getByLabelText('No application fee'));
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()).toEqual({
+      landlordId: 'contact-landlord-0001',
+      deposit_one_month: true,
+      application_fee: 0,
+      requirements_snapshot: blankSnapshot('contact-landlord-0001'),
+    });
+  });
+
+  it('a landlord deposit with cents (1250.5) pre-fills and Create sends it - native validation never blocks it (planner PR2-3)', async () => {
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({
+      contactId: 'contact-landlord-0001',
+      type: 'landlord',
+      firstName: 'Rosa',
+      lastName: 'Kim',
+      req_deposit: 1250.5,
+    });
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    expect(await screen.findByText(FILLED)).toBeInTheDocument();
+    const amount = screen.getByLabelText('Fixed amount');
+    expect(amount).toHaveValue(1250.5);
+    // step="any": the default step of 1 would mark 1250.5 a step mismatch and
+    // stop the submit before onSubmit runs.
+    expect(amount).toHaveAttribute('step', 'any');
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()['deposit']).toBe(1250.5);
+    expect(sentBody()['requirements_snapshot']).toMatchObject({
+      landlordId: 'contact-landlord-0001',
+      deposit: { deposit_one_month: null, deposit: 1250.5, deposit_flexible: null, deposit_notes: null },
+    });
+  });
+});
+
+// --- Spec 2026-10-20 D10, D10a: the flyer tags and the D10 order ------------
+describe('UnitCreateForm - flyer tags and the D10 order (spec 2026-10-20)', () => {
+  const TAG = { on_flyer: 'On flyer', staff_only: 'Staff only' } as const;
+  const PUBLIC_NOTE = 'Tenants see this on the public flyer.';
+  const ADDRESS_PARTS = ['Street address', 'Apt / unit', 'City', 'State', 'ZIP'];
+
+  /** The control(s) one D10a row labels (the picker path, where every row has one). */
+  function controlsFor(label: string): HTMLElement[] {
+    if (label === 'Address') return ADDRESS_PARTS.map((part) => screen.getByLabelText(part));
+    if (label === 'Owning landlord' || label === 'Housing authorities') {
+      return [screen.getByRole('combobox', { name: label })];
+    }
+    if (label === 'Voucher sizes accepted') return [screen.getByRole('group', { name: label })];
+    return [screen.getByLabelText(label)];
+  }
+  function describers(control: HTMLElement): HTMLElement[] {
+    return (control.getAttribute('aria-describedby') ?? '')
+      .split(' ')
+      .filter((id) => id !== '')
+      .map((id) => document.getElementById(id))
+      .filter((el): el is HTMLElement => el !== null);
+  }
+  const describedTexts = (control: HTMLElement): string[] => describers(control).map((el) => el.textContent ?? '');
+
+  it.each(PROPERTY_FORM_FIELDS.map((f) => [f.label, f.flyer] as const))(
+    '%s carries its %s tag, outside its accessible name',
+    async (label, flyer) => {
+      setup();
+      await waitFor(() => expect(getAllContacts).toHaveBeenCalled());
+      for (const control of controlsFor(label)) {
+        expect(describedTexts(control)).toContain(TAG[flyer]);
+        const tag = describers(control).find((el) => el.textContent === TAG[flyer]);
+        expect(tag?.closest('label')).toBeNull();
+        if (label !== 'Address') expect(control).toHaveAccessibleName(label);
+      }
+    },
+  );
+
+  it('locked: the Owning landlord label carries its Staff only tag beside it (planner ruling C8)', async () => {
+    setup({ landlordId: 'contact-landlord-0001' });
+    await dialogReady();
+    expect(screen.getByText('Owning landlord').parentElement).toHaveTextContent('Staff only');
+  });
+
+  it('the fields run in the D10 order, the owning landlord first', async () => {
+    setup();
+    await waitFor(() => expect(getAllContacts).toHaveBeenCalled());
+    const firsts = PROPERTY_FORM_FIELDS.map((f) => controlsFor(f.label)[0]);
+    for (let i = 1; i < firsts.length; i += 1) {
+      const before = firsts[i - 1];
+      const after = firsts[i];
+      if (before === undefined || after === undefined) throw new Error('a D10a field has no control');
+      expect(
+        before.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING,
+        `${PROPERTY_FORM_FIELDS[i - 1]?.label} before ${PROPERTY_FORM_FIELDS[i]?.label}`,
+      ).toBeTruthy();
+    }
+  });
+
+  it('a legend under the title explains both tags, and the public free-text boxes say tenants see them', async () => {
+    setup({ landlordId: 'contact-landlord-0001' });
+    await dialogReady();
+    expect(screen.getByText('On flyer - tenants see it on the public flyer.')).toBeInTheDocument();
+    expect(screen.getByText('Staff only - never leaves the dashboard.')).toBeInTheDocument();
+    for (const label of ['Tenant-paid utilities', 'Accessibility', 'Lease terms', 'Pets (details)', 'Pet fee']) {
+      expect(describedTexts(screen.getByLabelText(label)), label).toContain(PUBLIC_NOTE);
+    }
   });
 });

@@ -7,13 +7,14 @@ deployed.
 
 ## STATE (replace each time)
 
-- Phase: DESIGN - spec rev 4 committed @e8fe644f
+- Phase: SPEC GATE (Cameron) - spec rev 5 @dacf74ee
   (`docs/superpowers/specs/2026-10-21-flyer-leads-design.md`).
-  - Rounds 1-3 all changed decisions: R1 18 findings, R2 12, R3 7, all
-    accepted.
-  - Round 4 (the CAP) is running: reviewer B continued, writing
-    `design-review/R4-reviewer-b.md`. If it still changes a decision, STOP and
-    put the open findings to Cameron as decisions; do not run a fifth round.
+  - Review CLOSED at round 4 (the cap): 41 findings, all accepted.
+  - Open for Cameron: O1 (the decline race; recommended: the decline writers
+    stamp a fresh `shares_op`).
+  - Planner calls are shown at the gate.
+  - The context nudge fired at 500k: compaction gate A is offered after the
+    spec gate.
 - Subzone auto-fill is NOT this mission. Its research is at
   `W:\tmp\subzone-autofill-research\research-report.md`. Cameron starts that session
   himself from the prompt given 2026-10-21; he rejected the start_session card.

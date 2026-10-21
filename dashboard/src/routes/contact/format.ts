@@ -4,11 +4,13 @@ import {
   LANDLORD_STATUS_LABELS,
   TENANT_STATUS_LABELS,
   type Address,
+  type Contact,
   type LandlordStatus,
   type TenantStatus,
 } from '../../api/types.js';
 import { formatPhoneDisplay } from '../../lib/phone.js';
 import { isoOf } from '../../lib/time.js';
+import { contactPhones, defaultPhone } from './contactPhones.js';
 
 /** Format a US E.164 number as "(404) 010-0007". Non-US / unparseable numbers
  *  are returned as-is (honest — never mangle an unexpected shape).
@@ -144,4 +146,19 @@ export function contactDisplayName(
   if (name) return name;
   if (phone) return formatPhone(phone);
   return 'Unknown contact';
+}
+
+/** The ONE name rule for copy that names a LANDLORD (code review RD-9): the
+ *  property Requirements card's "<L> has no requirements recorded yet." and
+ *  the New property form's note, loading and failure lines. First + last
+ *  name; else the company (a landlord is often a company); else the default
+ *  phone exactly as the contact page header picks it (the primary of
+ *  phones[], before any legacy single phone - contactPhones / defaultPhone);
+ *  "Unknown contact" only when none of them exists. */
+export function landlordDisplayName(contact: Contact): string {
+  const name = [contact.firstName?.trim(), contact.lastName?.trim()].filter(Boolean).join(' ');
+  if (name !== '') return name;
+  const company = typeof contact.company === 'string' ? contact.company.trim() : '';
+  if (company !== '') return company;
+  return contactDisplayName(undefined, undefined, defaultPhone(contactPhones(contact))?.phone);
 }

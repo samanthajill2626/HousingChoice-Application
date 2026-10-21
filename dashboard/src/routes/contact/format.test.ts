@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { Contact } from '../../api/index.js';
 import {
   contactDisplayName,
   contactStatusLabel,
@@ -10,6 +11,7 @@ import {
   formatTime,
   formatTimeWithSeconds,
   humanize,
+  landlordDisplayName,
 } from './format.js';
 
 describe('humanize', () => {
@@ -132,5 +134,38 @@ describe('contactDisplayName', () => {
     expect(contactDisplayName('Cameron   ', ' Abt ', undefined)).toBe('Cameron Abt');
     // A whitespace-only part contributes nothing (falls through to the phone).
     expect(contactDisplayName('   ', '  ', '+14040100007')).toBe('(404) 010-0007');
+  });
+});
+
+// Code review RD-9: the ONE name rule for copy that names a landlord (the
+// property Requirements card, the New property form's lines).
+describe('landlordDisplayName', () => {
+  const landlord = (over: Partial<Contact>): Contact => ({ contactId: 'L1', type: 'landlord', ...over });
+
+  it('prefers the name, then the company, then the default phone', () => {
+    expect(landlordDisplayName(landlord({ firstName: 'Rosa', lastName: 'Kim', company: 'Kim Realty' }))).toBe('Rosa Kim');
+    expect(landlordDisplayName(landlord({ company: 'Kim Realty', phone: '+14045550100' }))).toBe('Kim Realty');
+    expect(landlordDisplayName(landlord({ phone: '+14045550100' }))).toBe('(404) 555-0100');
+  });
+
+  it('takes the primary of phones[] before any legacy phone, as the contact page header does', () => {
+    expect(
+      landlordDisplayName(
+        landlord({
+          phones: [
+            { phone: '+14045550111', primary: false },
+            { phone: '+14045550100', primary: true },
+          ],
+          phone: '+14045550199',
+        }),
+      ),
+    ).toBe('(404) 555-0100');
+  });
+
+  it('says "Unknown contact" only when there is no name, company or phone', () => {
+    expect(landlordDisplayName(landlord({}))).toBe('Unknown contact');
+    // Whitespace-only parts are nothing.
+    expect(landlordDisplayName(landlord({ firstName: '  ', company: '   ', phone: '+14045550100' }))).toBe('(404) 555-0100');
+    expect(landlordDisplayName(landlord({ company: ' Kim Realty ' }))).toBe('Kim Realty');
   });
 });

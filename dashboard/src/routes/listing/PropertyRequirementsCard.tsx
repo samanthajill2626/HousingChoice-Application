@@ -8,7 +8,7 @@
 // or a landlord that did not load: no tags and no lines.
 import type { Contact, UnitItem } from '../../api/index.js';
 import { BLANK, Card, CardAction } from '../contact/Card.js';
-import { contactDisplayName } from '../contact/format.js';
+import { landlordDisplayName } from '../contact/format.js';
 import {
   formatItemValue,
   isItemBlank,
@@ -43,9 +43,9 @@ export function PropertyRequirementsCard({ unit, landlord, onEdit }: PropertyReq
       }
     >
       {landlord !== undefined && landlordHasNoRequirements(landlord) ? (
-        <p className={styles.note}>
-          {`${contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)} has no requirements recorded yet.`}
-        </p>
+        // <L> by the one landlord name rule (code review RD-9): the company or
+        // the primary of phones[] before "Unknown contact".
+        <p className={styles.note}>{`${landlordDisplayName(landlord)} has no requirements recorded yet.`}</p>
       ) : null}
       {requirementItemsByGroup().map(({ group, items }) => (
         <div key={group} className={styles.group}>

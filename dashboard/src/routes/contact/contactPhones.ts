@@ -1,7 +1,10 @@
 // contactPhones — resolve a Contact's phone numbers + the default reply/call
 // target, handling BOTH the C1 shape (contact.phones[]) and the legacy single
 // `phone`. Pure + tested so the header and the file pane stay declarative.
-import type { Contact, ContactPhone } from '../../api/index.js';
+// From api/types.js, not the api barrel: format.ts imports this module, and
+// the e2e workspace compiles format.ts without JSX (the barrel re-exports a
+// .tsx provider) - code review RD-9's landlordDisplayName.
+import type { Contact, ContactPhone } from '../../api/types.js';
 
 /** Normalize a Contact to a ContactPhone[]. When C1's phones[] is present use
  *  it; otherwise synthesize a single primary from the legacy `phone`. Returns

@@ -96,6 +96,22 @@ describe('PropertyRequirementsCard', () => {
     expect(screen.queryByText(/has no requirements recorded yet/)).toBeNull();
   });
 
+  // Code review RD-9: the landlord name rule (landlordDisplayName) - the
+  // company, then the primary of phones[] - never "Unknown contact" while
+  // either exists.
+  it.each<[string, Contact, string]>([
+    ['a company-only landlord', { contactId: 'L1', type: 'landlord', company: 'Kim Realty' }, 'Kim Realty'],
+    [
+      'a landlord with only phones[]',
+      { contactId: 'L1', type: 'landlord', phones: [{ phone: '+14045550100', primary: true }] },
+      '(404) 555-0100',
+    ],
+  ])('the no-requirements note names %s by the landlord name rule', (_label, landlord, name) => {
+    render(<PropertyRequirementsCard unit={UNIT} landlord={landlord} />);
+    expect(screen.getByText(`${name} has no requirements recorded yet.`)).toBeInTheDocument();
+    expect(screen.queryByText(/Unknown contact/)).toBeNull();
+  });
+
   it('Edit opens the property edit form; no Edit without a handler', async () => {
     const user = userEvent.setup();
     const onEdit = vi.fn();

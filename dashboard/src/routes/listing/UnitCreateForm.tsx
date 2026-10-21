@@ -33,7 +33,7 @@ import {
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
-import { contactDisplayName } from '../contact/format.js';
+import { landlordDisplayName } from '../contact/format.js';
 import { contactTypeErrorMessage } from '../../lib/contactTypeErrors.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { OrgPicker, type OrgPickerHandle } from '../orgs/OrgPicker.js';
@@ -77,16 +77,11 @@ export interface UnitCreateFormProps {
 
 const FORM_ID = 'unit-create-form';
 
-/** Display name for a landlord contact (name -> phone -> "Unknown contact"). */
-function landlordLabel(c: Contact): string {
-  const phone = c.phones?.find((p) => p.primary)?.phone ?? c.phone;
-  return contactDisplayName(c.firstName, c.lastName, phone);
-}
-
 /** What the Requirements section was filled in from (D7). */
 interface FilledFrom {
   landlordId: string;
-  /** <L> in the note. */
+  /** <L> in the note: landlordDisplayName, the ONE landlord name rule the
+   *  property Requirements card uses too (code review RD-9). */
   name: string;
   /** D5: sent as `requirements_snapshot` while this landlord is the body's. */
   snapshot: RequirementsSnapshotWire;
@@ -100,7 +95,7 @@ function fillFromLandlord(c: Contact): { values: RequirementFormValues; filled: 
     values: requirementFormValuesFromLandlord(c),
     filled: {
       landlordId: c.contactId,
-      name: landlordLabel(c),
+      name: landlordDisplayName(c),
       snapshot: requirementsSnapshotOf(c),
       hasRequirements: REQUIREMENT_ITEM_IDS.some((id) => !isItemBlank(landlordItemValue(c, id))),
     },
@@ -214,7 +209,7 @@ export function UnitCreateForm({
         setLandlords(items);
         if (landlordId !== undefined) {
           const hit = items.find((c) => c.contactId === landlordId);
-          if (hit) setLockedLandlordLabel(landlordLabel(hit));
+          if (hit) setLockedLandlordLabel(landlordDisplayName(hit));
         }
       } catch {
         // Non-fatal: the picker stays empty; a locked side still submits.
@@ -375,7 +370,8 @@ export function UnitCreateForm({
     }
   }
 
-  // C6: <L> is the landlord's name once either read has landed.
+  // C6: <L> is the landlord's name (landlordDisplayName, code review RD-9)
+  // once either read has landed.
   const statusName = lockedLandlordLabel ?? 'the landlord';
   const filledNote =
     landlordRead === 'done' && filled !== null && filled.landlordId === resolvedLandlordId && filled.hasRequirements

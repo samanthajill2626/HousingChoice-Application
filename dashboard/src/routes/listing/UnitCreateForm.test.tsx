@@ -804,6 +804,59 @@ describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", ()
     await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
     expect(sentBody()['requirements_snapshot']).toEqual(ROSA_SNAPSHOT);
   });
+
+  // Code review RD-9: the note, the loading line and the failure line name the
+  // landlord by the ONE landlord name rule (landlordDisplayName, shared with
+  // the property Requirements card): the company, then the primary of
+  // phones[] - never "Unknown contact" while either exists.
+  const KIM_REALTY: Contact = {
+    contactId: 'contact-landlord-0001',
+    type: 'landlord',
+    company: 'Kim Realty',
+    req_credit_requirements: '600+',
+  };
+  const PHONES_ONLY: Contact = {
+    contactId: 'contact-landlord-0001',
+    type: 'landlord',
+    phones: [
+      { phone: '+14045550111', primary: false },
+      { phone: '+14045550100', primary: true },
+    ],
+    req_credit_requirements: '600+',
+  };
+  const NAMED_BY_THE_RULE: Array<[string, Contact, string]> = [
+    ['a company-only landlord', KIM_REALTY, 'Kim Realty'],
+    ['a landlord with only phones[]', PHONES_ONLY, '(404) 555-0100'],
+  ];
+
+  it.each(NAMED_BY_THE_RULE)('%s: the loading line and the note name it by the landlord name rule', async (_label, landlord, name) => {
+    getAllContacts.mockResolvedValue([landlord]);
+    const held = { resolve: (_c: Contact): void => {} };
+    getContact.mockReturnValueOnce(
+      new Promise<Contact>((resolve) => {
+        held.resolve = resolve;
+      }),
+    );
+    setup({ landlordId: 'contact-landlord-0001' });
+    expect(await screen.findByText(`Loading ${name}'s requirements...`)).toBeInTheDocument();
+    await act(async () => held.resolve(landlord));
+    expect(
+      await screen.findByText(`Filled in from ${name}'s requirements. Change anything that is different for this property.`),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Unknown contact/)).toBeNull();
+  });
+
+  it.each(NAMED_BY_THE_RULE)('%s: the failure line names it by the landlord name rule', async (_label, landlord, name) => {
+    getAllContacts.mockResolvedValue([landlord]);
+    getContact.mockRejectedValue(new ApiError(503, 'unavailable', 'unavailable'));
+    setup({ landlordId: 'contact-landlord-0001' });
+    expect(
+      await screen.findByText(
+        `Couldn't load ${name}'s requirements, so this property starts without them. You can apply them from the landlord page later.`,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Unknown contact/)).toBeNull();
+  });
 });
 
 // --- Spec 2026-10-20 D10, D10a: the flyer tags and the D10 order ------------

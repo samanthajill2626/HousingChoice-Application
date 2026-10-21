@@ -1,6 +1,6 @@
 # Flyer trim and flyer / join leads - design
 
-Status: DRAFT revision 4 (2026-10-21).
+Status: DRAFT revision 5 (2026-10-21), at Cameron's spec gate.
 - Rev 2 folded in review round 1: two reviewers, 18 merged findings, all
   accepted.
 - Rev 3 folds in round 2: one continued reviewer, 12 findings, all
@@ -8,7 +8,10 @@ Status: DRAFT revision 4 (2026-10-21).
   consent stamp - and replaces "first sight only".
 - Rev 4 folds in round 3: 7 findings, all accepted. A sign-up never clears a
   decline.
-- Next: round 4, the cap, then Cameron's spec gate.
+- Rev 5 folds in round 4, the cap: 4 findings, all accepted. One changes
+  what gets built - the decline race - and is put to Cameron as O1 (D7)
+  instead of a fifth round.
+- Next: Cameron's spec gate.
 
 Adjudications:
 `docs/superpowers/reviews/2026-10-21-flyer-leads/design-review/adjudications.md`.
@@ -350,6 +353,14 @@ The `housing_fair_signup` audit event gains these fields, with no PII:
 - `deletedContact`;
 - `recorded` (pin written);
 - `sentRecorded` (sent-list entry written);
+- `sentSkipped`: why no entry was written, one of:
+  - `not_flyer` (no unitId);
+  - `not_shareable`;
+  - `not_tenant` (another contact type);
+  - `declined` (a current decline, D7);
+  - `lost` (token retries exhausted);
+  - `error`;
+  - absent when one was written.
 - `consentVersion` (the disclosure version the form showed).
 
 ### D7. A flyer sign-up puts the property on the properties-sent list
@@ -388,10 +399,28 @@ was sent to them before.
   - Reason: the sign-up box asks for alerts about "this home and others", so
     a sign-up is not proof of renewed interest in a home they turned down.
     It also means a public request can never undo a staff decision.
-  - The test is made inside the ledger's conditional write, on the same
-    consistent read the token write is conditioned on: a predicate beside
-    `mayReplace` that returns `'refused'`. So a decline recorded
-    concurrently is never raced past.
+  - "Current" is exactly `effectiveDecline(row, undefined)`
+    (`listingSendOutcome.ts:47-58`) on the row the ledger write read: a
+    decline whose instant is at or after `sentAt`, or any decline when the
+    row has no `sentAt`. Tours are not consulted.
+    - A tour created after the decline already makes the pair "Interested"
+      (D8 order), so refusing the flyer write changes nothing it shows.
+    - Residual: if that tour is later canceled, the pair reads by its old
+      `sentAt` ("No reply yet") rather than `signed_up`.
+  - The refusal applies to the `flyer` share key ONLY. A broadcast or
+    individual send that staff deliberately make to a declined tenant still
+    supersedes the decline, as today.
+  - The refusal is decided inside the ledger's read-modify-write, on the row
+    that write read.
+  - **O1 - open, for Cameron at the gate (round 4 was the cap):** today
+    that write is conditioned only on the row's change token (`shares_op`),
+    and the decline writers (`setDeclined` / `clearDeclined`,
+    `listingSendsRepo.ts:368-420`) do not change it. So a decline clicked in
+    the same instant as a public flyer write can be overwritten.
+    - *Planner's recommendation:* the two decline writers also stamp a fresh
+      `shares_op`, so a racing ledger write loses its condition, re-reads,
+      and sees the decline. This is two writers and the harness fake.
+    - *Alternative:* accept the race as a stated residual.
   - *(Rev 2's "first sight only" was dropped. It left an already-sent pair
     at "No reply yet" on Follow up after the person signed up, and it could
     not be enforced inside the conditional write. Rev 3's "supersede a
@@ -409,7 +438,10 @@ was sent to them before.
   - A LOST flyer write (the ledger's token retries exhausted) is NOT repaired
     later: the repair walks broadcast slots only. The flyer path's log line
     says so, rather than the shared "the repair heals it" wording
-    (`shareLedger.ts:190-193`), and the audit's `sentRecorded` is false.
+    (`shareLedger.ts:190-193`).
+  - Every reason a flyer entry is not written is recorded on the audit
+    (`sentSkipped`, below), and a decline refusal also logs at INFO. When the
+    D6 cap also skipped the pin, the audit row is the only trace.
   - "Newest counted entry" compares a broadcast's whole-second Twilio
     timestamp with the app's millisecond clock, so two writes within about
     one second order arbitrarily. Cosmetic.
@@ -546,8 +578,10 @@ reports it.
 - The dashboard: the activity-type union and `MilestonePin`.
 - The ledger: `shareLedger.ts` (`summarize` key mapping, the `flyer` key
   beside `INDIVIDUAL_KEY`, the exported `latestCountedShareKey` helper, the
-  current-decline refusal inside the conditional write, and the flyer
-  path's lost-write log line), `shareAttemptOrder.ts` (the attempt-key form) and
+  flyer-only current-decline refusal inside the conditional write, and the
+  flyer path's lost-write log line). If O1 is adopted, also
+  `listingSendsRepo.setDeclined` / `clearDeclined`, which stamp a fresh
+  `shares_op`, with the harness fake and the NO-RESET comment; `shareAttemptOrder.ts` (the attempt-key form) and
   `putShareMemory`. Its signature is unchanged, so the dev listing-send
   fixture (`dev.ts:1433-1484`) and the seeds are unchanged.
 - Outcome readers (D8):
@@ -613,8 +647,12 @@ reports it.
     `not_interested`, and the pin and unread mark are still recorded;
   - a tour: it stays `interested`.
 - A decline recorded AFTER a sign-up, then a second sign-up: the decline
-  holds, and no flyer entry is written. This includes the decline landing
-  concurrently with the write.
+  holds, no flyer entry is written, and the audit has
+  `sentSkipped: 'declined'`.
+- If O1 is adopted, a decline landing between the ledger's read and its
+  write also holds: the write loses its token and re-reads.
+- A broadcast send to a declined pair still supersedes the decline. The
+  refusal is flyer-only.
 - /join: the join label, and no ledger write.
 - An existing landlord with no thread: a `landlord_1to1` thread, the pin,
   unread, and no welcome or ledger write.

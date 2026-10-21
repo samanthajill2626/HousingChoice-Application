@@ -115,3 +115,35 @@ changes a decision, the open findings go to Cameron as decisions.
 | R3-5 | LOW | ACCEPT | A failed touch means no increment and no event. Stated. |
 | R3-6 | LOW | ACCEPT | Whole-second vs millisecond ordering within about 1 s is arbitrary. Stated as cosmetic. |
 | R3-7 | LOW | ACCEPT | "Request a tour" is partner-only, so it never shows on these rows; eligibility decides between Interested and Not eligible. D8 and the tests corrected. |
+
+## Round 4 (2026-10-21) - reviewer B continued - THE CAP
+
+- Report: `R4-reviewer-b.md` (4 findings), run against rev 4 @e8fe644f.
+- The reviewer conceded R3-2 to R3-7, and accepted R3-1's direction but
+  contested its implementation (finding 1).
+- Claim checked: `listingSendsRepo.ts:14-22,177-181,306,368-420`. putShareMemory
+  is conditioned on `shares_op` only, and `setDeclined` / `clearDeclined`
+  touch only `declined` and `updated_at`.
+
+Result: 4 findings, 4 ACCEPT, 0 REJECT. **Decisions changed: YES (one)**:
+finding 1 adds a surface. Round 4 is the cap, so per the pipeline there is NO
+fifth round. Finding 1 goes to Cameron at the spec gate as **O1**, with the
+planner's recommendation. Findings 2-4 are precision, folded into rev 5.
+
+| # | Sev (reviewer) | Ruling | What changed in rev 5 |
+|---|---|---|---|
+| R4-1 | MEDIUM | ACCEPT -> O1 for Cameron | The decline refusal is not protected by the token: a decline clicked between the ledger read and write is overwritten. Recommended: setDeclined / clearDeclined stamp a fresh `shares_op` (two writers plus the fake). Alternative: accept the race as a residual. |
+| R4-2 | LOW | ACCEPT | "Current" = `effectiveDecline(row, undefined)`; the no-`sentAt` case is stated; the canceled-tour residual is stated. |
+| R4-3 | LOW | ACCEPT | The refusal is flyer-key only; a staff broadcast to a declined tenant still supersedes, as today. |
+| R4-4 | LOW | ACCEPT | Audit `sentSkipped` reason (`not_flyer` / `not_shareable` / `not_tenant` / `declined` / `lost` / `error`), plus an INFO log on a decline refusal. |
+
+## Totals across the four rounds
+
+- 41 findings: R1 18 merged from 30 raw, R2 12, R3 7, R4 4. All accepted;
+  0 outright rejections; 0 deferred.
+- The planner REVERSED four of its own calls under review:
+  - rev 2's ranked phone holder (R2-1/2);
+  - rev 2's consent stamp (R2-4);
+  - rev 2's first-sight rule (R2-5);
+  - rev 3's decline supersession (R3-1).
+- Open for Cameron: O1 (above).

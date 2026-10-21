@@ -74,6 +74,24 @@
   gap: var(--sp-2);
 }
 
+/* The landlord's Requirements / Qualifications group (property requirements
+ * D9): a real <fieldset> so its legend names the group, laid out like
+ * .fieldset. */
+.requirementsFieldset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.requirementsFieldset > legend {
+  padding: 0;
+  margin-bottom: var(--sp-2);
+}
+
 .stateField {
   flex: 0 1 5rem;
 }

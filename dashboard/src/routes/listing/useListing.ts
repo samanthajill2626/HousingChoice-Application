@@ -60,7 +60,11 @@ export interface ListingState {
    *  setUnit precedent). An unknown contactId, or a slice that is not
    *  'ready', is left alone. */
   setRecipientRow: (unitId: string, contactId: string, row: ListingSendRow) => void;
-  /** The resolved landlord contact (for the roster fallback), or null. */
+  /** The resolved landlord contact (for the roster fallback and the
+   *  Requirements card's comparison, D6), or null - no landlord, or the read
+   *  failed. Re-read whenever the unit's landlordId changes after the load
+   *  (until that read lands it can still be the previous landlord's, so a
+   *  reader compares `landlord.contactId` with `unit.landlordId`). */
   landlord: Contact | null;
   roster: RosterRow[];
   placementsOnUnit: ReturnType<typeof placementsOnUnit>;
@@ -146,7 +150,12 @@ export function useListing(unitId: string): ListingState {
   // change we DERIVE loading during render until the new fetch commits, rather
   // than resetting with a synchronous setState in the effect (which the React
   // Compiler flags as a cascading render — set-state-in-effect).
-  const [state, setState] = useState<Omit<ListingState, 'setUnit' | 'setRecipientRow'> & { forId: string }>({
+  // `landlordForId` records which landlordId the held `landlord` was read for
+  // (undefined = none), so a landlordId change is noticed and a failed read
+  // (landlord null) is not retried in a loop.
+  const [state, setState] = useState<
+    Omit<ListingState, 'setUnit' | 'setRecipientRow'> & { forId: string; landlordForId?: string }
+  >({
     ...LOADING,
     forId: unitId,
   });
@@ -242,6 +251,7 @@ export function useListing(unitId: string): ListingState {
           status: 'ready',
           unit,
           landlord,
+          landlordForId: unit.landlordId,
           roster: listingRoster(unit, landlord),
           ...(unit.propertyContact !== undefined && { propertyContact: unit.propertyContact }),
           placementsOnUnit: placementsOnUnit(placements, unitId),
@@ -260,6 +270,34 @@ export function useListing(unitId: string): ListingState {
 
     return () => controller.abort();
   }, [unitId]);
+
+  // D6 (property requirements): re-read the landlord whenever the committed
+  // unit's landlordId differs from the one the held landlord was read for - a
+  // roster claim of the landlord slot or a restore with a landlord answers with
+  // the new unit through setUnit, with no reload. A cleared landlordId resolves
+  // to null without a request (loadLandlord).
+  const committedLandlordId =
+    state.forId === unitId && state.status === 'ready' ? state.unit?.landlordId : undefined;
+  const landlordStale =
+    state.forId === unitId && state.status === 'ready' && state.unit?.landlordId !== state.landlordForId;
+  useEffect(() => {
+    if (!landlordStale) return;
+    const controller = new AbortController();
+    const wanted = committedLandlordId;
+    void loadLandlord(wanted, controller.signal)
+      .then((landlord) => {
+        if (controller.signal.aborted) return;
+        setState((prev) =>
+          prev.forId === unitId && prev.unit?.landlordId === wanted
+            ? { ...prev, landlord, landlordForId: wanted }
+            : prev,
+        );
+      })
+      .catch(() => {
+        /* aborted: a newer landlordId (or another property) superseded this read */
+      });
+    return () => controller.abort();
+  }, [landlordStale, committedLandlordId, unitId]);
 
   // setUnit (above) applies an updated unit in place without a refetch - the
   // roster/panels stay; only the unit record (and its deleted_at) changes. A

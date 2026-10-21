@@ -8,7 +8,10 @@
 //       stored filter's authorities (authoritiesOfFilter - a legacy
 //       one-string row included) and the wire shape every response carries;
 //   D4  the tour hold rule: one tour, the pick among several, per tenant;
-//   D5  the default-checked rule.
+//   D5  the default-checked rule;
+//   D12 (property-requirements 2026-10-20) the voucher size list: the ONE
+//       reader of a filter's sizes (bedroomSizesOfFilter - a legacy
+//       one-number row included) and the match rule (voucherSizeMatches).
 import type { AudienceFilter } from '../repos/broadcastsRepo.js';
 import type { TenantStatus } from './statusModel.js';
 
@@ -201,6 +204,42 @@ export function authoritiesOfFilter(
   const legacy: unknown = filter.housing_authority;
   if (typeof legacy === 'string' && legacy.trim() !== '') return [legacy.trim()];
   return [];
+}
+
+/** D12: the top voucher size chip. 4 means "4 or more" (the chip reads "4+ BR"). */
+export const VOUCHER_CHIP_MAX = 4;
+
+/** D12 - the ONLY reader of a filter's voucher sizes (validation, the
+ *  resolver behind the estimate, preview and send, and every projection):
+ *  `bedroomSizes` when it is an array (integers >= 0 kept, each
+ *  min(n, VOUCHER_CHIP_MAX), de-duplicated, ascending - even when that leaves
+ *  it empty), else a legacy integer `bedroomSize` >= 0 as [min(n, 4)], else
+ *  []. A stored row is never rewritten; it is read through here. */
+export function bedroomSizesOfFilter(
+  filter: { bedroomSizes?: unknown; bedroomSize?: unknown } | undefined,
+): number[] {
+  if (filter === undefined) return [];
+  const isSize = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+  const list: unknown = filter.bedroomSizes;
+  if (Array.isArray(list)) {
+    const out = new Set<number>();
+    for (const raw of list as unknown[]) {
+      if (isSize(raw)) out.add(Math.min(raw, VOUCHER_CHIP_MAX));
+    }
+    return [...out].sort((a, b) => a - b);
+  }
+  const legacy: unknown = filter.bedroomSize;
+  return isSize(legacy) ? [Math.min(legacy, VOUCHER_CHIP_MAX)] : [];
+}
+
+/** D12 match: an empty list filters nothing; otherwise the tenant needs a
+ *  voucher size that is a listed size below 4, or is 4 or more while the 4
+ *  chip is listed. `sizes` must come from bedroomSizesOfFilter. */
+export function voucherSizeMatches(sizes: readonly number[], tenantSize: number | undefined): boolean {
+  if (sizes.length === 0) return true;
+  if (tenantSize === undefined) return false;
+  if (tenantSize >= VOUCHER_CHIP_MAX) return sizes.includes(VOUCHER_CHIP_MAX);
+  return sizes.includes(tenantSize);
 }
 
 /** D2 wire shape: never housing_authority; housing_authorities only when non-empty. */

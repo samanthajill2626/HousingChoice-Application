@@ -78,12 +78,15 @@ export const MAX_BROADCAST_RECIPIENTS = 1000;
  * The audience filter SNAPSHOT persisted on the broadcast (M1.8a): tenant
  * contacts - only those in Onboarding or Searching (matching-blast-rules D1,
  * applied by the resolver, not stored here) - optionally narrowed by ANY of a
- * list of housing authorities (D2) and exact bedroom size. contact_type is
+ * list of housing authorities (D2) and by ANY of a list of voucher sizes
+ * (property-requirements D12, the 4 chip meaning 4 or more). contact_type is
  * fixed 'tenant' for M1.8 (never relay-group rosters); opt-out + unreachable
  * are ALWAYS excluded (the booleans record the intent for the audit trail /
  * future flexibility). Read a filter's authorities ONLY through
  * authoritiesOfFilter (lib/blastAudienceRules.ts), which also reads the
- * legacy one-string shape.
+ * legacy one-string shape, and its voucher sizes ONLY through
+ * bedroomSizesOfFilter (the same module), which also reads the legacy
+ * one-number bedroomSize.
  */
 export interface AudienceFilter {
   contact_type: 'tenant';
@@ -92,6 +95,13 @@ export interface AudienceFilter {
   /** @deprecated LEGACY stored shape (drafts saved before 2026-10-14). Read
    *  ONLY through authoritiesOfFilter; never written by new code. */
   housing_authority?: string;
+  /** D12 (property-requirements 2026-10-20): voucher size CHIP values 0..4,
+   *  4 = "4 or more"; absent = no size filter (never stored empty). Written
+   *  by every draft created since; read ONLY through bedroomSizesOfFilter. */
+  bedroomSizes?: number[];
+  /** @deprecated LEGACY stored shape (drafts saved before 2026-10-20): ONE
+   *  exact size. Read ONLY through bedroomSizesOfFilter, which reads it as
+   *  [min(n, 4)]; never written by new code, stored rows never rewritten. */
   bedroomSize?: number;
   excludeOptedOut: boolean;
   excludeUnreachable: boolean;

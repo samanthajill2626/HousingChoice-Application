@@ -7,19 +7,23 @@ deployed.
 
 ## STATE (replace each time)
 
-- Phase: SPEC APPROVED - rev 6 @5944de7e, approved by Cameron 2026-10-21 ("Yes, I
-  do"). Compaction gate A happens next; Cameron asked for it.
-- NEXT STEP after the compaction: write the detailed TDD implementation plan
-  for the approved spec at
+- Phase: PLAN DRAFTING (compaction gate A done 2026-10-21 17:22, 595k -> 28k).
+  Spec rev 6 @5944de7e is approved.
+- Plan sections 0-4 (binding: rules, copy, interfaces, slices, invariants,
+  AR1-AR3) committed @7ac1f2e3 in
   `docs/superpowers/plans/2026-10-21-flyer-leads-plan.md`.
-  - Enumerate every surface in spec section 4.
-  - Split it into slices: projection and tags, flyer page, the sign-up
-    route, the ledger and outcome, the dashboard renderers, the subzone
-    match, e2e, GLOSSARY.
-  - Run the adversarial PLAN review (2 opus reviewers in R1, then the
-    continued one, cap 4).
-  - Then the mission block, the launch gate (AUTO / MANUAL / Revise), and
-    compaction gate B.
+- In flight: six opus drafting agents (S1 app projection/tags/subzone, S2
+  dashboard flyer page/tags, S3 ledger/outcome, S4 sign-up route, S5 dashboard
+  renderers, S6 e2e/docs/gates). They write
+  `.superpowers/sdd/plan-drafts/S<n>.md` only.
+- NEXT STEP: when all six are in, rule on their CONTRACT ISSUES (add AR4+ to
+  plan section 4) and check the cross-slice names (S2/S5 accessible names vs
+  S6 selectors; S3 names vs S4). Then assemble the drafts verbatim as plan
+  sections 5-10, commit, and run the adversarial PLAN review (2 opus
+  reviewers in R1, then the continued one, cap 4). Then the mission block,
+  the launch gate (AUTO / MANUAL / Revise), and compaction gate B.
+- If this planner died: the drafting agents' results are lost with it, but
+  the drafts on disk survive. Re-dispatch only the missing slices.
 - Gate answers in rev 6:
   - O1 closed: the decline writers stamp `shares_op`;
   - the repeat limit is per contact per PROPERTY per 24 hours, with /join and
@@ -36,11 +40,7 @@ deployed.
 - Subzone auto-fill is NOT this mission. Its research is at
   `W:\tmp\subzone-autofill-research\research-report.md`. Cameron starts that session
   himself from the prompt given 2026-10-21; he rejected the start_session card.
-- NEXT STEP: adjudicate R1 into `design-review/adjudications.md`, revise the spec,
-  and continue the stronger reviewer for R2 with the RE-REVIEW CHARGE. Loop until a
-  round changes no decision (cap 4), then go to Cameron's spec gate, showing the
-  counts and every REJECT with its reason.
-- Planner calls inside the spec for Cameron to see at the gate:
+- Planner calls inside the spec that Cameron saw and accepted at the gate:
   - the heading fallback "Home for rent";
   - the thank-you text;
   - the typed name in the milestone label;

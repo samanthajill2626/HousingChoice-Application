@@ -32,8 +32,8 @@ const FLYER: PublicFlyer = {
   beds: 3,
   baths: 2,
   area: 'Decatur',
-  subzone: 'Oakhurst',
   voucher_size: 3,
+  voucher_sizes: [3],
   accepted_authorities: ['Atlanta (AHA)', 'DCA'],
   listing_link: 'https://external.example/listing/1',
   rent_min: 1800,
@@ -44,8 +44,13 @@ const FLYER: PublicFlyer = {
   application_fee: 40,
   same_day_rta: true,
   pets: 'Cats only',
+  no_pets: false,
+  pet_fee: null,
   accessibility: 'Ground floor',
   deposit: 1800,
+  deposit_one_month: false,
+  deposit_flexible: false,
+  washer_dryer: null,
   lease_terms: '12-month minimum',
   contact_number: '+15550009999',
 };
@@ -85,7 +90,8 @@ describe('FlyerPage', () => {
     renderPage();
 
     await screen.findByText('88 Sycamore St', { exact: false });
-    expect(screen.getByRole('heading', { name: /Oakhurst/i })).toBeInTheDocument();
+    // D11 / D3: the neighborhood line is the area alone.
+    expect(screen.getByRole('heading', { name: 'Decatur' })).toBeInTheDocument();
     // Detail rows are all present upfront (no gate).
     expect(screen.getByText('Deposit')).toBeInTheDocument();
     expect(screen.getByText('$1800')).toBeInTheDocument();
@@ -233,17 +239,17 @@ describe('FlyerPage', () => {
   });
 
   it('sms prefill falls back to neighborhood, then to "this home"', async () => {
-    // No address line1 -> neighborhood ("subzone, area").
+    // No address line1 -> the neighborhood (the area alone).
     getFlyer.mockResolvedValue({ ...FLYER, address: {} });
     const first = renderPage('/p/unit-1?cta=text');
     expect(await screen.findByRole('link', { name: /text us/i })).toHaveAttribute(
       'href',
-      'sms:+15550009999?&body=' + encodeURIComponent("I'm interested in Oakhurst, Decatur"),
+      'sms:+15550009999?&body=' + encodeURIComponent("I'm interested in Decatur"),
     );
     first.unmount();
 
     // No address AND no neighborhood -> "this home".
-    getFlyer.mockResolvedValue({ ...FLYER, address: {}, area: null, subzone: null });
+    getFlyer.mockResolvedValue({ ...FLYER, address: {}, area: null });
     renderPage('/p/unit-1?cta=text');
     expect(await screen.findByRole('link', { name: /text us/i })).toHaveAttribute(
       'href',
@@ -377,5 +383,111 @@ describe('FlyerPage', () => {
       expect(call[0]).toMatchObject({ unitId: 'unit-1' });
       expect(call[0]).not.toHaveProperty('housingAuthority');
     }
+  });
+});
+
+// D11 (property requirements spec 2026-10-20): the tenant-facing wording.
+describe('FlyerPage - D11 wording', () => {
+  async function renderFlyer(over: Partial<PublicFlyer>): Promise<void> {
+    getFlyer.mockResolvedValue({ ...FLYER, ...over });
+    renderPage();
+    await screen.findByText('88 Sycamore St', { exact: false });
+  }
+  /** The facts list item that reads exactly `text` (its <strong> included). */
+  const fact = (text: string): HTMLElement | null =>
+    screen.queryByText((_, el) => el?.tagName === 'LI' && el.textContent === text);
+  /** The detail row's value for `label`, or null when there is no such row. */
+  const detail = (label: string): string | null =>
+    screen.queryByText(label, { selector: 'dt' })?.nextElementSibling?.textContent ?? null;
+
+  it.each<[number[], string]>([
+    [[0], 'Fits a studio voucher'],
+    [[2], 'Fits a 2-bedroom voucher'],
+    [[2, 3], 'Fits a 2- or 3-bedroom voucher'],
+    [[0, 1], 'Fits a studio or 1-bedroom voucher'],
+    [[1, 2, 3], 'Fits a 1-, 2-, or 3-bedroom voucher'],
+    [[3, 2, 2], 'Fits a 2- or 3-bedroom voucher'],
+  ])('voucher sizes %j read "%s"', async (sizes, text) => {
+    await renderFlyer({ voucher_sizes: sizes, voucher_size: sizes[0] ?? null });
+    expect(fact(text)).not.toBeNull();
+  });
+
+  it('no voucher size: no voucher line', async () => {
+    await renderFlyer({ voucher_sizes: [], voucher_size: null });
+    expect(screen.queryByText(/Fits a/)).toBeNull();
+  });
+
+  it('Pets: "No pets", "No pets (<details>)" or the details; the pet fee is its own row', async () => {
+    await renderFlyer({ no_pets: true, pets: 'service animals only', pet_fee: '$300' });
+    expect(detail('Pets')).toBe('No pets (service animals only)');
+    expect(detail('Pet fee')).toBe('$300');
+  });
+
+  it('Pets: the checkbox alone reads "No pets"', async () => {
+    await renderFlyer({ no_pets: true, pets: null });
+    expect(detail('Pets')).toBe('No pets');
+    expect(detail('Pet fee')).toBeNull();
+  });
+
+  it('Pets: details alone read as written', async () => {
+    await renderFlyer({ no_pets: false, pets: 'Cats OK' });
+    expect(detail('Pets')).toBe('Cats OK');
+  });
+
+  it('a legacy boolean arrives already interpreted by the projection (true -> "Allowed", false -> No pets)', async () => {
+    await renderFlyer({ no_pets: false, pets: 'Allowed' });
+    expect(detail('Pets')).toBe('Allowed');
+  });
+
+  it('a blank pet fee shows no row', async () => {
+    await renderFlyer({ pet_fee: '   ' });
+    expect(detail('Pet fee')).toBeNull();
+  });
+
+  it.each<[Partial<PublicFlyer>, string]>([
+    [{ deposit_one_month: true, deposit: null }, "One month's rent"],
+    [{ deposit: 1800 }, '$1800'],
+    [{ deposit: 1800, deposit_flexible: true }, '$1800, flexible / payment plan available'],
+    [{ deposit_one_month: true, deposit: null, deposit_flexible: true }, "One month's rent, flexible / payment plan available"],
+    [{ deposit: null, deposit_flexible: true }, 'Flexible / payment plan available'],
+  ])('Deposit %j reads "%s"', async (over, text) => {
+    await renderFlyer(over);
+    expect(detail('Deposit')).toBe(text);
+  });
+
+  it('no deposit recorded: no Deposit row (the notes are staff only and never projected)', async () => {
+    await renderFlyer({ deposit: null, deposit_one_month: false, deposit_flexible: false });
+    expect(detail('Deposit')).toBeNull();
+  });
+
+  it('Application fee: "No application fee" for 0, "$N" otherwise, no row when absent', async () => {
+    await renderFlyer({ application_fee: 0 });
+    expect(detail('Application fee')).toBe('No application fee');
+  });
+
+  it('Application fee: no row when absent', async () => {
+    await renderFlyer({ application_fee: null });
+    expect(detail('Application fee')).toBeNull();
+  });
+
+  it.each<[PublicFlyer['washer_dryer'], string]>([
+    ['hookups', 'Hookups'],
+    ['included', 'Washer and dryer included'],
+    ['none', 'No hookups'],
+  ])('Washer / dryer %s reads "%s"', async (value, text) => {
+    await renderFlyer({ washer_dryer: value });
+    expect(detail('Washer / dryer')).toBe(text);
+  });
+
+  it('Washer / dryer: no row when not recorded', async () => {
+    await renderFlyer({ washer_dryer: null });
+    expect(detail('Washer / dryer')).toBeNull();
+  });
+
+  it('a stale subzone in the payload is never shown (D3: staff only)', async () => {
+    getFlyer.mockResolvedValue({ ...FLYER, subzone: 'Oakhurst' } as unknown as PublicFlyer);
+    renderPage();
+    expect(await screen.findByRole('heading', { name: 'Decatur' })).toBeInTheDocument();
+    expect(screen.queryByText(/Oakhurst/)).toBeNull();
   });
 });

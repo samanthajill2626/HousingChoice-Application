@@ -31,8 +31,12 @@ export interface PublicFlyer {
   beds: number | null;
   baths: number | null;
   area: string | null;
-  subzone: string | null;
+  /** The FIRST accepted size - kept for flyer pages opened before D11 (they
+   *  read it until they reload). This page reads `voucher_sizes`. */
   voucher_size: number | null;
+  /** D11: every voucher size the home takes, ascending (the projection's
+   *  acceptedVoucherSizes, so a home with none recorded falls back to beds). */
+  voucher_sizes: number[];
   /** The authorities whose vouchers this unit accepts - synthesized server-side
    *  from `accepted_authorities`, falling back to a legacy `jurisdiction` value
    *  (spec section 8; app/src/lib/unitFields.ts `authoritiesOf`). */
@@ -45,9 +49,18 @@ export interface PublicFlyer {
   video_url: string | null;
   application_fee: number | null;
   same_day_rta: boolean | null;
-  pets: string | boolean | null;
+  /** The pets details text. The projection already interprets a legacy
+   *  stored boolean (D1): true arrives as 'Allowed', false as no_pets. */
+  pets: string | null;
+  /** D11: the "No pets" rule. */
+  no_pets: boolean;
+  pet_fee: string | null;
   accessibility: string | null;
   deposit: number | null;
+  /** D11: the deposit is one month's rent (an alternative to `deposit`). */
+  deposit_one_month: boolean;
+  deposit_flexible: boolean;
+  washer_dryer: 'hookups' | 'included' | 'none' | null;
   lease_terms: string | null;
   contact_number: string | null;
 }

@@ -6,7 +6,8 @@
 // Two CTA variants, selected by ?cta=text (stripped from the URL on load so a
 // copied/shared address never carries it; sessionStorage keeps the variant
 // across a same-tab refresh):
-//   form (bare link)  - the IntakeForm signup funnel at the bottom.
+//   form (bare link)  - the IntakeForm sign-up for home alerts at the bottom
+//                       (flyer-leads D3: it never reads as a tour request).
 //   text (?cta=text)  - "I'm interested - text us": a tap-to-text sms: link to
 //                       our main business number (contact_number). No form -
 //                       these visitors are ALREADY onboarded.
@@ -425,16 +426,19 @@ export function FlyerPage(): React.JSX.Element {
               Thanks - you&apos;re all set!
             </h2>
             <p className={styles.muted}>
-              We&apos;ve got your info and a team member will be in touch.
+              We&apos;ll text you about this home and others that fit your voucher.
             </p>
           </>
         ) : (
           <>
-            <h2 className={styles.title}>Interested in this home?</h2>
+            {/* flyer-leads D3: alerts, never a tour request (Cameron approved
+                this copy; Sam reviews it after the build). */}
+            <h2 className={styles.title}>Sign up for home alerts</h2>
             <p className={styles.muted}>
-              Share your info and a team member will reach out about this home.
+              We&apos;ll text you about this home and others that fit your voucher.
+              Signing up does not book a tour.
             </p>
-            <IntakeForm onSubmit={handleIntakeSubmit} submitLabel="I'm interested" />
+            <IntakeForm onSubmit={handleIntakeSubmit} submitLabel="Sign up" />
           </>
         )}
       </div>

@@ -167,7 +167,7 @@ describe('FlyerPage', () => {
     await user.type(screen.getByLabelText(/phone number/i), '4045551234');
     // A2P/CTIA consent gate - the required checkbox must be checked to submit.
     await user.click(screen.getByRole('checkbox', { name: /I agree to receive/i }));
-    await user.click(screen.getByRole('button', { name: /i'm interested/i }));
+    await user.click(screen.getByRole('button', { name: 'Sign up' }));
 
     await waitFor(() => expect(submitHousingFair).toHaveBeenCalled());
     expect(submitHousingFair).toHaveBeenCalledWith(
@@ -181,10 +181,11 @@ describe('FlyerPage', () => {
     );
 
     // Only the CTA section swaps; the info above stays on screen and the form is gone.
-    const thanks = await screen.findByRole('heading', {
-      name: /you're all set|we've got your info/i,
-    });
+    const thanks = await screen.findByRole('heading', { name: "Thanks - you're all set!" });
     expect(thanks).toBeInTheDocument();
+    // flyer-leads D3: the thank-you promises alerts, never a call back.
+    expect(screen.getByText("We'll text you about this home and others that fit your voucher.")).toBeInTheDocument();
+    expect(screen.queryByText(/team member/i)).toBeNull();
     // a11y: on the thank-you swap (the conversion moment) focus moves to the new
     // heading so screen readers announce the state change.
     expect(thanks).toHaveFocus();
@@ -377,13 +378,13 @@ describe('FlyerPage', () => {
     await user.click(screen.getByRole('checkbox', { name: /I agree to receive/i }));
 
     // A 429: today's message, not the /join one.
-    await user.click(screen.getByRole('button', { name: /i'm interested/i }));
+    await user.click(screen.getByRole('button', { name: 'Sign up' }));
     expect(await screen.findByRole('alert')).toHaveTextContent(
       "Sorry, we couldn't send that. Please try again.",
     );
 
     // A not-listed refusal: still today's message.
-    await user.click(screen.getByRole('button', { name: /i'm interested/i }));
+    await user.click(screen.getByRole('button', { name: 'Sign up' }));
     await waitFor(() => expect(submitHousingFair).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole('alert')).toHaveTextContent(
       "Sorry, we couldn't send that. Please try again.",
@@ -668,5 +669,29 @@ describe('FlyerPage - the highlight and the authority line (flyer-leads D3)', ()
     getFlyer.mockResolvedValue(FLYER);
     renderPage();
     expect(await screen.findByText('Accepts: Atlanta (AHA), DCA')).toHaveClass(styles.authorities!);
+  });
+});
+
+// flyer-leads D3 item 8: tenants filled the box in as if it booked a tour.
+describe('FlyerPage - the sign-up box (flyer-leads D3)', () => {
+  it('the bare-link box says what it is: home alerts, not a tour', async () => {
+    getFlyer.mockResolvedValue(FLYER);
+    renderPage();
+    expect(await screen.findByRole('heading', { level: 2, name: 'Sign up for home alerts' })).toBeInTheDocument();
+    expect(
+      screen.getByText("We'll text you about this home and others that fit your voucher. Signing up does not book a tour."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign up' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Interested in this home?' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /interested/i })).toBeNull();
+    expect(screen.queryByText(/team member/i)).toBeNull();
+  });
+
+  it('(PIN) the ?cta=text variant keeps its copy', async () => {
+    getFlyer.mockResolvedValue(FLYER);
+    renderPage('/p/unit-1?cta=text');
+    expect(await screen.findByRole('heading', { level: 2, name: 'Interested in this home?' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: "I'm interested - text us" })).toBeInTheDocument();
+    expect(screen.queryByText('Sign up for home alerts')).toBeNull();
   });
 });

@@ -460,6 +460,9 @@ function milestoneVariant(type: TimelineMilestoneType): string {
     case 'tour_took_place':
     case 'tour_outcome':
     case 'placement_closed':
+    // flyer-leads D6: a flyer / join sign-up is a positive lead signal - the
+    // existing green colour, no new token.
+    case 'signed_up':
       return styles.green ?? '';
     default:
       return styles.neutral ?? '';

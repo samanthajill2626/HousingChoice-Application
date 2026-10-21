@@ -440,6 +440,43 @@ describe('Timeline', () => {
     expect(link.parentElement?.className).toContain('neutral');
   });
 
+  // flyer-leads D6: the sign-up pin. A flyer sign-up for a shareable property
+  // carries refType 'unit', so the generic unit deep-link makes the pin a link
+  // to the property page. Its colour is the existing green (a positive lead
+  // signal) - no new token.
+  it('renders a signed_up milestone with a unit ref as a green pin linking to the property', () => {
+    const signedUp: TimelineItem = {
+      kind: 'milestone',
+      id: 'ms-signed-up',
+      at: '2026-06-08T08:00:00',
+      type: 'signed_up',
+      label: 'Signed up from the flyer for 12 Oak St as Tia Moss',
+      refType: 'unit',
+      refId: 'u1',
+    };
+    renderTimeline({ items: [signedUp] });
+    const link = screen.getByRole('link', { name: 'Signed up from the flyer for 12 Oak St as Tia Moss' });
+    expect(link).toHaveAttribute('href', '/listings/u1');
+    expect(link.parentElement?.className).toContain('green');
+  });
+
+  // flyer-leads D6: the /join pin and the not-shareable flyer pin carry no
+  // ref - a plain (non-link) green pin showing the server's label verbatim.
+  it('renders a signed_up milestone with no ref as a plain green pin', () => {
+    const joined: TimelineItem = {
+      kind: 'milestone',
+      id: 'ms-joined',
+      at: '2026-06-08T08:00:00',
+      type: 'signed_up',
+      label: 'Signed up on the join page as Tia Moss',
+    };
+    renderTimeline({ items: [joined] });
+    const text = screen.getByText('Signed up on the join page as Tia Moss');
+    expect(text.closest('a')).toBeNull();
+    // pillText span -> pill span -> the event div that carries the variant.
+    expect(text.parentElement?.parentElement?.className).toContain('green');
+  });
+
   it('hides milestones when "Comms only" is toggled', () => {
     renderTimeline({ items: [MESSAGE_IN, MILESTONE, NUMBER_ADDED] });
     expect(screen.getByText(/Placement opened/)).toBeInTheDocument();

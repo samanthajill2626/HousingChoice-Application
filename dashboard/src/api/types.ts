@@ -2929,7 +2929,10 @@ export type TimelineMilestoneType =
   // last-heard-from spec 5.4: mirrors the server union (activityEventsRepo.ts).
   | 'listing_declined'
   | 'listing_decline_cleared'
-  | 'listing_interested';
+  | 'listing_interested'
+  // flyer-leads D6: mirrors the server union (activityEventsRepo.ts) - a flyer
+  // or /join sign-up pin; a shareable flyer's pin carries refType 'unit'.
+  | 'signed_up';
 
 interface TimelineBase {
   id: string;

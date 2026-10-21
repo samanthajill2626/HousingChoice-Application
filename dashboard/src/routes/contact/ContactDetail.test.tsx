@@ -3371,3 +3371,93 @@ describe('ContactDetail - the per-contact dialogs across a contact change (code 
     expect(within(other).queryByRole('alert')).toBeNull();
   });
 });
+
+// Code review R2D-9: the three tenant-page flags of the RD-4 reset that no
+// case pinned - Start placement, Schedule a tour, and the tour's property
+// override (an Interested row's property). Left set, "New placement" and
+// "Schedule a tour" re-opened on the next tenant's page bound to that tenant,
+// and the override pre-committed one tenant's clicked property as another
+// tenant's tour.
+describe('ContactDetail - the tenant-page dialogs across a contact change (code review R2D-9)', () => {
+  type User = { click: (el: Element) => Promise<void> };
+  const SENT_UNITS: UnitItem[] = [
+    { unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' },
+    { unitId: 'u2', landlordId: 'L1', status: 'available', beds: 1, address: '88 Sycamore St' },
+  ];
+
+  function renderWithNav(): void {
+    getContact.mockImplementation((id: unknown) => Promise.resolve(id === 'z99' ? OTHER : TENANT));
+    render(
+      <MemoryRouter initialEntries={['/contacts/k1']}>
+        <ImageViewerProvider>
+          <Routes>
+            <Route
+              path="/contacts/:contactId"
+              element={
+                <>
+                  <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                  <Link to="/contacts/k1">NAV-TO-TENANT</Link>
+                  <ContactDetail />
+                </>
+              }
+            />
+          </Routes>
+        </ImageViewerProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  const OPENERS: Array<[string, (user: User) => Promise<void>]> = [
+    ['New placement', async (user) => user.click(await screen.findByRole('button', { name: 'Start a placement' }))],
+    ['Schedule a tour', async (user) => user.click(await screen.findByRole('button', { name: 'Schedule a tour' }))],
+  ];
+
+  it.each(OPENERS)(
+    'a "%s" dialog left open on one tenant closes on the contact change and does not re-open on coming back',
+    async (title, open) => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      renderWithNav();
+      await screen.findByText('Tasha Williams');
+      await open(user);
+      await screen.findByRole('dialog', { name: title });
+
+      await user.click(screen.getByText('NAV-TO-OTHER'));
+      // The other tenant's page has loaded (its name can also sit in a
+      // re-opened dialog, so any match will do).
+      await screen.findAllByText('Bob Other');
+      expect(screen.queryByRole('dialog', { name: title })).toBeNull();
+
+      await user.click(screen.getByText('NAV-TO-TENANT'));
+      await screen.findAllByText('Tasha Williams');
+      expect(screen.queryByRole('dialog', { name: title })).toBeNull();
+    },
+  );
+
+  it("an Interested row's property on one tenant never pre-commits the next tenant's tour", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getAllUnits.mockResolvedValue(SENT_UNITS);
+    getContactListingsSent.mockImplementation((id: unknown) =>
+      Promise.resolve(
+        id === 'z99'
+          ? [{ contactId: 'z99', unitId: 'u2', sentAt: '2026-07-13T15:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true }]
+          : [{ contactId: 'k1', unitId: 'u1', sentAt: '2026-07-01T15:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true }],
+      ),
+    );
+    renderWithNav();
+    // k1's Interested on 1450 Joseph Blvd opens the tour form on THAT property.
+    await user.click(await screen.findByRole('button', { name: 'Mark Tasha Williams interested in 1450 Joseph Blvd' }));
+    const first = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    await waitFor(() => expect(within(first).getByRole('combobox', { name: 'Unit' })).toHaveValue('1450 Joseph Blvd'));
+
+    // Move to tenant z99 (its Properties sent has loaded) and schedule a tour there.
+    await user.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByRole('button', { name: 'Mark Bob Other interested in 88 Sycamore St' });
+    expect(screen.queryByRole('dialog', { name: 'Schedule a tour' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Schedule a tour' }));
+    const next = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    // z99's own latest send - never k1's clicked property.
+    await waitFor(() => expect(within(next).getByRole('combobox', { name: 'Unit' })).toHaveValue('88 Sycamore St'));
+  });
+});

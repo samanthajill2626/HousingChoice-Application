@@ -50,7 +50,7 @@ import {
   UsageError,
   type RepairOptions,
 } from '../scripts/repair-share-outcomes.js';
-import { seedListingSend } from './helpers/listingSendSeed.js';
+import { seedFlyerSignUp, seedListingSend } from './helpers/listingSendSeed.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -803,6 +803,24 @@ describe.skipIf(!reachable)('repair-share-outcomes (spec D8) against DynamoDB Lo
     expect(deriveBroadcastStats(share)).toMatchObject({ sending: 0, sent: 1 });
     expect((await ledgerOf('b-20'))?.shares?.['b-20']).toMatchObject({ attempt: k.ROOT, state: 'counted', by: 'acceptance' });
     expect(await run('b-20', false)).toMatchObject({ slotsToMove: 0 });
+  });
+
+  it("flyer-leads D7 watch: a pair that ALSO holds a flyer entry is not mis-forecast - the slot stuck sent over its failed row moves to failed, the pair stays counted by the flyer entry (an update: pairsToUncount 0), and its sentAt / broadcastId follow the flyer entry; a second run forecasts nothing", async () => {
+    const k = ids('b-fly');
+    await seedShareWithChain({ broadcastId: 'b-fly', slotStatus: 'sent', rows: [{ tsMsgId: k.ROOT, status: 'failed', errorCode: '30007' }] });
+    await seedListingSend(listingSends, { unitId: k.unitId, contactId: k.contactId, sentAt: T_ROOT, broadcastId: 'b-fly' });
+    const SIGNED_UP_AT = '2026-09-28T11:30:00.000Z';
+    await seedFlyerSignUp(listingSends, { unitId: k.unitId, contactId: k.contactId, signedUpAt: SIGNED_UP_AT });
+    // Contrast: the same fixture without the flyer entry forecasts pairsToUncount 1 (the b-4 case above).
+    expect(await run('b-fly', false)).toMatchObject({ slotsToMove: 1, rowsToCreate: 0, pairsToRecount: 0, pairsToUncount: 0 });
+    expect(await run('b-fly', true)).toMatchObject({ slotsMoved: 1, rowsCreated: 0, pairsRecounted: 0, pairsUncounted: 0 });
+    expect(await slotOf('b-fly')).toMatchObject({ status: 'failed', errorCode: '30007' });
+    const row = await ledgerOf('b-fly');
+    expect(row).toMatchObject({ counted: true, sentAt: SIGNED_UP_AT });
+    expect(row).not.toHaveProperty('broadcastId');
+    expect(row?.shares?.['b-fly']).toMatchObject({ state: 'failed' });
+    expect(row?.shares?.['flyer']).toMatchObject({ state: 'counted', by: 'acceptance', countedAt: SIGNED_UP_AT });
+    expect(await run('b-fly', false)).toMatchObject({ slotsToMove: 0, rowsToCreate: 0, pairsToRecount: 0, pairsToUncount: 0 });
   });
 
   it('the CLI contract: --env local|dev|prod, --lane with local only, --broadcast <id>, --apply; anything else is a usage error', () => {

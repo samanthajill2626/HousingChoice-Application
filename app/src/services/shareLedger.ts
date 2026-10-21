@@ -14,6 +14,11 @@
  * entry counted by a delivery is terminal (I2). A legacy row's first write
  * seeds its memory from the row itself.
  *
+ * flyer-leads D7: a flyer sign-up is one more share entry (key `flyer`,
+ * applyFlyerShareEntry) - refused while the pair holds a CURRENT decline,
+ * decided on each round's read (O1: a decline stamps the token, so a decline
+ * that lands mid-loop is seen on the forced re-read).
+ *
  * Imports repos and libs only - never a job module. Log lines carry ids only.
  */
 import type { Logger } from '../lib/logger.js';
@@ -22,7 +27,8 @@ import type { ListingSendItem, ListingSendsRepo, ShareLedgerEntry, ShareMemoryWr
 import { RETRIED_ERROR_CODE } from '../lib/retrySendWindow.js';
 import { SEND_UNCONFIRMED_CODE } from '../lib/sendOutcome.js';
 import { INDIVIDUAL_ATTEMPT_KEY, LEGACY_ATTEMPT_KEY, attemptKeyTimestampMs, compareAttemptKeys } from '../lib/shareAttemptOrder.js';
-import { FLYER_SHARE_KEY, INDIVIDUAL_SHARE_KEY, latestCountedShareKey } from '../lib/shareLedgerKeys.js';
+import { effectiveDecline } from '../lib/listingSendOutcome.js';
+import { FLYER_SHARE_KEY, INDIVIDUAL_SHARE_KEY, flyerAttemptKey, latestCountedShareKey } from '../lib/shareLedgerKeys.js';
 
 export type ShareLedgerOutcome =
   | { kind: 'accepted' }
@@ -173,6 +179,40 @@ export function ledgerEntryForSlot(slot: BroadcastRecipient, conversationId: str
   }
 }
 
+/** What one run of the ledger loop decided. `'vetoed'` = the caller's veto refused the write on a read. */
+type LedgerLoopResult = 'written' | 'refused' | 'lost' | 'vetoed';
+
+/**
+ * The ONE read-modify-write loop every ledger write runs (spec D7): read
+ * consistently; let `veto` refuse the write on THAT read (flyer-leads D7: the
+ * flyer's current-decline refusal - decided on each round's read, so a decline
+ * that lands mid-loop is seen on the re-read its token change forces, O1);
+ * seed a legacy row's memory, apply the order rule, summarize, write on the
+ * token. A lost condition re-reads and re-applies up to MAX_REAPPLY times,
+ * then ONE ERROR (`lostLine`, ids only: the pair, `lostIds`, the attempt and
+ * its state) and `'lost'`.
+ */
+async function applyLedgerLoop(
+  deps: ShareLedgerDeps,
+  args: { unitId: string; contactId: string; shareKey: string; entry: ShareLedgerEntry },
+  opts: { veto?: (row: ListingSendItem | undefined) => boolean; lostLine: string; lostIds: Record<string, string> },
+): Promise<LedgerLoopResult> {
+  for (let round = 0; round <= MAX_REAPPLY; round += 1) {
+    const row = await deps.listingSends.getByKeyConsistent(args.unitId, args.contactId);
+    if (opts.veto !== undefined && opts.veto(row)) return 'vetoed';
+    const shares = seeded(row);
+    if (!mayReplace(shares[args.shareKey], args.entry)) return 'refused';
+    shares[args.shareKey] = args.entry;
+    const next: ShareMemoryWrite = { shares, ...summarize(shares) };
+    if (await deps.listingSends.putShareMemory(args.unitId, args.contactId, next, { token: row?.shares_op })) return 'written';
+  }
+  deps.log.error(
+    { unitId: args.unitId, contactId: args.contactId, ...opts.lostIds, attempt: args.entry.attempt, state: args.entry.state },
+    opts.lostLine,
+  );
+  return 'lost';
+}
+
 /**
  * Apply one share's entry to the pair's row: read consistently, seed a legacy
  * row's memory, apply the order rule, summarize, write on the token. A lost
@@ -183,17 +223,56 @@ export async function applyShareLedgerEntry(
   deps: ShareLedgerDeps,
   args: { unitId: string; contactId: string; broadcastId: string; entry: ShareLedgerEntry },
 ): Promise<'written' | 'refused' | 'lost'> {
-  for (let round = 0; round <= MAX_REAPPLY; round += 1) {
-    const row = await deps.listingSends.getByKeyConsistent(args.unitId, args.contactId);
-    const shares = seeded(row);
-    if (!mayReplace(shares[args.broadcastId], args.entry)) return 'refused';
-    shares[args.broadcastId] = args.entry;
-    const next: ShareMemoryWrite = { shares, ...summarize(shares) };
-    if (await deps.listingSends.putShareMemory(args.unitId, args.contactId, next, { token: row?.shares_op })) return 'written';
-  }
-  deps.log.error(
-    { unitId: args.unitId, contactId: args.contactId, broadcastId: args.broadcastId, attempt: args.entry.attempt, state: args.entry.state },
-    'share ledger: the entry write lost its condition past the re-read bound - the repair heals it',
+  const result = await applyLedgerLoop(
+    deps,
+    { unitId: args.unitId, contactId: args.contactId, shareKey: args.broadcastId, entry: args.entry },
+    {
+      lostLine: 'share ledger: the entry write lost its condition past the re-read bound - the repair heals it',
+      lostIds: { broadcastId: args.broadcastId },
+    },
   );
-  return 'lost';
+  // No veto is passed, so the loop never answers 'vetoed' here.
+  return result === 'vetoed' ? 'refused' : result;
+}
+
+/** flyer-leads D7 (plan 2.2, AR2): what a flyer sign-up's ledger write did. */
+export type FlyerShareResult = 'written' | 'declined' | 'refused' | 'lost';
+
+/**
+ * flyer-leads D7: record a flyer sign-up for (unitId, contactId) at
+ * `signedUpAt` (ISO with ms): ONE counted-by-acceptance entry under the
+ * `flyer` key whose attempt is `<signedUpAt>#flyer`, so the pair's sentAt
+ * moves to the sign-up and it reads `signed_up` (D8); no "Property sent"
+ * milestone is written here. Same loop as applyShareLedgerEntry plus ONE
+ * refusal, decided on EACH round's consistent read: a CURRENT decline
+ * (effectiveDecline(row, undefined) - at or after the row's sentAt, or any
+ * decline on a row with none; tours are not consulted) answers 'declined',
+ * writes nothing and logs at INFO. A sign-up never clears a decline, so a
+ * public request never undoes a staff decision; the refusal is the flyer's
+ * ONLY - a broadcast or individual share still supersedes a decline.
+ * 'refused' = the order rule kept the stored flyer entry (an equal or newer
+ * sign-up instant - AR2). 'lost' = token retries exhausted, ONE ERROR with the
+ * flyer's own line: the repair walks broadcast slots only, so it never heals
+ * a flyer entry. Log lines carry ids only.
+ */
+export async function applyFlyerShareEntry(
+  deps: ShareLedgerDeps,
+  args: { unitId: string; contactId: string; signedUpAt: string },
+): Promise<FlyerShareResult> {
+  const entry = ledgerEntryFor(flyerAttemptKey(args.signedUpAt), undefined, { kind: 'accepted' });
+  const result = await applyLedgerLoop(
+    deps,
+    { unitId: args.unitId, contactId: args.contactId, shareKey: FLYER_SHARE_KEY, entry },
+    {
+      veto: (row) => effectiveDecline(row ?? {}, undefined),
+      lostLine:
+        'share ledger: the flyer entry write lost its condition past the re-read bound - not repaired (the repair walks broadcast slots only)',
+      lostIds: { shareKey: FLYER_SHARE_KEY },
+    },
+  );
+  if (result === 'vetoed') {
+    deps.log.info({ unitId: args.unitId, contactId: args.contactId }, 'share ledger: flyer entry not written - the pair holds a current decline');
+    return 'declined';
+  }
+  return result;
 }

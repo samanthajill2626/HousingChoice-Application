@@ -27,6 +27,7 @@ import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
 import type { AppConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import { seedFlyerSignUp } from './helpers/listingSendSeed.js';
 import type { ConversationItem, ConversationType } from '../src/repos/conversationsRepo.js';
 import {
   isoHoursFromNow,
@@ -1524,6 +1525,22 @@ describe('GET /api/contacts/:id/timeline - the tenant Property sent words (share
     const res = await authedGet(app, `/api/contacts/${TENANT_D6}/timeline`);
     expect(res.status).toBe(200);
     expect(pinLabels(res.body)).toEqual(['Property text failed', 'Property sent', 'Property sent', 'Property text failed']);
+  });
+
+  it('flyer-leads D7 residual (PIN): a flyer entry on a pair no share counted makes its pair-read pins read Property sent; the pin of the share whose entry failed keeps Property text failed', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedTenant(world);
+    await seedEntry(world, 'u-fly', 'b-x', { attempt: buildTsMsgId(minutesAgo(90), 'SMx'), state: 'failed' });
+    await seedPin(world, 'u-fly', 50); // a pre-branch pin (no share id): reads the PAIR
+    await seedPin(world, 'u-fly', 40, 'b-x'); // the failed share's own pin: reads ITS entry
+    const before = await authedGet(app, `/api/contacts/${TENANT_D6}/timeline`);
+    expect(before.status).toBe(200);
+    expect(pinLabels(before.body)).toEqual(['Property text failed', 'Property text failed']);
+
+    await seedFlyerSignUp(world.listingSendsRepo, { unitId: 'u-fly', contactId: TENANT_D6, signedUpAt: minutesAgo(10) });
+    const after = await authedGet(app, `/api/contacts/${TENANT_D6}/timeline`);
+    expect(after.status).toBe(200);
+    expect(pinLabels(after.body)).toEqual(['Property sent', 'Property text failed']);
   });
 
   it('a ledger read failure leaves the stored labels and logs one ERROR', async () => {

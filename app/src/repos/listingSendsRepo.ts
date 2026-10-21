@@ -104,7 +104,7 @@ export interface ListingSendItem {
   updated_at: string;
   /** share-sent-outcome D7: true while any share entry counts; ABSENT on a legacy row = counted. */
   counted?: boolean;
-  /** share-sent-outcome D7: the per-share memory, keyed by broadcastId (or `individual`). Absent on a legacy row. */
+  /** share-sent-outcome D7: the per-share memory, keyed by broadcastId (or `individual`, or `flyer` for a flyer sign-up - flyer-leads D7). Absent on a legacy row. */
   shares?: Record<string, ShareLedgerEntry>;
   /** share-sent-outcome D7: the change token every putShareMemory stamps - and, since flyer-leads O1, every setDeclined / clearDeclined (a random id, never a clock). */
   shares_op?: string;

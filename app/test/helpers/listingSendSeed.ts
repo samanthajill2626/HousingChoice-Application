@@ -13,11 +13,11 @@
 import { createLogger } from '../../src/lib/logger.js';
 import type { ListingSendsRepo, ShareLedgerEntry } from '../../src/repos/listingSendsRepo.js';
 import { INDIVIDUAL_ATTEMPT_KEY, LEGACY_ATTEMPT_KEY } from '../../src/lib/shareAttemptOrder.js';
-import { applyShareLedgerEntry } from '../../src/services/shareLedger.js';
+import { applyFlyerShareEntry, applyShareLedgerEntry } from '../../src/services/shareLedger.js';
 
 /** The entry key of an individual send (the service's own key for a seeded row with no share id). */
 const INDIVIDUAL_KEY = 'individual';
-/** The service logs only a lost write, which this helper throws on anyway. */
+/** The service logs only a lost write or a refused flyer write, which these helpers throw on anyway. */
 const log = createLogger({ level: 'silent' });
 
 export async function seedListingSend(
@@ -36,5 +36,22 @@ export async function seedListingSend(
   );
   if (result !== 'written') {
     throw new Error(`seedListingSend: the seed write for ${args.unitId}|${args.contactId} was ${result}`);
+  }
+}
+
+/**
+ * flyer-leads D7: seed a flyer sign-up's share entry on a pair THROUGH the
+ * service's own writer (applyFlyerShareEntry), so the entry, the pair's
+ * sentAt and its broadcastId come from the service and never diverge from
+ * what a sign-up writes. Anything but 'written' (a current decline, an equal
+ * or older sign-up instant, a lost write) throws: a seed never fails silently.
+ */
+export async function seedFlyerSignUp(
+  repo: Pick<ListingSendsRepo, 'getByKeyConsistent' | 'putShareMemory'>,
+  args: { unitId: string; contactId: string; signedUpAt: string },
+): Promise<void> {
+  const result = await applyFlyerShareEntry({ listingSends: repo, log }, args);
+  if (result !== 'written') {
+    throw new Error(`seedFlyerSignUp: the flyer write for ${args.unitId}|${args.contactId} was ${result}`);
   }
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Contact } from '../../api/index.js';
 import {
   contactDisplayName,
+  contactHeaderName,
   contactStatusLabel,
   dayKey,
   formatAddress,
@@ -137,15 +138,39 @@ describe('contactDisplayName', () => {
   });
 });
 
-// Code review RD-9: the ONE name rule for copy that names a landlord (the
-// property Requirements card, the New property form's lines).
+// Code review RD-9, amended by worklist OR-33 (R2D-4): the ONE name rule for
+// copy that names a landlord (the property Requirements card, the New
+// property form's lines) is exactly the contact page header's name - plan
+// 1.1's <L> is "the landlord contact's display name as the page already shows
+// it" - so it agrees with the header and the New form's own landlord picker.
+// There is NO company step.
 describe('landlordDisplayName', () => {
   const landlord = (over: Partial<Contact>): Contact => ({ contactId: 'L1', type: 'landlord', ...over });
 
-  it('prefers the name, then the company, then the default phone', () => {
+  it('prefers the name, then the default phone - never the company', () => {
     expect(landlordDisplayName(landlord({ firstName: 'Rosa', lastName: 'Kim', company: 'Kim Realty' }))).toBe('Rosa Kim');
-    expect(landlordDisplayName(landlord({ company: 'Kim Realty', phone: '+14045550100' }))).toBe('Kim Realty');
+    expect(landlordDisplayName(landlord({ company: 'Kim Realty', phone: '+14045550100' }))).toBe('(404) 555-0100');
     expect(landlordDisplayName(landlord({ phone: '+14045550100' }))).toBe('(404) 555-0100');
+  });
+
+  it('is exactly the name the contact page header shows, for every shape of contact', () => {
+    const shapes: Contact[] = [
+      landlord({ firstName: 'Rosa', lastName: 'Kim', company: 'Kim Realty', phone: '+14045550100' }),
+      landlord({ lastName: 'Kim' }),
+      landlord({ company: 'Kim Realty', phones: [{ phone: '+14045550100', primary: true }] }),
+      landlord({
+        phones: [
+          { phone: '+14045550111', primary: false, lastSeenAt: '2026-10-01T00:00:00.000Z' },
+          { phone: '+14045550122', primary: false, lastSeenAt: '2026-10-09T00:00:00.000Z' },
+        ],
+        phone: '+14045550199',
+      }),
+      landlord({ company: 'Kim Realty' }),
+      landlord({}),
+    ];
+    for (const c of shapes) expect(landlordDisplayName(c)).toBe(contactHeaderName(c));
+    // The header's phone choice: the most recent of phones[] when none is primary.
+    expect(contactHeaderName(shapes[3]!)).toBe('(404) 555-0122');
   });
 
   it('takes the primary of phones[] before any legacy phone, as the contact page header does', () => {
@@ -162,10 +187,22 @@ describe('landlordDisplayName', () => {
     ).toBe('(404) 555-0100');
   });
 
-  it('says "Unknown contact" only when there is no name, company or phone', () => {
+  it('says "Unknown contact" when there is no name and no phone - as the header does, a company or not', () => {
     expect(landlordDisplayName(landlord({}))).toBe('Unknown contact');
+    expect(landlordDisplayName(landlord({ company: 'Kim Realty' }))).toBe('Unknown contact');
     // Whitespace-only parts are nothing.
     expect(landlordDisplayName(landlord({ firstName: '  ', company: '   ', phone: '+14045550100' }))).toBe('(404) 555-0100');
-    expect(landlordDisplayName(landlord({ company: ' Kim Realty ' }))).toBe('Kim Realty');
+  });
+});
+
+// Worklist OR-33: the contact page header's name, the ONE expression the header
+// and landlordDisplayName share.
+describe('contactHeaderName', () => {
+  it('first + last name, trimmed; else the default phone; else "Unknown contact"', () => {
+    expect(contactHeaderName({ contactId: 'k1', type: 'tenant', firstName: ' Tasha ', lastName: 'Williams ' })).toBe(
+      'Tasha Williams',
+    );
+    expect(contactHeaderName({ contactId: 'k1', type: 'tenant', phone: '+14040100007' })).toBe('(404) 010-0007');
+    expect(contactHeaderName({ contactId: 'k1', type: 'tenant' })).toBe('Unknown contact');
   });
 });

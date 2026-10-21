@@ -81,7 +81,8 @@ const FORM_ID = 'unit-create-form';
 interface FilledFrom {
   landlordId: string;
   /** <L> in the note: landlordDisplayName, the ONE landlord name rule the
-   *  property Requirements card uses too (code review RD-9). */
+   *  property Requirements card uses too (code review RD-9) - the contact page
+   *  header's name, which this form's landlord picker shows as well (OR-33). */
   name: string;
   /** D5: sent as `requirements_snapshot` while this landlord is the body's. */
   snapshot: RequirementsSnapshotWire;
@@ -370,8 +371,8 @@ export function UnitCreateForm({
     }
   }
 
-  // C6: <L> is the landlord's name (landlordDisplayName, code review RD-9)
-  // once either read has landed.
+  // C6: <L> is the landlord's name (landlordDisplayName, code review RD-9 and
+  // worklist OR-33) once either read has landed.
   const statusName = lockedLandlordLabel ?? 'the landlord';
   const filledNote =
     landlordRead === 'done' && filled !== null && filled.landlordId === resolvedLandlordId && filled.hasRequirements

@@ -805,14 +805,16 @@ describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", ()
     expect(sentBody()['requirements_snapshot']).toEqual(ROSA_SNAPSHOT);
   });
 
-  // Code review RD-9: the note, the loading line and the failure line name the
-  // landlord by the ONE landlord name rule (landlordDisplayName, shared with
-  // the property Requirements card): the company, then the primary of
-  // phones[] - never "Unknown contact" while either exists.
+  // Code review RD-9, amended by worklist OR-33 (R2D-4): the note, the loading
+  // line and the failure line name the landlord by the ONE landlord name rule
+  // (landlordDisplayName, shared with the property Requirements card) - the
+  // contact page header's name: first + last, else the primary of phones[],
+  // never the company - so they agree with this form's own landlord picker.
   const KIM_REALTY: Contact = {
     contactId: 'contact-landlord-0001',
     type: 'landlord',
     company: 'Kim Realty',
+    phones: [{ phone: '+14045550123', primary: true }],
     req_credit_requirements: '600+',
   };
   const PHONES_ONLY: Contact = {
@@ -825,9 +827,25 @@ describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", ()
     req_credit_requirements: '600+',
   };
   const NAMED_BY_THE_RULE: Array<[string, Contact, string]> = [
-    ['a company-only landlord', KIM_REALTY, 'Kim Realty'],
+    ['a company-only landlord', KIM_REALTY, '(404) 555-0123'],
     ['a landlord with only phones[]', PHONES_ONLY, '(404) 555-0100'],
   ];
+
+  // Code review R2D-4: one landlord, one name - the picker's committed value
+  // and the note under the Requirements heading.
+  it('the picker: a company-only landlord reads as the same name in the owner field and in the note', async () => {
+    const user = userEvent.setup();
+    getAllContacts.mockResolvedValue([KIM_REALTY, GENE]);
+    setup();
+    const owner = screen.getByRole('combobox', { name: 'Owning landlord' });
+    await user.type(owner, '555-0123');
+    await user.click(await screen.findByRole('option', { name: /\(404\) 555-0123/ }));
+    expect(owner).toHaveValue('(404) 555-0123');
+    expect(
+      await screen.findByText("Filled in from (404) 555-0123's requirements. Change anything that is different for this property."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Kim Realty/)).toBeNull();
+  });
 
   it.each(NAMED_BY_THE_RULE)('%s: the loading line and the note name it by the landlord name rule', async (_label, landlord, name) => {
     getAllContacts.mockResolvedValue([landlord]);
@@ -844,6 +862,9 @@ describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", ()
       await screen.findByText(`Filled in from ${name}'s requirements. Change anything that is different for this property.`),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Unknown contact/)).toBeNull();
+    // The locked box names it the same way.
+    expect(screen.getAllByText(name).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Kim Realty/)).toBeNull();
   });
 
   it.each(NAMED_BY_THE_RULE)('%s: the failure line names it by the landlord name rule', async (_label, landlord, name) => {
@@ -856,6 +877,7 @@ describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", ()
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Unknown contact/)).toBeNull();
+    expect(screen.queryByText(/Kim Realty/)).toBeNull();
   });
 });
 

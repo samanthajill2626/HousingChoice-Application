@@ -87,7 +87,7 @@ import { SUGGESTION_TARGET_LABEL, suggestionFor } from './suggestionTargets.js';
 import { useContactTimeline } from './useContactTimeline.js';
 import { useContactFile } from './useContactFile.js';
 import { useMarkContactRead } from './useMarkContactRead.js';
-import { contactDisplayName } from './format.js';
+import { contactHeaderName } from './format.js';
 import { contactPhones, defaultPhone } from './contactPhones.js';
 import { landlordUnits } from './buildContactFile.js';
 import {
@@ -659,7 +659,10 @@ export function ContactDetail(): React.JSX.Element {
           : { label: kindLabel, cls: styles.pillTenant };
   const phones = contactPhones(contact);
   const target = defaultPhone(phones);
-  const name = contactDisplayName(contact.firstName, contact.lastName, target?.phone);
+  // The ONE expression the landlord name rule shares (landlordDisplayName,
+  // worklist OR-33): the property card and the New property form name a
+  // landlord exactly as this header does.
+  const name = contactHeaderName(contact);
 
   // firstName/lastName can be WRITTEN or SUGGESTED for a tenant OR unknown contact
   // (apply.ts), but the name lives in the header - not a file-pane row - so its

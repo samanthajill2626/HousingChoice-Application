@@ -148,17 +148,22 @@ export function contactDisplayName(
   return 'Unknown contact';
 }
 
-/** The ONE name rule for copy that names a LANDLORD (code review RD-9): the
- *  property Requirements card's "<L> has no requirements recorded yet." and
- *  the New property form's note, loading and failure lines. First + last
- *  name; else the company (a landlord is often a company); else the default
- *  phone exactly as the contact page header picks it (the primary of
- *  phones[], before any legacy single phone - contactPhones / defaultPhone);
- *  "Unknown contact" only when none of them exists. */
+/** The name the contact page HEADER shows for a contact (ContactDetail): the
+ *  trimmed first + last name; else the default phone (contactPhones /
+ *  defaultPhone: the primary of phones[], else the most recent, else the
+ *  first, before any legacy single phone), formatted; else "Unknown contact".
+ *  The header and landlordDisplayName share this ONE expression. */
+export function contactHeaderName(contact: Contact): string {
+  return contactDisplayName(contact.firstName, contact.lastName, defaultPhone(contactPhones(contact))?.phone);
+}
+
+/** The ONE name rule for copy that names a LANDLORD: the property
+ *  Requirements card's "<L> has no requirements recorded yet." and the New
+ *  property form's note, loading and failure lines. Worklist OR-33 (code
+ *  review R2D-4, amends the RD-9 ruling): plan 1.1's <L> is "the landlord
+ *  contact's display name as the page already shows it", so this is exactly
+ *  the contact page header's name (contactHeaderName) - with NO company step -
+ *  and it agrees with the header and with the New form's landlord picker. */
 export function landlordDisplayName(contact: Contact): string {
-  const name = [contact.firstName?.trim(), contact.lastName?.trim()].filter(Boolean).join(' ');
-  if (name !== '') return name;
-  const company = typeof contact.company === 'string' ? contact.company.trim() : '';
-  if (company !== '') return company;
-  return contactDisplayName(undefined, undefined, defaultPhone(contactPhones(contact))?.phone);
+  return contactHeaderName(contact);
 }

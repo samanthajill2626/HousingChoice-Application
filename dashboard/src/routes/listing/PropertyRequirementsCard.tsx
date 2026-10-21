@@ -43,8 +43,9 @@ export function PropertyRequirementsCard({ unit, landlord, onEdit }: PropertyReq
       }
     >
       {landlord !== undefined && landlordHasNoRequirements(landlord) ? (
-        // <L> by the one landlord name rule (code review RD-9): the company or
-        // the primary of phones[] before "Unknown contact".
+        // <L> by the one landlord name rule (code review RD-9, worklist OR-33):
+        // the name the landlord page header shows - first + last, else the
+        // primary of phones[] - before "Unknown contact".
         <p className={styles.note}>{`${landlordDisplayName(landlord)} has no requirements recorded yet.`}</p>
       ) : null}
       {requirementItemsByGroup().map(({ group, items }) => (

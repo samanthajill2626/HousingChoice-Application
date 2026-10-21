@@ -7,6 +7,7 @@
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import type { ContactItem, ContactType } from '../src/repos/contactsRepo.js';
+import { seedListingSend } from './helpers/listingSendSeed.js';
 import { toConversationUpdatedEvent } from '../src/lib/events.js';
 import type { ConversationItem, ConversationType } from '../src/repos/conversationsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
@@ -82,6 +83,23 @@ const captured = (capture: { lines: Record<string, unknown>[] }) =>
 const FLYER_LABEL = 'Signed up from the flyer for 12 Oak St, Atlanta, GA 30303 as Keisha Jones';
 const A_FLYER_LABEL = 'Signed up from a flyer as Keisha Jones';
 const JOIN_LABEL = 'Signed up on the join page as Keisha Jones';
+
+/** An earlier counted send of unit-1 to c-1. */
+const SENT_AT = '2026-10-01T10:00:00.000Z';
+/** Plan 2.2: the flyer entry a sign-up at `iso` writes. */
+const flyerEntry = (iso: string) => ({ attempt: `${iso}#flyer`, state: 'counted', by: 'acceptance', countedAt: iso });
+const ledgerRow = (world: FakeWorld, unitId = 'unit-1', contactId = 'c-1') =>
+  world.listingSendsRepo.getByKeyConsistent(unitId, contactId);
+
+/** The pair's outcome on the contact page's Properties sent read (S3 derives signed_up). */
+async function outcomeOf(app: App, contactId = 'c-1', unitId = 'unit-1'): Promise<string | undefined> {
+  const res = await request(app)
+    .get(`/api/contacts/${contactId}/listings-sent`)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('cookie', TEST_SESSION_COOKIE);
+  expect(res.status).toBe(200);
+  return (res.body.sent as Array<{ unitId: string; outcome: string }>).find((r) => r.unitId === unitId)?.outcome;
+}
 
 /** The existing contact's open 1:1 thread, read and quiet. */
 function seedThread(world: FakeWorld, over: Partial<ConversationItem> = {}): ConversationItem {
@@ -324,6 +342,9 @@ describe('the signed_up pin and the unread mark (D6)', () => {
     expect(convUpdates(world)).toEqual([]);
     expect(stepFailures(capture)).toEqual([expect.objectContaining({ step: 'touch', reason: 'group_thread', level: 40 })]);
     expect(pins(world)).toEqual([expect.objectContaining({ label: FLYER_LABEL, refType: 'unit', refId: 'unit-1' })]);
+    // The flyer entry is unaffected too (D7).
+    const holder = world.contacts.find((c) => c.phone === PHONE);
+    expect((await ledgerRow(world, 'unit-1', holder?.contactId ?? ''))?.shares).toEqual({ flyer: flyerEntry(T0_ISO) });
   });
 
   it('a NEW contact on a flyer: the welcome first, then the pin and the unread mark - and no repeat read', async () => {
@@ -544,5 +565,214 @@ describe('the pin and the unread mark are best-effort (D6.4)', () => {
     await post(app, signupBody({ unitId: 'unit-1' }));
 
     expect(convUpdates(world)).toEqual([expect.objectContaining({ conversationId: 'conv-1', unread_count: 7 })]);
+  });
+});
+
+describe('a flyer sign-up puts the property on the properties-sent list (D7)', () => {
+  it('an existing tenant never sent the property: ONE counted flyer entry at the sign-up instant, and the pair reads signed_up', async () => {
+    const { app, world, capture } = harness();
+    seedUnit(world);
+    seedContact(world);
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    const row = await ledgerRow(world);
+    expect(row?.shares).toEqual({ flyer: flyerEntry(T0_ISO) });
+    expect(row).toMatchObject({ counted: true, sentAt: T0_ISO });
+    expect(row?.broadcastId).toBeUndefined();
+    expect(await outcomeOf(app)).toBe('signed_up');
+    // No "Property sent" milestone for it: the signed_up pin names the flyer.
+    expect(world.activityEvents.filter((e) => e.type === 'listing_sent')).toHaveLength(0);
+    expect(captured(capture)).toEqual([expect.objectContaining({ sentRecorded: true })]);
+    expect(captured(capture)[0]).not.toHaveProperty('sentSkipped');
+  });
+
+  const ALREADY_SENT: Array<[string, Partial<ContactItem>, string]> = [
+    ['no reply', {}, 'no_reply'],
+    ['a reply', { last_heard_from_at: '2026-10-02T10:00:00.000Z' }, 'replied'],
+  ];
+
+  it.each(ALREADY_SENT)('a pair already sent, with %s, reads signed_up after the sign-up', async (_what, contactOver, before) => {
+    const { app, world } = harness();
+    seedUnit(world);
+    seedContact(world, contactOver);
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
+    expect(await outcomeOf(app)).toBe(before);
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    const row = await ledgerRow(world);
+    expect(row?.shares?.['flyer']).toEqual(flyerEntry(T0_ISO));
+    expect(row?.sentAt).toBe(T0_ISO);
+    expect(await outcomeOf(app)).toBe('signed_up');
+  });
+
+  it('a CURRENT decline holds: no flyer entry, still not_interested - and the pin and the unread mark are still recorded', async () => {
+    const { app, world, capture } = harness();
+    seedUnit(world);
+    seedContact(world);
+    seedThread(world);
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
+    expect(await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-10-05T10:00:00.000Z', by: 'staff', staffId: 'usr-1' })).toBe('ok');
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    const row = await ledgerRow(world);
+    expect(row?.shares?.['flyer']).toBeUndefined();
+    expect(row?.sentAt).toBe(SENT_AT);
+    expect(await outcomeOf(app)).toBe('not_interested');
+    expect(pins(world)).toHaveLength(1);
+    expect(world.conversations.get('conv-1')?.unread_count).toBe(1);
+    expect(capture.lines.some((l) => l['msg'] === 'share ledger: flyer entry not written - the pair holds a current decline')).toBe(true);
+    expect(captured(capture)).toEqual([expect.objectContaining({ sentRecorded: false, sentSkipped: 'declined' })]);
+  });
+
+  it('a decline recorded AFTER a sign-up holds against a second sign-up', async () => {
+    const { app, world, clock } = harness();
+    seedUnit(world);
+    seedContact(world);
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    expect(await outcomeOf(app)).toBe('signed_up');
+    expect(
+      await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: new Date(T0 + HOUR_MS).toISOString(), by: 'staff', staffId: 'usr-1' }),
+    ).toBe('ok');
+
+    clock.ms = T0 + 2 * HOUR_MS;
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    const row = await ledgerRow(world);
+    expect(row?.shares?.['flyer']).toEqual(flyerEntry(T0_ISO)); // the FIRST sign-up's entry, never a newer one
+    expect(row?.sentAt).toBe(T0_ISO);
+    expect(await outcomeOf(app)).toBe('not_interested');
+  });
+
+  it('a pair with a tour stays interested', async () => {
+    const { app, world } = harness();
+    seedUnit(world);
+    seedContact(world);
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
+    await world.toursRepo.create({
+      tourId: 't-1',
+      tenantId: 'c-1',
+      unitId: 'unit-1',
+      tourType: 'self_guided',
+      status: 'scheduled',
+      createdAt: '2026-10-02T00:00:00.000Z',
+    });
+    expect(await outcomeOf(app)).toBe('interested');
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect((await ledgerRow(world))?.shares?.['flyer']).toEqual(flyerEntry(T0_ISO));
+    expect(await outcomeOf(app)).toBe('interested');
+  });
+
+  it('a repeat inside the 24-hour cap still writes a NEWER flyer entry: the cap governs the pin and the bump only', async () => {
+    const { app, world, clock } = harness();
+    seedUnit(world);
+    seedContact(world);
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    clock.ms = T0 + HOUR_MS;
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    const later = new Date(T0 + HOUR_MS).toISOString();
+    expect(pins(world)).toHaveLength(1);
+    expect((await ledgerRow(world))?.shares?.['flyer']).toEqual(flyerEntry(later));
+    expect((await ledgerRow(world))?.sentAt).toBe(later);
+  });
+
+  it('a DIFFERENT property within 24 hours gets its own flyer entry', async () => {
+    const { app, world, clock } = harness();
+    seedUnit(world, 'unit-1');
+    seedUnit(world, 'unit-2');
+    seedContact(world);
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    clock.ms = T0 + HOUR_MS;
+
+    await post(app, signupBody({ unitId: 'unit-2' }));
+
+    expect((await ledgerRow(world, 'unit-1'))?.shares).toEqual({ flyer: flyerEntry(T0_ISO) });
+    expect((await ledgerRow(world, 'unit-2'))?.shares).toEqual({ flyer: flyerEntry(new Date(T0 + HOUR_MS).toISOString()) });
+  });
+
+  it('an existing unknown contact gets the entry, and the property Sent to read lists it', async () => {
+    const { app, world } = harness();
+    seedUnit(world);
+    world.contacts.push({ contactId: 'c-u', type: 'unknown', status: 'needs_review', phone: PHONE } as ContactItem);
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect((await ledgerRow(world, 'unit-1', 'c-u'))?.shares).toEqual({ flyer: flyerEntry(T0_ISO) });
+    expect((await world.listingSendsRepo.listByUnit('unit-1')).map((r) => r.contactId)).toEqual(['c-u']);
+  });
+
+  const NON_TENANTS: ContactType[] = ['landlord', 'partner'];
+
+  it.each(NON_TENANTS)('an existing %s gets the pin and the unread mark but no entry', async (type) => {
+    const { app, world, capture } = harness();
+    seedUnit(world);
+    seedContact(world, { type });
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(world.listingSends).toHaveLength(0);
+    expect(pins(world)).toHaveLength(1);
+    expect([...world.conversations.values()].map((c) => c.unread_count)).toEqual([1]);
+    expect(captured(capture)).toEqual([expect.objectContaining({ sentRecorded: false, sentSkipped: 'not_tenant' })]);
+  });
+
+  it('/join, an unavailable property and a made-up unitId never touch the ledger', async () => {
+    const { app, world, clock } = harness();
+    seedUnit(world, 'unit-placed', { status: 'placed' });
+    seedContact(world);
+    const read = vi.spyOn(world.listingSendsRepo, 'getByKeyConsistent');
+    const write = vi.spyOn(world.listingSendsRepo, 'putShareMemory');
+
+    await post(app, signupBody());
+    clock.ms = T0 + HOUR_MS;
+    await post(app, signupBody({ unitId: 'unit-placed' }));
+    clock.ms = T0 + 2 * HOUR_MS;
+    await post(app, signupBody({ unitId: 'no-such-unit' }));
+
+    expect(read).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    expect(world.listingSends).toHaveLength(0);
+  });
+
+  // OR-15: the flyer entry is written whether the new contact's welcome was
+  // sent or refused - the ledger runs whatever the welcome did.
+  const WELCOME_OUTCOMES: Array<[string, Record<string, string>, number]> = [
+    ['sent', {}, 1],
+    ['refused (the SMS kill switch)', { SMS_SENDING_ENABLED: 'false' }, 0],
+  ];
+
+  it.each(WELCOME_OUTCOMES)('a NEW contact on a flyer, its welcome %s: the pin, the unread mark and the flyer entry', async (_what, env, sentCount) => {
+    const { app, world } = harness(env);
+    seedUnit(world);
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    const contact = world.contacts.find((c) => c.phone === PHONE);
+    expect(world.sent).toHaveLength(sentCount);
+    expect(pins(world)).toHaveLength(1);
+    expect([...world.conversations.values()].map((c) => c.unread_count)).toEqual([1]);
+    expect((await ledgerRow(world, 'unit-1', contact?.contactId ?? ''))?.shares).toEqual({ flyer: flyerEntry(T0_ISO) });
+  });
+
+  it('a failed ledger write still answers { ok: true }: no entry, the pin kept, ERROR step ledger', async () => {
+    const { app, world, capture } = harness();
+    seedUnit(world);
+    seedContact(world);
+    vi.spyOn(world.listingSendsRepo, 'getByKeyConsistent').mockRejectedValue(new Error('ledger read down'));
+
+    const res = await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(world.listingSends).toHaveLength(0);
+    expect(pins(world)).toHaveLength(1);
+    expect(stepFailures(capture)).toEqual([expect.objectContaining({ step: 'ledger', level: 50 })]);
+    expect(captured(capture)).toEqual([expect.objectContaining({ sentRecorded: false, sentSkipped: 'error' })]);
   });
 });

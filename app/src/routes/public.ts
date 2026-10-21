@@ -54,7 +54,7 @@ import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createContactsRepo, isDeleted as isContactDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationItem, type ConversationsRepo } from '../repos/conversationsRepo.js';
-import type { ListingSendsRepo } from '../repos/listingSendsRepo.js';
+import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { createOrgListRepo, type OrgListRepo } from '../repos/orgListRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
@@ -69,6 +69,7 @@ import {
   housingAuthorityNames,
   loadPublicOrgEntries,
 } from '../services/publicOrgList.js';
+import { applyFlyerShareEntry, type FlyerShareResult } from '../services/shareLedger.js';
 
 /**
  * The housing-fair "auto welcome text" DEFAULT copy — the FILED A2P welcome
@@ -101,6 +102,21 @@ const SIGNUP_REPEAT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** flyer-leads plan 1.1: the log line of every failed best-effort sign-up step (with { marker, step }). */
 const SIGNUP_STEP_FAILED = 'housing-fair signup step failed';
+
+/**
+ * flyer-leads D6 / AR2 / AR11: why a sign-up wrote no flyer entry (the
+ * audit's sentSkipped, absent ONLY when an entry was written): a soft-deleted
+ * holder (the deleted path); no unitId; a unitId that is not a shareable
+ * unit; a contact type the sent list is not for; the ledger's own refusals (a
+ * current decline, the order rule, token retries exhausted); or a throw.
+ */
+type SignupSentSkipped =
+  | 'deleted'
+  | 'not_flyer'
+  | 'not_shareable'
+  | 'not_tenant'
+  | Exclude<FlyerShareResult, 'written'>
+  | 'error';
 
 /**
  * flyer-leads D6.2 (plan 1.1): the signed_up pin's words - inline staff copy,
@@ -311,6 +327,8 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   const activity = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const now = deps.now ?? (() => Date.now());
+  // flyer-leads D7: the ledger a flyer sign-up's share entry goes through.
+  const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
 
   /**
    * flyer-leads D6.3: bump the contact's 1:1 thread to the top of the inbox and
@@ -597,6 +615,36 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       await markSignupUnread(conversation, nowIso, marker);
     }
 
+    // (3c) The flyer share entry (D7): a flyer of a shareable unit puts that
+    // property on a tenant's or an unknown contact's properties-sent list -
+    // new or existing, sent before or not - through the share ledger
+    // (applyFlyerShareEntry: key 'flyer', counted by acceptance at the sign-up
+    // instant), unless the pair holds a CURRENT decline, decided inside the
+    // ledger's conditional write (a sign-up never clears a decline). Written
+    // on EVERY sign-up it applies to: the 24-hour cap governs the pin and the
+    // bump only. Landlords, partners and other types get the pin and the bump
+    // but no entry (the list records homes offered to someone looking for
+    // one). Best-effort: a throw is logged (step ledger) and recorded as
+    // 'error'; the ledger logs its own decline (INFO) and lost (ERROR) lines.
+    let sentRecorded = false;
+    let sentSkipped: SignupSentSkipped | undefined;
+    if (unitId === undefined) {
+      sentSkipped = 'not_flyer';
+    } else if (!viaFlyer) {
+      sentSkipped = 'not_shareable';
+    } else if (contact.type !== 'tenant' && contact.type !== 'unknown') {
+      sentSkipped = 'not_tenant';
+    } else {
+      try {
+        const result = await applyFlyerShareEntry({ listingSends, log }, { unitId, contactId, signedUpAt: nowIso });
+        if (result === 'written') sentRecorded = true;
+        else sentSkipped = result;
+      } catch (err) {
+        sentSkipped = 'error';
+        log.error({ marker, step: 'ledger', err }, SIGNUP_STEP_FAILED);
+      }
+    }
+
     // (4) Audit (no PII in the payload beyond the marker — the contactId is an
     // internal id, fine for the audit trail but NOT returned to the public).
     // join-housing-authority D7: every event from now on carries
@@ -623,6 +671,8 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
         viaFlyer,
         withAuthority: housingAuthority !== undefined,
         recorded,
+        sentRecorded,
+        ...(sentSkipped !== undefined && { sentSkipped }),
       },
       'housing-fair signup captured',
     );

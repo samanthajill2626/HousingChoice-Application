@@ -24,14 +24,19 @@ deployed.
   rounds: 21 distinct findings, 20 accepted (one only as a watch item), 1
   rejected (a client-sent consent version; its wording half accepted in R2).
   Mission block committed at `mission-block.md`.
-- Phase: AT THE LAUNCH GATE. Nothing is in flight.
-- NEXT STEP: Cameron's launch-gate answer (AUTO / MANUAL / Revise). On a Go:
-  compaction gate B (refresh this STATE, prove the replay, confirm the
-  registration with --show, start the watcher, offer /compact), THEN dispatch
-  (AUTO: abt:build-orchestrator, background, prompt = mission-block.md
-  verbatim; arm the watchdog with Cameron's checkpoint cadence - he asked for
-  55-minute checkpoints last mission - and start the live mirror) or hand
-  over the MANUAL prompt.
+- Phase: LAUNCH GATE PASSED - Cameron picked "Go - AUTO dispatch" (2026-10-21).
+  Compaction gate B is being offered. Nothing is dispatched yet.
+- NEXT STEP after the compaction (or a skip): dispatch `abt:build-orchestrator`
+  in the background with `mission-block.md` VERBATIM as the prompt. Then arm
+  the watchdog: one at a time, checkpoint ceiling 55 minutes (memory
+  watchdog-30min-checkpoints), a 25-minute stall, terminal on
+  DONE/QUESTION/BLOCKED in `.superpowers/sdd/progress.md`. Start the live
+  mirror from the CURRENT skill base dir's transcript-tail.mjs, on
+  `~/.claude/projects/<slug>/<session>/subagents/agent-<id>.jsonl` (NOT the
+  temp dir) -> `.superpowers/sdd/live.log`, and verify it grows. Tell Cameron
+  about the three surfaces (chat checkpoints, live.log, IDE activity pane).
+  Then supervise; at the handback, replay the whole conversation before
+  reviewing.
 - Gate answers in rev 6:
   - O1 closed: the decline writers stamp `shares_op`;
   - the repeat limit is per contact per PROPERTY per 24 hours, with /join and
@@ -206,3 +211,14 @@ phones (true for NEW ones: 409 on create and on add-number) and that every
 existing contact already has consent (true for inbound, web forms and imports;
 not for hand-added contacts, whose consent field is optional). The planner
 explained both; rev 6 D4 states the duplicate-phone block.
+
+## Gate B additions (2026-10-21)
+
+- Plan v3 FINAL @981eba1c. The planner's AR5 whitespace question (plain-text
+  unit fields saved untrimmed) was withdrawn as AR16 before it reached
+  Cameron: `trimJsonBody` already deep-trims every JSON body. He was told it
+  was moot.
+- Launch gate: Cameron picked "Go - AUTO dispatch (Recommended)" in the
+  question widget. He named no checkpoint cadence this time (last mission:
+  "Go auto with 55 minute watchdog timers"); the planner uses the 55-minute
+  ceiling.

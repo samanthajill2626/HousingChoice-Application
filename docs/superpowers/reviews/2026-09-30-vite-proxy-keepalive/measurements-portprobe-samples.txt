@@ -1,0 +1,22 @@
+Raw TIME_WAIT port probe samples (W:/tmp/vite-proxy-keepalive/.superpowers/sdd/portprobe/samples.txt), preserved verbatim at cleanup 2026-10-21; distilled in measurements.md.
+
+14:56:44 TIME_WAIT=4343 | client-side (ephemeral) by remote port: 10401=1786 10411=2413 | server-side by local port:
+14:56:49 TIME_WAIT=4127 | client-side (ephemeral) by remote port: 10401=1695 10411=2279 | server-side by local port:
+14:56:54 TIME_WAIT=3942 | client-side (ephemeral) by remote port: 10401=1625 10411=2164 | server-side by local port:
+14:56:59 TIME_WAIT=3795 | client-side (ephemeral) by remote port: 10401=1567 10411=2078 | server-side by local port:
+14:57:04 TIME_WAIT=3846 | client-side (ephemeral) by remote port: 10401=1592 10411=2096 | server-side by local port:
+14:57:09 TIME_WAIT=3860 | client-side (ephemeral) by remote port: 10401=1598 10411=2111 | server-side by local port:
+14:57:15 TIME_WAIT=3882 | client-side (ephemeral) by remote port: 10401=1616 10411=2120 | server-side by local port:
+14:57:20 TIME_WAIT=3926 | client-side (ephemeral) by remote port: 10401=1635 10411=2146 | server-side by local port:
+14:57:25 TIME_WAIT=3905 | client-side (ephemeral) by remote port: 10401=1623 10411=2135 | server-side by local port:
+14:57:30 TIME_WAIT=3987 | client-side (ephemeral) by remote port: 10401=1665 10411=2169 | server-side by local port:
+14:57:35 TIME_WAIT=3974 | client-side (ephemeral) by remote port: 10401=1665 10411=2164 | server-side by local port:
+14:57:40 TIME_WAIT=3998 | client-side (ephemeral) by remote port: 10401=1668 10411=2182 | server-side by local port:
+14:57:45 TIME_WAIT=4004 | client-side (ephemeral) by remote port: 10401=1670 10411=2191 | server-side by local port:
+14:57:50 TIME_WAIT=3977 | client-side (ephemeral) by remote port: 10401=1649 10411=2176 | server-side by local port:
+14:57:55 TIME_WAIT=3994 | client-side (ephemeral) by remote port: 10401=1652 10411=2194 | server-side by local port:
+14:58:01 TIME_WAIT=4019 | client-side (ephemeral) by remote port: 10401=1658 10411=2216 | server-side by local port:
+14:58:06 TIME_WAIT=4029 | client-side (ephemeral) by remote port: 10401=1660 10411=2225 | server-side by local port:
+14:58:11 TIME_WAIT=4159 | client-side (ephemeral) by remote port: 10401=1722 10411=2294 | server-side by local port:
+14:58:16 TIME_WAIT=4466 | client-side (ephemeral) by remote port: 10401=1859 10411=2460 | server-side by local port:
+14:58:21 TIME_WAIT=4695 | client-side (ephemeral) by remote port: 10401=1963 10411=2593 | server-side by local port:

@@ -1,0 +1,266 @@
+// Joins the passive TCP-table samples (sampler/) with the in-process hook
+// records (hook/) and prints a churn ranking per hop.
+// usage: node analyze.mjs <runDir> <laneJson> [--from <epochMs>] [--to <epochMs>]
+import fs from 'node:fs';
+import path from 'node:path';
+
+const runDir = process.argv[2];
+const lane = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+const argFrom = process.argv.indexOf('--from');
+const argTo = process.argv.indexOf('--to');
+const fromMs = argFrom > 0 ? Number(process.argv[argFrom + 1]) : 0;
+const toMs = argTo > 0 ? Number(process.argv[argTo + 1]) : Infinity;
+const P = lane.ports;
+const PROXIED_RE = new RegExp('^/(api|auth|__dev|app-identity|unit-media|public|manifest)([/.?]|$)');
+const svc = new Map([
+  [P.app, 'app'],
+  [P.dashboard, 'vite'],
+  [P.fake, 'fake-twilio'],
+  [P.publicBase, 'publicBase'],
+  [8000, 'dynamodb'],
+  [9000, 'minio'],
+]);
+
+// ---------- OS sampler ----------
+const sdir = path.join(runDir, 'sampler');
+const readTsv = (f) => {
+  if (!fs.existsSync(f)) return [];
+  const lines = fs.readFileSync(f, 'utf8').split(/\r?\n/).filter((l) => l && !l.startsWith('#'));
+  const hdr = lines.shift().split('\t');
+  return lines.map((l) => Object.fromEntries(l.split('\t').map((v, i) => [hdr[i], v])));
+};
+const series = readTsv(path.join(sdir, 'series.tsv'));
+const seriesHdr = fs.existsSync(path.join(sdir, 'series.tsv'))
+  ? fs.readFileSync(path.join(sdir, 'series.tsv'), 'utf8').match(/#epochStartMs=(\d+)/)
+  : null;
+const epochStart = seriesHdr ? Number(seriesHdr[1]) : 0;
+const conns = readTsv(path.join(sdir, 'conns.tsv'));
+const pids = new Map(readTsv(path.join(sdir, 'pids.tsv')).map((r) => [Number(r.pid), r]));
+
+const role = (pid) => {
+  const r = pids.get(Number(pid));
+  if (!r) return pid === '0' || pid === 0 ? '?' : `pid${pid}`;
+  const c = r.cmdline || '';
+  if (/chrome|headless_shell/i.test(r.name)) return 'chromium';
+  if (/e2e-session\.mjs/.test(c)) return 'launcher';
+  if (/vite[\\/]bin|vite\.js/.test(c)) return 'vite';
+  if (/app[\\/]src[\\/]index\.ts/.test(c)) return 'app';
+  if (/app[\\/]src[\\/]worker\.ts/.test(c)) return 'worker';
+  if (/fake-twilio/.test(c)) return 'fake-twilio';
+  if (/playwright/.test(c) && /test/.test(c)) return 'playwright';
+  if (/com\.docker|wslrelay|vpnkit|docker/i.test(r.name + c)) return 'docker';
+  return `${r.name}`;
+};
+
+const inWin = (ms) => {
+  const e = epochStart + ms;
+  return e >= fromMs && e <= toMs;
+};
+
+// Pair client endpoints (eph -> svc) with server endpoints (svc -> eph).
+const byTuple = new Map(); // key "eph>svcPort"
+for (const c of conns) {
+  const l = Number(c.lport), r = Number(c.rport);
+  const first = Number(c.firstMs);
+  if (!inWin(first)) continue;
+  let key, side;
+  if (svc.has(r) && !svc.has(l)) { key = `${l}>${r}`; side = 'cli'; }
+  else if (svc.has(l) && !svc.has(r)) { key = `${r}>${l}`; side = 'srv'; }
+  else if (svc.has(l) && svc.has(r)) { key = `${l}>${r}`; side = 'cli'; }
+  else continue;
+  // A tuple can be reused within a run; keep a list and pair by time proximity.
+  if (!byTuple.has(key)) byTuple.set(key, []);
+  byTuple.get(key).push({ side, c, first, last: Number(c.lastMs) });
+}
+const osConns = [];
+for (const [key, eps] of byTuple) {
+  const [eph, sport] = key.split('>').map(Number);
+  eps.sort((a, b) => a.first - b.first);
+  const used = new Set();
+  for (let i = 0; i < eps.length; i++) {
+    if (used.has(i)) continue;
+    used.add(i);
+    const a = eps[i];
+    let b = null;
+    for (let j = i + 1; j < eps.length; j++) {
+      if (used.has(j) || eps[j].side === a.side) continue;
+      if (Math.abs(eps[j].first - a.first) < 2000 || (eps[j].first >= a.first && eps[j].first <= a.last + 500)) { b = eps[j]; used.add(j); break; }
+    }
+    const cli = a.side === 'cli' ? a : b;
+    const srv = a.side === 'srv' ? a : b;
+    const tw = (e) => e && (Number(e.c.statesMask) & (1 << 11)) !== 0;
+    const closer = tw(cli) ? 'client' : tw(srv) ? 'server' : 'none-seen';
+    osConns.push({
+      eph, sport, service: svc.get(sport),
+      client: cli ? role(cli.c.pid) : '?',
+      server: srv ? role(srv.c.pid) : '?',
+      closer,
+      first: Math.min(a.first, b ? b.first : Infinity),
+      estMs: cli && Number(cli.c.estFirstMs) >= 0 ? Number(cli.c.estLastMs) - Number(cli.c.estFirstMs) : srv && Number(srv.c.estFirstMs) >= 0 ? Number(srv.c.estLastMs) - Number(srv.c.estFirstMs) : -1,
+    });
+  }
+}
+
+const out = [];
+const p = (s = '') => out.push(s);
+const winSeries = series.filter((r) => inWin(Number(r.tMs)));
+const peak = (col) => winSeries.reduce((m, r) => Math.max(m, Number(r[col] ?? 0)), 0);
+const peakRow = winSeries.reduce((m, r) => (Number(r.allTW) > Number(m?.allTW ?? -1) ? r : m), null);
+const durS = winSeries.length ? (Number(winSeries.at(-1).tMs) - Number(winSeries[0].tMs)) / 1000 : 0;
+p(`window: ${durS.toFixed(0)} s, ${winSeries.length} series rows; endpoint records in window: ${osConns.length} connections paired`);
+p(`peak TIME_WAIT (whole machine): ${peak('allTW')}; loopback TW at that moment: ${peakRow?.loopTW}`);
+p('');
+p('## OS view: connections per hop (paired endpoints, both closer sides)');
+p('| hop (client -> service) | connections | per min | closed by client | closed by server | no TW seen | peak TW client-side | peak TW server-side |');
+p('|---|---|---|---|---|---|---|---|');
+const hops = new Map();
+for (const c of osConns) {
+  const k = `${c.client} -> ${c.service}`;
+  if (!hops.has(k)) hops.set(k, { n: 0, client: 0, server: 0, none: 0, sport: c.sport });
+  const h = hops.get(k);
+  h.n++;
+  h[c.closer === 'client' ? 'client' : c.closer === 'server' ? 'server' : 'none']++;
+}
+for (const [k, h] of [...hops].sort((a, b) => b[1].n - a[1].n)) {
+  p(`| ${k} | ${h.n} | ${(h.n / (durS / 60 || 1)).toFixed(1)} | ${h.client} | ${h.server} | ${h.none} | ${peak('cliTW_' + h.sport)} | ${peak('srvTW_' + h.sport)} |`);
+}
+p('');
+p('Peak TIME_WAIT by service port (over the whole window, not simultaneous):');
+for (const [port, name] of svc) p(`- ${name} :${port} - client-side ${peak('cliTW_' + port)}, server-side ${peak('srvTW_' + port)}`);
+
+// ---------- hook ----------
+const hdir = path.join(runDir, 'hook');
+if (fs.existsSync(hdir)) {
+  const procs = new Map();
+  for (const f of fs.readdirSync(hdir)) {
+    const lines = fs.readFileSync(path.join(hdir, f), 'utf8').split('\n').filter(Boolean);
+    const recs = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    const pr = recs.find((r) => r.e === 'proc');
+    if (!pr) continue;
+    const a = pr.argv;
+    const name = /e2e-session\.mjs/.test(a) ? 'launcher'
+      : /vite/.test(a) ? 'vite'
+      : /app[\\/]src[\\/]index\.ts/.test(a) ? 'app'
+      : /app[\\/]src[\\/]worker\.ts/.test(a) ? 'worker'
+      : /fake-twilio/.test(a) ? 'fake-twilio'
+      : /playwright/.test(a) ? 'playwright'
+      : /npm-cli|npx-cli/.test(a) ? 'npm'
+      : 'other:' + a.slice(-60);
+    const listens = new Set(recs.filter((r) => r.e === 'ic').map((r) => r.lp));
+    const byPort = listens.has(P.app) ? 'app' : listens.has(P.dashboard) ? 'vite' : listens.has(P.fake) ? 'fake-twilio' : null;
+    procs.set(pr.pid, { name: byPort ?? name, recs: recs.filter((r) => r.t >= fromMs && r.t <= toMs) });
+  }
+  const norm = (pth) => pth
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, ':id')
+    .replace(/\b[0-9A-HJKMNP-TV-Z]{26}\b/g, ':ulid')
+    .replace(/\/(c|u|t|p|pl|org|usr|msg|cv|sid)[-_][A-Za-z0-9_-]{6,}/g, '/:$1id')
+    .replace(/\/[A-Za-z0-9_-]{20,}/g, '/:tok')
+    .replace(/\/\d{3,}/g, '/:n')
+    .replace(/\?$/, '?…');
+
+  p('');
+  p('## Hook view: outbound connections opened, by process and destination');
+  p('| process -> service | opened | requests | reqs/conn | closed locally (destroy) | closed locally (end) | closed by peer | conns whose last request was aborted |');
+  p('|---|---|---|---|---|---|---|---|');
+  const outAgg = [];
+  const firstPathAgg = new Map();
+  const abortAgg = new Map();
+  for (const [pid, pr] of procs) {
+    const socks = new Map();
+    for (const r of pr.recs) {
+      if (r.e === 'oc') socks.set(r.id, { rp: r.rp, reqs: [], close: null, open: r.t });
+      else if (r.e === 'rq' && socks.has(r.id)) socks.get(r.id).reqs.push({ i: r.i, m: r.m, p: r.p, a: r.a, done: null });
+      else if (r.e === 'rqc' && socks.has(r.id)) { const q = socks.get(r.id).reqs.find((x) => x.i === r.i); if (q) { q.done = r.done; q.s = r.s; } }
+      else if (r.e === 'x' && r.d === 'out' && socks.has(r.id)) socks.get(r.id).close = r;
+    }
+    const agg = new Map();
+    for (const [, s] of socks) {
+      const dest = svc.get(s.rp) ?? `:${s.rp}`;
+      const k = `${pr.name} -> ${dest}`;
+      if (!agg.has(k)) agg.set(k, { opened: 0, reqs: 0, destroy: 0, end: 0, peer: 0, other: 0, abortedLast: 0 });
+      const g = agg.get(k);
+      g.opened++;
+      g.reqs += s.reqs.length;
+      const cl = s.close?.closer;
+      if (cl === 'peer') g.peer++;
+      else if (cl === 'destroy' || cl === 'destroy-err') g.destroy++;
+      else if (cl === 'end') g.end++;
+      else g.other++;
+      const last = s.reqs.at(-1);
+      if (last && last.done === 0) g.abortedLast++;
+      const fp = s.reqs[0] ? `${s.reqs[0].m} ${norm(s.reqs[0].p)}${s.reqs[0].a ? ' [' + s.reqs[0].a + ']' : ''}` : '(no http request)';
+      const fk = `${k} | ${fp}`;
+      firstPathAgg.set(fk, (firstPathAgg.get(fk) ?? 0) + 1);
+      if (last && last.done === 0) {
+        const ak = `${k} | ${last.m} ${norm(last.p)}`;
+        abortAgg.set(ak, (abortAgg.get(ak) ?? 0) + 1);
+      }
+    }
+    for (const [k, g] of agg) outAgg.push([k, g]);
+  }
+  outAgg.sort((a, b) => b[1].opened - a[1].opened);
+  for (const [k, g] of outAgg) {
+    p(`| ${k} | ${g.opened} | ${g.reqs} | ${(g.reqs / g.opened).toFixed(1)} | ${g.destroy} | ${g.end} | ${g.peer} | ${g.abortedLast} |`);
+  }
+  p('');
+  p('Top first-request paths of FRESH outbound connections (what made the process open a new socket):');
+  for (const [k, n] of [...firstPathAgg].sort((a, b) => b[1] - a[1]).slice(0, 40)) p(`- ${n} x ${k}`);
+  p('');
+  p('Outbound connections destroyed with an unfinished request (aborted in flight), by path:');
+  for (const [k, n] of [...abortAgg].sort((a, b) => b[1] - a[1]).slice(0, 25)) p(`- ${n} x ${k}`);
+
+  p('');
+  p('## Hook view: inbound connections accepted, by server process');
+  p('| server (port) | accepted | requests | reqs/conn | closed by peer | closed by server (destroy) | closed by server (end) | zero-request conns |');
+  p('|---|---|---|---|---|---|---|---|');
+  const inFirst = new Map();
+  const inKind = new Map();
+  const inAbort = new Map();
+  for (const [pid, pr] of procs) {
+    const socks = new Map();
+    for (const r of pr.recs) {
+      if (r.e === 'ic') socks.set(r.id, { lp: r.lp, rp: r.rp, reqs: [], close: null });
+      else if (r.e === 'sr' && socks.has(r.id)) socks.get(r.id).reqs.push({ i: r.i, m: r.m, p: r.p, c: r.c, done: null });
+      else if (r.e === 'src' && socks.has(r.id)) { const q = socks.get(r.id).reqs.find((x) => x.i === r.i); if (q) q.done = r.done; }
+      else if (r.e === 'x' && r.d === 'in' && socks.has(r.id)) socks.get(r.id).close = r;
+    }
+    const agg = new Map();
+    for (const [, s] of socks) {
+      const k = `${pr.name} (:${s.lp})`;
+      if (!agg.has(k)) agg.set(k, { n: 0, reqs: 0, peer: 0, destroy: 0, end: 0, zero: 0 });
+      const g = agg.get(k);
+      g.n++; g.reqs += s.reqs.length;
+      if (s.reqs.length === 0) g.zero++;
+      const cl = s.close?.closer;
+      if (cl === 'peer') g.peer++; else if (cl === 'destroy' || cl === 'destroy-err') g.destroy++; else if (cl === 'end') g.end++;
+      const fp = s.reqs[0] ? `${s.reqs[0].m} ${norm(s.reqs[0].p)}${s.reqs[0].c ? ' (Connection: ' + s.reqs[0].c + ')' : ''}` : '(no http request)';
+      const fk = `${k} | ${fp}`;
+      inFirst.set(fk, (inFirst.get(fk) ?? 0) + 1);
+    }
+    for (const [k, g] of agg) p(`| ${k} | ${g.n} | ${g.reqs} | ${(g.reqs / g.n).toFixed(1)} | ${g.peer} | ${g.destroy} | ${g.end} | ${g.zero} |`);
+    for (const [, s] of socks) {
+      const unfinished = s.reqs.filter((q) => q.done === 0);
+      const k = `${pr.name} (:${s.lp})`;
+      const kind = s.reqs.length === 0 ? 'zero-request' : unfinished.length === 0 ? 'all responses finished' : 'had an unfinished response';
+      inKind.set(`${k} | ${kind}`, (inKind.get(`${k} | ${kind}`) ?? 0) + 1);
+      for (const q of unfinished) {
+        const cls = PROXIED_RE.test(q.p) ? 'proxied' : 'module/static';
+        const ak = `${k} | ${cls} | ${q.m} ${norm(q.p)}`;
+        inAbort.set(ak, (inAbort.get(ak) ?? 0) + 1);
+      }
+    }
+  }
+  p('');
+  p('Top first-request paths of ACCEPTED connections:');
+  for (const [k, n] of [...inFirst].sort((a, b) => b[1] - a[1]).slice(0, 30)) p(`- ${n} x ${k}`);
+  p('');
+  p('Accepted connections by outcome:');
+  for (const [k, n] of [...inKind].sort()) p(`- ${n} x ${k}`);
+  p('');
+  p('Unfinished responses on accepted connections (the client went away mid-response), by path:');
+  const clsTot = new Map();
+  for (const [k, n] of inAbort) { const c = k.split(' | ').slice(0, 3).join(' | ').replace(/ (GET|POST|PATCH|PUT|DELETE) .*$/, ''); const kk = k.split(' | ').slice(0, 2).join(' | '); clsTot.set(kk, (clsTot.get(kk) ?? 0) + n); }
+  for (const [k, n] of clsTot) p(`- TOTAL ${n} x ${k}`);
+  for (const [k, n] of [...inAbort].sort((a, b) => b[1] - a[1]).slice(0, 30)) p(`- ${n} x ${k}`);
+}
+console.log(out.join('\n'));

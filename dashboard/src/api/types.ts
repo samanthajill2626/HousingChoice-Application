@@ -3387,10 +3387,16 @@ export interface UnitActivityEvent {
   tenantCount?: number;
   tourId?: string;
   outcome?: string;
-  /** unit_primary_contact_assigned only: why the primary contact was set
-   *  automatically (primary-contact-integrity spec 8) - auto_on_add,
-   *  handoff_on_remove, handoff_on_delete, handoff_on_restore or backfill. An
-   *  open set: an unknown value humanizes. */
+  /** Served on two event types only (the Activity projection,
+   *  app/src/routes/units.ts):
+   *  - unit_primary_contact_assigned: why the primary contact was set
+   *    automatically (primary-contact-integrity spec 8) - auto_on_add,
+   *    handoff_on_remove, handoff_on_delete, handoff_on_restore or backfill. An
+   *    open set: an unknown value humanizes.
+   *  - unit_updated: only when it is exactly 'requirements_applied' (an Apply
+   *    to properties, property requirements spec 2026-10-20 D13), which
+   *    describeUnitActivity labels "Requirements applied from the landlord".
+   *  listing_status_changed's free-text reason is never served. */
   reason?: string;
 }
 

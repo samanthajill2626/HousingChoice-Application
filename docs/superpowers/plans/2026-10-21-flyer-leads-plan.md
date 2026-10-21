@@ -8,7 +8,7 @@
   @b7959e2a. Mission records: `docs/superpowers/reviews/2026-10-21-flyer-leads/`.
 - Spec review: 4 rounds (the cap) + Cameron's gate answers -
   `docs/superpowers/reviews/2026-10-21-flyer-leads/design-review/adjudications.md`.
-- Status: PLAN v2 (2026-10-21), round 1 folded in, going to review round 2. Sections
+- Status: PLAN v3 FINAL (2026-10-21), plan review CLOSED after 2 rounds. Sections
   0-4 are BINDING and written by the planner; slice sections 5-10 are the
   six opus section drafts, verbatim. Section 4 (assembly rulings AR1-AR16)
   wins over any slice text it contradicts. The drafts themselves
@@ -60,9 +60,11 @@
 - Slice reports (plan review R1 #2): a "slice report" is the file
   `docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S<n>-report.md`,
   ASCII, findings only (what the tree held that the plan got wrong, risks,
-  untrimmed paths), citing code by `file:line`. Commit it with explicit paths
-  when the slice ends. A slice with nothing to report writes one line saying
-  so.
+  untrimmed paths), citing code by `file:line`. It MAY name pre-existing
+  lint errors in files the slice touched (a finding for the next reader);
+  `S6-gates.md` stays the authority for gate 5's baseline attribution (R2
+  #6). Commit it with explicit paths when the slice ends. A slice with
+  nothing to report writes one line saying so.
 - Code blocks under list bullets (R1 #13) carry the bullet's indent in this
   file. Strip that indent before using a block as an Edit anchor or as
   replacement text; the target file's own indentation is the authority.
@@ -5034,7 +5036,15 @@ cd "W:/tmp/flyer-leads" && git commit -m "feat(units): label a nameless Sent to 
 
 1. `cd "W:/tmp/flyer-leads" && npm run db:start`
 2. The slice's own files first (fast signal): `cd "W:/tmp/flyer-leads/app" && npx vitest run test/shareLedgerKeys.test.ts test/shareLedger.test.ts test/shareLedgerFlyer.test.ts test/shareAttemptOrder.test.ts test/listingSendsRepo.integration.test.ts test/listingSendsRepoShares.integration.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/listingSendOutcome.test.ts test/listingSendsApi.test.ts test/listingSendOutcomeApi.test.ts test/followUps.test.ts test/followUpsApi.test.ts test/broadcastApi.test.ts test/blastAudienceRules.test.ts test/repairShareOutcomes.test.ts test/contactTimeline.test.ts test/devListingSendFixture.test.ts test/shareAttemptOutcome.test.ts test/broadcastFanOut.test.ts test/listingSendRowProjection.test.ts test/contactsBatchReads.test.ts` - all pass, no `SKIPPED` line.
-3. AR15 - the FULL app suite, because S3 edits shared test helpers (the harness's listing-sends fake, `listingSendSeed.ts`) that suites outside this list import: `cd "W:/tmp/flyer-leads/app" && npx vitest run` - bare, never piped; give the shell call a hard outer timeout (e.g. the tool's 600000 ms) and read the captured output after it exits. Exit 0. A red DynamoDB Local suite is adjudicated by AGENTS.md's re-run-and-compare rule (re-run the failing FILE alone, more than once; compare failing files against a run at the merge base) - never by the old `AWS_ACCESS_KEY_ID` recipe; any `[dynamoAdmin]` line is a real container fault to capture. A named-spec failure is a regression to diagnose.
+3. AR15 - the FULL app suite, because S3 edits shared test helpers (the harness's listing-sends fake, `listingSendSeed.ts`) that suites outside this list import. The S6 Task 6.5 pattern, in Git Bash (the Bash tool - not cmd, where `timeout` is `timeout.exe`):
+   (a) AWS-credential check FIRST (a diagnostic): `env | grep '^AWS_'`. If ANY `AWS_ACCESS_KEY_ID` prints, the suite command in (c) runs under `env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY` (AGENTS.md: an exported key collapses every app test file onto one DynamoDB Local database).
+   (b) `mkdir -p "W:/tmp/flyer-leads/.superpowers/sdd/gates"` (gitignored).
+   (c) In the BACKGROUND (Bash tool `run_in_background: true`), as its own bare command - output REDIRECTED to the log (a redirect is not a pipe), never piped, never `;`-chained, under a hard outer timeout:
+       `cd "W:/tmp/flyer-leads/app" && timeout 1500 npx vitest run > "W:/tmp/flyer-leads/.superpowers/sdd/gates/s3-app-suite.log" 2>&1`
+       (key check positive: `cd "W:/tmp/flyer-leads/app" && timeout 1500 env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY npx vitest run > "W:/tmp/flyer-leads/.superpowers/sdd/gates/s3-app-suite.log" 2>&1`)
+       Wait for the completion notice; do not poll, and do not edit or commit meanwhile.
+   (d) After it finishes, read and QUOTE its real exit code from the notice: `0` passes; `124` is the timeout firing (a hang to report, never a pass); anything else is a failure. Then read the captured log: `grep -nE "Test Files|Tests  |FAIL|SKIPPED|\[dynamoAdmin\]" "W:/tmp/flyer-leads/.superpowers/sdd/gates/s3-app-suite.log"` - the `Test Files` line has no `failed`, no `FAIL` line, no `SKIPPED - no DynamoDB Local` line.
+   (e) A red DynamoDB Local suite is adjudicated by AGENTS.md's re-run-and-compare rule (re-run each failing FILE alone, more than once: `cd "W:/tmp/flyer-leads/app" && npx vitest run test/<file>`; compare failing FILES against a run at the merge base; report both runs) - never by the old `AWS_ACCESS_KEY_ID` recipe. Any `[dynamoAdmin]` line is one real container fault: capture that run's `err.$metadata.httpStatusCode` and `attempts` and report it. Any other failure is a regression to diagnose (there is no named-flake list).
 4. `cd "W:/tmp/flyer-leads" && npm run typecheck` - exit 0.
 5. `cd "W:/tmp/flyer-leads" && npx eslint app/src/lib/shareLedgerKeys.ts app/src/services/shareLedger.ts app/src/lib/shareAttemptOrder.ts app/src/lib/listingSendOutcome.ts app/src/repos/listingSendsRepo.ts app/src/routes/units.ts app/test/shareLedgerKeys.test.ts app/test/shareLedgerFlyer.test.ts app/test/shareLedger.test.ts app/test/listingSendsRepo.integration.test.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts app/test/helpers/twilioWebhookHarness.ts app/test/helpers/listingSendSeed.ts app/test/repairShareOutcomes.test.ts app/test/contactTimeline.test.ts app/test/listingSendOutcome.test.ts app/test/listingSendsApi.test.ts app/test/listingSendOutcomeApi.test.ts app/test/followUps.test.ts app/test/broadcastApi.test.ts` - no NEW error (attribute any error by the AGENTS.md baseline comparison at `main`).
 6. ASCII on every S3 file (section C commands) - all `0`.
@@ -7636,8 +7646,9 @@ with
     // sentRecorded (the flyer entry was written), sentSkipped (why no entry was
     // written: not_flyer, not_shareable, not_tenant, declined, refused, lost or
     // error - and deleted on the deleted path, AR11; absent ONLY when one was)
-    // and consentVersion (the disclosure version the form showed - evidence
-    // only, never stamped on an existing contact).
+    // and consentVersion (the consent disclosure version in force -
+    // CONSENT_VERSION, smsCompliance.ts:91 - which ships with the form;
+    // evidence only, never stamped on an existing contact).
     await audit.append(`contacts#${contactId}`, 'housing_fair_signup', {
       marker,
       isNew,
@@ -7694,7 +7705,13 @@ Paths: `app/src/routes/public.ts app/test/publicSignupLeads.test.ts app/test/pub
 
 ## S4 exit check (commits ONLY the slice report)
 
-1. The FULL app suite (AR15 - S4 edits the shared harness fakes): `cd "W:/tmp/flyer-leads/app" && npx vitest run` -> exit 0 (with the AWS-key prefix from section C if `env | grep '^AWS_'` printed anything). On a red DynamoDB-Local file, follow AGENTS.md's re-run-and-compare (re-run the file alone; compare failing FILES at the merge base) before calling it S4's.
+1. The FULL app suite (AR15 - S4 edits the shared harness fakes), the S6 Task 6.5 pattern. Git Bash (the Bash tool), each command bare - never piped, never `;`-chained.
+   a. AWS-credential check FIRST (a diagnostic, not a gate): `env | grep '^AWS_'`. If any `AWS_ACCESS_KEY_ID` prints, step b runs under `env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY` (AGENTS.md: an exported key collapses every app test file onto one DynamoDB Local database).
+   b. Run it in the BACKGROUND (Bash tool `run_in_background: true` - the tool's 120 s foreground default would kill it), with a hard outer timeout and the output REDIRECTED (a redirect is not a pipe) to a log under the gitignored `.superpowers/sdd/`:
+      `mkdir -p "W:/tmp/flyer-leads/.superpowers/sdd/gates"` (foreground, once), then
+      `cd "W:/tmp/flyer-leads/app" && timeout 1500 npx vitest run > "W:/tmp/flyer-leads/.superpowers/sdd/gates/s4-app-suite.log" 2>&1`
+      (with the step-a prefix when needed: `cd "W:/tmp/flyer-leads/app" && timeout 1500 env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY npx vitest run > "W:/tmp/flyer-leads/.superpowers/sdd/gates/s4-app-suite.log" 2>&1`). Wait for the completion notice; do not poll; never edit source or commit while it runs.
+   c. After it finishes, read the EXIT CODE from the completion notice (expected `0`; `124` = the cap fired - report it, do not call it green), then read the log: `grep -nE "Test Files|Tests  |FAIL|\[dynamoAdmin\]" "W:/tmp/flyer-leads/.superpowers/sdd/gates/s4-app-suite.log"`. Expected: a `Test Files` line with no `failed`, no `FAIL`. Any `[dynamoAdmin]` line is one real container fault - capture that run's `err.$metadata.httpStatusCode` and `attempts` and report it. A red DynamoDB Local file is adjudicated by AGENTS.md's re-run-and-compare (re-run the failing FILE alone, more than once, `cd "W:/tmp/flyer-leads/app" && npx vitest run test/<file>`; compare failing FILES at the merge base) before it is called S4's; any other failure is a regression to fix.
 2. `cd "W:/tmp/flyer-leads" && npm run typecheck` -> exit 0.
 3. `cd "W:/tmp/flyer-leads" && npm run smoke` -> exit 0 (public.ts gained runtime imports: lib/address, lib/events, lib/voiceMasking, repos/activityEventsRepo, repos/listingSendsRepo, services/shareLedger).
 4. `cd "W:/tmp/flyer-leads" && npx eslint app/src/routes/public.ts app/src/repos/activityEventsRepo.ts app/test/helpers/twilioWebhookHarness.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts app/test/activityEventsRepo.integration.test.ts app/test/activityEventsRepoConsistentRead.test.ts app/test/contactTimeline.test.ts app/test/publicSignupLeads.test.ts app/test/publicIntake.test.ts app/test/backfillJoinHousingAuthority.test.ts` -> no errors (none of these files is in the pre-existing lint backlog, which is dashboard react-hooks only).
@@ -8715,9 +8732,20 @@ cd /w/tmp/flyer-leads && git commit -m 'feat(dashboard): property Sent to card f
    -> exactly ONE error, pre-existing (F14): `Timeline.tsx` `react-hooks/set-state-in-effect`
    on `setNow(fresh);` (1618 at main, 1621 after Task 5.1). Anything else is
    S5's and blocking. Name the pre-existing one in the slice report.
-4. Optional but cheap: `cd /w/tmp/flyer-leads/dashboard && npx vitest run`
-   (the whole dashboard suite; was 263 files / 5361 tests green with S5 alone
-   on main sources). Not concurrently with an e2e run in this worktree.
+4. MANDATORY - the full DASHBOARD suite, because S5 edits shared modules
+   (the `types.ts` unions, the `Card.tsx` action gate used by every
+   SendRosterRow host, `groupSendRows`). Run it bare from `dashboard/` with a
+   hard outer timeout, never piped. It can take longer than two minutes, so
+   run it in the background with the Bash tool (`run_in_background`) and its
+   log under `.superpowers/sdd/` (gitignored run state, never committed):
+   `cd /w/tmp/flyer-leads/dashboard && timeout 1200 npx vitest run > /w/tmp/flyer-leads/.superpowers/sdd/S5-dashboard-suite.log 2>&1; echo "exit=$?" >> /w/tmp/flyer-leads/.superpowers/sdd/S5-dashboard-suite.log`
+   Wait for the completion notice, then read the log's last lines and its
+   `exit=` line. `exit=0` with `Test Files  N passed (N)` and no failed test
+   is the pass (263 files / 5361 tests with S5 alone on main sources; S1-S4
+   may add files). `exit=124` means the timeout fired - a FAIL to diagnose,
+   never a pass. Any other non-zero exit: read the failing files in the log
+   and fix S5's cause before step 5. Never run it at the same time as an e2e
+   run in this worktree.
 5. `cd /w/tmp/flyer-leads && git status` -> no S5 path modified or untracked
    (Tasks 5.1-5.3 are committed).
 6. The slice report (plan 0): write
@@ -10455,13 +10483,15 @@ attempt. First confirm the BUILT deleted path (S4) matches what the update
 will say:
 
 ```bash
-grep -n "deletedContact\|sentSkipped" "W:/tmp/flyer-leads/app/src/routes/public.ts"
+grep -n "deletedContact\|sentSkipped\|housing-fair signup captured" "W:/tmp/flyer-leads/app/src/routes/public.ts"
 ```
 
 Expected: the deleted branch writes the audit with `deletedContact: true`,
-`recorded: false`, `sentRecorded: false`, `sentSkipped: 'deleted'` and
-returns before any conversation call or send. If the built code differs,
-write what the code DOES and record the gap in the S6 slice report.
+`recorded: false`, `sentRecorded: false`, `sentSkipped: 'deleted'`, logs
+the INFO line `housing-fair signup captured` with `deletedContact: true`
+(S4 section E), and returns before any conversation call or send. If the
+built code differs, write what the code DOES and record the gap in the S6
+slice report.
 
 Keep the frontmatter's `id`, `type`, `severity`, `status: open`, `area`,
 `created` and `refs` as they are; add one optional line (docs/issues/README.md:52
@@ -10491,8 +10521,10 @@ sign-up pin, unread mark or properties-sent entry. It still answers
 { ok: true } (the visitor sees the normal thank-you; the flyer's button
 reads "Sign up" now) and still writes the housing_fair_signup audit event
 on that contact's entity (contacts#<id>), now with deletedContact: true,
-recorded: false, sentRecorded: false and sentSkipped: 'deleted'. That audit
-row is the ONLY trace; point 4 stands (no inbox row, no Deleted chip). On a
+recorded: false, sentRecorded: false and sentSkipped: 'deleted', and it logs
+the INFO line "housing-fair signup captured" with deletedContact: true.
+That audit row and that log line are the only traces - nothing reaches the
+dashboard; point 4 stands (no inbox row, no Deleted chip). On a
 legacy phone shared with a live contact, a deleted FIRST holder takes this
 path too (spec D4 residual). A LIVE contact's sign-up, by contrast, now pins
 "Signed up ..." in their thread and marks it unread (GLOSSARY "signed up"),
@@ -10750,9 +10782,10 @@ moved or changed, an extra stale assertion Task 6.1 had to repair, a
 mutation run whose first failure differed from Task 6.2's expectation, a
 built deleted path that differs from the issue update), risks and regressions found while running the
 specs or gates, and any untrimmed typed-input path seen in a surface this
-plan touches (plan section 0, D10). Gate exit codes and pre-existing lint
-errors stay in `S6-gates.md`, not here (one file, one kind). With nothing
-to report, the file is the single line:
+plan touches (plan section 0, D10). It MAY also name pre-existing lint
+errors in files this slice touched (plan section 0); `S6-gates.md` stays
+the authority for gate 5's baseline attribution and for the gate exit
+codes. With nothing to report, the file is the single line:
 
 ```
 S6: nothing to report - every anchor, expectation and citation held as planned.

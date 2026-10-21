@@ -385,7 +385,8 @@ The `housing_fair_signup` audit event gains these fields, with no PII:
   - `lost` (token retries exhausted);
   - `error`;
   - absent when one was written.
-- `consentVersion` (the disclosure version the form showed).
+- `consentVersion` (the consent disclosure version in force, the server's
+  `CONSENT_VERSION`, which ships with the form; section 7).
 
 ### D7. A flyer sign-up puts the property on the properties-sent list
 
@@ -747,6 +748,12 @@ and plan section 4.
   `sentSkipped` is absent only when an entry was written.
 - D6 repeat check (AR12): `hasEventSince` reads with `ConsistentRead: true`,
   so two sign-ups seconds apart see each other's pin.
-- D7 (AR13): an existing `unknown` contact with no name, never renamed by a
-  sign-up (D4), is labelled on the property's Sent to card by its formatted
-  phone, never by its raw contactId.
+- D7 (AR13): a recipient that exists but has no name is labelled on the
+  property's Sent to card by its formatted phone, never by its raw
+  contactId. The case that matters is an existing `unknown` contact, which a
+  flyer sign-up newly puts on that card and never renames (D4); the rule
+  covers every contact type, so a nameless tenant row changes too. A missing
+  contact keeps today's label.
+- D6 audit wording (plan review R2 #5): `consentVersion` is the consent
+  disclosure version in force, the server's `CONSENT_VERSION`. The form
+  sends no version of its own; the two ship in one release.

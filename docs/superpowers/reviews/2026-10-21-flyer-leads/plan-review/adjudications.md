@@ -42,3 +42,28 @@ S1's drafter while writing the conditional task; verified by the planner.
 Decision changes this round: #1 (a new surface), #5 (mechanism), #11 (audit
 value). So round 2 runs. Reviewer B continues (it found the round's only
 mediums); it receives reviewer A's report.
+
+## Round 2 (plan v2 @444e0f86) - TERMINAL
+
+Report: `R2-reviewer-b.md` (reviewer B continued with the RE-REVIEW CHARGE;
+it also held reviewer A's round-1 report). 6 findings, all LOW. No BLOCKING,
+HIGH or MEDIUM. The reviewer checked every round-1 fix against the code
+(AR11, AR12, AR13 / Task 3.5, AR16, the closed-thread test, the commit
+quoting) and found them correct. It conceded its R1 #9 (AR5) and did not
+contest A3 staying a watch item.
+
+| # | Finding | Ruling | Where it lands |
+|---|---|---|---|
+| 1 | The S3 and S4 full-app-suite exit steps run a 3-8 minute suite in the foreground; S4 sets no timeout (the tool's 120 s default kills it), S3 caps at 600 s and skips the AWS-key check. | ACCEPT - run in the background with a log file, a hard outer `timeout`, and the AWS-key check, like Task 6.5. | S3, S4 exit checks |
+| 2 | S5 leaves the full dashboard suite optional although it edits shared modules (the `types.ts` unions, the `Card.tsx` gate, `groupSendRows`). | ACCEPT - mandatory, by AR15's own reasoning. | S5 exit check |
+| 3 | Task 6.4 Step 1f calls the audit row the "ONLY trace" of a deleted-contact sign-up; the INFO `housing-fair signup captured` line with `deletedContact: true` is a second. | ACCEPT - wording. | S6 |
+| 4 | Spec section 7 records AR13 for "an existing unknown contact with no name", but Task 3.5 labels EVERY resolved nameless contact (any type) and re-pins two nameless-tenant rows. | ACCEPT - the plan (AR13) is right; the spec note is widened to match. | spec section 7 |
+| 5 | CONTESTED R1 #12: the rejection stands for a client-sent version, but the WORDING "the disclosure version the form showed" is still inaccurate - it is the server's `CONSENT_VERSION` (`smsCompliance.ts:91`). | ACCEPT the wording fix only (the round-1 REJECT of a client-sent version stands): the audit field is "the consent disclosure version in force, `CONSENT_VERSION`, which ships with the form". | spec section 7, S4 Task 4.5 comment |
+| 6 | Slice-report rules conflict: S2 and S5 must list pre-existing lint errors; S6 Step 11 says those belong only in `S6-gates.md`; section 0 says "findings only". | ACCEPT - section 0 rules it: a slice report MAY name pre-existing lint errors in files the slice touched (a finding for the next reader); `S6-gates.md` remains the authority for gate 5's baseline attribution. | plan section 0, S6 |
+
+Decision changes this round: NONE - every accepted finding is a precision
+edit (execution steps, wording, a verification step made mandatory). Per the
+stop rule this is the TERMINAL round; the edits are folded in and the plan
+review is CLOSED after 2 rounds: 21 distinct findings, 20 accepted (one only
+as a watch item), 1 rejected (R1 #12's client-sent version; its wording half
+accepted in round 2).

@@ -49,13 +49,23 @@ function scoreBeds(target: UnitItem, c: UnitItem): number {
   return 0;
 }
 
-/** area: 1.0 same subzone, 0.6 same area (different subzone), else 0. */
+/**
+ * flyer-leads D9: a subzone as the score compares it - EVERY whitespace
+ * character removed, then uppercased, so "se11", " SE11 " and "SE 11" are one
+ * subzone. Never fuzzy: "SE1" and "SE11" stay different. A non-string reads
+ * as '', and '' never matches (scoreArea). Stored values are not rewritten.
+ */
+function subzoneKey(v: unknown): string {
+  return typeof v === 'string' ? v.replace(/\s+/g, '').toUpperCase() : '';
+}
+
+/**
+ * area: 1.0 same subzone (compared by subzoneKey, flyer-leads D9), 0.6 same
+ * area (different subzone; an exact, unchanged comparison), else 0.
+ */
 function scoreArea(target: UnitItem, c: UnitItem): number {
-  if (
-    typeof target.subzone === 'string' &&
-    target.subzone.length > 0 &&
-    target.subzone === c.subzone
-  ) {
+  const subzone = subzoneKey(target.subzone);
+  if (subzone.length > 0 && subzone === subzoneKey(c.subzone)) {
     return 1;
   }
   if (typeof target.area === 'string' && target.area.length > 0 && target.area === c.area) {

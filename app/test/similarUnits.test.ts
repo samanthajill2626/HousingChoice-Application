@@ -243,3 +243,76 @@ describe('rankSimilarUnits (BE5/C6)', () => {
     expect(typeof item.summary).toBe('string');
   });
 });
+
+describe('rankSimilarUnits - the subzone ignores case and spacing (flyer-leads D9)', () => {
+  // beds 1.0 * 0.35 + same subzone 1.0 * 0.25 = 0.60 -> 60;
+  // beds 1.0 * 0.35 + same area 0.6 * 0.25 = 0.50 -> 50.
+  const zoneTarget = unit('zone-target', { beds: 2, area: 'East', subzone: 'SE11' });
+  const ranked = (target: UnitItem, candidates: UnitItem[]) =>
+    rankSimilarUnits(target, candidates, { limit: 10 }).map((u) => [u.unitId, u.matchPct, u.summary]);
+
+  it('"se11", " SE11 ", "SE 11" and a tab-spaced value are the same subzone as "SE11"', () => {
+    expect(
+      ranked(zoneTarget, [
+        unit('z-lower', { beds: 2, area: 'East', subzone: 'se11' }),
+        unit('z-outer', { beds: 2, area: 'East', subzone: ' SE11 ' }),
+        unit('z-inner', { beds: 2, area: 'East', subzone: 'SE 11' }),
+        unit('z-tab', { beds: 2, area: 'East', subzone: 'Se\t1 1' }),
+      ]),
+    ).toEqual([
+      ['z-inner', 60, '2 bed - Same subzone'],
+      ['z-lower', 60, '2 bed - Same subzone'],
+      ['z-outer', 60, '2 bed - Same subzone'],
+      ['z-tab', 60, '2 bed - Same subzone'],
+    ]);
+  });
+
+  it("normalizes the target's subzone too", () => {
+    const messyTarget = unit('messy-target', { beds: 2, area: 'East', subzone: ' se 11 ' });
+    expect(ranked(messyTarget, [unit('c', { beds: 2, area: 'East', subzone: 'SE11' })])).toEqual([
+      ['c', 60, '2 bed - Same subzone'],
+    ]);
+  });
+
+  it('a subzone that normalizes to empty never matches, not even another blank one', () => {
+    const blankTarget = unit('blank-target', { beds: 2, area: 'East', subzone: '   ' });
+    expect(
+      ranked(blankTarget, [
+        unit('b-spaces', { beds: 2, area: 'East', subzone: '   ' }),
+        unit('b-tab', { beds: 2, area: 'East', subzone: ' \t ' }),
+        unit('b-empty', { beds: 2, area: 'East', subzone: '' }),
+        unit('b-none', { beds: 2, area: 'East' }),
+      ]),
+    ).toEqual([
+      ['b-empty', 50, '2 bed - Same area'],
+      ['b-none', 50, '2 bed - Same area'],
+      ['b-spaces', 50, '2 bed - Same area'],
+      ['b-tab', 50, '2 bed - Same area'],
+    ]);
+  });
+
+  it('(PIN) no fuzzy matching: "SE1" and "SE111" stay different from "SE11"', () => {
+    expect(
+      ranked(zoneTarget, [
+        unit('c-se1', { beds: 2, area: 'East', subzone: 'SE1' }),
+        unit('c-se111', { beds: 2, area: 'East', subzone: 'se 111' }),
+      ]),
+    ).toEqual([
+      ['c-se1', 50, '2 bed - Same area'],
+      ['c-se111', 50, '2 bed - Same area'],
+    ]);
+  });
+
+  it('(PIN) the area comparison is unchanged - still exact, case included', () => {
+    const areaTarget = unit('area-target', { beds: 2, area: 'East' });
+    expect(
+      ranked(areaTarget, [
+        unit('a-case', { beds: 2, area: 'east' }),
+        unit('a-exact', { beds: 2, area: 'East' }),
+      ]),
+    ).toEqual([
+      ['a-exact', 50, '2 bed - Same area'],
+      ['a-case', 35, '2 bed'],
+    ]);
+  });
+});

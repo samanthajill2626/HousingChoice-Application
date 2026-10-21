@@ -38,10 +38,13 @@ describe('FlyerLegend', () => {
     ]);
   });
 
+  // Planner ruling PR-2 (code review PA-2): copy only - saving the landlord
+  // never changes an existing property, so the line names the two ways a
+  // value reaches a property.
   it("the landlord form: the property-flyers line", () => {
     render(<FlyerLegend audience="landlord" />);
     expect(screen.getAllByRole('listitem').map((li) => li.textContent)).toEqual([
-      "On property flyers - copied to this landlord's properties, where tenants see it on the public flyer.",
+      'On property flyers - tenants see it once it is copied to a property (a new property, or Apply to properties).',
       'Staff only - never leaves the dashboard.',
     ]);
   });

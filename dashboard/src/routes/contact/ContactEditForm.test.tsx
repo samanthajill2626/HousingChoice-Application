@@ -1447,7 +1447,7 @@ describe('ContactEditForm - landlord Requirements / Qualifications', () => {
     const group = fieldset();
     expect(within(group).getAllByText('On property flyers').length).toBeGreaterThan(0);
     expect(within(group).getAllByText('Staff only').length).toBeGreaterThan(0);
-    expect(group).toHaveTextContent(/copied to this landlord's properties/);
+    expect(group).toHaveTextContent(/tenants see it once it is copied to a property/);
     // Tags stay out of the accessible names: exact names still resolve.
     expect(within(group).getByRole('checkbox', { name: 'No pets' })).toBeChecked();
     expect(within(group).getByLabelText('Pet fee')).toHaveDisplayValue('$300');

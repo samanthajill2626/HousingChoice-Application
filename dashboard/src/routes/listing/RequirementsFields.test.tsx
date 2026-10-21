@@ -81,8 +81,10 @@ describe('RequirementsFields', () => {
     const texts = describedTexts(control);
     expect(texts).toContain(TAGS[audience][flyer]);
     for (const el of describers(control)) expect(el.closest('label')).toBeNull();
-    // D10: only the public free-text boxes (pets details, pet fee) say tenants see them.
-    expect(texts.includes(PUBLIC_NOTE)).toBe(kind === 'text' && flyer === 'on_flyer');
+    // D10: only the PROPERTY forms' public free-text boxes (pets details, pet
+    // fee) say tenants see them; a landlord value reaches a flyer only once it
+    // is copied to a property (D9; planner ruling PR-2, code review PC-1).
+    expect(texts.includes(PUBLIC_NOTE)).toBe(audience === 'property' && kind === 'text' && flyer === 'on_flyer');
   });
 
   it.each(['property', 'landlord'] as const)('%s form: No application fee is tagged as the fee is', (audience) => {

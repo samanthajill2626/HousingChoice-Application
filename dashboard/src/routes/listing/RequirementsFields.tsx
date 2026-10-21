@@ -2,7 +2,8 @@
 // D9, D10; plan 2.6) of the New and Edit property forms and the landlord edit
 // form. The eight items in their four groups, every field tagged from the
 // registry ("On flyer" / "Staff only" on a property form, "On property flyers"
-// / "Staff only" on the landlord form), the public free-text boxes noted, and
+// / "Staff only" on the landlord form), the public free-text boxes noted on a
+// property form (never on the landlord form - planner ruling PR-2), and
 // the two alternatives D1 couples: "One month's rent" clears and disables the
 // fixed amount; "No application fee" records 0 and disables the amount (its
 // own form flag, code review R2D-5 - never read off the amount text).
@@ -146,7 +147,10 @@ export function RequirementsFields({
         label={field.label}
         visibility={field.flyer}
         audience={audience}
-        publicNote={field.kind === 'text' && field.flyer === 'on_flyer'}
+        // D10: the note is the PROPERTY forms' - a landlord value reaches a
+        // flyer only once it is copied to a property (D9; planner ruling PR-2,
+        // code review PC-1).
+        publicNote={audience === 'property' && field.kind === 'text' && field.flyer === 'on_flyer'}
       >
         {(control) =>
           rows !== undefined ? (

@@ -160,7 +160,7 @@ test.describe('Contact detail — header actions + edit', () => {
     await expect(dialog.getByText('Requirements / Qualifications', { exact: true })).toBeVisible();
     await expect(
       dialog.getByText(
-        "On property flyers - copied to this landlord's properties, where tenants see it on the public flyer.",
+        'On property flyers - tenants see it once it is copied to a property (a new property, or Apply to properties).',
         { exact: true },
       ),
     ).toBeVisible();

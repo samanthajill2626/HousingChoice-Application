@@ -70,6 +70,9 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   // Staff-only sub-market code (Sam's codes, e.g. E8 or SE11; spec 2026-10-20
   // D3). NEVER on the flyer projection below; feeds the similar-properties score.
   subzone: 'clearable_string',
+  // The asking rent range. Staff only since flyer-leads D1 (spec 2026-10-21):
+  // NEVER on the flyer projection below. Still read by the [Rent] merge field
+  // and the similar-properties rent score.
   rent_min: 'number',
   rent_max: 'number',
   // The accepted contract rent (Approval & Move-in). Writable in place at rent
@@ -78,24 +81,27 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   final_rent: 'number',
   payment_standard: 'number',
   // Security deposit: the Deposit item's fixed amount in dollars (spec
-  // 2026-10-20 D1: clearable money, null REMOVEs). PUBLIC on the flyer.
+  // 2026-10-20 D1: clearable money, null REMOVEs). Staff only since
+  // flyer-leads D1 (spec 2026-10-21): NEVER on the flyer projection below.
   deposit: 'requirement',
   lif: 'number',
   // TENANT-PAID utilities (which utilities the tenant must pay) — free-form.
   utilities: 'string',
-  // Accessibility notes (tenant-useful). PUBLIC on the flyer projection (flyer-full-info).
+  // Accessibility notes. Staff only since flyer-leads D1 (spec 2026-10-21):
+  // NEVER on the flyer projection below.
   accessibility: 'string',
   // Internal staff notes ("In-unit washer/dryer", "No dishwasher"). NEVER on
   // the flyer projection below - internal only.
   notes: 'string',
   // Lease terms - free-form per-unit fact ("12-month minimum, month-to-month
   // after"). Moved OFF the landlord contact 2026-07-10 (with pet policy /
-  // accepted programs / expected rent - see GLOSSARY). PUBLIC on the flyer
-  // projection below (flyer-full-info 2026-07-16).
+  // accepted programs / expected rent - see GLOSSARY). Staff only since
+  // flyer-leads D1 (spec 2026-10-21): NEVER on the flyer projection below.
   lease_terms: 'string',
   // The Pets item's details text (spec 2026-10-20 D1; trimmed, ''/null
   // REMOVE). A raw caller may still send a legacy bare boolean: it is stored
-  // in the new shape at once (the 'pets' case below). PUBLIC on the flyer.
+  // in the new shape at once (the 'pets' case below). Staff only since
+  // flyer-leads D1 (spec 2026-10-21), like the whole Pets item.
   pets: 'pets',
   priority: 'string',
   media: 'string[]',
@@ -354,6 +360,10 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
  * only since spec 2026-10-20 D3), requirement_sources (server-owned, D5), or
  * the staff-only requirement keys no_evictions_on_program, evictions_notes,
  * credit_requirements, income_requirements, qualifications and deposit_notes.
+ * Since flyer-leads D1 (spec 2026-10-21) also NEVER rent_min, rent_max,
+ * lease_terms, accessibility, or any key of the Pets item (pets, no_pets,
+ * pet_fee) or the Deposit item (deposit, deposit_one_month, deposit_flexible) -
+ * see "Removed keys" below.
  * lib/requirements.ts records each requirement field's flyer visibility, and
  * the D10a parity walk (app/test/propertyFormFlyerParity.test.ts) fails when a
  * property-form tag disagrees with this projection.
@@ -372,9 +382,23 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
  * flyer's "Fits a ... voucher" line must state the sizes the property actually
  * takes, not its bedroom count.
  *
- * Older bundles (spec 2026-10-20 D11): a flyer page loaded before #12 keeps
- * reading `voucher_size`, `deposit`, `application_fee` and `pets`, so the
- * projection keeps those keys and only ADDS keys.
+ * Older bundles (spec 2026-10-20 D11): a flyer page loaded before #12 reads
+ * `voucher_size` and `application_fee`, so the projection keeps those keys.
+ *
+ * Removed keys (flyer-leads D1, spec 2026-10-21). The projection used to only
+ * ADD keys. It now deliberately REMOVES ten: rent_min, rent_max, lease_terms,
+ * accessibility, pets, no_pets, pet_fee, deposit, deposit_one_month and
+ * deposit_flexible - Sam talks rent, lease terms, accessibility, pets and the
+ * deposit through with each tenant instead of publishing them. The keys are
+ * ABSENT, never null: "off the flyer" means the public endpoint never returns
+ * them. This is safe for old flyer pages: an old bundle fed the new payload
+ * would crash on render (its textOrNull(undefined).trim() throws - a white
+ * page, never a stray value), but it is never fed it - the page fetches once
+ * on load and nothing caches the bundle (the app container serves the
+ * dashboard and CloudFront does not cache the default behavior), so the load
+ * that fetches the new payload also brings the new bundle. Add no
+ * compatibility code for the old page. Removing any OTHER key needs the same
+ * argument recorded here.
  */
 export interface UnitFlyer {
   unitId: string;
@@ -391,8 +415,6 @@ export interface UnitFlyer {
   /** The authorities whose vouchers this unit accepts (synthesized - see authoritiesOf). */
   accepted_authorities: string[];
   listing_link: string | null;
-  rent_min: number | null;
-  rent_max: number | null;
   /** The structured postal address (allowlisted sub-fields only). */
   address: Address;
   /** Tenant-paid utilities (which utilities the tenant pays). */
@@ -403,23 +425,6 @@ export interface UnitFlyer {
   application_fee: number | null;
   /** Same-day RTA available. */
   same_day_rta: boolean | null;
-  /** The Pets item's details text, read per spec D1: a legacy `true` reads
-   *  "Allowed"; a legacy `false` reads null with `no_pets` true. */
-  pets: string | null;
-  /** The Pets item's "No pets" checkbox. */
-  no_pets: boolean;
-  /** The Pets item's pet fee (free text). */
-  pet_fee: string | null;
-  /** Accessibility notes (tenant-useful, staff-authored). */
-  accessibility: string | null;
-  /** The Deposit item's fixed amount in dollars. */
-  deposit: number | null;
-  /** The Deposit item's "One month's rent" (an alternative to the amount). */
-  deposit_one_month: boolean;
-  /** The Deposit item's "Flexible / payment terms available". Its notes are staff only. */
-  deposit_flexible: boolean;
-  /** Lease terms - free-form ("12-month minimum, month-to-month after"). */
-  lease_terms: string | null;
   /** Washer / dryer (spec D3): hookups, included or none; null when not recorded. */
   washer_dryer: (typeof WASHER_DRYER_VALUES)[number] | null;
 }
@@ -479,14 +484,10 @@ export function toUnitFlyer(unit: UnitItem): UnitFlyer {
   // spec 2026-10-20 D11: every size, ascending and de-duplicated (a legacy
   // stored list may be neither); voucher_size keeps the first for old pages.
   const voucherSizes = [...new Set(acceptedVoucherSizes(unit))].sort((x, y) => x - y);
-  // The requirement items through the D1 read interpretation (legacy pets
-  // boolean, trimmed text, blank -> null). Only their ON-FLYER keys are copied.
-  const pets = unitItemValue(unit, 'pets');
-  const deposit = unitItemValue(unit, 'deposit');
+  // The Application fee item through the D1 read interpretation (a negative or
+  // non-number amount reads blank). Since flyer-leads D1 it is the only
+  // requirement item on the flyer.
   const fee = unitItemValue(unit, 'application_fee')['application_fee'];
-  const petsDetails = pets['pets'];
-  const petFee = pets['pet_fee'];
-  const depositAmount = deposit['deposit'];
   return {
     unitId: unit.unitId,
     media: isStringArray(unit.media) ? unit.media : [],
@@ -497,21 +498,11 @@ export function toUnitFlyer(unit: UnitItem): UnitFlyer {
     voucher_sizes: voucherSizes,
     accepted_authorities: authoritiesOf(unit),
     listing_link: typeof unit.listing_link === 'string' ? unit.listing_link : null,
-    rent_min: isFiniteNumber(unit.rent_min) ? unit.rent_min : null,
-    rent_max: isFiniteNumber(unit.rent_max) ? unit.rent_max : null,
     address: addr.ok ? addr.address : {},
     utilities: typeof unit.utilities === 'string' ? unit.utilities : null,
     video_url: typeof unit.video_url === 'string' ? unit.video_url : null,
     application_fee: typeof fee === 'number' ? fee : null,
     same_day_rta: typeof unit.same_day_rta === 'boolean' ? unit.same_day_rta : null,
-    pets: typeof petsDetails === 'string' ? petsDetails : null,
-    no_pets: pets['no_pets'] === true,
-    pet_fee: typeof petFee === 'string' ? petFee : null,
-    accessibility: typeof unit.accessibility === 'string' ? unit.accessibility : null,
-    deposit: typeof depositAmount === 'number' ? depositAmount : null,
-    deposit_one_month: deposit['deposit_one_month'] === true,
-    deposit_flexible: deposit['deposit_flexible'] === true,
-    lease_terms: typeof unit.lease_terms === 'string' ? unit.lease_terms : null,
     washer_dryer: isWasherDryer(unit.washer_dryer) ? unit.washer_dryer : null,
   };
 }

@@ -579,6 +579,21 @@ describe('acceptedVoucherSizes', () => {
 });
 
 describe('toUnitFlyer - the merged public allowlist', () => {
+  // flyer-leads D1 (spec 2026-10-21): the ten keys the public flyer no longer
+  // carries. Staff only; ABSENT from the payload, never sent as null.
+  const TRIMMED_FLYER_KEYS = [
+    'rent_min',
+    'rent_max',
+    'lease_terms',
+    'accessibility',
+    'pets',
+    'no_pets',
+    'pet_fee',
+    'deposit',
+    'deposit_one_month',
+    'deposit_flexible',
+  ] as const;
+
   // A unit loaded with EVERY internal/landlord/contact field set, to prove none
   // leak through the projection.
   function fullUnit(overrides: Partial<UnitItem> = {}): UnitItem {
@@ -599,14 +614,19 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       video_url: 'https://v.example/tour9',
       application_fee: 50,
       same_day_rta: true,
-      // newly PUBLIC (flyer-full-info 2026-07-16) - real values, asserted below
+      // flyer-leads D1 (2026-10-21): staff only now. Every one of the ten
+      // trimmed keys is set (TRIMMED marks the text ones) and asserted ABSENT
+      // below. Both deposit alternatives are set on purpose: this is a
+      // projection fixture, not a valid write.
       deposit: 1400,
-      accessibility: 'Ground floor, no stairs',
-      lease_terms: '12-month minimum',
-      pets: 'Cats only',
-      // spec 2026-10-20 D1/D3/D11: public requirement keys and washer / dryer
-      pet_fee: '$300 one-time',
+      deposit_one_month: true,
       deposit_flexible: true,
+      accessibility: 'TRIMMED ground floor, no stairs',
+      lease_terms: 'TRIMMED 12-month minimum',
+      pets: 'TRIMMED cats only',
+      no_pets: true,
+      pet_fee: 'TRIMMED $300 one-time',
+      // spec 2026-10-20 D3/D11: washer / dryer stays public
       washer_dryer: 'hookups',
       // still INTERNAL - SECRET markers prove they never serialize
       // (spec 2026-10-20: subzone is staff only now, D3; so are the screening
@@ -650,23 +670,26 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       // is retired and never folded into the new one.
       accepted_authorities: ['DCA'],
       listing_link: 'https://example.com/listing/9',
-      rent_min: 1400,
-      rent_max: 1600,
       address: { line1: '123 Private St', city: 'Atlanta', state: 'GA', zip: '30303' },
       utilities: 'Tenant-paid',
       video_url: 'https://v.example/tour9',
       application_fee: 50,
       same_day_rta: true,
-      pets: 'Cats only',
-      no_pets: false,
-      pet_fee: '$300 one-time',
-      accessibility: 'Ground floor, no stairs',
-      deposit: 1400,
-      deposit_one_month: false,
-      deposit_flexible: true,
-      lease_terms: '12-month minimum',
       washer_dryer: 'hookups',
     });
+  });
+
+  it('flyer-leads D1: a fully filled property publishes NONE of the ten trimmed keys - absent, never null', () => {
+    const flyer = toUnitFlyer(fullUnit());
+    for (const key of TRIMMED_FLYER_KEYS) {
+      expect(key in flyer, key).toBe(false);
+    }
+    expect(JSON.stringify(flyer)).not.toContain('TRIMMED');
+    // A bare unit carries none of them either: no null placeholders.
+    const bare = toUnitFlyer({ unitId: 'bare', landlordId: 'll', status: 'available' });
+    for (const key of TRIMMED_FLYER_KEYS) {
+      expect(key in bare, key).toBe(false);
+    }
   });
 
   it('NEVER leaks an internal/landlord/contact field (allowlist wall)', () => {
@@ -686,6 +709,8 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       // spec 2026-10-20: staff only (D3, D1) and server-owned (D5)
       'subzone', 'requirement_sources', 'no_evictions_on_program', 'evictions_notes',
       'credit_requirements', 'income_requirements', 'qualifications', 'deposit_notes',
+      // flyer-leads D1 (2026-10-21): staff only, removed from the projection
+      ...TRIMMED_FLYER_KEYS,
     ]) {
       expect(keys, forbidden).not.toContain(forbidden);
     }
@@ -707,36 +732,19 @@ describe('toUnitFlyer - the merged public allowlist', () => {
     expect(flyer.video_url).toBeNull();
     expect(flyer.application_fee).toBeNull();
     expect(flyer.same_day_rta).toBeNull();
-    expect(flyer.pets).toBeNull();
-    expect(flyer.accessibility).toBeNull();
-    expect(flyer.deposit).toBeNull();
-    expect(flyer.lease_terms).toBeNull();
-    // spec 2026-10-20 D11: the added keys - checkboxes read false, the list [].
+    // spec 2026-10-20 D11: the added keys that stay - the list [].
     expect(flyer.voucher_sizes).toEqual([]);
     expect(flyer.voucher_size).toBeNull();
-    expect(flyer.no_pets).toBe(false);
-    expect(flyer.pet_fee).toBeNull();
-    expect(flyer.deposit_one_month).toBe(false);
-    expect(flyer.deposit_flexible).toBe(false);
     expect(flyer.washer_dryer).toBeNull();
   });
 
-  it('reads pets through the D1 interpretation (spec 2026-10-20): details text + No pets', () => {
-    const pick = (f: UnitFlyer): { pets: string | null; no_pets: boolean } => ({ pets: f.pets, no_pets: f.no_pets });
-    // A legacy true reads "Allowed"; a legacy false reads No pets with no details.
-    expect(pick(toUnitFlyer(fullUnit({ pets: true })))).toEqual({ pets: 'Allowed', no_pets: false });
-    expect(pick(toUnitFlyer(fullUnit({ pets: false })))).toEqual({ pets: null, no_pets: true });
-    // Free text is never parsed: "No pets" stays details text.
-    expect(pick(toUnitFlyer(fullUnit({ pets: 'No pets' })))).toEqual({ pets: 'No pets', no_pets: false });
-    expect(pick(toUnitFlyer(fullUnit({ no_pets: true, pets: ' service animals only ' })))).toEqual({
-      pets: 'service animals only',
-      no_pets: true,
-    });
-    expect(pick(toUnitFlyer(fullUnit({ pets: '   ' })))).toEqual({ pets: null, no_pets: false });
-    expect(pick(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }))).toEqual({
-      pets: null,
-      no_pets: false,
-    });
+  it('flyer-leads D1: the Pets item never ships, whatever its stored shape (a legacy boolean too)', () => {
+    for (const pets of [true, false, 'No pets', ' service animals only ', '   ']) {
+      const flyer = toUnitFlyer(fullUnit({ pets, no_pets: true, pet_fee: '$300' }));
+      for (const key of ['pets', 'no_pets', 'pet_fee']) {
+        expect(key in flyer, `${JSON.stringify(pets)} ${key}`).toBe(false);
+      }
+    }
   });
 
   it('voucher_size states the RECORDED size over the bedroom count; the key stays off', () => {
@@ -791,32 +799,22 @@ describe('toUnitFlyer - the merged public allowlist', () => {
     expect(JSON.stringify(flyer)).not.toContain('E8');
   });
 
-  it('projects the Deposit item: one month, a fixed amount, flexible - never its notes (D11)', () => {
+  it('flyer-leads D1: the Deposit item never ships - not the amount, one month, flexible or the notes', () => {
     const bare: UnitItem = { unitId: 'd', landlordId: 'll', status: 'available' };
-    const pick = (u: UnitItem) => {
-      const f = toUnitFlyer(u);
-      return { deposit: f.deposit, deposit_one_month: f.deposit_one_month, deposit_flexible: f.deposit_flexible };
-    };
-    expect(pick({ ...bare, deposit_one_month: true })).toEqual({
-      deposit: null,
-      deposit_one_month: true,
-      deposit_flexible: false,
-    });
-    expect(pick({ ...bare, deposit: 1400, deposit_flexible: true })).toEqual({
-      deposit: 1400,
-      deposit_one_month: false,
-      deposit_flexible: true,
-    });
-    // Flexible alone is data the page shows as its own deposit row.
-    expect(pick({ ...bare, deposit_flexible: true })).toEqual({
-      deposit: null,
-      deposit_one_month: false,
-      deposit_flexible: true,
-    });
-    // Notes alone give the page nothing to show - and the notes never ship.
-    const notesOnly: UnitItem = { ...bare, deposit_notes: 'SECRET split it' };
-    expect(pick(notesOnly)).toEqual({ deposit: null, deposit_one_month: false, deposit_flexible: false });
-    expect(JSON.stringify(toUnitFlyer(notesOnly))).not.toContain('SECRET');
+    const variants: Partial<UnitItem>[] = [
+      { deposit_one_month: true },
+      { deposit: 1400, deposit_flexible: true },
+      { deposit_flexible: true },
+      { deposit: 0 },
+      { deposit_notes: 'SECRET split it' },
+    ];
+    for (const variant of variants) {
+      const flyer = toUnitFlyer({ ...bare, ...variant });
+      for (const key of ['deposit', 'deposit_one_month', 'deposit_flexible', 'deposit_notes']) {
+        expect(key in flyer, `${JSON.stringify(variant)} ${key}`).toBe(false);
+      }
+      expect(JSON.stringify(flyer)).not.toContain('SECRET');
+    }
   });
 
   it('(PIN) projects the application fee: 0 is "No application fee", absent is null (D11)', () => {
@@ -824,18 +822,14 @@ describe('toUnitFlyer - the merged public allowlist', () => {
     expect(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }).application_fee).toBeNull();
   });
 
-  it('reads both money fields through the D1 read: a stored negative amount projects null (D1, D11)', () => {
+  it('reads the application fee through the D1 read: a stored negative amount projects null (D1, D11)', () => {
     // A negative amount was never writable (the validator's >= 0), so only bad
     // raw data can hold one. The registry read (unitItemValue) treats it as
-    // blank, so the flyer must not publish it as "$-50".
+    // blank, so the flyer must not publish it as "$-50". The deposit is not on
+    // the flyer at all (flyer-leads D1).
     const flyer = toUnitFlyer(fullUnit({ application_fee: -50, deposit: -1400 }));
     expect(flyer.application_fee).toBeNull();
-    expect(flyer.deposit).toBeNull();
-  });
-
-  it('projects the pet fee trimmed, null when blank (D11)', () => {
-    expect(toUnitFlyer(fullUnit({ pet_fee: '  $300 one-time ' })).pet_fee).toBe('$300 one-time');
-    expect(toUnitFlyer(fullUnit({ pet_fee: '  ' })).pet_fee).toBeNull();
+    expect('deposit' in flyer).toBe(false);
   });
 
   it('projects washer / dryer only when it holds a recorded value (D3, D11)', () => {

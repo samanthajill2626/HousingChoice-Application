@@ -180,15 +180,17 @@ describe('PROPERTY_FORM_FIELDS - the D10a tag table', () => {
       ['Beds', ['beds'], 'on_flyer'],
       ['Baths', ['baths'], 'on_flyer'],
       ['Voucher sizes accepted', ['voucher_size_accepted'], 'on_flyer'],
-      ['Rent min', ['rent_min'], 'on_flyer'],
-      ['Rent max', ['rent_max'], 'on_flyer'],
+      // flyer-leads D2 (spec 2026-10-21): rent, accessibility, lease terms and
+      // every Pets / Deposit field are Staff only; Application fee stays On flyer.
+      ['Rent min', ['rent_min'], 'staff_only'],
+      ['Rent max', ['rent_max'], 'staff_only'],
       ['Payment standard', ['payment_standard'], 'staff_only'],
       ['Address', ['address'], 'on_flyer'],
       ['Subzone', ['subzone'], 'staff_only'],
       ['Washer / dryer', ['washer_dryer'], 'on_flyer'],
       ['Tenant-paid utilities', ['utilities'], 'on_flyer'],
-      ['Accessibility', ['accessibility'], 'on_flyer'],
-      ['Lease terms', ['lease_terms'], 'on_flyer'],
+      ['Accessibility', ['accessibility'], 'staff_only'],
+      ['Lease terms', ['lease_terms'], 'staff_only'],
       ['Public listing link', ['listing_link'], 'on_flyer'],
       ['Video URL', ['video_url'], 'on_flyer'],
       ['Same-day RTA', ['same_day_rta'], 'on_flyer'],
@@ -197,12 +199,12 @@ describe('PROPERTY_FORM_FIELDS - the D10a tag table', () => {
       ['Credit score', ['credit_requirements'], 'staff_only'],
       ['Income requirements', ['income_requirements'], 'staff_only'],
       ['Qualifications', ['qualifications'], 'staff_only'],
-      ['No pets', ['no_pets'], 'on_flyer'],
-      ['Pets (details)', ['pets'], 'on_flyer'],
-      ['Pet fee', ['pet_fee'], 'on_flyer'],
-      ["One month's rent", ['deposit_one_month'], 'on_flyer'],
-      ['Fixed amount', ['deposit'], 'on_flyer'],
-      ['Flexible / payment terms available', ['deposit_flexible'], 'on_flyer'],
+      ['No pets', ['no_pets'], 'staff_only'],
+      ['Pets (details)', ['pets'], 'staff_only'],
+      ['Pet fee', ['pet_fee'], 'staff_only'],
+      ["One month's rent", ['deposit_one_month'], 'staff_only'],
+      ['Fixed amount', ['deposit'], 'staff_only'],
+      ['Flexible / payment terms available', ['deposit_flexible'], 'staff_only'],
       ['Deposit notes', ['deposit_notes'], 'staff_only'],
       ['No application fee', ['application_fee'], 'on_flyer'],
       ['Application fee', ['application_fee'], 'on_flyer'],
@@ -259,11 +261,35 @@ describe('the D10a parity walk - the tags agree with toUnitFlyer', () => {
 
   it('catches a wrong tag - the walk is not vacuous', () => {
     const flip = (v: FlyerVisibility): FlyerVisibility => (v === 'on_flyer' ? 'staff_only' : 'on_flyer');
-    const flipped = new Set(['Subzone', 'Pets (details)', 'Deposit notes']);
+    // Both directions: three Staff only rows flipped On flyer, and one On flyer
+    // row (Application fee) flipped Staff only.
+    const flipped = new Set(['Subzone', 'Pets (details)', 'Deposit notes', 'Application fee']);
     const wrong = PROPERTY_FORM_FIELDS.map((f) => (flipped.has(f.label) ? { ...f, flyer: flip(f.flyer) } : f));
     const mismatches = flyerTagMismatches(wrong, BASES);
     expect(mismatches).toHaveLength(flipped.size * BASES.length);
     expect(new Set(mismatches.map((m) => m.split(' | ')[0]))).toEqual(flipped);
+  });
+
+  it('flyer-leads D2: a re-tagged field tagged On flyer again fails the walk on every base', () => {
+    const retagged = new Set([
+      'Rent min',
+      'Rent max',
+      'Accessibility',
+      'Lease terms',
+      'No pets',
+      'Pets (details)',
+      'Pet fee',
+      "One month's rent",
+      'Fixed amount',
+      'Flexible / payment terms available',
+    ]);
+    const wrong = PROPERTY_FORM_FIELDS.map((f) =>
+      retagged.has(f.label) ? { ...f, flyer: 'on_flyer' as FlyerVisibility } : f,
+    );
+    const mismatches = flyerTagMismatches(wrong, BASES);
+    expect(mismatches).toHaveLength(retagged.size * BASES.length);
+    expect(new Set(mismatches.map((m) => m.split(' | ')[0]))).toEqual(retagged);
+    expect(mismatches.every((m) => m.endsWith('tagged On flyer, but the flyer does not change'))).toBe(true);
   });
 
   it('(PIN) pins the trap: on the sizes-equal-beds base, clearing the sizes alone changes nothing', () => {

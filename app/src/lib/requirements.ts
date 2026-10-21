@@ -81,18 +81,21 @@ export const REQUIREMENT_ITEMS: readonly RequirementItem[] = Object.freeze([
   defineItem('qualifications', 'Qualifications', 'Screening', [
     defineField('qualifications', 'Qualifications', 'long_text', 'staff_only'),
   ]),
+  // flyer-leads D2 (spec 2026-10-21): every Pets and Deposit field is Staff
+  // only - Sam talks them through with each tenant instead of publishing them,
+  // and lib/unitFields.ts toUnitFlyer no longer carries them (D1).
   defineItem('pets', 'Pets', 'Pets', [
-    defineField('no_pets', 'No pets', 'checkbox', 'on_flyer'),
+    defineField('no_pets', 'No pets', 'checkbox', 'staff_only'),
     // The EXISTING unit key. A legacy bare boolean is read (and, on the unit
     // write only, accepted) per D1 - see unitItemValue below.
-    defineField('pets', 'Pets (details)', 'text', 'on_flyer'),
-    defineField('pet_fee', 'Pet fee', 'text', 'on_flyer'),
+    defineField('pets', 'Pets (details)', 'text', 'staff_only'),
+    defineField('pet_fee', 'Pet fee', 'text', 'staff_only'),
   ]),
   defineItem('deposit', 'Deposit', 'Move-in costs', [
     // "One month's rent" and a fixed amount are ALTERNATIVES (hasDepositConflict).
-    defineField('deposit_one_month', "One month's rent", 'checkbox', 'on_flyer'),
-    defineField('deposit', 'Fixed amount', 'money', 'on_flyer'),
-    defineField('deposit_flexible', 'Flexible / payment terms available', 'checkbox', 'on_flyer'),
+    defineField('deposit_one_month', "One month's rent", 'checkbox', 'staff_only'),
+    defineField('deposit', 'Fixed amount', 'money', 'staff_only'),
+    defineField('deposit_flexible', 'Flexible / payment terms available', 'checkbox', 'staff_only'),
     defineField('deposit_notes', 'Deposit notes', 'text', 'staff_only'),
   ]),
   defineItem('application_fee', 'Application fee', 'Move-in costs', [
@@ -532,15 +535,17 @@ export const PROPERTY_FORM_FIELDS: readonly FormFieldVisibility[] = Object.freez
   formField('Beds', ['beds'], 'on_flyer'),
   formField('Baths', ['baths'], 'on_flyer'),
   formField('Voucher sizes accepted', ['voucher_size_accepted'], 'on_flyer'),
-  formField('Rent min', ['rent_min'], 'on_flyer'),
-  formField('Rent max', ['rent_max'], 'on_flyer'),
+  // flyer-leads D2 (spec 2026-10-21): rent, accessibility and lease terms are
+  // Staff only (toUnitFlyer no longer carries them, D1).
+  formField('Rent min', ['rent_min'], 'staff_only'),
+  formField('Rent max', ['rent_max'], 'staff_only'),
   formField('Payment standard', ['payment_standard'], 'staff_only'),
   formField('Address', ['address'], 'on_flyer'),
   formField('Subzone', ['subzone'], 'staff_only'),
   formField('Washer / dryer', ['washer_dryer'], 'on_flyer'),
   formField('Tenant-paid utilities', ['utilities'], 'on_flyer'),
-  formField('Accessibility', ['accessibility'], 'on_flyer'),
-  formField('Lease terms', ['lease_terms'], 'on_flyer'),
+  formField('Accessibility', ['accessibility'], 'staff_only'),
+  formField('Lease terms', ['lease_terms'], 'staff_only'),
   formField('Public listing link', ['listing_link'], 'on_flyer'),
   formField('Video URL', ['video_url'], 'on_flyer'),
   formField('Same-day RTA', ['same_day_rta'], 'on_flyer'),

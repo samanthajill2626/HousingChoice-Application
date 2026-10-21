@@ -280,6 +280,15 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       payment_standard: 1700,
       deposit: 1400,
       lif: 500,
+      // flyer-leads D1 (2026-10-21): the rest of the ten trimmed keys, so the
+      // allowlist test below proves a FULLY filled property publishes none.
+      lease_terms: 'TRIMMED 12-month minimum',
+      accessibility: 'TRIMMED ground floor',
+      pets: 'TRIMMED cats ok',
+      no_pets: true,
+      pet_fee: 'TRIMMED $300',
+      deposit_one_month: true,
+      deposit_flexible: true,
       // Own-namespace keys (review F2: only `unit-media/<thisUnit>/` presigns).
       media: ['unit-media/unit-1/photo1', 'unit-media/unit-1/photo2'],
       listing_link: 'https://example.com/listing/1',
@@ -317,16 +326,15 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       // "Accepts:" line is not blank for every pre-feature unit.
       accepted_authorities: ['DCA'],
       listing_link: 'https://example.com/listing/1',
-      rent_min: 1400,
-      rent_max: 1600,
     });
     expect(flyer.media).toEqual(['/unit-media/unit-1/photo1', '/unit-media/unit-1/photo2']);
     // The flyer now carries the FULL public payload upfront (no reveal tier)
     // plus contact_number - the main 1:1 business number from config.
     expect(flyer.contact_number).toBe(OUR_NUMBER);
 
-    // The flyer shape carries the full public allowlist + media + contact_number
-    // and NOTHING beyond it (address/deposit/pets/etc. are public now).
+    // The flyer shape carries the public allowlist + media + contact_number and
+    // NOTHING beyond it. flyer-leads D1 (2026-10-21): rent, lease terms,
+    // accessibility, pets and deposit are staff only again - absent, never null.
     expect(Object.keys(flyer).sort()).toEqual(
       [
         'accepted_authorities',
@@ -335,8 +343,6 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
         'beds',
         'listing_link',
         'media',
-        'rent_max',
-        'rent_min',
         'unitId',
         'voucher_size',
         'voucher_sizes',
@@ -345,22 +351,29 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
         'video_url',
         'application_fee',
         'same_day_rta',
-        'pets',
-        'accessibility',
-        'deposit',
-        'lease_terms',
-        // spec 2026-10-20 D11: the added public keys (subzone left, D3)
-        'no_pets',
-        'pet_fee',
-        'deposit_one_month',
-        'deposit_flexible',
+        // spec 2026-10-20 D11 (subzone left, D3)
         'washer_dryer',
         'contact_number',
       ].sort(),
     );
+    for (const trimmed of [
+      'rent_min',
+      'rent_max',
+      'lease_terms',
+      'accessibility',
+      'pets',
+      'no_pets',
+      'pet_fee',
+      'deposit',
+      'deposit_one_month',
+      'deposit_flexible',
+    ]) {
+      expect(trimmed in flyer, trimmed).toBe(false);
+    }
 
-    // INTERNAL fields must never appear in the response (address + deposit are
-    // PUBLIC now, so they moved into the exact-keys assertion above).
+    // INTERNAL fields must never appear in the response (the address is public,
+    // so it is in the exact-keys assertion above, where the D1 keys are
+    // asserted absent too).
     const serialized = JSON.stringify(res.body);
     for (const secret of [
       'tour_process',
@@ -374,6 +387,8 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       // spec 2026-10-20 D3: subzone is staff only - neither the key nor the value ships
       'subzone',
       'Zone 4',
+      // flyer-leads D1: no trimmed text value ships either
+      'TRIMMED',
     ]) {
       expect(serialized, secret).not.toContain(secret);
     }

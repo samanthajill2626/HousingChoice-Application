@@ -107,7 +107,8 @@ export function formatStreet(a: Address | string | undefined): string {
  * One-line display string for server-side logging / display needs. Joins the
  * present fields in postal order; "city, state zip" reads naturally. Tolerant of
  * a legacy plain-string address (returns it as-is) and of missing fields.
- * NOT for the public flyer — the flyer never shows the street address.
+ * NOT what the public flyer shows: the flyer page formats its own address
+ * client-side (its heading since flyer-leads D3).
  */
 export function formatAddress(a: Address | string | undefined | null): string {
   // TOTAL FUNCTION - `a == null` catches BOTH undefined and null. A stored

@@ -420,7 +420,7 @@ export interface UnitItem {
   rent_max?: number;
   payment_standard?: number;
   /** The Deposit item's fixed amount in dollars (spec 2026-10-20 D1; an
-   *  alternative to `deposit_one_month`). PUBLIC on the flyer. */
+   *  alternative to `deposit_one_month`). Staff only (flyer-leads D1). */
   deposit?: number;
   /** Landlord incentive fee (LIF). */
   lif?: number;
@@ -439,7 +439,7 @@ export interface UnitItem {
    * "Tenant-paid utilities"); the storage key stays `utilities`.
    */
   utilities?: string;
-  /** Accessibility notes — free-form. */
+  /** Accessibility notes - free-form. Staff only (flyer-leads D1). */
   accessibility?: string;
   /**
    * Internal staff notes — free-form, the contact-`notes` counterpart (e.g.
@@ -449,9 +449,9 @@ export interface UnitItem {
   notes?: string;
   /**
    * Lease terms - free-form per-unit fact ("12-month minimum, month-to-month
-   * after"). Moved off the landlord contact 2026-07-10 (GLOSSARY). PUBLIC on
-   * the flyer projection (flyer-full-info 2026-07-16; lib/unitFields.ts
-   * toUnitFlyer).
+   * after"). Moved off the landlord contact 2026-07-10 (GLOSSARY). Staff only
+   * since flyer-leads D1 (spec 2026-10-21): never on the flyer projection
+   * (lib/unitFields.ts toUnitFlyer).
    */
   lease_terms?: string;
   /**
@@ -512,13 +512,13 @@ export interface UnitItem {
   income_requirements?: string;
   /** Qualifications item (long free text). Staff only (Cameron, 2026-10-20). */
   qualifications?: string;
-  /** Pets item: "No pets". PUBLIC on the flyer. */
+  /** Pets item: "No pets". Staff only (flyer-leads D1). */
   no_pets?: true;
-  /** Pets item: "Pet fee" (free text). PUBLIC on the flyer. */
+  /** Pets item: "Pet fee" (free text). Staff only (flyer-leads D1). */
   pet_fee?: string;
-  /** Deposit item: "One month's rent" (an alternative to `deposit`). PUBLIC on the flyer. */
+  /** Deposit item: "One month's rent" (an alternative to `deposit`). Staff only (flyer-leads D1). */
   deposit_one_month?: true;
-  /** Deposit item: "Flexible / payment terms available". PUBLIC on the flyer. */
+  /** Deposit item: "Flexible / payment terms available". Staff only (flyer-leads D1). */
   deposit_flexible?: true;
   /** Deposit item: "Deposit notes". Staff only. */
   deposit_notes?: string;

@@ -82,17 +82,24 @@ describe('REQUIREMENT_ITEMS - the eight items (D1)', () => {
       ['credit_requirements', 'credit_requirements', 'req_credit_requirements', 'Credit score', 'text', 'staff_only'],
       ['income_requirements', 'income_requirements', 'req_income_requirements', 'Income requirements', 'text', 'staff_only'],
       ['qualifications', 'qualifications', 'req_qualifications', 'Qualifications', 'long_text', 'staff_only'],
-      ['pets', 'no_pets', 'req_no_pets', 'No pets', 'checkbox', 'on_flyer'],
-      ['pets', 'pets', 'req_pets', 'Pets (details)', 'text', 'on_flyer'],
-      ['pets', 'pet_fee', 'req_pet_fee', 'Pet fee', 'text', 'on_flyer'],
-      ['deposit', 'deposit_one_month', 'req_deposit_one_month', "One month's rent", 'checkbox', 'on_flyer'],
-      ['deposit', 'deposit', 'req_deposit', 'Fixed amount', 'money', 'on_flyer'],
-      ['deposit', 'deposit_flexible', 'req_deposit_flexible', 'Flexible / payment terms available', 'checkbox', 'on_flyer'],
+      // flyer-leads D2 (spec 2026-10-21): every Pets and Deposit field is Staff only.
+      ['pets', 'no_pets', 'req_no_pets', 'No pets', 'checkbox', 'staff_only'],
+      ['pets', 'pets', 'req_pets', 'Pets (details)', 'text', 'staff_only'],
+      ['pets', 'pet_fee', 'req_pet_fee', 'Pet fee', 'text', 'staff_only'],
+      ['deposit', 'deposit_one_month', 'req_deposit_one_month', "One month's rent", 'checkbox', 'staff_only'],
+      ['deposit', 'deposit', 'req_deposit', 'Fixed amount', 'money', 'staff_only'],
+      ['deposit', 'deposit_flexible', 'req_deposit_flexible', 'Flexible / payment terms available', 'checkbox', 'staff_only'],
       ['deposit', 'deposit_notes', 'req_deposit_notes', 'Deposit notes', 'text', 'staff_only'],
       ['application_fee', 'application_fee', 'req_application_fee', 'Application fee', 'money', 'on_flyer'],
       ['touring', 'tour_type', 'req_tour_type', 'Tour type', 'tour_type', 'staff_only'],
       ['touring', 'tour_process', 'req_tour_process', 'Tour process', 'text', 'staff_only'],
     ]);
+  });
+
+  it('flyer-leads D2: Application fee is the only requirement field On flyer', () => {
+    expect(
+      REQUIREMENT_ITEMS.flatMap((item) => item.fields.filter((f) => f.flyer === 'on_flyer').map((f) => f.key)),
+    ).toEqual(['application_fee']);
   });
 
   it('flattens the 15 unit keys and the 15 req_ keys in item, then field, order', () => {

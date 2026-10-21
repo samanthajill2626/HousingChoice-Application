@@ -290,7 +290,9 @@ test.describe('Property detail — Notes card (internal staff notes)', () => {
     // "+ Add" (accessible name "Edit property notes") opens the SAME edit dialog.
     await notesCard.getByRole('button', { name: 'Edit property notes' }).click();
     const dialog = page.getByRole('dialog', { name: /Edit property/i });
-    await dialog.getByLabel('Notes').fill(`In-unit washer/dryer; no dishwasher (${stamp})`);
+    // exact: the property form also carries "Deposit notes" (property
+    // requirements D1), and getByLabel is a case-insensitive SUBSTRING match.
+    await dialog.getByLabel('Notes', { exact: true }).fill(`In-unit washer/dryer; no dishwasher (${stamp})`);
     await dialog.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
 

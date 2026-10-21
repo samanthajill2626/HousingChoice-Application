@@ -317,7 +317,8 @@ test.describe('Broadcasts — compose from a property → curate → send → re
     await expect(threeBr).toHaveAttribute('aria-pressed', 'true');
     await expect(threeBr).toContainText(/matches property/i);
     await expect(page.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'false');
-    await expect(page.getByText('Pre-filled to the 3-bedroom voucher this property takes')).toBeVisible();
+    // D12: the note names every size the property takes, as the chips label them.
+    await expect(page.getByText('Pre-filled to the voucher sizes this property takes: 3-BR')).toBeVisible();
   });
 });
 

@@ -18,6 +18,7 @@ import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
+import { planRequirementWrite } from '../src/lib/unitRequirementWrite.js';
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../src/repos/unitsRepo.js';
 import { quietLogger } from './helpers/orgFixtures.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -247,6 +248,67 @@ describe('unitsRepo.updateIfRequirementsCurrent - the PATCH fence (D5)', () => {
     const read = await readBack(w, id);
     await w.units.updateIfRequirementsCurrent(read, { income_requirements: '3x rent' });
     expect((await readBack(w, id))['income_requirements']).toBe('3x rent');
+  });
+});
+
+// Code review RC-1: the PATCH landlord change through the fence - the patch
+// the route's planner (planRequirementWrite) builds SETs landlordId, the very
+// attribute the condition names, and REMOVEs requirement_sources, in ONE write.
+describe('unitsRepo.updateIfRequirementsCurrent - a PATCH landlord change (D5; code review RC-1)', () => {
+  parity('a landlord change SETs landlordId and REMOVEs the map in one write; a write from the older read is then refused', async (w, id) => {
+    await w.putUnit(
+      unitRow(id, { pets: 'Cats OK', requirement_sources: { pets: 'set_here', credit_requirements: 'copied' } }),
+    );
+    const before = await readBack(w, id);
+    const plan = planRequirementWrite({
+      stored: before,
+      fields: { landlordId: 'c-new' },
+      landlord: { contactId: 'c-new', type: 'landlord' },
+      landlordChanged: true,
+    });
+    if (!plan.ok) throw new Error('the planner refused a landlord change');
+    expect(plan.patch).toEqual({ landlordId: 'c-new', requirement_sources: null });
+    const written = await w.units.updateIfRequirementsCurrent(before, plan.patch);
+    const stored = await readBack(w, id);
+    expect(stored.landlordId).toBe('c-new');
+    expect(stored).not.toHaveProperty('requirement_sources');
+    expect(stored['pets']).toBe('Cats OK');
+    expect(stored.updated_at).not.toBe(STAMP);
+    expect(written).toEqual(stored);
+    // A slow write computed from the read BEFORE the change can never write
+    // the old map back (the restore / claim guarantee, here for PATCH).
+    await expect(
+      w.units.updateIfRequirementsCurrent(before, {
+        pet_fee: '$300',
+        requirement_sources: { pets: 'set_here', credit_requirements: 'copied' },
+      }),
+    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+    expect(await readBack(w, id)).toEqual(stored);
+  });
+
+  parity('a landlord change that also touches an item: reset, then the item classified against the NEW landlord, in one write', async (w, id) => {
+    await w.putUnit(unitRow(id, { pets: 'Cats OK', requirement_sources: { pets: 'set_here' } }));
+    const before = await readBack(w, id);
+    const plan = planRequirementWrite({
+      stored: before,
+      fields: { landlordId: 'c-new', income_requirements: '3x rent' },
+      landlord: { contactId: 'c-new', type: 'landlord', req_income_requirements: '3x rent' },
+      landlordChanged: true,
+    });
+    if (!plan.ok) throw new Error('the planner refused a landlord change');
+    expect(plan.patch).toEqual({
+      landlordId: 'c-new',
+      income_requirements: '3x rent',
+      requirement_sources: { income_requirements: 'copied' },
+    });
+    await w.units.updateIfRequirementsCurrent(before, plan.patch);
+    const stored = await readBack(w, id);
+    expect(stored).toMatchObject({
+      landlordId: 'c-new',
+      pets: 'Cats OK',
+      income_requirements: '3x rent',
+      requirement_sources: { income_requirements: 'copied' },
+    });
   });
 });
 

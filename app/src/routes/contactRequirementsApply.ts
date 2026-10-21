@@ -160,8 +160,38 @@ function parseApplyRequirementsBody(body: unknown): ApplyRequirementsRequest | {
   return { items, expected, units };
 }
 
+/** The skip reasons a re-read after a lost write condition reports as is
+ *  (planner ruling PR-5); any other re-read plan stays changed_during_apply. */
+const LOST_WRITE_REASONS: ReadonlySet<ApplySkipReason> = new Set<ApplySkipReason>([
+  'landlord_changed',
+  'deleted',
+  'not_found',
+]);
+
+type UnitPlan = ReturnType<typeof planUnitApply>;
+
 export function registerRequirementsApplyRoute(router: Router, deps: RequirementsApplyDeps): void {
   const log = deps.logger;
+
+  /** Planner ruling PR-5 (code review PA-7): why a fenced write lost its
+   *  condition. ONE consistent re-read (the route's own copy, ruling AR6),
+   *  planned the same way: a landlord change, a delete or a miss is reported
+   *  as that; anything else - an edit that raced the write, or a re-read that
+   *  failed (best-effort: it only names the reason) - is changed_during_apply. */
+  async function lostWriteReason(
+    contactId: string,
+    unitId: string,
+    planFor: (unit: Record<string, unknown> | undefined) => UnitPlan,
+  ): Promise<ApplySkipReason> {
+    try {
+      const again = await deps.units.getById(unitId, { consistentRead: true });
+      const plan = planFor(again === undefined ? undefined : structuredClone(again));
+      if (plan.kind === 'skip' && LOST_WRITE_REASONS.has(plan.reason)) return plan.reason;
+    } catch (err) {
+      log.warn({ err, contactId, unitId }, 'requirements apply: re-read after a lost write failed (best-effort)');
+    }
+    return 'changed_during_apply';
+  }
 
   router.post('/:contactId/requirements/apply', async (req: AuthedRequest, res) => {
     const contactId = String(req.params['contactId'] ?? '');
@@ -206,20 +236,15 @@ export function registerRequirementsApplyRoute(router: Router, deps: Requirement
     const updated: string[] = [];
     const skipped: Array<{ unitId: string; reason: ApplySkipReason }> = [];
     for (const { unitId, ownItems, seen } of body.units) {
+      const planFor = (unit: Record<string, unknown> | undefined): UnitPlan =>
+        planUnitApply({ unit, landlordId: contactId, items: body.items, landlordValues, ownItems, seen });
       const raw = await deps.units.getById(unitId, { consistentRead: true });
       // The route's OWN copy of the consistent read (ruling AR6): a repo may
       // hand out its live stored object (the harness does), and the fence must
       // compare the stored unit with what was READ, not with whatever that
       // object has become by the time the write runs.
       const read = raw === undefined ? undefined : structuredClone(raw);
-      const plan = planUnitApply({
-        unit: read,
-        landlordId: contactId,
-        items: body.items,
-        landlordValues,
-        ownItems,
-        seen,
-      });
+      const plan = planFor(read);
       // planUnitApply skips an unread unit as not_found; the `read` test only
       // narrows the type for the write below.
       if (plan.kind === 'skip' || read === undefined) {
@@ -234,7 +259,8 @@ export function registerRequirementsApplyRoute(router: Router, deps: Requirement
         await deps.units.applyRequirements(read, plan.patch);
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
-          skipped.push({ unitId, reason: 'changed_during_apply' });
+          // PR-5: changed_during_apply unless the re-read names the cause.
+          skipped.push({ unitId, reason: await lostWriteReason(contactId, unitId, planFor) });
           continue;
         }
         throw err; // Express 5 forwards async throws to the error handler.

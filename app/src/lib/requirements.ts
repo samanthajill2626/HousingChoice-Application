@@ -430,7 +430,9 @@ function storedValueChanges(unit: Record<string, unknown>, key: string, next: St
  * each changing item 'copied' - a listed item that already equaled the
  * landlord keeps its record. `changedKeys` lists the unit keys whose STORED
  * value the write changes (the D13 audit), never `requirement_sources`. The
- * route's conditional write turns a race into changed_during_apply.
+ * route's conditional write turns a race into changed_during_apply - or, by
+ * one re-read planned here again, landlord_changed / deleted / not_found
+ * (planner ruling PR-5).
  */
 export function planUnitApply(input: {
   unit: Record<string, unknown> | undefined;

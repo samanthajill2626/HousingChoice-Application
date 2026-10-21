@@ -569,6 +569,59 @@ describe('skip reasons', () => {
     expect(unitAudits(world).map((e) => e.entityKey)).toEqual(['units#u-b']);
   });
 
+  // Planner ruling PR-5 (code review PA-7): on a lost write condition the
+  // route re-reads the property once (consistent) and reports why when the
+  // re-read is a landlord change, a delete or a miss.
+  it('a landlord change between the read and the write is reported as landlord_changed - nothing written', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedLandlord(world);
+    seedUnit(world, 'u-moved');
+    const realApply = world.unitsRepo.applyRequirements.bind(world.unitsRepo);
+    vi.spyOn(world.unitsRepo, 'applyRequirements').mockImplementationOnce(async (read, patch) => {
+      // The colleague's landlord change lands on the stored unit first; the
+      // real fenced write then fails its landlordId condition.
+      const live = world.units.get(read.unitId);
+      if (live !== undefined) live.landlordId = OTHER_LL;
+      return realApply(read, patch);
+    });
+    const unitReads = vi.spyOn(world.unitsRepo, 'getById');
+    const res = await postApply(app, applyBody(['pets'], EXPECTED_PETS, ['u-moved']));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ updated: [], skipped: [{ unitId: 'u-moved', reason: 'landlord_changed' }] });
+    // The read, then ONE consistent re-read after the lost condition.
+    expect(unitReads.mock.calls).toEqual([
+      ['u-moved', { consistentRead: true }],
+      ['u-moved', { consistentRead: true }],
+    ]);
+    const u = unitOf(world, 'u-moved');
+    expect(u?.landlordId).toBe(OTHER_LL);
+    expect(u?.no_pets).toBeUndefined();
+    expect(u?.updated_at).toBe(OLD);
+    expect(unitAudits(world)).toEqual([]);
+  });
+
+  it('a re-read that fails after a lost condition keeps changed_during_apply, and the run goes on', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    seedLandlord(world);
+    seedUnit(world, 'u-a');
+    seedUnit(world, 'u-b');
+    vi.spyOn(world.unitsRepo, 'applyRequirements').mockRejectedValueOnce(
+      new ConditionalCheckFailedException({ message: 'raced', $metadata: {} }),
+    );
+    const realGet = world.unitsRepo.getById.bind(world.unitsRepo);
+    let readsOfA = 0;
+    vi.spyOn(world.unitsRepo, 'getById').mockImplementation(async (unitId, opts) => {
+      if (unitId === 'u-a' && ++readsOfA === 2) throw new Error('re-read unavailable');
+      return realGet(unitId, opts);
+    });
+    const res = await postApply(app, applyBody(['pets'], EXPECTED_PETS, ['u-a', 'u-b']));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ updated: ['u-b'], skipped: [{ unitId: 'u-a', reason: 'changed_during_apply' }] });
+    expect(
+      capture.atLevel(40).filter((l) => l['msg'] === 'requirements apply: re-read after a lost write failed (best-effort)'),
+    ).toHaveLength(1);
+  });
+
   it('an exception set between the read and the write is never overwritten', async () => {
     const { app, world } = makeWebhookHarness();
     seedLandlord(world);

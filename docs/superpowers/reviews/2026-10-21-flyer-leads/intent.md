@@ -7,11 +7,13 @@ deployed.
 
 ## STATE (replace each time)
 
-- Phase: DESIGN - spec rev 2 committed @bd73315c
+- Phase: DESIGN - spec rev 4 committed @e8fe644f
   (`docs/superpowers/specs/2026-10-21-flyer-leads-design.md`).
-  - Round 1: 18 merged findings, all accepted; it changed decisions.
-  - Round 2 is running: reviewer B continued (writes `design-review/R2-reviewer-b.md`).
-  - Reviewer A is idle; keep it alive for later rounds if needed.
+  - Rounds 1-3 all changed decisions: R1 18 findings, R2 12, R3 7, all
+    accepted.
+  - Round 4 (the CAP) is running: reviewer B continued, writing
+    `design-review/R4-reviewer-b.md`. If it still changes a decision, STOP and
+    put the open findings to Cameron as decisions; do not run a fifth round.
 - Subzone auto-fill is NOT this mission. Its research is at
   `W:\tmp\subzone-autofill-research\research-report.md`. Cameron starts that session
   himself from the prompt given 2026-10-21; he rejected the start_session card.

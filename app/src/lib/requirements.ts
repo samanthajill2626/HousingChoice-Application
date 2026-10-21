@@ -419,7 +419,11 @@ function storedValueChanges(unit: Record<string, unknown>, key: string, next: St
  * every listed item (the route already checked them equal to `expected`).
  * Check order: not found, deleted, landlord changed, then the changing items
  * by INTERPRETED value (D1); nothing changing -> already_matches; a changing
- * item that is an own value (D6) and not in `ownItems` -> changed_since_opened.
+ * item that is an own value (D6) -> changed_since_opened unless it is in
+ * `ownItems` AND its value now equals (itemValuesEqual) its `seen` value, the
+ * property's value as the dialog showed it (planner ruling PR-1, code review
+ * PA-1: staff accepted replacing THAT value, never one a colleague saved
+ * since).
  * A write sets EVERY key of each changing item to the landlord's value (null =
  * REMOVE), so a legacy boolean `pets` is rewritten into the new shape with the
  * Pets item; `requirement_sources` is the stored map (read defensively) with
@@ -434,6 +438,8 @@ export function planUnitApply(input: {
   items: readonly RequirementItemId[];
   landlordValues: Partial<Record<RequirementItemId, ItemValue>>;
   ownItems: readonly RequirementItemId[];
+  /** Per `ownItems` item, the unit's value as the dialog read it (unit keys; null = blank). */
+  seen: Partial<Record<RequirementItemId, ItemValue>>;
 }):
   | { kind: 'skip'; reason: Exclude<ApplySkipReason, 'changed_during_apply'> }
   | { kind: 'write'; patch: Record<string, unknown>; changedKeys: string[]; changedItems: RequirementItemId[] } {
@@ -456,7 +462,10 @@ export function planUnitApply(input: {
   const sources = readRequirementSources(unit['requirement_sources']);
   const own = new Set<RequirementItemId>(input.ownItems);
   for (const { item } of changing) {
-    if (isOwnValue(sources, item.id, unitItemValue(unit, item.id)) && !own.has(item.id)) {
+    const current = unitItemValue(unit, item.id);
+    if (!isOwnValue(sources, item.id, current)) continue;
+    const shown = input.seen[item.id];
+    if (!own.has(item.id) || shown === undefined || !itemValuesEqual(current, shown)) {
       return { kind: 'skip', reason: 'changed_since_opened' };
     }
   }

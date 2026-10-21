@@ -260,10 +260,11 @@ describe('ApplyRequirementsDialog - Update', () => {
       }),
     );
     expect(applyLandlordRequirements).toHaveBeenCalledTimes(1);
+    // Planner ruling PR-1: each row's own values ride with what the dialog read.
     expect(applyLandlordRequirements).toHaveBeenCalledWith('L1', {
       units: [
-        { unitId: 'u-old', ownItems: [] },
-        { unitId: 'u-own', ownItems: ['pets'] },
+        { unitId: 'u-old', ownItems: [], seen: {} },
+        { unitId: 'u-own', ownItems: ['pets'], seen: { pets: { no_pets: null, pets: 'Cats OK', pet_fee: null } } },
       ],
       items: ['credit_requirements', 'pets'],
       expected: {

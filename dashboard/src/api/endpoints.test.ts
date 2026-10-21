@@ -849,8 +849,8 @@ it('applyLandlordRequirements POSTs the Apply body to the landlord route and ret
   vi.mocked(request).mockResolvedValue(result);
   const body: ApplyRequirementsBody = {
     units: [
-      { unitId: 'u1', ownItems: ['pets'] },
-      { unitId: 'u2', ownItems: [] },
+      { unitId: 'u1', ownItems: ['pets'], seen: { pets: { no_pets: null, pets: 'Cats OK', pet_fee: null } } },
+      { unitId: 'u2', ownItems: [], seen: {} },
     ],
     items: ['pets', 'deposit'],
     expected: {

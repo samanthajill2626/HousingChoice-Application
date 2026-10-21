@@ -2694,7 +2694,13 @@ export type ApplySkipReason =
 
 /** POST /api/contacts/:id/requirements/apply body (D8): at most 100 units per request. */
 export interface ApplyRequirementsBody {
-  units: Array<{ unitId: string; ownItems: RequirementItemId[] }>;
+  /** `seen` (planner ruling PR-1): for exactly the unit's `ownItems`, every
+   *  unit key as the dialog read the property (null = blank). */
+  units: Array<{
+    unitId: string;
+    ownItems: RequirementItemId[];
+    seen: Partial<Record<RequirementItemId, RequirementItemWire>>;
+  }>;
   items: RequirementItemId[];
   /** For every listed item, every one of its unit keys as the dialog showed the
    *  landlord's value (null = blank). */

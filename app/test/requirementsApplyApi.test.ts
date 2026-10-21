@@ -26,6 +26,8 @@ const E_UNITS = 'units must be a non-empty array of at most 100 properties';
 const E_UNIT_ID = 'each entry of units needs a unitId string';
 const E_UNIT_REPEAT = 'units must not repeat a unitId';
 const E_OWN_ITEMS = 'each entry of units needs ownItems, a list of items from items';
+const E_SEEN =
+  'each entry of units needs seen: exactly its ownItems, each with exactly its keys, each value a string, a number, a boolean or null';
 
 /** The landlord most cases apply from, stored as the contacts PATCH stores it. */
 const LANDLORD_REQS: Record<string, unknown> = {
@@ -41,7 +43,12 @@ const EXPECTED_BLANK_DEPOSIT = {
   deposit: { deposit_one_month: null, deposit: null, deposit_flexible: null, deposit_notes: null },
 };
 
-type UnitRef = string | { unitId: string; ownItems: string[] };
+/** A bare id = a row with no own values (ownItems [], seen {}); an object is
+ *  sent as written, so a case can leave `seen` out on purpose. */
+type UnitRef = string | { unitId: string; ownItems: string[]; seen?: unknown };
+
+/** The property's Pets value as the dialog read it from `pets: 'Cats OK'` (PR-1 `seen`). */
+const SEEN_CATS_OK = { pets: { no_pets: null, pets: 'Cats OK', pet_fee: null } };
 
 function seedLandlord(world: FakeWorld, reqs: Record<string, unknown> = LANDLORD_REQS): void {
   world.contacts.push({
@@ -69,7 +76,7 @@ function applyBody(items: string[], expected: Record<string, unknown>, units: Un
   return {
     items,
     expected,
-    units: units.map((u) => (typeof u === 'string' ? { unitId: u, ownItems: [] } : u)),
+    units: units.map((u) => (typeof u === 'string' ? { unitId: u, ownItems: [], seen: {} } : u)),
   };
 }
 
@@ -163,6 +170,40 @@ describe('refusals - each writes nothing', () => {
       'ownItems naming an unlisted item',
       applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-1', ownItems: ['credit_requirements'] }]),
       E_OWN_ITEMS,
+    ],
+    // Planner ruling PR-1 (PA-1): `seen` holds exactly the entry's ownItems,
+    // each with every key of the item, validated like `expected`.
+    ['a unit without seen', applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-1', ownItems: [] }]), E_SEEN],
+    ['seen that is not an object', applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-1', ownItems: [], seen: [] }]), E_SEEN],
+    ['seen missing an ownItems item', applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-1', ownItems: ['pets'], seen: {} }]), E_SEEN],
+    [
+      'seen naming an item not in ownItems',
+      applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-1', ownItems: [], seen: SEEN_CATS_OK }]),
+      E_SEEN,
+    ],
+    [
+      'a seen item missing a key',
+      applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-1', ownItems: ['pets'], seen: { pets: { no_pets: null, pets: 'Cats OK' } } }]),
+      E_SEEN,
+    ],
+    [
+      'a seen item with an extra key',
+      applyBody(['pets'], EXPECTED_PETS, [
+        { unitId: 'u-1', ownItems: ['pets'], seen: { pets: { no_pets: null, pets: 'Cats OK', pet_fee: null, pet_rent: null } } },
+      ]),
+      E_SEEN,
+    ],
+    [
+      'a seen item that is not an object',
+      applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-1', ownItems: ['pets'], seen: { pets: 'Cats OK' } }]),
+      E_SEEN,
+    ],
+    [
+      'a seen value that is an object',
+      applyBody(['pets'], EXPECTED_PETS, [
+        { unitId: 'u-1', ownItems: ['pets'], seen: { pets: { no_pets: null, pets: { text: 'Cats OK' }, pet_fee: null } } },
+      ]),
+      E_SEEN,
     ],
   ])('400 for %s', async (_case, body, error) => {
     const { app, world } = makeWebhookHarness();
@@ -388,7 +429,10 @@ describe('own values (the D6 definition) and ownItems', () => {
     const { app, world } = makeWebhookHarness();
     seedLandlord(world);
     seedUnit(world, 'u-7', { pets: 'Cats OK' });
-    const res = await postApply(app, applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-7', ownItems: ['pets'] }]));
+    const res = await postApply(
+      app,
+      applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-7', ownItems: ['pets'], seen: SEEN_CATS_OK }]),
+    );
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ updated: ['u-7'], skipped: [] });
     const u = unitOf(world, 'u-7');
@@ -397,6 +441,46 @@ describe('own values (the D6 definition) and ownItems', () => {
     expect(u?.pet_fee).toBe('$300');
     expect(u?.requirement_sources).toEqual({ pets: 'copied' });
     expect(sortedFields(unitAudits(world, 'u-7')[0])).toEqual(['no_pets', 'pet_fee', 'pets']);
+  });
+
+  // Planner ruling PR-1 (code review PA-1): staff accepted replacing the own
+  // value the dialog SHOWED; an own value a colleague changed to a different
+  // own value after that read (the item stays set_here, so the map is as it
+  // was) is never overwritten.
+  it('an own value a colleague changed to a different own value after the dialog read is skipped - nothing written (PA-1)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedLandlord(world);
+    // The dialog read 'Cats OK'; the colleague's save landed before Update.
+    seedUnit(world, 'u-p', { pets: 'Cats and small dogs OK', pet_fee: '$200', requirement_sources: { pets: 'set_here' } });
+    const res = await postApply(
+      app,
+      applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-p', ownItems: ['pets'], seen: SEEN_CATS_OK }]),
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ updated: [], skipped: [{ unitId: 'u-p', reason: 'changed_since_opened' }] });
+    const u = unitOf(world, 'u-p');
+    expect(u?.pets).toBe('Cats and small dogs OK');
+    expect(u?.pet_fee).toBe('$200');
+    expect(u?.no_pets).toBeUndefined();
+    expect(u?.requirement_sources).toEqual({ pets: 'set_here' });
+    expect(u?.updated_at).toBe(OLD);
+    expect(unitAudits(world)).toEqual([]);
+  });
+
+  it('an own value unchanged since the dialog read is written - seen compares by D1 equality', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedLandlord(world);
+    seedUnit(world, 'u-p', { pets: 'Cats OK', pet_fee: '$200', requirement_sources: { pets: 'set_here' } });
+    // false and '' read as blank, text is trimmed (D1), as in `expected`.
+    const seen = { pets: { no_pets: false, pets: ' Cats OK ', pet_fee: '$200' } };
+    const res = await postApply(app, applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-p', ownItems: ['pets'], seen }]));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ updated: ['u-p'], skipped: [] });
+    const u = unitOf(world, 'u-p');
+    expect(u?.no_pets).toBe(true);
+    expect('pets' in (u ?? {})).toBe(false);
+    expect(u?.pet_fee).toBe('$300');
+    expect(u?.requirement_sources).toEqual({ pets: 'copied' });
   });
 
   it('an own value in an item the request does not list never holds the unit back', async () => {
@@ -421,7 +505,11 @@ describe('own values (the D6 definition) and ownItems', () => {
       app,
       applyBody(['deposit'], EXPECTED_BLANK_DEPOSIT, [
         'u-own',
-        { unitId: 'u-own-accepted', ownItems: ['deposit'] },
+        {
+          unitId: 'u-own-accepted',
+          ownItems: ['deposit'],
+          seen: { deposit: { deposit_one_month: null, deposit: 1450, deposit_flexible: null, deposit_notes: null } },
+        },
         'u-copied',
         'u-blank',
       ]),
@@ -530,7 +618,10 @@ describe('skip reasons', () => {
       return realApply(read, patch);
     });
     // Staff accepted replacing the 'Cats OK' they saw (ownItems lists pets).
-    const res = await postApply(app, applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-race', ownItems: ['pets'] }]));
+    const res = await postApply(
+      app,
+      applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-race', ownItems: ['pets'], seen: SEEN_CATS_OK }]),
+    );
     expect(colleague).toBe(200);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ updated: [], skipped: [{ unitId: 'u-race', reason: 'changed_during_apply' }] });

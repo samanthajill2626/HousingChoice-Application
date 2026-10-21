@@ -156,16 +156,28 @@ export function chunk<T>(list: readonly T[], size: number): T[][] {
 /** One request (plan 2.4): the batch's rows with the changing items shown as
  *  their own values (the ones staff accepted by checking the row), the checked
  *  items, and for each item every key as the dialog showed the landlord's
- *  value (null for blank). */
+ *  value (null for blank). Planner ruling PR-1 (code review PA-1): each row
+ *  also sends `seen` - for exactly its own-value items, the property's value
+ *  as the dialog read it from `units` (every key, null for blank) - so the
+ *  server skips a property whose own value changed since this read. */
 export function applyRequestBody(
   rows: readonly ApplyRow[],
   items: readonly RequirementItemId[],
   landlord: Contact,
+  units: readonly UnitItem[],
 ): ApplyRequirementsBody {
   const expected: Partial<Record<RequirementItemId, ItemValue>> = {};
   for (const id of items) expected[id] = landlordItemValue(landlord, id);
+  const byId = new Map(units.map((unit) => [unit.unitId, unit]));
   return {
-    units: rows.map((row) => ({ unitId: row.unitId, ownItems: [...row.own] })),
+    units: rows.map((row) => {
+      const unit = byId.get(row.unitId);
+      // Every row is built from these units (applyRows); a miss is a bug here.
+      if (unit === undefined) throw new Error(`applyRequestBody: no read for unit ${row.unitId}`);
+      const seen: Partial<Record<RequirementItemId, ItemValue>> = {};
+      for (const id of row.own) seen[id] = unitItemValue(unit, id);
+      return { unitId: row.unitId, ownItems: [...row.own], seen };
+    }),
     items: [...items],
     expected,
   };

@@ -416,7 +416,7 @@ describe('PATCH /api/units/:id - the requirements fence (D5)', () => {
     const applied = await postRequirementsApply(app, 'c-ll', {
       items: ['pets'],
       expected: { pets: { no_pets: null, pets: 'Cats OK', pet_fee: null } },
-      units: [{ unitId: 'u-1', ownItems: [] }],
+      units: [{ unitId: 'u-1', ownItems: [], seen: {} }],
     });
     expect(applied.status).toBe(200);
     expect(applied.body).toEqual({ updated: [], skipped: [{ unitId: 'u-1', reason: 'changed_since_opened' }] });

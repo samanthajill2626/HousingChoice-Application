@@ -237,7 +237,7 @@ export function ApplyRequirementsDialog({
     // is opened again. The requests carry no AbortSignal on purpose.
     for (const [index, batch] of chunk(checkedRows, APPLY_BATCH_SIZE).entries()) {
       try {
-        results.push(await applyLandlordRequirements(contactId, applyRequestBody(batch, items, landlord)));
+        results.push(await applyLandlordRequirements(contactId, applyRequestBody(batch, items, landlord, units)));
       } catch (err) {
         if (!liveRef.current) return;
         setSending(false);

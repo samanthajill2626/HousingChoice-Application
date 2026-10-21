@@ -244,13 +244,17 @@ describe('carryHandUnchecks - the row choices across a preserving re-read (workl
 });
 
 describe('applyRequestBody + chunk', () => {
-  it('sends each row with its own values, the items in order, and the landlord values with null for blank', () => {
+  // Planner ruling PR-1 (code review PA-1): each row also carries `seen` - for
+  // exactly its own-value items, the property's value as the dialog read it
+  // (every key of the item, null = blank), so the server never overwrites an
+  // own value a colleague changed after this read.
+  it('sends each row with its own values and what the dialog read for them, the items in order, and the landlord values with null for blank', () => {
     const rows = applyRows(UNITS, LANDLORD, set('pets', 'credit_requirements'));
     const checked = [rowOf(rows, 'u-old'), rowOf(rows, 'u-own')];
-    expect(applyRequestBody(checked, ['credit_requirements', 'pets'], LANDLORD)).toEqual({
+    expect(applyRequestBody(checked, ['credit_requirements', 'pets'], LANDLORD, UNITS)).toEqual({
       units: [
-        { unitId: 'u-old', ownItems: [] },
-        { unitId: 'u-own', ownItems: ['pets'] },
+        { unitId: 'u-old', ownItems: [], seen: {} },
+        { unitId: 'u-own', ownItems: ['pets'], seen: { pets: { no_pets: null, pets: 'Cats OK', pet_fee: null } } },
       ],
       items: ['credit_requirements', 'pets'],
       expected: {

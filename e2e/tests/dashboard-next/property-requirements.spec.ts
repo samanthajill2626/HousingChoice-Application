@@ -361,15 +361,16 @@ test('landlord requirements: the New form pre-fills them, the property page tags
   );
   await dialog.getByRole('button', { name: 'Update 2 properties', exact: true }).click();
   const sent = (await applyRequest).postDataJSON() as {
-    units: Array<{ unitId: string; ownItems: string[] }>;
+    units: Array<{ unitId: string; ownItems: string[]; seen: Record<string, unknown> }>;
     items: string[];
   };
   expect([...sent.items].sort()).toEqual([...ITEM_IDS].sort());
   expect(sent.units).toHaveLength(2);
+  // Planner ruling PR-1: each own value rides with C's value as the dialog read it.
   expect(sent.units).toEqual(
     expect.arrayContaining([
-      { unitId: unitB, ownItems: [] },
-      { unitId: unitC, ownItems: ['pets'] },
+      { unitId: unitB, ownItems: [], seen: {} },
+      { unitId: unitC, ownItems: ['pets'], seen: { pets: { no_pets: null, pets: 'Cats OK', pet_fee: null } } },
     ]),
   );
   await expect(dialog).toHaveCount(0, { timeout: 15_000 });

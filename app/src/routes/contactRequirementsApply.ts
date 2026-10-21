@@ -1,7 +1,7 @@
 // Apply to properties (property-requirements spec D8; plan 2.4):
 //
 //   POST /api/contacts/:contactId/requirements/apply
-//        { units: [{ unitId, ownItems }], items, expected }
+//        { units: [{ unitId, ownItems, seen }], items, expected }
 //        -> 200 { updated: string[], skipped: [{ unitId, reason }] }
 //
 // Registered on the contacts router by createContactsRouter, like the
@@ -13,7 +13,7 @@
 // gets is the pure planUnitApply (lib/requirements.ts); this route validates,
 // refuses, reads, writes and audits. Refusals write nothing, in this order:
 // 404 contact_not_found; 400 contact is not a landlord; 400 the body (items,
-// expected, units, ownItems); 409 deposit_conflict; 409 requirements_changed.
+// expected, units, ownItems, seen); 409 deposit_conflict; 409 requirements_changed.
 // The dashboard owns every sentence; it shows only the two 409s.
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { Router } from 'express';
@@ -45,6 +45,8 @@ const E_UNITS = `units must be a non-empty array of at most ${APPLY_UNITS_MAX} p
 const E_UNIT_ID = 'each entry of units needs a unitId string';
 const E_UNIT_REPEAT = 'units must not repeat a unitId';
 const E_OWN_ITEMS = 'each entry of units needs ownItems, a list of items from items';
+const E_SEEN =
+  'each entry of units needs seen: exactly its ownItems, each with exactly its keys, each value a string, a number, a boolean or null';
 
 export interface RequirementsApplyDeps {
   contacts: ContactsRepo;
@@ -57,7 +59,9 @@ interface ApplyRequirementsRequest {
   items: RequirementItemId[];
   /** Per listed item, the landlord's value as the dialog showed it (unit keys; null = blank). */
   expected: Partial<Record<RequirementItemId, ItemValue>>;
-  units: Array<{ unitId: string; ownItems: RequirementItemId[] }>;
+  /** `seen` (planner ruling PR-1, code review PA-1): per ownItems item, the
+   *  property's value as the dialog read it (unit keys; null = blank). */
+  units: Array<{ unitId: string; ownItems: RequirementItemId[]; seen: Partial<Record<RequirementItemId, ItemValue>> }>;
 }
 
 /** Every unit key of each item, in registry order. */
@@ -69,7 +73,26 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Validate the body, in plan 2.4's order: items, expected, units, ownItems. */
+/** One item's wire value - `expected` and `seen` alike: an object holding
+ *  exactly the item's keys, each a string, a number, a boolean or null
+ *  (false reads as blank, D1). 'shape' / 'value' name what was wrong. */
+function parseItemValue(raw: unknown, id: RequirementItemId): ItemValue | 'shape' | 'value' {
+  const keys = KEYS_OF_ITEM.get(id) ?? [];
+  if (!isPlainObject(raw)) return 'shape';
+  const rawKeys = Object.keys(raw);
+  if (rawKeys.length !== keys.length || !keys.every((key) => rawKeys.includes(key))) return 'shape';
+  const value: ItemValue = {};
+  for (const key of keys) {
+    const v = raw[key];
+    if (v === null || v === false) value[key] = null; // D1: false is blank
+    else if (v === true || typeof v === 'string' || typeof v === 'number') value[key] = v;
+    else return 'value';
+  }
+  return value;
+}
+
+/** Validate the body, in plan 2.4's order: items, expected, units, ownItems,
+ *  then (planner ruling PR-1) each entry's seen. */
 function parseApplyRequirementsBody(body: unknown): ApplyRequirementsRequest | { error: string } {
   const b = isPlainObject(body) ? body : {};
 
@@ -89,20 +112,9 @@ function parseApplyRequirementsBody(body: unknown): ApplyRequirementsRequest | {
   }
   const expected: Partial<Record<RequirementItemId, ItemValue>> = {};
   for (const id of items) {
-    const raw = rawExpected[id];
-    const keys = KEYS_OF_ITEM.get(id) ?? [];
-    if (!isPlainObject(raw)) return { error: E_EXPECTED };
-    const rawKeys = Object.keys(raw);
-    if (rawKeys.length !== keys.length || !keys.every((key) => rawKeys.includes(key))) {
-      return { error: E_EXPECTED };
-    }
-    const value: ItemValue = {};
-    for (const key of keys) {
-      const v = raw[key];
-      if (v === null || v === false) value[key] = null; // D1: false is blank
-      else if (v === true || typeof v === 'string' || typeof v === 'number') value[key] = v;
-      else return { error: E_EXPECTED_VALUE };
-    }
+    const value = parseItemValue(rawExpected[id], id);
+    if (value === 'shape') return { error: E_EXPECTED };
+    if (value === 'value') return { error: E_EXPECTED_VALUE };
     expected[id] = value;
   }
 
@@ -128,7 +140,22 @@ function parseApplyRequirementsBody(body: unknown): ApplyRequirementsRequest | {
     ) {
       return { error: E_OWN_ITEMS };
     }
-    units.push({ unitId: unitIds[index] ?? '', ownItems: [...new Set(ownItems)] });
+    const accepted = [...new Set(ownItems)];
+    // Planner ruling PR-1 (code review PA-1): keyed by EXACTLY the entry's
+    // ownItems, each the item's whole value as the dialog read the property.
+    const rawSeen: unknown = isPlainObject(entry) ? entry['seen'] : undefined;
+    if (!isPlainObject(rawSeen)) return { error: E_SEEN };
+    const seenIds = Object.keys(rawSeen);
+    if (seenIds.length !== accepted.length || !seenIds.every((id) => (accepted as string[]).includes(id))) {
+      return { error: E_SEEN };
+    }
+    const seen: Partial<Record<RequirementItemId, ItemValue>> = {};
+    for (const id of accepted) {
+      const value = parseItemValue(rawSeen[id], id);
+      if (typeof value === 'string') return { error: E_SEEN };
+      seen[id] = value;
+    }
+    units.push({ unitId: unitIds[index] ?? '', ownItems: accepted, seen });
   }
   return { items, expected, units };
 }
@@ -178,14 +205,21 @@ export function registerRequirementsApplyRoute(router: Router, deps: Requirement
     const actor = req.user?.userId;
     const updated: string[] = [];
     const skipped: Array<{ unitId: string; reason: ApplySkipReason }> = [];
-    for (const { unitId, ownItems } of body.units) {
+    for (const { unitId, ownItems, seen } of body.units) {
       const raw = await deps.units.getById(unitId, { consistentRead: true });
       // The route's OWN copy of the consistent read (ruling AR6): a repo may
       // hand out its live stored object (the harness does), and the fence must
       // compare the stored unit with what was READ, not with whatever that
       // object has become by the time the write runs.
       const read = raw === undefined ? undefined : structuredClone(raw);
-      const plan = planUnitApply({ unit: read, landlordId: contactId, items: body.items, landlordValues, ownItems });
+      const plan = planUnitApply({
+        unit: read,
+        landlordId: contactId,
+        items: body.items,
+        landlordValues,
+        ownItems,
+        seen,
+      });
       // planUnitApply skips an unread unit as not_found; the `read` test only
       // narrows the type for the write below.
       if (plan.kind === 'skip' || read === undefined) {

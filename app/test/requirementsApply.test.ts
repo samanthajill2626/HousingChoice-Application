@@ -8,6 +8,7 @@ import {
   REQUIREMENT_ITEM_IDS,
   landlordItemValue,
   planUnitApply,
+  unitItemValue,
   type ItemValue,
   type RequirementItemId,
 } from '../src/lib/requirements.js';
@@ -41,13 +42,32 @@ function unit(overrides: Record<string, unknown> = {}): Record<string, unknown> 
   return { unitId: 'unit-1', landlordId: LANDLORD_ID, status: 'available', ...overrides };
 }
 
+/** The unit's own items as the dialog read them (PR-1 `seen`): by default the
+ *  unit as given, i.e. nothing changed since the dialog's read. */
+function seenOf(
+  u: Record<string, unknown> | undefined,
+  ownItems: readonly RequirementItemId[],
+): Partial<Record<RequirementItemId, ItemValue>> {
+  const out: Partial<Record<RequirementItemId, ItemValue>> = {};
+  for (const id of ownItems) out[id] = unitItemValue(u ?? {}, id);
+  return out;
+}
+
 function plan(
   u: Record<string, unknown> | undefined,
   items: readonly RequirementItemId[],
   ownItems: readonly RequirementItemId[] = [],
   landlord: Record<string, unknown> = LANDLORD,
+  seen: Partial<Record<RequirementItemId, ItemValue>> = seenOf(u, ownItems),
 ) {
-  return planUnitApply({ unit: u, landlordId: LANDLORD_ID, items, landlordValues: valuesOf(landlord, items), ownItems });
+  return planUnitApply({
+    unit: u,
+    landlordId: LANDLORD_ID,
+    items,
+    landlordValues: valuesOf(landlord, items),
+    ownItems,
+    seen,
+  });
 }
 
 describe('planUnitApply - skips, in check order (D8)', () => {
@@ -95,6 +115,25 @@ describe('planUnitApply - skips, in check order (D8)', () => {
       kind: 'skip',
       reason: 'changed_since_opened',
     });
+  });
+
+  // Planner ruling PR-1 (code review PA-1): an own value in ownItems is
+  // written only while it still equals what the dialog showed (`seen`).
+  it('changed_since_opened when an accepted own value is no longer the value the dialog showed', () => {
+    const u = unit({ pets: 'Cats and small dogs OK', pet_fee: '$200', requirement_sources: { pets: 'set_here' } });
+    const shown = { pets: { no_pets: null, pets: 'Cats OK', pet_fee: null } };
+    expect(plan(u, ['pets'], ['pets'], LANDLORD, shown)).toEqual({ kind: 'skip', reason: 'changed_since_opened' });
+    // No seen value at all for an accepted own item is no consent either.
+    expect(plan(u, ['pets'], ['pets'], LANDLORD, {})).toEqual({ kind: 'skip', reason: 'changed_since_opened' });
+  });
+
+  it('an accepted own value that still equals seen (D1 equality) is written; seen never holds back a value that is not own', () => {
+    const u = unit({ pets: 'Cats OK', requirement_sources: { pets: 'set_here' } });
+    const shown = { pets: { no_pets: null, pets: ' Cats OK ', pet_fee: null } };
+    expect(plan(u, ['pets'], ['pets'], LANDLORD, shown).kind).toBe('write');
+    // A copied (not own) item is written whatever seen says.
+    const copied = unit({ pets: 'Dogs OK', requirement_sources: { pets: 'copied' } });
+    expect(plan(copied, ['pets'], [], LANDLORD, {}).kind).toBe('write');
   });
 
   it('already_matches is decided before changed_since_opened: an EQUAL own value blocks nothing', () => {
@@ -241,7 +280,7 @@ describe('planUnitApply - writes (D8, D5, D13)', () => {
 
   it('throws when a listed item has no landlord value (a route bug, never a silent clear)', () => {
     expect(() =>
-      planUnitApply({ unit: unit(), landlordId: LANDLORD_ID, items: ['pets'], landlordValues: {}, ownItems: [] }),
+      planUnitApply({ unit: unit(), landlordId: LANDLORD_ID, items: ['pets'], landlordValues: {}, ownItems: [], seen: {} }),
     ).toThrow('planUnitApply: no landlord value for item pets');
   });
 });

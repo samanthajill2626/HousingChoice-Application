@@ -1,0 +1,24 @@
+Raw TIME_WAIT port probe samples (W:/tmp/today-past-tours/.superpowers/sdd/portprobe/samples.txt), preserved verbatim at cleanup 2026-10-21; distilled in gate-runs.md.
+
+14:25:00 TIME_WAIT=139 | client-side (ephemeral) by remote port: 53=53 | server-side by local port:
+14:25:05 TIME_WAIT=146 | client-side (ephemeral) by remote port: 53=55 | server-side by local port:
+14:25:10 TIME_WAIT=380 | client-side (ephemeral) by remote port: 53=55 9401=73 9411=56 | server-side by local port: 9411=56
+14:25:15 TIME_WAIT=1008 | client-side (ephemeral) by remote port: 53=53 9401=231 9411=219 | server-side by local port: 9401=188 9411=213
+14:25:20 TIME_WAIT=2121 | client-side (ephemeral) by remote port: 53=55 9401=491 9411=551 | server-side by local port: 9401=476 9411=439
+14:25:25 TIME_WAIT=3237 | client-side (ephemeral) by remote port: 53=55 9401=780 9411=846 | server-side by local port: 9401=736 9411=712
+14:25:30 TIME_WAIT=4303 | client-side (ephemeral) by remote port: 53=55 9401=1081 9411=1165 | server-side by local port: 9401=962 9411=933
+14:25:35 TIME_WAIT=5323 | client-side (ephemeral) by remote port: 53=53 9401=1357 9411=1470 | server-side by local port: 9401=1188 9411=1149
+14:25:40 TIME_WAIT=6335 | client-side (ephemeral) by remote port: 53=59 9401=1599 9411=1828 | server-side by local port: 9401=1433 9411=1299
+14:25:46 TIME_WAIT=7293 | client-side (ephemeral) by remote port: 53=61 9401=1874 9411=2127 | server-side by local port: 9401=1636 9411=1471
+14:25:51 TIME_WAIT=8223 | client-side (ephemeral) by remote port: 53=56 9401=2089 9411=2464 | server-side by local port: 9401=1878 9411=1612
+14:25:56 TIME_WAIT=9114 | client-side (ephemeral) by remote port: 53=56 9401=2373 9411=2790 | server-side by local port: 9401=2037 9411=1735
+14:26:01 TIME_WAIT=9985 | client-side (ephemeral) by remote port: 53=58 9401=2590 9411=3151 | server-side by local port: 9401=2262 9411=1800
+14:26:06 TIME_WAIT=10807 | client-side (ephemeral) by remote port: 53=58 9401=2827 9411=3466 | server-side by local port: 9401=2421 9411=1915
+14:26:11 TIME_WAIT=11611 | client-side (ephemeral) by remote port: 53=54 9401=3097 9411=3761 | server-side by local port: 9401=2556 9411=2015
+14:26:16 TIME_WAIT=12423 | client-side (ephemeral) by remote port: 53=56 9401=3370 9411=4111 | server-side by local port: 9401=2672 9411=2086
+14:26:22 TIME_WAIT=13159 | client-side (ephemeral) by remote port: 9401=3607 9411=4460 | server-side by local port: 9401=2808 9411=2116
+14:26:27 TIME_WAIT=13861 | client-side (ephemeral) by remote port: 9401=3829 9411=4803 | server-side by local port: 9401=2949 9411=2127
+14:26:32 TIME_WAIT=14500 | client-side (ephemeral) by remote port: 9401=4065 9411=5123 | server-side by local port: 9401=3028 9411=2134
+14:26:37 TIME_WAIT=15110 | client-side (ephemeral) by remote port: 9401=4296 9411=5396 | server-side by local port: 9401=3103 9411=2159
+14:26:42 TIME_WAIT=15490 | client-side (ephemeral) by remote port: 9401=4420 9411=5609 | server-side by local port: 9401=3166 9411=2141
+14:26:47 TIME_WAIT=15490 | client-side (ephemeral) by remote port: 9401=4420 9411=5609 | server-side by local port: 9401=3166 9411=2141

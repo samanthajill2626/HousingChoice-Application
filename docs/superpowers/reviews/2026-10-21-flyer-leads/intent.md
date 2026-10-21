@@ -1,0 +1,139 @@
+# Intent record - flyer-leads (Sam's flyer trim + tracker #13 "Flyers and leads")
+
+Planner session 9be85e76-82e9-4d98-a7ac-709a778803fe. Worktree `W:\tmp\flyer-leads`,
+branch `feat/flyer-leads`, cut from main @b7959e2a (2026-10-21). Main already holds
+the #11 + #12 property-requirements merge (e46cc770), which is merged but NOT
+deployed.
+
+## STATE (replace each time)
+
+- Phase: DESIGN - spec drafting (2026-10-21). The brainstorm happened in the
+  conversation on 2026-10-21; no separate brainstorm doc.
+- In flight: an explore agent maps the sign-up recording surfaces (conversation
+  notes, unread state, properties-sent list). A separate research agent on subzone
+  auto-fill writes `W:\tmp\subzone-autofill-research\research-report.md`. That work is
+  NOT part of this mission: Cameron wants it handed to a NEW session/agent and kept
+  out of this planner's context.
+- NEXT STEP: write the spec at
+  `docs/superpowers/specs/2026-10-21-flyer-leads-design.md`, commit it, then run the
+  adversarial spec review (2 opus reviewers, normal loop, cap 4), then Cameron's spec gate.
+
+## What Cameron asked for (verbatim, 2026-10-21)
+
+Sam's feedback, relayed by Cameron at 15:05 UTC:
+
+> "Can we remove some fields from displaying on the flyer? Rental max and min, lease
+> terms can be removed entirely since it is always 1 year, accessibility, pets (may be
+> flexible), also deposit information is often better to talk through with the
+> tenant. This is information I will want but does not need to be on the flyer. "
+
+> "Subzones have to be manually looked up by me via this link
+> https://www.atlantahousing.org/wp-content/uploads/2023/03/AHs-Payment-Standards-and-How-We-Determine-Rent.pdf"
+
+Cameron's answers to the planner's scope questions:
+
+> "Since we're making flyer trim information here, I think that we should just do
+> number 13 while we're at it. Lease terms should be kept in the system because I think
+> that they'll be useful for market rent, and she's not really thinking about that. We
+> do need to keep them in the system and just make them staff-only and pull them off
+> the flyer. Accessibility comes off. Application fee stays. Yes, leave the rent merge
+> field alone. We can still add it if we need to."
+
+> "For the heading, I think A is probably the best. Yeah, I like your answer for number
+> two as well. Let's do number 3 for the signup wording, and then we can see if she
+> agrees after we've built it. That's not a big issue. For your number 4, let's talk
+> about. I agree with what you've got here, except for the /join page. I want that to
+> sort of function similarly: if the join page gets a signup from someone who's already
+> a contact, the same thing occurs. They signed up from the join list, but obviously
+> there's no property added to their properties sent list. That would still mark the
+> conversation unread and standing out in the inbox, but they wouldn't get a welcome
+> text because they're already part of it. Does that make sense?"
+
+> "I do want to ignore case and spacing for the subzone specifically. We do need to
+> make sure that we're doing things like trimming, so front or back spaces, white
+> spaces, are not treated differently or saved as actual data. That's a big pet peeve
+> of mine [...] Use that thought process as we're updating this flyer."
+
+The options he picked refer to the planner's 2026-10-21 messages:
+- heading (a): the address becomes the heading, linked to the map, and the separate
+  Address row goes;
+- (2): a highlighted "Same-day tours available" line near the top of EVERY flyer;
+- (3): sign-up box copy - heading "Sign up for home alerts", text "We'll text you
+  about this home and others that fit your voucher. Signing up does not book a tour.",
+  button "Sign up". Sam reviews it after the build;
+- (4): an existing contact signing up from a flyer gets no welcome text, a note in
+  their conversation ("Signed up from the flyer for <address>"), the conversation
+  marked unread, and the property added to their properties-sent list. A NEW contact
+  from a flyer also gets the property on their sent list. /join behaves the same for an
+  existing contact (no welcome, a note, unread), minus the property.
+
+## Settled scope
+
+1. Off the public flyer, and out of the public projection (not merely hidden):
+   - rent min/max (the rent line);
+   - lease terms;
+   - accessibility;
+   - the whole Pets item (No pets, Pets details, Pet fee);
+   - the whole Deposit item (One month's rent, Fixed amount, Flexible).
+
+   Every field stays in the system, on the forms and on the property page, re-tagged
+   "Staff only". The application fee STAYS on the flyer.
+2. Tracker #13 flyer changes:
+   - "A home for you" heading gone - the address is the heading (map link);
+   - rent removed;
+   - "Same-day tours available" on every flyer;
+   - the housing authority line bolder;
+   - the sign-up box kept and reworded.
+3. Tracker #13 lead handling, for an existing contact on both the flyer and /join: no
+   welcome text, a sign-up note in the 1:1 conversation, and the conversation marked
+   unread. A flyer sign-up (new or existing contact) adds the property to the contact's
+   properties-sent list.
+4. Similar properties: the subzone match ignores case and spacing. Exact codes only -
+   no fuzzy matching on codes ("SE1" vs "SE11").
+5. Whitespace hygiene on anything touched: trim before store/compare (memory
+   `trim-input-whitespace`).
+
+Already done elsewhere: #13's "AHA Housing Fair link: leads should default to AHA"
+shipped with #14 (/join housing-authority dropdown, default rule).
+
+## Why
+
+- Sam would rather discuss rent, deposit, pets, lease and accessibility with each
+  tenant than publish them; she still needs the data.
+- #13: flyers now travel through caseworkers. Tenants filled in the sign-up box as if it
+  booked a tour, and existing tenants got the welcome text in the middle of an ongoing
+  conversation.
+- Lease terms stay because Cameron expects them to matter for market rent later.
+
+## Preferences and taste calls
+
+- The sign-up copy is the planner's draft, accepted to build; Sam may revise it later.
+- Cameron wants untrimmed whitespace never stored or compared as data ("a big pet
+  peeve").
+- Future similar-properties matching (fuzzy matching on free text) waits for the new
+  matching engine (Work Package 1).
+
+## Rejected options
+
+- A subzone DROPDOWN of AH's 24 codes: rejected (Cameron 2026-10-21). It would lock the
+  app to Atlanta Housing when other authorities may have their own zones.
+- Fuzzy matching on subzone codes: rejected - codes are exact.
+- Removing lease terms from the system: rejected - staff only instead.
+- Folding subzone AUTO-FILL from the address into this mission: rejected - it is a
+  separate feature for a new session.
+- Fuzzy matching on other similar-properties fields now: deferred to the new matching
+  engine.
+
+## Explicit NOs
+
+- No change to the [Rent] broadcast merge field.
+- No deletion or backfill of any stored field.
+- No subzone dropdown.
+
+## Open questions / assumptions made on Cameron's behalf
+
+- Pets and Deposit coming off WHOLE was asked as "Is that right?". Cameron answered the
+  surrounding parts (accessibility off, application fee stays) without objecting;
+  recorded as accepted.
+- The spec will mark as planner calls: the heading fallback when a property has no
+  address, the thank-you copy, the note wording, and repeat-sign-up dedupe.

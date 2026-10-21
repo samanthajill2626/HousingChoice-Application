@@ -93,3 +93,59 @@ every gate re-runs on the final commit.
 - RD-13 / RA-10: a soft-deleted landlord's page still offers Apply to
   properties (and Add a property / Edit, as today).
 - RD-3 filed, not fixed (spec defines the stop message).
+
+# Round 2 (2026-10-21) - two FRESH re-reviewers on fix wave 1
+
+Fix wave 1 = FW1a (app, 2aa30812, report build/FW1a-app.md) + FW1b (dashboard,
+83ec4ee3, report build/FW1b-dashboard.md). Gates at 83ec4ee3 ('fw1'):
+typecheck 0, npm test 0 (app 522 files 10891 passed + 1 skipped, dashboard 263 /
+5290, e2e 22 / 508, fake-twilio 34 / 275, fake-twilio-web 13 / 111;
+[dynamoAdmin] 0), smoke 0, e2e 0 (367 passed, 18.8m), lint 1 = the same 5
+pre-existing errors (branch-attributed 0).
+
+- R2A (server): `R2-app.md` - 0 blocker/high/medium, 1 low, 4 info. Every FW1a
+  fix REAL (mutant-killed on the real repo and the harness).
+- R2D (dashboard): `R2-dashboard.md` - 1 medium, 8 low, 4 info. Every FW1b fix
+  REAL except three RD-4 resets left unpinned (R2D-9).
+
+| # | Finding | Severity | Ruling | Fix unit |
+|---|---|---|---|---|
+| R2D-1 | Apply: a property staff UNCHECKED by hand comes back CHECKED after a failed / stopped / deposit_conflict Update (the re-read resets row choices), and "press Update again" then writes it. Challenges OR-17's "row choices reset". | MEDIUM | ACCEPT - OR-32 below | FW2 |
+| R2D-2 | A Delete (and the creates) still in flight when staff move to another contact lands on the next contact's page (its error, or a navigation away). | LOW | FILE - the in-flight resolution class predates this branch and spans flows the feature does not own; new issue `contact-detail-inflight-actions-cross-contact` | orchestrator |
+| R2D-3 | A later batch answering 409 deposit_conflict replaces D8's stop sentence (the count already written is lost). | LOW | ACCEPT - on a LATER batch show D8's stop sentence AND the deposit sentence (OR-31 added a sentence; it never removed the spec'd one) | FW2 |
+| R2D-4 / C4 | The RD-9 name rule disagrees with the New form's own landlord picker (company-only landlord: the picker shows the phone, the note names the company) and with the contact page header. | LOW | ACCEPT - OR-33 below | FW2 |
+| R2D-5 | The Application fee box disables itself mid-typing whenever the partial text reads 0 ("0.50", or deleting the 4 of "40"): "No application fee" is DERIVED from the amount text. | LOW | ACCEPT - "No application fee" becomes its own form flag, set only by the checkbox (initially checked when the stored fee is 0); the amount is disabled only by the checkbox; checked records 0, unchecked records the typed amount (blank = none) - D10 unchanged | FW2 |
+| R2D-6 | The New form's D7 loading / failure lines are live regions inserted already filled (the RD-7 pattern). | LOW | ACCEPT - one always-mounted status region for the section's lines (the failure may use role="alert") | FW2 |
+| R2D-7 | Try again after a failed D7 read silently replaces what staff typed into the Requirements section. | LOW | ACCEPT - on the retry path a successful read fills only the fields staff left blank (D7 replaces typed values only for a DIFFERENT landlord pick); the snapshot is still the landlord's values | FW2 |
+| R2D-8 | Public flyer "Fits a 8-bedroom voucher" / "a 11-" / "a 8- or 9-". | LOW | ACCEPT (grammar; plan 1.1's examples never meet 8 or 11) - "an" when the phrase starts with 8 or 11; cases added; listed for Cameron's eye | FW2 |
+| R2D-9 | Three of the nine RD-4 resets (Start placement, Schedule a tour, the tour property override) are unpinned; the override guards a real cross-tenant prefill. | LOW | ACCEPT - tests only | FW2 |
+| R2D-10 | Sub-cent money shows a difference nobody can see. | INFO | NO ACTION (sub-cent amounts are not a real input) | - |
+| R2D-11 | The edit forms' "Reload ... and try again" cannot help a record that already holds both deposit forms. | INFO | NO ACTION - reachable only by a direct data edit since OR-30; the remedy (untick One month's rent) works | - |
+| R2D-12 | Possible tag overflow at ~320px on the property Requirements card. | INFO (PLAUSIBLE) | DEFER to live self-QA (measure at 320 / 360 / 768 / 1280); fix if confirmed | self-QA |
+| R2D-13 | The deposit notice says "then press Update again" but the fix is behind the dialog. | INFO | ACCEPT - copy revised (amends OR-31): `This landlord's deposit is set to both one month's rent and a fixed amount. Close this, fix it with Edit requirements, then open Apply to properties again.` | FW2 |
+| R2A-1 | A plain re-type away from landlord keeps the contact's req_ keys, and the gate refuses the null that would clear them. | LOW | NO ACTION - the D2-bound residue already recorded (worklist OR-10, R2-F6): spec D2 makes every req_ key a 400 on a non-landlord; the keys are invisible off the landlord page and return with a re-type to landlord. Listed for Cameron (options in R2-app.md) | - |
+| R2A-2 | OR-30's guards also refuse a Deposit save that could not conflict, under a race (409 contact_changed). | INFO | NO ACTION - race-only, a safe refusal, the form keeps the draft | - |
+| R2A-3 | A money value past 2^53 validates, then the write 500s. | INFO | NO ACTION - the pre-existing unbounded-number class; noted in the handback | - |
+| R2A-4 | An Apply whose `expected` carries ~99k chars of requirement text exceeds the 100kb body limit. | INFO | NO ACTION - free text has no length cap anywhere today; noted | - |
+| R2A-5 | The spec (D5 / D8) and AR11 still describe the fence as landlordId + map only. | INFO | Handback note (OR-29 is stricter than the spec's text, never looser) | - |
+
+## Orchestrator rulings from round 2
+
+- OR-32 (R2D-1, amends OR-17): the preserving re-reads (after a mid-run stop, a
+  first-request non-409 failure, and any 409 deposit_conflict) carry the hand
+  UNCHECKS too: a row staff unchecked stays unchecked when it still exists and
+  is not "Already matches"; hand CHECKS are still dropped (staff confirm a check
+  again - the safe direction). So no re-read ever writes more than staff chose,
+  rows and items alike. A first-request 409 requirements_changed keeps today's
+  full reset (the spec's "Review the updated list"). Pin: the R2D-1 scenario
+  (the unchecked row stays unchecked; the button reads the smaller count) after
+  a failure and after a deposit_conflict.
+- OR-33 (R2D-4 / C4, amends the RD-9 ruling): plan 1.1 defines `<L>` as "the
+  landlord contact's display name as the page already shows it". The one rule
+  is therefore exactly the contact page header's name (first + last, else the
+  default phone - primary of phones[] before the legacy phone - else
+  "Unknown contact"), with NO company step, so the card, the New form's note /
+  loading / failure lines, its picker and the landlord page agree. RD-9's real
+  defect ("Unknown contact" while phones[] holds a number) stays fixed. A
+  company-first name across the dashboard is a separate product change
+  (handback, Cameron's eye).

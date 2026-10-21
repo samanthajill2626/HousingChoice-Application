@@ -15,6 +15,7 @@ import { emailRefId, phoneRefId } from '../src/repos/contactsRepo.js';
 import {
   getUnit,
   patchUnit,
+  postRequirementsApply,
   REQ_STAMP,
   seedContact,
   seedLandlord,
@@ -348,6 +349,68 @@ describe('PATCH /api/units/:id - the requirements fence (D5)', () => {
     expect(res.body.unit.landlordId).toBe('c-new');
     expect(res.body.unit.requirement_sources).toEqual({ credit_requirements: 'copied' });
     expect(world.units.get('u-1')?.requirement_sources).toEqual({ credit_requirements: 'copied' });
+  });
+
+  // Code review RA-1 / OR-29: the fence also holds every key of each item the
+  // write touches, as read. Each race lands a colleague's save of the SAME
+  // item, through the route, inside this PATCH's first write; the colleague's
+  // save leaves the map as it was, so only the item fence can see it.
+  it("a colleague's save of another key of the same item between the read and the write: re-read and reclassified, never a wrong copied record - and Apply then keeps the colleague's value (RA-1a)", async () => {
+    const { app, world } = makeWebhookHarness();
+    seedLandlord(world, 'c-ll', { req_pets: 'Cats OK' });
+    seedUnit(world, 'u-1', { pets: 'Cats OK', pet_fee: '$25', requirement_sources: { pets: 'set_here' } });
+    const fenced = world.unitsRepo.updateIfRequirementsCurrent.bind(world.unitsRepo);
+    let calls = 0;
+    let colleague: number | undefined;
+    world.unitsRepo.updateIfRequirementsCurrent = async (read, patch) => {
+      calls += 1;
+      if (calls === 1) colleague = (await patchUnit(app, 'u-1', { pets: 'Dogs OK' })).status;
+      return fenced(read, patch);
+    };
+    const res = await patchUnit(app, 'u-1', { pet_fee: null });
+    expect(colleague).toBe(200);
+    expect(res.status).toBe(200);
+    // Pets 'Dogs OK' differs from the landlord's 'Cats OK': set here, not copied.
+    expect(res.body.unit.requirement_sources).toEqual({ pets: 'set_here' });
+    expect(res.body.unit.pets).toBe('Dogs OK');
+    expect(res.body.unit).not.toHaveProperty('pet_fee');
+    expect(calls).toBe(3); // this PATCH, the colleague's, this PATCH's retry
+    // D6 / D8: the colleague's value is an own value, so an Apply that did not
+    // accept it skips the property instead of overwriting it unseen.
+    const applied = await postRequirementsApply(app, 'c-ll', {
+      items: ['pets'],
+      expected: { pets: { no_pets: null, pets: 'Cats OK', pet_fee: null } },
+      units: [{ unitId: 'u-1', ownItems: [] }],
+    });
+    expect(applied.status).toBe(200);
+    expect(applied.body).toEqual({ updated: [], skipped: [{ unitId: 'u-1', reason: 'changed_since_opened' }] });
+    expect(world.units.get('u-1')?.pets).toBe('Dogs OK');
+  });
+
+  it("a colleague's One month's rent between the read and the write: the amount is re-checked and refused, never both deposit forms (RA-1b)", async () => {
+    const { app, world } = makeWebhookHarness();
+    seedLandlord(world, 'c-ll');
+    seedUnit(world, 'u-1', { deposit_notes: 'Three payments', requirement_sources: { deposit: 'set_here' } });
+    const fenced = world.unitsRepo.updateIfRequirementsCurrent.bind(world.unitsRepo);
+    let calls = 0;
+    let colleague: number | undefined;
+    world.unitsRepo.updateIfRequirementsCurrent = async (read, patch) => {
+      calls += 1;
+      // The dashboard's One-month save: the amount goes as null in the same save.
+      if (calls === 1) colleague = (await patchUnit(app, 'u-1', { deposit_one_month: true, deposit: null })).status;
+      return fenced(read, patch);
+    };
+    const res = await patchUnit(app, 'u-1', { deposit: 900 });
+    expect(colleague).toBe(200);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'deposit_conflict' });
+    const stored = world.units.get('u-1');
+    expect(stored?.deposit_one_month).toBe(true);
+    expect(stored).not.toHaveProperty('deposit');
+    // Nothing wedged: a later save of another Deposit key lands.
+    const notes = await patchUnit(app, 'u-1', { deposit_notes: 'Two payments' });
+    expect(notes.status).toBe(200);
+    expect(notes.body.unit).toMatchObject({ deposit_one_month: true, deposit_notes: 'Two payments' });
   });
 
   it("a slow PATCH never writes its map back over a restore's REMOVE: recomputed against the restored landlord", async () => {

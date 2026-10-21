@@ -770,8 +770,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
    * L2); the landlord of record AFTER the write (readLandlordOfRecord); then
    * planRequirementWrite (deposit_conflict, the legacy pets partner, the
    * reset on a landlord change, the classification, the audit fields) and ONE
-   * write fenced on the landlordId and requirement_sources read
-   * (unitsRepo.updateIfRequirementsCurrent). A lost condition re-reads and
+   * write fenced on the landlordId, the requirement_sources and the values of
+   * every requirement item it writes, as read (unitsRepo.updateIfRequirementsCurrent;
+   * code review OR-29: a colleague's save of the same item). A lost condition re-reads and
    * recomputes - a vanished unit answers not_found - at most
    * REQUIREMENTS_WRITE_MAX_ATTEMPTS writes, then property_changed. A restore
    * or a roster claim changes landlordId and REMOVEs the map, so a slow PATCH

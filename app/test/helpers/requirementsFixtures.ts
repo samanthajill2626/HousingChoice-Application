@@ -1,7 +1,7 @@
 // property requirements (spec 2026-10-20): fixtures for the unit-requirement
 // route suites on the FakeWorld harness - a landlord contact holding req_
 // keys, a unit row, the New form's all-blank requirements_snapshot, the
-// authed unit requests, and the unit_updated audit rows.
+// authed unit requests and Apply request, and the unit_updated audit rows.
 import request from 'supertest';
 import type { Express } from 'express';
 import { REQUIREMENT_ITEMS, REQUIREMENT_ITEM_IDS } from '../../src/lib/requirements.js';
@@ -77,6 +77,15 @@ export function getUnit(app: Express, unitId: string) {
     .get(`/api/units/${unitId}`)
     .set('x-origin-verify', ORIGIN_SECRET)
     .set('cookie', TEST_SESSION_COOKIE);
+}
+
+/** POST /api/contacts/:contactId/requirements/apply (D8), authed. */
+export function postRequirementsApply(app: Express, contactId: string, body: Record<string, unknown>) {
+  return request(app)
+    .post(`/api/contacts/${encodeURIComponent(contactId)}/requirements/apply`)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('cookie', TEST_SESSION_COOKIE)
+    .send(body);
 }
 
 /** The unit_updated audit rows, oldest first. */

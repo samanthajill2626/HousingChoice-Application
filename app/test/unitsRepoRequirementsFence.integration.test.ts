@@ -4,7 +4,8 @@
 // (DynamoDB Local) and the API-test fake (test/helpers/twilioWebhookHarness.ts
 // createFakeWorld), which the route suites run on. Each writes only while the
 // unit exists with the landlordId and requirement_sources the caller READ
-// (absent included); applyRequirements also refuses a soft-deleted unit - a
+// (absent included) and with every key of each requirement item the patch
+// writes as READ (code review OR-29); applyRequirements also refuses a soft-deleted unit - a
 // NON-EMPTY deleted_at, exactly as unitsRepo.isDeleted reads it (a blank
 // deleted_at is live). A lost condition throws
 // ConditionalCheckFailedException and writes nothing.
@@ -248,6 +249,77 @@ describe('unitsRepo.updateIfRequirementsCurrent - the PATCH fence (D5)', () => {
     const read = await readBack(w, id);
     await w.units.updateIfRequirementsCurrent(read, { income_requirements: '3x rent' });
     expect((await readBack(w, id))['income_requirements']).toBe('3x rent');
+  });
+});
+
+// Code review RA-1 / OR-29: a write's classification (D5), its
+// deposit_conflict (D1) and Apply's own values (D8) are computed from EVERY
+// key of each item it touches, so both fenced writes also condition every key
+// of each requirement item the patch writes on its value in the read - equal
+// when the read holds it, attribute_not_exists when it does not - the whole
+// item, not only the patch's keys. Each case below lands a colleague's write
+// of the SAME item between the read and the stale write, with the map and the
+// landlordId unchanged (the hole the landlordId + map fence left open).
+describe('the fence covers the item values the write was computed from (code review RA-1 / OR-29)', () => {
+  const MAP = { pets: 'set_here', deposit: 'set_here' } as const;
+  const staleWrites: Array<[string, Record<string, unknown>, Record<string, unknown>, Record<string, unknown>]> = [
+    // [the item key's value type, the row at the read, the row after the colleague's write, the stale patch]
+    ['a string (the Pets details)', { pets: 'Cats OK', pet_fee: '$25' }, { pets: 'Dogs OK', pet_fee: '$25' }, { pet_fee: null, requirement_sources: { pets: 'copied', deposit: 'set_here' } }],
+    ['a number (the fixed deposit amount)', { deposit: 900 }, { deposit: 950 }, { deposit_notes: 'Two payments' }],
+    ['a legacy boolean pets', { pets: false }, { pets: true }, { pet_fee: '$300' }],
+    ['a checkbox true (One month\'s rent, cleared since)', { deposit_one_month: true }, {}, { deposit_flexible: true }],
+    ['absent (One month\'s rent, checked since)', {}, { deposit_one_month: true }, { deposit: 900 }],
+    ['the patch key itself', { pet_fee: '$25' }, { pet_fee: '$50' }, { pet_fee: null }],
+  ];
+  for (const [kind, atRead, afterColleague, patch] of staleWrites) {
+    parity(`updateIfRequirementsCurrent refuses a write computed from a stale item key - ${kind}; nothing written`, async (w, id) => {
+      await w.putUnit(unitRow(id, { ...atRead, requirement_sources: MAP }));
+      const read = await readBack(w, id);
+      const colleague = unitRow(id, { ...afterColleague, requirement_sources: MAP });
+      await w.putUnit(colleague);
+      await expect(w.units.updateIfRequirementsCurrent(read, patch)).rejects.toBeInstanceOf(
+        ConditionalCheckFailedException,
+      );
+      expect(await readBack(w, id)).toEqual(colleague);
+    });
+  }
+
+  parity('applyRequirements refuses an Apply over an edit of the item it copies (the map unchanged) - nothing written', async (w, id) => {
+    await w.putUnit(unitRow(id, { pets: 'Cats OK', requirement_sources: { pets: 'set_here' } }));
+    const read = await readBack(w, id);
+    const colleague = unitRow(id, { pets: 'Dogs OK', requirement_sources: { pets: 'set_here' } });
+    await w.putUnit(colleague);
+    await expect(
+      w.units.applyRequirements(read, {
+        no_pets: true,
+        pets: null,
+        pet_fee: '$300',
+        requirement_sources: { pets: 'copied' },
+      }),
+    ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+    expect(await readBack(w, id)).toEqual(colleague);
+  });
+
+  parity('(PIN) every key of the item as read - a legacy false, a number, a checkbox true, absent keys - is matched exactly and the write lands', async (w, id) => {
+    await w.putUnit(unitRow(id, { pets: false, deposit: 900, deposit_flexible: true }));
+    const read = await readBack(w, id);
+    await w.units.updateIfRequirementsCurrent(read, {
+      no_pets: true,
+      pets: null,
+      pet_fee: '$300',
+      deposit_notes: 'Two payments',
+    });
+    const stored = await readBack(w, id);
+    expect(stored).toMatchObject({ no_pets: true, pet_fee: '$300', deposit: 900, deposit_flexible: true, deposit_notes: 'Two payments' });
+    expect(stored).not.toHaveProperty('pets');
+  });
+
+  parity("(PIN) the fence is per item: a colleague's write of ANOTHER item does not refuse the write", async (w, id) => {
+    await w.putUnit(unitRow(id, { pets: 'Cats OK', credit_requirements: '600+' }));
+    const read = await readBack(w, id);
+    await w.putUnit(unitRow(id, { pets: 'Cats OK', credit_requirements: '650+' }));
+    await w.units.updateIfRequirementsCurrent(read, { pet_fee: '$300' });
+    expect(await readBack(w, id)).toMatchObject({ pets: 'Cats OK', pet_fee: '$300', credit_requirements: '650+' });
   });
 });
 

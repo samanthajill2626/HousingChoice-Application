@@ -128,6 +128,7 @@ import {
   RosterReadFailedError,
   RosterWriteConflictError,
   landlordWasPrimary,
+  requirementFenceKeys,
   unitContacts,
   type UnitContact,
   type UnitDisplayItem,
@@ -2866,11 +2867,12 @@ export function createFakeWorld(): FakeWorld {
   };
   /**
    * property requirements (spec 2026-10-20 D5 / D8; plan 2.3): the real
-   * repo's fenced write - the unit exists, its landlordId and
-   * requirement_sources equal what the caller READ (absent on both sides
-   * included), and with `requireLive` not deleted as isUnitDeleted reads it
-   * (the real `attribute_not_exists OR = ''`); then SET / REMOVE (an empty
-   * map REMOVEs) and stamp updated_at. The caller must pass
+   * repo's fenced write - the unit exists, its landlordId,
+   * requirement_sources and every key of each requirement item the patch
+   * writes (requirementFenceKeys, code review OR-29) equal what the caller
+   * READ (absent on both sides included), and with `requireLive` not deleted
+   * as isUnitDeleted reads it (the real `attribute_not_exists OR = ''`); then
+   * SET / REMOVE (an empty map REMOVEs) and stamp updated_at. The caller must pass
    * its OWN copy of the read: getById below hands out the live stored object,
    * which a concurrent write mutates in place.
    */
@@ -2891,6 +2893,7 @@ export function createFakeWorld(): FakeWorld {
       !unit ||
       !sameAsRead(unit, read, 'landlordId') ||
       !sameAsRead(unit, read, 'requirement_sources') ||
+      !requirementFenceKeys(patch).every((key) => sameAsRead(unit, read, key)) ||
       (requireLive && isUnitDeleted(unit))
     ) {
       throw conditionalCheckFailed(`${method}: unit ${read.unitId} changed since the read`);

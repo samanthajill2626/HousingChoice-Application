@@ -32,6 +32,7 @@ import type { TourType } from '../lib/toursModel.js';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import { itemOfUnitKey, REQUIREMENT_ITEMS } from '../lib/requirements.js';
 import {
   LISTING_STATUSES,
   SHAREABLE,
@@ -677,9 +678,11 @@ export interface UnitsRepo {
    * SET each non-null / REMOVE each null field of `patch` (an EMPTY
    * requirement_sources map REMOVEs the attribute - it is never stored empty)
    * and stamp updated_at, in ONE update conditioned on the unit existing with
-   * the landlordId AND the requirement_sources map exactly as in `read`
-   * (attribute_not_exists when `read` has none; the map compared whole, the
-   * updateRosterIfCurrent precedent). Any lost condition throws
+   * the landlordId, the requirement_sources map AND every key of each
+   * requirement item the patch writes exactly as in `read` (attribute_not_exists
+   * when `read` has none; the map compared whole, the updateRosterIfCurrent
+   * precedent; the item keys per requirementFenceKeys, code review OR-29), so
+   * a write computed from a stale item fails. Any lost condition throws
    * ConditionalCheckFailedException; the CALLER re-reads to tell a missing
    * unit (404) from a race (retry). `read` must be the caller's OWN copy of a
    * consistent read (the API-test fake hands out its live object). ALL_NEW.
@@ -687,7 +690,9 @@ export interface UnitsRepo {
   updateIfRequirementsCurrent(read: UnitItem, patch: Record<string, unknown>): Promise<UnitItem>;
   /**
    * property requirements (spec 2026-10-20 D8; plan 2.3): the Apply write -
-   * updateIfRequirementsCurrent's fence plus "not deleted" exactly as
+   * updateIfRequirementsCurrent's fence (the item values of every item it
+   * copies included, so an edit between the read and the write is never
+   * overwritten) plus "not deleted" exactly as
    * isDeleted reads it: deleted_at absent OR '' (a non-empty stamp is a
    * deleted property), so a property deleted after the caller's read is never
    * written and a blank stamp is never mistaken for one. ALL_NEW.
@@ -1004,6 +1009,28 @@ function isEmptySourcesMap(key: string, value: unknown): boolean {
   );
 }
 
+/**
+ * property requirements (spec 2026-10-20 D5 / D8; code review OR-29): the
+ * unit keys a fenced write conditions on their value in the caller's read -
+ * EVERY key of each requirement item that has a key the patch writes (a SET
+ * or a null REMOVE; undefined writes nothing), in registry order. The whole
+ * item, not only the patch's keys: the D5 classification, the D1
+ * deposit_conflict and Apply's own-value decision each read the whole item,
+ * so a write computed from a stale value of ANY of its keys must fail. Shared
+ * with the API-test fake, which mirrors the fence.
+ */
+export function requirementFenceKeys(patch: Record<string, unknown>): string[] {
+  const items = new Set<string>();
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    const item = itemOfUnitKey(key);
+    if (item !== undefined) items.add(item.id);
+  }
+  return REQUIREMENT_ITEMS.filter((item) => items.has(item.id)).flatMap((item) =>
+    item.fields.map((field) => field.key),
+  );
+}
+
 export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
   const doc = deps.doc ?? getDocumentClient();
   const table = tableName('units', deps.env);
@@ -1114,10 +1141,12 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
    * property requirements (spec 2026-10-20 D5 / D8; plan 2.3): ONE update
    * fenced on what the caller READ - the unit exists, its landlordId and its
    * requirement_sources are exactly `read`'s (attribute_not_exists when absent
-   * there), and with `requireLive` it is not deleted as isDeleted reads it
-   * (deleted_at absent or ''; plan review PR1-8). The SET/REMOVE build is
-   * updateRosterIfCurrent's; an empty requirement_sources map REMOVEs. A lost
-   * condition throws ConditionalCheckFailedException.
+   * there), every key of each requirement item the patch writes is exactly
+   * `read`'s (requirementFenceKeys; attribute_not_exists when absent there -
+   * code review OR-29), and with `requireLive` it is not deleted as isDeleted
+   * reads it (deleted_at absent or ''; plan review PR1-8). The SET/REMOVE build
+   * is updateRosterIfCurrent's; an empty requirement_sources map REMOVEs. A
+   * lost condition throws ConditionalCheckFailedException.
    */
   async function updateIfRequirementsFenced(
     read: UnitItem,
@@ -1161,6 +1190,19 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
     } else {
       conditions.push('attribute_not_exists(#expectedSources)');
     }
+    // OR-29: the item values the caller computed this write from - a
+    // colleague's save of the same item leaves the map unchanged whenever its
+    // classification does (set_here -> set_here), so only these see it.
+    requirementFenceKeys(patch).forEach((key, j) => {
+      const nameKey = `#fence${j}`;
+      names[nameKey] = key;
+      if (Object.prototype.hasOwnProperty.call(read, key)) {
+        values[`:fence${j}`] = read[key];
+        conditions.push(`${nameKey} = :fence${j}`);
+      } else {
+        conditions.push(`attribute_not_exists(${nameKey})`);
+      }
+    });
     if (opts.requireLive) {
       // isDeleted (above) counts only a NON-EMPTY deleted_at as deleted.
       names['#expectedDeletedAt'] = 'deleted_at';

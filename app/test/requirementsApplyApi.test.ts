@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { phoneRefId, type ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
+import { patchUnit } from './helpers/requirementsFixtures.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
 const LL = 'c-apply-landlord';
@@ -511,6 +512,35 @@ describe('skip reasons', () => {
     expect(unitOf(world, 'u-race')?.no_pets).toBeUndefined();
     expect(unitOf(world, 'u-race')?.requirement_sources).toEqual({ pets: 'set_here' });
     expect(unitAudits(world)).toEqual([]);
+  });
+
+  // Code review RA-1c / OR-29: the race above also changes the map. Here the
+  // colleague's edit of the SAME item leaves the map as it was (set_here ->
+  // set_here), so only the fence on the item's values can see it.
+  it('an edit of the copied item between the read and the write that leaves the map unchanged is changed_during_apply - never overwritten (RA-1c)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedLandlord(world);
+    seedUnit(world, 'u-race', { pets: 'Cats OK', requirement_sources: { pets: 'set_here' } });
+    const realApply = world.unitsRepo.applyRequirements.bind(world.unitsRepo);
+    let colleague: number | undefined;
+    vi.spyOn(world.unitsRepo, 'applyRequirements').mockImplementationOnce(async (read, patch) => {
+      // A colleague's property edit through the real PATCH route: 'Dogs OK'
+      // differs from the landlord too, so the item stays set_here.
+      colleague = (await patchUnit(app, 'u-race', { pets: 'Dogs OK' })).status;
+      return realApply(read, patch);
+    });
+    // Staff accepted replacing the 'Cats OK' they saw (ownItems lists pets).
+    const res = await postApply(app, applyBody(['pets'], EXPECTED_PETS, [{ unitId: 'u-race', ownItems: ['pets'] }]));
+    expect(colleague).toBe(200);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ updated: [], skipped: [{ unitId: 'u-race', reason: 'changed_during_apply' }] });
+    const u = unitOf(world, 'u-race');
+    expect(u?.pets).toBe('Dogs OK');
+    expect(u?.no_pets).toBeUndefined();
+    expect(u?.pet_fee).toBeUndefined();
+    expect(u?.requirement_sources).toEqual({ pets: 'set_here' });
+    // Only the colleague's own save is audited - no requirements_applied row.
+    expect(unitAudits(world).map((e) => e.payload?.['reason'])).toEqual([undefined]);
   });
 });
 

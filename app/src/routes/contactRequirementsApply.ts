@@ -194,7 +194,9 @@ export function registerRequirementsApplyRoute(router: Router, deps: Requirement
       }
       try {
         // Conditioned on the unit still existing, not deleted, with this
-        // landlordId and the requirement_sources it was read with (plan 2.3).
+        // landlordId, the requirement_sources it was read with (plan 2.3) and
+        // the read values of every item it copies (code review OR-29), so an
+        // edit landing between the read and this write is never overwritten.
         await deps.units.applyRequirements(read, plan.patch);
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {

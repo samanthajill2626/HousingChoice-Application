@@ -331,6 +331,9 @@ export function formatRequirementMoney(amount: number): string {
 }
 
 /** One item value as one line: its parts joined by '; '; all blank -> 'blank'.
+ *  A part followed by another drops ONE trailing '.' before the '; ' (live
+ *  self-QA QA-2: "Service animals only.; pet fee" read badly), and a part
+ *  that was only a '.' then goes; the last part keeps its period.
  *  evictions: 'No evictions while on the program', details;
  *  credit / income / qualifications: the text;
  *  pets: 'No pets', details, 'pet fee ' + fee;
@@ -394,7 +397,12 @@ export function formatItemValue(id: RequirementItemId, value: ItemValue): string
       break;
     }
   }
-  return parts.length > 0 ? parts.join('; ') : 'blank';
+  if (parts.length === 0) return 'blank';
+  const last = parts.length - 1;
+  return parts
+    .map((part, i) => (i < last && part.endsWith('.') ? part.slice(0, -1) : part))
+    .filter((part) => part !== '')
+    .join('; ');
 }
 
 /** D6, the tag table. `landlord` undefined = the property has no landlord, or

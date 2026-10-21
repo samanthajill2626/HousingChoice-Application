@@ -207,6 +207,41 @@ describe('formatItemValue - one item value as one line', () => {
       formatItemValue('deposit', { deposit_one_month: true, deposit: 1400, deposit_flexible: true, deposit_notes: 'Half at signing' }),
     ).toBe("One month's rent; $1,400; flexible; Half at signing");
   });
+
+  // Live self-QA QA-2: details that end with a period read "only.; pet fee"
+  // once joined. A part followed by another drops ONE trailing period before
+  // the "; "; the last part keeps its own, and a period inside a part stays.
+  it('a part followed by another drops its trailing period before the "; " (live self-QA QA-2)', () => {
+    expect(formatItemValue('pets', { no_pets: true, pets: 'Service animals only.', pet_fee: '$300' })).toBe(
+      'No pets; Service animals only; pet fee $300',
+    );
+    expect(formatItemValue('pets', { no_pets: null, pets: 'Cats OK. Dogs ask first.', pet_fee: '$300' })).toBe(
+      'Cats OK. Dogs ask first; pet fee $300',
+    );
+    // The property card's landlord line is the same text.
+    expect(
+      requirementDisplay(unit(), landlord({ req_no_pets: true, req_pets: 'Service animals only.', req_pet_fee: '$300' }), 'pets'),
+    ).toEqual({ tag: null, landlordLine: 'Landlord: No pets; Service animals only; pet fee $300' });
+  });
+
+  it('(PIN) the last part keeps its period (live self-QA QA-2)', () => {
+    expect(formatItemValue('pets', { no_pets: true, pets: 'Service animals only.', pet_fee: null })).toBe(
+      'No pets; Service animals only.',
+    );
+    expect(
+      formatItemValue('deposit', { deposit_one_month: true, deposit: null, deposit_flexible: true, deposit_notes: 'Half at signing.' }),
+    ).toBe("One month's rent; flexible; Half at signing.");
+    expect(formatItemValue('touring', { tour_type: 'landlord_led', tour_process: 'Call first.' })).toBe('Landlord-led; Call first.');
+    expect(formatItemValue('qualifications', { qualifications: 'Two references.' })).toBe('Two references.');
+  });
+
+  it('only ONE trailing period goes before the "; " (live self-QA QA-2)', () => {
+    expect(formatItemValue('pets', { no_pets: null, pets: 'Ask first...', pet_fee: '$300' })).toBe('Ask first..; pet fee $300');
+  });
+
+  it('a part that was only a period leaves no empty "; ;" behind (live self-QA QA-2)', () => {
+    expect(formatItemValue('pets', { no_pets: true, pets: '.', pet_fee: '$300' })).toBe('No pets; pet fee $300');
+  });
 });
 
 // Code review RD-2: requirement values compare EXACTLY (D1), so the amount a

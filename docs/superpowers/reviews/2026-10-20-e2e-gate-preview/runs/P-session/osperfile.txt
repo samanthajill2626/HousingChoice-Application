@@ -1,0 +1,8 @@
+file | tests | failed | browser->vite per test | vite->app per test | s per test
+dashboard-next/maintenance-page.spec.ts | 16 | 0 | 3 | 0 | 0.4
+scenarios/approval-and-move-in.spec.ts | 10 | 0 | 60 | 52 | 6.9
+scenarios/landlord-onboarding.spec.ts | 14 | 0 | 38 | 28 | 1.9
+scenarios/participant-names.spec.ts | 2 | 0 | 35 | 27 | 2.3
+scenarios/post-tour-application.spec.ts | 10 | 0 | 46 | 40 | 4.8
+scenarios/tours.spec.ts | 18 | 0 | 36 | 28 | 4.8
+peak machine TIME_WAIT: 2160; connections toward vite/app in run: 4243

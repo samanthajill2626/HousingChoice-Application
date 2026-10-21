@@ -1,0 +1,3 @@
+ports: 10301,10311,10321,10331,8000,9000; window 9.5 min
+at start   - machine 117, loopback 51, lane 10
+peak       - machine 1194 (6.3 min in), loopback 1138 (6.3 min in), lane 1094 (6.3 min in)

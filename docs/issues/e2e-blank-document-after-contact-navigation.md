@@ -130,7 +130,7 @@ budget)"; the screenshot is an entirely white document - a placement page this t
 not a contact page, so the signature is "a blank document after an in-app navigation".
 The run's other failure was the sign-in twin (`e2e-blank-first-paint-at-sign-in`, third
 sighting); 2672 TIME_WAIT sockets right after. Artifacts:
-`W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p6-e2e-artifacts\`. Isolation and the
+`W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p6-e2e-artifacts\`. Isolation and the [path deleted at worktree cleanup 2026-10-21; the prose here is the surviving record]
 clean re-run are recorded in the caseworker-integrity handback.
 
 **Fourth sighting (2026-10-13 ~03:00 EDT, Windows, `fix/caseworker-integrity` @05db50e0,
@@ -141,7 +141,7 @@ Unknown tab after `page.goto('/inbox?filter=unknown')`; the screenshot is an ent
 white document - an inbox page this time. No `net::ERR_*` line in the run log; 2843
 TIME_WAIT sockets right after the run (141 when it started). The spec file passed alone
 2/2 (18.1 s), and the full re-run is recorded in the caseworker-integrity handback.
-Artifacts: `W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p9-e2e-artifacts\`.
+Artifacts: `W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p9-e2e-artifacts\`. [path deleted at worktree cleanup 2026-10-21; the prose here is the surviving record]
 
 **Artifacts moved (2026-10-13).** The feat/join-housing-authority worktree was retired after
 its merge. Its artifacts cited above (`.superpowers/sdd/e2e-results-run1/`,
@@ -159,7 +159,7 @@ The run's other failure was the sign-in twin (`e2e-blank-first-paint-at-sign-in`
 2127 sockets in TIME_WAIT right after it. Both failing files passed alone (8/8, 57.7 s),
 and a full re-run of the same commit with `E2E_TRACE=1` passed 363/363 (23.0 min; TIME_WAIT
 2091 at its start, 2738 at its end). Artifacts (gitignored, that worktree):
-`W:\tmp\matching-blast-rules\.superpowers\gates\final\e2e-artifacts\`; record:
+`W:\tmp\matching-blast-rules\.superpowers\gates\final\e2e-artifacts\`; record: [path deleted at worktree cleanup 2026-10-21; the prose here is the surviving record]
 `docs/superpowers/reviews/2026-10-14-matching-blast-rules/handback.md`.
 
 **Twelfth and thirteenth sightings - THE API-READ VARIANT, MECHANISM CAUGHT IN THE LOG
@@ -181,7 +181,7 @@ intermediate run `fw2` (`/api/tours?status=toured`) and once in a later GREEN ru
 exhaustion; the white-document variant (a failed MODULE fetch) is the same pressure on the
 browser -> Vite side. A third full run of 4f608a40 passed 364/364 (22.7 min; TIME_WAIT 215 at
 its start, 3181 at its end). Every failing file passed alone (12/12, 1.3 min). Traces and
-screenshots (gitignored): `W:\tmp\matching-blast-rules\.superpowers\gates\final2\e2e-artifacts\`,
+screenshots (gitignored): `W:\tmp\matching-blast-rules\.superpowers\gates\final2\e2e-artifacts\`, [path deleted at worktree cleanup 2026-10-21; the prose here is the surviving record]
 `...\final2-e2e-2\e2e-artifacts\`. Direction this points to: fewer proxy connections per run
 (keep-alive on the Vite proxy agent - see the vite-proxy-keepalive history) or a wider
 dynamic port range / shorter TIME_WAIT on the test host.
@@ -193,7 +193,7 @@ white page; the lead's link never appeared. Full run 1 failed / 363 passed
 (31.5m) with TIME_WAIT rising from 321 at the start to 2,862 at the end
 (the run itself exhausts the ephemeral range). The file passed 14 of 14
 alone (`--repeat-each=2`) right after. Artifacts:
-`W:\tmp\matching-blast-rules\.superpowers\gates\planner-final2\artifacts\landlord-onboarding`.
+`W:\tmp\matching-blast-rules\.superpowers\gates\planner-final2\artifacts\landlord-onboarding`. [path deleted at worktree cleanup 2026-10-21; the prose here is the surviving record]
 
 **Measured diagnosis (2026-10-20).** See
 `docs/superpowers/reviews/2026-10-20-e2e-connection-churn/diagnosis.md`: the port pressure

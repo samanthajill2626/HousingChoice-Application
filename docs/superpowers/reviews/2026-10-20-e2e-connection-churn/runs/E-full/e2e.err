@@ -1,0 +1,3 @@
+[WebServer] 2:06:16 PM [vite] http proxy error: /__dev/ping
+[WebServer] Error: connect ECONNREFUSED 127.0.0.1:9301
+[WebServer]     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:2021:16)

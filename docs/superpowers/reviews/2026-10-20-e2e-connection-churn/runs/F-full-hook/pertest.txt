@@ -1,0 +1,42 @@
+WHOLE RUN {"browserToViteConns":5894,"viteToAppConns":2426,"proxiedRequests":30492,"unfinishedProxied":2378,"strict":695,"sse":1268,"other":415}
+INSIDE TEST WINDOWS {"tests":365,"inConns":5891,"outConns":2418,"proxied":30339,"strict":695,"sse":1262,"other":414}
+TOP STRICT-MODE ABORTED PATHS
+  209 GET /api/contacts/contact-:id/relay-groups
+  194 GET /api/contacts/contact-:id/group-threads
+  182 GET /api/contacts/contact-:id/listings-sent
+  58 GET /api/tours/tour-:id/reminders
+  17 GET /api/tours/tour-:id/roster
+  15 GET /api/units?...
+  8 GET /api/placements?...
+  5 GET /api/unread-counts?...
+  3 GET /api/contacts?...
+  2 GET /api/placements/placement-:id/nudges
+  1 GET /api/contacts/:id/relay-groups
+  1 GET /api/contacts/:id/group-threads
+PER FILE (sorted by browser->Vite + Vite->app connections)
+file | tests | s | browser->vite conns | vite->app conns | conns/test | unfinished: strict / sse / other
+scenarios/tours.spec.ts | 9 | 53 | 462 | 306 | 85 | 143 / 95 / 68
+scenarios/approval-and-move-in.spec.ts | 5 | 53 | 451 | 264 | 143 | 72 / 155 / 37
+scenarios/post-tour-application.spec.ts | 5 | 33 | 341 | 210 | 110 | 79 / 97 / 35
+scenarios/landlord-onboarding.spec.ts | 7 | 21 | 315 | 195 | 73 | 96 / 61 / 38
+scenarios/tenant-onboarding.spec.ts | 6 | 18 | 207 | 129 | 56 | 81 / 42 / 6
+scenarios/scheduled-visibility.spec.ts | 5 | 13 | 186 | 119 | 61 | 57 / 39 / 23
+dashboard-next/org-lists.spec.ts | 16 | 27 | 179 | 46 | 14 | 0 / 42 / 5
+dashboard-next/a2p-compliance.spec.ts | 23 | 16 | 161 | 27 | 8 | 0 / 22 / 1
+scenarios/sending-unit.spec.ts | 2 | 16 | 111 | 73 | 92 | 44 / 25 / 2
+dashboard-next/placements-page.spec.ts | 12 | 12 | 133 | 36 | 14 | 2 / 27 / 7
+dashboard-next/contact-create.spec.ts | 7 | 8 | 105 | 44 | 21 | 6 / 19 / 19
+dashboard-next/contact-detail.spec.ts | 8 | 9 | 108 | 40 | 19 | 12 / 20 / 8
+flows/conversation-fact-extraction.spec.ts | 12 | 10 | 119 | 29 | 12 | 3 / 25 / 0
+dashboard-next/voice-outbound.spec.ts | 12 | 11 | 111 | 20 | 11 | 0 / 20 / 1
+dashboard-next/roster-paging.spec.ts | 1 | 1 | 69 | 57 | 126 | 0 / 2 / 0
+scenarios/quiet-hours.spec.ts | 3 | 5 | 72 | 39 | 37 | 14 / 17 / 8
+dashboard-next/ai-run-log.spec.ts | 9 | 8 | 89 | 21 | 12 | 0 / 21 / 2
+dashboard-next/public-pages.spec.ts | 7 | 10 | 98 | 6 | 15 | 0 / 5 / 0
+dashboard-next/relay-number-lifecycle.spec.ts | 6 | 37 | 77 | 25 | 17 | 8 / 15 / 2
+dashboard-next/tours-page.spec.ts | 6 | 7 | 77 | 23 | 17 | 0 / 16 / 7
+dashboard-next/relay-group-view.spec.ts | 5 | 23 | 67 | 26 | 19 | 0 / 10 / 17
+scenarios/participant-names.spec.ts | 1 | 4 | 54 | 37 | 91 | 17 / 11 / 9
+dashboard-next/caseworkers.spec.ts | 6 | 7 | 69 | 20 | 15 | 5 / 14 / 0
+dashboard-next/inbox-rows-timestamps.spec.ts | 6 | 15 | 67 | 21 | 15 | 3 / 14 / 3
+dashboard-next/last-heard-from.spec.ts | 4 | 6 | 58 | 23 | 20 | 9 / 11 / 3

@@ -1,0 +1,70 @@
+TCP connects: 1240 (no request bound: 0)
+first request on the new socket | connects | of which carried only that one request
+proxied api | 1016 | 98
+SSE /api/events | 112 | 112
+built asset | 61 | 0
+document | 35 | 0
+proxied app-identity | 16 | 0
+requests per socket | sockets
+1 | 210
+2 | 109
+3 | 60
+4 | 66
+5 | 70
+6 | 58
+7 | 68
+8 | 69
+9 | 87
+10 | 34
+11 | 49
+12 | 31
+13 | 45
+14 | 28
+15 | 26
+16 | 15
+17 | 21
+18 | 21
+19 | 18
+20 | 13
+21 | 11
+22 | 14
+23 | 16
+24 | 8
+25 | 4
+26 | 8
+27 | 4
+28 | 6
+29 | 2
+30 | 2
+31 | 4
+32 | 3
+33 | 2
+34 | 4
+35 | 4
+36 | 2
+37 | 4
+38 | 1
+39 | 3
+40 | 1
+41 | 4
+42 | 4
+43 | 2
+44 | 3
+45 | 3
+46 | 1
+47 | 1
+48 | 5
+49 | 2
+50 | 1
+51 | 1
+53 | 1
+54 | 2
+55 | 1
+57 | 1
+59 | 1
+61 | 1
+62 | 1
+65 | 1
+67 | 1
+83 | 1
+85 | 1

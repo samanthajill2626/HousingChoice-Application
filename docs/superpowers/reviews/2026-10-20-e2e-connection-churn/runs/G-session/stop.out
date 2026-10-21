@@ -1,0 +1,8 @@
+
+> housingchoice@0.1.0 e2e:stop
+> node scripts/e2e-stop.mjs
+
+[e2e-stop] stopped session launcher 53660 (+ children)
+[e2e-stop] dropped lane 3 tables (hc-local-3-*)
+[e2e-stop] released lane 3 lease
+[e2e-stop] stale owned session state cleanup complete

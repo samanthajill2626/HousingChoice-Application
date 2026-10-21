@@ -1,0 +1,29 @@
+window: 450 s, 441 series rows; endpoint records in window: 4734 connections paired
+peak TIME_WAIT (whole machine): 1194; loopback TW at that moment: 1138
+
+## OS view: connections per hop (paired endpoints, both closer sides)
+| hop (client -> service) | connections | per min | closed by client | closed by server | no TW seen | peak TW client-side | peak TW server-side |
+|---|---|---|---|---|---|---|---|
+| chromium -> vite | 3009 | 401.4 | 2022 | 4 | 983 | 619 | 4 |
+| vite -> app | 1602 | 213.7 | 1439 | 0 | 163 | 463 | 0 |
+| ? -> app | 44 | 5.9 | 44 | 0 | 0 | 463 | 0 |
+| app -> fake-twilio | 33 | 4.4 | 33 | 0 | 0 | 12 | 0 |
+| app -> dynamodb | 18 | 2.4 | 0 | 18 | 0 | 6 | 12 |
+| app -> minio | 6 | 0.8 | 0 | 6 | 0 | 3 | 3 |
+| worker -> dynamodb | 4 | 0.5 | 0 | 1 | 3 | 6 | 12 |
+| ? -> vite | 4 | 0.5 | 4 | 0 | 0 | 619 | 4 |
+| fake-twilio -> app | 4 | 0.5 | 4 | 0 | 0 | 463 | 0 |
+| playwright -> vite | 3 | 0.4 | 2 | 1 | 0 | 619 | 4 |
+| node.exe -> vite | 2 | 0.3 | 0 | 0 | 2 | 619 | 4 |
+| node.exe -> fake-twilio | 2 | 0.3 | 0 | 0 | 2 | 12 | 0 |
+| playwright -> app | 1 | 0.1 | 1 | 0 | 0 | 463 | 0 |
+| playwright -> fake-twilio | 1 | 0.1 | 1 | 0 | 0 | 12 | 0 |
+| worker -> app | 1 | 0.1 | 1 | 0 | 0 | 463 | 0 |
+
+Peak TIME_WAIT by service port (over the whole window, not simultaneous):
+- app :10301 - client-side 463, server-side 0
+- vite :10311 - client-side 619, server-side 4
+- fake-twilio :10321 - client-side 12, server-side 0
+- publicBase :10331 - client-side 0, server-side 0
+- dynamodb :8000 - client-side 6, server-side 12
+- minio :9000 - client-side 3, server-side 3

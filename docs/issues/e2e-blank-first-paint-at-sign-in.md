@@ -35,7 +35,7 @@ serves source live, no build) for one fresh context and recovered by the next te
 sighting in four full runs of this suite on 2026-10-06/07.
 
 Evidence (gitignored run state, kept while the worktree exists): the full gate log
-`W:\tmp\clean-org-names\.superpowers\sdd\final2-g4.log` and the extracts in
+`W:\tmp\clean-org-names\.superpowers\sdd\final2-g4.log` and the extracts in [path deleted at worktree cleanup 2026-10-21; the prose here is the surviving record]
 `.superpowers\sdd\final2-g4-failure\` (the error block and the neighbouring test lines).
 The screenshot (viewed: blank white) and the video were cleared by the isolated re-run
 before they could be copied - Playwright empties `e2e/.artifacts/test-results` at each
@@ -76,7 +76,7 @@ budget for "Continue as dev user" at sign-in; the screenshot is an entirely whit
 document. Socket table right after: 2672 TIME_WAIT, 302 established (dynamic pool
 16384). The other failure is the contact-navigation twin
 (`e2e-blank-document-after-contact-navigation`, third sighting). Artifacts copied before
-any re-run: `W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p6-e2e-artifacts\`
+any re-run: `W:\tmp\caseworker-integrity\.superpowers\sdd\logs\p6-e2e-artifacts\` [path deleted at worktree cleanup 2026-10-21; the prose here is the surviving record]
 (screenshots, videos, error contexts). Isolation and the clean re-run are recorded in
 `docs/superpowers/reviews/2026-10-12-caseworker-integrity/handback.md`.
 
@@ -88,7 +88,7 @@ passed / 2 failed, 21.9 min): `tests/scenarios/post-tour-application.spec.ts:270
 rendered in 15 s; the screenshot is an entirely white page. No `net::ERR_*` line in the run
 log; 2127 TIME_WAIT sockets right after the run. The file passed in isolation (5/5; with
 `settings.spec.ts` in the same isolation run, 8/8 in 57.7 s), and the full re-run of the same commit passed 363/363.
-Artifacts: `W:\tmp\matching-blast-rules\.superpowers\gates\final\e2e-artifacts\`.
+Artifacts: `W:\tmp\matching-blast-rules\.superpowers\gates\final\e2e-artifacts\`. [path deleted at worktree cleanup 2026-10-21; the prose here is the surviving record]
 
 **Fifth and sixth sightings (2026-10-19, Windows, `feat/matching-blast-rules`, lane 10).**
 Run `fw2` on e1c2bbe8 (09:46-10:14 EDT; 1 failed / 362 passed, 24.9 min, overlapping a
@@ -98,7 +98,7 @@ EDT, `E2E_TRACE=1`): `tests/scenarios/tenant-onboarding.spec.ts:159` waited 100 
 same button, white page. Both are the sign-in face of the port-exhaustion mechanism the
 contact-navigation twin's twelfth/thirteenth sightings caught in the log (`[vite] http proxy
 error ... connect EADDRINUSE 127.0.0.1:10001`). The next full run of 4f608a40 passed 364/364.
-Artifacts: `W:\tmp\matching-blast-rules\.superpowers\gates\fw2\e2e-artifacts\`,
+Artifacts: `W:\tmp\matching-blast-rules\.superpowers\gates\fw2\e2e-artifacts\`, [path deleted at worktree cleanup 2026-10-21; the prose here is the surviving record]
 `...\final2-e2e-2\e2e-artifacts\` (with a trace).
 
 **Seventh sighting (2026-10-20 ~10:51 EDT, Windows, `fix/voucher-size-prompt` @1c8d2380,
@@ -111,7 +111,8 @@ error); 2541 TIME_WAIT sockets right after the run. The branch changes only extr
 prompt text, a CLI script and unit tests - the e2e stack runs the fake extraction driver,
 which takes only the prompt's fingerprint, never its text, and the failure came before
 any extraction step. The file passed in isolation (4/4, this test 964 ms).
-Artifacts: `W:\tmp\voucher-size-prompt\.superpowers\gates\e2e-artifacts\`.
+Artifacts: `docs/superpowers/reviews/2026-10-20-voucher-size-prompt/e2e-blank-first-paint-sighting-7-*`
+(error-context + screenshot, moved there from the worktree at cleanup 2026-10-21; the video was dropped).
 The full re-run of 452189c0 (Cameron asked for `db:stop`/`db:start` and
 `s3:stop`/`s3:start` first; 1110 TIME_WAIT at its start, no other test runner on the
 machine) passed 365/365 in 19.5 min - yet still logged one `[vite] http proxy error:

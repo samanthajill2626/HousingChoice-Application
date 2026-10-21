@@ -38,6 +38,7 @@ import { UnitSearchField, type UnitSearchValue } from '../contact/UnitSearchFiel
 import { acceptedVoucherSizes, authoritiesOf, shortAddress } from '../listing/listingFormat.js';
 import { AudienceFilters, type PrefillNotice } from './AudienceFilters.js';
 import { prefillAuthorities } from './authorityPrefill.js';
+import { bedroomSizesOfFilter, prefillVoucherChips } from './broadcastFormat.js';
 import { MessageEditor } from './MessageEditor.js';
 import { RecipientPreview } from './RecipientPreview.js';
 import {
@@ -92,8 +93,9 @@ interface FilterEdits {
   unitId: string | null;
   /** Staff's housing authority list ([] = staff emptied it). */
   authorities?: string[];
-  /** Staff's voucher size (null = staff cleared it). */
-  size?: number | null;
+  /** Staff's voucher sizes - chip values 0..4, ascending ([] = staff unpressed
+   *  every chip: no size filter). property-requirements D12. */
+  sizes?: number[];
 }
 
 /** No authority prefill (no property loaded) - ONE shared value, so the
@@ -191,9 +193,10 @@ export function BroadcastComposer(): React.JSX.Element {
   const unit = loaded !== null && loaded.status === 'loaded' ? loaded.unit : null;
 
   // D3 prefill - DERIVED, never written by an effect: the property's accepted
-  // authorities mapped to list names (authorityPrefill), and the voucher size
-  // it takes (acceptedVoucherSizes, the one reader; the filter holds ONE size
-  // until tracker #12, so the first, as the public flyer does - D3a).
+  // authorities mapped to list names (authorityPrefill), and the voucher sizes
+  // it takes (property-requirements D12: one chip per size acceptedVoucherSizes
+  // returns - the one reader, its bedrooms when none is recorded - each size
+  // of 4 or more on the 4+ chip; a size no chip holds is left out, CI-2).
   const { entries: orgEntries, loading: orgLoading, error: orgError } = orgList;
   const authorityPrefill = useMemo(
     () =>
@@ -202,7 +205,7 @@ export function BroadcastComposer(): React.JSX.Element {
         : prefillAuthorities(authoritiesOf(unit), { entries: orgEntries, loading: orgLoading, error: orgError }),
     [unit, orgEntries, orgLoading, orgError],
   );
-  const propertyVoucherSize = unit === null ? undefined : acceptedVoucherSizes(unit)[0];
+  const propertyVoucherChips = unit === null ? undefined : prefillVoucherChips(acceptedVoucherSizes(unit));
 
   // D3 ownership: staff's edits for THIS property win; a filter not edited
   // shows the prefill. A DIFFERENT property resets the edits (pickProperty).
@@ -210,19 +213,23 @@ export function BroadcastComposer(): React.JSX.Element {
   const unitKey = effectiveUnitId ?? null;
   const ownEdits: FilterEdits = edits.unitId === unitKey ? edits : { unitId: unitKey };
   const authorities = ownEdits.authorities ?? authorityPrefill.names;
-  const size = ownEdits.size !== undefined ? (ownEdits.size ?? undefined) : propertyVoucherSize;
+  const sizes = ownEdits.sizes ?? propertyVoucherChips ?? [];
   // The filter keeps its identity while its content stays (the draft hook
   // re-runs on a new filter object): keyed on the names joined by a line
-  // break, which no organization name can hold.
+  // break, which no organization name can hold, and the sizes joined by a
+  // comma.
   const authoritiesKey = authorities.join('\n');
+  const sizesKey = sizes.join(',');
   const filter = useMemo<AudienceFilter>(() => {
     const names = authoritiesKey === '' ? [] : authoritiesKey.split('\n');
+    const chosen = sizesKey === '' ? [] : sizesKey.split(',').map(Number);
     return {
       contact_type: 'tenant',
       ...(names.length > 0 && { housing_authorities: names }),
-      ...(size !== undefined && { bedroomSize: size }),
+      // D12: the list, never the legacy bedroomSize; none = no size filter.
+      ...(chosen.length > 0 && { bedroomSizes: chosen }),
     };
-  }, [authoritiesKey, size]);
+  }, [authoritiesKey, sizesKey]);
 
   // D3 timing: ONLY with a property attached and the filters on (never on a
   // resumed draft, which has no property here) does Preview wait for the
@@ -295,16 +302,16 @@ export function BroadcastComposer(): React.JSX.Element {
   function onFilterChange(next: AudienceFilter): void {
     setAuthorityNotice(null);
     const nextAuthorities = next.housing_authorities ?? [];
-    const nextSize = next.bedroomSize ?? null;
+    const nextSizes = bedroomSizesOfFilter(next);
     const authoritiesEdited = nextAuthorities.join('\n') !== authoritiesKey;
-    const sizeEdited = nextSize !== (size ?? null);
-    if (!authoritiesEdited && !sizeEdited) return;
+    const sizesEdited = nextSizes.join(',') !== sizesKey;
+    if (!authoritiesEdited && !sizesEdited) return;
     setEdits((prev) => {
       const own: FilterEdits = prev.unitId === unitKey ? prev : { unitId: unitKey };
       return {
         ...own,
         ...(authoritiesEdited && { authorities: nextAuthorities }),
-        ...(sizeEdited && { size: nextSize }),
+        ...(sizesEdited && { sizes: nextSizes }),
       };
     });
   }
@@ -765,7 +772,7 @@ export function BroadcastComposer(): React.JSX.Element {
                 authorityNotice !== null && authorityNotice.unitId === unitKey ? authorityNotice.text : null
               }
               disabled={previewBusy}
-              {...(propertyVoucherSize !== undefined && { propertyVoucherSize })}
+              {...(propertyVoucherChips !== undefined && { propertyVoucherSizes: propertyVoucherChips })}
               unusedAuthorities={authorityPrefill.unused}
               noAuthorityMapped={authorityPrefill.names.length === 0 && authorityPrefill.unused.length > 0}
               prefillNotices={prefillNotices}

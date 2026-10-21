@@ -87,13 +87,6 @@ export function voucherSizesLabel(sizes: readonly number[]): string {
   return sizes.map(voucherSizeLabel).join(', ');
 }
 
-/** A plain "N-bedroom" phrase for the property-match tag ("matches this
- *  2-bedroom property"). Studio reads "studio". */
-export function bedroomPhrase(beds: number): string {
-  if (beds <= 0) return 'studio';
-  return `${beds}-bedroom`;
-}
-
 /** A human audience summary for a list row / results header, e.g.
  *  "Tenants - 2-BR - Atlanta Housing". Always leads with "Tenants": it
  *  summarizes the FILTER, which reaches tenants only (hand-picked partner

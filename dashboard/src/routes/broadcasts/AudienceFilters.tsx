@@ -1,6 +1,7 @@
 // AudienceFilters — the extensible audience-filter framework (the composer's
 // centerpiece). v1 ships two criteria: a prominent VoucherSize chip control
-// (bedroomSize 0..4) and a "Housing authorities" multi-picker (any-of,
+// (multi-select, property-requirements D12: bedroomSizes of 0..4, the 4+ chip
+// meaning 4 or more) and a "Housing authorities" multi-picker (any-of,
 // matching-blast-rules D2); the disabled "+ Add
 // filter" seam is the placeholder for future criteria (neighborhood,
 // accessibility…). The always-on hard fences (opted-out - unreachable) are noted
@@ -9,10 +10,11 @@
 // live reach - the rows that will start checked - carries an incomplete-list
 // suffix when the read was truncated (D7).
 //
-// The voucher-size control pre-fills with the voucher size the property takes
-// (its recorded size, else its beds - acceptedVoucherSizes) when composing from
-// a unit, shown with a "matches property" tag (overridable - a home may suit
-// other sizes). The composer prefills the housing authorities from the
+// The voucher-size control pre-fills one chip per voucher size the property
+// takes (its recorded sizes, else its beds - acceptedVoucherSizes; 4 and up on
+// the 4+ chip) when composing from a unit, each shown with a "matches
+// property" tag (staff press or unpress any chip, D12). The composer prefills
+// the housing authorities from the
 // property too (D3) and owns that prefill; this component shows its notes:
 // the property's names that are not on the organization list, and why the
 // prefill is held (a failed property load or list read), each with a Try
@@ -29,7 +31,8 @@ import {
 } from '../orgs/orgCopy.js';
 import {
   VOUCHER_SIZE_CHOICES,
-  bedroomPhrase,
+  bedroomSizesOfFilter,
+  voucherSizesLabel,
 } from './broadcastFormat.js';
 import styles from './AudienceFilters.module.css';
 
@@ -45,6 +48,8 @@ const NOT_USED_PREFIX = 'Not used (not on the organization list): ';
 const NOT_LIMITED = ' This blast is not limited by housing authority.';
 /** D7: the reach line's suffix while the audience read was truncated. */
 const REACH_INCOMPLETE = ' - the list is incomplete';
+/** property-requirements D12: the pre-fill note, followed by the chip labels. */
+const PREFILL_SIZES_NOTE = 'Pre-filled to the voucher sizes this property takes: ';
 
 /** D3 (AR44): a failed read the prefill is held on - the composer's notice
  *  and the retry of THAT read alone (the property load, or the organization
@@ -63,10 +68,11 @@ export interface AudienceFiltersProps {
    *  read's Try again - AR44) and passes it down: its property prefill and its
    *  Preview gate read the same answer (matching-blast-rules D3). */
   orgList: OrgListView;
-  /** The voucher size the composed-from property takes (its recorded size, else
-   *  its beds - acceptedVoucherSizes); drives the "matches property" tag on the
-   *  matching chip. Undefined when not unit-scoped or nothing is recorded. */
-  propertyVoucherSize?: number;
+  /** property-requirements D12: the chips the composed-from property's voucher
+   *  sizes press (prefillVoucherChips of acceptedVoucherSizes - 4 and up on
+   *  the 4+ chip). Each carries the "matches property" tag and the pre-fill
+   *  note names them. Undefined or empty when not unit-scoped or none maps. */
+  propertyVoucherSizes?: readonly number[];
   /** D3: the property's accepted authorities that map to no list entry -
    *  "Not used (not on the organization list): <names>." */
   unusedAuthorities?: readonly string[];
@@ -104,7 +110,7 @@ export function AudienceFilters({
   filter,
   onChange,
   orgList,
-  propertyVoucherSize,
+  propertyVoucherSizes = [],
   unusedAuthorities = [],
   noAuthorityMapped = false,
   prefillNotices = [],
@@ -130,11 +136,19 @@ export function AudienceFilters({
   // has one.
   const [typed, setTyped] = useState('');
 
-  function pickSize(value: number): void {
-    // Toggle: re-clicking the active chip clears the size narrower.
+  // property-requirements D12: the sizes on screen, read through the one
+  // reader (an old-shape filter's one bedroomSize included).
+  const sizes = bedroomSizesOfFilter(filter);
+
+  /** D12: a chip toggles ITS size in or out of the list (kept ascending); the
+   *  last one off is no size filter. Never the legacy bedroomSize. */
+  function toggleSize(value: number): void {
+    const nextSizes = sizes.includes(value)
+      ? sizes.filter((s) => s !== value)
+      : [...sizes, value].sort((a, b) => a - b);
     const next: AudienceFilter = { contact_type: 'tenant' };
     if (authorities.length > 0) next.housing_authorities = authorities;
-    if (filter.bedroomSize !== value) next.bedroomSize = value; // (===) → cleared
+    if (nextSizes.length > 0) next.bedroomSizes = nextSizes;
     onChange(next);
   }
 
@@ -143,13 +157,9 @@ export function AudienceFilters({
   function setAuthorities(names: string[]): void {
     const next: AudienceFilter = { contact_type: 'tenant' };
     if (names.length > 0) next.housing_authorities = names;
-    if (filter.bedroomSize !== undefined) next.bedroomSize = filter.bedroomSize;
+    if (sizes.length > 0) next.bedroomSizes = sizes;
     onChange(next);
   }
-
-  // The chip that matches the property's voucher size (capped at the top "4+" chip).
-  const matchedChipValue =
-    propertyVoucherSize !== undefined ? Math.max(0, Math.min(4, propertyVoucherSize)) : undefined;
 
   // D3 (AR44): the "Not used" names end with ONE period - none is added when
   // the last name already ends with one (fix-wave-2 review FW2-7).
@@ -172,8 +182,8 @@ export function AudienceFilters({
         <span className={styles.criterionLabel}>Voucher size</span>
         <div className={styles.chips} role="group" aria-label="Voucher size">
           {VOUCHER_SIZE_CHOICES.map((choice) => {
-            const active = filter.bedroomSize === choice.value;
-            const isMatch = matchedChipValue === choice.value;
+            const active = sizes.includes(choice.value);
+            const isMatch = propertyVoucherSizes.includes(choice.value);
             return (
               <button
                 key={choice.value}
@@ -181,7 +191,7 @@ export function AudienceFilters({
                 className={`${styles.chip} ${active ? styles.chipActive : ''}`.trim()}
                 aria-pressed={active}
                 disabled={disabled}
-                onClick={() => pickSize(choice.value)}
+                onClick={() => toggleSize(choice.value)}
               >
                 {choice.label}
                 {isMatch ? <span className={styles.matchTag}> - matches property</span> : null}
@@ -189,11 +199,8 @@ export function AudienceFilters({
             );
           })}
         </div>
-        {matchedChipValue !== undefined && propertyVoucherSize !== undefined ? (
-          <p className={styles.matchNote}>
-            Pre-filled to the {bedroomPhrase(propertyVoucherSize)} voucher this property takes -
-            change it to reach other sizes.
-          </p>
+        {propertyVoucherSizes.length > 0 ? (
+          <p className={styles.matchNote}>{`${PREFILL_SIZES_NOTE}${voucherSizesLabel(propertyVoucherSizes)}`}</p>
         ) : null}
       </div>
 

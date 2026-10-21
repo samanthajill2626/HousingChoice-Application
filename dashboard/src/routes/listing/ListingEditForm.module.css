@@ -125,10 +125,20 @@
   color: var(--c-text);
 }
 
-/* The New property form's "Couldn't load" line with its Try again button (D7). */
-.loadFailed {
+/* The New property form's Requirements heading with the locked landlord's one
+ * always-mounted status region under it (D7; code review R2D-6). No gap: the
+ * empty region takes no space. */
+.sectionHead {
+  display: flex;
+  flex-direction: column;
+}
+
+/* That region while it has text - the loading line, or the "Couldn't load"
+ * line with its Try again button. */
+.sectionStatus {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--sp-2);
+  margin-top: var(--sp-3);
 }

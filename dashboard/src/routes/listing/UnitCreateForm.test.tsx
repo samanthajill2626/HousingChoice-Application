@@ -698,6 +698,40 @@ describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", ()
     expect(sentBody()['requirements_snapshot']).toEqual(ROSA_SNAPSHOT);
   });
 
+  // Code review R2D-6 (the RD-7 pattern): the loading and failure lines are
+  // ONE live region mounted from the first render, whose TEXT changes - a
+  // region inserted already filled may not be announced, and the failure
+  // also re-enables Create silently.
+  it('the loading and failure lines share ONE always-mounted status region whose text changes', async () => {
+    const user = userEvent.setup();
+    const first = { reject: (_e: unknown): void => {} };
+    const second = { resolve: (_c: Contact): void => {} };
+    getContact.mockReturnValueOnce(
+      new Promise<Contact>((_resolve, reject) => {
+        first.reject = reject;
+      }),
+    );
+    setup({ landlordId: 'contact-landlord-0001' });
+    const region = await screen.findByText(LOADING);
+    expect(region).toHaveAttribute('role', 'status');
+    await act(async () => first.reject(new ApiError(503, 'unavailable', 'unavailable')));
+    expect(await screen.findByText(FAILED)).toBe(region);
+    // Queued only now, so a failure above never leaks it into the next test.
+    getContact.mockReturnValueOnce(
+      new Promise<Contact>((resolve) => {
+        second.resolve = resolve;
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(region).toHaveTextContent(LOADING);
+    await act(async () => second.resolve(ROSA_WITH_REQS));
+    expect(await screen.findByText(FILLED)).toBeInTheDocument();
+    // Still mounted, now empty; the button is gone.
+    expect(region.isConnected).toBe(true);
+    expect(region).toBeEmptyDOMElement();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+  });
+
   it('a landlord with no requirements: the section starts blank, with no note (C7)', async () => {
     setup({ landlordId: 'contact-landlord-0001' });
     await dialogReady();

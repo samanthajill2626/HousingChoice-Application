@@ -374,6 +374,13 @@ export function UnitCreateForm({
   // C6: <L> is the landlord's name (landlordDisplayName, code review RD-9 and
   // worklist OR-33) once either read has landed.
   const statusName = lockedLandlordLabel ?? 'the landlord';
+  /** D7's status line for the locked read (plan 1.1 copy); '' once it landed. */
+  const readStatus =
+    landlordRead === 'loading'
+      ? `Loading ${statusName}'s requirements...`
+      : landlordRead === 'failed'
+        ? `Couldn't load ${statusName}'s requirements, so this property starts without them. You can apply them from the landlord page later.`
+        : '';
   const filledNote =
     landlordRead === 'done' && filled !== null && filled.landlordId === resolvedLandlordId && filled.hasRequirements
       ? `Filled in from ${filled.name}'s requirements. Change anything that is different for this property.`
@@ -723,27 +730,34 @@ export function UnitCreateForm({
           onChange={setSameDayRta}
         />
 
-        <h3 className={styles.sectionHeading}>Requirements</h3>
-        {landlordRead === 'loading' ? (
-          <p className={styles.hint} role="status">
-            {`Loading ${statusName}'s requirements...`}
-          </p>
-        ) : (
-          <>
-            {landlordRead === 'failed' ? (
-              <div className={styles.loadFailed}>
-                <p className={styles.hint} role="status">
-                  {`Couldn't load ${statusName}'s requirements, so this property starts without them. You can apply them from the landlord page later.`}
-                </p>
+        <div className={styles.sectionHead}>
+          <h3 className={styles.sectionHeading}>Requirements</h3>
+          {/* Code review R2D-6 (the RD-7 pattern): the locked landlord's read
+              has ONE live region, mounted from the first render, whose TEXT
+              changes - loading, then the failure (which also re-enables
+              Create), then loading again on Try again, then empty - so
+              assistive technology hears each change; a region inserted
+              already filled may not be announced. It takes no space while
+              empty. The picker path reads nothing, so it has none. */}
+          {landlordLocked ? (
+            <div className={readStatus !== '' ? styles.sectionStatus : undefined}>
+              <p className={styles.hint} role="status">
+                {readStatus}
+              </p>
+              {landlordRead === 'failed' ? (
                 <Button variant="secondary" size="sm" type="button" onClick={retryLandlordRead}>
                   Try again
                 </Button>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        {landlordRead !== 'loading' ? (
+          <>
             {filledNote !== null ? <p className={styles.hint}>{filledNote}</p> : null}
             <RequirementsFields values={requirements} onChange={setRequirements} audience="property" />
           </>
-        )}
+        ) : null}
 
         <TaggedField
           label="Application process"

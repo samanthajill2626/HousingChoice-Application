@@ -49,15 +49,23 @@
   overflow-wrap: anywhere;
 }
 
+/* A tag never runs past the card (live self-QA QA-1). Beside a label on a
+ * 320px screen the value column is narrower than "Set on this property", so
+ * the tag shrinks to the column and wraps its words inside the pill,
+ * centered (clear of the round ends). No breakpoint: where the tag fits on
+ * one line - every width from 360px up - it lays out exactly as before. */
 .tagSetHere,
 .tagLandlordUpdated {
   display: inline-block;
+  max-width: 100%;
   padding: 0 var(--sp-2);
   border-radius: var(--radius-pill);
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
   line-height: 1.6;
-  white-space: nowrap;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .tagSetHere {

@@ -15,6 +15,7 @@ import {
   landlordHasNoRequirements,
   requirementDisplay,
   requirementItemsByGroup,
+  type ItemValue,
   type RequirementItemId,
 } from './requirements.js';
 
@@ -208,39 +209,28 @@ describe('formatItemValue - one item value as one line', () => {
     ).toBe("One month's rent; $1,400; flexible; Half at signing");
   });
 
-  // Live self-QA QA-2: details that end with a period read "only.; pet fee"
-  // once joined. A part followed by another drops ONE trailing period before
-  // the "; "; the last part keeps its own, and a period inside a part stays.
-  it('a part followed by another drops its trailing period before the "; " (live self-QA QA-2)', () => {
-    expect(formatItemValue('pets', { no_pets: true, pets: 'Service animals only.', pet_fee: '$300' })).toBe(
-      'No pets; Service animals only; pet fee $300',
-    );
-    expect(formatItemValue('pets', { no_pets: null, pets: 'Cats OK. Dogs ask first.', pet_fee: '$300' })).toBe(
-      'Cats OK. Dogs ask first; pet fee $300',
-    );
-    // The property card's landlord line is the same text.
+  // Code review R3-2 (reverts live self-QA QA-2): the parts are joined by
+  // "; " exactly as recorded (plan 2.6). Requirement values compare EXACTLY
+  // (D1), so a trailing period is a real difference: dropping it before the
+  // "; " once put a "Set on this property" tag over a value and a landlord
+  // line that read the same.
+  it('a period before the "; " stays, so two values one period apart read differently (code review R3-2)', () => {
+    const own: ItemValue = { no_pets: true, pets: 'Service animals only.', pet_fee: '$300' };
+    const theirs: ItemValue = { no_pets: true, pets: 'Service animals only', pet_fee: '$300' };
+    expect(formatItemValue('pets', own)).toBe('No pets; Service animals only.; pet fee $300');
+    expect(formatItemValue('pets', theirs)).toBe('No pets; Service animals only; pet fee $300');
+    expect(formatItemValue('pets', own)).not.toBe(formatItemValue('pets', theirs));
+    // The property card tags the difference; its landlord line is the landlord's text.
     expect(
-      requirementDisplay(unit(), landlord({ req_no_pets: true, req_pets: 'Service animals only.', req_pet_fee: '$300' }), 'pets'),
-    ).toEqual({ tag: null, landlordLine: 'Landlord: No pets; Service animals only; pet fee $300' });
-  });
-
-  it('(PIN) the last part keeps its period (live self-QA QA-2)', () => {
-    expect(formatItemValue('pets', { no_pets: true, pets: 'Service animals only.', pet_fee: null })).toBe(
-      'No pets; Service animals only.',
-    );
-    expect(
-      formatItemValue('deposit', { deposit_one_month: true, deposit: null, deposit_flexible: true, deposit_notes: 'Half at signing.' }),
-    ).toBe("One month's rent; flexible; Half at signing.");
-    expect(formatItemValue('touring', { tour_type: 'landlord_led', tour_process: 'Call first.' })).toBe('Landlord-led; Call first.');
-    expect(formatItemValue('qualifications', { qualifications: 'Two references.' })).toBe('Two references.');
-  });
-
-  it('only ONE trailing period goes before the "; " (live self-QA QA-2)', () => {
-    expect(formatItemValue('pets', { no_pets: null, pets: 'Ask first...', pet_fee: '$300' })).toBe('Ask first..; pet fee $300');
-  });
-
-  it('a part that was only a period leaves no empty "; ;" behind (live self-QA QA-2)', () => {
-    expect(formatItemValue('pets', { no_pets: true, pets: '.', pet_fee: '$300' })).toBe('No pets; pet fee $300');
+      requirementDisplay(
+        unit({ no_pets: true, pets: 'Service animals only.', pet_fee: '$300' }),
+        landlord({ req_no_pets: true, req_pets: 'Service animals only', req_pet_fee: '$300' }),
+        'pets',
+      ),
+    ).toEqual({ tag: 'set_here', landlordLine: 'Landlord: No pets; Service animals only; pet fee $300' });
+    // Details that are only "." are not blank details.
+    expect(formatItemValue('pets', { no_pets: true, pets: '.', pet_fee: '$300' })).toBe('No pets; .; pet fee $300');
+    expect(formatItemValue('pets', { no_pets: true, pets: null, pet_fee: '$300' })).toBe('No pets; pet fee $300');
   });
 });
 

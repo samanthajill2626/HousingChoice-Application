@@ -8,6 +8,8 @@
 //                                    → { contact }                                          (M1.4)
 //                                    + the 15 landlord requirement keys req_* (landlords only;
 //                                      lib/requirements.ts, property-requirements spec D2)
+//   POST  /api/contacts/:contactId/requirements/apply  { units, items, expected }
+//                                    -> { updated, skipped }   (routes/contactRequirementsApply.ts)
 //
 // THE M1.5 SEAM the honest-identity deviation left (README 2026-06-12):
 // resolving a contact's type to tenant/landlord PROPAGATES that to the linked
@@ -120,6 +122,7 @@ import {
 import { typeChangeRefusals } from '../services/contactHoldings.js';
 import { handOffPrimariesOfDeletedContact } from '../services/primaryHandoff.js';
 import { registerCaseworkerRoutes } from './caseworkerReview.js';
+import { registerRequirementsApplyRoute } from './contactRequirementsApply.js';
 import {
   displayNameOf,
   drainTypeSuggestion,
@@ -1224,6 +1227,11 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   // Caseworkers (spec 2026-10-06 D19): GET /possible-caseworkers is a literal
   // segment, so it MUST be registered before GET /:contactId (as /vocabulary is).
   registerCaseworkerRoutes(router, { contacts, conversion: caseworkerConversion, logger: log });
+
+  // Apply to properties (property-requirements spec D8):
+  // POST /:contactId/requirements/apply, in its own module like the
+  // caseworker-review routes above.
+  registerRequirementsApplyRoute(router, { contacts, units, audit, logger: log });
 
   // GET /api/contacts/:contactId — the side-panel contact item. The returned
   // shape is a SUPERSET of the legacy one: the scalar `phone` stays intact and

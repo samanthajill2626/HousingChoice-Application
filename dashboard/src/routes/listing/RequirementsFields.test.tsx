@@ -5,7 +5,12 @@ import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { RequirementsFields } from './RequirementsFields.js';
-import { emptyRequirementFormValues, type RequirementFormValues } from './requirementForm.js';
+import {
+  NO_APPLICATION_FEE_FLAG,
+  emptyRequirementFormValues,
+  requirementFormValuesFromUnit,
+  type RequirementFormValues,
+} from './requirementForm.js';
 import { REQUIREMENT_ITEMS } from './requirements.js';
 
 type Audience = 'property' | 'landlord';
@@ -137,6 +142,54 @@ describe('RequirementsFields', () => {
   it('a recorded 0 shows as No application fee', () => {
     render(<Harness initial={{ ...emptyRequirementFormValues(), application_fee: '0' }} />);
     expect(screen.getByLabelText('No application fee')).toBeChecked();
+    expect(screen.getByLabelText('Application fee')).toBeDisabled();
+  });
+
+  // Code review R2D-5: "No application fee" is its own form flag, set only by
+  // the checkbox (it starts checked when the stored / prefilled fee is 0).
+  // It was DERIVED from the amount text, so any partial amount reading 0
+  // ticked it and disabled the box under the caret.
+  it('typing an amount that starts with 0 ("0.50") never ticks No application fee or disables the box', async () => {
+    const user = userEvent.setup();
+    const spy = vi.fn();
+    render(<Harness spy={spy} />);
+    const fee = screen.getByLabelText('Application fee');
+    await user.type(fee, '0.50');
+    expect(fee).toBeEnabled();
+    expect(fee).toHaveValue(0.5);
+    expect(screen.getByLabelText('No application fee')).not.toBeChecked();
+    const last = spy.mock.lastCall?.[0] as RequirementFormValues;
+    expect(Number(last['application_fee'])).toBe(0.5);
+    expect(last[NO_APPLICATION_FEE_FLAG]).toBe(false);
+  });
+
+  it('deleting the 4 of a stored 40 leaves an editable 0, unticked', async () => {
+    const user = userEvent.setup();
+    render(<Harness initial={requirementFormValuesFromUnit({ application_fee: 40 })} />);
+    const fee = screen.getByLabelText('Application fee');
+    expect(fee).toHaveValue(40);
+    await user.click(fee);
+    await user.keyboard('{Home}{Delete}');
+    expect(fee).toHaveValue(0);
+    expect(fee).toBeEnabled();
+    expect(screen.getByLabelText('No application fee')).not.toBeChecked();
+    // ... and staff can go on typing.
+    await user.type(fee, '5');
+    expect(fee).toBeEnabled();
+  });
+
+  it('only the checkbox sets the flag: ticked it records 0, unticked the amount is blank again', async () => {
+    const user = userEvent.setup();
+    const spy = vi.fn();
+    render(<Harness initial={requirementFormValuesFromUnit({ application_fee: 0 })} spy={spy} />);
+    const box = screen.getByLabelText('No application fee');
+    expect(box).toBeChecked();
+    await user.click(box);
+    expect(spy.mock.lastCall?.[0]).toMatchObject({ application_fee: '', [NO_APPLICATION_FEE_FLAG]: false });
+    await user.type(screen.getByLabelText('Application fee'), '0');
+    expect(box).not.toBeChecked();
+    await user.click(box);
+    expect(spy.mock.lastCall?.[0]).toMatchObject({ application_fee: '0', [NO_APPLICATION_FEE_FLAG]: true });
     expect(screen.getByLabelText('Application fee')).toBeDisabled();
   });
 

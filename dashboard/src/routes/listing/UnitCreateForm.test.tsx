@@ -740,6 +740,26 @@ describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", ()
     });
   });
 
+  // Code review R2D-5: "No application fee" is its own flag - typing a fee
+  // that starts with 0 never ticks it or locks the box, and Create sends the
+  // amount typed (never the form-only flag).
+  it('a typed $0.50 fee is never mistaken for No application fee; Create sends 0.5', async () => {
+    const user = userEvent.setup();
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await dialogReady();
+    await user.type(screen.getByLabelText('Application fee'), '0.50');
+    expect(screen.getByLabelText('Application fee')).toBeEnabled();
+    expect(screen.getByLabelText('No application fee')).not.toBeChecked();
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()).toEqual({
+      landlordId: 'contact-landlord-0001',
+      application_fee: 0.5,
+      requirements_snapshot: blankSnapshot('contact-landlord-0001'),
+    });
+  });
+
   it('a landlord deposit with cents (1250.5) pre-fills and Create sends it - native validation never blocks it (planner PR2-3)', async () => {
     const user = userEvent.setup();
     getContact.mockResolvedValue({

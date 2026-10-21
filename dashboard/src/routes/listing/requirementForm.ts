@@ -4,7 +4,8 @@
 //
 // RequirementFormValues is keyed by UNIT key (plan 2.6): a checkbox holds a
 // boolean, every other field the string its control shows (an amount as typed,
-// '' = blank). The Edit form diffs two of them (buildRequirementPatch), the New
+// '' = blank) - plus one form-only flag, NO_APPLICATION_FEE_FLAG (code review
+// R2D-5), which is never sent. The Edit form diffs two of them (buildRequirementPatch), the New
 // form sends the non-blank fields (buildRequirementCreateFields) plus the
 // landlord snapshot (requirementsSnapshotOf), and the landlord form maps req_
 // keys in (requirementFormValuesFromLandlord) and out (toLandlordPatch).
@@ -67,6 +68,30 @@ export function isNoApplicationFee(values: RequirementFormValues): boolean {
   return v !== '' && Number(v) === 0;
 }
 
+/** Code review R2D-5: "No application fee" is its OWN form flag, kept in the
+ *  values under this key - a form-only key, never a unit or contact key, and
+ *  never sent (the builders below read REQUIREMENT_FIELDS only). The starting
+ *  values never carry it; RequirementsFields sets it from the checkbox, and
+ *  pins it as it stands whenever the amount is edited. */
+export const NO_APPLICATION_FEE_FLAG = 'form:no_application_fee';
+
+/** Whether "No application fee" is checked: the flag once the form has set it;
+ *  before that, the stored / prefilled value (a recorded 0). So a typed amount
+ *  that reads 0 ("0.50" half typed, the 4 of "40" deleted) never ticks it -
+ *  only the checkbox does. */
+export function noApplicationFeeChecked(values: RequirementFormValues): boolean {
+  const flag = values[NO_APPLICATION_FEE_FLAG];
+  return typeof flag === 'boolean' ? flag : isNoApplicationFee(values);
+}
+
+/** The text a field records: as its control holds it, except the application
+ *  fee - checked "No application fee" records 0, unchecked the typed amount
+ *  (blank = none) (D10, R2D-5). */
+function recordedText(values: RequirementFormValues, f: RequirementField): string | boolean | undefined {
+  if (f.key === 'application_fee') return noApplicationFeeChecked(values) ? '0' : asText(values[f.key]);
+  return values[f.key];
+}
+
 function parseMoney(text: string, label: string): { ok: true; value: number | null } | { ok: false; error: string } {
   const v = text.trim();
   if (v === '') return { ok: true, value: null };
@@ -78,15 +103,16 @@ function parseMoney(text: string, label: string): { ok: true; value: number | nu
 /** The Edit form's requirement keys to PATCH: only keys whose value changed.
  *  A checkbox sends true or null; text sends the string as typed ('' when
  *  cleared - the server trims and REMOVEs ''); an amount sends a number or
- *  null when cleared (D1: clearable); the tour type sends the select value. */
+ *  null when cleared (D1: clearable); the tour type sends the select value.
+ *  The application fee compares and sends what it records (recordedText). */
 export function buildRequirementPatch(
   initial: RequirementFormValues,
   current: RequirementFormValues,
 ): { ok: true; patch: Record<string, unknown> } | { ok: false; error: string } {
   const patch: Record<string, unknown> = {};
   for (const f of REQUIREMENT_FIELDS) {
-    const after = current[f.key];
-    if (initial[f.key] === after) continue;
+    const after = recordedText(current, f);
+    if (recordedText(initial, f) === after) continue;
     if (f.kind === 'checkbox') {
       patch[f.key] = after === true ? true : null;
     } else if (f.kind === 'money') {
@@ -112,7 +138,7 @@ export function buildRequirementCreateFields(
 ): { ok: true; fields: Record<string, string | number | true> } | { ok: false; error: string } {
   const fields: Record<string, string | number | true> = {};
   for (const f of REQUIREMENT_FIELDS) {
-    const v = values[f.key];
+    const v = recordedText(values, f);
     if (f.kind === 'checkbox') {
       if (v === true) fields[f.key] = true;
       continue;

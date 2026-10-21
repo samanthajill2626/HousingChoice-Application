@@ -1505,6 +1505,23 @@ describe('ContactEditForm - landlord Requirements / Qualifications', () => {
     );
   });
 
+  // Code review R2D-5: "No application fee" is its own flag - deleting the 4
+  // of a stored 40 leaves an editable 0, and Save sends req_application_fee 0
+  // (never the form-only flag).
+  it('deleting the 4 of a stored 40 fee keeps the box editable and unticked; Save sends req_application_fee 0', async () => {
+    const user = userEvent.setup();
+    const contact: Contact = { ...LANDLORD, req_application_fee: 40 };
+    updateContact.mockResolvedValue({ ...contact });
+    render(<ContactEditForm contact={contact} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const fee = within(fieldset()).getByLabelText('Application fee');
+    await user.click(fee);
+    await user.keyboard('{Home}{Delete}');
+    expect(fee).toBeEnabled();
+    expect(within(fieldset()).getByRole('checkbox', { name: 'No application fee' })).not.toBeChecked();
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { req_application_fee: 0 }));
+  });
+
   it('an untouched fieldset sends no req_ key', async () => {
     const user = userEvent.setup();
     updateContact.mockResolvedValue({ ...WITH_REQUIREMENTS });

@@ -782,6 +782,32 @@ describe('ListingEditForm - property requirements and fields (spec 2026-10-20)',
     expect(updateUnit).toHaveBeenCalledWith('u1', { application_fee: null });
   });
 
+  // Code review R2D-5: the checkbox is its own flag - a partial amount that
+  // reads 0 never ticks it or locks the box, and Save sends the amount typed
+  // (never the form-only flag).
+  it('deleting the 4 of a stored 40 keeps the box editable and unticked; Save sends 0', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={{ ...UNIT, application_fee: 40 }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const fee = screen.getByLabelText('Application fee');
+    await user.click(fee);
+    await user.keyboard('{Home}{Delete}');
+    expect(fee).toBeEnabled();
+    expect(screen.getByLabelText('No application fee')).not.toBeChecked();
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { application_fee: 0 });
+  });
+
+  it('a typed $0.50 fee is never mistaken for No application fee; Save sends 0.5', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText('Application fee'), '0.50');
+    expect(screen.getByLabelText('No application fee')).not.toBeChecked();
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { application_fee: 0.5 });
+  });
+
   it('a cleared text requirement sends an empty string (the server removes it)', async () => {
     const user = userEvent.setup();
     updateUnit.mockResolvedValue({ ...UNIT });

@@ -1,11 +1,13 @@
 // The property forms' Requirements plumbing (spec 2026-10-20 D1, D4, D5, D7, D10a).
 import { describe, expect, it } from 'vitest';
 import {
+  NO_APPLICATION_FEE_FLAG,
   buildRequirementCreateFields,
   buildRequirementPatch,
   emptyRequirementFormValues,
   formFieldVisibility,
   isNoApplicationFee,
+  noApplicationFeeChecked,
   requirementFormValuesFromLandlord,
   requirementFormValuesFromUnit,
   requirementsSnapshotOf,
@@ -67,6 +69,26 @@ describe('requirement form values', () => {
     expect(isNoApplicationFee({ ...v, application_fee: '' })).toBe(false);
     expect(isNoApplicationFee({ ...v, application_fee: '25' })).toBe(false);
   });
+
+  // Code review R2D-5: "No application fee" is its own form flag. Until the
+  // checkbox (or an edit of the amount) sets it, it reads the stored /
+  // prefilled value - checked for a recorded 0; once set, only the checkbox
+  // changes it, so a typed 0 is an amount of 0.
+  it('noApplicationFeeChecked: the stored / prefilled 0 until the flag is set; then only the flag', () => {
+    expect(noApplicationFeeChecked(requirementFormValuesFromUnit({ application_fee: 0 }))).toBe(true);
+    expect(noApplicationFeeChecked(requirementFormValuesFromLandlord({ req_application_fee: 0 }))).toBe(true);
+    expect(noApplicationFeeChecked(requirementFormValuesFromUnit({ application_fee: 40 }))).toBe(false);
+    expect(noApplicationFeeChecked(emptyRequirementFormValues())).toBe(false);
+    const v = emptyRequirementFormValues();
+    expect(noApplicationFeeChecked({ ...v, application_fee: '0', [NO_APPLICATION_FEE_FLAG]: false })).toBe(false);
+    expect(noApplicationFeeChecked({ ...v, application_fee: '', [NO_APPLICATION_FEE_FLAG]: true })).toBe(true);
+  });
+
+  it('the flag is not a unit key: the starting values never carry it', () => {
+    expect(NO_APPLICATION_FEE_FLAG in emptyRequirementFormValues()).toBe(false);
+    expect(NO_APPLICATION_FEE_FLAG in requirementFormValuesFromUnit({ application_fee: 0 })).toBe(false);
+    expect(REQUIREMENT_UNIT_KEYS as readonly string[]).not.toContain(NO_APPLICATION_FEE_FLAG);
+  });
 });
 
 describe('buildRequirementPatch (the Edit form, D1)', () => {
@@ -125,6 +147,61 @@ describe('buildRequirementPatch (the Edit form, D1)', () => {
     expect(buildRequirementPatch(base, { ...base, application_fee: 'abc' })).toEqual({
       ok: false,
       error: 'Application fee must be a number 0 or greater.',
+    });
+  });
+
+  // Code review R2D-5: checked records 0, unchecked the typed amount (blank =
+  // none); the flag itself is never a key.
+  describe('the No application fee flag (code review R2D-5)', () => {
+    const NO = NO_APPLICATION_FEE_FLAG;
+    const forty = requirementFormValuesFromUnit({ application_fee: 40 });
+    const zero = requirementFormValuesFromUnit({ application_fee: 0 });
+
+    it('a typed 0 (the 4 of 40 deleted) is an amount of 0; a typed 0.50 is 0.5', () => {
+      expect(buildRequirementPatch(forty, { ...forty, application_fee: '0', [NO]: false })).toEqual({
+        ok: true,
+        patch: { application_fee: 0 },
+      });
+      expect(buildRequirementPatch(forty, { ...forty, application_fee: '0.50', [NO]: false })).toEqual({
+        ok: true,
+        patch: { application_fee: 0.5 },
+      });
+    });
+
+    it('checked records 0 whatever the amount box holds; unchecked a stored 0 sends null', () => {
+      expect(buildRequirementPatch(forty, { ...forty, application_fee: '40', [NO]: true })).toEqual({
+        ok: true,
+        patch: { application_fee: 0 },
+      });
+      expect(buildRequirementPatch(zero, { ...zero, application_fee: '', [NO]: false })).toEqual({
+        ok: true,
+        patch: { application_fee: null },
+      });
+    });
+
+    it('a stored 0 ticked again, or retyped as 0, sends nothing - only what changed is sent', () => {
+      expect(buildRequirementPatch(zero, { ...zero, application_fee: '0', [NO]: true })).toEqual({ ok: true, patch: {} });
+      expect(buildRequirementPatch(zero, { ...zero, application_fee: '0', [NO]: false })).toEqual({ ok: true, patch: {} });
+      expect(buildRequirementPatch(forty, { ...forty, [NO]: false })).toEqual({ ok: true, patch: {} });
+    });
+
+    it('the New form: checked sends 0, unchecked the typed amount, blank nothing; the flag is never a key', () => {
+      const v = emptyRequirementFormValues();
+      expect(buildRequirementCreateFields({ ...v, application_fee: '', [NO]: true })).toEqual({
+        ok: true,
+        fields: { application_fee: 0 },
+      });
+      expect(buildRequirementCreateFields({ ...v, application_fee: '0.50', [NO]: false })).toEqual({
+        ok: true,
+        fields: { application_fee: 0.5 },
+      });
+      expect(buildRequirementCreateFields({ ...v, application_fee: '', [NO]: false })).toEqual({ ok: true, fields: {} });
+    });
+
+    it('the landlord patch carries req_application_fee and never the flag', () => {
+      const r = buildRequirementPatch(forty, { ...forty, application_fee: '0', [NO]: false });
+      if (!r.ok) throw new Error(r.error);
+      expect(toLandlordPatch(r.patch)).toEqual({ req_application_fee: 0 });
     });
   });
 });

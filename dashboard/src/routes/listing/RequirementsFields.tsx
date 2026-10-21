@@ -4,7 +4,8 @@
 // registry ("On flyer" / "Staff only" on a property form, "On property flyers"
 // / "Staff only" on the landlord form), the public free-text boxes noted, and
 // the two alternatives D1 couples: "One month's rent" clears and disables the
-// fixed amount; "No application fee" records 0 and disables the amount.
+// fixed amount; "No application fee" records 0 and disables the amount (its
+// own form flag, code review R2D-5 - never read off the amount text).
 // Controlled: `values` is keyed by UNIT key (the landlord form maps req_ keys
 // in and out, requirementForm.ts) and every change reports the whole next
 // value. The host renders the section heading ("Requirements", or the landlord
@@ -12,7 +13,7 @@
 import { Fragment } from 'react';
 import { TOUR_TYPE_LABELS, type TourType } from '../../api/index.js';
 import type { FlyerAudience } from './FlyerTag.js';
-import { isNoApplicationFee, type RequirementFormValues } from './requirementForm.js';
+import { NO_APPLICATION_FEE_FLAG, noApplicationFeeChecked, type RequirementFormValues } from './requirementForm.js';
 import { REQUIREMENT_ITEMS, type RequirementField, type RequirementGroup, type RequirementItem } from './requirements.js';
 import { TaggedCheckbox, TaggedField } from './TaggedField.js';
 import formStyles from './ListingEditForm.module.css';
@@ -48,7 +49,11 @@ export function RequirementsFields({
   };
   const checked = (key: string): boolean => values[key] === true;
   const set = (key: string, value: string | boolean): void => onChange({ ...values, [key]: value });
-  const noFee = isNoApplicationFee(values);
+  // Code review R2D-5: "No application fee" is its own flag - set only by its
+  // checkbox (it starts checked for a stored / prefilled 0) - never derived
+  // from the amount text, so a partial amount reading 0 neither ticks it nor
+  // disables the box under the caret.
+  const noFee = noApplicationFeeChecked(values);
   const oneMonth = checked('deposit_one_month');
 
   function renderField(field: RequirementField): React.ReactNode {
@@ -80,7 +85,9 @@ export function RequirementsFields({
               audience={audience}
               checked={noFee}
               disabled={disabled}
-              onChange={(on) => set('application_fee', on ? '0' : '')}
+              onChange={(on) =>
+                onChange({ ...values, application_fee: on ? '0' : '', [NO_APPLICATION_FEE_FLAG]: on })
+              }
             />
           ) : null}
           <TaggedField label={field.label} visibility={field.flyer} audience={audience}>
@@ -97,7 +104,13 @@ export function RequirementsFields({
                 step="any"
                 value={text(field.key)}
                 disabled={disabled || (isFee ? noFee : oneMonth)}
-                onChange={(e) => set(field.key, e.target.value)}
+                onChange={(e) =>
+                  // R2D-5: an amount edit pins the flag as it stands, so the
+                  // typed text never decides the checkbox.
+                  isFee
+                    ? onChange({ ...values, [field.key]: e.target.value, [NO_APPLICATION_FEE_FLAG]: noFee })
+                    : set(field.key, e.target.value)
+                }
               />
             )}
           </TaggedField>

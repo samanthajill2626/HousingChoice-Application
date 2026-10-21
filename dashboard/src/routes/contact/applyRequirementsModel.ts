@@ -44,22 +44,36 @@ export function defaultCheckedItems(landlord: Contact): Set<RequirementItemId> {
   );
 }
 
-/** Worklist OR-17 (amended by OR-34, code review R3-1): the left column after
- *  EVERY re-read that follows an Update inside one open dialog - a later batch
- *  that answered 409 or failed, or a first request that failed in any way, a
- *  409 requirements_changed included. "... press Update again" continues the
- *  same Apply, so the items staff chose stay chosen - but only those the
- *  re-read landlord still holds: an item staff unchecked stays unchecked (it
- *  may be one staff deliberately left out, such as Touring), and an item the
- *  landlord has since blanked comes back unchecked, never a surprise "Clears".
- *  It only ever copies LESS than staff chose. Only opening the dialog starts
- *  from defaultCheckedItems. The rows staff unchecked are carried by
- *  carryHandUnchecks (OR-32). */
+/** Worklist OR-17, amended by OR-34 and OR-35 (code review R3-1, R3-3): the
+ *  left column after EVERY re-read that follows an Update inside one open
+ *  dialog - a later batch that answered 409 or failed, or a first request
+ *  that failed in any way, a 409 requirements_changed included. "... press
+ *  Update again" continues the same Apply, so each item in `previous` (what
+ *  staff had checked when they pressed Update) is judged against `landlord`
+ *  (the re-read) and `seen` (the landlord the dialog showed at that click):
+ *  - it stays checked while the re-read landlord holds a value (a changed
+ *    value shows its new text - what "Review the updated list" asks staff to
+ *    look at);
+ *  - it stays checked when the re-read value equals (itemValuesEqual) the
+ *    value staff saw, so a deliberate "Clears" of an unchanged blank survives;
+ *  - it comes back unchecked only when it turned blank since - never a
+ *    surprise "Clears".
+ *  An item staff unchecked stays unchecked (it may be one staff deliberately
+ *  left out, such as Touring), and an item the landlord filled in since stays
+ *  unchecked (staff never chose it): the carry never adds an item. Only
+ *  opening the dialog starts from defaultCheckedItems. The rows staff
+ *  unchecked are carried by carryHandUnchecks (OR-32). */
 export function carryCheckedItems(
   previous: ReadonlySet<RequirementItemId>,
   landlord: Contact,
+  seen: Contact,
 ): Set<RequirementItemId> {
-  return new Set([...defaultCheckedItems(landlord)].filter((id) => previous.has(id)));
+  return new Set(
+    orderedItems(previous).filter((id) => {
+      const now = landlordItemValue(landlord, id);
+      return !isItemBlank(now) || itemValuesEqual(now, landlordItemValue(seen, id));
+    }),
+  );
 }
 
 /** The checked items in display order - the order the request lists them. */

@@ -103,33 +103,63 @@ describe('applyRows', () => {
   });
 });
 
-// Worklist OR-17 (amended by OR-34, code review R3-1): after an Update that
-// stopped or failed - a first-request 409 requirements_changed included - the
-// re-read keeps what staff chose on the left, narrowed to what the re-read
-// landlord still holds, instead of resetting it to the defaults. It only ever
-// copies LESS than staff chose, never more.
-describe('carryCheckedItems - the left column across a re-read after a stop (worklist OR-17)', () => {
-  it('an item staff unchecked stays unchecked; an item staff checked stays checked', () => {
-    // The landlord still holds both; staff had unchecked Credit score.
-    expect(orderedItems(carryCheckedItems(set('pets'), LANDLORD))).toEqual(['pets']);
-    expect(orderedItems(carryCheckedItems(set('credit_requirements', 'pets'), LANDLORD))).toEqual([
+// Worklist OR-17, amended by OR-34 and OR-35 (code review R3-1, R3-3): after
+// an Update that stopped or failed - a first-request 409 requirements_changed
+// included - the re-read keeps what staff chose on the left instead of
+// resetting it to the defaults. carryCheckedItems(previous, landlord, seen):
+// each item staff CHECKED (`previous`) stays checked while the re-read
+// `landlord` holds a value, or holds the same value as `seen` (the landlord
+// the dialog showed when staff pressed Update - so a deliberate Clears of an
+// unchanged blank survives); it comes back unchecked only when it turned
+// blank since. An item staff UNCHECKED stays unchecked, and the carry never
+// adds an item staff did not check.
+describe('carryCheckedItems - the left column across a re-read (worklist OR-17, OR-35)', () => {
+  it('an item staff unchecked stays unchecked, blank or not', () => {
+    // The landlord still holds Credit score; staff had unchecked it.
+    expect(orderedItems(carryCheckedItems(set('pets'), LANDLORD, LANDLORD))).toEqual(['pets']);
+    // Evictions is blank ("Clears") and unchanged; staff never checked it.
+    expect(carryCheckedItems(set('pets'), LANDLORD, LANDLORD).has('evictions')).toBe(false);
+  });
+
+  it('a checked item the re-read landlord holds a value for stays checked, a changed value included', () => {
+    expect(orderedItems(carryCheckedItems(set('credit_requirements', 'pets'), LANDLORD, LANDLORD))).toEqual([
       'credit_requirements',
       'pets',
     ]);
+    // A new pet fee: still checked (the re-read shows the new value).
+    const newFee: Contact = { ...LANDLORD, req_pet_fee: '$350' };
+    expect(orderedItems(carryCheckedItems(set('credit_requirements', 'pets'), newFee, LANDLORD))).toEqual([
+      'credit_requirements',
+      'pets',
+    ]);
+    // A Clears staff checked that the landlord has filled in since: a value now, still checked.
+    const touringNow: Contact = { ...LANDLORD, req_tour_type: 'self_guided' };
+    expect(carryCheckedItems(set('touring'), touringNow, LANDLORD).has('touring')).toBe(true);
   });
 
-  it('an item the re-read landlord holds blank comes back unchecked - never a surprise Clears', () => {
+  it('a checked item that turned blank since comes back unchecked - never a surprise Clears', () => {
     const petsBlanked: Contact = { contactId: 'L1', type: 'landlord', req_credit_requirements: '600+' };
-    expect(orderedItems(carryCheckedItems(set('credit_requirements', 'pets'), petsBlanked))).toEqual([
+    expect(orderedItems(carryCheckedItems(set('credit_requirements', 'pets'), petsBlanked, LANDLORD))).toEqual([
       'credit_requirements',
     ]);
-    // A Clears item staff had checked comes back unchecked too: the carry never copies a blank by itself.
-    expect(carryCheckedItems(set('evictions', 'pets'), LANDLORD).has('evictions')).toBe(false);
+  });
+
+  // Code review R3-3: the carry once kept only the items the re-read landlord
+  // held, so a Clears staff chose was dropped by every re-read - after a
+  // mid-run stop, 100 properties cleared and 50 not.
+  it('a Clears item staff checked on purpose stays checked while the landlord still holds the blank staff saw (code review R3-3)', () => {
+    expect(orderedItems(carryCheckedItems(set('evictions', 'pets', 'touring'), LANDLORD, LANDLORD))).toEqual([
+      'evictions',
+      'pets',
+      'touring',
+    ]);
+    // Something else changed (the pet fee), the blank did not: still checked.
+    expect(carryCheckedItems(set('touring'), { ...LANDLORD, req_pet_fee: '$350' }, LANDLORD).has('touring')).toBe(true);
   });
 
   it('an item the landlord filled in since is not checked by the carry (staff never chose it)', () => {
     const more: Contact = { ...LANDLORD, req_income_requirements: '3x rent' };
-    expect(orderedItems(carryCheckedItems(set('pets'), more))).toEqual(['pets']);
+    expect(orderedItems(carryCheckedItems(set('pets'), more, LANDLORD))).toEqual(['pets']);
     expect(orderedItems(defaultCheckedItems(more))).toEqual(['credit_requirements', 'income_requirements', 'pets']);
   });
 });

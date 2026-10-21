@@ -25,14 +25,15 @@
 // one open dialog - after a stopped run, or after a first request that failed
 // in any way, a 409 requirements_changed or deposit_conflict included -
 // continues the same Apply ("... press Update again"), so it keeps what staff
-// chose. The left column keeps what staff had checked, narrowed to what the
-// re-read landlord still holds (carryCheckedItems): an item staff unchecked is
-// never re-checked, and an item the landlord has since blanked comes back
-// unchecked. The rows keep what staff UNCHECKED by hand (carryHandUnchecks),
-// while a row staff CHECKED by hand goes back to its starting state (staff
-// confirm a check again) - so no re-read writes more than staff chose. Only
-// opening the dialog (its first read, and Try again after it failed) starts
-// both columns from the defaults.
+// chose. The left column keeps what staff had checked (carryCheckedItems,
+// worklist OR-35): an item the re-read landlord holds a value for, or still
+// holds the blank staff saw (a deliberate "Clears"), stays checked; an item
+// the landlord has since blanked comes back unchecked; an item staff unchecked
+// is never re-checked. The rows keep what staff UNCHECKED by hand
+// (carryHandUnchecks), while a row staff CHECKED by hand goes back to its
+// starting state (staff confirm a check again) - so no re-read writes more
+// than staff chose. Only opening the dialog (its first read, and Try again
+// after it failed) starts both columns from the defaults.
 import { useEffect, useId, useRef, useState } from 'react';
 import {
   ApiError,
@@ -97,10 +98,13 @@ type DialogLoad =
 
 /** What staff chose when an Update failed or stopped (OR-17, OR-32, OR-34):
  *  the left column and the row hand choices, for the next successful read to
- *  carry. */
+ *  carry - with the landlord as the dialog showed it at that click, so the
+ *  left column can tell an unchanged blank from one that turned blank since
+ *  (OR-35). */
 interface ApplyCarry {
   checkedItems: ReadonlySet<RequirementItemId>;
   hand: HandChoices;
+  landlord: Contact;
 }
 
 const ITEM_LABEL: ReadonlyMap<RequirementItemId, string> = new Map(REQUIREMENT_ITEMS.map((item) => [item.id, item.label]));
@@ -163,13 +167,17 @@ export function ApplyRequirementsDialog({
         // The landlord of record only, never a deleted property (D8) - the
         // server read already narrows both; this keeps the rule here too.
         const listed = units.filter((u) => u.landlordId === contactId && !isDeleted(u));
-        // OR-17: a carried left column is narrowed to what this landlord still
-        // holds (and consumed); otherwise the defaults (D8). OR-32: the rows
-        // staff unchecked stay unchecked on the re-read rows; every other row
-        // starts from its starting state.
+        // OR-17 + OR-35: a carried left column is judged against this
+        // landlord and the one staff saw at the click (and consumed);
+        // otherwise the defaults (D8). OR-32: the rows staff unchecked stay
+        // unchecked on the re-read rows; every other row starts from its
+        // starting state.
         const carried = carryRef.current;
         carryRef.current = null;
-        const checked = carried !== null ? carryCheckedItems(carried.checkedItems, landlord) : defaultCheckedItems(landlord);
+        const checked =
+          carried !== null
+            ? carryCheckedItems(carried.checkedItems, landlord, carried.landlord)
+            : defaultCheckedItems(landlord);
         setCheckedItems(checked);
         setHand(carried !== null ? carryHandUnchecks(carried.hand, applyRows(listed, landlord, checked)) : new Map());
         setLoad({ phase: 'ready', landlord, units: listed });
@@ -236,7 +244,8 @@ export function ApplyRequirementsDialog({
         // OR-17 + OR-32 + OR-34 (code review R3-1): EVERY failure - a
         // first-request 409 requirements_changed included - continues the
         // same Apply, so the next read keeps what staff chose, on both sides.
-        carryRef.current = { checkedItems, hand };
+        // OR-35: with the landlord this click was made against.
+        carryRef.current = { checkedItems, hand, landlord };
         // D8: a LATER batch says how many properties the batches before it
         // updated.
         const stopped = index > 0 ? [stoppedNotice(summarizeApply(results, units).updated)] : [];

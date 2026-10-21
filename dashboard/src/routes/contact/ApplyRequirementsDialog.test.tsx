@@ -367,10 +367,12 @@ describe('ApplyRequirementsDialog - Update', () => {
 // Worklist OR-17 (a divergence from the plan text, recorded for Cameron): the
 // re-read after an Update that stopped or failed continues the same Apply -
 // so it never re-checks an item staff unchecked, and an item the re-read
-// landlord has since blanked comes back unchecked (never a surprise Clears).
-// Worklist OR-34 (code review R3-1): EVERY re-read inside one open dialog
-// carries, a first-request 409 requirements_changed included; only opening
-// the dialog starts the left column from the defaults.
+// landlord has since blanked comes back unchecked (never a surprise Clears),
+// while a Clears staff checked on a blank that did not change stays checked
+// (worklist OR-35, code review R3-3). Worklist OR-34 (code review R3-1):
+// EVERY re-read inside one open dialog carries, a first-request 409
+// requirements_changed included; only opening the dialog starts the left
+// column from the defaults.
 describe('ApplyRequirementsDialog - the left column across a re-read (worklist OR-17)', () => {
   const box = (copy: HTMLElement, name: string): HTMLElement => within(copy).getByRole('checkbox', { name });
   const sentItems = (call: number): string[] =>
@@ -475,6 +477,58 @@ describe('ApplyRequirementsDialog - the left column across a re-read (worklist O
     await user.click(screen.getByRole('button', { name: 'Update 2 properties' }));
     await waitFor(() => expect(applyLandlordRequirements).toHaveBeenCalledTimes(2));
     expect(sentItems(1)).toEqual(['pets']);
+  });
+
+  // Code review R3-3 (worklist OR-35): the carry once kept only the items the
+  // re-read landlord held, so a Clears staff checked on purpose was dropped by
+  // the re-read after a mid-run stop and the rest of the run left it out: 100
+  // properties cleared and 50 not.
+  it('a Clears item staff checked stays checked after a mid-run stop, and the rest of the run still clears it (OR-35)', async () => {
+    const user = userEvent.setup();
+    // 150 properties holding a copied tour type; the landlord's Touring is blank.
+    const units = many(150).map((u): UnitItem => ({ ...u, tour_type: 'self_guided', requirement_sources: { touring: 'copied' } }));
+    // The re-read sees what batch 1 wrote: the first 100 match every checked item.
+    const landed = units.map(
+      (u, i): UnitItem =>
+        i < 100
+          ? {
+              ...u,
+              tour_type: undefined,
+              credit_requirements: '600+',
+              no_pets: true,
+              pet_fee: '$300',
+              requirement_sources: { credit_requirements: 'copied', pets: 'copied', touring: 'copied' },
+            }
+          : u,
+    );
+    getAllUnits.mockReset().mockResolvedValueOnce(units).mockResolvedValue(landed);
+    applyLandlordRequirements
+      .mockResolvedValueOnce({ updated: units.slice(0, 100).map((u) => u.unitId), skipped: [] })
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({ updated: units.slice(100).map((u) => u.unitId), skipped: [] });
+    const { onDone } = renderDialog();
+    const { copy } = await columns();
+    expect(box(copy, 'Touring')).toHaveAccessibleDescription('Clears');
+    // Staff clear Touring on every property, with the filled items.
+    await user.click(box(copy, 'Touring'));
+    await user.click(screen.getByRole('button', { name: 'Update 150 properties' }));
+    expect(
+      await screen.findByText('Updated 100 properties before this stopped. Review the rest and press Update again.'),
+    ).toBeInTheDocument();
+    expect(sentItems(0)).toEqual(['credit_requirements', 'pets', 'touring']);
+    expect(sentItems(1)).toEqual(['credit_requirements', 'pets', 'touring']);
+    await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
+    const { copy: after } = await columns();
+    // The landlord did not change: the Clears staff chose is still chosen.
+    expect(box(after, 'Touring')).toBeChecked();
+    expect(box(after, 'Touring')).toHaveAccessibleDescription('Clears');
+    expect(box(after, 'Pets')).toBeChecked();
+    // "press Update again": the last 50 are cleared too.
+    await user.click(screen.getByRole('button', { name: 'Update 50 properties' }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith({ updated: 50, skipped: [] }));
+    expect(sentItems(2)).toEqual(['credit_requirements', 'pets', 'touring']);
+    const lastUnits = (applyLandlordRequirements.mock.calls[2]?.[1] as { units: Array<{ unitId: string }> }).units;
+    expect(lastUnits.map((u) => u.unitId)).toEqual(units.slice(100).map((u) => u.unitId));
   });
 });
 

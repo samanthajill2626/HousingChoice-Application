@@ -48,13 +48,16 @@ const artifactsDir = path.join(repoRoot, 'e2e', '.artifacts');
 // playwright.config.ts asks for 'preview' when IT boots the stack, i.e. the full
 // `npm run e2e` gate.
 //
-// WHY THE GATE USES A BUILD: the dev server costs a socket per page load that no
-// spec uses (the HMR WebSocket - 456 in a 70-test subset, 27% of the browser's
-// residual connections in a full run) and serves the app as hundreds of separate
-// modules; on Windows that churn is what parks loopback ports in TIME_WAIT behind
-// the white-page failures. See
-// docs/superpowers/reviews/2026-10-20-e2e-connection-churn/fix-results.md and the
-// measured result in docs/superpowers/reviews/2026-10-20-e2e-gate-preview/.
+// WHAT A BUILD BUYS, MEASURED (docs/superpowers/reviews/2026-10-20-e2e-gate-preview/
+// findings.md): no HMR WebSocket per page load (456 in a 70-test subset -> 0),
+// browser -> Vite connections -32% over the full gate, and a faster gate
+// (19.3 -> 15.9 min). What it does NOT buy: fewer TIME_WAIT sockets. The HMR
+// socket closes by reset and never sat in TIME_WAIT, and the connections that
+// do (each test's fresh browser context and its pool) are unchanged - so the
+// faster gate packs them tighter and PEAK TIME_WAIT ROSE about 50% (lane
+// ports 1,735 -> 2,618), the quantity behind the Windows white pages
+// (docs/superpowers/reviews/2026-10-20-e2e-connection-churn/). Read the
+// findings before relying on this mode to cure churn.
 //
 // WHAT CHANGES UNDER A BUILD: it is a production bundle, so React's StrictMode
 // double-invoke (a development-only behavior) does not run, and dashboard source

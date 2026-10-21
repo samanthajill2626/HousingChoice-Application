@@ -198,8 +198,9 @@ export default defineConfig({
       // A stack Playwright boots itself (the `npm run e2e` gate) serves a
       // production BUILD of the dashboard via `vite preview`, not the dev
       // server: no HMR socket per page load and a few bundled assets instead of
-      // hundreds of modules (connection churn - see the launcher's comment on
-      // E2E_DASHBOARD_SERVE). `npm run e2e:session` does not pass through here
+      // hundreds of modules, and a faster gate - but NOT fewer TIME_WAIT
+      // sockets (see the launcher's comment on E2E_DASHBOARD_SERVE for the
+      // measured trade). `npm run e2e:session` does not pass through here
       // and keeps the dev server; a run that REUSES a live session uses
       // whatever that session serves. E2E_DASHBOARD_SERVE=dev forces the dev
       // server for a gate run.

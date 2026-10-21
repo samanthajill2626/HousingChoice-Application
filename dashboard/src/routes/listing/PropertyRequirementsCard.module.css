@@ -1,0 +1,79 @@
+/* PropertyRequirementsCard - the property page's Requirements card (property
+ * requirements D6 layout A). Tokens only. The two tags differ in LIGHTNESS as
+ * well as hue (D6): "Set on this property" is a solid dark violet with white
+ * text, "Landlord updated" a pale amber with dark amber text - and each
+ * carries its words, never color alone. */
+
+.note {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.group + .group {
+  margin-top: var(--sp-2);
+}
+
+.groupHeading {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-muted);
+}
+
+/* The same label/value rhythm as the Card KV rows (Card.module.css .kv). */
+.item {
+  display: flex;
+  gap: var(--sp-2);
+  margin: 2px 0;
+  font-size: var(--fs-sm);
+}
+
+.itemLabel {
+  flex: 0 0 auto;
+  min-width: 120px;
+  color: var(--c-text-muted);
+}
+
+.itemBody {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-1) var(--sp-2);
+  min-width: 0;
+}
+
+.value {
+  color: var(--c-text);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.tagSetHere,
+.tagLandlordUpdated {
+  display: inline-block;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.tagSetHere {
+  background: var(--c-pill-partner-bg);
+  color: var(--c-text-inverse);
+}
+
+.tagLandlordUpdated {
+  background: var(--c-evt-amber-bg);
+  border: 1px solid var(--c-evt-amber-border);
+  color: var(--c-evt-amber-text);
+}
+
+.landlordLine {
+  flex-basis: 100%;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+  overflow-wrap: anywhere;
+}

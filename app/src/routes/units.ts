@@ -340,9 +340,11 @@ interface UnitActivityEvent {
   tourId?: string;
   outcome?: string;
   /**
-   * unit_primary_contact_assigned ONLY (primary-contact-integrity C11): why
-   * the primary moved without a click - auto_on_add | handoff_on_remove |
-   * handoff_on_delete | handoff_on_restore | backfill.
+   * unit_primary_contact_assigned (primary-contact-integrity C11): why the
+   * primary moved without a click - auto_on_add | handoff_on_remove |
+   * handoff_on_delete | handoff_on_restore | backfill. unit_updated (property
+   * requirements spec 2026-10-20 D13): ONLY 'requirements_applied', an Apply
+   * from the landlord. No other event serves it.
    */
   reason?: string;
 }
@@ -378,11 +380,16 @@ function toUnitActivityEvent(e: AuditEvent): UnitActivityEvent {
     ...(str('tourId') !== undefined && { tourId: str('tourId') }),
     ...(str('outcome') !== undefined && { outcome: str('outcome') }),
     // primary-contact-integrity C11: `reason` is lifted for the primary-contact
-    // event ONLY. listing_status_changed stores a FREE-TEXT `reason` under the
-    // same key (services/statusTransition setListingStatus), which this
-    // projection has never served and must not start serving.
-    ...(e.event_type === 'unit_primary_contact_assigned' &&
-      str('reason') !== undefined && { reason: str('reason') }),
+    // event, and (property requirements spec 2026-10-20 D13) for unit_updated
+    // ONLY when it is exactly 'requirements_applied'. listing_status_changed
+    // stores a FREE-TEXT `reason` under the same key (services/statusTransition
+    // setListingStatus), which this projection has never served and must not
+    // start serving.
+    ...(str('reason') !== undefined &&
+      (e.event_type === 'unit_primary_contact_assigned' ||
+        (e.event_type === 'unit_updated' && str('reason') === 'requirements_applied')) && {
+        reason: str('reason'),
+      }),
   };
 }
 

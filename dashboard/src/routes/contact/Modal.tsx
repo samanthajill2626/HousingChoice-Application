@@ -16,7 +16,9 @@ export interface ModalProps {
   children: React.ReactNode;
   /** Optional footer (action buttons), pinned below the scrollable body. */
   footer?: React.ReactNode;
-  variant?: 'default' | 'media';
+  /** 'wide': a two-column dialog (Apply to properties, property requirements
+   *  D8) - wider on a desktop, otherwise the default dialog in every way. */
+  variant?: 'default' | 'media' | 'wide';
   headerActions?: React.ReactNode;
   trapFocus?: boolean;
   initialFocus?: 'dialog' | 'close';
@@ -166,7 +168,13 @@ export function Modal({
       onMouseDown={onClose}
     >
       <div
-        className={variant === 'media' ? `${styles.dialog} ${styles.mediaDialog}` : styles.dialog}
+        className={
+          variant === 'media'
+            ? `${styles.dialog} ${styles.mediaDialog}`
+            : variant === 'wide'
+              ? `${styles.dialog} ${styles.wideDialog}`
+              : styles.dialog
+        }
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

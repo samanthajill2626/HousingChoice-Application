@@ -982,12 +982,13 @@ export async function createUnit(body: CreateUnitBody): Promise<UnitItem> {
  *  landlordId === contactId to show the landlord's own properties; the property
  *  page reuses it for "Related properties" (same landlord). `deleted: true` returns
  *  ONLY soft-deleted properties (the Properties "Deleted" view); omitted = exclude them.
+ *  `landlordId` returns only that landlord's properties (the Apply dialog, D8).
  *  Returns ONE page; `nextCursor` continues the walk - prefer `getAllUnits` when
  *  the caller needs the WHOLE list. `limit` is 1..MAX_PAGE_LIMIT (100); the
  *  server REJECTS anything outside that range with a 400, it does not clamp.
  *  Omitted = 50. */
 export function getUnits(
-  params: { deleted?: boolean; cursor?: string; limit?: string } = {},
+  params: { deleted?: boolean; cursor?: string; limit?: string; landlordId?: string } = {},
   signal?: AbortSignal,
 ): Promise<UnitsPage> {
   return request<UnitsPage>('/api/units', {
@@ -995,6 +996,10 @@ export function getUnits(
       ...(params.cursor !== undefined && { cursor: params.cursor }),
       ...(params.limit !== undefined && { limit: params.limit }),
       ...(params.deleted === true && { deleted: 'true' }),
+      // One landlord's properties (the server's byLandlord read, deleted ones
+      // hidden unless `deleted` is also set) - the Apply dialog, property
+      // requirements D8.
+      ...(params.landlordId !== undefined && { landlordId: params.landlordId }),
     },
     ...(signal !== undefined && { signal }),
   });
@@ -1432,7 +1437,7 @@ export async function getAllContacts(
 /** EVERY unit, walking `nextCursor`. The property roster behind the unit
  *  typeaheads and the listings views. */
 export async function getAllUnits(
-  params: { deleted?: boolean } = {},
+  params: { deleted?: boolean; landlordId?: string } = {},
   signal?: AbortSignal,
 ): Promise<UnitItem[]> {
   return fetchAllPages(
@@ -1441,12 +1446,13 @@ export async function getAllUnits(
         {
           limit: PAGE_LIMIT,
           ...(params.deleted === true && { deleted: true }),
+          ...(params.landlordId !== undefined && { landlordId: params.landlordId }),
           ...(cursor !== undefined && { cursor }),
         },
         signal,
       ),
     (page) => ({ items: page.units, nextCursor: page.nextCursor }),
-    { label: params.deleted === true ? 'units:deleted' : 'units' },
+    { label: params.landlordId !== undefined ? 'units:landlord' : params.deleted === true ? 'units:deleted' : 'units' },
   );
 }
 

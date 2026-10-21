@@ -20,14 +20,18 @@ deployed.
   Task 3.5 for AR13). AR16 WITHDREW the AR5 whitespace question: app.ts:146
   trimJsonBody deep-trims every JSON body, so no HTTP save stores those unit
   fields untrimmed. Nothing is owed to Cameron on it; tell him it was moot.
-- In flight: plan review round 2, reviewer B continued with the RE-REVIEW
-  CHARGE, writing `plan-review/R2-reviewer-b.md` (diff v1->v2 at
-  `.superpowers/sdd/plan-v1-to-v2.diff`; agent ids in `.superpowers/sdd/agents.md`).
-- NEXT STEP: adjudicate R2 (append to `plan-review/adjudications.md`); if it
-  changes no decision, fold the precision edits and STOP the review;
-  otherwise send fixes to the drafters, re-assemble, commit, and run R3
-  (cap 4). Then write the mission block, ask the launch gate (AUTO / MANUAL /
-  Revise), and run compaction gate B on a Go.
+- PLAN v3 FINAL committed @981eba1c (26 tasks). Plan review CLOSED after 2
+  rounds: 21 distinct findings, 20 accepted (one only as a watch item), 1
+  rejected (a client-sent consent version; its wording half accepted in R2).
+  Mission block committed at `mission-block.md`.
+- Phase: AT THE LAUNCH GATE. Nothing is in flight.
+- NEXT STEP: Cameron's launch-gate answer (AUTO / MANUAL / Revise). On a Go:
+  compaction gate B (refresh this STATE, prove the replay, confirm the
+  registration with --show, start the watcher, offer /compact), THEN dispatch
+  (AUTO: abt:build-orchestrator, background, prompt = mission-block.md
+  verbatim; arm the watchdog with Cameron's checkpoint cadence - he asked for
+  55-minute checkpoints last mission - and start the live mirror) or hand
+  over the MANUAL prompt.
 - Gate answers in rev 6:
   - O1 closed: the decline writers stamp `shares_op`;
   - the repeat limit is per contact per PROPERTY per 24 hours, with /join and

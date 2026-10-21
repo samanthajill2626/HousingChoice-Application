@@ -64,3 +64,30 @@ slower and rarer.
 
 **Not yet known:** whether this reproduces solo. Both sightings were in full
 suites; nobody has run it in isolation.
+
+**Sighting 3 (2026-10-20, full gate run on `fix/contact-file-double-fetch`,
+a dashboard-only branch; 364/365).** Same signature, same assertion. This
+run's app log answers the first question above: the inbound WAS persisted -
+into the CLOSED group, not into the sender's 1:1. App log timestamps (ms):
+
+| t | line |
+|---|---|
+| 715547 | `PATCH /api/conversations/<group1>/close` received |
+| 715552 | `relay status set` conv=group1 |
+| 715558 | `relay group close/reopen via api` (the PATCH answered) |
+| 715564 | `POST /webhooks/twilio/sms` received (the late text) |
+| 715570 | `message appended` conv=group1 |
+| 715574 | `twilio relay inbound message processed` conv=group1 |
+
+No closed-intercept line was logged: the text took the ordinary group path
+12 ms after the close committed, so the 1:1 timeline honestly showed
+"No messages yet." and the dashboard was not at fault. `resolveRelayInbound`
+classifies the sender from `getAllByPoolNumber`, a Query on the
+`byPoolNumber` GSI (`app/src/repos/conversationsRepo.ts:2055`); a GSI read
+that still returned group1 as `open` would classify the sender
+`open_member` and produce exactly this filing. Whether DynamoDB Local's GSI
+can lag a base-table write by that much is unverified - a leading
+hypothesis, not a finding. The spec passed on its own straight afterwards
+(`npm run e2e -w @housingchoice/e2e -- --grep "late text"`, 3.1 s), so
+"reproduces solo" is now answered: not in one try; it needs the suite's
+timing, as the two earlier sightings did.

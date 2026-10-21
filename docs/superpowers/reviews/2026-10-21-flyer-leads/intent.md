@@ -7,16 +7,26 @@ deployed.
 
 ## STATE (replace each time)
 
-- Phase: DESIGN - spec drafting (2026-10-21). The brainstorm happened in the
-  conversation on 2026-10-21; no separate brainstorm doc.
-- In flight: an explore agent maps the sign-up recording surfaces (conversation
-  notes, unread state, properties-sent list). A separate research agent on subzone
-  auto-fill writes `W:\tmp\subzone-autofill-research\research-report.md`. That work is
-  NOT part of this mission: Cameron wants it handed to a NEW session/agent and kept
-  out of this planner's context.
-- NEXT STEP: write the spec at
-  `docs/superpowers/specs/2026-10-21-flyer-leads-design.md`, commit it, then run the
-  adversarial spec review (2 opus reviewers, normal loop, cap 4), then Cameron's spec gate.
+- Phase: DESIGN - spec rev 1 committed @880c5973
+  (`docs/superpowers/specs/2026-10-21-flyer-leads-design.md`). Adversarial review
+  round 1 is running: two opus reviewers, writing
+  `design-review/R1-reviewer-{a,b}.md`.
+- Subzone auto-fill is NOT this mission. Its research is at
+  `W:\tmp\subzone-autofill-research\research-report.md`. Cameron starts that session
+  himself from the prompt given 2026-10-21; he rejected the start_session card.
+- NEXT STEP: adjudicate R1 into `design-review/adjudications.md`, revise the spec,
+  and continue the stronger reviewer for R2 with the RE-REVIEW CHARGE. Loop until a
+  round changes no decision (cap 4), then go to Cameron's spec gate, showing the
+  counts and every REJECT with its reason.
+- Planner calls inside the spec for Cameron to see at the gate:
+  - the heading fallback "Home for rent";
+  - the thank-you text;
+  - the typed name in the milestone label;
+  - the 24-hour repeat dedupe;
+  - the milestone for new contacts too;
+  - a sent-list row for tenant contacts only;
+  - a failed milestone/unread write not failing the request;
+  - D5's consequence (a failed welcome is never retried by a re-sign-up).
 
 ## What Cameron asked for (verbatim, 2026-10-21)
 

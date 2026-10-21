@@ -149,3 +149,43 @@ pre-existing errors (branch-attributed 0).
   defect ("Unknown contact" while phones[] holds a number) stays fixed. A
   company-first name across the dashboard is a separate product change
   (handback, Cameron's eye).
+
+# Round 3 (2026-10-21) - a FRESH re-reviewer on fix wave 2 + the self-QA micro-wave
+
+FW2 (dashboard, 7c0f2a3e, build/FW2-dashboard.md) + FW3 (live self-QA QA-1 /
+QA-2, 9ac92b17, build/FW3-selfqa.md, self-qa.md). Gates at 1009a5e1 ('final2',
+code = 77abd659): typecheck 0, npm test 0 (app 522 / 10891 + 1 skipped,
+dashboard 263 / 5340, e2e 22 / 508, fake-twilio 34 / 275, fake-twilio-web
+13 / 111; [dynamoAdmin] 0), smoke 0, e2e 0 (367 passed, 21.1m), lint 1 = the
+same 5 pre-existing errors (branch-attributed 0).
+
+- R3 (dashboard): `R3-dashboard.md` - 1 medium, 2 low, 2 info. Every FW2 /
+  FW3 fix REAL (mutant-killed); QA-1's CSS sound by reading (measured live).
+
+| # | Finding | Severity | Ruling | Fix unit |
+|---|---|---|---|---|
+| R3-1 | Apply: a FIRST-request 409 requirements_changed resets the left column and the rows, so items and properties staff excluded come back checked and "press Update again" writes them (R2D-1's harm on the path OR-17 / OR-32 exempted). | MEDIUM | ACCEPT - OR-34 below | FW4 |
+| R3-2 | QA-2's dropped period makes a real difference invisible: a tag over a value and a landlord line that print the same text (the RD-2 class, reintroduced by a cosmetic self-QA call). | LOW | ACCEPT - revert QA-2 (plain `'; '` join, plan 2.6); keep a test that pins the visible difference; the ".;" cosmetic goes to Cameron's list | FW4 |
+| R3-3 | A "Clears" item staff checked on purpose is dropped by every preserving re-read (the carry intersects with the defaults, which never hold a blank item): after a mid-run stop, 100 properties cleared and 50 not. | LOW | ACCEPT - OR-35 below | FW4 |
+| R3-4 | The New form's landlord picker names a phones[]-without-primary landlord by the legacy phone; the header and the note by the most recent phone. | INFO | NO ACTION - a rare data shape; noted with OR-33 for Cameron | - |
+| R3-5 | A later batch's deposit_conflict alert pairs "press Update again" with "Close this, fix it ..."; closing as told loses the "Updated N" count. | INFO | NO ACTION - copy for Cameron's eye (the RD-3 class, filed) | - |
+
+## Orchestrator rulings from round 3
+
+- OR-34 (R3-1, amends OR-17 / OR-32): EVERY re-read inside one open dialog
+  carries staff's choices - after a first-request 409 requirements_changed
+  too: the left column per OR-35 and the hand UNCHECKS per OR-32; hand checks
+  drop. Only opening the dialog starts from the defaults. The two tests that
+  pinned the reset flip; the R3 scenarios (an unchecked row and an unchecked
+  item survive a requirements_changed re-read) are pinned.
+- OR-35 (R3-3, amends OR-17's carry): after a re-read, an item staff had
+  CHECKED stays checked when the re-read landlord's value is not blank, OR when
+  it equals the value staff saw when they checked it (a deliberate "Clears" of
+  an unchanged blank survives); it comes back unchecked only when it turned
+  blank since (never a surprise clear). An item staff UNCHECKED stays
+  unchecked. The click-time landlord value is kept with the carry and compared
+  with itemValuesEqual.
+- Terminal rule for this round: the FW4 fixes are small and were probed by the
+  reviewer (R3-1's one-line fix, R3-3's stated fix, R3-2's revert); the
+  orchestrator verifies the FW4 diff and its mutant evidence instead of a
+  fourth review round, then runs the full gates on the final code commit.

@@ -3268,3 +3268,74 @@ describe('ContactDetail - Apply to properties across a contact change (worklist 
     expect(screen.queryByText(/^Updated \d/)).toBeNull();
   });
 });
+
+// Code review RD-4: the same contact-change reset closes every other dialog
+// the page opens for ONE contact. Left open, "New property" re-opened on the
+// next contact's page, locked to it, and read that contact as the landlord to
+// fill in from (another landlord = a property under the wrong owner); the
+// Delete confirmation would have named, and deleted, the next contact.
+describe('ContactDetail - the per-contact dialogs across a contact change (code review RD-4)', () => {
+  type User = { click: (el: Element) => Promise<void> };
+
+  function renderWithNav(): void {
+    getContact.mockImplementation((id: unknown) =>
+      Promise.resolve(id === 'z99' ? OTHER : { ...LANDLORD, req_pet_fee: '$300' }),
+    );
+    render(
+      <MemoryRouter initialEntries={['/contacts/L1']}>
+        <ImageViewerProvider>
+          <Routes>
+            <Route
+              path="/contacts/:contactId"
+              element={
+                <>
+                  <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                  <Link to="/contacts/L1">NAV-TO-LANDLORD</Link>
+                  <ContactDetail />
+                </>
+              }
+            />
+          </Routes>
+        </ImageViewerProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  const OPENERS: Array<[string, (user: User) => Promise<void>]> = [
+    [
+      'New property',
+      async (user) => user.click(await screen.findByRole('button', { name: 'Add a property for this landlord' })),
+    ],
+    ['Edit contact', async (user) => user.click(await screen.findByRole('button', { name: 'Edit contact details' }))],
+    ['Manage numbers', async (user) => user.click(await screen.findByRole('button', { name: 'Manage phone numbers' }))],
+    [
+      'Delete contact?',
+      async (user) => {
+        await user.click(await screen.findByRole('button', { name: /More actions/i }));
+        await user.click(screen.getByRole('menuitem', { name: /Delete contact/i }));
+      },
+    ],
+  ];
+
+  it.each(OPENERS)(
+    'a "%s" dialog left open on the landlord closes on the contact change and does not re-open on coming back',
+    async (title, open) => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      renderWithNav();
+      await open(user);
+      await screen.findByRole('dialog', { name: title });
+
+      await user.click(screen.getByText('NAV-TO-OTHER'));
+      // The other contact's page has loaded (its name can also sit in a
+      // re-opened dialog, so any match will do).
+      await screen.findAllByText('Bob Other');
+      expect(screen.queryByRole('dialog', { name: title })).toBeNull();
+
+      await user.click(screen.getByText('NAV-TO-LANDLORD'));
+      await screen.findByRole('button', { name: 'Apply to properties' });
+      expect(screen.queryByRole('dialog', { name: title })).toBeNull();
+      expect(deleteContact).not.toHaveBeenCalled();
+    },
+  );
+});

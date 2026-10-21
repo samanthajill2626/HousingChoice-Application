@@ -356,6 +356,19 @@ export function ContactDetail(): React.JSX.Element {
     // (and re-reads without a click) or re-shows an old "Updated N" result.
     setApplyingFor(null);
     setApplyDone(null);
+    // Code review RD-4, the same rule for every other dialog opened for ONE
+    // contact: left open, it re-mounted on contact B's page, bound to B -
+    // "New property" locked to B (and read B as the landlord to fill in
+    // from), the edit form editing B, the Delete confirmation deleting B.
+    setEditing(false);
+    setManagingPhones(false);
+    setCreatingRelayGroup(false);
+    setStartingPlacement(false);
+    setSchedulingTour(false);
+    setTourUnitOverride(undefined);
+    setAddingProperty(false);
+    setConfirmingDelete(false);
+    setDeleteError(null);
   }, [contactId]);
   // The current navigator's voice self-view — gates the masked-call control on
   // "has a verified cell" (the CallMenu prompts them to set one otherwise).

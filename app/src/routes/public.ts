@@ -46,9 +46,13 @@ import { createRateLimit } from '../middleware/rateLimit.js';
 import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer } from '../lib/unitFields.js';
 import { resolveUnitMedia } from '../lib/unitMedia.js';
+import type { EventBus } from '../lib/events.js';
+import { conversationTypeFor } from '../lib/voiceMasking.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
-import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import type { ActivityEventsRepo } from '../repos/activityEventsRepo.js';
+import { createContactsRepo, isDeleted as isContactDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
+import type { ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { createOrgListRepo, type OrgListRepo } from '../repos/orgListRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
@@ -223,6 +227,29 @@ export interface PublicRouterDeps {
    * reply-prompt copy (never a broken button).
    */
   contactNumber?: string;
+  /**
+   * flyer-leads D6 (plan 2.6): the sign-up's `signed_up` thread pin and its
+   * 24-hour repeat read (hasEventSince). Default createActivityEventsRepo().
+   */
+  activityEventsRepo?: Pick<ActivityEventsRepo, 'record' | 'hasEventSince'>;
+  /**
+   * flyer-leads D7 (plan 2.6): the properties-sent ledger a flyer sign-up's
+   * `flyer` share entry is written through (services/shareLedger.ts
+   * applyFlyerShareEntry). Default createListingSendsRepo().
+   */
+  listingSendsRepo?: Pick<ListingSendsRepo, 'getByKeyConsistent' | 'putShareMemory'>;
+  /**
+   * flyer-leads D6: the bus the sign-up's unread mark emits its ONE
+   * conversation.updated on, so open dashboards re-sort the bumped row.
+   * Default appEvents (the process-wide bus the SSE route listens on).
+   */
+  events?: EventBus;
+  /**
+   * flyer-leads AR3: the clock (epoch ms) - the ONLY time source for the
+   * 24-hour repeat window, the pin and touch instant and the flyer attempt
+   * key, so tests are deterministic. Default Date.now.
+   */
+  now?: () => number;
 }
 
 export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
@@ -318,15 +345,41 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       }
     }
 
-    // (1) Dedupe by phone. A fair signup for an existing phone must NOT create
-    // a second contact and must NOT re-send the welcome (idempotent — the
-    // money/abuse guard). `housing_fair_welcomed` is the dedupe flag.
+    // (1) Who is signing up (flyer-leads D4). contacts.findByPhone stays the
+    // ONE lookup - the same routing read the inbox, the unread feed and a
+    // staff reply's gates use - so the thread pin, the unread mark and those
+    // gates always judge the SAME contact. A live holder (any type) is an
+    // EXISTING contact and is never changed by a sign-up (no name, type,
+    // status, voucher size, housing authority, consent or welcome flag); a
+    // soft-deleted holder takes the deleted path below; no holder creates a
+    // new tenant, as before.
     const existing = await contacts.findByPhone(phone);
-    let contactId: string;
-    let alreadyWelcomed: boolean;
-    if (existing) {
-      contactId = existing.contactId;
-      alreadyWelcomed = existing['housing_fair_welcomed'] === true;
+
+    // (1a) The deleted path (D4): no conversation, no send, no pin, no unread
+    // mark, no sent-list entry - only the audit event on THAT contact (the
+    // trace docs/issues/deleted-contact-web-signup-silent.md relies on) and
+    // the generic { ok: true }.
+    if (existing !== undefined && isContactDeleted(existing)) {
+      await audit.append(`contacts#${existing.contactId}`, 'housing_fair_signup', {
+        marker,
+        isNew: false,
+        welcomeSent: false,
+        viaFlyer,
+        signupVersion: 2,
+        housingAuthority: housingAuthority ?? null,
+      });
+      log.info(
+        { marker, isNew: false, welcomeSent: false, viaFlyer, withAuthority: housingAuthority !== undefined },
+        'housing-fair signup captured',
+      );
+      res.json({ ok: true });
+      return;
+    }
+
+    const isNew = existing === undefined;
+    let contact: ContactItem;
+    if (existing !== undefined) {
+      contact = existing;
     } else {
       // Status (join-housing-authority D5). A request with NO unitId - the /join
       // form, filled in by staff at housing fairs and by the public - starts the
@@ -337,7 +390,7 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       // keeps 'needs_review' and stores no authority, even when the unit is
       // missing or not shareable. type 'tenant': the form is a tenant intake,
       // asserted by the form, not a guess from an unknown inbound.
-      const created = await contacts.create({
+      contact = await contacts.create({
         type: 'tenant',
         status: unitId === undefined ? 'onboarding' : 'needs_review',
         phone,
@@ -369,19 +422,24 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
         consent_at: new Date().toISOString(),
         consent_version: CONSENT_VERSION,
       });
-      contactId = created.contactId;
-      alreadyWelcomed = false;
     }
+    const contactId = contact.contactId;
 
-    // (2) Conversation: create or get the 1:1 tenant thread and link the
-    // contact, so the welcome text and any reply land on one thread.
-    const conversation = await conversations.createOrGetByParticipantPhone(phone, 'tenant_1to1');
+    // (2) Conversation: create or get the contact's 1:1 thread, TYPED for the
+    // contact (D6: conversationTypeFor - a landlord, partner or unknown
+    // contact with no thread yet gets a correctly typed one; a new contact is
+    // a tenant, so tenant_1to1 as before), and link the contact, so the
+    // welcome text, any reply and the sign-up's unread mark land on one thread.
+    const conversation = await conversations.createOrGetByParticipantPhone(phone, conversationTypeFor(contact));
     await conversations.setParticipantsIfAbsent(conversation.conversationId, [{ contactId, phone }]);
 
-    // (3) Welcome text — ONLY on the FIRST capture of this phone (idempotent).
-    // A repeat signup never re-sends (no SMS spend, no spam).
+    // (3) Welcome text - ONLY when this request CREATED the contact (D5). An
+    // existing contact never gets it, from either form, whatever
+    // housing_fair_welcomed says (that rule texted landlords, caseworkers and
+    // long-time tenants the tenant welcome mid-conversation). A new contact
+    // whose welcome fails is not re-welcomed by a later sign-up.
     let welcomeSent = false;
-    if (!alreadyWelcomed) {
+    if (isNew) {
       try {
         // Resolve the welcome through the catalog: the operator's settings
         // `welcomeText` override when set (interpolating {firstName}), else the
@@ -393,9 +451,9 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
           automated: true,
         });
         welcomeSent = true;
-        // Flag the contact so a later signup with the same phone is a no-op
-        // for the welcome. Best-effort: a failure here only risks ONE possible
-        // duplicate welcome on a later signup, never a crash.
+        // D5: still recorded after a successful welcome. It no longer gates a
+        // later welcome (no existing contact is ever welcomed); a failure here
+        // lands in the catch below and costs only the flag.
         await contacts.update(contactId, { housing_fair_welcomed: true });
       } catch (err) {
         // A refused send (opted out, breaker, etc.) must NOT fail the public

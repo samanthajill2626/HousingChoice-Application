@@ -5561,6 +5561,12 @@ export interface HarnessOptions {
    */
   relayGroupsNow?: () => string;
   /**
+   * flyer-leads (plan 2.6, AR3): the injected clock (epoch ms) for
+   * POST /public/housing-fair - the 24-hour repeat window, the pin and touch
+   * instant and the flyer attempt key. Omit to use the wall clock.
+   */
+  publicNow?: () => number;
+  /**
    * Pre-built dev-only router (routes/dev.ts) — tests that exercise /__dev
    * endpoints against the world fakes pass one in; mounted exactly like the
    * composition root mounts it (before the origin-secret gate).
@@ -5802,6 +5808,13 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
         auditRepo: world.auditRepo,
         events: world.events,
       }),
+      // flyer-leads D6/D7 (plan 2.6): the sign-up's thread pin and repeat
+      // read, its flyer share entry and its unread-mark event go through the
+      // SAME world fakes and bus the /api routers read.
+      activityEventsRepo: world.activityEventsRepo,
+      listingSendsRepo: world.listingSendsRepo,
+      events: world.events,
+      ...(opts.publicNow !== undefined && { now: opts.publicNow }),
     },
     webhooks: {
       adapter: world.adapter,

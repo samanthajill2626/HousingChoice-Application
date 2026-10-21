@@ -163,9 +163,8 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
     expect(world.sent[0]?.body).toBe(WELCOME_TEXT_TEMPLATE.replace('{firstName}', 'Keisha'));
   });
 
-  it('does not fail the public request when the welcome send is refused (opted-out phone)', async () => {
-    const { app, world } = makeWebhookHarness();
-    // Pre-seed a contact that has opted out — the send wrapper refuses.
+  it('an EXISTING opted-out contact gets no welcome attempt at all (flyer-leads D5): nothing refused, nothing sent', async () => {
+    const { app, world, capture } = makeWebhookHarness();
     world.contacts.push({
       contactId: 'c-optout',
       type: 'tenant',
@@ -179,9 +178,28 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
       .set('x-origin-verify', SECRET)
       .send(signupBody({ phone: '+15550104000' }));
 
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(world.sent).toHaveLength(0);
+    // Not refused - never attempted: only a contact this request created is welcomed.
+    expect(capture.lines.some((l) => l['msg'] === 'housing-fair welcome text refused')).toBe(false);
+  });
+
+  it('does not fail the public request when the welcome send to a NEW contact is refused (the SMS kill switch)', async () => {
+    const { app, world, capture } = makeWebhookHarness({ env: { SMS_SENDING_ENABLED: 'false' } });
+
+    const res = await request(app)
+      .post(FAIR)
+      .set('x-origin-verify', SECRET)
+      .send(signupBody({ phone: '+15550104001' }));
+
     expect(res.status).toBe(200); // signup still succeeds
     expect(res.body).toEqual({ ok: true });
-    expect(world.sent).toHaveLength(0); // refused — no text sent
+    expect(world.sent).toHaveLength(0); // refused - no text sent
+    expect(world.contacts.find((c) => c.phone === '+15550104001')?.housing_fair_welcomed).toBe(false);
+    expect(
+      capture.lines.some((l) => l['msg'] === 'housing-fair welcome text refused' && l['code'] === 'sms_sending_disabled'),
+    ).toBe(true);
   });
 });
 
@@ -1173,7 +1191,7 @@ describe('POST /public/housing-fair - new contacts start Onboarding with the mar
     expect(world.sent).toHaveLength(0);
   });
 
-  it('(PIN) an existing phone never welcomed gets the welcome and its flag, and nothing else', async () => {
+  it('an existing phone never welcomed is NOT welcomed now (flyer-leads D5), and nothing is written to it', async () => {
     const { app, world } = harness();
     world.contacts.push({
       contactId: 'c-existing',
@@ -1192,8 +1210,8 @@ describe('POST /public/housing-fair - new contacts start Onboarding with the mar
       .set('x-origin-verify', SECRET)
       .send(signupBody({ housingAuthority: 'Atlanta Housing Authority' }));
     expect(res.status).toBe(200);
-    expect(world.sent).toHaveLength(1);
-    expect(world.contacts).toEqual([{ ...neverWelcomed, housing_fair_welcomed: true }]);
+    expect(world.sent).toHaveLength(0);
+    expect(world.contacts).toEqual([neverWelcomed]);
   });
 });
 

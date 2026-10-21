@@ -1,3 +1,11 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-10-21).** This document describes how
+> this work was *designed/planned at the time of writing*. The work shipped to the main line and
+> its feature branch + worktree were deleted during cleanup. **This file is NOT current
+> documentation and the live code may have drifted from it - do not treat it as authoritative
+> guidance on how the system should be built or behaves today.** For current truth read the code
+> and the project's living docs. Kept only as a point-in-time record of intent.
+
 # Caseworker integrity - design
 
 Status: APPROVED revision 7 (2026-10-13). Branch `fix/caseworker-integrity`,

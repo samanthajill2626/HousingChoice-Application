@@ -1,3 +1,11 @@
+<!-- HISTORICAL-RECORD -->
+> **HISTORICAL RECORD - completed, merged, and frozen (2026-10-21).** This document describes how
+> this work was *designed/planned at the time of writing*. The work shipped to the main line and
+> its feature branch + worktree were deleted during cleanup. **This file is NOT current
+> documentation and the live code may have drifted from it - do not treat it as authoritative
+> guidance on how the system should be built or behaves today.** For current truth read the code
+> and the project's living docs. Kept only as a point-in-time record of intent.
+
 # Primary contact integrity - implementation plan
 
 Status: v5 FINAL 2026-10-13 (sections 0-3 binding; slices S1-S5 from five section drafts; contract issues ruled in 3.2; plan review CLOSED after round 4, terminal - see plan-review/adjudications.md).

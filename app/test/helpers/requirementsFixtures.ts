@@ -72,6 +72,16 @@ export function patchUnit(app: Express, unitId: string, body: Record<string, unk
     .send(body);
 }
 
+/** PATCH /api/units/:unitId with a RAW JSON text, sent as is (a key such as `__proto__` reaches express.json as an own key). */
+export function patchUnitRaw(app: Express, unitId: string, json: string) {
+  return request(app)
+    .patch(`/api/units/${unitId}`)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('cookie', TEST_SESSION_COOKIE)
+    .set('content-type', 'application/json')
+    .send(json);
+}
+
 export function getUnit(app: Express, unitId: string) {
   return request(app)
     .get(`/api/units/${unitId}`)

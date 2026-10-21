@@ -185,6 +185,32 @@ describe('validateUnitBody - primary_contact is not writable (primary-contact-in
   });
 });
 
+describe('validateUnitBody - only OWN allowlist keys are fields (code review RA-3)', () => {
+  // An inherited lookup made every Object.prototype name a "known" field: a
+  // `__proto__` body key passed and then SET THE PROTOTYPE of the validated
+  // fields (so fields.landlordId read through it), and `toString` & co. were
+  // stored unvalidated. A JSON body (express.json is JSON.parse) carries
+  // `__proto__` as an OWN key, so the bodies here are parsed the same way.
+  const INHERITED = Object.getOwnPropertyNames(Object.prototype);
+
+  it('the inherited names checked include the ones the review named', () => {
+    expect(INHERITED).toEqual(
+      expect.arrayContaining(['__proto__', 'toString', 'constructor', 'valueOf', 'hasOwnProperty']),
+    );
+  });
+
+  it.each(INHERITED)('%s is an unknown field on update and on create', (key) => {
+    const body: unknown = JSON.parse(`{${JSON.stringify(key)}:{"landlordId":"c-ll-2"},"notes":"x"}`);
+    expect(validateUnitBody(body, 'update')).toEqual({ ok: false, error: `unknown field: ${key}` });
+    expect(validateUnitBody(body, 'create')).toEqual({ ok: false, error: `unknown field: ${key}` });
+  });
+
+  it('an inherited name after a valid field is still refused - never stored unvalidated', () => {
+    const body: unknown = JSON.parse('{"notes":"x","toString":"y","valueOf":1}');
+    expect(validateUnitBody(body, 'update')).toEqual({ ok: false, error: 'unknown field: toString' });
+  });
+});
+
 describe('validateUnitBody - tour_type (structured, clear-to-absent)', () => {
   // A dedicated enum field: a value must be in the TourType union, and clearing
   // it (''/null) maps to a null patch value so the repo REMOVEs the attribute

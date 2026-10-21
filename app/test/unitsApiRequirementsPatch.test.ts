@@ -15,6 +15,7 @@ import { emailRefId, phoneRefId } from '../src/repos/contactsRepo.js';
 import {
   getUnit,
   patchUnit,
+  patchUnitRaw,
   postRequirementsApply,
   REQ_STAMP,
   seedContact,
@@ -251,6 +252,25 @@ describe('PATCH /api/units/:id - where each requirement value came from (D5)', (
     expect(contactRead).toHaveBeenCalledWith('c-ll', { consistentRead: true });
     expect(plain).not.toHaveBeenCalled();
     expect(fenced).toHaveBeenCalledTimes(1);
+  });
+
+  // Code review RA-3: an inherited allowlist lookup let `__proto__` through
+  // the validator; through the prototype it then faked a landlordId CHANGE,
+  // and the fenced write REMOVEd the map with no landlord change and no trace.
+  it.each<[string, string]>([
+    ['__proto__', '{"__proto__":{"landlordId":"c-ll-2"},"notes":"x"}'],
+    ['toString', '{"toString":"x","notes":"x"}'],
+  ])('a body key inherited from Object.prototype (%s) is a 400 unknown field - the unit and its map are kept (RA-3)', async (key, json) => {
+    const { app, world } = makeWebhookHarness();
+    seedLandlord(world, 'c-ll');
+    seedLandlord(world, 'c-ll-2');
+    seedUnit(world, 'u-1', { notes: 'kept', requirement_sources: { pets: 'set_here' } });
+    const before = structuredClone(world.units.get('u-1'));
+    const res = await patchUnitRaw(app, 'u-1', json);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: `unknown field: ${key}` });
+    expect(world.units.get('u-1')).toEqual(before);
+    expect(unitUpdatedEvents(world)).toHaveLength(0);
   });
 
   it('(PIN) requirement_sources is not client-writable', async () => {

@@ -217,7 +217,11 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
       sawTombstone = true;
       continue;
     }
-    const kind = WRITABLE_FIELDS[key];
+    // An OWN key of the allowlist only (code review RA-3): a bare
+    // WRITABLE_FIELDS[key] is an inherited lookup, so `__proto__`, `toString`,
+    // `constructor` ... would read as known fields - and assigning
+    // fields['__proto__'] would set the PROTOTYPE of the validated fields.
+    const kind = Object.hasOwn(WRITABLE_FIELDS, key) ? WRITABLE_FIELDS[key] : undefined;
     if (kind === undefined) {
       return { ok: false, error: `unknown field: ${key}` };
     }

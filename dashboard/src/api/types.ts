@@ -3265,7 +3265,7 @@ export interface UnitActivityEvent {
 // console.log a phone/name/body (rendering them in the UI is fine).
 
 /** The CLIENT send shape for an audience filter — contact_type is fixed
- *  'tenant' (M1.8 targets tenants only); housing_authorities/bedroomSize are
+ *  'tenant' (M1.8 targets tenants only); housing_authorities/bedroomSizes are
  *  optional narrowers. The server FILLS excludeOptedOut/excludeUnreachable
  *  (always-on hard fences) — the client never sends them. */
 export interface AudienceFilter {
@@ -3276,7 +3276,16 @@ export interface AudienceFilter {
    *  the legacy one-string `housing_authority` - the server normalizes stored
    *  legacy rows, so the dashboard reads ONE shape. */
   housing_authorities?: string[];
-  /** Approved bedroom size to match against the tenant's voucherSize (0=Studio). */
+  /** property-requirements D12: voucher size CHIP values 0..4 (0 = Studio,
+   *  4 = "4 or more"), any-of, matched against the tenant's voucherSize;
+   *  absent = no size filter. The client SENDS this key (never the legacy
+   *  one); every response carries it, normalized. Read it ONLY through
+   *  bedroomSizesOfFilter (routes/broadcasts/broadcastFormat.ts). */
+  bedroomSizes?: number[];
+  /** @deprecated D12 compat, read-only: the server's FIRST size, kept on
+   *  responses for a page open from before the deploy (and the shape of a
+   *  response such a server sent). Never sent by this client; read ONLY
+   *  through bedroomSizesOfFilter. */
   bedroomSize?: number;
 }
 

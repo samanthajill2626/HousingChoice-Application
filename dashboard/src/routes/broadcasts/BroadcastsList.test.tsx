@@ -85,6 +85,24 @@ describe('BroadcastsList — rows', () => {
     expect(within(list).getByText('3/4 delivered')).toBeInTheDocument();
   });
 
+  it('property-requirements D12: a row whose filter takes several voucher sizes lists every one', async () => {
+    listBroadcasts.mockResolvedValue(
+      pageOf([
+        summary({
+          audience_filter: {
+            contact_type: 'tenant',
+            bedroomSizes: [2, 3],
+            bedroomSize: 2,
+            housing_authorities: ['Atlanta Housing Authority'],
+          },
+        }),
+      ]),
+    );
+    renderList();
+    const list = await screen.findByRole('list', { name: 'Property sends' });
+    expect(within(list).getByText('Tenants - 2-BR, 3-BR - Atlanta Housing Authority')).toBeInTheDocument();
+  });
+
   it('caseworkers D22: the subtitle and the empty state use the neutral share wording', async () => {
     listBroadcasts.mockResolvedValue(pageOf([]));
     renderList();

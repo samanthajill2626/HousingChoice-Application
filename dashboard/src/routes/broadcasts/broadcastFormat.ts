@@ -22,9 +22,9 @@ import {
 import { contactDisplayName } from '../contact/format.js';
 import { isRetryPromiseLive, RETRY_OUTCOME_UNCONFIRMED } from '../contact/retryPromise.js';
 
-/** The voucher-size chip choices (bedroomSize 0..4; "4+" means 4-or-more). */
+/** The voucher-size chip choices (bedroomSizes values 0..4; "4+" means 4-or-more). */
 export interface VoucherSizeChoice {
-  /** The bedroomSize value sent to the backend (0 = Studio). */
+  /** The value sent in bedroomSizes (0 = Studio). */
   value: number;
   /** The chip label. */
   label: string;
@@ -39,12 +39,52 @@ export const VOUCHER_SIZE_CHOICES: readonly VoucherSizeChoice[] = [
 ];
 
 /** A short label for a bedroom size (0 → "Studio"; 4 → "4+ BR" since 4 is the
- *  top chip). Used in the audience summary + the "matches this N-bedroom
- *  property" tag. */
+ *  top chip). Used by the chips, the audience summary and the pre-fill note
+ *  (voucherSizesLabel). */
 export function voucherSizeLabel(bedroomSize: number): string {
   if (bedroomSize <= 0) return 'Studio';
   if (bedroomSize >= 4) return '4+ BR';
   return `${bedroomSize}-BR`;
+}
+
+/** property-requirements D12: the top voucher size chip - 4 means "4 or more". */
+export const VOUCHER_CHIP_MAX = 4;
+
+/** D12 - the ONLY dashboard reader of a filter's voucher sizes. Hand mirror of
+ *  bedroomSizesOfFilter in app/src/lib/blastAudienceRules.ts (no
+ *  cross-workspace import exists; both suites run the same SIZE_CASES):
+ *  bedroomSizes when it is an array (integers >= 0 kept, each min(n, 4),
+ *  de-duplicated, ascending), else a legacy integer bedroomSize >= 0 as
+ *  [min(n, 4)], else []. */
+export function bedroomSizesOfFilter(
+  filter: { bedroomSizes?: unknown; bedroomSize?: unknown } | undefined,
+): number[] {
+  if (filter === undefined) return [];
+  const isSize = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+  const list: unknown = filter.bedroomSizes;
+  if (Array.isArray(list)) {
+    const out = new Set<number>();
+    for (const raw of list as unknown[]) {
+      if (isSize(raw)) out.add(Math.min(raw, VOUCHER_CHIP_MAX));
+    }
+    return [...out].sort((a, b) => a - b);
+  }
+  const legacy: unknown = filter.bedroomSize;
+  return isSize(legacy) ? [Math.min(legacy, VOUCHER_CHIP_MAX)] : [];
+}
+
+/** D12 pre-fill: the chips a property's accepted voucher sizes
+ *  (acceptedVoucherSizes) press - one per size, each size of 4 or more on
+ *  the 4+ chip, de-duplicated, ascending. A size no chip can hold (a
+ *  non-integer, possible only in old data) is left out (CI-2). */
+export function prefillVoucherChips(sizes: readonly number[]): number[] {
+  return bedroomSizesOfFilter({ bedroomSizes: sizes });
+}
+
+/** D12: chip labels joined with ", " ("Studio, 2-BR, 4+ BR"); '' for none.
+ *  The audience summary and the composer's pre-fill note. */
+export function voucherSizesLabel(sizes: readonly number[]): string {
+  return sizes.map(voucherSizeLabel).join(', ');
 }
 
 /** A plain "N-bedroom" phrase for the property-match tag ("matches this
@@ -65,7 +105,10 @@ export function bedroomPhrase(beds: number): string {
 export function audienceSummary(filter: AudienceFilter | undefined): string {
   const parts: string[] = ['Tenants'];
   if (filter === undefined) return parts.join(' - ');
-  if (filter.bedroomSize !== undefined) parts.push(voucherSizeLabel(filter.bedroomSize));
+  // property-requirements D12: every size, through the one reader (an
+  // old-shape row's one size included).
+  const sizes = bedroomSizesOfFilter(filter);
+  if (sizes.length > 0) parts.push(voucherSizesLabel(sizes));
   const authorities = (filter.housing_authorities ?? []).filter((name) => name.length > 0);
   if (authorities.length > 0) parts.push(authorities.join(', '));
   return parts.join(' - ');

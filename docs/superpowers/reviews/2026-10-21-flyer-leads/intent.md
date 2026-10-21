@@ -7,14 +7,32 @@ deployed.
 
 ## STATE (replace each time)
 
-- Phase: SPEC GATE (Cameron) - spec rev 5 @dacf74ee
-  (`docs/superpowers/specs/2026-10-21-flyer-leads-design.md`).
-  - Review CLOSED at round 4 (the cap): 41 findings, all accepted.
-  - Open for Cameron: O1 (the decline race; recommended: the decline writers
-    stamp a fresh `shares_op`).
-  - Planner calls are shown at the gate.
-  - The context nudge fired at 500k: compaction gate A is offered after the
-    spec gate.
+- Phase: SPEC APPROVED - rev 6 @5944de7e, approved by Cameron 2026-10-21 ("Yes, I
+  do"). Compaction gate A happens next; Cameron asked for it.
+- NEXT STEP after the compaction: write the detailed TDD implementation plan
+  for the approved spec at
+  `docs/superpowers/plans/2026-10-21-flyer-leads-plan.md`.
+  - Enumerate every surface in spec section 4.
+  - Split it into slices: projection and tags, flyer page, the sign-up
+    route, the ledger and outcome, the dashboard renderers, the subzone
+    match, e2e, GLOSSARY.
+  - Run the adversarial PLAN review (2 opus reviewers in R1, then the
+    continued one, cap 4).
+  - Then the mission block, the launch gate (AUTO / MANUAL / Revise), and
+    compaction gate B.
+- Gate answers in rev 6:
+  - O1 closed: the decline writers stamp `shares_op`;
+  - the repeat limit is per contact per PROPERTY per 24 hours, with /join and
+    unavailable flyers sharing one "no property" source;
+  - new sign-ups are marked unread too, after the welcome;
+  - the flyer calls and the name in the note are accepted.
+- Also done 2026-10-21 at Cameron's request: tracker #11 and #12 set to Done in
+  both the summary table and the item tables. The Order of work line and
+  dated "Oct 21, 2026: Done (merged Oct 21; goes live with the next release)"
+  notes were added; verified via read_doc.
+  - Cameron confirmed #11 and #12 asked for nothing on the TENANT record.
+  - A separate subzone session (started by Cameron) added tracker #33 "Fill
+    in the subzone from the address". Never edit #33 from here.
 - Subzone auto-fill is NOT this mission. Its research is at
   `W:\tmp\subzone-autofill-research\research-report.md`. Cameron starts that session
   himself from the prompt given 2026-10-21; he rejected the start_session card.
@@ -151,3 +169,32 @@ shipped with #14 (/join housing-authority dropdown, default rule).
   recorded as accepted.
 - The spec will mark as planner calls: the heading fallback when a property has no
   address, the thank-you copy, the note wording, and repeat-sign-up dedupe.
+
+## Gate A additions (2026-10-21)
+
+Cameron's spec-gate answers, verbatim:
+
+> "For O1, let's close it. For the flyer calls that you made, those are fine. For
+> existing contacts who sign up, the note doesn't matter. To include the name,
+> let's just leave it there. We don't need to rename the contact. That's fine. On
+> the limit, I don't know if one note and one inbox bump per contact per 24 hours
+> is right, because if you are sharing flyers here, it could be multiple different
+> flyers. They use the same process every time to re-sign up, which is not what
+> they're supposed to do, but if they do, we still want to track that.
+>
+> Really, it's one note and one inbox bump per contact per property. I don't know
+> if we need a limit on time, because if they've already signed up once, we don't
+> need to do it again. However, maybe we want to record that they did something,
+> so maybe it should be a 24-hour check. When you say new contacts get the same
+> note without the unread mark, does that mean that they won't show up in the
+> inbox as unread? We definitely want that to happen."
+
+> "Yes, I do" (approving rev 6), then: "You're right. 11 is landlord requirements,
+> and 12 is property page fields. [...] let's update the tracker and make sure
+> that we've noted that those are finished as well."
+
+Cameron questioned two rev 2 reversals. He believed the app blocks shared
+phones (true for NEW ones: 409 on create and on add-number) and that every
+existing contact already has consent (true for inbound, web forms and imports;
+not for hand-added contacts, whose consent field is optional). The planner
+explained both; rev 6 D4 states the duplicate-phone block.

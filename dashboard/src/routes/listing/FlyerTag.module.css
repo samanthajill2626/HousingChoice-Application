@@ -1,0 +1,30 @@
+/* FlyerTag - the On flyer / Staff only tag beside a property-form field label,
+ * and the legend under the form title (spec 2026-10-20 D10). Tokens only. The
+ * two tones differ in lightness and hue; the words carry the meaning. */
+
+.tag {
+  display: inline-block;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.onFlyer {
+  background: var(--c-brand-soft);
+  color: var(--c-brand-hover);
+}
+
+.staffOnly {
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+}
+
+.legend {
+  margin: 0;
+  padding-left: var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}

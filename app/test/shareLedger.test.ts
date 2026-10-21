@@ -99,6 +99,18 @@ describe('applyShareLedgerEntry', () => {
     expect(f.row).toMatchObject({ counted: true, sentAt: '2026-07-01T00:00:00.000Z' });
     expect(f.row?.broadcastId).toBeUndefined();
   });
+  it("flyer-leads D7: a `flyer` entry that is the pair's latest counted entry gives the pair NO broadcastId (summarize maps it like `individual`); a later broadcast entry takes sentAt and broadcastId back", async () => {
+    const f = fakeLedger();
+    await write(f, 'b1', A1, 'accepted');
+    const flyer = ledgerEntryFor('2026-09-28T10:30:00.000Z#flyer', undefined, { kind: 'accepted' });
+    expect(await applyShareLedgerEntry(deps(f), { unitId: 'u', contactId: 'c', broadcastId: 'flyer', entry: flyer })).toBe('written');
+    expect(f.row).toMatchObject({ counted: true, sentAt: '2026-09-28T10:30:00.000Z' });
+    expect(f.row?.broadcastId).toBeUndefined();
+    expect(f.row?.shares?.['b1']).toMatchObject({ state: 'counted', countedAt: '2026-09-28T10:00:00.000Z' });
+    expect(await write(f, 'b2', '2026-09-28T11:00:00.000Z#SM3', 'accepted')).toBe('written');
+    expect(f.row).toMatchObject({ counted: true, sentAt: '2026-09-28T11:00:00.000Z', broadcastId: 'b2' });
+  });
+
   it('a lost condition re-reads and re-applies; past the bound it reports lost with one ERROR', async () => {
     const f = fakeLedger({ shares: {}, counted: false, shares_op: 't' }, { loseFirst: 2 });
     expect(await write(f, 'b1', A1, 'accepted')).toBe('written');

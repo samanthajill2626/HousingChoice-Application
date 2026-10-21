@@ -22,6 +22,7 @@ import type { ListingSendItem, ListingSendsRepo, ShareLedgerEntry, ShareMemoryWr
 import { RETRIED_ERROR_CODE } from '../lib/retrySendWindow.js';
 import { SEND_UNCONFIRMED_CODE } from '../lib/sendOutcome.js';
 import { INDIVIDUAL_ATTEMPT_KEY, LEGACY_ATTEMPT_KEY, attemptKeyTimestampMs, compareAttemptKeys } from '../lib/shareAttemptOrder.js';
+import { FLYER_SHARE_KEY, INDIVIDUAL_SHARE_KEY, latestCountedShareKey } from '../lib/shareLedgerKeys.js';
 
 export type ShareLedgerOutcome =
   | { kind: 'accepted' }
@@ -37,8 +38,6 @@ export interface ShareLedgerDeps {
 
 /** Re-reads after a lost condition (so up to 1 + MAX_REAPPLY writes). */
 const MAX_REAPPLY = 3;
-/** The entry key of an individual send (a seeded legacy row with no share id). */
-const INDIVIDUAL_KEY = 'individual';
 
 /**
  * The entry an attempt's outcome implies. A counted entry's `countedAt` is the
@@ -71,7 +70,7 @@ function seeded(row: ListingSendItem | undefined): Record<string, ShareLedgerEnt
   if (row.sentAt === undefined) return {};
   return row.broadcastId !== undefined
     ? { [row.broadcastId]: { attempt: LEGACY_ATTEMPT_KEY, state: 'counted', by: 'acceptance', countedAt: row.sentAt } }
-    : { [INDIVIDUAL_KEY]: { attempt: INDIVIDUAL_ATTEMPT_KEY, state: 'counted', by: 'acceptance', countedAt: row.sentAt } };
+    : { [INDIVIDUAL_SHARE_KEY]: { attempt: INDIVIDUAL_ATTEMPT_KEY, state: 'counted', by: 'acceptance', countedAt: row.sentAt } };
 }
 
 /** Whether `next` may replace `existing` for the same share (spec D7 order rule). */
@@ -89,7 +88,12 @@ function mayReplace(existing: ShareLedgerEntry | undefined, next: ShareLedgerEnt
   return false;
 }
 
-/** Whether one entry counts the pair: a `counted` entry carrying its attempt's instant (the summary's rule - an entry without an instant counts nowhere). */
+/**
+ * Whether one entry counts the pair: a `counted` entry carrying its attempt's
+ * instant (an entry without an instant counts nowhere). The summary's rule is
+ * lib/shareLedgerKeys.ts latestCountedShareKey (flyer-leads AR1, OR-11), which
+ * counts exactly these entries; the repair script's census reads this one.
+ */
 export function ledgerEntryCounts(entry: ShareLedgerEntry): entry is ShareLedgerEntry & { countedAt: string } {
   return entry.state === 'counted' && entry.countedAt !== undefined;
 }
@@ -106,17 +110,17 @@ export function ledgerRowCounted(row: ListingSendItem | undefined): boolean {
 /**
  * The pair-level fields the entries imply: `counted` while a counted entry
  * (with its instant) exists; `sentAt` = the latest such instant and
- * `broadcastId` = that entry's share (absent for `individual`). So a counted
- * row always carries sentAt, and an un-counted one never does.
+ * `broadcastId` = that entry's share - absent for `individual` and, since
+ * flyer-leads D7, for `flyer` (neither is a broadcast). The latest entry is
+ * latestCountedShareKey's (lib/shareLedgerKeys.ts - the ONE rule the outcome
+ * derivation reads too). So a counted row always carries sentAt, and an
+ * un-counted one never does.
  */
 function summarize(shares: Record<string, ShareLedgerEntry>): Pick<ShareMemoryWrite, 'counted' | 'sentAt' | 'broadcastId'> {
-  let latest: { key: string; at: string } | undefined;
-  for (const [key, e] of Object.entries(shares)) {
-    if (!ledgerEntryCounts(e)) continue;
-    if (latest === undefined || e.countedAt > latest.at) latest = { key, at: e.countedAt };
-  }
-  if (latest === undefined) return { counted: false, sentAt: undefined, broadcastId: undefined };
-  return { counted: true, sentAt: latest.at, broadcastId: latest.key === INDIVIDUAL_KEY ? undefined : latest.key };
+  const key = latestCountedShareKey(shares);
+  const sentAt = key === undefined ? undefined : shares[key]?.countedAt;
+  if (key === undefined || sentAt === undefined) return { counted: false, sentAt: undefined, broadcastId: undefined };
+  return { counted: true, sentAt, broadcastId: key === INDIVIDUAL_SHARE_KEY || key === FLYER_SHARE_KEY ? undefined : key };
 }
 
 /**

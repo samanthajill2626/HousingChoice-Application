@@ -6,7 +6,10 @@
  * row was appended) is `<retried row's key>~` - `~` (0x7E) sorts after `#`
  * and every SID character, so the marker is newer than the row it retried
  * and older than any row with a later timestamp; a SEEDED legacy ledger
- * entry is `!legacy` (`!` sorts before any year digit). Import-free leaf.
+ * entry is `!legacy` (`!` sorts before any year digit). A flyer sign-up's
+ * attempt (flyer-leads D7, lib/shareLedgerKeys.ts flyerAttemptKey) is
+ * `<sign-up ISO>#flyer`: an ordinary key whose instant is the sign-up's, so a
+ * later sign-up is a newer attempt. Import-free leaf.
  */
 export const ROWLESS_ATTEMPT_SUFFIX = '~';
 export const LEGACY_ATTEMPT_KEY = '!legacy';

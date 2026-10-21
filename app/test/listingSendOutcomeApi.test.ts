@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
-import { seedListingSend } from './helpers/listingSendSeed.js';
+import { seedFlyerSignUp, seedListingSend } from './helpers/listingSendSeed.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
 type App = ReturnType<typeof makeWebhookHarness>['app'];
@@ -702,5 +702,34 @@ describe('outcome route - interested', () => {
     expect(res.status).toBe(503);
     expect(res.body).toEqual({ error: 'outcome_unavailable' });
     expect(world.toursMap.size).toBe(0);
+  });
+});
+
+describe('flyer-leads D8: a signed_up pair takes the same outcome actions as a waiting one (any counted row)', () => {
+  const SIGNED_UP_AT = '2026-06-18T10:00:00.000Z';
+
+  it('Not interested on a signed_up pair -> not_interested; Undo -> signed_up again', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world);
+    seedContact(world, 'c-1');
+    await seedFlyerSignUp(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', signedUpAt: SIGNED_UP_AT });
+    const declined = await post(app, { outcome: 'not_interested' });
+    expect(declined.status).toBe(200);
+    expect(declined.body.row).toMatchObject({ outcome: 'not_interested', sentAt: SIGNED_UP_AT });
+    const undone = await post(app, { outcome: 'clear' });
+    expect(undone.status).toBe(200);
+    expect(undone.body.row).toMatchObject({ outcome: 'signed_up', sentAt: SIGNED_UP_AT });
+    expect((await stored(world))?.declined).toBeUndefined();
+  });
+
+  it('(PIN) Interested on a signed_up pair creates the tour -> interested', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, { tour_type: 'self_guided' });
+    seedContact(world, 'c-1');
+    await seedFlyerSignUp(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', signedUpAt: SIGNED_UP_AT });
+    const res = await post(app, { outcome: 'interested' });
+    expect(res.status).toBe(200);
+    expect(res.body.row).toMatchObject({ outcome: 'interested' });
+    expect(world.toursMap.size).toBe(1);
   });
 });

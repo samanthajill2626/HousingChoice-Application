@@ -8,7 +8,10 @@ import type { ListingSendItem } from '../src/repos/listingSendsRepo.js';
 import type { TourItem } from '../src/repos/toursRepo.js';
 import type { ListUnitsOpts, UnitItem, UnitsPage } from '../src/repos/unitsRepo.js';
 import { buildFollowUps, FOLLOW_UPS_UNIT_CAP, type FollowUpsDeps } from '../src/services/followUps.js';
+import { FLYER_SHARE_KEY, flyerAttemptKey, latestCountedShareKey } from '../src/lib/shareLedgerKeys.js';
+import { seedFlyerSignUp } from './helpers/listingSendSeed.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 
 const NOW = Date.parse('2026-10-12T15:00:00.000Z');
 const HOUR = 3_600_000;
@@ -321,5 +324,62 @@ describe('buildFollowUps (last-heard-from 5.6)', () => {
     const c = depsFor(w).deps;
     c.contacts = { getRecipientDisplaysByIds: async () => { throw new IncompleteBatchReadError(1, 1); } };
     await expect(buildFollowUps(c)).rejects.toThrow(IncompleteBatchReadError);
+  });
+});
+
+describe('flyer-leads D8: a signed_up pair never waits (followUps.ts derives through the one helper)', () => {
+  const flyerShare = (at: string) => ({
+    [FLYER_SHARE_KEY]: { attempt: flyerAttemptKey(at), state: 'counted' as const, by: 'acceptance' as const, countedAt: at },
+  });
+
+  it('a pair whose latest counted entry is the flyer entry is not listed nor counted in byUnit, however quiet; a later broadcast share of a pair lists it as no_reply', async () => {
+    const w = emptyWorld();
+    w.units.push(unit('u1'));
+    w.contacts.push(tenant('c1'), tenant('c2'));
+    const signed = ago(2 * DAY);
+    const resent = ago(30 * HOUR);
+    w.sends.push(
+      send('u1', 'c1', signed, { shares: flyerShare(signed) }),
+      send('u1', 'c2', resent, {
+        shares: { ...flyerShare(signed), b2: { attempt: `${resent}#SM2`, state: 'counted', by: 'acceptance', countedAt: resent } },
+      }),
+    );
+    const out = await buildFollowUps(depsFor(w).deps);
+    expect(out.items.map((i) => [i.contactId, i.outcome])).toEqual([['c2', 'no_reply']]);
+    expect(out.byUnit).toEqual({ u1: 1 });
+  });
+
+  // Worklist OR-12 (R5 F5): a decision, not an accident - replied outranks
+  // signed_up (D8 order), so a later inbound puts a flyer pair back on Follow
+  // up once it is quiet, unknown contacts included (Follow up keeps any
+  // eligible typed contact).
+  it('(PIN) a reply AFTER a sign-up, then quiet past QUIET: the flyer-latest pair is listed as replied - an unknown contact included', async () => {
+    const ledger = createFakeWorld().listingSendsRepo;
+    const signed = ago(3 * DAY);
+    const heard = ago(30 * HOUR);
+    await seedFlyerSignUp(ledger, { unitId: 'u1', contactId: 'c-unk', signedUpAt: signed });
+    const row = await ledger.getByKeyConsistent('u1', 'c-unk');
+    expect(latestCountedShareKey(row?.shares)).toBe(FLYER_SHARE_KEY);
+    const w = emptyWorld();
+    w.units.push(unit('u1'));
+    w.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'active', phone: '+15550100077', last_heard_from_at: heard } as ContactItem);
+    w.sends.push(row!);
+    const out = await buildFollowUps(depsFor(w).deps);
+    expect(out.items).toEqual([
+      {
+        unitId: 'u1',
+        unitLabel: 'u1',
+        contactId: 'c-unk',
+        name: '+15550100077',
+        type: 'unknown',
+        sentAt: signed,
+        lastHeardFromAt: heard,
+        outcome: 'replied',
+        interestedSupported: false,
+        interestedMode: 'form',
+        waitingSince: heard,
+      },
+    ]);
+    expect(out.byUnit).toEqual({ u1: 1 });
   });
 });

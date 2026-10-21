@@ -247,3 +247,51 @@ describe('waitingSince', () => {
     expect(waitingSince(SENT, 'garbage')).toBe(SENT);
   });
 });
+
+describe('flyer-leads D8: signed_up - the latest counted entry is the flyer entry', () => {
+  const SIGNED = '2026-10-01T18:00:00.000Z'; // after SENT, before AFTER
+  const signedRow = {
+    sentAt: SIGNED,
+    shares: { b1: { state: 'counted', countedAt: SENT }, flyer: { state: 'counted', countedAt: SIGNED } },
+  };
+  type Input = Parameters<typeof deriveListingSendOutcome>[0];
+  const derive = (row: Input['row'], over: Partial<Omit<Input, 'row'>> = {}) =>
+    deriveListingSendOutcome({ row, recipientType: 'tenant', lastHeardFromAt: undefined, tour: undefined, tourActivityAt: undefined, ...over });
+
+  it('nothing heard since the sign-up and no tour -> signed_up, whatever the recipient type (type-blind: tenant, unknown, a missing recipient)', () => {
+    expect(derive(signedRow)).toBe('signed_up');
+    expect(derive(signedRow, { recipientType: 'unknown' })).toBe('signed_up');
+    expect(derive(signedRow, { recipientType: undefined })).toBe('signed_up');
+  });
+
+  it('a reply BEFORE the sign-up no longer beats it (the sign-up moved sentAt); a reply AFTER it -> replied', () => {
+    expect(derive({ sentAt: SENT }, { lastHeardFromAt: '2026-10-01T15:00:00.000Z' })).toBe('replied'); // the contrast, before the sign-up
+    expect(derive(signedRow, { lastHeardFromAt: '2026-10-01T15:00:00.000Z' })).toBe('signed_up');
+    expect(derive(signedRow, { lastHeardFromAt: AFTER })).toBe('replied');
+  });
+
+  it('order: an effective decline > a tour > replied > signed_up', () => {
+    expect(derive(signedRow, { tour: TOUR, tourActivityAt: SIGNED })).toBe('interested');
+    expect(derive({ ...signedRow, declined: staff(LATER) }, { tour: TOUR, tourActivityAt: AFTER, lastHeardFromAt: LATER })).toBe('not_interested');
+    // A decline the sign-up's sentAt superseded is not effective.
+    expect(derive({ ...signedRow, declined: staff(SENT) })).toBe('signed_up');
+  });
+
+  it('a LATER counted share of the pair is the latest entry -> the normal outcomes again', () => {
+    const resent = { sentAt: LATER, shares: { flyer: { state: 'counted', countedAt: SIGNED }, b2: { state: 'counted', countedAt: LATER } } };
+    expect(derive(resent)).toBe('no_reply');
+    expect(derive(resent, { lastHeardFromAt: '2026-10-04T12:00:00.000Z' })).toBe('replied');
+  });
+
+  it('the latest COUNTED entry decides: a later uncounted entry keeps signed_up; a legacy row (no shares) and an individual latest entry read no_reply', () => {
+    expect(derive({ sentAt: SIGNED, shares: { flyer: { state: 'counted', countedAt: SIGNED }, b2: { state: 'failed' } } })).toBe('signed_up');
+    expect(derive({ sentAt: SENT })).toBe('no_reply');
+    expect(derive({ sentAt: SENT, shares: { individual: { state: 'counted', countedAt: SENT } } })).toBe('no_reply');
+  });
+
+  it('(PIN) signed_up never waits however long the pair is quiet, and carries no wire decline', () => {
+    const sentMs = Date.parse(SIGNED);
+    expect(isWaiting({ outcome: 'signed_up', eligible: true, sentAt: SIGNED, now: sentMs + 2 * 86_400_000 })).toBe(false);
+    expect(wireDecline({ declined: staff(SENT) }, 'signed_up')).toBeUndefined();
+  });
+});

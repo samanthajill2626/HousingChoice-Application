@@ -6,7 +6,8 @@
 //   - effectiveDecline: a recorded `declined` counts until a later counted
 //     share (the row's sentAt) or later tour ACTIVITY supersedes it;
 //   - deriveListingSendOutcome: not_interested > interested > replied >
-//     no_reply, and a non-tenant recipient never reads a tour;
+//     signed_up (flyer-leads D8: the pair's latest counted entry is the
+//     flyer entry) > no_reply, and a non-tenant recipient never reads a tour;
 //   - isEligibleRecipient: the follow-up eligibility half (one rule, B6);
 //   - interestedModeFor: 'route' when the unit has a structured tour_type;
 //   - isWaiting / waitingSince: the waiting-on-a-reply rule (5.6).
@@ -16,8 +17,9 @@
 // Every instant comparison goes through Date.parse (spec section 7): a stored
 // value may lack milliseconds, and an unparseable one never wins.
 import type { TourSignal } from './listingSendTour.js';
+import { FLYER_SHARE_KEY, latestCountedShareKey } from './shareLedgerKeys.js';
 
-export type ListingSendOutcome = 'no_reply' | 'replied' | 'interested' | 'not_interested';
+export type ListingSendOutcome = 'no_reply' | 'replied' | 'interested' | 'not_interested' | 'signed_up';
 export type InterestedMode = 'route' | 'form';
 
 /** A waiting row is listed once the pair has been quiet this long. */
@@ -62,10 +64,14 @@ export function effectiveDecline(
  * The ONE outcome derivation (spec 5.4). A recipient whose type is not
  * 'tenant' never reads a tour: neither the signal nor its activity (the tours
  * API accepts any contactId, and a converted caseworker keeps tenant-era
- * tours).
+ * tours). flyer-leads D8: after the decline, the tour and a reply, a pair
+ * whose LATEST counted entry is the flyer entry (latestCountedShareKey on
+ * the row's stored `shares` - the rule summarize uses, lib/shareLedgerKeys.ts)
+ * reads `signed_up`; every caller passes the stored row, so they cannot
+ * disagree. Type-blind: the row alone decides.
  */
 export function deriveListingSendOutcome(input: {
-  row: { declined?: DeclineRecord; sentAt?: string };
+  row: { declined?: DeclineRecord; sentAt?: string; shares?: Record<string, { state: string; countedAt?: string }> };
   recipientType: string | undefined;
   lastHeardFromAt: string | undefined;
   tour: TourSignal | undefined;
@@ -79,7 +85,7 @@ export function deriveListingSendOutcome(input: {
   const heardMs = instantMs(input.lastHeardFromAt);
   const sentMs = instantMs(input.row.sentAt);
   if (heardMs !== undefined && sentMs !== undefined && heardMs > sentMs) return 'replied';
-  return 'no_reply';
+  return latestCountedShareKey(input.row.shares) === FLYER_SHARE_KEY ? 'signed_up' : 'no_reply';
 }
 
 /** The wire `declined` (spec 5.4): present ONLY while effective; never staffId. */
@@ -120,6 +126,7 @@ export function isWaiting(input: {
   lastHeardFromAt?: string;
   now: number;
 }): boolean {
+  // flyer-leads D8: `signed_up` never waits - the person reached out.
   if (input.outcome !== 'no_reply' && input.outcome !== 'replied') return false;
   if (!input.eligible) return false;
   const sentMs = instantMs(input.sentAt);

@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { IncompleteBatchReadError, type ContactItem } from '../src/repos/contactsRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
-import { seedListingSend } from './helpers/listingSendSeed.js';
+import { seedFlyerSignUp, seedListingSend } from './helpers/listingSendSeed.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 
 const SECRET = ORIGIN_SECRET;
@@ -574,5 +574,48 @@ describe('last-heard-from: the outcome on both GET projections (spec 5.4, D12)',
       interestedSupported: false,
     });
     expect(res.body.recipients[0]).not.toHaveProperty('tenantName');
+  });
+});
+
+describe('flyer-leads D8: signed_up on both GET projections (the callers pass the FULL stored row)', () => {
+  const get = (app: ReturnType<typeof makeWebhookHarness>['app'], path: string) =>
+    request(app).get(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+  const SIGNED_UP_AT = '2026-06-18T10:00:00.000Z';
+
+  it('a pair whose latest counted entry is the flyer entry reads signed_up on the units recipients (a tenant, an unknown contact, a missing recipient) and on the contact listings-sent - sentAt is the sign-up, no broadcastId', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedTenant(world, 'c-1');
+    world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'active', phone: '+15550109010' } as ContactItem);
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT, broadcastId: 'b-1' });
+    for (const contactId of ['c-1', 'c-unk', 'c-gone']) {
+      await seedFlyerSignUp(world.listingSendsRepo, { unitId: 'unit-1', contactId, signedUpAt: SIGNED_UP_AT });
+    }
+
+    const units = await get(app, '/api/units/unit-1/recipients');
+    expect(units.status).toBe(200);
+    const byId = new Map((units.body.recipients as Array<Record<string, unknown>>).map((r) => [r['contactId'] as string, r]));
+    expect(byId.get('c-1')).toMatchObject({ outcome: 'signed_up', sentAt: SIGNED_UP_AT, interestedSupported: true, eligible: true });
+    expect(byId.get('c-1')).not.toHaveProperty('broadcastId');
+    expect(byId.get('c-1')).not.toHaveProperty('declined');
+    expect(byId.get('c-unk')).toMatchObject({ outcome: 'signed_up', type: 'unknown', interestedSupported: false });
+    expect(byId.get('c-gone')).toMatchObject({ outcome: 'signed_up', recipientMissing: true, eligible: false });
+
+    const contact = await get(app, '/api/contacts/c-1/listings-sent');
+    expect(contact.status).toBe(200);
+    expect(contact.body.sent[0]).toMatchObject({ unitId: 'unit-1', outcome: 'signed_up', sentAt: SIGNED_UP_AT });
+    expect(contact.body.sent[0]).not.toHaveProperty('broadcastId');
+  });
+
+  it('a later counted share of the pair takes it back to the normal outcomes (no_reply, its broadcastId)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    seedTenant(world, 'c-1');
+    await seedFlyerSignUp(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', signedUpAt: SIGNED_UP_AT });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: '2026-06-19T10:00:00.000Z', broadcastId: 'b-2' });
+    const units = await get(app, '/api/units/unit-1/recipients');
+    expect(units.body.recipients[0]).toMatchObject({ outcome: 'no_reply', sentAt: '2026-06-19T10:00:00.000Z', broadcastId: 'b-2' });
+    const contact = await get(app, '/api/contacts/c-1/listings-sent');
+    expect(contact.body.sent[0]).toMatchObject({ outcome: 'no_reply', broadcastId: 'b-2' });
   });
 });

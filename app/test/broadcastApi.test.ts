@@ -42,6 +42,7 @@ import type { TourItem } from '../src/repos/toursRepo.js';
 import { SEED } from '../src/lib/seed/lean.js';
 import { TOUR_REQUEST_HOLD_MS } from '../src/lib/blastAudienceRules.js';
 import { createSendMessageService } from '../src/services/sendMessage.js';
+import { applyFlyerShareEntry } from '../src/services/shareLedger.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
@@ -3504,6 +3505,29 @@ describe('share-broadcast API (M1.8a)', () => {
       ]);
       expect(res.body).not.toHaveProperty('declineLabelsUnavailable');
       expect(res.body).not.toHaveProperty('audienceRulesUnavailable');
+    });
+
+    it('flyer-leads D8 (PIN): a signed_up pair stays checked by default - D5 unchecks only an effective decline (broadcasts.ts derives signed_up for a row whose old decline a later share superseded); a sign-up refused by a CURRENT decline leaves that pair declined and unchecked', async () => {
+      seedUnit(world);
+      seedTenant(world, { contactId: 'c-signed', phone: '+15550302001' });
+      seedTenant(world, { contactId: 'c-superseded', phone: '+15550302002' });
+      seedTenant(world, { contactId: 'c-declined', phone: '+15550302003' });
+      const ledger = { listingSends: world.listingSendsRepo, log: createLogger({ level: 'silent' }) };
+      const FLYER_AT = '2026-10-03T12:00:00.000Z';
+      // An old decline a later share superseded (sentAt after DECLINED_AT), then a sign-up.
+      world.listingSends.push({ ...declinedRow('c-superseded'), sentAt: '2026-10-02T18:00:00.000Z' });
+      world.listingSends.push(declinedRow('c-declined'));
+      expect(await applyFlyerShareEntry(ledger, { unitId: 'unit-1', contactId: 'c-signed', signedUpAt: FLYER_AT })).toBe('written');
+      expect(await applyFlyerShareEntry(ledger, { unitId: 'unit-1', contactId: 'c-superseded', signedUpAt: FLYER_AT })).toBe('written');
+      expect(await applyFlyerShareEntry(ledger, { unitId: 'unit-1', contactId: 'c-declined', signedUpAt: FLYER_AT })).toBe('declined');
+      const { app } = makeWebhookHarness({ world });
+      const res = await preview(app, await createDraft(app));
+      expect(res.status).toBe(200);
+      const byId = rowsById(res.body);
+      expect(byId.get('c-signed')).toMatchObject({ checkedByDefault: true, declinedThisProperty: false });
+      expect(byId.get('c-superseded')).toMatchObject({ checkedByDefault: true, declinedThisProperty: false });
+      expect(byId.get('c-declined')).toMatchObject({ checkedByDefault: false, declinedThisProperty: true });
+      expect(res.body.declinedContactIds).toEqual(['c-declined']);
     });
 
     it('checkedByDefault is the ONE server rule: a seed is checked whatever its flags; a held, declined, already-sent or no-consent filter row is not; tourHolds lists EVERY held contact, in the rows or not', async () => {

@@ -419,6 +419,27 @@ describe('useListing - the landlord is re-read when the landlordId changes', () 
     expect(result.current.landlord).toBeNull();
     expect(getContact).toHaveBeenCalledTimes(2);
   });
+
+  it('a landlord changed back (A -> B -> A) is read again: the held contact follows the landlord of record', async () => {
+    // Each landed re-read records the landlordId it was read for, so a change
+    // back to the load-time landlord is noticed too (the page never keeps B's
+    // contact for A, which would leave the Requirements card comparing with
+    // nobody until a reload).
+    answerSlices();
+    getUnit.mockResolvedValue(UNIT); // landlordId ll1
+    getContact.mockImplementation((id: string) =>
+      Promise.resolve({ contactId: id, type: 'landlord', firstName: id } as Contact),
+    );
+    const { result } = renderHook(() => useListing('u1'));
+    await waitFor(() => expect(result.current.landlord?.contactId).toBe('ll1'));
+
+    act(() => result.current.setUnit({ ...UNIT, landlordId: 'll2' }));
+    await waitFor(() => expect(result.current.landlord?.contactId).toBe('ll2'));
+
+    act(() => result.current.setUnit({ ...UNIT, landlordId: 'll1' }));
+    await waitFor(() => expect(result.current.landlord?.contactId).toBe('ll1'));
+    expect(getContact.mock.calls.map(([id]) => id)).toEqual(['ll1', 'll2', 'll1']);
+  });
 });
 
 // R2 code review, dashboard finding A1 (fix wave 2 FW2-5): the /listings/:unitId

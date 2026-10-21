@@ -19,10 +19,13 @@ import { expectTodayReady } from '../../support/today.js';
 // NEVER click an sms: link (there is no page to land on) - assert its href only.
 //
 // What this asserts (no session/cookies for the public reads):
-//   1. Full info is public with NO gate - address/deposit/fee/utilities/pets/
-//      accessibility/lease-terms/RTA/video all render upfront; the intake form is
-//      present; no login redirect. Plus a raw flyer-API sanity check (contact_number).
-//      The address is a Google Maps link - href only, never clicked (it leaves the app).
+//   1. Full info is public with NO gate - the address heading (a Google Maps
+//      link - href only, never clicked: it leaves the app), the area, beds and
+//      the fee/utilities/RTA/video rows all render upfront; the intake form is
+//      present; no login redirect. Plus a raw flyer-API sanity check
+//      (contact_number). Rent, deposit, pets, accessibility and lease terms are
+//      staff only since flyer-leads (2026-10-21): flyer-leads.spec.ts proves
+//      them absent.
 //   2. The bottom form submit swaps ONLY the CTA to a thank-you in place (the info
 //      above stays), stamps the contact capture_source:'flyer' + unit_of_interest,
 //      and records the welcome SMS in the dev outbox.
@@ -213,10 +216,11 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     await expect(page).toHaveURL(new RegExp(`/p/${unit.unitId}$`));
     await expect(page.getByText('Sign in with Google')).toHaveCount(0);
 
-    // Key facts: neighborhood heading + beds + rent.
-    await expect(page.getByRole('heading', { name: new RegExp(unit.area) })).toBeVisible();
+    // Key facts (flyer-leads D3): the ADDRESS is the heading, the neighborhood
+    // is the line under it, then beds. Rent is staff only now.
+    await expect(page.getByRole('heading', { level: 1, name: unit.addressLine1 })).toBeVisible();
+    await expect(page.getByText(unit.area, { exact: true })).toBeVisible();
     await expect(page.getByText(new RegExp(`${unit.beds}\\s*beds`))).toBeVisible();
-    await expect(page.getByText(`$${unit.rent}`, { exact: false }).first()).toBeVisible();
     // No voucher size is recorded on this unit, so the flyer falls back to beds.
     await expect(page.getByText(`Fits a ${unit.beds}-bedroom voucher`)).toBeVisible();
 
@@ -236,17 +240,9 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
         ].join(', '),
       )}`,
     );
-    await expect(page.getByText('Deposit')).toBeVisible();
-    await expect(page.getByText(`$${unit.deposit}`)).toBeVisible();
     await expect(page.getByText('Application fee')).toBeVisible();
     await expect(page.getByText(`$${unit.applicationFee}`)).toBeVisible();
     await expect(page.getByText(unit.utilities)).toBeVisible();
-    await expect(page.getByText('Pets')).toBeVisible();
-    await expect(page.getByText(unit.pets)).toBeVisible();
-    await expect(page.getByText('Accessibility')).toBeVisible();
-    await expect(page.getByText(unit.accessibility)).toBeVisible();
-    await expect(page.getByText('Lease terms')).toBeVisible();
-    await expect(page.getByText(unit.leaseTerms)).toBeVisible();
     await expect(page.getByText('Same-day RTA')).toBeVisible();
     await expect(page.getByRole('link', { name: /Watch the tour/i })).toHaveAttribute(
       'href',
@@ -282,7 +278,8 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     await page.goto(`${NEXT}/p/${unit.unitId}`);
     const phone = uniquePhone();
     await fillIntake(page, { firstName: 'Funnel', lastName: 'Tester', phone, voucher: '2' });
-    await page.getByRole('button', { name: /I'm interested/i }).click();
+    // flyer-leads D3: the bare-link flyer's sign-up button reads "Sign up".
+    await page.getByRole('button', { name: 'Sign up', exact: true }).click();
 
     // ONLY the CTA swaps to the thank-you; the info above STAYS on screen.
     await expect(page.getByRole('heading', { name: /you're all set/i })).toBeVisible();

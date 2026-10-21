@@ -12,9 +12,11 @@
 //   3. Apply to properties (D8): the exception row starts unchecked with its
 //      own value marked, the out-of-date row starts checked, and a property
 //      whose pets details say "Cats OK" is an own value too and starts
-//      unchecked; checked and updated, its flyer reads "No pets", never
-//      "No pets (Cats OK)" (Cameron's O1);
-//   4. that flyer shows the public items and none of the staff-only ones (D11);
+//      unchecked; checked and updated, it records "No pets" with no details,
+//      never "No pets (Cats OK)" (Cameron's O1);
+//   4. that flyer shows the public items and none of the staff-only ones (D11;
+//      since flyer-leads, 2026-10-21, rent, accessibility, lease terms, pets
+//      and deposit are staff only too, and the New form's tags say so);
 //   5. the property pages show the new values and the Activity line (D13), and
 //      the unchecked exception was not written;
 //   6. a Matching blast from a two-size property pre-fills two chips, and a
@@ -59,6 +61,21 @@ const NEVER_ON_FLYER = [
   'subzone',
   'notes',
   'requirement_sources',
+] as const;
+
+/** Keys flyer-leads D1 (2026-10-21) removed from the public flyer projection:
+ *  they stay on the property, staff only. */
+const TRIMMED_FROM_FLYER = [
+  'rent_min',
+  'rent_max',
+  'lease_terms',
+  'accessibility',
+  'pets',
+  'no_pets',
+  'pet_fee',
+  'deposit',
+  'deposit_one_month',
+  'deposit_flexible',
 ] as const;
 
 interface Landlord {
@@ -259,8 +276,30 @@ test('landlord requirements: the New form pre-fills them, the property page tags
       await expect(dialog.getByText('On flyer - tenants see it on the public flyer.', { exact: true })).toBeVisible();
       await expect(dialog.getByText('Staff only - never leaves the dashboard.', { exact: true })).toBeVisible();
       await expect(dialog.getByLabel('Credit score', { exact: true })).toHaveAccessibleDescription(/Staff only/);
-      await expect(dialog.getByLabel('Pet fee', { exact: true })).toHaveAccessibleDescription(/On flyer/);
       await expect(dialog.getByLabel('Subzone', { exact: true })).toHaveAccessibleDescription(/Staff only/);
+      // flyer-leads D2 (2026-10-21): rent, accessibility, lease terms and every
+      // field of the Pets and Deposit items are Staff only; the application fee
+      // pair and tenant-paid utilities stay On flyer.
+      for (const label of [
+        'Rent min',
+        'Rent max',
+        'Accessibility',
+        'Lease terms',
+        'No pets',
+        'Pets (details)',
+        'Pet fee',
+        "One month's rent",
+        'Fixed amount',
+        'Flexible / payment terms available',
+      ]) {
+        await expect(dialog.getByLabel(label, { exact: true }), label).toHaveAccessibleDescription(/Staff only/);
+      }
+      for (const label of ['No application fee', 'Application fee', 'Tenant-paid utilities']) {
+        await expect(dialog.getByLabel(label, { exact: true }), label).toHaveAccessibleDescription(/On flyer/);
+      }
+      // D2: the public note shows only under an On flyer field - on this form,
+      // Tenant-paid utilities alone (never under a Staff only field).
+      await expect(dialog.getByText('Tenants see this on the public flyer.', { exact: true })).toHaveCount(1);
       await dialog.getByLabel('Credit score', { exact: true }).fill('');
     },
   });
@@ -377,16 +416,20 @@ test('landlord requirements: the New form pre-fills them, the property page tags
   await expect(page.getByText(/^Updated 2 properties/)).toBeVisible();
   await expect(page.getByText(/\d+ skipped/)).toHaveCount(0);
 
-  // --- 4. C's flyer. The deposit row exists only since Apply, so it proves
-  // this load carries the applied values before the absences are read. ---
+  // --- 4. C's flyer. C was created with no application fee, so the "No
+  // application fee" row exists only since Apply: it proves this load carries
+  // the applied values before the absences are read. Pets and Deposit are
+  // staff only since flyer-leads (D1/D2, 2026-10-21), so neither the copied
+  // "No pets" nor the deposit reaches the flyer; step 5 reads them on the
+  // property. ---
   await page.goto(`${NEXT}/p/${unitC}`);
-  await expect(page.getByText("One month's rent, flexible / payment plan available", { exact: true })).toBeVisible();
-  // O1: "No pets", never "No pets (Cats OK)" - the details were copied too.
-  await expect(page.getByText('Cats OK')).toHaveCount(0);
-  await expect(page.getByText('No pets', { exact: true })).toBeVisible();
   await expect(page.getByText('No application fee', { exact: true })).toBeVisible();
   await expect(page.getByText('Fits a 2- or 3-bedroom voucher')).toBeVisible();
   await expect(page.getByText('Hookups', { exact: true })).toBeVisible();
+  for (const gone of ['Pets', 'No pets', 'Pet fee', 'Deposit', "One month's rent, flexible / payment plan available"]) {
+    await expect(page.getByText(gone, { exact: true }), gone).toHaveCount(0);
+  }
+  await expect(page.getByText('Cats OK')).toHaveCount(0);
   for (const staffOnly of [
     REQ.evictionsNotes,
     REQ.credit,
@@ -404,18 +447,12 @@ test('landlord requirements: the New form pre-fills them, the property page tags
   expect(flyerRes.ok(), await flyerRes.text()).toBeTruthy();
   const { flyer } = (await flyerRes.json()) as { flyer: Record<string, unknown> };
   expect(flyer).toMatchObject({
-    no_pets: true,
-    pets: null,
-    pet_fee: null,
-    deposit_one_month: true,
-    deposit_flexible: true,
-    deposit: null,
     application_fee: 0,
     washer_dryer: 'hookups',
     voucher_sizes: [2, 3],
     voucher_size: 2,
   });
-  for (const key of NEVER_ON_FLYER) expect(Object.keys(flyer), key).not.toContain(key);
+  for (const key of [...NEVER_ON_FLYER, ...TRIMMED_FROM_FLYER]) expect(Object.keys(flyer), key).not.toContain(key);
 
   // --- 5. The property pages. The Activity row renders with the loaded unit,
   // so the absences after it read the loaded card; requirement_sources is the
@@ -438,6 +475,10 @@ test('landlord requirements: the New form pre-fills them, the property page tags
   await expect(requirementsCard(page).getByText('Set on this property', { exact: true })).toHaveCount(0);
   const appliedC = await getUnit(api, unitC);
   expect('pets' in appliedC).toBe(false);
+  // O1, on the record now that pets are staff only (flyer-leads D1): the
+  // copied item is "No pets" with no details, and the deposit was copied too.
+  expect(appliedC['no_pets']).toBe(true);
+  expect(appliedC['deposit_one_month']).toBe(true);
   expect(appliedC['credit_requirements']).toBe(REQ.credit);
   expect(appliedC['requirement_sources']).toEqual(ALL_COPIED);
 

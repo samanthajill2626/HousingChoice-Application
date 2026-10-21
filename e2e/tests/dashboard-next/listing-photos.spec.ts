@@ -239,7 +239,8 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
     // (4) The PUBLIC flyer for this available unit renders the surviving photo
     // (the teaser gallery mounts OUTSIDE the auth gate; alt = "Home photo N").
     await page.goto(`${NEXT}/p/${unitId}`);
-    await expect(page.getByRole('button', { name: /I'm interested/i })).toBeVisible();
+    // flyer-leads D3: the bare-link flyer's sign-up button reads "Sign up".
+    await expect(page.getByRole('button', { name: 'Sign up', exact: true })).toBeVisible();
     const flyerPhoto = page.getByRole('img', { name: 'Home photo 1' });
     await expectLoadedBytes(
       flyerPhoto,

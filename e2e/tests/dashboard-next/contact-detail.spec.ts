@@ -184,8 +184,23 @@ test.describe('Contact detail — header actions + edit', () => {
     ]) {
       await expect(dialog.getByLabel(label, { exact: true }), label).toHaveCount(1);
     }
-    await expect(dialog.getByLabel('Pet fee', { exact: true })).toHaveAccessibleDescription(/On property flyers/);
-    await expect(dialog.getByLabel('Credit score', { exact: true })).toHaveAccessibleDescription(/Staff only/);
+    // flyer-leads D2 (2026-10-21): only the application fee pair still
+    // reaches a property's flyer; every Pets and Deposit field is Staff only.
+    await expect(dialog.getByText('On property flyers', { exact: true })).toHaveCount(2);
+    for (const label of ['No application fee', 'Application fee']) {
+      await expect(dialog.getByLabel(label, { exact: true }), label).toHaveAccessibleDescription(/On property flyers/);
+    }
+    for (const label of [
+      'Credit score',
+      'No pets',
+      'Pets (details)',
+      'Pet fee',
+      "One month's rent",
+      'Fixed amount',
+      'Flexible / payment terms available',
+    ]) {
+      await expect(dialog.getByLabel(label, { exact: true }), label).toHaveAccessibleDescription(/Staff only/);
+    }
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog')).toHaveCount(0);
   });

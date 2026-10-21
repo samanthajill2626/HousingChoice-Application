@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -145,6 +148,17 @@ describe('ApplyRequirementsDialog - the two columns', () => {
       // "Clears" is visible text in the item's row.
       expect(box.closest('li')).toHaveTextContent('Clears');
     }
+  });
+
+  // Code review RD-8: "Clears" is the only visible warning that checking an
+  // item ERASES values. jsdom computes no CSS, so the rule is read from disk:
+  // the small semibold mark uses the amber text token (7.1:1 on white), never
+  // the shared --c-warning (4.28:1, under AA's 4.5:1 for small text).
+  it('the Clears mark uses the amber text token that passes AA contrast', () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'ApplyRequirementsDialog.module.css'), 'utf8');
+    const rule = /\.clears\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(rule).toMatch(/color:\s*var\(--c-evt-amber-text\);/);
+    expect(rule).not.toContain('--c-warning');
   });
 
   it('Which properties: changes per row, own values marked, Already matches, and the starting state', async () => {

@@ -100,9 +100,11 @@
   overflow-wrap: anywhere;
 }
 
+/* Small semibold warning text: the amber TEXT token (7.1:1 on white), not
+ * the shared --c-warning (4.28:1, under AA's 4.5:1 here) - code review RD-8. */
 .clears {
   font-weight: var(--fw-semibold);
-  color: var(--c-warning);
+  color: var(--c-evt-amber-text);
 }
 
 .ownMark {

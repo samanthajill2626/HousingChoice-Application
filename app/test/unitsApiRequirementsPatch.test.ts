@@ -227,6 +227,22 @@ describe('PATCH /api/units/:id - where each requirement value came from (D5)', (
     expect(auditFieldsOf(world)).toEqual(['landlordId', 'beds']);
   });
 
+  // Code review RA-7: such a body classifies nothing, so the fenced path reads
+  // no landlord contact - and a contacts-table fault cannot fail the save.
+  it('re-saving the stored landlordId with no requirement field reads no contact (RA-7)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedLandlord(world, 'c-ll');
+    seedUnit(world, 'u-1', { requirement_sources: { pets: 'set_here' } });
+    const contactRead = vi.spyOn(world.contactsRepo, 'getById').mockRejectedValue(new Error('contacts table down'));
+    const fenced = vi.spyOn(world.unitsRepo, 'updateIfRequirementsCurrent');
+    const res = await patchUnit(app, 'u-1', { landlordId: 'c-ll', beds: 3 });
+    expect(res.status).toBe(200);
+    expect(contactRead).not.toHaveBeenCalled();
+    expect(fenced).toHaveBeenCalledTimes(1);
+    expect(res.body.unit.beds).toBe(3);
+    expect(res.body.unit.requirement_sources).toEqual({ pets: 'set_here' });
+  });
+
   it('(PIN) a plain PATCH never reads the landlord and keeps the map', async () => {
     const { app, world } = makeWebhookHarness();
     seedLandlord(world, 'c-ll');

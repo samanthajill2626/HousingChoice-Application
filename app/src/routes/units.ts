@@ -767,7 +767,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
    * landlordId must name a contact typed landlord - requireLandlordContact
    * throws its typed errors, which the caller maps; an empty id is
    * landlord_not_found without a read; an unchanged one is never checked,
-   * L2); the landlord of record AFTER the write (readLandlordOfRecord); then
+   * L2); the landlord of record AFTER the write (readLandlordOfRecord - for
+   * an unchanged landlord only when the body touches a requirement key, code
+   * review RA-7: otherwise nothing is classified); then
    * planRequirementWrite (deposit_conflict, the legacy pets partner, the
    * reset on a landlord change, the classification, the audit fields) and ONE
    * write fenced on the landlordId, the requirement_sources and the values of
@@ -784,6 +786,11 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     fields: Record<string, unknown>,
   ): Promise<FencedPatchOutcome> {
     const landlordPatch = typeof fields['landlordId'] === 'string' ? (fields['landlordId'] as string) : undefined;
+    // Code review RA-7: an unchanged landlord of record is read only to
+    // classify, i.e. when the body touches a requirement key. A body that
+    // only re-sends the stored landlordId beside other fields classifies
+    // nothing (no item changes, the map is kept), so it reads no contact.
+    const classifies = touchesRequirements(fields);
     for (let attempt = 1; attempt <= REQUIREMENTS_WRITE_MAX_ATTEMPTS; attempt += 1) {
       const stored = await units.getById(unitId, { consistentRead: true });
       if (stored === undefined) return { kind: 'not_found' };
@@ -794,7 +801,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       if (changedTo !== undefined) {
         if (changedTo.length === 0) throw new LandlordNotFoundError();
         landlord = await requireLandlordContact(contacts, changedTo);
-      } else {
+      } else if (classifies) {
         const ofRecord =
           typeof read.landlordId === 'string' && read.landlordId.length > 0 ? read.landlordId : undefined;
         landlord = ofRecord === undefined ? undefined : await readLandlordOfRecord(ofRecord);

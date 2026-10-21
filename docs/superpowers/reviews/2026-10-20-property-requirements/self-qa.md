@@ -40,7 +40,9 @@ was MEASURED (accessible names, text, request bodies, bounding boxes,
 - QA-2 (cosmetic): `formatItemValue` printed `Service animals only.; pet fee
   ...`. Fixed in 77abd659 (a part followed by another drops one trailing
   period). Re-checked live: `No pets; Service animals only; pet fee $300
-  one-time`.
+  one-time`. ADDENDUM: reverted in fix wave FW4 (1c6af57d, code review round
+  3, R3-2) - dropping the period hid a real difference (values compare
+  exactly, D1) under a tag; the ".;" cosmetic is listed for Cameron instead.
 
 ## Not covered live (by design)
 

@@ -189,3 +189,12 @@ same 5 pre-existing errors (branch-attributed 0).
   reviewer (R3-1's one-line fix, R3-3's stated fix, R3-2's revert); the
   orchestrator verifies the FW4 diff and its mutant evidence instead of a
   fourth review round, then runs the full gates on the final code commit.
+- FW4 verification (orchestrator, 2026-10-21): FW4 = 29dc15b3 (OR-34),
+  e649bbd8 (OR-35), 1c6af57d (R3-2 revert), report build/FW4-dashboard.md
+  (8 mutants, all killed). Diff read in full: the carry is set once for every
+  failure, before the notice branches; carryCheckedItems keeps an item that is
+  non-blank now or equal to the click-time value; the join is the plain
+  `'; '`. The three suites: 78/78. Two independent orchestrator mutants -
+  carryCheckedItems ignoring the click-time value, and a
+  requirements_changed branch resetting the carry - each KILLED (2 failures
+  each) and reverted (`git diff --exit-code` 0).

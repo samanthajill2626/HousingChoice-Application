@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { StrictMode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
@@ -763,6 +764,45 @@ describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", ()
       landlordId: 'contact-landlord-0001',
       deposit: { deposit_one_month: null, deposit: 1250.5, deposit_flexible: null, deposit_notes: null },
     });
+  });
+
+  // Mutant follow-up (U10 M11): the dashboard renders under StrictMode, whose
+  // first mount starts this read and aborts it at once; since main b222a4ac the
+  // client drops a signalled request aborted in that tick (it rejects with the
+  // signal's reason). That dropped read must leave the section loading - never
+  // the failure line, never an enabled Create that would send no snapshot.
+  it('StrictMode: the dropped first-mount read never shows the failure line; Create waits for the live read', async () => {
+    const user = userEvent.setup();
+    const held = { resolve: (_c: Contact): void => {} };
+    const live = new Promise<Contact>((resolve) => {
+      held.resolve = resolve;
+    });
+    // request() since main b222a4ac: one microtask, then a signal aborted in
+    // that tick rejects with its reason.
+    getContact.mockImplementation(async (_id: string, signal?: AbortSignal) => {
+      await Promise.resolve();
+      if (signal?.aborted === true) throw signal.reason;
+      return live;
+    });
+    createUnit.mockResolvedValue(newUnit());
+    render(
+      <StrictMode>
+        <MemoryRouter>
+          <UnitCreateForm landlordId="contact-landlord-0001" onClose={vi.fn()} onCreated={vi.fn()} />
+        </MemoryRouter>
+      </StrictMode>,
+    );
+    await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
+    await act(async () => {}); // the dropped read settles
+    expect(screen.queryByText(/^Couldn't load/)).toBeNull();
+    expect(screen.getByText(/^Loading .+'s requirements\.\.\.$/)).toBeInTheDocument();
+    expect(create()).toBeDisabled();
+    await act(async () => held.resolve(ROSA_WITH_REQS));
+    expect(await screen.findByText(FILLED)).toBeInTheDocument();
+    expect(create()).toBeEnabled();
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()['requirements_snapshot']).toEqual(ROSA_SNAPSHOT);
   });
 });
 

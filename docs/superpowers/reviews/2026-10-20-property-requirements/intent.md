@@ -2,7 +2,19 @@
 
 ## STATE (replace on every move)
 
-- Phase: HANDBACK REVIEW (planner) - the orchestrator returned DONE
+- Phase: VERDICT DELIVERED 2026-10-21 ~09:30 EDT - MERGE-READY, UNMERGED.
+  Final code c1cc7e80 (planner FW5 on top of the build); planner gates on it:
+  typecheck 0, npm test 0, smoke 0, e2e 1 then 0 (one white-page sign-in,
+  the open blank-first-paint issue, ninth sighting recorded; full re-run on
+  a61b2d6f 367/367), lint 5 pre-existing / 0 branch. Verdict record:
+  `<records>/planner-verdict.md`. Nothing in flight (no watchdog, no mirror,
+  no agents). NEXT STEP: wait for Cameron - merge is his
+  (`git -C "W:\AI Projects\Housing Choice\HC Application" merge --ff-only feat/property-requirements`);
+  on his asks: amend spec D8 (docs), copy / behavior calls from the verdict's
+  "For Cameron" list (a follow-up change), tracker #11 / #12 updates (needs
+  his go), cleanup (needs his go). When the mission ends, unregister
+  compact-resume (`register-session.mjs <session> --off`).
+- (previous) HANDBACK REVIEW (planner) - the orchestrator returned DONE
   2026-10-21 ~11:37 UTC: MERGE-READY @e59362bb (tip f61b310b = handback
   record), 0 behind main @3df43172, failure budget 0 of 2 used. Handback at
   `<records>/handback.md`. Mirror stopped; watchdog not re-armed (no build in

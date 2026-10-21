@@ -517,4 +517,23 @@ describe('ApplyRequirementsDialog - a landlord deposit holding both forms (code 
     const { copy: after } = await columns();
     await waitFor(() => expect(depositBox(after)).toHaveAccessibleDescription("One month's rent; $1,400"));
   });
+
+  // Mutant follow-up (FW1b M1): the re-read after a deposit_conflict carries
+  // the left column the way any failure does (OR-17) - an item staff left out
+  // is never re-checked by the defaults.
+  it('the re-read after a deposit_conflict keeps what staff left out (the OR-17 carry)', async () => {
+    const user = userEvent.setup();
+    getContact.mockReset().mockResolvedValue(BOTH);
+    applyLandlordRequirements.mockRejectedValueOnce(refusal());
+    renderDialog();
+    const { copy } = await columns();
+    await user.click(within(copy).getByRole('checkbox', { name: 'Credit score' }));
+    await user.click(screen.getByRole('button', { name: /^Update \d+ propert(y|ies)$/ }));
+    expect(await screen.findByText(DEPOSIT_CONFLICT)).toBeInTheDocument();
+    await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
+    const { copy: after } = await columns();
+    expect(within(after).getByRole('checkbox', { name: 'Credit score' })).not.toBeChecked();
+    expect(within(after).getByRole('checkbox', { name: 'Pets' })).toBeChecked();
+    expect(depositBox(after)).toBeChecked();
+  });
 });

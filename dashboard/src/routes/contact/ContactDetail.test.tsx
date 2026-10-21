@@ -3282,6 +3282,8 @@ describe('ContactDetail - the per-contact dialogs across a contact change (code 
     getContact.mockImplementation((id: unknown) =>
       Promise.resolve(id === 'z99' ? OTHER : { ...LANDLORD, req_pet_fee: '$300' }),
     );
+    // A loaded (empty) Relay groups card, so its "Create a relay group" shows.
+    getContactRelayGroups.mockResolvedValue([]);
     render(
       <MemoryRouter initialEntries={['/contacts/L1']}>
         <ImageViewerProvider>
@@ -3309,6 +3311,11 @@ describe('ContactDetail - the per-contact dialogs across a contact change (code 
     ],
     ['Edit contact', async (user) => user.click(await screen.findByRole('button', { name: 'Edit contact details' }))],
     ['Manage numbers', async (user) => user.click(await screen.findByRole('button', { name: 'Manage phone numbers' }))],
+    // Mutant follow-up (FW1b M7): seeded with the landlord as a LOCKED member.
+    [
+      'Create a relay group',
+      async (user) => user.click(await screen.findByRole('button', { name: 'Create a relay group' })),
+    ],
     [
       'Delete contact?',
       async (user) => {
@@ -3339,4 +3346,28 @@ describe('ContactDetail - the per-contact dialogs across a contact change (code 
       expect(deleteContact).not.toHaveBeenCalled();
     },
   );
+
+  // Mutant follow-up (FW1b M6): a failed Delete leaves its error in the
+  // still-open dialog; the contact change must clear it too, or the next
+  // contact's Delete dialog opens showing the landlord's failure.
+  it("a failed Delete's error on the landlord never shows in the next contact's Delete dialog", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    deleteContact.mockRejectedValueOnce(new ApiError(500, 'boom', 'x'));
+    renderWithNav();
+    const openDelete = async (): Promise<HTMLElement> => {
+      await user.click(await screen.findByRole('button', { name: /More actions/i }));
+      await user.click(screen.getByRole('menuitem', { name: /Delete contact/i }));
+      return screen.findByRole('dialog', { name: 'Delete contact?' });
+    };
+    const dialog = await openDelete();
+    await user.click(within(dialog).getByRole('button', { name: /^Delete$/ }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/Couldn.t delete/);
+
+    await user.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findAllByText('Bob Other');
+    const other = await openDelete();
+    expect(within(other).getByText('Bob Other')).toBeInTheDocument();
+    expect(within(other).queryByRole('alert')).toBeNull();
+  });
 });

@@ -423,6 +423,25 @@ describe('groupSendRows - the four groups that cover every row (spec 5.5)', () =
     const groups = groupSendRows([row('a', '2026-10-01T00:00:00.000Z', { eligible: undefined })]);
     expect(groups.map((g) => g.rows.length)).toEqual([0, 0, 0, 1]);
   });
+
+  // flyer-leads D8: a signed_up row is filed like a waiting outcome, except
+  // that an ELIGIBLE recipient goes under Interested (the person reached out).
+  // Not eligible otherwise: eligible false or absent, or the contact missing.
+  it('signed_up: Interested when eligible; Not eligible when not, when the flag is absent, or when the contact is missing', () => {
+    const groups = groupSendRows([
+      row('su-ok', '2026-10-05T00:00:00.000Z', { outcome: 'signed_up' }),
+      row('su-ne', '2026-10-06T00:00:00.000Z', { outcome: 'signed_up', eligible: false }),
+      row('su-unset', '2026-10-04T00:00:00.000Z', { outcome: 'signed_up', eligible: undefined }),
+      row('su-missing', '2026-10-07T00:00:00.000Z', { outcome: 'signed_up', recipientMissing: true }),
+      row('int', '2026-10-03T00:00:00.000Z', { outcome: 'interested' }),
+    ]);
+    expect(groups.map((g) => [g.key, g.rows.map((r) => r.contactId)])).toEqual([
+      ['waiting', []],
+      ['interested', ['su-ok', 'int']],
+      ['not_interested', []],
+      ['not_eligible', ['su-missing', 'su-ne', 'su-unset']],
+    ]);
+  });
 });
 
 describe('recordedVoucherSizes + formatVoucherSizes (D4: the property page row)', () => {

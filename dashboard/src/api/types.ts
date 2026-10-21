@@ -3156,8 +3156,13 @@ export type ListingSendOutcome = 'no_reply' | 'replied' | 'interested' | 'not_in
 export type InterestedMode = 'route' | 'form';
 export interface ListingSendRow {
   contactId: string;
-  /** Denormalized tenant display name (server contacts join). HONEST - absent
-   *  when the contact is unknown or nameless; render the id as the fallback. */
+  /** Denormalized recipient display name (server contacts join), attached only
+   *  by the units recipients read and the outcome route's `{ row }` answer -
+   *  the contact listings-sent read never carries it. A RESOLVED contact with
+   *  no first or last name carries its formatted phone instead (flyer-leads
+   *  AR13), so a contact that exists is never shown by its raw id. HONEST -
+   *  absent when the contact did not resolve (recipientMissing), or has
+   *  neither a name nor a phone; render the id as the fallback. */
   tenantName?: string;
   unitId: string;
   sentAt: string; // ISO

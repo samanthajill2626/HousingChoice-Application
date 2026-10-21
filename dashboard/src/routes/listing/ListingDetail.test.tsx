@@ -3112,6 +3112,56 @@ describe('ListingDetail - "Sent to" outcomes (last-heard-from spec 5.5)', () => 
     expect(within(card()).getAllByRole('listitem')).toHaveLength(1);
   });
 
+  // flyer-leads D8: a flyer sign-up on the property page - an eligible
+  // recipient files under Interested with the waiting actions; an ineligible
+  // one under Not eligible.
+  it('a signed_up row files under Interested with "Signed up from the flyer <date>", the "Signed up" chip and both actions', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit,
+      recipients: {
+        status: 'ready',
+        rows: [sent({ outcome: 'signed_up' }), sent({ contactId: 'c-ne', tenantName: 'Ned Ineligible', outcome: 'signed_up', eligible: false })],
+      },
+    });
+    renderAt();
+    expect(within(card()).getAllByRole('list').map((l) => l.getAttribute('aria-label'))).toEqual(['Interested', 'Not eligible']);
+    const li = within(within(card()).getByRole('list', { name: 'Interested' })).getByRole('listitem');
+    expect(within(li).getByRole('link', { name: 'Tia Moss' })).toHaveAttribute('href', '/contacts/c-1');
+    expect(within(li).getByText(/^Signed up from the flyer /)).toBeInTheDocument();
+    expect(within(li).getByText('Signed up', { exact: true })).toBeInTheDocument();
+    expect(within(li).getByRole('button', { name: 'Mark Tia Moss interested in 12 Oak St' })).toBeInTheDocument();
+    expect(within(li).getByRole('button', { name: 'Mark Tia Moss not interested in 12 Oak St' })).toBeInTheDocument();
+    expect(within(within(card()).getByRole('list', { name: 'Not eligible' })).getByRole('link', { name: 'Ned Ineligible' })).toBeInTheDocument();
+  });
+
+  // flyer-leads AR13, PIN (pure rendering - the app projection owns the
+  // label): a RESOLVED contact with no name (an auto-captured unknown sign-up)
+  // arrives with its formatted phone in tenantName, and the row is named by
+  // it - never by the raw contactId. A MISSING contact still has no
+  // tenantName and keeps the contactId fallback (ListingDetail.tsx:1343).
+  it('a nameless resolved recipient is labelled by the phone the server sends in tenantName; a missing one keeps the id', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit,
+      recipients: {
+        status: 'ready',
+        rows: [
+          sent({ contactId: 'c-unk', tenantName: '(470) 555-0182', type: 'unknown', interestedSupported: false, outcome: 'signed_up' }),
+          sent({ contactId: 'c-gone', tenantName: undefined, interestedSupported: false, eligible: false, recipientMissing: true }),
+        ],
+      },
+    });
+    renderAt();
+    const link = within(card()).getByRole('link', { name: '(470) 555-0182' });
+    expect(link).toHaveAttribute('href', '/contacts/c-unk');
+    const li = link.closest('li') as HTMLElement;
+    expect(within(li).getByText('Unknown')).toBeInTheDocument();
+    expect(within(li).getByRole('button', { name: 'Mark (470) 555-0182 not interested in 12 Oak St' })).toBeInTheDocument();
+    expect(within(card()).queryByText('c-unk')).not.toBeInTheDocument();
+    expect(within(card()).getByRole('link', { name: 'c-gone' })).toHaveAttribute('href', '/contacts/c-gone');
+  });
+
   it('Not interested calls the route and applies the returned { row } through setRecipientRow', async () => {
     const setRecipientRow = vi.fn();
     const returned = sent({ outcome: 'not_interested', declined: { at: '2026-10-13T10:00:00.000Z', by: 'staff' } });

@@ -331,8 +331,9 @@ export interface SendRowGroup {
  * returned in this order (empty ones included; the host skips them), which
  * together cover every row, each newest sentAt first: Waiting (no_reply /
  * replied on an ELIGIBLE recipient - the eligibility half only, no
- * lookback/quiet thresholds), Interested, Not interested, Not eligible (a
- * waiting outcome on an ineligible recipient, and EVERY row whose contact is
+ * lookback/quiet thresholds), Interested (and, flyer-leads D8, signed_up on an
+ * ELIGIBLE recipient), Not interested, Not eligible (a waiting or signed_up
+ * outcome on an ineligible recipient, and EVERY row whose contact is
  * missing). `eligible` absent counts as not eligible.
  */
 export function groupSendRows(rows: readonly ListingSendRow[]): SendRowGroup[] {
@@ -346,6 +347,9 @@ export function groupSendRows(rows: readonly ListingSendRow[]): SendRowGroup[] {
     if (r.recipientMissing === true) return 3;
     if (r.outcome === 'interested') return 1;
     if (r.outcome === 'not_interested') return 2;
+    // flyer-leads D8: a flyer sign-up is never waiting - the person reached
+    // out - so an eligible recipient files under Interested.
+    if (r.outcome === 'signed_up') return r.eligible === true ? 1 : 3;
     return r.eligible === true ? 0 : 3;
   };
   const newestFirst = [...rows].sort((a, b) => (a.sentAt < b.sentAt ? 1 : a.sentAt > b.sentAt ? -1 : 0));

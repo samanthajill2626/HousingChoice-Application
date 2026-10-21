@@ -40,6 +40,33 @@ const viteBin = path.join(repoRoot, 'node_modules', 'vite', 'bin', 'vite.js');
 // We build it once at session start (below) and point the host at its dist.
 const fakeUiDistDir = path.join(repoRoot, 'fake-twilio', 'web', 'dist');
 const artifactsDir = path.join(repoRoot, 'e2e', '.artifacts');
+// HOW THE DASHBOARD IS SERVED. 'dev' (the default, and what `npm run e2e:session`
+// gets) is the Vite dev server: source served live, edits picked up, HMR. 'preview'
+// builds the dashboard ONCE at launch into dashboardDistDir and serves that bundle
+// with `vite preview` (same host, strictPort and /api.. proxy - preview inherits
+// server.proxy/host/strictPort; the port is passed on the command line).
+// playwright.config.ts asks for 'preview' when IT boots the stack, i.e. the full
+// `npm run e2e` gate.
+//
+// WHY THE GATE USES A BUILD: the dev server costs a socket per page load that no
+// spec uses (the HMR WebSocket - 456 in a 70-test subset, 27% of the browser's
+// residual connections in a full run) and serves the app as hundreds of separate
+// modules; on Windows that churn is what parks loopback ports in TIME_WAIT behind
+// the white-page failures. See
+// docs/superpowers/reviews/2026-10-20-e2e-connection-churn/fix-results.md and the
+// measured result in docs/superpowers/reviews/2026-10-20-e2e-gate-preview/.
+//
+// WHAT CHANGES UNDER A BUILD: it is a production bundle, so React's StrictMode
+// double-invoke (a development-only behavior) does not run, and dashboard source
+// edits are NOT picked up until the launcher is restarted. That is why the
+// interactive session keeps 'dev'.
+const dashboardServe = process.env['E2E_DASHBOARD_SERVE'] ?? 'dev';
+if (dashboardServe !== 'dev' && dashboardServe !== 'preview') {
+  throw new Error(`E2E_DASHBOARD_SERVE must be 'dev' or 'preview', got '${dashboardServe}'`);
+}
+// Per worktree and gitignored (e2e/.artifacts/), never dashboard/dist: a deploy
+// build in the same checkout must not be overwritten by a test launch.
+const dashboardDistDir = path.join(artifactsDir, 'dashboard-dist');
 const sentinel = path.join(artifactsDir, '.restart');
 const pidFile = path.join(artifactsDir, 'session.pid');
 const laneFile = path.join(artifactsDir, 'lane.json');
@@ -468,10 +495,37 @@ async function startViteNext() {
   // DASHBOARD_PORT (not the generic PORT — that's the APP's variable, and a
   // shared env would leak it into Vite: the 2026-07-02 `npm run dev` regression
   // where Vite bound the app's 8080). vite.config.ts reads DASHBOARD_PORT.
-  spawnNode('web-next', [viteBin], dashboardNextDir, {
-    DASHBOARD_PORT: String(ports.dashboard),
-    APP_PORT: String(ports.app),
-  });
+  if (dashboardServe === 'preview') {
+    // preview.port does NOT inherit server.port (it defaults to 4173), so the
+    // lane port is passed here rather than set in vite.config.ts, which would
+    // also move a human's `vite preview` onto the dev server's 5174.
+    spawnNode(
+      'web-next',
+      [viteBin, 'preview', '--outDir', dashboardDistDir, '--port', String(ports.dashboard)],
+      dashboardNextDir,
+      { ...dashboardEnv(), NODE_ENV: 'production' },
+    );
+    return;
+  }
+  spawnNode('web-next', [viteBin], dashboardNextDir, dashboardEnv());
+}
+function dashboardEnv() {
+  return { DASHBOARD_PORT: String(ports.dashboard), APP_PORT: String(ports.app) };
+}
+async function buildDashboard() {
+  // One production build per launch, so the bundle is always this checkout's
+  // and carries this launch's VITE_E2E_COMMIT stamp (commitStampPlugin runs at
+  // build time here, not per request). NODE_ENV is forced: childEnv sets
+  // 'development' for the app, and a Vite build under NODE_ENV=development
+  // bundles React's DEVELOPMENT build. No `tsc` step - typecheck is its own gate.
+  const started = Date.now();
+  log(`building dashboard (vite build -> ${dashboardDistDir})...`);
+  await runOnce(
+    'dashboard-build',
+    [viteBin, 'build', '--outDir', dashboardDistDir, '--emptyOutDir'],
+    { cwd: dashboardNextDir, env: { ...childEnv, ...dashboardEnv(), NODE_ENV: 'production' } },
+  );
+  log(`dashboard built in ${((Date.now() - started) / 1000).toFixed(1)}s`);
 }
 async function startFakeTwilio() {
   // The fake-twilio host impersonates Twilio's REST API (the app's redirected
@@ -530,9 +584,9 @@ function killChild(name) {
   children.delete(name);
 }
 
-async function runOnce(name, args) {
+async function runOnce(name, args, { cwd = repoRoot, env = childEnv } = {}) {
   await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, { cwd: repoRoot, env: childEnv, stdio: 'inherit' });
+    const child = spawn(process.execPath, args, { cwd, env, stdio: 'inherit' });
     child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`${name} exited ${code}`))));
     child.on('error', reject);
   });
@@ -746,6 +800,7 @@ async function main() {
   // Build the fake-phones UI BEFORE starting the host, so its dist/ exists when
   // the host wires up static serving (FAKE_TWILIO_UI_DIST).
   await buildFakeUi();
+  if (dashboardServe === 'preview') await buildDashboard();
 
   // Start fake-twilio FIRST so the app's very first outbound send has a host to
   // reach (the app only calls it on send, but this avoids a race on boot).
@@ -755,7 +810,7 @@ async function main() {
   log(`fake-twilio ready (:${ports.fake})`);
   log(`fake-phones UI → ${fakeUrl}/`);
 
-  log(`starting app, worker, web :${ports.dashboard} (non-watch)…`);
+  log(`starting app, worker, web :${ports.dashboard} (non-watch, dashboard=${dashboardServe})...`);
   if (activeProfilerOwnerToken !== null && !await defaultProbe(ports.app, '127.0.0.1')) {
     throw new Error('profiler_app_port_occupied');
   }

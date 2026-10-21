@@ -110,6 +110,13 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     }
     try {
       const html = await (await fetch(`${baseURL}/`)).text();
+      // Say which dashboard this run drives: the dev server injects its client
+      // script, a build served by `vite preview` does not. A gate run that
+      // reused a live e2e:session gets the session's dev server, and that is
+      // worth one line of output (see E2E_DASHBOARD_SERVE in e2e-session.mjs).
+      process.stdout.write(
+        `[preflight] dashboard: ${html.includes('/@vite/client') ? 'Vite dev server' : 'built bundle (vite preview)'}\n`,
+      );
       const frontendCommit = html.match(/<meta name="x-app-commit" content="([^"]+)"/)?.[1] ?? '';
       if (frontendCommit && frontendCommit !== currentCommit) {
         stale.push(`  - frontend (dashboard/Vite): built at ${frontendCommit}, checkout is ${currentCommit}`);

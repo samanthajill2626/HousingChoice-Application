@@ -70,6 +70,14 @@ function keepAliveHardeningPlugin(): import('vite').Plugin {
         http.headersTimeout = 66_000;
       }
     },
+    // The same for `vite preview`, which the full e2e gate serves the built
+    // dashboard with (scripts/e2e-session.mjs, E2E_DASHBOARD_SERVE=preview).
+    // Its server is a separate http.Server with Node's 5s default.
+    configurePreviewServer(server) {
+      const http = server.httpServer as { keepAliveTimeout: number; headersTimeout: number };
+      http.keepAliveTimeout = 65_000;
+      http.headersTimeout = 66_000;
+    },
   };
 }
 

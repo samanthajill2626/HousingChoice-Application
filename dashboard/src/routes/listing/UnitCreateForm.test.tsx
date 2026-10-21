@@ -571,7 +571,9 @@ describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", ()
     getContact.mockResolvedValue(ROSA_WITH_REQS);
     setup({ landlordId: 'contact-landlord-0001' });
     expect(await screen.findByText(FILLED)).toBeInTheDocument();
-    expect(getContact).toHaveBeenCalledWith('contact-landlord-0001', expect.any(AbortSignal));
+    // Planner ruling PR-3 (code review PA-3): a CONSISTENT read, so a landlord
+    // saved a moment ago never fills the form (and its snapshot) with old terms.
+    expect(getContact).toHaveBeenCalledWith('contact-landlord-0001', expect.any(AbortSignal), { consistent: true });
     expect(screen.getByLabelText('Credit score')).toHaveValue('600+');
     expect(screen.getByLabelText('No pets')).toBeChecked();
     expect(screen.getByLabelText('Pets (details)')).toHaveValue('Service animals only');

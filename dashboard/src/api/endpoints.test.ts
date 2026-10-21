@@ -41,6 +41,7 @@ import {
   getTours,
   listTours,
   getPlacement,
+  getContact,
   getContactVocabulary,
   getFollowUps,
   getPlacementHistory,
@@ -843,6 +844,19 @@ it('getFollowUps GETs the waiting list and forwards the abort signal (last-heard
 });
 
 // --- Property requirements (spec 2026-10-20 D5, D8; plan 2.6) ---------------
+
+// Planner ruling PR-3 (code review PA-3): `consistent` asks the contact GET
+// for a consistent read (?consistent=1); without it the read is as before.
+it('getContact sends ?consistent=1 only when asked, and unwraps { contact }', async () => {
+  vi.mocked(request).mockResolvedValue({ contact: { contactId: 'c 1', type: 'landlord' } });
+  const ac = new AbortController();
+  expect(await getContact('c 1', ac.signal)).toEqual({ contactId: 'c 1', type: 'landlord' });
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/c%201', { signal: ac.signal });
+  await getContact('c 1', ac.signal, { consistent: true });
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/c%201', { signal: ac.signal, query: { consistent: '1' } });
+  await getContact('c 1', undefined, { consistent: false });
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/c%201', {});
+});
 
 it('applyLandlordRequirements POSTs the Apply body to the landlord route and returns { updated, skipped } as sent', async () => {
   const result = { updated: ['u1'], skipped: [{ unitId: 'u2', reason: 'already_matches' }] };

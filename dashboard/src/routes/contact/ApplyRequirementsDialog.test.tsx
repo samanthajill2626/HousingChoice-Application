@@ -108,7 +108,9 @@ describe('ApplyRequirementsDialog - reading', () => {
     const { onLandlordRead } = renderDialog();
     expect(screen.getByText('Loading...')).toBeInTheDocument();
     await columns();
-    expect(getContact).toHaveBeenCalledWith('L1', expect.any(AbortSignal));
+    // Planner ruling PR-3 (code review PA-3): the landlord read is CONSISTENT,
+    // so a save a moment ago is never shown (or handed to the page) as old values.
+    expect(getContact).toHaveBeenCalledWith('L1', expect.any(AbortSignal), { consistent: true });
     expect(getAllUnits).toHaveBeenCalledWith({ landlordId: 'L1' }, expect.any(AbortSignal));
     expect(onLandlordRead).toHaveBeenCalledWith(LANDLORD);
   });

@@ -160,7 +160,10 @@ export function ApplyRequirementsDialog({
     void (async () => {
       try {
         const [landlord, units] = await Promise.all([
-          getContact(contactId, controller.signal),
+          // Planner ruling PR-3 (code review PA-3): CONSISTENT, so a landlord
+          // save a moment ago is never shown here (and handed to the page) as
+          // its old values.
+          getContact(contactId, controller.signal, { consistent: true }),
           getAllUnits({ landlordId: contactId }, controller.signal),
         ]);
         if (controller.signal.aborted) return;

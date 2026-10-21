@@ -1468,11 +1468,20 @@ export async function getAllPlacements(
 }
 
 /** GET /api/contacts/:id - the contact record (the detail page header + file).
- *  Wrapped under { contact } on the wire; unwrapped here. */
-export async function getContact(contactId: string, signal?: AbortSignal): Promise<Contact> {
+ *  Wrapped under { contact } on the wire; unwrapped here. `consistent` asks
+ *  for a consistent read (?consistent=1; planner ruling PR-3, code review
+ *  PA-3) - for a re-read that must see a save that landed a moment ago. */
+export async function getContact(
+  contactId: string,
+  signal?: AbortSignal,
+  options: { consistent?: boolean } = {},
+): Promise<Contact> {
   const res = await request<{ contact: Contact }>(
     `/api/contacts/${encodeURIComponent(contactId)}`,
-    { ...(signal !== undefined && { signal }) },
+    {
+      ...(signal !== undefined && { signal }),
+      ...(options.consistent === true && { query: { consistent: '1' } }),
+    },
   );
   return res.contact;
 }

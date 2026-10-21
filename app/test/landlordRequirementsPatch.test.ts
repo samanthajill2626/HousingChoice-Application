@@ -54,6 +54,40 @@ function contactUpdatedFields(world: FakeWorld, contactId: string): string[][] {
     .map((e) => [...((e.payload?.['fields'] as string[] | undefined) ?? [])].sort());
 }
 
+// Planner ruling PR-3 (code review PA-3): the Apply dialog's opening landlord
+// read and the New property form's locked landlord read must see a landlord
+// save that landed a moment ago, so the contact GET takes ?consistent=1.
+describe('GET /api/contacts/:contactId?consistent=1 (PR-3)', () => {
+  function getContactRoute(app: import('express').Express, query: string) {
+    return request(app)
+      .get(`/api/contacts/${LL}${query}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+  }
+
+  it('consistent=1 reads the contact with { consistentRead: true }', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, LL, { type: 'landlord', req_no_pets: true });
+    const reads = vi.spyOn(world.contactsRepo, 'getById');
+    const res = await getContactRoute(app, '?consistent=1');
+    expect(res.status).toBe(200);
+    expect(res.body.contact).toMatchObject({ contactId: LL, req_no_pets: true });
+    expect(reads.mock.calls.filter(([id]) => id === LL)).toEqual([[LL, { consistentRead: true }]]);
+  });
+
+  it.each(['', '?consistent=0', '?consistent=true', '?consistent=yes'])(
+    'any other value or none (%j) is the read as before',
+    async (query) => {
+      const { app, world } = makeWebhookHarness();
+      seedContact(world, LL, { type: 'landlord' });
+      const reads = vi.spyOn(world.contactsRepo, 'getById');
+      const res = await getContactRoute(app, query);
+      expect(res.status).toBe(200);
+      expect(reads.mock.calls.filter(([id]) => id === LL)).toEqual([[LL]]);
+    },
+  );
+});
+
 describe('PATCH /api/contacts/:contactId - landlord requirement keys (D2)', () => {
   it('stores each key in its D1 kind, and GET returns it', async () => {
     const { app, world } = makeWebhookHarness();

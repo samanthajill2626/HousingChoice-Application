@@ -228,7 +228,10 @@ export function UnitCreateForm({
     const ac = new AbortController();
     void (async () => {
       try {
-        const c = await getContact(landlordId, ac.signal);
+        // Planner ruling PR-3 (code review PA-3): CONSISTENT, so a landlord
+        // saved a moment ago never fills the form (and the snapshot, D5) with
+        // its old terms.
+        const c = await getContact(landlordId, ac.signal, { consistent: true });
         if (ac.signal.aborted) return;
         const fill = fillFromLandlord(c);
         setLockedLandlordLabel(fill.filled.name);

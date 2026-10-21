@@ -1253,10 +1253,17 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   // shape is a SUPERSET of the legacy one: the scalar `phone` stays intact and
   // `phones` (C1) is populated from contactPhones() (back-compat: a scalar-only
   // contact serializes as [{phone, primary:true}]). Never mutates stored items.
+  // `?consistent=1` reads with { consistentRead: true } (planner ruling PR-3,
+  // code review PA-3: the Apply dialog's and the New property form's
+  // landlord re-reads must see a save that landed a moment ago); any other
+  // value, or none, is the read as before.
   router.get('/:contactId', async (req, res) => {
     const contactId = String(req.params['contactId'] ?? '');
     mergeContext({ contactId });
-    const contact = await contacts.getById(contactId);
+    const contact =
+      req.query['consistent'] === '1'
+        ? await contacts.getById(contactId, { consistentRead: true })
+        : await contacts.getById(contactId);
     if (!contact) {
       res.status(404).json({ error: 'contact_not_found' });
       return;

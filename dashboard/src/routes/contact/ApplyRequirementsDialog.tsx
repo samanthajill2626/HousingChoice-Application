@@ -21,14 +21,17 @@
 // page gets the summary (onDone) and closes the dialog.
 //
 // Worklist OR-17: the re-read after a STOPPED run, or after a first request
-// that failed other than with 409 requirements_changed, continues the same
-// Apply ("Review the rest and press Update again"), so the left column keeps
-// what staff chose - narrowed to what the re-read landlord still holds
-// (carryCheckedItems): an item staff unchecked is never re-checked, and an
-// item the landlord has since blanked comes back unchecked. The row hand
-// choices still reset (rows are confirmed again). On open, on Try again with
-// nothing carried, and after a first-request 409 requirements_changed the
-// left column starts from the defaults.
+// that failed other than with 409 requirements_changed (any 409
+// deposit_conflict included), continues the same Apply ("Review the rest and
+// press Update again"), so the left column keeps what staff chose - narrowed
+// to what the re-read landlord still holds (carryCheckedItems): an item staff
+// unchecked is never re-checked, and an item the landlord has since blanked
+// comes back unchecked. Worklist OR-32: the same re-read keeps the rows staff
+// UNCHECKED by hand (carryHandUnchecks), while a row staff CHECKED by hand
+// goes back to its starting state (staff confirm a check again) - so no
+// re-read writes more than staff chose. On open, on Try again with nothing
+// carried, and after a first-request 409 requirements_changed both columns
+// start from the defaults.
 import { useEffect, useId, useRef, useState } from 'react';
 import {
   ApiError,
@@ -58,6 +61,7 @@ import {
   applyRows,
   carryCheckedItems,
   carryHandChoices,
+  carryHandUnchecks,
   chunk,
   defaultCheckedItems,
   orderedItems,
@@ -90,6 +94,13 @@ type DialogLoad =
   | { phase: 'error' }
   | { phase: 'ready'; landlord: Contact; units: UnitItem[] };
 
+/** What staff chose when an Update stopped (OR-17, OR-32): the left column and
+ *  the row hand choices, for the next successful read to carry. */
+interface ApplyCarry {
+  checkedItems: ReadonlySet<RequirementItemId>;
+  hand: HandChoices;
+}
+
 const ITEM_LABEL: ReadonlyMap<RequirementItemId, string> = new Map(REQUIREMENT_ITEMS.map((item) => [item.id, item.label]));
 
 const isDeleted = (unit: UnitItem): boolean => typeof unit.deleted_at === 'string' && unit.deleted_at.length > 0;
@@ -121,11 +132,12 @@ export function ApplyRequirementsDialog({
   // True once an Update was sent: the server may have written even when the
   // answer was lost, so a later close asks the page to re-read.
   const attemptedRef = useRef(false);
-  // OR-17: the left column staff chose when an Update stopped (or its first
-  // request failed other than with 409 requirements_changed). Kept until the
-  // next SUCCESSFUL read consumes it - so it survives a failed re-read and
-  // Try again; null = the next read starts from the defaults.
-  const carryRef = useRef<ReadonlySet<RequirementItemId> | null>(null);
+  // OR-17 + OR-32: the left column and the row hand choices staff had when an
+  // Update stopped (or its first request failed other than with 409
+  // requirements_changed). Kept until the next SUCCESSFUL read consumes it -
+  // so it survives a failed re-read and Try again; null = the next read
+  // starts from the defaults.
+  const carryRef = useRef<ApplyCarry | null>(null);
   // False after unmount: an answer that lands later must not touch the page.
   const liveRef = useRef(true);
   useEffect(() => {
@@ -144,19 +156,19 @@ export function ApplyRequirementsDialog({
           getAllUnits({ landlordId: contactId }, controller.signal),
         ]);
         if (controller.signal.aborted) return;
-        // OR-17: a carried left column is narrowed to what this landlord still
-        // holds (and consumed); otherwise the defaults (D8).
-        const carried = carryRef.current;
-        carryRef.current = null;
-        setCheckedItems(carried !== null ? carryCheckedItems(carried, landlord) : defaultCheckedItems(landlord));
-        setHand(new Map());
         // The landlord of record only, never a deleted property (D8) - the
         // server read already narrows both; this keeps the rule here too.
-        setLoad({
-          phase: 'ready',
-          landlord,
-          units: units.filter((u) => u.landlordId === contactId && !isDeleted(u)),
-        });
+        const listed = units.filter((u) => u.landlordId === contactId && !isDeleted(u));
+        // OR-17: a carried left column is narrowed to what this landlord still
+        // holds (and consumed); otherwise the defaults (D8). OR-32: the rows
+        // staff unchecked stay unchecked on the re-read rows; every other row
+        // starts from its starting state.
+        const carried = carryRef.current;
+        carryRef.current = null;
+        const checked = carried !== null ? carryCheckedItems(carried.checkedItems, landlord) : defaultCheckedItems(landlord);
+        setCheckedItems(checked);
+        setHand(carried !== null ? carryHandUnchecks(carried.hand, applyRows(listed, landlord, checked)) : new Map());
+        setLoad({ phase: 'ready', landlord, units: listed });
         onLandlordReadRef.current(landlord);
       } catch (err) {
         if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
@@ -217,21 +229,24 @@ export function ApplyRequirementsDialog({
       } catch (err) {
         if (!liveRef.current) return;
         setSending(false);
+        // OR-17 + OR-32: the same Apply goes on - the next read keeps what
+        // staff chose, on both sides.
+        const goesOn: ApplyCarry = { checkedItems, hand };
         if (err instanceof ApiError && err.status === 409 && err.code === 'deposit_conflict') {
           // OR-31: on ANY batch - the landlord holds both deposit forms, so
           // the next batch (and pressing Update alone) would be refused the
           // same way. Say what to fix; the re-read shows both forms.
           setNotice(DEPOSIT_CONFLICT_NOTICE);
-          carryRef.current = checkedItems; // OR-17: the same Apply goes on
+          carryRef.current = goesOn;
         } else if (index > 0) {
           setNotice(stoppedNotice(summarizeApply(results, units).updated));
-          carryRef.current = checkedItems; // OR-17: the same Apply goes on
+          carryRef.current = goesOn;
         } else if (err instanceof ApiError && err.status === 409 && err.code === 'requirements_changed') {
           setNotice(REQUIREMENTS_CHANGED_NOTICE);
           carryRef.current = null; // the landlord changed: start from its defaults
         } else {
           setNotice(APPLY_FAILED_NOTICE);
-          carryRef.current = checkedItems; // OR-17: the same Apply goes on
+          carryRef.current = goesOn;
         }
         reload();
         return;

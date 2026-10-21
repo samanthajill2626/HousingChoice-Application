@@ -9,6 +9,7 @@ import {
   applyRows,
   carryCheckedItems,
   carryHandChoices,
+  carryHandUnchecks,
   chunk,
   defaultCheckedItems,
   doneHeadline,
@@ -172,6 +173,42 @@ describe('carryHandChoices - the D8 hand rules across a left-column change', () 
     expect(carryHandChoices(new Map([['u-old', false]]), before, fewer).get('u-old')).toBe(false);
     const nothing = applyRows(UNITS, LANDLORD, set());
     expect(carryHandChoices(new Map([['u-old', false]]), fewer, nothing).has('u-old')).toBe(false);
+  });
+});
+
+// Worklist OR-32 (code review R2D-1, amends OR-17): the same preserving
+// re-read that keeps the left column (carryCheckedItems) keeps the rows staff
+// UNCHECKED by hand; the rows staff CHECKED by hand go back to their starting
+// state (staff confirm a check again). So no re-read ever writes more than
+// staff chose - rows and items alike.
+describe('carryHandUnchecks - the row choices across a preserving re-read (worklist OR-32)', () => {
+  const rows = applyRows(UNITS, LANDLORD, set('pets', 'credit_requirements'));
+
+  it('a row staff unchecked stays unchecked while it is listed and not Already matches', () => {
+    const carried = carryHandUnchecks(new Map([['u-old', false]]), rows);
+    expect(carried).toEqual(new Map([['u-old', false]]));
+    expect(rowIsChecked(rowOf(rows, 'u-old'), carried)).toBe(false);
+  });
+
+  it('a row staff checked by hand goes back to its starting state - staff confirm it again', () => {
+    const carried = carryHandUnchecks(new Map([['u-own', true], ['u-old', false]]), rows);
+    expect(carried.has('u-own')).toBe(false);
+    expect(rowIsChecked(rowOf(rows, 'u-own'), carried)).toBe(false); // an own value: starts unchecked
+    expect(carried.get('u-old')).toBe(false);
+  });
+
+  it('an uncheck is dropped for a row the re-read no longer lists, or that already matches now', () => {
+    // u-old left this landlord (or was deleted) since.
+    expect(carryHandUnchecks(new Map([['u-old', false]]), applyRows([MATCH, OWN], LANDLORD, set('pets'))).size).toBe(0);
+    // u-old was brought in line since: Already matches, so the uncheck is released.
+    const inLine: UnitItem = { ...OLD, pet_fee: '$300', credit_requirements: '600+' };
+    const reread = applyRows([MATCH, inLine, OWN], LANDLORD, set('pets', 'credit_requirements'));
+    expect(rowOf(reread, 'u-old').alreadyMatches).toBe(true);
+    expect(carryHandUnchecks(new Map([['u-old', false]]), reread).size).toBe(0);
+  });
+
+  it('nothing chosen by hand carries nothing', () => {
+    expect(carryHandUnchecks(new Map(), rows).size).toBe(0);
   });
 });
 

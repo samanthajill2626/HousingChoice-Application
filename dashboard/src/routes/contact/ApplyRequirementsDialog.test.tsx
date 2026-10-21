@@ -521,6 +521,7 @@ describe('ApplyRequirementsDialog - a landlord deposit holding both forms (code 
   // Mutant follow-up (FW1b M1): the re-read after a deposit_conflict carries
   // the left column the way any failure does (OR-17) - an item staff left out
   // is never re-checked by the defaults.
+  // (The rows staff unchecked are carried too - worklist OR-32, below.)
   it('the re-read after a deposit_conflict keeps what staff left out (the OR-17 carry)', async () => {
     const user = userEvent.setup();
     getContact.mockReset().mockResolvedValue(BOTH);
@@ -535,5 +536,123 @@ describe('ApplyRequirementsDialog - a landlord deposit holding both forms (code 
     expect(within(after).getByRole('checkbox', { name: 'Credit score' })).not.toBeChecked();
     expect(within(after).getByRole('checkbox', { name: 'Pets' })).toBeChecked();
     expect(depositBox(after)).toBeChecked();
+  });
+});
+
+// Worklist OR-32 (code review R2D-1, amends OR-17): the preserving re-reads -
+// after a first request that failed other than with 409
+// requirements_changed, after a mid-run stop, and after any 409
+// deposit_conflict - also keep the rows staff UNCHECKED by hand (while still
+// listed and not "Already matches"). Before, the re-read reset every row to
+// its starting state, so a property staff had left out came back CHECKED and
+// the notice's "press Update again" wrote it. Rows staff CHECKED by hand still
+// go back to their starting state (staff confirm a check again), and a
+// first-request 409 requirements_changed still resets every row.
+describe('ApplyRequirementsDialog - the rows staff unchecked across a re-read (worklist OR-32)', () => {
+  const FAILED = "Couldn't update the properties. Review the list and press Update again.";
+  const BOTH: Contact = { ...LANDLORD, req_deposit_one_month: true, req_deposit: 1400 };
+  const sentUnits = (call: number): string[] =>
+    (applyLandlordRequirements.mock.calls[call]?.[1] as { units: Array<{ unitId: string }> }).units.map((u) => u.unitId);
+
+  it('after a first request fails: the row staff unchecked stays unchecked, the button counts without it, and the next request leaves it out', async () => {
+    const user = userEvent.setup();
+    getAllUnits.mockReset().mockResolvedValue(many(3));
+    applyLandlordRequirements
+      .mockRejectedValueOnce(new ApiError(500, 'boom', 'x'))
+      .mockResolvedValueOnce({ updated: ['u0', 'u2'], skipped: [] });
+    const { onDone } = renderDialog();
+    const { which } = await columns();
+    // None of the three has an own value: all start checked. Staff leave
+    // "2 Many St" as it is.
+    await user.click(rowBox(which, '2 Many St'));
+    await user.click(screen.getByRole('button', { name: 'Update 2 properties' }));
+    expect(sentUnits(0)).toEqual(['u0', 'u2']);
+    expect(await screen.findByText(FAILED)).toBeInTheDocument();
+    await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
+    const { which: after } = await columns();
+    expect(rowBox(after, '2 Many St')).not.toBeChecked();
+    expect(rowBox(after, '1 Many St')).toBeChecked();
+    expect(rowBox(after, '3 Many St')).toBeChecked();
+    // "press Update again", as the notice says: still without it.
+    await user.click(screen.getByRole('button', { name: 'Update 2 properties' }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith({ updated: 2, skipped: [] }));
+    expect(sentUnits(1)).toEqual(['u0', 'u2']);
+  });
+
+  it('after a 409 deposit_conflict: the row staff unchecked stays unchecked, the button counts without it, and the next request leaves it out', async () => {
+    const user = userEvent.setup();
+    getAllUnits.mockReset().mockResolvedValue(many(3));
+    // Opened on a landlord holding both deposit forms; fixed by the time of the re-read.
+    getContact.mockReset().mockResolvedValueOnce(BOTH).mockResolvedValue(LANDLORD);
+    applyLandlordRequirements
+      .mockRejectedValueOnce(new ApiError(409, 'deposit_conflict', 'deposit_conflict', { error: 'deposit_conflict' }))
+      .mockResolvedValueOnce({ updated: ['u0', 'u2'], skipped: [] });
+    renderDialog();
+    const { which } = await columns();
+    await user.click(rowBox(which, '2 Many St'));
+    await user.click(screen.getByRole('button', { name: 'Update 2 properties' }));
+    expect(await screen.findByText(/deposit is set to both/)).toBeInTheDocument();
+    await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
+    const { which: after } = await columns();
+    expect(rowBox(after, '2 Many St')).not.toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Update 2 properties' }));
+    await waitFor(() => expect(applyLandlordRequirements).toHaveBeenCalledTimes(2));
+    expect(sentUnits(1)).toEqual(['u0', 'u2']);
+  });
+
+  it('after a mid-run stop: the row staff unchecked stays unchecked and the button counts without it', async () => {
+    const user = userEvent.setup();
+    const units = many(150);
+    getAllUnits.mockReset().mockResolvedValue(units);
+    applyLandlordRequirements
+      .mockResolvedValueOnce({ updated: units.slice(0, 101).filter((u) => u.unitId !== 'u1').map((u) => u.unitId), skipped: [] })
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    renderDialog();
+    const { which } = await columns();
+    await user.click(rowBox(which, '2 Many St'));
+    await user.click(screen.getByRole('button', { name: 'Update 149 properties' }));
+    expect(
+      await screen.findByText('Updated 100 properties before this stopped. Review the rest and press Update again.'),
+    ).toBeInTheDocument();
+    expect(sentUnits(0)).not.toContain('u1');
+    await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
+    const { which: after } = await columns();
+    expect(rowBox(after, '2 Many St')).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Update 149 properties' })).toBeEnabled();
+  });
+
+  it('a row staff CHECKED by hand goes back to its starting state after the re-read: staff confirm it again', async () => {
+    const user = userEvent.setup();
+    applyLandlordRequirements.mockRejectedValueOnce(new ApiError(500, 'boom', 'x'));
+    renderDialog();
+    const { which } = await columns();
+    // "3 Own St" holds own values, so it starts unchecked; staff check it.
+    await user.click(rowBox(which, '3 Own St'));
+    await user.click(screen.getByRole('button', { name: 'Update 2 properties' }));
+    expect(await screen.findByText(FAILED)).toBeInTheDocument();
+    await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
+    const { which: after } = await columns();
+    expect(rowBox(after, '3 Own St')).not.toBeChecked();
+    expect(rowBox(after, '2 Old St')).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Update 1 property' })).toBeEnabled();
+  });
+
+  it('a first request answering 409 requirements_changed still resets every row to its starting state', async () => {
+    const user = userEvent.setup();
+    getAllUnits.mockReset().mockResolvedValue(many(3));
+    applyLandlordRequirements.mockRejectedValueOnce(
+      new ApiError(409, 'requirements_changed', 'x', { error: 'requirements_changed' }),
+    );
+    renderDialog();
+    const { which } = await columns();
+    await user.click(rowBox(which, '2 Many St'));
+    await user.click(screen.getByRole('button', { name: 'Update 2 properties' }));
+    expect(
+      await screen.findByText("This landlord's requirements changed. Review the updated list and press Update again."),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
+    const { which: after } = await columns();
+    expect(rowBox(after, '2 Many St')).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Update 3 properties' })).toBeEnabled();
   });
 });

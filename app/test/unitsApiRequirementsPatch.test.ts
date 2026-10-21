@@ -11,10 +11,12 @@
 // PATCH never writes its map back over a restore's or a claim's REMOVE.
 // requirement_sources is asserted on the HTTP response.
 import { describe, expect, it, vi } from 'vitest';
+import { emailRefId, phoneRefId } from '../src/repos/contactsRepo.js';
 import {
   getUnit,
   patchUnit,
   REQ_STAMP,
+  seedContact,
   seedLandlord,
   seedUnit,
   unitUpdatedEvents,
@@ -22,6 +24,12 @@ import {
 import { makeWebhookHarness, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
 const LANDLORD_FACTS = { caseworker: false, landlordTyped: true, autoPrimaryEligible: true };
+
+/** AR9: a contacts ROUTING POINTER row (phone or email) - a routing record, never a contact. */
+const POINTER_ROWS: Array<[string, string, Record<string, unknown>]> = [
+  ['a phone', phoneRefId('+15550001111'), { phone: '+15550001111', phone_ref: true, phone_ref_owner: 'c-ll' }],
+  ['an email', emailRefId('lee@example.com'), { email: 'lee@example.com', email_ref: true, email_ref_owner: 'c-ll' }],
+];
 
 function auditFieldsOf(world: FakeWorld, index = 0): unknown {
   return unitUpdatedEvents(world)[index]?.payload?.['fields'];
@@ -189,6 +197,21 @@ describe('PATCH /api/units/:id - where each requirement value came from (D5)', (
     expect(res.body.unit).not.toHaveProperty('credit_requirements');
     expect(res.body.unit.requirement_sources).toEqual({ credit_requirements: 'set_here' });
   });
+
+  // AR9: read as a contact, a pointer row would hold a blank value for every
+  // item, so the cleared item below would read as copied from it.
+  it.each(POINTER_ROWS)(
+    'a landlord of record that is %s routing-pointer row counts as no landlord (a cleared item is set here, not copied)',
+    async (_kind, pointerId, pointer) => {
+      const { app, world } = makeWebhookHarness();
+      seedContact(world, pointerId, pointer);
+      seedUnit(world, 'u-1', { landlordId: pointerId, credit_requirements: 'Score 600+' });
+      const res = await patchUnit(app, 'u-1', { credit_requirements: null });
+      expect(res.status).toBe(200);
+      expect(res.body.unit).not.toHaveProperty('credit_requirements');
+      expect(res.body.unit.requirement_sources).toEqual({ credit_requirements: 'set_here' });
+    },
+  );
 
   it('(PIN) re-saving the stored landlordId with no requirement field keeps the map', async () => {
     const { app, world } = makeWebhookHarness();

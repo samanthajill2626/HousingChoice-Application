@@ -242,10 +242,15 @@ export function voucherSizeMatches(sizes: readonly number[], tenantSize: number 
   return sizes.includes(tenantSize);
 }
 
-/** D2 wire shape: never housing_authority; housing_authorities only when non-empty. */
+/** D2 wire shape: never housing_authority; housing_authorities only when
+ *  non-empty. D12: bedroomSizes ALWAYS (bedroomSizesOfFilter's list, [] = no
+ *  size filter, a legacy row's one size as [min(n, 4)]), plus the compat
+ *  bedroomSize - its FIRST size - only when non-empty, so a dashboard page
+ *  open from before the deploy still shows a size. */
 export interface WireAudienceFilter {
   contact_type: 'tenant';
   housing_authorities?: string[];
+  bedroomSizes: number[];
   bedroomSize?: number;
   excludeOptedOut: boolean;
   excludeUnreachable: boolean;
@@ -263,10 +268,13 @@ export function wireAudienceFilter(filter: AudienceFilter | undefined): WireAudi
 export function wireAudienceFilter(filter: AudienceFilter | undefined): WireAudienceFilter | undefined {
   if (filter === undefined) return undefined;
   const housing_authorities = authoritiesOfFilter(filter);
+  const bedroomSizes = bedroomSizesOfFilter(filter);
+  const firstSize = bedroomSizes[0];
   return {
     contact_type: 'tenant',
     ...(housing_authorities.length > 0 && { housing_authorities }),
-    ...(typeof filter.bedroomSize === 'number' && { bedroomSize: filter.bedroomSize }),
+    bedroomSizes,
+    ...(firstSize !== undefined && { bedroomSize: firstSize }),
     excludeOptedOut: filter.excludeOptedOut,
     excludeUnreachable: filter.excludeUnreachable,
   };

@@ -179,7 +179,7 @@ describe('voucherSizeMatches - any-of, the 4 chip is 4 or more (D12)', () => {
 });
 
 describe('wireAudienceFilter - the filter shape every response carries (D2)', () => {
-  it('a LEGACY row answers housing_authorities and never housing_authority; size and booleans pass through as stored', () => {
+  it('a LEGACY row answers housing_authorities and never housing_authority; its one size reads as a list (D12); booleans pass through as stored', () => {
     const legacy: AudienceFilter = {
       contact_type: 'tenant',
       housing_authority: 'Atlanta Housing Authority',
@@ -191,6 +191,7 @@ describe('wireAudienceFilter - the filter shape every response carries (D2)', ()
     expect(wire).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['Atlanta Housing Authority'],
+      bedroomSizes: [2],
       bedroomSize: 2,
       excludeOptedOut: true,
       excludeUnreachable: false,
@@ -208,22 +209,55 @@ describe('wireAudienceFilter - the filter shape every response carries (D2)', ()
     expect(wireAudienceFilter(listed)).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['DeKalb County Housing Authority', 'Decatur Housing Authority'],
+      bedroomSizes: [],
       excludeOptedOut: true,
       excludeUnreachable: true,
     });
   });
 
-  it('no authority (absent, or an empty list) and no size: neither key is sent', () => {
+  it('no authority (absent, or an empty list) and no size: no housing_authorities, bedroomSizes [] and no compat bedroomSize (D12)', () => {
     const filters: AudienceFilter[] = [
       { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
       { contact_type: 'tenant', housing_authorities: [], excludeOptedOut: true, excludeUnreachable: true },
     ];
     for (const filter of filters) {
       const wire = wireAudienceFilter(filter);
-      expect(wire).toEqual({ contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true });
+      expect(wire).toEqual({ contact_type: 'tenant', bedroomSizes: [], excludeOptedOut: true, excludeUnreachable: true });
       expect(wire).not.toHaveProperty('housing_authorities');
       expect(wire).not.toHaveProperty('bedroomSize');
     }
+  });
+
+  it('D12: a bedroomSizes row answers its normalized list and its FIRST size as the compat bedroomSize', () => {
+    const listed: AudienceFilter = {
+      contact_type: 'tenant',
+      bedroomSizes: [3, 2, 6],
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    };
+    expect(wireAudienceFilter(listed)).toEqual({
+      contact_type: 'tenant',
+      bedroomSizes: [2, 3, 4],
+      bedroomSize: 2,
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    });
+  });
+
+  it('D12: a LEGACY size of 4 or more answers the 4 chip in both keys', () => {
+    const legacy: AudienceFilter = {
+      contact_type: 'tenant',
+      bedroomSize: 7,
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    };
+    expect(wireAudienceFilter(legacy)).toEqual({
+      contact_type: 'tenant',
+      bedroomSizes: [4],
+      bedroomSize: 4,
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    });
   });
 });
 

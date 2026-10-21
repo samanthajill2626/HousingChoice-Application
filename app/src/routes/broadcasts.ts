@@ -13,8 +13,13 @@
 //
 // Audience: a FILTER resolves TENANT 1:1 contacts ONLY (never relay-group
 // rosters), and only tenants in Onboarding or Searching (matching-blast-rules
-// D1), narrowed by ANY of a list of housing authorities (D2) and/or exact
-// bedroom size; hand-picked seeds and an explicit recipient list may also
+// D1), narrowed by ANY of a list of housing authorities (D2) and/or ANY of a
+// list of voucher sizes, the 4 chip meaning 4 or more (property-requirements
+// 2026-10-20 D12: POST stores bedroomSizes; a stored legacy one-number
+// bedroomSize is read as [min(n, 4)] through bedroomSizesOfFilter at the
+// estimate, preview, send and every projection, and is never rewritten; the
+// projections answer bedroomSizes and the compat bedroomSize, its first
+// size); hand-picked seeds and an explicit recipient list may also
 // name PARTNERS, of any status (spec 2026-10-06 D20).
 // Opted-out + unreachable are ALWAYS excluded. A tenant with an unresolved
 // tour (D4) or a #27 decline is listed for review but not checked by default
@@ -93,6 +98,7 @@ import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { checkScalarWrite, isOnListFor, KINDS_FOR_FIELD, type OrgNotOnList } from '../lib/orgNames.js';
 import {
   authoritiesOfFilter,
+  bedroomSizesOfFilter,
   checkedByDefault as isCheckedByDefault,
   MAX_FILTER_AUTHORITIES,
   TOUR_REQUEST_HOLD_MS,
@@ -165,12 +171,16 @@ export interface BroadcastsRouterDeps {
  * housing_authorities (matching-blast-rules D2: any-of, an array of at most
  * MAX_FILTER_AUTHORITIES strings; the LEGACY one-string housing_authority is
  * read as a one-member list while the list is absent, and both keys at once
- * is a 400; null reads as absent) and bedroomSize are optional narrowers;
+ * is a 400; null reads as absent) and the voucher sizes (property-requirements
+ * D12: bedroomSizes, an array of integers 0..12, wins - the LEGACY one-number
+ * bedroomSize is read only while no list is sent; null reads as absent) are
+ * optional narrowers;
  * opt-out + unreachable are ALWAYS excluded regardless of the request.
  * Members are trimmed, blanks dropped and de-duplicated here
  * (authoritiesOfFilter); the route then checks them against the org list.
- * The result NEVER carries housing_authority, and carries housing_authorities
- * only when non-empty.
+ * The result NEVER carries housing_authority or bedroomSize, and carries
+ * housing_authorities and bedroomSizes (bedroomSizesOfFilter: each min(n, 4),
+ * de-duplicated, ascending) only when non-empty.
  */
 function parseAudienceFilter(raw: unknown): AudienceFilter | { error: string } {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
@@ -207,18 +217,30 @@ function parseAudienceFilter(raw: unknown): AudienceFilter | { error: string } {
   // Trimmed, blanks dropped, de-duplicated (first wins) - the ONE normalizer.
   // An empty result is no housing authority filter: no key is stored.
   const housing_authorities = authoritiesOfFilter({ housing_authorities: given });
-  let bedroomSize: number | undefined;
-  if (f['bedroomSize'] !== undefined && f['bedroomSize'] !== null) {
-    const v = f['bedroomSize'];
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 12) {
+  // D12 (property-requirements 2026-10-20): the voucher size LIST. A present
+  // bedroomSizes wins and the legacy key is then not read (an old open tab
+  // sends only bedroomSize; a new one only bedroomSizes). Either is validated
+  // as integers 0..12 and normalized by the ONE reader (bedroomSizesOfFilter);
+  // an empty result is no size filter - no key is stored.
+  const rawSizes = f['bedroomSizes'];
+  const rawSize = f['bedroomSize'];
+  let bedroomSizes: number[] = [];
+  const isSize = (v: unknown): boolean => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 12;
+  if (rawSizes !== undefined && rawSizes !== null) {
+    if (!Array.isArray(rawSizes) || !(rawSizes as unknown[]).every(isSize)) {
+      return { error: 'audience_filter.bedroomSizes must be an array of integers 0..12' };
+    }
+    bedroomSizes = bedroomSizesOfFilter({ bedroomSizes: rawSizes });
+  } else if (rawSize !== undefined && rawSize !== null) {
+    if (!isSize(rawSize)) {
       return { error: 'audience_filter.bedroomSize must be an integer 0..12' };
     }
-    bedroomSize = v;
+    bedroomSizes = bedroomSizesOfFilter({ bedroomSize: rawSize });
   }
   return {
     contact_type: 'tenant',
     ...(housing_authorities.length > 0 && { housing_authorities }),
-    ...(bedroomSize !== undefined && { bedroomSize }),
+    ...(bedroomSizes.length > 0 && { bedroomSizes }),
     excludeOptedOut: true,
     excludeUnreachable: true,
   };

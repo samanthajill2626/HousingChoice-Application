@@ -194,3 +194,23 @@ white page; the lead's link never appeared. Full run 1 failed / 363 passed
 (the run itself exhausts the ephemeral range). The file passed 14 of 14
 alone (`--repeat-each=2`) right after. Artifacts:
 `W:\tmp\matching-blast-rules\.superpowers\gates\planner-final2\artifacts\landlord-onboarding`.
+
+**Measured diagnosis (2026-10-20).** See
+`docs/superpowers/reviews/2026-10-20-e2e-connection-churn/diagnosis.md`: the port pressure
+behind this signature is ~24,000 short-lived loopback connections per full run, 96% of them
+browser -> Vite and Vite -> app, closed because the browser cancelled an in-flight API
+request - 81% of those cancels by React StrictMode's dev double mount. Proposed fix awaiting
+Cameron's go. **Sighting in that work** (lane 4, an `e2e:session` subset of four scenario
+files with the measurement hook, main 1d7a4667, 17 passed / 1 failed):
+`tests/scenarios/post-tour-application.spec.ts:210` stopped on "the placement page did not
+finish loading"; entirely white page, at that run's TIME_WAIT peak (5,305). Its last
+`/placements/<id>` load made 56 requests and never reached `/auth/me`.
+
+**Fix measured (2026-10-20), unmerged.** Branch `fix/e2e-strictmode-aborts` (`b222a4ac`);
+see `docs/superpowers/reviews/2026-10-20-e2e-connection-churn/fix-results.md`. Two full runs
+365/365, browser -> Vite / Vite -> app connections -57% / -73%, peak TIME_WAIT 4,784 ->
+~1,800; the heavy scenario specs fell most (approval-and-move-in and post-tour-application
+by ~70-75% per test). Keep open until the merged fix has clean gate runs behind it. Part
+of the residual is a separate production double fetch on every contact page
+(`useContactFile` re-runs its effect when `contactType` arrives), noted there as a
+follow-up.

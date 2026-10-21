@@ -114,6 +114,21 @@ export async function requestWithStatus<T>(
 
   let res: Response;
   try {
+    // A signalled request waits one microtask before it touches the network,
+    // and is dropped if its signal aborted in that tick - rejecting with the
+    // same reason fetch would. React StrictMode's dev double mount runs every
+    // effect, its cleanup and the effect again in ONE task, so without this the
+    // first mount's fetch is already on the wire when its cleanup aborts it.
+    // Each cancelled in-flight request closes two sockets (browser -> Vite,
+    // then Vite -> app), and those cancels were ~81% of an e2e run's loopback
+    // churn: the Windows TIME_WAIT pile behind its WSAEADDRINUSE white pages.
+    // See docs/superpowers/reviews/2026-10-20-e2e-connection-churn/diagnosis.md.
+    if (signal !== undefined) {
+      await Promise.resolve();
+      if (signal.aborted) {
+        throw signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+      }
+    }
     res = await fetch(buildUrl(path, query), {
       method,
       headers,

@@ -229,7 +229,7 @@ describe('applyExtraction - suggestions on conflict (item 4)', () => {
     const { deps, records } = makeDeps();
     const contact = makeContact({ type: 'tenant', voucherSize: 2 });
     const outcome = await run(deps, contact, {
-      fields: { voucherSize: { op: 'suggest', value: '3', reason: 'now needs 3BR' } },
+      fields: { voucherSize: { op: 'suggest', value: '3', reason: 'voucher reissued as a 3-bedroom' } },
     });
     expect(outcome.suggested).toEqual(['voucherSize']);
     expect(records.updates).toHaveLength(0);
@@ -238,7 +238,7 @@ describe('applyExtraction - suggestions on conflict (item 4)', () => {
       target: 'voucherSize',
       currentValue: '2',
       suggestedValue: '3',
-      reason: 'now needs 3BR',
+      reason: 'voucher reissued as a 3-bedroom',
       conversationId: CONV,
       tsMsgId: 'ts-9',
     });
@@ -794,7 +794,7 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
       conversationId: CONV,
       cursorTsMsgId: 'ts-9',
       result: {
-        fields: { voucherSize: { op: 'suggest', value: '3', reason: 'now needs 3BR' } },
+        fields: { voucherSize: { op: 'suggest', value: '3', reason: 'voucher reissued as a 3-bedroom' } },
         noteLines: ['likes the neighborhood'],
       },
       hasInferredRoleContent: true,

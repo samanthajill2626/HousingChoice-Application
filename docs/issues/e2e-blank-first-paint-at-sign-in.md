@@ -100,3 +100,49 @@ contact-navigation twin's twelfth/thirteenth sightings caught in the log (`[vite
 error ... connect EADDRINUSE 127.0.0.1:10001`). The next full run of 4f608a40 passed 364/364.
 Artifacts: `W:\tmp\matching-blast-rules\.superpowers\gates\fw2\e2e-artifacts\`,
 `...\final2-e2e-2\e2e-artifacts\` (with a trace).
+
+**Seventh sighting (2026-10-20 ~10:51 EDT, Windows, `fix/voucher-size-prompt` @1c8d2380,
+lane 7).** The branch's first full gate run, after a full `npm test` on the same machine:
+364 passed / 1 failed in 20.4 min. `tests/flows/voice-extraction.spec.ts:155` waited the
+whole 60 s test budget for "Continue as dev user"; the screenshot is an entirely white
+page. The test before it in the same file had signed in and passed 815 ms earlier. No
+`net::ERR_*` or EADDRINUSE line in the run log (only the routine startup `/__dev/ping` proxy
+error); 2541 TIME_WAIT sockets right after the run. The branch changes only extraction
+prompt text, a CLI script and unit tests - the e2e stack runs the fake extraction driver,
+which takes only the prompt's fingerprint, never its text, and the failure came before
+any extraction step. The file passed in isolation (4/4, this test 964 ms).
+Artifacts: `W:\tmp\voucher-size-prompt\.superpowers\gates\e2e-artifacts\`.
+The full re-run of 452189c0 (Cameron asked for `db:stop`/`db:start` and
+`s3:stop`/`s3:start` first; 1110 TIME_WAIT at its start, no other test runner on the
+machine) passed 365/365 in 19.5 min - yet still logged one `[vite] http proxy error:
+/api/tours/<id>/activity` with `connect EADDRINUSE 127.0.0.1:9701` about 17 min in (that
+test recovered and passed), and 3687 TIME_WAIT right after. So the connect failures come
+from churn WITHIN one run, not from state left by earlier runs or the containers: a
+restart cannot prevent them. The residual browser -> Vite and Vite -> app connection churn
+the 2026-09-30 proxy keep-alive fix left unchased is the lead.
+
+**Measured diagnosis (2026-10-20).** The churn is measured and attributed in
+`docs/superpowers/reviews/2026-10-20-e2e-connection-churn/diagnosis.md`: 96% of a full
+run's ~24,000 short-lived loopback connections are browser -> Vite and Vite -> app, each
+closed because the browser cancelled an API request that was already on the wire, and 81%
+of those cancels are React StrictMode's dev double mount. A NetLog of a green 70-test run
+caught a browser connect failing with WSAEADDRINUSE at only 2,890 TIME_WAIT, so these
+failures need no exhausted pool. Proposed fix (awaiting Cameron's go): defer a signalled
+fetch's dispatch one microtask in `dashboard/src/api/client.ts`.
+**Eighth sighting**, in that work (full `npm run e2e` with the measurement hook, main
+1d7a4667, lane 4, 364 passed / 1 failed, 20.9 min):
+`tests/dashboard-next/maintenance-page.spec.ts:22` "502 GET recovers with GET home at width
+320" waited 15 s for "Sign in with Google" after the maintenance page's home link; entirely
+white page. Vite served the document and 9 modules in 15 ms, then the browser never asked
+for `react-dom_client.js` and the app saw no request; ~2,000 TIME_WAIT at that moment. That
+spec intercepts requests with `page.route`, which cannot be excluded for this one.
+
+**Fix measured (2026-10-20), unmerged.** Branch `fix/e2e-strictmode-aborts` (`b222a4ac`)
+makes that change; before/after in
+`docs/superpowers/reviews/2026-10-20-e2e-connection-churn/fix-results.md`. Two full runs
+(one bare, one with the hook) went 365/365; browser -> Vite connections fell 57%, Vite -> app
+73%, cancelled proxied requests 74% (the StrictMode signature 91%), and peak TIME_WAIT
+4,784 -> ~1,800. The NetLog subset went 70/70 with 67% fewer browser connects, none failing.
+That lowers the rate rather than ruling the white page out (no safe threshold; the full
+runs still peak near 1,800), so this stays open until the merged fix has a run of clean
+gate runs behind it.

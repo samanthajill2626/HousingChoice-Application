@@ -103,11 +103,11 @@ describe('applyRows', () => {
   });
 });
 
-// Worklist OR-17: after an Update that stopped (a later batch's 409 or
-// failure) or a first request that failed other than with 409
-// requirements_changed, the re-read keeps what staff chose on the left -
-// narrowed to what the re-read landlord still holds - instead of resetting it
-// to the defaults. It only ever copies LESS than staff chose, never more.
+// Worklist OR-17 (amended by OR-34, code review R3-1): after an Update that
+// stopped or failed - a first-request 409 requirements_changed included - the
+// re-read keeps what staff chose on the left, narrowed to what the re-read
+// landlord still holds, instead of resetting it to the defaults. It only ever
+// copies LESS than staff chose, never more.
 describe('carryCheckedItems - the left column across a re-read after a stop (worklist OR-17)', () => {
   it('an item staff unchecked stays unchecked; an item staff checked stays checked', () => {
     // The landlord still holds both; staff had unchecked Credit score.

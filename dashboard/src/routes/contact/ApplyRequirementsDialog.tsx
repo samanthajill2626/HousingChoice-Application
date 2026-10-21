@@ -21,18 +21,18 @@
 // saying how many landed (code review R2D-3). When every batch lands the
 // page gets the summary (onDone) and closes the dialog.
 //
-// Worklist OR-17: the re-read after a STOPPED run, or after a first request
-// that failed other than with 409 requirements_changed (any 409
-// deposit_conflict included), continues the same Apply ("Review the rest and
-// press Update again"), so the left column keeps what staff chose - narrowed
-// to what the re-read landlord still holds (carryCheckedItems): an item staff
-// unchecked is never re-checked, and an item the landlord has since blanked
-// comes back unchecked. Worklist OR-32: the same re-read keeps the rows staff
-// UNCHECKED by hand (carryHandUnchecks), while a row staff CHECKED by hand
-// goes back to its starting state (staff confirm a check again) - so no
-// re-read writes more than staff chose. On open, on Try again with nothing
-// carried, and after a first-request 409 requirements_changed both columns
-// start from the defaults.
+// Worklist OR-17, OR-32 and OR-34 (code review R3-1): EVERY re-read inside
+// one open dialog - after a stopped run, or after a first request that failed
+// in any way, a 409 requirements_changed or deposit_conflict included -
+// continues the same Apply ("... press Update again"), so it keeps what staff
+// chose. The left column keeps what staff had checked, narrowed to what the
+// re-read landlord still holds (carryCheckedItems): an item staff unchecked is
+// never re-checked, and an item the landlord has since blanked comes back
+// unchecked. The rows keep what staff UNCHECKED by hand (carryHandUnchecks),
+// while a row staff CHECKED by hand goes back to its starting state (staff
+// confirm a check again) - so no re-read writes more than staff chose. Only
+// opening the dialog (its first read, and Try again after it failed) starts
+// both columns from the defaults.
 import { useEffect, useId, useRef, useState } from 'react';
 import {
   ApiError,
@@ -95,8 +95,9 @@ type DialogLoad =
   | { phase: 'error' }
   | { phase: 'ready'; landlord: Contact; units: UnitItem[] };
 
-/** What staff chose when an Update stopped (OR-17, OR-32): the left column and
- *  the row hand choices, for the next successful read to carry. */
+/** What staff chose when an Update failed or stopped (OR-17, OR-32, OR-34):
+ *  the left column and the row hand choices, for the next successful read to
+ *  carry. */
 interface ApplyCarry {
   checkedItems: ReadonlySet<RequirementItemId>;
   hand: HandChoices;
@@ -135,11 +136,11 @@ export function ApplyRequirementsDialog({
   // True once an Update was sent: the server may have written even when the
   // answer was lost, so a later close asks the page to re-read.
   const attemptedRef = useRef(false);
-  // OR-17 + OR-32: the left column and the row hand choices staff had when an
-  // Update stopped (or its first request failed other than with 409
-  // requirements_changed). Kept until the next SUCCESSFUL read consumes it -
-  // so it survives a failed re-read and Try again; null = the next read
-  // starts from the defaults.
+  // OR-17 + OR-32 + OR-34: the left column and the row hand choices staff had
+  // when an Update failed or stopped (any failure, a first-request 409
+  // requirements_changed included). Kept until the next SUCCESSFUL read
+  // consumes it - so it survives a failed re-read and Try again; null = the
+  // next read starts from the defaults (only the dialog's first read).
   const carryRef = useRef<ApplyCarry | null>(null);
   // False after unmount: an answer that lands later must not touch the page.
   const liveRef = useRef(true);
@@ -232,9 +233,10 @@ export function ApplyRequirementsDialog({
       } catch (err) {
         if (!liveRef.current) return;
         setSending(false);
-        // OR-17 + OR-32: the same Apply goes on - the next read keeps what
-        // staff chose, on both sides.
-        const goesOn: ApplyCarry = { checkedItems, hand };
+        // OR-17 + OR-32 + OR-34 (code review R3-1): EVERY failure - a
+        // first-request 409 requirements_changed included - continues the
+        // same Apply, so the next read keeps what staff chose, on both sides.
+        carryRef.current = { checkedItems, hand };
         // D8: a LATER batch says how many properties the batches before it
         // updated.
         const stopped = index > 0 ? [stoppedNotice(summarizeApply(results, units).updated)] : [];
@@ -244,16 +246,12 @@ export function ApplyRequirementsDialog({
           // same way. Say what to fix; the re-read shows both forms. Code
           // review R2D-3: on a later batch D8's stop sentence comes first.
           setNotice([...stopped, DEPOSIT_CONFLICT_NOTICE]);
-          carryRef.current = goesOn;
         } else if (index > 0) {
           setNotice(stopped);
-          carryRef.current = goesOn;
         } else if (err instanceof ApiError && err.status === 409 && err.code === 'requirements_changed') {
           setNotice([REQUIREMENTS_CHANGED_NOTICE]);
-          carryRef.current = null; // the landlord changed: start from its defaults
         } else {
           setNotice([APPLY_FAILED_NOTICE]);
-          carryRef.current = goesOn;
         }
         reload();
         return;

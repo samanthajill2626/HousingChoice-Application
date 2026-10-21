@@ -365,14 +365,16 @@ describe('ApplyRequirementsDialog - Update', () => {
 });
 
 // Worklist OR-17 (a divergence from the plan text, recorded for Cameron): the
-// re-read after an Update that stopped, or whose FIRST request failed other
-// than with 409 requirements_changed, continues the same Apply - so it never
-// re-checks an item staff unchecked, and an item the re-read landlord holds
-// blank comes back unchecked (never a surprise Clears). On open and after a
-// first-request 409 requirements_changed the left column starts from the
-// defaults.
+// re-read after an Update that stopped or failed continues the same Apply -
+// so it never re-checks an item staff unchecked, and an item the re-read
+// landlord has since blanked comes back unchecked (never a surprise Clears).
+// Worklist OR-34 (code review R3-1): EVERY re-read inside one open dialog
+// carries, a first-request 409 requirements_changed included; only opening
+// the dialog starts the left column from the defaults.
 describe('ApplyRequirementsDialog - the left column across a re-read (worklist OR-17)', () => {
   const box = (copy: HTMLElement, name: string): HTMLElement => within(copy).getByRole('checkbox', { name });
+  const sentItems = (call: number): string[] =>
+    (applyLandlordRequirements.mock.calls[call]?.[1] as { items: string[] }).items;
 
   it('a first request failing other than with 409 keeps what staff unchecked; an item the landlord blanked comes back unchecked', async () => {
     const user = userEvent.setup();
@@ -443,22 +445,36 @@ describe('ApplyRequirementsDialog - the left column across a re-read (worklist O
     expect(box(after, 'Pets')).toBeChecked();
   });
 
-  it('a first request answering 409 requirements_changed starts the left column from the defaults again', async () => {
+  // Code review R3-1 (worklist OR-34): this path once reset the left column,
+  // so an item staff left out came back checked and "press Update again"
+  // copied it onto every property.
+  it('a first request answering 409 requirements_changed keeps what staff unchecked, and the next request leaves it out (OR-34)', async () => {
     const user = userEvent.setup();
-    applyLandlordRequirements.mockRejectedValueOnce(
-      new ApiError(409, 'requirements_changed', 'x', { error: 'requirements_changed' }),
-    );
+    // A colleague changed the landlord's pet fee while staff were reviewing.
+    getContact.mockReset().mockResolvedValueOnce(LANDLORD).mockResolvedValue({ ...LANDLORD, req_pet_fee: '$350' });
+    applyLandlordRequirements
+      .mockRejectedValueOnce(new ApiError(409, 'requirements_changed', 'x', { error: 'requirements_changed' }))
+      .mockResolvedValueOnce({ updated: ['u-match', 'u-old'], skipped: [] });
     renderDialog();
     const { copy } = await columns();
+    // Staff leave Credit score out of this Apply.
     await user.click(box(copy, 'Credit score'));
     await user.click(screen.getByRole('button', { name: 'Update 1 property' }));
+    expect(sentItems(0)).toEqual(['pets']);
     expect(
       await screen.findByText("This landlord's requirements changed. Review the updated list and press Update again."),
     ).toBeInTheDocument();
     await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
     const { copy: after } = await columns();
-    expect(box(after, 'Credit score')).toBeChecked();
+    // Still left out, although the re-read landlord still holds it.
+    expect(box(after, 'Credit score')).not.toBeChecked();
+    // Kept by staff and still held: still checked, showing the new value.
     expect(box(after, 'Pets')).toBeChecked();
+    expect(box(after, 'Pets')).toHaveAccessibleDescription('No pets; pet fee $350');
+    // "press Update again", as the notice says: still without Credit score.
+    await user.click(screen.getByRole('button', { name: 'Update 2 properties' }));
+    await waitFor(() => expect(applyLandlordRequirements).toHaveBeenCalledTimes(2));
+    expect(sentItems(1)).toEqual(['pets']);
   });
 });
 
@@ -551,15 +567,14 @@ describe('ApplyRequirementsDialog - a landlord deposit holding both forms (code 
   });
 });
 
-// Worklist OR-32 (code review R2D-1, amends OR-17): the preserving re-reads -
-// after a first request that failed other than with 409
-// requirements_changed, after a mid-run stop, and after any 409
-// deposit_conflict - also keep the rows staff UNCHECKED by hand (while still
-// listed and not "Already matches"). Before, the re-read reset every row to
-// its starting state, so a property staff had left out came back CHECKED and
-// the notice's "press Update again" wrote it. Rows staff CHECKED by hand still
-// go back to their starting state (staff confirm a check again), and a
-// first-request 409 requirements_changed still resets every row.
+// Worklist OR-32 (code review R2D-1, amends OR-17): the re-read after a
+// failed or stopped Update also keeps the rows staff UNCHECKED by hand (while
+// still listed and not "Already matches"). Before, the re-read reset every
+// row to its starting state, so a property staff had left out came back
+// CHECKED and the notice's "press Update again" wrote it. Rows staff CHECKED
+// by hand still go back to their starting state (staff confirm a check
+// again). Worklist OR-34 (code review R3-1): every re-read inside one open
+// dialog carries, a first-request 409 requirements_changed included.
 describe('ApplyRequirementsDialog - the rows staff unchecked across a re-read (worklist OR-32)', () => {
   const FAILED = "Couldn't update the properties. Review the list and press Update again.";
   const BOTH: Contact = { ...LANDLORD, req_deposit_one_month: true, req_deposit: 1400 };
@@ -649,22 +664,33 @@ describe('ApplyRequirementsDialog - the rows staff unchecked across a re-read (w
     expect(screen.getByRole('button', { name: 'Update 1 property' })).toBeEnabled();
   });
 
-  it('a first request answering 409 requirements_changed still resets every row to its starting state', async () => {
+  // Code review R3-1 (worklist OR-34): this path once reset every row, so the
+  // property staff left out came back checked ("Update 3 properties") and
+  // "press Update again" overwrote it.
+  it('after a first request answers 409 requirements_changed: the row staff unchecked stays unchecked, the button counts without it, and the next request leaves it out (OR-34)', async () => {
     const user = userEvent.setup();
     getAllUnits.mockReset().mockResolvedValue(many(3));
-    applyLandlordRequirements.mockRejectedValueOnce(
-      new ApiError(409, 'requirements_changed', 'x', { error: 'requirements_changed' }),
-    );
-    renderDialog();
+    // A colleague changed the landlord's pet fee while staff were reviewing.
+    getContact.mockReset().mockResolvedValueOnce(LANDLORD).mockResolvedValue({ ...LANDLORD, req_pet_fee: '$350' });
+    applyLandlordRequirements
+      .mockRejectedValueOnce(new ApiError(409, 'requirements_changed', 'x', { error: 'requirements_changed' }))
+      .mockResolvedValueOnce({ updated: ['u0', 'u2'], skipped: [] });
+    const { onDone } = renderDialog();
     const { which } = await columns();
     await user.click(rowBox(which, '2 Many St'));
     await user.click(screen.getByRole('button', { name: 'Update 2 properties' }));
+    expect(sentUnits(0)).toEqual(['u0', 'u2']);
     expect(
       await screen.findByText("This landlord's requirements changed. Review the updated list and press Update again."),
     ).toBeInTheDocument();
     await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
     const { which: after } = await columns();
-    expect(rowBox(after, '2 Many St')).toBeChecked();
-    expect(screen.getByRole('button', { name: 'Update 3 properties' })).toBeEnabled();
+    expect(rowBox(after, '2 Many St')).not.toBeChecked();
+    expect(rowBox(after, '1 Many St')).toBeChecked();
+    expect(rowBox(after, '3 Many St')).toBeChecked();
+    // "press Update again", as the notice says: still without it.
+    await user.click(screen.getByRole('button', { name: 'Update 2 properties' }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith({ updated: 2, skipped: [] }));
+    expect(sentUnits(1)).toEqual(['u0', 'u2']);
   });
 });

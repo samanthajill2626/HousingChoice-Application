@@ -44,17 +44,17 @@ export function defaultCheckedItems(landlord: Contact): Set<RequirementItemId> {
   );
 }
 
-/** Worklist OR-17: the left column after the re-read that follows an Update
- *  that STOPPED (a later batch answered 409 or failed) or whose FIRST request
- *  failed other than with 409 requirements_changed. "Review the rest and press
- *  Update again" continues the same Apply, so the items staff chose stay
- *  chosen - but only those the re-read landlord still holds: an item staff
- *  unchecked stays unchecked (it may be one staff deliberately left out, such
- *  as Touring), and an item the landlord has since blanked comes back
- *  unchecked, never a surprise "Clears". It only ever copies LESS than staff
- *  chose. On open, on Try again with nothing carried, and after a first-request
- *  409 requirements_changed the dialog starts from defaultCheckedItems instead.
- *  The rows staff unchecked are carried by carryHandUnchecks (OR-32). */
+/** Worklist OR-17 (amended by OR-34, code review R3-1): the left column after
+ *  EVERY re-read that follows an Update inside one open dialog - a later batch
+ *  that answered 409 or failed, or a first request that failed in any way, a
+ *  409 requirements_changed included. "... press Update again" continues the
+ *  same Apply, so the items staff chose stay chosen - but only those the
+ *  re-read landlord still holds: an item staff unchecked stays unchecked (it
+ *  may be one staff deliberately left out, such as Touring), and an item the
+ *  landlord has since blanked comes back unchecked, never a surprise "Clears".
+ *  It only ever copies LESS than staff chose. Only opening the dialog starts
+ *  from defaultCheckedItems. The rows staff unchecked are carried by
+ *  carryHandUnchecks (OR-32). */
 export function carryCheckedItems(
   previous: ReadonlySet<RequirementItemId>,
   landlord: Contact,
@@ -114,16 +114,16 @@ export function carryHandChoices(
   return next;
 }
 
-/** Worklist OR-32 (code review R2D-1, amends OR-17): the row choices after the
- *  same preserving re-read carryCheckedItems serves (a mid-run stop, a first
- *  request that failed other than with 409 requirements_changed, any 409
- *  deposit_conflict). `rows` are the re-read rows. A row staff UNCHECKED by
- *  hand stays unchecked while the re-read still lists it and it is not
- *  "Already matches" (D8's hand rule - "press Update again" must not write a
- *  property staff left out); a row staff CHECKED by hand goes back to its
- *  starting state, so staff confirm a check again. So no re-read ever writes
- *  more than staff chose, rows and items alike. After a first-request 409
- *  requirements_changed the dialog resets every row instead. */
+/** Worklist OR-32 (code review R2D-1, amends OR-17) and OR-34 (code review
+ *  R3-1): the row choices after the same re-read carryCheckedItems serves -
+ *  EVERY re-read that follows an Update inside one open dialog (a mid-run
+ *  stop, any failed first request, a 409 requirements_changed or
+ *  deposit_conflict included). `rows` are the re-read rows. A row staff
+ *  UNCHECKED by hand stays unchecked while the re-read still lists it and it
+ *  is not "Already matches" (D8's hand rule - "press Update again" must not
+ *  write a property staff left out); a row staff CHECKED by hand goes back to
+ *  its starting state, so staff confirm a check again. So no re-read ever
+ *  writes more than staff chose, rows and items alike. */
 export function carryHandUnchecks(previous: HandChoices, rows: readonly ApplyRow[]): Map<string, boolean> {
   const next = new Map<string, boolean>();
   for (const row of rows) {

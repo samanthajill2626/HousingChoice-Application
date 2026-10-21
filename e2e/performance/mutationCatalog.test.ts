@@ -379,7 +379,9 @@ describe('dashboard mutation inventory', () => {
     // /api/contacts/:contactId/caseworker-review, one function per action).
     // + setListingSendOutcome (last-heard-from: POST
     // /api/units/:unitId/recipients/:contactId/outcome).
-    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(121);
+    // + applyLandlordRequirements (property requirements, spec 2026-10-20 D8:
+    // POST /api/contacts/:contactId/requirements/apply).
+    expect(catalogedRaw.filter((entry) => !entry.methodClass.includes('delegated_to_typed_request_options'))).toHaveLength(122);
     expect(new Set(discoveredFingerprints).size).toBe(discoveredFingerprints.length);
     expect(new Set(checkedInFingerprints).size).toBe(checkedInFingerprints.length);
     expect(checkedInFingerprints).toEqual(discoveredFingerprints);

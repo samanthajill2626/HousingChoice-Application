@@ -143,6 +143,9 @@ export const DASHBOARD_MUTATION_CATALOG: readonly DashboardMutationCatalogEntry[
   // The preview and the Possible list are GETs and are never catalogued.
   entry(ENDPOINTS, 'makeCaseworker', 'request:POST', '/api/contacts/:contactId/caseworker-review'),
   entry(ENDPOINTS, 'dismissPossibleCaseworker', 'request:POST', '/api/contacts/:contactId/caseworker-review'),
+  // Property requirements (spec 2026-10-20 D8): workflow_only - the Apply
+  // dialog's "Update N properties" click is its only caller.
+  entry(ENDPOINTS, 'applyLandlordRequirements', 'request:POST', '/api/contacts/:contactId/requirements/apply'),
   entry(ENDPOINTS, 'subscribePush', 'request:POST', '/api/push/subscriptions'),
   entry(ENDPOINTS, 'unsubscribePush', 'request:DELETE', '/api/push/subscriptions'),
   entry(ENDPOINTS, 'sendPushTest', 'request:POST', '/api/push/test'),

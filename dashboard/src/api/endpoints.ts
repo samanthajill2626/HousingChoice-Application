@@ -23,6 +23,8 @@ import type {
   PlacementsPage,
   PlacementStage,
   PoolNumberRow,
+  ApplyRequirementsBody,
+  ApplyRequirementsResult,
   Contact,
   ContactCreate,
   ContactMediaPage,
@@ -966,7 +968,10 @@ export function markConversationUnread(conversationId: string, signal?: AbortSig
 /** POST /api/units - create a unit (property) under a landlord. The body carries
  *  the owning landlordId plus the writable unit fields; the server validates them
  *  against a strict allowlist + types and stamps the initial status ('setup').
- *  Returns the created unit (unwrapped from { unit }). */
+ *  From the New property form it also carries `requirements_snapshot` - the
+ *  landlord's values the form filled in (spec 2026-10-20 D5) - which the server
+ *  classifies against and never stores. Returns the created unit (unwrapped
+ *  from { unit }). */
 export async function createUnit(body: Record<string, unknown>): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>('/api/units', { method: 'POST', body });
   return res.unit;
@@ -1463,6 +1468,22 @@ export async function getContact(contactId: string, signal?: AbortSignal): Promi
     { ...(signal !== undefined && { signal }) },
   );
   return res.contact;
+}
+
+/** POST /api/contacts/:id/requirements/apply (spec 2026-10-20 D8) - copy the
+ *  landlord's listed requirement items onto the listed properties. At most 100
+ *  units per request (the dialog batches). The server answers 409
+ *  `requirements_changed` / `deposit_conflict` before writing anything; else
+ *  200 with the units it updated and the ones it skipped, and why. */
+export function applyLandlordRequirements(
+  contactId: string,
+  body: ApplyRequirementsBody,
+  signal?: AbortSignal,
+): Promise<ApplyRequirementsResult> {
+  return request<ApplyRequirementsResult>(
+    `/api/contacts/${encodeURIComponent(contactId)}/requirements/apply`,
+    { method: 'POST', body, ...(signal !== undefined && { signal }) },
+  );
 }
 
 /** GET /api/contacts/:id/timeline (C2) - the server-merged person-centric

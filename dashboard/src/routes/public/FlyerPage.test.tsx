@@ -490,6 +490,23 @@ describe('FlyerPage - D11 wording', () => {
     expect(detail('Application fee')).toBeNull();
   });
 
+  // Planner ruling PR-4 (code review PA-4): both amounts print through one
+  // formatter - a whole number exactly as before, any other amount with two
+  // decimals (the forms accept cents, D1).
+  // Plain its with template titles (note O-1 above).
+  const MONEY_CASES: Array<[string, Partial<PublicFlyer>, string]> = [
+    ['Deposit', { deposit: 1250.4 }, '$1250.40'],
+    ['Deposit', { deposit: 1250.4, deposit_flexible: true }, '$1250.40, flexible / payment plan available'],
+    ['Application fee', { application_fee: 37.5 }, '$37.50'],
+    ['Application fee', { application_fee: 40 }, '$40'],
+  ];
+  for (const [row, over, text] of MONEY_CASES) {
+    it(`${row} ${JSON.stringify(over)} reads "${text}" (cents print two decimals, a whole amount as before)`, async () => {
+      await renderFlyer(over);
+      expect(detail(row)).toBe(text);
+    });
+  }
+
   it.each<[PublicFlyer['washer_dryer'], string]>([
     ['hookups', 'Hookups'],
     ['included', 'Washer and dryer included'],

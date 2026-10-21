@@ -139,6 +139,13 @@ function petsLabel(flyer: Pick<PublicFlyer, 'no_pets' | 'pets'>): string | null 
   return details;
 }
 
+/** The deposit and application-fee amounts (planner ruling PR-4, code review
+ *  PA-4): a whole number exactly as before ("$1500"), any other amount with
+ *  two decimals ("$1250.40", "$37.50") - the forms accept cents (D1). */
+function flyerMoney(amount: number): string {
+  return Number.isInteger(amount) ? `$${amount}` : `$${amount.toFixed(2)}`;
+}
+
 /** D11: "One month's rent" or "$N", then ", flexible / payment plan
  *  available" when flexible; flexible alone reads "Flexible / payment plan
  *  available". Null when none of the three is recorded (the deposit notes are
@@ -146,7 +153,7 @@ function petsLabel(flyer: Pick<PublicFlyer, 'no_pets' | 'pets'>): string | null 
 function depositLabel(
   flyer: Pick<PublicFlyer, 'deposit_one_month' | 'deposit' | 'deposit_flexible'>,
 ): string | null {
-  const base = flyer.deposit_one_month ? "One month's rent" : flyer.deposit !== null ? `$${flyer.deposit}` : null;
+  const base = flyer.deposit_one_month ? "One month's rent" : flyer.deposit !== null ? flyerMoney(flyer.deposit) : null;
   if (!flyer.deposit_flexible) return base;
   return base !== null ? `${base}, flexible / payment plan available` : 'Flexible / payment plan available';
 }
@@ -154,7 +161,7 @@ function depositLabel(
 /** D11: "No application fee" for 0, "$N" otherwise; null when not recorded. */
 function applicationFeeLabel(fee: number | null): string | null {
   if (fee === null) return null;
-  return fee === 0 ? 'No application fee' : `$${fee}`;
+  return fee === 0 ? 'No application fee' : flyerMoney(fee);
 }
 
 export function FlyerPage(): React.JSX.Element {

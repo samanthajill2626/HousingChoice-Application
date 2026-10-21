@@ -487,15 +487,20 @@ describe('ApplyRequirementsDialog - a landlord deposit holding both forms (code 
     expect(depositBox(copy)).toHaveAccessibleDescription("One month's rent; $1,400");
     await user.click(screen.getByRole('button', { name: 'Update 150 properties' }));
     // The notice role the dialog's other notices use.
-    expect(await screen.findByText(DEPOSIT_CONFLICT)).toHaveAttribute('role', 'alert');
+    expect((await screen.findByText(DEPOSIT_CONFLICT)).closest('[role="alert"]')).not.toBeNull();
     expect(screen.queryByText("Couldn't update the properties. Review the list and press Update again.")).toBeNull();
+    // Code review R2D-3: on the FIRST batch nothing landed - the deposit sentence alone.
+    expect(screen.queryByText(/before this stopped/)).toBeNull();
     await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
     expect(getAllUnits).toHaveBeenCalledTimes(2);
     expect(applyLandlordRequirements).toHaveBeenCalledTimes(1); // the second batch is never sent
     expect(onDone).not.toHaveBeenCalled();
   });
 
-  it('a later batch answering 409 deposit_conflict says the same, sends no further batch and re-reads', async () => {
+  // Code review R2D-3: a LATER batch keeps D8's stop sentence - the first
+  // batch really wrote 100 properties - and adds the deposit sentence after
+  // it, in the same alert.
+  it('a later batch answering 409 deposit_conflict says how many landed, then what to fix; sends no further batch and re-reads', async () => {
     const user = userEvent.setup();
     const units = many(250);
     // The landlord gained the second form between the open and the second batch.
@@ -507,8 +512,13 @@ describe('ApplyRequirementsDialog - a landlord deposit holding both forms (code 
     const { onDone } = renderDialog();
     await columns();
     await user.click(screen.getByRole('button', { name: 'Update 250 properties' }));
-    expect(await screen.findByText(DEPOSIT_CONFLICT)).toHaveAttribute('role', 'alert');
-    expect(screen.queryByText(/before this stopped/)).toBeNull();
+    const deposit = await screen.findByText(DEPOSIT_CONFLICT);
+    const stopped = screen.getByText('Updated 100 properties before this stopped. Review the rest and press Update again.');
+    const alert = deposit.closest('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(stopped.closest('[role="alert"]')).toBe(alert);
+    // The stop sentence first, then the deposit sentence.
+    expect(stopped.compareDocumentPosition(deposit) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await waitFor(() => expect(getContact).toHaveBeenCalledTimes(2));
     expect(getAllUnits).toHaveBeenCalledTimes(2);
     expect(applyLandlordRequirements).toHaveBeenCalledTimes(2); // no third batch

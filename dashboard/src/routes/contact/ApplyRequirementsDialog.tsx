@@ -17,7 +17,8 @@
 // for another look; a LATER one that answers 409 or fails stops the run,
 // re-reads and says how many landed. ANY request answering 409
 // deposit_conflict (the landlord holds both deposit forms) stops the run,
-// re-reads and says what to fix (worklist OR-31). When every batch lands the
+// re-reads and says what to fix (worklist OR-31) - on a later batch after
+// saying how many landed (code review R2D-3). When every batch lands the
 // page gets the summary (onDone) and closes the dialog.
 //
 // Worklist OR-17: the re-read after a STOPPED run, or after a first request
@@ -116,7 +117,9 @@ export function ApplyRequirementsDialog({
   const [loadNonce, setLoadNonce] = useState(0);
   const [checkedItems, setCheckedItems] = useState<ReadonlySet<RequirementItemId>>(() => new Set());
   const [hand, setHand] = useState<HandChoices>(() => new Map());
-  const [notice, setNotice] = useState<string | null>(null);
+  // The notice above the columns, one sentence per entry ([] = none): a LATER
+  // batch's deposit_conflict says how many landed, then what to fix (R2D-3).
+  const [notice, setNotice] = useState<readonly string[]>([]);
   const [sending, setSending] = useState(false);
 
   // The latest callbacks (the Modal.tsx onCloseRef precedent): the read effect
@@ -215,7 +218,7 @@ export function ApplyRequirementsDialog({
     const items = orderedItems(checkedItems);
     const results: ApplyRequirementsResult[] = [];
     setSending(true);
-    setNotice(null);
+    setNotice([]);
     attemptedRef.current = true;
     // By design (code review RD-10): an Update, once sent, is not cancelled by
     // leaving the page. Cancel is disabled while sending, and an unmount
@@ -232,20 +235,24 @@ export function ApplyRequirementsDialog({
         // OR-17 + OR-32: the same Apply goes on - the next read keeps what
         // staff chose, on both sides.
         const goesOn: ApplyCarry = { checkedItems, hand };
+        // D8: a LATER batch says how many properties the batches before it
+        // updated.
+        const stopped = index > 0 ? [stoppedNotice(summarizeApply(results, units).updated)] : [];
         if (err instanceof ApiError && err.status === 409 && err.code === 'deposit_conflict') {
           // OR-31: on ANY batch - the landlord holds both deposit forms, so
           // the next batch (and pressing Update alone) would be refused the
-          // same way. Say what to fix; the re-read shows both forms.
-          setNotice(DEPOSIT_CONFLICT_NOTICE);
+          // same way. Say what to fix; the re-read shows both forms. Code
+          // review R2D-3: on a later batch D8's stop sentence comes first.
+          setNotice([...stopped, DEPOSIT_CONFLICT_NOTICE]);
           carryRef.current = goesOn;
         } else if (index > 0) {
-          setNotice(stoppedNotice(summarizeApply(results, units).updated));
+          setNotice(stopped);
           carryRef.current = goesOn;
         } else if (err instanceof ApiError && err.status === 409 && err.code === 'requirements_changed') {
-          setNotice(REQUIREMENTS_CHANGED_NOTICE);
+          setNotice([REQUIREMENTS_CHANGED_NOTICE]);
           carryRef.current = null; // the landlord changed: start from its defaults
         } else {
-          setNotice(APPLY_FAILED_NOTICE);
+          setNotice([APPLY_FAILED_NOTICE]);
           carryRef.current = goesOn;
         }
         reload();
@@ -281,10 +288,12 @@ export function ApplyRequirementsDialog({
         </>
       }
     >
-      {notice !== null ? (
-        <p role="alert" className={styles.notice}>
-          {notice}
-        </p>
+      {notice.length > 0 ? (
+        <div role="alert" className={styles.notice}>
+          {notice.map((sentence) => (
+            <p key={sentence}>{sentence}</p>
+          ))}
+        </div>
       ) : null}
       {load.phase === 'loading' ? (
         <p className={styles.muted}>Loading...</p>

@@ -12,6 +12,16 @@
   font-size: var(--fs-sm);
 }
 
+/* One sentence per paragraph: a later batch's deposit_conflict shows the stop
+ * sentence, then the deposit sentence (code review R2D-3). */
+.notice p {
+  margin: 0;
+}
+
+.notice p + p {
+  margin-top: var(--sp-1);
+}
+
 .muted {
   margin: 0;
   font-size: var(--fs-sm);

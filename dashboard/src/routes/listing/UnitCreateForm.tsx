@@ -19,7 +19,8 @@
 // Only non-blank requirement fields are sent: a key left out counts as blank
 // against the snapshot (plan 2.4), so a pre-filled field staff cleared still
 // classifies as set on this property. A failed read sends no snapshot, so only
-// what staff typed is recorded.
+// what staff typed is recorded; Try again then fills in only the items staff
+// left blank (code review R2D-7).
 import { useEffect, useId, useRef, useState } from 'react';
 import {
   createUnit,
@@ -51,6 +52,7 @@ import { FlyerLegend, FlyerTag } from './FlyerTag.js';
 import {
   buildRequirementCreateFields,
   emptyRequirementFormValues,
+  fillBlankRequirementItems,
   formFieldVisibility,
   requirementFormValuesFromLandlord,
   requirementsSnapshotOf,
@@ -230,7 +232,13 @@ export function UnitCreateForm({
         if (ac.signal.aborted) return;
         const fill = fillFromLandlord(c);
         setLockedLandlordLabel(fill.filled.name);
-        setRequirements(fill.values);
+        // Code review R2D-7: only what staff left blank is filled in - after a
+        // failed read the fields stayed usable, and Try again must not replace
+        // what was typed (D7 replaces typed values only for a DIFFERENT
+        // landlord pick). On the first read everything is blank, so the
+        // section is the landlord's values. The snapshot stays the landlord's
+        // values either way (D5).
+        setRequirements((typed) => fillBlankRequirementItems(typed, fill.values));
         setFilled(fill.filled);
         setLandlordRead('done');
       } catch {

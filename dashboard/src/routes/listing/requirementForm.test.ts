@@ -5,6 +5,7 @@ import {
   buildRequirementCreateFields,
   buildRequirementPatch,
   emptyRequirementFormValues,
+  fillBlankRequirementItems,
   formFieldVisibility,
   isNoApplicationFee,
   noApplicationFeeChecked,
@@ -235,6 +236,66 @@ describe('buildRequirementCreateFields (the New form, D5)', () => {
   it('refuses a bad amount', () => {
     const v: RequirementFormValues = { ...emptyRequirementFormValues(), application_fee: '-1' };
     expect(buildRequirementCreateFields(v)).toEqual({ ok: false, error: 'Application fee must be a number 0 or greater.' });
+  });
+});
+
+// Code review R2D-7 (spec D7): Try again after a failed read of the locked
+// landlord fills in only what staff left blank - D7 replaces typed values only
+// for a DIFFERENT landlord pick. An item is filled only when every field of it
+// is blank (D1: an item is copied whole, so a filled checkbox never
+// contradicts a typed detail or amount).
+describe('fillBlankRequirementItems (the New form Try again, R2D-7)', () => {
+  const landlord = requirementFormValuesFromLandlord({
+    req_credit_requirements: '600+',
+    req_income_requirements: '3x rent',
+    req_no_pets: true,
+    req_pets: 'Service animals only',
+    req_deposit_one_month: true,
+    req_application_fee: 0,
+    req_tour_type: 'landlord_led',
+  });
+  const blank = emptyRequirementFormValues();
+
+  it('an all-blank section takes every landlord value', () => {
+    const filled = fillBlankRequirementItems(blank, landlord);
+    expect(filled).toMatchObject(landlord);
+    expect(noApplicationFeeChecked(filled)).toBe(true);
+  });
+
+  it('keeps every item staff typed into; fills the blank ones', () => {
+    const typed = { ...blank, credit_requirements: '650 minimum', tour_process: 'Call first' };
+    const filled = fillBlankRequirementItems(typed, landlord);
+    expect(filled['credit_requirements']).toBe('650 minimum');
+    // Touring was typed into (the process), so its tour type is not filled either.
+    expect(filled['tour_process']).toBe('Call first');
+    expect(filled['tour_type']).toBe('');
+    // Blank items are filled.
+    expect(filled['income_requirements']).toBe('3x rent');
+    expect(filled).toMatchObject({ no_pets: true, pets: 'Service animals only' });
+  });
+
+  it('never fills part of an item: a typed fixed amount keeps One month\'s rent unticked (no deposit conflict)', () => {
+    const filled = fillBlankRequirementItems({ ...blank, deposit: '1400' }, landlord);
+    expect(filled).toMatchObject({ deposit: '1400', deposit_one_month: false });
+  });
+
+  it('a ticked box or a ticked No application fee counts as typed; whitespace alone is blank', () => {
+    const filled = fillBlankRequirementItems(
+      { ...blank, no_pets: true, credit_requirements: '   ', application_fee: '', [NO_APPLICATION_FEE_FLAG]: true },
+      { ...landlord, application_fee: '35' },
+    );
+    expect(filled).toMatchObject({ no_pets: true, pets: '' });
+    expect(filled['credit_requirements']).toBe('600+');
+    expect(noApplicationFeeChecked(filled)).toBe(true);
+    expect(filled['application_fee']).toBe('');
+  });
+
+  it('a blank fee takes the landlord fee and its No application fee state', () => {
+    const typedThenCleared = { ...blank, application_fee: '', [NO_APPLICATION_FEE_FLAG]: false };
+    expect(noApplicationFeeChecked(fillBlankRequirementItems(typedThenCleared, landlord))).toBe(true);
+    const thirtyFive = fillBlankRequirementItems(typedThenCleared, { ...landlord, application_fee: '35' });
+    expect(thirtyFive['application_fee']).toBe('35');
+    expect(noApplicationFeeChecked(thirtyFive)).toBe(false);
   });
 });
 

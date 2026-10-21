@@ -157,6 +157,37 @@ export function buildRequirementCreateFields(
   return { ok: true, fields };
 }
 
+/** A field staff left blank: an unticked box, or text that is empty or only
+ *  whitespace - and for the application fee, "No application fee" unticked
+ *  too (R2D-5). */
+function fieldIsBlank(values: RequirementFormValues, f: RequirementField): boolean {
+  if (f.kind === 'checkbox') return values[f.key] !== true;
+  if (f.key === 'application_fee' && noApplicationFeeChecked(values)) return false;
+  return asText(values[f.key]).trim() === '';
+}
+
+/** Code review R2D-7 (spec D7): the New form's read of the locked landlord,
+ *  above all on Try again after a failed read - the fields stayed usable, so
+ *  staff may have typed into them. D7 replaces typed values only for a
+ *  DIFFERENT landlord pick: this fills in only what staff left blank. An ITEM
+ *  is filled from the landlord only when every one of its fields is blank in
+ *  `current` (D1: an item is copied whole, so a filled checkbox never
+ *  contradicts a typed detail or amount - e.g. One month's rent beside a typed
+ *  fixed amount); every item staff typed into keeps what they typed. On the
+ *  first read every item is blank, so the section is the landlord's values. */
+export function fillBlankRequirementItems(
+  current: RequirementFormValues,
+  landlord: RequirementFormValues,
+): RequirementFormValues {
+  const out: RequirementFormValues = { ...current };
+  for (const item of REQUIREMENT_ITEMS) {
+    if (!item.fields.every((f) => fieldIsBlank(current, f))) continue;
+    for (const f of item.fields) out[f.key] = landlord[f.key] ?? (f.kind === 'checkbox' ? false : '');
+    if (item.id === 'application_fee') out[NO_APPLICATION_FEE_FLAG] = noApplicationFeeChecked(landlord);
+  }
+  return out;
+}
+
 /** D5 / D7: the landlord's values the New form filled in - every item, every
  *  key, null for blank - naming the landlord they came from. */
 export function requirementsSnapshotOf(contact: Contact): RequirementsSnapshotWire {

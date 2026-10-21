@@ -698,6 +698,64 @@ describe("UnitCreateForm - the landlord's requirements (spec 2026-10-20 D7)", ()
     expect(sentBody()['requirements_snapshot']).toEqual(ROSA_SNAPSHOT);
   });
 
+  // Code review R2D-7: after a failed read the fields stay usable (D7), and
+  // Try again used to REPLACE whatever staff typed there, unseen (the section
+  // is hidden while the read runs). D7 replaces typed values only for a
+  // DIFFERENT landlord pick: a retry fills in only what staff left blank, and
+  // the snapshot is still the landlord's values (D5).
+  it('Try again fills in only what staff left blank; what they typed stays, and Create still sends the landlord snapshot', async () => {
+    const user = userEvent.setup();
+    getContact.mockRejectedValueOnce(new ApiError(503, 'unavailable', 'unavailable'));
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByText(FAILED);
+    await user.type(screen.getByLabelText('Credit score'), '650 minimum');
+    await user.type(screen.getByLabelText('Income requirements'), '2x rent');
+    getContact.mockResolvedValueOnce(ROSA_WITH_REQS);
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(FILLED)).toBeInTheDocument();
+    expect(screen.getByLabelText('Credit score')).toHaveValue('650 minimum');
+    expect(screen.getByLabelText('Income requirements')).toHaveValue('2x rent');
+    // Fields staff left blank are filled in from the landlord.
+    expect(screen.getByLabelText('No pets')).toBeChecked();
+    expect(screen.getByLabelText('Pets (details)')).toHaveValue('Service animals only');
+    expect(screen.getByLabelText('No application fee')).toBeChecked();
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()).toEqual({
+      landlordId: 'contact-landlord-0001',
+      credit_requirements: '650 minimum',
+      income_requirements: '2x rent',
+      no_pets: true,
+      pets: 'Service animals only',
+      pet_fee: '$300',
+      deposit_one_month: true,
+      application_fee: 0,
+      tour_type: 'landlord_led',
+      tour_process: 'Call the office first.',
+      requirements_snapshot: ROSA_SNAPSHOT,
+    });
+  });
+
+  it("Try again never fills part of an item staff typed into: a typed fixed amount keeps One month's rent unticked", async () => {
+    const user = userEvent.setup();
+    getContact.mockRejectedValueOnce(new ApiError(503, 'unavailable', 'unavailable'));
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+    await screen.findByText(FAILED);
+    await user.type(screen.getByLabelText('Fixed amount'), '1400');
+    getContact.mockResolvedValueOnce(ROSA_WITH_REQS);
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(FILLED)).toBeInTheDocument();
+    expect(screen.getByLabelText('Fixed amount')).toHaveValue(1400);
+    expect(screen.getByLabelText('Fixed amount')).toBeEnabled();
+    expect(screen.getByLabelText("One month's rent")).not.toBeChecked();
+    await user.click(create());
+    await waitFor(() => expect(createUnit).toHaveBeenCalledTimes(1));
+    expect(sentBody()).toMatchObject({ deposit: 1400, requirements_snapshot: ROSA_SNAPSHOT });
+    expect(sentBody()).not.toHaveProperty('deposit_one_month');
+  });
+
   // Code review R2D-6 (the RD-7 pattern): the loading and failure lines are
   // ONE live region mounted from the first render, whose TEXT changes - a
   // region inserted already filled may not be announced, and the failure

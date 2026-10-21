@@ -9,21 +9,24 @@ deployed.
 
 - Phase: PLAN DRAFTING (compaction gate A done 2026-10-21 17:22, 595k -> 28k).
   Spec rev 6 @5944de7e is approved.
-- Plan sections 0-4 (binding: rules, copy, interfaces, slices, invariants,
-  AR1-AR3) committed @7ac1f2e3 in
-  `docs/superpowers/plans/2026-10-21-flyer-leads-plan.md`.
-- In flight: six opus drafting agents (S1 app projection/tags/subzone, S2
-  dashboard flyer page/tags, S3 ledger/outcome, S4 sign-up route, S5 dashboard
-  renderers, S6 e2e/docs/gates). They write
-  `.superpowers/sdd/plan-drafts/S<n>.md` only.
-- NEXT STEP: when all six are in, rule on their CONTRACT ISSUES (add AR4+ to
-  plan section 4) and check the cross-slice names (S2/S5 accessible names vs
-  S6 selectors; S3 names vs S4). Then assemble the drafts verbatim as plan
-  sections 5-10, commit, and run the adversarial PLAN review (2 opus
-  reviewers in R1, then the continued one, cap 4). Then the mission block,
-  the launch gate (AUTO / MANUAL / Revise), and compaction gate B.
-- If this planner died: the drafting agents' results are lost with it, but
-  the drafts on disk survive. Re-dispatch only the missing slices.
+- Plan v1 committed @d5684bbe: sections 0-4 binding (AR1-AR10), six slice
+  drafts assembled as sections 5-10 (S1 2 tasks, S2 6, S3 4, S4 5, S5 3, S6 5).
+- In flight: plan review round 1, two opus reviewers, writing
+  `plan-review/R1-reviewer-a.md` and `-b.md`. The live agent ids (drafters and
+  reviewers) are in `.superpowers/sdd/agents.md`.
+- NEXT STEP: adjudicate R1 into `plan-review/adjudications.md`; send each
+  slice's accepted fixes to its drafter (it edits only its draft); re-assemble
+  with `node .superpowers/sdd/assemble-plan.cjs <plan> .superpowers/sdd/plan-drafts`;
+  commit; continue the stronger reviewer for R2 with the RE-REVIEW CHARGE
+  (cap 4). Then the mission block, the launch gate (AUTO / MANUAL / Revise),
+  and compaction gate B.
+- OPEN FOR CAMERON at the launch gate (AR5): the property save stores plain
+  text fields untrimmed (area, utilities, accessibility, lease_terms, notes,
+  listing_link, video_url, application_process, priority; the Edit form sends
+  several raw). Fix in this mission, or file an issue? Planner's
+  recommendation: fix it here as one small S1 task (trim in the validator,
+  so every save path is covered), since it is his standing rule and these
+  are the fields this mission re-tags.
 - Gate answers in rev 6:
   - O1 closed: the decline writers stamp `shares_op`;
   - the repeat limit is per contact per PROPERTY per 24 hours, with /join and

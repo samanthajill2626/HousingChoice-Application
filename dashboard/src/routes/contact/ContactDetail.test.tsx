@@ -3264,7 +3264,8 @@ describe('ContactDetail - Apply to properties across a contact change (worklist 
     await waitFor(() => expect(within(requirementsCard()).getByRole('status')).toHaveTextContent('Updated 1 property'));
 
     await leaveAndComeBack(user);
-    expect(within(requirementsCard()).queryByRole('status')).toBeNull();
+    // The card's status region stays mounted (code review RD-7), empty.
+    expect(within(requirementsCard()).getByRole('status')).toBeEmptyDOMElement();
     expect(screen.queryByText(/^Updated \d/)).toBeNull();
   });
 });

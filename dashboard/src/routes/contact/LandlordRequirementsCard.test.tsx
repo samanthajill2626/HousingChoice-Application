@@ -86,4 +86,20 @@ describe('LandlordRequirementsCard', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Updated 1 property');
     expect(screen.queryByText(/skipped/)).toBeNull();
   });
+
+  // Code review RD-7: a live region inserted already filled may not be
+  // announced, so the card keeps ONE status region mounted, empty until an
+  // Apply finishes, and the result is written into that same element.
+  it('the result goes into a status region that was already mounted, empty', () => {
+    const { rerender } = render(<LandlordRequirementsCard contact={LANDLORD} hasProperties notice={null} />);
+    const region = screen.getByRole('status');
+    expect(region).toBeEmptyDOMElement();
+    rerender(<LandlordRequirementsCard contact={LANDLORD} hasProperties notice={{ updated: 2, skipped: [] }} />);
+    expect(screen.getByRole('status')).toBe(region);
+    expect(region).toHaveTextContent('Updated 2 properties');
+    // Cleared again (the next Apply opens): the same region, empty.
+    rerender(<LandlordRequirementsCard contact={LANDLORD} hasProperties notice={null} />);
+    expect(screen.getByRole('status')).toBe(region);
+    expect(region).toBeEmptyDOMElement();
+  });
 });

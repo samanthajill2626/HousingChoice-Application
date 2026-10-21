@@ -61,21 +61,26 @@ export function LandlordRequirementsCard({
           {APPLY_NO_PROPERTIES_REASON}
         </p>
       ) : null}
-      {notice !== undefined && notice !== null ? (
-        <div role="status" className={styles.notice}>
-          <p className={styles.noticeLine}>{doneHeadline(notice.updated)}</p>
-          {notice.skipped.length > 0 ? (
-            <>
-              <p className={styles.noticeLine}>{`${notice.skipped.length} skipped`}</p>
-              <ul className={styles.skipped}>
-                {notice.skipped.map((s) => (
-                  <li key={s.unitId}>{`${s.address} - ${s.reason}`}</li>
-                ))}
-              </ul>
-            </>
-          ) : null}
-        </div>
-      ) : null}
+      {/* Code review RD-7: ONE live region, always mounted and empty until an
+          Apply finishes - a region inserted already filled may not be
+          announced - so the result is a change to a region that exists. */}
+      <div role="status">
+        {notice !== undefined && notice !== null ? (
+          <div className={styles.notice}>
+            <p className={styles.noticeLine}>{doneHeadline(notice.updated)}</p>
+            {notice.skipped.length > 0 ? (
+              <>
+                <p className={styles.noticeLine}>{`${notice.skipped.length} skipped`}</p>
+                <ul className={styles.skipped}>
+                  {notice.skipped.map((s) => (
+                    <li key={s.unitId}>{`${s.address} - ${s.reason}`}</li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
       {requirementItemsByGroup().map(({ group, items }) => (
         <div key={group} className={styles.group}>
           <h4 className={styles.groupHeading}>{group}</h4>

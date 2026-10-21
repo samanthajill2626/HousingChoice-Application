@@ -24,6 +24,10 @@
 //
 // Row keys, SIDs and broadcast ids are unique per case: the tables are
 // created once per file and never reset.
+//
+// flyer-leads D6 adds the activity-events fake's hasEventSince (the public
+// sign-up's repeat check): the window edge, the type filter, ref vs no ref
+// and the contact partition, script against script.
 import { randomUUID } from 'node:crypto';
 import { PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -32,6 +36,11 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
+import {
+  createActivityEventsRepo,
+  type ActivityEventsRepo,
+  type ActivityEventType,
+} from '../src/repos/activityEventsRepo.js';
 import {
   createBroadcastsRepo,
   type AttemptOutcomeExpect,
@@ -1111,6 +1120,102 @@ const LS_CASES: LsCase[] = [
   },
 ];
 
+// ===========================================================================
+// activityEventsRepo (flyer-leads D6): hasEventSince, the public sign-up's
+// repeat check - the window edge, the type filter, ref vs no ref, the
+// contact partition
+// ===========================================================================
+
+interface AeCtx {
+  id: string;
+}
+
+interface AeStep {
+  label: string;
+  run: (repo: ActivityEventsRepo, ctx: AeCtx) => Promise<unknown>;
+  /** What the REAL answer must be (toBe for a primitive). */
+  expect?: unknown;
+}
+
+interface AeCase {
+  name: string;
+  steps: AeStep[];
+}
+
+const aeContact = (ctx: AeCtx, name: string): string => `c-${ctx.id}-${name}`;
+const AE_T0 = '2026-10-21T12:00:00.000Z';
+const AE_BEFORE = '2026-10-21T11:59:59.999Z';
+const AE_AFTER = '2026-10-21T12:00:00.001Z';
+
+/** record() at a fixed instant; answers the stored item minus its random id and wall clock. */
+const aeRecord = (contact: string, type: ActivityEventType, at: string, refId?: string): AeStep => ({
+  label: `record ${contact} ${type} at=${at} ref=${refId ?? '(none)'}`,
+  run: async (repo, ctx) => {
+    const item = await repo.record({
+      contactId: aeContact(ctx, contact),
+      type,
+      label: 'Signed up on the join page as Parity Probe',
+      at,
+      ...(refId !== undefined && { refType: 'unit' as const, refId }),
+    });
+    return {
+      contactId: item.contactId,
+      type: item.type,
+      at: item.at,
+      refType: item.refType,
+      refId: item.refId,
+      keyedAt: item.tsEventId.startsWith(`${at}#`),
+    };
+  },
+});
+
+const aeSince = (contact: string, type: ActivityEventType, sinceIso: string, refId: string | undefined, expected: boolean): AeStep => ({
+  label: `hasEventSince ${contact} ${type} since=${sinceIso} ref=${refId ?? '(none)'}`,
+  run: async (repo, ctx) => repo.hasEventSince(aeContact(ctx, contact), type, sinceIso, refId),
+  expect: expected,
+});
+
+const AE_CASES: AeCase[] = [
+  {
+    name: 'hasEventSince: the window edge - an event AT sinceIso counts, one a millisecond before it does not',
+    steps: [
+      aeSince('a', 'signed_up', AE_BEFORE, 'unit-1', false),
+      aeRecord('a', 'signed_up', AE_T0, 'unit-1'),
+      aeSince('a', 'signed_up', AE_BEFORE, 'unit-1', true),
+      aeSince('a', 'signed_up', AE_T0, 'unit-1', true),
+      aeSince('a', 'signed_up', AE_AFTER, 'unit-1', false),
+    ],
+  },
+  {
+    name: 'hasEventSince: the type filter - another milestone type on the same ref never counts',
+    steps: [
+      aeRecord('a', 'listing_sent', AE_T0, 'unit-1'),
+      aeSince('a', 'signed_up', AE_BEFORE, 'unit-1', false),
+      aeSince('a', 'listing_sent', AE_BEFORE, 'unit-1', true),
+    ],
+  },
+  {
+    name: 'hasEventSince: ref vs no ref - undefined matches only an event with NO refId, a refId only its own',
+    steps: [
+      aeRecord('a', 'signed_up', AE_T0, 'unit-2'),
+      aeSince('a', 'signed_up', AE_BEFORE, undefined, false),
+      aeSince('a', 'signed_up', AE_BEFORE, 'unit-1', false),
+      aeSince('a', 'signed_up', AE_BEFORE, 'unit-2', true),
+      aeRecord('a', 'signed_up', AE_T0),
+      aeSince('a', 'signed_up', AE_BEFORE, undefined, true),
+      aeSince('a', 'signed_up', AE_BEFORE, 'unit-1', false),
+    ],
+  },
+  {
+    name: 'hasEventSince: the contact partition - another contact event never counts',
+    steps: [
+      aeRecord('a', 'signed_up', AE_T0, 'unit-1'),
+      aeSince('b', 'signed_up', AE_BEFORE, 'unit-1', false),
+      aeSince('a', 'signed_up', AE_BEFORE, 'unit-1', true),
+    ],
+  },
+];
+
 // ---- the harness -----------------------------------------------------------
 
 const client = createDynamoClient({ endpoint });
@@ -1120,6 +1225,7 @@ const logger = createLogger({ level: 'info', destination: createLogCapture().str
 const realMessages = createMessagesRepo({ doc, env: testEnv, logger });
 const realBroadcasts = createBroadcastsRepo({ doc, env: testEnv, logger });
 const realListingSends = createListingSendsRepo({ doc, env: testEnv, logger });
+const realActivityEvents = createActivityEventsRepo({ doc, env: testEnv, logger });
 
 /** share-sent-outcome T3: both implementations' watched ledger rows must agree after every step. */
 async function ledgerAgree(world: FakeWorld, ctx: LsCtx, watch: Array<[string, string]>, where: string): Promise<void> {
@@ -1238,13 +1344,13 @@ describe('the harness consistent twins delegate through the object property', ()
 
 describe.skipIf(!reachable)('the harness messages and broadcasts fakes mirror the real repos on the SOR additions (DynamoDB Local)', () => {
   beforeAll(async () => {
-    for (const base of ['messages', 'broadcasts', 'listing_sends'] as const) {
+    for (const base of ['messages', 'broadcasts', 'listing_sends', 'activity_events'] as const) {
       await ensureTable(client, getTableSpec(base), tableName(base, testEnv));
     }
   }, 120_000);
 
   afterAll(async () => {
-    for (const base of ['messages', 'broadcasts', 'listing_sends'] as const) {
+    for (const base of ['messages', 'broadcasts', 'listing_sends', 'activity_events'] as const) {
       await deleteTableIfExists(client, tableName(base, testEnv));
     }
     doc.destroy();
@@ -1299,6 +1405,22 @@ describe.skipIf(!reachable)('the harness messages and broadcasts fakes mirror th
           expect(fakeAnswer, `${where}: result`).toStrictEqual(realAnswer);
           expectScripted(realAnswer, step.expect, where);
           await ledgerAgree(world, ctx, c.watch, where);
+        }
+      }, 60_000);
+    }
+  });
+
+  describe('activityEventsRepo', () => {
+    for (const [caseNo, c] of AE_CASES.entries()) {
+      it(c.name, async () => {
+        const ctx: AeCtx = { id: `${caseNo}-${randomUUID().slice(0, 8)}` };
+        const world = createFakeWorld();
+        for (const [stepNo, step] of c.steps.entries()) {
+          const where = `${c.name} / step ${stepNo} ${step.label}`;
+          const realAnswer = await step.run(realActivityEvents, ctx);
+          const fakeAnswer = await step.run(world.activityEventsRepo, ctx);
+          expect(fakeAnswer, `${where}: result`).toStrictEqual(realAnswer);
+          expectScripted(realAnswer, step.expect, where);
         }
       }, 60_000);
     }

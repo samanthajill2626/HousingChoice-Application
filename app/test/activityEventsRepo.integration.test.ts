@@ -2,11 +2,15 @@
 // record() several milestones for a contact, listByContact() returns them
 // newest-first, the `before` bound paginates with no dups/skips, and events for
 // a different contact are fully isolated (the PK partition).
+// flyer-leads D6 adds hasEventSince, the public sign-up's repeat check: the
+// window edge, the type filter, ref vs no ref, the partition, paging to the
+// end of the window, and a throw on a DynamoDB error.
 //
 // Self-skipping like the other integration suites: when nothing answers at
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
 // `npm test` stays green without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
+import { QueryCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -147,5 +151,101 @@ describe.skipIf(!reachable)('activityEventsRepo against DynamoDB Local (throwawa
     expect(bPage.items).toHaveLength(2);
     expect(aPage.items.every((e) => e.contactId === a)).toBe(true);
     expect(bPage.items.every((e) => e.contactId === b)).toBe(true);
+  });
+
+  // flyer-leads D6: hasEventSince - one pin per contact per source per 24
+  // hours. sinceIso bounds the `<ISO at>#<eventId>` key EXCLUSIVELY, so an
+  // event AT sinceIso (its key extends the bound) is inside the window and
+  // one a millisecond before sinceIso is not.
+  describe('hasEventSince (flyer-leads D6)', () => {
+    const T0 = '2026-10-21T12:00:00.000Z';
+    const BEFORE = '2026-10-21T11:59:59.999Z';
+    const AFTER = '2026-10-21T12:00:00.001Z';
+    const newContact = (): string => `contact-${randomUUID().slice(0, 8)}`;
+
+    it('the window edge: an event AT sinceIso counts; one a millisecond before sinceIso does not', async () => {
+      const contactId = newContact();
+      expect(await repo.hasEventSince(contactId, 'signed_up', BEFORE, 'unit-1')).toBe(false);
+      await repo.record({
+        contactId,
+        type: 'signed_up',
+        label: 'Signed up from the flyer for 1 Main St as Ann Lee',
+        refType: 'unit',
+        refId: 'unit-1',
+        at: T0,
+      });
+      expect(await repo.hasEventSince(contactId, 'signed_up', BEFORE, 'unit-1')).toBe(true);
+      expect(await repo.hasEventSince(contactId, 'signed_up', T0, 'unit-1')).toBe(true);
+      expect(await repo.hasEventSince(contactId, 'signed_up', AFTER, 'unit-1')).toBe(false);
+    });
+
+    it('the type filter: another milestone type with the same ref never counts', async () => {
+      const contactId = newContact();
+      await repo.record({ contactId, type: 'listing_sent', label: 'Property sent', refType: 'unit', refId: 'unit-1', at: T0 });
+      expect(await repo.hasEventSince(contactId, 'signed_up', BEFORE, 'unit-1')).toBe(false);
+      expect(await repo.hasEventSince(contactId, 'listing_sent', BEFORE, 'unit-1')).toBe(true);
+    });
+
+    it('ref vs no ref: undefined matches only an event with NO refId; a refId matches only its own', async () => {
+      const contactId = newContact();
+      await repo.record({
+        contactId,
+        type: 'signed_up',
+        label: 'Signed up from the flyer for 2 Elm St as Ann Lee',
+        refType: 'unit',
+        refId: 'unit-2',
+        at: T0,
+      });
+      expect(await repo.hasEventSince(contactId, 'signed_up', BEFORE, undefined)).toBe(false);
+      expect(await repo.hasEventSince(contactId, 'signed_up', BEFORE, 'unit-1')).toBe(false);
+      expect(await repo.hasEventSince(contactId, 'signed_up', BEFORE, 'unit-2')).toBe(true);
+      await repo.record({ contactId, type: 'signed_up', label: 'Signed up on the join page as Ann Lee', at: T0 });
+      expect(await repo.hasEventSince(contactId, 'signed_up', BEFORE, undefined)).toBe(true);
+      expect(await repo.hasEventSince(contactId, 'signed_up', BEFORE, 'unit-1')).toBe(false);
+    });
+
+    it('the contact partition: another contact event never counts', async () => {
+      const a = newContact();
+      const b = newContact();
+      await repo.record({ contactId: a, type: 'signed_up', label: 'Signed up on the join page as Ann Lee', at: T0 });
+      expect(await repo.hasEventSince(b, 'signed_up', BEFORE, undefined)).toBe(false);
+      expect(await repo.hasEventSince(a, 'signed_up', BEFORE, undefined)).toBe(true);
+    });
+
+    it('pages to the END of the window: a match between filtered-out rows is found at one row per page', async () => {
+      const contactId = newContact();
+      const at = (second: number): string => `2026-10-21T12:00:0${second}.000Z`;
+      await repo.record({ contactId, type: 'listing_sent', label: 'Property sent', refType: 'unit', refId: 'unit-1', at: at(1) });
+      await repo.record({ contactId, type: 'stage_changed', label: 's', at: at(2) });
+      await repo.record({ contactId, type: 'signed_up', label: 'Signed up on the join page as Ann Lee', at: at(3) });
+      await repo.record({ contactId, type: 'listing_sent', label: 'Property sent', refType: 'unit', refId: 'unit-1', at: at(4) });
+      await repo.record({ contactId, type: 'stage_changed', label: 's', at: at(5) });
+      // Limit 1 on EVERY Query the repo sends: a read that stops after one
+      // page sees only the first (or, newest-first, the last) row - neither
+      // matches - and answers false. The match is the third row.
+      let queries = 0;
+      const onePerPageDoc = {
+        send: async (command: unknown) => {
+          if (command instanceof QueryCommand) {
+            queries += 1;
+            return doc.send(new QueryCommand({ ...command.input, Limit: 1 }));
+          }
+          return doc.send(command as never);
+        },
+      } as unknown as DynamoDBDocumentClient;
+      const pagingRepo = createActivityEventsRepo({ doc: onePerPageDoc, env: testEnv, logger });
+      expect(await pagingRepo.hasEventSince(contactId, 'signed_up', T0, undefined)).toBe(true);
+      expect(queries).toBeGreaterThanOrEqual(3);
+    });
+
+    it('throws on a DynamoDB error (the sign-up handler is the one that fails open)', async () => {
+      const failingDoc = {
+        send: async () => {
+          throw new Error('dynamo unavailable');
+        },
+      } as unknown as DynamoDBDocumentClient;
+      const failingRepo = createActivityEventsRepo({ doc: failingDoc, env: testEnv, logger });
+      await expect(failingRepo.hasEventSince('contact-x', 'signed_up', T0, undefined)).rejects.toThrow('dynamo unavailable');
+    });
   });
 });

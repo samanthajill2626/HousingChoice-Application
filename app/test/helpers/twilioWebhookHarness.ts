@@ -3588,6 +3588,21 @@ export function createFakeWorld(): FakeWorld {
         .map((e) => ({ ...e }));
       return { items };
     },
+    // flyer-leads D6: the repeat-check read, modelled on the real key-range
+    // Query - the event's SK strictly after sinceIso (so an event AT sinceIso
+    // counts: its `<at>#<eventId>` key extends the bound), its type, and its
+    // ref: refId undefined matches only an event with NO refId. The array is
+    // strongly consistent by construction, like the real read (AR12). Held to
+    // the real repo by twilioWebhookHarnessRepoAdditions.integration.test.ts.
+    async hasEventSince(contactId, type, sinceIso, refId) {
+      return activityEvents.some(
+        (e) =>
+          e.contactId === contactId &&
+          e.tsEventId > sinceIso &&
+          e.type === type &&
+          (refId === undefined ? e.refId === undefined : e.refId === refId),
+      );
+    },
   };
 
   // In-memory listing sends (BE4/C4): mirror the repo's contractual semantics -

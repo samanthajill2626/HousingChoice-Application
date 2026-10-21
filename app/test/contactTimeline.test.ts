@@ -2593,3 +2593,44 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(unitReadIds.filter((id) => id === 'u-pin7-a')).toHaveLength(1);
   });
 });
+
+describe('flyer-leads D6: a signed_up pin passes through the timeline', () => {
+  it('(PIN) keeps its label and its unit ref; a ref-less sign-up pin carries no ref', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-signup', type: 'tenant', status: 'searching', phone: '+15550109001' });
+    await world.activityEventsRepo.record({
+      contactId: 'c-signup',
+      type: 'signed_up',
+      label: 'Signed up from the flyer for 12 Oak St as Ann Lee',
+      refType: 'unit',
+      refId: 'unit-1',
+      at: '2026-10-21T12:00:00.000Z',
+    });
+    await world.activityEventsRepo.record({
+      contactId: 'c-signup',
+      type: 'signed_up',
+      label: 'Signed up on the join page as Ann Lee',
+      at: '2026-10-21T13:00:00.000Z',
+    });
+
+    const res = await request(app)
+      .get('/api/contacts/c-signup/timeline?kinds=milestone')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(200);
+    const pins = (res.body.items as Array<Record<string, unknown>>).filter((i) => i['type'] === 'signed_up');
+    expect(pins).toEqual([
+      expect.objectContaining({
+        kind: 'milestone',
+        at: '2026-10-21T12:00:00.000Z',
+        label: 'Signed up from the flyer for 12 Oak St as Ann Lee',
+        refType: 'unit',
+        refId: 'unit-1',
+      }),
+      expect.objectContaining({ kind: 'milestone', at: '2026-10-21T13:00:00.000Z', label: 'Signed up on the join page as Ann Lee' }),
+    ]);
+    expect(pins[1]).not.toHaveProperty('refType');
+    expect(pins[1]).not.toHaveProperty('refId');
+  });
+});

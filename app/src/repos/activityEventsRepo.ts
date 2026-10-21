@@ -16,11 +16,16 @@
 // Items stay flexible documents; only the two key attrs (contactId, tsEventId)
 // are contractual (lib/tables.ts).
 //
+// flyer-leads D6: hasEventSince is the public sign-up's repeat check - one
+// key-range Query on the contact's partition (`tsEventId > :since`), filtered
+// to one type and one ref (or no ref), walked to the end of the window.
+//
 // PII (doc §9): NEVER log the label (it can carry a name/tag) — IDs/type only.
 import { randomUUID } from 'node:crypto';
 import { PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
+import { queryAll } from '../lib/dynamoPaging.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
@@ -63,7 +68,13 @@ export type ActivityEventType =
   // by lib/listingOutcomeEvents.ts (refType 'unit', the CONTACT's feed only).
   | 'listing_declined'
   | 'listing_decline_cleared'
-  | 'listing_interested';
+  | 'listing_interested'
+  // flyer-leads D6: a public sign-up (the flyer's sign-up box or /join) by an
+  // existing or new contact, pinned in its thread. refType 'unit' + refId the
+  // unitId when the flyer's property was shareable; NO ref for /join and any
+  // other flyer - the one shared "no property" source of the 24-hour repeat
+  // check (hasEventSince).
+  | 'signed_up';
 
 /** What a milestone can deep-link out to (C2 `TimelineMilestone.refType`). */
 export type ActivityEventRefType = 'placement' | 'unit' | 'conversation' | 'broadcast' | 'tour';
@@ -122,6 +133,21 @@ export interface ActivityEventsRepo {
     contactId: string,
     opts?: ListByContactOptions,
   ): Promise<{ items: ActivityEventItem[] }>;
+  /**
+   * flyer-leads D6: whether the contact has an event of `type` recorded at or
+   * after `sinceIso` whose refId is `refId` (undefined = an event with NO
+   * refId). Query PK contactId, KeyCondition `tsEventId > :since` (sinceIso as
+   * the bound), FilterExpression on `#type = :type` and on the ref
+   * (`refId = :ref` or `attribute_not_exists(refId)`), `ConsistentRead: true`
+   * (AR12 - two quick sign-ups must see each other's pin), paginated to the end
+   * of the window (lib/dynamoPaging queryAll). Throws on a DynamoDB error.
+   */
+  hasEventSince(
+    contactId: string,
+    type: ActivityEventType,
+    sinceIso: string,
+    refId: string | undefined,
+  ): Promise<boolean>;
 }
 
 const DEFAULT_PAGE_LIMIT = 50;
@@ -179,6 +205,38 @@ export function createActivityEventsRepo(deps: RepoDeps = {}): ActivityEventsRep
         }),
       );
       return { items: (Items ?? []) as ActivityEventItem[] };
+    },
+
+    async hasEventSince(contactId, type, sinceIso, refId) {
+      // flyer-leads D6. The bare ISO bounds `<ISO at>#<eventId>` keys, so an
+      // event AT sinceIso is inside the window. A FilterExpression is applied
+      // after each page is read, so the walk follows the cursor to the end
+      // (queryAll) and never stops at an empty or filtered-out page. AR12:
+      // strongly consistent (a base-table Query allows it), so a second
+      // sign-up moments after the first sees the first one's pin. `type` is
+      // a DynamoDB reserved word, hence #type. PII (doc section 9): no label is
+      // read into a log line.
+      const items = await queryAll<ActivityEventItem>(
+        doc,
+        {
+          TableName: table,
+          ConsistentRead: true,
+          KeyConditionExpression: 'contactId = :c AND tsEventId > :since',
+          FilterExpression:
+            refId === undefined
+              ? '#type = :type AND attribute_not_exists(refId)'
+              : '#type = :type AND refId = :ref',
+          ExpressionAttributeNames: { '#type': 'type' },
+          ExpressionAttributeValues: {
+            ':c': contactId,
+            ':since': sinceIso,
+            ':type': type,
+            ...(refId !== undefined && { ':ref': refId }),
+          },
+        },
+        { logger: log },
+      );
+      return items.length > 0;
     },
   };
 }

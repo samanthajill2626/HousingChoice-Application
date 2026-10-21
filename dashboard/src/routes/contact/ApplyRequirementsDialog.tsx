@@ -205,6 +205,12 @@ export function ApplyRequirementsDialog({
     setSending(true);
     setNotice(null);
     attemptedRef.current = true;
+    // By design (code review RD-10): an Update, once sent, is not cancelled by
+    // leaving the page. Cancel is disabled while sending, and an unmount
+    // (browser Back / Forward) stops only the UI updates (liveRef) - the
+    // remaining batches still go out, one after another, for the landlord
+    // this run started on; the landlord page re-reads its properties when it
+    // is opened again. The requests carry no AbortSignal on purpose.
     for (const [index, batch] of chunk(checkedRows, APPLY_BATCH_SIZE).entries()) {
       try {
         results.push(await applyLandlordRequirements(contactId, applyRequestBody(batch, items, landlord)));

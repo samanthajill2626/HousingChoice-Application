@@ -57,3 +57,38 @@ Planner notes: no rejections this round. Both reviewers independently found
 M1/M2 (HIGH) and M4/M5/M6/M8/M10. M7 (shared phone holders) was reviewer A only;
 M14 and M17 were reviewer B only. Reviewer B landed more accepted findings
 (15 vs 14 merged), so B is continued for round 2.
+
+## Round 2 (2026-10-21) - reviewer B continued, re-review charge
+
+- Report: `R2-reviewer-b.md` (12 findings), run against rev 2 @bd73315c.
+- Claims checked in the code:
+  - `contactsRepo.ts:746-755,1279`: findAllByPhone EXCLUDES deleted holders;
+  - `Card.tsx:348`: the roster action gate is `no_reply` or `replied` only;
+  - `listingFormat.ts:338-354`: every other outcome files under Waiting;
+  - `sendMessage.ts:541-557` plus `dashboard/src/routes/contact/ConsentCaptureModal.tsx`:
+    the JIT gate has a dashboard capture prompt, so it is friction, not a dead end.
+
+Result: 12 findings, 12 ACCEPT, 0 REJECT. **Decisions changed: YES**, so round 3
+is required:
+- reverted rev 2's M7 (holder ranking) and M10 (consent stamp);
+- replaced first-sight with always-write;
+- added the roster actions and the Interested grouping for `signed_up`.
+
+| # | Sev (reviewer) | Ruling | What changed in rev 3 |
+|---|---|---|---|
+| R2-1 | HIGH | ACCEPT | findAllByPhone cannot see deleted holders, so the deleted path was unreachable. Rev 3 keeps `findByPhone`, which sees deleted holders, as the one lookup: live means existing, deleted means the deleted path (audit on that contact). M7's ranking is REVERSED. |
+| R2-2 | MEDIUM | ACCEPT | A ranked holder disagreed with the inbox, unread feed and send gates (all `findByPhone`). With `findByPhone` everywhere, they all judge one contact. Residual: on a shared phone the first index hit decides, the app-wide accepted risk at `contactsRepo.ts:1288`. |
+| R2-3 | MEDIUM | ACCEPT | A `signed_up` row lost its actions and filed under Waiting. Rev 3: it offers Interested / Request a tour / Not interested (the Card gate adds `signed_up`), and the property card files it under Interested. `listingFormat.ts` is added to section 4. |
+| R2-4 | MEDIUM | ACCEPT | A consent stamp without the welcome conflicts with the A2P design (stamp + welcome). M10 is REVERSED: no write to an existing contact. Staff's first manual text uses the existing `ConsentCaptureModal`. The audit keeps `consentVersion` as evidence. |
+| R2-5 | MEDIUM | ACCEPT | First-sight left already-sent pairs at "No reply yet" on Follow up. Rev 3 always writes the flyer entry (the newest counted entry wins): no reply / replied become `signed_up`, an older decline is superseded (newer interest; stated with the attacker residual), and a tour stays Interested. |
+| R2-6 | MEDIUM | ACCEPT (moot) | First-sight was unenforceable inside the token write. Removed with R2-5. |
+| R2-7 | LOW | ACCEPT | An `unknown` contact's entry is invisible on its own page; stated in Goal 4 and D7. |
+| R2-8 | LOW | ACCEPT (moot) | The guard for the consent stamp. The stamp was removed with R2-4. |
+| R2-9 | LOW | ACCEPT | The cap vs the second flyer, and attacker pre-emption. Both stated as residuals; the flyer entry is still written. |
+| R2-10 | LOW | ACCEPT | One `latestCountedShareKey` helper beside `summarize`; `deriveListingSendOutcome` takes `shares`. |
+| R2-11 | LOW | ACCEPT | The event is the touched image with the incremented count spliced in; a failed increment still emits the touched image. |
+| R2-12 | LOW | ACCEPT | Text gaps: the city line is not repeated, the deleted-path audit entity is named, and the first-sight read is gone. |
+
+Concession received: reviewer B withdrew its R1 #6 claim that only caseworker
+conversion re-types a thread (`contacts.ts:537-543,1658` also does). The
+`conversationTypeFor` fix stands.

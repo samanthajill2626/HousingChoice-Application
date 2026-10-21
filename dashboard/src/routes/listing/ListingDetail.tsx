@@ -1042,13 +1042,15 @@ export function ListingDetail(): React.JSX.Element {
             }
           >
             {/* D10: tour type and tour process moved to the Requirements card
-                (its Touring item); this card keeps the application process. */}
+                (its Touring item); this card keeps the application process,
+                so its empty state names that process only (code review
+                RD-5) - a tour process may well be recorded. */}
             {unit.application_process ? (
               <div className={styles.process}>
                 <p>{unit.application_process}</p>
               </div>
             ) : (
-              <EmptyRow>No process recorded yet.</EmptyRow>
+              <EmptyRow>No application process recorded yet.</EmptyRow>
             )}
           </Card>
 

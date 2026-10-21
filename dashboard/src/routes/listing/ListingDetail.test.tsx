@@ -341,9 +341,14 @@ describe('ListingDetail', () => {
   });
 
   it('the tour card shows its empty state when no application process is recorded', () => {
+    // READY.unit records a tour process: it lives under Requirements > Touring
+    // now (D10), so the empty state names the APPLICATION process only (code
+    // review RD-5) and never says no process is recorded at all.
     useListing.mockReturnValue({ ...READY, unit: { ...READY.unit!, application_process: undefined } });
     renderAt();
-    expect(within(cardTitled(/^Tour & application process/)).getByText('No process recorded yet.')).toBeInTheDocument();
+    const process = cardTitled(/^Tour & application process/);
+    expect(within(process).getByText('No application process recorded yet.')).toBeInTheDocument();
+    expect(within(process).queryByText('No process recorded yet.')).toBeNull();
   });
 
   it('renders the Notes card: property notes when present, an empty state with "+ Add" otherwise', () => {

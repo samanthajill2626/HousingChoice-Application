@@ -195,6 +195,16 @@ export default defineConfig({
       // it and becomes the owner. Without this the session would refuse its own
       // parent's lease and no `npm run e2e` would boot.
       ...(laneJson.ownerToken ? { E2E_LANE_TOKEN: laneJson.ownerToken } : {}),
+      // A stack Playwright boots itself (the `npm run e2e` gate) serves a
+      // production BUILD of the dashboard via `vite preview`, not the dev
+      // server: no HMR socket per page load and a few bundled assets instead of
+      // hundreds of modules, and a faster gate - but NOT fewer TIME_WAIT
+      // sockets (see the launcher's comment on E2E_DASHBOARD_SERVE for the
+      // measured trade). `npm run e2e:session` does not pass through here
+      // and keeps the dev server; a run that REUSES a live session uses
+      // whatever that session serves. E2E_DASHBOARD_SERVE=dev forces the dev
+      // server for a gate run.
+      E2E_DASHBOARD_SERVE: process.env['E2E_DASHBOARD_SERVE'] ?? 'preview',
     },
     cwd: repoRoot,
     // Readiness gate: the launcher only logs 'ready' after db:start/create/seed

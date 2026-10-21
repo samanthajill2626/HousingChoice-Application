@@ -13,6 +13,7 @@ sampler; hermetic lanes only (never the live :5174 / :8080 stack).
 | `netlog.playwright.config.ts` | The suite's config plus `--log-net-log`. Copied into `e2e/` by `subset-run.ps1 -NetLog` for one run and deleted afterwards. A full-suite NetLog is several GB. |
 | `netlog-scan.mjs` | Counts TCP connect attempts and every socket-level error in a NetLog. |
 | `netlog-trace.mjs` | Prints the events (and URL) of the NetLog sources that hit a given net error. |
+| `netlog-connects.mjs` | Attributes each browser TCP connect to the request that first used the new socket (dev module, HMR WebSocket, `/api`, SSE, built asset, document). Added for `../../2026-10-20-e2e-gate-preview/findings.md`. |
 | `analyze.mjs` | Per-hop table from the sampler, joined with the hook when present. |
 | `pertest.mjs` | Hook: cancelled proxied requests split by cause (StrictMode / SSE / other), per spec file. |
 | `osperfile.mjs`, `oswindow.mjs` | Sampler only: connections per spec file / per time window. |

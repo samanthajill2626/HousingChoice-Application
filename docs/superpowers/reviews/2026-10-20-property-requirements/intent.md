@@ -2,7 +2,21 @@
 
 ## STATE (replace on every move)
 
-- Phase: BUILD (AUTO) - dispatched 2026-10-20 ~21:32 UTC after compaction
+- Phase: HANDBACK REVIEW (planner) - the orchestrator returned DONE
+  2026-10-21 ~11:37 UTC: MERGE-READY @e59362bb (tip f61b310b = handback
+  record), 0 behind main @3df43172, failure budget 0 of 2 used. Handback at
+  `<records>/handback.md`. Mirror stopped; watchdog not re-armed (no build in
+  flight). In flight now: the planner's own gate run (script in the planner
+  scratchpad, logs `.superpowers/gates/planner/`), then two read-only opus
+  reviewers (spec-conformance; plan-blind adversarial) - static first, any
+  test they want waits until the gates end (continue them by SendMessage).
+- NEXT STEP: conversation checklist (replay re-read), read the riskiest
+  diffs (Apply dialog carry OR-17/32/34/35, the OR-29 fence, toUnitFlyer
+  staff-only leak, the Apply route), short live QA on a hermetic lane after
+  the gates, adjudicate, fix wave if needed (via a fresh foreground child or
+  a re-dispatched orchestrator), verdict with the conversation checklist +
+  merge command, UNMERGED.
+- (previous) BUILD (AUTO) - dispatched 2026-10-20 ~21:32 UTC after compaction
   gate B (441k -> 23k). In flight: the build-orchestrator (background
   agent af0697670f3a44739, prompt = mission-block.md verbatim), the
   watchdog (CHECKPOINT 3300 s, STALL 1500 s quiet; exactly one), and the

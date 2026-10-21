@@ -11,15 +11,19 @@ deployed.
   Spec rev 6 @5944de7e is approved.
 - Plan v1 committed @d5684bbe: sections 0-4 binding (AR1-AR10), six slice
   drafts assembled as sections 5-10 (S1 2 tasks, S2 6, S3 4, S4 5, S5 3, S6 5).
-- In flight: plan review round 1, two opus reviewers, writing
-  `plan-review/R1-reviewer-a.md` and `-b.md`. The live agent ids (drafters and
-  reviewers) are in `.superpowers/sdd/agents.md`.
-- NEXT STEP: adjudicate R1 into `plan-review/adjudications.md`; send each
-  slice's accepted fixes to its drafter (it edits only its draft); re-assemble
-  with `node .superpowers/sdd/assemble-plan.cjs <plan> .superpowers/sdd/plan-drafts`;
-  commit; continue the stronger reviewer for R2 with the RE-REVIEW CHARGE
-  (cap 4). Then the mission block, the launch gate (AUTO / MANUAL / Revise),
-  and compaction gate B.
+- Plan review round 1 done and committed @ebc7a5bd: 15 distinct findings
+  (2 medium, 13 low), 14 accepted, 1 rejected; 3 change a decision (AR11
+  deleted-path audit, AR12 consistent read, AR13 phone label for a nameless
+  contact on the Sent to card). The spec got a section 7 "Plan-time
+  amendments" note.
+- In flight: the six drafters are applying their slices' round-1 fixes to
+  their drafts (live agent ids in `.superpowers/sdd/agents.md`).
+- NEXT STEP: when all six reply, re-assemble with
+  `node .superpowers/sdd/assemble-plan.cjs docs/superpowers/plans/2026-10-21-flyer-leads-plan.md .superpowers/sdd/plan-drafts`,
+  commit as plan v2, then continue reviewer B (it found the mediums) for R2
+  with the RE-REVIEW CHARGE, giving it reviewer A's report (cap 4). Then the
+  mission block, the launch gate (AUTO / MANUAL / Revise) with the AR5/AR14
+  question, and compaction gate B.
 - OPEN FOR CAMERON at the launch gate (AR5): the property save stores plain
   text fields untrimmed (area, utilities, accessibility, lease_terms, notes,
   listing_link, video_url, application_process, priority; the Edit form sends

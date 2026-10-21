@@ -163,6 +163,29 @@ export async function pickOrgName(
   await expect(scope.getByRole('button', { name: ORG_PICKER.removeChip(name), exact: true })).toBeVisible();
 }
 
+/**
+ * Press the property form's voucher-size chips for `sizes` (picker B,
+ * property requirements spec D4) inside `dialog` - the New property or Edit
+ * property dialog, on a picker with no other size pressed. The chips are
+ * toggle buttons named exactly `Studio`, `1` ... `12` in the group "Voucher
+ * sizes accepted" (a bare '1' would substring-match 10, 11 and 12, hence
+ * exact); 5-12 sit behind "More sizes (5-12)" unless a size of 5 or more is
+ * already recorded. Waits for every chip to read pressed and for the
+ * "Accepts: ..." summary, so the caller saves exactly what it picked.
+ */
+export async function pickVoucherSizes(dialog: Locator, sizes: readonly number[]): Promise<void> {
+  const picker = dialog.getByRole('group', { name: 'Voucher sizes accepted', exact: true });
+  const more = dialog.getByRole('button', { name: 'More sizes (5-12)', exact: true });
+  if (sizes.some((n) => n >= 5) && (await more.count()) > 0) await more.click();
+  for (const n of sizes) {
+    const chip = picker.getByRole('button', { name: n === 0 ? 'Studio' : String(n), exact: true });
+    if ((await chip.getAttribute('aria-pressed')) !== 'true') await chip.click();
+    await expect(chip).toHaveAttribute('aria-pressed', 'true');
+  }
+  const summary = [...new Set(sizes)].sort((a, b) => a - b).map((n) => (n === 0 ? 'Studio' : `${n} BR`));
+  await expect(dialog.getByText(`Accepts: ${summary.join(', ')}`, { exact: true })).toBeVisible();
+}
+
 // ==== Tour scheduling + reminder-ladder vocabulary (tours-sequence) ==========
 
 /** Escape a literal string for embedding in a RegExp. */
@@ -1512,7 +1535,12 @@ export class Scenario {
       if (o.registeredLandlord) await dialog.getByLabel('Registered landlord').check();
       if (o.rta48h) await dialog.getByLabel('Submits RTA within 48h').check();
       if (o.inspectionFirstTry) await dialog.getByLabel('Passes inspection first try').check();
-      if (o.softTermsNote !== undefined) await dialog.getByLabel('Notes').fill(o.softTermsNote);
+      // /^Notes/, not a bare 'Notes': the landlord form also carries "Deposit
+      // notes" (property requirements D9), and getByLabel is a case-insensitive
+      // SUBSTRING match. Not { exact: true } either: this Notes is a WRAPPING
+      // label around its textarea, so the label's text grows with the box's
+      // text and an exact match fails once the box holds any.
+      if (o.softTermsNote !== undefined) await dialog.getByLabel(/^Notes/).fill(o.softTermsNote);
       await this.saveEditDialog(dialog);
     });
   }
@@ -1680,7 +1708,8 @@ export class Scenario {
         .getByLabel('Public listing link')
         .fill(opts.listingLink ?? 'https://www.zillow.com/homedetails/example');
       if (opts.voucherSizeAccepted !== undefined) {
-        await dialog.getByLabel('Voucher size accepted').fill(String(opts.voucherSizeAccepted));
+        // Picker B (property requirements D4): one toggle chip per size.
+        await pickVoucherSizes(dialog, [opts.voucherSizeAccepted]);
       }
       await dialog.getByLabel('Street address').fill(addressLine1);
       await dialog.getByLabel('City').fill('Atlanta');
@@ -1730,20 +1759,22 @@ export class Scenario {
   /** [App] The unit's voucher_size_accepted is set (API) — the missing-field follow-up
    *  landed on the record. */
   expectUnitVoucherSizeAccepted(unit: Unit, expected: number): Promise<void> {
-    return step(`App: unit voucher_size_accepted = ${expected}`, async () => {
+    return step(`App: unit voucher_size_accepted = [${expected}]`, async () => {
       const res = await this.page.request.get(`${NEXT}/api/units/${unit.unitId}`);
       expect(res.ok()).toBeTruthy();
-      const { unit: u } = (await res.json()) as { unit: { voucher_size_accepted?: number } };
-      expect(u.voucher_size_accepted).toBe(expected);
+      // A LIST since property requirements D4: a written number is stored as [n].
+      const { unit: u } = (await res.json()) as { unit: { voucher_size_accepted?: number[] } };
+      expect(u.voucher_size_accepted).toEqual([expected]);
     });
   }
 
   /**
    * [App] Onboarding complete: the unit is available, its public flyer is live (the
    * "[AUTO] Listing link generated and shareable"), AND Team SEES it Available with the
-   * "Voucher size accepted" row on the property detail.
+   * recorded sizes in the "Voucher sizes accepted" row on the property detail
+   * (`voucherSizes` is the row's text, e.g. '2 BR').
    */
-  expectUnitAvailableWithListingLink(unit: Unit): Promise<void> {
+  expectUnitAvailableWithListingLink(unit: Unit, voucherSizes: string): Promise<void> {
     return step('App: unit available + flyer live + shown on property detail', async () => {
       const res = await this.page.request.get(`${NEXT}/api/units/${unit.unitId}`);
       expect(res.ok()).toBeTruthy();
@@ -1757,7 +1788,10 @@ export class Scenario {
       const details = this.page
         .locator('section')
         .filter({ has: this.page.getByRole('heading', { name: 'Property details' }) });
-      await expect(details.getByText('Voucher size accepted')).toBeVisible();
+      // The row always renders since property requirements D4 (blank when
+      // nothing is recorded), so its VALUE is what proves the recorded size.
+      await expect(details.getByText('Voucher sizes accepted', { exact: true })).toBeVisible();
+      await expect(details.getByText(voucherSizes, { exact: true })).toBeVisible();
       // The header status is the interactive pill (its visible text carries a
       // trailing caret glyph, so exact-text matching can't work) — assert via its
       // accessible name instead.

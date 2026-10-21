@@ -89,7 +89,7 @@ async function signedThroughHandoff(flow: Scenario, landlordId: string): Promise
     listingLink: 'https://www.zillow.com/homedetails/onboarded-unit',
     expectedRent: EXPECTED_RENT,
   });
-  await flow.expectUnitAvailableWithListingLink(unit);
+  await flow.expectUnitAvailableWithListingLink(unit, '2 BR');
   await flow.expectHandoffToMatching(unit);
 }
 
@@ -268,6 +268,6 @@ test('property intake · missing field → follow-up → set → published → h
   await flow.teamUpdatesUnit(unit, { voucherSizeAccepted: 2 });
   await flow.expectUnitVoucherSizeAccepted(unit, 2);
   await flow.teamPublishesUnit(unit);
-  await flow.expectUnitAvailableWithListingLink(unit);
+  await flow.expectUnitAvailableWithListingLink(unit, '2 BR');
   await flow.expectHandoffToMatching(unit);
 });

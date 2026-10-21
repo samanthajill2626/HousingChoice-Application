@@ -447,16 +447,22 @@ describe('FlyerPage - D11 wording', () => {
     expect(detail('Pet fee')).toBeNull();
   });
 
-  it.each<[Partial<PublicFlyer>, string]>([
+  // Plain its, not it.each (orchestrator note O-1): an it.each title has every
+  // `$<word>` read as a case field AFTER the %s substitution, so "$1800"
+  // printed as "undefined". A template-literal title prints the text as is.
+  const DEPOSIT_CASES: Array<[Partial<PublicFlyer>, string]> = [
     [{ deposit_one_month: true, deposit: null }, "One month's rent"],
     [{ deposit: 1800 }, '$1800'],
     [{ deposit: 1800, deposit_flexible: true }, '$1800, flexible / payment plan available'],
     [{ deposit_one_month: true, deposit: null, deposit_flexible: true }, "One month's rent, flexible / payment plan available"],
     [{ deposit: null, deposit_flexible: true }, 'Flexible / payment plan available'],
-  ])('Deposit %j reads "%s"', async (over, text) => {
-    await renderFlyer(over);
-    expect(detail('Deposit')).toBe(text);
-  });
+  ];
+  for (const [over, text] of DEPOSIT_CASES) {
+    it(`Deposit ${JSON.stringify(over)} reads "${text}"`, async () => {
+      await renderFlyer(over);
+      expect(detail('Deposit')).toBe(text);
+    });
+  }
 
   it('no deposit recorded: no Deposit row (the notes are staff only and never projected)', async () => {
     await renderFlyer({ deposit: null, deposit_one_month: false, deposit_flexible: false });

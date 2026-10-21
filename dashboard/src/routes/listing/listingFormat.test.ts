@@ -7,13 +7,17 @@ import {
   formatBedsBaths,
   formatMoney,
   formatRent,
+  formatVoucherSizes,
   describeUnitActivity,
   groupSendRows,
   isMediaUrl,
+  recordedVoucherSizes,
   sendRowKindLabel,
   shortAddress,
   statusLabel,
+  washerDryerLabel,
 } from './listingFormat.js';
+import { WASHER_DRYER_LABELS } from './requirements.js';
 
 describe('formatMoney', () => {
   it('formats whole dollars with separators', () => {
@@ -81,10 +85,12 @@ describe('authoritiesOf', () => {
 
 describe('acceptedVoucherSizes', () => {
   // THE one reader of "which voucher sizes does this property take" (Cameron,
-  // 2026-10-04): the recorded `voucher_size_accepted` when there is one - ONE
-  // number today, a multi-select LIST with tracker #12 (the `full` demo seed
-  // already stores [2, 3]) - otherwise the bedroom count; nothing only when
-  // BOTH are missing.
+  // 2026-10-04): the recorded `voucher_size_accepted` when there is one - a
+  // LIST since tracker #12 (D4: the write API stores the sizes de-duplicated
+  // and ascending), or a single number stored before it (still read, never
+  // backfilled) - otherwise the bedroom count; nothing only when BOTH are
+  // missing. The property page's "Voucher sizes accepted" row is NOT this
+  // reader: it shows only what was recorded (recordedVoucherSizes, below).
   it('a recorded single size wins, even over a different bedroom count', () => {
     expect(acceptedVoucherSizes({ voucher_size_accepted: 2 })).toEqual([2]);
     expect(acceptedVoucherSizes({ voucher_size_accepted: 2, beds: 3 })).toEqual([2]);
@@ -199,6 +205,22 @@ describe('describeUnitActivity', () => {
     });
     // No recorded fields → no sub-line (never an empty one).
     expect(describeUnitActivity(evt({ type: 'unit_updated' }))).toEqual({ label: 'Property updated' });
+  });
+
+  it('labels an Apply from the landlord (D13), keeping the field list', () => {
+    expect(
+      describeUnitActivity(
+        evt({ type: 'unit_updated', reason: 'requirements_applied', fields: ['no_pets', 'pets', 'pet_fee'] }),
+      ),
+    ).toEqual({ label: 'Requirements applied from the landlord', sub: 'No pets, Pets, Pet fee' });
+    expect(describeUnitActivity(evt({ type: 'unit_updated', reason: 'requirements_applied' }))).toEqual({
+      label: 'Requirements applied from the landlord',
+    });
+    // Any other reason keeps the staff-edit label: only the one value is lifted.
+    expect(describeUnitActivity(evt({ type: 'unit_updated', reason: 'something_else', fields: ['deposit'] }))).toEqual({
+      label: 'Property updated',
+      sub: 'Deposit',
+    });
   });
 
   it('describes roster changes with name → id fallback, role label, and a contact link', () => {
@@ -400,5 +422,41 @@ describe('groupSendRows - the four groups that cover every row (spec 5.5)', () =
   it('a row with no eligible flag is Not eligible (only the units route sets it); empty groups stay empty', () => {
     const groups = groupSendRows([row('a', '2026-10-01T00:00:00.000Z', { eligible: undefined })]);
     expect(groups.map((g) => g.rows.length)).toEqual([0, 0, 0, 1]);
+  });
+});
+
+describe('recordedVoucherSizes + formatVoucherSizes (D4: the property page row)', () => {
+  it('lists the RECORDED sizes ascending and de-duplicated - never the bedrooms fallback', () => {
+    expect(recordedVoucherSizes({ voucher_size_accepted: [3, 0, 2, 3] })).toEqual([0, 2, 3]);
+    // An older single stored number still reads (D4: not backfilled).
+    expect(recordedVoucherSizes({ voucher_size_accepted: 2 })).toEqual([2]);
+    // Variables, not literals, so the extra `beds` key is allowed: a property
+    // with bedrooms but no recorded size records NOTHING here.
+    const bedsOnly = { voucher_size_accepted: undefined, beds: 2 };
+    expect(recordedVoucherSizes(bedsOnly)).toEqual([]);
+    const emptyList = { voucher_size_accepted: [] as unknown[], beds: 3 };
+    expect(recordedVoucherSizes(emptyList)).toEqual([]);
+    expect(recordedVoucherSizes({ voucher_size_accepted: ['2', null, Number.NaN] })).toEqual([]);
+  });
+
+  it('formats Studio and "<n> BR", joined by ", "; nothing recorded is ""', () => {
+    expect(formatVoucherSizes([0, 2, 3])).toBe('Studio, 2 BR, 3 BR');
+    expect(formatVoucherSizes([4])).toBe('4 BR');
+    expect(formatVoucherSizes([])).toBe('');
+  });
+});
+
+describe('washerDryerLabel (D3)', () => {
+  it('labels the three recorded values from the ONE label map, and nothing else', () => {
+    expect(washerDryerLabel('hookups')).toBe('Hookups');
+    expect(washerDryerLabel('included')).toBe('Washer and dryer included');
+    expect(washerDryerLabel('none')).toBe('No hookups');
+    // AR39: the labels are S5's map in requirements.ts, never a second copy.
+    for (const value of ['hookups', 'included', 'none'] as const) {
+      expect(washerDryerLabel(value)).toBe(WASHER_DRYER_LABELS[value]);
+    }
+    expect(washerDryerLabel(undefined)).toBeNull();
+    expect(washerDryerLabel('')).toBeNull();
+    expect(washerDryerLabel('stacked')).toBeNull();
   });
 });

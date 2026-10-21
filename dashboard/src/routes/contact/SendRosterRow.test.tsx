@@ -158,6 +158,56 @@ describe('SendRosterRow - outcome rendering', () => {
   });
 });
 
+// flyer-leads D8: a pair whose latest counted entry is a flyer sign-up.
+describe('SendRosterRow - signed_up (flyer-leads D8)', () => {
+  const SIGNED_UP_AT = '2026-10-11T16:30:00.000Z';
+  const SIGNED_UP: Partial<ListingSendRow> = { outcome: 'signed_up', sentAt: SIGNED_UP_AT };
+
+  it('reads "Signed up from the flyer <date>" in place of "Sent <date>" - the same date label and title', () => {
+    renderRow(SIGNED_UP);
+    const sent = formatHeardFrom(SIGNED_UP_AT, NOW);
+    expect(sent.title).not.toBe('');
+    expect(screen.getByText(`Signed up from the flyer ${sent.label}`)).toHaveAttribute('title', sent.title);
+    expect(screen.queryByText(/^Sent /)).not.toBeInTheDocument();
+    // The Last heard from half is unchanged.
+    expect(screen.getByText(`Last heard from ${formatHeardFrom(undefined, NOW).label}`)).toBeInTheDocument();
+  });
+
+  it('the outcome chip reads "Signed up", in the positive chip colour', () => {
+    renderRow(SIGNED_UP);
+    expect(screen.getByText('Signed up', { exact: true }).className).toContain('chipPositive');
+  });
+
+  it('offers the waiting actions - Interested and Not interested - and no Undo', () => {
+    renderRow(SIGNED_UP);
+    expect(screen.getByRole('button', { name: 'Mark Tia Moss interested in 12 Oak St' })).toHaveTextContent('Interested');
+    expect(screen.getByRole('button', { name: 'Mark Tia Moss not interested in 12 Oak St' })).toHaveTextContent('Not interested');
+    expect(screen.queryByRole('button', { name: /^Undo/ })).not.toBeInTheDocument();
+  });
+
+  it('Not interested calls the outcome route', async () => {
+    const { onOutcome } = renderRow(SIGNED_UP);
+    await userEvent.click(screen.getByRole('button', { name: 'Mark Tia Moss not interested in 12 Oak St' }));
+    expect(onOutcome).toHaveBeenCalledWith('not_interested');
+  });
+
+  // An unknown contact's flyer row (interestedSupported false; the hosts pass
+  // requestTourTo for a PARTNER only): Not interested alone.
+  it('an unknown-contact row offers Not interested only - no Interested, no Request a tour', () => {
+    renderRow({ ...SIGNED_UP, interestedSupported: false });
+    expect(screen.getByRole('button', { name: 'Mark Tia Moss not interested in 12 Oak St' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Mark Tia Moss interested in/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /^Request a tour/ })).not.toBeInTheDocument();
+  });
+
+  it('a deleted property keeps the words and the chip but drops every action', () => {
+    renderRow(SIGNED_UP, { actionsDisabled: true });
+    expect(screen.getByText(`Signed up from the flyer ${formatHeardFrom(SIGNED_UP_AT, NOW).label}`)).toBeInTheDocument();
+    expect(screen.getByText('Signed up', { exact: true })).toBeInTheDocument();
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
+});
+
 describe('SendRosterRow - actions', () => {
   it('Not interested calls onOutcome and disables itself while in flight', async () => {
     let resolve!: () => void;

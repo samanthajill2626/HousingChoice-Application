@@ -42,8 +42,10 @@ import {
   listTours,
   getPlacement,
   getContact,
+  getContactListingsSent,
   getContactVocabulary,
   getFollowUps,
+  getUnitRecipients,
   getPlacementHistory,
   getPlacementNudges,
   patchPlacementNudge,
@@ -59,7 +61,7 @@ import {
   updatePlacement,
   validateLostReason,
 } from './endpoints.js';
-import type { ApplyRequirementsBody, ContactPatch, RosterView, UnitItem } from './types.js';
+import type { ApplyRequirementsBody, ContactPatch, ListingSendRow, RosterView, UnitItem } from './types.js';
 
 /** A minimal roster payload - the 202 body of a DEFERRED open (s6b contract). */
 function rosterWithPendingOpen(): RosterView {
@@ -830,6 +832,26 @@ it('setListingSendOutcome POSTs the outcome and returns the { row } body as-is (
     body: { outcome: 'not_interested' },
   });
   expect(res).toEqual({ row: { contactId: 'c 1', unitId: 'u1', outcome: 'not_interested' } });
+});
+
+// flyer-leads D8 (plan 2.7), PIN: the two roster reads never validate or remap
+// the wire outcome - a signed_up row arrives as-is. The typed fixture is the
+// compile-time half (npm run typecheck).
+it('getContactListingsSent and getUnitRecipients pass a signed_up row through as-is', async () => {
+  const row: ListingSendRow = {
+    contactId: 'c1',
+    unitId: 'u1',
+    sentAt: '2026-10-11T16:30:00.000Z',
+    via: 'broadcast',
+    outcome: 'signed_up',
+    interestedSupported: true,
+  };
+  vi.mocked(request).mockResolvedValueOnce({ sent: [row] });
+  await expect(getContactListingsSent('c1')).resolves.toEqual([row]);
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/c1/listings-sent', {});
+  vi.mocked(request).mockResolvedValueOnce({ recipients: [row] });
+  await expect(getUnitRecipients('u1')).resolves.toEqual([row]);
+  expect(request).toHaveBeenLastCalledWith('/api/units/u1/recipients', {});
 });
 
 it('getFollowUps GETs the waiting list and forwards the abort signal (last-heard-from 5.6)', async () => {

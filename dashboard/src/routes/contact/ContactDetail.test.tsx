@@ -1142,6 +1142,23 @@ describe('ContactDetail', () => {
     expect(await screen.findByRole('button', { name: 'Undo not interested for Tasha Williams' })).toBeInTheDocument();
   });
 
+  // flyer-leads D8: the contact page's Properties sent row for a flyer sign-up.
+  it('a signed_up Properties sent row reads "Signed up from the flyer <date>", chips "Signed up" and offers Interested / Not interested', async () => {
+    getContact.mockResolvedValue(TENANT);
+    getAllUnits.mockResolvedValue([{ unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd', tour_type: 'self_guided' }]);
+    getContactListingsSent.mockResolvedValue([
+      { contactId: 'k1', unitId: 'u1', sentAt: '2026-06-30T15:00:00.000Z', via: 'broadcast', outcome: 'signed_up', interestedSupported: true },
+    ]);
+    renderAt('k1');
+    const list = await screen.findByRole('list', { name: 'Properties sent' });
+    const row = within(list).getByRole('listitem');
+    expect(within(row).getByText(/^Signed up from the flyer /)).toBeInTheDocument();
+    expect(within(row).queryByText(/^Sent /)).not.toBeInTheDocument();
+    expect(within(row).getByText('Signed up', { exact: true })).toBeInTheDocument();
+    expect(await within(row).findByRole('button', { name: 'Mark Tasha Williams interested in 1450 Joseph Blvd' })).toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: 'Mark Tasha Williams not interested in 1450 Joseph Blvd' })).toBeInTheDocument();
+  });
+
   it("a failed listings-sent read shows \"We couldn't load properties sent.\" (not the pending panel)", async () => {
     getContact.mockResolvedValue(TENANT);
     getContactListingsSent.mockRejectedValue(new ApiError(503, 'outcome_unavailable', 'x', { error: 'outcome_unavailable' }));

@@ -271,6 +271,9 @@ function OutcomeChip({ row, now }: { row: ListingSendRow; now: Date }): React.JS
       return <span className={chip}>No reply yet</span>;
     case 'replied':
       return <span className={`${chip} ${styles.chipPositive ?? ''}`}>Replied</span>;
+    case 'signed_up':
+      // flyer-leads D8: the pair's latest counted entry is a flyer sign-up.
+      return <span className={`${chip} ${styles.chipPositive ?? ''}`}>Signed up</span>;
     case 'interested':
       // Head 3.4 #5: an interested row whose response carries no `tour` reads `Interested`.
       return row.tour ? <TourChip tourId={row.tour.tourId} state={row.tour.state} /> : <span className={chip}>Interested</span>;
@@ -301,7 +304,8 @@ export function SendRosterList({ label, children }: { label: string; children: R
 }
 
 /** A send-roster row (last-heard-from spec 5.5): line one is the identity
- *  link (+ kind) and the muted "Sent <date> - Last heard from <date>"; line
+ *  link (+ kind) and the muted "Sent <date> - Last heard from <date>" (a
+ *  signed_up row reads "Signed up from the flyer <date>", flyer-leads D8); line
  *  two is the outcome chip and the outcome's actions. The root is an `<li>`
  *  (markup R1) and must sit inside a SendRosterList. The row is NOT a
  *  full-row link (the identity, the tour chip and the actions go to different
@@ -343,10 +347,15 @@ export function SendRosterRow({
       .finally(() => setBusy(false));
   };
   const sent = formatHeardFrom(row.sentAt, now);
+  // flyer-leads D8: a flyer sign-up's sentAt is the sign-up instant.
+  const sentWords = row.outcome === 'signed_up' ? 'Signed up from the flyer' : 'Sent';
   const heard = formatHeardFrom(row.lastHeardFromAt, now);
   const showActions = !actionsDisabled && row.recipientMissing !== true;
-  const waiting = row.outcome === 'no_reply' || row.outcome === 'replied';
-  const canInterested = waiting && row.interestedSupported && (interestedMode === 'route' || onOpenTourForm !== undefined);
+  // The waiting outcomes' actions. flyer-leads D8: a signed_up row offers the
+  // same ones (signed_up is never "waiting" on the server - isWaiting - but it
+  // is still an open lead); Request a tour keeps its host-side partner-only rule.
+  const actionable = row.outcome === 'no_reply' || row.outcome === 'replied' || row.outcome === 'signed_up';
+  const canInterested = actionable && row.interestedSupported && (interestedMode === 'route' || onOpenTourForm !== undefined);
   return (
     <li className={styles.sendRow}>
       <div className={styles.sendRowLine}>
@@ -358,7 +367,9 @@ export function SendRosterRow({
         </span>
         <span className={styles.sendRowDates}>
           {/* Contract N1: an empty title (a "Never" label) renders NO title attribute. */}
-          <span {...(sent.title !== '' && { title: sent.title })}>Sent {sent.label}</span>
+          <span {...(sent.title !== '' && { title: sent.title })}>
+            {sentWords} {sent.label}
+          </span>
           {' - '}
           <span {...(heard.title !== '' && { title: heard.title })}>Last heard from {heard.label}</span>
         </span>
@@ -378,7 +389,7 @@ export function SendRosterRow({
                 Interested
               </button>
             ) : null}
-            {waiting && !row.interestedSupported && requestTourTo !== undefined ? (
+            {actionable && !row.interestedSupported && requestTourTo !== undefined ? (
               <Link
                 className={styles.rowActionLink ?? ''}
                 to={requestTourTo}
@@ -388,7 +399,7 @@ export function SendRosterRow({
                 Request a tour
               </Link>
             ) : null}
-            {waiting ? (
+            {actionable ? (
               <button
                 type="button"
                 className={styles.rowButton}

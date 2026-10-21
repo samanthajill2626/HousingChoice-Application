@@ -226,6 +226,26 @@ describe('FollowUpView - actions', () => {
     expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('1 waiting');
   });
 
+  // flyer-leads D8, PIN: the server never serves a signed_up row (it is not
+  // waiting), but an action can ANSWER signed_up - an Undo (clear) on a pair
+  // whose latest counted entry is a flyer sign-up. Like any answer that is
+  // neither interested nor not_interested, the row goes back to its waiting
+  // display for the session and leaves the list on the next load.
+  it('an Undo answered signed_up un-resolves the row back to its waiting display', async () => {
+    const u = userEvent.setup();
+    setListingSendOutcome
+      .mockResolvedValueOnce({ row: { outcome: 'not_interested' } })
+      .mockResolvedValueOnce({ row: { outcome: 'signed_up' } });
+    renderView([item()]);
+    await u.click(await screen.findByRole('button', { name: 'Mark Dario Vance not interested in 672 Cameron Alexander Blvd A' }));
+    const row = rowOf('Dario Vance');
+    await u.click(await within(row).findByRole('button', { name: 'Undo not interested for Dario Vance' }));
+    expect(setListingSendOutcome).toHaveBeenLastCalledWith('u1', 'c1', 'clear');
+    expect(await within(row).findByText('No reply yet, 10 days')).toBeInTheDocument();
+    expect(within(row).getByRole('button', { name: 'Mark Dario Vance not interested in 672 Cameron Alexander Blvd A' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('1 waiting');
+  });
+
   // Review B R2-5: the property lost its tour_type since the list loaded -
   // the route answers 409 tour_type_required, and the click falls through to
   // the form path instead of a dead-end "try again".

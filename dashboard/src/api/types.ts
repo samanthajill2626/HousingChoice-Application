@@ -3149,8 +3149,10 @@ export interface TourSignal {
   state: TourSignalState;
 }
 /** last-heard-from spec 5.4 - hand-mirrored from app/src/lib/listingSendOutcome.ts
- *  (independent types; the lockstep pin is each side's tsc plus the route tests). */
-export type ListingSendOutcome = 'no_reply' | 'replied' | 'interested' | 'not_interested';
+ *  (independent types; the lockstep pin is each side's tsc plus the route tests).
+ *  flyer-leads D8 adds `signed_up`: the pair's latest counted entry is a flyer
+ *  sign-up. It is never waiting, so a Follow up item never carries it. */
+export type ListingSendOutcome = 'no_reply' | 'replied' | 'interested' | 'not_interested' | 'signed_up';
 export type InterestedMode = 'route' | 'form';
 export interface ListingSendRow {
   contactId: string;

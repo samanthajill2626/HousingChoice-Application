@@ -152,7 +152,7 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
   describe('declined (last-heard-from spec 5.4) - setDeclined / clearDeclined', () => {
     const DECLINE: DeclineRecord = { at: '2026-06-17T09:00:00.000Z', by: 'staff', staffId: 'usr_test' };
 
-    it('setDeclined stores the record on a counted row and touches nothing else', async () => {
+    it('setDeclined stores the record on a counted row, stamps a fresh change token (flyer-leads O1) and touches nothing else', async () => {
       const unitId = `unit-${randomUUID().slice(0, 8)}`;
       const contactId = `contact-${randomUUID().slice(0, 8)}`;
       await seedListingSend(repo, { unitId, contactId, sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'bcast-1' });
@@ -165,7 +165,10 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
       expect(after?.sentAt).toBe(before?.sentAt);
       expect(after?.broadcastId).toBe(before?.broadcastId);
       expect(after?.shares).toEqual(before?.shares);
-      expect(after?.shares_op).toBe(before?.shares_op); // not a memory write
+      // flyer-leads O1: a decline stamps a FRESH change token, so a ledger
+      // write that read the row before it loses its condition and re-reads.
+      expect(typeof after?.shares_op).toBe('string');
+      expect(after?.shares_op).not.toBe(before?.shares_op);
       expect(after?.created_at).toBe(before?.created_at);
     });
 
@@ -234,6 +237,32 @@ describe.skipIf(!reachable)('listingSendsRepo against DynamoDB Local (throwaway 
       expect(await repo.putShareMemory(unitId, contactId, failed, { token })).toBe(true);
       expect(await repo.clearDeclined(unitId, contactId, { expectedAt: DECLINE.at })).toBe('not_found');
       expect((await repo.getByKeyConsistent(unitId, contactId))?.declined).toEqual(DECLINE);
+    });
+
+    it('flyer-leads O1: a token read BEFORE either decline writer loses its condition after it; clearDeclined stamps a fresh token too; a compare-and-clear that loses writes nothing (the token stays)', async () => {
+      const unitId = `unit-${randomUUID().slice(0, 8)}`;
+      const contactId = `contact-${randomUUID().slice(0, 8)}`;
+      await seedListingSend(repo, { unitId, contactId, sentAt: '2026-06-16T10:00:00.000Z', broadcastId: 'bcast-1' });
+      const next: ShareMemoryWrite = {
+        shares: { 'bcast-2': { attempt: '2026-06-18T10:00:00.000Z#SM2', state: 'counted', by: 'acceptance', countedAt: '2026-06-18T10:00:00.000Z' } },
+        counted: true,
+        sentAt: '2026-06-18T10:00:00.000Z',
+        broadcastId: 'bcast-2',
+      };
+      const t0 = (await repo.getByKeyConsistent(unitId, contactId))?.shares_op;
+      expect(await repo.setDeclined(unitId, contactId, DECLINE)).toBe('ok');
+      expect(await repo.putShareMemory(unitId, contactId, next, { token: t0 })).toBe(false); // the racing ledger write loses
+      const t1 = (await repo.getByKeyConsistent(unitId, contactId))?.shares_op;
+      expect(t1).not.toBe(t0);
+      // A compare-and-clear that loses (a stale expectedAt) writes nothing - the token stays.
+      expect(await repo.clearDeclined(unitId, contactId, { expectedAt: '2026-06-17T08:00:00.000Z' })).toBe('not_found');
+      expect((await repo.getByKeyConsistent(unitId, contactId))?.shares_op).toBe(t1);
+      expect(await repo.clearDeclined(unitId, contactId, { expectedAt: DECLINE.at })).toBe('ok');
+      const t2 = (await repo.getByKeyConsistent(unitId, contactId))?.shares_op;
+      expect(typeof t2).toBe('string');
+      expect(t2).not.toBe(t1);
+      expect(await repo.putShareMemory(unitId, contactId, next, { token: t1 })).toBe(false);
+      expect(await repo.putShareMemory(unitId, contactId, next, { token: t2 })).toBe(true); // the re-read token wins
     });
 
     it("an UNCOUNTED row is not declinable: both writers answer 'not_found' and write nothing", async () => {

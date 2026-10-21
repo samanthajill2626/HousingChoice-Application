@@ -3611,7 +3611,8 @@ export function createFakeWorld(): FakeWorld {
     },
     // share-sent-outcome T3 (spec D7): the conditional memory write, modelled
     // on the real one - `expect.token` undefined requires NO stored token (an
-    // absent row or a seeded row), else the stored token must match; a win
+    // absent row, or a seeded row nobody has written memory or a decline on -
+    // flyer-leads O1, OR-11), else the stored token must match; a win
     // stamps a fresh token, sets or removes sentAt/broadcastId and stamps
     // created_at/via only if absent. `shares` is stored as the document client
     // writes it (undefined fields dropped). Held to the real repo by
@@ -3638,7 +3639,9 @@ export function createFakeWorld(): FakeWorld {
     // last-heard-from spec 5.4: the decline writers, modelled on the real
     // conditional UpdateItem - a row must exist and count (`counted` absent on
     // a legacy row reads as counted); otherwise 'not_found' and nothing is
-    // written. They touch ONLY `declined` + `updated_at`, so putShareMemory
+    // written. They touch ONLY `declined`, `updated_at` and a FRESH
+    // `shares_op` (flyer-leads O1: a ledger write that read the row before
+    // the decline loses its condition and re-reads), so putShareMemory
     // (which mutates its own fields in place) never clobbers a decline. Held
     // to the real repo by twilioWebhookHarnessRepoAdditions.integration.test.ts.
     async setDeclined(unitId, contactId, record) {
@@ -3646,6 +3649,7 @@ export function createFakeWorld(): FakeWorld {
       if (row === undefined || row.counted === false) return 'not_found';
       row.declined = JSON.parse(JSON.stringify(record)) as DeclineRecord;
       row.updated_at = new Date().toISOString();
+      row.shares_op = randomUUID();
       return 'ok';
     },
     // `expectedAt` mirrors the real compare-and-clear (review B R2-1): the
@@ -3656,6 +3660,7 @@ export function createFakeWorld(): FakeWorld {
       if (opts?.expectedAt !== undefined && row.declined?.at !== opts.expectedAt) return 'not_found';
       delete row.declined;
       row.updated_at = new Date().toISOString();
+      row.shares_op = randomUUID();
       return 'ok';
     },
     // share-sent-outcome T3 (spec D6): the BatchGet by pair - found rows only,

@@ -16,8 +16,12 @@
 // furniture. (share-sent-outcome T7 retired the old blind upsert writer.) It
 // extends to `declined` (last-heard-from spec 5.4): putShareMemory never SETs
 // or REMOVEs it, and NO writer resets it except clearDeclined. The outcome
-// route's two writers, setDeclined / clearDeclined, touch ONLY `declined` and
-// `updated_at`, conditioned on a COUNTED row. A cleared decline's history
+// route's two writers, setDeclined / clearDeclined, touch ONLY `declined`,
+// `updated_at` and the change token `shares_op`, conditioned on a COUNTED
+// row. flyer-leads O1: each stamps a FRESH token, so a ledger write that read
+// the row before a decline landed loses its condition, re-reads and sees the
+// decline (the flyer entry's current-decline refusal is decided on that
+// re-read - services/shareLedger.ts applyFlyerShareEntry). A cleared decline's history
 // lives in the activity / audit events, never on the row. The ONE accepted
 // exception is dev-only: the seed runner's full PutCommand (lib/seed/index.ts,
 // seedAll's Put loop) rewrites the seeded listing_sends rows (seed/cast.ts and
@@ -34,7 +38,8 @@
 // REMOVED, so the byContact index drops the pair by attribute ABSENCE and the
 // base-table reader filters it. Every memory write is a conditional
 // read-modify-write on the row's change token (`shares_op`, stamped fresh by
-// each putShareMemory); services/shareLedger.ts is its one caller. A legacy row
+// each putShareMemory and, since flyer-leads O1, by each decline writer);
+// services/shareLedger.ts is its one caller. A legacy row
 // (no memory yet) has no `counted` and reads as counted.
 //
 // PII (doc section 9): NEVER log names/phones -- IDs/type only.
@@ -101,7 +106,7 @@ export interface ListingSendItem {
   counted?: boolean;
   /** share-sent-outcome D7: the per-share memory, keyed by broadcastId (or `individual`). Absent on a legacy row. */
   shares?: Record<string, ShareLedgerEntry>;
-  /** share-sent-outcome D7: the change token every putShareMemory stamps (a random id, never a clock). */
+  /** share-sent-outcome D7: the change token every putShareMemory stamps - and, since flyer-leads O1, every setDeclined / clearDeclined (a random id, never a clock). */
   shares_op?: string;
   /** last-heard-from spec 5.4: a recorded "not interested". Absent = not
    *  declined. Written ONLY by setDeclined / clearDeclined. Supersession is
@@ -179,7 +184,7 @@ export interface ListingSendsRepo {
    * SETs or REMOVEs `sentAt` and `broadcastId` (undefined = REMOVE - never an
    * empty REMOVE clause). The condition is `shares_op = :tok`, or, when
    * `expect.token` is undefined, `attribute_not_exists(shares_op)` (an absent
-   * row OR a seeded/legacy row nobody has written memory on). `false` = the
+   * row OR a seeded/legacy row nobody has written memory or a decline on). `false` = the
    * condition failed (the caller re-reads and re-applies); anything else throws.
    */
   putShareMemory(unitId: string, contactId: string, next: ShareMemoryWrite, expect: { token: string | undefined }): Promise<boolean>;
@@ -194,14 +199,15 @@ export interface ListingSendsRepo {
   /** The contact's listings-sent (byContact GSI, newest-first by sentAt); a row no share counts is filtered out. */
   listByContact(contactId: string): Promise<ListingSendItem[]>;
   /**
-   * last-heard-from spec 5.4: SET `declined` (and `updated_at`) on a COUNTED
+   * last-heard-from spec 5.4: SET `declined` (and `updated_at` and a fresh
+   * `shares_op` - flyer-leads O1) on a COUNTED
    * row - condition `attribute_exists(unitId) AND (attribute_not_exists(counted)
    * OR counted <> :false)`. 'not_found' when the condition fails (no row, or no
    * share counts); anything else throws. Never creates a row.
    */
   setDeclined(unitId: string, contactId: string, record: DeclineRecord): Promise<'ok' | 'not_found'>;
   /**
-   * REMOVE `declined` (SET `updated_at`) under the same condition. Idempotent
+   * REMOVE `declined` (SET `updated_at` and a fresh `shares_op`) under the same condition. Idempotent
    * without `opts`. With `opts.expectedAt` it is a COMPARE-AND-CLEAR (spec
    * 14.7, code review round 2 B R2-1): the condition also requires
    * `declined.at = :readAt`, so it removes only the record the caller READ - a
@@ -372,18 +378,22 @@ export function createListingSendsRepo(deps: RepoDeps = {}): ListingSendsRepo {
           new UpdateCommand({
             TableName: table,
             Key: { unitId, contactId },
-            UpdateExpression: 'SET #declined = :declined, #updatedAt = :now',
+            // flyer-leads O1: a fresh change token - a ledger write that read
+            // the row before this decline loses its condition and re-reads.
+            UpdateExpression: 'SET #declined = :declined, #updatedAt = :now, #op = :op',
             ConditionExpression: 'attribute_exists(#unitId) AND (attribute_not_exists(#counted) OR #counted <> :false)',
             ExpressionAttributeNames: {
               '#declined': 'declined',
               '#updatedAt': 'updated_at',
               '#unitId': 'unitId',
               '#counted': 'counted',
+              '#op': 'shares_op',
             },
             ExpressionAttributeValues: {
               ':declined': { at: record.at, by: record.by, ...(record.staffId !== undefined && { staffId: record.staffId }) },
               ':now': now,
               ':false': false,
+              ':op': randomUUID(),
             },
           }),
         );
@@ -404,7 +414,8 @@ export function createListingSendsRepo(deps: RepoDeps = {}): ListingSendsRepo {
           new UpdateCommand({
             TableName: table,
             Key: { unitId, contactId },
-            UpdateExpression: 'SET #updatedAt = :now REMOVE #declined',
+            // flyer-leads O1: a fresh change token, as setDeclined.
+            UpdateExpression: 'SET #updatedAt = :now, #op = :op REMOVE #declined',
             // Compare-and-clear (B R2-1): an absent `declined` fails the
             // comparison too, so only the record the caller read is removed.
             ConditionExpression: expectedAt !== undefined ? `${counted} AND #declined.#at = :readAt` : counted,
@@ -413,9 +424,10 @@ export function createListingSendsRepo(deps: RepoDeps = {}): ListingSendsRepo {
               '#updatedAt': 'updated_at',
               '#unitId': 'unitId',
               '#counted': 'counted',
+              '#op': 'shares_op',
               ...(expectedAt !== undefined && { '#at': 'at' }),
             },
-            ExpressionAttributeValues: { ':now': now, ':false': false, ...(expectedAt !== undefined && { ':readAt': expectedAt }) },
+            ExpressionAttributeValues: { ':now': now, ':false': false, ':op': randomUUID(), ...(expectedAt !== undefined && { ':readAt': expectedAt }) },
           }),
         );
       } catch (err) {

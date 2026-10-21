@@ -1012,6 +1012,30 @@ const clearDeclineStep = (unit: string, contact: string, expected: 'ok' | 'not_f
   expect: expected,
 });
 
+/**
+ * flyer-leads O1: a decline writer runs BETWEEN a ledger write's read and its
+ * write - read the token, run setDeclined / clearDeclined, then putShareMemory
+ * on the token read before it. Both writers stamp a fresh token, so the put
+ * loses (false) in BOTH implementations. The RESULT carries the put's answer:
+ * the normalized row compare alone cannot see a fake that skips the stamp on
+ * a row that already had a token (normalizeLedgerRow reduces it to '<op>').
+ */
+const tokenAcrossDecline = (unit: string, contact: string, writer: 'set' | 'clear', next: ShareMemoryWrite): LsStep => ({
+  label: `putShareMemory ${unit}/${contact} on the token read before ${writer === 'set' ? 'setDeclined' : 'clearDeclined'}`,
+  run: async (repo, ctx) => {
+    const unitId = lsUnit(ctx, unit);
+    const contactId = lsContact(ctx, contact);
+    const before = (await repo.getByKeyConsistent(unitId, contactId))?.shares_op;
+    const wrote =
+      writer === 'set'
+        ? await repo.setDeclined(unitId, contactId, { at: T1, by: 'staff', staffId: 'usr_parity' })
+        : await repo.clearDeclined(unitId, contactId);
+    const put = await repo.putShareMemory(unitId, contactId, structuredClone(next), { token: before });
+    return { wrote, put };
+  },
+  expect: { wrote: 'ok', put: false },
+});
+
 const LS_CASES: LsCase[] = [
   {
     name: 'putShareMemory creates the row when no token is expected and none exists; a second tokenless write loses',
@@ -1071,6 +1095,18 @@ const LS_CASES: LsCase[] = [
       declineStep('unit-2', 'c2', 'ok'),
       shareMemory('unit-2', 'c2', LS_CLEARED, 'current', true),
       clearDeclineStep('unit-2', 'c2', 'not_found', T1),
+    ],
+  },
+  {
+    name: 'flyer-leads O1: both decline writers stamp a fresh change token - a token read before setDeclined or clearDeclined loses its condition after it; a legacy row gains a token from its first decline',
+    watch: [['unit-1', 'c1'], ['unit-mx', 'c-mx']],
+    steps: [
+      shareMemory('unit-1', 'c1', LS_COUNTED, 'none', true),
+      tokenAcrossDecline('unit-1', 'c1', 'set', LS_RECOUNTED),
+      shareMemory('unit-1', 'c1', LS_RECOUNTED, 'current', true),
+      tokenAcrossDecline('unit-1', 'c1', 'clear', LS_COUNTED),
+      seedLegacyRow('unit-mx', 'c-mx'),
+      tokenAcrossDecline('unit-mx', 'c-mx', 'set', { shares: { 'b-old': { ...LS_A1, attempt: '!legacy' } }, counted: true, sentAt: T0, broadcastId: 'b-old' }),
     ],
   },
 ];

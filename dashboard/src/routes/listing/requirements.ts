@@ -24,8 +24,9 @@ import {
   type UnitItem,
   type WasherDryer,
 } from '../../api/index.js';
+// Nothing from ./listingFormat.js: that module imports WASHER_DRYER_LABELS from
+// here (ruling AR39), so importing it back would be a cycle (code review RD-6).
 import { humanize } from '../contact/format.js';
-import { formatMoney } from './listingFormat.js';
 
 export type { RequirementItemId, RequirementSource } from '../../api/index.js';
 
@@ -319,6 +320,16 @@ export interface RequirementDisplay {
   landlordLine: string | null;
 }
 
+/** Requirement money as staff read it: '$1,400' for a whole amount,
+ *  '$1,250.40' when it has cents (code review RD-2). Requirement values compare
+ *  EXACTLY (D1), so the amount a tag or an Apply change is about must show
+ *  exactly - never rounded to whole dollars. The public flyer keeps its own
+ *  formatter (plan 1.1). */
+export function formatRequirementMoney(amount: number): string {
+  const digits = Number.isInteger(amount) ? 0 : 2;
+  return `$${amount.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: 2 })}`;
+}
+
 /** One item value as one line: its parts joined by '; '; all blank -> 'blank'.
  *  evictions: 'No evictions while on the program', details;
  *  credit / income / qualifications: the text;
@@ -327,7 +338,7 @@ export interface RequirementDisplay {
  *  worklist OR-31), 'flexible', notes;
  *  application_fee: 0 -> 'No application fee', else '$N';
  *  touring: the tour type's dashboard label, tour process.
- *  '$N' is the property page's money format (formatMoney). */
+ *  '$N' is formatRequirementMoney (cents kept when present). */
 export function formatItemValue(id: RequirementItemId, value: ItemValue): string {
   const parts: string[] = [];
   const add = (part: string | null): void => {
@@ -339,7 +350,7 @@ export function formatItemValue(id: RequirementItemId, value: ItemValue): string
   };
   const money = (key: string): string | null => {
     const v = value[key];
-    return typeof v === 'number' && Number.isFinite(v) ? formatMoney(v) : null;
+    return typeof v === 'number' && Number.isFinite(v) ? formatRequirementMoney(v) : null;
   };
   const checked = (key: string): boolean => value[key] === true;
   switch (id) {

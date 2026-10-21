@@ -3,11 +3,15 @@
 // CURRENT value, how one item value reads as one line, and the
 // no-requirements note. Pure; the mirror-parity cases live in
 // requirements.test.ts.
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { Contact, UnitItem } from '../../api/index.js';
 import {
   REQUIREMENT_ITEMS,
   formatItemValue,
+  formatRequirementMoney,
   landlordHasNoRequirements,
   requirementDisplay,
   requirementItemsByGroup,
@@ -202,6 +206,48 @@ describe('formatItemValue - one item value as one line', () => {
     expect(
       formatItemValue('deposit', { deposit_one_month: true, deposit: 1400, deposit_flexible: true, deposit_notes: 'Half at signing' }),
     ).toBe("One month's rent; $1,400; flexible; Half at signing");
+  });
+});
+
+// Code review RD-2: requirement values compare EXACTLY (D1), so the amount a
+// tag or an Apply change is about must show exactly - cents kept when present,
+// whole amounts as before. (The public flyer keeps its own formatter, plan 1.1.)
+describe('formatRequirementMoney - requirement money keeps its cents (code review RD-2)', () => {
+  it('a whole amount reads as before; an amount with cents keeps them', () => {
+    expect(formatRequirementMoney(1400)).toBe('$1,400');
+    expect(formatRequirementMoney(40)).toBe('$40');
+    expect(formatRequirementMoney(0)).toBe('$0');
+    expect(formatRequirementMoney(1250.4)).toBe('$1,250.40');
+    expect(formatRequirementMoney(1250.5)).toBe('$1,250.50');
+    expect(formatRequirementMoney(35.75)).toBe('$35.75');
+  });
+
+  it('formatItemValue shows the deposit amount and the application fee with it', () => {
+    expect(formatItemValue('deposit', { deposit_one_month: null, deposit: 1250.4, deposit_flexible: null, deposit_notes: null })).toBe(
+      '$1,250.40',
+    );
+    expect(formatItemValue('application_fee', { application_fee: 35.75 })).toBe('$35.75');
+    // Whole amounts are unchanged.
+    expect(formatItemValue('deposit', { deposit_one_month: null, deposit: 1400, deposit_flexible: true, deposit_notes: null })).toBe(
+      '$1,400; flexible',
+    );
+  });
+
+  it('a landlord amount that differs only in cents shows the difference it is tagged for', () => {
+    expect(requirementDisplay(unit({ deposit: 1250 }), landlord({ req_deposit: 1250.4 }), 'deposit')).toEqual({
+      tag: 'set_here',
+      landlordLine: 'Landlord: $1,250.40',
+    });
+  });
+});
+
+// Code review RD-6: requirements.ts and listingFormat.ts once imported each
+// other. listingFormat keeps reading WASHER_DRYER_LABELS from requirements.ts
+// (ruling AR39), so requirements.ts must never import listingFormat back.
+describe('requirements.ts does not import listingFormat (code review RD-6)', () => {
+  it('names no ./listingFormat module', () => {
+    const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'requirements.ts'), 'utf8');
+    expect(source).not.toMatch(/['"]\.\/listingFormat(\.js)?['"]/);
   });
 });
 

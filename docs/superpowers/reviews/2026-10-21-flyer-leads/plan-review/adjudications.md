@@ -32,6 +32,13 @@ ACCEPTED only as a watch item (A3).
 | 14 | Task 1.1 Step 3e says 16 lines for a 17-line range (B7). | ACCEPT | S1 |
 | 15 | `git commit -F <file>` with no location for the file (S3, S5) - inside the worktree it pollutes `git status` (B8). | ACCEPT (ground rule) - message files live outside the worktree, or use repeated `-m`. | plan section 0, S3, S5 |
 
+Correction while applying round 1 (AR16): finding #4's premise - the
+drafters' AR5 report that plain-string unit fields save untrimmed - is
+FALSE. `app.ts:146` mounts `trimJsonBody()` (`middleware/trimStrings.ts:43-50`),
+which deep-trims every string in every JSON body before any route, so the
+conditional work for AR5 is removed and nothing is put to Cameron. Caught by
+S1's drafter while writing the conditional task; verified by the planner.
+
 Decision changes this round: #1 (a new surface), #5 (mechanism), #11 (audit
 value). So round 2 runs. Reviewer B continues (it found the round's only
 mediums); it receives reviewer A's report.

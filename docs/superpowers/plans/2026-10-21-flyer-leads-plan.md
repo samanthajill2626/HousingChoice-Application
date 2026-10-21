@@ -8,9 +8,9 @@
   @b7959e2a. Mission records: `docs/superpowers/reviews/2026-10-21-flyer-leads/`.
 - Spec review: 4 rounds (the cap) + Cameron's gate answers -
   `docs/superpowers/reviews/2026-10-21-flyer-leads/design-review/adjudications.md`.
-- Status: PLAN v1 (2026-10-21), assembled, going to plan review. Sections
+- Status: PLAN v2 (2026-10-21), round 1 folded in, going to review round 2. Sections
   0-4 are BINDING and written by the planner; slice sections 5-10 are the
-  six opus section drafts, verbatim. Section 4 (assembly rulings AR1-AR10)
+  six opus section drafts, verbatim. Section 4 (assembly rulings AR1-AR16)
   wins over any slice text it contradicts. The drafts themselves
   (gitignored, `.superpowers/sdd/plan-drafts/`) are never the authority. Headings INSIDE
   a slice are numbered within that slice; "plan section N" always means this
@@ -457,16 +457,11 @@ Slice contract issues, ruled at assembly (2026-10-21):
 
 - AR4. (S1-1, S2-1) Build order S1 -> S2 -> S3 -> S4 -> S5 -> S6 (plan
   section 3). S2's Task 2.2 precheck (stop if S1 has not landed) stays.
-- AR5. (S1-2, S2-2) PENDING CAMERON. `validateUnitBody`'s plain `string`
-  kind saves area, utilities, accessibility, lease_terms, notes,
-  listing_link, video_url, application_process and priority untrimmed, and
-  the Edit form sends several of them raw (`ListingEditForm.tsx:182-186`);
-  a test pins it (`unitFields.test.ts:540`). Outside the approved spec. Put
-  to Cameron at the launch gate: fix here, or file
-  `docs/issues/unit-plain-string-fields-untrimmed.md`. Until he answers, it
-  is out of scope. S2's display-time trim of the area (Task 2.4 step 3(a),
-  `neighborhood()`) is ACCEPTED: it changes no stored data, and the
-  tap-to-text prefill losing outer whitespace is the D10 rule applied.
+- AR5. (S1-2, S2-2) WITHDRAWN by AR16 (premise false). The drafters read
+  `validateUnitBody`'s plain `string` kind and the Edit form's raw fields as
+  an untrimmed save path. S2's display-time trim of the area (Task 2.4 step
+  3(a), `neighborhood()`) stays ACCEPTED: it changes no stored data and is
+  harmless.
 - AR6. (S2-3) No change: `interestedPrefill` is fed a validated, trimmed
   address.
 - AR7. (S3) 1: no change (the conformance normalizer already treats
@@ -519,78 +514,44 @@ Plan review round 1 rulings (adjudications:
   exists. `tenantName` stays absent for an unresolved / missing contact (the
   dashboard's existing contactId fallback is unchanged for those). The wire
   comment on `ListingSendRow.tenantName` is updated to say so. S3 owns it.
-- AR14. (R1 #4) AR5's two outcomes are drafted as CONDITIONAL work: S1 Task
-  1.3 (trim the plain-string unit fields in the validator) is built ONLY if
-  Cameron answers "fix here"; S6 Task 6.4's issue-file step
-  (`docs/issues/unit-plain-string-fields-untrimmed.md`) is built ONLY if he
-  answers "file it". The launch gate records his answer here and the
-  unchosen one is skipped.
+- AR14. (R1 #4) Superseded by AR16: the conditional work drafted for AR5's
+  two outcomes is removed from S1 and S6.
 - AR15. (R1 #9) The S3 and S4 exit checks each run the FULL app suite
   (`cd app; npx vitest run`), because both slices edit shared test helpers
   (the harness fakes, `listingSendSeed.ts`).
+- AR16. (S1's own correction while applying R1, verified by the planner)
+  AR5's premise is FALSE. `app.ts:146` mounts `trimJsonBody()`
+  (`middleware/trimStrings.ts:43-50`) before every route, and it deep-trims
+  every string in every JSON body. The validator's only callers are the HTTP
+  routes, so no dashboard or public save stores those unit fields
+  untrimmed, and the importer trims `notes` itself. No task, no issue file,
+  no question for Cameron.
 
 ## 5. S1 - App: the public projection (D1), the tag tables (D2, app side), subzone matching (D9)
 
-Slice S1 owns Tasks 1.1 and 1.2. Build it first (plan section 3: S1 -> S3 -> S4
--> S2 -> S5 -> S6). It touches app files only. Both tasks were dry-run in a
-scratch copy against the real files at main @b7959e2a: every test below was
-RED before its implementation, GREEN after, and the scratch `tsc` (app compiler
-options) exited 0. The one exception is `publicIntake.test.ts`, which needs the
-whole harness; its expected key list was computed from the real, edited
+Slice S1 owns Tasks 1.1 and 1.2. Build it first (plan section 3 and AR4:
+S1 -> S2 -> S3 -> S4 -> S5 -> S6). It touches app files only.
+
+Both tasks were dry-run in a scratch copy against the real files at main
+@b7959e2a. Every projection, tag and ranking test below was RED before its
+implementation and GREEN after, and the scratch `tsc` (app compiler options)
+exited 0. The one exception is `publicIntake.test.ts`, which needs the whole
+harness; its expected key list was computed from the real, edited
 `toUnitFlyer`.
 
 ## A. CONTRACT ISSUES (for the planner to rule)
 
-1. **The dashboard drift test goes RED at Task 1.1's commit and stays red until
-   S2 re-tags the mirror.** `dashboard/src/routes/listing/requirementsMirror.test.ts`
-   imports the APP module (`import * as app from '../../../../app/src/lib/requirements.js';`,
-   line 18). It compares it by `toEqual`:
-   - line 81: `expect(mirror.REQUIREMENT_ITEMS).toEqual(app.REQUIREMENT_ITEMS);`
-   - line 88: `expect(mirror.PROPERTY_FORM_FIELDS).toEqual(app.PROPERTY_FORM_FIELDS);`
-
-   Task 1.1 changes the app tables, so these two cases ("the items, ids and
-   key lists are identical" and "the D10a property-form table is identical")
-   fail from that commit on. The plan's build order puts S3 and S4 between S1
-   and S2, so `npm test -w @housingchoice/dashboard` stays red through two
-   slices. Any reviewer or gate run in that window would read it as a
-   regression.
-
-   **Recommended ruling (a):** run S2's mirror re-tag task (the mirror
-   `dashboard/src/routes/listing/requirements.ts` plus its pinned shapes in
-   `dashboard/src/routes/listing/requirements.test.ts`) IMMEDIATELY after
-   S1. The build order becomes S1 -> S2 mirror task -> S3 -> S4 -> rest of
-   S2 -> S5 -> S6. The alternative is to fold the mirror edit into Task
-   1.1's commit; that crosses the slice boundary but keeps every commit
-   green.
-
-   **Alternative (b):** accept the window and name the two cases as
-   expected-red in the S3 and S4 exit checks.
-
-   This draft does NOT touch the dashboard. Its exit check names the two
-   expected-red cases.
-2. **D10 report - an untrimmed path in a touched surface (pre-existing; not
-   fixed here).** In `validateUnitBody`, the plain `'string'` kind
-   (`app/src/lib/unitFields.ts:230-232`, `case 'string': if (typeof value !==
-   'string') ... break;`, then `fields[key] = value;` at :331) stores these
-   keys UNTRIMMED: `area`, `utilities`, `accessibility`, `lease_terms`,
-   `notes`, `listing_link`, `video_url`, `application_process` and `priority`.
-   - The Edit property form sends `utilities`, `accessibility` and
-     `lease_terms` raw
-     (`dashboard/src/routes/listing/ListingEditForm.tsx:182-184`,
-     `if (utilities !== str(unit.utilities)) patch['utilities'] = utilities;`).
-     The New form trims (`UnitCreateForm.tsx:297-299`, `const v = value.trim();`).
-   - `area` has no dashboard editor; only the raw API and seeds write it.
-   - The flyer still publishes `utilities` and `area` exactly as stored.
-     D9 keeps the area comparison exact, so a stored " East" never matches
-     "East".
-   - The behavior is pinned by `app/test/unitFields.test.ts:540`, "(PIN) area,
-     notes, lease_terms, utilities and accessibility keep the plain string
-     kind".
-
-   Spec D9 and D10 keep this out of scope, so S1 leaves it unchanged.
-   Recommendation: file `docs/issues/unit-plain-string-fields-untrimmed.md`
-   (Tier 2), or rule a separate fix. Cameron's standing rule makes this a
-   real finding.
+1. **RULED by AR4 - no action left.** Task 1.1 changes the app tables, and
+   `dashboard/src/routes/listing/requirementsMirror.test.ts` compares them by
+   `toEqual` (line 81 `REQUIREMENT_ITEMS`, line 88 `PROPERTY_FORM_FIELDS`).
+   Under AR4's order S2 is the NEXT slice, so its two cases ("the items, ids
+   and key lists are identical" and "the D10a property-form table is
+   identical") are red only from Task 1.1's commit until S2 re-tags the
+   mirror. The S1 exit check names them as expected-red.
+2. **WITHDRAWN - premise false; ruled AR16, no task.**
+   - `app.ts:146` `trimJsonBody` deep-trims every JSON body.
+   - The validator's only callers are the HTTP routes.
+   - The importer trims `notes`.
 
 No other contract issue. Plan sections 1 (D1, D2, D9) and 3.1 (Invariant A)
 match the code. The binding interfaces in section 2 do not touch S1.
@@ -1265,7 +1226,7 @@ stays unchanged.
 **3e. `app/src/lib/unitFields.ts`, `interface UnitFlyer`.**
 - Delete `  rent_min: number | null;` and `  rent_max: number | null;` (after
   `  listing_link: string | null;`).
-- Delete the 16 lines from
+- Delete the 17 lines (406-422) from
   `  /** The Pets item's details text, read per spec D1: a legacy \`true\` reads`
   through `  lease_terms: string | null;`. That covers the doc comments and
   fields of `pets`, `no_pets`, `pet_fee`, `accessibility`, `deposit`,
@@ -1562,7 +1523,7 @@ Message:
 - body: `scoreArea compares subzones after removing all whitespace and uppercasing ("se11", " SE11 " and "SE 11" are one subzone); a value that normalizes to empty never matches; no fuzzy matching (SE1 != SE11). The area comparison, the "Same subzone" reason text and stored values are unchanged.`
 - trailer: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
 
-## S1 exit check (no commit)
+## S1 exit check (ends with the slice report commit)
 
 1. From `W:/tmp/flyer-leads/app`, with DynamoDB Local up and WITHOUT
    `ALLOW_SKIP_DYNAMO_TESTS`:
@@ -1576,18 +1537,38 @@ Message:
      `b7959e2a` (AGENTS.md gate 5).
 4. In `git log --oneline -3`, the two newest commits are Task 1.2 and then
    Task 1.1. A bare `git status` shows nothing staged and no S1 file modified.
-5. Known and EXPECTED red outside S1 until S2 (contract issue A.1). From
-   `W:/tmp/flyer-leads/dashboard`:
+5. Known and EXPECTED red outside S1, until S2 (the next slice, AR4)
+   re-tags the mirror. From `W:/tmp/flyer-leads/dashboard`:
    `npx vitest run src/routes/listing/requirementsMirror.test.ts`
    - It fails exactly two cases: "the items, ids and key lists are
-     identical" and "the D10a property-form table is identical". Every other
-     case passes.
-   - Record this in the S1 slice report.
+     identical" (line 81) and "the D10a property-form table is identical"
+     (line 88). Every other case passes.
    - Any OTHER dashboard failure is a regression to diagnose.
 
    The e2e specs that assert flyer rent / pets / deposit rows
    (`public-pages.spec.ts`, `property-requirements.spec.ts`) are S6's; do not
    run e2e here.
+6. **The slice report (plan section 0).** Write
+   `docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S1-report.md`.
+   The `slices/` directory may not exist yet; the Write tool creates it.
+   - ASCII, findings only, each citing code by `file:line`.
+   - It must at least record:
+     - the two expected-red `requirementsMirror.test.ts` cases (:81, :88)
+       until S2;
+     - anything the tree held that this plan got wrong;
+     - any untrimmed typed-input path found in a touched surface.
+   - If there is nothing beyond the expected-red pair, say so in one line
+     after it.
+   - Check: `tr -d '\11\12\15\40-\176' < docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S1-report.md | wc -c`
+     prints `0`.
+
+   Then commit it, from `W:/tmp/flyer-leads`:
+   1. Run a bare `git status`.
+   2. Check MERGE_HEAD as in section C.
+   3. `git add docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S1-report.md`,
+      then a bare `git status`.
+   4. Commit:
+      `git commit -m "docs(records): flyer-leads S1 slice report" -m "Findings from building S1 (projection trim, Staff only tags, subzone matching)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
 
 ## D. Spec coverage map
 
@@ -1603,11 +1584,12 @@ Message:
 | D2: the parity walk green, its 35-row table changing only for those rows | Task 1.1 test 1c + the existing walk case |
 | D2: a deliberately wrong tag still fails the walk | Task 1.1 test 1d (both directions, plus all ten re-tagged rows) |
 | D2: the pinned shapes in `requirements.test.ts` / `unitFields.test.ts` | Task 1.1 tests 1a, 1e |
-| D2: the dashboard mirror, `TaggedField` note gate, forms, landlord form | NOT S1 - S2 (see A.1 for the mirror's timing) |
+| D2: the dashboard mirror, `TaggedField` note gate, forms, landlord form | NOT S1 - S2, the next slice (AR4; see A.1) |
 | D9: subzone normalized (all whitespace removed, uppercased) | Task 1.2 Step 3 |
 | D9: blank never matches; SE1 vs SE11 differ | Task 1.2 tests (blank case; PIN fuzzy case) |
 | D9: area comparison and reason text unchanged | Task 1.2 PIN case + the reason text asserted in every row |
-| D10: whitespace - report untrimmed paths in touched surfaces | A.2 (reported, not fixed) |
+| D10: whitespace - report untrimmed paths in touched surfaces | The slice report (exit check 6); A.2 withdrawn (AR16) |
+| Plan section 0: the slice report | S1 exit check 6 |
 | Spec section 4 "app tests: the parity test, unitFields.test.ts, requirements.test.ts" | Task 1.1 |
 | Spec section 4 "Similar properties (D9): similarUnits.ts scoreArea and its tests" | Task 1.2 |
 | Spec section 5 "Projection" (three bullets) | Task 1.1 |
@@ -1663,39 +1645,39 @@ Message:
 Slice S2 of `docs/superpowers/plans/2026-10-21-flyer-leads-plan.md` (plan
 section 6). Spec: `docs/superpowers/specs/2026-10-21-flyer-leads-design.md`
 rev 6 - D1 (dashboard type), D2 (dashboard side), D3 (all of it).
-Depends on S1 (the app tag table values). Six tasks, 2.1 - 2.6.
+Depends on S1 (the app tag table values). Build order (AR4):
+S1 -> S2 -> S3 -> S4 -> S5 -> S6, so S2's commits sit directly on top of
+S1's. Six tasks, 2.1 - 2.6, then the slice report (exit check).
 
-## A. CONTRACT ISSUES (for the planner to rule)
+## A. CONTRACT ISSUES (all ruled at assembly - kept for the record)
 
-1. **Cross-slice red window on the dashboard suite.**
+1. **Cross-slice red window on the dashboard suite - RULED (AR4): S2 runs
+   right after S1.**
    `dashboard/src/routes/listing/requirementsMirror.test.ts:18` imports the
    APP module (`import * as app from '../../../../app/src/lib/requirements.js'`)
    and asserts `expect(mirror.REQUIREMENT_ITEMS).toEqual(app.REQUIREMENT_ITEMS)`
    (:81) and `expect(mirror.PROPERTY_FORM_FIELDS).toEqual(app.PROPERTY_FORM_FIELDS)`
-   (:88). The moment S1 commits the app re-tag, this dashboard test (and so
-   `npm test`) is RED until Task 2.2 lands. The binding build order
-   `S1 -> S3 -> S4 -> S2` keeps it red across all of S3 and S4, and S1's exit
-   check (its own files + typecheck) does not see it. Proposed ruling: run
-   Task 2.2 IMMEDIATELY after S1 (it needs nothing but S1), then S3, S4, and
-   the rest of S2. Task 2.2 below works in either order; its precheck stops
-   the builder if S1 has NOT landed.
-2. **Area whitespace (D10 report + one small in-slice trim).** `area` is a
-   `'string'` kind (`app/src/lib/unitFields.ts:69` "area: 'string',"; the
-   validator only type-checks it, :230-232 "case 'string': if (typeof value
-   !== 'string') ..."), and `toUnitFlyer` copies it untrimmed (:495
+   (:88), so it is RED from S1's app re-tag commit until Task 2.2 lands.
+   With S2 next in the build order, that window is S2's own Tasks 2.1 - 2.2
+   only. Task 2.2's precheck still stops the builder if S1 has NOT landed.
+2. **Area whitespace - RULED (AR5, AR16): the display-time trim is
+   ACCEPTED.** `toUnitFlyer` copies the stored `area` as is (:495
    "area: typeof unit.area === 'string' ? unit.area : null,"). S2 now prints
    the area as the h1 fallback and as the line under the heading, so Task 2.4
-   makes `neighborhood()` return the TRIMMED area (blank -> null). That also
-   trims the unchanged tap-to-text prefill's fallback word (whitespace only;
-   the wording is unchanged). Planner: confirm, or strike Task 2.4 step 3(a).
-   Out of S2's scope, reported per D10: `ListingEditForm.tsx:182-186`
-   PATCHes `utilities`, `accessibility`, `lease_terms`, `listing_link`,
-   `video_url` UNTRIMMED and compares them untrimmed ("if (utilities !==
-   str(unit.utilities)) patch['utilities'] = utilities;"), and the app stores
-   them as sent (`'string'` kind). `UnitCreateForm.tsx:297-300` trims
-   (`addStr`). The flyer's Tenant pays row only blank-guards it
-   (`textOrNull`). Suggest a `docs/issues/` entry; not built here.
-3. **(info, no change)** `interestedPrefill` (`FlyerPage.tsx:108-115`) tests
+   makes `neighborhood()` return the TRIMMED area (blank -> null) - a
+   defensive display guard (it changes no stored data). That also trims the
+   unchanged tap-to-text prefill's fallback word (whitespace only; the
+   wording is unchanged) - AR5: the D10 rule applied. Task 2.4 step 3(a) is
+   binding as written.
+   No untrimmed stored path (AR16): `app/src/app.ts:146` mounts
+   `trimJsonBody()` (`app/src/middleware/trimStrings.ts:43-50`), which
+   deep-trims every string in every JSON body before any route, so every
+   dashboard write - the Edit form's raw `utilities`, `accessibility`,
+   `lease_terms`, `listing_link`, `video_url` included
+   (`ListingEditForm.tsx:182-186`) - is stored trimmed. The Edit form's raw
+   (untrimmed) comparison can only add a harmless no-op field to a PATCH.
+   S2 builds nothing for it.
+3. **(info) RULED (AR6): no change.** `interestedPrefill` (`FlyerPage.tsx:108-115`) tests
    `line1 !== ''` untrimmed. Unreachable from a real payload:
    `toUnitFlyer` re-validates the address (`unitFields.ts:478`) and
    `validateAddress` trims and drops blank parts (`app/src/lib/address.ts:69-71`
@@ -1848,8 +1830,11 @@ gate command. Never run e2e in this slice (S6). Never touch :5174 / :8080.
 - Commit preamble (two separate commands, read both):
   `cd "W:/tmp/flyer-leads" && git status`
   `test -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/flyer-leads/MERGE_HEAD" && echo "MERGE_HEAD PRESENT - STOP" || echo "no MERGE_HEAD"`
-  then `git add <explicit paths>` and
-  `git commit -F - <<'EOF'` ... `EOF` (message ASCII, trailer last).
+  then `cd "W:/tmp/flyer-leads" && git add <explicit paths>` and the task's
+  `git commit` command, which passes the message as REPEATED `-m` arguments
+  (plan 0: never a message file inside the worktree). Each `-m` argument is
+  single-quoted, and the message texts below contain no apostrophe, so they
+  paste as written; the trailer is the last `-m`.
 
 ---
 
@@ -1945,16 +1930,10 @@ On flyer, so nothing else moves).
 
 ### Step 6 - commit
 
-Paths: `dashboard/src/routes/listing/TaggedField.tsx`,
-`dashboard/src/routes/listing/TaggedField.test.tsx`.
+After the section C preamble:
 ```
-feat(dashboard): show the public flyer note only on an On flyer field (flyer-leads D2)
-
-TaggedField renders "Tenants see this on the public flyer." only when the
-field's visibility is on_flyer, whatever publicNote says, so a hand-set
-prop can no longer drift from the tag (spec 2026-10-21 D2, plan 2.7).
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd "W:/tmp/flyer-leads" && git add dashboard/src/routes/listing/TaggedField.tsx dashboard/src/routes/listing/TaggedField.test.tsx
+cd "W:/tmp/flyer-leads" && git commit -m 'feat(dashboard): show the public flyer note only on an On flyer field (flyer-leads D2)' -m 'TaggedField renders "Tenants see this on the public flyer." only when the visibility of the field is on_flyer, whatever publicNote says, so a hand-set prop can no longer drift from the tag (spec 2026-10-21 D2, plan 2.7).' -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
 ```
 
 ---
@@ -2245,18 +2224,10 @@ prints 0.
 
 ### Step 6 - commit
 
-Paths: the eight files listed under Files.
+After the section C preamble:
 ```
-feat(dashboard): re-tag rent, accessibility, lease terms, pets and deposit Staff only (flyer-leads D2)
-
-The dashboard mirror of the D10a tag table and the requirement registry
-follows the app (S1): Rent min / max, Accessibility, Lease terms and every
-Pets and Deposit field are Staff only; the application-fee pair stays On
-flyer. The hand-set public notes on Accessibility and Lease terms go - only
-Tenant-paid utilities keeps one. Explicit pins on both property forms, the
-shared Requirements section and the landlord form (spec 2026-10-21 D2).
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd "W:/tmp/flyer-leads" && git add dashboard/src/routes/listing/requirements.ts dashboard/src/routes/listing/requirements.test.ts dashboard/src/routes/listing/RequirementsFields.test.tsx dashboard/src/routes/listing/ListingEditForm.tsx dashboard/src/routes/listing/ListingEditForm.test.tsx dashboard/src/routes/listing/UnitCreateForm.tsx dashboard/src/routes/listing/UnitCreateForm.test.tsx dashboard/src/routes/contact/ContactEditForm.test.tsx
+cd "W:/tmp/flyer-leads" && git commit -m 'feat(dashboard): re-tag rent, accessibility, lease terms, pets and deposit Staff only (flyer-leads D2)' -m 'The dashboard mirror of the D10a tag table and the requirement registry follows the app (S1): Rent min / max, Accessibility, Lease terms and every Pets and Deposit field are Staff only; the application-fee pair stays On flyer. The hand-set public notes on Accessibility and Lease terms go - only Tenant-paid utilities keeps one. Explicit pins on both property forms, the shared Requirements section and the landlord form (spec 2026-10-21 D2).' -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
 ```
 
 ---
@@ -2598,17 +2569,10 @@ fixture.)
 
 ### Step 6 - commit
 
-Paths: the four files listed under Files.
+After the section C preamble:
 ```
-feat(flyer): drop rent, deposit, pets, accessibility and lease from the public flyer (flyer-leads D1, D3)
-
-The flyer page no longer shows the rent fact or the Deposit, Pets, Pet fee,
-Accessibility and Lease terms rows, and ignores those keys on a stale
-payload; PublicFlyer drops the ten keys the projection no longer sends
-(type-pinned). rentRange, petsLabel and depositLabel are deleted;
-flyerMoney stays for the application fee (spec 2026-10-21 D1, D3).
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd "W:/tmp/flyer-leads" && git add dashboard/src/routes/public/FlyerPage.tsx dashboard/src/routes/public/FlyerPage.test.tsx dashboard/src/routes/public/publicApi.ts dashboard/src/routes/public/publicApi.test.ts
+cd "W:/tmp/flyer-leads" && git commit -m 'feat(flyer): drop rent, deposit, pets, accessibility and lease from the public flyer (flyer-leads D1, D3)' -m 'The flyer page no longer shows the rent fact or the Deposit, Pets, Pet fee, Accessibility and Lease terms rows, and ignores those keys on a stale payload; PublicFlyer drops the ten keys the projection no longer sends (type-pinned). rentRange, petsLabel and depositLabel are deleted; flyerMoney stays for the application fee (spec 2026-10-21 D1, D3).' -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
 ```
 
 ---
@@ -2859,8 +2823,9 @@ function neighborhood(flyer: Pick<PublicFlyer, 'area'>): string | null {
 ```
 replace with
 ```
-/** The neighborhood: the AREA alone (D11), trimmed (flyer-leads D10 - the
- *  write side stores it as typed). Subzone is a staff-only code and is not in
+/** The neighborhood: the AREA alone (D11), trimmed (flyer-leads D10 - a
+ *  display guard; JSON writes are already trimmed server-side, but a legacy
+ *  or imported value may not be). Subzone is a staff-only code and is not in
  *  the projection (D3). flyer-leads D3: the line under an address heading,
  *  or the plain heading when there is no address. */
 function neighborhood(flyer: Pick<PublicFlyer, 'area'>): string | null {
@@ -2869,8 +2834,8 @@ function neighborhood(flyer: Pick<PublicFlyer, 'area'>): string | null {
   return area === '' ? null : area;
 }
 ```
-(If the planner strikes contract issue 2, keep the old body and drop the
-"a recorded area prints trimmed (D10)" case.)
+(Binding: the display-time trim is accepted by AR5 and stands under AR16 as
+a defensive display guard.)
 
 (b) `FlyerPage.tsx` - delete `addressLines` (:82-87, from
 "function addressLines(a: PublicFlyer['address']): string | null {" through
@@ -3041,19 +3006,11 @@ new-file command prints 0. `FlyerPage.tsx`: diff command prints 0.
 
 ### Step 6 - commit
 
-Paths: the four files listed under Files.
+After the section C preamble (the styles test is a NEW file - add it by
+its explicit path too):
 ```
-feat(flyer): make the address the flyer heading, linked to Google Maps (flyer-leads D3)
-
-The h1 is the street line inside the Maps link, with the city line under it
-in the same link and the old sr-only "open in Google Maps" suffix; with no
-street line the city line is the h1, with no address the area (plain text),
-else "Home for rent". The area is a line under an address heading. The
-Address row and addressLines are gone, the detail rows are pinned in order,
-and CSS pins keep the heading one tap target that wraps at 320px (spec
-2026-10-21 D3).
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd "W:/tmp/flyer-leads" && git add dashboard/src/routes/public/FlyerPage.tsx dashboard/src/routes/public/FlyerPage.module.css dashboard/src/routes/public/FlyerPage.test.tsx dashboard/src/routes/public/FlyerPage.styles.test.ts
+cd "W:/tmp/flyer-leads" && git commit -m 'feat(flyer): make the address the flyer heading, linked to Google Maps (flyer-leads D3)' -m 'The h1 is the street line inside the Maps link, with the city line under it in the same link and the old sr-only "open in Google Maps" suffix; with no street line the city line is the h1, with no address the area (plain text, trimmed), else "Home for rent". The area is a line under an address heading. The Address row and addressLines are gone, the detail rows are pinned in order, and CSS pins keep the heading one tap target that wraps at 320px (spec 2026-10-21 D3; AR5).' -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
 ```
 
 ---
@@ -3243,16 +3200,10 @@ new-file command prints 0. `FlyerPage.tsx`: diff command prints 0.
 
 ### Step 6 - commit
 
-Paths: the four files listed under Files.
+After the section C preamble:
 ```
-feat(flyer): add "Same-day tours available" to every flyer and strengthen the authority line (flyer-leads D3)
-
-A highlighted static line under the heading on every ready flyer (both CTA
-variants, not the unavailable state); the "Accepts: ..." line is bold,
-larger than body text and full contrast, wording unchanged. CSS source pins
-hold both (spec 2026-10-21 D3 items 4 and 6).
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd "W:/tmp/flyer-leads" && git add dashboard/src/routes/public/FlyerPage.tsx dashboard/src/routes/public/FlyerPage.module.css dashboard/src/routes/public/FlyerPage.test.tsx dashboard/src/routes/public/FlyerPage.styles.test.ts
+cd "W:/tmp/flyer-leads" && git commit -m 'feat(flyer): add "Same-day tours available" to every flyer and strengthen the authority line (flyer-leads D3)' -m 'A highlighted static line under the heading on every ready flyer (both CTA variants, not the unavailable state); the "Accepts: ..." line is bold, larger than body text and full contrast, wording unchanged. CSS source pins hold both (spec 2026-10-21 D3 items 4 and 6).' -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
 ```
 
 ---
@@ -3381,22 +3332,15 @@ command prints 0.
 
 ### Step 6 - commit
 
-Paths: `dashboard/src/routes/public/FlyerPage.tsx`,
-`dashboard/src/routes/public/FlyerPage.test.tsx`.
+After the section C preamble:
 ```
-feat(flyer): reword the flyer sign-up box as home alerts, not a tour request (flyer-leads D3)
-
-The bare-link box reads "Sign up for home alerts", says signing up does not
-book a tour, and its button reads "Sign up"; the thank-you keeps its heading
-and says we'll text about this home and others. The ?cta=text variant is
-unchanged (spec 2026-10-21 D3 item 8).
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd "W:/tmp/flyer-leads" && git add dashboard/src/routes/public/FlyerPage.tsx dashboard/src/routes/public/FlyerPage.test.tsx
+cd "W:/tmp/flyer-leads" && git commit -m 'feat(flyer): reword the flyer sign-up box as home alerts, not a tour request (flyer-leads D3)' -m 'The bare-link box reads "Sign up for home alerts", says signing up does not book a tour, and its button reads "Sign up"; the thank-you keeps its heading and now promises texts about this home and others. The ?cta=text variant is unchanged (spec 2026-10-21 D3 item 8).' -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
 ```
 
 ---
 
-## S2 exit check (no commit)
+## S2 exit check (its only commit is the slice report, step 7)
 
 1. `cd "W:/tmp/flyer-leads/dashboard" && npx vitest run` - the whole
    dashboard suite green (no DynamoDB needed). Includes
@@ -3409,12 +3353,42 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
    'unavailable', ...})`); anything else is S2's and blocking. Name the two
    in the slice report.
 4. `cd "W:/tmp/flyer-leads" && grep -rn "A home for you\|petsLabel\|depositLabel\|rentRange\|addressLines" dashboard/src`
-   prints nothing.
+   prints ONLY the `FlyerPage.test.tsx` lines of the case
+   '"A home for you" appears nowhere, whatever the payload' (its title and
+   its `/A home for you/` query) - no source file.
 5. `cd "W:/tmp/flyer-leads" && grep -rn "rent_min\|rent_max\|no_pets\|pet_fee\|deposit_one_month\|deposit_flexible\|lease_terms" dashboard/src/routes/public`
    prints only `FlyerPage.test.tsx` (`STALE_TRIMMED_KEYS`) and
    `publicApi.test.ts` (`TrimmedFlyerKey`).
-6. `cd "W:/tmp/flyer-leads" && git status` - clean; six S2 commits on top
-   of the S1 (and, by build order, S3/S4) commits.
+6. `cd "W:/tmp/flyer-leads" && git status` - clean (bare read). Then
+   `cd "W:/tmp/flyer-leads" && git log --oneline -10`: the newest SIX
+   commits are S2's, newest first - Task 2.6 ("feat(flyer): reword the flyer
+   sign-up box ..."), 2.5, 2.4, 2.3, 2.2, 2.1 ("feat(dashboard): show the
+   public flyer note only ...") - and the commit directly below Task 2.1's is
+   S1's last commit (AR4: S1 -> S2 -> S3; no S3 / S4 commit exists yet).
+   Anything else in between: STOP and report.
+7. **Slice report** (plan 0). Write
+   `W:/tmp/flyer-leads/docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S2-report.md`
+   (create the `slices/` folder if S1 did not), ASCII, FINDINGS ONLY, each
+   citing code by `file:line` - what the tree held that this plan got wrong
+   (any anchor that did not match, any RED that was red for another reason),
+   risks, and untrimmed paths. At minimum it names, with the line numbers the
+   tree shows at the end of S2:
+   - the 2 pre-existing lint errors in `dashboard/src/routes/public/FlyerPage.tsx`
+     (`react-hooks/set-state-in-effect`: `setVariant(...)` in the cta effect,
+     `setStage({ kind: 'unavailable', contactNumber: null })` in the unit
+     effect) - not S2's;
+   - that the 320px wrap is pinned only by CSS source (`FlyerPage.styles.test.ts`)
+     and still needs the S6 real-browser check.
+   If nothing else turned up, those items are the whole report. Check it:
+   `cd "W:/tmp/flyer-leads" && tr -d '\11\12\15\40-\176' < docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S2-report.md | wc -c`
+   prints 0. Then the section C preamble (bare `git status`, MERGE_HEAD
+   absent) and:
+   ```
+   cd "W:/tmp/flyer-leads" && git add docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S2-report.md
+   cd "W:/tmp/flyer-leads" && git commit -m 'docs(records): flyer-leads S2 slice report (dashboard: mirror, note gate, flyer page)' -m 'Findings only: pre-existing FlyerPage lint errors and the 320px check owed to S6.' -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
+   ```
+   (Adjust the second `-m` to what the report actually says; keep it free
+   of apostrophes.)
 
 ## D. Spec coverage map
 
@@ -3439,7 +3413,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 | D3 320px wrap, whole heading block is the tap target | 2.4 (CSS pins + one-link DOM assertions); real-browser check = S6 |
 | Spec 5 "Tags" bullets | 2.1, 2.2 |
 | Spec 5 "Flyer page" bullets | 2.3, 2.4, 2.5, 2.6 |
-| D10 whitespace | 2.4 (address parts and area trimmed at display); A2 / A3 report the rest |
+| D10 whitespace | 2.4 (address parts and area trimmed at display); A2 / A3 (server trims every JSON body, AR16) |
 
 ## E. Notes for other slices
 
@@ -3453,9 +3427,9 @@ Names S2 creates (dashboard only, none cross-workspace):
 
 Relies on:
 - S1: the app `REQUIREMENT_ITEMS` / `PROPERTY_FORM_FIELDS` values (B, plan
-  1 D2). Contract issue A1 (red window) concerns S1's exit check and the
-  build order.
-- Nothing from S3 / S4 / S5.
+  1 D2). S2 runs directly after S1 (AR4), so the mirror drift test is red
+  only between S1's re-tag commit and Task 2.2.
+- Nothing from S3 / S4 / S5 (all of them run after S2).
 
 Files other slices also touch: none of S2's files. S5's dashboard files
 (`routes/listing/listingFormat.ts`, `routes/listing/ListingDetail.tsx`,
@@ -3517,12 +3491,22 @@ e2e assertions S2 breaks (S6 repairs; line numbers @7ac1f2e3):
 
 Spec decisions owned: D7 (the flyer share entry, the current-decline refusal,
 O1), D8 (the `signed_up` outcome, its derivation and its five callers).
-Binding interfaces implemented: plan 2.1, 2.2, 2.3, 2.4; rulings AR1, AR2.
+Binding interfaces implemented: plan 2.1, 2.2, 2.3, 2.4; rulings AR1, AR2,
+AR7, AR13, AR15.
+Slice order (AR4): S1 -> S2 -> S3 -> S4 -> S5 -> S6. S3 needs nothing from S1
+or S2 (it touches no file they edit); S4 and S5 build on it.
 Tasks: 3.1 keys leaf + summarize; 3.2 O1 decline token; 3.3 applyFlyerShareEntry;
-3.4 `signed_up` outcome + every caller's wire. Order is binding: 3.3's race
-test needs 3.2's token, 3.4's caller tests seed through 3.3's writer.
+3.4 `signed_up` outcome + every caller's wire; 3.5 (AR13) a nameless resolved
+recipient's "Sent to" label is its formatted phone. Task order is binding:
+3.3's race test needs 3.2's token, 3.4's caller tests seed through 3.3's
+writer, 3.5's tests read 3.4's `signed_up`.
 
 ## A. CONTRACT ISSUES (for the planner to rule)
+
+RULED - AR7 (2026-10-21): all five accepted / confirmed; none is open. Kept
+below as the record the ruling cites. Plan review round 1 added AR13 (Task
+3.5), AR15 (full app suite at the exit check) and the section 0 ground rules
+(slice report, commit messages); no new contract issue arises from them.
 
 1. (Informational - no deviation.) Plan 2.3 says "the conformance normalizer
    treats `shares_op` as an opaque token". It ALREADY does:
@@ -3619,9 +3603,21 @@ Test helpers: `app/test/helpers/listingSendSeed.ts` (ASCII) - `:20` `/** The ser
 
 Test-file anchors (each unique): `shareLedger.test.ts:102` `  it('a lost condition re-reads and re-applies; past the bound it reports lost with one ERROR', async () => {`; `contactTimeline.test.ts` `  it('a ledger read failure leaves the stored labels and logs one ERROR', async () => {` (inside the D6 describe that defines `TENANT_D6`, `seedTenant`, `seedPin`, `seedEntry`, `pinLabels`, `authedGet`, `minutesAgo`; pins list OLDEST first); `repairShareOutcomes.test.ts:808` `  it('the CLI contract: --env local|dev|prod, --lane with local only, --broadcast <id>, --apply; anything else is a usage error', () => {` and `:53` `import { seedListingSend } from './helpers/listingSendSeed.js';`; `broadcastApi.test.ts` `    it('checkedByDefault is the ONE server rule: a seed is checked whatever its flags;` (inside describe `matching-blast-rules D4/D5/D7: the preview review rows`, which defines `declinedRow`, `preview`, `rowsById`, `SENT = '2026-10-01T12:00:00.000Z'`, `DECLINED_AT = '2026-10-02T12:00:00.000Z'`; `seedTenant` defaults `status: 'searching'` and `consent_method: 'inbound_text'`; `createDraft(app)` makes a unit-1 tenant filter draft); `broadcastApi.test.ts:44` `import { createSendMessageService } from '../src/services/sendMessage.js';`; `listingSendsApi.test.ts:11` and `listingSendOutcomeApi.test.ts:9` `import { seedListingSend } from './helpers/listingSendSeed.js';`; `contactTimeline.test.ts:29` `import { createLogCapture } from './helpers/logCapture.js';`.
 
+AR13 facts (Task 3.5):
+- `app/src/routes/units.ts:183-194` `function displayNameOfContact(contact: { contactId: string; firstName?: unknown; lastName?: unknown; }): string | undefined` - trimmed first/last join, `undefined` without a name. It has EIGHT callers (`:268`, `:473`, `:650`, `:1871`, `:2123`, `:2249`, `:2522`, `:2573` - rosters, placements, landlord names), so AR13 does NOT change it: a new `recipientLabelOf` wraps it for the recipients projection only.
+- `:196-201` the anchor `/**` / ` * caseworkers D20 (plan 3.7, ruling R3-F3): a recipients row's contact type and` / ` * role, from the recipient display projection. \`role\` only when it holds text;` then `function recipientFactsOf(contact: RecipientDisplay): ListingSendRecipientFacts {`.
+- `:268` `  const tenantName = displayNameOfContact(contact);` (unique - every other caller assigns `name`), inside `projectRecipientRow`, which serves BOTH the units recipients GET (`:1496`) and the outcome route's re-projection (`:1743`). A MISSING recipient returns earlier (`:238-256`) with no tenantName.
+- `:120` `import { formatAddress } from '../lib/address.js';`; units.ts imports nothing from `../lib/phone.js` yet. units.ts carries 142 pre-existing non-ASCII bytes.
+- `app/src/lib/phone.ts:73-77` `formatPhoneForDisplay(e164: string | undefined): string | undefined` - `undefined` for an absent / empty number, `(NNN) NNN-NNNN` for a `+1` ten-digit number, any other value returned AS IS. Precedent `app/src/lib/groupTitle.ts:56` `const label = first.length > 0 ? first : (formatPhoneForDisplay(phone) ?? phone);` (staff chrome only, per its `relayMemberLabels` doc).
+- `RecipientDisplay` (`repos/contactsRepo.ts:397`) = `ContactDisplayItem & {...}`, and `ContactDisplayItem` carries `phone?: string` (`:385`); the recipient projection reads `phone`.
+- The contact listings-sent read (`routes/contacts.ts:1332-1338`) passes `toListingSendRow(row, { tour, outcome, lastHeardFromAt, declined, interestedSupported })` - it never attaches `tenantName` (its contact is the page owner). So AR13 changes nothing there, and sharing a helper with it is moot: the rule lives in `units.ts` only.
+- `repos/listingSendsRepo.ts:132-134` the wire comment: `  /** Denormalized tenant display name, attached by the GET projections (same` / `   *  contacts join as the roster's \`name\`). HONEST - absent when the contact is` / `   *  unknown or has no name; the dashboard then falls back to the id. */`
+- The dashboard reads it at `dashboard/src/routes/listing/ListingDetail.tsx:1343` `const name = row.tenantName ?? row.contactId;` (identity link text and the outcome dialogs' `name`). No dashboard edit is needed.
+- Two existing tests pin the EXACT units row of a NAMELESS seeded tenant and would break: `app/test/listingSendsApi.test.ts:169` `expect(byUnit.body.recipients[0]).toEqual({ ...byContact.body.sent[0], type: 'tenant', interestedMode: 'form', eligible: true });` (after `:152` `    seedTenant(world, 'c-x');`) and `:239` `expect(c1).toEqual({ contactId: 'c-1', unitId: 'unit-1', sentAt: c1.sentAt, via: 'broadcast', tour: { tourId: 'tour-c1', state: 'scheduled' }, type: 'tenant', outcome: 'interested', interestedSupported: true, interestedMode: 'form', eligible: true });` (seeded at `:217-221`). `seedTenant` there gives no name and the phone `+1555010` + the id's last four characters padded with `0` (e.g. `+15550100c-1`), which `formatPhoneForDisplay` passes through as stored. Every other `tenantName` assertion in `app/test` is on a NAMED contact or a MISSING one (`listingSendsApi.test.ts:83`, `:576`) - unaffected. No e2e spec finds a Sent to row by a raw contactId (grep of `e2e/tests`).
+
 Non-ASCII baseline of every pre-existing file S3 touches: 0 bytes in shareLedger.ts, listingSendOutcome.ts, shareAttemptOrder.ts, the conformance suite, shareLedger.test.ts, listingSendOutcome.test.ts, listingSendOutcomeApi.test.ts, followUps.test.ts, repairShareOutcomes.test.ts, listingSendSeed.ts; non-zero in listingSendsRepo.ts (9), the harness (156), listingSendsRepo.integration.test.ts (3), listingSendsApi.test.ts (3), broadcastApi.test.ts (134), contactTimeline.test.ts (66). Always use the ADDED-lines check below.
 
-Verified outside the worktree (scratch only): (1) a prototype of the 3.1 / 3.3 logic, run against the worktree's harness fake with O1 emulated, passed every 3.3 scenario below, the O1 race included; (2) a scratch copy of `app/` with EVERY edit of Tasks 3.1-3.4 applied exactly as written here (the code blocks were extracted from this file) typechecks under `app/tsconfig.test.json` with ZERO new errors against the unmodified copy (tsc 5.9.3, worktree node_modules). The vitest runs themselves were not executed (no shared-DynamoDB runs from a planning agent).
+Verified outside the worktree (scratch only): (1) a prototype of the 3.1 / 3.3 logic, run against the worktree's harness fake with O1 emulated, passed every 3.3 scenario below, the O1 race included; (2) a scratch copy of `app/` with EVERY edit of Tasks 3.1-3.5 applied exactly as written here (the code blocks were extracted from this file) typechecks under `app/tsconfig.test.json` with ZERO new errors against the unmodified copy (tsc 5.9.3, worktree node_modules). The vitest runs themselves were not executed (no shared-DynamoDB runs from a planning agent).
 
 ## C. Commands used by every task
 
@@ -3635,7 +3631,8 @@ Every shell call starts from an explicit `cd` (the cwd resets). Git Bash syntax.
 - ASCII, new file: `cd "W:/tmp/flyer-leads" && tr -d '\11\12\15\40-\176' < app/<path> | wc -c` prints `0`.
 - ASCII, pre-existing file (added lines only): `cd "W:/tmp/flyer-leads" && git diff -U0 -- app/<path> | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c` prints `0`.
 - No literal backslash-u in S3's code; if an Edit ever introduces one, check with `grep -n '\\u' <file>`.
-- Commit (one per task): (1) `cd "W:/tmp/flyer-leads" && git status` - read it bare; (2) `test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/flyer-leads/MERGE_HEAD" && echo no-merge` prints `no-merge`; (3) `cd "W:/tmp/flyer-leads" && git add <explicit paths>` (never `-A`); (4) `cd "W:/tmp/flyer-leads" && git commit -F <message file>` with the message given in the task, ending in the trailer line.
+- Commit (one per task): (1) `cd "W:/tmp/flyer-leads" && git status` - read it bare; (2) `test ! -e "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/flyer-leads/MERGE_HEAD" && echo no-merge` prints `no-merge`; (3) `cd "W:/tmp/flyer-leads" && git add <explicit paths>` (never `-A`); (4) the task's `git commit` command, verbatim: repeated `-m` arguments (subject, body, trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`) - never a message file inside the worktree (plan section 0, R1 #15).
+- Code blocks nested under a list bullet carry the bullet's indent in this file; strip it before using a block as an Edit anchor or replacement - the target file's own indentation is the authority (plan section 0, R1 #13).
 
 ---
 
@@ -3836,16 +3833,9 @@ New: `app/src/lib/shareLedgerKeys.ts`, `app/test/shareLedgerKeys.test.ts` (full-
 
 Paths: `app/src/lib/shareLedgerKeys.ts app/test/shareLedgerKeys.test.ts app/src/services/shareLedger.ts app/src/lib/shareAttemptOrder.ts app/test/shareLedger.test.ts`
 
-Message:
+Command (repeated `-m`, plan section 0 - no message file):
 ```
-feat(ledger): shareLedgerKeys leaf - one latest-counted-entry rule; summarize maps the flyer key like individual
-
-flyer-leads D7/D8, plan 2.1 (AR1): INDIVIDUAL_SHARE_KEY, FLYER_SHARE_KEY,
-flyerAttemptKey and latestCountedShareKey live in a pure lib leaf so the
-ledger summary and the outcome derivation read the same entry. A flyer
-entry never names a broadcastId.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd "W:/tmp/flyer-leads" && git commit -m "feat(ledger): shareLedgerKeys leaf - one latest-counted-entry rule; summarize maps the flyer key like individual" -m "flyer-leads D7/D8, plan 2.1 (AR1): INDIVIDUAL_SHARE_KEY, FLYER_SHARE_KEY, flyerAttemptKey and latestCountedShareKey live in a pure lib leaf so the ledger summary and the outcome derivation read the same entry. A flyer entry never names a broadcastId." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -4134,16 +4124,9 @@ Added-lines check on all four files; each prints `0`.
 
 Paths: `app/src/repos/listingSendsRepo.ts app/test/helpers/twilioWebhookHarness.ts app/test/listingSendsRepo.integration.test.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts`
 
-Message:
+Command (repeated `-m`, plan section 0 - no message file):
 ```
-feat(listing-sends): decline writers stamp a fresh shares_op so a racing ledger write re-reads (flyer-leads O1)
-
-Plan 2.3: setDeclined / clearDeclined SET a fresh change token, so a
-ledger write that read the pair before a decline landed loses its
-condition, re-reads and sees it. The harness fake mirrors it; the
-conformance suite and the repo suite pin it.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd "W:/tmp/flyer-leads" && git commit -m "feat(listing-sends): decline writers stamp a fresh shares_op so a racing ledger write re-reads (flyer-leads O1)" -m "Plan 2.3: setDeclined / clearDeclined SET a fresh change token, so a ledger write that read the pair before a decline landed loses its condition, re-reads and sees it. The harness fake mirrors it; the conformance suite and the repo suite pin it." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -4574,17 +4557,9 @@ New: `app/test/shareLedgerFlyer.test.ts` (full-file). Touched (added lines): `ap
 
 Paths: `app/src/services/shareLedger.ts app/src/repos/listingSendsRepo.ts app/test/helpers/listingSendSeed.ts app/test/shareLedgerFlyer.test.ts app/test/repairShareOutcomes.test.ts app/test/contactTimeline.test.ts`
 
-Message:
+Command (repeated `-m`, plan section 0 - no message file):
 ```
-feat(ledger): applyFlyerShareEntry - flyer share entry, refused by a current decline (flyer-leads D7)
-
-Plan 2.2 / AR2: one counted flyer entry through the shared ledger loop;
-a current decline (effectiveDecline(row, undefined)) refuses it on each
-round's read, so a decline racing the write wins (O1). Lost writes log
-their own not-repaired line. Pins the repair census and the timeline
-pin-word residual; adds the seedFlyerSignUp test helper.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd "W:/tmp/flyer-leads" && git commit -m "feat(ledger): applyFlyerShareEntry - flyer share entry, refused by a current decline (flyer-leads D7)" -m "Plan 2.2 / AR2: one counted flyer entry through the shared ledger loop; a current decline (effectiveDecline(row, undefined)) refuses it on each round's read, so a decline racing the write wins (O1). Lost writes log their own not-repaired line. Pins the repair census and the timeline pin-word residual; adds the seedFlyerSignUp test helper." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -4876,29 +4851,197 @@ Added-lines check on all six files; each prints `0`.
 
 Paths: `app/src/lib/listingSendOutcome.ts app/test/listingSendOutcome.test.ts app/test/listingSendsApi.test.ts app/test/listingSendOutcomeApi.test.ts app/test/followUps.test.ts app/test/broadcastApi.test.ts`
 
-Message:
+Command (repeated `-m`, plan section 0 - no message file):
 ```
-feat(outcome): signed_up send outcome from the latest counted flyer entry (flyer-leads D8)
-
-Plan 2.4: deriveListingSendOutcome reads the stored shares through
-latestCountedShareKey - decline > tour > replied > signed_up / no_reply.
-signed_up never waits. Pinned on every caller's wire: units recipients,
-contact listings-sent, the outcome route, follow-ups and the blast
-preview.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd "W:/tmp/flyer-leads" && git commit -m "feat(outcome): signed_up send outcome from the latest counted flyer entry (flyer-leads D8)" -m "Plan 2.4: deriveListingSendOutcome reads the stored shares through latestCountedShareKey - decline > tour > replied > signed_up / no_reply. signed_up never waits. Pinned on every caller's wire: units recipients, contact listings-sent, the outcome route, follow-ups and the blast preview." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
 
-## S3 exit check (no commit)
+## Task 3.5 - AR13: a resolved recipient with no name is labelled by its formatted phone
+
+Goal: the units recipients projection (and the outcome route's re-projection - the same `projectRecipientRow`) attaches, for a RESOLVED contact with no first / last name, `tenantName = formatPhoneForDisplay(phone) ?? phone` when the contact has a phone (AR13, plan review R1 #1). A missing recipient, or a contact with neither a name nor a phone, still carries no `tenantName`. Why: spec D7 puts EXISTING `unknown` contacts - auto-captured, often nameless - on the property's Sent to card, and D4 never renames them, so the card would print a raw contactId. The contact listings-sent read is unchanged (it never attaches `tenantName` - section B); the rule therefore lives in `units.ts` only, not in a shared helper.
+
+Files: `app/src/routes/units.ts`; `app/src/repos/listingSendsRepo.ts` (the `ListingSendRow.tenantName` wire comment); `app/test/listingSendsApi.test.ts`.
+
+### Step 1 - tests first (`app/test/listingSendsApi.test.ts`; Task 3.4 already imports `seedFlyerSignUp` here)
+
+1a. The two exact-shape pins of a nameless tenant (section B) now expect the phone label:
+- Replace the anchor `    seedTenant(world, 'c-x');` with `    const tx = seedTenant(world, 'c-x');`
+- Replace the anchor
+  `    expect(byUnit.body.recipients[0]).toEqual({ ...byContact.body.sent[0], type: 'tenant', interestedMode: 'form', eligible: true });`
+  with:
+  ```ts
+    // flyer-leads AR13: the units side also labels a resolved contact with no
+    // name by its phone (seedTenant's phone is not NANP-shaped, so
+    // formatPhoneForDisplay passes it through as stored); the contact side
+    // never carries tenantName.
+    expect(byUnit.body.recipients[0]).toEqual({ ...byContact.body.sent[0], type: 'tenant', interestedMode: 'form', eligible: true, tenantName: tx.phone });
+    expect(byContact.body.sent[0]).not.toHaveProperty('tenantName');
+  ```
+- Replace the anchor block
+  ```ts
+    seedTenant(world, 'c-1');
+    seedTenant(world, 'c-2');
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
+    await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-2', sentAt: SENT_AT });
+    // c-1 has a scheduled tour on unit-1; c-2 has none.
+  ```
+  with the same five lines, the first one changed to `    const t1 = seedTenant(world, 'c-1');`
+- Replace the anchor
+  `    expect(c1).toEqual({ contactId: 'c-1', unitId: 'unit-1', sentAt: c1.sentAt, via: 'broadcast', tour: { tourId: 'tour-c1', state: 'scheduled' }, type: 'tenant', outcome: 'interested', interestedSupported: true, interestedMode: 'form', eligible: true });`
+  with:
+  ```ts
+    // flyer-leads AR13: c-1 has no name, so its label is its phone.
+    expect(c1).toEqual({ contactId: 'c-1', unitId: 'unit-1', sentAt: c1.sentAt, via: 'broadcast', tour: { tourId: 'tour-c1', state: 'scheduled' }, type: 'tenant', outcome: 'interested', interestedSupported: true, interestedMode: 'form', eligible: true, tenantName: t1.phone });
+  ```
+
+1b. Append at end of file (after Task 3.4's describe):
+
+```ts
+
+describe('flyer-leads AR13: a resolved recipient with no name is labelled by its formatted phone (units recipients only)', () => {
+  const get = (app: ReturnType<typeof makeWebhookHarness>['app'], path: string) =>
+    request(app).get(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+  it('a nameless unknown contact a flyer sign-up put on the card carries its formatted phone; a non-NANP phone is shown as stored; a named contact keeps its name; a contact with neither and a missing recipient carry none; the contact listings-sent read is unchanged', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    // An auto-captured contact: no name, never renamed by a sign-up (spec D4).
+    world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'active', phone: '+14045550142' } as ContactItem);
+    world.contacts.push({ contactId: 'c-intl', type: 'unknown', status: 'active', phone: '+442071838750' } as ContactItem);
+    world.contacts.push({ contactId: 'c-bare', type: 'unknown', status: 'active' } as ContactItem);
+    const named = seedTenant(world, 'c-named');
+    named.firstName = 'Brianna';
+    named.lastName = 'Whitfield';
+    await seedFlyerSignUp(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-unk', signedUpAt: '2026-06-18T10:00:00.000Z' });
+    for (const contactId of ['c-intl', 'c-bare', 'c-named', 'c-gone']) {
+      await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId, sentAt: SENT_AT });
+    }
+
+    const units = await get(app, '/api/units/unit-1/recipients');
+    expect(units.status).toBe(200);
+    const byId = new Map((units.body.recipients as Array<Record<string, unknown>>).map((r) => [r['contactId'] as string, r]));
+    expect(byId.get('c-unk')).toMatchObject({ tenantName: '(404) 555-0142', type: 'unknown', outcome: 'signed_up' });
+    expect(byId.get('c-intl')).toMatchObject({ tenantName: '+442071838750' });
+    expect(byId.get('c-named')).toMatchObject({ tenantName: 'Brianna Whitfield' });
+    expect(byId.get('c-bare')).not.toHaveProperty('tenantName');
+    expect(byId.get('c-gone')).toMatchObject({ recipientMissing: true });
+    expect(byId.get('c-gone')).not.toHaveProperty('tenantName');
+
+    const contact = await get(app, '/api/contacts/c-unk/listings-sent');
+    expect(contact.status).toBe(200);
+    expect(contact.body.sent[0]).toMatchObject({ unitId: 'unit-1', outcome: 'signed_up' });
+    expect(contact.body.sent[0]).not.toHaveProperty('tenantName');
+  });
+
+  it('the outcome route answers the same label on its re-projected row (it reuses the recipients projection)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'active', phone: '+14045550142' } as ContactItem);
+    await seedFlyerSignUp(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-unk', signedUpAt: '2026-06-18T10:00:00.000Z' });
+    const res = await request(app)
+      .post('/api/units/unit-1/recipients/c-unk/outcome')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ outcome: 'not_interested' });
+    expect(res.status).toBe(200);
+    expect(res.body.row).toMatchObject({ contactId: 'c-unk', outcome: 'not_interested', tenantName: '(404) 555-0142' });
+  });
+});
+```
+
+### Step 2 - run RED
+
+`cd "W:/tmp/flyer-leads/app" && npx vitest run test/listingSendsApi.test.ts`
+
+Expected: the two edited exact-shape cases fail (the received row has no `tenantName`); in the new describe the first case fails at `c-unk` (`tenantName` absent - today the label is name-only) and the outcome-route case fails the same way. The `c-named`, `c-bare`, `c-gone` and listings-sent assertions would pass on their own; every other case in the file passes.
+
+### Step 3 - implementation
+
+3a. `app/src/routes/units.ts`:
+- After the anchor `import { formatAddress } from '../lib/address.js';` add `import { formatPhoneForDisplay } from '../lib/phone.js';`
+- Insert directly BEFORE the anchor block (the recipientFactsOf doc comment)
+  ```
+  /**
+   * caseworkers D20 (plan 3.7, ruling R3-F3): a recipients row's contact type and
+   * role, from the recipient display projection. `role` only when it holds text;
+  ```
+  this function:
+
+```ts
+/**
+ * flyer-leads AR13: the "Sent to" row's label (`tenantName`) for a RESOLVED
+ * recipient - the contact's name, else its OWN formatted phone
+ * (`formatPhoneForDisplay(phone) ?? phone`, the staff-chrome fallback of
+ * lib/groupTitle.ts). An auto-captured `unknown` contact that signed up from
+ * a flyer is put on the card (spec D7) and never renamed (D4), so without
+ * this the card would print its raw contactId. Staff chrome only - never a
+ * message body. undefined when the contact has neither a name nor a phone
+ * (the dashboard then falls back to the id, as for a missing recipient).
+ */
+function recipientLabelOf(contact: RecipientDisplay): string | undefined {
+  const name = displayNameOfContact(contact);
+  if (name !== undefined) return name;
+  const phone = typeof contact.phone === 'string' ? contact.phone : '';
+  if (phone.length === 0) return undefined;
+  return formatPhoneForDisplay(phone) ?? phone;
+}
+
+```
+
+- In `projectRecipientRow`, replace the anchor `  const tenantName = displayNameOfContact(contact);` with `  const tenantName = recipientLabelOf(contact);` (`displayNameOfContact` itself and its seven other callers are unchanged).
+
+3b. `app/src/repos/listingSendsRepo.ts` - replace the wire-comment anchor
+```
+  /** Denormalized tenant display name, attached by the GET projections (same
+   *  contacts join as the roster's `name`). HONEST - absent when the contact is
+   *  unknown or has no name; the dashboard then falls back to the id. */
+```
+with
+```
+  /** Denormalized recipient label, attached ONLY by the units recipients read
+   *  and the outcome route's re-projection (routes/units.ts recipientLabelOf;
+   *  the contact listings-sent read never carries it - its contact is the page
+   *  owner): the contact's name, else - flyer-leads AR13 - its OWN formatted
+   *  phone, because an `unknown` contact a flyer sign-up puts on the card is
+   *  never renamed (spec D4, D7). Absent when the contact did not resolve (a
+   *  missing recipient) or has neither a name nor a phone; the dashboard then
+   *  falls back to the id. Staff chrome only - never a message body. */
+```
+
+### Step 4 - run GREEN
+
+`cd "W:/tmp/flyer-leads/app" && npx vitest run test/listingSendsApi.test.ts test/listingSendOutcomeApi.test.ts test/contactsBatchReads.test.ts test/listingSendRowProjection.test.ts`
+All pass. Then `cd "W:/tmp/flyer-leads/app" && npm run typecheck` exits 0.
+
+### Step 5 - ASCII
+
+Added-lines check on `app/src/routes/units.ts`, `app/src/repos/listingSendsRepo.ts`, `app/test/listingSendsApi.test.ts`; each prints `0`.
+
+### Step 6 - commit
+
+Paths: `app/src/routes/units.ts app/src/repos/listingSendsRepo.ts app/test/listingSendsApi.test.ts`
+
+Command (repeated `-m`, plan section 0 - no message file):
+```
+cd "W:/tmp/flyer-leads" && git commit -m "feat(units): label a nameless Sent to recipient by its formatted phone (flyer-leads AR13)" -m "The units recipients projection (and the outcome route's re-projection) falls back from the contact's name to formatPhoneForDisplay(phone) ?? phone, so an unknown contact a flyer sign-up puts on the card never shows a raw contactId. A missing recipient keeps no label; the contact listings-sent read is unchanged." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
+---
+
+## S3 exit check (one commit: the slice report)
 
 1. `cd "W:/tmp/flyer-leads" && npm run db:start`
-2. `cd "W:/tmp/flyer-leads/app" && npx vitest run test/shareLedgerKeys.test.ts test/shareLedger.test.ts test/shareLedgerFlyer.test.ts test/shareAttemptOrder.test.ts test/listingSendsRepo.integration.test.ts test/listingSendsRepoShares.integration.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/listingSendOutcome.test.ts test/listingSendsApi.test.ts test/listingSendOutcomeApi.test.ts test/followUps.test.ts test/followUpsApi.test.ts test/broadcastApi.test.ts test/blastAudienceRules.test.ts test/repairShareOutcomes.test.ts test/contactTimeline.test.ts test/devListingSendFixture.test.ts test/shareAttemptOutcome.test.ts test/broadcastFanOut.test.ts test/listingSendRowProjection.test.ts` - all pass, no `SKIPPED` line.
-3. `cd "W:/tmp/flyer-leads" && npm run typecheck` - exit 0.
-4. `cd "W:/tmp/flyer-leads" && npx eslint app/src/lib/shareLedgerKeys.ts app/src/services/shareLedger.ts app/src/lib/shareAttemptOrder.ts app/src/lib/listingSendOutcome.ts app/src/repos/listingSendsRepo.ts app/test/shareLedgerKeys.test.ts app/test/shareLedgerFlyer.test.ts app/test/shareLedger.test.ts app/test/listingSendsRepo.integration.test.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts app/test/helpers/twilioWebhookHarness.ts app/test/helpers/listingSendSeed.ts app/test/repairShareOutcomes.test.ts app/test/contactTimeline.test.ts app/test/listingSendOutcome.test.ts app/test/listingSendsApi.test.ts app/test/listingSendOutcomeApi.test.ts app/test/followUps.test.ts app/test/broadcastApi.test.ts` - no NEW error (attribute any error by the AGENTS.md baseline comparison at `main`).
-5. ASCII on every S3 file (sections C commands) - all `0`.
-6. `cd "W:/tmp/flyer-leads" && git status` - clean; `git log --oneline -4` shows the four S3 commits.
+2. The slice's own files first (fast signal): `cd "W:/tmp/flyer-leads/app" && npx vitest run test/shareLedgerKeys.test.ts test/shareLedger.test.ts test/shareLedgerFlyer.test.ts test/shareAttemptOrder.test.ts test/listingSendsRepo.integration.test.ts test/listingSendsRepoShares.integration.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/listingSendOutcome.test.ts test/listingSendsApi.test.ts test/listingSendOutcomeApi.test.ts test/followUps.test.ts test/followUpsApi.test.ts test/broadcastApi.test.ts test/blastAudienceRules.test.ts test/repairShareOutcomes.test.ts test/contactTimeline.test.ts test/devListingSendFixture.test.ts test/shareAttemptOutcome.test.ts test/broadcastFanOut.test.ts test/listingSendRowProjection.test.ts test/contactsBatchReads.test.ts` - all pass, no `SKIPPED` line.
+3. AR15 - the FULL app suite, because S3 edits shared test helpers (the harness's listing-sends fake, `listingSendSeed.ts`) that suites outside this list import: `cd "W:/tmp/flyer-leads/app" && npx vitest run` - bare, never piped; give the shell call a hard outer timeout (e.g. the tool's 600000 ms) and read the captured output after it exits. Exit 0. A red DynamoDB Local suite is adjudicated by AGENTS.md's re-run-and-compare rule (re-run the failing FILE alone, more than once; compare failing files against a run at the merge base) - never by the old `AWS_ACCESS_KEY_ID` recipe; any `[dynamoAdmin]` line is a real container fault to capture. A named-spec failure is a regression to diagnose.
+4. `cd "W:/tmp/flyer-leads" && npm run typecheck` - exit 0.
+5. `cd "W:/tmp/flyer-leads" && npx eslint app/src/lib/shareLedgerKeys.ts app/src/services/shareLedger.ts app/src/lib/shareAttemptOrder.ts app/src/lib/listingSendOutcome.ts app/src/repos/listingSendsRepo.ts app/src/routes/units.ts app/test/shareLedgerKeys.test.ts app/test/shareLedgerFlyer.test.ts app/test/shareLedger.test.ts app/test/listingSendsRepo.integration.test.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts app/test/helpers/twilioWebhookHarness.ts app/test/helpers/listingSendSeed.ts app/test/repairShareOutcomes.test.ts app/test/contactTimeline.test.ts app/test/listingSendOutcome.test.ts app/test/listingSendsApi.test.ts app/test/listingSendOutcomeApi.test.ts app/test/followUps.test.ts app/test/broadcastApi.test.ts` - no NEW error (attribute any error by the AGENTS.md baseline comparison at `main`).
+6. ASCII on every S3 file (section C commands) - all `0`.
+7. `cd "W:/tmp/flyer-leads" && git status` - clean; `git log --oneline -5` shows the five S3 task commits.
+8. The slice report (plan section 0): write `docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S3-report.md` (create the `slices/` directory if absent) - ASCII, FINDINGS ONLY: what the tree held that this plan got wrong (a stale anchor, a line number, an expected RED that was green or red for another reason), risks seen, any untrimmed typed-input path met in a surface S3 touched (D10), each citing code by `file:line`. If there is nothing, the file is one line: `S3: nothing to report - every task ran as planned.` Do not paste diffs or code. Then the full-file ASCII check on it, a bare `git status` read, the MERGE_HEAD check, `cd "W:/tmp/flyer-leads" && git add docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S3-report.md`, and:
+   `cd "W:/tmp/flyer-leads" && git commit -m "docs(records): flyer-leads S3 slice report" -m "Findings from building S3 (ledger keys, flyer apply, decline token O1, signed_up outcome, AR13 recipient label)." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"`
+   Then `git status` is clean again.
 
 ## D. Spec coverage map (items this slice owns -> task)
 
@@ -4911,7 +5054,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 - D7 repeat sign-ups move sentAt forward -> 3.3; AR2 `'refused'` -> 3.3.
 - D7 residuals: uncounted pair -> "Property sent" (`contactTimeline.ts:732`) -> 3.3 PIN; repair census -> 3.3 (repairShareOutcomes case); lost write not repaired + its own log line -> 3.3; INFO log on a decline refusal -> 3.3; clock-skew ordering -> documented only (cosmetic, spec).
 - D7 `via` untouched / `putShareMemory` unchanged -> 3.3 (no repo writer change; dev fixture and seeds unchanged, section B).
-- D7 an `unknown` contact's entry shows on the Sent to card at once -> 3.4 (units recipients wire, `c-unk`).
+- D7 an `unknown` contact's entry shows on the Sent to card at once -> 3.4 (units recipients wire, `c-unk`) + 3.5 (labelled by its formatted phone, AR13).
 - D8 outcome `signed_up`, order decline > tour > replied > signed_up / no_reply, ONE helper -> 3.1 (helper) + 3.4.
 - D8 `signed_up` never waiting (Follow up tab, waiting pill) -> 3.4 (isWaiting PIN + followUps case).
 - D8 a later counted share returns the pair to normal outcomes -> 3.4 (unit + listingSendsApi + followUps).
@@ -4920,13 +5063,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 - D8 Matching blast keeps a signed_up tenant checked (`blastAudienceRules.ts`) -> 3.4 broadcast-preview PIN.
 - Spec section 5 "Ledger and outcome" bullets 1-5 and "O1" / "broadcast supersedes" / "decline after a sign-up" -> 3.3, 3.4.
 - Spec section 4 surfaces: `shareAttemptOrder.ts` attempt-key form (doc) -> 3.1; `putShareMemory` signature unchanged -> 3.3.
+- AR13 (plan review R1 #1): a resolved nameless recipient on the Sent to card is labelled by its formatted phone; a missing one keeps no label; the wire comment says so -> 3.5 (units recipients GET, outcome-route re-projection, listings-sent unchanged).
+- AR15: the full app suite at the slice exit -> S3 exit check step 3. Slice report (plan section 0) -> exit check step 8.
 - NOT owned here: the audit `sentSkipped` mapping, the handler, `hasEventSince`, pins (S4); every renderer and the dashboard union (S5); GLOSSARY and e2e (S6).
 
 ## E. Notes for other slices
 
-- **S4 calls** `applyFlyerShareEntry(deps, { unitId, contactId, signedUpAt })` from `app/src/services/shareLedger.ts`. `deps` is the existing `ShareLedgerDeps = { listingSends: Pick<ListingSendsRepo, 'getByKeyConsistent' | 'putShareMemory'>; log: Logger }` (plan 2.6's `listingSendsRepo` dep satisfies `listingSends`). Returns `FlyerShareResult` (exported type): `'written'` -> `sentRecorded: true`, no `sentSkipped`; `'declined'` -> `sentSkipped: 'declined'`; `'refused'` -> `sentSkipped: 'refused'` (AR2); `'lost'` -> `sentSkipped: 'lost'`; a THROW -> `sentSkipped: 'error'`. The function already logs its INFO (declined) and ERROR (lost) lines - S4 logs only `housing-fair signup step failed` with `step: 'ledger'` on a throw. Pass `signedUpAt = new Date(now()).toISOString()` (ms precision; an equal instant twice answers `'refused'`).
+- **S4 calls** `applyFlyerShareEntry(deps, { unitId, contactId, signedUpAt })` from `app/src/services/shareLedger.ts`. `deps` is the existing `ShareLedgerDeps = { listingSends: Pick<ListingSendsRepo, 'getByKeyConsistent' | 'putShareMemory'>; log: Logger }` (plan 2.6's `listingSendsRepo` dep satisfies `listingSends`). Returns `FlyerShareResult` (exported type): `'written'` -> `sentRecorded: true`, no `sentSkipped`; `'declined'` -> `sentSkipped: 'declined'`; `'refused'` -> `sentSkipped: 'refused'` (AR2); `'lost'` -> `sentSkipped: 'lost'`; a THROW -> `sentSkipped: 'error'`. The function already logs its INFO (declined) and ERROR (lost) lines - S4 logs only `housing-fair signup step failed` with `step: 'ledger'` on a throw. Pass `signedUpAt` as the ISO of the handler's ONE clock reading (AR8 #2; ms precision via `new Date(ms).toISOString()`; an equal instant twice answers `'refused'`).
 - **New exports S4/S5/S6 may use:** `app/src/lib/shareLedgerKeys.ts` (`INDIVIDUAL_SHARE_KEY`, `FLYER_SHARE_KEY`, `flyerAttemptKey`, `latestCountedShareKey`); test helper `seedFlyerSignUp(repo, { unitId, contactId, signedUpAt })` in `app/test/helpers/listingSendSeed.ts` (throws unless `'written'`).
 - **S5 wire facts:** `ListingSendRow.outcome` (units recipients, contact listings-sent, the outcome route's `row`) can now be `'signed_up'`; such a row's `sentAt` is the sign-up instant (render "Signed up from the flyer <date>" from it) and it carries NO `broadcastId` and no `declined`. It can be a tenant, an `unknown` contact (`type: 'unknown'`, `interestedSupported: false`) or a missing recipient (`recipientMissing: true`, `eligible: false`) - file the latter under Not eligible. `FollowUpItem.outcome`'s type widens but a follow-up item never carries `signed_up`. `via` on a flyer-only row is `'broadcast'` (first-write furniture) - never render it.
+- **AR13 wire change (Task 3.5), for S5 and S6:** on the units recipients read and the outcome route's `row`, `tenantName` is now ALSO present for a resolved contact with no name - it is the formatted phone (`(404) 555-0142`; a non-NANP number as stored). So `ListingDetail.tsx:1343`'s `row.tenantName ?? row.contactId` shows the phone for a nameless unknown sign-up; no dashboard code change is needed. S5 may mirror the new wire comment on the dashboard `ListingSendRow.tenantName` (`dashboard/src/api/types.ts:3156`) - comment only. S6's flyer e2e can locate a nameless contact's Sent to row by its formatted phone, never by its contactId. The contact page's Properties sent rows carry no `tenantName` (unchanged).
 - **Shared files touched by S3 that S4 also edits** (apply on top, never revert): `app/test/helpers/twilioWebhookHarness.ts` (S3: only the listing-sends fake's setDeclined / clearDeclined bodies and their comment, ~`:3638-3660`; S4: public router wiring and the activity-events fake); `app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts` (S3: the `tokenAcrossDecline` builder before `const LS_CASES` and one appended LS case; S4: the activity-events `hasEventSince` cases); `app/test/contactTimeline.test.ts` (S3: one case in the D6 describe and one import line; S4: the `signed_up` mapper cases; S3 does not touch `contactTimeline.ts`).
 - **Plan 3.1 Invariant D rows closed here:** decline writers stamp the token (3.2); the flyer writer refuses on the read it writes from (3.3); `blastAudienceRules.ts` excludes only `not_interested` (3.4 PIN); the repair census (3.3); `propertySentWords` residual (3.3).
 - `app/test/helpers/listingSendSeed.ts` keeps its own local `INDIVIDUAL_KEY = 'individual'` constant (unchanged; equal to `INDIVIDUAL_SHARE_KEY`) - not worth a touch in this mission.
@@ -4941,13 +5087,25 @@ contacts only (D5); 4.3 the pin, the 24-hour repeat check and the unread mark
 (D6); 4.4 the flyer share entry call site (D7); 4.5 the audit fields, the
 route comment, the backfill pin and the PII test.
 
-Build after S3 (it needs `applyFlyerShareEntry` / `FlyerShareResult`, plan
-2.2, the O1 decline token in the harness fake, and the `signed_up` outcome on
+Build order (AR4): S1 -> S2 -> S3 -> S4 -> S5 -> S6. S4 needs S3
+(`applyFlyerShareEntry` / `FlyerShareResult`, plan 2.2; the O1 decline token
+in the harness fake; `seedFlyerSignUp`; the `signed_up` outcome on
 `GET /api/contacts/:id/listings-sent`, plan 2.4). The test code below was
 written against this worktree at 7ac1f2e3 (S3 not yet built) and has NOT been
-executed; every anchor was read from the files.
+executed (plan review R1 #7, a watch item: a compile error surfaces at a
+task's Step 2 and is fixed there); every anchor was read from the files.
+
+Plan review round 1 folded in: AR8 (the five issues below, all accepted),
+AR11 (the deleted path's `sentSkipped: 'deleted'`), AR12 (`hasEventSince`
+reads with `ConsistentRead: true`, pinned by a stub-doc test), R1 #6 (a spy
+test pins touch -> increment on an adopted CLOSED thread), AR15 (the exit
+check runs the full app suite), and the slice-report and commit-message
+ground rules (plan section 0).
 
 ## A. CONTRACT ISSUES (for the planner to rule)
+
+None open. Issues 1-5 below were ACCEPTED as AR8 and the tasks implement them
+exactly; they are kept for the record.
 
 1. The pin's `at`. Plan 2.6 step 8 does not say what instant the pin is
    recorded with; `record` defaults `at` to the WALL clock
@@ -5024,6 +5182,8 @@ Activity events `app/src/repos/activityEventsRepo.ts` (non-ASCII at 16 pre-exist
 - `:181-184` `      return { items: (Items ?? []) as ActivityEventItem[] };` / `    },` / `  };` / `}`.
 - `app/src/lib/dynamoPaging.ts:29` `export async function queryAll<T>(doc, input: QueryCommandInput, opts: { maxPages?: number; logger?: Logger } = {}): Promise<T[]>` - the KEY ends the walk, not the item count.
 - `app/src/lib/tables.ts:397-400` `activity_events`: hash `contactId`, range `tsEventId`, no GSIs.
+- `app/src/lib/config.ts:512-514` `tableName(base, env)` is `${env.TABLE_PREFIX ?? DEFAULT_TABLE_PREFIX}${base}`, so `{ TABLE_PREFIX: 'hc-test-x-' }` names the table `hc-test-x-activity_events`.
+- The pure stub-doc idiom for a repo's command input: `app/test/contactsRepoConsistentBatchRead.test.ts:30-46` (`function stubDoc(...)` records every `BatchGetCommand` input; `makeRepo(doc)` builds the repo on it); also `app/test/aiRunsRepo.test.ts:479` `expect(getInputs()[0]!.input.ConsistentRead).toBe(true);`. AR12's test follows it for `QueryCommand`.
 - Only full implementers of `ActivityEventsRepo`: the real factory and the harness fake (`twilioWebhookHarness.ts:3562`); `lib/personEvents.ts:51` takes `Pick<..., 'record'>`. Adding `hasEventSince` to the interface breaks `tsc` until the fake has it - so the repo, the fake and the conformance cases are ONE task (4.1).
 - `app/test/activityEventsRepo.integration.test.ts` (non-ASCII on lines 1 and one more): `:4` `// a different contact are fully isolated (the PK partition).`; `:9-10` `import { randomUUID } from 'node:crypto';` / `import { afterAll, beforeAll, describe, expect, it } from 'vitest';`; `:39-43` `testEnv`, `client`, `doc`, `logger`, `repo` are in scope of the describe; the file ends `:148-151` `    expect(bPage.items.every((e) => e.contactId === b)).toBe(true);` / `  });` / `});`.
 
@@ -5063,13 +5223,13 @@ All from Git Bash. Never pipe a test or gate command (the ASCII check is not a g
 - ASCII, pre-existing file: `cd "W:/tmp/flyer-leads" && git diff -U0 -- <path> | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c` -> `0`.
 - ASCII, new file: `cd "W:/tmp/flyer-leads" && tr -d '\11\12\15\40-\176' < <path> | wc -c` -> `0`.
 - After any Edit, confirm no decoded escape: `grep -nF '\u' <path>` shows no line the task added. (Use `-F`: in this Git Bash, plan 0's `grep -n '\\u'` matched lines with no backslash at all.) No S4 code contains a backslash-u.
-- Commit, in three separate calls: (1) `cd "W:/tmp/flyer-leads" && git status` (bare; read it: only this task's paths modified); (2) `ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/flyer-leads/MERGE_HEAD"` -> must answer `No such file or directory`; (3) `cd "W:/tmp/flyer-leads" && git add <explicit paths> && git commit -F - <<'EOF'` ... `EOF` (message ASCII, ending with the trailer line).
+- Commit, in three separate calls: (1) `cd "W:/tmp/flyer-leads" && git status` (bare; read it: only this task's paths modified); (2) `ls "W:/AI Projects/Housing Choice/HC Application/.git/worktrees/flyer-leads/MERGE_HEAD"` -> must answer `No such file or directory`; (3) `cd "W:/tmp/flyer-leads" && git add <explicit paths> && git commit -m "<subject>" -m "<body>" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"` - repeated `-m` (plan section 0), never a message file inside the worktree. Each Step 6 below gives the `-m` values; none contains a double quote, a backtick or a dollar sign.
 
 ## Task 4.1 - The `signed_up` activity type and `hasEventSince` (repo, harness fake, conformance, timeline pin)
 
-Goal: `ActivityEventType` gains `signed_up`; `ActivityEventsRepo.hasEventSince(contactId, type, sinceIso, refId)` answers the D6.1 repeat check (plan 2.5) in the real repo and in the harness fake, held together by the conformance suite; the timeline passes a `signed_up` pin through (spec D6.2, plan 2.5).
+Goal: `ActivityEventType` gains `signed_up`; `ActivityEventsRepo.hasEventSince(contactId, type, sinceIso, refId)` answers the D6.1 repeat check (plan 2.5) in the real repo - strongly consistent (AR12) - and in the harness fake, held together by the conformance suite; the timeline passes a `signed_up` pin through (spec D6.2, plan 2.5).
 
-Files: `app/src/repos/activityEventsRepo.ts`; `app/test/activityEventsRepo.integration.test.ts`; `app/test/helpers/twilioWebhookHarness.ts`; `app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts`; `app/test/contactTimeline.test.ts`.
+Files: `app/src/repos/activityEventsRepo.ts`; `app/test/activityEventsRepo.integration.test.ts`; NEW `app/test/activityEventsRepoConsistentRead.test.ts`; `app/test/helpers/twilioWebhookHarness.ts`; `app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts`; `app/test/contactTimeline.test.ts`.
 
 ### Step 1 - tests first
 
@@ -5380,11 +5540,83 @@ describe('flyer-leads D6: a signed_up pin passes through the timeline', () => {
 });
 ```
 
+1d. NEW `app/test/activityEventsRepoConsistentRead.test.ts` (AR12):
+```ts
+// flyer-leads AR12 (plan 2.5, plan review R1 #5): hasEventSince - the public
+// sign-up's repeat check - reads STRONGLY CONSISTENT, so two quick sign-ups
+// see each other's pin (an eventually consistent Query could miss the first
+// pin and let both pin and bump). Every page of the walk carries it.
+//
+// Pure: a stub DocumentClient records every QueryCommand input (the
+// contactsRepoConsistentBatchRead.test.ts pattern). DynamoDB Local's
+// acceptance of the consistent Query is exercised by
+// activityEventsRepo.integration.test.ts.
+import { QueryCommand, type DynamoDBDocumentClient, type QueryCommandInput } from '@aws-sdk/lib-dynamodb';
+import { describe, expect, it } from 'vitest';
+import { createLogger } from '../src/lib/logger.js';
+import { createActivityEventsRepo } from '../src/repos/activityEventsRepo.js';
+import { createLogCapture } from './helpers/logCapture.js';
+
+const SINCE = '2026-10-20T12:00:00.000Z';
+const CURSOR = { contactId: 'c-1', tsEventId: '2026-10-21T12:00:00.000Z#evt-x' };
+
+/** A table that answers two pages: an EMPTY first page that still carries a cursor, then nothing. */
+function stubDoc() {
+  const requests: QueryCommandInput[] = [];
+  const doc = {
+    async send(command: unknown) {
+      if (!(command instanceof QueryCommand)) throw new Error('stub: expected a QueryCommand');
+      requests.push(command.input);
+      return requests.length === 1 ? { Items: [], LastEvaluatedKey: CURSOR } : { Items: [] };
+    },
+  };
+  return { doc: doc as unknown as DynamoDBDocumentClient, requests };
+}
+
+function makeRepo(doc: DynamoDBDocumentClient) {
+  const logger = createLogger({ destination: createLogCapture().stream });
+  return createActivityEventsRepo({ doc, env: { TABLE_PREFIX: 'hc-test-x-' }, logger });
+}
+
+describe('activityEventsRepo.hasEventSince - ConsistentRead (flyer-leads AR12)', () => {
+  it('every page of the window read is strongly consistent, on the key-range query plan 2.5 binds', async () => {
+    const { doc, requests } = stubDoc();
+
+    expect(await makeRepo(doc).hasEventSince('c-1', 'signed_up', SINCE, 'unit-1')).toBe(false);
+
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      expect(request).toMatchObject({
+        TableName: 'hc-test-x-activity_events',
+        ConsistentRead: true,
+        KeyConditionExpression: 'contactId = :c AND tsEventId > :since',
+        FilterExpression: '#type = :type AND refId = :ref',
+        ExpressionAttributeNames: { '#type': 'type' },
+        ExpressionAttributeValues: { ':c': 'c-1', ':since': SINCE, ':type': 'signed_up', ':ref': 'unit-1' },
+      });
+    }
+    expect(requests[1]?.ExclusiveStartKey).toEqual(CURSOR);
+  });
+
+  it('the no-ref source filters on attribute_not_exists(refId), binds no :ref, and is consistent too', async () => {
+    const { doc, requests } = stubDoc();
+
+    await makeRepo(doc).hasEventSince('c-1', 'signed_up', SINCE, undefined);
+
+    expect(requests[0]).toMatchObject({
+      ConsistentRead: true,
+      FilterExpression: '#type = :type AND attribute_not_exists(refId)',
+    });
+    expect(requests[0]?.ExpressionAttributeValues).not.toHaveProperty(':ref');
+  });
+});
+```
+
 ### Step 2 - run RED
 
-`cd "W:/tmp/flyer-leads/app" && npx vitest run test/activityEventsRepo.integration.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/contactTimeline.test.ts`
+`cd "W:/tmp/flyer-leads/app" && npx vitest run test/activityEventsRepo.integration.test.ts test/activityEventsRepoConsistentRead.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/contactTimeline.test.ts`
 
-Expected: the six `hasEventSince (flyer-leads D6)` cases and the four `activityEventsRepo` conformance cases fail with `TypeError: ... hasEventSince is not a function` (the conformance cases fail on the REAL step, which runs first). The timeline `(PIN)` case passes (the mapper is generic). Every pre-existing case passes.
+Expected: the six `hasEventSince (flyer-leads D6)` cases, the two `ConsistentRead (flyer-leads AR12)` cases and the four `activityEventsRepo` conformance cases fail with `TypeError: ... hasEventSince is not a function` (the conformance cases fail on the REAL step, which runs first). The timeline `(PIN)` case passes (the mapper is generic). Every pre-existing case passes. (If 3a were later written without `ConsistentRead`, only the AR12 file would stay red - that is its job.)
 
 ### Step 3 - implementation
 
@@ -5420,8 +5652,9 @@ import { queryAll } from '../lib/dynamoPaging.js';
    * after `sinceIso` whose refId is `refId` (undefined = an event with NO
    * refId). Query PK contactId, KeyCondition `tsEventId > :since` (sinceIso as
    * the bound), FilterExpression on `#type = :type` and on the ref
-   * (`refId = :ref` or `attribute_not_exists(refId)`), paginated to the end of
-   * the window (lib/dynamoPaging queryAll). Throws on a DynamoDB error.
+   * (`refId = :ref` or `attribute_not_exists(refId)`), `ConsistentRead: true`
+   * (AR12 - two quick sign-ups must see each other's pin), paginated to the end
+   * of the window (lib/dynamoPaging queryAll). Throws on a DynamoDB error.
    */
   hasEventSince(
     contactId: string,
@@ -5440,13 +5673,16 @@ import { queryAll } from '../lib/dynamoPaging.js';
       // flyer-leads D6. The bare ISO bounds `<ISO at>#<eventId>` keys, so an
       // event AT sinceIso is inside the window. A FilterExpression is applied
       // after each page is read, so the walk follows the cursor to the end
-      // (queryAll) and never stops at an empty or filtered-out page. `type` is
+      // (queryAll) and never stops at an empty or filtered-out page. AR12:
+      // strongly consistent (a base-table Query allows it), so a second
+      // sign-up moments after the first sees the first one's pin. `type` is
       // a DynamoDB reserved word, hence #type. PII (doc section 9): no label is
       // read into a log line.
       const items = await queryAll<ActivityEventItem>(
         doc,
         {
           TableName: table,
+          ConsistentRead: true,
           KeyConditionExpression: 'contactId = :c AND tsEventId > :since',
           FilterExpression:
             refId === undefined
@@ -5489,8 +5725,9 @@ with:
     // flyer-leads D6: the repeat-check read, modelled on the real key-range
     // Query - the event's SK strictly after sinceIso (so an event AT sinceIso
     // counts: its `<at>#<eventId>` key extends the bound), its type, and its
-    // ref: refId undefined matches only an event with NO refId. Held to the
-    // real repo by twilioWebhookHarnessRepoAdditions.integration.test.ts.
+    // ref: refId undefined matches only an event with NO refId. The array is
+    // strongly consistent by construction, like the real read (AR12). Held to
+    // the real repo by twilioWebhookHarnessRepoAdditions.integration.test.ts.
     async hasEventSince(contactId, type, sinceIso, refId) {
       return activityEvents.some(
         (e) =>
@@ -5505,31 +5742,24 @@ with:
 
 ### Step 4 - run GREEN
 
-`cd "W:/tmp/flyer-leads/app" && npx vitest run test/activityEventsRepo.integration.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/contactTimeline.test.ts` -> all pass. Then `cd "W:/tmp/flyer-leads/app" && npm run typecheck` -> exit 0.
+`cd "W:/tmp/flyer-leads/app" && npx vitest run test/activityEventsRepo.integration.test.ts test/activityEventsRepoConsistentRead.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/contactTimeline.test.ts` -> all pass. Then `cd "W:/tmp/flyer-leads/app" && npm run typecheck` -> exit 0.
 
 ### Step 5 - ASCII
 
-Pre-existing-file check on `app/src/repos/activityEventsRepo.ts`, `app/test/activityEventsRepo.integration.test.ts`, `app/test/helpers/twilioWebhookHarness.ts`, `app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts`, `app/test/contactTimeline.test.ts` -> each `0`.
+New file: `app/test/activityEventsRepoConsistentRead.test.ts` -> `0`. Pre-existing-file check on `app/src/repos/activityEventsRepo.ts`, `app/test/activityEventsRepo.integration.test.ts`, `app/test/helpers/twilioWebhookHarness.ts`, `app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts`, `app/test/contactTimeline.test.ts` -> each `0`.
 
 ### Step 6 - commit
 
-Paths: `app/src/repos/activityEventsRepo.ts app/test/activityEventsRepo.integration.test.ts app/test/helpers/twilioWebhookHarness.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts app/test/contactTimeline.test.ts`
+Paths: `app/src/repos/activityEventsRepo.ts app/test/activityEventsRepo.integration.test.ts app/test/activityEventsRepoConsistentRead.test.ts app/test/helpers/twilioWebhookHarness.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts app/test/contactTimeline.test.ts`
 
-```
-feat(activity): signed_up milestone type and the hasEventSince window read (flyer-leads D6)
-
-The public sign-up's repeat check: a key-range Query on the contact's
-partition (tsEventId > since), filtered to one type and one ref or no ref,
-walked to the end of the window. The harness fake mirrors it and the
-conformance suite holds the two together (window edge, type filter, ref vs
-no ref, partition). The timeline already passes the new type through.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-```
+`-m` values, in order:
+1. `feat(activity): signed_up milestone type and the hasEventSince window read (flyer-leads D6)`
+2. `The public sign-up's repeat check: a strongly consistent key-range Query on the contact's partition (tsEventId > since), filtered to one type and one ref or no ref, walked to the end of the window (AR12). The harness fake mirrors it and the conformance suite holds the two together (window edge, type filter, ref vs no ref, partition). The timeline already passes the new type through.`
+3. `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
 
 ## Task 4.2 - Router deps + harness wiring; who counts as existing (D4); the welcome for new contacts only (D5)
 
-Goal: `PublicRouterDeps` gains the four plan 2.6 deps (wired in the harness, plus the `publicNow` seam - contract issue 3); the handler keeps `findByPhone` as its one lookup, sends a soft-deleted holder down the deleted path, never changes or welcomes an existing contact, and types a missing thread with `conversationTypeFor` (spec D4, D5; plan 2.6 steps 2-6).
+Goal: `PublicRouterDeps` gains the four plan 2.6 deps (wired in the harness, plus the `publicNow` seam - AR8 point 3); the handler keeps `findByPhone` as its one lookup, sends a soft-deleted holder down the deleted path, never changes or welcomes an existing contact, and types a missing thread with `conversationTypeFor` (spec D4, D5; plan 2.6 steps 2-6).
 
 Files: `app/src/routes/public.ts`; `app/test/helpers/twilioWebhookHarness.ts`; NEW `app/test/publicSignupLeads.test.ts`; `app/test/publicIntake.test.ts`.
 
@@ -5955,16 +6185,10 @@ New file: `app/test/publicSignupLeads.test.ts` -> `0`. Pre-existing: `app/src/ro
 
 Paths: `app/src/routes/public.ts app/test/helpers/twilioWebhookHarness.ts app/test/publicSignupLeads.test.ts app/test/publicIntake.test.ts`
 
-```
-feat(public): sign-up resolves deleted holders and welcomes new contacts only (flyer-leads D4, D5)
-
-findByPhone stays the one lookup. A soft-deleted holder writes only its
-audit event; an existing contact is never changed or welcomed; a missing
-thread is typed for the contact. The router gains the activity, ledger,
-events and clock deps (plan 2.6), wired to the harness world.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-```
+`-m` values, in order:
+1. `feat(public): sign-up resolves deleted holders and welcomes new contacts only (flyer-leads D4, D5)`
+2. `findByPhone stays the one lookup. A soft-deleted holder writes only its audit event; an existing contact is never changed or welcomed; a missing thread is typed for the contact. The router gains the activity, ledger, events and clock deps (plan 2.6, AR8), wired to the harness world with the publicNow seam.`
+3. `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
 
 ## Task 4.3 - The pin, the 24-hour repeat check and the unread mark (D6)
 
@@ -5975,7 +6199,11 @@ Files: `app/src/routes/public.ts`; `app/test/publicSignupLeads.test.ts`; `app/te
 ### Step 1 - tests first
 
 1a. `app/test/publicSignupLeads.test.ts`
-- Replace `import type { ConversationType } from '../src/repos/conversationsRepo.js';` with `import type { ConversationItem, ConversationType } from '../src/repos/conversationsRepo.js';`
+- Replace `import type { ConversationType } from '../src/repos/conversationsRepo.js';` with
+```ts
+import { toConversationUpdatedEvent } from '../src/lib/events.js';
+import type { ConversationItem, ConversationType } from '../src/repos/conversationsRepo.js';
+```
 - Replace `import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';` with
 ```ts
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
@@ -6025,8 +6253,6 @@ describe('the signed_up pin and the unread mark (D6)', () => {
     seedUnit(world);
     seedContact(world);
     seedThread(world);
-    const touch = vi.spyOn(world.conversationsRepo, 'touchLastActivity');
-    const increment = vi.spyOn(world.conversationsRepo, 'incrementUnread');
 
     const res = await post(app, signupBody({ unitId: 'unit-1' }));
 
@@ -6036,9 +6262,9 @@ describe('the signed_up pin and the unread mark (D6)', () => {
     expect(pins(world)).toEqual([
       expect.objectContaining({ contactId: 'c-1', label: FLYER_LABEL, refType: 'unit', refId: 'unit-1', at: T0_ISO }),
     ]);
-    // Touch FIRST (status open, the sign-up instant, preview untouched), then the increment.
+    // ONE touch at the sign-up instant with the preview untouched (the order is pinned by the next case).
     expect(world.touches).toEqual([{ conversationId: 'conv-1', previewText: undefined, ts: T0_ISO }]);
-    expect(touch.mock.invocationCallOrder[0]).toBeLessThan(increment.mock.invocationCallOrder[0] ?? 0);
+    expect(world.unreadIncrements).toEqual(['conv-1']);
     expect(world.conversations.get('conv-1')).toMatchObject({
       status: 'open',
       last_activity_at: T0_ISO,
@@ -6056,6 +6282,27 @@ describe('the signed_up pin and the unread mark (D6)', () => {
       }),
     ]);
     expect(captured(capture)).toEqual([expect.objectContaining({ recorded: true })]);
+  });
+
+  it('an existing contact on a CLOSED thread: touch (which reopens it) runs BEFORE the increment, and the ONE event is built from the touched image', async () => {
+    // The harness fake reuses only OPEN threads while the real repo adopts a closed one (its phone claim), so the adoption is stubbed and the order pinned by spies.
+    const { app, world } = harness();
+    seedUnit(world);
+    seedContact(world);
+    const closed = seedThread(world, { status: 'closed' });
+    vi.spyOn(world.conversationsRepo, 'createOrGetByParticipantPhone').mockResolvedValue(closed);
+    const touch = vi.spyOn(world.conversationsRepo, 'touchLastActivity');
+    const increment = vi.spyOn(world.conversationsRepo, 'incrementUnread');
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(touch).toHaveBeenCalledTimes(1);
+    expect(increment).toHaveBeenCalledTimes(1);
+    expect(touch.mock.invocationCallOrder[0]).toBeLessThan(increment.mock.invocationCallOrder[0] ?? 0);
+    const touched = (await touch.mock.results[0]?.value) as ConversationItem;
+    expect(touched).toMatchObject({ conversationId: 'conv-1', status: 'open', last_activity_at: T0_ISO });
+    expect(world.conversations.get('conv-1')).toMatchObject({ status: 'open', unread_count: 1 });
+    expect(convUpdates(world)).toEqual([{ ...toConversationUpdatedEvent(touched), unread_count: 1 }]);
   });
 
   it('the flyer label falls back to the unitId when the property has no address, and carries the TRIMMED typed name', async () => {
@@ -6522,17 +6769,10 @@ Pre-existing-file check on `app/src/routes/public.ts`, `app/test/publicSignupLea
 
 Paths: `app/src/routes/public.ts app/test/publicSignupLeads.test.ts app/test/publicIntake.test.ts`
 
-```
-feat(public): sign-up pin, 24-hour repeat check and unread mark (flyer-leads D6)
-
-Every live contact's sign-up records a signed_up pin in its thread and marks
-its 1:1 conversation unread (touch, then increment, then one
-conversation.updated with the new count), at most once per contact per source
-per 24 hours. Each step is best-effort and logs its step without PII; the
-injected clock drives the window, the pin and the touch.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-```
+`-m` values, in order:
+1. `feat(public): sign-up pin, 24-hour repeat check and unread mark (flyer-leads D6)`
+2. `Every live contact's sign-up records a signed_up pin in its thread and marks its 1:1 conversation unread (touch, then increment, then one conversation.updated with the new count), at most once per contact per source per 24 hours. Each step is best-effort and logs its step without PII; a failed pin still marks. One clock reading after the welcome drives the window, the pin, the touch and the attempt key (AR8).`
+3. `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
 
 ## Task 4.4 - The flyer share entry call site (D7)
 
@@ -6800,12 +7040,19 @@ import { applyFlyerShareEntry, type FlyerShareResult } from '../services/shareLe
 const SIGNUP_STEP_FAILED = 'housing-fair signup step failed';
 
 /**
- * flyer-leads D6 / AR2: why a sign-up wrote no flyer entry (the audit's
- * sentSkipped): no unitId; a unitId that is not a shareable unit; a contact
- * type the sent list is not for; the ledger's own refusals (a current
- * decline, the order rule, token retries exhausted); or a throw.
+ * flyer-leads D6 / AR2 / AR11: why a sign-up wrote no flyer entry (the
+ * audit's sentSkipped, absent ONLY when an entry was written): a soft-deleted
+ * holder (the deleted path); no unitId; a unitId that is not a shareable
+ * unit; a contact type the sent list is not for; the ledger's own refusals (a
+ * current decline, the order rule, token retries exhausted); or a throw.
  */
-type SignupSentSkipped = 'not_flyer' | 'not_shareable' | 'not_tenant' | Exclude<FlyerShareResult, 'written'> | 'error';
+type SignupSentSkipped =
+  | 'deleted'
+  | 'not_flyer'
+  | 'not_shareable'
+  | 'not_tenant'
+  | Exclude<FlyerShareResult, 'written'>
+  | 'error';
 ```
 
 3c. The ledger dep. Replace `  const now = deps.now ?? (() => Date.now());` with:
@@ -6877,21 +7124,14 @@ Pre-existing-file check on `app/src/routes/public.ts`, `app/test/publicSignupLea
 
 Paths: `app/src/routes/public.ts app/test/publicSignupLeads.test.ts`
 
-```
-feat(public): flyer sign-up writes the flyer share entry (flyer-leads D7)
-
-A flyer sign-up for a shareable unit by a tenant or unknown contact puts the
-property on the contact's properties-sent list through applyFlyerShareEntry,
-on every sign-up (the 24-hour cap governs the pin only). A current decline
-holds; landlords and partners get no entry; a ledger failure is logged and
-never reaches the public answer.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-```
+`-m` values, in order:
+1. `feat(public): flyer sign-up writes the flyer share entry (flyer-leads D7)`
+2. `A flyer sign-up for a shareable unit by a tenant or unknown contact puts the property on the contact's properties-sent list through applyFlyerShareEntry, on every sign-up (the 24-hour cap governs the pin only). A current decline holds; landlords and partners get no entry; a ledger failure is logged and never reaches the public answer.`
+3. `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
 
 ## Task 4.5 - The audit fields, the route comment, the backfill pin and the PII test
 
-Goal: the `housing_fair_signup` audit gains `existingContact`, `deletedContact`, `recorded`, `sentRecorded`, `sentSkipped` (incl. AR2 `refused`) and `consentVersion` (spec D6, plan 2.6), the log line mirrors them, the route comment describes D4-D7, the backfill reader is pinned, and the never-log-PII test covers every new step.
+Goal: the `housing_fair_signup` audit gains `existingContact`, `deletedContact`, `recorded`, `sentRecorded`, `sentSkipped` (incl. AR2 `refused`, and AR11 `deleted` on the deleted path - so `sentSkipped` is absent ONLY when an entry was written) and `consentVersion` (spec D6, plan 2.6), the log line mirrors them, the route comment describes D4-D7, the backfill reader is pinned, and the never-log-PII test covers every new step.
 
 Files: `app/src/routes/public.ts`; `app/test/publicSignupLeads.test.ts`; `app/test/publicIntake.test.ts`; `app/test/backfillJoinHousingAuthority.test.ts`.
 
@@ -6936,7 +7176,7 @@ describe('the housing_fair_signup audit fields (D6, plan 2.6)', () => {
     ]);
   });
 
-  it('a soft-deleted holder: the event lands on THAT contact with deletedContact true, sentRecorded false and no sentSkipped', async () => {
+  it('a soft-deleted holder (AR11): the event lands on THAT contact with deletedContact true, recorded and sentRecorded false, sentSkipped deleted', async () => {
     const { app, world, capture } = harness();
     seedUnit(world);
     seedContact(world, { contactId: 'c-del', deleted_at: '2026-10-01T00:00:00.000Z' });
@@ -6958,11 +7198,14 @@ describe('the housing_fair_signup audit fields (D6, plan 2.6)', () => {
           deletedContact: true,
           recorded: false,
           sentRecorded: false,
+          sentSkipped: 'deleted',
           consentVersion: 'ctia-2026-06',
         },
       },
     ]);
-    expect(captured(capture)).toEqual([expect.objectContaining({ existingContact: false, deletedContact: true, recorded: false })]);
+    expect(captured(capture)).toEqual([
+      expect.objectContaining({ existingContact: false, deletedContact: true, recorded: false, sentRecorded: false, sentSkipped: 'deleted' }),
+    ]);
   });
 
   const SKIP_CASES: Array<{ skipped: string; arrange: (h: Harness) => Promise<Record<string, unknown>> }> = [
@@ -7278,10 +7521,16 @@ with
       consentVersion: 'ctia-2026-06',
     };
     expect(leftOutReasonFromAudit([event('housing_fair_signup', flyerLeadsPayload)])).toBe('signed_up_again');
-    // The deleted path's event too (it is on the deleted contact's entity).
+    // The deleted path's event too (it is on the deleted contact's entity; AR11).
     expect(
       leftOutReasonFromAudit([
-        event('housing_fair_signup', { ...flyerLeadsPayload, existingContact: false, deletedContact: true, recorded: false }),
+        event('housing_fair_signup', {
+          ...flyerLeadsPayload,
+          existingContact: false,
+          deletedContact: true,
+          recorded: false,
+          sentSkipped: 'deleted',
+        }),
       ]),
     ).toBe('signed_up_again');
   });
@@ -7309,7 +7558,8 @@ Expected RED: the new audit describe (every case: the payload has no `existingCo
 //          - a live holder (any type): an EXISTING contact - never changed and
 //            never welcomed.
 //          - a soft-deleted holder: no conversation, send, pin, unread mark or
-//            sent-list entry; only the housing_fair_signup audit, on it.
+//            sent-list entry; only the housing_fair_signup audit, on it
+//            (sentSkipped 'deleted').
 //          Every live contact (new or existing) then gets, best-effort (D6): a
 //          'signed_up' pin in its thread and an unread mark on its 1:1
 //          conversation (touch -> incrementUnread -> ONE conversation.updated),
@@ -7352,6 +7602,8 @@ with
         deletedContact: true,
         recorded: false,
         sentRecorded: false,
+        // AR11: sentSkipped is absent ONLY when an entry was written.
+        sentSkipped: 'deleted' satisfies SignupSentSkipped,
         consentVersion: CONSENT_VERSION,
       });
       log.info(
@@ -7365,10 +7617,12 @@ with
           deletedContact: true,
           recorded: false,
           sentRecorded: false,
+          sentSkipped: 'deleted' satisfies SignupSentSkipped,
         },
         'housing-fair signup captured',
       );
 ```
+(`satisfies` - TypeScript 5.9.3 here, already used at `jobs/broadcastFanOut.ts:1177` - ties the literal to the union Task 4.4 declared, so the two cannot drift.)
 
 3c. The normal path's audit, log and response. Replace the region from the line that starts `    // (4) Audit (no PII in the payload beyond the marker` (non-ASCII further along that line) through the 4-space `    res.json({ ok: true });` that ends the handler (the region includes the non-ASCII lines `    // Log a hashed marker only` and `    // (5) Minimal response`; copy them from the file) with:
 ```ts
@@ -7381,8 +7635,9 @@ with
     // deleted path writes its own event above), recorded (the pin was written),
     // sentRecorded (the flyer entry was written), sentSkipped (why no entry was
     // written: not_flyer, not_shareable, not_tenant, declined, refused, lost or
-    // error; absent when one was) and consentVersion (the disclosure version
-    // the form showed - evidence only, never stamped on an existing contact).
+    // error - and deleted on the deleted path, AR11; absent ONLY when one was)
+    // and consentVersion (the disclosure version the form showed - evidence
+    // only, never stamped on an existing contact).
     await audit.append(`contacts#${contactId}`, 'housing_fair_signup', {
       marker,
       isNew,
@@ -7432,25 +7687,19 @@ Pre-existing-file check on `app/src/routes/public.ts`, `app/test/publicSignupLea
 
 Paths: `app/src/routes/public.ts app/test/publicSignupLeads.test.ts app/test/publicIntake.test.ts app/test/backfillJoinHousingAuthority.test.ts`
 
-```
-feat(public): housing_fair_signup audit fields and route notes (flyer-leads D6)
+`-m` values, in order:
+1. `feat(public): housing_fair_signup audit fields and route notes (flyer-leads D6)`
+2. `The sign-up audit gains existingContact, deletedContact, recorded, sentRecorded, sentSkipped (including refused, AR2, and deleted for a soft-deleted holder, AR11) and consentVersion, with no PII; the log line mirrors them. The route comment describes D4-D7, the lead backfill's reader is pinned, and the never-log-PII test covers every new step.`
+3. `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
 
-The sign-up audit gains existingContact, deletedContact, recorded,
-sentRecorded, sentSkipped (including refused, AR2) and consentVersion, with
-no PII; the log line mirrors them. The route comment describes D4-D7, the
-lead backfill's reader is pinned, and the never-log-PII test covers every
-new step.
+## S4 exit check (commits ONLY the slice report)
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-```
-
-## S4 exit check (no commit)
-
-1. `cd "W:/tmp/flyer-leads/app" && npx vitest run test/activityEventsRepo.integration.test.ts test/twilioWebhookHarnessRepoAdditions.integration.test.ts test/contactTimeline.test.ts test/publicSignupLeads.test.ts test/publicIntake.test.ts test/rateLimitClientKey.test.ts test/backfillJoinHousingAuthority.test.ts test/shareLedgerFlyer.test.ts test/listingSendOutcomeApi.test.ts` -> all pass.
+1. The FULL app suite (AR15 - S4 edits the shared harness fakes): `cd "W:/tmp/flyer-leads/app" && npx vitest run` -> exit 0 (with the AWS-key prefix from section C if `env | grep '^AWS_'` printed anything). On a red DynamoDB-Local file, follow AGENTS.md's re-run-and-compare (re-run the file alone; compare failing FILES at the merge base) before calling it S4's.
 2. `cd "W:/tmp/flyer-leads" && npm run typecheck` -> exit 0.
 3. `cd "W:/tmp/flyer-leads" && npm run smoke` -> exit 0 (public.ts gained runtime imports: lib/address, lib/events, lib/voiceMasking, repos/activityEventsRepo, repos/listingSendsRepo, services/shareLedger).
-4. `cd "W:/tmp/flyer-leads" && npx eslint app/src/routes/public.ts app/src/repos/activityEventsRepo.ts app/test/helpers/twilioWebhookHarness.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts app/test/activityEventsRepo.integration.test.ts app/test/contactTimeline.test.ts app/test/publicSignupLeads.test.ts app/test/publicIntake.test.ts app/test/backfillJoinHousingAuthority.test.ts` -> no errors (none of these files is in the pre-existing lint backlog, which is dashboard react-hooks only).
-5. `cd "W:/tmp/flyer-leads" && git status` -> clean; `git log --oneline -5` shows the five S4 commits on top of S3's.
+4. `cd "W:/tmp/flyer-leads" && npx eslint app/src/routes/public.ts app/src/repos/activityEventsRepo.ts app/test/helpers/twilioWebhookHarness.ts app/test/twilioWebhookHarnessRepoAdditions.integration.test.ts app/test/activityEventsRepo.integration.test.ts app/test/activityEventsRepoConsistentRead.test.ts app/test/contactTimeline.test.ts app/test/publicSignupLeads.test.ts app/test/publicIntake.test.ts app/test/backfillJoinHousingAuthority.test.ts` -> no errors (none of these files is in the pre-existing lint backlog, which is dashboard react-hooks only).
+5. `cd "W:/tmp/flyer-leads" && git status` -> clean; `git log --oneline -6` shows the five S4 task commits on top of S3's.
+6. The slice report (plan section 0): write `docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S4-report.md` (create the `slices/` directory if absent) - ASCII, FINDINGS ONLY (what the tree held that the plan got wrong, risks, untrimmed paths), each citing code by `file:line` as the tree stands at the end of S4; if there is nothing to report, one line saying so. Re-verify before writing, and include only what still holds; the candidates this draft already knows of (section E): `unitId` not trimmed by `parseHousingFairBody` itself (`app/src/routes/public.ts` parser, relying on `app/src/app.ts:146`); the harness `createOrGetByParticipantPhone` reusing only OPEN threads (`app/test/helpers/twilioWebhookHarness.ts:652-669`); the audit not telling a repeat from a failed pin (`recorded: false` both); plus anything a task's Step 2 or Step 4 surfaced (e.g. a compile fix the S4 test code needed - R1 #7). Check it: `cd "W:/tmp/flyer-leads" && tr -d '\11\12\15\40-\176' < docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S4-report.md | wc -c` -> `0`. Commit it alone, in the three calls of section C, with paths `docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S4-report.md` and `-m` values: 1. `docs(records): flyer-leads S4 slice report` 2. `Findings from building S4 (the activity type, the sign-up handler D4-D7 and its audit), cited by file and line.` 3. `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Then `git status` -> clean.
 
 ## D. Spec coverage map
 
@@ -7458,12 +7707,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 |---|---|
 | D4 findByPhone stays the one lookup | 4.2 (spy: `findByPhone` once, `findAllByPhone` never) |
 | D4 live holder of any type = existing; deleted holder = deleted path; none = create | 4.2 |
-| D4 deleted path: no conversation, send, pin, unread, sent row; audit on that contact with `deletedContact: true`; `{ ok: true }` | 4.2 (no writes), 4.5 (payload) |
+| D4 deleted path: no conversation, send, pin, unread, sent row; audit on that contact with `deletedContact: true`, `recorded: false`, `sentRecorded: false`, `sentSkipped: 'deleted'` (AR11); `{ ok: true }` | 4.2 (no writes), 4.4 (`'deleted'` in the union), 4.5 (payload + log) |
 | D4 an existing contact is never changed (consent included) - Invariant B | 4.2 (byte-identical `toStrictEqual`, no `update` / `create`) |
 | D5 welcome only when this request created the contact; flag still set | 4.2 |
 | D6.1 repeat check per contact per source per 24h, shared no-property source, new contacts skip the read, fails OPEN - Invariant C | 4.3 (+ 4.1 for the read) |
 | D6.2 pin labels (plan 1.1), unit ref only on a shareable flyer, typed name trimmed | 4.3 |
 | D6.3 touch -> increment -> ONE event with the returned count; failed increment still emits; failed touch no increment/no event; typed thread via conversationTypeFor; `events` dep - Invariant E | 4.2 (thread type, dep), 4.3 |
+| R1 #6: an existing contact on a CLOSED thread - spies pin touch before increment and the event built from the touched image (status `open`) | 4.3 |
+| AR8 (S4 issues 1-5): pin `at: nowIso`; ONE clock reading after the welcome feeding window start, pin `at`, touch `ts`, `signedUpAt`; `HarnessOptions.publicNow`; a failed pin still marks; one event for an existing contact, the LAST event carries the count for a new one | 4.2 (seam), 4.3 (clock, pin, mark, event counts), 4.4 (`signedUpAt`) |
+| AR12 `hasEventSince` `ConsistentRead: true`, asserted on the command | 4.1 (`activityEventsRepoConsistentRead.test.ts`) |
+| AR15 full app suite at the slice end; plan 0 slice report | S4 exit check |
 | D6.4 every post-contact step best-effort, logged with marker + step, `{ ok: true }` | 4.3 (repeat, pin, touch, increment), 4.4 (ledger), 4.5 (honest audit flags) |
 | D6 new contacts: welcome, then pin + unread; refused welcome still pin + unread | 4.3 |
 | D6 audit fields incl. AR2 `refused`, `consentVersion` | 4.5 |
@@ -7491,11 +7744,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ## E. Notes for other slices
 
 Names S4 creates:
-- `ActivityEventType` member `'signed_up'`; `ActivityEventsRepo.hasEventSince(contactId, type, sinceIso, refId)` (plan 2.5, exact).
+- `ActivityEventType` member `'signed_up'`; `ActivityEventsRepo.hasEventSince(contactId, type, sinceIso, refId)` (plan 2.5, exact; a strongly consistent read, AR12).
+- Audit `sentSkipped` values: `deleted` (AR11), `not_flyer`, `not_shareable`, `not_tenant`, `declined`, `refused` (AR2), `lost`, `error`; absent ONLY when a flyer entry was written.
 - `PublicRouterDeps.activityEventsRepo | listingSendsRepo | events | now` (plan 2.6, exact).
-- `HarnessOptions.publicNow?: () => number` (contract issue 3).
+- `HarnessOptions.publicNow?: () => number` (AR8 point 3).
 - Private to `routes/public.ts`: `SIGNUP_REPEAT_WINDOW_MS`, `SIGNUP_STEP_FAILED`, `SignupSentSkipped`, `signupPinLabel`, `markSignupUnread`; contactsRepo's `isDeleted` imported as `isContactDeleted` (the unit `isDeleted` already holds the name).
-- NEW test file `app/test/publicSignupLeads.test.ts`.
+- NEW test files `app/test/publicSignupLeads.test.ts` and `app/test/activityEventsRepoConsistentRead.test.ts`; the slice report `docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S4-report.md`.
+- S6 Task 6.4 (R1 #8) rewrites `docs/issues/deleted-contact-web-signup-silent.md`: after S4 the deleted path writes NO welcome-refused WARN; its only trace is the `housing_fair_signup` audit on the deleted contact (`deletedContact: true`, `sentSkipped: 'deleted'`) and the `housing-fair signup captured` log line carrying the same booleans.
 
 S4 relies on S3 (plan 2.2 / 2.4 / O1): `applyFlyerShareEntry`, `FlyerShareResult` (incl. `'refused'`), its INFO decline line and ERROR lost line, the `<iso>#flyer` attempt key and the `flyer` entry shape `{ attempt, state: 'counted', by: 'acceptance', countedAt }`, the test helper `seedFlyerSignUp`, the harness fake's token-stamping `setDeclined`, and `outcome: 'signed_up'` on `GET /api/contacts/:id/listings-sent`. Note S3's own warning: an EQUAL `signedUpAt` twice answers `'refused'` - every S4 test advances `clock.ms` between two flyer sign-ups on one pair.
 
@@ -7512,53 +7767,44 @@ S6 (e2e) can rely on:
 Watch items / residuals observed:
 - The audit cannot tell a repeat skip from a failed pin (both `recorded: false`); only a failure writes the `housing-fair signup step failed` line (`step: 'pin'`). Spec-defined fields; no change proposed.
 - Production ordering: a new contact's welcome touch uses the provider's whole-second timestamp; the mark's touch uses the app clock read just after the welcome. If the provider clock runs ahead, `last_activity_at` can step back by under a second. Cosmetic (the row is still on top).
-- Harness divergence (pre-existing, not changed): the fake `createOrGetByParticipantPhone` reuses only an OPEN thread, while the real repo adopts a closed one through its phone claim; so no fake test asserts "a closed thread reopens". The real `touchLastActivity` writes `status = 'open'`, which is what D6.3's touch-first rule relies on.
+- Harness divergence (pre-existing, not changed): the fake `createOrGetByParticipantPhone` reuses only an OPEN thread, while the real repo adopts a closed one through its phone claim. Task 4.3 therefore STUBS the adoption (`createOrGetByParticipantPhone` resolves the seeded closed thread) and pins touch -> increment with spies, plus the touched image's `status: 'open'` (R1 #6). The real `touchLastActivity` writes `status = 'open'`, which is what D6.3's touch-first rule relies on.
 - Whitespace (D10): the pin label uses the parser-trimmed names (and the app-wide trim). `unitId` is NOT trimmed by `parseHousingFairBody` itself (`public.ts:160-167`); it relies on the app-wide `trimJsonBody` (`app.ts:146`, JSON bodies only). A non-JSON body cannot reach the handler past the boolean consent gate (`smsConsent !== true` refuses a urlencoded `'true'`), so no untrimmed unitId reaches the pin ref, the repeat source or the ledger. Reported, not changed.
 
 ## 9. S5 - Dashboard renderers of D6 (the pin) and D8 (the signed_up outcome) (Tasks 5.x)
 
 Plan section 9, Tasks 5.x. Binding: plan sections 0-4 (2.7 minus the flyer /
-tag items, which S2 owns). Depends on S3 (app outcome union) and S4 (app
-activity type); the dashboard mirrors both by hand (there is no mirror test for
-either union - `grep -rn "listing_decline_cleared" app dashboard e2e` finds no
-cross-workspace test).
+tag items, which S2 owns; AR9 and AR13 for this slice). Build order (AR4):
+S1 -> S2 -> S3 -> S4 -> S5 -> S6, so S1-S4 are on the branch when S5 starts.
+S5 depends on S3 (the app outcome union, and AR13's `tenantName` label) and
+S4 (the app activity type); the dashboard mirrors both unions by hand (there
+is no mirror test for either - `grep -rn "listing_decline_cleared" app
+dashboard e2e` finds no cross-workspace test).
 
 Verification note: every test and edit below was run in an isolated copy of the
 dashboard (scratch dir, main @b7959e2a sources, the worktree's node_modules
 copied) - RED for the stated reason, then GREEN, `tsc -p tsconfig.json --noEmit`
 exit 0, the full dashboard suite green (263 files / 5361 tests), and eslint on
-the 11 touched files showing only the one pre-existing error named in the exit
-check. Nothing was run inside W:\tmp\flyer-leads.
+the touched files showing only the one pre-existing error named in the exit
+check. The AR13 PIN (Task 5.3 step 1c) was run the same way, green with the
+Task 5.2 gate in place. Nothing was run inside W:\tmp\flyer-leads.
 
-## A. CONTRACT ISSUES (for the planner to rule)
+## A. CONTRACT ISSUES - RULED (AR9, 2026-10-21; nothing open)
 
-1. FollowUpView, a session-only state (rule wanted: accept as pinned, or ask
-   for a chip). The server never serves a `signed_up` item (D8, not waiting),
-   so the list never SHOWS one. But an action can ANSWER one: staff mark a
-   Follow up row Not interested, the person signs up from the flyer, staff
-   press Undo -> the clear re-derives `signed_up`. FollowUpView resolves only
-   `interested` / `not_interested` answers (`FollowUpView.tsx:83-85`, `else
-   onUnresolve()`), so the row returns to its WAITING display ("No reply yet,
-   N days", counted in "<n> waiting", with Interested / Not interested) until
-   the next load drops it. Recommendation: accept and pin (Task 5.2 does) -
-   rare, session-only, and self-correcting on reload; changing it means a new
-   resolution kind in `useFollowUps.ts`, which the spec does not ask for.
-2. Informational, no ruling needed: plan 2.7's "`endpoints.ts` accepts
-   `signed_up` wherever it validates or maps outcomes" is vacuous. No
-   dashboard endpoint validates or maps an outcome: `getUnitRecipients`
-   (`endpoints.ts:1179-1188`) and `getContactListingsSent` (`:1530-1539`)
-   return rows as-is, and `setListingSendOutcome` (`:1195-1199`) POSTs only
-   `'interested' | 'not_interested' | 'clear'` (a sign-up is never a staff
-   action). No source change; Task 5.2 adds a pass-through PIN.
-3. Informational, the planner's call to overrule: the MilestonePin colour.
-   2.7 allows "an existing neutral or positive milestone colour". Neutral is
-   `milestoneVariant`'s `default`, so choosing it is a no-op with no RED test
-   possible. This draft picks GREEN (`styles.green`, the "positive
-   outcome-ish" family `tour_scheduled` / `tour_took_place` / `tour_outcome` /
-   `placement_closed` use): a sign-up is a positive lead signal. If the
-   planner rules neutral, drop the Timeline.tsx edit and turn Task 5.1's two
-   `toContain('green')` assertions into `toContain('neutral')` PINs (the task
-   then rests on its typecheck RED alone).
+1. FollowUpView session-only state: ACCEPTED as pinned. The server never
+   serves a `signed_up` item (D8, not waiting), but an Undo (clear) can
+   ANSWER one when the person signed up from the flyer meanwhile. FollowUpView
+   resolves only `interested` / `not_interested` answers
+   (`FollowUpView.tsx:83-85`, `else onUnresolve()`), so the row shows its
+   waiting display ("No reply yet, N days", counted) until the next load
+   drops it. Task 5.2 step 1d pins it.
+2. No endpoint change: nothing in `endpoints.ts` validates or maps an outcome
+   (`getUnitRecipients` `:1179-1188` and `getContactListingsSent`
+   `:1530-1539` return rows as-is; `setListingSendOutcome` `:1195-1199` POSTs
+   only `'interested' | 'not_interested' | 'clear'`). Task 5.2 step 1c keeps
+   the pass-through PIN.
+3. The `signed_up` pin is GREEN (`styles.green`, the existing positive
+   family `tour_scheduled` / `tour_took_place` / `tour_outcome` /
+   `placement_closed` use; AR9 replaces 2.7's "neutral or positive").
 
 ## B. Facts the tasks rely on (verified on this worktree, main @b7959e2a)
 
@@ -7594,7 +7840,7 @@ check. Nothing was run inside W:\tmp\flyer-leads.
   - `ContactDetail.tsx:705-708` `onListingOutcome` and `ListingDetail.tsx:473-476`
     `onRecipientOutcome` only pass the route's `{ row }` through - no switch;
   - `useFollowUps.ts:16` `FollowUpResolution` (interested / not_interested) - no outcome read;
-  - `endpoints.ts` - see A2.
+  - `endpoints.ts` - see A2 (AR9-2).
   No other file switches on or maps the outcome.
 - F5 The SendRosterRow hosts: `TenantFile.tsx:334-359` (contact page,
   "Properties sent"; no `requestTourTo` - B8), `PartnerFile.tsx:193-197`
@@ -7649,6 +7895,24 @@ check. Nothing was run inside W:\tmp\flyer-leads.
   on `setNow(fresh);`. After Task 5.1 adds 3 lines above it, it reports at
   `1621:7`. Not S5's; name it in the handback. Every other touched file lints clean.
 
+- F15 `tenantName` (AR13). Its one producer is the units recipients
+  projection: `app/src/routes/units.ts:268-271`
+  `const tenantName = displayNameOfContact(contact);` /
+  `...(tenantName !== undefined && { tenantName }),` (no other app route sets
+  it; the contact page's listings-sent rows carry none). S3 makes a RESOLVED
+  nameless contact carry `formatPhoneForDisplay(phone) ?? phone` there
+  (`app/src/lib/phone.ts:73-77`, NANP -> `(470) 555-0182`). The dashboard
+  wire comment, `dashboard/src/api/types.ts:3154-3155`:
+  `/** Denormalized tenant display name (server contacts join). HONEST - absent`
+  / ` *  when the contact is unknown or nameless; render the id as the fallback. */`
+  - "or nameless" becomes wrong, so Task 5.3 updates it. The one dashboard
+  reader is `ListingDetail.tsx:1343`
+  `const name = row.tenantName ?? row.contactId;` - pure rendering, NO
+  dashboard logic change is needed: a phone in `tenantName` is shown as the
+  identity link and used in the action names. A resolved unknown row is
+  labelled `Unknown` by `sendRowKindLabel` (`CONTACT_TYPE_LABEL.unknown`,
+  `contactProfile.ts:55`).
+
 Every anchor quoted below was checked unique in its file on this worktree.
 
 ## C. Commands used by every task
@@ -7673,12 +7937,16 @@ DynamoDB.
   2. `test -e "/w/AI Projects/Housing Choice/HC Application/.git/worktrees/flyer-leads/MERGE_HEAD" && echo MERGE_IN_PROGRESS || echo no-merge`
      must print `no-merge`;
   3. `cd /w/tmp/flyer-leads && git add <explicit paths>` (never `-A`);
-  4. `cd /w/tmp/flyer-leads && git commit -F <msgfile>` with the message given
-     in the task, written to a scratch file (ASCII), ending with the trailer
-     line `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+  4. `cd /w/tmp/flyer-leads && git commit -m '<subject>' -m '<body paragraph>' ... -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'`
+     - repeated `-m` arguments (plan 0, R1 #15), never a message file inside
+     the worktree. Each task gives its exact command. The arguments are
+     single-quoted and contain no apostrophe; the last `-m` is the trailer.
+  5. `cd /w/tmp/flyer-leads && git status` again - the task's paths are gone
+     from it.
 - Never edit dashboard source while this worktree's e2e suite runs; never commit during it.
-- If an earlier slice (S2) already changed a file named here, re-read it and
-  apply the edit on top; the quoted anchor is the authority, not the line number.
+- S1-S4 are on the branch (AR4). If an earlier slice (S2 is the only other
+  dashboard slice) already changed a file named here, re-read it and apply the
+  edit on top; the quoted anchor is the authority, not the line number.
 
 ## Task 5.1 - The `signed_up` thread pin (D6)
 
@@ -7815,17 +8083,10 @@ Run the C command for `dashboard/src/api/types.ts`,
 
 Paths: `dashboard/src/api/types.ts dashboard/src/routes/contact/Timeline.tsx dashboard/src/routes/contact/Timeline.test.tsx`
 
-Message:
+After the C steps 1-3 (`git add` of exactly those three paths):
 
 ```
-feat(dashboard): signed_up thread pin - green milestone, unit ref links to the property
-
-flyer-leads D6 (plan Task 5.1). TimelineMilestoneType mirrors the app's new
-signed_up activity type. milestoneVariant files it with the green (positive)
-family; the existing unit deep-link makes a shareable flyer's pin a link to
-the property, and a /join or not-shareable pin stays plain text.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd /w/tmp/flyer-leads && git commit -m 'feat(dashboard): signed_up thread pin - green milestone, unit ref links to the property' -m 'flyer-leads D6 (plan Task 5.1). TimelineMilestoneType mirrors the new app activity type signed_up. milestoneVariant files it with the green (positive) family (AR9); the existing unit deep-link makes the pin of a shareable flyer a link to the property, and a /join or not-shareable pin stays plain text.' -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
 ```
 
 ## Task 5.2 - The `signed_up` outcome on the send roster (D8)
@@ -7834,7 +8095,7 @@ Goal: the wire outcome union gains `signed_up`; `SendRosterRow` (contact page
 and property page) reads "Signed up from the flyer <date>" in place of
 "Sent <date>", chips "Signed up", and offers the waiting actions (spec D8
 Renderers bullets 1-3, plan 1.1 "Send roster", plan 2.7 `Card.tsx`). Pins the
-pass-through endpoints (A2) and the FollowUpView answer path (A1).
+pass-through endpoints (AR9-2) and the FollowUpView answer path (AR9-1).
 
 Files:
 - `dashboard/src/api/types.ts` (`ListingSendOutcome`)
@@ -7945,7 +8206,7 @@ Text to insert:
 `:25-28`; the `findByRole` on Interested waits for the units read, which gates
 `actionsDisabled` in `TenantFile.tsx:349`.)
 
-1c. `endpoints.test.ts` (PIN, A2) - three edits.
+1c. `endpoints.test.ts` (PIN, AR9-2) - three edits.
 
 Import list anchor (`:44-46`):
 
@@ -8008,7 +8269,7 @@ it('getContactListingsSent and getUnitRecipients pass a signed_up row through as
 
 ```
 
-1d. `FollowUpView.test.tsx` (PIN, A1) - insert IMMEDIATELY BEFORE the anchor
+1d. `FollowUpView.test.tsx` (PIN, AR9-1) - insert IMMEDIATELY BEFORE the anchor
 (`:229`, inside `describe('FollowUpView - actions', ...)`):
 
 ```
@@ -8040,7 +8301,7 @@ Text to insert:
 
 ```
 
-(If the planner rules A1 differently, replace this PIN with the ruled behavior.)
+(AR9-1 accepted this behavior; the PIN records it.)
 
 ### Step 2 - run RED
 
@@ -8203,32 +8464,26 @@ Run the C command for each of the six files - each prints `0`.
 
 Paths: `dashboard/src/api/types.ts dashboard/src/routes/contact/Card.tsx dashboard/src/routes/contact/SendRosterRow.test.tsx dashboard/src/routes/contact/ContactDetail.test.tsx dashboard/src/api/endpoints.test.ts dashboard/src/routes/broadcasts/FollowUpView.test.tsx`
 
-Message:
+After the C steps 1-3 (`git add` of exactly those six paths):
 
 ```
-feat(dashboard): signed_up send outcome - "Signed up from the flyer" row, chip and actions
-
-flyer-leads D8 (plan Task 5.2). ListingSendOutcome mirrors the app's new
-signed_up outcome. SendRosterRow (contact page Properties sent, property page
-Sent to) reads "Signed up from the flyer <date>" in place of "Sent <date>"
-with the same date label and title, chips "Signed up", and offers the waiting
-actions (Interested / Not interested; Request a tour keeps its partner-only
-host rule). Pins: the roster endpoints pass the outcome through, and a
-FollowUpView Undo answered signed_up returns the row to its waiting display.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd /w/tmp/flyer-leads && git commit -m 'feat(dashboard): signed_up send outcome - "Signed up from the flyer" row, chip and actions' -m 'flyer-leads D8 (plan Task 5.2). ListingSendOutcome mirrors the new app outcome signed_up. SendRosterRow (contact page Properties sent, property page Sent to) reads "Signed up from the flyer <date>" in place of "Sent <date>" with the same date label and title, chips "Signed up", and offers the waiting actions (Interested / Not interested; Request a tour keeps its partner-only host rule).' -m 'Pins (AR9): the roster endpoints pass the outcome through, and a FollowUpView Undo answered signed_up returns the row to its waiting display until the next load.' -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
 ```
 
 ## Task 5.3 - The property "Sent to" card files `signed_up` (D8)
 
 Goal: `groupSendRows` files a `signed_up` row under Interested when the
 recipient is eligible and under Not eligible otherwise, like a waiting outcome
-(spec D8 Renderers bullet 4, plan 2.7 `listingFormat.ts`).
+(spec D8 Renderers bullet 4, plan 2.7 `listingFormat.ts`, AR7 item 3). Also
+AR13's dashboard half: the `tenantName` wire comment, and a PIN that a
+nameless resolved recipient renders the phone label the server sends (no
+dashboard logic change - F15).
 
 Files:
 - `dashboard/src/routes/listing/listingFormat.ts`
 - `dashboard/src/routes/listing/listingFormat.test.ts`
 - `dashboard/src/routes/listing/ListingDetail.test.tsx`
+- `dashboard/src/api/types.ts` (the `ListingSendRow.tenantName` comment only)
 
 ### Step 1 - tests (write first)
 
@@ -8307,6 +8562,44 @@ Text to insert:
 (`unit`, `sent()`, `card()` are the describe's own helpers at `:3064-3069`;
 `sent()` defaults `eligible: true`, `interestedMode: 'route'`, `tenantName: 'Tia Moss'`.)
 
+1c. `ListingDetail.test.tsx` (PIN, AR13) - insert directly AFTER the 1b test,
+i.e. also IMMEDIATELY BEFORE the same anchor
+`  it('Not interested calls the route and applies the returned { row } through setRecipientRow', async () => {`:
+
+```tsx
+  // flyer-leads AR13, PIN (pure rendering - the app projection owns the
+  // label): a RESOLVED contact with no name (an auto-captured unknown sign-up)
+  // arrives with its formatted phone in tenantName, and the row is named by
+  // it - never by the raw contactId. A MISSING contact still has no
+  // tenantName and keeps the contactId fallback (ListingDetail.tsx:1343).
+  it('a nameless resolved recipient is labelled by the phone the server sends in tenantName; a missing one keeps the id', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit,
+      recipients: {
+        status: 'ready',
+        rows: [
+          sent({ contactId: 'c-unk', tenantName: '(470) 555-0182', type: 'unknown', interestedSupported: false, outcome: 'signed_up' }),
+          sent({ contactId: 'c-gone', tenantName: undefined, interestedSupported: false, eligible: false, recipientMissing: true }),
+        ],
+      },
+    });
+    renderAt();
+    const link = within(card()).getByRole('link', { name: '(470) 555-0182' });
+    expect(link).toHaveAttribute('href', '/contacts/c-unk');
+    const li = link.closest('li') as HTMLElement;
+    expect(within(li).getByText('Unknown')).toBeInTheDocument();
+    expect(within(li).getByRole('button', { name: 'Mark (470) 555-0182 not interested in 12 Oak St' })).toBeInTheDocument();
+    expect(within(card()).queryByText('c-unk')).not.toBeInTheDocument();
+    expect(within(card()).getByRole('link', { name: 'c-gone' })).toHaveAttribute('href', '/contacts/c-gone');
+  });
+
+```
+
+(It asserts no group on purpose - 1b owns the grouping - so it is green both
+before and after step 3: a PIN. The Not interested button exists because Task
+5.2's gate is in. `Unknown` is the kind label, F15.)
+
 ### Step 2 - run RED
 
 `cd /w/tmp/flyer-leads/dashboard && npx vitest run src/routes/listing/listingFormat.test.ts src/routes/listing/ListingDetail.test.tsx -t "signed_up"`
@@ -8316,6 +8609,10 @@ Expected: `2 failed`:
   (today `signed_up` falls through to `eligible === true ? 0 : 3`, F4);
 - ListingDetail: `AssertionError: expected [ 'Waiting', 'Not eligible' ] to deeply equal [ 'Interested', 'Not eligible' ]`.
 (Task 5.2 is already in, so the words / chip / buttons exist; only the group is wrong.)
+
+Then the PIN alone:
+`cd /w/tmp/flyer-leads/dashboard && npx vitest run src/routes/listing/ListingDetail.test.tsx -t "nameless"`
+-> `1 passed` (expected green - PIN).
 
 `npm run typecheck` is already green here (Task 5.2 added the union member;
 these fixtures are `Partial<ListingSendRow>` / untyped).
@@ -8362,6 +8659,31 @@ Replace with:
 
 `SendRowGroup`'s key / label unions are unchanged (still four groups).
 
+3c. `dashboard/src/api/types.ts` (AR13, comment only) - anchor
+(`:3154-3156`, in `interface ListingSendRow`; re-read it first - Task 5.2
+edited lines just above it):
+
+```
+  /** Denormalized tenant display name (server contacts join). HONEST - absent
+   *  when the contact is unknown or nameless; render the id as the fallback. */
+  tenantName?: string;
+```
+
+Replace with:
+
+```
+  /** Denormalized recipient display name (server contacts join; only the
+   *  property "Sent to" rows carry it). A RESOLVED contact with no first or
+   *  last name carries its formatted phone instead (flyer-leads AR13), so a
+   *  contact that exists is never shown by its raw id. HONEST - absent when
+   *  the contact did not resolve (recipientMissing), or has neither a name nor
+   *  a phone; render the id as the fallback. */
+  tenantName?: string;
+```
+
+No other dashboard change for AR13: `ListingDetail.tsx:1343`
+`row.tenantName ?? row.contactId` already renders whatever label arrives.
+
 ### Step 4 - run GREEN
 
 - `cd /w/tmp/flyer-leads/dashboard && npx vitest run src/routes/listing/listingFormat.test.ts src/routes/listing/ListingDetail.test.tsx`
@@ -8370,25 +8692,19 @@ Replace with:
 
 ### Step 5 - ASCII check
 
-Run the C command for the three files - each prints `0`.
+Run the C command for the four files - each prints `0`.
 
 ### Step 6 - commit
 
-Paths: `dashboard/src/routes/listing/listingFormat.ts dashboard/src/routes/listing/listingFormat.test.ts dashboard/src/routes/listing/ListingDetail.test.tsx`
+Paths: `dashboard/src/routes/listing/listingFormat.ts dashboard/src/routes/listing/listingFormat.test.ts dashboard/src/routes/listing/ListingDetail.test.tsx dashboard/src/api/types.ts`
 
-Message:
+After the C steps 1-3 (`git add` of exactly those four paths):
 
 ```
-feat(dashboard): property Sent to card files a signed_up row under Interested
-
-flyer-leads D8 (plan Task 5.3). groupSendRows files a flyer sign-up under
-Interested when the recipient is eligible and under Not eligible otherwise
-(eligible false or absent, or the contact missing) - never Waiting.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cd /w/tmp/flyer-leads && git commit -m 'feat(dashboard): property Sent to card files a signed_up row under Interested' -m 'flyer-leads D8 (plan Task 5.3). groupSendRows files a flyer sign-up under Interested when the recipient is eligible and under Not eligible otherwise (eligible false or absent, or the contact missing) - never Waiting.' -m 'AR13: the ListingSendRow.tenantName comment now says a resolved nameless contact carries its formatted phone; a PIN shows the Sent to card renders that label, and a missing contact keeps the id fallback.' -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
 ```
 
-## S5 exit check (no commit)
+## S5 exit check (ends with the slice report commit)
 
 1. `cd /w/tmp/flyer-leads/dashboard && npx vitest run src/routes/contact/Timeline.test.tsx src/routes/contact/SendRosterRow.test.tsx src/routes/contact/ContactDetail.test.tsx src/routes/contact/files.test.tsx src/api/endpoints.test.ts src/routes/broadcasts/FollowUpView.test.tsx src/routes/listing/listingFormat.test.ts src/routes/listing/ListingDetail.test.tsx`
    -> 8 files passed, 0 failed.
@@ -8402,8 +8718,21 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 4. Optional but cheap: `cd /w/tmp/flyer-leads/dashboard && npx vitest run`
    (the whole dashboard suite; was 263 files / 5361 tests green with S5 alone
    on main sources). Not concurrently with an e2e run in this worktree.
-5. `cd /w/tmp/flyer-leads && git status` -> clean except files other slices
-   own and have not committed (S5 itself leaves nothing uncommitted).
+5. `cd /w/tmp/flyer-leads && git status` -> no S5 path modified or untracked
+   (Tasks 5.1-5.3 are committed).
+6. The slice report (plan 0): write
+   `W:\tmp\flyer-leads\docs\superpowers\reviews\2026-10-21-flyer-leads\slices\S5-report.md`
+   (create the `slices` folder if S1-S4 have not), ASCII, FINDINGS ONLY, each
+   citing code by `file:line`: what the tree held that this plan got wrong,
+   risks, and any untrimmed typed-input path met in a surface S5 touched
+   (D10). It always names the pre-existing lint error from step 3
+   (`dashboard/src/routes/contact/Timeline.tsx:<line>` `react-hooks/set-state-in-effect`,
+   not S5's) so gate 5 is not re-diagnosed. If there is nothing else, that
+   one line is the report. No narrative, no copy of the plan.
+   - ASCII: `cd /w/tmp/flyer-leads && tr -d '\11\12\15\40-\176' < docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S5-report.md | wc -c` prints `0`.
+   - Commit it with the C steps 1-3 (`git add docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S5-report.md` only), then:
+     `cd /w/tmp/flyer-leads && git commit -m 'docs(records): flyer-leads S5 slice report' -m 'Findings from building plan section 9 (Tasks 5.1-5.3), cited by file:line.' -m 'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'`
+   - `cd /w/tmp/flyer-leads && git status` -> clean for S5.
 
 ## D. Spec coverage map (S5's items -> task)
 
@@ -8413,16 +8742,18 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 | D6 step 2: a shareable flyer's pin (refType `unit`) links to the property | 5.1 (pinned; existing generic link, F7) |
 | D6 step 2: /join and not-shareable pins (no ref) render plain | 5.1 |
 | Spec 4 "The dashboard: the activity-type union and `MilestonePin`" | 5.1 |
-| Plan 2.7: `MilestonePin` colour reusing an existing token | 5.1 (green; A3) |
+| Plan 2.7 / AR9-3: `MilestonePin` colour, the existing green | 5.1 |
 | Spec 4 / plan 2.7: wire outcome union in `types.ts` | 5.2 |
-| Spec 4 / plan 2.7: `endpoints.ts` | 5.2 (no change needed - PIN; A2) |
+| Spec 4 / plan 2.7 / AR9-2: `endpoints.ts` | 5.2 (no change - pass-through PIN) |
 | D8 renderer: roster row "Signed up from the flyer <date>" in place of "Sent <date>" (plan 1.1: same date format) | 5.2 |
 | D8 renderer: chip "Signed up" | 5.2 |
 | D8 renderer: the row offers Interested / Not interested; the action gate adds `signed_up`; Request a tour stays partner-only | 5.2 |
 | D8 renderer: both hosts (contact page and property page) | 5.2 (contact page host test), 5.3 (property page host test) |
 | D7: an unknown contact's row on the property's Sent to card | 5.2 (unknown-row case: Not interested only), 5.3 (grouping) |
 | D8 renderer: property card files `signed_up` under Interested if eligible, else Not eligible | 5.3 |
-| D8: `signed_up` never waiting / not on Follow up - dashboard side | 5.2 (FollowUpView answer PIN; A1). The list and the "<n> waiting" pill read the server (S3) |
+| D8: `signed_up` never waiting / not on Follow up - dashboard side | 5.2 (FollowUpView answer PIN; AR9-1). The list and the "<n> waiting" pill read the server (S3) |
+| AR7-3: a missing recipient or an unknown contact reading `signed_up` files under Not eligible when ineligible / missing | 5.3 |
+| AR13 (dashboard half): the `ListingSendRow.tenantName` comment; a nameless resolved recipient shows the phone label it receives; a missing one keeps the id | 5.3 (comment step 3c; PIN 1c - no logic change) |
 | Spec 4: `ContactDetail.tsx`, `ListingDetail.tsx`, `FollowUpView.tsx` | Verified no outcome switch (F4); host tests in 5.2 / 5.3 |
 | D8: the Matching blast keeps the tenant checked by default | No dashboard code (F10) - S3's `blastAudienceRules.ts` pin |
 | Spec 5 Tests: "the dashboard row and chip read ..." / "offers Interested / Not interested" / "files it under Interested when eligible, Not eligible when not" | 5.2, 5.2, 5.3 |
@@ -8458,8 +8789,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
     `<address>` is `formatAddress(unit.address)` from the app (plan 1.1).
   - Contact page: `getByRole('list', { name: 'Properties sent' })` ->
     the `listitem` whose text matches `/^Signed up from the flyer /` (the date
-    is `formatHeardFrom`'s label, e.g. "Today 3:05p" - match by regex, never
-    the exact date); chip `getByText('Signed up', { exact: true })` within it;
+    is `formatHeardFrom`'s label: "Today 2:14 PM" on the same day, else
+    "Yesterday", else "Sep 12" (or "Sep 12, 2025" in another year) - match by
+    regex, never the exact date); chip `getByText('Signed up', { exact: true })` within it;
     buttons `Mark <name> interested in <address>` (tenant only) and
     `Mark <name> not interested in <address>`. The identity link's name is the
     property's label. There is no "Sent " text in that row.
@@ -8467,18 +8799,24 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
     -> its `section`), list `getByRole('list', { name: 'Interested' })` for an
     eligible recipient (`'Not eligible'` otherwise), the identity link named by
     the recipient's name, the same row text / chip / buttons as above. An
-    UNKNOWN contact's row carries the kind label beside the name and offers
-    only `Mark <name> not interested in <address>`.
+    UNKNOWN contact's row carries the kind label `Unknown` beside the name and
+    offers only `Mark <name> not interested in <address>`. AR13: a nameless
+    contact (an auto-captured unknown sign-up) is named by its formatted
+    phone, e.g. `(470) 555-0182` - the identity link, and `<name>` in the
+    button, are that phone, never the contactId.
   - The Follow up tab never lists the pair (server rule).
 
 ## 10. S6 - e2e repairs, the flyer-leads spec, docs, completion gates (Tasks 6.x)
 
-Slice S6 is built LAST, after S1-S5 are committed (plan section 3 build order
-S1 -> S3 -> S4 -> S2 -> S5 -> S6). It edits ONLY e2e specs, two docs and the
-mission records; it never edits app or dashboard source, except the scratch
+Slice S6 is built LAST, after S1-S5 are committed (plan section 3 and AR4:
+build order S1 -> S2 -> S3 -> S4 -> S5 -> S6). It edits ONLY e2e specs,
+docs (selectors.md, GLOSSARY.md, the issue registry) and the mission
+records; it never edits app or dashboard source, except the scratch
 mutation in Task 6.2 that the builder reverts in the same task.
 
 ## A. CONTRACT ISSUES (for the planner to rule)
+
+RULED: all three ACCEPTED as AR10 (plan section 4). Kept below for the record.
 
 1. Ground rule 0 says every task has a real RED case. Tasks 6.3 and 6.4
    (selectors.md, GLOSSARY.md) are docs and Task 6.5 is the gates: none has
@@ -8774,6 +9112,11 @@ git -C "W:/tmp/flyer-leads" add <paths>
 ```bash
 git -C "W:/tmp/flyer-leads" commit -m "<subject>" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
+
+Commit messages are ASCII and use repeated `-m` arguments as above (plan
+section 0, R1 #15); a longer message may instead come from a message file
+OUTSIDE the worktree (e.g. the session scratchpad) with `-F <path>` - never
+a file inside the worktree, which would show in `git status`.
 
 ## Task 6.1 - Repair the existing e2e assertions the change breaks
 
@@ -9866,7 +10209,7 @@ git -C "W:/tmp/flyer-leads" commit -m "test(e2e): flyer-leads spec - the new fly
 
 Goal: record the selector conventions S6 relies on, and retire the ones the
 change made false (selectors.md:43 and :137 describe the old flyer).
-Verification is the grep + ASCII check (contract issue A1).
+Verification is the grep + ASCII check (AR10.1).
 
 Files: Modify `e2e/support/selectors.md`.
 
@@ -9970,14 +10313,19 @@ git -C "W:/tmp/flyer-leads" add e2e/support/selectors.md
 git -C "W:/tmp/flyer-leads" commit -m "docs(e2e): selectors for the flyer address heading, Sign up, the sign-up pin and the Signed up row" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-## Task 6.4 - `documentation/GLOSSARY.md`
+## Task 6.4 - `documentation/GLOSSARY.md` and the issue registry
 
-Goal (spec section 4 "Docs", contract issue A3): rent, accessibility, lease
-terms, pets and deposit are staff only; the area is the line under the
-flyer's address heading; new terms: the `signed_up` pin and outcome, and
-the `flyer` share entry. Verification is the grep + ASCII check (A1).
+Goal (spec section 4 "Docs", AR10.3): rent, accessibility, lease terms,
+pets and deposit are staff only; the area is the line under the flyer's
+address heading; new terms: the `signed_up` pin and outcome, and the
+`flyer` share entry. Also (plan review R1 #8) the open issue
+`deleted-contact-web-signup-silent` stops describing a welcome attempt the
+new deleted path never makes. Verification is grep + the ASCII check
+(AR10.1).
 
-Files: Modify `documentation/GLOSSARY.md`.
+Files:
+- Modify `documentation/GLOSSARY.md`
+- Modify `docs/issues/deleted-contact-web-signup-silent.md`
 
 Step 1. Edits (Edit tool).
 
@@ -10099,6 +10447,59 @@ lines are part of the text):
   does not move **last heard from**.
 ```
 
+1f. `docs/issues/deleted-contact-web-signup-silent.md` (plan review R1 #8).
+Read the WHOLE file first. Its point 3 says the welcome is attempted,
+refused `contact_deleted` and warn-logged, and its "Net" paragraph says the
+only traces are the audit entry and a warn log; spec D4 + AR11 remove that
+attempt. First confirm the BUILT deleted path (S4) matches what the update
+will say:
+
+```bash
+grep -n "deletedContact\|sentSkipped" "W:/tmp/flyer-leads/app/src/routes/public.ts"
+```
+
+Expected: the deleted branch writes the audit with `deletedContact: true`,
+`recorded: false`, `sentRecorded: false`, `sentSkipped: 'deleted'` and
+returns before any conversation call or send. If the built code differs,
+write what the code DOES and record the gap in the S6 slice report.
+
+Keep the frontmatter's `id`, `type`, `severity`, `status: open`, `area`,
+`created` and `refs` as they are; add one optional line (docs/issues/README.md:52
+`updated: 2026-06-18            # optional`) right after `created: 2026-08-03`:
+
+```
+updated: <the build date, YYYY-MM-DD>
+```
+
+Then insert this paragraph between the "Net:" paragraph (it ends `the
+public flow's handling of it is not.`) and `**Suggested fix.**`, as its own
+paragraph (the repo's `**Update (<date>, <branch>): ...**` convention, e.g.
+`docs/issues/auto-routing-changes-not-named.md:62`); the original points
+stay as the historical record:
+
+```
+**Update (2026-10-21, `feat/flyer-leads`): the deleted path is now explicit,
+and quieter.** Point 3 and the last line of the "Net" paragraph no longer
+hold. POST /public/housing-fair still resolves the phone with
+contacts.findByPhone (point 1), and a SOFT-DELETED holder is still neither
+restored nor given the form's consent (point 2). But since flyer-leads
+(spec docs/superpowers/specs/2026-10-21-flyer-leads-design.md D4, D5) the
+route stops at that holder: it writes no conversation, attempts no send -
+so there is no contact_deleted refusal and no welcome-refused WARN line any
+more; only a contact the request CREATED is ever welcomed - and records no
+sign-up pin, unread mark or properties-sent entry. It still answers
+{ ok: true } (the visitor sees the normal thank-you; the flyer's button
+reads "Sign up" now) and still writes the housing_fair_signup audit event
+on that contact's entity (contacts#<id>), now with deletedContact: true,
+recorded: false, sentRecorded: false and sentSkipped: 'deleted'. That audit
+row is the ONLY trace; point 4 stands (no inbox row, no Deleted chip). On a
+legacy phone shared with a live contact, a deleted FIRST holder takes this
+path too (spec D4 residual). A LIVE contact's sign-up, by contrast, now pins
+"Signed up ..." in their thread and marks it unread (GLOSSARY "signed up"),
+so option (b) below has a ready mechanism; flyer-leads deliberately left the
+deleted case to this issue.
+```
+
 Step 2. Check:
 
 ```bash
@@ -10109,16 +10510,24 @@ Expected: no `is PUBLIC` hit; one hit each for `flyer share entry`,
 `**signed up**`, `Signed up / No reply yet`, `address heading`. And
 `grep -n "the Pets item, the deposit" documentation/GLOSSARY.md` prints nothing.
 
-Step 3. C5 (the diff form - GLOSSARY.md carries non-ASCII today).
+```bash
+cd "W:/tmp/flyer-leads" && grep -nE "^updated: |^status: open|Update \(2026-10-21, .feat/flyer-leads.\)|sentSkipped: 'deleted'" docs/issues/deleted-contact-web-signup-silent.md
+```
+
+Expected: one hit each (the `updated:` line, `status: open` unchanged, the
+Update heading, the audit fields).
+
+Step 3. C5: the diff form for GLOSSARY.md (it carries non-ASCII today) and
+for deleted-contact-web-signup-silent.md.
 
 Step 4. C6, then:
 
 ```bash
-git -C "W:/tmp/flyer-leads" add documentation/GLOSSARY.md
+git -C "W:/tmp/flyer-leads" add documentation/GLOSSARY.md docs/issues/deleted-contact-web-signup-silent.md
 ```
 
 ```bash
-git -C "W:/tmp/flyer-leads" commit -m "docs(glossary): flyer-leads - staff-only flyer fields, the address heading, signed_up and the flyer share entry" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C "W:/tmp/flyer-leads" commit -m "docs(glossary,issues): flyer-leads - staff-only flyer fields, the address heading, signed_up, the flyer share entry; the deleted sign-up path" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ## Task 6.5 - FINAL: sync `main` once, then the five completion gates
@@ -10134,6 +10543,11 @@ commit while gate 4 runs.
 Files:
 - (a merge commit, unless `main` has not moved)
 - Create: `docs/superpowers/reviews/2026-10-21-flyer-leads/S6-gates.md`
+- Create: `docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S6-report.md` (the slice report, plan section 0)
+
+AR10.2: this is the branch's ONE main sync. A later review fix wave re-runs
+Steps 5-9 (the five gates) WITHOUT re-running Step 2, and reports any newer
+`main` drift instead of chasing it.
 
 Step 1. State: C6's two reads. Expected `On branch feat/flyer-leads`,
 `nothing to commit, working tree clean`, and `no-merge`. Then C2 (no e2e
@@ -10326,15 +10740,33 @@ Pre-existing lint errors in touched files (baseline-matched, not ours):
 <file: rule - message, one per line, or "none">
 ```
 
-Step 11. C5 (new-file form) on the record, C6 (only the record file is
-new; no merge in progress), then:
+Step 11. The slice report (plan section 0). Gate 4 has exited, so no e2e
+run is live (never write source or commit while one runs). Create
+`docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S6-report.md`
+(`mkdir -p` the `slices/` directory if it is absent): ASCII, FINDINGS ONLY,
+each citing code by `file:line` - never a recap of the tasks. What belongs
+there: anything the tree held that this plan got wrong (an anchor that had
+moved or changed, an extra stale assertion Task 6.1 had to repair, a
+mutation run whose first failure differed from Task 6.2's expectation, a
+built deleted path that differs from the issue update), risks and regressions found while running the
+specs or gates, and any untrimmed typed-input path seen in a surface this
+plan touches (plan section 0, D10). Gate exit codes and pre-existing lint
+errors stay in `S6-gates.md`, not here (one file, one kind). With nothing
+to report, the file is the single line:
+
+```
+S6: nothing to report - every anchor, expectation and citation held as planned.
+```
+
+Step 12. C5 (new-file form) on both records, C6 (only the two record files
+are new; no merge in progress), then:
 
 ```bash
-git -C "W:/tmp/flyer-leads" add docs/superpowers/reviews/2026-10-21-flyer-leads/S6-gates.md
+git -C "W:/tmp/flyer-leads" add docs/superpowers/reviews/2026-10-21-flyer-leads/S6-gates.md docs/superpowers/reviews/2026-10-21-flyer-leads/slices/S6-report.md
 ```
 
 ```bash
-git -C "W:/tmp/flyer-leads" commit -m "docs(records): flyer-leads S6 completion gates" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git -C "W:/tmp/flyer-leads" commit -m "docs(records): flyer-leads S6 completion gates and slice report" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ## D. Spec coverage map (items this slice owns -> task)
@@ -10355,7 +10787,9 @@ git -C "W:/tmp/flyer-leads" commit -m "docs(records): flyer-leads S6 completion 
 | s5 Tags (e2e half): Pets / Deposit / Rent / Accessibility / Lease Staff only on the New property form; landlord form "On property flyers" only on the application-fee pair; the public note never on a Staff only field | 6.1 (2i, 2m). The Edit form's tags are S2's unit tests. |
 | s5 e2e: specs follow selectors.md; selectors.md updated | 6.2, 6.3 |
 | s4 Docs: GLOSSARY (staff-only fields, the area under the address heading, signed_up pin and outcome, the flyer share entry) | 6.4 |
-| AGENTS.md completion gates (main sync once, the five gates) | 6.5 |
+| Plan review R1 #8: `docs/issues/deleted-contact-web-signup-silent.md` describes the deleted path as built (no send, no WARN, the audit with `deletedContact: true` and AR11's `sentSkipped: 'deleted'`) | 6.4 Step 1f |
+| AGENTS.md completion gates (main sync once - AR10.2 - and the five gates) | 6.5 |
+| Plan section 0: the S6 slice report | 6.5 Steps 11-12 |
 
 Not owned here (app / dashboard tests in S1-S5): every s5 "Sign-up (app,
 fake world)" case (repeat window, declines, O1, deleted holder, failures,

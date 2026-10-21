@@ -3,11 +3,27 @@ id: unit-voucher-size-readers-diverge
 title: The property page and New/Edit forms cannot show or edit a recorded voucher-size LIST (#12); every reader now uses acceptedVoucherSizes
 type: debt
 severity: med
-status: open
+status: resolved
 area: dashboard
 created: 2026-10-01
+resolved: 2026-10-21
 refs: dashboard/src/routes/listing/listingFormat.ts, app/src/lib/unitFields.ts, dashboard/src/routes/broadcasts/BroadcastComposer.tsx, dashboard/src/routes/listing/ListingDetail.tsx:755-756, dashboard/src/routes/listing/ListingEditForm.tsx:105, dashboard/src/routes/listing/UnitCreateForm.tsx:114
 ---
+
+**Resolution (2026-10-21, feat/property-requirements, tracker #12).** The
+last two readers take the list shape. `voucher_size_accepted` is a LIST:
+null or [] removes it (the property falls back to its bedrooms), an
+integer 0..12 or a list of them is stored de-duplicated and ascending, and
+anything else is a 400 (non-integer sizes included). The New and Edit
+forms edit it with picker B (chips Studio and 1-4, "More sizes (5-12)",
+an "Accepts: ..." line; emptying it sends null; a stored value with no chip
+is listed and dropped on save), and the property page row "Voucher sizes
+accepted" lists the recorded sizes and stays empty when none is recorded
+(the 2026-10-12 decision stands). The flyer states every size ("Fits a 2-
+or 3-bedroom voucher") and Matching pre-fills one chip per size.
+`acceptedVoucherSizes` stays the one reader. Design:
+`docs/superpowers/specs/2026-10-20-property-requirements-design.md` D4,
+D11, D12; e2e `e2e/tests/dashboard-next/property-requirements.spec.ts`.
 
 **Update (2026-10-12) - both readers are FIXED and a recorded size can be cleared**, after a
 prod report that a property with its own voucher size showed its bedroom count on the public

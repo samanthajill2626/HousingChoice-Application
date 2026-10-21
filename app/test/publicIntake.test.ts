@@ -80,6 +80,10 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
 
     expect(world.sent).toHaveLength(1); // still exactly one welcome text ever
     expect(world.contacts.length).toBe(contactCount); // no duplicate contact
+    // flyer-leads D6: the repeat falls inside the 24-hour window of the first
+    // sign-up's pin (the same /join source), so it adds no second pin or bump.
+    expect(world.activityEvents.filter((e) => e.type === 'signed_up')).toHaveLength(1);
+    expect(world.unreadIncrements).toHaveLength(1);
   });
 
   it('rejects an invalid phone and missing names with a generic 400 (no send, no capture)', async () => {

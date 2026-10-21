@@ -46,12 +46,14 @@ import { createRateLimit } from '../middleware/rateLimit.js';
 import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer } from '../lib/unitFields.js';
 import { resolveUnitMedia } from '../lib/unitMedia.js';
-import type { EventBus } from '../lib/events.js';
+import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
+import { formatAddress } from '../lib/address.js';
+import { isOneToOneBucket } from '../lib/unreadFeed.js';
 import { conversationTypeFor } from '../lib/voiceMasking.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
-import type { ActivityEventsRepo } from '../repos/activityEventsRepo.js';
+import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createContactsRepo, isDeleted as isContactDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
-import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
+import { createConversationsRepo, type ConversationItem, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import type { ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { createOrgListRepo, type OrgListRepo } from '../repos/orgListRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
@@ -93,6 +95,33 @@ function phoneMarker(phone: string): string {
 const MAX_NAME_LEN = 100;
 /** A unitId is an opaque id; cap it so it can't smuggle a blob through the body. */
 const MAX_UNIT_ID_LEN = 200;
+
+/** flyer-leads D6.1: one pin and one inbox bump per contact per source per 24 hours. */
+const SIGNUP_REPEAT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** flyer-leads plan 1.1: the log line of every failed best-effort sign-up step (with { marker, step }). */
+const SIGNUP_STEP_FAILED = 'housing-fair signup step failed';
+
+/**
+ * flyer-leads D6.2 (plan 1.1): the signed_up pin's words - inline staff copy,
+ * the "Property sent" convention (the message catalog holds outbound sends
+ * only). The name is the one TYPED on the form (trimmed by the app-wide body
+ * trim and by the parser): the contact itself is never renamed, and an
+ * auto-captured unknown contact has no other name. The address is
+ * formatAddress, falling back to the unitId, as the tour-request label does.
+ */
+function signupPinLabel(args: {
+  unitId: string | undefined;
+  flyerUnit: UnitItem | undefined;
+  viaFlyer: boolean;
+  firstName: string;
+  lastName: string;
+}): string {
+  const name = `${args.firstName} ${args.lastName}`;
+  if (args.unitId === undefined) return `Signed up on the join page as ${name}`;
+  if (!args.viaFlyer || args.flyerUnit === undefined) return `Signed up from a flyer as ${name}`;
+  return `Signed up from the flyer for ${formatAddress(args.flyerUnit.address) || args.unitId} as ${name}`;
+}
 
 interface HousingFairFields {
   firstName: string;
@@ -275,6 +304,58 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       contactsRepo: contacts,
     });
 
+  // flyer-leads D6 (plan 2.6): the sign-up's thread pin and its 24-hour repeat
+  // read, the bus its unread mark emits on, and the injected clock (AR3) - the
+  // ONE time source for the repeat window, the pin and touch instant and the
+  // flyer attempt key.
+  const activity = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
+  const events = deps.events ?? appEvents;
+  const now = deps.now ?? (() => Date.now());
+
+  /**
+   * flyer-leads D6.3: bump the contact's 1:1 thread to the top of the inbox and
+   * mark it unread. touchLastActivity FIRST (status open, last_activity_at =
+   * the sign-up instant, preview untouched - the inbox preview stays the newest
+   * MESSAGE), then incrementUnread, then ONE conversation.updated built from
+   * the touched image with unread_count replaced by the count the increment
+   * returned. A failed increment still emits from the touched image as it is,
+   * so open dashboards re-sort the bumped row; a failed touch means no
+   * increment and no event, so a closed thread is never left flagged unread
+   * but invisible. Best-effort: each failure is logged (marker + step, no PII)
+   * and never reaches the public answer.
+   *
+   * OR-14 (R5 F1): the mark is for a 1:1 thread ONLY. The thread read returns
+   * the first OPEN conversation for the phone whatever its type, and a relay
+   * group stores its POOL number as participant_phone, so a sign-up typed with
+   * a pool number resolves to that relay group - where a touch would write
+   * status 'open' (resurrecting a group closed within the index lag, the
+   * hazard conversationsRepo's D16 note names) and bump a thread no inbound
+   * landed on. Such a thread is skipped (logged as a failed touch, reason
+   * group_thread); the pin, the flyer entry and the audit are unaffected.
+   */
+  async function markSignupUnread(conversation: ConversationItem, atIso: string, marker: string): Promise<void> {
+    if (!isOneToOneBucket(conversation)) {
+      log.warn({ marker, step: 'touch', reason: 'group_thread' }, SIGNUP_STEP_FAILED);
+      return;
+    }
+    const { conversationId } = conversation;
+    let touched: ConversationItem;
+    try {
+      touched = await conversations.touchLastActivity(conversationId, undefined, atIso);
+    } catch (err) {
+      log.error({ marker, step: 'touch', err }, SIGNUP_STEP_FAILED);
+      return;
+    }
+    let count: number | undefined;
+    try {
+      count = await conversations.incrementUnread(conversationId);
+    } catch (err) {
+      log.error({ marker, step: 'increment', err }, SIGNUP_STEP_FAILED);
+    }
+    const event = toConversationUpdatedEvent(touched);
+    events.emit('conversation.updated', count === undefined ? event : { ...event, unread_count: count });
+  }
+
   const router = Router();
 
   // The opaque 404 - IDENTICAL for missing, soft-deleted, and not-shareable (no
@@ -335,8 +416,10 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     // never reveal whether the id existed). unitId is NOT PII, so logging its
     // presence as a boolean is fine.
     let viaFlyer = false;
+    // flyer-leads D6.2: the unit is kept for the sign-up pin's address label.
+    let flyerUnit: UnitItem | undefined;
     if (unitId !== undefined) {
-      const flyerUnit = await units.getById(unitId);
+      flyerUnit = await units.getById(unitId);
       // A soft-deleted unit is not publicly shareable (it's hidden everywhere),
       // so it must not earn flyer attribution either - mirror the flyer gate
       // exactly.
@@ -468,6 +551,52 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       }
     }
 
+    // (3a) One clock reading (AR3), taken AFTER the welcome so the unread
+    // mark's touch follows the welcome in the thread. Then the repeat check
+    // (D6.1): one pin and one inbox bump per contact per SOURCE per 24 hours.
+    // The source is the shareable flyer's unit (the pin's unitId ref), or the
+    // ONE shared "no property" source (/join, and a flyer whose unit is
+    // missing, deleted, unavailable or made up - no ref), so made-up unitIds
+    // cannot multiply pins. A brand-new contact has no earlier pin and skips
+    // the read. A failed read FAILS OPEN: the pin and the bump are recorded.
+    const nowMs = now();
+    const nowIso = new Date(nowMs).toISOString();
+    const sourceRefId = viaFlyer ? unitId : undefined;
+    let isRepeat = false;
+    if (!isNew) {
+      try {
+        isRepeat = await activity.hasEventSince(
+          contactId,
+          'signed_up',
+          new Date(nowMs - SIGNUP_REPEAT_WINDOW_MS).toISOString(),
+          sourceRefId,
+        );
+      } catch (err) {
+        log.warn({ marker, step: 'repeat_check', err }, SIGNUP_STEP_FAILED);
+      }
+    }
+
+    // (3b) The pin and the unread mark (D6.2, D6.3), for every live contact -
+    // a new one too, AFTER its welcome, so its new thread ends with the
+    // welcome as the newest message and is unread and on top. Both skipped on
+    // a repeat. Each is best-effort, and a failed pin still marks the thread.
+    let recorded = false;
+    if (!isRepeat) {
+      try {
+        await activity.record({
+          contactId,
+          type: 'signed_up',
+          label: signupPinLabel({ unitId, flyerUnit, viaFlyer, firstName, lastName }),
+          ...(sourceRefId !== undefined && { refType: 'unit' as const, refId: sourceRefId }),
+          at: nowIso,
+        });
+        recorded = true;
+      } catch (err) {
+        log.error({ marker, step: 'pin', err }, SIGNUP_STEP_FAILED);
+      }
+      await markSignupUnread(conversation, nowIso, marker);
+    }
+
     // (4) Audit (no PII in the payload beyond the marker — the contactId is an
     // internal id, fine for the audit trail but NOT returned to the public).
     // join-housing-authority D7: every event from now on carries
@@ -493,6 +622,7 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
         welcomeSent,
         viaFlyer,
         withAuthority: housingAuthority !== undefined,
+        recorded,
       },
       'housing-fair signup captured',
     );

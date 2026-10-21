@@ -134,9 +134,14 @@ export interface ListingSendItem {
  */
 export interface ListingSendRow {
   contactId: string;
-  /** Denormalized tenant display name, attached by the GET projections (same
-   *  contacts join as the roster's `name`). HONEST - absent when the contact is
-   *  unknown or has no name; the dashboard then falls back to the id. */
+  /** Denormalized recipient label, attached ONLY by the units recipients read
+   *  and the outcome route's re-projection (routes/units.ts recipientLabelOf;
+   *  the contact listings-sent read never carries it - its contact is the page
+   *  owner): the contact's name, else - flyer-leads AR13 - its OWN formatted
+   *  phone, because an `unknown` contact a flyer sign-up puts on the card is
+   *  never renamed (spec D4, D7). Absent when the contact did not resolve (a
+   *  missing recipient) or has neither a name nor a phone; the dashboard then
+   *  falls back to the id. Staff chrome only - never a message body. */
   tenantName?: string;
   unitId: string;
   sentAt: string;

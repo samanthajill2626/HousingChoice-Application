@@ -149,7 +149,7 @@ describe('the two directions share row fields; units adds recipient facts, inter
   it('a single seeded row surfaces in both units/recipients and contacts/listings-sent', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-x');
-    seedTenant(world, 'c-x');
+    const tx = seedTenant(world, 'c-x');
     await seedListingSend(world.listingSendsRepo, { unitId: 'unit-x', contactId: 'c-x', sentAt: SENT_AT, broadcastId: 'b-x' });
 
     const byUnit = await request(app)
@@ -166,7 +166,12 @@ describe('the two directions share row fields; units adds recipient facts, inter
     // page owner). Otherwise the two directions return the same row.
     // last-heard-from spec 5.4: the units side also carries interestedMode and
     // eligible (the unit and the recipient's reachability are known there).
-    expect(byUnit.body.recipients[0]).toEqual({ ...byContact.body.sent[0], type: 'tenant', interestedMode: 'form', eligible: true });
+    // flyer-leads AR13: the units side also labels a resolved contact with no
+    // name by its phone (seedTenant's phone is not NANP-shaped, so
+    // formatPhoneForDisplay passes it through as stored); the contact side
+    // never carries tenantName.
+    expect(byUnit.body.recipients[0]).toEqual({ ...byContact.body.sent[0], type: 'tenant', interestedMode: 'form', eligible: true, tenantName: tx.phone });
+    expect(byContact.body.sent[0]).not.toHaveProperty('tenantName');
     expect(byContact.body.sent[0]).toMatchObject({ outcome: 'no_reply', interestedSupported: true });
     expect(byContact.body.sent[0]).not.toHaveProperty('interestedMode');
     expect(byContact.body.sent[0]).not.toHaveProperty('eligible');
@@ -214,7 +219,7 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
     seedUnit(world, 'unit-1');
     // last-heard-from D12: a tour is read only for a RESOLVED tenant (a row
     // with no contact would now serve as recipientMissing).
-    seedTenant(world, 'c-1');
+    const t1 = seedTenant(world, 'c-1');
     seedTenant(world, 'c-2');
     await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
     await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-2', sentAt: SENT_AT });
@@ -236,7 +241,8 @@ describe('tour chip projection (listing-response-tour-chip section 5)', () => {
     const c1 = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-1');
     const c2 = res.body.recipients.find((r: { contactId: string }) => r.contactId === 'c-2');
     // Exact optional-field wire shape: tour is EXACTLY { tourId, state }.
-    expect(c1).toEqual({ contactId: 'c-1', unitId: 'unit-1', sentAt: c1.sentAt, via: 'broadcast', tour: { tourId: 'tour-c1', state: 'scheduled' }, type: 'tenant', outcome: 'interested', interestedSupported: true, interestedMode: 'form', eligible: true });
+    // flyer-leads AR13: c-1 has no name, so its label is its phone.
+    expect(c1).toEqual({ contactId: 'c-1', unitId: 'unit-1', sentAt: c1.sentAt, via: 'broadcast', tour: { tourId: 'tour-c1', state: 'scheduled' }, type: 'tenant', outcome: 'interested', interestedSupported: true, interestedMode: 'form', eligible: true, tenantName: t1.phone });
     // c-2 (no tour) carries NO tour field (absent, not null).
     expect(c2).not.toHaveProperty('tour');
   });
@@ -617,5 +623,55 @@ describe('flyer-leads D8: signed_up on both GET projections (the callers pass th
     expect(units.body.recipients[0]).toMatchObject({ outcome: 'no_reply', sentAt: '2026-06-19T10:00:00.000Z', broadcastId: 'b-2' });
     const contact = await get(app, '/api/contacts/c-1/listings-sent');
     expect(contact.body.sent[0]).toMatchObject({ outcome: 'no_reply', broadcastId: 'b-2' });
+  });
+});
+
+describe('flyer-leads AR13: a resolved recipient with no name is labelled by its formatted phone (units recipients only)', () => {
+  const get = (app: ReturnType<typeof makeWebhookHarness>['app'], path: string) =>
+    request(app).get(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE);
+
+  it('a nameless unknown contact a flyer sign-up put on the card carries its formatted phone; a non-NANP phone is shown as stored; a named contact keeps its name; a contact with neither and a missing recipient carry none; the contact listings-sent read is unchanged', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    // An auto-captured contact: no name, never renamed by a sign-up (spec D4).
+    world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'active', phone: '+14045550142' } as ContactItem);
+    world.contacts.push({ contactId: 'c-intl', type: 'unknown', status: 'active', phone: '+442071838750' } as ContactItem);
+    world.contacts.push({ contactId: 'c-bare', type: 'unknown', status: 'active' } as ContactItem);
+    const named = seedTenant(world, 'c-named');
+    named.firstName = 'Brianna';
+    named.lastName = 'Whitfield';
+    await seedFlyerSignUp(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-unk', signedUpAt: '2026-06-18T10:00:00.000Z' });
+    for (const contactId of ['c-intl', 'c-bare', 'c-named', 'c-gone']) {
+      await seedListingSend(world.listingSendsRepo, { unitId: 'unit-1', contactId, sentAt: SENT_AT });
+    }
+
+    const units = await get(app, '/api/units/unit-1/recipients');
+    expect(units.status).toBe(200);
+    const byId = new Map((units.body.recipients as Array<Record<string, unknown>>).map((r) => [r['contactId'] as string, r]));
+    expect(byId.get('c-unk')).toMatchObject({ tenantName: '(404) 555-0142', type: 'unknown', outcome: 'signed_up' });
+    expect(byId.get('c-intl')).toMatchObject({ tenantName: '+442071838750' });
+    expect(byId.get('c-named')).toMatchObject({ tenantName: 'Brianna Whitfield' });
+    expect(byId.get('c-bare')).not.toHaveProperty('tenantName');
+    expect(byId.get('c-gone')).toMatchObject({ recipientMissing: true });
+    expect(byId.get('c-gone')).not.toHaveProperty('tenantName');
+
+    const contact = await get(app, '/api/contacts/c-unk/listings-sent');
+    expect(contact.status).toBe(200);
+    expect(contact.body.sent[0]).toMatchObject({ unitId: 'unit-1', outcome: 'signed_up' });
+    expect(contact.body.sent[0]).not.toHaveProperty('tenantName');
+  });
+
+  it('the outcome route answers the same label on its re-projected row (it reuses the recipients projection)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    world.contacts.push({ contactId: 'c-unk', type: 'unknown', status: 'active', phone: '+14045550142' } as ContactItem);
+    await seedFlyerSignUp(world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-unk', signedUpAt: '2026-06-18T10:00:00.000Z' });
+    const res = await request(app)
+      .post('/api/units/unit-1/recipients/c-unk/outcome')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ outcome: 'not_interested' });
+    expect(res.status).toBe(200);
+    expect(res.body.row).toMatchObject({ contactId: 'c-unk', outcome: 'not_interested', tenantName: '(404) 555-0142' });
   });
 });

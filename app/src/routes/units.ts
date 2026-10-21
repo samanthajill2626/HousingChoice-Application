@@ -118,6 +118,7 @@ import {
 } from '../lib/listingSendOutcome.js';
 import { recordListingOutcomeEvent } from '../lib/listingOutcomeEvents.js';
 import { formatAddress } from '../lib/address.js';
+import { formatPhoneForDisplay } from '../lib/phone.js';
 import { ledgerRowCounted } from '../services/shareLedger.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 
@@ -194,6 +195,24 @@ function displayNameOfContact(contact: {
 }
 
 /**
+ * flyer-leads AR13: the "Sent to" row's label (`tenantName`) for a RESOLVED
+ * recipient - the contact's name, else its OWN formatted phone
+ * (`formatPhoneForDisplay(phone) ?? phone`, the staff-chrome fallback of
+ * lib/groupTitle.ts). An auto-captured `unknown` contact that signed up from
+ * a flyer is put on the card (spec D7) and never renamed (D4), so without
+ * this the card would print its raw contactId. Staff chrome only - never a
+ * message body. undefined when the contact has neither a name nor a phone
+ * (the dashboard then falls back to the id, as for a missing recipient).
+ */
+function recipientLabelOf(contact: RecipientDisplay): string | undefined {
+  const name = displayNameOfContact(contact);
+  if (name !== undefined) return name;
+  const phone = typeof contact.phone === 'string' ? contact.phone : '';
+  if (phone.length === 0) return undefined;
+  return formatPhoneForDisplay(phone) ?? phone;
+}
+
+/**
  * caseworkers D20 (plan 3.7, ruling R3-F3): a recipients row's contact type and
  * role, from the recipient display projection. `role` only when it holds text;
  * a contact that did not resolve never reaches here (its row omits both).
@@ -265,7 +284,7 @@ function projectRecipientRow(row: ListingSendItem, unit: UnitItem, join: Recipie
     tourActivityAt: deriveTourActivityAt(pairTours),
   });
   const declined = wireDecline(row, outcome);
-  const tenantName = displayNameOfContact(contact);
+  const tenantName = recipientLabelOf(contact);
   return toListingSendRow(row, {
     ...(tour !== undefined && { tour }),
     ...(tenantName !== undefined && { tenantName }),

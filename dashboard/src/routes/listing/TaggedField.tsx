@@ -11,8 +11,9 @@ import type { FlyerVisibility } from './requirements.js';
 import formStyles from './ListingEditForm.module.css';
 import styles from './TaggedField.module.css';
 
-/** D10: under each public free-text box (pets details, pet fee, tenant-paid
- *  utilities, accessibility, lease terms). */
+/** D10: under each public free-text box. flyer-leads D2: only On flyer
+ *  fields carry it (today Tenant-paid utilities alone); TaggedField never
+ *  shows it on a Staff only field. */
 export const PUBLIC_FLYER_NOTE = 'Tenants see this on the public flyer.';
 
 /** The props a TaggedField hands its control (spread them onto it). */
@@ -25,7 +26,8 @@ export interface TaggedFieldProps {
   label: string;
   visibility: FlyerVisibility;
   audience: FlyerAudience;
-  /** Show PUBLIC_FLYER_NOTE under the control (and describe the control by it). */
+  /** Show PUBLIC_FLYER_NOTE under the control (and describe the control by
+   *  it) - only when `visibility` is 'on_flyer' (flyer-leads D2). */
   publicNote?: boolean;
   /** The root class; defaults to the form's stacked `.field`. */
   className?: string;
@@ -44,6 +46,9 @@ export function TaggedField({
   const controlId = `${uid}-control`;
   const tagId = `${uid}-tag`;
   const noteId = `${uid}-note`;
+  // flyer-leads D2: the note follows the TAG, never the prop alone, so a
+  // hand-set prop can never again say tenants see a Staff only field.
+  const showNote = publicNote && visibility === 'on_flyer';
   return (
     <div className={className ?? formStyles.field}>
       <div className={styles.labelRow}>
@@ -52,8 +57,8 @@ export function TaggedField({
         </label>
         <FlyerTag id={tagId} visibility={visibility} audience={audience} />
       </div>
-      {children({ id: controlId, 'aria-describedby': publicNote ? `${tagId} ${noteId}` : tagId })}
-      {publicNote ? (
+      {children({ id: controlId, 'aria-describedby': showNote ? `${tagId} ${noteId}` : tagId })}
+      {showNote ? (
         <p id={noteId} className={styles.publicNote}>
           {PUBLIC_FLYER_NOTE}
         </p>

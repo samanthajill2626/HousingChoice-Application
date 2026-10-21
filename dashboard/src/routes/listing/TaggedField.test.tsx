@@ -21,24 +21,35 @@ describe('TaggedField', () => {
 
   it('a public free-text box also says tenants see it, in its description too', () => {
     render(
-      <TaggedField label="Lease terms" visibility="on_flyer" audience="property" publicNote>
+      <TaggedField label="Tenant-paid utilities" visibility="on_flyer" audience="property" publicNote>
         {(control) => <input {...control} />}
       </TaggedField>,
     );
     expect(PUBLIC_FLYER_NOTE).toBe('Tenants see this on the public flyer.');
     expect(screen.getByText('Tenants see this on the public flyer.')).toBeInTheDocument();
-    expect(screen.getByLabelText('Lease terms')).toHaveAccessibleDescription(
+    expect(screen.getByLabelText('Tenant-paid utilities')).toHaveAccessibleDescription(
       'On flyer Tenants see this on the public flyer.',
     );
   });
 
-  it('on the landlord form the public tag reads On property flyers', () => {
+  it('a Staff only field never shows the public note, even with publicNote set (flyer-leads D2)', () => {
     render(
-      <TaggedField label="Pet fee" visibility="on_flyer" audience="landlord">
+      <TaggedField label="Lease terms" visibility="staff_only" audience="property" publicNote>
         {(control) => <input {...control} />}
       </TaggedField>,
     );
-    expect(screen.getByLabelText('Pet fee')).toHaveAccessibleDescription('On property flyers');
+    expect(screen.queryByText(PUBLIC_FLYER_NOTE)).toBeNull();
+    // ... and the control is described by its tag alone.
+    expect(screen.getByLabelText('Lease terms')).toHaveAccessibleDescription('Staff only');
+  });
+
+  it('on the landlord form the public tag reads On property flyers', () => {
+    render(
+      <TaggedField label="Application fee" visibility="on_flyer" audience="landlord">
+        {(control) => <input {...control} />}
+      </TaggedField>,
+    );
+    expect(screen.getByLabelText('Application fee')).toHaveAccessibleDescription('On property flyers');
   });
 });
 

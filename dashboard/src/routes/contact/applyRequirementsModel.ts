@@ -232,9 +232,11 @@ export const APPLY_FAILED_NOTICE = "Couldn't update the properties. Review the l
 /** Worklist OR-31 (code review RD-1): ANY request answered 409
  *  deposit_conflict - the landlord record holds both deposit forms, so every
  *  further request would be refused the same way until the landlord's
- *  requirements are fixed. */
+ *  requirements are fixed. Code review R2D-13 (amends OR-31's copy): Edit
+ *  requirements is on the landlord card BEHIND this dialog, so the sentence
+ *  says to close it first. */
 export const DEPOSIT_CONFLICT_NOTICE =
-  "This landlord's deposit is set to both one month's rent and a fixed amount. Fix it with Edit requirements, then press Update again.";
+  "This landlord's deposit is set to both one month's rent and a fixed amount. Close this, fix it with Edit requirements, then open Apply to properties again.";
 /** Plan 1.1: the dialog's load error. */
 export const APPLY_LOAD_ERROR = "Couldn't load this landlord's properties.";
 /** Plan 1.1: why Apply to properties is disabled. */

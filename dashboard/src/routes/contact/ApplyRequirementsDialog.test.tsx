@@ -469,8 +469,10 @@ describe('ApplyRequirementsDialog - the left column across a re-read (worklist O
 // no more, re-reads, and says what to fix; the left column shows both forms,
 // so the refusal is visible.
 describe('ApplyRequirementsDialog - a landlord deposit holding both forms (code review RD-1, worklist OR-31)', () => {
+  // Code review R2D-13 (amends OR-31): Edit requirements is on the card BEHIND
+  // the dialog, so the sentence says to close it first.
   const DEPOSIT_CONFLICT =
-    "This landlord's deposit is set to both one month's rent and a fixed amount. Fix it with Edit requirements, then press Update again.";
+    "This landlord's deposit is set to both one month's rent and a fixed amount. Close this, fix it with Edit requirements, then open Apply to properties again.";
   const BOTH: Contact = { ...LANDLORD, req_deposit_one_month: true, req_deposit: 1400 };
   const refusal = (): ApiError => new ApiError(409, 'deposit_conflict', 'deposit_conflict', { error: 'deposit_conflict' });
   const depositBox = (copy: HTMLElement): HTMLElement => within(copy).getByRole('checkbox', { name: 'Deposit' });

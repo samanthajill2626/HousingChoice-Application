@@ -4,6 +4,7 @@ import type { RequirementItemId } from '../listing/requirements.js';
 import {
   APPLY_BATCH_SIZE,
   APPLY_FAILED_NOTICE,
+  DEPOSIT_CONFLICT_NOTICE,
   REQUIREMENTS_CHANGED_NOTICE,
   applyRequestBody,
   applyRows,
@@ -282,5 +283,9 @@ describe('summary + copy', () => {
       "This landlord's requirements changed. Review the updated list and press Update again.",
     );
     expect(APPLY_FAILED_NOTICE).toBe("Couldn't update the properties. Review the list and press Update again.");
+    // Code review R2D-13 (amends OR-31): the fix is behind the dialog.
+    expect(DEPOSIT_CONFLICT_NOTICE).toBe(
+      "This landlord's deposit is set to both one month's rent and a fixed amount. Close this, fix it with Edit requirements, then open Apply to properties again.",
+    );
   });
 });

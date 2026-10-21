@@ -188,7 +188,9 @@ Helpers (session mode):
 - `npm run e2e:reseed` - reset local data only after the lane identity ping matches.
 - `npm run e2e:restart` - restart **app+worker only** after proving the launcher is live.
 - `npm run e2e:stop` - stop a live launcher or confirmed orphan lane and remove its state.
-- `npm run e2e -- --grep "<name>"` - run a subset against the live session.
+- `npm run e2e -w @housingchoice/e2e -- --grep "<name>"` - run a subset against the live session
+  (one npm hop into the e2e workspace; the root `npm run e2e -- --grep` form is a double hop that
+  drops the flag and runs EVERYTHING).
 - `npm run e2e:report` - open the last HTML report.
 
 On Windows, profiler lifecycle ownership checks invoke `powershell.exe`; it must

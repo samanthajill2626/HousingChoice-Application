@@ -23,6 +23,9 @@ import type {
   PlacementsPage,
   PlacementStage,
   PoolNumberRow,
+  ApplyRequirementsBody,
+  ApplyRequirementsResult,
+  CreateUnitBody,
   Contact,
   ContactCreate,
   ContactMediaPage,
@@ -966,8 +969,11 @@ export function markConversationUnread(conversationId: string, signal?: AbortSig
 /** POST /api/units - create a unit (property) under a landlord. The body carries
  *  the owning landlordId plus the writable unit fields; the server validates them
  *  against a strict allowlist + types and stamps the initial status ('setup').
- *  Returns the created unit (unwrapped from { unit }). */
-export async function createUnit(body: Record<string, unknown>): Promise<UnitItem> {
+ *  From the New property form it also carries `requirements_snapshot` - the
+ *  landlord's values the form filled in (spec 2026-10-20 D5) - which the server
+ *  classifies against and never stores. Returns the created unit (unwrapped
+ *  from { unit }). */
+export async function createUnit(body: CreateUnitBody): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>('/api/units', { method: 'POST', body });
   return res.unit;
 }
@@ -976,12 +982,13 @@ export async function createUnit(body: Record<string, unknown>): Promise<UnitIte
  *  landlordId === contactId to show the landlord's own properties; the property
  *  page reuses it for "Related properties" (same landlord). `deleted: true` returns
  *  ONLY soft-deleted properties (the Properties "Deleted" view); omitted = exclude them.
+ *  `landlordId` returns only that landlord's properties (the Apply dialog, D8).
  *  Returns ONE page; `nextCursor` continues the walk - prefer `getAllUnits` when
  *  the caller needs the WHOLE list. `limit` is 1..MAX_PAGE_LIMIT (100); the
  *  server REJECTS anything outside that range with a 400, it does not clamp.
  *  Omitted = 50. */
 export function getUnits(
-  params: { deleted?: boolean; cursor?: string; limit?: string } = {},
+  params: { deleted?: boolean; cursor?: string; limit?: string; landlordId?: string } = {},
   signal?: AbortSignal,
 ): Promise<UnitsPage> {
   return request<UnitsPage>('/api/units', {
@@ -989,6 +996,10 @@ export function getUnits(
       ...(params.cursor !== undefined && { cursor: params.cursor }),
       ...(params.limit !== undefined && { limit: params.limit }),
       ...(params.deleted === true && { deleted: 'true' }),
+      // One landlord's properties (the server's byLandlord read, deleted ones
+      // hidden unless `deleted` is also set) - the Apply dialog, property
+      // requirements D8.
+      ...(params.landlordId !== undefined && { landlordId: params.landlordId }),
     },
     ...(signal !== undefined && { signal }),
   });
@@ -1426,7 +1437,7 @@ export async function getAllContacts(
 /** EVERY unit, walking `nextCursor`. The property roster behind the unit
  *  typeaheads and the listings views. */
 export async function getAllUnits(
-  params: { deleted?: boolean } = {},
+  params: { deleted?: boolean; landlordId?: string } = {},
   signal?: AbortSignal,
 ): Promise<UnitItem[]> {
   return fetchAllPages(
@@ -1435,12 +1446,13 @@ export async function getAllUnits(
         {
           limit: PAGE_LIMIT,
           ...(params.deleted === true && { deleted: true }),
+          ...(params.landlordId !== undefined && { landlordId: params.landlordId }),
           ...(cursor !== undefined && { cursor }),
         },
         signal,
       ),
     (page) => ({ items: page.units, nextCursor: page.nextCursor }),
-    { label: params.deleted === true ? 'units:deleted' : 'units' },
+    { label: params.landlordId !== undefined ? 'units:landlord' : params.deleted === true ? 'units:deleted' : 'units' },
   );
 }
 
@@ -1456,13 +1468,38 @@ export async function getAllPlacements(
 }
 
 /** GET /api/contacts/:id - the contact record (the detail page header + file).
- *  Wrapped under { contact } on the wire; unwrapped here. */
-export async function getContact(contactId: string, signal?: AbortSignal): Promise<Contact> {
+ *  Wrapped under { contact } on the wire; unwrapped here. `consistent` asks
+ *  for a consistent read (?consistent=1; planner ruling PR-3, code review
+ *  PA-3) - for a re-read that must see a save that landed a moment ago. */
+export async function getContact(
+  contactId: string,
+  signal?: AbortSignal,
+  options: { consistent?: boolean } = {},
+): Promise<Contact> {
   const res = await request<{ contact: Contact }>(
     `/api/contacts/${encodeURIComponent(contactId)}`,
-    { ...(signal !== undefined && { signal }) },
+    {
+      ...(signal !== undefined && { signal }),
+      ...(options.consistent === true && { query: { consistent: '1' } }),
+    },
   );
   return res.contact;
+}
+
+/** POST /api/contacts/:id/requirements/apply (spec 2026-10-20 D8) - copy the
+ *  landlord's listed requirement items onto the listed properties. At most 100
+ *  units per request (the dialog batches). The server answers 409
+ *  `requirements_changed` / `deposit_conflict` before writing anything; else
+ *  200 with the units it updated and the ones it skipped, and why. */
+export function applyLandlordRequirements(
+  contactId: string,
+  body: ApplyRequirementsBody,
+  signal?: AbortSignal,
+): Promise<ApplyRequirementsResult> {
+  return request<ApplyRequirementsResult>(
+    `/api/contacts/${encodeURIComponent(contactId)}/requirements/apply`,
+    { method: 'POST', body, ...(signal !== undefined && { signal }) },
+  );
 }
 
 /** GET /api/contacts/:id/timeline (C2) - the server-merged person-centric
@@ -1981,7 +2018,7 @@ export function getFollowUps(signal?: AbortSignal): Promise<FollowUpsResponse> {
 /** POST /api/broadcasts — create a DRAFT + estimate the audience reach. Returns
  *  the new draft's id, the estimated reach, and `truncated` (the estimate hit
  *  the page cap → incomplete). The client sends the `audience_filter` client
- *  shape (contact_type/housing_authorities?/bedroomSize?); the server adds the
+ *  shape (contact_type/housing_authorities?/bedroomSizes?); the server adds the
  *  always-on opt-out/unreachable fences. Matching sends: `audience_filter` is
  *  now OPTIONAL — omitting it while passing `seedContactIds` creates a
  *  seeds_only draft (the seeded 1:1/1:N entry) instead of the whole tenant

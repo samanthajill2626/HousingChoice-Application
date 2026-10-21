@@ -66,6 +66,9 @@ export interface ContactSearchFieldProps {
    *  the kind: a sibling node, never folded into the committed `value.name`
    *  (the header rule above). Return undefined for no note. */
   annotate?: (c: Contact) => string | undefined;
+  /** Ids for the input's aria-describedby - a property form's flyer tag (spec
+   *  2026-10-20 D10). The accessible name stays `inputLabel`. */
+  describedBy?: string;
 }
 
 /** Filter candidates whose display name or primary phone contains the query
@@ -92,6 +95,7 @@ export function ContactSearchField({
   inputLabel = 'Contact search',
   disabled = false,
   annotate,
+  describedBy,
 }: ContactSearchFieldProps): React.JSX.Element {
   // Fix 3: keyboard navigation state
   const [activeIndex, setActiveIndex] = useState<number>(-1);
@@ -247,6 +251,7 @@ export function ContactSearchField({
         className={isSelected ? `${styles.input} ${styles.inputSelected}` : styles.input}
         type="text"
         aria-label={inputLabel}
+        aria-describedby={describedBy}
         role="combobox"
         aria-autocomplete="list"
         aria-expanded={isListShown}

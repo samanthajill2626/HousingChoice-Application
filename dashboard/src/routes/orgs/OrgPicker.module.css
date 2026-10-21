@@ -15,6 +15,15 @@
   color: var(--c-text);
 }
 
+/* A label with something beside it, outside the <label> (a property form's
+ * flyer tag, spec 2026-10-20 D10). */
+.labelRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
 .chips {
   list-style: none;
   margin: 0;

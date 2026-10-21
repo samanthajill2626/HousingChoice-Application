@@ -20,6 +20,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import { ListingEditForm } from './ListingEditForm.js';
+import { PROPERTY_FORM_FIELDS } from './requirements.js';
 
 function orgEntry(name: string, spellings: string[] = []): OrgEntry {
   return {
@@ -172,10 +173,11 @@ describe('ListingEditForm', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('renders the new public-flyer inputs', () => {
+  it('renders the public-flyer inputs (the fee by its exact label: "No application fee" sits beside it)', () => {
     render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
     expect(screen.getByLabelText(/Video URL/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/Application fee/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Application fee')).toBeInTheDocument();
+    expect(screen.getByLabelText('No application fee')).toBeInTheDocument();
     expect(screen.getByLabelText(/Same-day RTA/i)).toBeInTheDocument();
   });
 
@@ -192,12 +194,12 @@ describe('ListingEditForm', () => {
 
     // Prefilled from the unit.
     expect(screen.getByLabelText(/Video URL/i)).toHaveValue('https://v.example/old');
-    expect(screen.getByLabelText(/Application fee/i)).toHaveValue(25);
+    expect(screen.getByLabelText('Application fee')).toHaveValue(25);
     expect(screen.getByLabelText(/Same-day RTA/i)).not.toBeChecked();
 
     await user.clear(screen.getByLabelText(/Video URL/i));
     await user.type(screen.getByLabelText(/Video URL/i), 'https://v.example/new');
-    fireEvent.change(screen.getByLabelText(/Application fee/i), { target: { value: '40' } });
+    fireEvent.change(screen.getByLabelText('Application fee'), { target: { value: '40' } });
     await user.click(screen.getByLabelText(/Same-day RTA/i));
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
 
@@ -208,58 +210,90 @@ describe('ListingEditForm', () => {
     });
   });
 
-  it('renders the "Voucher size accepted" input, prefills it, and PATCHes it (as a number) when changed', async () => {
+  // --- Voucher sizes accepted: picker B (spec 2026-10-20 D4) ----------------
+  const sizes = (): HTMLElement => screen.getByRole('group', { name: 'Voucher sizes accepted' });
+
+  it('shows the recorded voucher sizes as pressed chips and PATCHes the list when one is added', async () => {
     const user = userEvent.setup();
     updateUnit.mockResolvedValue({ ...UNIT });
-    const withVoucher: UnitItem = { ...UNIT, voucher_size_accepted: 2 };
-    render(<ListingEditForm unit={withVoucher} onClose={vi.fn()} onSaved={vi.fn()} />);
-
-    const input = screen.getByLabelText('Voucher size accepted');
-    expect(input).toBeInTheDocument();
-    expect(input).toHaveValue(2);
-
-    fireEvent.change(input, { target: { value: '3' } });
+    render(<ListingEditForm unit={{ ...UNIT, voucher_size_accepted: [2, 3] }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(within(sizes()).getByRole('button', { name: '2' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(sizes()).getByRole('button', { name: '3' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(sizes()).getByRole('button', { name: '4' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByText('Accepts: 2 BR, 3 BR')).toBeInTheDocument();
+    await user.click(within(sizes()).getByRole('button', { name: '4' }));
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
-
-    expect(updateUnit).toHaveBeenCalledWith('u1', { voucher_size_accepted: 3 });
+    expect(updateUnit).toHaveBeenCalledWith('u1', { voucher_size_accepted: [2, 3, 4] });
   });
 
-  it('clearing a recorded "Voucher size accepted" PATCHes null (backend removes it)', async () => {
-    // 2026-10-12: a wrong recorded size must be removable, so the property falls
-    // back to its bedroom count again.
+  it('a stored single number shows as one pressed chip; left alone, nothing is sent', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ListingEditForm unit={{ ...UNIT, voucher_size_accepted: 2 }} onClose={onClose} onSaved={vi.fn()} />);
+    expect(within(sizes()).getByRole('button', { name: '2' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(updateUnit).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('emptying the picker PATCHes null (the property falls back to its bedroom count)', async () => {
     const user = userEvent.setup();
     updateUnit.mockResolvedValue({ ...UNIT });
-    const withVoucher: UnitItem = { ...UNIT, voucher_size_accepted: 2 };
-    render(<ListingEditForm unit={withVoucher} onClose={vi.fn()} onSaved={vi.fn()} />);
-
-    fireEvent.change(screen.getByLabelText('Voucher size accepted'), { target: { value: '' } });
+    render(<ListingEditForm unit={{ ...UNIT, voucher_size_accepted: 2 }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(within(sizes()).getByRole('button', { name: '2' }));
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
-
     expect(updateUnit).toHaveBeenCalledWith('u1', { voucher_size_accepted: null });
   });
 
-  it('an empty "Voucher size accepted" that was never recorded sends nothing', async () => {
+  it('never recorded and left empty sends nothing', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ListingEditForm unit={UNIT} onClose={onClose} onSaved={vi.fn()} />);
+    expect(screen.getByText('Accepts: none recorded')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(updateUnit).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('a stored size of 5 or more opens the larger chips', () => {
+    render(<ListingEditForm unit={{ ...UNIT, voucher_size_accepted: [6] }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(within(sizes()).getByRole('button', { name: '6' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('button', { name: 'More sizes (5-12)' })).toBeNull();
+  });
+
+  it('a stored value with no chip is listed, and the next save drops it', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(
+      <ListingEditForm unit={{ ...UNIT, voucher_size_accepted: [2, 2.5, 13] }} onClose={vi.fn()} onSaved={vi.fn()} />,
+    );
+    expect(screen.getByText('Not a valid size, removed when you save: 2.5, 13')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(updateUnit).toHaveBeenCalledWith('u1', { voucher_size_accepted: [2] });
+  });
+
+  it('clearing Beds still leaves it untouched (beds, baths, rent and the payment standard do not clear)', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<ListingEditForm unit={UNIT} onClose={onClose} onSaved={vi.fn()} />);
 
-    expect(screen.getByLabelText('Voucher size accepted')).toHaveValue(null);
-    await user.click(screen.getByRole('button', { name: /^Save$/i }));
-
-    expect(updateUnit).not.toHaveBeenCalled();
-    expect(onClose).toHaveBeenCalled(); // nothing changed
-  });
-
-  it('clearing another number field still leaves it untouched (only the voucher size clears)', async () => {
-    const user = userEvent.setup();
-    const onClose = vi.fn();
-    render(<ListingEditForm unit={{ ...UNIT, deposit: 1200 }} onClose={onClose} onSaved={vi.fn()} />);
-
-    fireEvent.change(screen.getByLabelText('Deposit'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('Beds'), { target: { value: '' } });
     await user.click(screen.getByRole('button', { name: /^Save$/i }));
 
     expect(updateUnit).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('clearing the Fixed amount PATCHes null - the deposit is clearable now (spec 2026-10-20 D1)', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={{ ...UNIT, deposit: 1200 }} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+    expect(screen.getByLabelText('Fixed amount')).toHaveValue(1200);
+    fireEvent.change(screen.getByLabelText('Fixed amount'), { target: { value: '' } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+
+    expect(updateUnit).toHaveBeenCalledWith('u1', { deposit: null });
   });
 
   it('sets the Tour type from Not set and PATCHes the chosen value', async () => {
@@ -299,9 +333,11 @@ describe('ListingEditForm', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/couldn.t save/i));
   });
 
-  it('tells staff which facts are publicly visible on the flyer', () => {
+  it('a legend under the title explains both tags; the old single hint line is gone (spec 2026-10-20 D10)', () => {
     render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
-    expect(screen.getByText(/shown on the public flyer/i)).toBeInTheDocument();
+    expect(screen.getByText('On flyer - tenants see it on the public flyer.')).toBeInTheDocument();
+    expect(screen.getByText('Staff only - never leaves the dashboard.')).toBeInTheDocument();
+    expect(screen.queryByText(/shown on the public flyer/i)).toBeNull();
   });
 
   // --- the authorities picker (spec 2026-10-06 D5, D6) -----------------------
@@ -466,7 +502,8 @@ describe('ListingEditForm - text typed in the picker but never picked', () => {
     await user.type(authorities(), text);
     await screen.findAllByRole('option');
     await user.tab();
-    expect(authorities()).toHaveAccessibleDescription(note);
+    // The field's flyer tag joins the description after the note (spec 2026-10-20 D10).
+    expect(authorities()).toHaveAccessibleDescription(`${note} On flyer`);
   });
 
   it('a member removed after typing a name: the name stays and Save adds it (R2-FE-2)', async () => {
@@ -543,5 +580,301 @@ describe('ListingEditForm - text typed in the picker but never picked', () => {
     await user.click(save());
     expect(updateUnit).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// --- Spec 2026-10-20 (property requirements): the D10 fields, tags and order,
+// subzone, washer / dryer, the requirement items, and the 409 ----------------
+describe('ListingEditForm - property requirements and fields (spec 2026-10-20)', () => {
+  const TAG = { on_flyer: 'On flyer', staff_only: 'Staff only' } as const;
+  const PUBLIC_NOTE = 'Tenants see this on the public flyer.';
+  const ADDRESS_PARTS = ['Street address', 'Apt / unit', 'City', 'State', 'ZIP'];
+  // The D10a rows of THIS form: the Edit form has no landlord field (no
+  // dashboard form PATCHes landlordId - spec section 2), so the New form's
+  // first row, Owning landlord, is not here.
+  const EDIT_FIELDS = PROPERTY_FORM_FIELDS.filter((f) => f.label !== 'Owning landlord');
+  const save = (): HTMLElement => screen.getByRole('button', { name: /^Save$/i });
+
+  /** The control(s) one D10a row labels. */
+  function controlsFor(label: string): HTMLElement[] {
+    if (label === 'Address') return ADDRESS_PARTS.map((part) => screen.getByLabelText(part));
+    if (label === 'Housing authorities') return [screen.getByRole('combobox', { name: label })];
+    if (label === 'Voucher sizes accepted') return [screen.getByRole('group', { name: label })];
+    return [screen.getByLabelText(label)];
+  }
+  /** The elements a control's aria-describedby names. */
+  function describers(control: HTMLElement): HTMLElement[] {
+    return (control.getAttribute('aria-describedby') ?? '')
+      .split(' ')
+      .filter((id) => id !== '')
+      .map((id) => document.getElementById(id))
+      .filter((el): el is HTMLElement => el !== null);
+  }
+  const describedTexts = (control: HTMLElement): string[] => describers(control).map((el) => el.textContent ?? '');
+
+  it.each(EDIT_FIELDS.map((f) => [f.label, f.flyer] as const))(
+    '%s carries its %s tag, outside its accessible name (D10, D10a)',
+    (label, flyer) => {
+      render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+      for (const control of controlsFor(label)) {
+        expect(describedTexts(control)).toContain(TAG[flyer]);
+        const tag = describers(control).find((el) => el.textContent === TAG[flyer]);
+        expect(tag?.closest('label')).toBeNull();
+        if (label !== 'Address') expect(control).toHaveAccessibleName(label);
+      }
+    },
+  );
+
+  it('(PIN) has no Owning landlord field - that row is the New form only', () => {
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.queryByText('Owning landlord')).toBeNull();
+    expect(EDIT_FIELDS).toHaveLength(PROPERTY_FORM_FIELDS.length - 1);
+  });
+
+  it('the fields run in the D10 order (the D10a table is in form order)', () => {
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const firsts = EDIT_FIELDS.map((f) => controlsFor(f.label)[0]);
+    for (let i = 1; i < firsts.length; i += 1) {
+      const before = firsts[i - 1];
+      const after = firsts[i];
+      if (before === undefined || after === undefined) throw new Error('a D10a field has no control');
+      expect(
+        before.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING,
+        `${EDIT_FIELDS[i - 1]?.label} before ${EDIT_FIELDS[i]?.label}`,
+      ).toBeTruthy();
+    }
+  });
+
+  it('the public free-text boxes say tenants see them; staff-only boxes do not', () => {
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    for (const label of ['Tenant-paid utilities', 'Accessibility', 'Lease terms', 'Pets (details)', 'Pet fee']) {
+      expect(describedTexts(screen.getByLabelText(label)), label).toContain(PUBLIC_NOTE);
+    }
+    for (const label of ['Notes', 'Subzone', 'Deposit notes', 'Qualifications', 'Public listing link']) {
+      expect(describedTexts(screen.getByLabelText(label)), label).not.toContain(PUBLIC_NOTE);
+    }
+  });
+
+  it('prefills Subzone and PATCHes it; clearing it sends an empty string (the server removes it, D3)', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={{ ...UNIT, subzone: 'E8' }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('Subzone')).toHaveValue('E8');
+    await user.clear(screen.getByLabelText('Subzone'));
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { subzone: '' });
+  });
+
+  it('Washer / dryer offers the D3 choices and PATCHes the one picked', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const select = screen.getByLabelText('Washer / dryer');
+    expect(within(select).getAllByRole('option').map((o) => o.textContent)).toEqual([
+      'Not recorded',
+      'Hookups',
+      'Washer and dryer included',
+      'No hookups',
+    ]);
+    expect(select).toHaveValue('');
+    await user.selectOptions(select, 'included');
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { washer_dryer: 'included' });
+  });
+
+  it('setting Washer / dryer back to Not recorded sends an empty string', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={{ ...UNIT, washer_dryer: 'none' }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.selectOptions(screen.getByLabelText('Washer / dryer'), '');
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { washer_dryer: '' });
+  });
+
+  it('a legacy pets false reads as No pets with blank details, and is not re-sent untouched (D1)', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ListingEditForm unit={{ ...UNIT, pets: false }} onClose={onClose} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('No pets')).toBeChecked();
+    expect(screen.getByLabelText('Pets (details)')).toHaveValue('');
+    await user.click(save());
+    expect(updateUnit).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('a legacy pets true reads as details "Allowed"; a pet fee edit alone sends only the pet fee', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={{ ...UNIT, pets: true }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('No pets')).not.toBeChecked();
+    expect(screen.getByLabelText('Pets (details)')).toHaveValue('Allowed');
+    await user.type(screen.getByLabelText('Pet fee'), '$300');
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { pet_fee: '$300' });
+  });
+
+  it('ticking No evictions sends true', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByLabelText('No evictions while on the program'));
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { no_evictions_on_program: true });
+  });
+
+  it('unticking a recorded No evictions sends null (the server removes it)', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={{ ...UNIT, no_evictions_on_program: true }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByLabelText('No evictions while on the program'));
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { no_evictions_on_program: null });
+  });
+
+  it("ticking One month's rent clears and disables the fixed amount and sends the amount as null in the same save", async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={{ ...UNIT, deposit: 1200 }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByLabelText("One month's rent"));
+    expect(screen.getByLabelText('Fixed amount')).toBeDisabled();
+    expect(screen.getByLabelText('Fixed amount')).toHaveValue(null);
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { deposit_one_month: true, deposit: null });
+  });
+
+  it("ticking One month's rent sends the amount as null even when none was showing (D1: a colleague may have set one)", async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByLabelText("One month's rent"));
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { deposit_one_month: true, deposit: null });
+  });
+
+  it("unticking a recorded One month's rent sends null and makes the fixed amount editable", async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={{ ...UNIT, deposit_one_month: true }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('Fixed amount')).toBeDisabled();
+    await user.click(screen.getByLabelText("One month's rent"));
+    expect(screen.getByLabelText('Fixed amount')).toBeEnabled();
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { deposit_one_month: null });
+  });
+
+  it('No application fee records 0 and disables the amount', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(screen.getByLabelText('No application fee'));
+    expect(screen.getByLabelText('Application fee')).toBeDisabled();
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { application_fee: 0 });
+  });
+
+  it('a recorded 0 reads as No application fee; unticking it sends null (no fee recorded)', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={{ ...UNIT, application_fee: 0 }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('No application fee')).toBeChecked();
+    await user.click(screen.getByLabelText('No application fee'));
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { application_fee: null });
+  });
+
+  // Code review R2D-5: the checkbox is its own flag - a partial amount that
+  // reads 0 never ticks it or locks the box, and Save sends the amount typed
+  // (never the form-only flag).
+  it('deleting the 4 of a stored 40 keeps the box editable and unticked; Save sends 0', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={{ ...UNIT, application_fee: 40 }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const fee = screen.getByLabelText('Application fee');
+    await user.click(fee);
+    await user.keyboard('{Home}{Delete}');
+    expect(fee).toBeEnabled();
+    expect(screen.getByLabelText('No application fee')).not.toBeChecked();
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { application_fee: 0 });
+  });
+
+  it('a typed $0.50 fee is never mistaken for No application fee; Save sends 0.5', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText('Application fee'), '0.50');
+    expect(screen.getByLabelText('No application fee')).not.toBeChecked();
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { application_fee: 0.5 });
+  });
+
+  it('a cleared text requirement sends an empty string (the server removes it)', async () => {
+    const user = userEvent.setup();
+    updateUnit.mockResolvedValue({ ...UNIT });
+    render(<ListingEditForm unit={{ ...UNIT, credit_requirements: '600+' }} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('Credit score')).toHaveValue('600+');
+    await user.clear(screen.getByLabelText('Credit score'));
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { credit_requirements: '' });
+  });
+
+  it('a 409 property_changed keeps the form open with what staff typed and says to save again (D5)', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    updateUnit
+      .mockRejectedValueOnce(new ApiError(409, 'property_changed', 'property_changed', { error: 'property_changed' }))
+      .mockResolvedValueOnce({ ...UNIT, credit_requirements: '600+' });
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={onSaved} />);
+    await user.type(screen.getByLabelText('Credit score'), '600+');
+    await user.click(save());
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This property changed while you were saving. Save again.',
+    );
+    expect(screen.getByRole('dialog', { name: 'Edit property' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Credit score')).toHaveValue('600+');
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(save()).toBeEnabled();
+    await user.click(save());
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(updateUnit).toHaveBeenCalledTimes(2);
+    expect(updateUnit).toHaveBeenNthCalledWith(2, 'u1', { credit_requirements: '600+' });
+  });
+
+  it('a 400 deposit_conflict says why, keeps the form open with what staff typed, and is not the generic error (D1)', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    updateUnit.mockRejectedValueOnce(
+      new ApiError(400, 'deposit_conflict', 'deposit_conflict', { error: 'deposit_conflict' }),
+    );
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={onSaved} />);
+    fireEvent.change(screen.getByLabelText('Fixed amount'), { target: { value: '1200' } });
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { deposit: 1200 });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      "A deposit can be one month's rent or a fixed amount, not both. Reload the property and try again.",
+    );
+    expect(alert).not.toHaveTextContent(/couldn.t save/i);
+    expect(screen.getByRole('dialog', { name: 'Edit property' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Fixed amount')).toHaveValue(1200);
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(save()).toBeEnabled();
+  });
+
+  it('a stored deposit with cents (1250.5) never blocks Save: another field changed, the patch is sent (planner PR2-3)', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    updateUnit.mockResolvedValue({ ...UNIT, deposit: 1250.5, utilities: 'Gas only' });
+    render(<ListingEditForm unit={{ ...UNIT, deposit: 1250.5 }} onClose={vi.fn()} onSaved={onSaved} />);
+    const amount = screen.getByLabelText('Fixed amount');
+    expect(amount).toHaveValue(1250.5);
+    // step="any": a number input's default step is 1, which would mark 1250.5 a
+    // step mismatch and stop the submit before onSubmit runs.
+    expect(amount).toHaveAttribute('step', 'any');
+    await user.clear(screen.getByLabelText('Tenant-paid utilities'));
+    await user.type(screen.getByLabelText('Tenant-paid utilities'), 'Gas only');
+    await user.click(save());
+    expect(updateUnit).toHaveBeenCalledWith('u1', { utilities: 'Gas only' });
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
   });
 });

@@ -3,11 +3,27 @@ id: broadcast-4plus-exact-match-underreach
 title: Broadcast "4+ BR" targeting matches ONLY exactly-4 voucherSize while the tenant facet's identical label means >= 4
 type: bug
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-08-10
+resolved: 2026-10-21
 refs: app/src/services/audienceResolution.ts, dashboard/src/routes/broadcasts/broadcastFormat.ts, dashboard/src/routes/contacts/tenantFacets.ts
 ---
+
+**Resolution (2026-10-21, feat/property-requirements, tracker #12).** Fixed
+the first way this issue suggests, keeping data fidelity. The audience
+filter holds a LIST of chip values, `bedroomSizes` (0..4, where 4 means 4
+or more); a tenant matches a chosen size below 4 exactly, or the 4+ chip at
+any size of 4 or more (`voucherSizeMatches`,
+`app/src/lib/blastAudienceRules.ts`). A stored or posted legacy
+`bedroomSize: n` reads as `[min(n, 4)]` through ONE normalizer
+(`bedroomSizesOfFilter`), so a stored 4 now also reaches 5- to 12-bedroom
+holders, and a stored 5-12 (possible from the old uncapped pre-fill)
+reaches every holder of 4 or more (spec section 4). The tenant facet was
+not touched. Design:
+`docs/superpowers/specs/2026-10-20-property-requirements-design.md` D12;
+e2e `e2e/tests/dashboard-next/property-requirements.spec.ts` (a 6-bedroom
+tenant matches 4+).
 
 **Problem.** Two surfaces share the label `4+ BR` (both via `voucherSizeLabel`,
 `broadcastFormat.ts`) with different semantics:

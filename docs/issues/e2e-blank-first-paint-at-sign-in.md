@@ -146,3 +146,18 @@ makes that change; before/after in
 That lowers the rate rather than ruling the white page out (no safe threshold; the full
 runs still peak near 1,800), so this stays open until the merged fix has a run of clean
 gate runs behind it.
+
+**Ninth sighting - the first AFTER the fix merged (2026-10-21 ~09:00 EDT, Windows,
+`feat/property-requirements` @c1cc7e80, which carries main @3df43172 and so `b222a4ac`).**
+The planner's second full gate run of the day (the machine's sixth full `npm run e2e`
+since the previous evening): 366 passed / 1 failed, 22.2 min.
+`tests/flows/email-triage.spec.ts:158` "script-bearing HTML from an unknown sender renders
+inert in the triage detail" timed out (60 s) in its sign-in step waiting for "Continue as
+dev user" (`e2e/scenarios/steps.ts:558`); the failure screenshot is an entirely white page.
+Test 303 (the same file, the step before) passed 1.6 s earlier. The branch touches no file
+on the sign-in or email-triage path, and the planner's first full run on the previous tip
+(763314e5, 2 hours earlier) went 367/367. The file alone right after (TIME_WAIT 1,038, no
+orphaned lane listener): 4 passed, the failing test 1.3 s. Artifacts (screenshot, video,
+error context, the neighbouring test lines) copied before the re-run to
+`W:\tmp\property-requirements\.superpowers\gates\planner2\g4-failure\`. So the merged fix
+lowers the rate but has not yet put a run of clean gate runs behind it.

@@ -1,0 +1,123 @@
+/* ApplyRequirementsDialog - "Apply to properties" (property requirements D8,
+ * dialog B). Two columns on a wide screen (the Modal's wide variant), one
+ * below 860px - the breakpoint the other dialogs use. Tokens only. */
+
+.notice {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-evt-amber-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-evt-amber-bg);
+  color: var(--c-evt-amber-text);
+  font-size: var(--fs-sm);
+}
+
+/* One sentence per paragraph: a later batch's deposit_conflict shows the stop
+ * sentence, then the deposit sentence (code review R2D-3). */
+.notice p {
+  margin: 0;
+}
+
+.notice p + p {
+  margin-top: var(--sp-1);
+}
+
+.muted {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.loadError {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+
+.loadError p {
+  margin: 0;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: var(--sp-4);
+}
+
+@media (max-width: 860px) {
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The left column is a <fieldset> (its legend names the group); reset the
+ * browser frame so both columns look alike. */
+.column {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.columnHeading {
+  padding: 0;
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--c-text-muted);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-sm);
+}
+
+.check {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+  color: var(--c-text);
+  font-weight: var(--fw-medium);
+  overflow-wrap: anywhere;
+}
+
+/* The landlord value under an item, or a property's changes - indented to sit
+ * under the label, past the checkbox. */
+.detail {
+  flex-basis: 100%;
+  margin: 0;
+  padding-left: 1.5rem;
+  color: var(--c-text-muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+/* Small semibold warning text: the amber TEXT token (7.1:1 on white), not
+ * the shared --c-warning (4.28:1, under AA's 4.5:1 here) - code review RD-8. */
+.clears {
+  font-weight: var(--fw-semibold);
+  color: var(--c-evt-amber-text);
+}
+
+.ownMark {
+  font-weight: var(--fw-semibold);
+  color: var(--c-pill-partner-bg);
+}

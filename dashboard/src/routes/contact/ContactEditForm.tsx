@@ -100,12 +100,26 @@ import {
 } from './contactProfile.js';
 import { Modal } from './Modal.js';
 import { LANDLORD_ONBOARDING_HINTS } from './landlordOnboarding.js';
+import { FlyerLegend } from '../listing/FlyerTag.js';
+import { RequirementsFields } from '../listing/RequirementsFields.js';
+import {
+  buildRequirementPatch,
+  requirementFormValuesFromLandlord,
+  toLandlordPatch,
+  type RequirementFormValues,
+} from '../listing/requirementForm.js';
 import styles from './ContactEditForm.module.css';
 
 /** The PATCH refuses a save whose result would make this contact a caseworker
  *  (409 caseworker_use_conversion, spec D16): the conversion is the only way.
  *  Reachable only from a stale form - the offer gate below hides the choice. */
 export const CASEWORKER_USE_CONVERSION = 'To make this contact a caseworker, use More actions > Make caseworker.';
+
+/** Ruling AR32 (property requirements D1): a landlord save the server refuses
+ *  with 400 deposit_conflict - the resulting record would hold both a
+ *  one-month deposit and a fixed amount (a colleague's save landed first). */
+export const DEPOSIT_CONFLICT_COPY =
+  "A deposit can be one month's rent or a fixed amount, not both. Reload the landlord and try again.";
 
 export interface ContactEditFormProps {
   contact: Contact;
@@ -222,6 +236,13 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
     contact.income_includes_voucher === true,
   );
   const [parkReason, setParkReason] = useState(str(contact.park_reason));
+  // Property requirements D9: the landlord's requirements as form values keyed
+  // by UNIT key (S5's requirementForm.ts maps the req_ keys in with
+  // requirementFormValuesFromLandlord, and toLandlordPatch maps the changed
+  // ones back out).
+  const [requirements, setRequirements] = useState<RequirementFormValues>(() =>
+    requirementFormValuesFromLandlord(contact),
+  );
   const [housingAuthority, setHousingAuthority] = useState(str(contact.housingAuthority));
   // The helper organization a tenant works with - a DIFFERENT dimension from the
   // authority that runs the voucher (two lists, spec 2026-10-06 D1).
@@ -347,6 +368,16 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         patch.income_includes_voucher = incomeIncludesVoucher;
       }
       if (parkReason !== str(contact.park_reason)) patch.park_reason = parkReason;
+      // D9: only the req_ keys that changed - and, on the save that CHECKS One
+      // month's rent, req_deposit null (D1; buildRequirementPatch adds it) - by
+      // the same helper the property forms use, so the two cannot drift.
+      // Gated on the LIVE kind: a contact retyped away from landlord sends no
+      // req_ key (the server refuses them).
+      const req = buildRequirementPatch(requirementFormValuesFromLandlord(contact), requirements);
+      // Defensive: the amount inputs' min={0} stops a bad amount at native
+      // validation first; ok: false is pinned in requirementForm.test.ts (S5 Task 5.3).
+      if (!req.ok) return { error: req.error };
+      Object.assign(patch, toLandlordPatch(req.patch));
     }
 
     // Relationships - only send if the normalized form changed.
@@ -525,6 +556,10 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
       } else if (err instanceof ApiError && err.status === 409 && err.code === 'caseworker_use_conversion') {
         // A save never makes a contact a caseworker (spec D16) - say where to go.
         setError(CASEWORKER_USE_CONVERSION);
+      } else if (err instanceof ApiError && err.status === 400 && err.code === 'deposit_conflict') {
+        // AR32: say why, and keep the form open with what staff typed - never
+        // the generic save error below.
+        setError(DEPOSIT_CONFLICT_COPY);
       } else {
         // A type change that would orphan open records (spec 2026-10-12 D2):
         // keep the draft and show what blocks it beside the kind picker.
@@ -970,6 +1005,23 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
               />
             </label>
           </div>
+        ) : null}
+
+        {/* D9: the landlord's requirements - copy-only defaults its properties
+            get at create and through Apply to properties. Tags read On
+            property flyers / Staff only (they reach flyers only through
+            properties). */}
+        {isLandlord ? (
+          <fieldset className={styles.requirementsFieldset}>
+            <legend className={styles.label}>Requirements / Qualifications</legend>
+            <FlyerLegend audience="landlord" />
+            <RequirementsFields
+              values={requirements}
+              onChange={setRequirements}
+              audience="landlord"
+              disabled={saving}
+            />
+          </fieldset>
         ) : null}
 
         {isTenant ? (

@@ -99,6 +99,20 @@ describe('BroadcastResults — render', () => {
     expect(within(list).getByText('Sending…')).toBeInTheDocument();
   });
 
+  it('property-requirements D12: the header names EVERY voucher size of the filter', async () => {
+    getBroadcastResults.mockResolvedValue(
+      results({ audience_filter: { contact_type: 'tenant', bedroomSizes: [0, 2, 4], bedroomSize: 0 } }),
+    );
+    renderResults();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Tenants - Studio, 2-BR, 4+ BR' })).toBeInTheDocument();
+  });
+
+  it('(PIN) an old-shape filter (the legacy one size) still names its size in the header', async () => {
+    getBroadcastResults.mockResolvedValue(results());
+    renderResults();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Tenants - 2-BR' })).toBeInTheDocument();
+  });
+
   it('a recipient row links to /contacts/:contactId', async () => {
     getBroadcastResults.mockResolvedValue(results({ recipients: { c1: { status: 'delivered' } } }));
     renderResults();

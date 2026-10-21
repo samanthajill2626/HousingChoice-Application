@@ -32,6 +32,7 @@ import type { TourType } from '../lib/toursModel.js';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import { itemOfUnitKey, REQUIREMENT_ITEMS } from '../lib/requirements.js';
 import {
   LISTING_STATUSES,
   SHAREABLE,
@@ -409,10 +410,17 @@ export interface UnitItem {
   baths?: number;
   /** Sub-market / neighborhood label (free text). */
   area?: string;
+  /**
+   * Staff-only sub-market code (Sam's codes, e.g. E8 or SE11; spec 2026-10-20
+   * D3). Never on the public flyer; feeds the similar-properties score
+   * (lib/similarUnits.ts).
+   */
   subzone?: string;
   rent_min?: number;
   rent_max?: number;
   payment_standard?: number;
+  /** The Deposit item's fixed amount in dollars (spec 2026-10-20 D1; an
+   *  alternative to `deposit_one_month`). PUBLIC on the flyer. */
   deposit?: number;
   /** Landlord incentive fee (LIF). */
   lif?: number;
@@ -440,12 +448,18 @@ export interface UnitItem {
    */
   notes?: string;
   /**
-   * Lease terms — free-form per-unit fact ("12-month minimum, month-to-month
-   * after"). Moved off the landlord contact 2026-07-10 (GLOSSARY). Internal
-   * only — never on the flyer projections.
+   * Lease terms - free-form per-unit fact ("12-month minimum, month-to-month
+   * after"). Moved off the landlord contact 2026-07-10 (GLOSSARY). PUBLIC on
+   * the flyer projection (flyer-full-info 2026-07-16; lib/unitFields.ts
+   * toUnitFlyer).
    */
   lease_terms?: string;
-  /** Pets policy — free-form (string or boolean). */
+  /**
+   * The Pets item's details text (spec 2026-10-20 D1). Old data may still hold
+   * a legacy bare boolean: read it through lib/requirements.ts unitItemValue
+   * (false = No pets, details blank; true = details "Allowed"). A write never
+   * stores a boolean any more (lib/unitFields.ts validateUnitBody).
+   */
   pets?: string | boolean;
   /** Property priority — free-form. */
   priority?: string;
@@ -460,13 +474,15 @@ export interface UnitItem {
   /** Public flyer details (public-pages §3): same-day RTA available. Shareable. */
   same_day_rta?: boolean;
   /**
-   * Landlord-onboarding: the voucher size (bedroom size) this unit ACCEPTS —
-   * a stored, writable number (>= 0), DISTINCT from `beds` (a 3bd unit may
-   * accept a 2BR voucher). Read it through `acceptedVoucherSizes`
-   * (lib/unitFields.ts), which falls back to `beds`. The key is never on the
-   * public flyer; its value drives the flyer's derived `voucher_size`.
+   * Landlord-onboarding: the voucher (bedroom) sizes this unit ACCEPTS - a
+   * stored LIST of integers 0..12 since tracker #12 (spec 2026-10-20 D4), or
+   * ONE number written before it (never backfilled). DISTINCT from `beds` (a
+   * 3bd unit may accept only a 2BR voucher). Read it ONLY through
+   * `acceptedVoucherSizes` (lib/unitFields.ts), which reads both shapes and
+   * falls back to `beds`. The key is never on the public flyer; its value
+   * drives the flyer's derived `voucher_sizes` / `voucher_size`.
    */
-  voucher_size_accepted?: number;
+  voucher_size_accepted?: number | number[];
   /** The never-standardized per-unit tour process (free text). INTERNAL. */
   tour_process?: string;
   /**
@@ -478,6 +494,45 @@ export interface UnitItem {
   tour_type?: TourType;
   /** The never-standardized per-unit application process (free text). INTERNAL. */
   application_process?: string;
+  /*
+   * Landlord requirements copied onto this property (spec 2026-10-20 D1/D2,
+   * tracker #11). The registry - items, kinds, flyer visibility - is
+   * lib/requirements.ts. A checkbox is stored only as `true` (unchecked =
+   * absent); text is trimmed and never ''. `deposit`, `pets`,
+   * `application_fee`, `tour_type` and `tour_process` above are requirement
+   * keys too. Staff only unless marked PUBLIC.
+   */
+  /** Evictions item: "No evictions while on the program". */
+  no_evictions_on_program?: true;
+  /** Evictions item: "Evictions (details)". */
+  evictions_notes?: string;
+  /** Credit score item (free text; nothing matches on it). */
+  credit_requirements?: string;
+  /** Income requirements item (free text; nothing matches on it). */
+  income_requirements?: string;
+  /** Qualifications item (long free text). Staff only (Cameron, 2026-10-20). */
+  qualifications?: string;
+  /** Pets item: "No pets". PUBLIC on the flyer. */
+  no_pets?: true;
+  /** Pets item: "Pet fee" (free text). PUBLIC on the flyer. */
+  pet_fee?: string;
+  /** Deposit item: "One month's rent" (an alternative to `deposit`). PUBLIC on the flyer. */
+  deposit_one_month?: true;
+  /** Deposit item: "Flexible / payment terms available". PUBLIC on the flyer. */
+  deposit_flexible?: true;
+  /** Deposit item: "Deposit notes". Staff only. */
+  deposit_notes?: string;
+  /** Washer / dryer (spec 2026-10-20 D3); absent = Not recorded. PUBLIC on the flyer. */
+  washer_dryer?: 'hookups' | 'included' | 'none';
+  /**
+   * Where each requirement item's current value came from (spec 2026-10-20
+   * D5): `copied` from the landlord, or `set_here` on this property; an item
+   * absent from the map was never touched. A plain map (a DynamoDB string set
+   * would reach the dashboard as `{}`), written ONLY by the server, always
+   * WHOLE in the same update as the item keys; an empty map is REMOVEd. Read
+   * it through lib/requirements.ts readRequirementSources. Never on the flyer.
+   */
+  requirement_sources?: Record<string, 'copied' | 'set_here'>;
   /**
    * The unit's primary contact (CO1), kept consistent with the contact-list
    * row marked primary by the roster writes (unitsRepo.addContact,
@@ -619,6 +674,31 @@ export interface UnitsRepo {
    */
   update(unitId: string, patch: Record<string, unknown>): Promise<UnitItem>;
   /**
+   * property requirements (spec 2026-10-20 D5; plan 2.3): the PATCH fence.
+   * SET each non-null / REMOVE each null field of `patch` (an EMPTY
+   * requirement_sources map REMOVEs the attribute - it is never stored empty)
+   * and stamp updated_at, in ONE update conditioned on the unit existing with
+   * the landlordId, the requirement_sources map AND every key of each
+   * requirement item the patch writes exactly as in `read` (attribute_not_exists
+   * when `read` has none; the map compared whole, the updateRosterIfCurrent
+   * precedent; the item keys per requirementFenceKeys, code review OR-29), so
+   * a write computed from a stale item fails. Any lost condition throws
+   * ConditionalCheckFailedException; the CALLER re-reads to tell a missing
+   * unit (404) from a race (retry). `read` must be the caller's OWN copy of a
+   * consistent read (the API-test fake hands out its live object). ALL_NEW.
+   */
+  updateIfRequirementsCurrent(read: UnitItem, patch: Record<string, unknown>): Promise<UnitItem>;
+  /**
+   * property requirements (spec 2026-10-20 D8; plan 2.3): the Apply write -
+   * updateIfRequirementsCurrent's fence (the item values of every item it
+   * copies included, so an edit between the read and the write is never
+   * overwritten) plus "not deleted" exactly as
+   * isDeleted reads it: deleted_at absent OR '' (a non-empty stamp is a
+   * deleted property), so a property deleted after the caller's read is never
+   * written and a blank stamp is never mistaken for one. ALL_NEW.
+   */
+  applyRequirements(read: UnitItem, patch: Record<string, unknown>): Promise<UnitItem>;
+  /**
    * Soft-delete: stamp `deleted_at` (ISO 8601 `at`) so the property is hidden from
    * the lists / landlord card / related / similar while every field is retained.
    * ConditionExpression guards existence (route → 404). Returns ALL_NEW.
@@ -664,7 +744,9 @@ export interface UnitsRepo {
    * a contact typed landlord (LandlordClaimNotLandlordError). A refusal
    * writes nothing.
    * Adding role `landlord` to an ownerless legacy unit claims `landlordId` in
-   * the same conditional write as contacts[]; a different existing or racing
+   * the same conditional write as contacts[] - and REMOVEs requirement_sources,
+   * a new landlord of record (property requirements spec 2026-10-20 D5); a
+   * different existing or racing
    * owner throws LandlordReassignmentRequiredError instead of being replaced.
    * All roster writes optimistically compare landlordId + contacts[], retry up
    * to three times, then throw RosterWriteConflictError under sustained races.
@@ -794,7 +876,9 @@ export interface UnitsRepo {
    * soft-deleted (restore never reassigns a LIVE property's landlord), or its
    * landlordId is no longer `expectLandlordId` (undefined = ownerless), throws
    * RosterWriteConflictError and writes nothing. Otherwise REMOVEs deleted_at,
-   * sets landlordId to `next.contactId` (or REMOVEs it for `next` null), drops
+   * sets landlordId to `next.contactId` (or REMOVEs it for `next` null) -
+   * REMOVing requirement_sources too whenever that changes the landlord of
+   * record (property requirements spec 2026-10-20 D5) - drops
    * the old landlord's contact-list row, upserts `next` with role pinned
    * 'landlord' (kept when already seated; name/company updated when supplied),
    * and keeps `primary_contact` consistent: when the restore needs a hand-off
@@ -910,6 +994,43 @@ export function contactIsPrimaryToHandOff(
   return roster.find((row) => row.primaryContact === true)?.contactId === contactId;
 }
 
+/**
+ * property requirements (spec 2026-10-20 D5): the requirement_sources map is
+ * never stored EMPTY - an empty map in a patch REMOVEs the attribute, in the
+ * fenced writes below and in the API-test fake.
+ */
+function isEmptySourcesMap(key: string, value: unknown): boolean {
+  return (
+    key === 'requirement_sources' &&
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 0
+  );
+}
+
+/**
+ * property requirements (spec 2026-10-20 D5 / D8; code review OR-29): the
+ * unit keys a fenced write conditions on their value in the caller's read -
+ * EVERY key of each requirement item that has a key the patch writes (a SET
+ * or a null REMOVE; undefined writes nothing), in registry order. The whole
+ * item, not only the patch's keys: the D5 classification, the D1
+ * deposit_conflict and Apply's own-value decision each read the whole item,
+ * so a write computed from a stale value of ANY of its keys must fail. Shared
+ * with the API-test fake, which mirrors the fence.
+ */
+export function requirementFenceKeys(patch: Record<string, unknown>): string[] {
+  const items = new Set<string>();
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    const item = itemOfUnitKey(key);
+    if (item !== undefined) items.add(item.id);
+  }
+  return REQUIREMENT_ITEMS.filter((item) => items.has(item.id)).flatMap((item) =>
+    item.fields.map((field) => field.key),
+  );
+}
+
 export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
   const doc = deps.doc ?? getDocumentClient();
   const table = tableName('units', deps.env);
@@ -1012,6 +1133,99 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
         ExpressionAttributeValues: values,
         ReturnValues: 'ALL_NEW',
       }),
+    );
+    return Attributes as UnitItem;
+  }
+
+  /**
+   * property requirements (spec 2026-10-20 D5 / D8; plan 2.3): ONE update
+   * fenced on what the caller READ - the unit exists, its landlordId and its
+   * requirement_sources are exactly `read`'s (attribute_not_exists when absent
+   * there), every key of each requirement item the patch writes is exactly
+   * `read`'s (requirementFenceKeys; attribute_not_exists when absent there -
+   * code review OR-29), and with `requireLive` it is not deleted as isDeleted
+   * reads it (deleted_at absent or ''; plan review PR1-8). The SET/REMOVE build
+   * is updateRosterIfCurrent's; an empty requirement_sources map REMOVEs. A
+   * lost condition throws ConditionalCheckFailedException.
+   */
+  async function updateIfRequirementsFenced(
+    read: UnitItem,
+    patch: Record<string, unknown>,
+    opts: { requireLive: boolean },
+  ): Promise<UnitItem> {
+    const sets: string[] = [];
+    const removes: string[] = [];
+    const names: Record<string, string> = {};
+    const values: Record<string, unknown> = {};
+    let i = 0;
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) continue;
+      const nameKey = `#k${i}`;
+      names[nameKey] = key;
+      if (value === null || isEmptySourcesMap(key, value)) {
+        removes.push(nameKey);
+      } else {
+        const valueKey = `:v${i}`;
+        values[valueKey] = value;
+        sets.push(`${nameKey} = ${valueKey}`);
+      }
+      i += 1;
+    }
+    names['#updatedAt'] = 'updated_at';
+    values[':updatedAt'] = new Date().toISOString();
+    sets.push('#updatedAt = :updatedAt');
+
+    const conditions = ['attribute_exists(unitId)'];
+    names['#expectedLandlordId'] = 'landlordId';
+    if (Object.prototype.hasOwnProperty.call(read, 'landlordId')) {
+      values[':expectedLandlordId'] = read.landlordId;
+      conditions.push('#expectedLandlordId = :expectedLandlordId');
+    } else {
+      conditions.push('attribute_not_exists(#expectedLandlordId)');
+    }
+    names['#expectedSources'] = 'requirement_sources';
+    if (Object.prototype.hasOwnProperty.call(read, 'requirement_sources')) {
+      values[':expectedSources'] = read.requirement_sources;
+      conditions.push('#expectedSources = :expectedSources');
+    } else {
+      conditions.push('attribute_not_exists(#expectedSources)');
+    }
+    // OR-29: the item values the caller computed this write from - a
+    // colleague's save of the same item leaves the map unchanged whenever its
+    // classification does (set_here -> set_here), so only these see it.
+    requirementFenceKeys(patch).forEach((key, j) => {
+      const nameKey = `#fence${j}`;
+      names[nameKey] = key;
+      if (Object.prototype.hasOwnProperty.call(read, key)) {
+        values[`:fence${j}`] = read[key];
+        conditions.push(`${nameKey} = :fence${j}`);
+      } else {
+        conditions.push(`attribute_not_exists(${nameKey})`);
+      }
+    });
+    if (opts.requireLive) {
+      // isDeleted (above) counts only a NON-EMPTY deleted_at as deleted.
+      names['#expectedDeletedAt'] = 'deleted_at';
+      values[':blankDeletedAt'] = '';
+      conditions.push('(attribute_not_exists(#expectedDeletedAt) OR #expectedDeletedAt = :blankDeletedAt)');
+    }
+
+    const clauses = [`SET ${sets.join(', ')}`];
+    if (removes.length > 0) clauses.push(`REMOVE ${removes.join(', ')}`);
+    const { Attributes } = await doc.send(
+      new UpdateCommand({
+        TableName: table,
+        Key: { unitId: read.unitId },
+        UpdateExpression: clauses.join(' '),
+        ConditionExpression: conditions.join(' AND '),
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    log.info(
+      { unitId: read.unitId, fields: sets.length - 1 + removes.length, live: opts.requireLive },
+      'unit updated (requirements fence)',
     );
     return Attributes as UnitItem;
   }
@@ -1144,6 +1358,14 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
       );
       log.info({ unitId, fields: sets.length - 1 + removes.length }, 'unit updated');
       return Attributes as UnitItem;
+    },
+
+    async updateIfRequirementsCurrent(read, patch) {
+      return updateIfRequirementsFenced(read, patch, { requireLive: false });
+    },
+
+    async applyRequirements(read, patch) {
+      return updateIfRequirementsFenced(read, patch, { requireLive: true });
     },
 
     async softDelete(unitId, at) {
@@ -1321,7 +1543,14 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           contacts: roster,
           primary_contact: primary !== undefined ? primary.contactId : null,
         };
-        if (claimsVacantLandlord) patch['landlordId'] = contact.contactId;
+        // A claim of the vacant landlord slot CHANGES the landlord of record:
+        // property requirements (spec 2026-10-20 D5) REMOVE requirement_sources
+        // in this same write - every item becomes never touched against the
+        // new landlord.
+        if (claimsVacantLandlord) {
+          patch['landlordId'] = contact.contactId;
+          patch['requirement_sources'] = null;
+        }
 
         let updated: UnitItem;
         try {
@@ -1689,6 +1918,11 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
           landlordId: next !== null ? next.contactId : null, // null -> REMOVE
           deleted_at: null, // null -> REMOVE: the restore itself
         };
+        // property requirements (spec 2026-10-20 D5): a restore that CHANGES the
+        // landlord of record - another landlord, or none - REMOVEs
+        // requirement_sources in this same write (a `keepsOld` restore changes
+        // nothing and keeps it).
+        if ((next !== null ? next.contactId : undefined) !== old) patch['requirement_sources'] = null;
         let heirId: string | undefined;
         if (oldWasPrimary) {
           if (next !== null) {

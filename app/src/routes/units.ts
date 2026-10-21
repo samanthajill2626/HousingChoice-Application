@@ -22,6 +22,12 @@ import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { validateUnitBody } from '../lib/unitFields.js';
+import {
+  depositConflictAfter,
+  planRequirementWrite,
+  splitRequirementsSnapshot,
+  touchesRequirements,
+} from '../lib/unitRequirementWrite.js';
 import { rankSimilarUnits } from '../lib/similarUnits.js';
 import { isImageMediaType } from '../lib/mediaTypes.js';
 import { transcodeForUnitPhoto } from '../adapters/mediaTranscode.js';
@@ -86,7 +92,12 @@ import { deriveTourActivityAt, deriveTourSignal } from '../lib/listingSendTour.j
 import { createBroadcastsRepo, type BroadcastItem, type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { reachedCount } from '../services/shareRecipientState.js';
 import { createOrgNamesService, type OrgNamesService } from '../services/orgNames.js';
-import { requireLandlordContact, requireTenantContact, sendContactTypeError } from '../services/contactTypeGuards.js';
+import {
+  LandlordNotFoundError,
+  requireLandlordContact,
+  requireTenantContact,
+  sendContactTypeError,
+} from '../services/contactTypeGuards.js';
 import { isCaseworker } from '../lib/caseworkers.js';
 // The ONE automatic-routing eligibility rule lives in lib/propertyContact.ts
 // (primary-contact-integrity spec 4.3), shared with the heir function.
@@ -329,9 +340,11 @@ interface UnitActivityEvent {
   tourId?: string;
   outcome?: string;
   /**
-   * unit_primary_contact_assigned ONLY (primary-contact-integrity C11): why
-   * the primary moved without a click - auto_on_add | handoff_on_remove |
-   * handoff_on_delete | handoff_on_restore | backfill.
+   * unit_primary_contact_assigned (primary-contact-integrity C11): why the
+   * primary moved without a click - auto_on_add | handoff_on_remove |
+   * handoff_on_delete | handoff_on_restore | backfill. unit_updated (property
+   * requirements spec 2026-10-20 D13): ONLY 'requirements_applied', an Apply
+   * from the landlord. No other event serves it.
    */
   reason?: string;
 }
@@ -367,11 +380,16 @@ function toUnitActivityEvent(e: AuditEvent): UnitActivityEvent {
     ...(str('tourId') !== undefined && { tourId: str('tourId') }),
     ...(str('outcome') !== undefined && { outcome: str('outcome') }),
     // primary-contact-integrity C11: `reason` is lifted for the primary-contact
-    // event ONLY. listing_status_changed stores a FREE-TEXT `reason` under the
-    // same key (services/statusTransition setListingStatus), which this
-    // projection has never served and must not start serving.
-    ...(e.event_type === 'unit_primary_contact_assigned' &&
-      str('reason') !== undefined && { reason: str('reason') }),
+    // event, and (property requirements spec 2026-10-20 D13) for unit_updated
+    // ONLY when it is exactly 'requirements_applied'. listing_status_changed
+    // stores a FREE-TEXT `reason` under the same key (services/statusTransition
+    // setListingStatus), which this projection has never served and must not
+    // start serving.
+    ...(str('reason') !== undefined &&
+      (e.event_type === 'unit_primary_contact_assigned' ||
+        (e.event_type === 'unit_updated' && str('reason') === 'requirements_applied')) && {
+        reason: str('reason'),
+      }),
   };
 }
 
@@ -526,6 +544,16 @@ function decodeCursor(cursor: string): Record<string, unknown> | undefined {
 function bufferToStream(buf: Buffer): Readable {
   return Readable.from([buf]);
 }
+
+/** property requirements (spec 2026-10-20 D5): how one fenced PATCH ended (writeFencedPatch). */
+type FencedPatchOutcome =
+  | { kind: 'written'; unit: UnitItem; auditFields: string[] }
+  | { kind: 'not_found' }
+  | { kind: 'deposit_conflict' }
+  | { kind: 'property_changed' };
+
+/** D5: a fenced PATCH writes at most this many times, then answers 409 property_changed (the roster writes' bound). */
+const REQUIREMENTS_WRITE_MAX_ATTEMPTS = 3;
 
 export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
@@ -716,6 +744,91 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     return { kind: 'decided', promote: heir.kind === 'heir' ? heir.contactId : null };
   }
 
+  /**
+   * property requirements (spec 2026-10-20 D5): the landlord of record's
+   * contact to classify against, read CONSISTENTLY. A missing record or a
+   * routing-pointer row (never a contact) counts as no landlord; any existing
+   * record counts, whatever its type or state - an unchanged landlordId is
+   * never type-checked (caseworker-integrity L2).
+   */
+  async function readLandlordOfRecord(contactId: string): Promise<ContactItem | undefined> {
+    const contact = await contacts.getById(contactId, { consistentRead: true });
+    if (contact === undefined || contact.phone_ref === true || contact.email_ref === true) return undefined;
+    return contact;
+  }
+
+  /**
+   * property requirements (spec 2026-10-20 D5; plan 2.4): the PATCH write for
+   * a body that touches a requirement key or names a landlordId. Per attempt:
+   * a CONSISTENT read of the unit (absent -> not_found), COPIED, so the fence
+   * compares against what this attempt read (the API-test fake hands out its
+   * live object, which a concurrent write changes in place); whether the
+   * landlord changes, decided on that read (caseworker-integrity I3: a CHANGED
+   * landlordId must name a contact typed landlord - requireLandlordContact
+   * throws its typed errors, which the caller maps; an empty id is
+   * landlord_not_found without a read; an unchanged one is never checked,
+   * L2); the landlord of record AFTER the write (readLandlordOfRecord - for
+   * an unchanged landlord only when the body touches a requirement key, code
+   * review RA-7: otherwise nothing is classified); then
+   * planRequirementWrite (deposit_conflict, the legacy pets partner, the
+   * reset on a landlord change, the classification, the audit fields) and ONE
+   * write fenced on the landlordId, the requirement_sources and the values of
+   * every requirement item it writes, as read (unitsRepo.updateIfRequirementsCurrent;
+   * code review OR-29: a colleague's save of the same item). A lost condition re-reads and
+   * recomputes - a vanished unit answers not_found - at most
+   * REQUIREMENTS_WRITE_MAX_ATTEMPTS writes, then property_changed. A restore
+   * or a roster claim changes landlordId and REMOVEs the map, so a slow PATCH
+   * read before either can never write its map back. A concurrent change of
+   * the landlord's own values is not fenced (D5 accepts it).
+   */
+  async function writeFencedPatch(
+    unitId: string,
+    fields: Record<string, unknown>,
+  ): Promise<FencedPatchOutcome> {
+    const landlordPatch = typeof fields['landlordId'] === 'string' ? (fields['landlordId'] as string) : undefined;
+    // Code review RA-7: an unchanged landlord of record is read only to
+    // classify, i.e. when the body touches a requirement key. A body that
+    // only re-sends the stored landlordId beside other fields classifies
+    // nothing (no item changes, the map is kept), so it reads no contact.
+    const classifies = touchesRequirements(fields);
+    for (let attempt = 1; attempt <= REQUIREMENTS_WRITE_MAX_ATTEMPTS; attempt += 1) {
+      const stored = await units.getById(unitId, { consistentRead: true });
+      if (stored === undefined) return { kind: 'not_found' };
+      const read = structuredClone(stored);
+      const changedTo =
+        landlordPatch !== undefined && landlordPatch !== read.landlordId ? landlordPatch : undefined;
+      let landlord: ContactItem | undefined;
+      if (changedTo !== undefined) {
+        if (changedTo.length === 0) throw new LandlordNotFoundError();
+        landlord = await requireLandlordContact(contacts, changedTo);
+      } else if (classifies) {
+        const ofRecord =
+          typeof read.landlordId === 'string' && read.landlordId.length > 0 ? read.landlordId : undefined;
+        landlord = ofRecord === undefined ? undefined : await readLandlordOfRecord(ofRecord);
+      }
+      const plan = planRequirementWrite({ stored: read, fields, landlord, landlordChanged: changedTo !== undefined });
+      if (!plan.ok) return { kind: 'deposit_conflict' };
+      try {
+        const unit = await units.updateIfRequirementsCurrent(read, plan.patch);
+        if (attempt > 1) log.info({ unitId, attempts: attempt }, 'unit patch: requirements fence held on a retry');
+        // D13 (plan review PR1-10): a write that touches a requirement key or
+        // changes the landlord lists the keys whose STORED value it changed
+        // (plan.auditFields: from this attempt's read and the final patch). A
+        // body with neither - only an unchanged landlordId re-sent beside
+        // other fields - keeps the plain path's list, Object.keys(fields).
+        const auditFields =
+          changedTo !== undefined || touchesRequirements(fields) ? plan.auditFields : Object.keys(fields);
+        return { kind: 'written', unit, auditFields };
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // The unit changed (or vanished) since this attempt's read: the next
+        // attempt's read tells which.
+      }
+    }
+    const last = await units.getById(unitId, { consistentRead: true });
+    return last === undefined ? { kind: 'not_found' } : { kind: 'property_changed' };
+  }
+
   // GET /api/units — filtered list. Exactly one filter is honored, in priority
   // order landlordId > status (each a single-partition Query); with no filter, a
   // paginated Scan (repo.list). This keeps every list read a bounded operation.
@@ -768,9 +881,30 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
   // POST /api/units — create a unit.
   router.post('/', async (req: AuthedRequest, res) => {
-    const validation = validateUnitBody(req.body, 'create');
+    // property requirements (spec 2026-10-20 D5; plan 2.4): the New form's
+    // `requirements_snapshot` - the landlord's values it filled in - comes OFF
+    // the body before the field allowlist sees it and is never stored. A
+    // malformed snapshot is a 400 ahead of the validator's.
+    const split = splitRequirementsSnapshot(req.body);
+    if (!split.ok) {
+      res.status(400).json({ error: split.error });
+      return;
+    }
+    const validation = validateUnitBody(split.body, 'create');
     if (!validation.ok) {
       res.status(400).json({ error: validation.error });
+      return;
+    }
+    // D5: the snapshot must have been taken from the landlord this property is
+    // created for.
+    if (split.snapshot !== undefined && split.snapshot.landlordId !== validation.fields['landlordId']) {
+      res.status(400).json({ error: 'requirements_snapshot.landlordId does not match landlordId' });
+      return;
+    }
+    // D1: "One month's rent" and a fixed amount are alternatives - a new
+    // property holding both is a 400, with the other 400s.
+    if (depositConflictAfter(undefined, validation.fields)) {
+      res.status(400).json({ error: 'deposit_conflict' });
       return;
     }
     // ORGANIZATION NAMES (spec 2026-10-06 D5): a new unit holds nothing yet,
@@ -799,8 +933,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // exists, 409 landlord_not_landlord otherwise. A consistent read. It runs
     // after the validator's 400s and the org-list 422, and nothing is created
     // on a refusal. landlordId is guaranteed by validation.
+    let landlord: ContactItem;
     try {
-      await requireLandlordContact(contacts, validation.fields['landlordId'] as string);
+      landlord = await requireLandlordContact(contacts, validation.fields['landlordId'] as string);
     } catch (err) {
       if (sendContactTypeError(err, res)) {
         log.info({ actor: req.user?.userId }, 'unit create refused: landlordId is not a landlord');
@@ -818,11 +953,26 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // and a committed placement then derives it onward to under_application/
     // finalizing/occupied (§7). landlordId is guaranteed by validation.
     const fields = validation.fields;
+    // property requirements (spec 2026-10-20 D5): where each requirement value
+    // came from - against the snapshot for every item it names, else against
+    // the landlord just read (only items written non-blank). The map rides in
+    // the same Put as the item keys.
+    const requirementWrite = planRequirementWrite({
+      stored: undefined,
+      fields,
+      landlord,
+      landlordChanged: false,
+      ...(split.snapshot !== undefined && { snapshot: split.snapshot }),
+    });
+    if (!requirementWrite.ok) {
+      res.status(400).json({ error: requirementWrite.error });
+      return;
+    }
     const unit = await units.create({
       landlordId: fields['landlordId'] as string,
       status: 'setup',
       status_source: 'derived',
-      ...fields,
+      ...requirementWrite.patch,
     });
     mergeContext({});
     await audit.append(`units#${unit.unitId}`, 'unit_created', {
@@ -2181,29 +2331,12 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // landlord_not_landlord). "Changed" is decided on a CONSISTENT unit read; an
     // unchanged landlordId is not checked (re-saving the stored owner, L2). An
     // empty id names no contact, so it is a 404 without a contact read.
-    const landlordPatch = validation.fields['landlordId'];
-    if (typeof landlordPatch === 'string') {
-      const current = await units.getById(unitId, { consistentRead: true });
-      if (current === undefined) {
-        res.status(404).json({ error: 'unit_not_found' });
-        return;
-      }
-      if (current.landlordId !== landlordPatch) {
-        if (landlordPatch.length === 0) {
-          res.status(404).json({ error: 'landlord_not_found' });
-          return;
-        }
-        try {
-          await requireLandlordContact(contacts, landlordPatch);
-        } catch (err) {
-          if (sendContactTypeError(err, res)) {
-            log.info({ unitId, actor: req.user?.userId }, 'unit patch refused: landlordId is not a landlord');
-            return;
-          }
-          throw err;
-        }
-      }
-    }
+    // property requirements (spec 2026-10-20 D5): that decision is made on
+    // EACH attempt's read inside writeFencedPatch - which every body naming a
+    // landlordId or touching a requirement key takes - because a landlord
+    // change also resets requirement_sources in the same fenced write.
+    const fenced =
+      touchesRequirements(validation.fields) || typeof validation.fields['landlordId'] === 'string';
     // D1 delete-on-removal (the raw E5 seam): `media` is PATCH-writable and a
     // wholesale replace can drop stored keys. Snapshot the PRIOR list BEFORE the
     // write - as a COPY, because a read-modify-write repo can return the SAME
@@ -2228,15 +2361,49 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         ? prevMediaValue.filter((e): e is string => typeof e === 'string')
         : [];
     }
-    let unit;
-    try {
-      unit = await units.update(unitId, validation.fields);
-    } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
+    let unit: UnitItem;
+    let auditFields: string[];
+    if (fenced) {
+      let outcome: FencedPatchOutcome;
+      try {
+        outcome = await writeFencedPatch(unitId, validation.fields);
+      } catch (err) {
+        if (sendContactTypeError(err, res)) {
+          log.info({ unitId, actor: req.user?.userId }, 'unit patch refused: landlordId is not a landlord');
+          return;
+        }
+        throw err; // Express 5 forwards async throws to the error handler.
+      }
+      if (outcome.kind === 'not_found') {
         res.status(404).json({ error: 'unit_not_found' });
         return;
       }
-      throw err; // Express 5 forwards async throws to the error handler.
+      if (outcome.kind === 'deposit_conflict') {
+        log.info({ unitId, actor: req.user?.userId }, 'unit patch refused: a one-month deposit and a fixed amount');
+        res.status(400).json({ error: 'deposit_conflict' });
+        return;
+      }
+      if (outcome.kind === 'property_changed') {
+        log.warn(
+          { unitId, actor: req.user?.userId, attempts: REQUIREMENTS_WRITE_MAX_ATTEMPTS },
+          'unit patch refused: the property changed under every attempt',
+        );
+        res.status(409).json({ error: 'property_changed' });
+        return;
+      }
+      unit = outcome.unit;
+      auditFields = outcome.auditFields;
+    } else {
+      try {
+        unit = await units.update(unitId, validation.fields);
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          res.status(404).json({ error: 'unit_not_found' });
+          return;
+        }
+        throw err; // Express 5 forwards async throws to the error handler.
+      }
+      auditFields = Object.keys(validation.fields);
     }
     if (hasMediaPatch) {
       // Diff prior vs next by set membership (string entries only); best-effort-
@@ -2246,12 +2413,23 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       const removed = prevMedia.filter((e) => !next.has(e));
       deleteRemovedUnitMedia(mediaStore, unitId, removed, log);
     }
-    await audit.append(`units#${unitId}`, 'unit_updated', {
-      actor: req.user?.userId,
-      fields: Object.keys(validation.fields),
-    });
+    // D13 (plan review PR1-10): on the fenced path the keys whose STORED value
+    // this write changed, the server-added legacy pets partner included (a key
+    // re-sent with its stored value is not listed); on the plain path today's
+    // body keys. Never requirement_sources. PR1-10a: a fenced write that
+    // changed NO stored value (every key re-sent unchanged) still wrote - it
+    // stamped updated_at like any staff save - but appends no unit_updated row:
+    // an empty "Property updated" line is noise (the tombstone no-op reasoning
+    // above). The plain path's list is never empty (the validator refuses an
+    // empty body, and the tombstone-only no-op returned earlier).
+    if (auditFields.length > 0) {
+      await audit.append(`units#${unitId}`, 'unit_updated', {
+        actor: req.user?.userId,
+        fields: auditFields,
+      });
+    }
     log.info(
-      { unitId, fields: Object.keys(validation.fields).length, actor: req.user?.userId },
+      { unitId, fields: auditFields.length, actor: req.user?.userId },
       'unit updated via api',
     );
     res.json({ unit });

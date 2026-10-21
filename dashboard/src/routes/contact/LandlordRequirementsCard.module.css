@@ -1,0 +1,60 @@
+/* LandlordRequirementsCard - the landlord's Requirements / Qualifications card
+ * (property requirements D9). Tokens only; the same rhythm as the property
+ * page's Requirements card and the Card KV rows. */
+
+.reason {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+.notice {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-2);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+.noticeLine {
+  margin: 0;
+}
+
+.skipped {
+  margin: var(--sp-1) 0 0;
+  padding-left: var(--sp-4);
+  color: var(--c-text-muted);
+}
+
+.group + .group {
+  margin-top: var(--sp-2);
+}
+
+.groupHeading {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-muted);
+}
+
+.item {
+  display: flex;
+  gap: var(--sp-2);
+  margin: 2px 0;
+  font-size: var(--fs-sm);
+}
+
+.itemLabel {
+  flex: 0 0 auto;
+  min-width: 120px;
+  color: var(--c-text-muted);
+}
+
+.value {
+  min-width: 0;
+  color: var(--c-text);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}

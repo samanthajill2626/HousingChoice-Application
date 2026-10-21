@@ -4,11 +4,13 @@ import {
   LANDLORD_STATUS_LABELS,
   TENANT_STATUS_LABELS,
   type Address,
+  type Contact,
   type LandlordStatus,
   type TenantStatus,
 } from '../../api/types.js';
 import { formatPhoneDisplay } from '../../lib/phone.js';
 import { isoOf } from '../../lib/time.js';
+import { contactPhones, defaultPhone } from './contactPhones.js';
 
 /** Format a US E.164 number as "(404) 010-0007". Non-US / unparseable numbers
  *  are returned as-is (honest — never mangle an unexpected shape).
@@ -144,4 +146,24 @@ export function contactDisplayName(
   if (name) return name;
   if (phone) return formatPhone(phone);
   return 'Unknown contact';
+}
+
+/** The name the contact page HEADER shows for a contact (ContactDetail): the
+ *  trimmed first + last name; else the default phone (contactPhones /
+ *  defaultPhone: the primary of phones[], else the most recent, else the
+ *  first, before any legacy single phone), formatted; else "Unknown contact".
+ *  The header and landlordDisplayName share this ONE expression. */
+export function contactHeaderName(contact: Contact): string {
+  return contactDisplayName(contact.firstName, contact.lastName, defaultPhone(contactPhones(contact))?.phone);
+}
+
+/** The ONE name rule for copy that names a LANDLORD: the property
+ *  Requirements card's "<L> has no requirements recorded yet." and the New
+ *  property form's note, loading and failure lines. Worklist OR-33 (code
+ *  review R2D-4, amends the RD-9 ruling): plan 1.1's <L> is "the landlord
+ *  contact's display name as the page already shows it", so this is exactly
+ *  the contact page header's name (contactHeaderName) - with NO company step -
+ *  and it agrees with the header and with the New form's landlord picker. */
+export function landlordDisplayName(contact: Contact): string {
+  return contactHeaderName(contact);
 }

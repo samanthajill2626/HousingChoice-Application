@@ -10,6 +10,7 @@ import {
 import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
 import { formatAddress, humanize } from '../contact/format.js';
 import { ROLE_LABEL } from './buildListingFile.js';
+import { WASHER_DRYER_LABELS } from './requirements.js';
 
 /** A whole-dollar money label, e.g. 1550 → "$1,550". Undefined → "". */
 export function formatMoney(amount: number | undefined): string {
@@ -76,9 +77,10 @@ export function authoritiesOf(unit: {
  * re-deriving the rule at a call site (Cameron, 2026-10-04):
  *
  *   1. its RECORDED `voucher_size_accepted`, when that holds at least one size -
- *      ONE number today, or a LIST once tracker #12 makes the field a
- *      multi-select (the `full` demo seed already stores `[2, 3]`). A recorded
- *      size always wins: a 3-bed property may take only a 2-BR voucher;
+ *      a LIST since tracker #12 (D4: the write API stores the sizes
+ *      de-duplicated and ascending), or a single number stored before it (still
+ *      read, never backfilled). A recorded size always wins: a 3-bed property
+ *      may take only a 2-BR voucher;
  *   2. otherwise its bedroom count (`beds`) - most properties never had the
  *      field filled in (the import does not write it), and a property usually
  *      takes the voucher that matches its bedrooms;
@@ -87,8 +89,9 @@ export function authoritiesOf(unit: {
  * Only finite numbers count; anything else - absent, NaN, a string, an empty or
  * junk list - records nothing at that step.
  *
- * NOT for the property page's "Voucher size accepted" row or the New/Edit forms:
- * those show and edit what was RECORDED, which is a different question.
+ * NOT for the property page's "Voucher sizes accepted" row (recordedVoucherSizes
+ * below) or the New/Edit forms (splitVoucherSizes, requirementForm.ts): those
+ * show and edit what was RECORDED, which is a different question.
  *
  * Server side: no shared package exists between app and dashboard, so this is
  * the HAND MIRROR of `acceptedVoucherSizes` in app/src/lib/unitFields.ts - the
@@ -106,6 +109,35 @@ export function acceptedVoucherSizes(unit: { voucher_size_accepted?: unknown; be
   const recorded = Array.isArray(raw) ? raw.filter(isSize) : isSize(raw) ? [raw] : [];
   if (recorded.length > 0) return recorded;
   return isSize(unit.beds) ? [unit.beds] : [];
+}
+
+/**
+ * D4 (property requirements spec 2026-10-20): the voucher sizes RECORDED on a
+ * property - the property page's "Voucher sizes accepted" row - ascending and
+ * de-duplicated. NEVER the bedrooms fallback (Cameron's 2026-10-12 decision):
+ * that is `acceptedVoucherSizes`, a different question. Reads a stored list or
+ * an older single number; anything else records nothing. Every finite number
+ * shows, a legacy 2.5 included (the page shows what is stored); the New / Edit
+ * forms split the same value with splitVoucherSizes (requirementForm.ts),
+ * which flags such a value for removal on save.
+ */
+export function recordedVoucherSizes(unit: { voucher_size_accepted?: unknown }): number[] {
+  const isSize = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+  const raw = unit.voucher_size_accepted;
+  const list = Array.isArray(raw) ? raw.filter(isSize) : isSize(raw) ? [raw] : [];
+  return [...new Set(list)].sort((a, b) => a - b);
+}
+
+/** D4 copy: "Studio, 2 BR, 3 BR" (0 is Studio); '' when nothing is recorded. */
+export function formatVoucherSizes(sizes: readonly number[]): string {
+  return sizes.map((n) => (n === 0 ? 'Studio' : `${n} BR`)).join(', ');
+}
+
+/** D3: the label of a stored washer / dryer value (S5's WASHER_DRYER_LABELS,
+ *  requirements.ts - the one label map, ruling AR39), or null when none is
+ *  recorded. */
+export function washerDryerLabel(value: unknown): string | null {
+  return value === 'hookups' || value === 'included' || value === 'none' ? WASHER_DRYER_LABELS[value] : null;
 }
 
 /** The header facts subline: "2 BR - 1 BA - $1,400-1,600/mo - West End
@@ -224,7 +256,10 @@ export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescript
       return { label: 'Property created' };
     case 'unit_updated': {
       const fields = (e.fields ?? []).map((f) => humanize(f)).join(', ');
-      return { label: 'Property updated', ...(fields && { sub: fields }) };
+      // D13: an Apply to properties writes unit_updated with reason
+      // 'requirements_applied' (the Activity projection lifts that one value).
+      const label = e.reason === 'requirements_applied' ? 'Requirements applied from the landlord' : 'Property updated';
+      return { label, ...(fields && { sub: fields }) };
     }
     case 'unit_contact_added': {
       const role =

@@ -517,6 +517,8 @@ describe('ContactEditForm', () => {
   it('no landlord preference / expected-rent inputs — those fields moved to the property', () => {
     // 2026-07-10: accepted programs / lease terms / pet policy / expected rent
     // are per-property facts edited on the UNIT (ListingEditForm), not here.
+    // (2026-10-20, D9: the landlord's copy-only requirement defaults, pets
+    // included, now live in the Requirements / Qualifications fieldset.)
     render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
     expect(screen.queryByLabelText(/^Accepted vouchers \/ programs$/i)).toBeNull();
     expect(screen.queryByLabelText(/^Lease terms$/i)).toBeNull();
@@ -1424,5 +1426,144 @@ describe('ContactEditForm - a refused type change (spec 2026-10-12 D2)', () => {
     await user.click(save());
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
     expect(updateContact).toHaveBeenLastCalledWith('L1', { role: 'Property Manager' });
+  });
+});
+
+// Property requirements D9: the landlord's Requirements / Qualifications
+// fieldset - the shared RequirementsFields with the landlord tags, sending
+// only the req_ keys that changed.
+describe('ContactEditForm - landlord Requirements / Qualifications', () => {
+  const WITH_REQUIREMENTS: Contact = {
+    ...LANDLORD,
+    req_no_pets: true,
+    req_pet_fee: '$300',
+    req_deposit: 1400,
+    req_tour_type: 'self_guided',
+  };
+  const fieldset = (): HTMLElement => screen.getByRole('group', { name: 'Requirements / Qualifications' });
+
+  it('shows the fieldset for a landlord, with the landlord tags and legend, filled from the req_ keys', () => {
+    render(<ContactEditForm contact={WITH_REQUIREMENTS} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const group = fieldset();
+    expect(within(group).getAllByText('On property flyers').length).toBeGreaterThan(0);
+    expect(within(group).getAllByText('Staff only').length).toBeGreaterThan(0);
+    expect(group).toHaveTextContent(/tenants see it once it is copied to a property/);
+    // Tags stay out of the accessible names: exact names still resolve.
+    expect(within(group).getByRole('checkbox', { name: 'No pets' })).toBeChecked();
+    expect(within(group).getByLabelText('Pet fee')).toHaveDisplayValue('$300');
+    expect(within(group).getByLabelText('Fixed amount')).toHaveDisplayValue('1400');
+    expect(within(group).getByRole('combobox', { name: 'Tour type' })).toHaveValue('self_guided');
+    expect(within(group).getByRole('checkbox', { name: 'No evictions while on the program' })).not.toBeChecked();
+  });
+
+  it('never shows the fieldset for a tenant', () => {
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.queryByRole('group', { name: 'Requirements / Qualifications' })).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: 'No pets' })).toBeNull();
+  });
+
+  it('sends only the req_ key that changed', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...WITH_REQUIREMENTS });
+    render(<ContactEditForm contact={WITH_REQUIREMENTS} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(within(fieldset()).getByRole('checkbox', { name: 'No evictions while on the program' }));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('L1', { req_no_evictions_on_program: true }),
+    );
+  });
+
+  it('a typed pet fee rides the PATCH as req_pet_fee', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...LANDLORD });
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(within(fieldset()).getByLabelText('Pet fee'), '$300');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { req_pet_fee: '$300' }));
+  });
+
+  it('unchecking a requirement checkbox sends just that key as null (not a rule, D1)', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...WITH_REQUIREMENTS });
+    render(<ContactEditForm contact={WITH_REQUIREMENTS} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(within(fieldset()).getByRole('checkbox', { name: 'No pets' }));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { req_no_pets: null }));
+  });
+
+  it.each<[string, Contact]>([
+    ['holds a fixed amount', { ...LANDLORD, req_deposit: 1400 }],
+    ['holds no amount', LANDLORD],
+  ])("checking One month's rent sends req_deposit null in the same save when the landlord %s (D1)", async (_label, contact) => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...contact });
+    render(<ContactEditForm contact={contact} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(within(fieldset()).getByRole('checkbox', { name: "One month's rent" }));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith('L1', { req_deposit_one_month: true, req_deposit: null }),
+    );
+  });
+
+  // Code review R2D-5: "No application fee" is its own flag - deleting the 4
+  // of a stored 40 leaves an editable 0, and Save sends req_application_fee 0
+  // (never the form-only flag).
+  it('deleting the 4 of a stored 40 fee keeps the box editable and unticked; Save sends req_application_fee 0', async () => {
+    const user = userEvent.setup();
+    const contact: Contact = { ...LANDLORD, req_application_fee: 40 };
+    updateContact.mockResolvedValue({ ...contact });
+    render(<ContactEditForm contact={contact} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const fee = within(fieldset()).getByLabelText('Application fee');
+    await user.click(fee);
+    await user.keyboard('{Home}{Delete}');
+    expect(fee).toBeEnabled();
+    expect(within(fieldset()).getByRole('checkbox', { name: 'No application fee' })).not.toBeChecked();
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { req_application_fee: 0 }));
+  });
+
+  it('an untouched fieldset sends no req_ key', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...WITH_REQUIREMENTS });
+    render(<ContactEditForm contact={WITH_REQUIREMENTS} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText(/^Park reason$/i), 'Declined');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalledWith('L1', { park_reason: 'Declined' }));
+  });
+
+  it('a 400 deposit_conflict says why, keeps the form open with what staff typed, and is not the generic error (AR32)', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    const onClose = vi.fn();
+    updateContact.mockRejectedValue(
+      new ApiError(400, 'deposit_conflict', 'deposit_conflict', { error: 'deposit_conflict' }),
+    );
+    render(<ContactEditForm contact={LANDLORD} onClose={onClose} onSaved={onSaved} />);
+    fireEvent.change(within(fieldset()).getByLabelText('Fixed amount'), { target: { value: '1400' } });
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      "A deposit can be one month's rent or a fixed amount, not both. Reload the landlord and try again.",
+    );
+    expect(updateContact).toHaveBeenCalledWith('L1', { req_deposit: 1400 });
+    expect(screen.queryByText("Couldn't save - please try again.")).toBeNull();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(within(fieldset()).getByLabelText('Fixed amount')).toHaveDisplayValue('1400');
+    expect(screen.getByRole('button', { name: /^Save$/i })).toBeEnabled();
+  });
+
+  it('a landlord retyped to a tenant sends no req_ key, even after a requirement was edited', async () => {
+    const user = userEvent.setup();
+    setTenantStatus.mockResolvedValue({ ...LANDLORD, type: 'tenant', status: 'needs_review' });
+    updateContact.mockResolvedValue({ ...LANDLORD, type: 'tenant' });
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.click(within(fieldset()).getByRole('checkbox', { name: 'No pets' }));
+    await user.click(screen.getByRole('button', { name: /Change type/i }));
+    await user.click(screen.getByRole('button', { name: 'Tenant' }));
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalled());
+    const patch = updateContact.mock.calls[0]![1] as Record<string, unknown>;
+    expect(patch['type']).toBe('tenant');
+    expect(Object.keys(patch).filter((k) => k.startsWith('req_'))).toEqual([]);
   });
 });

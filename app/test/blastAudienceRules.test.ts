@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   authoritiesOfFilter,
   BLAST_TENANT_STATUSES,
+  bedroomSizesOfFilter,
   checkedByDefault,
   MAX_FILTER_AUTHORITIES,
   pickTourHold,
@@ -15,6 +16,8 @@ import {
   TOUR_REQUEST_HOLD_MS,
   tourHoldOf,
   tourHoldsByTenant,
+  VOUCHER_CHIP_MAX,
+  voucherSizeMatches,
   wireAudienceFilter,
   type DefaultCheckFlags,
   type TourHold,
@@ -101,8 +104,82 @@ describe('authoritiesOfFilter - the ONE reader of a stored filter authorities (D
   });
 });
 
+// property-requirements (spec 2026-10-20) D12: the voucher size LIST. The
+// dashboard mirror (dashboard/src/routes/broadcasts/broadcastFormat.ts) runs
+// the SAME SIZE_CASES; keep the two tables identical.
+const SIZE_CASES: Array<[string, { bedroomSizes?: unknown; bedroomSize?: unknown } | undefined, number[]]> = [
+  ['no filter', undefined, []],
+  ['a filter naming no size', {}, []],
+  ['a list is de-duplicated and ascending', { bedroomSizes: [3, 2, 2, 0] }, [0, 2, 3]],
+  ['4 and up clamp to the 4 chip, once', { bedroomSizes: [5, 12, 4, 1] }, [1, 4]],
+  [
+    'non-integers, negatives and non-numbers are dropped',
+    { bedroomSizes: [2.5, '3', null, Number.NaN, Number.POSITIVE_INFINITY, -1, 2] },
+    [2],
+  ],
+  ['an empty list is no size filter', { bedroomSizes: [] }, []],
+  ['LEGACY: one number below 4 is a one-member list', { bedroomSize: 2 }, [2]],
+  ['LEGACY: a studio (0) is a size', { bedroomSize: 0 }, [0]],
+  ['LEGACY: 4 or more reads as the 4 chip', { bedroomSize: 7 }, [4]],
+  ['LEGACY: a non-integer is no size', { bedroomSize: 2.5 }, []],
+  ['LEGACY: a negative is no size', { bedroomSize: -1 }, []],
+  ['a present list wins over the legacy number', { bedroomSizes: [1], bedroomSize: 3 }, [1]],
+  ['a present EMPTY list wins too', { bedroomSizes: [], bedroomSize: 3 }, []],
+  ['a list that is not an array is ignored: the legacy number is read', { bedroomSizes: 3, bedroomSize: 2 }, [2]],
+];
+
+describe('bedroomSizesOfFilter - the ONE reader of a filter voucher sizes (D12)', () => {
+  it('the top chip is 4, meaning 4 or more', () => {
+    expect(VOUCHER_CHIP_MAX).toBe(4);
+  });
+
+  it.each(SIZE_CASES)('%s', (_name, filter, expected) => {
+    expect(bedroomSizesOfFilter(filter)).toEqual(expected);
+  });
+
+  it('reads a stored AudienceFilter of either shape (the type the resolver passes)', () => {
+    const legacy: AudienceFilter = {
+      contact_type: 'tenant',
+      bedroomSize: 6,
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    };
+    const listed: AudienceFilter = {
+      contact_type: 'tenant',
+      bedroomSizes: [3, 2],
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    };
+    expect(bedroomSizesOfFilter(legacy)).toEqual([4]);
+    expect(bedroomSizesOfFilter(listed)).toEqual([2, 3]);
+  });
+});
+
+describe('voucherSizeMatches - any-of, the 4 chip is 4 or more (D12)', () => {
+  const cases: Array<[number[], number | undefined, boolean]> = [
+    [[], undefined, true],
+    [[], 7, true],
+    [[2], 2, true],
+    [[2], 3, false],
+    [[2], undefined, false],
+    [[0], 0, true],
+    [[0], 1, false],
+    [[4], 3, false],
+    [[4], 4, true],
+    [[4], 5, true],
+    [[4], 12, true],
+    [[2, 4], 2, true],
+    [[2, 4], 3, false],
+    [[2, 4], 6, true],
+    [[1, 3], 4, false],
+  ];
+  it.each(cases)('sizes %j, tenant voucher size %s -> %s', (sizes, tenantSize, expected) => {
+    expect(voucherSizeMatches(sizes, tenantSize)).toBe(expected);
+  });
+});
+
 describe('wireAudienceFilter - the filter shape every response carries (D2)', () => {
-  it('a LEGACY row answers housing_authorities and never housing_authority; size and booleans pass through as stored', () => {
+  it('a LEGACY row answers housing_authorities and never housing_authority; its one size reads as a list (D12); booleans pass through as stored', () => {
     const legacy: AudienceFilter = {
       contact_type: 'tenant',
       housing_authority: 'Atlanta Housing Authority',
@@ -114,6 +191,7 @@ describe('wireAudienceFilter - the filter shape every response carries (D2)', ()
     expect(wire).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['Atlanta Housing Authority'],
+      bedroomSizes: [2],
       bedroomSize: 2,
       excludeOptedOut: true,
       excludeUnreachable: false,
@@ -131,22 +209,55 @@ describe('wireAudienceFilter - the filter shape every response carries (D2)', ()
     expect(wireAudienceFilter(listed)).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['DeKalb County Housing Authority', 'Decatur Housing Authority'],
+      bedroomSizes: [],
       excludeOptedOut: true,
       excludeUnreachable: true,
     });
   });
 
-  it('no authority (absent, or an empty list) and no size: neither key is sent', () => {
+  it('no authority (absent, or an empty list) and no size: no housing_authorities, bedroomSizes [] and no compat bedroomSize (D12)', () => {
     const filters: AudienceFilter[] = [
       { contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true },
       { contact_type: 'tenant', housing_authorities: [], excludeOptedOut: true, excludeUnreachable: true },
     ];
     for (const filter of filters) {
       const wire = wireAudienceFilter(filter);
-      expect(wire).toEqual({ contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true });
+      expect(wire).toEqual({ contact_type: 'tenant', bedroomSizes: [], excludeOptedOut: true, excludeUnreachable: true });
       expect(wire).not.toHaveProperty('housing_authorities');
       expect(wire).not.toHaveProperty('bedroomSize');
     }
+  });
+
+  it('D12: a bedroomSizes row answers its normalized list and its FIRST size as the compat bedroomSize', () => {
+    const listed: AudienceFilter = {
+      contact_type: 'tenant',
+      bedroomSizes: [3, 2, 6],
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    };
+    expect(wireAudienceFilter(listed)).toEqual({
+      contact_type: 'tenant',
+      bedroomSizes: [2, 3, 4],
+      bedroomSize: 2,
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    });
+  });
+
+  it('D12: a LEGACY size of 4 or more answers the 4 chip in both keys', () => {
+    const legacy: AudienceFilter = {
+      contact_type: 'tenant',
+      bedroomSize: 7,
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    };
+    expect(wireAudienceFilter(legacy)).toEqual({
+      contact_type: 'tenant',
+      bedroomSizes: [4],
+      bedroomSize: 4,
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    });
   });
 });
 

@@ -150,7 +150,7 @@ describe('POST /api/units — create', () => {
     expect('accepted_programs' in stored).toBe(false);
   });
 
-  it('accepts voucher_size_accepted (a stored number, distinct from beds) and GET returns it', async () => {
+  it('accepts voucher_size_accepted (stored as a list, distinct from beds) and GET returns it', async () => {
     const { app } = landlordHarness();
     const res = await request(app)
       .post('/api/units')
@@ -159,14 +159,14 @@ describe('POST /api/units — create', () => {
       // A 3bd unit that accepts a 2BR voucher — voucher_size_accepted ≠ beds.
       .send({ landlordId: 'contact-ll-1', beds: 3, voucher_size_accepted: 2 });
     expect(res.status).toBe(201);
-    expect(res.body.unit.voucher_size_accepted).toBe(2);
+    expect(res.body.unit.voucher_size_accepted).toEqual([2]);
 
     const got = await request(app)
       .get(`/api/units/${res.body.unit.unitId}`)
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
     expect(got.status).toBe(200);
-    expect(got.body.unit.voucher_size_accepted).toBe(2);
+    expect(got.body.unit.voucher_size_accepted).toEqual([2]);
   });
 
   it('rejects a non-number voucher_size_accepted with 400', async () => {
@@ -194,7 +194,11 @@ describe('POST /api/units — create', () => {
     expect(res.status).toBe(201);
     expect(res.body.unit.tour_process).toBe('lockbox 1234');
     expect(res.body.unit.application_process).toBe('online portal');
-    expect(res.body.unit.pets).toBe(true);
+    // spec 2026-10-20 D1: a legacy boolean is stored in the new shape at once -
+    // true MEANS No pets unchecked and details "Allowed" (the null no_pets is
+    // dropped on create, never stored).
+    expect(res.body.unit.pets).toBe('Allowed');
+    expect('no_pets' in res.body.unit).toBe(false);
   });
 
   // primary-contact-integrity spec 4.5 (P2b, Cameron 2026-10-13): only the
@@ -389,14 +393,14 @@ describe('PATCH /api/units/:unitId', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ voucher_size_accepted: 2 });
     expect(ok.status).toBe(200);
-    expect(ok.body.unit.voucher_size_accepted).toBe(2);
+    expect(ok.body.unit.voucher_size_accepted).toEqual([2]);
     expect(ok.body.unit.beds).toBe(3); // untouched — distinct from beds
 
     const got = await request(app)
       .get('/api/units/unit-vsa')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
-    expect(got.body.unit.voucher_size_accepted).toBe(2);
+    expect(got.body.unit.voucher_size_accepted).toEqual([2]);
 
     const bad = await request(app)
       .patch('/api/units/unit-vsa')
@@ -404,6 +408,44 @@ describe('PATCH /api/units/:unitId', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ voucher_size_accepted: 'two' });
     expect(bad.status).toBe(400);
+  });
+
+  it('PATCH stores a voucher size LIST de-duplicated and ascending; 13 is a 400 (spec 2026-10-20 D4)', async () => {
+    const { app, world } = landlordHarness();
+    seedUnit(world, 'unit-vsl', { beds: 3, voucher_size_accepted: 2 });
+
+    const ok = await request(app)
+      .patch('/api/units/unit-vsl')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ voucher_size_accepted: [3, 2, 3] });
+    expect(ok.status).toBe(200);
+    expect(ok.body.unit.voucher_size_accepted).toEqual([2, 3]);
+    expect(world.units.get('unit-vsl')!.voucher_size_accepted).toEqual([2, 3]);
+
+    const bad = await request(app)
+      .patch('/api/units/unit-vsl')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ voucher_size_accepted: [2, 13] });
+    expect(bad.status).toBe(400);
+    expect(bad.body).toEqual({ error: 'voucher_size_accepted must be an integer 0..12 or a list of them' });
+    expect(world.units.get('unit-vsl')!.voucher_size_accepted).toEqual([2, 3]); // untouched
+  });
+
+  it('PATCH a legacy boolean pets stores the new shape (spec 2026-10-20 D1)', async () => {
+    const { app, world } = landlordHarness();
+    seedUnit(world, 'unit-pb', { pets: 'Cats OK' });
+
+    const res = await request(app)
+      .patch('/api/units/unit-pb')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ pets: false });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.no_pets).toBe(true);
+    expect('pets' in res.body.unit).toBe(false);
+    expect(world.units.get('unit-pb')).not.toHaveProperty('pets');
   });
 
   it('PATCH null CLEARS a recorded voucher_size_accepted (GET shows the key ABSENT)', async () => {

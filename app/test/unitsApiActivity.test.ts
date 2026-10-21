@@ -348,3 +348,60 @@ describe('GET /api/units/:id/activity (property Activity card)', () => {
     expect(res.body.events[0]).not.toHaveProperty('reason');
   });
 });
+
+// property requirements (spec 2026-10-20 D13): an Apply from the landlord
+// writes unit_updated { fields, reason: 'requirements_applied', landlordId }.
+// The projection lifts `reason` for unit_updated ONLY when it is exactly that
+// code; the landlordId stays off the wire.
+describe('GET /api/units/:id/activity - the Apply reason (property requirements D13)', () => {
+  it("projects unit_updated with reason 'requirements_applied' and the field names", async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-apply');
+    await world.auditRepo.append('units#u-apply', 'unit_updated', {
+      actor: TEST_SESSION_USER.userId,
+      fields: ['no_pets', 'pet_fee'],
+      reason: 'requirements_applied',
+      landlordId: 'c-ll-1',
+    });
+
+    const res = await authedGet(app, '/api/units/u-apply/activity');
+    expect(res.status).toBe(200);
+    expect(res.body.events[0]).toEqual({
+      id: expect.any(String),
+      at: expect.any(String),
+      type: 'unit_updated',
+      actorId: TEST_SESSION_USER.userId,
+      fields: ['no_pets', 'pet_fee'],
+      reason: 'requirements_applied',
+    });
+  });
+
+  it('(PIN) keeps any other unit_updated reason OFF the wire', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-other-reason');
+    await world.auditRepo.append('units#u-other-reason', 'unit_updated', {
+      fields: ['beds'],
+      reason: 'Owner asked',
+    });
+
+    const res = await authedGet(app, '/api/units/u-other-reason/activity');
+    expect(res.status).toBe(200);
+    expect(res.body.events[0]).toMatchObject({ type: 'unit_updated', fields: ['beds'] });
+    expect(res.body.events[0]).not.toHaveProperty('reason');
+  });
+
+  it("(PIN) keeps 'requirements_applied' OFF the wire on any other event type", async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-status-applied', { status: 'available' });
+    await world.auditRepo.append('units#u-status-applied', 'listing_status_changed', {
+      from: 'setup',
+      to: 'available',
+      source: 'manual',
+      reason: 'requirements_applied',
+    });
+
+    const res = await authedGet(app, '/api/units/u-status-applied/activity');
+    expect(res.status).toBe(200);
+    expect(res.body.events[0]).not.toHaveProperty('reason');
+  });
+});

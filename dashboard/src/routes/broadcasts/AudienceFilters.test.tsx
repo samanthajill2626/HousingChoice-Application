@@ -42,7 +42,7 @@ const CAPTION_LONG =
  *  toggles round-trip through onChange. */
 function Harness({
   authorityError,
-  propertyVoucherSize,
+  propertyVoucherSizes,
   reachCount,
   reachPending = false,
   truncated = false,
@@ -55,7 +55,7 @@ function Harness({
   noAuthorityMapped,
   prefillNotices,
 }: {
-  propertyVoucherSize?: number;
+  propertyVoucherSizes?: number[];
   reachCount?: number;
   reachPending?: boolean;
   truncated?: boolean;
@@ -79,7 +79,7 @@ function Harness({
       }}
       orgList={orgList}
       {...(disabled !== undefined && { disabled })}
-      {...(propertyVoucherSize !== undefined && { propertyVoucherSize })}
+      {...(propertyVoucherSizes !== undefined && { propertyVoucherSizes })}
       {...(reachCount !== undefined && { reachCount })}
       reachPending={reachPending}
       truncated={truncated}
@@ -92,37 +92,64 @@ function Harness({
   );
 }
 
-describe('AudienceFilters - voucher size pre-fill + override', () => {
-  it('shows the "matches property" tag + note on the chip matching the voucher size the unit takes', () => {
-    render(<Harness propertyVoucherSize={2} />);
+describe('AudienceFilters - voucher sizes: multi-select chips (property-requirements D12)', () => {
+  it('tags EVERY chip the property takes "matches property", and the note names those sizes', () => {
+    render(<Harness propertyVoucherSizes={[2, 3]} initialFilter={{ contact_type: 'tenant', bedroomSizes: [2, 3] }} />);
     const chips = screen.getByRole('group', { name: 'Voucher size' });
-    const twoBr = within2(chips, '2-BR');
-    expect(twoBr).toHaveTextContent(/matches property/i);
-    // The note names the voucher size (not the bedrooms) and says it is overridable.
-    expect(
-      screen.getByText(/Pre-filled to the 2-bedroom voucher this property takes - change it/i),
-    ).toBeInTheDocument();
+    expect(within2(chips, '2-BR')).toHaveTextContent(/matches property/i);
+    expect(within2(chips, '3-BR')).toHaveTextContent(/matches property/i);
+    expect(within2(chips, 'Studio')).not.toHaveTextContent(/matches property/i);
+    expect(within2(chips, '1-BR')).not.toHaveTextContent(/matches property/i);
+    expect(within2(chips, '4+ BR')).not.toHaveTextContent(/matches property/i);
+    expect(screen.getByText('Pre-filled to the voucher sizes this property takes: 2-BR, 3-BR')).toBeInTheDocument();
   });
 
-  it('lets the operator override the voucher size (pick a different chip)', async () => {
-    const u = userEvent.setup();
-    const onChangeSpy = vi.fn();
-    render(<Harness propertyVoucherSize={2} onChangeSpy={onChangeSpy} />);
-    await u.click(screen.getByRole('button', { name: /^3-BR/ }));
-    expect(onChangeSpy).toHaveBeenCalledWith({ contact_type: 'tenant', bedroomSize: 3 });
-    // The 3-BR chip is now pressed.
-    expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveAttribute('aria-pressed', 'true');
+  it('the 4+ chip carries the tag for a property that takes 4 or more', () => {
+    render(<Harness propertyVoucherSizes={[4]} initialFilter={{ contact_type: 'tenant', bedroomSizes: [4] }} />);
+    expect(within2(screen.getByRole('group', { name: 'Voucher size' }), '4+ BR')).toHaveTextContent(/matches property/i);
+    expect(screen.getByText('Pre-filled to the voucher sizes this property takes: 4+ BR')).toBeInTheDocument();
   });
 
-  it('toggles a chip off when re-clicked (clears the size narrower)', async () => {
+  it('presses every chip in the filter, and only those (aria-pressed)', () => {
+    render(<Harness initialFilter={{ contact_type: 'tenant', bedroomSizes: [0, 3] }} />);
+    expect(screen.getByRole('button', { name: 'Studio' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: '3-BR' })).toHaveAttribute('aria-pressed', 'true');
+    for (const name of ['1-BR', '2-BR', '4+ BR']) {
+      expect(screen.getByRole('button', { name })).toHaveAttribute('aria-pressed', 'false');
+    }
+  });
+
+  it('a chip ADDS its size (the list stays ascending), a pressed chip takes it out, the last one off clears the size filter - never the legacy bedroomSize', async () => {
     const u = userEvent.setup();
     const onChangeSpy = vi.fn();
     render(<Harness onChangeSpy={onChangeSpy} />);
-    await u.click(screen.getByRole('button', { name: '2-BR' }));
-    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', bedroomSize: 2 });
-    await u.click(screen.getByRole('button', { name: '2-BR' }));
-    // Re-click: bedroomSize cleared.
+    await u.click(screen.getByRole('button', { name: '3-BR' }));
+    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', bedroomSizes: [3] });
+    await u.click(screen.getByRole('button', { name: '1-BR' }));
+    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', bedroomSizes: [1, 3] });
+    expect(screen.getByRole('button', { name: '1-BR' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: '3-BR' })).toHaveAttribute('aria-pressed', 'true');
+    await u.click(screen.getByRole('button', { name: '3-BR' }));
+    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', bedroomSizes: [1] });
+    await u.click(screen.getByRole('button', { name: '1-BR' }));
     expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant' });
+    for (const [next] of onChangeSpy.mock.calls as Array<[AudienceFilter]>) expect(next).not.toHaveProperty('bedroomSize');
+  });
+
+  it('a pre-filled chip can be unpressed by hand and keeps its tag (the tag describes the property)', async () => {
+    const u = userEvent.setup();
+    const onChangeSpy = vi.fn();
+    render(
+      <Harness
+        onChangeSpy={onChangeSpy}
+        propertyVoucherSizes={[2, 3]}
+        initialFilter={{ contact_type: 'tenant', bedroomSizes: [2, 3] }}
+      />,
+    );
+    await u.click(screen.getByRole('button', { name: /^3-BR/ }));
+    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', bedroomSizes: [2] });
+    expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveTextContent(/matches property/i);
   });
 
   it('a voucher chip keeps the housing authority list as it is', async () => {
@@ -138,8 +165,32 @@ describe('AudienceFilters - voucher size pre-fill + override', () => {
     expect(onChangeSpy).toHaveBeenLastCalledWith({
       contact_type: 'tenant',
       housing_authorities: ['Atlanta Housing Authority', 'DeKalb County Housing Authority'],
-      bedroomSize: 3,
+      bedroomSizes: [3],
     });
+  });
+
+  it('a housing authority pick keeps the voucher sizes as they are', async () => {
+    const u = userEvent.setup();
+    const onChangeSpy = vi.fn();
+    render(<Harness onChangeSpy={onChangeSpy} initialFilter={{ contact_type: 'tenant', bedroomSizes: [2, 4] }} />);
+    await u.type(screen.getByRole('combobox', { name: 'Housing authorities' }), 'AHA');
+    await u.click(screen.getByRole('option', { name: /^Atlanta Housing Authority/ }));
+    expect(onChangeSpy).toHaveBeenLastCalledWith({
+      contact_type: 'tenant',
+      housing_authorities: ['Atlanta Housing Authority'],
+      bedroomSizes: [2, 4],
+    });
+  });
+
+  it('an old-shape filter (a legacy bedroomSize) presses its chip - 6 on the 4+ chip', () => {
+    render(<Harness initialFilter={{ contact_type: 'tenant', bedroomSize: 6 }} />);
+    expect(screen.getByRole('button', { name: '4+ BR' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('no property: no tag and no pre-fill note', () => {
+    render(<Harness initialFilter={{ contact_type: 'tenant', bedroomSizes: [2] }} />);
+    expect(screen.queryByText(/matches property/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Pre-filled to the voucher sizes/)).not.toBeInTheDocument();
   });
 });
 
@@ -204,7 +255,7 @@ describe('AudienceFilters - housing authorities (matching-blast-rules D2)', () =
     expect(screen.getByRole('alert')).toHaveTextContent("Couldn't load housing authorities");
     expect(screen.getByRole('combobox', { name: 'Housing authorities' })).toBeDisabled();
     await u.click(screen.getByRole('button', { name: '2-BR' }));
-    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', bedroomSize: 2 });
+    expect(onChangeSpy).toHaveBeenLastCalledWith({ contact_type: 'tenant', bedroomSizes: [2] });
   });
 
   it('tells the composer what is typed in the picker - and nothing once a name is picked (R2-FE-3)', async () => {
@@ -244,7 +295,7 @@ describe('AudienceFilters - housing authorities (matching-blast-rules D2)', () =
     render(
       <Harness
         disabled
-        initialFilter={{ contact_type: 'tenant', bedroomSize: 2, housing_authorities: ['Atlanta Housing Authority'] }}
+        initialFilter={{ contact_type: 'tenant', bedroomSizes: [2], housing_authorities: ['Atlanta Housing Authority'] }}
       />,
     );
     const chips = screen.getByRole('group', { name: 'Voucher size' });

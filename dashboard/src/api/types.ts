@@ -2291,6 +2291,25 @@ export interface Contact {
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
+  /** Landlord requirements (spec 2026-10-20 D2): `req_` + the unit key, 15 keys,
+   *  copied onto properties only by Apply (copy only). Prefixed because `pets` /
+   *  `evictions` are the TENANT's answers. Never a boolean req_pets. Read them
+   *  through landlordItemValue (routes/listing/requirements.ts). */
+  req_no_evictions_on_program?: boolean;
+  req_evictions_notes?: string;
+  req_credit_requirements?: string;
+  req_income_requirements?: string;
+  req_qualifications?: string;
+  req_no_pets?: boolean;
+  req_pets?: string;
+  req_pet_fee?: string;
+  req_deposit_one_month?: boolean;
+  req_deposit?: number;
+  req_deposit_flexible?: boolean;
+  req_deposit_notes?: string;
+  req_application_fee?: number;
+  req_tour_type?: TourType;
+  req_tour_process?: string;
   // NOTE (2026-07-10): expected_rent + accepts_programs/lease_terms/pet_policy
   // moved to the UNIT (per-property facts — see UnitItem + GLOSSARY).
   /** Structured postal address, or a plain string on pre-contract dev records. */
@@ -2357,6 +2376,24 @@ export interface ContactPatch {
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
+  /** Landlord requirements (spec 2026-10-20 D2): only on a landlord (400
+   *  otherwise); only the changed keys are sent. Checkboxes: true, or false /
+   *  null to REMOVE; text: '' or null REMOVEs; money: null REMOVEs. */
+  req_no_evictions_on_program?: boolean | null;
+  req_evictions_notes?: string | null;
+  req_credit_requirements?: string | null;
+  req_income_requirements?: string | null;
+  req_qualifications?: string | null;
+  req_no_pets?: boolean | null;
+  req_pets?: string | null;
+  req_pet_fee?: string | null;
+  req_deposit_one_month?: boolean | null;
+  req_deposit?: number | null;
+  req_deposit_flexible?: boolean | null;
+  req_deposit_notes?: string | null;
+  req_application_fee?: number | null;
+  req_tour_type?: TourType | '' | null;
+  req_tour_process?: string | null;
   /** Landlord lead lifecycle: the reason captured when a landlord is parked. */
   park_reason?: string;
   /** Structured address; the server stores only the non-empty parts. */
@@ -2513,10 +2550,16 @@ export interface UnitItem {
   beds?: number;
   baths?: number;
   area?: string;
+  /** Sam's subzone code (e.g. E8, SE11). STAFF ONLY (spec 2026-10-20 D3): never
+   *  on the public flyer; it still feeds the similar-properties score. */
   subzone?: string;
+  /** D3 washer / dryer; absent = not recorded. On the flyer. */
+  washer_dryer?: WasherDryer;
   rent_min?: number;
   rent_max?: number;
   payment_standard?: number;
+  /** Requirements, Deposit item (D1): the FIXED amount in dollars - an
+   *  alternative to `deposit_one_month` (a record never holds both). */
   deposit?: number;
   /** TENANT-PAID utilities (which utilities the tenant must pay), e.g. "Electric and gas". */
   utilities?: string;
@@ -2524,10 +2567,14 @@ export interface UnitItem {
   accessibility?: string;
   /** Internal staff notes, e.g. "In-unit washer/dryer". Never public. */
   notes?: string;
-  /** Lease terms, e.g. "12-month minimum". Per-unit fact (moved off the landlord contact 2026-07-10). Never public. */
+  /** Lease terms, e.g. "12-month minimum". Per-unit fact (moved off the landlord
+   *  contact 2026-07-10). PUBLIC: on the flyer (spec 2026-10-20 D10a). */
   lease_terms?: string;
-  /** Pet policy, e.g. "Cats only". */
-  pets?: string;
+  /** Requirements, Pets item (D1): the details text, e.g. "Cats only". A LEGACY
+   *  boolean (old data, raw API callers) reads per D1 - false = No pets with
+   *  blank details, true = details "Allowed" - so read it through
+   *  unitItemValue (routes/listing/requirements.ts), never directly. */
+  pets?: string | boolean;
   /** S3 keys / URLs of property media (the Photos gallery + hero). The raw
    *  management handle: the photo routes mutate this array (Remove / Make cover). */
   media?: string[];
@@ -2542,10 +2589,39 @@ export interface UnitItem {
   application_fee?: number;
   /** Public flyer details (public-pages §3): same-day RTA available. */
   same_day_rta?: boolean;
-  /** Landlord-onboarding: the voucher (bedroom) size this unit ACCEPTS — a
-   *  stored number, DISTINCT from `beds` and from the derived read-only
-   *  voucher_size. Feeds matching. Internal (not on the public flyer). */
-  voucher_size_accepted?: number;
+  // --- Requirements (spec 2026-10-20 D1, D2): the property's OWN copy of each
+  // item, flat keys named as in the registry (routes/listing/requirements.ts).
+  // Checkboxes are true or absent; text and money are absent when blank.
+  // `deposit`, `pets`, `application_fee`, `tour_type` and `tour_process` keep
+  // their existing declarations in this interface.
+  /** Evictions item: "No evictions while on the program". Staff only. */
+  no_evictions_on_program?: boolean;
+  /** Evictions item: the details. Staff only. */
+  evictions_notes?: string;
+  /** Credit score (free text). Staff only. */
+  credit_requirements?: string;
+  /** Income requirements (free text). Staff only. */
+  income_requirements?: string;
+  /** Qualifications (long free text). Staff only. */
+  qualifications?: string;
+  /** Pets item: "No pets". On the flyer. */
+  no_pets?: boolean;
+  /** Pets item: the pet fee (free text, e.g. "$300 per pet"). On the flyer. */
+  pet_fee?: string;
+  /** Deposit item: "One month's rent" - the alternative to a fixed `deposit`. On the flyer. */
+  deposit_one_month?: boolean;
+  /** Deposit item: "Flexible / payment terms available". On the flyer. */
+  deposit_flexible?: boolean;
+  /** Deposit item: notes. Staff only. */
+  deposit_notes?: string;
+  /** D5: where each item's current value came from; an absent item was never
+   *  touched. Server-written only - the dashboard never sends it. */
+  requirement_sources?: Partial<Record<RequirementItemId, RequirementSource>>;
+  /** D4: the voucher (bedroom) sizes this unit ACCEPTS - a list of integers
+   *  0..12 (an older record may hold one number), DISTINCT from `beds`. Read it
+   *  through `acceptedVoucherSizes` (listingFormat.ts), never directly. Reaches
+   *  the public flyer as the derived `voucher_sizes` / `voucher_size`. */
+  voucher_size_accepted?: number | number[];
   /** C3: the landlord/PM roster (BE3). Absent on legacy → fall back to the
    *  single `landlordId` for a one-row roster. */
   contacts?: UnitContact[];
@@ -2567,6 +2643,74 @@ export interface UnitItem {
   created_at?: string;
   updated_at?: string;
   [key: string]: unknown;
+}
+
+// --- Landlord requirements (spec 2026-10-20 D1, D5, D8; plan 2.4, 2.6) ------
+
+/** The eight requirement items (D1): the namespace of `requirement_sources`
+ *  and of the Apply API. Hand mirror of app/src/lib/requirements.ts
+ *  RequirementItemId; routes/listing/requirements.ts re-exports it. */
+export type RequirementItemId =
+  | 'evictions'
+  | 'credit_requirements'
+  | 'income_requirements'
+  | 'qualifications'
+  | 'pets'
+  | 'deposit'
+  | 'application_fee'
+  | 'touring';
+
+/** Where a property's current value of an item came from (D5). */
+export type RequirementSource = 'copied' | 'set_here';
+
+/** D3 washer / dryer on a property; absent = not recorded. */
+export type WasherDryer = 'hookups' | 'included' | 'none';
+
+/** One item's value on the wire: each unit key of the item -> its value; null = blank. */
+export type RequirementItemWire = Record<string, string | number | boolean | null>;
+
+/** POST /api/units `requirements_snapshot` (D5, plan 2.4): the landlord's values
+ *  the New property form filled in, every item, naming the landlord they came from. */
+export type RequirementsSnapshotWire = { landlordId: string } & Partial<
+  Record<RequirementItemId, RequirementItemWire>
+>;
+
+/** POST /api/units body: the owning landlord, the writable unit fields and,
+ *  from the New property form, the snapshot above. */
+export interface CreateUnitBody {
+  landlordId: string;
+  requirements_snapshot?: RequirementsSnapshotWire;
+  [key: string]: unknown;
+}
+
+/** Why the Apply route skipped a property (D8, plan 2.4). */
+export type ApplySkipReason =
+  | 'not_found'
+  | 'deleted'
+  | 'landlord_changed'
+  | 'changed_since_opened'
+  | 'already_matches'
+  | 'changed_during_apply';
+
+/** POST /api/contacts/:id/requirements/apply body (D8): at most 100 units per request. */
+export interface ApplyRequirementsBody {
+  /** `seen` (planner ruling PR-1): for exactly the unit's `ownItems`, every
+   *  unit key as the dialog read the property (null = blank). */
+  units: Array<{
+    unitId: string;
+    ownItems: RequirementItemId[];
+    seen: Partial<Record<RequirementItemId, RequirementItemWire>>;
+  }>;
+  items: RequirementItemId[];
+  /** For every listed item, every one of its unit keys as the dialog showed the
+   *  landlord's value (null = blank). */
+  expected: Partial<Record<RequirementItemId, RequirementItemWire>>;
+}
+
+/** The Apply route's 200 answer (D8). */
+export interface ApplyRequirementsResult {
+  updated: string[];
+  skipped: Array<{ unitId: string; reason: ApplySkipReason }>;
 }
 
 /** GET /api/units page. */
@@ -3249,10 +3393,16 @@ export interface UnitActivityEvent {
   tenantCount?: number;
   tourId?: string;
   outcome?: string;
-  /** unit_primary_contact_assigned only: why the primary contact was set
-   *  automatically (primary-contact-integrity spec 8) - auto_on_add,
-   *  handoff_on_remove, handoff_on_delete, handoff_on_restore or backfill. An
-   *  open set: an unknown value humanizes. */
+  /** Served on two event types only (the Activity projection,
+   *  app/src/routes/units.ts):
+   *  - unit_primary_contact_assigned: why the primary contact was set
+   *    automatically (primary-contact-integrity spec 8) - auto_on_add,
+   *    handoff_on_remove, handoff_on_delete, handoff_on_restore or backfill. An
+   *    open set: an unknown value humanizes.
+   *  - unit_updated: only when it is exactly 'requirements_applied' (an Apply
+   *    to properties, property requirements spec 2026-10-20 D13), which
+   *    describeUnitActivity labels "Requirements applied from the landlord".
+   *  listing_status_changed's free-text reason is never served. */
   reason?: string;
 }
 
@@ -3265,7 +3415,7 @@ export interface UnitActivityEvent {
 // console.log a phone/name/body (rendering them in the UI is fine).
 
 /** The CLIENT send shape for an audience filter — contact_type is fixed
- *  'tenant' (M1.8 targets tenants only); housing_authorities/bedroomSize are
+ *  'tenant' (M1.8 targets tenants only); housing_authorities/bedroomSizes are
  *  optional narrowers. The server FILLS excludeOptedOut/excludeUnreachable
  *  (always-on hard fences) — the client never sends them. */
 export interface AudienceFilter {
@@ -3276,7 +3426,16 @@ export interface AudienceFilter {
    *  the legacy one-string `housing_authority` - the server normalizes stored
    *  legacy rows, so the dashboard reads ONE shape. */
   housing_authorities?: string[];
-  /** Approved bedroom size to match against the tenant's voucherSize (0=Studio). */
+  /** property-requirements D12: voucher size CHIP values 0..4 (0 = Studio,
+   *  4 = "4 or more"), any-of, matched against the tenant's voucherSize;
+   *  absent = no size filter. The client SENDS this key (never the legacy
+   *  one); every response carries it, normalized. Read it ONLY through
+   *  bedroomSizesOfFilter (routes/broadcasts/broadcastFormat.ts). */
+  bedroomSizes?: number[];
+  /** @deprecated D12 compat, read-only: the server's FIRST size, kept on
+   *  responses for a page open from before the deploy (and the shape of a
+   *  response such a server sent). Never sent by this client; read ONLY
+   *  through bedroomSizesOfFilter. */
   bedroomSize?: number;
 }
 

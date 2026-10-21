@@ -38,7 +38,6 @@ import {
   LISTING_STATUSES,
   LISTING_STATUS_LABELS,
   STAGE_LABELS,
-  TOUR_TYPE_LABELS,
   setListingStatus,
   tourStatusLabel,
   undatedTourLabel,
@@ -57,6 +56,7 @@ import { useContacts } from '../contacts/useContacts.js';
 import { tenantName } from '../placements/placementsFormat.js';
 import { ListingActionsMenu } from './ListingActionsMenu.js';
 import { ListingEditForm } from './ListingEditForm.js';
+import { PropertyRequirementsCard } from './PropertyRequirementsCard.js';
 import { RestoreLandlordDialog } from './RestoreLandlordDialog.js';
 import {
   authoritiesOf,
@@ -65,11 +65,14 @@ import {
   formatBedsBaths,
   formatMoney,
   formatRent,
+  formatVoucherSizes,
   groupSendRows,
   isMediaUrl,
+  recordedVoucherSizes,
   sendRowKindLabel,
   shortAddress,
   statusLabel,
+  washerDryerLabel,
 } from './listingFormat.js';
 import { formatDayDivider, formatTime } from '../contact/format.js';
 import { safeHttpUrl } from '../../lib/safeUrl.js';
@@ -361,12 +364,20 @@ export function ListingDetail(): React.JSX.Element {
 
   const { unit, roster, placementsOnUnit, related, recipients, similar, activity, tours } = state;
   const address = shortAddress(unit.address, unit.unitId);
+  // D6: the Requirements card compares with the landlord OF RECORD only. Until
+  // useListing's re-read lands after a landlordId change (a roster claim or a
+  // restore), the held contact is the previous landlord's - never compare with
+  // it. No landlord, or a failed read, is `undefined`: no tags, no lines. The
+  // Contacts card's synthesized fallback row (below) reads the same guarded
+  // contact, so it never puts the previous landlord's name on that row either.
+  const requirementsLandlord =
+    state.landlord !== null && state.landlord.contactId === unit.landlordId ? state.landlord : undefined;
   // The Contacts roster: the hook's rows until a roster write answers, then the
   // server's own response (see `rosterUnit`). The unitId guard keeps a stale
   // property's roster from leaking onto the next one.
   const contactsUnit = rosterUnit !== null && rosterUnit.unitId === unit.unitId ? rosterUnit : null;
   const contactRows: RosterRow[] =
-    contactsUnit !== null ? listingRoster(contactsUnit, state.landlord) : roster;
+    contactsUnit !== null ? listingRoster(contactsUnit, requirementsLandlord ?? null) : roster;
   // The property-contact block (primary-contact-integrity spec 7.5) comes from
   // the SAME roster source as the rows: a roster write's (or a re-read's) own
   // block, else the load-time GET's. Absent = the server could not tell.
@@ -388,6 +399,8 @@ export function ListingDetail(): React.JSX.Element {
   // (spec section 8) behind the single "Housing authorities" detail row that
   // replaced the old Jurisdiction KV and the accepted-vouchers bulleted list.
   const authorities = authoritiesOf(unit);
+  // D3: subzone is staff only (never on the flyer); a blank one is not recorded.
+  const subzone = typeof unit.subzone === 'string' && unit.subzone.trim() !== '' ? unit.subzone : undefined;
   // The gallery renders resolved display media (presign-per-read). The server
   // attaches `mediaDisplay` alongside the raw `media`; on an older response with
   // only `media`, derive it (legacy absolute URLs pass through, bare keys become
@@ -956,23 +969,23 @@ export function ListingDetail(): React.JSX.Element {
             }
           >
             <div className={styles.detailGrid}>
-              <KV k="Beds / Baths" v={formatBedsBaths(unit.beds, unit.baths) || '—'} />
-              <KV k="Rent" v={formatRent(unit.rent_min, unit.rent_max) || '—'} />
-              <KV k="Payment standard" v={formatMoney(unit.payment_standard) || '—'} />
-              <KV k="Deposit" v={formatMoney(unit.deposit) || '—'} />
+              <KV k="Beds / Baths" v={formatBedsBaths(unit.beds, unit.baths) || BLANK} />
+              {/* D4: the RECORDED sizes only - never the bedrooms fallback
+                  (Cameron, 2026-10-12); none recorded shows the blank marker. */}
+              <KV k="Voucher sizes accepted" v={formatVoucherSizes(recordedVoucherSizes(unit)) || BLANK} />
+              <KV k="Rent" v={formatRent(unit.rent_min, unit.rent_max) || BLANK} />
+              <KV k="Payment standard" v={formatMoney(unit.payment_standard) || BLANK} />
               <KV k="Housing authorities" v={authorities.join(', ') || BLANK} />
-              <KV k="Tenant-paid utilities" v={unit.utilities ?? '—'} />
-              <KV k="Accessibility" v={unit.accessibility ?? '—'} />
-              <KV k="Pets" v={unit.pets ?? '—'} />
-              <KV k="Lease terms" v={unit.lease_terms ?? '—'} />
-              <KV k="Application fee" v={formatMoney(unit.application_fee) || '—'} />
+              {/* D3: staff only - never on the public flyer. */}
+              <KV k="Subzone" v={subzone ?? BLANK} />
+              <KV k="Washer / dryer" v={washerDryerLabel(unit['washer_dryer']) ?? BLANK} />
+              <KV k="Tenant-paid utilities" v={unit.utilities ?? BLANK} />
+              <KV k="Accessibility" v={unit.accessibility ?? BLANK} />
+              <KV k="Lease terms" v={unit.lease_terms ?? BLANK} />
               <KV
                 k="Same-day RTA"
-                v={unit.same_day_rta === true ? 'Yes' : unit.same_day_rta === false ? 'No' : '—'}
+                v={unit.same_day_rta === true ? 'Yes' : unit.same_day_rta === false ? 'No' : BLANK}
               />
-              {typeof unit.voucher_size_accepted === 'number' ? (
-                <KV k="Voucher size accepted" v={String(unit.voucher_size_accepted)} />
-              ) : null}
               <KV
                 k="Video tour"
                 v={
@@ -981,12 +994,21 @@ export function ListingDetail(): React.JSX.Element {
                       Watch video
                     </a>
                   ) : (
-                    '—'
+                    BLANK
                   )
                 }
               />
             </div>
           </Card>
+
+          {/* D6 / D10: the eight requirement items with the property's own
+              values; tags compare with the landlord of record. Its Edit opens
+              the same property edit form. */}
+          <PropertyRequirementsCard
+            unit={unit}
+            landlord={requirementsLandlord}
+            {...(!deleted && { onEdit: () => setEditing(true) })}
+          />
 
           {/* Free-form property notes (the tenant "Preferences & notes" counterpart):
               amenity/quirk facts that are neither utilities nor accessibility —
@@ -1019,17 +1041,16 @@ export function ListingDetail(): React.JSX.Element {
               )
             }
           >
-            {/* Structured tour type reads together with the free-form process
-                copy below (spec S2). Em-dash placeholder when unset, matching
-                the Property details KV rows. */}
-            <KV k="Tour type" v={unit.tour_type ? TOUR_TYPE_LABELS[unit.tour_type] : '—'} />
-            {unit.tour_process || unit.application_process ? (
+            {/* D10: tour type and tour process moved to the Requirements card
+                (its Touring item); this card keeps the application process,
+                so its empty state names that process only (code review
+                RD-5) - a tour process may well be recorded. */}
+            {unit.application_process ? (
               <div className={styles.process}>
-                {unit.tour_process ? <p>{unit.tour_process}</p> : null}
-                {unit.application_process ? <p>{unit.application_process}</p> : null}
+                <p>{unit.application_process}</p>
               </div>
             ) : (
-              <EmptyRow>No process recorded yet.</EmptyRow>
+              <EmptyRow>No application process recorded yet.</EmptyRow>
             )}
           </Card>
 

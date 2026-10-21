@@ -131,25 +131,61 @@ test.describe('Contact detail — header actions + edit', () => {
     await expect(page.getByText('DeKalb County Housing Authority')).toHaveCount(0);
   });
 
-  test('landlord contact carries notes only — preference fields moved to the property', async ({
+  test('landlord contact: free-text Notes, no property facts on the form, and the Requirements / Qualifications fieldset', async ({
     page,
   }) => {
-    // 2026-07-10: accepted programs / lease terms / pet policy / expected rent are
-    // per-property facts on the UNIT now (see GLOSSARY). The landlord contact keeps
-    // free-text notes only, and its card points staff at the property.
+    // 2026-07-10: accepted programs / lease terms / expected rent are
+    // per-property facts on the UNIT (see GLOSSARY). 2026-10-20 (property
+    // requirements D2, D9): pets and the other requirements ALSO live on the
+    // landlord, as copy-only defaults, in their own fieldset; the Notes card
+    // keeps free text and no longer points at the property.
     await devLogin(page);
     await page.goto(`${NEXT}/contacts/${LANDLORD}`);
     await expect(page.getByRole('heading', { name: 'Notes' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Preferences & notes' })).toHaveCount(0);
-    await expect(page.getByText(/live on each property/)).toBeVisible();
+    await expect(page.getByText('No notes yet - use + Add.', { exact: true })).toBeVisible();
+    await expect(page.getByText(/live on each property/)).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: /^Requirements \/ Qualifications/ })).toBeVisible();
 
-    // The edit dialog no longer offers the moved fields.
     await page.getByRole('button', { name: 'Edit contact details' }).click();
-    await expect(page.getByRole('dialog', { name: /Edit contact/i })).toBeVisible();
-    await expect(page.getByLabel('Accepted vouchers / programs')).toHaveCount(0);
-    await expect(page.getByLabel('Lease terms')).toHaveCount(0);
-    await expect(page.getByLabel('Pet policy')).toHaveCount(0);
-    await expect(page.getByLabel('Expected rent')).toHaveCount(0);
+    const dialog = page.getByRole('dialog', { name: /Edit contact/i });
+    await expect(dialog).toBeVisible();
+    // The property facts stay off the landlord form.
+    await expect(dialog.getByLabel('Accepted vouchers / programs')).toHaveCount(0);
+    await expect(dialog.getByLabel('Lease terms')).toHaveCount(0);
+    await expect(dialog.getByLabel('Expected rent')).toHaveCount(0);
+    // D9: the Requirements / Qualifications fieldset with every field of the
+    // eight items (plan 1.0 labels, matched EXACTLY - several collide as
+    // substrings), its legend, and the tags as each field's DESCRIPTION.
+    await expect(dialog.getByText('Requirements / Qualifications', { exact: true })).toBeVisible();
+    await expect(
+      dialog.getByText(
+        'On property flyers - tenants see it once it is copied to a property (a new property, or Apply to properties).',
+        { exact: true },
+      ),
+    ).toBeVisible();
+    for (const label of [
+      'No evictions while on the program',
+      'Evictions (details)',
+      'Credit score',
+      'Income requirements',
+      'Qualifications',
+      'No pets',
+      'Pets (details)',
+      'Pet fee',
+      "One month's rent",
+      'Fixed amount',
+      'Flexible / payment terms available',
+      'Deposit notes',
+      'No application fee',
+      'Application fee',
+      'Tour type',
+      'Tour process',
+    ]) {
+      await expect(dialog.getByLabel(label, { exact: true }), label).toHaveCount(1);
+    }
+    await expect(dialog.getByLabel('Pet fee', { exact: true })).toHaveAccessibleDescription(/On property flyers/);
+    await expect(dialog.getByLabel('Credit score', { exact: true })).toHaveAccessibleDescription(/Staff only/);
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog')).toHaveCount(0);
   });

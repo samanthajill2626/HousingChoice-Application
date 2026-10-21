@@ -66,6 +66,24 @@ describe('whole-list read wrappers', () => {
     expect(queryOf(1)['cursor']).toBe('n1');
   });
 
+  it('getAllUnits narrows to one landlord when asked (the Apply dialog, property requirements D8)', async () => {
+    request
+      .mockResolvedValueOnce({ units: [{ unitId: 'u1' }], nextCursor: 'n1' })
+      .mockResolvedValueOnce({ units: [{ unitId: 'u2' }], nextCursor: null });
+    const items = await getAllUnits({ landlordId: 'L1' });
+    expect(items.map((u) => u.unitId)).toEqual(['u1', 'u2']);
+    expect(queryOf(0)['landlordId']).toBe('L1');
+    expect(queryOf(1)['landlordId']).toBe('L1');
+    expect(queryOf(1)['cursor']).toBe('n1');
+    expect(queryOf(0)['limit']).toBe('100');
+    expect(queryOf(0)['deleted']).toBeUndefined();
+
+    request.mockReset();
+    request.mockResolvedValue({ units: [], nextCursor: null });
+    await getAllUnits();
+    expect(queryOf(0)['landlordId']).toBeUndefined();
+  });
+
   it('getAllPlacements walks every page and maps `placements` onto items', async () => {
     request
       .mockResolvedValueOnce({ placements: [{ placementId: 'p1' }], nextCursor: 'n1' })

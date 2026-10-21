@@ -53,6 +53,14 @@ function unit(over: Partial<UnitItem> = {}): UnitItem {
   };
 }
 
+/** property-requirements D12: a property recording SEVERAL voucher sizes. The
+ *  wire carries a list since S1 and acceptedVoucherSizes reads both shapes;
+ *  UnitItem types the field as one number until S5 widens it (plan 2.6), so
+ *  the list is cast here (CI-3). */
+function withSizes(sizes: number[]): Partial<UnitItem> {
+  return { voucher_size_accepted: sizes as unknown as number };
+}
+
 const emptyContacts: Contact[] = [];
 
 const seedTenant: Contact = {
@@ -205,7 +213,7 @@ describe('BroadcastComposer — voucher size pre-fill from ?unitId', () => {
       expect(chip).toHaveAttribute('aria-pressed', 'true');
     });
     expect(screen.getByText(/matches property/i)).toBeInTheDocument();
-    expect(screen.getByText(/Pre-filled to the 2-bedroom voucher this property takes/i)).toBeInTheDocument();
+    expect(screen.getByText('Pre-filled to the voucher sizes this property takes: 2-BR')).toBeInTheDocument();
     expect(getUnit).toHaveBeenCalledWith('unit-0001', expect.anything());
   });
 
@@ -220,16 +228,19 @@ describe('BroadcastComposer — voucher size pre-fill from ?unitId', () => {
     expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveTextContent(/matches property/i);
     expect(screen.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByRole('button', { name: /^2-BR/ })).not.toHaveTextContent(/matches property/i);
-    expect(screen.getByText(/Pre-filled to the 3-bedroom voucher this property takes/i)).toBeInTheDocument();
+    expect(screen.getByText('Pre-filled to the voucher sizes this property takes: 3-BR')).toBeInTheDocument();
   });
 
-  it('lets the operator override the pre-filled voucher size', async () => {
+  it('a chip ADDS a size to the pre-fill, and the pre-filled chip comes off by hand (D12 multi-select)', async () => {
     const u = userEvent.setup();
     renderComposer('?unitId=unit-0001');
-    await waitFor(() => expect(screen.getByRole('button', { name: /2-BR/ })).toHaveAttribute('aria-pressed', 'true'));
+    await waitFor(() => expect(screen.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'true'));
     await u.click(screen.getByRole('button', { name: /^3-BR/ }));
     expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: /2-BR/ })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'true');
+    await u.click(screen.getByRole('button', { name: /^2-BR/ }));
+    expect(screen.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveAttribute('aria-pressed', 'true');
   });
 });
 
@@ -729,7 +740,7 @@ describe('BroadcastComposer - a housing authority that left the list (matching-b
     expect(createBroadcast.mock.calls.at(-1)?.[0]?.audience_filter).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['Atlanta Housing Authority'],
-      bedroomSize: 2,
+      bedroomSizes: [2],
     });
     // Never the raw code.
     expect(screen.queryByText(/org_not_on_list/)).not.toBeInTheDocument();
@@ -741,7 +752,7 @@ describe('BroadcastComposer - a housing authority that left the list (matching-b
         expect(createBroadcast.mock.calls.at(-1)?.[0]?.audience_filter).toEqual({
           contact_type: 'tenant',
           housing_authorities: ['Atlanta Housing Authority'],
-          bedroomSize: 3,
+          bedroomSizes: [2, 3],
         }),
       { timeout: 4000 },
     );
@@ -756,7 +767,7 @@ describe('BroadcastComposer - a housing authority that left the list (matching-b
     expect(createBroadcast.mock.calls[0]?.[0]?.audience_filter).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['Atlanta Housing Authority', 'DeKalb County Housing Authority'],
-      bedroomSize: 2,
+      bedroomSizes: [2],
     });
     await u.click(preview());
     expect(await screen.findByText(GONE)).toBeInTheDocument();
@@ -766,7 +777,7 @@ describe('BroadcastComposer - a housing authority that left the list (matching-b
     expect(createBroadcast.mock.calls[1]?.[0]?.audience_filter).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['Atlanta Housing Authority'],
-      bedroomSize: 2,
+      bedroomSizes: [2],
     });
     expect(screen.queryByText(/org_not_on_list/)).not.toBeInTheDocument();
   });
@@ -817,6 +828,102 @@ describe('BroadcastComposer - a housing authority that left the list (matching-b
     for (const body of oakDrafts) {
       expect(body.audience_filter?.housing_authorities).toEqual(['Atlanta Housing Authority']);
     }
+  });
+});
+
+// property-requirements (spec 2026-10-20) D12: a property may take SEVERAL
+// voucher sizes. The filter pre-fills one chip per size acceptedVoucherSizes
+// returns, sizes of 4 and up on the ONE 4+ chip; every pre-filled chip is
+// tagged and the note names them. The blast-rules D3 ownership rule covers
+// the list as it covered the one size.
+describe('BroadcastComposer - several voucher sizes (property-requirements D12)', () => {
+  const preview = (): HTMLElement => screen.getByRole('button', { name: 'Preview recipients' });
+  const lastDraftFilter = (): unknown =>
+    (createBroadcast.mock.calls.at(-1)?.[0] as { audience_filter?: unknown } | undefined)?.audience_filter;
+
+  it('a property that takes two sizes pre-fills BOTH chips, each tagged, and the note names them; the draft carries the list, never bedroomSize', async () => {
+    getUnit.mockResolvedValue(unit(withSizes([2, 3])));
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(screen.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'true'));
+    expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /^2-BR/ })).toHaveTextContent(/matches property/i);
+    expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveTextContent(/matches property/i);
+    for (const name of [/^Studio/, /^1-BR/, /^4\+ BR/]) {
+      expect(screen.getByRole('button', { name })).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByRole('button', { name })).not.toHaveTextContent(/matches property/i);
+    }
+    expect(screen.getByText('Pre-filled to the voucher sizes this property takes: 2-BR, 3-BR')).toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSizes: [2, 3] });
+    expect(lastDraftFilter()).not.toHaveProperty('bedroomSize');
+  });
+
+  it('a 5-bedroom-only property pre-fills the 4+ chip (it also reaches 4-bedroom holders; staff unpress by hand)', async () => {
+    getUnit.mockResolvedValue(unit(withSizes([5])));
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(screen.getByRole('button', { name: /^4\+ BR/ })).toHaveAttribute('aria-pressed', 'true'));
+    expect(screen.getByRole('button', { name: /^4\+ BR/ })).toHaveTextContent(/matches property/i);
+    expect(screen.getByText('Pre-filled to the voucher sizes this property takes: 4+ BR')).toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSizes: [4] });
+  });
+
+  it('sizes 3, 6 and 12 pre-fill 3-BR and 4+ BR - the 4+ chip once', async () => {
+    getUnit.mockResolvedValue(unit(withSizes([3, 6, 12])));
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(screen.getByRole('button', { name: /^4\+ BR/ })).toHaveAttribute('aria-pressed', 'true'));
+    expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('Pre-filled to the voucher sizes this property takes: 3-BR, 4+ BR')).toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSizes: [3, 4] });
+  });
+
+  it('unpressing a pre-filled chip is an edit: the draft follows (the draft key holds the list), and every chip off is no size filter', async () => {
+    const u = userEvent.setup();
+    getUnit.mockResolvedValue(unit(withSizes([2, 3])));
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(createBroadcast).toHaveBeenCalledTimes(1);
+    await u.click(screen.getByRole('button', { name: /^3-BR/ }));
+    expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveAttribute('aria-pressed', 'false');
+    await waitFor(() => expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSizes: [2] }), {
+      timeout: 4000,
+    });
+    await u.click(screen.getByRole('button', { name: /^2-BR/ }));
+    await waitFor(() => expect(lastDraftFilter()).toEqual({ contact_type: 'tenant' }), { timeout: 4000 });
+    // The pre-fill never comes back while the property stays (D3).
+    for (const chip of within(screen.getByRole('group', { name: 'Voucher size' })).getAllByRole('button')) {
+      expect(chip).toHaveAttribute('aria-pressed', 'false');
+    }
+  });
+
+  it('CI-2: a recorded size no chip can hold (2.5, old data) is left out of the pre-fill', async () => {
+    getUnit.mockResolvedValue(unit(withSizes([2.5, 3])));
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(screen.getByRole('button', { name: /^3-BR/ })).toHaveAttribute('aria-pressed', 'true'));
+    expect(screen.getByRole('button', { name: /^2-BR/ })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByText('Pre-filled to the voucher sizes this property takes: 3-BR')).toBeInTheDocument();
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSizes: [3] });
+  });
+
+  it('CI-2: when no recorded size maps to a chip, nothing is pre-filled and no note shows', async () => {
+    getUnit.mockResolvedValue(unit(withSizes([2.5])));
+    renderComposer('?unitId=unit-0001');
+    await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
+    for (const chip of within(screen.getByRole('group', { name: 'Voucher size' })).getAllByRole('button')) {
+      expect(chip).toHaveAttribute('aria-pressed', 'false');
+    }
+    expect(screen.queryByText(/Pre-filled to the voucher sizes/)).not.toBeInTheDocument();
+    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant' });
+  });
+
+  it('(PIN) a resumed draft presses no voucher chip and shows no pre-fill note: the composer never reads the stored filter', async () => {
+    renderComposer('?draftId=bcast_resume');
+    const group = await screen.findByRole('group', { name: 'Voucher size' });
+    for (const chip of within(group).getAllByRole('button')) expect(chip).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByText(/matches property/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Pre-filled to the voucher sizes/)).not.toBeInTheDocument();
   });
 });
 
@@ -874,7 +981,7 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     expect(lastDraftFilter()).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['DeKalb County Housing Authority', 'Atlanta Housing Authority'],
-      bedroomSize: 2,
+      bedroomSizes: [2],
     });
   });
 
@@ -887,7 +994,7 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
       ),
     ).toBeInTheDocument();
     await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
-    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSize: 2 });
+    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSizes: [2] });
   });
 
   it('staff edits win while the property stays: a size picked before the list lands is kept, and the authorities still fill in', async () => {
@@ -905,7 +1012,7 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     expect(lastDraftFilter()).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['Atlanta Housing Authority'],
-      bedroomSize: 3,
+      bedroomSizes: [2, 3],
     });
   });
 
@@ -952,7 +1059,7 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     expect(lastDraftFilter()).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['DeKalb County Housing Authority'],
-      bedroomSize: 3,
+      bedroomSizes: [3],
     });
     expect(confirmSpy).not.toHaveBeenCalled();
   });
@@ -983,7 +1090,7 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     expect(lastDraftFilter()).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['Atlanta Housing Authority'],
-      bedroomSize: 2,
+      bedroomSizes: [2],
     });
   });
 
@@ -1088,7 +1195,7 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     expect(lastDraftFilter()).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['Atlanta Housing Authority'],
-      bedroomSize: 2,
+      bedroomSizes: [2],
     });
   });
 
@@ -1127,7 +1234,7 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     expect(lastDraftFilter()).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['Atlanta Housing Authority'],
-      bedroomSize: 2,
+      bedroomSizes: [2],
     });
   });
 
@@ -1158,7 +1265,7 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     // Nothing to fill in from 12 Oak St: no hold and no notice.
     await waitFor(() => expect(preview()).toBeEnabled(), { timeout: 4000 });
     expect(screen.queryByText(/Couldn't load the organization list/)).not.toBeInTheDocument();
-    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSize: 2 });
+    expect(lastDraftFilter()).toEqual({ contact_type: 'tenant', bedroomSizes: [2] });
     // 77 Peachtree St accepts one: the same failed read holds it.
     await u.click(screen.getByRole('button', { name: 'Change property' }));
     await u.click(await screen.findByRole('button', { name: /77 Peachtree St/ }));
@@ -1203,7 +1310,7 @@ describe('BroadcastComposer - the property prefill (matching-blast-rules D3)', (
     expect(lastDraftFilter()).toEqual({
       contact_type: 'tenant',
       housing_authorities: ['Atlanta Housing Authority'],
-      bedroomSize: 2,
+      bedroomSizes: [2],
     });
   });
 

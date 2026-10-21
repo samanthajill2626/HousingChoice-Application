@@ -11,6 +11,7 @@ import {
   validateUnitBody,
   type UnitFlyer,
 } from '../src/lib/unitFields.js';
+import { REQUIREMENT_UNIT_KEYS } from '../src/lib/requirements.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 
 describe('validateUnitBody — new public-flyer fields', () => {
@@ -62,48 +63,65 @@ describe('validateUnitBody — new public-flyer fields', () => {
 });
 
 describe('validateUnitBody — voucher_size_accepted (landlord-onboarding)', () => {
-  // A writable, STORED voucher size the unit accepts - DISTINCT from beds. A 3bd
-  // unit may accept a 2BR voucher, so this is its own number field; readers go
-  // through acceptedVoucherSizes (below), which falls back to beds.
-  it('accepts voucher_size_accepted (a number >= 0)', () => {
+  // A writable, STORED LIST of the voucher sizes the unit accepts (spec
+  // 2026-10-20 D4) - DISTINCT from beds. A 3bd unit may accept only a 2BR
+  // voucher; readers go through acceptedVoucherSizes (below), which falls
+  // back to beds.
+  it('a bare integer 0..12 is stored as a one-item list (a raw caller or an older bundle)', () => {
     expect(validateUnitBody({ voucher_size_accepted: 2 }, 'update')).toEqual({
       ok: true,
-      fields: { voucher_size_accepted: 2 },
+      fields: { voucher_size_accepted: [2] },
     });
-    // 0 is allowed (an efficiency/SRO voucher).
+    // 0 is allowed (an efficiency/SRO voucher), and so is the largest size.
     expect(validateUnitBody({ voucher_size_accepted: 0 }, 'update')).toEqual({
       ok: true,
-      fields: { voucher_size_accepted: 0 },
+      fields: { voucher_size_accepted: [0] },
+    });
+    expect(validateUnitBody({ voucher_size_accepted: 12 }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: [12] },
     });
   });
 
-  it('rejects a non-number voucher_size_accepted', () => {
-    expect(validateUnitBody({ voucher_size_accepted: 'two' }, 'update')).toEqual({
-      ok: false,
-      error: 'voucher_size_accepted must be a number',
+  it('a list is stored de-duplicated and ascending', () => {
+    expect(validateUnitBody({ voucher_size_accepted: [3, 2, 3] }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: [2, 3] },
+    });
+    expect(validateUnitBody({ voucher_size_accepted: [12, 0, 5] }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: [0, 5, 12] },
     });
   });
 
-  it('rejects a negative voucher_size_accepted', () => {
-    expect(validateUnitBody({ voucher_size_accepted: -1 }, 'update')).toEqual({
-      ok: false,
-      error: 'voucher_size_accepted must be >= 0',
-    });
-  });
-
-  it('null CLEARS voucher_size_accepted (a null patch value -> REMOVE), so beds decide again', () => {
+  it('null and [] CLEAR it (a null patch value -> REMOVE), so beds decide again', () => {
     expect(validateUnitBody({ voucher_size_accepted: null }, 'update')).toEqual({
       ok: true,
       fields: { voucher_size_accepted: null },
     });
-    // An empty string is not a clear - only null is.
-    expect(validateUnitBody({ voucher_size_accepted: '' }, 'update')).toEqual({
-      ok: false,
-      error: 'voucher_size_accepted must be a number',
+    expect(validateUnitBody({ voucher_size_accepted: [] }, 'update')).toEqual({
+      ok: true,
+      fields: { voucher_size_accepted: null },
     });
   });
 
-  it('other number fields still reject null (only the voucher size is clearable)', () => {
+  it('rejects 13, -1, 2.5, strings, mixed and nested lists - anything but integers 0..12', () => {
+    for (const bad of [13, -1, 2.5, Number.NaN, '2', 'two', '', true, {}, [2, '3'], [2, 13], [2.5], [-1], [[2]], [null]]) {
+      expect(validateUnitBody({ voucher_size_accepted: bad }, 'update'), JSON.stringify(bad)).toEqual({
+        ok: false,
+        error: 'voucher_size_accepted must be an integer 0..12 or a list of them',
+      });
+    }
+  });
+
+  it('accepts the list on create as well as update', () => {
+    expect(validateUnitBody({ landlordId: 'contact-ll', voucher_size_accepted: [3, 2] }, 'create')).toEqual({
+      ok: true,
+      fields: { landlordId: 'contact-ll', voucher_size_accepted: [2, 3] },
+    });
+  });
+
+  it('(PIN) beds still rejects null (only the voucher sizes and the requirement money fields clear)', () => {
     expect(validateUnitBody({ beds: null }, 'update')).toEqual({
       ok: false,
       error: 'beds must be a number',
@@ -164,6 +182,32 @@ describe('validateUnitBody - primary_contact is not writable (primary-contact-in
       ok: false,
       error: 'unknown field: primary_contact',
     });
+  });
+});
+
+describe('validateUnitBody - only OWN allowlist keys are fields (code review RA-3)', () => {
+  // An inherited lookup made every Object.prototype name a "known" field: a
+  // `__proto__` body key passed and then SET THE PROTOTYPE of the validated
+  // fields (so fields.landlordId read through it), and `toString` & co. were
+  // stored unvalidated. A JSON body (express.json is JSON.parse) carries
+  // `__proto__` as an OWN key, so the bodies here are parsed the same way.
+  const INHERITED = Object.getOwnPropertyNames(Object.prototype);
+
+  it('the inherited names checked include the ones the review named', () => {
+    expect(INHERITED).toEqual(
+      expect.arrayContaining(['__proto__', 'toString', 'constructor', 'valueOf', 'hasOwnProperty']),
+    );
+  });
+
+  it.each(INHERITED)('%s is an unknown field on update and on create', (key) => {
+    const body: unknown = JSON.parse(`{${JSON.stringify(key)}:{"landlordId":"c-ll-2"},"notes":"x"}`);
+    expect(validateUnitBody(body, 'update')).toEqual({ ok: false, error: `unknown field: ${key}` });
+    expect(validateUnitBody(body, 'create')).toEqual({ ok: false, error: `unknown field: ${key}` });
+  });
+
+  it('an inherited name after a valid field is still refused - never stored unvalidated', () => {
+    const body: unknown = JSON.parse('{"notes":"x","toString":"y","valueOf":1}');
+    expect(validateUnitBody(body, 'update')).toEqual({ ok: false, error: 'unknown field: toString' });
   });
 });
 
@@ -295,6 +339,212 @@ describe('validateUnitBody - accepted_authorities consolidation (spec section 8)
   });
 });
 
+describe('validateUnitBody - the requirement keys (spec 2026-10-20 D1, D2)', () => {
+  it('accepts every requirement key with its kind', () => {
+    expect(
+      validateUnitBody(
+        {
+          no_evictions_on_program: true,
+          evictions_notes: 'None in the last 5 years',
+          credit_requirements: '600+',
+          income_requirements: '2.5x the tenant portion',
+          qualifications: 'Background check\nNo prior landlord debt',
+          no_pets: true,
+          pets: 'Service animals only',
+          pet_fee: '$300 one-time',
+          deposit_one_month: true,
+          deposit_flexible: true,
+          deposit_notes: 'Can split over two months',
+          application_fee: 0,
+          tour_type: 'landlord_led',
+          tour_process: 'Text Ana a day ahead',
+        },
+        'update',
+      ),
+    ).toEqual({
+      ok: true,
+      fields: {
+        no_evictions_on_program: true,
+        evictions_notes: 'None in the last 5 years',
+        credit_requirements: '600+',
+        income_requirements: '2.5x the tenant portion',
+        qualifications: 'Background check\nNo prior landlord debt',
+        no_pets: true,
+        pets: 'Service animals only',
+        pet_fee: '$300 one-time',
+        deposit_one_month: true,
+        deposit_flexible: true,
+        deposit_notes: 'Can split over two months',
+        application_fee: 0,
+        tour_type: 'landlord_led',
+        tour_process: 'Text Ana a day ahead',
+      },
+    });
+  });
+
+  it('a checkbox stores true; false and null REMOVE (a null patch value); anything else is a 400', () => {
+    for (const key of ['no_evictions_on_program', 'no_pets', 'deposit_one_month', 'deposit_flexible']) {
+      expect(validateUnitBody({ [key]: true }, 'update'), key).toEqual({ ok: true, fields: { [key]: true } });
+      expect(validateUnitBody({ [key]: false }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: null }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: 'yes' }, 'update'), key).toEqual({
+        ok: false,
+        error: `${key} must be true, false or null`,
+      });
+    }
+  });
+
+  it('text is trimmed; "", whitespace and null REMOVE; a non-string is a 400', () => {
+    for (const key of [
+      'evictions_notes',
+      'credit_requirements',
+      'income_requirements',
+      'qualifications',
+      'pet_fee',
+      'deposit_notes',
+      'tour_process',
+    ]) {
+      expect(validateUnitBody({ [key]: '  Call first  ' }, 'update'), key).toEqual({
+        ok: true,
+        fields: { [key]: 'Call first' },
+      });
+      expect(validateUnitBody({ [key]: '' }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: '   ' }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: null }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: 42 }, 'update'), key).toEqual({
+        ok: false,
+        error: `${key} must be a string or null`,
+      });
+    }
+  });
+
+  it('money: deposit and application_fee now CLEAR on null; 0 stays a value', () => {
+    for (const key of ['deposit', 'application_fee']) {
+      expect(validateUnitBody({ [key]: 1400 }, 'update'), key).toEqual({ ok: true, fields: { [key]: 1400 } });
+      expect(validateUnitBody({ [key]: 0 }, 'update'), key).toEqual({ ok: true, fields: { [key]: 0 } });
+      expect(validateUnitBody({ [key]: null }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+      expect(validateUnitBody({ [key]: '1400' }, 'update'), key).toEqual({ ok: false, error: `${key} must be a number` });
+      expect(validateUnitBody({ [key]: -1 }, 'update'), key).toEqual({ ok: false, error: `${key} must be >= 0` });
+    }
+  });
+
+  it('does NOT check the deposit conflict - that needs the stored record (the route does it)', () => {
+    expect(validateUnitBody({ deposit_one_month: true, deposit: 1400 }, 'update')).toEqual({
+      ok: true,
+      fields: { deposit_one_month: true, deposit: 1400 },
+    });
+  });
+
+  it('requirement keys are writable on create too', () => {
+    expect(validateUnitBody({ landlordId: 'contact-ll', no_pets: true, pet_fee: ' $300 ' }, 'create')).toEqual({
+      ok: true,
+      fields: { landlordId: 'contact-ll', no_pets: true, pet_fee: '$300' },
+    });
+  });
+
+  it('every registry unit key is writable (the allowlist and the registry agree)', () => {
+    for (const key of REQUIREMENT_UNIT_KEYS) {
+      expect(validateUnitBody({ [key]: null }, 'update'), key).toEqual({ ok: true, fields: { [key]: null } });
+    }
+  });
+
+  it('(PIN) requirement_sources is server-written only - a body carrying it is refused', () => {
+    expect(validateUnitBody({ requirement_sources: { pets: 'copied' } }, 'update')).toEqual({
+      ok: false,
+      error: 'unknown field: requirement_sources',
+    });
+  });
+});
+
+describe('validateUnitBody - pets: the details text and the legacy boolean (spec 2026-10-20 D1)', () => {
+  it('a string is the details text: trimmed; "" and null REMOVE', () => {
+    expect(validateUnitBody({ pets: '  Cats OK ' }, 'update')).toEqual({ ok: true, fields: { pets: 'Cats OK' } });
+    expect(validateUnitBody({ pets: '' }, 'update')).toEqual({ ok: true, fields: { pets: null } });
+    expect(validateUnitBody({ pets: null }, 'update')).toEqual({ ok: true, fields: { pets: null } });
+    // Free text is never parsed: "No pets" stays details text.
+    expect(validateUnitBody({ pets: 'No pets' }, 'update')).toEqual({ ok: true, fields: { pets: 'No pets' } });
+  });
+
+  it('pets: false MEANS No pets checked and details blank - stored in the new shape at once', () => {
+    expect(validateUnitBody({ pets: false }, 'update')).toEqual({ ok: true, fields: { no_pets: true, pets: null } });
+  });
+
+  it('pets: true MEANS No pets unchecked and details "Allowed"', () => {
+    expect(validateUnitBody({ pets: true }, 'update')).toEqual({ ok: true, fields: { no_pets: null, pets: 'Allowed' } });
+  });
+
+  it('a boolean beside pet_fee keeps the fee', () => {
+    expect(validateUnitBody({ pets: false, pet_fee: ' $300 ' }, 'update')).toEqual({
+      ok: true,
+      fields: { no_pets: true, pets: null, pet_fee: '$300' },
+    });
+  });
+
+  it('a boolean pets beside no_pets is a 400, in either key order and for a null no_pets', () => {
+    for (const body of [{ pets: false, no_pets: true }, { no_pets: null, pets: true }, { no_pets: false, pets: false }]) {
+      expect(validateUnitBody(body, 'update'), JSON.stringify(body)).toEqual({
+        ok: false,
+        error: 'pets: a boolean pets cannot be combined with no_pets',
+      });
+    }
+  });
+
+  it('a string pets beside no_pets is the new shape and fine', () => {
+    expect(validateUnitBody({ no_pets: true, pets: 'Service animals only' }, 'update')).toEqual({
+      ok: true,
+      fields: { no_pets: true, pets: 'Service animals only' },
+    });
+  });
+
+  it('rejects a pets that is not a string, a boolean or null', () => {
+    for (const bad of [42, {}, ['cats']]) {
+      expect(validateUnitBody({ pets: bad }, 'update')).toEqual({
+        ok: false,
+        error: 'pets must be a string, a boolean or null',
+      });
+    }
+  });
+});
+
+describe('validateUnitBody - subzone and washer_dryer (spec 2026-10-20 D3)', () => {
+  it('subzone is clearable text: trimmed; "", whitespace and null REMOVE', () => {
+    expect(validateUnitBody({ subzone: ' SE11 ' }, 'update')).toEqual({ ok: true, fields: { subzone: 'SE11' } });
+    expect(validateUnitBody({ subzone: '' }, 'update')).toEqual({ ok: true, fields: { subzone: null } });
+    expect(validateUnitBody({ subzone: '  ' }, 'update')).toEqual({ ok: true, fields: { subzone: null } });
+    expect(validateUnitBody({ subzone: null }, 'update')).toEqual({ ok: true, fields: { subzone: null } });
+  });
+
+  it('subzone rejects a non-string', () => {
+    expect(validateUnitBody({ subzone: 11 }, 'update')).toEqual({ ok: false, error: 'subzone must be a string or null' });
+  });
+
+  it('washer_dryer takes hookups, included or none; "" and null REMOVE', () => {
+    for (const v of ['hookups', 'included', 'none']) {
+      expect(validateUnitBody({ washer_dryer: v }, 'update')).toEqual({ ok: true, fields: { washer_dryer: v } });
+    }
+    expect(validateUnitBody({ washer_dryer: '' }, 'update')).toEqual({ ok: true, fields: { washer_dryer: null } });
+    expect(validateUnitBody({ washer_dryer: null }, 'update')).toEqual({ ok: true, fields: { washer_dryer: null } });
+  });
+
+  it('washer_dryer rejects anything else', () => {
+    for (const bad of ['yes', 'Hookups', 'in-unit', true, 1, {}]) {
+      expect(validateUnitBody({ washer_dryer: bad }, 'update')).toEqual({
+        ok: false,
+        error: 'washer_dryer must be one of: hookups, included, none',
+      });
+    }
+  });
+});
+
+describe('validateUnitBody - the other kinds are unchanged', () => {
+  it('(PIN) area, notes, lease_terms, utilities and accessibility keep the plain string kind', () => {
+    for (const key of ['area', 'notes', 'lease_terms', 'utilities', 'accessibility']) {
+      expect(validateUnitBody({ [key]: '' }, 'update'), key).toEqual({ ok: true, fields: { [key]: '' } });
+      expect(validateUnitBody({ [key]: null }, 'update'), key).toEqual({ ok: false, error: `${key} must be a string` });
+    }
+  });
+});
+
 describe('acceptedVoucherSizes', () => {
   // THE one reader of "which voucher sizes does this unit take" (Cameron,
   // 2026-10-04): the recorded `voucher_size_accepted` when there is one - ONE
@@ -341,7 +591,6 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       beds: 2,
       baths: 1,
       area: 'Westside',
-      subzone: 'Zone 4',
       rent_min: 1400,
       rent_max: 1600,
       media: ['s3://photo1.jpg'],
@@ -355,7 +604,21 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       accessibility: 'Ground floor, no stairs',
       lease_terms: '12-month minimum',
       pets: 'Cats only',
+      // spec 2026-10-20 D1/D3/D11: public requirement keys and washer / dryer
+      pet_fee: '$300 one-time',
+      deposit_flexible: true,
+      washer_dryer: 'hookups',
       // still INTERNAL - SECRET markers prove they never serialize
+      // (spec 2026-10-20: subzone is staff only now, D3; so are the screening
+      // items and the deposit notes, D1; the sources map is server-owned, D5)
+      subzone: 'SECRET subzone E8',
+      no_evictions_on_program: true,
+      evictions_notes: 'SECRET evictions note',
+      credit_requirements: 'SECRET credit 600+',
+      income_requirements: 'SECRET income 3x rent',
+      qualifications: 'SECRET background check',
+      deposit_notes: 'SECRET deposit split',
+      requirement_sources: { pets: 'set_here', deposit: 'copied' },
       payment_standard: 1700,
       lif: 500,
       notes: 'SECRET in-unit washer note',
@@ -380,8 +643,8 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       beds: 2,
       baths: 1,
       area: 'Westside',
-      subzone: 'Zone 4',
       voucher_size: 2,
+      voucher_sizes: [2],
       // SYNTHESIZED from the fixture's legacy `jurisdiction: 'DCA'` (spec section
       // 8): the fixture no longer sets accepted_programs at all, since that field
       // is retired and never folded into the new one.
@@ -395,9 +658,14 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       application_fee: 50,
       same_day_rta: true,
       pets: 'Cats only',
+      no_pets: false,
+      pet_fee: '$300 one-time',
       accessibility: 'Ground floor, no stairs',
       deposit: 1400,
+      deposit_one_month: false,
+      deposit_flexible: true,
       lease_terms: '12-month minimum',
+      washer_dryer: 'hookups',
     });
   });
 
@@ -415,12 +683,17 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       'application_process', 'status', 'status_source', 'notes',
       'payment_standard', 'lif', 'propertyId', 'jurisdiction', 'priority',
       'final_rent', 'voucher_size_accepted',
+      // spec 2026-10-20: staff only (D3, D1) and server-owned (D5)
+      'subzone', 'requirement_sources', 'no_evictions_on_program', 'evictions_notes',
+      'credit_requirements', 'income_requirements', 'qualifications', 'deposit_notes',
     ]) {
       expect(keys, forbidden).not.toContain(forbidden);
     }
     // And no SECRET value (carried on internal fields) reaches the serialization.
     expect(JSON.stringify(flyer)).not.toContain('SECRET');
     expect(JSON.stringify(flyer)).not.toContain('contact-ll-secret');
+    // The sources map's values never serialize either.
+    expect(JSON.stringify(flyer)).not.toContain('set_here');
   });
 
   it('falls each absent field to null (not undefined) and address to {}', () => {
@@ -438,13 +711,32 @@ describe('toUnitFlyer - the merged public allowlist', () => {
     expect(flyer.accessibility).toBeNull();
     expect(flyer.deposit).toBeNull();
     expect(flyer.lease_terms).toBeNull();
+    // spec 2026-10-20 D11: the added keys - checkboxes read false, the list [].
+    expect(flyer.voucher_sizes).toEqual([]);
+    expect(flyer.voucher_size).toBeNull();
+    expect(flyer.no_pets).toBe(false);
+    expect(flyer.pet_fee).toBeNull();
+    expect(flyer.deposit_one_month).toBe(false);
+    expect(flyer.deposit_flexible).toBe(false);
+    expect(flyer.washer_dryer).toBeNull();
   });
 
-  it('passes pets through as string or boolean; null when absent', () => {
-    expect(toUnitFlyer(fullUnit({ pets: true })).pets).toBe(true);
-    expect(toUnitFlyer(fullUnit({ pets: false })).pets).toBe(false);
-    expect(toUnitFlyer(fullUnit({ pets: 'Cats only' })).pets).toBe('Cats only');
-    expect(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }).pets).toBeNull();
+  it('reads pets through the D1 interpretation (spec 2026-10-20): details text + No pets', () => {
+    const pick = (f: UnitFlyer): { pets: string | null; no_pets: boolean } => ({ pets: f.pets, no_pets: f.no_pets });
+    // A legacy true reads "Allowed"; a legacy false reads No pets with no details.
+    expect(pick(toUnitFlyer(fullUnit({ pets: true })))).toEqual({ pets: 'Allowed', no_pets: false });
+    expect(pick(toUnitFlyer(fullUnit({ pets: false })))).toEqual({ pets: null, no_pets: true });
+    // Free text is never parsed: "No pets" stays details text.
+    expect(pick(toUnitFlyer(fullUnit({ pets: 'No pets' })))).toEqual({ pets: 'No pets', no_pets: false });
+    expect(pick(toUnitFlyer(fullUnit({ no_pets: true, pets: ' service animals only ' })))).toEqual({
+      pets: 'service animals only',
+      no_pets: true,
+    });
+    expect(pick(toUnitFlyer(fullUnit({ pets: '   ' })))).toEqual({ pets: null, no_pets: false });
+    expect(pick(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }))).toEqual({
+      pets: null,
+      no_pets: false,
+    });
   });
 
   it('voucher_size states the RECORDED size over the bedroom count; the key stays off', () => {
@@ -466,9 +758,19 @@ describe('toUnitFlyer - the merged public allowlist', () => {
     ).toBe(1);
   });
 
-  it('voucher_size takes the first size of a recorded list (demo seed only until #12)', () => {
-    const listed = fullUnit({ beds: 4, voucher_size_accepted: [2, 3] as unknown as number });
-    expect(toUnitFlyer(listed).voucher_size).toBe(2);
+  it('voucher_sizes lists every recorded size ascending; voucher_size keeps the first (spec 2026-10-20 D11)', () => {
+    const listed = toUnitFlyer(fullUnit({ beds: 4, voucher_size_accepted: [2, 3] }));
+    expect(listed.voucher_sizes).toEqual([2, 3]);
+    expect(listed.voucher_size).toBe(2);
+    // A legacy stored list may be unsorted or repeat a size.
+    const messy = toUnitFlyer(fullUnit({ voucher_size_accepted: [3, 2, 3] }));
+    expect(messy.voucher_sizes).toEqual([2, 3]);
+    expect(messy.voucher_size).toBe(2);
+    // A single number stored before #12 still reads (never backfilled).
+    expect(toUnitFlyer(fullUnit({ beds: 2, voucher_size_accepted: 3 })).voucher_sizes).toEqual([3]);
+    // No recorded size -> the beds; neither -> [].
+    expect(toUnitFlyer(fullUnit({ beds: 3 })).voucher_sizes).toEqual([3]);
+    expect(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }).voucher_sizes).toEqual([]);
   });
 
   it('drops a legacy plain-string address (only structured sub-fields survive)', () => {
@@ -481,5 +783,65 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       address: '123 Legacy St' as unknown as UnitItem['address'],
     });
     expect(flyer.address).toEqual({});
+  });
+
+  it('never projects subzone (staff only since spec 2026-10-20 D3)', () => {
+    const flyer = toUnitFlyer(fullUnit({ subzone: 'E8' }));
+    expect(Object.keys(flyer)).not.toContain('subzone');
+    expect(JSON.stringify(flyer)).not.toContain('E8');
+  });
+
+  it('projects the Deposit item: one month, a fixed amount, flexible - never its notes (D11)', () => {
+    const bare: UnitItem = { unitId: 'd', landlordId: 'll', status: 'available' };
+    const pick = (u: UnitItem) => {
+      const f = toUnitFlyer(u);
+      return { deposit: f.deposit, deposit_one_month: f.deposit_one_month, deposit_flexible: f.deposit_flexible };
+    };
+    expect(pick({ ...bare, deposit_one_month: true })).toEqual({
+      deposit: null,
+      deposit_one_month: true,
+      deposit_flexible: false,
+    });
+    expect(pick({ ...bare, deposit: 1400, deposit_flexible: true })).toEqual({
+      deposit: 1400,
+      deposit_one_month: false,
+      deposit_flexible: true,
+    });
+    // Flexible alone is data the page shows as its own deposit row.
+    expect(pick({ ...bare, deposit_flexible: true })).toEqual({
+      deposit: null,
+      deposit_one_month: false,
+      deposit_flexible: true,
+    });
+    // Notes alone give the page nothing to show - and the notes never ship.
+    const notesOnly: UnitItem = { ...bare, deposit_notes: 'SECRET split it' };
+    expect(pick(notesOnly)).toEqual({ deposit: null, deposit_one_month: false, deposit_flexible: false });
+    expect(JSON.stringify(toUnitFlyer(notesOnly))).not.toContain('SECRET');
+  });
+
+  it('(PIN) projects the application fee: 0 is "No application fee", absent is null (D11)', () => {
+    expect(toUnitFlyer(fullUnit({ application_fee: 0 })).application_fee).toBe(0);
+    expect(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }).application_fee).toBeNull();
+  });
+
+  it('reads both money fields through the D1 read: a stored negative amount projects null (D1, D11)', () => {
+    // A negative amount was never writable (the validator's >= 0), so only bad
+    // raw data can hold one. The registry read (unitItemValue) treats it as
+    // blank, so the flyer must not publish it as "$-50".
+    const flyer = toUnitFlyer(fullUnit({ application_fee: -50, deposit: -1400 }));
+    expect(flyer.application_fee).toBeNull();
+    expect(flyer.deposit).toBeNull();
+  });
+
+  it('projects the pet fee trimmed, null when blank (D11)', () => {
+    expect(toUnitFlyer(fullUnit({ pet_fee: '  $300 one-time ' })).pet_fee).toBe('$300 one-time');
+    expect(toUnitFlyer(fullUnit({ pet_fee: '  ' })).pet_fee).toBeNull();
+  });
+
+  it('projects washer / dryer only when it holds a recorded value (D3, D11)', () => {
+    for (const v of ['hookups', 'included', 'none'] as const) {
+      expect(toUnitFlyer(fullUnit({ washer_dryer: v })).washer_dryer).toBe(v);
+    }
+    expect(toUnitFlyer(fullUnit({ washer_dryer: 'in-unit' as unknown as 'hookups' })).washer_dryer).toBeNull();
   });
 });

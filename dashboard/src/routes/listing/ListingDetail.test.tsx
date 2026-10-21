@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { ApiError, type UnitContact, type UnitPropertyContact } from '../../api/index.js';
 import { listingRoster } from './buildListingFile.js';
+import { BLANK } from '../contact/Card.js';
 import type { ListingState } from './useListing.js';
 
 const useListing = vi.fn();
@@ -177,6 +178,12 @@ async function chooseStatus(
   await user.click(screen.getByRole('menuitemradio', { name: optionLabel }));
 }
 
+/** The card whose heading starts with `title` (a card heading also carries
+ *  its action's accessible name, so match the start). */
+function cardTitled(title: RegExp): HTMLElement {
+  return screen.getByRole('heading', { name: title }).closest('section') as HTMLElement;
+}
+
 describe('ListingDetail', () => {
   it('shows a spinner while loading', () => {
     useListing.mockReturnValue({ ...READY, status: 'loading', unit: null });
@@ -204,11 +211,12 @@ describe('ListingDetail', () => {
     expect(screen.getByText((t) => t.includes('2 BR') && t.includes('1 BA') && t.includes('$1,400') && t.includes('1,600/mo'))).toBeInTheDocument();
     // Broadcast + Start placement moved into the ⋯ menu (asserted in its own test).
     // Edit is not a standalone HEADER button either — it's under the ⋯ menu — but it
-    // IS available inline on the Property details + Notes + Tour & application +
-    // Contacts cards (four real, clickable CardAction buttons - Contacts gained
-    // its "Edit contacts" toggle with the roster editor; the More-actions
-    // menu's Edit is hidden until open).
-    expect(screen.getAllByRole('button', { name: /Edit/ })).toHaveLength(4);
+    // IS available inline on the Property details + Requirements + Notes +
+    // Tour & application + Contacts cards (five real, clickable CardAction
+    // buttons - Contacts gained its "Edit contacts" toggle with the roster
+    // editor, Requirements its own Edit (D10); the More-actions menu's Edit is
+    // hidden until open).
+    expect(screen.getAllByRole('button', { name: /Edit/ })).toHaveLength(5);
     expect(screen.getByRole('button', { name: /More actions/ })).toBeInTheDocument();
   });
 
@@ -253,35 +261,58 @@ describe('ListingDetail', () => {
   it('renders property details and the Housing authorities row', () => {
     useListing.mockReturnValue(READY);
     renderAt();
-    expect(screen.getByText('$1,550')).toBeInTheDocument(); // payment standard
+    const details = cardTitled(/^Property details/);
+    expect(within(details).getByText('$1,550')).toBeInTheDocument(); // payment standard
     // Utilities carry tenant-paid semantics: the label says WHO pays, the value
     // lists WHICH utilities.
-    expect(screen.getByText('Tenant-paid utilities')).toBeInTheDocument();
-    expect(screen.getByText('Electric and gas')).toBeInTheDocument();
-    expect(screen.getByText('Cats only')).toBeInTheDocument();
+    expect(within(details).getByText('Tenant-paid utilities')).toBeInTheDocument();
+    expect(within(details).getByText('Electric and gas')).toBeInTheDocument();
     // Lease terms are a per-unit fact (moved off the landlord contact 2026-07-10).
-    expect(screen.getByText('Lease terms')).toBeInTheDocument();
-    expect(screen.getByText('12-month minimum')).toBeInTheDocument();
-    // Flyer-detail fields now surface on the read view (staff see what's on the flyer).
-    expect(screen.getByText('Application fee')).toBeInTheDocument();
-    expect(screen.getByText('$25')).toBeInTheDocument();
-    expect(screen.getByText('Same-day RTA')).toBeInTheDocument();
-    // The accepted voucher size (distinct from beds) surfaces as a detail row.
-    expect(screen.getByText('Voucher size accepted')).toBeInTheDocument();
-    expect(screen.getByText('2')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Watch video' })).toHaveAttribute(
+    expect(within(details).getByText('Lease terms')).toBeInTheDocument();
+    expect(within(details).getByText('12-month minimum')).toBeInTheDocument();
+    expect(within(details).getByText('Same-day RTA')).toBeInTheDocument();
+    // D4: the RECORDED voucher sizes, as a list (a stored single number reads too).
+    expect(within(details).getByText('Voucher sizes accepted')).toBeInTheDocument();
+    expect(within(details).getByText('2 BR')).toBeInTheDocument();
+    expect(within(details).getByRole('link', { name: 'Watch video' })).toHaveAttribute(
       'href',
       'https://example.com/tour.mp4',
     );
     // ONE authorities row from the synthesized list - the legacy `jurisdiction`
     // value shows here now (spec section 8).
-    expect(screen.getByText('Housing authorities')).toBeInTheDocument();
-    expect(screen.getByText('Atlanta')).toBeInTheDocument();
+    expect(within(details).getByText('Housing authorities')).toBeInTheDocument();
+    expect(within(details).getByText('Atlanta')).toBeInTheDocument();
     // Both retired surfaces are gone: the Jurisdiction KV and the accepted
     // vouchers bulleted list.
     expect(screen.queryByText('Jurisdiction')).toBeNull();
     expect(screen.queryByRole('list', { name: /Accepted vouchers/i })).toBeNull();
     expect(screen.queryByText('Accepted vouchers')).toBeNull();
+  });
+
+  it('D10: Property details gains Subzone and Washer / dryer; Deposit, Pets and Application fee move to Requirements', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, subzone: 'SE11', washer_dryer: 'hookups' },
+    });
+    renderAt();
+    const details = cardTitled(/^Property details/);
+    expect(within(details).getByText('Subzone')).toBeInTheDocument();
+    expect(within(details).getByText('SE11')).toBeInTheDocument();
+    expect(within(details).getByText('Washer / dryer')).toBeInTheDocument();
+    expect(within(details).getByText('Hookups')).toBeInTheDocument();
+    expect(within(details).queryByText('Deposit')).toBeNull();
+    expect(within(details).queryByText('Pets')).toBeNull();
+    expect(within(details).queryByText('Application fee')).toBeNull();
+    const requirements = cardTitled(/^Requirements/);
+    expect(within(requirements).getByRole('group', { name: 'Deposit' })).toHaveTextContent('$1,400');
+    expect(within(requirements).getByRole('group', { name: 'Pets' })).toHaveTextContent('Cats only');
+    expect(within(requirements).getByRole('group', { name: 'Application fee' })).toHaveTextContent('$25');
+  });
+
+  it('shows several recorded voucher sizes, Studio first', () => {
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit!, voucher_size_accepted: [3, 0, 2] } });
+    renderAt();
+    expect(within(cardTitled(/^Property details/)).getByText('Studio, 2 BR, 3 BR')).toBeInTheDocument();
   });
 
   it('joins a multi-authority list into the Housing authorities row', () => {
@@ -295,21 +326,29 @@ describe('ListingDetail', () => {
     expect(screen.queryByText('Atlanta')).toBeNull();
   });
 
-  it('renders a Tour type row (placeholder when unset)', () => {
-    // The READY fixture has no tour_type -> the row still renders with a placeholder.
-    useListing.mockReturnValue(READY);
-    renderAt();
-    expect(screen.getByText('Tour type')).toBeInTheDocument();
-  });
-
-  it('renders the structured Tour type label when the unit carries one', () => {
+  it('tour type and process are the Touring requirement; the tour card keeps only the application process (D10)', () => {
     useListing.mockReturnValue({
       ...READY,
       unit: { ...READY.unit, tour_type: 'landlord_led' },
     } as ListingState);
     renderAt();
-    expect(screen.getByText('Tour type')).toBeInTheDocument();
-    expect(screen.getByText('Landlord-led')).toBeInTheDocument();
+    const touring = within(cardTitled(/^Requirements/)).getByRole('group', { name: 'Touring' });
+    expect(touring).toHaveTextContent('Landlord-led; Text the landlord to arrange access.');
+    const process = cardTitled(/^Tour & application process/);
+    expect(within(process).getByText('Apply via the property portal.')).toBeInTheDocument();
+    expect(within(process).queryByText('Tour type')).toBeNull();
+    expect(within(process).queryByText('Text the landlord to arrange access.')).toBeNull();
+  });
+
+  it('the tour card shows its empty state when no application process is recorded', () => {
+    // READY.unit records a tour process: it lives under Requirements > Touring
+    // now (D10), so the empty state names the APPLICATION process only (code
+    // review RD-5) and never says no process is recorded at all.
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit!, application_process: undefined } });
+    renderAt();
+    const process = cardTitled(/^Tour & application process/);
+    expect(within(process).getByText('No application process recorded yet.')).toBeInTheDocument();
+    expect(within(process).queryByText('No process recorded yet.')).toBeNull();
   });
 
   it('renders the Notes card: property notes when present, an empty state with "+ Add" otherwise', () => {
@@ -338,11 +377,94 @@ describe('ListingDetail', () => {
     expect(screen.getByRole('button', { name: 'Edit property notes' })).toHaveTextContent('Edit');
   });
 
-  it('omits the "Voucher size accepted" detail row when it is unset', () => {
+  it('shows "Voucher sizes accepted" with the blank marker when none is recorded - never the bedrooms fallback (D4)', () => {
     const { voucher_size_accepted: _omit, ...rest } = READY.unit!;
-    useListing.mockReturnValue({ ...READY, unit: rest });
+    useListing.mockReturnValue({ ...READY, unit: rest }); // beds: 2 is still on the unit
     renderAt();
-    expect(screen.queryByText('Voucher size accepted')).not.toBeInTheDocument();
+    const row = within(cardTitled(/^Property details/)).getByText('Voucher sizes accepted').parentElement as HTMLElement;
+    expect(row).toHaveTextContent(BLANK);
+    expect(row).not.toHaveTextContent('2 BR');
+  });
+
+  it('the Requirements card compares with the landlord OF RECORD: tags and the no-requirements note (D6)', () => {
+    // READY's landlord IS the landlord of record (ll1) and has no requirements yet.
+    useListing.mockReturnValue(READY);
+    renderAt();
+    const requirements = cardTitled(/^Requirements/);
+    expect(within(requirements).getByText('James Porter has no requirements recorded yet.')).toBeInTheDocument();
+    const pets = within(requirements).getByRole('group', { name: 'Pets' });
+    expect(within(pets).getByText('Set on this property')).toBeInTheDocument();
+    expect(within(pets).getByText('Landlord: blank')).toBeInTheDocument();
+  });
+
+  it('the Requirements card never compares with a held contact that is not the landlord of record', () => {
+    // A roster claim / restore changed landlordId and the re-read has not landed.
+    useListing.mockReturnValue({
+      ...READY,
+      landlord: { contactId: 'll-previous', type: 'landlord', firstName: 'Old', lastName: 'Owner' } as never,
+    });
+    renderAt();
+    const requirements = cardTitled(/^Requirements/);
+    expect(within(requirements).queryByText(/has no requirements recorded yet/)).toBeNull();
+    expect(within(requirements).queryByText('Set on this property')).toBeNull();
+    expect(within(requirements).queryByText(/^Landlord: /)).toBeNull();
+  });
+
+  it('the Contacts fallback row never names a held contact that is not the landlord of record (OR-22)', async () => {
+    // A restore's re-read with no contacts[] becomes the Contacts card's
+    // roster source, so its one row is synthesized from the unit's landlordId
+    // plus the held landlord contact. Until useListing's re-read lands, that
+    // contact can be the PREVIOUS landlord's: the row stays id-only rather than
+    // put the old name and company on the landlord of record's row.
+    const user = userEvent.setup();
+    restoreUnit.mockReset().mockResolvedValue({ ...READY.unit });
+    getUnit.mockReset().mockResolvedValue({ ...READY.unit });
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+      landlord: {
+        contactId: 'll-previous',
+        type: 'landlord',
+        firstName: 'Old',
+        lastName: 'Owner',
+        company: 'Old Owner Co',
+      } as never,
+      setUnit: vi.fn(),
+    });
+    renderAt();
+    await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
+    // The re-read is now the roster source: the row is the landlord of
+    // record's id, linked, and no borrowed name or company shows anywhere.
+    expect(await screen.findByRole('link', { name: /^ll1\b/ })).toHaveAttribute('href', '/contacts/ll1');
+    expect(screen.queryByText(/Old Owner/)).toBeNull();
+  });
+
+  it('no landlord contact: the Requirements card shows values only', () => {
+    useListing.mockReturnValue({ ...READY, landlord: null });
+    renderAt();
+    const requirements = cardTitled(/^Requirements/);
+    expect(within(requirements).getByRole('group', { name: 'Pets' })).toHaveTextContent('Cats only');
+    expect(within(requirements).queryByText('Set on this property')).toBeNull();
+    expect(within(requirements).queryByText(/^Landlord/)).toBeNull();
+  });
+
+  it('the Requirements card Edit opens the property edit form; a deleted property offers no Edit', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(READY);
+    const { unmount } = render(
+      <MemoryRouter initialEntries={['/listings/u1']}>
+        <Routes>
+          <Route path="/listings/:unitId" element={<ListingDetail />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await user.click(screen.getByRole('button', { name: 'Edit property requirements' }));
+    expect(screen.getByRole('dialog', { name: /Edit property/i })).toBeInTheDocument();
+    unmount();
+
+    useListing.mockReturnValue({ ...READY, unit: { ...READY.unit!, deleted_at: '2026-07-01T00:00:00.000Z' } });
+    renderAt();
+    expect(screen.queryByRole('button', { name: 'Edit property requirements' })).toBeNull();
   });
 
   it('does not render a video link for a non-http(s) (javascript:) URL — XSS guard', () => {

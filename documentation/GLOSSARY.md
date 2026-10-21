@@ -139,6 +139,12 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   waits with Try again (and the API's no-body filter send answers 503
   `audience_rules_unavailable`), while a direct send from a contact's page
   goes ahead with a notice that the labels could not be loaded.
+  **Voucher sizes** (property requirements, 2026-10-20): the voucher-size
+  filter is a LIST of chips (Studio, 1-BR, 2-BR, 3-BR, 4+ BR; stored
+  `bedroomSizes`, values 0..4). A tenant matches ANY chosen size, and 4+ BR
+  means 4 or more, so a 6-bedroom voucher matches it. A property pre-fills
+  one chip per voucher size it takes; a stored legacy `bedroomSize` reads as
+  one chip (`bedroomSizesOfFilter`).
   Design: `docs/superpowers/specs/2026-10-14-matching-blast-rules-design.md`.
 
 - **`utilities` = TENANT-PAID utilities** (2026-07-08). The unit's `utilities`
@@ -169,22 +175,73 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
 - **Unit `notes`** - free-form INTERNAL notes on a property (the
   counterpart of contact `notes`, the Preferences & notes field - not of the
   contact's Staff notes): amenity/quirk facts that are neither utilities nor
-  accessibility, e.g. "In-unit washer/dryer", "No dishwasher". Never on the
+  accessibility, e.g. "No dishwasher" (washer/dryer has its own field,
+  `washer_dryer`, since 2026-10-20; older notes that mention it keep their
+  text). Never on the
   public flyer projections (`unitFields.ts` allowlists exclude it by
   construction).
 
-- **Landlord preferences + expected rent live on the UNIT** (2026-07-10,
-  reversing the 2026-07-02 contact-level-defaults design). Accepted
-  authorities (`accepted_programs` until 2026-08-10 - see **accepted
-  authorities** below), lease terms, pet policy, and expected rent are
-  PER-PROPERTY facts: `accepted_authorities` / `lease_terms` / `pets` /
-  `rent_min`-`rent_max` on `UnitItem`. The landlord CONTACT no longer models
-  them (`accepts_programs` / `lease_terms` / `pet_policy` / `expected_rent`
-  were removed from `ContactItem` and the contact parsers ignore them); its
-  card keeps free-text `notes` only. The onboarding call still CAPTURES the
-  expected rent — it is recorded on the property created from the intake (the
-  New-property form's Rent fields), not on the person. `lease_terms` is
-  internal-only (never on the flyer projections).
+- **Landlord preferences + expected rent live on the UNIT; requirements live
+  on BOTH** (2026-07-10, reversing the 2026-07-02 contact-level-defaults
+  design; amended 2026-10-20 by property requirements, tracker #11/#12).
+  Accepted authorities (`accepted_programs` until 2026-08-10 - see **accepted
+  authorities** below), lease terms and expected rent are PER-PROPERTY facts:
+  `accepted_authorities` / `lease_terms` / `rent_min`-`rent_max` on
+  `UnitItem`, and the landlord CONTACT does not model them
+  (`accepts_programs` / `lease_terms` / `pet_policy` / `expected_rent` were
+  removed from `ContactItem` and the contact parsers ignore them). Pets and
+  the other **requirements** (below) live on the property AND on the
+  landlord: the landlord's `req_` keys are copy-only defaults that reach a
+  property only when staff copy them (the New property form's pre-fill, or
+  Apply to properties). The onboarding call still CAPTURES the expected
+  rent, on the property created from the intake (the New property form's
+  Rent fields), not on the person. `lease_terms` is PUBLIC: the flyer shows
+  it as "Lease terms". `subzone` (Sam's area codes, e.g. E8) is STAFF ONLY:
+  it is on the New and Edit forms and the property page, never on the
+  flyer, whose neighborhood line is `area` alone.
+
+- **requirements (landlord and property)** (property requirements,
+  2026-10-20, tracker #11/#12) - what a landlord asks of a tenant and a
+  tenancy, as EIGHT items in four groups: Screening (Evictions, Credit
+  score, Income requirements, Qualifications), Pets (Pets), Move-in costs
+  (Deposit, Application fee) and Touring (Touring). An ITEM is the unit of
+  copying, comparing and tagging: a checkbox or choice and the free text
+  that details it are ONE item (Evictions, Pets, Deposit and Touring have
+  several fields), so a copy can never leave "No pets" beside contradicting
+  details. A property holds each item under its own keys (`no_pets`,
+  `pets`, `pet_fee`, `deposit_one_month`, ...); a landlord holds the same
+  keys with a `req_` prefix (`req_no_pets`, ...), because bare `pets` and
+  `evictions` on a contact are the TENANT's answers, with AI provenance.
+  Staff labels: "Requirements" on the property page and forms,
+  "Requirements / Qualifications" on the landlord page and form. The
+  registry is `app/src/lib/requirements.ts` (dashboard hand mirror
+  `dashboard/src/routes/listing/requirements.ts`, same test cases). Only
+  the Pets item, the deposit's one month's rent / fixed amount / flexible
+  fields and the application fee reach the public flyer; screening, the
+  deposit notes and touring are staff only, and so are qualifications
+  (Cameron, 2026-10-20). Nothing filters or ranks on them yet (Work Package
+  1's AI ranking reads them); credit and income are notes only.
+
+- **copy only** (property requirements, 2026-10-20) - the rule that a
+  property NEVER reads its landlord's requirements to fill its own: it
+  shows and serves only its own stored values, and nothing on a property
+  changes because its landlord changed until staff press "Apply to
+  properties" and choose what to copy where. Where each value came from is
+  recorded per item in the server-written map `unit.requirement_sources`
+  (`{ <item id>: 'copied' | 'set_here' }`; an item absent from it is "never
+  touched"), and a change of the property's landlord of record clears the
+  map.
+
+- **"Set on this property" / "Landlord updated"** (property requirements,
+  2026-10-20) - the two tags a property's Requirements card puts on an item
+  whose value differs from its landlord's current value. Purple "Set on
+  this property" + "Landlord: <value>" is a deliberate exception (recorded
+  `set_here`, or never touched with a value of its own); orange "Landlord
+  updated" + "Landlord now: <value>" is an out-of-date copy (recorded
+  `copied`, and the landlord changed since). A blank landlord value prints
+  "blank" and counts as differing. An exception is an "own value": Apply
+  starts a property UNCHECKED when an own value is among its changes and
+  names the item, so an exception is overwritten only on purpose.
 
 - **"Relay group"** (RENAMED 2026-08-10, group-texting S1) = the STAFF-FACING
   label for the MASKED relay thread: tenant and landlord talk through a shared
@@ -478,21 +535,26 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   set up. Its partner column is "Available" (`available`). Code: the
   `COMING_SOON_STATUS` constant in `dashboard/src/routes/listings/unitListFacets.ts`.
 
-- **voucher size of a property** (accepted voucher sizes; Cameron, 2026-10-04) -
-  the voucher (bedroom) sizes a property takes: its RECORDED
-  `voucher_size_accepted` when there is one (one number today, a multi-select
-  list with tracker #12), otherwise its bedroom count (`beds`); "Not recorded"
-  only when both are missing. Read ONLY through `acceptedVoucherSizes(unit)` -
-  never re-derived at a call site. The source of truth is in
-  `app/src/lib/unitFields.ts` (the public flyer reads it, 2026-10-12); the
-  dashboard copy in `dashboard/src/routes/listing/listingFormat.ts` is its hand
-  mirror, like `authoritiesOf`, with the same test cases in both suites.
-  Matching's voucher-size pre-fill reads it too (2026-10-12).
-  Distinct from a tenant's `voucherSize` (the voucher the tenant holds) and from
-  the stored field itself, which the property page and the New/Edit forms show
-  and edit as entered: the page's "Voucher size accepted" row stays EMPTY when
-  nothing is recorded (never the bedrooms fallback - Cameron, 2026-10-12), and
-  emptying the field in the edit form removes it.
+- **voucher size of a property** (accepted voucher sizes; Cameron, 2026-10-04;
+  a list since property requirements, 2026-10-20) - the voucher (bedroom)
+  sizes a property takes: its RECORDED `voucher_size_accepted` when there is
+  one (a LIST of integers 0..12, Studio being 0, stored de-duplicated and
+  ascending; an older stored single number still reads as one size),
+  otherwise its bedroom count (`beds`); "Not recorded" only when both are
+  missing. Read ONLY through `acceptedVoucherSizes(unit)` - never re-derived
+  at a call site. The source of truth is in `app/src/lib/unitFields.ts` (the
+  public flyer reads it, 2026-10-12); the dashboard copy in
+  `dashboard/src/routes/listing/listingFormat.ts` is its hand mirror, like
+  `authoritiesOf`, with the same test cases in both suites. The flyer states
+  every size ("Fits a 2- or 3-bedroom voucher"), and Matching pre-fills one
+  voucher chip per size (a size of 4 or more is the "4+ BR" chip).
+  Distinct from a tenant's `voucherSize` (the voucher the tenant holds) and
+  from the stored field itself, which the property page and the New/Edit
+  forms show and edit as entered: the forms use picker B (chips Studio and
+  1-4, "More sizes (5-12)" for the rest, an "Accepts: 2 BR, 3 BR" line under
+  them), and the page's "Voucher sizes accepted" row lists the recorded
+  sizes and stays EMPTY when nothing is recorded (never the bedrooms
+  fallback - Cameron, 2026-10-12); emptying the picker removes the field.
   
 - **Tour auto-close / "No outcome recorded" / Reopen** (tour auto-close,
   2026-10-01, Sam's item 18) - a tour still undecided two weeks after its

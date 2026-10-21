@@ -25,6 +25,7 @@ import {
 } from './publicApi.js';
 import { IntakeForm } from './IntakeForm.js';
 import { safeHttpUrl } from '../../lib/safeUrl.js';
+import { WASHER_DRYER_LABELS } from '../listing/requirements.js';
 import styles from './FlyerPage.module.css';
 
 type Stage =
@@ -51,9 +52,31 @@ function rentRange(flyer: Pick<PublicFlyer, 'rent_min' | 'rent_max'>): string | 
   return null;
 }
 
-function neighborhood(flyer: Pick<PublicFlyer, 'area' | 'subzone'>): string | null {
-  const parts = [flyer.subzone, flyer.area].filter((p): p is string => typeof p === 'string' && p !== '');
-  return parts.length > 0 ? parts.join(', ') : null;
+/** The neighborhood line: the AREA alone (D11). Subzone is a staff-only code
+ *  and is not in the projection (D3). */
+function neighborhood(flyer: Pick<PublicFlyer, 'area'>): string | null {
+  return typeof flyer.area === 'string' && flyer.area.trim() !== '' ? flyer.area : null;
+}
+
+/** D11: the voucher sizes as one phrase - "studio", "2-bedroom", "2- or
+ *  3-bedroom", "studio or 1-bedroom", "1-, 2-, or 3-bedroom". Ascending and
+ *  de-duplicated; every number but the last reads "<n>-", the last
+ *  "<n>-bedroom"; a studio always reads "studio". Null for none. */
+function voucherPhrase(sizes: readonly number[]): string | null {
+  const sorted = [...new Set(sizes.filter((n) => Number.isFinite(n)))].sort((a, b) => a - b);
+  const words = sorted.map((n, i) => (n === 0 ? 'studio' : i === sorted.length - 1 ? `${n}-bedroom` : `${n}-`));
+  if (words.length === 0) return null;
+  if (words.length === 1) return words[0] ?? null;
+  if (words.length === 2) return `${words[0]} or ${words[1]}`;
+  return `${words.slice(0, -1).join(', ')}, or ${words[words.length - 1]}`;
+}
+
+/** Code review R2D-8: the article before the voucher phrase - "an" when it
+ *  starts with 8 or 11 (said "eight", "eleven": "Fits an 8-bedroom voucher",
+ *  "Fits an 11-bedroom voucher", "Fits an 8- or 9-bedroom voucher"), "a"
+ *  for every other start (sizes run 0..12, D4). */
+function voucherArticle(phrase: string): 'a' | 'an' {
+  return /^(?:8|11)(?!\d)/.test(phrase) ? 'an' : 'a';
 }
 
 function addressLines(a: PublicFlyer['address']): string | null {
@@ -107,11 +130,38 @@ function textOrNull(v: string | null): string | null {
   return v === null || v.trim() === '' ? null : v;
 }
 
-function petsLabel(pets: string | boolean | null): string | null {
-  if (pets === true) return 'Allowed';
-  if (pets === false) return 'Not allowed';
-  if (pets === null) return null;
-  return pets.trim() === '' ? null : pets;
+/** D11: "No pets", "No pets (<details>)", or the details alone. A legacy stored
+ *  boolean reaches the page already interpreted (true -> details "Allowed",
+ *  false -> no_pets), so the page reads only the new shape. */
+function petsLabel(flyer: Pick<PublicFlyer, 'no_pets' | 'pets'>): string | null {
+  const details = textOrNull(flyer.pets);
+  if (flyer.no_pets) return details !== null ? `No pets (${details.trim()})` : 'No pets';
+  return details;
+}
+
+/** The deposit and application-fee amounts (planner ruling PR-4, code review
+ *  PA-4): a whole number exactly as before ("$1500"), any other amount with
+ *  two decimals ("$1250.40", "$37.50") - the forms accept cents (D1). */
+function flyerMoney(amount: number): string {
+  return Number.isInteger(amount) ? `$${amount}` : `$${amount.toFixed(2)}`;
+}
+
+/** D11: "One month's rent" or "$N", then ", flexible / payment plan
+ *  available" when flexible; flexible alone reads "Flexible / payment plan
+ *  available". Null when none of the three is recorded (the deposit notes are
+ *  staff only and never projected). */
+function depositLabel(
+  flyer: Pick<PublicFlyer, 'deposit_one_month' | 'deposit' | 'deposit_flexible'>,
+): string | null {
+  const base = flyer.deposit_one_month ? "One month's rent" : flyer.deposit !== null ? flyerMoney(flyer.deposit) : null;
+  if (!flyer.deposit_flexible) return base;
+  return base !== null ? `${base}, flexible / payment plan available` : 'Flexible / payment plan available';
+}
+
+/** D11: "No application fee" for 0, "$N" otherwise; null when not recorded. */
+function applicationFeeLabel(fee: number | null): string | null {
+  if (fee === null) return null;
+  return fee === 0 ? 'No application fee' : flyerMoney(fee);
 }
 
 export function FlyerPage(): React.JSX.Element {
@@ -228,7 +278,12 @@ export function FlyerPage(): React.JSX.Element {
   const hood = neighborhood(flyer);
   const safeVideoUrl = safeHttpUrl(flyer.video_url);
   const safeListingUrl = safeHttpUrl(flyer.listing_link);
-  const pets = petsLabel(flyer.pets);
+  const pets = petsLabel(flyer);
+  const petFee = textOrNull(flyer.pet_fee);
+  const deposit = depositLabel(flyer);
+  const applicationFee = applicationFeeLabel(flyer.application_fee);
+  const washerDryer = flyer.washer_dryer !== null ? WASHER_DRYER_LABELS[flyer.washer_dryer] : null;
+  const voucher = voucherPhrase(flyer.voucher_sizes);
   const address = addressLines(flyer.address);
   const mapUrl = mapsHref(flyer.address);
   const utilities = textOrNull(flyer.utilities);
@@ -262,9 +317,9 @@ export function FlyerPage(): React.JSX.Element {
             <strong>{rent}</strong>/mo
           </li>
         )}
-        {flyer.voucher_size !== null && (
+        {voucher !== null && (
           <li>
-            Fits a <strong>{flyer.voucher_size}-bedroom</strong> voucher
+            Fits {voucherArticle(voucher)} <strong>{voucher}</strong> voucher
           </li>
         )}
       </ul>
@@ -295,16 +350,16 @@ export function FlyerPage(): React.JSX.Element {
             </dd>
           </div>
         )}
-        {flyer.deposit !== null && (
+        {deposit !== null && (
           <div className={styles.detailRow}>
             <dt className={styles.dt}>Deposit</dt>
-            <dd className={styles.dd}>${flyer.deposit}</dd>
+            <dd className={styles.dd}>{deposit}</dd>
           </div>
         )}
-        {flyer.application_fee !== null && (
+        {applicationFee !== null && (
           <div className={styles.detailRow}>
             <dt className={styles.dt}>Application fee</dt>
-            <dd className={styles.dd}>${flyer.application_fee}</dd>
+            <dd className={styles.dd}>{applicationFee}</dd>
           </div>
         )}
         {utilities !== null && (
@@ -313,10 +368,22 @@ export function FlyerPage(): React.JSX.Element {
             <dd className={styles.dd}>{utilities}</dd>
           </div>
         )}
+        {washerDryer !== null && (
+          <div className={styles.detailRow}>
+            <dt className={styles.dt}>Washer / dryer</dt>
+            <dd className={styles.dd}>{washerDryer}</dd>
+          </div>
+        )}
         {pets !== null && (
           <div className={styles.detailRow}>
             <dt className={styles.dt}>Pets</dt>
             <dd className={styles.dd}>{pets}</dd>
+          </div>
+        )}
+        {petFee !== null && (
+          <div className={styles.detailRow}>
+            <dt className={styles.dt}>Pet fee</dt>
+            <dd className={styles.dd}>{petFee}</dd>
           </div>
         )}
         {accessibility !== null && (

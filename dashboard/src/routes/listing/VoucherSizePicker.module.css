@@ -1,0 +1,89 @@
+/* VoucherSizePicker - picker B (spec 2026-10-20 D4): toggle chips Studio..12.
+ * The chip look mirrors AudienceFilters.module.css. Tokens only. */
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.labelRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* Matches the form's field label (ListingEditForm.module.css .label). */
+.label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-text-muted);
+}
+
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.chip {
+  min-width: 2.25rem;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--c-surface-2);
+  color: var(--c-text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+
+.chipOn {
+  background: var(--c-brand);
+  border-color: var(--c-brand);
+  color: var(--c-text-inverse);
+}
+
+.more {
+  padding: var(--sp-1) var(--sp-2);
+  border: 0;
+  background: none;
+  color: var(--c-brand-hover);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.chip:focus-visible,
+.more:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.chip:disabled,
+.more:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.summary {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+.invalid {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-danger);
+}

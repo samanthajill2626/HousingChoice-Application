@@ -1,16 +1,20 @@
-// ListingEditForm — the edit dialog for a property (unit). Mirrors ContactEditForm:
+// ListingEditForm - the edit dialog for a property (unit). Mirrors ContactEditForm:
 // stacked labelled fields in a Modal, DIRTY-TRACKED (only the changed fields are
 // PATCHed; the server SET-merges, so an untouched field is never blanked). On
 // success the parent applies the returned unit in place (no refetch). The field
 // set + types match the backend allowlist (app/src/lib/unitFields.ts).
-import { useRef, useState } from 'react';
-import {
-  updateUnit,
-  TOUR_TYPE_LABELS,
-  type Address,
-  type TourType,
-  type UnitItem,
-} from '../../api/index.js';
+//
+// Spec 2026-10-20 (property requirements) D10: the fields run in the D10 order
+// and EVERY field carries an "On flyer" / "Staff only" tag from the D10a table
+// (PROPERTY_FORM_FIELDS) - outside its <label>, tied by aria-describedby, so
+// each field's accessible name stays its label. A legend under the title
+// explains both tags. The Requirements section is the shared
+// RequirementsFields, read through the D1 interpretation (a legacy boolean
+// `pets` included) and diffed by buildRequirementPatch; the voucher sizes are
+// picker B (D4). A 409 property_changed keeps the form open with what staff
+// typed (D5): the patch carries only changed keys, so saving again is safe.
+import { useId, useRef, useState } from 'react';
+import { ApiError, updateUnit, type Address, type UnitItem } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
@@ -25,7 +29,20 @@ import {
 } from '../orgs/orgCopy.js';
 import { useOrgList } from '../orgs/useOrgList.js';
 import { useTypedOrgText } from '../orgs/useTypedOrgText.js';
+import { FlyerLegend, FlyerTag } from './FlyerTag.js';
 import { authoritiesOf } from './listingFormat.js';
+import {
+  buildRequirementPatch,
+  formFieldVisibility,
+  requirementFormValuesFromUnit,
+  splitVoucherSizes,
+  voucherSizesPatchValue,
+  type RequirementFormValues,
+} from './requirementForm.js';
+import { WASHER_DRYER_LABELS, WASHER_DRYER_VALUES } from './requirements.js';
+import { RequirementsFields } from './RequirementsFields.js';
+import { TaggedCheckbox, TaggedField, TaggedGroupLabel } from './TaggedField.js';
+import { VoucherSizePicker } from './VoucherSizePicker.js';
 import styles from './ListingEditForm.module.css';
 
 export interface ListingEditFormProps {
@@ -33,6 +50,14 @@ export interface ListingEditFormProps {
   onClose: () => void;
   onSaved: (updated: UnitItem) => void;
 }
+
+/** Spec 2026-10-20 D5: the PATCH's 409 after its fenced retries. */
+const PROPERTY_CHANGED = 'This property changed while you were saving. Save again.';
+
+/** Spec 2026-10-20 D1 (planner ruling PR1-1): the 400 deposit_conflict - the
+ *  property would hold one month's rent AND a fixed amount. */
+const DEPOSIT_CONFLICT =
+  "A deposit can be one month's rent or a fixed amount, not both. Reload the property and try again.";
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
@@ -76,34 +101,28 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
   }
   const [beds, setBeds] = useState(numStr(unit.beds));
   const [baths, setBaths] = useState(numStr(unit.baths));
+  // Voucher sizes accepted (D4): the recorded sizes the picker has a chip for;
+  // any other stored value is listed under the chips and dropped by the save.
+  const [storedSizes] = useState(() => splitVoucherSizes(unit.voucher_size_accepted));
+  const [voucherSizes, setVoucherSizes] = useState<number[]>(storedSizes.sizes);
   const [rentMin, setRentMin] = useState(numStr(unit.rent_min));
   const [rentMax, setRentMax] = useState(numStr(unit.rent_max));
   const [paymentStandard, setPaymentStandard] = useState(numStr(unit.payment_standard));
-  const [deposit, setDeposit] = useState(numStr(unit.deposit));
+  const [subzone, setSubzone] = useState(str(unit.subzone));
+  const [washerDryer, setWasherDryer] = useState(str(unit.washer_dryer));
   const [utilities, setUtilities] = useState(str(unit.utilities));
   const [accessibility, setAccessibility] = useState(str(unit.accessibility));
-  const [notes, setNotes] = useState(str(unit.notes));
   const [leaseTerms, setLeaseTerms] = useState(str(unit.lease_terms));
-  const [pets, setPets] = useState(
-    typeof unit.pets === 'string'
-      ? unit.pets
-      : unit.pets === true
-        ? 'Yes'
-        : unit.pets === false
-          ? 'No'
-          : '',
-  );
-  const [tourProcess, setTourProcess] = useState(str(unit.tour_process));
-  const [tourType, setTourType] = useState<string>(str(unit.tour_type));
-  const [applicationProcess, setApplicationProcess] = useState(str(unit.application_process));
   const [listingLink, setListingLink] = useState(str(unit.listing_link));
-  // Public flyer details (public-pages §5): tenants see these on the post-intake
-  // reveal. video URL (text) + application fee (number) + same-day RTA (boolean).
   const [videoUrl, setVideoUrl] = useState(str(unit.video_url));
-  const [applicationFee, setApplicationFee] = useState(numStr(unit.application_fee));
-  // Accepted voucher size (bedroom count the voucher covers) — distinct from beds.
-  const [voucherSize, setVoucherSize] = useState(numStr(unit.voucher_size_accepted));
   const [sameDayRta, setSameDayRta] = useState(unit.same_day_rta === true);
+  // The Requirements section (D1): the baseline is the INTERPRETED value, so a
+  // legacy boolean `pets` shows as No pets / "Allowed" and is never re-sent
+  // untouched; buildRequirementPatch diffs against it.
+  const [initialRequirements] = useState(() => requirementFormValuesFromUnit(unit));
+  const [requirements, setRequirements] = useState<RequirementFormValues>(initialRequirements);
+  const [applicationProcess, setApplicationProcess] = useState(str(unit.application_process));
+  const [notes, setNotes] = useState(str(unit.notes));
 
   // Address parts (a structured object, or a legacy string folded into line1).
   const addrObj: Partial<Address> =
@@ -124,23 +143,27 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  /** Diff a number field: unchanged → skip; cleared → leave untouched (the
-   *  server expects a number, and clearing a number isn't a supported edit) -
-   *  unless `clearable`, where clearing a stored value sends null and the server
-   *  REMOVEs it; else validate finite >= 0. Returns false on a validation failure. */
+  // The tags the authorities picker, the voucher sizes and the address parts
+  // point at (D10).
+  const uid = useId();
+  const authoritiesTagId = `${uid}-authorities-tag`;
+  const voucherTagId = `${uid}-voucher-tag`;
+  const addressTagId = `${uid}-address-tag`;
+
+  /** Diff a number field: unchanged -> skip; cleared -> leave untouched (beds,
+   *  baths, rent and the payment standard are not clearable); else validate
+   *  finite >= 0. Returns false on a validation failure. The requirement
+   *  amounts clear through buildRequirementPatch, the voucher sizes through
+   *  the picker. */
   function addNumber(
     patch: Record<string, unknown>,
     key: keyof UnitItem,
     value: string,
     initial: string,
     label: string,
-    clearable = false,
   ): boolean {
     if (value === initial) return true;
-    if (value.trim() === '') {
-      if (clearable && initial !== '') patch[key as string] = null;
-      return true;
-    }
+    if (value.trim() === '') return true;
     const n = Number(value);
     if (!Number.isFinite(n) || n < 0) {
       setError(`${label} must be a number 0 or greater.`);
@@ -153,31 +176,20 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
   /** `authoritiesNow`: the picker's list as Save settled it (settleTypedAuthority). */
   function buildPatch(authoritiesNow: string[]): Record<string, unknown> | null {
     const patch: Record<string, unknown> = {};
+    if (subzone !== str(unit.subzone)) patch['subzone'] = subzone;
+    // '' for "Not recorded" -> the server REMOVEs it (D3).
+    if (washerDryer !== str(unit.washer_dryer)) patch['washer_dryer'] = washerDryer;
     if (utilities !== str(unit.utilities)) patch['utilities'] = utilities;
-    if (videoUrl !== str(unit.video_url)) patch['video_url'] = videoUrl;
-    // same_day_rta — a boolean toggle; send when it differs from the stored value.
-    if (sameDayRta !== (unit.same_day_rta === true)) patch['same_day_rta'] = sameDayRta;
     if (accessibility !== str(unit.accessibility)) patch['accessibility'] = accessibility;
-    if (notes !== str(unit.notes)) patch['notes'] = notes;
     if (leaseTerms !== str(unit.lease_terms)) patch['lease_terms'] = leaseTerms;
     if (listingLink !== str(unit.listing_link)) patch['listing_link'] = listingLink;
-    if (tourProcess !== str(unit.tour_process)) patch['tour_process'] = tourProcess;
-    // Sends '' on clear -> the backend tour_type FieldKind maps ''->null->REMOVE.
-    if (tourType !== str(unit.tour_type)) patch['tour_type'] = tourType;
+    if (videoUrl !== str(unit.video_url)) patch['video_url'] = videoUrl;
+    // same_day_rta - a boolean toggle; send when it differs from the stored value.
+    if (sameDayRta !== (unit.same_day_rta === true)) patch['same_day_rta'] = sameDayRta;
     if (applicationProcess !== str(unit.application_process)) {
       patch['application_process'] = applicationProcess;
     }
-
-    // Pets — initial reflects the boolean/string normalization above.
-    const initialPets =
-      typeof unit.pets === 'string'
-        ? unit.pets
-        : unit.pets === true
-          ? 'Yes'
-          : unit.pets === false
-            ? 'No'
-            : '';
-    if (pets !== initialPets) patch['pets'] = pets;
+    if (notes !== str(unit.notes)) patch['notes'] = notes;
 
     if (!addNumber(patch, 'beds', beds, numStr(unit.beds), 'Beds')) return null;
     if (!addNumber(patch, 'baths', baths, numStr(unit.baths), 'Baths')) return null;
@@ -186,24 +198,22 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
     if (!addNumber(patch, 'payment_standard', paymentStandard, numStr(unit.payment_standard), 'Payment standard')) {
       return null;
     }
-    if (!addNumber(patch, 'deposit', deposit, numStr(unit.deposit), 'Deposit')) return null;
-    if (!addNumber(patch, 'application_fee', applicationFee, numStr(unit.application_fee), 'Application fee')) {
+
+    // D4: the picker's list, sent when it changed - or when the stored value
+    // held a size the picker has no chip for (dropped now, as the line under
+    // the chips said). Emptied, it sends null: the property falls back to its
+    // bedroom count wherever a voucher size is read.
+    const sizes = voucherSizesPatchValue(unit.voucher_size_accepted, voucherSizes);
+    if (sizes !== undefined) patch['voucher_size_accepted'] = sizes;
+
+    // The eight requirement items (D1): only the changed keys; the save that
+    // checks "One month's rent" also sends the amount as null.
+    const req = buildRequirementPatch(initialRequirements, requirements);
+    if (!req.ok) {
+      setError(req.error);
       return null;
     }
-    // Clearable (2026-10-12): emptying a recorded size removes it, so the
-    // property falls back to its bedroom count wherever a voucher size is read.
-    if (
-      !addNumber(
-        patch,
-        'voucher_size_accepted',
-        voucherSize,
-        numStr(unit.voucher_size_accepted),
-        'Voucher size accepted',
-        true,
-      )
-    ) {
-      return null;
-    }
+    Object.assign(patch, req.patch);
 
     // Housing authorities - the picker's list, sent only when it changed. The
     // baseline is the SYNTHESIZED list, so a legacy `jurisdiction` value that
@@ -255,7 +265,23 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
         setSaving(false);
         return;
       }
-      setError("Couldn't save — please try again.");
+      // Spec 2026-10-20 D5: the property changed under the save (its landlord or
+      // requirement record moved). The form stays open with what staff typed;
+      // the patch holds only the changed keys, so saving again is safe.
+      if (err instanceof ApiError && err.status === 409 && err.code === 'property_changed') {
+        setError(PROPERTY_CHANGED);
+        setSaving(false);
+        return;
+      }
+      // D1: the save would leave one month's rent AND a fixed amount (a
+      // colleague ticked One month's rent after this form opened, and this save
+      // sent an amount). Say so; the form stays open with what staff typed.
+      if (err instanceof ApiError && err.status === 400 && err.code === 'deposit_conflict') {
+        setError(DEPOSIT_CONFLICT);
+        setSaving(false);
+        return;
+      }
+      setError("Couldn't save - please try again.");
       setSaving(false);
     }
   }
@@ -270,16 +296,14 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
             Cancel
           </Button>
           <Button variant="primary" size="sm" type="submit" form="listing-edit-form" disabled={saving}>
-            {saving ? 'Saving…' : 'Save'}
+            {saving ? 'Saving...' : 'Save'}
           </Button>
         </>
       }
     >
       <form id="listing-edit-form" className={styles.form} onSubmit={(e) => void onSubmit(e)}>
-        <p className={styles.hint}>
-          Address, rent, deposit, fees, utilities, pets, accessibility, and lease
-          terms are shown on the public flyer.
-        </p>
+        <FlyerLegend audience="property" />
+
         <div className={styles.row}>
           <OrgPicker
             ref={authoritiesPicker}
@@ -305,63 +329,93 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
             errorAttempt={authorityText.refusalAttempt}
             className={styles.field}
             labelClassName={styles.label}
+            labelAside={
+              <FlyerTag
+                id={authoritiesTagId}
+                visibility={formFieldVisibility('Housing authorities')}
+                audience="property"
+              />
+            }
+            describedBy={authoritiesTagId}
           />
         </div>
 
         <div className={styles.row}>
-          <label className={styles.field}>
-            <span className={styles.label}>Beds</span>
-            <input
-              className={styles.input}
-              type="number"
-              min={0}
-              step={1}
-              value={beds}
-              onChange={(e) => setBeds(e.target.value)}
-            />
-          </label>
-          <label className={styles.field}>
-            <span className={styles.label}>Baths</span>
-            <input
-              className={styles.input}
-              type="number"
-              min={0}
-              step={0.5}
-              value={baths}
-              onChange={(e) => setBaths(e.target.value)}
-            />
-          </label>
+          <TaggedField label="Beds" visibility={formFieldVisibility('Beds')} audience="property">
+            {(control) => (
+              <input
+                {...control}
+                className={styles.input}
+                type="number"
+                min={0}
+                step={1}
+                value={beds}
+                onChange={(e) => setBeds(e.target.value)}
+              />
+            )}
+          </TaggedField>
+          <TaggedField label="Baths" visibility={formFieldVisibility('Baths')} audience="property">
+            {(control) => (
+              <input
+                {...control}
+                className={styles.input}
+                type="number"
+                min={0}
+                step={0.5}
+                value={baths}
+                onChange={(e) => setBaths(e.target.value)}
+              />
+            )}
+          </TaggedField>
         </div>
 
-        <div className={styles.row}>
-          <label className={styles.field}>
-            <span className={styles.label}>Rent min</span>
-            <input
-              className={styles.input}
-              type="number"
-              min={0}
-              step={1}
-              value={rentMin}
-              onChange={(e) => setRentMin(e.target.value)}
+        <VoucherSizePicker
+          value={voucherSizes}
+          invalid={storedSizes.invalid}
+          onChange={setVoucherSizes}
+          labelAside={
+            <FlyerTag
+              id={voucherTagId}
+              visibility={formFieldVisibility('Voucher sizes accepted')}
+              audience="property"
             />
-          </label>
-          <label className={styles.field}>
-            <span className={styles.label}>Rent max</span>
-            <input
-              className={styles.input}
-              type="number"
-              min={0}
-              step={1}
-              value={rentMax}
-              onChange={(e) => setRentMax(e.target.value)}
-            />
-          </label>
-        </div>
+          }
+          describedBy={voucherTagId}
+        />
 
         <div className={styles.row}>
-          <label className={styles.field}>
-            <span className={styles.label}>Payment standard</span>
+          <TaggedField label="Rent min" visibility={formFieldVisibility('Rent min')} audience="property">
+            {(control) => (
+              <input
+                {...control}
+                className={styles.input}
+                type="number"
+                min={0}
+                step={1}
+                value={rentMin}
+                onChange={(e) => setRentMin(e.target.value)}
+              />
+            )}
+          </TaggedField>
+          <TaggedField label="Rent max" visibility={formFieldVisibility('Rent max')} audience="property">
+            {(control) => (
+              <input
+                {...control}
+                className={styles.input}
+                type="number"
+                min={0}
+                step={1}
+                value={rentMax}
+                onChange={(e) => setRentMax(e.target.value)}
+              />
+            )}
+          </TaggedField>
+        </div>
+
+        <TaggedField label="Payment standard" visibility={formFieldVisibility('Payment standard')} audience="property">
+          {(control) => (
             <input
+              {...control}
               className={styles.input}
               type="number"
               min={0}
@@ -369,22 +423,16 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
               value={paymentStandard}
               onChange={(e) => setPaymentStandard(e.target.value)}
             />
-          </label>
-          <label className={styles.field}>
-            <span className={styles.label}>Deposit</span>
-            <input
-              className={styles.input}
-              type="number"
-              min={0}
-              step={1}
-              value={deposit}
-              onChange={(e) => setDeposit(e.target.value)}
-            />
-          </label>
-        </div>
+          )}
+        </TaggedField>
 
         <div className={styles.fieldset}>
-          <span className={styles.label}>Address</span>
+          <TaggedGroupLabel
+            label="Address"
+            visibility={formFieldVisibility('Address')}
+            audience="property"
+            tagId={addressTagId}
+          />
           <label className={styles.field}>
             <span className={styles.srLabel}>Street address</span>
             <input
@@ -393,6 +441,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
               onChange={(e) => setLine1(e.target.value)}
               placeholder="Street address"
               autoComplete="off"
+              aria-describedby={addressTagId}
             />
           </label>
           <label className={styles.field}>
@@ -403,6 +452,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
               onChange={(e) => setLine2(e.target.value)}
               placeholder="Apt, suite, unit (optional)"
               autoComplete="off"
+              aria-describedby={addressTagId}
             />
           </label>
           <div className={styles.row}>
@@ -414,6 +464,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
                 onChange={(e) => setCity(e.target.value)}
                 placeholder="City"
                 autoComplete="off"
+                aria-describedby={addressTagId}
               />
             </label>
             <label className={`${styles.field} ${styles.stateField}`}>
@@ -424,6 +475,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
                 onChange={(e) => setStateField(e.target.value)}
                 placeholder="State"
                 autoComplete="off"
+                aria-describedby={addressTagId}
               />
             </label>
             <label className={`${styles.field} ${styles.zipField}`}>
@@ -434,158 +486,157 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
                 onChange={(e) => setZip(e.target.value)}
                 placeholder="ZIP"
                 autoComplete="off"
+                aria-describedby={addressTagId}
               />
             </label>
           </div>
         </div>
 
-        <label className={styles.field}>
-          <span className={styles.label}>Tenant-paid utilities</span>
-          <input
-            className={styles.input}
-            value={utilities}
-            onChange={(e) => setUtilities(e.target.value)}
-            placeholder="e.g. Electric and gas"
-            autoComplete="off"
-          />
-        </label>
+        <div className={styles.row}>
+          <TaggedField label="Subzone" visibility={formFieldVisibility('Subzone')} audience="property">
+            {(control) => (
+              <input
+                {...control}
+                className={styles.input}
+                value={subzone}
+                onChange={(e) => setSubzone(e.target.value)}
+                placeholder="e.g. E8"
+                autoComplete="off"
+              />
+            )}
+          </TaggedField>
+          <TaggedField label="Washer / dryer" visibility={formFieldVisibility('Washer / dryer')} audience="property">
+            {(control) => (
+              <select
+                {...control}
+                className={styles.input}
+                value={washerDryer}
+                onChange={(e) => setWasherDryer(e.target.value)}
+              >
+                <option value="">Not recorded</option>
+                {WASHER_DRYER_VALUES.map((v) => (
+                  <option key={v} value={v}>
+                    {WASHER_DRYER_LABELS[v]}
+                  </option>
+                ))}
+              </select>
+            )}
+          </TaggedField>
+        </div>
 
-        <label className={styles.field}>
-          <span className={styles.label}>Accessibility</span>
-          <input
-            className={styles.input}
-            value={accessibility}
-            onChange={(e) => setAccessibility(e.target.value)}
-            placeholder="e.g. Ground floor"
-            autoComplete="off"
-          />
-        </label>
+        <TaggedField
+          label="Tenant-paid utilities"
+          visibility={formFieldVisibility('Tenant-paid utilities')}
+          audience="property"
+          publicNote
+        >
+          {(control) => (
+            <input
+              {...control}
+              className={styles.input}
+              value={utilities}
+              onChange={(e) => setUtilities(e.target.value)}
+              placeholder="e.g. Electric and gas"
+              autoComplete="off"
+            />
+          )}
+        </TaggedField>
 
-        <label className={styles.field}>
-          <span className={styles.label}>Notes</span>
-          <textarea
-            className={styles.textarea}
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="e.g. In-unit washer/dryer; no dishwasher"
-            rows={3}
-          />
-        </label>
+        <TaggedField label="Accessibility" visibility={formFieldVisibility('Accessibility')} audience="property" publicNote>
+          {(control) => (
+            <input
+              {...control}
+              className={styles.input}
+              value={accessibility}
+              onChange={(e) => setAccessibility(e.target.value)}
+              placeholder="e.g. Ground floor"
+              autoComplete="off"
+            />
+          )}
+        </TaggedField>
 
-        <label className={styles.field}>
-          <span className={styles.label}>Pets</span>
-          <input
-            className={styles.input}
-            value={pets}
-            onChange={(e) => setPets(e.target.value)}
-            placeholder="e.g. Cats only"
-            autoComplete="off"
-          />
-        </label>
+        <TaggedField label="Lease terms" visibility={formFieldVisibility('Lease terms')} audience="property" publicNote>
+          {(control) => (
+            <input
+              {...control}
+              className={styles.input}
+              value={leaseTerms}
+              onChange={(e) => setLeaseTerms(e.target.value)}
+              placeholder="e.g. 12-month minimum, month-to-month after"
+              autoComplete="off"
+            />
+          )}
+        </TaggedField>
 
-        <label className={styles.field}>
-          <span className={styles.label}>Lease terms</span>
-          <input
-            className={styles.input}
-            value={leaseTerms}
-            onChange={(e) => setLeaseTerms(e.target.value)}
-            placeholder="e.g. 12-month minimum, month-to-month after"
-            autoComplete="off"
-          />
-        </label>
+        <TaggedField
+          label="Public listing link"
+          visibility={formFieldVisibility('Public listing link')}
+          audience="property"
+        >
+          {(control) => (
+            <input
+              {...control}
+              className={styles.input}
+              value={listingLink}
+              onChange={(e) => setListingLink(e.target.value)}
+              placeholder="https://..."
+              autoComplete="off"
+            />
+          )}
+        </TaggedField>
 
-        <label className={styles.field}>
-          <span className={styles.label}>Public listing link</span>
-          <input
-            className={styles.input}
-            value={listingLink}
-            onChange={(e) => setListingLink(e.target.value)}
-            placeholder="https://…"
-            autoComplete="off"
-          />
-        </label>
+        <TaggedField label="Video URL" visibility={formFieldVisibility('Video URL')} audience="property">
+          {(control) => (
+            <input
+              {...control}
+              className={styles.input}
+              value={videoUrl}
+              onChange={(e) => setVideoUrl(e.target.value)}
+              placeholder="https://... (tour video)"
+              autoComplete="off"
+            />
+          )}
+        </TaggedField>
 
-        <label className={styles.field}>
-          <span className={styles.label}>Video URL</span>
-          <input
-            className={styles.input}
-            value={videoUrl}
-            onChange={(e) => setVideoUrl(e.target.value)}
-            placeholder="https://… (tour video)"
-            autoComplete="off"
-          />
-        </label>
+        <TaggedCheckbox
+          label="Same-day RTA"
+          visibility={formFieldVisibility('Same-day RTA')}
+          audience="property"
+          checked={sameDayRta}
+          onChange={setSameDayRta}
+        />
 
-        <label className={styles.field}>
-          <span className={styles.label}>Application fee</span>
-          <input
-            className={styles.input}
-            type="number"
-            min={0}
-            step={1}
-            value={applicationFee}
-            onChange={(e) => setApplicationFee(e.target.value)}
-          />
-        </label>
+        <h3 className={styles.sectionHeading}>Requirements</h3>
+        <RequirementsFields values={requirements} onChange={setRequirements} audience="property" />
 
-        <label className={styles.field}>
-          <span className={styles.label}>Voucher size accepted</span>
-          <input
-            className={styles.input}
-            type="number"
-            min={0}
-            step={1}
-            value={voucherSize}
-            onChange={(e) => setVoucherSize(e.target.value)}
-          />
-        </label>
+        <TaggedField
+          label="Application process"
+          visibility={formFieldVisibility('Application process')}
+          audience="property"
+        >
+          {(control) => (
+            <textarea
+              {...control}
+              className={styles.textarea}
+              value={applicationProcess}
+              onChange={(e) => setApplicationProcess(e.target.value)}
+              rows={2}
+            />
+          )}
+        </TaggedField>
 
-        <label className={`${styles.field} ${styles.checkField}`}>
-          <input
-            className={styles.checkbox}
-            type="checkbox"
-            checked={sameDayRta}
-            onChange={(e) => setSameDayRta(e.target.checked)}
-          />
-          <span className={styles.label}>Same-day RTA</span>
-        </label>
-
-        <label className={styles.field}>
-          <span className={styles.label}>Tour type</span>
-          <select
-            className={styles.input}
-            aria-label="Tour type"
-            value={tourType}
-            onChange={(e) => setTourType(e.target.value)}
-          >
-            <option value="">Not set</option>
-            {(Object.keys(TOUR_TYPE_LABELS) as TourType[]).map((t) => (
-              <option key={t} value={t}>
-                {TOUR_TYPE_LABELS[t]}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className={styles.field}>
-          <span className={styles.label}>Tour process</span>
-          <textarea
-            className={styles.textarea}
-            value={tourProcess}
-            onChange={(e) => setTourProcess(e.target.value)}
-            rows={2}
-          />
-        </label>
-
-        <label className={styles.field}>
-          <span className={styles.label}>Application process</span>
-          <textarea
-            className={styles.textarea}
-            value={applicationProcess}
-            onChange={(e) => setApplicationProcess(e.target.value)}
-            rows={2}
-          />
-        </label>
+        <TaggedField label="Notes" visibility={formFieldVisibility('Notes')} audience="property">
+          {(control) => (
+            <textarea
+              {...control}
+              className={styles.textarea}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="e.g. No dishwasher"
+              rows={3}
+            />
+          )}
+        </TaggedField>
 
         {error !== null ? (
           <p role="alert" className={styles.error}>

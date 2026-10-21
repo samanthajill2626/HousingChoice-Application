@@ -1,0 +1,44 @@
+/* RequirementsFields - the Requirements section's groups (spec 2026-10-20 D1,
+ * D10). Tokens only; the fields use ListingEditForm.module.css. */
+
+.requirements {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+  margin: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+}
+
+.groupHeading {
+  padding: 0 var(--sp-1);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.itemHeading {
+  padding: 0;
+  margin-bottom: var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-muted);
+}

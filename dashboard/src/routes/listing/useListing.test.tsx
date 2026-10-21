@@ -354,6 +354,94 @@ describe('useListing', () => {
   });
 });
 
+// Property requirements D6: the Requirements card compares with the landlord
+// OF RECORD, so the page re-reads the landlord contact whenever the unit's
+// landlordId changes without a reload - a roster claim of the landlord slot or
+// a restore with a landlord both answer through setUnit.
+describe('useListing - the landlord is re-read when the landlordId changes', () => {
+  function answerSlices(): void {
+    getAllUnits.mockResolvedValue(UNITS);
+    getAllPlacements.mockResolvedValue(CASES);
+    getUnitRelated.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitRecipients.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitSimilar.mockRejectedValue(new ApiError(404, 'x', 'x'));
+    getUnitActivity.mockRejectedValue(new ApiError(404, 'x', 'x'));
+  }
+
+  it('an ownerless property that gains a landlord reads that landlord, once', async () => {
+    answerSlices();
+    getUnit.mockResolvedValue({ unitId: 'u1', status: 'available' });
+    getContact.mockImplementation((id: string) =>
+      Promise.resolve({ contactId: id, type: 'landlord', firstName: id } as Contact),
+    );
+    const { result } = renderHook(() => useListing('u1'));
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(getContact).not.toHaveBeenCalled();
+    expect(result.current.landlord).toBeNull();
+
+    act(() => result.current.setUnit({ unitId: 'u1', status: 'available', landlordId: 'll2' }));
+    await waitFor(() => expect(result.current.landlord?.contactId).toBe('ll2'));
+    expect(getContact).toHaveBeenCalledTimes(1);
+    expect(getContact).toHaveBeenCalledWith('ll2', expect.anything());
+
+    // A later write that keeps the same landlord reads nothing new.
+    act(() => result.current.setUnit({ unitId: 'u1', status: 'occupied', landlordId: 'll2' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(getContact).toHaveBeenCalledTimes(1);
+  });
+
+  it('a changed landlord replaces the old one; a failed read leaves none and is not retried; a cleared landlord reads nothing', async () => {
+    answerSlices();
+    getUnit.mockResolvedValue(UNIT); // landlordId ll1
+    getContact.mockImplementation((id: string) =>
+      id === 'll3'
+        ? Promise.reject(new ApiError(500, 'boom', 'x'))
+        : Promise.resolve({ contactId: id, type: 'landlord', firstName: id } as Contact),
+    );
+    const { result } = renderHook(() => useListing('u1'));
+    await waitFor(() => expect(result.current.landlord?.contactId).toBe('ll1'));
+    expect(getContact).toHaveBeenCalledTimes(1);
+
+    act(() => result.current.setUnit({ ...UNIT, landlordId: 'll3' }));
+    await waitFor(() => expect(getContact).toHaveBeenCalledWith('ll3', expect.anything()));
+    await waitFor(() => expect(result.current.landlord).toBeNull());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(getContact).toHaveBeenCalledTimes(2);
+
+    act(() => result.current.setUnit({ unitId: 'u1', status: 'available' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.landlord).toBeNull();
+    expect(getContact).toHaveBeenCalledTimes(2);
+  });
+
+  it('a landlord changed back (A -> B -> A) is read again: the held contact follows the landlord of record', async () => {
+    // Each landed re-read records the landlordId it was read for, so a change
+    // back to the load-time landlord is noticed too (the page never keeps B's
+    // contact for A, which would leave the Requirements card comparing with
+    // nobody until a reload).
+    answerSlices();
+    getUnit.mockResolvedValue(UNIT); // landlordId ll1
+    getContact.mockImplementation((id: string) =>
+      Promise.resolve({ contactId: id, type: 'landlord', firstName: id } as Contact),
+    );
+    const { result } = renderHook(() => useListing('u1'));
+    await waitFor(() => expect(result.current.landlord?.contactId).toBe('ll1'));
+
+    act(() => result.current.setUnit({ ...UNIT, landlordId: 'll2' }));
+    await waitFor(() => expect(result.current.landlord?.contactId).toBe('ll2'));
+
+    act(() => result.current.setUnit({ ...UNIT, landlordId: 'll1' }));
+    await waitFor(() => expect(result.current.landlord?.contactId).toBe('ll1'));
+    expect(getContact.mock.calls.map(([id]) => id)).toEqual(['ll1', 'll2', 'll1']);
+  });
+});
+
 // R2 code review, dashboard finding A1 (fix wave 2 FW2-5): the /listings/:unitId
 // element is not keyed, so a history move from property A to property B
 // re-renders the SAME page and this hook moves to B in place. A write started

@@ -1,0 +1,22 @@
+/* TaggedField - a field label with its flyer tag beside it, outside the
+ * <label> element (spec 2026-10-20 D10). Tokens only. */
+
+.labelRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.checkRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.publicNote {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}

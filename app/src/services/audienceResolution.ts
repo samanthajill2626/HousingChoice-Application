@@ -27,6 +27,13 @@
 // byHousingAuthority GSI and contactsRepo.listByHousingAuthority are KEPT
 // (Cameron 2026-10-14) but no longer read here.
 //
+// VOUCHER SIZES (property-requirements 2026-10-20 D12) are an in-memory
+// any-of filter too. The list comes from bedroomSizesOfFilter (the ONE
+// reader - a legacy one-number row reads as [min(n, 4)]); a tenant matches
+// when its voucherSize is a listed size below 4, or is 4 or more while the 4
+// chip is listed (voucherSizeMatches). While the list is non-empty, a tenant
+// with no voucherSize does not match.
+//
 // SCAN-BOUND ASSUMPTION (Phase-1 volumes, doc section 5.1): the two
 // partitions are the active tenant working set - hundreds to low thousands of
 // small items - so paginating the Query and filtering in memory is fine. The
@@ -36,7 +43,12 @@
 // PII (doc section 9): NEVER log phones/names - counts only. The RESULT
 // carries phones (the send job + the authed preview need them) but the
 // service itself logs only counts.
-import { authoritiesOfFilter, BLAST_TENANT_STATUSES } from '../lib/blastAudienceRules.js';
+import {
+  authoritiesOfFilter,
+  bedroomSizesOfFilter,
+  BLAST_TENANT_STATUSES,
+  voucherSizeMatches,
+} from '../lib/blastAudienceRules.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import {
@@ -145,6 +157,8 @@ export function createAudienceResolutionService(
   return async function resolve(filter) {
     // D2: the any-of list, read through the ONE normalizer (legacy rows too).
     const authorities = new Set(authoritiesOfFilter(filter));
+    // D12: the voucher size list, read through its ONE normalizer.
+    const sizes = bedroomSizesOfFilter(filter);
 
     const resolved: ResolvedContact[] = [];
     // contactIds already resolved - the de-duplication below.
@@ -183,10 +197,9 @@ export function createAudienceResolutionService(
           if (filter.excludeOptedOut !== false && contact.sms_opt_out === true) continue;
           if (filter.excludeUnreachable !== false && contact.sms_unreachable === true) continue;
           if (typeof contact.phone !== 'string' || contact.phone.length === 0) continue;
-          // Bedroom-size filter: exact match on the contact's voucherSize.
-          if (filter.bedroomSize !== undefined && voucherSizeOf(contact) !== filter.bedroomSize) {
-            continue;
-          }
+          // D12: any listed voucher size, the 4 chip meaning 4 or more; an
+          // empty list filters nothing.
+          if (!voucherSizeMatches(sizes, voucherSizeOf(contact))) continue;
           const housingAuthority = housingAuthorityOf(contact);
           // D2: any-of on the trimmed value; an empty list filters nothing,
           // a non-empty one leaves out a missing or non-member authority.
@@ -242,7 +255,7 @@ export function createAudienceResolutionService(
       {
         count: resolved.length,
         authorities: authorities.size,
-        bedroomSizeFilter: filter.bedroomSize ?? null,
+        bedroomSizesFilter: sizes,
         truncated,
       },
       'broadcast audience resolved',

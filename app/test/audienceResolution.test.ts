@@ -5,8 +5,9 @@
 // onboarding) - searching FIRST, under one page bound - and narrows by an
 // any-of housing authority list IN MEMORY; the byHousingAuthority GSI is kept
 // but never read here. Caseworkers (partners) never resolve. The fences that
-// predate it are pinned too: opt-out, unreachable, phone, exact voucher size,
-// the per-candidate consent flag, the page cap.
+// predate it are pinned too: opt-out, unreachable, phone, the per-candidate
+// consent flag, the page cap. property-requirements (spec 2026-10-20) D12:
+// the voucher size LIST, any-of, where the 4 chip means 4 or more.
 //
 // listByType is served by helpers/contactsPartitionFake.ts, which models the
 // GSI as DynamoDB runs it (status partitions, range-key order, the
@@ -322,7 +323,7 @@ describe('audience resolution - D2: the housing authority list, any-of, in memor
     expect(out.contactIds).toEqual(['c-c']);
   });
 
-  it('combines the list with bedroomSize', async () => {
+  it('combines the authority list with the voucher size list (D12)', async () => {
     const sized = [
       tenant({ contactId: 'a2', housingAuthority: 'HA-A', voucherSize: 2 }),
       tenant({ contactId: 'a3', housingAuthority: 'HA-A', voucherSize: 3 }),
@@ -330,8 +331,74 @@ describe('audience resolution - D2: the housing authority list, any-of, in memor
       tenant({ contactId: 'c2', housingAuthority: 'HA-C', voucherSize: 2 }),
     ];
     const resolve = createAudienceResolutionService({ contactsRepo: fakeContacts(sized), logger });
-    const out = await resolve({ ...TENANTS, housing_authorities: ['HA-A', 'HA-B'], bedroomSize: 2 });
+    const out = await resolve({ ...TENANTS, housing_authorities: ['HA-A', 'HA-B'], bedroomSizes: [2] });
     expect(out.contactIds).toEqual(['a2', 'b2']);
+  });
+});
+
+describe('audience resolution - D12: voucher sizes, any-of, the 4 chip is 4 or more', () => {
+  const items = [
+    tenant({ contactId: 'v0', voucherSize: 0 }),
+    tenant({ contactId: 'v1', voucherSize: 1 }),
+    tenant({ contactId: 'v2', voucherSize: 2 }),
+    tenant({ contactId: 'v3', voucherSize: 3 }),
+    tenant({ contactId: 'v4', voucherSize: 4 }),
+    tenant({ contactId: 'v5', voucherSize: 5 }),
+    tenant({ contactId: 'v6', voucherSize: 6 }),
+    tenant({ contactId: 'v12', voucherSize: 12 }),
+    tenant({ contactId: 'v-none' }), // no voucherSize
+  ];
+  const resolveFor = async (filter: AudienceFilter): Promise<string[]> => {
+    const resolve = createAudienceResolutionService({ contactsRepo: fakeContacts(items), logger });
+    return (await resolve(filter)).contactIds.sort();
+  };
+
+  it('a list matches ANY listed size, in memory; a tenant with no voucher size never matches a size filter', async () => {
+    expect(await resolveFor({ ...TENANTS, bedroomSizes: [1, 3] })).toEqual(['v1', 'v3']);
+  });
+
+  it('a studio (0) is a size like any other', async () => {
+    expect(await resolveFor({ ...TENANTS, bedroomSizes: [0] })).toEqual(['v0']);
+  });
+
+  it('the 4 chip is 4 OR MORE: 4 through 12 match, 3 does not', async () => {
+    expect(await resolveFor({ ...TENANTS, bedroomSizes: [4] })).toEqual(['v12', 'v4', 'v5', 'v6']);
+    expect(await resolveFor({ ...TENANTS, bedroomSizes: [2, 4] })).toEqual(['v12', 'v2', 'v4', 'v5', 'v6']);
+  });
+
+  it('an empty list, or none, is no size filter: every size and none resolve', async () => {
+    const everyone = ['v-none', 'v0', 'v1', 'v12', 'v2', 'v3', 'v4', 'v5', 'v6'];
+    expect(await resolveFor({ ...TENANTS, bedroomSizes: [] })).toEqual(everyone);
+    expect(await resolveFor(TENANTS)).toEqual(everyone);
+  });
+
+  it('LEGACY stored bedroomSize below 4 still matches exactly', async () => {
+    expect(await resolveFor({ ...TENANTS, bedroomSize: 2 })).toEqual(['v2']);
+  });
+
+  it('LEGACY stored bedroomSize 4 now reaches every holder of 4 or more (broadcast-4plus-exact-match-underreach)', async () => {
+    expect(await resolveFor({ ...TENANTS, bedroomSize: 4 })).toEqual(['v12', 'v4', 'v5', 'v6']);
+  });
+
+  it('LEGACY stored bedroomSize 5 to 12 (the uncapped pre-fill) reaches every holder of 4 or more (spec section 4)', async () => {
+    expect(await resolveFor({ ...TENANTS, bedroomSize: 6 })).toEqual(['v12', 'v4', 'v5', 'v6']);
+  });
+
+  it('a list wins over a legacy number on the same row', async () => {
+    expect(await resolveFor({ ...TENANTS, bedroomSizes: [3], bedroomSize: 2 })).toEqual(['v3']);
+  });
+
+  it('logs the normalized list as bedroomSizesFilter - never the old bedroomSizeFilter', async () => {
+    const capture = createLogCapture();
+    const resolve = createAudienceResolutionService({
+      contactsRepo: fakeContacts(items),
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+    });
+    await resolve({ ...TENANTS, bedroomSizes: [4, 2] });
+    await resolve({ ...TENANTS, bedroomSize: 7 });
+    const lines = capture.lines.filter((l) => l['msg'] === 'broadcast audience resolved');
+    expect(lines.map((l) => l['bedroomSizesFilter'])).toEqual([[2, 4], [4]]);
+    for (const line of lines) expect(line).not.toHaveProperty('bedroomSizeFilter');
   });
 });
 
@@ -381,18 +448,6 @@ describe('audience resolution - the fences that predate the blast rules', () => 
     const resolve = createAudienceResolutionService({ contactsRepo: fakeContacts(items), logger });
     const out = await resolve(TENANTS);
     expect(out.contactIds).toEqual(['ok']);
-  });
-
-  it('bedroomSize filters on the contact voucherSize (exact match), in memory', async () => {
-    const items = [
-      tenant({ contactId: 'two', voucherSize: 2 }),
-      tenant({ contactId: 'three', voucherSize: 3 }),
-      tenant({ contactId: 'none' }), // no voucherSize
-      tenant({ contactId: 'twoB', voucherSize: 2 }),
-    ];
-    const resolve = createAudienceResolutionService({ contactsRepo: fakeContacts(items), logger });
-    const out = await resolve({ ...TENANTS, bedroomSize: 2 });
-    expect(out.contactIds.sort()).toEqual(['two', 'twoB']);
   });
 
   it('carries firstName + lastName + phone + status through (merge field / the review rows FULL name)', async () => {
@@ -489,7 +544,8 @@ describe('audience resolution - the fences that predate the blast rules', () => 
     });
     await resolve({ ...TENANTS, housing_authorities: ['HA-A', 'HA-B'] });
     const line = capture.lines.find((l) => l['msg'] === 'broadcast audience resolved');
-    expect(line).toMatchObject({ count: 1, authorities: 2, bedroomSizeFilter: null, truncated: false });
+    expect(line).toMatchObject({ count: 1, authorities: 2, bedroomSizesFilter: [], truncated: false });
+    expect(line).not.toHaveProperty('bedroomSizeFilter');
     expect(line).not.toHaveProperty('byHousingAuthority');
     // PII (doc section 9): counts only - no name, no phone.
     const dump = JSON.stringify(capture.lines);

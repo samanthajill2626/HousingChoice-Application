@@ -94,6 +94,13 @@
   border-top: 1px solid var(--c-border);
 }
 
+/* A two-column dialog (Apply to properties, property requirements D8). Only
+ * bites on wide screens: a phone is already full-bleed-minus-padding
+ * (width: 100% inside the padded backdrop). */
+.wideDialog {
+  max-width: 56rem;
+}
+
 .mediaBackdrop {
   z-index: 200;
   padding: var(--sp-6);

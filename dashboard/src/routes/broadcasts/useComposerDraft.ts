@@ -24,6 +24,7 @@ import {
   deleteBroadcast,
   type AudienceFilter,
 } from '../../api/index.js';
+import { bedroomSizesOfFilter } from './broadcastFormat.js';
 
 const DEBOUNCE_MS = 600;
 
@@ -105,7 +106,9 @@ function materialKey(input: ComposerDraftInput): string {
         ? null
         : {
             h: input.filter.housing_authorities ?? null,
-            s: input.filter.bedroomSize ?? null,
+            // property-requirements D12: the size LIST, through the one
+            // reader, so pressing or unpressing any chip makes a new draft.
+            s: bedroomSizesOfFilter(input.filter),
           },
     s: input.seedContactIds?.join(',') ?? null,
   });

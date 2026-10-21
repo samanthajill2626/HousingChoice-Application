@@ -5,6 +5,10 @@ import { describe, expect, it } from 'vitest';
 import type { BroadcastRecipient, BroadcastStats } from '../../api/index.js';
 import {
   audienceSummary,
+  bedroomSizesOfFilter,
+  prefillVoucherChips,
+  VOUCHER_CHIP_MAX,
+  voucherSizesLabel,
   sendReachLabel,
   splitContactKey,
   toRecipientViews,
@@ -21,6 +25,64 @@ describe('voucherSizeLabel', () => {
     expect(voucherSizeLabel(2)).toBe('2-BR');
     expect(voucherSizeLabel(4)).toBe('4+ BR');
     expect(voucherSizeLabel(7)).toBe('4+ BR');
+  });
+});
+
+// property-requirements (spec 2026-10-20) D12: the hand mirror of the app's
+// bedroomSizesOfFilter (app/src/lib/blastAudienceRules.ts). SIZE_CASES is the
+// SAME table as app/test/blastAudienceRules.test.ts; keep the two identical.
+const SIZE_CASES: Array<[string, { bedroomSizes?: unknown; bedroomSize?: unknown } | undefined, number[]]> = [
+  ['no filter', undefined, []],
+  ['a filter naming no size', {}, []],
+  ['a list is de-duplicated and ascending', { bedroomSizes: [3, 2, 2, 0] }, [0, 2, 3]],
+  ['4 and up clamp to the 4 chip, once', { bedroomSizes: [5, 12, 4, 1] }, [1, 4]],
+  [
+    'non-integers, negatives and non-numbers are dropped',
+    { bedroomSizes: [2.5, '3', null, Number.NaN, Number.POSITIVE_INFINITY, -1, 2] },
+    [2],
+  ],
+  ['an empty list is no size filter', { bedroomSizes: [] }, []],
+  ['LEGACY: one number below 4 is a one-member list', { bedroomSize: 2 }, [2]],
+  ['LEGACY: a studio (0) is a size', { bedroomSize: 0 }, [0]],
+  ['LEGACY: 4 or more reads as the 4 chip', { bedroomSize: 7 }, [4]],
+  ['LEGACY: a non-integer is no size', { bedroomSize: 2.5 }, []],
+  ['LEGACY: a negative is no size', { bedroomSize: -1 }, []],
+  ['a present list wins over the legacy number', { bedroomSizes: [1], bedroomSize: 3 }, [1]],
+  ['a present EMPTY list wins too', { bedroomSizes: [], bedroomSize: 3 }, []],
+  ['a list that is not an array is ignored: the legacy number is read', { bedroomSizes: 3, bedroomSize: 2 }, [2]],
+];
+
+describe('bedroomSizesOfFilter - the ONE dashboard reader of a filter voucher sizes (D12 mirror)', () => {
+  it('the top chip is 4, meaning 4 or more', () => {
+    expect(VOUCHER_CHIP_MAX).toBe(4);
+  });
+
+  it.each(SIZE_CASES)('%s', (_name, filter, expected) => {
+    expect(bedroomSizesOfFilter(filter)).toEqual(expected);
+  });
+});
+
+describe('prefillVoucherChips - the chips a property pre-fills (D12)', () => {
+  it('one chip per accepted size, ascending; 4 and up all press the 4+ chip, once', () => {
+    expect(prefillVoucherChips([2, 3])).toEqual([2, 3]);
+    expect(prefillVoucherChips([3, 2])).toEqual([2, 3]);
+    expect(prefillVoucherChips([5])).toEqual([4]);
+    expect(prefillVoucherChips([3, 6, 12])).toEqual([3, 4]);
+    expect(prefillVoucherChips([0])).toEqual([0]);
+    expect(prefillVoucherChips([])).toEqual([]);
+  });
+
+  it('a size no chip can hold (a non-integer, old data) is left out (CI-2)', () => {
+    expect(prefillVoucherChips([2.5, 3])).toEqual([3]);
+    expect(prefillVoucherChips([2.5])).toEqual([]);
+  });
+});
+
+describe('voucherSizesLabel', () => {
+  it('joins the chip labels with ", " (empty for none)', () => {
+    expect(voucherSizesLabel([])).toBe('');
+    expect(voucherSizesLabel([2])).toBe('2-BR');
+    expect(voucherSizesLabel([0, 2, 4])).toBe('Studio, 2-BR, 4+ BR');
   });
 });
 
@@ -49,6 +111,25 @@ describe('audienceSummary', () => {
 
   it('planner review PA-5: a row with NO stored filter (the field absent) reads "Tenants" - never a crash', () => {
     expect(audienceSummary(undefined)).toBe('Tenants');
+  });
+
+  it('D12: lists EVERY voucher size, joined with ", ", before the housing authorities', () => {
+    expect(
+      audienceSummary({ contact_type: 'tenant', bedroomSizes: [2, 3], housing_authorities: ['Atlanta Housing Authority'] }),
+    ).toBe('Tenants - 2-BR, 3-BR - Atlanta Housing Authority');
+    expect(audienceSummary({ contact_type: 'tenant', bedroomSizes: [0, 4] })).toBe('Tenants - Studio, 4+ BR');
+    // An empty list is no size filter.
+    expect(audienceSummary({ contact_type: 'tenant', bedroomSizes: [] })).toBe('Tenants');
+  });
+
+  it('D12: the wire shape (the list plus the compat first size) reads the LIST', () => {
+    expect(audienceSummary({ contact_type: 'tenant', bedroomSizes: [2, 3], bedroomSize: 2 })).toBe(
+      'Tenants - 2-BR, 3-BR',
+    );
+  });
+
+  it('D12: an old-shape row (the legacy one size only) still names its size - 4 or more as 4+ BR', () => {
+    expect(audienceSummary({ contact_type: 'tenant', bedroomSize: 6 })).toBe('Tenants - 4+ BR');
   });
 });
 

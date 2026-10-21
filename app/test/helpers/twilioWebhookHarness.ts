@@ -128,6 +128,7 @@ import {
   RosterReadFailedError,
   RosterWriteConflictError,
   landlordWasPrimary,
+  requirementFenceKeys,
   unitContacts,
   type UnitContact,
   type UnitDisplayItem,
@@ -2436,7 +2437,8 @@ export function createFakeWorld(): FakeWorld {
         throw conditionalCheckFailed(`update: no contact ${contactId}`);
       }
       // Mirror the real repo's optional guards (UpdateContactOptions): every
-      // `expect` clause (string, number or null = absent) and `notDeleted`
+      // `expect` clause (string, number, boolean or null = absent; compared
+      // with ===, as DynamoDB compares type and value) and `notDeleted`
       // (attribute_not_exists(deleted_at)), refused BEFORE any field is
       // applied, as one conditional UpdateItem would.
       if (opts?.notDeleted === true && contact['deleted_at'] !== undefined) {
@@ -2864,6 +2866,53 @@ export function createFakeWorld(): FakeWorld {
     if (scope === 'any') return true;
     return scope === true ? isUnitDeleted(u) : !isUnitDeleted(u);
   };
+  /**
+   * property requirements (spec 2026-10-20 D5 / D8; plan 2.3): the real
+   * repo's fenced write - the unit exists, its landlordId,
+   * requirement_sources and every key of each requirement item the patch
+   * writes (requirementFenceKeys, code review OR-29) equal what the caller
+   * READ (absent on both sides included), and with `requireLive` not deleted
+   * as isUnitDeleted reads it (the real `attribute_not_exists OR = ''`); then
+   * SET / REMOVE (an empty map REMOVEs) and stamp updated_at. The caller must pass
+   * its OWN copy of the read: getById below hands out the live stored object,
+   * which a concurrent write mutates in place.
+   */
+  const ownsKey = (record: object, key: string): boolean =>
+    Object.prototype.hasOwnProperty.call(record, key);
+  const sameAsRead = (stored: UnitItem, read: UnitItem, key: string): boolean =>
+    ownsKey(read, key)
+      ? ownsKey(stored, key) && isDeepStrictEqual(stored[key], read[key])
+      : !ownsKey(stored, key);
+  const fencedRequirementsWrite = (
+    method: string,
+    read: UnitItem,
+    patch: Record<string, unknown>,
+    requireLive: boolean,
+  ): UnitItem => {
+    const unit = units.get(read.unitId);
+    if (
+      !unit ||
+      !sameAsRead(unit, read, 'landlordId') ||
+      !sameAsRead(unit, read, 'requirement_sources') ||
+      !requirementFenceKeys(patch).every((key) => sameAsRead(unit, read, key)) ||
+      (requireLive && isUnitDeleted(unit))
+    ) {
+      throw conditionalCheckFailed(`${method}: unit ${read.unitId} changed since the read`);
+    }
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) continue;
+      const emptySources =
+        key === 'requirement_sources' &&
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value) &&
+        Object.keys(value).length === 0;
+      if (value === null || emptySources) delete unit[key];
+      else unit[key] = structuredClone(value);
+    }
+    unit.updated_at = new Date().toISOString();
+    return unit;
+  };
   const unitsRepo: UnitsRepo = {
     async create(input) {
       const now = new Date().toISOString();
@@ -2911,6 +2960,13 @@ export function createFakeWorld(): FakeWorld {
       }
       unit.updated_at = new Date().toISOString();
       return unit;
+    },
+    // property requirements (plan 2.3): the fenced writes (see fencedRequirementsWrite).
+    async updateIfRequirementsCurrent(read, patch) {
+      return fencedRequirementsWrite('updateIfRequirementsCurrent', read, patch, false);
+    },
+    async applyRequirements(read, patch) {
+      return fencedRequirementsWrite('applyRequirements', read, patch, true);
     },
     // Soft-delete: default excludes deleted; deleted:true shows ONLY deleted.
     async softDelete(unitId, at) {
@@ -3060,7 +3116,13 @@ export function createFakeWorld(): FakeWorld {
         for (const c of roster) c.primaryContact = c.contactId === contact.contactId;
       }
       unit.contacts = roster;
-      if (claimsVacantLandlord) unit.landlordId = contact.contactId;
+      if (claimsVacantLandlord) {
+        unit.landlordId = contact.contactId;
+        // property requirements (spec 2026-10-20 D5): the claim changes the
+        // landlord of record - the real repo REMOVEs requirement_sources in
+        // the same write.
+        delete unit.requirement_sources;
+      }
       const primary = roster.find((c) => c.primaryContact);
       if (primary !== undefined) unit.primary_contact = primary.contactId;
       else delete unit.primary_contact; // null -> REMOVE, exactly as the real repo
@@ -3293,6 +3355,10 @@ export function createFakeWorld(): FakeWorld {
       else if (scalar !== undefined) unit.primary_contact = scalar;
       if (next !== null) unit.landlordId = next.contactId;
       else delete (unit as Partial<UnitItem>).landlordId;
+      // property requirements (spec 2026-10-20 D5): the real repo REMOVEs
+      // requirement_sources when the restore changes the landlord of record
+      // (a swap or a clear) - mirror it.
+      if ((next !== null ? next.contactId : undefined) !== old) delete unit.requirement_sources;
       delete unit.deleted_at;
       unit.updated_at = new Date().toISOString();
       if (heirId !== undefined && old !== undefined) opts?.onPrimaryHandoff?.({ from: old, to: heirId });

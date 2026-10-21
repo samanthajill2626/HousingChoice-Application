@@ -309,8 +309,8 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       beds: 2,
       baths: 1,
       area: 'Westside',
-      subzone: 'Zone 4',
       voucher_size: 2,
+      voucher_sizes: [2],
       // SYNTHESIZED from the fixture's legacy `jurisdiction: 'DCA'` (spec section
       // 8): the flyer now publishes the accepted-authorities list, and on a legacy
       // unit that list IS the old jurisdiction value - deliberate, so the public
@@ -337,9 +337,9 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
         'media',
         'rent_max',
         'rent_min',
-        'subzone',
         'unitId',
         'voucher_size',
+        'voucher_sizes',
         'address',
         'utilities',
         'video_url',
@@ -349,6 +349,12 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
         'accessibility',
         'deposit',
         'lease_terms',
+        // spec 2026-10-20 D11: the added public keys (subzone left, D3)
+        'no_pets',
+        'pet_fee',
+        'deposit_one_month',
+        'deposit_flexible',
+        'washer_dryer',
         'contact_number',
       ].sort(),
     );
@@ -365,6 +371,9 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       'payment_standard',
       'lif',
       'SECRET',
+      // spec 2026-10-20 D3: subzone is staff only - neither the key nor the value ships
+      'subzone',
+      'Zone 4',
     ]) {
       expect(serialized, secret).not.toContain(secret);
     }
@@ -379,6 +388,7 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     const res = await request(app).get('/public/units/unit-1/flyer').set('x-origin-verify', SECRET);
     expect(res.status).toBe(200);
     expect(res.body.flyer.voucher_size).toBe(3);
+    expect(res.body.flyer.voucher_sizes).toEqual([3]);
     expect(res.body.flyer.beds).toBe(2);
     expect(JSON.stringify(res.body)).not.toContain('voucher_size_accepted');
   });

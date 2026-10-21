@@ -63,6 +63,8 @@ const runExtraction = vi.fn();
 const getContactRelayGroups = vi.fn();
 const previewRelayGroup = vi.fn();
 const createRelayGroup = vi.fn();
+// Property requirements D8: the Apply to properties dialog's write.
+const applyLandlordRequirements = vi.fn();
 // The contact fan-out pair. `markInboxRead` used to be an anonymous vi.fn minted
 // inside the mock factory, so no test could assert on it - S7's ordering test
 // needs it hoisted, and `markInboxUnread` is its new sibling.
@@ -142,6 +144,7 @@ vi.mock('../../api/index.js', async () => {
     getContactRelayGroups: (...a: unknown[]) => getContactRelayGroups(...a),
     previewRelayGroup: (...a: unknown[]) => previewRelayGroup(...a),
     createRelayGroup: (...a: unknown[]) => createRelayGroup(...a),
+    applyLandlordRequirements: (...a: unknown[]) => applyLandlordRequirements(...a),
     // The page marks the contact read on view (useMarkContactRead) — stub it so
     // the tests don't fire a real fetch.
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
@@ -3144,5 +3147,317 @@ describe('ContactDetail - the Delete dialog names the primary-contact handoff (p
     const dialog = await openDeleteDialog(TENANT);
     expect(within(dialog).queryByText(HANDOFF)).not.toBeInTheDocument();
     expect(within(dialog).getByText(/Nothing is erased/)).toBeInTheDocument();
+  });
+});
+
+describe('ContactDetail - Apply to properties (property requirements D8)', () => {
+  it('opens from the Requirements card; on done re-reads the properties, takes the last-read landlord and shows the result', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(LANDLORD);
+    applyLandlordRequirements.mockReset().mockResolvedValue({ updated: ['u1'], skipped: [] });
+    renderAt('L1');
+    const apply = await screen.findByRole('button', { name: 'Apply to properties' });
+    // The dialog's re-read finds requirements recorded since the page loaded.
+    getContact.mockResolvedValue({ ...LANDLORD, req_pet_fee: '$300' });
+    const unitReadsBefore = getAllUnits.mock.calls.length;
+
+    await user.click(apply);
+    const dialog = await screen.findByRole('dialog', { name: 'Apply to properties' });
+    expect(getAllUnits).toHaveBeenCalledWith({ landlordId: 'L1' }, expect.anything());
+    // The row reads as the Properties card does ("1450 Joseph Blvd - 2BR").
+    const which = await within(dialog).findByRole('list', { name: 'Which properties' });
+    expect(within(which).getByRole('checkbox', { name: '1450 Joseph Blvd - 2BR' })).toBeChecked();
+    await user.click(within(dialog).getByRole('button', { name: 'Update 1 property' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Apply to properties' })).toBeNull());
+    expect(applyLandlordRequirements).toHaveBeenCalledWith('L1', expect.objectContaining({ items: ['pets'] }));
+    // The page re-read its properties (the existing refetch) on top of the dialog's read ...
+    await waitFor(() => expect(getAllUnits.mock.calls.length).toBeGreaterThan(unitReadsBefore + 1));
+    // ... took the landlord contact the dialog last read ...
+    const card = screen
+      .getByRole('heading', { name: /^Requirements \/ Qualifications/ })
+      .closest('section') as HTMLElement;
+    expect(within(card).getByText('pet fee $300')).toBeInTheDocument();
+    // ... and says what happened.
+    expect(within(card).getByRole('status')).toHaveTextContent('Updated 1 property');
+  });
+
+  it('Cancel before any Update closes the dialog and re-reads nothing', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(LANDLORD);
+    renderAt('L1');
+    await user.click(await screen.findByRole('button', { name: 'Apply to properties' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Apply to properties' });
+    await within(dialog).findByRole('group', { name: 'What to copy' });
+    const unitReads = getAllUnits.mock.calls.length;
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Apply to properties' })).toBeNull());
+    expect(getAllUnits.mock.calls.length).toBe(unitReads);
+    expect(screen.queryByText(/^Updated \d/)).toBeNull();
+  });
+});
+
+// Worklist OR-18: this route RE-RENDERS, not remounts, on a contact change, so
+// the page clears the Apply dialog and its last result whenever the contact
+// changes - Back / Forward (here: a link away and a link back) to the landlord
+// never re-opens the dialog or re-shows an old result.
+describe('ContactDetail - Apply to properties across a contact change (worklist OR-18)', () => {
+  const WITH_REQUIREMENTS: Contact = { ...LANDLORD, req_pet_fee: '$300' };
+  const requirementsCard = (): HTMLElement =>
+    screen.getByRole('heading', { name: /^Requirements \/ Qualifications/ }).closest('section') as HTMLElement;
+
+  function renderWithNav(): void {
+    getContact.mockImplementation((id: unknown) => Promise.resolve(id === 'z99' ? OTHER : WITH_REQUIREMENTS));
+    render(
+      <MemoryRouter initialEntries={['/contacts/L1']}>
+        <ImageViewerProvider>
+          <Routes>
+            <Route
+              path="/contacts/:contactId"
+              element={
+                <>
+                  <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                  <Link to="/contacts/L1">NAV-TO-LANDLORD</Link>
+                  <ContactDetail />
+                </>
+              }
+            />
+          </Routes>
+        </ImageViewerProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  /** Leave the landlord for another contact, then come back to it. */
+  async function leaveAndComeBack(user: { click: (el: Element) => Promise<void> }): Promise<void> {
+    await user.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByText('Bob Other');
+    expect(screen.queryByRole('dialog', { name: 'Apply to properties' })).toBeNull();
+    await user.click(screen.getByText('NAV-TO-LANDLORD'));
+    await screen.findByRole('button', { name: 'Apply to properties' });
+  }
+
+  it('a dialog left open on the landlord does not re-open when the operator comes back', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    applyLandlordRequirements.mockReset();
+    renderWithNav();
+    await user.click(await screen.findByRole('button', { name: 'Apply to properties' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Apply to properties' });
+    await within(dialog).findByRole('group', { name: 'What to copy' });
+
+    await leaveAndComeBack(user);
+    expect(screen.queryByRole('dialog', { name: 'Apply to properties' })).toBeNull();
+    expect(applyLandlordRequirements).not.toHaveBeenCalled();
+  });
+
+  it('a finished Apply result does not show again when the operator comes back', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    applyLandlordRequirements.mockReset().mockResolvedValue({ updated: ['u1'], skipped: [] });
+    renderWithNav();
+    await user.click(await screen.findByRole('button', { name: 'Apply to properties' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Apply to properties' });
+    await user.click(await within(dialog).findByRole('button', { name: 'Update 1 property' }));
+    await waitFor(() => expect(within(requirementsCard()).getByRole('status')).toHaveTextContent('Updated 1 property'));
+
+    await leaveAndComeBack(user);
+    // The card's status region stays mounted (code review RD-7), empty.
+    expect(within(requirementsCard()).getByRole('status')).toBeEmptyDOMElement();
+    expect(screen.queryByText(/^Updated \d/)).toBeNull();
+  });
+});
+
+// Code review RD-4: the same contact-change reset closes every other dialog
+// the page opens for ONE contact. Left open, "New property" re-opened on the
+// next contact's page, locked to it, and read that contact as the landlord to
+// fill in from (another landlord = a property under the wrong owner); the
+// Delete confirmation would have named, and deleted, the next contact.
+describe('ContactDetail - the per-contact dialogs across a contact change (code review RD-4)', () => {
+  type User = { click: (el: Element) => Promise<void> };
+
+  function renderWithNav(): void {
+    getContact.mockImplementation((id: unknown) =>
+      Promise.resolve(id === 'z99' ? OTHER : { ...LANDLORD, req_pet_fee: '$300' }),
+    );
+    // A loaded (empty) Relay groups card, so its "Create a relay group" shows.
+    getContactRelayGroups.mockResolvedValue([]);
+    render(
+      <MemoryRouter initialEntries={['/contacts/L1']}>
+        <ImageViewerProvider>
+          <Routes>
+            <Route
+              path="/contacts/:contactId"
+              element={
+                <>
+                  <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                  <Link to="/contacts/L1">NAV-TO-LANDLORD</Link>
+                  <ContactDetail />
+                </>
+              }
+            />
+          </Routes>
+        </ImageViewerProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  const OPENERS: Array<[string, (user: User) => Promise<void>]> = [
+    [
+      'New property',
+      async (user) => user.click(await screen.findByRole('button', { name: 'Add a property for this landlord' })),
+    ],
+    ['Edit contact', async (user) => user.click(await screen.findByRole('button', { name: 'Edit contact details' }))],
+    ['Manage numbers', async (user) => user.click(await screen.findByRole('button', { name: 'Manage phone numbers' }))],
+    // Mutant follow-up (FW1b M7): seeded with the landlord as a LOCKED member.
+    [
+      'Create a relay group',
+      async (user) => user.click(await screen.findByRole('button', { name: 'Create a relay group' })),
+    ],
+    [
+      'Delete contact?',
+      async (user) => {
+        await user.click(await screen.findByRole('button', { name: /More actions/i }));
+        await user.click(screen.getByRole('menuitem', { name: /Delete contact/i }));
+      },
+    ],
+  ];
+
+  it.each(OPENERS)(
+    'a "%s" dialog left open on the landlord closes on the contact change and does not re-open on coming back',
+    async (title, open) => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      renderWithNav();
+      await open(user);
+      await screen.findByRole('dialog', { name: title });
+
+      await user.click(screen.getByText('NAV-TO-OTHER'));
+      // The other contact's page has loaded (its name can also sit in a
+      // re-opened dialog, so any match will do).
+      await screen.findAllByText('Bob Other');
+      expect(screen.queryByRole('dialog', { name: title })).toBeNull();
+
+      await user.click(screen.getByText('NAV-TO-LANDLORD'));
+      await screen.findByRole('button', { name: 'Apply to properties' });
+      expect(screen.queryByRole('dialog', { name: title })).toBeNull();
+      expect(deleteContact).not.toHaveBeenCalled();
+    },
+  );
+
+  // Mutant follow-up (FW1b M6): a failed Delete leaves its error in the
+  // still-open dialog; the contact change must clear it too, or the next
+  // contact's Delete dialog opens showing the landlord's failure.
+  it("a failed Delete's error on the landlord never shows in the next contact's Delete dialog", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    deleteContact.mockRejectedValueOnce(new ApiError(500, 'boom', 'x'));
+    renderWithNav();
+    const openDelete = async (): Promise<HTMLElement> => {
+      await user.click(await screen.findByRole('button', { name: /More actions/i }));
+      await user.click(screen.getByRole('menuitem', { name: /Delete contact/i }));
+      return screen.findByRole('dialog', { name: 'Delete contact?' });
+    };
+    const dialog = await openDelete();
+    await user.click(within(dialog).getByRole('button', { name: /^Delete$/ }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/Couldn.t delete/);
+
+    await user.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findAllByText('Bob Other');
+    const other = await openDelete();
+    expect(within(other).getByText('Bob Other')).toBeInTheDocument();
+    expect(within(other).queryByRole('alert')).toBeNull();
+  });
+});
+
+// Code review R2D-9: the three tenant-page flags of the RD-4 reset that no
+// case pinned - Start placement, Schedule a tour, and the tour's property
+// override (an Interested row's property). Left set, "New placement" and
+// "Schedule a tour" re-opened on the next tenant's page bound to that tenant,
+// and the override pre-committed one tenant's clicked property as another
+// tenant's tour.
+describe('ContactDetail - the tenant-page dialogs across a contact change (code review R2D-9)', () => {
+  type User = { click: (el: Element) => Promise<void> };
+  const SENT_UNITS: UnitItem[] = [
+    { unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' },
+    { unitId: 'u2', landlordId: 'L1', status: 'available', beds: 1, address: '88 Sycamore St' },
+  ];
+
+  function renderWithNav(): void {
+    getContact.mockImplementation((id: unknown) => Promise.resolve(id === 'z99' ? OTHER : TENANT));
+    render(
+      <MemoryRouter initialEntries={['/contacts/k1']}>
+        <ImageViewerProvider>
+          <Routes>
+            <Route
+              path="/contacts/:contactId"
+              element={
+                <>
+                  <Link to="/contacts/z99">NAV-TO-OTHER</Link>
+                  <Link to="/contacts/k1">NAV-TO-TENANT</Link>
+                  <ContactDetail />
+                </>
+              }
+            />
+          </Routes>
+        </ImageViewerProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  const OPENERS: Array<[string, (user: User) => Promise<void>]> = [
+    ['New placement', async (user) => user.click(await screen.findByRole('button', { name: 'Start a placement' }))],
+    ['Schedule a tour', async (user) => user.click(await screen.findByRole('button', { name: 'Schedule a tour' }))],
+  ];
+
+  it.each(OPENERS)(
+    'a "%s" dialog left open on one tenant closes on the contact change and does not re-open on coming back',
+    async (title, open) => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      renderWithNav();
+      await screen.findByText('Tasha Williams');
+      await open(user);
+      await screen.findByRole('dialog', { name: title });
+
+      await user.click(screen.getByText('NAV-TO-OTHER'));
+      // The other tenant's page has loaded (its name can also sit in a
+      // re-opened dialog, so any match will do).
+      await screen.findAllByText('Bob Other');
+      expect(screen.queryByRole('dialog', { name: title })).toBeNull();
+
+      await user.click(screen.getByText('NAV-TO-TENANT'));
+      await screen.findAllByText('Tasha Williams');
+      expect(screen.queryByRole('dialog', { name: title })).toBeNull();
+    },
+  );
+
+  it("an Interested row's property on one tenant never pre-commits the next tenant's tour", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getAllUnits.mockResolvedValue(SENT_UNITS);
+    getContactListingsSent.mockImplementation((id: unknown) =>
+      Promise.resolve(
+        id === 'z99'
+          ? [{ contactId: 'z99', unitId: 'u2', sentAt: '2026-07-13T15:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true }]
+          : [{ contactId: 'k1', unitId: 'u1', sentAt: '2026-07-01T15:00:00.000Z', via: 'broadcast', outcome: 'no_reply', interestedSupported: true }],
+      ),
+    );
+    renderWithNav();
+    // k1's Interested on 1450 Joseph Blvd opens the tour form on THAT property.
+    await user.click(await screen.findByRole('button', { name: 'Mark Tasha Williams interested in 1450 Joseph Blvd' }));
+    const first = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    await waitFor(() => expect(within(first).getByRole('combobox', { name: 'Unit' })).toHaveValue('1450 Joseph Blvd'));
+
+    // Move to tenant z99 (its Properties sent has loaded) and schedule a tour there.
+    await user.click(screen.getByText('NAV-TO-OTHER'));
+    await screen.findByRole('button', { name: 'Mark Bob Other interested in 88 Sycamore St' });
+    expect(screen.queryByRole('dialog', { name: 'Schedule a tour' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Schedule a tour' }));
+    const next = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    // z99's own latest send - never k1's clicked property.
+    await waitFor(() => expect(within(next).getByRole('combobox', { name: 'Unit' })).toHaveValue('88 Sycamore St'));
   });
 });

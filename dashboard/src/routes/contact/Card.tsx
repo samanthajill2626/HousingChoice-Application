@@ -35,11 +35,17 @@ export function CardAction({
   children,
   onClick,
   label,
+  disabled,
+  describedBy,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   /** Accessible label when the text alone is ambiguous (e.g. "Edit"). */
   label?: string;
+  /** Disabled with a reason: render the reason in the card and pass its id
+   *  as `describedBy` (property requirements D8, Apply to properties). */
+  disabled?: boolean;
+  describedBy?: string;
 }): React.JSX.Element {
   return (
     <button
@@ -47,6 +53,8 @@ export function CardAction({
       className={styles.asideBtn}
       onClick={onClick}
       {...(label !== undefined && { 'aria-label': label })}
+      {...(disabled === true && { disabled: true })}
+      {...(describedBy !== undefined && { 'aria-describedby': describedBy })}
     >
       {children}
     </button>

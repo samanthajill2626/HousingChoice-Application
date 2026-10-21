@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useRef, useState } from 'react';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { vi } from 'vitest';
 import { Modal } from './Modal.js';
+import styles from './Modal.module.css';
 
 function EffectFocusedInput(): React.JSX.Element {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -20,6 +21,21 @@ describe('Modal focus lifecycle', () => {
     const dialog = screen.getByRole('dialog', { name: 'Example' });
     expect(dialog.parentElement).toHaveAttribute('data-modal-variant', 'default');
     expect(within(dialog).getByRole('button', { name: 'Close' })).toHaveTextContent('\u2715');
+  });
+
+  it('a wide dialog marks its variant and width and keeps the default behavior (property requirements D8)', () => {
+    const onClose = vi.fn();
+    render(
+      <Modal title="Wide" variant="wide" onClose={onClose}>
+        <p>Body</p>
+      </Modal>,
+    );
+    const dialog = screen.getByRole('dialog', { name: 'Wide' });
+    expect(dialog.parentElement).toHaveAttribute('data-modal-variant', 'wide');
+    expect(dialog).toHaveClass(styles.wideDialog!);
+    expect(dialog).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('focuses the dialog on mount when no child already owns focus', () => {

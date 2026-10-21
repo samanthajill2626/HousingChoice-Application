@@ -70,6 +70,8 @@ import { PhoneManager } from './PhoneManager.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
+import { ApplyRequirementsDialog } from './ApplyRequirementsDialog.js';
+import type { ApplyDoneSummary } from './applyRequirementsModel.js';
 import { NewOrgDialog } from '../orgs/NewOrgDialog.js';
 import { orgErrorCopy } from '../orgs/orgCopy.js';
 import { typeChangeRefusalsFrom } from '../../lib/holdingRefusals.js';
@@ -85,7 +87,7 @@ import { SUGGESTION_TARGET_LABEL, suggestionFor } from './suggestionTargets.js';
 import { useContactTimeline } from './useContactTimeline.js';
 import { useContactFile } from './useContactFile.js';
 import { useMarkContactRead } from './useMarkContactRead.js';
-import { contactDisplayName } from './format.js';
+import { contactHeaderName } from './format.js';
 import { contactPhones, defaultPhone } from './contactPhones.js';
 import { landlordUnits } from './buildContactFile.js';
 import {
@@ -210,6 +212,13 @@ export function ContactDetail(): React.JSX.Element {
   const [tourUnitOverride, setTourUnitOverride] = useState<string | undefined>(undefined);
   // The "New property" dialog, pre-filled+locked to this (landlord) contact.
   const [addingProperty, setAddingProperty] = useState(false);
+  // Property requirements D8: "Apply to properties", bound to the contact it
+  // opened for (this route re-renders, not remounts, on a contact change - a
+  // dialog opened on landlord A must never post for landlord B), and its last
+  // result, shown on that landlord's Requirements / Qualifications card until
+  // the next Apply opens.
+  const [applyingFor, setApplyingFor] = useState<string | null>(null);
+  const [applyDone, setApplyDone] = useState<{ contactId: string; summary: ApplyDoneSummary } | null>(null);
   // The "Create a relay group" dialog, seeded with this contact as a locked
   // member (tenant + landlord files; the other kinds have no relay card).
   const [creatingRelayGroup, setCreatingRelayGroup] = useState(false);
@@ -341,6 +350,25 @@ export function ContactDetail(): React.JSX.Element {
     setUnreadAction('idle');
     setUnreadError(null);
     unreadGenerationRef.current += 1;
+    // Property requirements D8 (worklist OR-18): contact A's Apply to
+    // properties dialog and its last result belong to that visit. Cleared on
+    // every contact change, so Back / Forward to A never re-opens the dialog
+    // (and re-reads without a click) or re-shows an old "Updated N" result.
+    setApplyingFor(null);
+    setApplyDone(null);
+    // Code review RD-4, the same rule for every other dialog opened for ONE
+    // contact: left open, it re-mounted on contact B's page, bound to B -
+    // "New property" locked to B (and read B as the landlord to fill in
+    // from), the edit form editing B, the Delete confirmation deleting B.
+    setEditing(false);
+    setManagingPhones(false);
+    setCreatingRelayGroup(false);
+    setStartingPlacement(false);
+    setSchedulingTour(false);
+    setTourUnitOverride(undefined);
+    setAddingProperty(false);
+    setConfirmingDelete(false);
+    setDeleteError(null);
   }, [contactId]);
   // The current navigator's voice self-view — gates the masked-call control on
   // "has a verified cell" (the CallMenu prompts them to set one otherwise).
@@ -631,7 +659,10 @@ export function ContactDetail(): React.JSX.Element {
           : { label: kindLabel, cls: styles.pillTenant };
   const phones = contactPhones(contact);
   const target = defaultPhone(phones);
-  const name = contactDisplayName(contact.firstName, contact.lastName, target?.phone);
+  // The ONE expression the landlord name rule shares (landlordDisplayName,
+  // worklist OR-33): the property card and the New property form name a
+  // landlord exactly as this header does.
+  const name = contactHeaderName(contact);
 
   // firstName/lastName can be WRITTEN or SUGGESTED for a tenant OR unknown contact
   // (apply.ts), but the name lives in the header - not a file-pane row - so its
@@ -1199,6 +1230,13 @@ export function ContactDetail(): React.JSX.Element {
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
                 onAddProperty={() => setAddingProperty(true)}
+                onApplyRequirements={() => {
+                  setApplyDone(null);
+                  setApplyingFor(contact.contactId);
+                }}
+                requirementsNotice={
+                  applyDone !== null && applyDone.contactId === contact.contactId ? applyDone.summary : null
+                }
                 {...relayCreateAction}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
@@ -1416,6 +1454,26 @@ export function ContactDetail(): React.JSX.Element {
           onCreated={(u) => {
             setAddingProperty(false);
             void navigate('/listings/' + u.unitId);
+          }}
+        />
+      ) : null}
+
+      {/* D8: Apply to properties. Every landlord read the dialog makes is
+          the page's contact too (setContact is bound to this contactId), so
+          the Requirements card matches what was applied; done or a close
+          after an Update re-reads the properties (the existing refetch). */}
+      {applyingFor !== null && applyingFor === contact.contactId ? (
+        <ApplyRequirementsDialog
+          contactId={contact.contactId}
+          onLandlordRead={setContact}
+          onClose={(wrote) => {
+            setApplyingFor(null);
+            if (wrote) file.refetch();
+          }}
+          onDone={(summary) => {
+            setApplyingFor(null);
+            setApplyDone({ contactId: contact.contactId, summary });
+            file.refetch();
           }}
         />
       ) : null}

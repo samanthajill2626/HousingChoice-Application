@@ -1224,6 +1224,8 @@ function buildBroadcasts(): Record<string, unknown>[] {
       // LEGACY shape on purpose (matching-blast-rules D2): a share sent before
       // 2026-10-14 stored ONE housing_authority string, and every server reader
       // goes through authoritiesOfFilter. Kept so the full world exercises it.
+      // Likewise its ONE bedroomSize (property-requirements D12): every reader
+      // goes through bedroomSizesOfFilter, which reads it as [min(n, 4)].
       audience_filter: {
         contact_type: 'tenant',
         housing_authority: SEED_AUTHORITY.atlanta,
@@ -1264,7 +1266,9 @@ function buildBroadcasts(): Record<string, unknown>[] {
       audience_filter: {
         contact_type: 'tenant',
         housing_authorities: [SEED_AUTHORITY.dca, SEED_AUTHORITY.dekalb],
-        bedroomSize: 2,
+        // property-requirements D12: a draft saved since 2026-10-20 stores the
+        // voucher size LIST.
+        bedroomSizes: [2],
         excludeOptedOut: true,
         excludeUnreachable: false,
       },

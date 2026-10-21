@@ -2257,7 +2257,7 @@ describe('share-broadcast API (M1.8a)', () => {
         excludeOptedOut: true,
         excludeUnreachable: true,
       };
-      expect(res.body.audience_filter).toEqual(wire);
+      expect(res.body.audience_filter).toEqual({ ...wire, bedroomSizes: [] });
       expect(res.body.audience_filter).not.toHaveProperty('housing_authority');
       const stored = world.broadcasts.get(res.body.broadcastId)?.audience_filter;
       expect(stored).toEqual(wire);
@@ -2462,7 +2462,7 @@ describe('share-broadcast API (M1.8a)', () => {
         excludeOptedOut: true,
         excludeUnreachable: true,
       };
-      expect(res.body.audience_filter).toEqual(wire);
+      expect(res.body.audience_filter).toEqual({ ...wire, bedroomSizes: [] });
       const stored = world.broadcasts.get(res.body.broadcastId)?.audience_filter;
       expect(stored).toEqual(wire);
       expect(stored).not.toHaveProperty('housing_authority');
@@ -2476,6 +2476,7 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(res.body.audience_filter).toEqual({
         contact_type: 'tenant',
         housing_authorities: ['Atlanta Housing Authority'],
+        bedroomSizes: [],
         excludeOptedOut: true,
         excludeUnreachable: true,
       });
@@ -2563,7 +2564,7 @@ describe('share-broadcast API (M1.8a)', () => {
       for (const housing_authorities of [[], ['  ', '']]) {
         const res = await postFilter(app, { contact_type: 'tenant', housing_authorities });
         expect(res.status).toBe(201);
-        expect(res.body.audience_filter).toEqual({ contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true });
+        expect(res.body.audience_filter).toEqual({ contact_type: 'tenant', bedroomSizes: [], excludeOptedOut: true, excludeUnreachable: true });
         expect(world.broadcasts.get(res.body.broadcastId)?.audience_filter).not.toHaveProperty('housing_authorities');
       }
       expect(read).not.toHaveBeenCalled();
@@ -2765,6 +2766,7 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(res.body.audience_filter).toEqual({
         contact_type: 'tenant',
         housing_authorities: ['Atlanta Housing Authority'],
+        bedroomSizes: [2],
         bedroomSize: 2,
         excludeOptedOut: true,
         excludeUnreachable: true,
@@ -2790,6 +2792,7 @@ describe('share-broadcast API (M1.8a)', () => {
       );
       expect(byId['bcast-row-legacy']).toEqual({
         contact_type: 'tenant',
+        bedroomSizes: [],
         housing_authorities: ['Atlanta Housing Authority'],
         excludeOptedOut: true,
         excludeUnreachable: true,
@@ -2797,11 +2800,12 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(byId['bcast-row-legacy']).not.toHaveProperty('housing_authority');
       expect(byId['bcast-row-list']).toEqual({
         contact_type: 'tenant',
+        bedroomSizes: [],
         housing_authorities: ['DeKalb County Housing Authority'],
         excludeOptedOut: true,
         excludeUnreachable: true,
       });
-      expect(byId['bcast-row-none']).toEqual({ contact_type: 'tenant', excludeOptedOut: true, excludeUnreachable: true });
+      expect(byId['bcast-row-none']).toEqual({ contact_type: 'tenant', bedroomSizes: [], excludeOptedOut: true, excludeUnreachable: true });
       expect(byId['bcast-row-none']).not.toHaveProperty('housing_authorities');
     });
 
@@ -2826,6 +2830,7 @@ describe('share-broadcast API (M1.8a)', () => {
       // The other rows keep their wire filter.
       expect(rows.find((b) => b.broadcastId === 'bcast-row-list')?.audience_filter).toEqual({
         contact_type: 'tenant',
+        bedroomSizes: [],
         housing_authorities: ['DeKalb County Housing Authority'],
         excludeOptedOut: true,
         excludeUnreachable: true,
@@ -2837,6 +2842,236 @@ describe('share-broadcast API (M1.8a)', () => {
       expect(results.status).toBe(200);
       expect(results.body.broadcastId).toBe('bcast-row-unfiltered');
       expect(results.body).not.toHaveProperty('audience_filter');
+    });
+  });
+
+  // --- property-requirements D12: the voucher size LIST. POST accepts
+  // bedroomSizes (it wins) or the legacy bedroomSize and stores bedroomSizes,
+  // normalized (each min(n, 4), de-duplicated, ascending; omitted when
+  // empty). The estimate, preview and no-body send read a stored row of
+  // either shape through bedroomSizesOfFilter, the 4 chip reaching every
+  // holder of 4 or more, and the row is never rewritten. Every projection
+  // answers bedroomSizes and, when there is a size, the compat bedroomSize. --
+  describe('property-requirements D12: voucher sizes at create, preview, send and the projections', () => {
+    function postFilter(app: import('express').Express, audience_filter: Record<string, unknown>) {
+      return request(app)
+        .post('/api/broadcasts')
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ unitId: 'unit-1', body_template: 'hi', audience_filter });
+    }
+
+    function act(app: import('express').Express, broadcastId: string, verb: 'preview' | 'send') {
+      return request(app)
+        .post(`/api/broadcasts/${broadcastId}/${verb}`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({});
+    }
+
+    function authedGet(app: import('express').Express, path: string) {
+      return request(app).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE);
+    }
+
+    /** A stored filter with no housing authority, carrying either size shape. */
+    const storedFilter = (
+      sizes: Pick<BroadcastItem['audience_filter'], 'bedroomSizes' | 'bedroomSize'>,
+    ): BroadcastItem['audience_filter'] => ({
+      contact_type: 'tenant',
+      ...sizes,
+      excludeOptedOut: true,
+      excludeUnreachable: true,
+    });
+
+    /** A searching tenant with recorded consent (seedTenant's defaults) and, when given, a voucher size. */
+    function sized(contactId: string, voucherSize?: number): void {
+      seedTenant(world, { contactId, ...(voucherSize !== undefined && { voucherSize }) } as Partial<ContactItem>);
+    }
+
+    const ids = (candidates: Array<{ contactId: string }>): string[] => candidates.map((c) => c.contactId).sort();
+
+    it('POST stores bedroomSizes normalized - clamped to the 4 chip, de-duplicated, ascending - and the 201 echoes it with the compat bedroomSize', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postFilter(app, { contact_type: 'tenant', bedroomSizes: [3, 6, 2, 3, 5] });
+      expect(res.status).toBe(201);
+      const stored = world.broadcasts.get(res.body.broadcastId)?.audience_filter;
+      expect(stored).toEqual(storedFilter({ bedroomSizes: [2, 3, 4] }));
+      expect(stored).not.toHaveProperty('bedroomSize');
+      expect(res.body.audience_filter).toEqual({ ...storedFilter({ bedroomSizes: [2, 3, 4] }), bedroomSize: 2 });
+    });
+
+    it('LEGACY body: bedroomSize n is stored as bedroomSizes [min(n, 4)], never as bedroomSize', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const cases: Array<[number, number[]]> = [
+        [2, [2]],
+        [0, [0]],
+        [7, [4]],
+      ];
+      for (const [given, expected] of cases) {
+        const res = await postFilter(app, { contact_type: 'tenant', bedroomSize: given });
+        expect(res.status).toBe(201);
+        const stored = world.broadcasts.get(res.body.broadcastId)?.audience_filter;
+        expect(stored).toEqual(storedFilter({ bedroomSizes: expected }));
+        expect(stored).not.toHaveProperty('bedroomSize');
+        expect(res.body.audience_filter).toMatchObject({ bedroomSizes: expected, bedroomSize: expected[0] });
+      }
+    });
+
+    it('both keys: bedroomSizes wins - the legacy number is not read, and a present empty list is no size filter', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const listed = await postFilter(app, { contact_type: 'tenant', bedroomSizes: [3], bedroomSize: 'not a size' });
+      expect(listed.status).toBe(201);
+      expect(world.broadcasts.get(listed.body.broadcastId)?.audience_filter).toEqual(storedFilter({ bedroomSizes: [3] }));
+      const emptied = await postFilter(app, { contact_type: 'tenant', bedroomSizes: [], bedroomSize: 2 });
+      expect(emptied.status).toBe(201);
+      expect(world.broadcasts.get(emptied.body.broadcastId)?.audience_filter).toEqual(storedFilter({}));
+      expect(emptied.body.audience_filter).toEqual({ ...storedFilter({}), bedroomSizes: [] });
+      expect(emptied.body.audience_filter).not.toHaveProperty('bedroomSize');
+    });
+
+    it('a null list reads as absent, so a legacy number beside it is read', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const res = await postFilter(app, { contact_type: 'tenant', bedroomSizes: null, bedroomSize: 3 });
+      expect(res.status).toBe(201);
+      expect(world.broadcasts.get(res.body.broadcastId)?.audience_filter).toEqual(storedFilter({ bedroomSizes: [3] }));
+    });
+
+    it('no size, or an empty list, is no size filter: no key stored, the wire answers bedroomSizes []', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const bodies: Array<Record<string, unknown>> = [{}, { bedroomSizes: [] }];
+      for (const sizes of bodies) {
+        const res = await postFilter(app, { contact_type: 'tenant', ...sizes });
+        expect(res.status).toBe(201);
+        const stored = world.broadcasts.get(res.body.broadcastId)?.audience_filter;
+        expect(stored).not.toHaveProperty('bedroomSizes');
+        expect(stored).not.toHaveProperty('bedroomSize');
+        expect(res.body.audience_filter).toEqual({ ...storedFilter({}), bedroomSizes: [] });
+        expect(res.body.audience_filter).not.toHaveProperty('bedroomSize');
+      }
+    });
+
+    it('a list that is not an array of integers 0..12 is a 400, and nothing is stored', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const bad: unknown[] = [3, '2', { 0: 2 }, [2.5], [13], [-1], ['2'], [null], [2, 'x']];
+      for (const bedroomSizes of bad) {
+        const res = await postFilter(app, { contact_type: 'tenant', bedroomSizes });
+        expect(res.status).toBe(400);
+        expect(res.body).toEqual({ error: 'audience_filter.bedroomSizes must be an array of integers 0..12' });
+      }
+      expect(world.broadcasts.size).toBe(0);
+    });
+
+    it('(PIN) the legacy bedroomSize keeps its 400 when no list is sent', async () => {
+      seedUnit(world);
+      const { app } = makeWebhookHarness({ world });
+      const bad: unknown[] = [13, -1, 2.5, '2'];
+      for (const bedroomSize of bad) {
+        const res = await postFilter(app, { contact_type: 'tenant', bedroomSize });
+        expect(res.status).toBe(400);
+        expect(res.body).toEqual({ error: 'audience_filter.bedroomSize must be an integer 0..12' });
+      }
+      expect(world.broadcasts.size).toBe(0);
+    });
+
+    it('the estimate counts ANY listed size, and the 4 chip counts every holder of 4 or more', async () => {
+      seedUnit(world);
+      const tenants: Array<[string, number]> = [
+        ['v0', 0],
+        ['v1', 1],
+        ['v2', 2],
+        ['v3', 3],
+        ['v4', 4],
+        ['v5', 5],
+        ['v12', 12],
+      ];
+      for (const [id, size] of tenants) sized(id, size);
+      sized('v-none');
+      const { app } = makeWebhookHarness({ world });
+      const res = await postFilter(app, { contact_type: 'tenant', bedroomSizes: [2, 4] });
+      expect(res.status).toBe(201);
+      // v2, v4, v5, v12 - all start checked (consent recorded, no tours, no declines).
+      expect(res.body.estimatedCount).toBe(4);
+    });
+
+    it('preview and the no-body send of a STORED legacy bedroomSize 4 reach every holder of 4 or more (broadcast-4plus-exact-match-underreach); the row is not rewritten', async () => {
+      seedUnit(world);
+      sized('v3', 3);
+      sized('v4', 4);
+      sized('v6', 6);
+      sized('v12', 12);
+      sized('v-none');
+      seedShare(world, 'bcast-sz-legacy-4', 'draft', {}, { audience_filter: storedFilter({ bedroomSize: 4 }) });
+      const { app } = makeWebhookHarness({ world });
+      const preview = await act(app, 'bcast-sz-legacy-4', 'preview');
+      expect(preview.status).toBe(200);
+      expect(ids(preview.body.candidates)).toEqual(['v12', 'v4', 'v6']);
+      const send = await act(app, 'bcast-sz-legacy-4', 'send');
+      expect(send.status).toBe(200);
+      expect(send.body.count).toBe(3);
+      const row = world.broadcasts.get('bcast-sz-legacy-4');
+      expect(Object.keys(row?.recipients ?? {}).sort()).toEqual(['v12', 'v4', 'v6']);
+      // Stored records are never rewritten (D12): still the legacy shape.
+      expect(row?.audience_filter).toEqual(storedFilter({ bedroomSize: 4 }));
+    });
+
+    it('a stored legacy size of 5 to 12 (the old uncapped pre-fill) previews every holder of 4 or more (spec section 4)', async () => {
+      seedUnit(world);
+      sized('v3', 3);
+      sized('v4', 4);
+      sized('v6', 6);
+      sized('v12', 12);
+      seedShare(world, 'bcast-sz-legacy-6', 'draft', {}, { audience_filter: storedFilter({ bedroomSize: 6 }) });
+      const { app } = makeWebhookHarness({ world });
+      const preview = await act(app, 'bcast-sz-legacy-6', 'preview');
+      expect(preview.status).toBe(200);
+      expect(ids(preview.body.candidates)).toEqual(['v12', 'v4', 'v6']);
+    });
+
+    it('preview and the no-body send of a STORED bedroomSizes list reach any listed size - a studio included', async () => {
+      seedUnit(world);
+      sized('v0', 0);
+      sized('v1', 1);
+      sized('v2', 2);
+      sized('v5', 5);
+      sized('v-none');
+      seedShare(world, 'bcast-sz-list', 'draft', {}, { audience_filter: storedFilter({ bedroomSizes: [0, 2] }) });
+      const { app } = makeWebhookHarness({ world });
+      const preview = await act(app, 'bcast-sz-list', 'preview');
+      expect(preview.status).toBe(200);
+      expect(ids(preview.body.candidates)).toEqual(['v0', 'v2']);
+      const send = await act(app, 'bcast-sz-list', 'send');
+      expect(send.status).toBe(200);
+      expect(send.body.count).toBe(2);
+    });
+
+    it('GET results and GET /api/broadcasts answer bedroomSizes for every row - legacy, list and none - and the compat bedroomSize when there is one', async () => {
+      seedUnit(world);
+      seedShare(world, 'bcast-sz-legacy', 'sent', { 'c-1': { status: 'delivered' } }, {
+        audience_filter: storedFilter({ bedroomSize: 7 }),
+      });
+      seedShare(world, 'bcast-sz-listed', 'draft', {}, { audience_filter: storedFilter({ bedroomSizes: [2, 3] }) });
+      seedShare(world, 'bcast-sz-none', 'draft', {});
+      const { app } = makeWebhookHarness({ world });
+      const results = await authedGet(app, '/api/broadcasts/bcast-sz-legacy/results');
+      expect(results.status).toBe(200);
+      expect(results.body.audience_filter).toEqual({ ...storedFilter({}), bedroomSizes: [4], bedroomSize: 4 });
+      const list = await authedGet(app, '/api/broadcasts');
+      expect(list.status).toBe(200);
+      const byId = Object.fromEntries(
+        (list.body.broadcasts as Array<{ broadcastId: string; audience_filter: Record<string, unknown> }>).map(
+          (b) => [b.broadcastId, b.audience_filter],
+        ),
+      );
+      expect(byId['bcast-sz-legacy']).toEqual({ ...storedFilter({}), bedroomSizes: [4], bedroomSize: 4 });
+      expect(byId['bcast-sz-listed']).toEqual({ ...storedFilter({}), bedroomSizes: [2, 3], bedroomSize: 2 });
+      expect(byId['bcast-sz-none']).toEqual({ ...storedFilter({}), bedroomSizes: [] });
+      expect(byId['bcast-sz-none']).not.toHaveProperty('bedroomSize');
     });
   });
 

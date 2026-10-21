@@ -20,6 +20,7 @@ import { logger as defaultLogger } from '../lib/logger.js';
 import { getTableSpec } from '../lib/tables.js';
 import type { ConsentMethod } from '../lib/smsCompliance.js';
 import type { TransitionSource } from '../lib/statusModel.js';
+import type { TourType } from '../lib/toursModel.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import { normalizeInstant } from '../lib/heardFrom.js';
 
@@ -341,6 +342,32 @@ export interface ContactItem {
   rta_within_48h?: boolean;
   pass_inspection_first_try?: boolean;
   income_includes_voucher?: boolean;
+  /*
+   * Landlord requirements (spec 2026-10-20 D2, tracker #11): the 15 'req_' +
+   * unit-key fields of the eight requirement items (registry:
+   * lib/requirements.ts). Prefixed because the bare `pets` / `evictions`
+   * above are the TENANT's AI-provenance answers. COPY-ONLY defaults: a
+   * property keeps its own copy (UnitItem) and changes only through Apply to
+   * properties. Written by the contacts PATCH on a landlord-typed contact
+   * only; never a boolean `req_pets`; a checkbox is stored only as `true`.
+   * For pets this supersedes the 2026-07-10 note below: pets now ALSO live on
+   * the landlord, as copy-only defaults.
+   */
+  req_no_evictions_on_program?: true;
+  req_evictions_notes?: string;
+  req_credit_requirements?: string;
+  req_income_requirements?: string;
+  req_qualifications?: string;
+  req_no_pets?: true;
+  req_pets?: string;
+  req_pet_fee?: string;
+  req_deposit_one_month?: true;
+  req_deposit?: number;
+  req_deposit_flexible?: true;
+  req_deposit_notes?: string;
+  req_application_fee?: number;
+  req_tour_type?: TourType;
+  req_tour_process?: string;
   // NOTE (2026-07-10): expected_rent + the landlord preference defaults
   // (accepts_programs / lease_terms / pet_policy) MOVED to the UNIT — they are
   // per-property facts (rent_min-rent_max / accepted_authorities / lease_terms /
@@ -676,14 +703,15 @@ export interface ListContactsOpts {
 
 /**
  * One `update` guard clause: the stored `attr` equals `value` exactly (a
- * string or a number - a number clause compares a stored number, so the
- * classification fence is guarded RAW, never through
- * contactClassificationRevision's fold of "absent" to 0), or is ABSENT for
- * `value: null`.
+ * string, a number or a boolean - a number clause compares a stored number, so
+ * the classification fence is guarded RAW, never through
+ * contactClassificationRevision's fold of "absent" to 0; a boolean clause
+ * compares a stored boolean, e.g. a landlord's req_deposit_one_month, never a
+ * string), or is ABSENT for `value: null`.
  */
 export interface ExpectClause {
   attr: string;
-  value: string | number | null;
+  value: string | number | boolean | null;
 }
 
 /**
@@ -694,10 +722,11 @@ export interface ExpectClause {
  * ConditionalCheckFailedException exactly like an unknown contact does - the
  * caller re-reads to tell "gone" from "stale". A no-op update evaluates every
  * guard on a consistent read. Users: the Staff notes stale-save guard (PATCH
- * staff_notes_expected_updated_at, spec 3.9 - one clause) and the caseworker
+ * staff_notes_expected_updated_at, spec 3.9 - one clause), the caseworker
  * conversion's commit (spec 2026-10-06 D19/D22 - the raw
  * classification_revision, housingAuthority, agency and organization as read,
- * plus notDeleted).
+ * plus notDeleted) and the landlord requirements PATCH (property-requirements
+ * code review OR-30 - the stored type and Deposit pair its checks read).
  */
 export interface UpdateContactOptions {
   expect?: ExpectClause | ExpectClause[];

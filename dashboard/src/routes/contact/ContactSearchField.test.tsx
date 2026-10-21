@@ -390,3 +390,29 @@ describe('ContactSearchField', () => {
     }
   });
 });
+
+// --- Spec 2026-10-20 D10: a property form's flyer tag describes the field ----
+describe('ContactSearchField - describedBy', () => {
+  it('adds describedBy to the input description; the accessible name stays inputLabel', () => {
+    render(
+      <>
+        <span id="owner-tag">Staff only</span>
+        <ContactSearchField
+          value={{ name: '' }}
+          onChange={vi.fn()}
+          candidates={CANDIDATES}
+          inputLabel="Owning landlord"
+          describedBy="owner-tag"
+        />
+      </>,
+    );
+    const input = screen.getByRole('combobox', { name: 'Owning landlord' });
+    expect(input).toHaveAccessibleName('Owning landlord');
+    expect(input).toHaveAccessibleDescription('Staff only');
+  });
+
+  it('(PIN) without it the input has no description', () => {
+    setup();
+    expect(screen.getByRole('combobox')).not.toHaveAttribute('aria-describedby');
+  });
+});

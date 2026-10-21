@@ -72,6 +72,13 @@ interface OrgPickerBaseProps {
   onRequestAdd?: (text: string) => void;
   /** Help text under the field, wired as aria-describedby. */
   hint?: string;
+  /** Rendered right after the <label> element, OUTSIDE it, so it never joins
+   *  the combobox's accessible name - a property form's "On flyer" tag (spec
+   *  2026-10-20 D10). */
+  labelAside?: React.ReactNode;
+  /** More ids for the combobox's aria-describedby, after the hint, note and
+   *  error ids (the tag beside the label). */
+  describedBy?: string;
   /** An inline field error (a list that failed to load, a refused save). */
   error?: string | null;
   /** Change it to announce `error` again although its words did not change:
@@ -171,6 +178,8 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
     onPendingTextChange,
     pendingNote,
     ref,
+    labelAside,
+    describedBy: extraDescribedBy,
   } = props;
   const chosen: readonly string[] =
     props.multiple === true ? props.value : props.value === '' ? [] : [props.value];
@@ -303,7 +312,7 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
   const activeOptionId =
     isListShown && activeIndex >= 0 && activeIndex < options.length ? `${uid}-option-${activeIndex}` : undefined;
   const describedBy =
-    [hint !== undefined ? hintId : '', showNote ? noteId : '', error ? errorId : '']
+    [hint !== undefined ? hintId : '', showNote ? noteId : '', error ? errorId : '', extraDescribedBy ?? '']
       .filter((id) => id !== '')
       .join(' ') || undefined;
 
@@ -356,9 +365,18 @@ export function OrgPicker(props: OrgPickerProps): React.JSX.Element {
 
   return (
     <div className={className ?? styles.field}>
-      <label htmlFor={inputId} className={labelClassName ?? styles.label}>
-        {label}
-      </label>
+      {labelAside !== undefined ? (
+        <div className={styles.labelRow}>
+          <label htmlFor={inputId} className={labelClassName ?? styles.label}>
+            {label}
+          </label>
+          {labelAside}
+        </div>
+      ) : (
+        <label htmlFor={inputId} className={labelClassName ?? styles.label}>
+          {label}
+        </label>
+      )}
       {chosen.length > 0 ? (
         <ul className={styles.chips}>
           {chosen.map((value, index) => {

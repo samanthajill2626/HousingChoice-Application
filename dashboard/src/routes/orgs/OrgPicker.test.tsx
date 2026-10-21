@@ -478,3 +478,31 @@ describe('OrgPicker - text typed but never picked (code review R1-ADV-FE-1)', ()
     expect(optionNames()).toEqual(['Atlanta Housing Authority (AHA)', 'Augusta Housing Authority (AHA)']);
   });
 });
+
+// --- Spec 2026-10-20 D10: a property form's flyer tag beside the label ------
+describe('OrgPicker - something beside the label (labelAside, describedBy)', () => {
+  it('renders labelAside outside the <label> and adds describedBy to the description, after its own ids', () => {
+    render(
+      <OrgPicker
+        multiple
+        label="Housing authorities"
+        hint="Pick every authority"
+        kinds={['housing_authority']}
+        entries={ENTRIES}
+        value={[]}
+        onChange={vi.fn()}
+        labelAside={<span id="tag-1">On flyer</span>}
+        describedBy="tag-1"
+      />,
+    );
+    const box = combobox('Housing authorities');
+    expect(box).toHaveAccessibleName('Housing authorities');
+    expect(box).toHaveAccessibleDescription('Pick every authority On flyer');
+    expect(screen.getByText('On flyer').closest('label')).toBeNull();
+  });
+
+  it('(PIN) without them the field has no description at all', () => {
+    render(<OrgPicker label="Housing authority" kinds={['housing_authority']} entries={ENTRIES} value="" onChange={vi.fn()} />);
+    expect(combobox()).not.toHaveAttribute('aria-describedby');
+  });
+});

@@ -6,6 +6,9 @@
 // /api/contacts/:id/relay-groups). Notes are free text only — the structured
 // preferences (accepted programs / lease terms / pet policy) and expected rent
 // are PER-PROPERTY facts on the unit (moved 2026-07-10; GLOSSARY).
+// Property requirements (spec 2026-10-20, D9): a Requirements / Qualifications
+// card sits right after Landlord onboarding - the landlord's copy-only
+// requirement defaults (pets included), applied with Apply to properties.
 import {
   STAGE_LABELS,
   tourStatusLabel,
@@ -35,6 +38,8 @@ import { DeadlineChip } from '../placements/DeadlineChip.js';
 import { GroupTextsCard } from './GroupTextsCard.js';
 import { GroupThreadsCard } from './GroupThreadsCard.js';
 import { LandlordOnboardingCard } from './LandlordOnboardingCard.js';
+import { LandlordRequirementsCard } from './LandlordRequirementsCard.js';
+import { propertyRowLabel, type ApplyDoneSummary } from './applyRequirementsModel.js';
 import { MediaGallery, type MediaGalleryPaging } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { landlordPlacements, landlordUnits } from './buildContactFile.js';
@@ -69,6 +74,10 @@ export interface LandlordFileProps {
   onManagePhones?: () => void;
   /** Open the "New property" dialog pre-filled + locked to this landlord (Properties card). */
   onAddProperty?: () => void;
+  /** D8: open "Apply to properties" (the Requirements / Qualifications card). */
+  onApplyRequirements?: (() => void) | undefined;
+  /** D8: the last Apply's result for this landlord, shown on that card. */
+  requirementsNotice?: ApplyDoneSummary | null;
   /** Open the "Create a relay group" dialog seeded with this contact (Relay
    *  groups card "+ Create group"). */
   onCreateRelayGroup?: () => void;
@@ -78,13 +87,6 @@ export interface LandlordFileProps {
  *  contactStatusLabel (format.ts), pinned to the landlord vocabulary. */
 function landlordStatusLabel(status: string): string {
   return contactStatusLabel('landlord', status);
-}
-
-/** A unit row label: "address - NBR" when both are known. */
-function unitRowLabel(unit: UnitItem): string {
-  const addr = formatAddress(unit.address) || unit.unitId;
-  const beds = typeof unit.beds === 'number' ? ` - ${unit.beds}BR` : '';
-  return `${addr}${beds}`;
 }
 
 export function LandlordFile({
@@ -105,6 +107,8 @@ export function LandlordFile({
   onManagePhones,
   onAddProperty,
   onCreateRelayGroup,
+  onApplyRequirements,
+  requirementsNotice,
 }: LandlordFileProps): React.JSX.Element {
   const myUnits = landlordUnits(units, contact.contactId);
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
@@ -114,6 +118,8 @@ export function LandlordFile({
   // Notes — free-text only. The structured preferences (accepted programs,
   // lease terms, pet policy) and expected rent MOVED to the property record
   // (2026-07-10; per-unit facts on UnitItem — see each property's details card).
+  // (2026-10-20, D9: the landlord's copy-only requirement defaults, pets
+  // included, live in the Requirements / Qualifications card and fieldset.)
   const notes = typeof contact.notes === 'string' ? contact.notes.trim() : '';
 
   return (
@@ -153,6 +159,16 @@ export function LandlordFile({
 
       <LandlordOnboardingCard contact={contact} />
 
+      {/* D9: the landlord's copy-only requirement defaults, right after
+          Landlord onboarding. Edit opens the existing landlord edit form. */}
+      <LandlordRequirementsCard
+        contact={contact}
+        hasProperties={myUnits.length > 0}
+        {...(onApplyRequirements !== undefined && { onApply: onApplyRequirements })}
+        {...(onEdit !== undefined && { onEdit })}
+        notice={requirementsNotice ?? null}
+      />
+
       <Card
         title="Notes"
         aside={
@@ -168,7 +184,7 @@ export function LandlordFile({
         {notes !== '' ? (
           <NotesText text={notes} />
         ) : (
-          <PendingPanel note="No notes yet — use + Add. (Programs, lease terms, and pet policy live on each property.)" />
+          <PendingPanel note="No notes yet - use + Add." />
         )}
       </Card>
 
@@ -192,7 +208,7 @@ export function LandlordFile({
               <Row
                 key={u.unitId}
                 to={`/listings/${u.unitId}`}
-                label={unitRowLabel(u)}
+                label={propertyRowLabel(u)}
                 right={<StatusBadge kind="listing" status={u.status} />}
               />
             ))}

@@ -63,6 +63,15 @@
   border-radius: var(--radius-sm);
 }
 
+/* A disabled heading action (its reason is rendered in the card): muted, not
+ * an affordance. */
+.asideBtn:disabled,
+.asideBtn:disabled:hover {
+  color: var(--c-text-subtle);
+  text-decoration: none;
+  cursor: not-allowed;
+}
+
 /* Inline text-button used inside a value (e.g. "Manage" next to phone numbers). */
 .inlineAction {
   background: transparent;

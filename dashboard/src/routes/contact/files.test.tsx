@@ -463,6 +463,8 @@ describe('LandlordFile', () => {
       groupThreadsTruncated?: boolean;
       onCreateRelayGroup?: () => void;
       contact?: Contact;
+      units?: UnitItem[];
+      onApplyRequirements?: () => void;
     } = {},
   ) {
     return render(
@@ -472,7 +474,7 @@ describe('LandlordFile', () => {
           phones={[{ phone: '+14042220190', primary: true }]}
           placements={[{ ...TENANT_CASE, unitId: 'u1' }]}
           tours={opts.tours ?? []}
-          units={[UNIT, PLACED_UNIT]}
+          units={opts.units ?? [UNIT, PLACED_UNIT]}
           relayGroupsPending={opts.relayGroups === undefined}
           relayGroups={opts.relayGroups ?? []}
           groupThreadsPending={opts.groupThreads === undefined}
@@ -480,6 +482,7 @@ describe('LandlordFile', () => {
           groupThreadsTruncated={opts.groupThreadsTruncated ?? false}
           media={[]}
           onCreateRelayGroup={opts.onCreateRelayGroup}
+          onApplyRequirements={opts.onApplyRequirements}
         />
       </MemoryRouter>,
     );
@@ -502,6 +505,8 @@ describe('LandlordFile', () => {
   it('renders free-text notes in the Notes card (preferences moved to the property)', () => {
     // 2026-07-10: accepted programs / lease terms / pet policy are per-property
     // facts on the unit now — the landlord card carries notes ONLY.
+    // (2026-10-20, D9: the landlord's copy-only requirement defaults, pets
+    // included, live in its Requirements / Qualifications card and fieldset.)
     renderIt({
       contact: {
         ...contact,
@@ -514,10 +519,29 @@ describe('LandlordFile', () => {
     expect(screen.queryByText(/No notes yet/i)).not.toBeInTheDocument();
   });
 
-  it('shows the empty Notes panel (pointing at the property) when there are no notes', () => {
+  it('shows the empty Notes panel when there are no notes (D9: pets now also live on the landlord)', () => {
     renderIt();
-    expect(screen.getByText(/No notes yet/i)).toBeInTheDocument();
-    expect(screen.getByText(/live on each property/i)).toBeInTheDocument();
+    expect(screen.getByText('No notes yet - use + Add.')).toBeInTheDocument();
+    expect(screen.queryByText(/live on each property/i)).toBeNull();
+  });
+
+  it('puts the Requirements / Qualifications card right after Landlord onboarding (D9)', () => {
+    renderIt();
+    const titles = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent ?? '');
+    const onboarding = titles.findIndex((t) => t.startsWith('Landlord onboarding'));
+    expect(onboarding).toBeGreaterThanOrEqual(0);
+    expect(titles[onboarding + 1]).toMatch(/^Requirements \/ Qualifications/);
+  });
+
+  it('offers Apply to properties when the landlord has properties, disabled with a reason when not (D8)', () => {
+    const onApplyRequirements = vi.fn();
+    const { unmount } = renderIt({ onApplyRequirements });
+    expect(screen.getByRole('button', { name: 'Apply to properties' })).toBeEnabled();
+    unmount();
+
+    renderIt({ onApplyRequirements, units: [] });
+    expect(screen.getByRole('button', { name: 'Apply to properties' })).toBeDisabled();
+    expect(screen.getByText('This landlord has no properties yet.')).toBeInTheDocument();
   });
 
   it('renders placements on their units linking to the placement route', () => {

@@ -14,6 +14,10 @@
 // contact_number so the text CTA still works there).
 //
 // Tenant-facing copy: the dwelling is a "home" (never unit/property/listing).
+//
+// flyer-leads (spec 2026-10-21 D1, D3): no rent, lease terms, accessibility,
+// pets or deposit - those are staff only, and the public projection no longer
+// sends them (a stale payload's keys are simply never read).
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { ApiError } from '../../api/client.js';
@@ -42,14 +46,6 @@ const UNAVAILABLE_PREFILL =
  *  (iOS takes &body / modern iOS ?body, Android takes ?body) - do not "fix" it. */
 function smsHref(number: string, body: string): string {
   return `sms:${number}?&body=${encodeURIComponent(body)}`;
-}
-
-function rentRange(flyer: Pick<PublicFlyer, 'rent_min' | 'rent_max'>): string | null {
-  const { rent_min: min, rent_max: max } = flyer;
-  if (min !== null && max !== null) return min === max ? `$${min}` : `$${min}-$${max}`;
-  if (min !== null) return `From $${min}`;
-  if (max !== null) return `Up to $${max}`;
-  return null;
 }
 
 /** The neighborhood line: the AREA alone (D11). Subzone is a staff-only code
@@ -130,32 +126,12 @@ function textOrNull(v: string | null): string | null {
   return v === null || v.trim() === '' ? null : v;
 }
 
-/** D11: "No pets", "No pets (<details>)", or the details alone. A legacy stored
- *  boolean reaches the page already interpreted (true -> details "Allowed",
- *  false -> no_pets), so the page reads only the new shape. */
-function petsLabel(flyer: Pick<PublicFlyer, 'no_pets' | 'pets'>): string | null {
-  const details = textOrNull(flyer.pets);
-  if (flyer.no_pets) return details !== null ? `No pets (${details.trim()})` : 'No pets';
-  return details;
-}
-
-/** The deposit and application-fee amounts (planner ruling PR-4, code review
- *  PA-4): a whole number exactly as before ("$1500"), any other amount with
- *  two decimals ("$1250.40", "$37.50") - the forms accept cents (D1). */
+/** The application-fee amount (planner ruling PR-4, code review PA-4): a
+ *  whole number exactly as before ("$40"), any other amount with two decimals
+ *  ("$37.50") - the forms accept cents (D1). flyer-leads D3: the deposit row
+ *  is gone; applicationFeeLabel is the only reader. */
 function flyerMoney(amount: number): string {
   return Number.isInteger(amount) ? `$${amount}` : `$${amount.toFixed(2)}`;
-}
-
-/** D11: "One month's rent" or "$N", then ", flexible / payment plan
- *  available" when flexible; flexible alone reads "Flexible / payment plan
- *  available". Null when none of the three is recorded (the deposit notes are
- *  staff only and never projected). */
-function depositLabel(
-  flyer: Pick<PublicFlyer, 'deposit_one_month' | 'deposit' | 'deposit_flexible'>,
-): string | null {
-  const base = flyer.deposit_one_month ? "One month's rent" : flyer.deposit !== null ? flyerMoney(flyer.deposit) : null;
-  if (!flyer.deposit_flexible) return base;
-  return base !== null ? `${base}, flexible / payment plan available` : 'Flexible / payment plan available';
 }
 
 /** D11: "No application fee" for 0, "$N" otherwise; null when not recorded. */
@@ -274,21 +250,15 @@ export function FlyerPage(): React.JSX.Element {
   }
 
   const { flyer } = stage;
-  const rent = rentRange(flyer);
   const hood = neighborhood(flyer);
   const safeVideoUrl = safeHttpUrl(flyer.video_url);
   const safeListingUrl = safeHttpUrl(flyer.listing_link);
-  const pets = petsLabel(flyer);
-  const petFee = textOrNull(flyer.pet_fee);
-  const deposit = depositLabel(flyer);
   const applicationFee = applicationFeeLabel(flyer.application_fee);
   const washerDryer = flyer.washer_dryer !== null ? WASHER_DRYER_LABELS[flyer.washer_dryer] : null;
   const voucher = voucherPhrase(flyer.voucher_sizes);
   const address = addressLines(flyer.address);
   const mapUrl = mapsHref(flyer.address);
   const utilities = textOrNull(flyer.utilities);
-  const accessibility = textOrNull(flyer.accessibility);
-  const leaseTerms = textOrNull(flyer.lease_terms);
 
   return (
     <section className={styles.card}>
@@ -310,11 +280,6 @@ export function FlyerPage(): React.JSX.Element {
         {flyer.baths !== null && (
           <li>
             <strong>{flyer.baths}</strong> bath{flyer.baths === 1 ? '' : 's'}
-          </li>
-        )}
-        {rent !== null && (
-          <li>
-            <strong>{rent}</strong>/mo
           </li>
         )}
         {voucher !== null && (
@@ -350,12 +315,6 @@ export function FlyerPage(): React.JSX.Element {
             </dd>
           </div>
         )}
-        {deposit !== null && (
-          <div className={styles.detailRow}>
-            <dt className={styles.dt}>Deposit</dt>
-            <dd className={styles.dd}>{deposit}</dd>
-          </div>
-        )}
         {applicationFee !== null && (
           <div className={styles.detailRow}>
             <dt className={styles.dt}>Application fee</dt>
@@ -372,30 +331,6 @@ export function FlyerPage(): React.JSX.Element {
           <div className={styles.detailRow}>
             <dt className={styles.dt}>Washer / dryer</dt>
             <dd className={styles.dd}>{washerDryer}</dd>
-          </div>
-        )}
-        {pets !== null && (
-          <div className={styles.detailRow}>
-            <dt className={styles.dt}>Pets</dt>
-            <dd className={styles.dd}>{pets}</dd>
-          </div>
-        )}
-        {petFee !== null && (
-          <div className={styles.detailRow}>
-            <dt className={styles.dt}>Pet fee</dt>
-            <dd className={styles.dd}>{petFee}</dd>
-          </div>
-        )}
-        {accessibility !== null && (
-          <div className={styles.detailRow}>
-            <dt className={styles.dt}>Accessibility</dt>
-            <dd className={styles.dd}>{accessibility}</dd>
-          </div>
-        )}
-        {leaseTerms !== null && (
-          <div className={styles.detailRow}>
-            <dt className={styles.dt}>Lease terms</dt>
-            <dd className={styles.dd}>{leaseTerms}</dd>
           </div>
         )}
         {flyer.same_day_rta === true && (

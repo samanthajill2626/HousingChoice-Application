@@ -2,7 +2,7 @@
 // spec D1, D3, D8): submitHousingFair sends housingAuthority only when it is
 // defined, and getHousingAuthorities reads GET /public/housing-authorities.
 // The transport (request) is mocked; ApiError stays the real class.
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 
 const request = vi.fn();
 vi.mock('../../api/client.js', async () => {
@@ -15,6 +15,8 @@ import {
   HOUSING_AUTHORITY_NOT_LISTED,
   getHousingAuthorities,
   submitHousingFair,
+  type PublicAddress,
+  type PublicFlyer,
 } from './publicApi.js';
 
 const PERSON = {
@@ -100,5 +102,33 @@ describe('getHousingAuthorities', () => {
 describe('HOUSING_AUTHORITY_NOT_LISTED', () => {
   it("is the sign-up's refusal code for an unlisted authority (spec D3)", () => {
     expect(HOUSING_AUTHORITY_NOT_LISTED).toBe('housing_authority_not_listed');
+  });
+});
+
+// flyer-leads D1: the public projection no longer carries rent, lease terms,
+// accessibility, pets or deposit - the keys are REMOVED, never null - so the
+// client type drops the same ten. A TYPE pin: vitest strips types, so these
+// cases pass at runtime either way; `npm run typecheck` is what fails while
+// any of the keys is still on PublicFlyer.
+type TrimmedFlyerKey =
+  | 'rent_min'
+  | 'rent_max'
+  | 'lease_terms'
+  | 'accessibility'
+  | 'pets'
+  | 'no_pets'
+  | 'pet_fee'
+  | 'deposit'
+  | 'deposit_one_month'
+  | 'deposit_flexible';
+
+describe('PublicFlyer (flyer-leads D1)', () => {
+  it('carries none of the ten trimmed keys', () => {
+    expectTypeOf<Extract<keyof PublicFlyer, TrimmedFlyerKey>>().toBeNever();
+  });
+
+  it('(PIN) keeps the application fee and the address', () => {
+    expectTypeOf<PublicFlyer['application_fee']>().toEqualTypeOf<number | null>();
+    expectTypeOf<PublicFlyer['address']>().toEqualTypeOf<PublicAddress>();
   });
 });

@@ -2568,7 +2568,7 @@ export interface UnitItem {
   /** Internal staff notes, e.g. "In-unit washer/dryer". Never public. */
   notes?: string;
   /** Lease terms, e.g. "12-month minimum". Per-unit fact (moved off the landlord
-   *  contact 2026-07-10). PUBLIC: on the flyer (spec 2026-10-20 D10a). */
+   *  contact 2026-07-10). Staff only (flyer-leads D2). */
   lease_terms?: string;
   /** Requirements, Pets item (D1): the details text, e.g. "Cats only". A LEGACY
    *  boolean (old data, raw API callers) reads per D1 - false = No pets with
@@ -2604,13 +2604,13 @@ export interface UnitItem {
   income_requirements?: string;
   /** Qualifications (long free text). Staff only. */
   qualifications?: string;
-  /** Pets item: "No pets". On the flyer. */
+  /** Pets item: "No pets". Staff only (flyer-leads D2). */
   no_pets?: boolean;
-  /** Pets item: the pet fee (free text, e.g. "$300 per pet"). On the flyer. */
+  /** Pets item: the pet fee (free text, e.g. "$300 per pet"). Staff only (flyer-leads D2). */
   pet_fee?: string;
-  /** Deposit item: "One month's rent" - the alternative to a fixed `deposit`. On the flyer. */
+  /** Deposit item: "One month's rent" - the alternative to a fixed `deposit`. Staff only (flyer-leads D2). */
   deposit_one_month?: boolean;
-  /** Deposit item: "Flexible / payment terms available". On the flyer. */
+  /** Deposit item: "Flexible / payment terms available". Staff only (flyer-leads D2). */
   deposit_flexible?: boolean;
   /** Deposit item: notes. Staff only. */
   deposit_notes?: string;

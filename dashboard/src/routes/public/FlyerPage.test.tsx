@@ -36,22 +36,12 @@ const FLYER: PublicFlyer = {
   voucher_sizes: [3],
   accepted_authorities: ['Atlanta (AHA)', 'DCA'],
   listing_link: 'https://external.example/listing/1',
-  rent_min: 1800,
-  rent_max: 2000,
   address: { line1: '88 Sycamore St', city: 'Decatur', state: 'GA', zip: '30030' },
   utilities: 'Electric and gas',
   video_url: 'https://video.example/tour',
   application_fee: 40,
   same_day_rta: true,
-  pets: 'Cats only',
-  no_pets: false,
-  pet_fee: null,
-  accessibility: 'Ground floor',
-  deposit: 1800,
-  deposit_one_month: false,
-  deposit_flexible: false,
   washer_dryer: null,
-  lease_terms: '12-month minimum',
   contact_number: '+15550009999',
 };
 
@@ -92,19 +82,12 @@ describe('FlyerPage', () => {
     await screen.findByText('88 Sycamore St', { exact: false });
     // D11 / D3: the neighborhood line is the area alone.
     expect(screen.getByRole('heading', { name: 'Decatur' })).toBeInTheDocument();
-    // Detail rows are all present upfront (no gate).
-    expect(screen.getByText('Deposit')).toBeInTheDocument();
-    expect(screen.getByText('$1800')).toBeInTheDocument();
+    // Detail rows are all present upfront (no gate) - the public ones only
+    // (flyer-leads D1, D3: no rent, deposit, pets, accessibility or lease).
     expect(screen.getByText('Application fee')).toBeInTheDocument();
     expect(screen.getByText('$40')).toBeInTheDocument();
     expect(screen.getByText('Tenant pays')).toBeInTheDocument();
     expect(screen.getByText('Electric and gas')).toBeInTheDocument();
-    expect(screen.getByText('Pets')).toBeInTheDocument();
-    expect(screen.getByText('Cats only')).toBeInTheDocument();
-    expect(screen.getByText('Accessibility')).toBeInTheDocument();
-    expect(screen.getByText('Ground floor')).toBeInTheDocument();
-    expect(screen.getByText('Lease terms')).toBeInTheDocument();
-    expect(screen.getByText('12-month minimum')).toBeInTheDocument();
     expect(screen.getByText('Same-day RTA')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /watch the tour/i })).toHaveAttribute(
       'href',
@@ -257,40 +240,55 @@ describe('FlyerPage', () => {
     );
   });
 
-  it('empty-string detail values render NO row (label suppressed)', async () => {
-    // Staff can save '' for the free-text fields (the write validator accepts
+  it('an empty-string detail value renders NO row (label suppressed)', async () => {
+    // Staff can save '' for a free-text field (the write validator accepts
     // it); a labeled <dt> with a blank <dd> must simply not render.
-    getFlyer.mockResolvedValue({
-      ...FLYER,
-      pets: '',
-      accessibility: '',
-      lease_terms: '',
-      utilities: '',
-    });
+    getFlyer.mockResolvedValue({ ...FLYER, utilities: '' });
     renderPage();
 
     await screen.findByText('88 Sycamore St', { exact: false });
-    expect(screen.queryByText('Pets')).toBeNull();
-    expect(screen.queryByText('Accessibility')).toBeNull();
-    expect(screen.queryByText('Lease terms')).toBeNull();
     expect(screen.queryByText('Tenant pays')).toBeNull();
   });
 
-  it('whitespace-only detail values render NO row (edit form saves untrimmed)', async () => {
-    getFlyer.mockResolvedValue({
-      ...FLYER,
-      pets: '   ',
-      accessibility: '\t',
-      lease_terms: ' ',
-      utilities: '  ',
-    });
+  it('a whitespace-only detail value renders NO row (edit form saves untrimmed)', async () => {
+    getFlyer.mockResolvedValue({ ...FLYER, utilities: '  ' });
     renderPage();
 
     await screen.findByText('88 Sycamore St', { exact: false });
-    expect(screen.queryByText('Pets')).toBeNull();
-    expect(screen.queryByText('Accessibility')).toBeNull();
-    expect(screen.queryByText('Lease terms')).toBeNull();
     expect(screen.queryByText('Tenant pays')).toBeNull();
+  });
+
+  // flyer-leads D1, D3: the projection no longer sends these ten keys. A
+  // stale payload that still carries them (hand-fed here) shows none of them:
+  // the page never reads them.
+  const STALE_TRIMMED_KEYS = {
+    rent_min: 1800,
+    rent_max: 2000,
+    lease_terms: '12-month minimum',
+    accessibility: 'Ground floor',
+    pets: 'Cats only',
+    no_pets: true,
+    pet_fee: '$300',
+    deposit: 1500,
+    deposit_one_month: true,
+    deposit_flexible: true,
+  };
+
+  it('shows no rent, deposit, pets, pet fee, accessibility or lease row, even from a stale payload (flyer-leads D1, D3)', async () => {
+    getFlyer.mockResolvedValue({ ...FLYER, ...STALE_TRIMMED_KEYS } as unknown as PublicFlyer);
+    renderPage();
+    // A positive read on the same load first: the page is ready.
+    expect(await screen.findByText('Tenant pays')).toBeInTheDocument();
+    for (const label of ['Deposit', 'Pets', 'Pet fee', 'Accessibility', 'Lease terms']) {
+      expect(screen.queryAllByText(label, { selector: 'dt' }), label).toHaveLength(0);
+    }
+    for (const text of ['12-month minimum', 'Ground floor', 'Cats only', '$300', '$1500', "One month's rent"]) {
+      expect(screen.queryAllByText(text, { exact: false }), text).toHaveLength(0);
+    }
+    expect(screen.queryAllByText(/No pets/)).toHaveLength(0);
+    expect(screen.queryAllByText(/flexible/i)).toHaveLength(0);
+    // No rent fact: neither amount, and no "/mo".
+    expect(screen.queryAllByText(/\$1800|\$2000|\/mo/)).toHaveLength(0);
   });
 
   it('unsafe (javascript:) video/listing URLs are not rendered as links', async () => {
@@ -431,55 +429,6 @@ describe('FlyerPage - D11 wording', () => {
     expect(screen.queryByText(/Fits a/)).toBeNull();
   });
 
-  it('Pets: "No pets", "No pets (<details>)" or the details; the pet fee is its own row', async () => {
-    await renderFlyer({ no_pets: true, pets: 'service animals only', pet_fee: '$300' });
-    expect(detail('Pets')).toBe('No pets (service animals only)');
-    expect(detail('Pet fee')).toBe('$300');
-  });
-
-  it('Pets: the checkbox alone reads "No pets"', async () => {
-    await renderFlyer({ no_pets: true, pets: null });
-    expect(detail('Pets')).toBe('No pets');
-    expect(detail('Pet fee')).toBeNull();
-  });
-
-  it('Pets: details alone read as written', async () => {
-    await renderFlyer({ no_pets: false, pets: 'Cats OK' });
-    expect(detail('Pets')).toBe('Cats OK');
-  });
-
-  it('a legacy boolean arrives already interpreted by the projection (true -> "Allowed", false -> No pets)', async () => {
-    await renderFlyer({ no_pets: false, pets: 'Allowed' });
-    expect(detail('Pets')).toBe('Allowed');
-  });
-
-  it('a blank pet fee shows no row', async () => {
-    await renderFlyer({ pet_fee: '   ' });
-    expect(detail('Pet fee')).toBeNull();
-  });
-
-  // Plain its, not it.each (orchestrator note O-1): an it.each title has every
-  // `$<word>` read as a case field AFTER the %s substitution, so "$1800"
-  // printed as "undefined". A template-literal title prints the text as is.
-  const DEPOSIT_CASES: Array<[Partial<PublicFlyer>, string]> = [
-    [{ deposit_one_month: true, deposit: null }, "One month's rent"],
-    [{ deposit: 1800 }, '$1800'],
-    [{ deposit: 1800, deposit_flexible: true }, '$1800, flexible / payment plan available'],
-    [{ deposit_one_month: true, deposit: null, deposit_flexible: true }, "One month's rent, flexible / payment plan available"],
-    [{ deposit: null, deposit_flexible: true }, 'Flexible / payment plan available'],
-  ];
-  for (const [over, text] of DEPOSIT_CASES) {
-    it(`Deposit ${JSON.stringify(over)} reads "${text}"`, async () => {
-      await renderFlyer(over);
-      expect(detail('Deposit')).toBe(text);
-    });
-  }
-
-  it('no deposit recorded: no Deposit row (the notes are staff only and never projected)', async () => {
-    await renderFlyer({ deposit: null, deposit_one_month: false, deposit_flexible: false });
-    expect(detail('Deposit')).toBeNull();
-  });
-
   it('Application fee: "No application fee" for 0, "$N" otherwise, no row when absent', async () => {
     await renderFlyer({ application_fee: 0 });
     expect(detail('Application fee')).toBe('No application fee');
@@ -490,13 +439,14 @@ describe('FlyerPage - D11 wording', () => {
     expect(detail('Application fee')).toBeNull();
   });
 
-  // Planner ruling PR-4 (code review PA-4): both amounts print through one
-  // formatter - a whole number exactly as before, any other amount with two
-  // decimals (the forms accept cents, D1).
-  // Plain its with template titles (note O-1 above).
+  // Planner ruling PR-4 (code review PA-4): the application fee prints through
+  // flyerMoney - a whole number exactly as before, any other amount with two
+  // decimals (the forms accept cents, D1). flyer-leads D3: the deposit row is
+  // gone, so the fee is flyerMoney's only reader.
+  // Plain its, not it.each (orchestrator note O-1): an it.each title has every
+  // `$<word>` read as a case field AFTER the %s substitution, so "$37.50"
+  // printed as "undefined". A template-literal title prints the text as is.
   const MONEY_CASES: Array<[string, Partial<PublicFlyer>, string]> = [
-    ['Deposit', { deposit: 1250.4 }, '$1250.40'],
-    ['Deposit', { deposit: 1250.4, deposit_flexible: true }, '$1250.40, flexible / payment plan available'],
     ['Application fee', { application_fee: 37.5 }, '$37.50'],
     ['Application fee', { application_fee: 40 }, '$40'],
   ];

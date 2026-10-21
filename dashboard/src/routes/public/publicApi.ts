@@ -24,7 +24,10 @@ export interface PublicAddress {
 /** The full public flyer - mirrors app/src/lib/unitFields.ts UnitFlyer exactly
  *  (same names + nullability), PLUS contact_number (config-sourced by the
  *  route: the main 1:1 business number, null when unconfigured). Everything is
- *  shown upfront - the teaser/reveal split is gone (flyer-full-info). */
+ *  shown upfront - the teaser/reveal split is gone (flyer-full-info).
+ *  flyer-leads D1 (spec 2026-10-21): rent, lease terms, accessibility, pets
+ *  and deposit are staff only - the projection REMOVES those ten keys and
+ *  this type drops them too. */
 export interface PublicFlyer {
   unitId: string;
   media: string[];
@@ -42,26 +45,12 @@ export interface PublicFlyer {
    *  (spec section 8; app/src/lib/unitFields.ts `authoritiesOf`). */
   accepted_authorities: string[];
   listing_link: string | null;
-  rent_min: number | null;
-  rent_max: number | null;
   address: PublicAddress;
   utilities: string | null;
   video_url: string | null;
   application_fee: number | null;
   same_day_rta: boolean | null;
-  /** The pets details text. The projection already interprets a legacy
-   *  stored boolean (D1): true arrives as 'Allowed', false as no_pets. */
-  pets: string | null;
-  /** D11: the "No pets" rule. */
-  no_pets: boolean;
-  pet_fee: string | null;
-  accessibility: string | null;
-  deposit: number | null;
-  /** D11: the deposit is one month's rent (an alternative to `deposit`). */
-  deposit_one_month: boolean;
-  deposit_flexible: boolean;
   washer_dryer: 'hookups' | 'included' | 'none' | null;
-  lease_terms: string | null;
   contact_number: string | null;
 }
 

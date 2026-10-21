@@ -18,7 +18,8 @@
 // flyer-leads (spec 2026-10-21 D1, D3): no rent, lease terms, accessibility,
 // pets or deposit - those are staff only, and the public projection no longer
 // sends them (a stale payload's keys are simply never read). The address is
-// the heading (a Google Maps link), the area the line under it.
+// the heading (a Google Maps link), the area the line under it, then the
+// static "Same-day tours available" line on every flyer.
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { ApiError } from '../../api/client.js';
@@ -326,6 +327,11 @@ export function FlyerPage(): React.JSX.Element {
         {heading.kind === 'address' && hood !== null && <p className={styles.area}>{hood}</p>}
       </div>
 
+      {/* flyer-leads D3: on EVERY flyer (Sam, tracker #13: for advertising) -
+          static page copy, not a property field. The per-property "Same-day
+          RTA" row below is a different thing (Request for Tenancy Approval). */}
+      <p className={styles.highlight}>Same-day tours available</p>
+
       <ul className={styles.facts}>
         {flyer.beds !== null && (
           <li>
@@ -345,7 +351,8 @@ export function FlyerPage(): React.JSX.Element {
       </ul>
 
       {/* Which authorities' vouchers this home takes - the tenant's actual
-          question. Absent authorities hide the line entirely (spec section 8). */}
+          question. Absent authorities hide the line entirely (spec section 8).
+          flyer-leads D3: visibly stronger - bold, larger, full contrast. */}
       {flyer.accepted_authorities.length > 0 && (
         <p className={styles.authorities}>Accepts: {flyer.accepted_authorities.join(', ')}</p>
       )}

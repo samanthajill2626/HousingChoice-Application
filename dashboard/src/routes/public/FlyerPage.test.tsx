@@ -610,3 +610,63 @@ describe('FlyerPage - the address heading (flyer-leads D3)', () => {
     ]);
   });
 });
+
+// flyer-leads D3 items 4 and 6: the highlight line on every flyer (Sam,
+// tracker #13) and the bolder housing authority line.
+describe('FlyerPage - the highlight and the authority line (flyer-leads D3)', () => {
+  const BARE: PublicFlyer = {
+    unitId: 'unit-bare',
+    media: [],
+    beds: null,
+    baths: null,
+    area: null,
+    voucher_size: null,
+    voucher_sizes: [],
+    accepted_authorities: [],
+    listing_link: null,
+    address: {},
+    utilities: null,
+    video_url: null,
+    application_fee: null,
+    same_day_rta: null,
+    washer_dryer: null,
+    contact_number: null,
+  };
+
+  it('"Same-day tours available" shows on a bare property: static copy, not the Same-day RTA row', async () => {
+    getFlyer.mockResolvedValue(BARE);
+    renderPage('/p/unit-bare');
+    expect(await screen.findByRole('heading', { level: 1, name: 'Home for rent' })).toBeInTheDocument();
+    expect(screen.getByText('Same-day tours available')).toHaveClass(styles.highlight!);
+    expect(screen.queryByText('Same-day RTA')).toBeNull();
+  });
+
+  it('sits under the heading group and above the facts, on both CTA variants', async () => {
+    getFlyer.mockResolvedValue(FLYER);
+    for (const entry of ['/p/unit-1', '/p/unit-1?cta=text']) {
+      const view = renderPage(entry);
+      const line = await screen.findByText('Same-day tours available');
+      const area = screen.getByText('Decatur');
+      const beds = screen.getByText((_, el) => el?.tagName === 'LI' && el.textContent === '3 beds');
+      expect(area.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(line.compareDocumentPosition(beds) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      view.unmount();
+      sessionStorage.clear();
+    }
+  });
+
+  it('(PIN) the unavailable state keeps its copy, with no highlight', async () => {
+    getFlyer.mockRejectedValue(
+      new ApiError(404, 'not_found', 'not_found', { error: 'not_found', contact_number: null }),
+    );
+    renderPage();
+    expect(await screen.findByRole('heading', { name: /no longer available/i })).toBeInTheDocument();
+    expect(screen.queryByText('Same-day tours available')).toBeNull();
+  });
+
+  it('(PIN) the authority line keeps its wording and the class the CSS pin reads', async () => {
+    getFlyer.mockResolvedValue(FLYER);
+    renderPage();
+    expect(await screen.findByText('Accepts: Atlanta (AHA), DCA')).toHaveClass(styles.authorities!);
+  });
+});

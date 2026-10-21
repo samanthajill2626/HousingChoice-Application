@@ -98,9 +98,23 @@
   color: var(--c-text);
 }
 
+/* flyer-leads D3: bold, larger than body text (--fs-md), full contrast. */
 .authorities {
-  font-size: var(--fs-sm);
-  color: var(--c-text-muted);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-bold);
+  color: var(--c-text);
+}
+
+/* flyer-leads D3: "Same-day tours available" - static copy on every flyer
+   (Sam, tracker #13), sized to its text rather than the card. */
+.highlight {
+  align-self: flex-start;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-pill);
+  background: var(--c-brand-soft);
+  color: var(--c-text);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
 }
 
 .cta,

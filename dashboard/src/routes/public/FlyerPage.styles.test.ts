@@ -28,6 +28,20 @@ describe('FlyerPage.module.css (flyer-leads D3)', () => {
     expect(bodyOf('.title')).toMatch(/overflow-wrap:\s*anywhere\s*;/);
   });
 
+  it('the housing authority line is bold, larger than body text (--fs-md) and full-contrast', () => {
+    const body = bodyOf('.authorities');
+    expect(body).toMatch(/font-weight:\s*var\(--fw-bold\)\s*;/);
+    expect(body).toMatch(/font-size:\s*var\(--fs-(?:lg|xl|2xl)\)\s*;/);
+    expect(body).toMatch(/(?:^|[\s;])color:\s*var\(--c-text\)\s*;/);
+  });
+
+  it('"Same-day tours available" is a highlighted line', () => {
+    const body = bodyOf('.highlight');
+    expect(body).toMatch(/background:\s*var\(--c-brand-soft\)\s*;/);
+    expect(body).toMatch(/font-weight:\s*var\(--fw-semibold\)\s*;/);
+    expect(body).toMatch(/(?:^|[\s;])color:\s*var\(--c-text\)\s*;/);
+  });
+
   // Worklist OR-9: spec D3 item 2 - "a second, smaller line" under the street
   // line (the h1 is --fs-xl).
   it('the city line is smaller than the street line', () => {

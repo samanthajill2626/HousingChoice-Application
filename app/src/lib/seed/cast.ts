@@ -1325,6 +1325,21 @@ const pmManagedProperty = {
     contract_status: 'signed',
     registered_landlord: true,
     authorities_served: [SEED_AUTHORITY.atlanta],
+    // Landlord requirements (property-requirements spec section 7 "Seeds"):
+    // the demo landlord whose property shows every requirement state (see the
+    // unit's requirement_sources below). Stored as the contacts PATCH stores
+    // them (lib/requirements.ts kinds; test/seedRequirements.test.ts).
+    req_no_evictions_on_program: true,
+    req_credit_requirements: '580+ preferred; a co-signer is considered.',
+    req_income_requirements: '2.5x the tenant portion of the rent.',
+    req_qualifications: 'A landlord reference from the last two years.',
+    req_no_pets: true,
+    req_pets: 'Service animals only.',
+    req_deposit_one_month: true,
+    req_deposit_flexible: true,
+    req_application_fee: 0,
+    req_tour_type: 'pm_team',
+    req_tour_process: 'Text the property manager to arrange a showing.',
     created_at: CC,
   },
   manager: {
@@ -1358,6 +1373,20 @@ const pmManagedProperty = {
     voucher_size_accepted: [2, 3],
     pets: 'Cats OK',
     tour_process: 'Text the property manager to arrange a showing.',
+    credit_requirements: '580+ preferred; a co-signer is considered.',
+    income_requirements: '3x the tenant portion of the rent.',
+    // Where each requirement came from (spec D5). Seeds bypass the API, so the
+    // seed writes the map itself, one item in each state against the owner's
+    // requirements above: credit COPIED and still equal (no tag); pets SET HERE
+    // ("Cats OK" against the owner's No pets - purple "Set on this property");
+    // income COPIED before the owner changed it (orange "Landlord updated").
+    // Every other item is never touched: the deposit and the tour process show
+    // as set on this property (existing values), the rest blank with a
+    // "Landlord:" line.
+    requirement_sources: { credit_requirements: 'copied', pets: 'set_here', income_requirements: 'copied' },
+    // Every writer of the map stamps updated_at (plan 3.1 invariant, PR1-9;
+    // build ruling OR-7): a unit holding requirement_sources is human-owned.
+    updated_at: CD,
     // The PM is the property's PRIMARY CONTACT - the person put on the relay
     // group and reached by a masked call. The scalar mirrors the flagged row.
     contacts: [

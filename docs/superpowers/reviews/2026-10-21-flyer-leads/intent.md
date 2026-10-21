@@ -7,10 +7,11 @@ deployed.
 
 ## STATE (replace each time)
 
-- Phase: DESIGN - spec rev 1 committed @880c5973
-  (`docs/superpowers/specs/2026-10-21-flyer-leads-design.md`). Adversarial review
-  round 1 is running: two opus reviewers, writing
-  `design-review/R1-reviewer-{a,b}.md`.
+- Phase: DESIGN - spec rev 2 committed @bd73315c
+  (`docs/superpowers/specs/2026-10-21-flyer-leads-design.md`).
+  - Round 1: 18 merged findings, all accepted; it changed decisions.
+  - Round 2 is running: reviewer B continued (writes `design-review/R2-reviewer-b.md`).
+  - Reviewer A is idle; keep it alive for later rounds if needed.
 - Subzone auto-fill is NOT this mission. Its research is at
   `W:\tmp\subzone-autofill-research\research-report.md`. Cameron starts that session
   himself from the prompt given 2026-10-21; he rejected the start_session card.

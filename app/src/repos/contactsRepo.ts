@@ -703,14 +703,15 @@ export interface ListContactsOpts {
 
 /**
  * One `update` guard clause: the stored `attr` equals `value` exactly (a
- * string or a number - a number clause compares a stored number, so the
- * classification fence is guarded RAW, never through
- * contactClassificationRevision's fold of "absent" to 0), or is ABSENT for
- * `value: null`.
+ * string, a number or a boolean - a number clause compares a stored number, so
+ * the classification fence is guarded RAW, never through
+ * contactClassificationRevision's fold of "absent" to 0; a boolean clause
+ * compares a stored boolean, e.g. a landlord's req_deposit_one_month, never a
+ * string), or is ABSENT for `value: null`.
  */
 export interface ExpectClause {
   attr: string;
-  value: string | number | null;
+  value: string | number | boolean | null;
 }
 
 /**
@@ -721,10 +722,11 @@ export interface ExpectClause {
  * ConditionalCheckFailedException exactly like an unknown contact does - the
  * caller re-reads to tell "gone" from "stale". A no-op update evaluates every
  * guard on a consistent read. Users: the Staff notes stale-save guard (PATCH
- * staff_notes_expected_updated_at, spec 3.9 - one clause) and the caseworker
+ * staff_notes_expected_updated_at, spec 3.9 - one clause), the caseworker
  * conversion's commit (spec 2026-10-06 D19/D22 - the raw
  * classification_revision, housingAuthority, agency and organization as read,
- * plus notDeleted).
+ * plus notDeleted) and the landlord requirements PATCH (property-requirements
+ * code review OR-30 - the stored type and Deposit pair its checks read).
  */
 export interface UpdateContactOptions {
   expect?: ExpectClause | ExpectClause[];

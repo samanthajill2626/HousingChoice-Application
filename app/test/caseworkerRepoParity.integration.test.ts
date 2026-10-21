@@ -266,6 +266,34 @@ describe('contactsRepo.update guards - expect clauses and notDeleted (plan 3.3)'
     expect((await w.readContact(id))?.['agency']).toBe('');
   });
 
+  // property-requirements (code review OR-30): the landlord PATCH guards the
+  // stored Deposit pair as read, and req_deposit_one_month is a stored true.
+  parity('a boolean clause guards a stored boolean exactly - never absent, the other boolean or the string', async (w, id) => {
+    const base: ContactItem = { contactId: id, type: 'landlord', status: 'active', req_deposit_one_month: true, lifEligible: false };
+    await w.putContact(base);
+    const lost: Array<[string, string | number | boolean | null]> = [
+      ['req_deposit_one_month', false], // the other boolean
+      ['req_deposit_one_month', null], // a held true is not absent
+      ['req_deposit_one_month', 'true'], // a string is not a boolean
+      ['lifEligible', true],
+      ['lifEligible', null], // a held false is not absent either
+      ['req_deposit', true], // an absent attribute is not true
+    ];
+    for (const [attr, value] of lost) {
+      await expect(
+        w.contacts.update(id, { req_pets: 'Lost' }, { expect: [{ attr, value }] }),
+      ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
+    }
+    expect(await w.readContact(id)).toEqual(base);
+    const updated = await w.contacts.update(
+      id,
+      { req_pets: 'Cats OK' },
+      { expect: [{ attr: 'req_deposit_one_month', value: true }, { attr: 'lifEligible', value: false }] },
+    );
+    expect(updated.req_pets).toBe('Cats OK');
+    expect(await w.readContact(id)).toEqual({ ...base, req_pets: 'Cats OK' });
+  });
+
   parity('a no-op update evaluates every clause and notDeleted', async (w, id) => {
     await w.putContact({ contactId: id, type: 'partner', status: 'active', classification_revision: 3 });
     await expect(

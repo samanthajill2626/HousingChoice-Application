@@ -8,6 +8,7 @@
 // landlordContactFields.test.ts.
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
+import { hasDepositConflict } from '../src/lib/requirements.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
@@ -240,6 +241,139 @@ describe('deposit_conflict - one month OR a fixed amount (D1)', () => {
     const res = await patchContact(app, LL, { req_pets: 'Cats OK' });
     expect(res.status).toBe(200);
     expect(storedContact(world, LL)?.['req_pets']).toBe('Cats OK');
+  });
+});
+
+describe('the write is guarded on what the checks read (code review RA-2 / OR-30)', () => {
+  // deposit_conflict and the landlord-only 400 are decided on the consistent
+  // read, so the ONE contacts.update also carries guards on what they read:
+  // the stored req_deposit_one_month and req_deposit when the body carries a
+  // Deposit key, the stored type when it carries a req_ key and no type
+  // change. Each colleague's save below runs, through the route, INSIDE this
+  // PATCH's write - after its checks passed. A lost guard is 409
+  // contact_changed with the current contact; nothing of this PATCH lands.
+  const STAMP = '2026-10-20T10:00:00.000Z';
+
+  /** Make the first contacts.update run `theirs` (another PATCH) before it writes; returns the colleague's status once it ran. */
+  function raceInsideFirstWrite(
+    app: import('express').Express,
+    world: FakeWorld,
+    theirs: Record<string, unknown>,
+  ): () => number | undefined {
+    const update = world.contactsRepo.update.bind(world.contactsRepo);
+    let calls = 0;
+    let colleague: number | undefined;
+    world.contactsRepo.update = async (id, patch, opts) => {
+      calls += 1;
+      if (calls === 1) colleague = (await patchContact(app, id, theirs)).status;
+      return update(id, patch, opts);
+    };
+    return () => colleague;
+  }
+
+  it.each<[string, Record<string, unknown>, Record<string, unknown>, Record<string, unknown>]>([
+    [
+      "a fixed amount over a colleague's One month's rent",
+      { req_deposit: 900 },
+      { req_deposit_one_month: true, req_deposit: null },
+      { req_deposit_one_month: true },
+    ],
+    [
+      "One month's rent (a raw save, no amount sent) over a colleague's fixed amount",
+      { req_deposit_one_month: true },
+      { req_deposit: 900 },
+      { req_deposit: 900 },
+    ],
+  ])('%s: 409 contact_changed - never both deposit forms (RA-2a)', async (_case, mine, theirs, kept) => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, LL, { type: 'landlord' });
+    const colleague = raceInsideFirstWrite(app, world, theirs);
+    const res = await patchContact(app, LL, mine);
+    expect(colleague()).toBe(200);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_changed');
+    expect(reqKeysOf(res.body.contact)).toEqual(kept);
+    expect(reqKeysOf(storedContact(world, LL))).toEqual(kept);
+    expect(hasDepositConflict(storedContact(world, LL) ?? {}, 'landlord')).toBe(false);
+    // Only the colleague's save is audited.
+    expect(contactUpdatedFields(world, LL)).toEqual([Object.keys(theirs).sort()]);
+  });
+
+  it('a req_ save racing a re-type to tenant: 409 contact_changed - no req_ key lands on a tenant (RA-2b)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, LL, { type: 'landlord' });
+    const colleague = raceInsideFirstWrite(app, world, { type: 'tenant' });
+    const res = await patchContact(app, LL, { req_pets: 'Cats OK' });
+    expect(colleague()).toBe(200);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_changed');
+    expect(res.body.contact.type).toBe('tenant');
+    expect(storedContact(world, LL)?.type).toBe('tenant');
+    expect(reqKeysOf(storedContact(world, LL))).toEqual({});
+  });
+
+  it('a lost requirement guard beside a CURRENT staff-notes stamp is contact_changed, never staff_notes_stale', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, LL, { type: 'landlord', staff_notes: 'theirs', staff_notes_updated_at: STAMP });
+    const colleague = raceInsideFirstWrite(app, world, { req_deposit_one_month: true, req_deposit: null });
+    const res = await patchContact(app, LL, {
+      staff_notes: 'mine',
+      staff_notes_expected_updated_at: STAMP,
+      req_deposit: 900,
+    });
+    expect(colleague()).toBe(200);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_changed');
+    expect(storedContact(world, LL)?.staff_notes).toBe('theirs');
+    expect(storedContact(world, LL)?.staff_notes_updated_at).toBe(STAMP);
+    expect(reqKeysOf(storedContact(world, LL))).toEqual({ req_deposit_one_month: true });
+  });
+
+  it('(PIN) a staff-notes-only conflict on a landlord still answers staff_notes_stale', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, LL, { type: 'landlord', staff_notes: 'newer', staff_notes_updated_at: STAMP });
+    const res = await patchContact(app, LL, {
+      staff_notes: 'mine, from a stale page',
+      staff_notes_expected_updated_at: '2026-10-20T09:00:00.000Z',
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('staff_notes_stale');
+    expect(res.body.contact.staff_notes).toBe('newer');
+  });
+
+  it('(PIN) a moved staff-notes stamp beside requirement guards that hold is still staff_notes_stale', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, LL, { type: 'landlord', staff_notes: 'newer', staff_notes_updated_at: STAMP });
+    const res = await patchContact(app, LL, {
+      staff_notes: 'mine, from a stale page',
+      staff_notes_expected_updated_at: '2026-10-20T09:00:00.000Z',
+      req_pets: 'Cats OK',
+      req_deposit: 900,
+    });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('staff_notes_stale');
+    expect(reqKeysOf(storedContact(world, LL))).toEqual({});
+  });
+
+  it('with no race the guarded save lands; the guards ride the ONE write, holding the values as read', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, LL, { type: 'landlord', req_deposit_one_month: true });
+    const writes = vi.spyOn(world.contactsRepo, 'update');
+    const res = await patchContact(app, LL, { req_deposit_flexible: true, req_pets: 'Cats OK' });
+    expect(res.status).toBe(200);
+    expect(reqKeysOf(storedContact(world, LL))).toEqual({
+      req_deposit_one_month: true,
+      req_deposit_flexible: true,
+      req_pets: 'Cats OK',
+    });
+    expect(writes).toHaveBeenCalledTimes(1);
+    expect(writes.mock.calls[0]?.[2]).toEqual({
+      expect: [
+        { attr: 'type', value: 'landlord' },
+        { attr: 'req_deposit_one_month', value: true },
+        { attr: 'req_deposit', value: null },
+      ],
+    });
   });
 });
 

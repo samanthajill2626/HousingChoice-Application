@@ -2437,7 +2437,8 @@ export function createFakeWorld(): FakeWorld {
         throw conditionalCheckFailed(`update: no contact ${contactId}`);
       }
       // Mirror the real repo's optional guards (UpdateContactOptions): every
-      // `expect` clause (string, number or null = absent) and `notDeleted`
+      // `expect` clause (string, number, boolean or null = absent; compared
+      // with ===, as DynamoDB compares type and value) and `notDeleted`
       // (attribute_not_exists(deleted_at)), refused BEFORE any field is
       // applied, as one conditional UpdateItem would.
       if (opts?.notDeleted === true && contact['deleted_at'] !== undefined) {

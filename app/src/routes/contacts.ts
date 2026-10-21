@@ -60,6 +60,7 @@ import {
   type ContactItem,
   type ContactsRepo,
   type ContactType,
+  type ExpectClause,
   type ListContactsOpts,
 } from '../repos/contactsRepo.js';
 import { isValidEmailAddress, normalizeEmailAddress } from '../lib/email.js';
@@ -515,6 +516,21 @@ function decodeEmailParam(raw: unknown): string | undefined {
   }
   const normalized = normalizeEmailAddress(decoded);
   return isValidEmailAddress(normalized) ? normalized : undefined;
+}
+
+/**
+ * property-requirements (code review OR-30): an update guard holding the
+ * stored `attr` exactly as read - its string, number or boolean, or ABSENT
+ * (null). A value no writer stores there (a list, a map, a stored NULL) has no
+ * clause form and is left unguarded, as before.
+ */
+function guardAsRead(record: Record<string, unknown>, attr: string): ExpectClause[] {
+  const value = record[attr];
+  if (value === undefined) return [{ attr, value: null }];
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return [{ attr, value }];
+  }
+  return [];
 }
 
 /** A resolved-identity 1:1 type for the conversation, or undefined when not propagatable. */
@@ -1612,6 +1628,23 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     const classificationGuard = changesClassification
       ? { attr: 'classification_revision', value: stored?.classification_revision ?? null }
       : undefined;
+    // LANDLORD REQUIREMENTS (code review OR-30): the landlord-only 400 and the
+    // deposit_conflict 400 below are decided on this read, so the write is
+    // guarded on what they read, captured NOW for the same reason as above:
+    // the stored type when the body carries a req_ key and changes no type
+    // (a type change is fenced by classificationGuard), and the stored
+    // req_deposit_one_month and req_deposit when it carries a Deposit key. A
+    // lost guard is the 409 contact_changed below, with the current contact.
+    const requirementGuards: ExpectClause[] = [];
+    if (touchesRequirements && stored !== undefined) {
+      if (!('type' in parsed.patch)) requirementGuards.push(...guardAsRead(stored, 'type'));
+      if (requirementKeys.some((key) => DEPOSIT_REQUIREMENT_KEYS.has(key))) {
+        requirementGuards.push(
+          ...guardAsRead(stored, 'req_deposit_one_month'),
+          ...guardAsRead(stored, 'req_deposit'),
+        );
+      }
+    }
 
     // The resolved 1:1 type, if triage set type=tenant|landlord this PATCH.
     const newType = parsed.patch['type'];
@@ -1881,6 +1914,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         : undefined;
     const guards = [
       ...(classificationGuard !== undefined ? [classificationGuard] : []),
+      ...requirementGuards,
       ...(staffNotesGuard !== undefined ? [staffNotesGuard] : []),
     ];
 
@@ -1895,13 +1929,15 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       if (err instanceof ConditionalCheckFailedException) {
         // A guarded write fails the same way for "gone" and "stale": re-read
         // (consistent) to tell them apart and return the CURRENT contact.
-        // A classification conflict must not claim that an unchanged note is
-        // stale merely because this request also supplied a note expectation.
+        // A conflict on ANOTHER guard (the classification, a requirement
+        // guard) must not claim that an unchanged note is stale merely because
+        // this request also supplied a note expectation: with any other guard
+        // present, the note is stale only when its stamp actually moved.
         if (guards.length > 0) {
           const current = await contacts.getById(contactId, { consistentRead: true });
           if (current) {
             const notesStale = staffNotesGuard !== undefined && (
-              classificationGuard === undefined
+              guards.length === 1
               || (current.staff_notes_updated_at ?? null) !== staffNotesGuard.value
             );
             const error = notesStale ? 'staff_notes_stale' : 'contact_changed';

@@ -7,7 +7,7 @@
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import type { ContactItem, ContactType } from '../src/repos/contactsRepo.js';
-import { seedListingSend } from './helpers/listingSendSeed.js';
+import { seedFlyerSignUp, seedListingSend } from './helpers/listingSendSeed.js';
 import { toConversationUpdatedEvent } from '../src/lib/events.js';
 import type { ConversationItem, ConversationType } from '../src/repos/conversationsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
@@ -774,5 +774,189 @@ describe('a flyer sign-up puts the property on the properties-sent list (D7)', (
     expect(pins(world)).toHaveLength(1);
     expect(stepFailures(capture)).toEqual([expect.objectContaining({ step: 'ledger', level: 50 })]);
     expect(captured(capture)).toEqual([expect.objectContaining({ sentRecorded: false, sentSkipped: 'error' })]);
+  });
+});
+
+describe('the housing_fair_signup audit fields (D6, plan 2.6)', () => {
+  type Harness = ReturnType<typeof harness>;
+
+  it('an existing tenant on a flyer, entry written: the full payload (no sentSkipped) and the matching log fields', async () => {
+    const { app, world, capture } = harness();
+    seedUnit(world);
+    seedContact(world);
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(signupAudits(world)).toEqual([
+      {
+        entityKey: 'contacts#c-1',
+        event_type: 'housing_fair_signup',
+        payload: {
+          marker: expect.any(String),
+          isNew: false,
+          welcomeSent: false,
+          viaFlyer: true,
+          signupVersion: 2,
+          housingAuthority: null,
+          existingContact: true,
+          deletedContact: false,
+          recorded: true,
+          sentRecorded: true,
+          consentVersion: 'ctia-2026-06',
+        },
+      },
+    ]);
+    expect(captured(capture)).toEqual([
+      expect.objectContaining({ isNew: false, viaFlyer: true, existingContact: true, deletedContact: false, recorded: true, sentRecorded: true }),
+    ]);
+  });
+
+  it('a soft-deleted holder (AR11): the event lands on THAT contact with deletedContact true, recorded and sentRecorded false, sentSkipped deleted', async () => {
+    const { app, world, capture } = harness();
+    seedUnit(world);
+    seedContact(world, { contactId: 'c-del', deleted_at: '2026-10-01T00:00:00.000Z' });
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(signupAudits(world)).toEqual([
+      {
+        entityKey: 'contacts#c-del',
+        event_type: 'housing_fair_signup',
+        payload: {
+          marker: expect.any(String),
+          isNew: false,
+          welcomeSent: false,
+          viaFlyer: true,
+          signupVersion: 2,
+          housingAuthority: null,
+          existingContact: false,
+          deletedContact: true,
+          recorded: false,
+          sentRecorded: false,
+          sentSkipped: 'deleted',
+          consentVersion: 'ctia-2026-06',
+        },
+      },
+    ]);
+    expect(captured(capture)).toEqual([
+      expect.objectContaining({ existingContact: false, deletedContact: true, recorded: false, sentRecorded: false, sentSkipped: 'deleted' }),
+    ]);
+  });
+
+  const SKIP_CASES: Array<{ skipped: string; arrange: (h: Harness) => Promise<Record<string, unknown>> }> = [
+    {
+      skipped: 'not_flyer',
+      arrange: async (h) => {
+        seedContact(h.world);
+        return signupBody();
+      },
+    },
+    {
+      skipped: 'not_shareable',
+      arrange: async (h) => {
+        seedContact(h.world);
+        seedUnit(h.world, 'unit-placed', { status: 'placed' });
+        return signupBody({ unitId: 'unit-placed' });
+      },
+    },
+    {
+      skipped: 'not_tenant',
+      arrange: async (h) => {
+        seedContact(h.world, { type: 'landlord' });
+        seedUnit(h.world);
+        return signupBody({ unitId: 'unit-1' });
+      },
+    },
+    {
+      skipped: 'declined',
+      arrange: async (h) => {
+        seedContact(h.world);
+        seedUnit(h.world);
+        await seedListingSend(h.world.listingSendsRepo, { unitId: 'unit-1', contactId: 'c-1', sentAt: SENT_AT });
+        await h.world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: '2026-10-05T10:00:00.000Z', by: 'staff', staffId: 'usr-1' });
+        return signupBody({ unitId: 'unit-1' });
+      },
+    },
+    {
+      // AR2: a NEWER flyer entry is already stored (two sign-ups inside two app
+      // instances' clock skew), so the order rule keeps it.
+      skipped: 'refused',
+      arrange: async (h) => {
+        seedContact(h.world);
+        seedUnit(h.world);
+        await seedFlyerSignUp(h.world.listingSendsRepo, {
+          unitId: 'unit-1',
+          contactId: 'c-1',
+          signedUpAt: new Date(T0 + HOUR_MS).toISOString(),
+        });
+        return signupBody({ unitId: 'unit-1' });
+      },
+    },
+    {
+      skipped: 'lost',
+      arrange: async (h) => {
+        seedContact(h.world);
+        seedUnit(h.world);
+        vi.spyOn(h.world.listingSendsRepo, 'putShareMemory').mockResolvedValue(false);
+        return signupBody({ unitId: 'unit-1' });
+      },
+    },
+    {
+      skipped: 'error',
+      arrange: async (h) => {
+        seedContact(h.world);
+        seedUnit(h.world);
+        vi.spyOn(h.world.listingSendsRepo, 'getByKeyConsistent').mockRejectedValue(new Error('ledger read down'));
+        return signupBody({ unitId: 'unit-1' });
+      },
+    },
+  ];
+
+  it.each(SKIP_CASES)('sentSkipped $skipped: sentRecorded false, and the pin still recorded', async ({ skipped, arrange }) => {
+    const h = harness();
+    const body = await arrange(h);
+
+    const res = await post(h.app, body);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(signupAudits(h.world).map((e) => e.payload)).toEqual([
+      expect.objectContaining({ existingContact: true, deletedContact: false, recorded: true, sentRecorded: false, sentSkipped: skipped }),
+    ]);
+  });
+
+  it('a decline recorded AFTER a sign-up: the second sign-up audits sentSkipped declined', async () => {
+    const { app, world, clock } = harness();
+    seedUnit(world);
+    seedContact(world);
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    await world.listingSendsRepo.setDeclined('unit-1', 'c-1', { at: new Date(T0 + HOUR_MS).toISOString(), by: 'staff', staffId: 'usr-1' });
+    clock.ms = T0 + 2 * HOUR_MS;
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(signupAudits(world).map((e) => [e.payload?.['sentRecorded'], e.payload?.['sentSkipped']])).toEqual([
+      [true, undefined],
+      [false, 'declined'],
+    ]);
+  });
+
+  it('recorded is false on a repeat inside the 24-hour cap and when the pin write fails; the flyer entry is still recorded', async () => {
+    const { app, world, clock } = harness();
+    seedUnit(world);
+    seedContact(world);
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    clock.ms = T0 + HOUR_MS;
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    vi.spyOn(world.activityEventsRepo, 'record').mockRejectedValue(new Error('pin write down'));
+    clock.ms = T0 + 25 * HOUR_MS;
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(signupAudits(world).map((e) => [e.payload?.['recorded'], e.payload?.['sentRecorded']])).toEqual([
+      [true, true],
+      [false, true],
+      [false, true],
+    ]);
   });
 });

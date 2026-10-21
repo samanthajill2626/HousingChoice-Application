@@ -122,6 +122,44 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
     expect(capture.lines.some((l) => l['msg'] === 'housing-fair signup captured')).toBe(true);
   });
 
+  it('(PIN) NEVER logs PII on the existing-contact path either: the pin, the unread mark, the ledger and every failed step', async () => {
+    const { app, world, capture } = makeWebhookHarness({ env: { PUBLIC_RATE_LIMIT_MAX: '100' } });
+    world.units.set('unit-pii', {
+      unitId: 'unit-pii',
+      landlordId: 'll-1',
+      status: 'available',
+      address: { line1: '77 Unique Ave', city: 'Atlanta', state: 'GA' },
+    });
+    world.contacts.push({
+      contactId: 'c-pii',
+      type: 'tenant',
+      status: 'searching',
+      phone: '+15550103334',
+      firstName: 'Stored1st',
+      lastName: 'Stored2nd',
+    } as ContactItem);
+    const body = { firstName: 'Unique1stName', lastName: 'Unique2ndName', phone: '+15550103334', smsConsent: true, unitId: 'unit-pii' };
+    const send = () => request(app).post(FAIR).set('x-origin-verify', SECRET).send(body);
+
+    // A clean pass: the pin, the mark and the flyer entry are all written.
+    expect((await send()).status).toBe(200);
+    // Then every best-effort step fails, across two passes (a failed touch skips the increment).
+    vi.spyOn(world.activityEventsRepo, 'hasEventSince').mockRejectedValue(new Error('repeat read down'));
+    vi.spyOn(world.activityEventsRepo, 'record').mockRejectedValue(new Error('pin write down'));
+    vi.spyOn(world.conversationsRepo, 'incrementUnread').mockRejectedValue(new Error('increment down'));
+    vi.spyOn(world.listingSendsRepo, 'getByKeyConsistent').mockRejectedValue(new Error('ledger read down'));
+    expect((await send()).status).toBe(200);
+    vi.spyOn(world.conversationsRepo, 'touchLastActivity').mockRejectedValue(new Error('touch down'));
+    expect((await send()).status).toBe(200);
+
+    const steps = capture.lines.filter((l) => l['msg'] === 'housing-fair signup step failed').map((l) => l['step']);
+    expect(new Set(steps)).toEqual(new Set(['repeat_check', 'pin', 'touch', 'increment', 'ledger']));
+    const serialized = JSON.stringify(capture.lines);
+    for (const pii of ['Unique1stName', 'Unique2ndName', 'Stored1st', 'Stored2nd', '+15550103334', '5550103334', 'Signed up from', '77 Unique Ave']) {
+      expect(serialized, pii).not.toContain(pii);
+    }
+  });
+
   it('renders the operator welcomeText override (with {firstName}) when set', async () => {
     const { app, world } = makeWebhookHarness();
     // Operator has overridden the welcome copy via the settings record.
@@ -1244,6 +1282,13 @@ describe('POST /public/housing-fair - audit and log (D7)', () => {
           viaFlyer: false,
           signupVersion: 2,
           housingAuthority: 'Atlanta Housing Authority',
+          // flyer-leads D6: a new /join contact - its pin written, no flyer entry.
+          existingContact: false,
+          deletedContact: false,
+          recorded: true,
+          sentRecorded: false,
+          sentSkipped: 'not_flyer',
+          consentVersion: 'ctia-2026-06',
         },
       },
     ]);
@@ -1265,6 +1310,15 @@ describe('POST /public/housing-fair - audit and log (D7)', () => {
     const payloads = world.auditEvents
       .filter((e) => e.event_type === 'housing_fair_signup')
       .map((e) => e.payload);
+    // flyer-leads D6: two new /join contacts - each pin written, no flyer entry.
+    const joinFields = {
+      existingContact: false,
+      deletedContact: false,
+      recorded: true,
+      sentRecorded: false,
+      sentSkipped: 'not_flyer',
+      consentVersion: 'ctia-2026-06',
+    };
     expect(payloads).toEqual([
       {
         marker: expect.any(String),
@@ -1273,6 +1327,7 @@ describe('POST /public/housing-fair - audit and log (D7)', () => {
         viaFlyer: false,
         signupVersion: 2,
         housingAuthority: null,
+        ...joinFields,
       },
       {
         marker: expect.any(String),
@@ -1281,6 +1336,7 @@ describe('POST /public/housing-fair - audit and log (D7)', () => {
         viaFlyer: false,
         signupVersion: 2,
         housingAuthority: null,
+        ...joinFields,
       },
     ]);
     const lines = capture.lines.filter((l) => l['msg'] === 'housing-fair signup captured');
@@ -1302,6 +1358,12 @@ describe('POST /public/housing-fair - audit and log (D7)', () => {
         viaFlyer: true,
         signupVersion: 2,
         housingAuthority: null,
+        // flyer-leads D6/D7: a new tenant on a shareable flyer - pin and flyer entry written.
+        existingContact: false,
+        deletedContact: false,
+        recorded: true,
+        sentRecorded: true,
+        consentVersion: 'ctia-2026-06',
       },
     ]);
     const lines = capture.lines.filter((l) => l['msg'] === 'housing-fair signup captured');
@@ -1337,6 +1399,13 @@ describe('POST /public/housing-fair - audit and log (D7)', () => {
           viaFlyer: false,
           signupVersion: 2,
           housingAuthority: 'Atlanta Housing Authority',
+          // flyer-leads D6: an existing contact - never welcomed, its pin written, no flyer entry.
+          existingContact: true,
+          deletedContact: false,
+          recorded: true,
+          sentRecorded: false,
+          sentSkipped: 'not_flyer',
+          consentVersion: 'ctia-2026-06',
         },
       },
     ]);

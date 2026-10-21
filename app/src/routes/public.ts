@@ -11,17 +11,31 @@
 //
 // Routes:
 //   POST /public/housing-fair  { firstName, lastName, phone, voucherSize?, unitId?, housingAuthority? }
-//        → 200 { ok: true }   (creates/dedupes a tenant contact, sends the
-//          welcome text on FIRST capture only; leaks NO internal IDs/PII. A
-//          present + shareable unitId stamps capture_source:'flyer' +
-//          unit_of_interest on the CREATED contact instead of 'housing_fair'.
-//          join-housing-authority: housingAuthority (absent/null = none) must
-//          be the exact name of a listed housing authority, else 400
-//          housing_authority_not_listed; sent WITH a unitId it is the generic
-//          400. A new contact from a request with NO unitId starts
-//          'onboarding' and holds the authority; WITH a unitId it starts
-//          'needs_review'. Every new contact carries housing_fair_signup_v2;
-//          an existing contact is never changed beyond the welcome flag.)
+//        -> 200 { ok: true }   (leaks NO internal IDs/PII). The phone is looked
+//          up with contacts.findByPhone - the ONE routing read (flyer-leads D4):
+//          - no holder: a NEW tenant contact is created and gets the welcome
+//            text (the only sign-up that does, D5). A present + shareable
+//            unitId stamps capture_source:'flyer' + unit_of_interest instead of
+//            'housing_fair'. A request with NO unitId starts 'onboarding' and
+//            holds the housing authority; WITH a unitId it starts
+//            'needs_review'. Every new contact carries housing_fair_signup_v2.
+//          - a live holder (any type): an EXISTING contact - never changed and
+//            never welcomed.
+//          - a soft-deleted holder: no conversation, send, pin, unread mark or
+//            sent-list entry; only the housing_fair_signup audit, on it
+//            (sentSkipped 'deleted').
+//          Every live contact (new or existing) then gets, best-effort (D6): a
+//          'signed_up' pin in its thread and an unread mark on its 1:1
+//          conversation (touch -> incrementUnread -> ONE conversation.updated),
+//          at most once per contact per source (a shareable flyer's unit, or
+//          the one "no property" source) per 24 hours; and, for a flyer of a
+//          shareable unit and a tenant or unknown contact, a 'flyer' entry on
+//          the properties-sent ledger unless the pair holds a current decline
+//          (D7). A failed step is logged without PII and the answer is still
+//          { ok: true }. join-housing-authority: housingAuthority (absent/null
+//          = none) must be the exact name of a listed housing authority, else
+//          400 housing_authority_not_listed; sent WITH a unitId it is the
+//          generic 400.)
 //   GET  /public/units/:unitId/flyer
 //        -> 200 { flyer }   (the FULL public payload upfront + contact_number)
 //        -> 404 { error, contact_number }   (missing/deleted/not-shareable;
@@ -468,9 +482,27 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
         viaFlyer,
         signupVersion: 2,
         housingAuthority: housingAuthority ?? null,
+        existingContact: false,
+        deletedContact: true,
+        recorded: false,
+        sentRecorded: false,
+        // AR11: sentSkipped is absent ONLY when an entry was written.
+        sentSkipped: 'deleted' satisfies SignupSentSkipped,
+        consentVersion: CONSENT_VERSION,
       });
       log.info(
-        { marker, isNew: false, welcomeSent: false, viaFlyer, withAuthority: housingAuthority !== undefined },
+        {
+          marker,
+          isNew: false,
+          welcomeSent: false,
+          viaFlyer,
+          withAuthority: housingAuthority !== undefined,
+          existingContact: false,
+          deletedContact: true,
+          recorded: false,
+          sentRecorded: false,
+          sentSkipped: 'deleted' satisfies SignupSentSkipped,
+        },
         'housing-fair signup captured',
       );
       res.json({ ok: true });
@@ -645,31 +677,45 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       }
     }
 
-    // (4) Audit (no PII in the payload beyond the marker — the contactId is an
+    // (4) Audit (no PII in the payload beyond the marker - the contactId is an
     // internal id, fine for the audit trail but NOT returned to the public).
-    // join-housing-authority D7: every event from now on carries
-    // signupVersion 2 (the lead backfill reads it: a pre-change lead who
-    // signed up again after the change is left alone) and the authority the
-    // REQUEST carried, else null - an organization name, not PII - recorded
-    // for an existing contact too, though D6 writes nothing to it.
+    // join-housing-authority D7: every event carries signupVersion 2 (the lead
+    // backfill reads it - scripts/backfill-join-housing-authority.ts) and the
+    // authority the REQUEST carried, else null. flyer-leads D6 adds, still with
+    // no PII: existingContact (a live holder), deletedContact (false here - the
+    // deleted path writes its own event above), recorded (the pin was written),
+    // sentRecorded (the flyer entry was written), sentSkipped (why no entry was
+    // written: not_flyer, not_shareable, not_tenant, declined, refused, lost or
+    // error - and deleted on the deleted path, AR11; absent ONLY when one was)
+    // and consentVersion (the consent disclosure version in force -
+    // CONSENT_VERSION, smsCompliance.ts:91 - which ships with the form;
+    // evidence only, never stamped on an existing contact).
     await audit.append(`contacts#${contactId}`, 'housing_fair_signup', {
       marker,
-      isNew: existing === undefined,
+      isNew,
       welcomeSent,
       viaFlyer,
       signupVersion: 2,
       housingAuthority: housingAuthority ?? null,
+      existingContact: !isNew,
+      deletedContact: false,
+      recorded,
+      sentRecorded,
+      ...(sentSkipped !== undefined && { sentSkipped }),
+      consentVersion: CONSENT_VERSION,
     });
-    // Log a hashed marker only — NEVER the name or phone (doc §9 / kickoff).
-    // viaFlyer is a non-PII boolean (whether a shareable unit was attributed);
-    // withAuthority (D7) is a boolean too - the name itself stays out of logs.
+    // Log a hashed marker only - NEVER the name or phone (doc section 9). Every
+    // other field is a non-PII boolean or enum; withAuthority (D7) stands in
+    // for the authority's name.
     log.info(
       {
         marker,
-        isNew: existing === undefined,
+        isNew,
         welcomeSent,
         viaFlyer,
         withAuthority: housingAuthority !== undefined,
+        existingContact: !isNew,
+        deletedContact: false,
         recorded,
         sentRecorded,
         ...(sentSkipped !== undefined && { sentSkipped }),
@@ -677,7 +723,7 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       'housing-fair signup captured',
     );
 
-    // (5) Minimal response — do NOT leak internal IDs or PII to the public.
+    // (5) Minimal response - do NOT leak internal IDs or PII to the public.
     res.json({ ok: true });
   });
 

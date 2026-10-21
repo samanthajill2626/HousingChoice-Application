@@ -238,6 +238,31 @@ describe('leftOutReasonFromAudit (spec D10: the WHOLE history, any order)', () =
     expect(leftOutReasonFromAudit([event('housing_fair_signup', { ...RESIGNUP_PAYLOAD, signupVersion: '2' })])).toBeNull();
   });
 
+  it('(PIN) flyer-leads D6: a sign-up event carrying the new audit fields still leaves the lead out', () => {
+    const flyerLeadsPayload = {
+      ...RESIGNUP_PAYLOAD,
+      existingContact: true,
+      deletedContact: false,
+      recorded: true,
+      sentRecorded: false,
+      sentSkipped: 'not_flyer',
+      consentVersion: 'ctia-2026-06',
+    };
+    expect(leftOutReasonFromAudit([event('housing_fair_signup', flyerLeadsPayload)])).toBe('signed_up_again');
+    // The deleted path's event too (it is on the deleted contact's entity; AR11).
+    expect(
+      leftOutReasonFromAudit([
+        event('housing_fair_signup', {
+          ...flyerLeadsPayload,
+          existingContact: false,
+          deletedContact: true,
+          recorded: false,
+          sentSkipped: 'deleted',
+        }),
+      ]),
+    ).toBe('signed_up_again');
+  });
+
   it('an exclusion recorded by an earlier --apply leaves the lead out - and wins over a post-change sign-up and an authority history; it is not itself authority history', () => {
     const excluded = event(BACKFILL_EXCLUDED_AUDIT_TYPE, { field: 'housingAuthority' });
     expect(touchesHousingAuthority(excluded)).toBe(false);

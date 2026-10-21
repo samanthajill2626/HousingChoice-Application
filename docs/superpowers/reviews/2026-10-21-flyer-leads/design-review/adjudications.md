@@ -147,3 +147,19 @@ planner's recommendation. Findings 2-4 are precision, folded into rev 5.
   - rev 2's first-sight rule (R2-5);
   - rev 3's decline supersession (R3-1).
 - Open for Cameron: O1 (above).
+
+## Cameron at the spec gate (2026-10-21) - folded into rev 6
+
+- O1: "For O1, let's close it." The decline writers stamp a fresh `shares_op`.
+- Flyer calls (heading fallback, area line, thank-you text): accepted as written.
+- The typed name in the note: accepted; the contact is never renamed.
+- The repeat limit: changed from per contact per 24 hours to per contact per
+  PROPERTY per 24 hours ("if you are sharing flyers here, it could be multiple
+  different flyers ... we still want to track that"). /join and unavailable or
+  made-up flyers share one "no property" source. `hasEventSince` takes the
+  source.
+- New contacts: marked unread too ("We definitely want that to happen"), after
+  the welcome send.
+- He asked for the shared-phone and consent reversals to be explained plainly;
+  D4's residual now states that the app blocks new duplicate phones (409), so
+  shared phones are legacy only.

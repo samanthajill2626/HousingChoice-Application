@@ -1,6 +1,6 @@
 # Flyer trim and flyer / join leads - design
 
-Status: DRAFT revision 5 (2026-10-21), at Cameron's spec gate.
+Status: DRAFT revision 6 (2026-10-21), at Cameron's spec gate.
 - Rev 2 folded in review round 1: two reviewers, 18 merged findings, all
   accepted.
 - Rev 3 folds in round 2: one continued reviewer, 12 findings, all
@@ -11,7 +11,12 @@ Status: DRAFT revision 5 (2026-10-21), at Cameron's spec gate.
 - Rev 5 folds in round 4, the cap: 4 findings, all accepted. One changes
   what gets built - the decline race - and is put to Cameron as O1 (D7)
   instead of a fifth round.
-- Next: Cameron's spec gate.
+- Rev 6 folds in Cameron's gate answers (2026-10-21):
+  - O1 closed: the decline writers stamp the token;
+  - the repeat limit is per contact per PROPERTY per 24 hours;
+  - new sign-ups are marked unread too;
+  - his flyer and note calls are accepted as written.
+- Next: Cameron's approval.
 
 Adjudications:
 `docs/superpowers/reviews/2026-10-21-flyer-leads/design-review/adjudications.md`.
@@ -45,7 +50,8 @@ decisions (its D3 and D11). Where the two disagree, this spec wins.
 3. A sign-up from someone who is ALREADY a contact, on the flyer or on
    /join, no longer sends them the welcome text. It is recorded in their
    thread, and their conversation is marked unread so staff see it in the
-   inbox.
+   inbox. A NEW contact's sign-up is recorded and marked unread too, after
+   its welcome text.
 4. A flyer sign-up puts that property on the contact's properties-sent list
    with its own "Signed up from the flyer" state, because they have seen it
    and asked about it. This applies to tenant and unknown contacts, new or
@@ -213,9 +219,13 @@ the SAME contact.
 - **The holder is soft-deleted**: the deleted path, below.
 - **No holder**: a NEW contact is created, as today.
 
-Residual, the app-wide accepted risk documented at `contactsRepo.ts:1288`: on
-a phone shared by several contacts, the first index hit decides, as it does
-everywhere else. In particular:
+Residual: the app blocks NEW duplicate phones. A create on a phone that is
+already held returns 409 (`routes/contacts.ts:1165-1177`), and so does adding
+a held number (`phone_in_use`, `:2724-2729`). So a phone held by more than
+one contact is a legacy record only: one from before those checks, or an
+import (the accepted risk documented at `contactsRepo.ts:1288`). On such a
+phone the first index hit decides, as it does everywhere else in the app. In
+particular:
 - a deleted first holder sends the sign-up down the deleted path even when
   a live contact shares the phone;
 - a dangling phone pointer that sorts first makes `findByPhone` return
@@ -271,26 +281,34 @@ existing contact never gets it, from either form, whatever
 
 For an existing contact (D4), on both forms, in this order.
 
-1. **The repeat check.** If the contact already has a `signed_up` milestone
-   in the last 24 hours, from ANY source, steps 2 and 3 are skipped.
+1. **The repeat check (Cameron, 2026-10-21): one pin and one inbox bump per
+   contact per PROPERTY per 24 hours.**
+   - Each sign-up has a source:
+     - for a flyer of a shareable property, that property (the pin's unitId
+       ref);
+     - for /join, and for a flyer whose property is not shareable (missing,
+       deleted, unavailable, or a made-up unitId), one shared "no property"
+       source (the pin has no ref).
+   - If the contact already has a `signed_up` pin from the SAME source in
+     the last 24 hours, steps 2 and 3 are skipped. A sign-up from a
+     different property's flyer always records.
+   - A repeat for the same property after 24 hours records again, so staff
+     see that the person came back.
    - The check is a new repo read,
-     `activityEventsRepo.hasEventSince(contactId, type, sinceIso)`: a
-     key-range query on the contact's partition for
-     `tsEventId > sinceIso`, filtered to `type`, paginated to the end of the
-     window.
-   - So each contact gets at most one sign-up pin and one inbox bump per 24
-     hours. That cap is what stops someone who knows a phone number from
-     flooding a thread or the inbox.
-   - The cap governs the pin and the bump only. A flyer sign-up's sent-list
-     entry (D7) is still written, so a second flyer the same day shows on
-     the sent list as "Signed up from the flyer", while the pin names the
-     first.
-   - Residuals, accepted:
-     - one pin a day per known phone can carry a typed name the attacker
-       chose (capped at 100 characters per part, and subject to the
-       endpoint's per-IP rate limit);
-     - an attacker's pin can pre-empt the genuine person's pin and bump for
-       that day. Their flyer entry is still written.
+     `activityEventsRepo.hasEventSince(contactId, type, sinceIso, refId)`:
+     - a key-range query on the contact's partition for
+       `tsEventId > sinceIso`;
+     - filtered to `type` and to the source: the given unitId as `refId`,
+       or no ref for the "no property" source;
+     - paginated to the end of the window.
+   - The cap governs the pin and the bump only. The flyer's sent-list entry
+     (D7) is written on every sign-up it applies to.
+   - Residuals, accepted: someone who knows a phone number can plant at most
+     one pin a day per shareable property, plus one "no property" pin. Each
+     pin can carry a typed name of their choosing, capped at 100 characters
+     per part, and the endpoint's per-IP rate limit applies. Made-up
+     unitIds all fall into the one "no property" source, so they cannot
+     multiply pins.
    - If the read fails, it fails OPEN: the pin and the bump are recorded.
 
 2. **The pin.** `activityEventsRepo.record` with a new event type
@@ -343,10 +361,16 @@ For an existing contact (D4), on both forms, in this order.
    failed welcome today.
 
 NEW contacts are created as today (status, capture source, unit of interest,
-consent), and they get the welcome text. They also get the `signed_up` pin,
-for a uniform history in which the pin names the flyer. They are NOT marked
-unread: the welcome text is outbound, and new leads already surface as Needs
-review / Onboarding. *(Planner's call.)*
+consent), and they get the welcome text. They ALSO get the `signed_up` pin
+and the unread mark (Cameron, 2026-10-21: a new sign-up must show in the
+inbox as unread).
+- The touch and unread mark run AFTER the welcome send, so the new
+  conversation ends with the welcome as its newest message, and is unread
+  and on top.
+- When the welcome is refused or fails, the pin and unread mark still
+  happen.
+- A brand-new contact has no earlier pin, so the repeat check always passes
+  for it.
 
 The `housing_fair_signup` audit event gains these fields, with no PII:
 - `existingContact`;
@@ -412,15 +436,13 @@ was sent to them before.
     supersedes the decline, as today.
   - The refusal is decided inside the ledger's read-modify-write, on the row
     that write read.
-  - **O1 - open, for Cameron at the gate (round 4 was the cap):** today
-    that write is conditioned only on the row's change token (`shares_op`),
-    and the decline writers (`setDeclined` / `clearDeclined`,
-    `listingSendsRepo.ts:368-420`) do not change it. So a decline clicked in
-    the same instant as a public flyer write can be overwritten.
-    - *Planner's recommendation:* the two decline writers also stamp a fresh
-      `shares_op`, so a racing ledger write loses its condition, re-reads,
-      and sees the decline. This is two writers and the harness fake.
-    - *Alternative:* accept the race as a stated residual.
+  - **O1, decided by Cameron 2026-10-21 ("let's close it"):** that write is
+    conditioned only on the row's change token (`shares_op`), and today the
+    decline writers (`setDeclined` / `clearDeclined`,
+    `listingSendsRepo.ts:368-420`) do not change it. So both decline
+    writers ALSO stamp a fresh `shares_op`. A ledger write racing a decline
+    then loses its condition, re-reads, and sees the decline. The harness
+    fake and the NO-RESET comment change with them.
   - *(Rev 2's "first sight only" was dropped. It left an already-sent pair
     at "No reply yet" on Follow up after the person signed up, and it could
     not be enforced inside the conditional write. Rev 3's "supersede a
@@ -579,8 +601,8 @@ reports it.
 - The ledger: `shareLedger.ts` (`summarize` key mapping, the `flyer` key
   beside `INDIVIDUAL_KEY`, the exported `latestCountedShareKey` helper, the
   flyer-only current-decline refusal inside the conditional write, and the
-  flyer path's lost-write log line). If O1 is adopted, also
-  `listingSendsRepo.setDeclined` / `clearDeclined`, which stamp a fresh
+  flyer path's lost-write log line). Also, per O1,
+  `listingSendsRepo.setDeclined` / `clearDeclined` stamp a fresh
   `shares_op`, with the harness fake and the NO-RESET comment; `shareAttemptOrder.ts` (the attempt-key form) and
   `putShareMemory`. Its signature is unchanged, so the dev listing-send
   fixture (`dev.ts:1433-1484`) and the seeds are unchanged.
@@ -649,8 +671,8 @@ reports it.
 - A decline recorded AFTER a sign-up, then a second sign-up: the decline
   holds, no flyer entry is written, and the audit has
   `sentSkipped: 'declined'`.
-- If O1 is adopted, a decline landing between the ledger's read and its
-  write also holds: the write loses its token and re-reads.
+- O1: a decline landing between the ledger's read and its write also
+  holds: the write loses its token and re-reads.
 - A broadcast send to a declined pair still supersedes the decline. The
   refusal is flyer-only.
 - /join: the join label, and no ledger write.
@@ -659,13 +681,17 @@ reports it.
 - A soft-deleted holder (findByPhone returns it): no conversation write, no
   send, no pin; the audit, on that contact, has `deletedContact: true`.
 - No write of any field to an existing contact, consent included.
-- A new contact on the flyer: the welcome sent, the pin, NOT unread, the
+- A new contact on the flyer: the welcome sent, then the pin, the unread
+  mark and the flyer entry. The welcome refused: still the pin and unread.
+- A repeat for the SAME property within 24 hours: no second pin and no
+  unread. After 24 hours: a new pin and unread.
+- A different property's flyer within 24 hours: its own pin, unread and
   flyer entry.
-- A repeat within 24 hours (any source): no second pin and no unread; after
-  24 hours, a new pin.
-- A second flyer within 24 hours: no pin, but its flyer entry IS written.
-- A made-up unitId: the "from a flyer" label, no ledger write, and the
-  24-hour cap still holds.
+- /join twice within 24 hours: one pin. /join, then a flyer for an
+  unavailable property, within 24 hours: one pin (the shared "no property"
+  source).
+- Made-up unitIds: the "from a flyer" label, no ledger write, and all of
+  them share the one "no property" source.
 - The repeat read, the pin, the touch, the increment or the ledger write
   failing: still `{ ok: true }`, with the audit flags honest. A failed
   increment still emits one event.

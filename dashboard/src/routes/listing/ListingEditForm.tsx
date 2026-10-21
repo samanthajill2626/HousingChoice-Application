@@ -542,7 +542,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
           )}
         </TaggedField>
 
-        <TaggedField label="Accessibility" visibility={formFieldVisibility('Accessibility')} audience="property" publicNote>
+        <TaggedField label="Accessibility" visibility={formFieldVisibility('Accessibility')} audience="property">
           {(control) => (
             <input
               {...control}
@@ -555,7 +555,7 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
           )}
         </TaggedField>
 
-        <TaggedField label="Lease terms" visibility={formFieldVisibility('Lease terms')} audience="property" publicNote>
+        <TaggedField label="Lease terms" visibility={formFieldVisibility('Lease terms')} audience="property">
           {(control) => (
             <input
               {...control}

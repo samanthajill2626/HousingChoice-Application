@@ -677,7 +677,7 @@ export function UnitCreateForm({
           )}
         </TaggedField>
 
-        <TaggedField label="Accessibility" visibility={formFieldVisibility('Accessibility')} audience="property" publicNote>
+        <TaggedField label="Accessibility" visibility={formFieldVisibility('Accessibility')} audience="property">
           {(control) => (
             <input
               {...control}
@@ -690,7 +690,7 @@ export function UnitCreateForm({
           )}
         </TaggedField>
 
-        <TaggedField label="Lease terms" visibility={formFieldVisibility('Lease terms')} audience="property" publicNote>
+        <TaggedField label="Lease terms" visibility={formFieldVisibility('Lease terms')} audience="property">
           {(control) => (
             <input
               {...control}

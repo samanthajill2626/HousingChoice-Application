@@ -1456,6 +1456,26 @@ describe('ContactEditForm - landlord Requirements / Qualifications', () => {
     expect(within(group).getByRole('checkbox', { name: 'No evictions while on the program' })).not.toBeChecked();
   });
 
+  it('Pets and Deposit read Staff only; On property flyers is only on the application-fee pair (flyer-leads D2)', () => {
+    render(<ContactEditForm contact={WITH_REQUIREMENTS} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const group = fieldset();
+    for (const label of ['Pets (details)', 'Pet fee', 'Fixed amount', 'Deposit notes']) {
+      expect(within(group).getByLabelText(label), label).toHaveAccessibleDescription('Staff only');
+    }
+    for (const name of ['No pets', "One month's rent", 'Flexible / payment terms available']) {
+      expect(within(group).getByRole('checkbox', { name }), name).toHaveAccessibleDescription('Staff only');
+    }
+    expect(within(group).getByRole('checkbox', { name: 'No application fee' })).toHaveAccessibleDescription(
+      'On property flyers',
+    );
+    expect(within(group).getByLabelText('Application fee')).toHaveAccessibleDescription('On property flyers');
+    // Exactly that pair: the legend line starts "On property flyers - ..."
+    // and so is not an exact match - only the two TAGS are.
+    expect(within(group).getAllByText('On property flyers')).toHaveLength(2);
+    // The landlord legend is unchanged (spec D2).
+    expect(group).toHaveTextContent(/tenants see it once it is copied to a property/);
+  });
+
   it('never shows the fieldset for a tenant', () => {
     render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
     expect(screen.queryByRole('group', { name: 'Requirements / Qualifications' })).toBeNull();

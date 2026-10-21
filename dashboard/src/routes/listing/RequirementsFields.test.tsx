@@ -81,9 +81,10 @@ describe('RequirementsFields', () => {
     const texts = describedTexts(control);
     expect(texts).toContain(TAGS[audience][flyer]);
     for (const el of describers(control)) expect(el.closest('label')).toBeNull();
-    // D10: only the PROPERTY forms' public free-text boxes (pets details, pet
-    // fee) say tenants see them; a landlord value reaches a flyer only once it
-    // is copied to a property (D9; planner ruling PR-2, code review PC-1).
+    // D10: only the PROPERTY forms' public free-text boxes say tenants see
+    // them; a landlord value reaches a flyer only once it is copied to a
+    // property (D9; planner ruling PR-2, code review PC-1). flyer-leads D2:
+    // no requirement text field is On flyer any more, so none carries it.
     expect(texts.includes(PUBLIC_NOTE)).toBe(audience === 'property' && kind === 'text' && flyer === 'on_flyer');
   });
 
@@ -93,6 +94,28 @@ describe('RequirementsFields', () => {
     expect(box).toHaveAccessibleName('No application fee');
     expect(describedTexts(box)).toContain(TAGS[audience].on_flyer);
   });
+
+  it.each(['property', 'landlord'] as const)(
+    '%s form: every Pets and Deposit field reads Staff only, and no requirement field carries the public note (flyer-leads D2)',
+    (audience) => {
+      render(<Harness audience={audience} />);
+      for (const label of [
+        'No pets',
+        'Pets (details)',
+        'Pet fee',
+        "One month's rent",
+        'Fixed amount',
+        'Flexible / payment terms available',
+        'Deposit notes',
+      ]) {
+        expect(describedTexts(screen.getByLabelText(label)), label).toEqual(['Staff only']);
+      }
+      expect(screen.queryByText(PUBLIC_NOTE)).toBeNull();
+      // The application-fee pair is the only public requirement left.
+      expect(describedTexts(screen.getByLabelText('No application fee'))).toEqual([TAGS[audience].on_flyer]);
+      expect(describedTexts(screen.getByLabelText('Application fee'))).toEqual([TAGS[audience].on_flyer]);
+    },
+  );
 
   it('typing and ticking report the whole next value', async () => {
     const user = userEvent.setup();

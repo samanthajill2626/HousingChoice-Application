@@ -97,9 +97,9 @@ const ITEM_LIST: RequirementItem[] = [
     label: 'Pets',
     group: 'Pets',
     fields: [
-      field('no_pets', 'No pets', 'checkbox', 'on_flyer'),
-      field('pets', 'Pets (details)', 'text', 'on_flyer'),
-      field('pet_fee', 'Pet fee', 'text', 'on_flyer'),
+      field('no_pets', 'No pets', 'checkbox', 'staff_only'),
+      field('pets', 'Pets (details)', 'text', 'staff_only'),
+      field('pet_fee', 'Pet fee', 'text', 'staff_only'),
     ],
   },
   {
@@ -107,9 +107,9 @@ const ITEM_LIST: RequirementItem[] = [
     label: 'Deposit',
     group: 'Move-in costs',
     fields: [
-      field('deposit_one_month', "One month's rent", 'checkbox', 'on_flyer'),
-      field('deposit', 'Fixed amount', 'money', 'on_flyer'),
-      field('deposit_flexible', 'Flexible / payment terms available', 'checkbox', 'on_flyer'),
+      field('deposit_one_month', "One month's rent", 'checkbox', 'staff_only'),
+      field('deposit', 'Fixed amount', 'money', 'staff_only'),
+      field('deposit_flexible', 'Flexible / payment terms available', 'checkbox', 'staff_only'),
       field('deposit_notes', 'Deposit notes', 'text', 'staff_only'),
     ],
   },
@@ -251,22 +251,25 @@ export interface FormFieldVisibility {
  *  forms tag each field from this table by its label (requirementForm.ts
  *  formFieldVisibility). The first row, the owning landlord, is on the New
  *  form only (the Edit form has no landlord field). Frozen below as
- *  PROPERTY_FORM_FIELDS, rows and key lists included (as the app's). */
+ *  PROPERTY_FORM_FIELDS, rows and key lists included (as the app's).
+ *  flyer-leads D2 (spec 2026-10-21): Rent min / max, Accessibility, Lease
+ *  terms and every Pets and Deposit field are Staff only - the public flyer
+ *  no longer carries them (D1). */
 const FORM_FIELD_LIST: FormFieldVisibility[] = [
   { label: 'Owning landlord', keys: ['landlordId'], flyer: 'staff_only' },
   { label: 'Housing authorities', keys: ['accepted_authorities'], flyer: 'on_flyer' },
   { label: 'Beds', keys: ['beds'], flyer: 'on_flyer' },
   { label: 'Baths', keys: ['baths'], flyer: 'on_flyer' },
   { label: 'Voucher sizes accepted', keys: ['voucher_size_accepted'], flyer: 'on_flyer' },
-  { label: 'Rent min', keys: ['rent_min'], flyer: 'on_flyer' },
-  { label: 'Rent max', keys: ['rent_max'], flyer: 'on_flyer' },
+  { label: 'Rent min', keys: ['rent_min'], flyer: 'staff_only' },
+  { label: 'Rent max', keys: ['rent_max'], flyer: 'staff_only' },
   { label: 'Payment standard', keys: ['payment_standard'], flyer: 'staff_only' },
   { label: 'Address', keys: ['address'], flyer: 'on_flyer' },
   { label: 'Subzone', keys: ['subzone'], flyer: 'staff_only' },
   { label: 'Washer / dryer', keys: ['washer_dryer'], flyer: 'on_flyer' },
   { label: 'Tenant-paid utilities', keys: ['utilities'], flyer: 'on_flyer' },
-  { label: 'Accessibility', keys: ['accessibility'], flyer: 'on_flyer' },
-  { label: 'Lease terms', keys: ['lease_terms'], flyer: 'on_flyer' },
+  { label: 'Accessibility', keys: ['accessibility'], flyer: 'staff_only' },
+  { label: 'Lease terms', keys: ['lease_terms'], flyer: 'staff_only' },
   { label: 'Public listing link', keys: ['listing_link'], flyer: 'on_flyer' },
   { label: 'Video URL', keys: ['video_url'], flyer: 'on_flyer' },
   { label: 'Same-day RTA', keys: ['same_day_rta'], flyer: 'on_flyer' },
@@ -275,12 +278,12 @@ const FORM_FIELD_LIST: FormFieldVisibility[] = [
   { label: 'Credit score', keys: ['credit_requirements'], flyer: 'staff_only' },
   { label: 'Income requirements', keys: ['income_requirements'], flyer: 'staff_only' },
   { label: 'Qualifications', keys: ['qualifications'], flyer: 'staff_only' },
-  { label: 'No pets', keys: ['no_pets'], flyer: 'on_flyer' },
-  { label: 'Pets (details)', keys: ['pets'], flyer: 'on_flyer' },
-  { label: 'Pet fee', keys: ['pet_fee'], flyer: 'on_flyer' },
-  { label: "One month's rent", keys: ['deposit_one_month'], flyer: 'on_flyer' },
-  { label: 'Fixed amount', keys: ['deposit'], flyer: 'on_flyer' },
-  { label: 'Flexible / payment terms available', keys: ['deposit_flexible'], flyer: 'on_flyer' },
+  { label: 'No pets', keys: ['no_pets'], flyer: 'staff_only' },
+  { label: 'Pets (details)', keys: ['pets'], flyer: 'staff_only' },
+  { label: 'Pet fee', keys: ['pet_fee'], flyer: 'staff_only' },
+  { label: "One month's rent", keys: ['deposit_one_month'], flyer: 'staff_only' },
+  { label: 'Fixed amount', keys: ['deposit'], flyer: 'staff_only' },
+  { label: 'Flexible / payment terms available', keys: ['deposit_flexible'], flyer: 'staff_only' },
   { label: 'Deposit notes', keys: ['deposit_notes'], flyer: 'staff_only' },
   { label: 'No application fee', keys: ['application_fee'], flyer: 'on_flyer' },
   { label: 'Application fee', keys: ['application_fee'], flyer: 'on_flyer' },

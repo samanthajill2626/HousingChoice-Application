@@ -645,13 +645,45 @@ describe('ListingEditForm - property requirements and fields (spec 2026-10-20)',
     }
   });
 
-  it('the public free-text boxes say tenants see them; staff-only boxes do not', () => {
+  it('only Tenant-paid utilities says tenants see it; every other box does not (flyer-leads D2)', () => {
     render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
-    for (const label of ['Tenant-paid utilities', 'Accessibility', 'Lease terms', 'Pets (details)', 'Pet fee']) {
-      expect(describedTexts(screen.getByLabelText(label)), label).toContain(PUBLIC_NOTE);
-    }
-    for (const label of ['Notes', 'Subzone', 'Deposit notes', 'Qualifications', 'Public listing link']) {
+    expect(describedTexts(screen.getByLabelText('Tenant-paid utilities'))).toContain(PUBLIC_NOTE);
+    for (const label of [
+      'Accessibility',
+      'Lease terms',
+      'Pets (details)',
+      'Pet fee',
+      'Notes',
+      'Subzone',
+      'Deposit notes',
+      'Qualifications',
+      'Public listing link',
+    ]) {
       expect(describedTexts(screen.getByLabelText(label)), label).not.toContain(PUBLIC_NOTE);
+    }
+    expect(screen.getAllByText(PUBLIC_NOTE)).toHaveLength(1);
+  });
+
+  it('rent, accessibility, lease terms, pets and deposit read Staff only; the fee pair stays On flyer (flyer-leads D2)', () => {
+    render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    for (const label of [
+      'Rent min',
+      'Rent max',
+      'Accessibility',
+      'Lease terms',
+      'No pets',
+      'Pets (details)',
+      'Pet fee',
+      "One month's rent",
+      'Fixed amount',
+      'Flexible / payment terms available',
+    ]) {
+      const texts = describedTexts(screen.getByLabelText(label));
+      expect(texts, label).toContain(TAG.staff_only);
+      expect(texts, label).not.toContain(TAG.on_flyer);
+    }
+    for (const label of ['No application fee', 'Application fee']) {
+      expect(describedTexts(screen.getByLabelText(label)), label).toContain(TAG.on_flyer);
     }
   });
 

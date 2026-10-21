@@ -410,6 +410,17 @@ describe('FlyerPage - D11 wording', () => {
     // Code review RC-11: plan 1.1's general rule with a studio inside three
     // or more sizes - studio as "studio", the other non-final sizes as "<n>-".
     [[0, 2, 3], 'Fits a studio, 2-, or 3-bedroom voucher'],
+    // Code review R2D-8: "an" when the phrase starts with 8 or 11 (said
+    // "eight", "eleven"); every other start keeps "a".
+    [[8], 'Fits an 8-bedroom voucher'],
+    [[11], 'Fits an 11-bedroom voucher'],
+    [[8, 9], 'Fits an 8- or 9-bedroom voucher'],
+    [[11, 12], 'Fits an 11- or 12-bedroom voucher'],
+    [[8, 10, 12], 'Fits an 8-, 10-, or 12-bedroom voucher'],
+    [[1, 8], 'Fits a 1- or 8-bedroom voucher'],
+    [[0, 11], 'Fits a studio or 11-bedroom voucher'],
+    [[10], 'Fits a 10-bedroom voucher'],
+    [[12], 'Fits a 12-bedroom voucher'],
   ])('voucher sizes %j read "%s"', async (sizes, text) => {
     await renderFlyer({ voucher_sizes: sizes, voucher_size: sizes[0] ?? null });
     expect(fact(text)).not.toBeNull();

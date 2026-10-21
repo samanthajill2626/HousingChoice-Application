@@ -71,6 +71,14 @@ function voucherPhrase(sizes: readonly number[]): string | null {
   return `${words.slice(0, -1).join(', ')}, or ${words[words.length - 1]}`;
 }
 
+/** Code review R2D-8: the article before the voucher phrase - "an" when it
+ *  starts with 8 or 11 (said "eight", "eleven": "Fits an 8-bedroom voucher",
+ *  "Fits an 11-bedroom voucher", "Fits an 8- or 9-bedroom voucher"), "a"
+ *  for every other start (sizes run 0..12, D4). */
+function voucherArticle(phrase: string): 'a' | 'an' {
+  return /^(?:8|11)(?!\d)/.test(phrase) ? 'an' : 'a';
+}
+
 function addressLines(a: PublicFlyer['address']): string | null {
   const street = [a.line1, a.line2].filter(Boolean).join(', ');
   const cityLine = [a.city, a.state].filter(Boolean).join(', ');
@@ -304,7 +312,7 @@ export function FlyerPage(): React.JSX.Element {
         )}
         {voucher !== null && (
           <li>
-            Fits a <strong>{voucher}</strong> voucher
+            Fits {voucherArticle(voucher)} <strong>{voucher}</strong> voucher
           </li>
         )}
       </ul>

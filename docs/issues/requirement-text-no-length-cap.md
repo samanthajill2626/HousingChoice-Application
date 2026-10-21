@@ -53,6 +53,21 @@ types. Found by the planner's adversarial code review (PA-5) and deferred by
 the planner: a cap is new validation and new user-facing copy, so it is its
 own change.
 
+**A second, smaller limit: the Apply to properties body** (planner review
+round 2, PA2-2). `POST /api/contacts/:contactId/requirements/apply` re-sends
+requirement text in its body: `expected` carries every key of every checked
+item (the landlord's text), and each property row adds `seen` with the full
+text of its own-value items (planner ruling PR-1). The dialog batches rows by
+COUNT (100 per request, `applyRequirementsModel.ts` `chunk`), not by size. So
+long text reaches the 100 KB body limit far below the 400 KB item limit: two
+landlord items of about 55 KB each make every Apply a 413, and a batch of
+hand-checked own rows with long Qualifications can do the same. The dialog
+shows the generic "Couldn't update the properties. Review the list and press
+Update again." and every retry sends the same body - a dead end with no
+named cause. Size any cap against this body (eight items plus the `seen` of
+a full batch), not only against the item limit; batching by serialized size
+or a 413-specific sentence are alternatives.
+
 **Suggested fix.** Cap requirement text in `normalizeRequirementValue` (for
 example 2,000 characters, Qualifications 10,000) with a 400, mirror the cap as
 `maxLength` on the shared Requirements fields (dashboard

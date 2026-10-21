@@ -91,3 +91,32 @@ orchestrator's three rounds:
 
 After FW5: the planner re-runs all five gates on the final commit and
 continues BOTH planner reviewers with the re-review charge on the FW5 diff.
+
+# Round 2 (re-review of FW5, 4a976cec..c1cc7e80) - TERMINAL
+
+FW5 landed every ruling (60e64d66 PR-1, 5627a9d3 PR-2, 3c400035 PR-3,
+ca8f64d4 PR-4, 5360615f PR-5, dd6f5a8a issue file, c1cc7e80 report; 17
+mutants killed). PC-17 was struck: the test already existed
+(ContactEditForm.test.tsx:1494-1506, added 230ccae4) - the conformance
+reviewer conceded its round-1 grep was cut short.
+
+Both planner reviewers were continued with the re-review charge:
+`planner-adversarial-R2.md` (0 blocking, 0 high, 0 medium, 2 low, 3 info)
+and `planner-conformance-R2.md` (0 blocking, 0 high, 0 medium, 3 low,
+4 info). No finding changes what gets built, so this round is terminal.
+
+| # | Finding | Sev | Ruling |
+|---|---|---|---|
+| PA2-1 / PC2-6 | The New form's PICKER path (Properties list) still fills and snapshots from the eventually consistent landlord list; the Apply dialog's unit list is a GSI read. | LOW / INFO | NO CODE. D5 already accepts the picker result (an untouched stale field is `copied` and shows "Landlord updated", the truth); a picker read needs a pick, which takes seconds, against a sub-second GSI lag. On the Apply side PR-1 turns a stale unit read into a safe `changed_since_opened` skip (PA2-3). |
+| PA2-2 + PA-5 contest | Apply re-sends requirement text (`expected`, per-row `seen`) under the 100 KB body limit; batches are by count: a 413 dead end with long text. | LOW | ACCEPT the contest in part: the issue `requirement-text-no-length-cap` now names the Apply body as the binding limit for any cap. Batching by size / a 413 sentence stay with that issue (realistic requirement text is far below it). |
+| PA2-3 | A stale unit list in the dialog surfaces as a spurious "changed since you opened this". | INFO | NO CODE - safe; noted so it is not diagnosed as a bug. |
+| PA2-4 | PR-5 still reports an identical concurrent Apply (`already_matches`) and a non-listed-item race as changed_during_apply. | INFO | NO CODE - rare; the copy asks staff to review, which is harmless. |
+| PA2-5 | The flyer's rent line prints raw cents (pre-existing, untouched). | INFO | NO CODE - Cameron's eye. |
+| PC2-1 / PC2-2 / PC2-3 | Spec D8's text no longer matches the code: the body gained a required `seen` (new 400), an accepted own value is also skipped when it changed since the read (D8's own parenthesis promises this), and a lost write can report landlord_changed / deleted / not_found. | LOW | NO CODE - one D8 spec amendment for Cameron (with PC-15). |
+| PC2-4 | GET /api/contacts/:contactId gained `?consistent=1`. | INFO | NO CODE - additive. |
+| PC2-5 | The flyer rounds a third decimal. | INFO | NO CODE - matches the staff views' rounding. |
+| PC2-7 | PR-5's `deleted` / `not_found` race reasons are untested (only landlord_changed is). | INFO | NO CODE - noted; a two-case test is a follow-up candidate. |
+| Routing contest (PC-8, PC-9, PC-11, PC-15) | These differ from the spec's text, so they belong on Cameron's list even though no code changes. | - | ACCEPT - all four go on Cameron's list. |
+
+Final: the planner's second gate run on c1cc7e80 (`.superpowers/gates/planner2/`)
+is the verdict's gate evidence; records after it are docs only.

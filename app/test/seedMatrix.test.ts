@@ -36,6 +36,8 @@ import {
   type PlacementStage,
 } from '../src/lib/statusModel.js';
 import { TOUR_STATUSES } from '../src/lib/toursModel.js';
+import { bedroomSizesOfFilter } from '../src/lib/blastAudienceRules.js';
+import type { AudienceFilter } from '../src/repos/broadcastsRepo.js';
 
 // ---------------------------------------------------------------------------
 // Build the merged full-profile item set (in-memory; no DB)
@@ -507,6 +509,19 @@ describe('seed matrix: broadcasts', () => {
     for (const b of allBroadcasts) {
       expect(b['_listPartition'], `broadcast ${String(b['broadcastId'])}`).toBe('broadcasts');
     }
+  });
+
+  it('property-requirements D12: the sent share keeps the LEGACY one-number bedroomSize, the draft holds a bedroomSizes list - one reader reads both', () => {
+    const filterOf = (id: string): AudienceFilter | undefined =>
+      allBroadcasts.find((b) => b['broadcastId'] === id)?.['audience_filter'] as AudienceFilter | undefined;
+    const sent = filterOf('broadcast-mx-sent-01');
+    const draft = filterOf('broadcast-mx-draft-01');
+    expect(sent?.bedroomSize).toBe(1);
+    expect(sent).not.toHaveProperty('bedroomSizes');
+    expect(draft?.bedroomSizes).toEqual([2]);
+    expect(draft).not.toHaveProperty('bedroomSize');
+    expect(bedroomSizesOfFilter(sent)).toEqual([1]);
+    expect(bedroomSizesOfFilter(draft)).toEqual([2]);
   });
 });
 

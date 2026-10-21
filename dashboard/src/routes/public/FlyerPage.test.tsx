@@ -6,12 +6,13 @@
 // encoded prefill and NO form, strips the cta param from the URL on load, and
 // survives a same-tab remount via sessionStorage; the null-contact degrade; the
 // unsafe-URL guard; and the variant-aware unavailable state. Public API mocked.
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { ApiError } from '../../api/client.js';
 import type { PublicFlyer } from './publicApi.js';
+import styles from './FlyerPage.module.css';
 
 const getFlyer = vi.fn();
 const submitHousingFair = vi.fn();
@@ -80,8 +81,9 @@ describe('FlyerPage', () => {
     renderPage();
 
     await screen.findByText('88 Sycamore St', { exact: false });
-    // D11 / D3: the neighborhood line is the area alone.
-    expect(screen.getByRole('heading', { name: 'Decatur' })).toBeInTheDocument();
+    // flyer-leads D3: the address is the heading; the area is the line under it.
+    expect(screen.getByRole('heading', { level: 1, name: '88 Sycamore St' })).toBeInTheDocument();
+    expect(screen.getByText('Decatur')).toBeInTheDocument();
     // Detail rows are all present upfront (no gate) - the public ones only
     // (flyer-leads D1, D3: no rent, deposit, pets, accessibility or lease).
     expect(screen.getByText('Application fee')).toBeInTheDocument();
@@ -128,10 +130,11 @@ describe('FlyerPage', () => {
     );
     first.unmount();
 
-    // Whitespace-only parts print (addressLines keeps them) but must not link.
+    // Whitespace-only parts are no address (flyer-leads D3): the heading falls
+    // back to the area, as plain text - no Maps link.
     getFlyer.mockResolvedValue({ ...FLYER, address: { line1: '   ' } });
     renderPage();
-    await screen.findByText('Address');
+    expect(await screen.findByRole('heading', { level: 1, name: 'Decatur' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /google maps/i })).toBeNull();
   });
 
@@ -282,6 +285,16 @@ describe('FlyerPage', () => {
     for (const label of ['Deposit', 'Pets', 'Pet fee', 'Accessibility', 'Lease terms']) {
       expect(screen.queryAllByText(label, { selector: 'dt' }), label).toHaveLength(0);
     }
+    // Exactly the public rows (worklist OR-9): no Address row either - the
+    // address is the heading (spec 5: "no ... address row, even when a stale
+    // payload is hand-fed those keys").
+    expect(Array.from(document.querySelectorAll('dt'), (dt) => dt.textContent)).toEqual([
+      'Application fee',
+      'Tenant pays',
+      'Same-day RTA',
+      'Video tour',
+      'Listing',
+    ]);
     for (const text of ['12-month minimum', 'Ground floor', 'Cats only', '$300', '$1500', "One month's rent"]) {
       expect(screen.queryAllByText(text, { exact: false }), text).toHaveLength(0);
     }
@@ -474,7 +487,126 @@ describe('FlyerPage - D11 wording', () => {
   it('a stale subzone in the payload is never shown (D3: staff only)', async () => {
     getFlyer.mockResolvedValue({ ...FLYER, subzone: 'Oakhurst' } as unknown as PublicFlyer);
     renderPage();
-    expect(await screen.findByRole('heading', { name: 'Decatur' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: '88 Sycamore St' })).toBeInTheDocument();
     expect(screen.queryByText(/Oakhurst/)).toBeNull();
+  });
+});
+
+// flyer-leads D3: the address is the heading - a Maps link holding the street
+// line (the h1), the city line and the sr-only suffix the old Address row
+// carried; the area is a line under it; fallbacks when parts are missing.
+describe('FlyerPage - the address heading (flyer-leads D3)', () => {
+  const MAPS = 'https://www.google.com/maps/search/?api=1&query=';
+  async function renderReady(over: Partial<PublicFlyer>): Promise<void> {
+    getFlyer.mockResolvedValue({ ...FLYER, ...over });
+    renderPage();
+    await screen.findByText('Tenant pays');
+  }
+  /** The Maps heading link; null when the heading is plain text. */
+  const mapsLink = (): HTMLElement | null => screen.queryByRole('link', { name: /open in Google Maps/ });
+
+  it('the h1 is the street line inside the Maps link, with the city line and the sr-only suffix', async () => {
+    await renderReady({
+      address: { line1: '88 Sycamore St', line2: 'Apt 2', city: 'Decatur', state: 'GA', zip: '30030' },
+    });
+    const heading = screen.getByRole('heading', { level: 1 });
+    expect(heading).toHaveAccessibleName('88 Sycamore St, Apt 2');
+    const link = mapsLink();
+    if (link === null) throw new Error('no Maps heading link');
+    expect(link).toContainElement(heading);
+    expect(link).toHaveAttribute('href', MAPS + encodeURIComponent('88 Sycamore St, Apt 2, Decatur, GA, 30030'));
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', 'noreferrer');
+    // The whole heading block is the tap target: the city line is in the SAME link.
+    expect(within(link).getByText('Decatur, GA 30030')).toBeInTheDocument();
+    // WCAG 2.5.3: the visible text leads the name; the hidden suffix only adds
+    // to it and says where the link goes (a new tab).
+    expect(link).toHaveAccessibleName(/^88 Sycamore St, Apt 2\s*Decatur, GA 30030 - open in Google Maps$/);
+    expect(within(link).getByText('- open in Google Maps')).toHaveClass(styles.srOnly!);
+    // The separate Address row is gone.
+    expect(screen.queryByText('Address', { selector: 'dt' })).toBeNull();
+  });
+
+  it('the area is a line directly under an address heading, outside the link; photos stay first', async () => {
+    await renderReady({});
+    const link = mapsLink();
+    if (link === null) throw new Error('no Maps heading link');
+    // Exact text: the city line inside the link reads "Decatur, GA 30030".
+    const area = screen.getByText('Decatur');
+    expect(link).not.toContainElement(area);
+    expect(link.nextElementSibling).toBe(area);
+    const photo = screen.getByRole('img', { name: 'Home photo 1' });
+    expect(photo.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each<[string, PublicFlyer['address'], string, string]>([
+    ['zip only', { zip: '30030' }, '30030', '30030'],
+    ['state and zip', { state: 'GA', zip: '30030' }, 'GA 30030', 'GA, 30030'],
+    ['city and zip', { city: 'Decatur', zip: '30030' }, 'Decatur, 30030', 'Decatur, 30030'],
+    ['city and state', { city: 'Decatur', state: 'GA' }, 'Decatur, GA', 'Decatur, GA'],
+  ])('no street line, %s: the h1 is the city line, linked, with no second line', async (_case, address, title, query) => {
+    await renderReady({ address });
+    const heading = screen.getByRole('heading', { level: 1 });
+    expect(heading).toHaveAccessibleName(title);
+    const link = mapsLink();
+    if (link === null) throw new Error('no Maps heading link');
+    expect(link).toContainElement(heading);
+    expect(link).toHaveAttribute('href', MAPS + encodeURIComponent(query));
+    // Name = the h1 and the suffix only: no second line.
+    expect(link).toHaveAccessibleName(`${title} - open in Google Maps`);
+  });
+
+  it('line2 alone is a street line; every part is trimmed', async () => {
+    await renderReady({ address: { line1: '  88 Sycamore St ', line2: '   ', city: ' Decatur', state: 'GA ', zip: ' 30030 ' } });
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('88 Sycamore St');
+    const link = mapsLink();
+    if (link === null) throw new Error('no Maps heading link');
+    expect(within(link).getByText('Decatur, GA 30030').textContent).toBe('Decatur, GA 30030');
+    getFlyer.mockResolvedValue({ ...FLYER, address: { line2: 'Unit 4', city: 'Decatur' } });
+    renderPage();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Unit 4' })).toBeInTheDocument();
+  });
+
+  it('no address at all: the area as plain text - no link, and no second area line', async () => {
+    await renderReady({ address: {} });
+    expect(screen.getByRole('heading', { level: 1 })).toHaveAccessibleName('Decatur');
+    expect(mapsLink()).toBeNull();
+    expect(screen.getAllByText('Decatur')).toHaveLength(1);
+  });
+
+  it.each<[string, string | null]>([
+    ['no area', null],
+    ['a blank area', '   '],
+  ])('no address and %s: the plain text "Home for rent"', async (_case, area) => {
+    await renderReady({ address: {}, area });
+    expect(screen.getByRole('heading', { level: 1 })).toHaveAccessibleName('Home for rent');
+    expect(mapsLink()).toBeNull();
+  });
+
+  it('a recorded area prints trimmed (D10)', async () => {
+    await renderReady({ area: '  Decatur  ' });
+    expect(screen.getByText('Decatur').textContent).toBe('Decatur');
+  });
+
+  it('"A home for you" appears nowhere, whatever the payload', async () => {
+    for (const over of [{}, { address: {} }, { address: {}, area: null }] as Partial<PublicFlyer>[]) {
+      getFlyer.mockResolvedValue({ ...FLYER, ...over });
+      const view = renderPage();
+      await screen.findByText('Tenant pays');
+      expect(screen.queryByText(/A home for you/)).toBeNull();
+      view.unmount();
+    }
+  });
+
+  it('the detail rows run Application fee, Tenant pays, Washer / dryer, Same-day RTA, Video tour, Listing', async () => {
+    await renderReady({ washer_dryer: 'hookups' });
+    expect(Array.from(document.querySelectorAll('dt'), (dt) => dt.textContent)).toEqual([
+      'Application fee',
+      'Tenant pays',
+      'Washer / dryer',
+      'Same-day RTA',
+      'Video tour',
+      'Listing',
+    ]);
   });
 });

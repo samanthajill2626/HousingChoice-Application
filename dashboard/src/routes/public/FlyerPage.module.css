@@ -22,9 +22,46 @@
   font-weight: var(--fw-bold);
   line-height: var(--lh-tight);
   color: var(--c-text);
+  overflow-wrap: anywhere;
 }
 
 .muted {
+  color: var(--c-text-muted);
+}
+
+/* flyer-leads D3: the heading group - the address heading link (the h1
+   street line plus the city line: ONE tap target) and the area line under
+   it. overflow-wrap lets a long street name wrap at 320px instead of
+   overflowing the card. */
+.headingGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.headingLink {
+  display: block;
+  color: var(--c-brand);
+  overflow-wrap: anywhere;
+}
+
+.addressTitle {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  line-height: var(--lh-tight);
+  color: inherit;
+}
+
+.subline {
+  display: block;
+  margin-top: var(--sp-1);
+  font-size: var(--fs-md);
+  color: inherit;
+}
+
+.area {
+  font-size: var(--fs-md);
   color: var(--c-text-muted);
 }
 
@@ -114,7 +151,7 @@
   color: var(--c-text);
 }
 
-/* Visually-hidden text (the Address link's "open in Google Maps" suffix). */
+/* Visually-hidden text (the address heading link's "open in Google Maps" suffix). */
 .srOnly {
   position: absolute;
   width: 1px;

@@ -17,7 +17,8 @@
 //
 // flyer-leads (spec 2026-10-21 D1, D3): no rent, lease terms, accessibility,
 // pets or deposit - those are staff only, and the public projection no longer
-// sends them (a stale payload's keys are simply never read).
+// sends them (a stale payload's keys are simply never read). The address is
+// the heading (a Google Maps link), the area the line under it.
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { ApiError } from '../../api/client.js';
@@ -48,10 +49,15 @@ function smsHref(number: string, body: string): string {
   return `sms:${number}?&body=${encodeURIComponent(body)}`;
 }
 
-/** The neighborhood line: the AREA alone (D11). Subzone is a staff-only code
- *  and is not in the projection (D3). */
+/** The neighborhood: the AREA alone (D11), trimmed (flyer-leads D10 - a
+ *  display guard; JSON writes are already trimmed server-side, but a legacy
+ *  or imported value may not be). Subzone is a staff-only code and is not in
+ *  the projection (D3). flyer-leads D3: the line under an address heading,
+ *  or the plain heading when there is no address. */
 function neighborhood(flyer: Pick<PublicFlyer, 'area'>): string | null {
-  return typeof flyer.area === 'string' && flyer.area.trim() !== '' ? flyer.area : null;
+  if (typeof flyer.area !== 'string') return null;
+  const area = flyer.area.trim();
+  return area === '' ? null : area;
 }
 
 /** D11: the voucher sizes as one phrase - "studio", "2-bedroom", "2- or
@@ -75,22 +81,17 @@ function voucherArticle(phrase: string): 'a' | 'an' {
   return /^(?:8|11)(?!\d)/.test(phrase) ? 'an' : 'a';
 }
 
-function addressLines(a: PublicFlyer['address']): string | null {
-  const street = [a.line1, a.line2].filter(Boolean).join(', ');
-  const cityLine = [a.city, a.state].filter(Boolean).join(', ');
-  const full = [street, cityLine, a.zip].filter((p) => p && p !== '').join(' - ');
-  return full === '' ? null : full;
-}
-
 /** A Google Maps link for the home's address - "where is this?" is the tenant's
- *  next question after the rent, and a flyer arrives by text on a phone, where
+ *  first question about a flyer, and a flyer arrives by text on a phone, where
  *  this hands off to the native Maps app. Uses the documented Maps URL API
  *  (`search/?api=1&query=`), which takes a free-text query, so a partial address
  *  (city + state, no street) still lands somewhere useful. The parts are joined
- *  with ', ' rather than reusing the DISPLAYED string, whose ' - ' separators are
- *  a presentation choice; every part is encodeURIComponent'd, and the host is a
- *  literal, so nothing here can become another scheme or origin. Null when the
- *  address carries nothing but blanks (the row then renders as plain text). */
+ *  with ', ' into one free-text query (the heading shows the same parts as a
+ *  street line and a city line - flyerHeading); every part is
+ *  encodeURIComponent'd, and the host is a literal, so nothing here can become
+ *  another scheme or origin. Null when the address carries nothing but blanks
+ *  (the heading then falls back to the area or "Home for rent" as plain text -
+ *  flyerHeading, flyer-leads D3). */
 function mapsHref(a: PublicFlyer['address']): string | null {
   const query = [a.line1, a.line2, a.city, a.state, a.zip]
     .filter((p): p is string => typeof p === 'string' && p.trim() !== '')
@@ -98,6 +99,45 @@ function mapsHref(a: PublicFlyer['address']): string | null {
   return query === ''
     ? null
     : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+}
+
+/** flyer-leads D3: one address part, trimmed ('' when absent). */
+function addressPart(v: string | undefined): string {
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+/** flyer-leads D3: the street line - line1, then line2, joined by ', ';
+ *  blank parts left out. Null when both are blank. */
+function streetLine(a: PublicFlyer['address']): string | null {
+  const line = [addressPart(a.line1), addressPart(a.line2)].filter((p) => p !== '').join(', ');
+  return line === '' ? null : line;
+}
+
+/** flyer-leads D3: the city line - city, then ', ', then state and zip joined
+ *  by one space; blank parts left out with their separators. Null when all
+ *  three are blank. */
+function cityLine(a: PublicFlyer['address']): string | null {
+  const stateZip = [addressPart(a.state), addressPart(a.zip)].filter((p) => p !== '').join(' ');
+  const line = [addressPart(a.city), stateZip].filter((p) => p !== '').join(', ');
+  return line === '' ? null : line;
+}
+
+/** flyer-leads D3: the ready state's heading. An address heading is the Maps
+ *  link; `subline` is the city line under the street line (null when the city
+ *  line IS the title). With no address part at all: the area, else "Home for
+ *  rent", as plain text. mapsHref is non-null exactly when streetLine or
+ *  cityLine is (both test every part trimmed). */
+type FlyerHeading =
+  | { kind: 'address'; title: string; subline: string | null; href: string }
+  | { kind: 'plain'; title: string };
+
+function flyerHeading(address: PublicFlyer['address'], hood: string | null): FlyerHeading {
+  const href = mapsHref(address);
+  const street = streetLine(address);
+  const city = cityLine(address);
+  if (href !== null && street !== null) return { kind: 'address', title: street, subline: city, href };
+  if (href !== null && city !== null) return { kind: 'address', title: city, subline: null, href };
+  return { kind: 'plain', title: hood ?? 'Home for rent' };
 }
 
 /** "I'm interested in <line1, city | neighborhood | this home>" */
@@ -256,8 +296,7 @@ export function FlyerPage(): React.JSX.Element {
   const applicationFee = applicationFeeLabel(flyer.application_fee);
   const washerDryer = flyer.washer_dryer !== null ? WASHER_DRYER_LABELS[flyer.washer_dryer] : null;
   const voucher = voucherPhrase(flyer.voucher_sizes);
-  const address = addressLines(flyer.address);
-  const mapUrl = mapsHref(flyer.address);
+  const heading = flyerHeading(flyer.address, hood);
   const utilities = textOrNull(flyer.utilities);
 
   return (
@@ -269,7 +308,23 @@ export function FlyerPage(): React.JSX.Element {
           ))}
         </div>
       )}
-      <h1 className={styles.title}>{hood ?? 'A home for you'}</h1>
+      {/* flyer-leads D3: the address IS the heading and the Maps link - the
+          whole block (street line + city line) is the tap target. The visible
+          text leads the accessible name and the hidden suffix only ADDS to it
+          (WCAG 2.5.3); it also says the link leaves for Maps in a new tab.
+          The area is a line under an address heading, never dropped. */}
+      <div className={styles.headingGroup}>
+        {heading.kind === 'address' ? (
+          <a className={styles.headingLink} href={heading.href} target="_blank" rel="noreferrer">
+            <h1 className={styles.addressTitle}>{heading.title}</h1>
+            {heading.subline !== null && <span className={styles.subline}>{heading.subline}</span>}
+            <span className={styles.srOnly}> - open in Google Maps</span>
+          </a>
+        ) : (
+          <h1 className={styles.title}>{heading.title}</h1>
+        )}
+        {heading.kind === 'address' && hood !== null && <p className={styles.area}>{hood}</p>}
+      </div>
 
       <ul className={styles.facts}>
         {flyer.beds !== null && (
@@ -296,25 +351,6 @@ export function FlyerPage(): React.JSX.Element {
       )}
 
       <dl className={styles.details}>
-        {address !== null && (
-          <div className={styles.detailRow}>
-            <dt className={styles.dt}>Address</dt>
-            {/* The address itself is the map link (no separate "Map" affordance).
-                The visible text stays the address and the hidden suffix only
-                ADDS to it, so the accessible name still contains what a voice
-                user would say (WCAG 2.5.3). */}
-            <dd className={styles.dd}>
-              {mapUrl !== null ? (
-                <a href={mapUrl} target="_blank" rel="noreferrer">
-                  {address}
-                  <span className={styles.srOnly}> - open in Google Maps</span>
-                </a>
-              ) : (
-                address
-              )}
-            </dd>
-          </div>
-        )}
         {applicationFee !== null && (
           <div className={styles.detailRow}>
             <dt className={styles.dt}>Application fee</dt>

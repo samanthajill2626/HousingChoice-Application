@@ -37,8 +37,13 @@
 //          (docs/issues/public-signup-abuse-hardening.md). For a flyer of a
 //          shareable unit and a tenant or unknown contact the sign-up also
 //          writes a 'flyer' entry on the properties-sent ledger, unless the
-//          pair holds a current decline (D7). A failed step is logged without
-//          PII and the answer is still { ok: true }. join-housing-authority:
+//          pair holds a current decline (D7). The deleted and the live paths
+//          both end with the housing_fair_signup audit, best-effort too
+//          (planner review C-F1). A failed step is logged without PII
+//          (SIGNUP_STEP_FAILED) and the answer is still { ok: true }.
+//          Unguarded, so a throw is the generic 500: the reads before the
+//          steps (the authority list, the unit, the phone lookup), the create,
+//          and the thread get-or-create and link. join-housing-authority:
 //          housingAuthority (absent/null = none) must be the exact name of a
 //          listed housing authority, else 400 housing_authority_not_listed;
 //          sent WITH a unitId it is the generic 400.
@@ -127,7 +132,14 @@ const MAX_UNIT_ID_LEN = 200;
  */
 const SIGNUP_REPEAT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-/** flyer-leads plan 1.1: the log line of every failed best-effort sign-up step (with { marker, step }). */
+/**
+ * flyer-leads plan 1.1: the log line of every failed best-effort sign-up step,
+ * with { marker, step } and never a name or phone. The steps: repeat_check
+ * (WARN - it fails open), pin, touch (ERROR; WARN with reason group_thread
+ * for a thread that is not 1:1), increment, ledger, and audit - the
+ * housing_fair_signup append on both paths (planner review C-F1). The welcome
+ * logs its own lines.
+ */
 const SIGNUP_STEP_FAILED = 'housing-fair signup step failed';
 
 /**
@@ -491,23 +503,29 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     // (1a) The deleted path (D4): no conversation, no send, no pin, no unread
     // mark, no sent-list entry - only the audit event on THAT contact (the
     // trace docs/issues/deleted-contact-web-signup-silent.md relies on) and
-    // the generic { ok: true }.
+    // the generic { ok: true }. The audit is best-effort (D6.4, planner review
+    // C-F1): a throw is logged (step audit) and the answer is still
+    // { ok: true }, so the log lines are then the only trace.
     if (existing !== undefined && isContactDeleted(existing)) {
-      await audit.append(`contacts#${existing.contactId}`, 'housing_fair_signup', {
-        marker,
-        isNew: false,
-        welcomeSent: false,
-        viaFlyer,
-        signupVersion: 2,
-        housingAuthority: housingAuthority ?? null,
-        existingContact: false,
-        deletedContact: true,
-        recorded: false,
-        sentRecorded: false,
-        // AR11: sentSkipped is absent ONLY when an entry was written.
-        sentSkipped: 'deleted' satisfies SignupSentSkipped,
-        consentVersion: CONSENT_VERSION,
-      });
+      try {
+        await audit.append(`contacts#${existing.contactId}`, 'housing_fair_signup', {
+          marker,
+          isNew: false,
+          welcomeSent: false,
+          viaFlyer,
+          signupVersion: 2,
+          housingAuthority: housingAuthority ?? null,
+          existingContact: false,
+          deletedContact: true,
+          recorded: false,
+          sentRecorded: false,
+          // AR11: sentSkipped is absent ONLY when an entry was written.
+          sentSkipped: 'deleted' satisfies SignupSentSkipped,
+          consentVersion: CONSENT_VERSION,
+        });
+      } catch (err) {
+        log.error({ marker, step: 'audit', err }, SIGNUP_STEP_FAILED);
+      }
       log.info(
         {
           marker,
@@ -581,6 +599,9 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     // contact with no thread yet gets a correctly typed one; a new contact is
     // a tenant, so tenant_1to1 as before), and link the contact, so the
     // welcome text, any reply and the sign-up's unread mark land on one thread.
+    // NOT best-effort: a throw here is the generic 500 (pre-existing; a new
+    // contact's retry then takes the existing path and is never welcomed -
+    // docs/issues/consent-capture-ignores-signup-web-form.md).
     const conversation = await conversations.createOrGetByParticipantPhone(phone, conversationTypeFor(contact));
     await conversations.setParticipantsIfAbsent(conversation.conversationId, [{ contactId, phone }]);
 
@@ -714,21 +735,29 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     // error - and deleted on the deleted path, AR11; absent ONLY when one was)
     // and consentVersion (the consent disclosure version in force -
     // CONSENT_VERSION, smsCompliance.ts:91 - which ships with the form;
-    // evidence only, never stamped on an existing contact).
-    await audit.append(`contacts#${contactId}`, 'housing_fair_signup', {
-      marker,
-      isNew,
-      welcomeSent,
-      viaFlyer,
-      signupVersion: 2,
-      housingAuthority: housingAuthority ?? null,
-      existingContact: !isNew,
-      deletedContact: false,
-      recorded,
-      sentRecorded,
-      ...(sentSkipped !== undefined && { sentSkipped }),
-      consentVersion: CONSENT_VERSION,
-    });
+    // evidence only, never stamped on an existing contact). Best-effort (D6.4,
+    // planner review C-F1): it runs after the pin, the unread mark and the
+    // flyer entry were written, so a throw is logged (step audit) and the
+    // answer is still { ok: true } - never an error that sends the visitor to
+    // re-submit a sign-up that landed.
+    try {
+      await audit.append(`contacts#${contactId}`, 'housing_fair_signup', {
+        marker,
+        isNew,
+        welcomeSent,
+        viaFlyer,
+        signupVersion: 2,
+        housingAuthority: housingAuthority ?? null,
+        existingContact: !isNew,
+        deletedContact: false,
+        recorded,
+        sentRecorded,
+        ...(sentSkipped !== undefined && { sentSkipped }),
+        consentVersion: CONSENT_VERSION,
+      });
+    } catch (err) {
+      log.error({ marker, step: 'audit', err }, SIGNUP_STEP_FAILED);
+    }
     // Log a hashed marker only - NEVER the name or phone (doc section 9). Every
     // other field is a non-PII boolean or enum; withAuthority (D7) stands in
     // for the authority's name.

@@ -960,3 +960,64 @@ describe('the housing_fair_signup audit fields (D6, plan 2.6)', () => {
     ]);
   });
 });
+
+// Planner review C-F1 (spec D6.4: failures never reach the public page): the
+// housing_fair_signup audit is best-effort on BOTH paths. A throw is logged
+// once (ERROR, the marker and step audit, no PII) and the answer is still
+// { ok: true } - on the main path after the pin, the unread mark and the
+// flyer entry were written, so a visitor is never told to re-submit a sign-up
+// that landed. The harness's failAuditAppendFor throws before recording.
+describe('the housing_fair_signup audit is best-effort too (D6.4, planner review C-F1)', () => {
+  /** The typed name, the phone in every form, the stored name and the pin's address. */
+  const PII = ['Keisha', 'Jones', PHONE, '5550102000', '010-2000', 'Storedfirst', 'Storedlast', '12 Oak St'];
+
+  it('the main path: 200 { ok: true }, the pin, the unread mark and the flyer entry still written; ONE ERROR step audit with no name or phone', async () => {
+    const { app, world, capture } = harness();
+    seedUnit(world);
+    seedContact(world, { firstName: 'Storedfirst', lastName: 'Storedlast' });
+    seedThread(world);
+    world.failAuditAppendFor.add('housing_fair_signup');
+
+    const res = await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(signupAudits(world)).toEqual([]);
+    expect(pins(world)).toEqual([
+      expect.objectContaining({ contactId: 'c-1', label: FLYER_LABEL, refType: 'unit', refId: 'unit-1', at: T0_ISO }),
+    ]);
+    expect(world.unreadIncrements).toEqual(['conv-1']);
+    expect(world.conversations.get('conv-1')).toMatchObject({ unread_count: 1 });
+    expect(convUpdates(world)).toEqual([expect.objectContaining({ conversationId: 'conv-1', unread_count: 1 })]);
+    expect((await ledgerRow(world))?.shares).toEqual({ flyer: flyerEntry(T0_ISO) });
+    expect(stepFailures(capture)).toEqual([expect.objectContaining({ step: 'audit', level: 50, marker: expect.any(String) })]);
+    const stepLine = JSON.stringify(stepFailures(capture));
+    for (const pii of PII) expect(stepLine, pii).not.toContain(pii);
+    // The request still closes with its captured line.
+    expect(captured(capture)).toEqual([expect.objectContaining({ recorded: true, sentRecorded: true })]);
+  });
+
+  it('the deleted path: 200 { ok: true } and ONE ERROR step audit with no name or phone', async () => {
+    const { app, world, capture } = harness();
+    seedUnit(world);
+    seedContact(world, {
+      contactId: 'c-del',
+      firstName: 'Storedfirst',
+      lastName: 'Storedlast',
+      deleted_at: '2026-10-01T00:00:00.000Z',
+    });
+    world.failAuditAppendFor.add('housing_fair_signup');
+
+    const res = await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(signupAudits(world)).toEqual([]);
+    expect(world.conversations.size).toBe(0);
+    expect(world.activityEvents).toHaveLength(0);
+    expect(stepFailures(capture)).toEqual([expect.objectContaining({ step: 'audit', level: 50, marker: expect.any(String) })]);
+    const stepLine = JSON.stringify(stepFailures(capture));
+    for (const pii of PII) expect(stepLine, pii).not.toContain(pii);
+    expect(captured(capture)).toEqual([expect.objectContaining({ deletedContact: true, sentSkipped: 'deleted' })]);
+  });
+});

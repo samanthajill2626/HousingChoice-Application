@@ -143,17 +143,19 @@ describe('POST /public/housing-fair — intake + auto welcome text', () => {
 
     // A clean pass: the pin, the mark and the flyer entry are all written.
     expect((await send()).status).toBe(200);
-    // Then every best-effort step fails, across two passes (a failed touch skips the increment).
+    // Then every best-effort step fails, across two passes (a failed touch skips the increment);
+    // the audit is one since planner review C-F1.
     vi.spyOn(world.activityEventsRepo, 'hasEventSince').mockRejectedValue(new Error('repeat read down'));
     vi.spyOn(world.activityEventsRepo, 'record').mockRejectedValue(new Error('pin write down'));
     vi.spyOn(world.conversationsRepo, 'incrementUnread').mockRejectedValue(new Error('increment down'));
     vi.spyOn(world.listingSendsRepo, 'getByKeyConsistent').mockRejectedValue(new Error('ledger read down'));
+    world.failAuditAppendFor.add('housing_fair_signup');
     expect((await send()).status).toBe(200);
     vi.spyOn(world.conversationsRepo, 'touchLastActivity').mockRejectedValue(new Error('touch down'));
     expect((await send()).status).toBe(200);
 
     const steps = capture.lines.filter((l) => l['msg'] === 'housing-fair signup step failed').map((l) => l['step']);
-    expect(new Set(steps)).toEqual(new Set(['repeat_check', 'pin', 'touch', 'increment', 'ledger']));
+    expect(new Set(steps)).toEqual(new Set(['repeat_check', 'pin', 'touch', 'increment', 'ledger', 'audit']));
     const serialized = JSON.stringify(capture.lines);
     for (const pii of ['Unique1stName', 'Unique2ndName', 'Stored1st', 'Stored2nd', '+15550103334', '5550103334', 'Signed up from', '77 Unique Ave']) {
       expect(serialized, pii).not.toContain(pii);

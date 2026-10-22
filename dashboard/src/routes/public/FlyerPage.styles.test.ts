@@ -28,6 +28,13 @@ describe('FlyerPage.module.css (flyer-leads D3)', () => {
     expect(bodyOf('.title')).toMatch(/overflow-wrap:\s*anywhere\s*;/);
   });
 
+  // Code review R2 N4: the area line under an address heading is new on this
+  // branch; a long unbroken area token must wrap like the heading above it
+  // rather than run past the card at 320px.
+  it('the area line under the address heading wraps too', () => {
+    expect(bodyOf('.area')).toMatch(/overflow-wrap:\s*anywhere\s*;/);
+  });
+
   it('the housing authority line is bold, larger than body text (--fs-md) and full-contrast', () => {
     const body = bodyOf('.authorities');
     expect(body).toMatch(/font-weight:\s*var\(--fw-bold\)\s*;/);

@@ -63,6 +63,9 @@
 .area {
   font-size: var(--fs-md);
   color: var(--c-text-muted);
+  /* Wraps like the heading above it: a long unbroken area token never runs
+     past the card at 320px (code review R2 N4). */
+  overflow-wrap: anywhere;
 }
 
 /* Photo gallery - horizontal scroll on mobile, snapping per photo. */

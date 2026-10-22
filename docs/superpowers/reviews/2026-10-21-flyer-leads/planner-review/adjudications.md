@@ -121,3 +121,86 @@ edits are folded in below and the review stops.
 | N1 = OR-26b | Only `signed_up` rows get their own words; a flyer-latest pair that a reply, tour or decline outranks reads "Sent <sign-up date>" on the roster and on Follow up (a Replied flyer-only pair is chased on Follow up as "Sent ..."). | LOW | CAMERON (= OR-26b) | Built per spec D8; the decision goes to Cameron with this sharper example and the wire-flag alternative. |
 | A-L1 (contested) | The reviewer defends A-L1: a throw before the welcome is not the "failed welcome" class; a safer fix is to create the thread BEFORE the contact so a thread failure leaves no contact and the retry is a create. | LOW | ACCEPT (kept) | The window needs a DynamoDB fault between two writes; the reorder moves the new-contact path at the end of review and leaves an empty participant-less thread when the create then fails, which shows in the inbox. Recorded in the consent issue as the preferred fix direction; Cameron sees it in the verdict. |
 | A-M1 refinement | Option (a) as worded would reword the shared legend for every Staff only field; the honest narrow version is a note on the two Rent fields only (`[Rent]` is the only merge field that reads a newly Staff only field). | MEDIUM | CAMERON (= OR-26) | Folded into the options put to Cameron. |
+
+## Cameron's decisions at the verdict (2026-10-22)
+
+Verbatim:
+
+> "Rent going out in the blast texts is fine. I think what we need to do is
+> say "staff only" because that's what's in the flyer. That's really what's
+> talking about a flyer. We shouldn't use the phrase "never leaves the
+> dashboard" because it does in the instance that you talk about with the
+> property sharing, and we want to keep that as is. [...] So either we need
+> to remove that specific phrase from rent, or we need to add something that
+> says Matching texts include it for number two, that's fine. Let's leave it
+> as is. And file an issue. For an opted-out contact who signs up again,
+> they should opt back in somehow. Is that a thing that we can do?"
+
+> (after the planner explained that Twilio's opt-out block lifts only when the
+> person texts START, and offered (a) a thank-you line for everyone and (b) a
+> staff note on the sign-up) "For A, I don't really like that because people
+> aren't going to know if they texted stop before. They aren't really paying
+> attention, and it just muddies the water. I think that option B is the only
+> solution. Let's add that."
+
+Rulings:
+- OR-26 / A-M1: `[Rent]` stays in the Matching default. The Staff only legend
+  line drops "never leaves the dashboard" (planner's pick of Cameron's two
+  options: it removes the phrase everywhere, so Rent needs no note of its own).
+- OR-26b / N1: keep as built; FILE.
+- A-L3: an opted-out contact cannot be opted back in by the form (Twilio's
+  Advanced Opt-Out block lifts only on START / YES / UNSTOP from the person).
+  BUILD option (b): the sign-up pin tells staff. NO thank-you line (option (a)
+  rejected by Cameron).
+
+## FW-P2 - the fix list sent to the build orchestrator
+
+1. **Legend (FIX, RED first).** `dashboard/src/routes/listing/FlyerTag.tsx`
+   LEGEND: property Staff only line -> `Staff only - not on the public flyer.`;
+   landlord Staff only line -> `Staff only - never on a property flyer.` The
+   On flyer lines are unchanged. Update every pin of the old text:
+   `FlyerTag.test.tsx`, `ListingEditForm.test.tsx`, `UnitCreateForm.test.tsx`,
+   `e2e/tests/dashboard-next/property-requirements.spec.ts` (and any other
+   hit of "never leaves the dashboard" outside docs/superpowers/).
+2. **Opted-out note on the sign-up pin (FIX, RED first).**
+   `app/src/routes/public.ts`: after the thread step, judge the number opted
+   out with the SEND path's rule on what the handler already holds -
+   `isOptedOut(conversation.sms_opt_out, contact.sms_opt_out)`
+   (`app/src/services/scheduledSendSuppression.ts:33`) - no new read. When
+   true, the `signed_up` pin label (all three forms: flyer with address,
+   "from a flyer", join page) gets the suffix
+   ` (opted out of texts - they need to text START to get texts again)`.
+   It applies to a NEW contact too (a number that opted out before any
+   contact held it: its thread carries the flag and the welcome is refused).
+   Nothing else changes: the unread mark, the 24-hour check, the flyer entry,
+   the welcome rule, the public answer. No new audit field. Tests in
+   `app/test/publicSignupLeads.test.ts`: contact flag; thread flag; a new
+   contact on a flagged thread; not opted out -> no suffix (the existing
+   label tests stay green).
+3. **Docs.** `documentation/GLOSSARY.md` (the signed_up pin entry, ~:666)
+   and `e2e/support/selectors.md` (the sign-up pin row, ~:52): name the
+   opted-out suffix. Spec `docs/superpowers/specs/2026-10-21-flyer-leads-design.md`
+   section 7: append two bullets - "D2 legend (Cameron, 2026-10-22): the
+   Staff only legend line reads 'Staff only - not on the public flyer.'
+   (property forms) and 'Staff only - never on a property flyer.' (landlord
+   form). The tags are about the flyer; rent still reaches tenants through
+   the Matching [Rent] merge field, which stays." and "D6.2 opted-out note
+   (Cameron, 2026-10-22): when the number is opted out (the send path's
+   rule: the thread's or the contact's sms_opt_out), the pin label ends
+   ' (opted out of texts - they need to text START to get texts again)'.
+   The form cannot re-subscribe a number: Twilio's opt-out block lifts only
+   when the person texts START, YES or UNSTOP. No thank-you line (Cameron
+   rejected it: people do not remember texting STOP)." ASCII only.
+4. **Issues.** New `docs/issues/signed-up-row-sent-words.md` from
+   `docs/issues/_TEMPLATE.md` (bug or improvement, low): a pair whose latest
+   counted entry is the flyer reads "Sent <sign-up date>" on the contact's
+   Properties sent row (`Card.tsx`) and on Follow up (`FollowUpView.tsx`)
+   once a reply, tour or decline outranks `signed_up`, for a property the app
+   may never have texted; fix direction: the latest entry's key on the wire
+   (`latestCountedShareKey`), the words keyed on it; Cameron 2026-10-22:
+   keep as built, filed. And update `docs/issues/consent-capture-ignores-signup-web-form.md`'s
+   opted-out paragraph: decided - the form cannot opt a number back in
+   (Twilio), staff see the pin note (FW-P2), no thank-you line.
+5. Run `npm run issues` (EXIT:0). Then the full five-gate battery on the
+   final commit; no second main sync; no review round of your own (my two
+   reviewers re-review this diff).

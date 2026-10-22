@@ -148,7 +148,8 @@ The new ready state, top to bottom:
      (blank parts left out). It is omitted when the city line itself is the
      h1 (first fallback below).
    - The link keeps the sr-only " - open in Google Maps" suffix that the old
-     Address row carried, for WCAG 2.5.3 and the new-tab disclosure.
+     Address row carried, for WCAG 2.5.3: it names the destination. It does
+     not say the link opens a new tab (it never did).
    - The separate Address detail row is removed, and its helper
      `addressLines` is deleted.
    - Fallbacks:
@@ -423,7 +424,9 @@ was sent to them before.
   up, so staff decide.
   - Reason: the sign-up box asks for alerts about "this home and others", so
     a sign-up is not proof of renewed interest in a home they turned down.
-    It also means a public request can never undo a staff decision.
+    It also means a public request never undoes a decline that is already
+    written (one exception, a race inside the outcome route's own write:
+    section 7).
   - "Current" is exactly `effectiveDecline(row, undefined)`
     (`listingSendOutcome.ts:47-58`) on the row the ledger write read: a
     decline whose instant is at or after `sentAt`, or any decline when the
@@ -453,9 +456,10 @@ was sent to them before.
   attempt key and move `sentAt` forward. A pair that reads `signed_up` keeps
   reading `signed_up`.
 - **Residuals, stated.**
-  - An UNCOUNTED pair (a text that failed) becomes counted, and its old
-    "Property text failed" pin reads "Property sent"
-    (`contactTimeline.ts:732`).
+  - An UNCOUNTED pair (a text that failed) becomes counted, and an old
+    "Property text failed" pin that reads the pair (a legacy pin with no
+    share id, or one whose share has no entry) reads "Property sent"
+    (`contactTimeline.ts`, `propertySentWords`).
   - The repair script's census (`app/scripts/repair-share-outcomes.ts`)
     sees the new entries and must not mis-forecast them.
   - A LOST flyer write (the ledger's token retries exhausted) is NOT repaired
@@ -750,26 +754,33 @@ and plan section 4.
 - D6 repeat check (AR12): `hasEventSince` reads with `ConsistentRead: true`,
   so two sign-ups seconds apart see each other's pin.
 - D7 (AR13): a recipient that exists but has no name is labelled on the
-  property's Sent to card by its formatted phone, never by its raw
-  contactId. The case that matters is an existing `unknown` contact, which a
-  flyer sign-up newly puts on that card and never renames (D4); the rule
-  covers every contact type, so a nameless tenant row changes too. A missing
-  contact keeps today's label.
+  property's Sent to card by its phone as staff screens show it
+  (`formatPhoneForDisplay`, which formats a US number and leaves any other
+  as stored), never by its raw contactId. The case that matters is an
+  existing `unknown` contact, which a flyer sign-up newly puts on that card
+  and never renames (D4); the rule covers every contact type, so a nameless
+  tenant row changes too. A missing contact, or one with neither a name nor
+  a phone, keeps today's label (the id). Follow up uses the same label
+  (code review R2 N1).
 - D6 audit wording (plan review R2 #5): `consentVersion` is the consent
   disclosure version in force, the server's `CONSENT_VERSION`. The form
   sends no version of its own; the two ship in one release.
 - The decline-click race: a sign-up that lands inside the outcome route's
   own window between its 'Not interested' stamp and its write leaves that
   new decline superseded at birth (the click answers Signed up; a second
-  click sticks). Accepted in the build's code review; filed as
-  docs/issues/flyer-signup-decline-click-race.md.
+  click sticks). The route still writes its "Not interested" timeline and
+  Activity rows for that click. Accepted in the build's code review; filed
+  as docs/issues/flyer-signup-decline-click-race.md.
 - D7 / AR13 at the handback review: the property Activity card's contact
   label uses the same rule as the Sent to card (name, else the formatted
   phone), since staff can now record outcomes on a nameless contact's row.
 - D6.4 at the handback review: the `housing_fair_signup` audit is
   best-effort too, on both the live and the deleted path (a throw is logged
   and the answer stays `{ ok: true }`). Still NOT best-effort, as before
-  this feature: the reads that route the request and the thread
-  get-or-create and link. A throw there is the generic 500, and a NEW
-  contact's retry then takes the existing path and is never welcomed (D5's
+  this feature: the reads that route the request, the contact create, and
+  the thread get-or-create and link. A throw there is the generic 500. When
+  it comes from the thread step, AFTER a new contact was created, the
+  visitor's retry takes the existing path and is never welcomed (D5's
   consequence; filed in docs/issues/consent-capture-ignores-signup-web-form.md).
+  Because the audit is best-effort, a missing `housing_fair_signup` row no
+  longer proves there was no sign-up; the error log line is then the trace.

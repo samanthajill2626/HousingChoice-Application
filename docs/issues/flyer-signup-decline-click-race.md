@@ -6,20 +6,20 @@ severity: low
 status: open
 area: app
 created: 2026-10-21
-refs: app/src/routes/units.ts:1572, app/src/routes/units.ts:1596, app/src/routes/units.ts:1688-1702, app/src/routes/units.ts:1742-1762, app/src/repos/listingSendsRepo.ts:379-411, app/src/lib/listingSendOutcome.ts:49-61, app/src/services/shareLedger.ts:276-296, app/src/routes/public.ts:637-703, app/src/lib/events.ts:5-6, app/src/lib/dynamo.ts:61-79
+refs: app/src/routes/units.ts:1576, app/src/routes/units.ts:1600, app/src/routes/units.ts:1692-1706, app/src/routes/units.ts:1746-1766, app/src/repos/listingSendsRepo.ts:379-411, app/src/lib/listingSendOutcome.ts:49-61, app/src/services/shareLedger.ts:276-296, app/src/routes/public.ts:658-724, app/src/lib/events.ts:5-6, app/src/lib/dynamo.ts:61-79
 ---
 
 **Problem.** The send-outcome route
 (`POST /api/units/:unitId/recipients/:contactId/outcome`,
-`app/src/routes/units.ts:1560`) records a staff "Not interested" in four steps:
-1. it reads the pair's row (`units.ts:1572`);
+`app/src/routes/units.ts:1564`) records a staff "Not interested" in four steps:
+1. it reads the pair's row (`units.ts:1576`);
 2. it stamps the decline instant, `const at = new Date().toISOString()`
-   (`units.ts:1596`);
-3. it writes the decline with `listingSends.setDeclined` (`units.ts:1690`),
+   (`units.ts:1600`);
+3. it writes the decline with `listingSends.setDeclined` (`units.ts:1694`),
    which is conditioned only on a counted row - not on the change token
    (`shares_op`) the route read (`app/src/repos/listingSendsRepo.ts:379-411`);
 4. it re-reads the row and answers the re-projected outcome
-   (`units.ts:1742-1762`).
+   (`units.ts:1746-1766`).
 
 A decline counts only while its instant is at or after the pair's `sentAt`
 (`effectiveDecline`, `app/src/lib/listingSendOutcome.ts:49-61`). Suppose a flyer
@@ -33,7 +33,7 @@ superseded - dead at birth - and the re-projection answers `signed_up`. The
 click visibly fails once (the row does not move to Not interested); a second
 click sticks, because its `at` is after the sign-up. The route still records
 its "Not interested in `<address>`" timeline event and the property Activity
-row (`units.ts:1695-1702`), so the contact's timeline says Not interested while
+row (`units.ts:1699-1706`), so the contact's timeline says Not interested while
 the pair reads Signed up. Both requests read ONE clock: the app is one process
 on one box (`app/src/lib/events.ts:5-6`), so no skew between instances is
 involved.
@@ -51,15 +51,15 @@ row A5 / C2) filed it rather than change a merged route's race semantics in a
 fix wave, and code review round 2 (`R2-review.md` F3 and the A5 / C2
 challenge, same directory) corrected what makes it reachable:
 
-**What it takes.** The window runs from the route's `at` (`units.ts:1596`) to
-its `setDeclined` landing (`units.ts:1690`). On the Not interested path nothing
+**What it takes.** The window runs from the route's `at` (`units.ts:1600`) to
+its `setDeclined` landing (`units.ts:1694`). On the Not interested path nothing
 is awaited between the two, so the route has ONE write in flight. During that
-write the sign-up must take its instant (`app/src/routes/public.ts:637`) and
+write the sign-up must take its instant (`app/src/routes/public.ts:658`) and
 then still run, before its flyer entry lands, the repeat read `hasEventSince`
-(`public.ts:643`) and the ledger's `getByKeyConsistent` and conditional
-`putShareMemory` (`applyFlyerShareEntry`, `public.ts:696`): about two and a
+(`public.ts:664`) and the ledger's `getByKeyConsistent` and conditional
+`putShareMemory` (`applyFlyerShareEntry`, `public.ts:717`): about two and a
 half DynamoDB round trips, five and a half when it also pins and marks the
-thread (`public.ts:661-672`). So ordinary latency does not reach it. It takes a
+thread (`public.ts:682-693`). So ordinary latency does not reach it. It takes a
 slow `setDeclined` (DynamoDB tail latency) or one the SDK retries (the client
 sets no retry policy of its own, so the SDK default applies,
 `app/src/lib/dynamo.ts:61-79`). Proof B below reaches it only by running the

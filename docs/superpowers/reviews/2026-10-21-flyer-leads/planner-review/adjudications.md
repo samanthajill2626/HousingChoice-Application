@@ -97,3 +97,27 @@ with the re-review charge, and I re-run the gates on the final commit.
 
 Gates after the wave: typecheck, the touched files' unit suites, then the
 full battery on the final commit (the build's manual), no second main sync.
+
+## Round P2 (2026-10-22, re-review of FW-P1 at 33e392aa) - TERMINAL
+
+FW-P1 landed as 6b632aef, 0363dde2, 21b47d65, 4a7796fb (report 098eaa11;
+`FW-P1-report.md`); the orchestrator's battery 4 on 098eaa11 was green.
+I then amended the spec (33e392aa: section 4's Activity card line, three
+section 7 bullets). The SAME two reviewers re-reviewed with the re-review
+charge (`P2-conformance.md`, `P2-adversarial.md`). Both confirm A-L2, C-F1
+and A-I2 correct; neither found anything at MEDIUM or above. No accepted
+finding changes what gets built, so this round is TERMINAL: its precision
+edits are folded in below and the review stops.
+
+| # | Finding | Sev | Ruling | Reason |
+|---|---|---|---|---|
+| P2-F1 / N2 | ~30 `public.ts` / `units.ts` line citations in five docs/issues files point at pre-FW-P1 lines; two files mix numberings. | LOW | DOC | Re-pointed to the final code (a docs-only sweep; symbol names where a line was ambiguous). |
+| P2-F2 | The D6.4 handback bullet omits `contacts.create` from the not-best-effort list and over-states who is never welcomed. | INFO | DOC | Bullet corrected: the create is listed; only a thread-step throw AFTER the create leaves a new contact unwelcomed. |
+| P2-F3 | Spec D3 says the " - open in Google Maps" suffix is the new-tab disclosure; it is not (and the corrected code comment says so). | INFO | DOC | D3 now says the suffix names the destination and never said "new tab". |
+| P2-F4 | AR13 wording: "formatted phone" (a non-US number shows as stored); no name and no phone still shows the id; Follow up unnamed; two dashboard comments (`listingFormat.ts:225`, `types.ts` UnitActivityEvent.contactName) still describe name-or-id. | INFO | DOC | Section 7 AR13 bullet made exact; the two comments corrected (comment-only). |
+| P2-F5 | D7's "a public request can never undo a staff decision" is still absolute; the race bullet omits that the route still writes its timeline / Activity rows. | INFO | DOC | D7 sentence qualified with a pointer to the section 7 race bullet; the bullet names the rows. |
+| C-F3 (re-raised) | The D7 "Property text failed" residual over-states the case. | INFO | DOC | D7 residual now says which pins read the pair (legacy / entry-less). |
+| N3 | With the audit best-effort, a missing `housing_fair_signup` row no longer proves there was no sign-up (the authority backfill's exclusion; the consent issue's planned stamp). | INFO | DOC | Stated in the D6.4 handback bullet. The authority backfill already ran in dev and prod (2026-10-13), so nothing reads it live. |
+| N1 = OR-26b | Only `signed_up` rows get their own words; a flyer-latest pair that a reply, tour or decline outranks reads "Sent <sign-up date>" on the roster and on Follow up (a Replied flyer-only pair is chased on Follow up as "Sent ..."). | LOW | CAMERON (= OR-26b) | Built per spec D8; the decision goes to Cameron with this sharper example and the wire-flag alternative. |
+| A-L1 (contested) | The reviewer defends A-L1: a throw before the welcome is not the "failed welcome" class; a safer fix is to create the thread BEFORE the contact so a thread failure leaves no contact and the retry is a create. | LOW | ACCEPT (kept) | The window needs a DynamoDB fault between two writes; the reorder moves the new-contact path at the end of review and leaves an empty participant-less thread when the create then fails, which shows in the inbox. Recorded in the consent issue as the preferred fix direction; Cameron sees it in the verdict. |
+| A-M1 refinement | Option (a) as worded would reword the shared legend for every Staff only field; the honest narrow version is a note on the two Rent fields only (`[Rent]` is the only merge field that reads a newly Staff only field). | MEDIUM | CAMERON (= OR-26) | Folded into the options put to Cameron. |

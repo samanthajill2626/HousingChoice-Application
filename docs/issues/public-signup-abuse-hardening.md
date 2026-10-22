@@ -6,7 +6,7 @@ severity: med
 status: open
 area: app
 created: 2026-10-21
-refs: app/src/routes/public.ts:637-673, app/src/repos/activityEventsRepo.ts:136-154, app/src/repos/activityEventsRepo.ts:214-245, app/src/app.ts:185-191, app/src/routes/public.ts:156-167, app/src/routes/public.ts:209-216, app/src/routes/public.ts:686-703, app/src/jobs/rosterActions.ts:236-237, app/src/jobs/rosterActions.ts:261-304, app/src/routes/public.ts:495-528, app/src/routes/public.ts:584, app/src/routes/today.ts:784-840, dashboard/src/routes/listing/listingFormat.ts:352, app/test/publicSignupLeads.test.ts:750-761, dashboard/src/routes/contact/Timeline.module.css:467-471, app/src/services/shareLedger.ts:50, app/src/services/shareLedger.ts:205-224, app/src/jobs/broadcastFanOut.ts:1270, app/src/services/shareAttemptOutcome.ts:188, app/scripts/repair-share-outcomes.ts, app/src/routes/today.ts:182, app/src/routes/today.ts:704-754, app/src/lib/config.ts:1008-1014, app/src/routes/units.ts:1495-1520, app/src/services/followUps.ts:141-161
+refs: app/src/routes/public.ts:658-694, app/src/repos/activityEventsRepo.ts:136-154, app/src/repos/activityEventsRepo.ts:214-245, app/src/app.ts:185-191, app/src/routes/public.ts:168-179, app/src/routes/public.ts:221-228, app/src/routes/public.ts:707-724, app/src/jobs/rosterActions.ts:236-237, app/src/jobs/rosterActions.ts:261-304, app/src/routes/public.ts:509-546, app/src/routes/public.ts:605, app/src/routes/today.ts:784-840, dashboard/src/routes/listing/listingFormat.ts:352, app/test/publicSignupLeads.test.ts:750-761, dashboard/src/routes/contact/Timeline.module.css:467-471, app/src/services/shareLedger.ts:50, app/src/services/shareLedger.ts:205-224, app/src/jobs/broadcastFanOut.ts:1270, app/src/services/shareAttemptOutcome.ts:188, app/scripts/repair-share-outcomes.ts, app/src/routes/today.ts:182, app/src/routes/today.ts:704-754, app/src/lib/config.ts:1008-1014, app/src/routes/units.ts:1495-1520, app/src/services/followUps.ts:141-161
 ---
 
 **Problem.** Since `feat/flyer-leads` (spec
@@ -34,9 +34,9 @@ new-phone bound and added what a wrapping pin lets a typed name do, the
 ledger contention in point 5 and the strip list's wider scope.
 
 **1. The 24-hour cap is read-then-write, not atomic.** The repeat check
-(`app/src/routes/public.ts:637-652`) is `activityEventsRepo.hasEventSince`, a
+(`app/src/routes/public.ts:658-673`) is `activityEventsRepo.hasEventSince`, a
 strongly consistent Query (AR12, `activityEventsRepo.ts:214-245`). The pin and
-the bump (`public.ts:658-673`) are separate, unconditional writes after it, and
+the bump (`public.ts:679-694`) are separate, unconditional writes after it, and
 nothing ties the read to the write. So:
 - a sign-up that starts after another's pin was written sees that pin and
   skips, so sequential sign-ups pin and bump once per source per 24 hours;
@@ -88,14 +88,14 @@ It can NOT:
 - learn anything from the answer, which is always `{ ok: true }` (but see 4
   for latency);
 - touch a relay group or a `group_text` thread (the 1:1-only guard in
-  `markSignupUnread`, `public.ts:382-385`).
+  `markSignupUnread`, `public.ts:394-397`).
 
 It CAN, per request, on ANY live contact of any type (tenant, landlord,
 partner, team member, unknown):
 - (a) put a staff-visible, system-looking pin in the contact's thread whose
   name is text of its choosing: "Signed up from the flyer for `<address>` as
-  `<typed first last>`" (`public.ts:156-167`). The names are only trimmed and
-  length-capped (`public.ts:209-216`, 100 characters per part), so interior
+  `<typed first last>`" (`public.ts:168-179`). The names are only trimmed and
+  length-capped (`public.ts:221-228`, 100 characters per part), so interior
   newlines, other C0/C1 control characters and bidi overrides are kept: an
   impersonation channel into staff UI (for example "... as Tia Moss - please
   cancel my tour"). React escapes the label, so this is spoofing, not script
@@ -115,7 +115,7 @@ partner, team member, unknown):
   anonymous and free.
 - (b) bump the contact's 1:1 thread to the top of the inbox and mark it unread
   (the touch also sets `status` to open), creating the thread when the contact
-  has none (`public.ts:584`). Creating it is not new: main created one too,
+  has none (`public.ts:605`). Creating it is not new: main created one too,
   typed `tenant_1to1` even for a landlord, and texted the welcome into it when
   the contact had never been welcomed. New is that the thread is correctly
   typed (`conversationTypeFor`), bumped and unread, and that no text goes with
@@ -124,7 +124,7 @@ partner, team member, unknown):
   (`app/src/routes/today.ts:784-840`).
 - (c) for a tenant or unknown contact and a shareable unit, rewrite the pair's
   properties-sent state on EVERY request, outside the 24-hour cap
-  (`public.ts:686-703`): `sentAt` moves to now, a Replied or No reply yet pair
+  (`public.ts:707-724`): `sentAt` moves to now, a Replied or No reply yet pair
   reads Signed up, files under Interested on the property's Sent to card and
   leaves Follow up. No writer removes a share entry, so staff's only remedy is
   a decline, which later sign-ups then respect.
@@ -137,12 +137,12 @@ number - still creates a tenant and gets the one welcome, as before the
 branch. But before the branch it left only a READ thread whose preview is our
 welcome; now each such sign-up ALSO leaves:
 - an unread row on top of the inbox: the pin and the unread mark run after the
-  welcome (`public.ts:654-673`; Cameron's D6 call that a new sign-up shows as
+  welcome (`public.ts:675-694`; Cameron's D6 call that a new sign-up shows as
   unread, pinned by `app/test/publicSignupLeads.test.ts:750-761`);
 - a Today row under Unreplied (`app/src/routes/today.ts:809-841`), which a read
   thread never made;
 - for a shareable unit's flyer, a "Signed up" row filed under Interested on
-  that property's Sent to card (`public.ts:686-703`;
+  that property's Sent to card (`public.ts:707-724`;
   `dashboard/src/routes/listing/listingFormat.ts:352`).
 
 Today the only bound on this noise is the per-IP `/public` limiter
@@ -200,7 +200,7 @@ deferral window (up to about 11 hours) would block a staff-confirmed relay add.
 It needs many shareable unitIds, many IPs, or point 1's overlapping bursts.
 
 **4. Response latency tells a deleted holder from a live one** (adversarial R1
-P4, not reproduced). The deleted path (`public.ts:495-528`) answers after the
+P4, not reproduced). The deleted path (`public.ts:509-546`) answers after the
 phone lookup and one audit write; a live holder's path runs about six more
 DynamoDB operations (the thread, the roster link, the repeat read, the pin, the
 touch and increment, the ledger, the audit); a new phone also waits on the
@@ -213,7 +213,7 @@ entry** (code review round 2 P-a, not reproduced). Every write to a pair's
 properties-sent row - a broadcast's entry (`applyShareLedgerEntry`, from the
 fan-out at `app/src/jobs/broadcastFanOut.ts:1270` and the delivery outcome at
 `app/src/services/shareAttemptOutcome.ts:188`) and the flyer's
-(`applyFlyerShareEntry`, `public.ts:696`) - runs one read-modify-write loop
+(`applyFlyerShareEntry`, `public.ts:717`) - runs one read-modify-write loop
 conditioned on the row's token (`applyLedgerLoop`,
 `app/src/services/shareLedger.ts:205-224`): a lost condition re-reads and
 re-applies at most `MAX_REAPPLY` (3) times (`shareLedger.ts:50`), then logs
@@ -254,8 +254,8 @@ beyond that residual.
   contact's thread gets no unread mark (P1 M2's shape: the contact is still
   created, only the bump is skipped), so made-up phones cannot fill Today's
   unread block ("Today crowd-out", under point 2).
-- Normalize the typed names in `parseHousingFairBody` (`public.ts:197`)
-  BEFORE its non-empty and length checks (`public.ts:209-216`):
+- Normalize the typed names in `parseHousingFairBody` (`public.ts:209`)
+  BEFORE its non-empty and length checks (`public.ts:221-228`):
   - strip C0/C1 control and bidi characters;
   - drop format (Cf) characters - zero-width ones such as U+200B, U+200C,
     U+200D and U+2060 survive `.trim()`, so a first and a last name of

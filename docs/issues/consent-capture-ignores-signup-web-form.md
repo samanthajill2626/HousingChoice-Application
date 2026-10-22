@@ -6,7 +6,7 @@ severity: low
 status: open
 area: dashboard
 created: 2026-10-21
-refs: dashboard/src/routes/contact/ConsentCaptureModal.tsx:28-109, dashboard/src/routes/contact/ContactCommsPane.tsx:369-371, dashboard/src/routes/contact/ConsentFields.tsx:57-62, dashboard/src/lib/consentCopy.ts:46-52, app/src/routes/contacts.ts:325-371, app/src/routes/public.ts:205, app/src/routes/public.ts:718-731, app/src/lib/smsCompliance.ts:66-91, app/src/lib/smsCompliance.ts:101, app/src/services/sendMessage.ts:551, app/src/jobs/broadcastFanOut.ts:276-283, app/src/services/groupMembers.ts:100-125, dashboard/src/routes/public/FlyerPage.tsx:251, dashboard/src/routes/public/FlyerPage.tsx:431-440, dashboard/src/routes/public/HousingFairIntake.tsx:163, app/src/services/sendMessage.ts:123, app/src/services/sendMessage.ts:513, app/src/lib/smsCompliance.ts:133, app/src/lib/smsCompliance.ts:239-245, app/src/lib/smsCompliance.ts:262-266, app/src/routes/public.ts:551, app/src/routes/public.ts:562-593, app/src/routes/public.ts:605-606, app/src/routes/public.ts:629, app/scripts/backfillConsentMethod.ts
+refs: dashboard/src/routes/contact/ConsentCaptureModal.tsx:28-109, dashboard/src/routes/contact/ContactCommsPane.tsx:369-371, dashboard/src/routes/contact/ConsentFields.tsx:57-62, dashboard/src/lib/consentCopy.ts:46-52, app/src/routes/contacts.ts:325-371, app/src/routes/public.ts:217, app/src/routes/public.ts:744-757, app/src/lib/smsCompliance.ts:66-91, app/src/lib/smsCompliance.ts:101, app/src/services/sendMessage.ts:551, app/src/jobs/broadcastFanOut.ts:276-283, app/src/services/groupMembers.ts:100-125, dashboard/src/routes/public/FlyerPage.tsx:251, dashboard/src/routes/public/FlyerPage.tsx:431-440, dashboard/src/routes/public/HousingFairIntake.tsx:163, app/src/services/sendMessage.ts:123, app/src/services/sendMessage.ts:513, app/src/lib/smsCompliance.ts:133, app/src/lib/smsCompliance.ts:239-245, app/src/lib/smsCompliance.ts:262-266, app/src/routes/public.ts:551, app/src/routes/public.ts:562-593, app/src/routes/public.ts:605-606, app/src/routes/public.ts:629, app/scripts/backfillConsentMethod.ts
 ---
 
 **Problem.** A public sign-up - the flyer's "Sign up" box or /join - never
@@ -20,7 +20,7 @@ was that flag, `:399`), and flyer-leads keeps the rule (spec
 contact is never changed, consent included). What the branch adds is
 visibility: the pin and the unread mark now bring such a sign-up to staff,
 who then reply. The form requires the CTIA consent box (the server refuses a
-body without `smsConsent: true`, `app/src/routes/public.ts:205`), but an
+body without `smsConsent: true`, `app/src/routes/public.ts:217`), but an
 existing contact with no `consent_method` keeps none. So:
 - every blast skips them (`no_consent`,
   `app/src/jobs/broadcastFanOut.ts:276-283`, on the one predicate
@@ -39,7 +39,7 @@ method from a staff path (`applyConsentFields`,
 `app/src/routes/contacts.ts:325-371`). Staff must pick something like
 "Verbal (phone)" for a person whose actual opt-in is the web form, while the
 evidence of that opt-in sits unused on the contact's `housing_fair_signup`
-audit event (`contacts#<id>`, `app/src/routes/public.ts:718-731`): its
+audit event (`contacts#<id>`, `app/src/routes/public.ts:744-757`): its
 `consentVersion` (the disclosure version in force, `CONSENT_VERSION`,
 `app/src/lib/smsCompliance.ts:91`) and its instant. The basis staff record can
 then differ from the form evidence the audit keeps - spec D4 states exactly
@@ -108,6 +108,15 @@ it (the D5 consequence above, which the rule would reverse), and so does a
 legacy `housing_fair` / `flyer` contact whose welcome never succeeded, once
 `app/scripts/backfillConsentMethod.ts` stamped it `web_form`. So the rule is a
 decision for Cameron, not a fix-wave change.
+
+A safer direction (planner review P2, `P2-adversarial.md`, A-L1 defended):
+create or get the thread BEFORE the contact on the new-contact path, so a
+thread-step throw leaves no contact behind and the visitor's retry is still a
+create that gets the welcome. It re-texts no one. Its own cost: if the
+contact create then fails, an empty thread with no participant link is left
+for that phone (the next sign-up or inbound text reuses it while it is open).
+It narrows the window rather than closing it (`setParticipantsIfAbsent` still
+runs after the create).
 
 **Suggested fix.**
 - When the contact's audit trail holds a `housing_fair_signup` (and no

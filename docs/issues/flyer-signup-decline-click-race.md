@@ -58,8 +58,8 @@ write the sign-up must take its instant (`app/src/routes/public.ts:690`) and
 then still run, before its flyer entry lands, the repeat read `hasEventSince`
 (`public.ts:696`) and the ledger's `getByKeyConsistent` and conditional
 `putShareMemory` (`applyFlyerShareEntry`, `public.ts:770`): about two and a
-half DynamoDB round trips, five and a half when it also pins and marks the
-thread (`public.ts:735-746`). So ordinary latency does not reach it. It takes a
+half DynamoDB round trips, six and a half when it also reads the number's
+threads (`public.ts:728`), pins and marks the thread (`public.ts:735-746`). So ordinary latency does not reach it. It takes a
 slow `setDeclined` (DynamoDB tail latency) or one the SDK retries (the client
 sets no retry policy of its own, so the SDK default applies,
 `app/src/lib/dynamo.ts:61-79`). Proof B below reaches it only by running the

@@ -65,6 +65,6 @@ the flyer <date>" whenever it is set, whatever the outcome. The existing
 `via` field cannot carry it: a row the flyer entry created reads
 `via: 'broadcast'` (putShareMemory's first-write value: it SETs
 `#via = if_not_exists(#via, :via)`, `app/src/repos/listingSendsRepo.ts:336`,
-with `:via` bound to `'broadcast'` at `:328`), and an older row keeps whatever
+with `:via` bound to `'broadcast'` at `:329`), and an older row keeps whatever
 its first share wrote. A server and dashboard change, so it takes the full
 gates.

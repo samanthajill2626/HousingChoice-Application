@@ -97,11 +97,16 @@ is built. Staff see it instead (planner review FW-P2), and since FW-P3
   A new contact gets this note too when its thread carries the flag from a
   STOP sent before any contact held the number (its welcome is refused, as
   before).
-- Else, when only the contact's own `sms_opt_out` is set - a staff
-  Do-Not-Contact, which staff can lift themselves with "Allow SMS (clear
-  opt-out)" (`dashboard/src/routes/contact/ContactActionsMenu.tsx:207`), or
-  the contact's other number opted out - the label ends with
-  " (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)".
+- Else, when only the contact's own `sms_opt_out` is set, the label ends
+  with " (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)".
+  Four causes leave only that flag: a staff Do-Not-Contact, which staff can
+  lift themselves with "Allow SMS (clear opt-out)"
+  (`dashboard/src/routes/contact/ContactActionsMenu.tsx:207`); a STOP from
+  the contact's other number; a 21610 receipt; and an imported STOP. For
+  the last two, Allow SMS is the wrong remedy (Twilio still blocks after a
+  21610; an imported STOP is a legal one). Cameron kept the words
+  (2026-10-22, planner review P4 option (b)) and the writer fix is filed:
+  `opt-out-writers-skip-number-thread.md`.
 
 No thank-you line: Cameron rejected one, since people do not remember texting
 STOP, so the flyer's and /join's thank-you copy stays as it is.

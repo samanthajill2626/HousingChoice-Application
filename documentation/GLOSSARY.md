@@ -672,10 +672,12 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   " (this number opted out of texts - they need to text START from it to get texts again)":
   a sign-up cannot opt a number back in, since Twilio's opt-out block
   lifts only when the person texts START, YES or UNSTOP from it. Else, when
-  only the contact's own `sms_opt_out` is set (a staff Do-Not-Contact, or
-  the contact's other number opted out), it ends with
-  " (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)":
-  staff lift it with "Allow SMS (clear opt-out)" on the contact's menu.
+  only the contact's own `sms_opt_out` is set, it ends with
+  " (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)".
+  Four causes leave only that flag: a staff Do-Not-Contact, a STOP from the
+  contact's other number, a 21610 receipt, and an imported STOP. "Allow SMS
+  (clear opt-out)" on the contact's menu is the remedy only for the staff
+  mark (`docs/issues/opt-out-writers-skip-number-thread.md`).
   Either way the pin tells staff and the public page says nothing different.
   `<First Last>` is the name typed on the form: a sign-up never changes an
   existing contact (no name, type, status, voucher size, housing authority

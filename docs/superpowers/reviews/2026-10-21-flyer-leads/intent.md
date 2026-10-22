@@ -7,16 +7,14 @@ deployed.
 
 ## STATE (replace each time)
 
-- Phase: FIX WAVE FW-P2 (Cameron's verdict decisions, 2026-10-22). The
-  verdict (`planner-verdict.md`) said MERGE-READY @d717d160; Cameron then
-  decided: legend reword, `[Rent]` stays, "Sent" words filed, opted-out
-  staff note on the sign-up pin (Verdict gate additions, below). FW-P2 list:
-  `planner-review/adjudications.md`; sent to the orchestrator by SendMessage
-  (resume). Mirror + watchdog ids in `.superpowers/sdd/agents.md`.
-- NEXT: on FW-P2's handback - read the diff, continue the SAME two reviewers
-  with the re-review charge on it, re-run my five gates on the final commit,
-  update `planner-verdict.md` (decisions section -> resolved), then bring
-  Cameron the merge command. UNMERGED - the merge is Cameron's.
+- Phase: VERDICT (2026-10-22). Fix waves FW-P2 (legend, opted-out pin
+  note) and FW-P3 (the note worded by cause) are built; review round P4
+  was TERMINAL (Cameron kept the Do-Not-Contact wording and the writer
+  problem is filed, `docs/issues/opt-out-writers-skip-number-thread.md`).
+  The orchestrator, mirror and watchdog are all stopped. Gated code tip
+  d3bb2617; later commits are records and docs only.
+- NEXT: deliver `planner-verdict.md` and the merge command. UNMERGED - the
+  merge is Cameron's. Check `git rev-list --count HEAD..main` is 0 first.
 - After the merge: unregister compact-resume (`--off`); cleanup only on
   Cameron's go. Still owed from earlier: property-requirements worktree
   cleanup, its 17 "For Cameron" calls, its spec D8 amendment.
@@ -227,3 +225,16 @@ Decided: the Staff only legend drops "never leaves the dashboard"; `[Rent]`
 stays in the Matching default; the "Sent <date>" words stay and are filed;
 an opted-out sign-up gets a staff note on its pin ("they need to text
 START"), and NO thank-you line for the public. Built as fix wave FW-P2.
+
+Later the same day, verbatim:
+
+> "Go with (a), the Do-Not-Contact note" (16:51 UTC, round P3: a staff
+> Do-Not-Contact gets its own note instead of "they need to text START").
+> Built as FW-P3.
+
+> "Let's just do it: B. File the problem note code change." (round P4:
+> three writers of a real opt-out flag only the contact, so they read as a
+> staff Do-Not-Contact; (a) was rewording the note, (b) keeping it and
+> filing the problem). Read as (b): the note keeps its words, no code
+> change on this branch, and the writer fix is filed as
+> `docs/issues/opt-out-writers-skip-number-thread.md`.

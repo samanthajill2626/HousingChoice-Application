@@ -274,7 +274,12 @@ is complete and correct; the note fires exactly on the send gate's flags.
 ## Round P4 (2026-10-22, re-review of FW-P3 at d3bb2617)
 
 Planner gates on d3bb2617 (logs `.superpowers/sdd/gates/planner-*`, round-3
-logs archived as `r3-planner-*`): results recorded below when the run ends.
+logs archived as `r3-planner-*`; 17:57-18:18 UTC): typecheck EXIT:0; npm
+test EXIT:0 (app 11046 passed + 1 skipped, dashboard 5391, e2e workspace
+508, fake-twilio 275, fake-twilio/web 111; no `[dynamoAdmin]` line - the
+two "dynamoAdmin" hits are test names); smoke EXIT:0 (1731 specifiers); e2e
+EXIT:0 (371 passed, 17.8m); eslint EXIT:1 with the same 3 merge-base errors
+(Timeline.tsx:1625, FlyerPage.tsx:212 and :230), 0 new.
 
 `P4-conformance.md` (14 items: 9 conform, 1 partial, 4 deviate; 1 MEDIUM,
 2 LOW, 2 INFO) and `P4-adversarial.md` (3 LOW, 3 INFO). The code mechanics

@@ -7,39 +7,25 @@ deployed.
 
 ## STATE (replace each time)
 
-- Phase: PLAN DRAFTING (compaction gate A done 2026-10-21 17:22, 595k -> 28k).
-  Spec rev 6 @5944de7e is approved.
-- Plan v1 committed @d5684bbe: sections 0-4 binding (AR1-AR10), six slice
-  drafts assembled as sections 5-10 (S1 2 tasks, S2 6, S3 4, S4 5, S5 3, S6 5).
-- Plan review round 1 done and committed @ebc7a5bd: 15 distinct findings
-  (2 medium, 13 low), 14 accepted, 1 rejected; 3 change a decision (AR11
-  deleted-path audit, AR12 consistent read, AR13 phone label for a nameless
-  contact on the Sent to card). The spec got a section 7 "Plan-time
-  amendments" note.
-- Plan v2 committed @444e0f86 (round 1 folded into the slices; S3 gained
-  Task 3.5 for AR13). AR16 WITHDREW the AR5 whitespace question: app.ts:146
-  trimJsonBody deep-trims every JSON body, so no HTTP save stores those unit
-  fields untrimmed. Nothing is owed to Cameron on it; tell him it was moot.
-- PLAN v3 FINAL committed @981eba1c (26 tasks). Plan review CLOSED after 2
-  rounds: 21 distinct findings, 20 accepted (one only as a watch item), 1
-  rejected (a client-sent consent version; its wording half accepted in R2).
-  Mission block committed at `mission-block.md`.
-- Phase: BUILD IN FLIGHT (AUTO). Compaction gate B done 2026-10-21 20:18
-  (474k -> 27k); replay re-read in full. `abt:build-orchestrator` dispatched
-  in the background on 2026-10-21 with `mission-block.md` VERBATIM as the
-  prompt; its agent id, the watchdog task id and the mirror task id are in
-  `.superpowers/sdd/agents.md` (gitignored run state).
-- SUPERVISION: one watchdog at a time, checkpoint ceiling 55 minutes (memory
-  watchdog-30min-checkpoints), a 25-minute stall, terminal on
-  DONE/QUESTION/BLOCKED in `.superpowers/sdd/progress.md`; re-arm at every
-  wake. Live mirror: the CURRENT skill base dir's transcript-tail.mjs on
-  `~/.claude/projects/<slug>/<session>/subagents/agent-<id>.jsonl` (NOT the
-  temp dir) -> `.superpowers/sdd/live.log`. Failure budget 2 (none used).
-- NEXT STEP if resumed after an automatic compaction: read
-  `.superpowers/sdd/agents.md` and the ledger tail, run a rung-0 transcript
-  probe, re-arm the watchdog (TaskStop any stale one first), check the mirror
-  is still growing, and post one "**Checkpoint:**" line. At the handback,
-  replay the whole conversation before reviewing (Handback section).
+- Phase: PLANNER HANDBACK REVIEW (started 2026-10-22 ~04:25 UTC). Spec rev 6
+  APPROVED; plan v3 FINAL @981eba1c. The build ran AUTO from 2026-10-21
+  ~20:20 UTC (`abt:build-orchestrator`, `mission-block.md` verbatim) and
+  handed back MERGE-READY @692c44a4 (records to 546be196): 0 recoveries,
+  three green batteries, `handback.md` committed.
+- Decide-before-merge items for Cameron: OR-26 (the rent legend "Staff only -
+  never leaves the dashboard." vs the [Rent] blast default) and OR-26b
+  ("Sent <date>" words on an outranked flyer-only pair).
+- In flight: my own five-gate run (logs `.superpowers/sdd/gates/planner-*`)
+  and two read-only opus reviewers (spec-conformance; plan-blind
+  adversarial); ids in `.superpowers/sdd/agents.md` (gitignored run state).
+- NEXT: read the riskiest diffs; a short live check after the gates; one
+  complete findings list -> fix wave by continuing the orchestrator with
+  SendMessage (then continue the SAME reviewers with the RE-REVIEW CHARGE);
+  then `planner-verdict.md` with the conversation checklist, quoted exit
+  codes and the merge command. UNMERGED - the merge is Cameron's. If resumed
+  after an automatic compaction: replay the conversation in full first.
+- Earlier history (plan reviews, AR16 withdrawing the AR5 whitespace
+  question as moot) is in the plan and `plan-review/adjudications.md`.
 - Gate answers in rev 6:
   - O1 closed: the decline writers stamp `shares_op`;
   - the repeat limit is per contact per PROPERTY per 24 hours, with /join and

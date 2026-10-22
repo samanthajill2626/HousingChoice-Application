@@ -269,10 +269,17 @@ interface NoReloadMarker {
   __flyerLeadsNoReload?: boolean;
 }
 
-/** Code review R2 F1: a milestone pin's WHOLE label is visible - its text box
- *  is not cut (scrollWidth within clientWidth: it wraps, never an ellipsis)
- *  and the pin lies inside, side to side, the nearest box that clips it (the
- *  stream that scrolls it). Soft, like the QA-1 checks beside it. */
+/** Code review R2 F1 and R3-1: a milestone pin's WHOLE label is visible. Its
+ *  text box is not cut (scrollWidth within clientWidth: it wraps, never an
+ *  ellipsis) and lies inside the pin's box on all four sides - a nowrap on
+ *  the label runs it out of the pin's side while the pin keeps its width, and
+ *  a height cap on the pin hides the lines above and below. The pin lies
+ *  inside, side to side, the nearest box that clips it (the stream that
+ *  scrolls it), and that stream does not scroll sideways: the measure of
+ *  support/viewport.ts expectNoHorizontalOverflowIn (scrollWidth within
+ *  clientWidth), taken here on the box found by its computed overflow - the
+ *  stream has no role, name or test id to locate it by - and kept soft.
+ *  Soft, like the QA-1 checks beside it. */
 async function expectWholePinLabelVisible(pin: Locator, where: string): Promise<void> {
   const g = await pin.evaluate((el) => {
     const label = el.querySelector('span');
@@ -281,11 +288,27 @@ async function expectWholePinLabelVisible(pin: Locator, where: string): Promise<
     while (clip !== null && getComputedStyle(clip).overflowX === 'visible') clip = clip.parentElement;
     if (clip === null) throw new Error('no box clips the pin');
     const p = el.getBoundingClientRect();
+    const t = label.getBoundingClientRect();
     const c = clip.getBoundingClientRect();
-    return { cut: label.scrollWidth - label.clientWidth, left: p.left - c.left, right: c.right - p.right };
+    return {
+      cut: label.scrollWidth - label.clientWidth,
+      // How far the label's box sits inside the pin's, per side (below 0: out of it).
+      inside: { left: t.left - p.left, right: p.right - t.right, top: t.top - p.top, bottom: p.bottom - t.bottom },
+      left: p.left - c.left,
+      right: c.right - p.right,
+      sideways: clip.scrollWidth - clip.clientWidth,
+    };
   });
+  const { inside } = g;
   expect.soft(g.cut, `${where}: the pin label is cut`).toBeLessThanOrEqual(1);
+  expect
+    .soft(
+      Math.min(inside.left, inside.right, inside.top, inside.bottom),
+      `${where}: the pin label runs out of its pin ${JSON.stringify(inside)}`,
+    )
+    .toBeGreaterThanOrEqual(-1);
   expect.soft(Math.min(g.left, g.right), `${where}: the pin runs past the side of its stream`).toBeGreaterThanOrEqual(-1);
+  expect.soft(g.sideways, `${where}: the stream scrolls sideways`).toBeLessThanOrEqual(1);
 }
 
 test('the flyer: the address heading links to Maps, the area sits under it, Same-day tours available, and no staff-only row or key', async ({

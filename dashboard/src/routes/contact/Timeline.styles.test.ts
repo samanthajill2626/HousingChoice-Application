@@ -1,8 +1,8 @@
 // Timeline.module.css source pins (flyer-leads self-QA QA-1, code review R2
-// F1). The unit tests run with `css: false` (vite.config.ts), so no test can
-// measure the pane; these pins keep the rules in place, and the e2e
-// flyer-leads spec measures the contact page at 1280x720 in a real browser.
-// Same mechanism as routes/public/FlyerPage.styles.test.ts.
+// F1, R3-1). The unit tests run with `css: false` (vite.config.ts), so no test
+// can measure the pane; these pins keep the rules in place, and the e2e
+// flyer-leads spec measures the contact page at 1280x720 and at 360px in a
+// real browser. Same mechanism as routes/public/FlyerPage.styles.test.ts.
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,10 @@ function bodyOf(selector: string): string {
   expect(match, `missing CSS rule for ${selector}`).not.toBeNull();
   return match![1]!;
 }
+
+// A declaration that stops text wrapping, in either spelling: `white-space`
+// or its CSS Text 4 longhand `text-wrap-mode` (and the `text-wrap` shorthand).
+const NOWRAP = /(?:white-space|text-wrap(?:-mode)?)\s*:\s*nowrap/;
 
 describe('Timeline.module.css (flyer-leads self-QA QA-1, code review R2 F1)', () => {
   // The pane is a flex: 1 item of the two-pane shell's ROW (.left). With the
@@ -42,11 +46,21 @@ describe('Timeline.module.css (flyer-leads self-QA QA-1, code review R2 F1)', ()
   // ellipsis cut that name first, at every common width and on every phone.
   it('a long pin wraps - long words break anywhere - and nothing clips its text', () => {
     expect(bodyOf('.pill')).toMatch(/white-space:\s*normal\s*;/);
-    expect(bodyOf('.pill')).not.toMatch(/white-space:\s*nowrap/);
+    expect(bodyOf('.pill')).not.toMatch(NOWRAP);
     const text = bodyOf('.pillText');
     expect(text).toMatch(/overflow-wrap:\s*anywhere\s*;/);
     expect(text).not.toMatch(/text-overflow/);
     expect(text).not.toMatch(/(?:^|[\s;])overflow:\s*hidden/);
+  });
+
+  // Code review R3-1: two tidy-looking edits that would hide the typed name
+  // again while every pin above stays green - a nowrap moved onto the LABEL
+  // (it runs out of the pin's side; the pin keeps its width) or a height cap
+  // on the PIN (it shows one line of a wrapped label). The pin grows with its
+  // lines instead. The e2e flyer-leads spec measures both shapes too.
+  it('the label itself never stops wrapping, and the pin has no height cap', () => {
+    expect(bodyOf('.pillText')).not.toMatch(NOWRAP);
+    expect(bodyOf('.pill')).not.toMatch(/(?:^|[\s;])(?:max-)?height\s*:/);
   });
 
   // A wrapped pin still reads as a pin: the radius is half a ONE-line pin's

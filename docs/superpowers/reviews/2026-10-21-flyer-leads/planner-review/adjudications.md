@@ -270,3 +270,58 @@ is complete and correct; the note fires exactly on the send gate's flags.
 4. `npm run issues`, then the full five-gate battery on the final commit
    (`npm run e2e:stop` first); no second main sync; no review round of your
    own.
+
+## Round P4 (2026-10-22, re-review of FW-P3 at d3bb2617)
+
+Planner gates on d3bb2617 (logs `.superpowers/sdd/gates/planner-*`, round-3
+logs archived as `r3-planner-*`): results recorded below when the run ends.
+
+`P4-conformance.md` (14 items: 9 conform, 1 partial, 4 deviate; 1 MEDIUM,
+2 LOW, 2 INFO) and `P4-adversarial.md` (3 LOW, 3 INFO). The code mechanics
+are correct (one shared thread rule, the read runs whatever the flags say,
+a clean fallback); the finding is in the premise behind the words.
+
+**The planner's error.** The P3-F1 ruling's reason read "A STOP or a 21610
+always writes the NUMBER's thread flag (`applyNumberSuppression`)". That is
+true only for an inbound STOP keyword (`webhooks/twilio.ts:1232`). Three
+other writers set the contact flag alone, so a real opt-out reads as the
+staff Do-Not-Contact case: the 1:1 21610 receipt on the primary number
+(`webhooks/twilio.ts:3982-3995`; on a secondary number it writes nothing),
+the native-group 21610 receipt when the contact flag is already set (it
+returns early, `groupReceipts.ts:300`), and an imported legacy STOP
+(`lib/import/apply.ts:1232-1236`, re-set on every import:apply). The build
+reported the first and third (FW-P3-report.md); the reviewers confirmed them
+and added the second. Verified in the code by the planner.
+
+| # | Finding | Sev | Ruling | Reason |
+|---|---|---|---|---|
+| P4-F1 / A4-L1 | The Do-Not-Contact note (" (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)") is true only for a staff mark. It is false for a STOP from the contact's other number, a 21610 (Twilio still blocks, so Allow SMS only earns another 21610 and a re-flag), and an imported STOP, where Twilio holds no block and Allow SMS lifts a legal STOP on the strength of a public form anyone can submit. | MEDIUM / LOW | DECISION (Cameron) - the wording is his pick (a) | Recommend rewording the contact-only note so it is true for every cause and asks staff to confirm first. The real fix - make those writers flag the number's thread, so the START note shows - sits outside this branch: FILE. |
+| A4-L2 | The note points staff at Allow SMS on consent nobody confirmed (existing contacts get no welcome text). | LOW | Folded into P4-F1's decision | The recommended words ask staff to confirm with the person first. |
+| P4-F2 / A4-I3 | The spec section 7 bullet says "A STOP always writes the number's own thread flag"; the spec, GLOSSARY and the consent issue list two of the four contact-only causes and say staff lift every one with Allow SMS. | LOW | FIX (doc) | Whatever the words, the docs must name all four causes and drop the false premise. |
+| P4-F3 | Pre-existing: the composer's opt-out refusal tells staff to "Clear the opt-out from the menu" for every cause (`dashboard/src/routes/contact/Timeline.tsx:97`) - a dead end for a Twilio-held STOP, an override of a legal one for an import. | LOW | FILE | Predates the branch; it belongs with the writer fix. |
+| A4-L3 | A START clears only the thread it lands on (`numberSuppression.ts:160`), so with two 1:1 threads on one number (an import run's own thread beside a live one) the "any thread" rule keeps showing the START note after the person texted START. | LOW | ACCEPT + FILE | readNumberSuppression has the same stale read today; the pin is a point-in-time record (P3-F3). |
+| A4-I1 | The note's seed reads `conversation.sms_opt_out` directly, not `isNumberThreadOptedOut(conversation)`. | INFO | FIX if a wave runs | Unreachable (spec 4.4 forbids the flag on a group thread); one call. |
+| A4-I2 | The new read has no timing or enumeration signal; cost grows with history only for a pool number. | INFO | ACCEPT | |
+| P4-F4 | P3-F4's "narrowed by FW-P3's read" is not so: the new read uses the same eventually consistent index. | INFO | ACCEPT; P3-F4's reason corrected here | |
+| P4-F5 | Leftovers: D7's "one exception" wording; `signed-up-row-sent-words.md` cites `listingSendsRepo.ts:328` for `via` (it is `:329`); the click-race issue's round-trip count is one higher. | INFO | FIX (doc) | |
+
+**Cameron's decision (2026-10-22, verbatim).** Asked to pick (a) reword the
+Do-Not-Contact note so it is true for every cause, or (b) keep his wording
+and file the problem: "Let's just do it: B. File the problem note code
+change." Read as option (b): the note keeps its words, no code change on
+this branch, and the code change (the writers) is filed.
+
+Rulings settled by it:
+- P4-F1 / A4-L1 / A4-L2: RESIDUAL, filed as
+  `docs/issues/opt-out-writers-skip-number-thread.md` (the three writers,
+  the repair of rows the old 21610 arm wrote, and the START gap).
+- P4-F3: filed in the same issue (the composer refusal copy).
+- A4-L3: filed in the same issue ("Also").
+- A4-I1: ACCEPT (no wave runs; unreachable).
+- P4-F2 and P4-F5: fixed by the planner, docs only - the spec section 7
+  D6.2 bullet (the four contact-only causes, the true premise, the
+  residual), D7's parenthesis, GLOSSARY, the consent issue,
+  `signed-up-row-sent-words.md` (`:329`) and
+  `flyer-signup-decline-click-race.md` (six and a half round trips).
+
+This round changes no code: TERMINAL. No FW-P4.

@@ -6,7 +6,7 @@ severity: low
 status: open
 area: dashboard
 created: 2026-10-21
-refs: dashboard/src/routes/contact/ConsentCaptureModal.tsx:28-109, dashboard/src/routes/contact/ContactCommsPane.tsx:369-371, dashboard/src/routes/contact/ConsentFields.tsx:57-62, dashboard/src/lib/consentCopy.ts:46-52, app/src/routes/contacts.ts:325-371, app/src/routes/public.ts:217, app/src/routes/public.ts:744-757, app/src/lib/smsCompliance.ts:66-91, app/src/lib/smsCompliance.ts:101, app/src/services/sendMessage.ts:551, app/src/jobs/broadcastFanOut.ts:276-283, app/src/services/groupMembers.ts:100-125, dashboard/src/routes/public/FlyerPage.tsx:251, dashboard/src/routes/public/FlyerPage.tsx:431-440, dashboard/src/routes/public/HousingFairIntake.tsx:163, app/src/services/sendMessage.ts:123, app/src/services/sendMessage.ts:513, app/src/lib/smsCompliance.ts:133, app/src/lib/smsCompliance.ts:239-245, app/src/lib/smsCompliance.ts:262-266, app/src/routes/public.ts:551, app/src/routes/public.ts:562-593, app/src/routes/public.ts:605-606, app/src/routes/public.ts:629, app/scripts/backfillConsentMethod.ts
+refs: dashboard/src/routes/contact/ConsentCaptureModal.tsx:28-109, dashboard/src/routes/contact/ContactCommsPane.tsx:369-371, dashboard/src/routes/contact/ConsentFields.tsx:57-62, dashboard/src/lib/consentCopy.ts:46-52, app/src/routes/contacts.ts:325-371, app/src/routes/public.ts:230, app/src/routes/public.ts:763-776, app/src/lib/smsCompliance.ts:66-91, app/src/lib/smsCompliance.ts:101, app/src/services/sendMessage.ts:551, app/src/jobs/broadcastFanOut.ts:276-283, app/src/services/groupMembers.ts:100-125, dashboard/src/routes/public/FlyerPage.tsx:251, dashboard/src/routes/public/FlyerPage.tsx:431-440, dashboard/src/routes/public/HousingFairIntake.tsx:163, app/src/services/sendMessage.ts:123, app/src/services/sendMessage.ts:513, app/src/lib/smsCompliance.ts:133, app/src/lib/smsCompliance.ts:239-245, app/src/lib/smsCompliance.ts:262-266, app/src/routes/public.ts:564, app/src/routes/public.ts:575-606, app/src/routes/public.ts:618-619, app/src/routes/public.ts:642, app/src/routes/public.ts:168, app/src/routes/public.ts:697, app/scripts/backfillConsentMethod.ts
 ---
 
 **Problem.** A public sign-up - the flyer's "Sign up" box or /join - never
@@ -20,7 +20,7 @@ was that flag, `:399`), and flyer-leads keeps the rule (spec
 contact is never changed, consent included). What the branch adds is
 visibility: the pin and the unread mark now bring such a sign-up to staff,
 who then reply. The form requires the CTIA consent box (the server refuses a
-body without `smsConsent: true`, `app/src/routes/public.ts:217`), but an
+body without `smsConsent: true`, `app/src/routes/public.ts:230`), but an
 existing contact with no `consent_method` keeps none. So:
 - every blast skips them (`no_consent`,
   `app/src/jobs/broadcastFanOut.ts:276-283`, on the one predicate
@@ -39,7 +39,7 @@ method from a staff path (`applyConsentFields`,
 `app/src/routes/contacts.ts:325-371`). Staff must pick something like
 "Verbal (phone)" for a person whose actual opt-in is the web form, while the
 evidence of that opt-in sits unused on the contact's `housing_fair_signup`
-audit event (`contacts#<id>`, `app/src/routes/public.ts:744-757`): its
+audit event (`contacts#<id>`, `app/src/routes/public.ts:763-776`): its
 `consentVersion` (the disclosure version in force, `CONSENT_VERSION`,
 `app/src/lib/smsCompliance.ts:91`) and its instant. The basis staff record can
 then differ from the form evidence the audit keeps - spec D4 states exactly
@@ -62,7 +62,7 @@ review P1, `P1-adversarial.md` L3, in
 `docs/superpowers/reviews/2026-10-21-flyer-leads/planner-review/`). A tenant
 who once replied STOP and later fills the flyer's sign-up box, ticking the
 consent box, is an existing contact: nothing is written to it (spec D4,
-`app/src/routes/public.ts:551`), so it keeps `sms_opt_out: true`, and it still
+`app/src/routes/public.ts:564`), so it keeps `sms_opt_out: true`, and it still
 gets the pin and the unread mark. The flyer's thank-you says "We'll text you
 about this home and others that fit your voucher."
 (`dashboard/src/routes/public/FlyerPage.tsx:431`, `:440`), but every send
@@ -74,21 +74,33 @@ the page cannot tailor its copy per contact. The kept opt-out is pre-existing
 new copy - main's said "a team member will be in touch" - while /join's
 "A team member will text you"
 (`dashboard/src/routes/public/HousingFairIntake.tsx:163`) is unchanged from
-main. Re-subscribing a STOPped number from a web form needs a compliance rule:
-the keyword way back is START (`OPT_IN_KEYWORDS`,
+main. The keyword way back is START (`OPT_IN_KEYWORDS`,
 `app/src/lib/smsCompliance.ts:239-245`), and Twilio Advanced Opt-Out is on, so
 Twilio holds the STOP too and refuses sends after it (21610, the live test
 noted at `smsCompliance.ts:262-266`) - clearing the app's flag alone would not
-reach the person. Whether a web-form opt-in may clear a STOP, and how, is a
-decision for Cameron before anything is built.
+reach the person.
+
+Decided (Cameron, 2026-10-22, at the planner's verdict): the form cannot opt a
+number back in. Twilio's opt-out block lifts only when the person texts START,
+YES or UNSTOP, so no web-form rule can re-subscribe a STOPped number, and none
+is built. Staff see it instead (planner review FW-P2): when the number is
+opted out - the send path's rule, `isOptedOut` on the thread's or the
+contact's `sms_opt_out` (`app/src/routes/public.ts:697`) - the `signed_up`
+pin's label, in all three forms, ends with
+" (opted out of texts - they need to text START to get texts again)"
+(`SIGNUP_OPTED_OUT_NOTE`, `public.ts:168`). A new contact gets the note too
+when its thread carries the flag from a STOP sent before any contact held the
+number (its welcome is refused, as before). No thank-you line: Cameron
+rejected one, since people do not remember texting STOP, so the flyer's and
+/join's thank-you copy stays as it is.
 
 **Also: a sign-up that fails before its welcome is never welcomed** (planner
 review P1, `P1-adversarial.md` L1). Spec D5 welcomes only a contact the
 request CREATED, and accepts that "a new contact whose welcome failed (refused
 or errored) does not get one from a later sign-up". The same consequence
-reaches a request that fails AFTER the create (`public.ts:562-593`, which
+reaches a request that fails AFTER the create (`public.ts:575-606`, which
 stamps `consent_method: 'web_form'`) and BEFORE the send: the thread
-get-or-create and link (`public.ts:605-606`) is unguarded, so a throw there
+get-or-create and link (`public.ts:618-619`) is unguarded, so a throw there
 answers 500 - since planner review C-F1 made the audit best-effort, the only
 step after the create that still can. The flyer form shows its error and
 stays put (`FlyerPage.tsx:251`), the visitor submits again, `findByPhone`
@@ -101,7 +113,7 @@ got `WELCOME_SMS`, the opt-in confirmation that carries STOP and HELP
 The candidate rule: on the existing path, welcome a contact that carries
 `consent_method: 'web_form'` and no `housing_fair_welcomed: true`. Its hazard
 is a double text: when the welcome succeeded but the flag write after it
-failed (`contacts.update`, `public.ts:629`, whose throw lands in the welcome's
+failed (`contacts.update`, `public.ts:642`, whose throw lands in the welcome's
 catch and "costs only the flag"), the next sign-up texts the welcome again.
 The pair is not unique to the crash either: a refused or failed welcome leaves
 it (the D5 consequence above, which the rule would reverse), and so does a

@@ -1,5 +1,61 @@
 # Handback - feat/flyer-leads (build orchestrator, AUTO)
 
+## Update 2026-10-22 (3) - fix wave FW-P3 (the opted-out note by cause)
+
+**MERGE-READY @647b5f3d on feat/flyer-leads (W:\tmp\flyer-leads), 0 behind
+main @0f6f29f9, UNMERGED (human gate).** Still NO infra or post-merge ops.
+This supersedes ef2c2dd8, 098eaa11 and 692c44a4 below; the gated commit
+includes the planner's d62d1a74 / a49e250f records.
+
+FW-P3 ran items 1-3 of `planner-review/adjudications.md` "FW-P3" plus
+`npm run issues` (no second main sync; no review round of my own). One fresh
+opus child; report `planner-review/FW-P3-report.md`; I read the whole code
+diff.
+
+| # | Item | Commit | Evidence |
+|---|---|---|---|
+| 1 | The pin's opted-out note by cause: STOP note (" (this number opted out of texts - they need to text START from it to get texts again)") when the handler's thread or ANY 1:1 thread of the number carries `sms_opt_out` (`findByParticipantPhone` + the exported `isNumberThreadOptedOut`, `numberSuppression.ts:141-143`, one rule with readNumberSuppression; best-effort, WARN step `opt_out_check`, falls back to the thread flag; read only when a pin is written); else Do-Not-Contact note (" (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)") on the contact flag; else none | 7aed3383 | RED publicSignupLeads 15 failed / 59 (old suffix, no number read, no step line); GREEN publicSignupLeads + publicIntake + numberSuppression 153, EXIT:0; readNumberSuppression's six caller suites 210 passed, EXIT:0 |
+| 2 | GLOSSARY + selectors (both notes); spec section 7 (the two cases, Cameron 2026-10-22) + the P3-F6 leftovers; consent issue names both notes; signed-up-row-sent-words cites putShareMemory's first-write `via` | fbdc5f4d | ASCII |
+| 3 | Stale `public.ts` / `units.ts` citations in docs/issues re-pointed to the final code, digits only (72 lines proven digits-only) | 7cc3f24f | `npm run issues` EXIT:0 |
+
+"Allow SMS" in the note is intended: the menu item reads "Allow SMS (clear
+opt-out)" (`ContactActionsMenu.tsx:207`). Two comment-only touches outside the
+list, consequences of the export: the moved clause's citation in
+`relayAnnouncements.ts:87` (digits) and the corrected rationale beside the
+helper (a relay group DOES carry its pool number as participant_phone).
+
+**For you (not changed):**
+- The P3-F1 premise "a 21610 always writes the number's thread flag" does not
+  hold for the 1:1 receipt arm (`routes/webhooks/twilio.ts` ~:3953-4001: no
+  applyNumberSuppression, contact flag only on the primary number), nor for an
+  imported legacy STOP (`lib/import/apply.ts` ~:1232-1236). Those contacts get
+  the Do-Not-Contact note, whose remedy (Allow SMS) would only draw another
+  21610 and re-flag the contact. No text goes out; only the note's remedy is
+  wrong. Accept as a residual, or route that arm through
+  applyNumberSuppression (a separate change).
+- Item 3 left alone, all listed in the report: citations deliberately anchored
+  to main 0f6f29f9; 8 resolved issues (historical "as filed"); two open
+  issues whose cited code was refactored on main before this branch
+  (contact-list-rule-duplication, landlord-of-record-no-reassign-ui); and
+  property-card-409's "has no 409 branch" claim, which may be stale behind a
+  fixed digit.
+
+**Gates on 647b5f3d (battery 6, bare, logs `.superpowers/sdd/gates/*-6.*`; `npm run e2e:stop` first):**
+
+| Gate | Result |
+|---|---|
+| 1 `npm run typecheck` | EXIT:0 (0 `error TS`) |
+| 2 `npm test` (no AWS_* exported) | EXIT:0 - app `Test Files 526 passed (526)`, `Tests 11046 passed \| 1 skipped (11047)`; dashboard `265`, `5391 passed`; e2e workspace `22`, `508 passed`; fake-twilio `34`, `275 passed`; fake-twilio/web `13`, `111 passed`; no `[dynamoAdmin]` line |
+| 3 `npm run smoke` | EXIT:0 - "smoke-dist: OK - 1731 import specifier(s) across 301 emitted file(s) resolve under plain Node." |
+| 4 `timeout 2700 npm run e2e` | EXIT:0 - "371 passed (17.8m)", no failed / flaky / skipped; TIME_WAIT 24 before |
+| 5 `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')` | EXIT:1 - 74 files, 3 errors, all baseline-matched at the merge base 0f6f29f9 (Timeline.tsx x1, FlyerPage.tsx x2, `react-hooks/set-state-in-effect`); 0 ours |
+
+Branch now: 104 non-merge commits; code, tests and product docs (excluding
+docs/superpowers records) 94 files, +6392 / -763. No stack is running; the
+battery's leftover `session.pid` (16988, dead) was cleared.
+
+---
+
 ## Update 2026-10-22 (2) - fix wave FW-P2 (Cameron's verdict decisions)
 
 **MERGE-READY @ef2c2dd8 on feat/flyer-leads (W:\tmp\flyer-leads), 0 behind

@@ -74,6 +74,7 @@ import {
 import {
   createContactsRepo,
   isDeleted as isContactDeleted,
+  type ContactDisplayItem,
   type ContactItem,
   type ContactsRepo,
   type RecipientDisplay,
@@ -203,8 +204,11 @@ function displayNameOfContact(contact: {
  * this the card would print its raw contactId. Staff chrome only - never a
  * message body. undefined when the contact has neither a name nor a phone
  * (the dashboard then falls back to the id, as for a missing recipient).
+ * Also the property Activity card's `contactName` (planner review A-L2), so
+ * a staff outcome on that nameless row reads the same label there; it needs
+ * only the display projection (getDisplaysByIds carries `phone`).
  */
-function recipientLabelOf(contact: RecipientDisplay): string | undefined {
+function recipientLabelOf(contact: ContactDisplayItem): string | undefined {
   const name = displayNameOfContact(contact);
   if (name !== undefined) return name;
   const phone = typeof contact.phone === 'string' ? contact.phone : '';
@@ -2261,11 +2265,15 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // Read-time contactName enrichment, deduped per contactId; a missing/failed
     // lookup leaves contactName absent (the client falls back to the id) and
     // NEVER 500s — same posture as /placements' tenantName.
+    // The label is the Sent to card's rule (recipientLabelOf - flyer-leads
+    // planner review A-L2): the name, else the contact's own formatted phone,
+    // so a nameless contact never reads as its id; absent only when it has
+    // neither.
     const nameByContact = new Map<string, string | undefined>();
     try {
       const wanted = events.flatMap((e) => (e.contactId === undefined ? [] : [e.contactId]));
       for (const [contactId, contact] of await contacts.getDisplaysByIds(wanted)) {
-        nameByContact.set(contactId, displayNameOfContact(contact));
+        nameByContact.set(contactId, recipientLabelOf(contact));
       }
     } catch (err) {
       log.warn({ unitId, err }, 'unit activity: contact lookup failed (best-effort)');

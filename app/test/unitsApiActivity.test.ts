@@ -405,3 +405,64 @@ describe('GET /api/units/:id/activity - the Apply reason (property requirements 
     expect(res.body.events[0]).not.toHaveProperty('reason');
   });
 });
+
+// flyer-leads planner review A-L2: the contactName enrichment uses the Sent to
+// card's label rule (routes/units.ts recipientLabelOf, AR13) - the name, else
+// the contact's OWN formatted phone. A flyer sign-up puts a nameless `unknown`
+// contact on the Sent to card (spec D7) and never renames it (D4); staff can
+// record an outcome on that row, which appends listing_declined (or
+// listing_interested / listing_decline_cleared) to the unit's trail, and this
+// card printed that contact's raw contactId.
+describe('GET /api/units/:id/activity - contactName follows the Sent to label rule (flyer-leads A-L2)', () => {
+  async function seedOutcomeRow(world: ReturnType<typeof createFakeWorld>, unitId: string, contactId: string): Promise<void> {
+    await world.auditRepo.append(`units#${unitId}`, 'listing_declined', {
+      actor: TEST_SESSION_USER.userId,
+      contactId,
+    });
+  }
+
+  const eventFor = (events: Array<Record<string, unknown>>, contactId: string) =>
+    events.find((e) => e['contactId'] === contactId);
+
+  it('a nameless contact with a phone reads as its formatted phone; a non-NANP phone as stored', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-label');
+    seedContact(world, 'c-unk', { type: 'unknown', status: 'active', phone: '+14045550142' });
+    seedContact(world, 'c-intl', { type: 'unknown', status: 'active', phone: '+442071838750' });
+    await seedOutcomeRow(world, 'u-label', 'c-unk');
+    await seedOutcomeRow(world, 'u-label', 'c-intl');
+
+    const res = await authedGet(app, '/api/units/u-label/activity');
+    expect(res.status).toBe(200);
+    const events = res.body.events as Array<Record<string, unknown>>;
+    expect(eventFor(events, 'c-unk')).toMatchObject({ type: 'listing_declined', contactName: '(404) 555-0142' });
+    expect(eventFor(events, 'c-intl')).toMatchObject({ type: 'listing_declined', contactName: '+442071838750' });
+  });
+
+  it('(PIN) a contact with neither a name nor a phone carries no contactName (the client falls back to the id)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-label');
+    seedContact(world, 'c-bare', { type: 'unknown', status: 'active' });
+    await seedOutcomeRow(world, 'u-label', 'c-bare');
+
+    const res = await authedGet(app, '/api/units/u-label/activity');
+    expect(res.status).toBe(200);
+    const row = eventFor(res.body.events as Array<Record<string, unknown>>, 'c-bare');
+    expect(row).toMatchObject({ type: 'listing_declined', contactId: 'c-bare' });
+    expect(row).not.toHaveProperty('contactName');
+  });
+
+  it('(PIN) a named contact keeps its name, even when it has a phone', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'u-label');
+    seedContact(world, 'c-named', { firstName: 'Brianna', lastName: 'Whitfield', phone: '+14045550143' });
+    await seedOutcomeRow(world, 'u-label', 'c-named');
+
+    const res = await authedGet(app, '/api/units/u-label/activity');
+    expect(res.status).toBe(200);
+    expect(eventFor(res.body.events as Array<Record<string, unknown>>, 'c-named')).toMatchObject({
+      type: 'listing_declined',
+      contactName: 'Brianna Whitfield',
+    });
+  });
+});

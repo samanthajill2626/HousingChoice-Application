@@ -9,12 +9,19 @@ created: 2026-10-21
 refs: dashboard/src/routes/contact/ConsentCaptureModal.tsx:28-109, dashboard/src/routes/contact/ContactCommsPane.tsx:369-371, dashboard/src/routes/contact/ConsentFields.tsx:57-62, dashboard/src/lib/consentCopy.ts:46-52, app/src/routes/contacts.ts:325-371, app/src/routes/public.ts:205, app/src/routes/public.ts:718-731, app/src/lib/smsCompliance.ts:66-91, app/src/lib/smsCompliance.ts:101, app/src/services/sendMessage.ts:551, app/src/jobs/broadcastFanOut.ts:276-283, app/src/services/groupMembers.ts:100-125
 ---
 
-**Problem.** Since `feat/flyer-leads` (spec
-`docs/superpowers/specs/2026-10-21-flyer-leads-design.md` D4), a public
-sign-up - the flyer's "Sign up" box or /join - never changes an EXISTING
-contact, consent included. The form requires the CTIA consent box (the server
-refuses a body without `smsConsent: true`, `app/src/routes/public.ts:205`), but
-an existing contact with no `consent_method` keeps none. So:
+**Problem.** A public sign-up - the flyer's "Sign up" box or /join - never
+stamps consent on an EXISTING contact. That predates `feat/flyer-leads`: main
+never did either (the #14 rule, D6 of
+`2026-10-12-join-housing-authority-design.md`; main `0f6f29f9`'s
+existing-contact path read only `housing_fair_welcomed`,
+`app/src/routes/public.ts:324-329` there, and its only write to the contact
+was that flag, `:399`), and flyer-leads keeps the rule (spec
+`docs/superpowers/specs/2026-10-21-flyer-leads-design.md` D4: an existing
+contact is never changed, consent included). What the branch adds is
+visibility: the pin and the unread mark now bring such a sign-up to staff,
+who then reply. The form requires the CTIA consent box (the server refuses a
+body without `smsConsent: true`, `app/src/routes/public.ts:205`), but an
+existing contact with no `consent_method` keeps none. So:
 - every blast skips them (`no_consent`,
   `app/src/jobs/broadcastFanOut.ts:276-283`, on the one predicate
   `hasSmsConsent`, `app/src/lib/smsCompliance.ts:101`), as do tour reminders
@@ -45,8 +52,9 @@ stubs, which are minted with no consent on purpose
 (`app/src/services/groupMembers.ts:100-125`).
 
 Traced from code review round 1 (`R1-adversarial.md` finding 3, adjudication
-row A3: ACCEPT, D4's decided design) and round 2 (`R2-review.md`, the A3
-challenge: file the follow-up so it reaches the registry), both in
+row A3: ACCEPT, D4's decided design), round 2 (`R2-review.md`, the A3
+challenge: file the follow-up so it reaches the registry) and round 3
+(`R3-review.md` finding 4: the gap predates the branch), all in
 `docs/superpowers/reviews/2026-10-21-flyer-leads/code-review/`.
 
 **Suggested fix.**

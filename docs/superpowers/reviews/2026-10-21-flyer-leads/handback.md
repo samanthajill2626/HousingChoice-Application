@@ -1,5 +1,48 @@
 # Handback - feat/flyer-leads (build orchestrator, AUTO)
 
+## Update 2026-10-22 (2) - fix wave FW-P2 (Cameron's verdict decisions)
+
+**MERGE-READY @ef2c2dd8 on feat/flyer-leads (W:\tmp\flyer-leads), 0 behind
+main @0f6f29f9, UNMERGED (human gate).** Still NO infra or post-merge ops.
+This supersedes 098eaa11 and 692c44a4 below; the gated commit includes the
+planner's own commits since FW-P1 (33e392aa spec, dbcb88fc dashboard
+comments, 3d916404 / d717d160 / 5e06423f records).
+
+FW-P2 ran items 1-4 of `planner-review/adjudications.md` "FW-P2" and nothing
+else (no second main sync; no review round of my own - your reviewers
+re-review this diff). One fresh opus child; report
+`planner-review/FW-P2-report.md`; I read the whole code diff.
+
+| # | Item | Commit | Evidence |
+|---|---|---|---|
+| 1 | FlyerTag LEGEND: property "Staff only - not on the public flyer.", landlord "Staff only - never on a property flyer."; every pin of the old text updated (no "never leaves the dashboard" remains outside docs/superpowers/ and run state) | f53eacda | RED FlyerTag / ListingEditForm / UnitCreateForm 4 failed / 178 (the old line rendered), GREEN 182, EXIT:0; e2e property-requirements + flyer-leads 6 passed, EXIT:0 |
+| 2 | Opted-out pin note: `isOptedOut(conversation.sms_opt_out, contact.sms_opt_out)` (no new read) -> all three pin forms end " (opted out of texts - they need to text START to get texts again)", a new contact on a flagged thread included; nothing else changes | 1ed6af53 | RED publicSignupLeads 5 failed / 58 (no note), GREEN publicSignupLeads + publicIntake 123, EXIT:0 |
+| 3 | GLOSSARY pin entry + selectors.md pin row name the suffix; spec section 7 gets the two bullets (exact text) | 337fb87e | ASCII |
+| 4 | New `docs/issues/signed-up-row-sent-words.md` (OR-26b, bug, low - names the roster row, the property Sent to card and Follow up); the consent issue's opted-out paragraph records the decision | 3bae6272 | `npm run issues` EXIT:0 |
+
+Child-reported, verified: `optedOut` is computed just before the pin (same
+inputs as "after the thread step"; the pin is its only user). FW-P2 shifted
+`public.ts` lines, so four other issue files cite slightly stale lines
+(deleted-contact, decline-click-race, abuse-hardening, welcome-cap) - outside
+items 1-4, left as is; the report carries the old-to-new line map.
+
+**Gates on ef2c2dd8 (battery 5, bare, logs `.superpowers/sdd/gates/*-5.*`):**
+
+| Gate | Result |
+|---|---|
+| 1 `npm run typecheck` | EXIT:0 (0 `error TS`) |
+| 2 `npm test` (no AWS_* exported) | EXIT:0 - app `Test Files 526 passed (526)`, `Tests 11035 passed \| 1 skipped (11036)`; dashboard `265`, `5391 passed`; e2e workspace `22`, `508 passed`; fake-twilio `34`, `275 passed`; fake-twilio/web `13`, `111 passed`; no `[dynamoAdmin]` line |
+| 3 `npm run smoke` | EXIT:0 - "smoke-dist: OK - 1731 import specifier(s) across 301 emitted file(s) resolve under plain Node." |
+| 4 `timeout 2700 npm run e2e` | EXIT:0 - "371 passed (18.4m)", no failed / flaky / skipped; TIME_WAIT 25 before |
+| 5 `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')` | EXIT:1 - 72 files, 3 errors, all baseline-matched at the merge base 0f6f29f9 (Timeline.tsx x1, FlyerPage.tsx x2, `react-hooks/set-state-in-effect`); 0 ours |
+
+Branch now: 97 non-merge commits; code, tests and product docs (excluding
+docs/superpowers records) 83 files, +6104 / -720. No stack is running; the
+battery's leftover `session.pid` (1828, dead) was cleared with
+`npm run e2e:stop`.
+
+---
+
 ## Update 2026-10-22 - fix wave FW-P1 (planner review P1)
 
 **MERGE-READY @098eaa11 on feat/flyer-leads (W:\tmp\flyer-leads), 0 behind

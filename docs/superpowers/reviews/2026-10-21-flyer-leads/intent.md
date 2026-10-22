@@ -7,25 +7,22 @@ deployed.
 
 ## STATE (replace each time)
 
-- Phase: PLANNER HANDBACK REVIEW (started 2026-10-22 ~04:25 UTC). Spec rev 6
-  APPROVED; plan v3 FINAL @981eba1c. The build ran AUTO from 2026-10-21
-  ~20:20 UTC (`abt:build-orchestrator`, `mission-block.md` verbatim) and
-  handed back MERGE-READY @692c44a4 (records to 546be196): 0 recoveries,
-  three green batteries, `handback.md` committed.
-- Decide-before-merge items for Cameron: OR-26 (the rent legend "Staff only -
-  never leaves the dashboard." vs the [Rent] blast default) and OR-26b
-  ("Sent <date>" words on an outranked flyer-only pair).
-- In flight: my own five-gate run (logs `.superpowers/sdd/gates/planner-*`)
-  and two read-only opus reviewers (spec-conformance; plan-blind
-  adversarial); ids in `.superpowers/sdd/agents.md` (gitignored run state).
-- NEXT: read the riskiest diffs; a short live check after the gates; one
-  complete findings list -> fix wave by continuing the orchestrator with
-  SendMessage (then continue the SAME reviewers with the RE-REVIEW CHARGE);
-  then `planner-verdict.md` with the conversation checklist, quoted exit
-  codes and the merge command. UNMERGED - the merge is Cameron's. If resumed
-  after an automatic compaction: replay the conversation in full first.
-- Earlier history (plan reviews, AR16 withdrawing the AR5 whitespace
-  question as moot) is in the plan and `plan-review/adjudications.md`.
+- Phase: VERDICT DELIVERED 2026-10-22 ~06:15 UTC. MERGE-READY, UNMERGED
+  (Cameron's gate). Tip 3d916404 (+ the verdict commit), 0 behind main
+  @0f6f29f9 (ff-only). Verdict: `planner-verdict.md`.
+- Planner review closed after round P2 (terminal): FW-P1 fixed the Activity
+  card label and the best-effort audit; final planner gates on 33e392aa all
+  green (e2e 371 passed; lint 3 = merge base); after that only two
+  dashboard comments changed (tsc, eslint, unit test green).
+- Waiting on Cameron: decision 1 (OR-26: recommended - take [Rent] out of
+  the Matching DEFAULT text), decision 2 (OR-26b: recommended - keep and
+  file), then the merge. Either change = a small fix wave by continuing the
+  orchestrator, then the gates again.
+- After the merge: unregister compact-resume (`register-session.mjs ...
+  --off`), cleanup of W:\tmp\flyer-leads only on Cameron's go. Still owed
+  from earlier: property-requirements worktree cleanup, its 17 "For
+  Cameron" calls, its spec D8 amendment.
+- No orchestrator, reviewer, watchdog or mirror is running.
 - Gate answers in rev 6:
   - O1 closed: the decline writers stamp `shares_op`;
   - the repeat limit is per contact per PROPERTY per 24 hours, with /join and

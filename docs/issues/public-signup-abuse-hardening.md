@@ -1,12 +1,12 @@
 ---
 id: public-signup-abuse-hardening
-title: The public sign-up's 24-hour pin cap is not atomic, and anyone who knows a phone can add staff-visible noise to that contact
+title: The public sign-up's 24-hour pin cap is not atomic, and anyone can add staff-visible noise - to a known phone's contact, or with made-up phones
 type: security
 severity: med
 status: open
 area: app
 created: 2026-10-21
-refs: app/src/routes/public.ts:637-673, app/src/repos/activityEventsRepo.ts:136-154, app/src/repos/activityEventsRepo.ts:214-245, app/src/app.ts:185-191, app/src/routes/public.ts:156-167, app/src/routes/public.ts:209-216, app/src/routes/public.ts:686-703, app/src/jobs/rosterActions.ts:236-237, app/src/jobs/rosterActions.ts:261-304, app/src/routes/public.ts:495-528
+refs: app/src/routes/public.ts:637-673, app/src/repos/activityEventsRepo.ts:136-154, app/src/repos/activityEventsRepo.ts:214-245, app/src/app.ts:185-191, app/src/routes/public.ts:156-167, app/src/routes/public.ts:209-216, app/src/routes/public.ts:686-703, app/src/jobs/rosterActions.ts:236-237, app/src/jobs/rosterActions.ts:261-304, app/src/routes/public.ts:495-528, app/src/routes/public.ts:584, app/src/routes/today.ts:784-840, dashboard/src/routes/listing/listingFormat.ts:352, app/test/publicSignupLeads.test.ts:750-761
 ---
 
 **Problem.** Since `feat/flyer-leads` (spec
@@ -14,15 +14,21 @@ refs: app/src/routes/public.ts:637-673, app/src/repos/activityEventsRepo.ts:136-
 `POST /public/housing-fair` - the unauthenticated endpoint behind the flyer's
 "Sign up" box and /join - writes into an EXISTING contact's records: a
 `signed_up` pin in their thread, a bump plus unread mark on their 1:1
-conversation and, for a flyer, a `flyer` entry on the properties-sent ledger.
-Before that branch an existing contact's sign-up wrote nothing to it except a
-one-time welcome flag. The approved spec accepted a per-day residual for this
-(D6.1, quoted under "What the spec accepted" below). This issue is about
-hardening BEYOND that residual: code review round 1
+conversation and, for a flyer, a `flyer` entry on the properties-sent ledger
+(and it leaves the same marks on every NEW contact it creates - "New phones",
+under point 2). Before that branch an existing contact's sign-up wrote no pin,
+no unread mark and no sent-list entry, but it was not a no-op either (main at
+`0f6f29f9`, `app/src/routes/public.ts:376-411`): it created the contact's 1:1
+thread when there was none - typed `tenant_1to1`, even for a landlord - and
+TEXTED the tenant welcome to an existing contact who had never been welcomed,
+then set the one-time welcome flag. The approved spec accepted a per-day
+residual for this (D6.1, quoted under "What the spec accepted" below). This
+issue is about hardening BEYOND that residual: code review round 1
 (`docs/superpowers/reviews/2026-10-21-flyer-leads/code-review/R1-adversarial.md`
 findings 1 and 2, P1 and P4; `R1-conformance.md` finding 1) found that the cap
 is not exact under concurrency, and set out what the endpoint now lets an
-anonymous caller do.
+anonymous caller do; round 2 (`R2-review.md` F4 and N2, same directory)
+corrected what main did before and added the new-phone case.
 
 **1. The 24-hour cap is read-then-write, not atomic.** The repeat check
 (`app/src/routes/public.ts:637-652`) is `activityEventsRepo.hasEventSince`, a
@@ -72,7 +78,8 @@ It can NOT:
 - make the app text anyone new: an existing contact is never welcomed now
   (spec D5), and a phone with no holder gets the same one welcome as before
   the branch (that spend is
-  [`public-welcome-text-global-cap`](public-welcome-text-global-cap.md));
+  [`public-welcome-text-global-cap`](public-welcome-text-global-cap.md)) -
+  though not the same noise around it ("New phones", below);
 - clear a current decline: the flyer entry is refused while the pair holds one
   (`app/src/services/shareLedger.ts` applyFlyerShareEntry);
 - learn anything from the answer, which is always `{ ok: true }` (but see 4
@@ -91,10 +98,14 @@ partner, team member, unknown):
   cancel my tour"). React escapes the label, so this is spoofing, not script
   injection.
 - (b) bump the contact's 1:1 thread to the top of the inbox and mark it unread
-  (the touch also sets `status` to open), CREATING an empty, correctly typed
-  thread when the contact has none (`public.ts:584`). That also puts the
-  contact on Today: under Unreplied, or under Needs you now as a "New unknown
-  contact" for an unknown contact (`app/src/routes/today.ts:784-840`).
+  (the touch also sets `status` to open), creating the thread when the contact
+  has none (`public.ts:584`). Creating it is not new: main created one too,
+  typed `tenant_1to1` even for a landlord, and texted the welcome into it when
+  the contact had never been welcomed. New is that the thread is correctly
+  typed (`conversationTypeFor`), bumped and unread, and that no text goes with
+  it. That also puts the contact on Today: under Unreplied, or under Needs you
+  now as a "New unknown contact" for an unknown contact
+  (`app/src/routes/today.ts:784-840`).
 - (c) for a tenant or unknown contact and a shareable unit, rewrite the pair's
   properties-sent state on EVERY request, outside the 24-hour cap
   (`public.ts:686-703`): `sentAt` moves to now, a Replied or No reply yet pair
@@ -104,6 +115,23 @@ partner, team member, unknown):
 - (d) multiply (a) and (b) by every shareable unitId it knows - each is its own
   24-hour source, and unitIds ride every Matching text's flyer link - and get
   past the cap altogether with overlapping requests (point 1).
+
+**New phones** (code review round 2, N2). A phone with NO holder - any made-up
+number - still creates a tenant and gets the one welcome, as before the
+branch. But before the branch it left only a READ thread whose preview is our
+welcome; now each such sign-up ALSO leaves:
+- an unread row on top of the inbox: the pin and the unread mark run after the
+  welcome (`public.ts:654-673`; Cameron's D6 call that a new sign-up shows as
+  unread, pinned by `app/test/publicSignupLeads.test.ts:750-761`);
+- a Today row under Unreplied (`app/src/routes/today.ts:809-841`), which a read
+  thread never made;
+- for a shareable unit's flyer, a "Signed up" row filed under Interested on
+  that property's Sent to card (`public.ts:686-703`;
+  `dashboard/src/routes/listing/listingFormat.ts:352`).
+
+The bound is the welcome spend's: the per-IP limiter and
+[`public-welcome-text-global-cap`](public-welcome-text-global-cap.md). A
+per-phone limit cannot bound this, since each made-up phone is used once.
 
 **3. A pin flood can block a deferred relay-group add** (adversarial R1 P1,
 not reproduced). The roster job's removal-history scan
@@ -145,6 +173,11 @@ beyond that residual.
   is a new mechanism (spec D6.1 names `hasEventSince` as the check), so it is
   its own change, with proof A as its concurrency pin test.
 - A per-phone limit on the existing-contact branch, independent of the IP.
+- For made-up phones ("New phones", under point 2), a global ceiling on new
+  contacts per window - the shape
+  [`public-welcome-text-global-cap`](public-welcome-text-global-cap.md)
+  proposes for the welcome spend - since a per-phone limit never sees the same
+  made-up phone twice.
 - Strip C0/C1 control and bidi characters from the typed names in
   `parseHousingFairBody` (`public.ts:197`).
 - Quote the typed name in the pin as untrusted data (for example

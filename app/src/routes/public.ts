@@ -94,6 +94,7 @@ import {
   housingAuthorityNames,
   loadPublicOrgEntries,
 } from '../services/publicOrgList.js';
+import { isOptedOut } from '../services/scheduledSendSuppression.js';
 import { applyFlyerShareEntry, type FlyerShareResult } from '../services/shareLedger.js';
 
 /**
@@ -158,12 +159,22 @@ type SignupSentSkipped =
   | 'error';
 
 /**
+ * flyer-leads FW-P2 (Cameron, 2026-10-22): the end of the signed_up pin's
+ * words when the number is opted out. A sign-up cannot opt a number back in -
+ * Twilio's opt-out block lifts only when the person texts START, YES or
+ * UNSTOP - so the pin tells staff (and no line on the public page: Cameron
+ * rejected a thank-you line, since people do not remember texting STOP).
+ */
+const SIGNUP_OPTED_OUT_NOTE = ' (opted out of texts - they need to text START to get texts again)';
+
+/**
  * flyer-leads D6.2 (plan 1.1): the signed_up pin's words - inline staff copy,
  * the "Property sent" convention (the message catalog holds outbound sends
  * only). The name is the one TYPED on the form (trimmed by the app-wide body
  * trim and by the parser): the contact itself is never renamed, and an
  * auto-captured unknown contact has no other name. The address is
  * formatAddress, falling back to the unitId, as the tour-request label does.
+ * Each form ends with SIGNUP_OPTED_OUT_NOTE when the number is opted out.
  */
 function signupPinLabel(args: {
   unitId: string | undefined;
@@ -171,11 +182,13 @@ function signupPinLabel(args: {
   viaFlyer: boolean;
   firstName: string;
   lastName: string;
+  optedOut: boolean;
 }): string {
   const name = `${args.firstName} ${args.lastName}`;
-  if (args.unitId === undefined) return `Signed up on the join page as ${name}`;
-  if (!args.viaFlyer || args.flyerUnit === undefined) return `Signed up from a flyer as ${name}`;
-  return `Signed up from the flyer for ${formatAddress(args.flyerUnit.address) || args.unitId} as ${name}`;
+  const note = args.optedOut ? SIGNUP_OPTED_OUT_NOTE : '';
+  if (args.unitId === undefined) return `Signed up on the join page as ${name}${note}`;
+  if (!args.viaFlyer || args.flyerUnit === undefined) return `Signed up from a flyer as ${name}${note}`;
+  return `Signed up from the flyer for ${formatAddress(args.flyerUnit.address) || args.unitId} as ${name}${note}`;
 }
 
 interface HousingFairFields {
@@ -676,13 +689,19 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     // a new one too, AFTER its welcome, so its new thread ends with the
     // welcome as the newest message and is unread and on top. Both skipped on
     // a repeat. Each is best-effort, and a failed pin still marks the thread.
+    // FW-P2 (Cameron, 2026-10-22): an opted-out number's pin ends with a note
+    // for staff. The send path's rule (isOptedOut, sendMessage's gate) on what
+    // the handler has held since the thread step - the thread's flag (a STOP
+    // from the number before any contact held it, so a NEW contact gets the
+    // note too) or the contact's - with no new read. Only the words change.
+    const optedOut = isOptedOut(conversation.sms_opt_out, contact.sms_opt_out);
     let recorded = false;
     if (!isRepeat) {
       try {
         await activity.record({
           contactId,
           type: 'signed_up',
-          label: signupPinLabel({ unitId, flyerUnit, viaFlyer, firstName, lastName }),
+          label: signupPinLabel({ unitId, flyerUnit, viaFlyer, firstName, lastName, optedOut }),
           ...(sourceRefId !== undefined && { refType: 'unit' as const, refId: sourceRefId }),
           at: nowIso,
         });

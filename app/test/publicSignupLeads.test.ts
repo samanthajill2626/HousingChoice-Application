@@ -1021,3 +1021,111 @@ describe('the housing_fair_signup audit is best-effort too (D6.4, planner review
     expect(captured(capture)).toEqual([expect.objectContaining({ deletedContact: true, sentSkipped: 'deleted' })]);
   });
 });
+
+// flyer-leads FW-P2 (Cameron, 2026-10-22): the form cannot opt a number back
+// in - Twilio's opt-out block lifts only when the person texts START, YES or
+// UNSTOP - so the sign-up's pin tells staff. The rule is the send path's
+// (isOptedOut: the thread's or the contact's sms_opt_out), judged after the
+// thread step on what the handler already holds. Nothing else changes: the
+// unread mark, the repeat check, the flyer entry, the welcome rule, the answer
+// and the audit; neither flag is written.
+describe('an opted-out number: the pin tells staff (FW-P2)', () => {
+  const NOTE = ' (opted out of texts - they need to text START to get texts again)';
+
+  const FORMS: Array<[string, Record<string, unknown>, string]> = [
+    ['the flyer', { unitId: 'unit-1' }, FLYER_LABEL],
+    ['a flyer whose property is not shareable', { unitId: 'unit-placed' }, A_FLYER_LABEL],
+    ['the join page', {}, JOIN_LABEL],
+  ];
+
+  it.each(FORMS)('the CONTACT opted out, %s: the pin label ends with the note', async (_what, extra, label) => {
+    const { app, world } = harness();
+    seedUnit(world);
+    seedUnit(world, 'unit-placed', { status: 'placed' });
+    seedContact(world, { sms_opt_out: true });
+    seedThread(world);
+
+    const res = await post(app, signupBody(extra));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(pins(world)).toEqual([expect.objectContaining({ contactId: 'c-1', label: `${label}${NOTE}`, at: T0_ISO })]);
+    expect(world.unreadIncrements).toEqual(['conv-1']);
+    expect(world.sent).toHaveLength(0);
+    expect(world.contacts.find((c) => c.contactId === 'c-1')?.sms_opt_out).toBe(true);
+  });
+
+  it('the THREAD opted out (the contact carries no flag): the note - and the mark, the entry, the audit and the repeat check are unchanged', async () => {
+    const { app, world, clock } = harness();
+    seedUnit(world);
+    seedContact(world);
+    seedThread(world, { sms_opt_out: true });
+
+    const res = await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(pins(world)).toEqual([
+      expect.objectContaining({ contactId: 'c-1', label: `${FLYER_LABEL}${NOTE}`, refType: 'unit', refId: 'unit-1', at: T0_ISO }),
+    ]);
+    expect(world.unreadIncrements).toEqual(['conv-1']);
+    expect(convUpdates(world)).toEqual([expect.objectContaining({ conversationId: 'conv-1', unread_count: 1 })]);
+    expect((await ledgerRow(world))?.shares).toEqual({ flyer: flyerEntry(T0_ISO) });
+    // No new audit field: the same payload as any existing tenant's flyer sign-up.
+    expect(signupAudits(world).map((e) => e.payload)).toEqual([
+      {
+        marker: expect.any(String),
+        isNew: false,
+        welcomeSent: false,
+        viaFlyer: true,
+        signupVersion: 2,
+        housingAuthority: null,
+        existingContact: true,
+        deletedContact: false,
+        recorded: true,
+        sentRecorded: true,
+        consentVersion: 'ctia-2026-06',
+      },
+    ]);
+    expect(world.conversations.get('conv-1')?.sms_opt_out).toBe(true);
+    // The repeat check still holds a second sign-up within 24 hours to the one pin and bump.
+    clock.ms = T0 + HOUR_MS;
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    expect(pins(world)).toHaveLength(1);
+    expect(world.unreadIncrements).toEqual(['conv-1']);
+  });
+
+  it('a NEW contact on a thread that opted out before any contact held the number: the welcome is refused as today, and the pin carries the note', async () => {
+    const { app, world, capture } = harness();
+    seedUnit(world);
+    seedThread(world, { type: 'unknown_1to1', participants: undefined, sms_opt_out: true });
+
+    const res = await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    const contact = world.contacts.find((c) => c.phone === PHONE);
+    expect(contact).toMatchObject({ type: 'tenant', housing_fair_welcomed: false });
+    expect(contact).not.toHaveProperty('sms_opt_out');
+    expect(world.sent).toHaveLength(0);
+    expect(capture.lines.filter((l) => l['msg'] === 'housing-fair welcome text refused')).toEqual([
+      expect.objectContaining({ code: 'contact_opted_out' }),
+    ]);
+    expect(pins(world)).toEqual([
+      expect.objectContaining({ contactId: contact?.contactId, label: `${FLYER_LABEL}${NOTE}`, refId: 'unit-1', at: T0_ISO }),
+    ]);
+    expect(world.unreadIncrements).toEqual(['conv-1']);
+    expect(world.conversations.get('conv-1')?.sms_opt_out).toBe(true);
+  });
+
+  it('(PIN) not opted out - both flags present and false: no note', async () => {
+    const { app, world } = harness();
+    seedUnit(world);
+    seedContact(world, { sms_opt_out: false });
+    seedThread(world, { sms_opt_out: false });
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(pins(world).map((p) => p.label)).toEqual([FLYER_LABEL]);
+  });
+});

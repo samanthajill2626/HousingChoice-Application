@@ -102,3 +102,35 @@ Challenges to this file:
 
 Fix wave 2 (FW2) carries N1 (label), N2, N4, F1, F2, F3, F4 and the A3
 issue; then a focused fresh round-3 review of its diff.
+
+## Round 2 PLAUSIBLE items (rows owed, R3 challenge)
+
+| # | Item | Ruling | Reason |
+|---|---|---|---|
+| P-a | A multi-IP burst of same-pair flyer sign-ups timed with a Matching blast can exhaust the broadcast entry write's re-reads ('lost' + ERROR, healed by the repair script). | ACCEPT + DOC (FW3, hardening issue) | Needs coordinated concurrency the per-IP limiter only bounds per IP; the broadcast entry is repairable. Recorded as one more amplifier in the hardening issue. |
+| P-b | GSI lag on the new deleted path: a sign-up within the byPhone index lag after a soft-delete takes the live path, after a restore the deleted path. | ACCEPT | The lag affects every findByPhone reader alike (inbox, unread feed, reply gates - spec D4's "one routing read"); the window is the index propagation time. Named in the handback. |
+| P-c | Zero-width and other format (Cf) characters survive `.trim()`, so a blank-looking typed name pins "... as" with nothing visible. | DOC (FW3, hardening issue strip list) | Folded into R3 finding 3's strip-list extension. |
+| P-d | A link pin's `title` equals its accessible name. | CLOSED | FW2 removed the title. |
+
+## Round 3 (2026-10-21, HEAD fb3dfae0) - focused on fix wave 2
+
+One fresh opus reviewer (`R3-review.md`), charged with FW2's code cold, then
+what R2 + FW2 still leave wrong in those surfaces, then the Round 2 rulings.
+BLOCKER 0, HIGH 0, MEDIUM 0; LOW 4, INFO 1; one challenge (the P rows,
+answered above). It confirmed gate battery 2 green on fb3dfae0 (typecheck,
+npm test, smoke EXIT:0; e2e 371 passed; lint 3 baseline errors, 0 new) and
+found the pin CSS clean on every page that renders it, one-line pins never
+wrapping while they fit, and every Follow up name reader unaffected.
+
+| # | Finding | Sev | Ruling | Reason |
+|---|---|---|---|---|
+| R3-1 | The new pin tests can pass while the typed name is hidden again (`white-space: nowrap` on `.pillText`, or `max-height` + `overflow: hidden` on `.pill`, measured). | LOW | FIX (FW3, tests) | The e2e check asserts the label's box sits inside the pin on all four sides plus no horizontal overflow in the stream; the styles pins forbid `nowrap` on `.pillText` and any `max-height` on `.pill`. |
+| R3-2 | The hardening issue names the welcome-text global cap as the bound on made-up phones; that cap holds back only the welcome, the sign-up is still captured. | LOW | FIX (FW3, doc) | |
+| R3-3 | Wrapping exposes typed-name layout abuse: em-space runs put attacker text on its own line; combining-mark stacks paint far outside the line now that `.pillText` lost `overflow: hidden`. | LOW | FIX (FW3: `.pill { overflow: hidden }`, no height cap, pinned; DOC: the strip list adds spacing, format (Cf) and combining characters) | Containment is one declaration and clips only ink outside the pin's box (outlines are not clipped); stripping is the issue's hardening, not this branch. |
+| R3-4 | The new consent-capture issue blames this branch for a gap main always had. | LOW | FIX (FW3, doc) | |
+| R3-5 | The pin radius (12px) does not scale with a larger root font, so one-line pins lose their round ends. | INFO | FIX (FW3) | `calc(0.75em + 3px)` is exactly half a one-line pin (1.5em line + 4px padding + 2px border) at any font size. |
+
+FW3 is test, two CSS declarations and doc work. It is verified by hand (diff
+read, RED / GREEN evidence, the final battery) rather than by a fourth review
+round: R3 found nothing above LOW, and the wave adds no behavior beyond
+containment and a radius expression.

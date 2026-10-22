@@ -621,8 +621,9 @@ reports it.
   - `contactTimeline.ts` `propertySentWords` (pin wording on the pair).
 - The repair script `app/scripts/repair-share-outcomes.ts`: a watch item.
   It must not mis-forecast a `flyer` entry.
-- The property Activity card is unchanged: a sign-up is not a property
-  audit.
+- The property Activity card: a sign-up is not a property audit, so no new
+  row appears there. Its contact label follows AR13 (section 7): a nameless
+  contact reads as its formatted phone.
 - The audit: the `housing_fair_signup` fields (D6). Its reader,
   `app/scripts/backfill-join-housing-authority.ts:226`, must still work.
 - Unchanged and named on purpose: no write to an existing contact. Staff's
@@ -762,3 +763,13 @@ and plan section 4.
   new decline superseded at birth (the click answers Signed up; a second
   click sticks). Accepted in the build's code review; filed as
   docs/issues/flyer-signup-decline-click-race.md.
+- D7 / AR13 at the handback review: the property Activity card's contact
+  label uses the same rule as the Sent to card (name, else the formatted
+  phone), since staff can now record outcomes on a nameless contact's row.
+- D6.4 at the handback review: the `housing_fair_signup` audit is
+  best-effort too, on both the live and the deleted path (a throw is logged
+  and the answer stays `{ ok: true }`). Still NOT best-effort, as before
+  this feature: the reads that route the request and the thread
+  get-or-create and link. A throw there is the generic 500, and a NEW
+  contact's retry then takes the existing path and is never welcomed (D5's
+  consequence; filed in docs/issues/consent-capture-ignores-signup-web-form.md).

@@ -442,12 +442,13 @@
 }
 
 .pill {
-  /* Half a ONE-line pin's height (12px text at line-height 1.5, 2px padding
-   * and a 1px border each way: 24px), so a one-line pin keeps its round ends
-   * and a wrapped pin is a rounded box whose corners never cut into its text
-   * - --radius-pill would clamp to half the WRAPPED height (code review R2
-   * F1). */
-  border-radius: var(--radius-lg);
+  /* Half a ONE-line pin's height - a 1.5em line, 2px padding and a 1px
+   * border each way - at any font size (12px at the default 12px text; code
+   * review R3-5: a fixed 12px lost the round ends once the font size went
+   * up), so a one-line pin keeps its round ends and a wrapped pin is a
+   * rounded box whose corners never cut into its text - --radius-pill would
+   * clamp to half the WRAPPED height (code review R2 F1). */
+  border-radius: calc(0.75em + 3px);
   padding: 2px var(--sp-3);
   display: inline-flex;
   align-items: center;
@@ -463,6 +464,11 @@
   text-align: center;
   min-width: 0;
   max-width: 100%;
+  /* The pin keeps its ink inside its box: a typed stack of combining marks
+   * paints far above and below its line (code review R3-3). With NO height
+   * cap the pin grows with its lines, so this never cuts a wrapped line; an
+   * element's overflow never clips its own focus outline. */
+  overflow: hidden;
   text-decoration: none;
   background: var(--c-evt-neutral-bg);
   border: 1px solid var(--c-evt-neutral-border);

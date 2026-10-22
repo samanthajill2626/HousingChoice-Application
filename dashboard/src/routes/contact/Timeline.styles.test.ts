@@ -1,8 +1,9 @@
 // Timeline.module.css source pins (flyer-leads self-QA QA-1, code review R2
-// F1, R3-1). The unit tests run with `css: false` (vite.config.ts), so no test
-// can measure the pane; these pins keep the rules in place, and the e2e
-// flyer-leads spec measures the contact page at 1280x720 and at 360px in a
-// real browser. Same mechanism as routes/public/FlyerPage.styles.test.ts.
+// F1, R3-1, R3-3, R3-5). The unit tests run with `css: false`
+// (vite.config.ts), so no test can measure the pane; these pins keep the
+// rules in place, and the e2e flyer-leads spec measures the contact page at
+// 1280x720 and at 360px in a real browser. Same mechanism as
+// routes/public/FlyerPage.styles.test.ts.
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,7 +24,7 @@ function bodyOf(selector: string): string {
 // or its CSS Text 4 longhand `text-wrap-mode` (and the `text-wrap` shorthand).
 const NOWRAP = /(?:white-space|text-wrap(?:-mode)?)\s*:\s*nowrap/;
 
-describe('Timeline.module.css (flyer-leads self-QA QA-1, code review R2 F1)', () => {
+describe('Timeline.module.css (flyer-leads self-QA QA-1, code review R2 F1 and R3)', () => {
   // The pane is a flex: 1 item of the two-pane shell's ROW (.left). With the
   // default min-width: auto a long pin's width became the pane's minimum, so
   // the pane pushed under the right column, which painted over the reply
@@ -63,16 +64,26 @@ describe('Timeline.module.css (flyer-leads self-QA QA-1, code review R2 F1)', ()
     expect(bodyOf('.pill')).not.toMatch(/(?:^|[\s;])(?:max-)?height\s*:/);
   });
 
+  // Code review R3-3: the pin clips ink outside its own box - a typed stack
+  // of combining marks paints far above and below its line - and, with no
+  // height cap (above), never a wrapped line. An element's overflow never
+  // clips its own focus outline (a.pill:focus-visible).
+  it('the pin keeps its ink inside its box', () => {
+    expect(bodyOf('.pill')).toMatch(/(?:^|[\s;])overflow:\s*hidden\s*;/);
+  });
+
   // A wrapped pin still reads as a pin: the radius is half a ONE-line pin's
-  // height (12px text at line-height 1.5, 2px padding and a 1px border each
-  // way: 24px tall), so a one-line pin keeps its round ends while a two- or
+  // height - a 1.5em line, 2px padding and a 1px border each way, so
+  // calc(0.75em + 3px), 12px at the default 12px text - at ANY font size
+  // (code review R3-5: a fixed 12px lost the round ends once the browser's
+  // font size went up). A one-line pin keeps its round ends while a two- or
   // three-line pin is a rounded box whose corners never cut into its text -
   // --radius-pill (999px) would clamp to half the WRAPPED height. Its lines
   // are centered, like the one-line pin between its side rules, so a wrapped
   // pin never reads as a left-aligned inbound bubble.
   it('a wrapped pin keeps corners that never cut into its text, and centered lines', () => {
     const body = bodyOf('.pill');
-    expect(body).toMatch(/border-radius:\s*var\(--radius-lg\)\s*;/);
+    expect(body).toMatch(/border-radius:\s*calc\(\s*0\.75em\s*\+\s*3px\s*\)\s*;/);
     expect(body).toMatch(/text-align:\s*center\s*;/);
   });
 });

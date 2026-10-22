@@ -27,15 +27,21 @@
 //          Every live contact (new or existing) then gets, best-effort (D6): a
 //          'signed_up' pin in its thread and an unread mark on its 1:1
 //          conversation (touch -> incrementUnread -> ONE conversation.updated),
-//          at most once per contact per source (a shareable flyer's unit, or
-//          the one "no property" source) per 24 hours; and, for a flyer of a
-//          shareable unit and a tenant or unknown contact, a 'flyer' entry on
-//          the properties-sent ledger unless the pair holds a current decline
-//          (D7). A failed step is logged without PII and the answer is still
-//          { ok: true }. join-housing-authority: housingAuthority (absent/null
-//          = none) must be the exact name of a listed housing authority, else
-//          400 housing_authority_not_listed; sent WITH a unitId it is the
-//          generic 400.)
+//          skipped when the contact already holds a pin from the same source
+//          (a shareable flyer's unit, or the one "no property" source) from
+//          the last 24 hours. That repeat check is a read, not a claim: a
+//          sign-up that starts after another's pin was written sees it (a
+//          strongly consistent read), but two OVERLAPPING same-source requests
+//          can each pin and bump, so a burst is bounded by the per-IP /public
+//          limiter (app.ts), not by the check
+//          (docs/issues/public-signup-abuse-hardening.md). For a flyer of a
+//          shareable unit and a tenant or unknown contact the sign-up also
+//          writes a 'flyer' entry on the properties-sent ledger, unless the
+//          pair holds a current decline (D7). A failed step is logged without
+//          PII and the answer is still { ok: true }. join-housing-authority:
+//          housingAuthority (absent/null = none) must be the exact name of a
+//          listed housing authority, else 400 housing_authority_not_listed;
+//          sent WITH a unitId it is the generic 400.
 //   GET  /public/units/:unitId/flyer
 //        -> 200 { flyer }   (the FULL public payload upfront + contact_number)
 //        -> 404 { error, contact_number }   (missing/deleted/not-shareable;
@@ -111,7 +117,14 @@ const MAX_NAME_LEN = 100;
 /** A unitId is an opaque id; cap it so it can't smuggle a blob through the body. */
 const MAX_UNIT_ID_LEN = 200;
 
-/** flyer-leads D6.1: one pin and one inbox bump per contact per source per 24 hours. */
+/**
+ * flyer-leads D6.1: the repeat window - a sign-up records no pin and no inbox
+ * bump when the contact already holds a pin from the same source this recent.
+ * One pin and one bump per contact per source per 24 hours only for sign-ups
+ * that do not overlap: the repeat read is not a claim, so two OVERLAPPING
+ * same-source requests can each pin and bump (step (3a);
+ * docs/issues/public-signup-abuse-hardening.md).
+ */
 const SIGNUP_REPEAT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** flyer-leads plan 1.1: the log line of every failed best-effort sign-up step (with { marker, step }). */
@@ -462,12 +475,17 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
 
     // (1) Who is signing up (flyer-leads D4). contacts.findByPhone stays the
     // ONE lookup - the same routing read the inbox, the unread feed and a
-    // staff reply's gates use - so the thread pin, the unread mark and those
-    // gates always judge the SAME contact. A live holder (any type) is an
-    // EXISTING contact and is never changed by a sign-up (no name, type,
-    // status, voucher size, housing authority, consent or welcome flag); a
-    // soft-deleted holder takes the deleted path below; no holder creates a
-    // new tenant, as before.
+    // staff reply's gates use (all three call findByPhone) - so the pin, the
+    // unread mark and those three readers judge the SAME contact. Today does
+    // not read it: it attributes a 1:1 thread by its participants link
+    // (routes/today.ts oneToOneContactId, named by whoOfConversation), which
+    // setParticipantsIfAbsent never relinks, so Today can name a different
+    // contact - only after a number moved between contacts, or on a legacy
+    // shared phone. A live holder (any type) is an EXISTING contact and is
+    // never changed by a sign-up (no name, type, status, voucher size,
+    // housing authority, consent or welcome flag); a soft-deleted holder
+    // takes the deleted path below; no holder creates a new tenant, as
+    // before.
     const existing = await contacts.findByPhone(phone);
 
     // (1a) The deleted path (D4): no conversation, no send, no pin, no unread
@@ -603,12 +621,19 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
 
     // (3a) One clock reading (AR3), taken AFTER the welcome so the unread
     // mark's touch follows the welcome in the thread. Then the repeat check
-    // (D6.1): one pin and one inbox bump per contact per SOURCE per 24 hours.
-    // The source is the shareable flyer's unit (the pin's unitId ref), or the
-    // ONE shared "no property" source (/join, and a flyer whose unit is
-    // missing, deleted, unavailable or made up - no ref), so made-up unitIds
-    // cannot multiply pins. A brand-new contact has no earlier pin and skips
-    // the read. A failed read FAILS OPEN: the pin and the bump are recorded.
+    // (D6.1): no pin and no inbox bump when the contact already holds a pin
+    // from the same SOURCE from the last 24 hours. The source is the
+    // shareable flyer's unit (the pin's unitId ref), or the ONE shared "no
+    // property" source (/join, and a flyer whose unit is missing, deleted,
+    // unavailable or made up - no ref), so made-up unitIds cannot multiply
+    // pins. The check is a read, not a claim: a sign-up that starts after
+    // another's pin was written sees it (hasEventSince reads strongly
+    // consistent, AR12), but two OVERLAPPING same-source requests can both
+    // read "no pin" and each pin and bump. A burst is bounded by the per-IP
+    // /public limiter (app.ts), not by this check
+    // (docs/issues/public-signup-abuse-hardening.md). A brand-new contact has
+    // no earlier pin and skips the read. A failed read FAILS OPEN: the pin
+    // and the bump are recorded.
     const nowMs = now();
     const nowIso = new Date(nowMs).toISOString();
     const sourceRefId = viaFlyer ? unitId : undefined;

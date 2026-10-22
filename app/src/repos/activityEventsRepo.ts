@@ -139,8 +139,12 @@ export interface ActivityEventsRepo {
    * refId). Query PK contactId, KeyCondition `tsEventId > :since` (sinceIso as
    * the bound), FilterExpression on `#type = :type` and on the ref
    * (`refId = :ref` or `attribute_not_exists(refId)`), `ConsistentRead: true`
-   * (AR12 - two quick sign-ups must see each other's pin), paginated to the end
-   * of the window (lib/dynamoPaging queryAll). Throws on a DynamoDB error.
+   * (AR12 - a sign-up that starts after another's pin was written sees that
+   * pin), paginated to the end of the window (lib/dynamoPaging queryAll).
+   * Throws on a DynamoDB error. A READ, not a claim: two OVERLAPPING
+   * same-source sign-ups can both answer false and each pin and bump, so the
+   * public sign-up's burst bound is the per-IP /public limiter, not this read
+   * (docs/issues/public-signup-abuse-hardening.md).
    */
   hasEventSince(
     contactId: string,
@@ -212,10 +216,11 @@ export function createActivityEventsRepo(deps: RepoDeps = {}): ActivityEventsRep
       // event AT sinceIso is inside the window. A FilterExpression is applied
       // after each page is read, so the walk follows the cursor to the end
       // (queryAll) and never stops at an empty or filtered-out page. AR12:
-      // strongly consistent (a base-table Query allows it), so a second
-      // sign-up moments after the first sees the first one's pin. `type` is
-      // a DynamoDB reserved word, hence #type. PII (doc section 9): no label is
-      // read into a log line.
+      // strongly consistent (a base-table Query allows it), so a sign-up that
+      // starts after another's pin was written sees that pin; one that
+      // OVERLAPS it can still miss it (a read, not a claim - see the interface
+      // note). `type` is a DynamoDB reserved word, hence #type. PII (doc
+      // section 9): no label is read into a log line.
       const items = await queryAll<ActivityEventItem>(
         doc,
         {

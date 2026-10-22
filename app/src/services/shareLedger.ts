@@ -4,7 +4,11 @@
  * entry on the pair's row: the attempt it records and that attempt's ledger
  * state. Every write is a conditional read-modify-write on the row's change
  * token (listingSendsRepo.putShareMemory), re-read and re-applied on a lost
- * condition up to a small bound, then logged at ERROR (the repair heals it).
+ * condition up to a small bound, then logged at ERROR. A lost BROADCAST entry
+ * is healed by the repair (app/scripts/repair-share-outcomes.ts rebuilds it
+ * from the broadcast's slot); a lost flyer entry is not - the repair walks
+ * broadcast slots only - so applyFlyerShareEntry logs its own ERROR line
+ * saying so.
  *
  * Order-independence: entries order by attempt (shareAttemptOrder: message
  * ids; a row-less attempt right after the one it retried; a seeded entry
@@ -97,8 +101,14 @@ function mayReplace(existing: ShareLedgerEntry | undefined, next: ShareLedgerEnt
 /**
  * Whether one entry counts the pair: a `counted` entry carrying its attempt's
  * instant (an entry without an instant counts nowhere). The summary's rule is
- * lib/shareLedgerKeys.ts latestCountedShareKey (flyer-leads AR1, OR-11), which
- * counts exactly these entries; the repair script's census reads this one.
+ * lib/shareLedgerKeys.ts latestCountedShareKey (flyer-leads AR1, OR-11). The
+ * two agree on every entry the ledger writes (ledgerEntryFor stamps a string
+ * countedAt or none) and differ only on a corrupt stored one: a non-string
+ * countedAt (null, a number) passes this `!== undefined` test but not
+ * latestCountedShareKey's `typeof === 'string'`. The repair script's census
+ * reads this one, on the entry it forecasts for a pair with no row yet (built
+ * by ledgerEntryFor), so the census and the summary agree there; a caller
+ * that applied it to a stored entry could disagree with the summary.
  */
 export function ledgerEntryCounts(entry: ShareLedgerEntry): entry is ShareLedgerEntry & { countedAt: string } {
   return entry.state === 'counted' && entry.countedAt !== undefined;
@@ -247,13 +257,21 @@ export type FlyerShareResult = 'written' | 'declined' | 'refused' | 'lost';
  * refusal, decided on EACH round's consistent read: a CURRENT decline
  * (effectiveDecline(row, undefined) - at or after the row's sentAt, or any
  * decline on a row with none; tours are not consulted) answers 'declined',
- * writes nothing and logs at INFO. A sign-up never clears a decline, so a
- * public request never undoes a staff decision; the refusal is the flyer's
- * ONLY - a broadcast or individual share still supersedes a decline.
- * 'refused' = the order rule kept the stored flyer entry (an equal or newer
- * sign-up instant - AR2). 'lost' = token retries exhausted, ONE ERROR with the
- * flyer's own line: the repair walks broadcast slots only, so it never heals
- * a flyer entry. Log lines carry ids only.
+ * writes nothing and logs at INFO. A sign-up never clears a decline it reads,
+ * so a public request never undoes a decline already written (one the
+ * outcome route has stamped but not yet written can be superseded at birth -
+ * docs/issues/flyer-signup-decline-click-race.md); the refusal is the
+ * flyer's ONLY - a broadcast or individual share still supersedes a decline.
+ * Because tours are not consulted, a decline that a later tour already
+ * superseded (a tenant's pair reads Interested) still refuses the entry, and
+ * if that tour is later canceled the pair reads by its old sentAt (No reply
+ * yet), not signed_up - the spec D7 residual. 'refused' = the order rule kept
+ * the stored flyer entry (an equal or newer sign-up instant - AR2). 'lost' =
+ * token retries exhausted, ONE ERROR with the flyer's own line: the repair
+ * walks broadcast slots only, so it never heals a flyer entry. A brand-new
+ * row's `via` is 'broadcast', putShareMemory's first-write if_not_exists
+ * value: first-write furniture that rides the wire but that nothing renders
+ * or branches on. Log lines carry ids only.
  */
 export async function applyFlyerShareEntry(
   deps: ShareLedgerDeps,

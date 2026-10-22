@@ -670,8 +670,12 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   existing contact (no name, type, status, voucher size, housing authority
   or consent), and only a contact the sign-up CREATED gets the welcome
   text. The sign-up also bumps the contact's 1:1 thread to the top of the
-  inbox and marks it unread - at most one pin and one bump per contact per
-  property (or per the shared "no property" source) per 24 hours. The send
+  inbox and marks it unread - one pin and one bump per contact per property
+  (or per the shared "no property" source) per 24 hours for sign-ups that do
+  not overlap. The repeat check is a read, not a claim, so two overlapping
+  requests from the same source can each pin and bump; a burst is bounded by
+  the public form's per-IP rate limit instead
+  (`docs/issues/public-signup-abuse-hardening.md`). The send
   outcome `signed_up` - staff copy "Signed up", the row reading "Signed up
   from the flyer <date>" in place of "Sent <date>" - is a pair whose latest
   counted share entry is the flyer entry (see **send outcome**). A sign-up

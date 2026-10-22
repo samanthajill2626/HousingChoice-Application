@@ -6,14 +6,15 @@ severity: low
 status: open
 area: app/routes
 created: 2026-10-12
-refs: app/src/routes/public.ts:288, app/src/app.ts:165, app/src/middleware/rateLimit.ts:81
+updated: 2026-10-21
+refs: app/src/routes/public.ts:593-603, app/src/app.ts:165, app/src/middleware/rateLimit.ts:81
 ---
 
 **Problem.** The only fence on `POST /public/housing-fair` (the /join intake and the
 flyer "Sign up" form, which share one endpoint) is the per-IP `/public` limiter
 (`PUBLIC_RATE_LIMIT_MAX`, default 5 per minute per viewer). Every first capture of a
 phone number sends the welcome text from the business number
-(`app/src/routes/public.ts:288`). A per-IP limit bounds ONE address; it cannot bound a
+(`app/src/routes/public.ts:593-603`). A per-IP limit bounds ONE address; it cannot bound a
 caller who spreads sign-ups across many REAL addresses (a botnet, a residential-proxy
 pool, a cloud account cycling instances). Such a caller still drives unbounded welcome
 texts: SMS spend, plus STOP replies and complaints counted against the A2P campaign.

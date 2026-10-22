@@ -161,9 +161,11 @@ function contactFromError(err: unknown): string | null {
   return null;
 }
 
-/** Treat an empty or whitespace-only string as absent - staff can save '' (or
- *  '   ': the edit form PATCHes untrimmed values) for a free-text field, and a
- *  labeled detail row with a blank value must simply not render. */
+/** Treat an empty or whitespace-only string as absent - staff can save '' for
+ *  a free-text field, and a legacy or imported value may be blank or padded
+ *  (every JSON body is deep-trimmed on the way in - app.ts trimJsonBody - so
+ *  no dashboard save stores '   '); a labeled detail row with a blank value
+ *  must simply not render. */
 function textOrNull(v: string | null): string | null {
   return v === null || v.trim() === '' ? null : v;
 }

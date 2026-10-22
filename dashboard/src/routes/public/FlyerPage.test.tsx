@@ -254,7 +254,7 @@ describe('FlyerPage', () => {
     expect(screen.queryByText('Tenant pays')).toBeNull();
   });
 
-  it('a whitespace-only detail value renders NO row (edit form saves untrimmed)', async () => {
+  it('a whitespace-only detail value renders NO row (a legacy or imported value may be blank or padded)', async () => {
     getFlyer.mockResolvedValue({ ...FLYER, utilities: '  ' });
     renderPage();
 

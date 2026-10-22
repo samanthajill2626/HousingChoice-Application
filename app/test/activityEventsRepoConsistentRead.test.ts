@@ -1,7 +1,10 @@
 // flyer-leads AR12 (plan 2.5, plan review R1 #5): hasEventSince - the public
-// sign-up's repeat check - reads STRONGLY CONSISTENT, so two quick sign-ups
-// see each other's pin (an eventually consistent Query could miss the first
-// pin and let both pin and bump). Every page of the walk carries it.
+// sign-up's repeat check - reads STRONGLY CONSISTENT, so a sign-up that starts
+// after another's pin was written sees that pin (an eventually consistent
+// Query could miss it and let both pin and bump). It stays a read, not a
+// claim: two OVERLAPPING same-source sign-ups can still both pin
+// (docs/issues/public-signup-abuse-hardening.md). Every page of the walk
+// carries it.
 //
 // Pure: a stub DocumentClient records every QueryCommand input (the
 // contactsRepoConsistentBatchRead.test.ts pattern). DynamoDB Local's

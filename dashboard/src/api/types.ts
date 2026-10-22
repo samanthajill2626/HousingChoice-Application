@@ -3392,7 +3392,8 @@ export interface UnitActivityEvent {
   /** The acting user, when the event wasn't a system action. */
   actorId?: string;
   contactId?: string;
-  /** Server-resolved display name (best-effort) — absent when unknown. */
+  /** Server-resolved label (best-effort): the name, else the contact's
+   *  formatted phone (flyer-leads AR13); absent when neither is known. */
   contactName?: string;
   role?: string;
   fields?: string[];

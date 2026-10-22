@@ -222,7 +222,8 @@ const OUTCOME_LABELS: Record<string, string> = {
 /** Staff copy per activity event (GLOSSARY: "property", never "listing"/"unit").
  *  `type` is an OPEN set — an unknown event humanizes (never a blank row). */
 export function describeUnitActivity(e: UnitActivityEvent): UnitActivityDescription {
-  // The contact an event references, by best display form: resolved name → id.
+  // The contact an event references, by best display form: the server's label
+  // (name, else formatted phone - flyer-leads AR13), else the id.
   const who = e.contactName ?? e.contactId;
   const contactLink =
     e.contactId !== undefined ? { to: `/contacts/${encodeURIComponent(e.contactId)}` } : {};

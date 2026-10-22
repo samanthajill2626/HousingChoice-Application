@@ -10,7 +10,7 @@ refs: app/src/routes/public.ts:288, app/src/app.ts:165, app/src/middleware/rateL
 ---
 
 **Problem.** The only fence on `POST /public/housing-fair` (the /join intake and the
-flyer "I'm interested" form, which share one endpoint) is the per-IP `/public` limiter
+flyer "Sign up" form, which share one endpoint) is the per-IP `/public` limiter
 (`PUBLIC_RATE_LIMIT_MAX`, default 5 per minute per viewer). Every first capture of a
 phone number sends the welcome text from the business number
 (`app/src/routes/public.ts:288`). A per-IP limit bounds ONE address; it cannot bound a

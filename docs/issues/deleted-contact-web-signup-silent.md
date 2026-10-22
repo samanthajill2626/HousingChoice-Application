@@ -6,6 +6,7 @@ severity: med
 status: open
 area: app
 created: 2026-08-03
+updated: 2026-10-21
 refs: app/src/routes/public.ts:245-318, app/src/repos/contactsRepo.ts:666-693, app/src/services/sendMessage.ts:268-275, app/src/routes/inbox.ts:437-448
 ---
 
@@ -42,6 +43,29 @@ now waiting for a text that will never arrive; staff have no signal anywhere in
 the product. The only trace is the audit entry (public.ts:322) and a warn log.
 This is a real, silent behavior change on a consent/spend path introduced by the
 send gate - the gate itself is correct, the public flow's handling of it is not.
+
+**Update (2026-10-21, `feat/flyer-leads`): the deleted path is now explicit,
+and quieter.** Point 3 and the last line of the "Net" paragraph no longer
+hold. POST /public/housing-fair still resolves the phone with
+contacts.findByPhone (point 1), and a SOFT-DELETED holder is still neither
+restored nor given the form's consent (point 2). But since flyer-leads
+(spec docs/superpowers/specs/2026-10-21-flyer-leads-design.md D4, D5) the
+route stops at that holder: it writes no conversation, attempts no send -
+so there is no contact_deleted refusal and no welcome-refused WARN line any
+more; only a contact the request CREATED is ever welcomed - and records no
+sign-up pin, unread mark or properties-sent entry. It still answers
+{ ok: true } (the visitor sees the normal thank-you; the flyer's button
+reads "Sign up" now) and still writes the housing_fair_signup audit event
+on that contact's entity (contacts#<id>), now with deletedContact: true,
+recorded: false, sentRecorded: false and sentSkipped: 'deleted', and it logs
+the INFO line "housing-fair signup captured" with deletedContact: true.
+That audit row and that log line are the only traces - nothing reaches the
+dashboard; point 4 stands (no inbox row, no Deleted chip). On a
+legacy phone shared with a live contact, a deleted FIRST holder takes this
+path too (spec D4 residual). A LIVE contact's sign-up, by contrast, now pins
+"Signed up ..." in their thread and marks it unread (GLOSSARY "signed up"),
+so option (b) below has a ready mechanism; flyer-leads deliberately left the
+deleted case to this issue.
 
 **Suggested fix.** Product call first - the plausible options are (a) treat a
 fresh web-form signup as an implicit restore (un-delete, stamp the new consent,

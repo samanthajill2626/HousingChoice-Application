@@ -195,10 +195,19 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   property only when staff copy them (the New property form's pre-fill, or
   Apply to properties). The onboarding call still CAPTURES the expected
   rent, on the property created from the intake (the New property form's
-  Rent fields), not on the person. `lease_terms` is PUBLIC: the flyer shows
-  it as "Lease terms". `subzone` (Sam's area codes, e.g. E8) is STAFF ONLY:
-  it is on the New and Edit forms and the property page, never on the
-  flyer, whose neighborhood line is `area` alone.
+  Rent fields), not on the person. `lease_terms` is STAFF ONLY since
+  flyer-leads (2026-10-21; the flyer showed it as "Lease terms" before), and
+  so are `rent_min` / `rent_max` and `accessibility`: Sam talks rent and
+  lease terms through with each tenant. They stay on the forms and the
+  property page. Rent still reaches tenants in one place: the `[Rent]` merge
+  field, which the Matching blast's default text carries
+  (`DEFAULT_SEND_TEMPLATE`, `dashboard/src/routes/broadcasts/resolveTemplate.ts`;
+  left as it was by Cameron's decision). `subzone` (Sam's area codes, e.g.
+  E8) is STAFF ONLY too: it is on the New and Edit forms and the property
+  page, never on the flyer. The flyer's neighborhood line is `area` alone,
+  and since flyer-leads it is the line directly under the flyer's
+  address heading (the address is the heading and links to Google Maps; the
+  area is the heading only when no address is recorded).
 
 - **requirements (landlord and property)** (property requirements,
   2026-10-20, tracker #11/#12) - what a landlord asks of a tenant and a
@@ -216,10 +225,11 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   "Requirements / Qualifications" on the landlord page and form. The
   registry is `app/src/lib/requirements.ts` (dashboard hand mirror
   `dashboard/src/routes/listing/requirements.ts`, same test cases). Only
-  the Pets item, the deposit's one month's rent / fixed amount / flexible
-  fields and the application fee reach the public flyer; screening, the
-  deposit notes and touring are staff only, and so are qualifications
-  (Cameron, 2026-10-20). Nothing filters or ranks on them yet (Work Package
+  the application fee ("No application fee" for 0) reaches the public
+  flyer. Screening, touring and qualifications are staff only (Cameron,
+  2026-10-20), and so are the whole Pets item (No pets, Pets (details), Pet
+  fee) and the whole Deposit item since flyer-leads (2026-10-21; Sam talks
+  them through with each tenant). Nothing filters or ranks on them yet (Work Package
   1's AI ranking reads them); credit and income are notes only.
 
 - **copy only** (property requirements, 2026-10-20) - the rule that a
@@ -614,14 +624,16 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   `last_activity_at` (any direction) and not a phone's `lastSeenAt`.
 
 - **send outcome** (last-heard-from, 2026-10-12) - per property sent to a
-  contact: No reply yet / Replied / Interested / Not interested. Interested =
+  contact: No reply yet / Replied / Interested / Not interested, plus Signed
+  up since flyer-leads (2026-10-21; see **signed up** below). Interested =
   a qualifying tour exists for that tenant and property (tenants only - a
   partner row never reads a tour); Not interested = a recorded decline not
   superseded by a later send or later tour activity (a tour CREATED after the
   decline, by any path - even if that tour is later canceled - or a qualifying
   tour rescheduled / reopened after it; never a cancel or no-show mark); Replied = heard from
-  after the send; otherwise No reply yet. Precedence: Not interested >
-  Interested > Replied > No reply yet. DERIVED, never stored, except the
+  after the send; otherwise Signed up when the pair's latest counted share
+  entry is the flyer entry, else No reply yet. Precedence: Not interested >
+  Interested > Replied > Signed up / No reply yet. DERIVED, never stored, except the
   decline record (`listing_sends.declined`). "(auto)" marks an engine decline
   on the cards only. Code: `ListingSendOutcome` in
   `app/src/lib/listingSendOutcome.ts` - never `SendOutcome`, which is the
@@ -633,7 +645,45 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   been quiet for 24 hours since the later of the send and their last heard
   from, within 14 days of the send (`FOLLOW_UP_QUIET_MS`,
   `FOLLOW_UP_LOOKBACK_MS`). Listed on Matching's "Follow up" tab, grouped by
-  property, and counted as "<n> waiting" on the Properties list.
+  property, and counted as "<n> waiting" on the Properties list. A Signed
+  up pair never waits: the person reached out, and the sign-up already
+  marked their thread unread.
+
+- **flyer share entry** (flyer-leads, 2026-10-21) - what a flyer sign-up
+  writes to a contact's properties-sent list: ONE entry with share key
+  `flyer` in the (property, contact) pair's `listing_sends.shares` map,
+  counted at the sign-up instant (attempt key `<sign-up ISO>#flyer`, by
+  `acceptance`), through the same ledger path every share uses. It is a
+  share ENTRY, not a new row kind, and not a send: no text goes out, it has
+  no broadcast, and no "Property sent" pin is written. It is written only
+  for a shareable property and a `tenant` or `unknown` contact, and never
+  while the pair holds a current decline (a sign-up never clears a
+  decline). Code: `FLYER_SHARE_KEY` in `app/src/lib/shareLedgerKeys.ts`.
+
+- **signed up** (the pin and the outcome; flyer-leads, 2026-10-21) - a
+  sign-up on the flyer or on /join from a live contact records an activity
+  event of type `signed_up`, shown as a pin in the contact's thread:
+  "Signed up from the flyer for `<address>` as `<First Last>`" (linked to
+  the property), "Signed up from a flyer as `<First Last>`" (the property
+  is not shareable) or "Signed up on the join page as `<First Last>`".
+  `<First Last>` is the name typed on the form: a sign-up never changes an
+  existing contact (no name, type, status, voucher size, housing authority
+  or consent), and only a contact the sign-up CREATED gets the welcome
+  text. The sign-up also bumps the contact's 1:1 thread to the top of the
+  inbox and marks it unread - at most one pin and one bump per contact per
+  property (or per the shared "no property" source) per 24 hours. The send
+  outcome `signed_up` - staff copy "Signed up", the row reading "Signed up
+  from the flyer <date>" in place of "Sent <date>" - is a pair whose latest
+  counted share entry is the flyer entry (see **send outcome**). A sign-up
+  does not move **last heard from**; a later inbound from the person does,
+  so the pair then reads Replied and is back on Follow up once quiet
+  (unknown contacts included). The unread thread also shows on Today: a
+  tenant's, landlord's or partner's under Unreplied as "<name> -
+  Unreplied", an existing unknown contact's under Needs you now as a "New
+  unknown contact". When the contact had no thread on that phone, the
+  sign-up creates one with no message, so its inbox row is bold with a
+  blank preview and, as the contact's newest conversation, heads that
+  contact's row.
 
 ---
 

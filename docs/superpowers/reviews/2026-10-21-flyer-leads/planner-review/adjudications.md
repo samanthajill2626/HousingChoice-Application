@@ -204,3 +204,69 @@ Rulings:
 5. Run `npm run issues` (EXIT:0). Then the full five-gate battery on the
    final commit; no second main sync; no review round of your own (my two
    reviewers re-review this diff).
+
+## Round P3 (2026-10-22, re-review of FW-P2 at 8ce2d404)
+
+Planner gates on 8ce2d404 (logs `.superpowers/sdd/gates/planner-*`, round-2
+logs archived as `r2-planner-*`): typecheck EXIT:0; npm test EXIT:0 (app
+11035 passed + 1 skipped, dashboard 5391, e2e workspace 508, fake-twilio
+275, fake-twilio/web 111; no `[dynamoAdmin]`); smoke EXIT:0 (1731
+specifiers); e2e EXIT:0 (371 passed, 17.8m); eslint EXIT:1 with the same 3
+merge-base errors, 0 new.
+
+`P3-conformance.md` (16 items, 12 conform, 4 partial; 3 LOW, 3 INFO) and
+`P3-adversarial.md` (2 LOW, 2 INFO): nothing at MEDIUM or above; the legend
+is complete and correct; the note fires exactly on the send gate's flags.
+
+| # | Finding | Sev | Ruling | Reason |
+|---|---|---|---|---|
+| P3-F1 / A3-L1 | `sms_opt_out` is also the staff "Mark Do-Not-Contact" flag (contact only, `contacts.ts:2253-2301`); for it, "they need to text START" is false (no Twilio block; staff lift it with Allow SMS) and a START would silently clear the staff DNC. | LOW | FIX (Cameron 2026-10-22: "Go with (a), the Do-Not-Contact note") | A STOP or a 21610 always writes the NUMBER's thread flag (`applyNumberSuppression`); a staff DNC writes only the contact flag. Word the note by cause. |
+| P3-F2 / A3-L2 | Two numbers: a START from a secondary number never clears the contact flag; a STOPped secondary does not stop the primary. | LOW | FIX (wording) | The STOP note names "this number" and "from it"; a contact-flag-only case gets the Do-Not-Contact note, as the contact page header already calls it. |
+| P3-F3 / A3-I1 | The note is frozen into the pin and reads as present tense after a later START; a repeat inside 24 hours adds no pin. | LOW | ACCEPT | A pin is a point-in-time record like every activity event; the contact page header shows the live state. |
+| P3-F4 | The handler's thread can come from the eventually consistent index copy. | INFO | ACCEPT (narrowed by FW-P3's read of all the number's threads) | |
+| P3-F5 | An opt-out after the day's first pin is not noted on a repeat. | INFO | ACCEPT | The 24-hour cap is Cameron's. |
+| A3-I2 | The send gate's third check (the named recipient's own flag) is not mirrored. | INFO | ACCEPT | Matters only on a legacy shared phone. |
+| P3-F6 | Spec leftovers: two loose "formatted phone" mentions (~:630, ~:774-776); D7's "one exception" parenthesis; the new issue cites a comment, not the code that writes `via`. | INFO | DOC | Folded into FW-P3. |
+
+## FW-P3 - the fix list sent to the build orchestrator
+
+1. **The opted-out note by cause (FIX, RED first)** in `app/src/routes/public.ts`:
+   - `numberOptedOut` = the handler's thread has `sms_opt_out`, OR any of the
+     phone's 1:1 threads does (`conversations.findByParticipantPhone(phone)`,
+     excluding `relay_group` / `group_text` exactly as
+     `numberSuppression.ts` readNumberSuppression does - reuse or export that
+     thread rule rather than copy it). The read is best-effort: on a throw,
+     log `{ marker, step: 'opt_out_check', err }` with SIGNUP_STEP_FAILED
+     (WARN) and fall back to the handler's thread flag; the answer stays
+     `{ ok: true }`. Read it only when a pin will be written (not on a
+     repeat).
+   - When `numberOptedOut`: the pin ends
+     ` (this number opted out of texts - they need to text START from it to get texts again)`.
+   - Else when `contact.sms_opt_out === true` (a staff Do-Not-Contact, or
+     the contact's other number opted out): the pin ends
+     ` (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)`.
+     Use the staff menu's exact label for "Allow SMS"
+     (`dashboard/src/routes/contact/ContactActionsMenu.tsx`); if it differs,
+     use the real label and say so in the report.
+   - Else no note. All three pin forms; new and existing contacts; nothing
+     else changes (no audit field, no public change).
+   - Tests (`app/test/publicSignupLeads.test.ts`, appended): handler-thread
+     flag -> STOP note; flag only on an OLDER thread of the number -> STOP
+     note; contact flag only -> Do-Not-Contact note; both -> STOP note;
+     neither -> no note; the thread read throwing -> logged, falls back, 200.
+2. **Docs.** GLOSSARY signed_up pin entry and `e2e/support/selectors.md` pin
+   row: both suffixes. Spec section 7: replace the FW-P2 "D6.2 opted-out
+   note" bullet's rule and words with the two cases (cite Cameron
+   2026-10-22 for both), and fix P3-F6's leftovers (the two "formatted
+   phone" mentions -> "the phone as staff screens show it"; D7's parenthesis
+   -> "one exception: a sign-up inside the outcome route's own write window,
+   section 7"). `docs/issues/consent-capture-ignores-signup-web-form.md`:
+   the opted-out paragraph names both notes. `docs/issues/signed-up-row-sent-words.md`:
+   cite the code that writes `via` (putShareMemory's first-write), not a
+   comment.
+3. **Citations.** Re-point every stale `public.ts` / `units.ts` line citation
+   in docs/issues/ to the FINAL code (FW-P2 and FW-P3 both shift public.ts;
+   the FW-P2 report has the FW-P2 map). Digits only.
+4. `npm run issues`, then the full five-gate battery on the final commit
+   (`npm run e2e:stop` first); no second main sync; no review round of your
+   own.

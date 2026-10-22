@@ -7,7 +7,7 @@ status: open
 area: app
 created: 2026-08-16
 updated: 2026-09-01
-refs: app/src/lib/contactName.ts:72, app/src/routes/contacts.ts:481, app/src/routes/units.ts:125, app/src/lib/rosterResolution.ts:164, app/src/services/groupMembers.ts:93, app/src/services/inboundEmail.ts:401, app/src/services/relayMembers.ts:41, app/src/services/groupConvert.ts:226, app/src/routes/api.ts:2085, app/src/routes/api.ts:2162, app/src/routes/inbox.ts:538, app/src/routes/today.ts:225, app/src/jobs/placementNudges.ts:147, app/src/routes/placements.ts:167
+refs: app/src/lib/contactName.ts:72, app/src/routes/contacts.ts:481, app/src/routes/units.ts:192, app/src/lib/rosterResolution.ts:164, app/src/services/groupMembers.ts:93, app/src/services/inboundEmail.ts:401, app/src/services/relayMembers.ts:41, app/src/services/groupConvert.ts:226, app/src/routes/api.ts:2085, app/src/routes/api.ts:2162, app/src/routes/inbox.ts:538, app/src/routes/today.ts:225, app/src/jobs/placementNudges.ts:147, app/src/routes/placements.ts:167
 ---
 
 **Problem.** "Trim firstName, trim lastName, join with a space, treat empty as
@@ -19,7 +19,7 @@ count in this file's first two revisions said SIX and was wrong, not stale - it
 listed the five copies that one push feature happened to walk past):
 
 - `app/src/routes/contacts.ts:481` (`displayNameOf`)
-- `app/src/routes/units.ts:125` (`displayNameOfContact`)
+- `app/src/routes/units.ts:192` (`displayNameOfContact`)
 - `app/src/lib/rosterResolution.ts:164` (`displayName`)
 - `app/src/services/groupMembers.ts:93` (`displayName`)
 - `app/src/services/inboundEmail.ts:401` (`displayNameOf`)

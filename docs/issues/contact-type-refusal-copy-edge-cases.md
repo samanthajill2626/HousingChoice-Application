@@ -7,7 +7,7 @@ status: open
 area: dashboard
 created: 2026-10-12
 updated: 2026-10-13
-refs: dashboard/src/lib/holdingRefusals.ts:35, app/src/services/contactHoldings.ts:137, dashboard/src/routes/listing/RestoreLandlordDialog.tsx:82, dashboard/src/routes/listing/RestoreLandlordDialog.tsx:90, dashboard/src/routes/listing/ListingDetail.tsx:386, dashboard/src/routes/listing/ListingDetail.tsx:779, dashboard/src/routes/listing/ListingDetail.tsx:1479, app/src/routes/units.ts:1773, app/src/routes/units.ts:1784, app/src/routes/units.ts:1804, app/src/routes/units.ts:1892
+refs: dashboard/src/lib/holdingRefusals.ts:35, app/src/services/contactHoldings.ts:137, dashboard/src/routes/listing/RestoreLandlordDialog.tsx:82, dashboard/src/routes/listing/RestoreLandlordDialog.tsx:90, dashboard/src/routes/listing/ListingDetail.tsx:386, dashboard/src/routes/listing/ListingDetail.tsx:779, dashboard/src/routes/listing/ListingDetail.tsx:1479, app/src/routes/units.ts:2547, app/src/routes/units.ts:2558, app/src/routes/units.ts:2578, app/src/routes/units.ts:2706
 ---
 
 **Problem.** Four edge cases in the copy `fix/caseworker-integrity` added
@@ -39,11 +39,11 @@ so none was changed there, and all are rare.
 2. **The restore dialog closes as a success when the server ignored the
    choice (dashboard finding 3; backend finding 10).** The restore route
    honors `{ landlordId }` only when the plain restore would refuse
-   (`app/src/routes/units.ts:1727-1737`). If the stored landlord became a
+   (`app/src/routes/units.ts:2496-2511`). If the stored landlord became a
    landlord again (or someone restored the property) between the 409 and the
    click, the dialog's request runs the PLAIN restore and answers 200 with the
-   OLD landlord of record, in the plain path's raw shape (`:1804`) rather than
-   the body path's enriched roster (`:1892`). The dialog closes
+   OLD landlord of record, in the plain path's raw shape (`:2578`) rather than
+   the body path's enriched roster (`:2706`). The dialog closes
    (`dashboard/src/routes/listing/RestoreLandlordDialog.tsx:82`,
    `dashboard/src/routes/listing/ListingDetail.tsx:1460-1463`) and nothing
    tells staff their choice was not applied; the page then shows the real
@@ -59,7 +59,7 @@ so none was changed there, and all are rare.
    round 2 R2-1, spec revisions 6 and 7).** The dialog no longer closes as a
    success when the plain restore would apply: a body that arrives then
    answers 409 `restore_landlord_not_needed` and writes nothing - no restore,
-   no `unit_restored` audit (`app/src/routes/units.ts:1784-1791`). The dialog
+   no `unit_restored` audit (`app/src/routes/units.ts:2558-2565`). The dialog
    closes with no alert (`RestoreLandlordDialog.tsx:90-93`) and the page
    re-reads the property (`ListingDetail.tsx:1479-1497`). When someone else
    restored it meanwhile, the re-read is live and the page shows the property
@@ -87,7 +87,7 @@ so none was changed there, and all are rare.
 4. **"no longer a landlord" for a landlord contact that no longer exists
    (dashboard finding 10).** The server answers `restore_needs_landlord` with
    no name when the stored contact is missing
-   (`app/src/routes/units.ts:1773-1775`), and the dialog then says "This
+   (`app/src/routes/units.ts:2547-2549`), and the dialog then says "This
    property's landlord is no longer a landlord, so they can't stay ..."
    (`RestoreLandlordDialog.tsx:104`, `:134`; pinned by
    `dashboard/src/routes/listing/RestoreLandlordDialog.test.tsx:66`) - the
@@ -108,10 +108,10 @@ that replaced the landlord of record, one that cleared it, and one that
 cleared it and made the sole remaining contact typed landlord the primary
 contact (spec revision 5). The audit row carries each outcome
 (`landlordReplaced { from, to }`, `landlordCleared { from }`,
-`primaryPromoted { to }`; `app/src/routes/units.ts:1872-1879`), so the label is
+`primaryPromoted { to }`; `app/src/routes/units.ts:2674-2681`), so the label is
 not false, but the one place staff can later see that a restore changed who
 owns or answers for the property does not say it. Direction: a sub line such
 as "Landlord changed" / "Landlord cleared" - new copy, and the Activity
 projection would also have to carry the fields (its fixed-key whitelist drops
-them today, `app/src/routes/units.ts:244`). The spec asks only for the audit
+them today, `app/src/routes/units.ts:376`). The spec asks only for the audit
 fields, so nothing was changed.

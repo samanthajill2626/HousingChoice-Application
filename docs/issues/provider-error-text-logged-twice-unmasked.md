@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app/observability
 created: 2026-09-27
-refs: app/src/services/sendMessage.ts:247, app/src/lib/logSerializers.ts:56, app/src/lib/logSerializers.ts:76, app/src/jobs/tourReminders.ts:1471, app/src/jobs/placementNudges.ts:707, app/src/jobs/missedCallAutoText.ts:260, app/src/routes/public.ts:314, app/src/lib/errors.ts:196, app/src/jobs/sendReconcile.ts:449, app/src/jobs/sendReconcile.ts:894, app/src/jobs/sendReconcile.ts:1018, app/src/lib/phone.ts:92
+refs: app/src/services/sendMessage.ts:247, app/src/lib/logSerializers.ts:56, app/src/lib/logSerializers.ts:76, app/src/jobs/tourReminders.ts:1471, app/src/jobs/placementNudges.ts:707, app/src/jobs/missedCallAutoText.ts:260, app/src/routes/public.ts:670, app/src/lib/errors.ts:196, app/src/jobs/sendReconcile.ts:449, app/src/jobs/sendReconcile.ts:894, app/src/jobs/sendReconcile.ts:1018, app/src/lib/phone.ts:92
 ---
 
 **Found by.** The planner's post-build review of `feat/send-outcome-reconcile`
@@ -30,7 +30,7 @@ failure now carries the provider's text twice:
 - placement nudges (`app/src/jobs/placementNudges.ts:707-710`, and the
   force-send line at `:886`);
 - the missed-call auto-text (`app/src/jobs/missedCallAutoText.ts:260-263`);
-- the housing-fair welcome (`app/src/routes/public.ts:314`);
+- the housing-fair welcome (`app/src/routes/public.ts:670`);
 - the Express error handler behind the staff send route
   (`app/src/lib/errors.ts:196-199`).
 

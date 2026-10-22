@@ -7,7 +7,7 @@ status: open
 area: app
 created: 2026-10-13
 updated: 2026-10-13
-refs: app/src/routes/units.ts:1220, app/src/routes/units.ts:1226, app/src/repos/unitsRepo.ts:922, app/src/repos/unitsRepo.ts:937, app/src/routes/units.ts:467, app/src/repos/unitsRepo.ts:1312, app/src/repos/unitsRepo.ts:1021, app/src/repos/unitsRepo.ts:1060, app/src/repos/unitsRepo.ts:1111, app/src/services/contactTypeGuards.ts:71, app/src/services/contactTypeGuards.ts:88, app/src/routes/units.ts:148, app/src/routes/units.ts:1196, app/src/routes/contacts.ts:1532, app/test/helpers/twilioWebhookHarness.ts:2839, app/test/helpers/twilioWebhookHarness.ts:2944, app/test/helpers/twilioWebhookHarness.ts:3125
+refs: app/src/routes/units.ts:1869, app/src/routes/units.ts:1875, app/src/repos/unitsRepo.ts:922, app/src/repos/unitsRepo.ts:937, app/src/routes/units.ts:467, app/src/repos/unitsRepo.ts:1312, app/src/repos/unitsRepo.ts:1021, app/src/repos/unitsRepo.ts:1060, app/src/repos/unitsRepo.ts:1111, app/src/services/contactTypeGuards.ts:71, app/src/services/contactTypeGuards.ts:88, app/src/routes/units.ts:148, app/src/routes/units.ts:1846, app/src/routes/contacts.ts:1532, app/test/helpers/twilioWebhookHarness.ts:2839, app/test/helpers/twilioWebhookHarness.ts:2944, app/test/helpers/twilioWebhookHarness.ts:3125
 ---
 
 **Problem.** Found by the caseworker-integrity final review (A7,
@@ -16,7 +16,7 @@ finding 7). Rules the contact list depends on are written out by hand in
 more than one place, so a change to one copy can silently miss another:
 
 - The SEAT and CLAIM definitions exist twice: the contact-list route's
-  pre-checks (`app/src/routes/units.ts:1220`, `:1226-1227`) and the repo's
+  pre-checks (`app/src/routes/units.ts:1869`, `:1875-1876`) and the repo's
   per-attempt decision in `addContact` (`app/src/repos/unitsRepo.ts:922-926`,
   `:937-938`).
 - "The cleared landlord was the primary" exists twice: the route's
@@ -24,7 +24,7 @@ more than one place, so a change to one copy can silently miss another:
   `restoreWithLandlord` (`unitsRepo.ts:1312-1313`).
 - The routing-pointer test (`phone_ref === true || email_ref === true`) is
   repeated in `app/src/services/contactTypeGuards.ts:71`, `:88`,
-  `units.ts:148-149` (`autoRoutingEligible`), `:1196` and
+  `units.ts:148-149` (`autoRoutingEligible`), `:1846` and
   `app/src/routes/contacts.ts:1532`.
 - The FakeWorld `addContact` and `restoreWithLandlord`
   (`app/test/helpers/twilioWebhookHarness.ts:2944`, `:3125`) are

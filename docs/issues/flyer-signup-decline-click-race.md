@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app
 created: 2026-10-21
-refs: app/src/routes/units.ts:1576, app/src/routes/units.ts:1600, app/src/routes/units.ts:1692-1706, app/src/routes/units.ts:1746-1766, app/src/repos/listingSendsRepo.ts:379-411, app/src/lib/listingSendOutcome.ts:49-61, app/src/services/shareLedger.ts:276-296, app/src/routes/public.ts:658-724, app/src/lib/events.ts:5-6, app/src/lib/dynamo.ts:61-79
+refs: app/src/routes/units.ts:1576, app/src/routes/units.ts:1600, app/src/routes/units.ts:1692-1706, app/src/routes/units.ts:1746-1766, app/src/repos/listingSendsRepo.ts:379-411, app/src/lib/listingSendOutcome.ts:49-61, app/src/services/shareLedger.ts:276-296, app/src/routes/public.ts:690-777, app/src/lib/events.ts:5-6, app/src/lib/dynamo.ts:61-79
 ---
 
 **Problem.** The send-outcome route
@@ -54,12 +54,12 @@ challenge, same directory) corrected what makes it reachable:
 **What it takes.** The window runs from the route's `at` (`units.ts:1600`) to
 its `setDeclined` landing (`units.ts:1694`). On the Not interested path nothing
 is awaited between the two, so the route has ONE write in flight. During that
-write the sign-up must take its instant (`app/src/routes/public.ts:658`) and
+write the sign-up must take its instant (`app/src/routes/public.ts:690`) and
 then still run, before its flyer entry lands, the repeat read `hasEventSince`
-(`public.ts:664`) and the ledger's `getByKeyConsistent` and conditional
-`putShareMemory` (`applyFlyerShareEntry`, `public.ts:717`): about two and a
+(`public.ts:696`) and the ledger's `getByKeyConsistent` and conditional
+`putShareMemory` (`applyFlyerShareEntry`, `public.ts:770`): about two and a
 half DynamoDB round trips, five and a half when it also pins and marks the
-thread (`public.ts:682-693`). So ordinary latency does not reach it. It takes a
+thread (`public.ts:735-746`). So ordinary latency does not reach it. It takes a
 slow `setDeclined` (DynamoDB tail latency) or one the SDK retries (the client
 sets no retry policy of its own, so the SDK default applies,
 `app/src/lib/dynamo.ts:61-79`). Proof B below reaches it only by running the

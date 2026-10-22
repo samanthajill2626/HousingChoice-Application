@@ -6,7 +6,7 @@ severity: low
 status: open
 area: dashboard
 created: 2026-07-15
-refs: dashboard/src/api/endpoints.ts, dashboard/src/routes/listing/ListingDetail.tsx, app/src/routes/units.ts:460
+refs: dashboard/src/api/endpoints.ts, dashboard/src/routes/listing/ListingDetail.tsx, app/src/routes/units.ts:1068
 ---
 
 **Problem (review NOTE, 2026-07-15).** The direct-upload presign request sends

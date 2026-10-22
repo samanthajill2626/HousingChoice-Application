@@ -7,7 +7,7 @@ status: open
 area: dashboard
 created: 2026-10-13
 updated: 2026-10-13
-refs: dashboard/src/routes/listing/RestoreLandlordDialog.tsx:134, dashboard/src/routes/listing/ListingDetail.tsx:564, dashboard/src/routes/listing/ListingDetail.tsx:579, dashboard/src/routes/listing/ListingDetail.tsx:1502, app/src/routes/units.ts:1845, app/src/repos/unitsRepo.ts:1347, app/src/repos/unitsRepo.ts:938, app/src/lib/rosterResolution.ts:294, app/src/lib/tourContacts.ts:129
+refs: dashboard/src/routes/listing/RestoreLandlordDialog.tsx:134, dashboard/src/routes/listing/ListingDetail.tsx:564, dashboard/src/routes/listing/ListingDetail.tsx:579, dashboard/src/routes/listing/ListingDetail.tsx:1502, app/src/routes/units.ts:2629, app/src/repos/unitsRepo.ts:1347, app/src/repos/unitsRepo.ts:938, app/src/lib/rosterResolution.ts:294, app/src/lib/tourContacts.ts:129
 ---
 
 **Problem.** Two rules `fix/caseworker-integrity` added (Cameron's rulings,
@@ -17,7 +17,7 @@ change before the write:
 
 - "Restore without a landlord" makes the one remaining contact eligible for
   automatic routing the primary contact when the cleared landlord was the
-  primary (decided at `app/src/routes/units.ts:1845`, written in
+  primary (decided at `app/src/routes/units.ts:2629`, written in
   `app/src/repos/unitsRepo.ts:1347-1350`), but the restore dialog's sentence
   and buttons say nothing about it
   (`dashboard/src/routes/listing/RestoreLandlordDialog.tsx:134`, `:114-130`).
@@ -106,7 +106,7 @@ on a "(deleted)" row - spec 7.4 drops only its "Make primary"
 Landlord there re-posts the row (`onSetContactRole`, `ListingDetail.tsx:569-577`:
 `POST /api/units/:id/contacts` with role `landlord` and the row's own flag).
 Both claim checks ask only the contact's TYPE
-(`app/src/routes/units.ts:1363-1369`; `app/src/repos/unitsRepo.ts:1173`,
+(`app/src/routes/units.ts:1875-1881`; `app/src/repos/unitsRepo.ts:1173`,
 `:1192`), so re-roling a "(deleted)" row whose contact is typed landlord
 claims the slot: the deleted contact becomes the landlord of record
 (`unitsRepo.ts:1281`), joins non-primary (it is not eligible for automatic
@@ -118,7 +118,7 @@ contact was deleted."). The same review lists the other type-only checks
 through which a soft-deleted contact becomes or stays a landlord of record:
 unit create, PATCH `landlordId`, the restore choice
 (`requireLandlordContact`, `app/src/services/contactTypeGuards.ts:83-90`)
-and the plain restore (`app/src/routes/units.ts:2001-2007`, which keeps a
+and the plain restore (`app/src/routes/units.ts:2545-2551`, which keeps a
 stored landlord of record typed landlord, deleted or not). Behavior is
 unchanged on `feat/primary-contact-integrity` (caseworker-integrity's domain;
 spec 7.4 keeps the role select on deleted rows).

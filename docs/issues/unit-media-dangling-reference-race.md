@@ -6,7 +6,7 @@ severity: low
 status: open
 area: app
 created: 2026-07-21
-refs: app/src/routes/units.ts:702, app/src/routes/units.ts:1127, app/src/repos/unitsRepo.ts:710, app/src/repos/unitsRepo.ts:728, app/src/repos/unitsRepo.ts:455
+refs: app/src/routes/units.ts:1435, app/src/routes/units.ts:2441, app/src/repos/unitsRepo.ts:710, app/src/repos/unitsRepo.ts:728, app/src/repos/unitsRepo.ts:455
 ---
 
 **Problem.** The unit-photo write helpers (removeMedia, makeCover) and the raw
@@ -15,8 +15,8 @@ PATCH /:unitId seam are each a NON-ATOMIC read-modify-write on unit.media
 update is a single last-writer-wins SET whose only condition is
 attribute_exists(unitId) - nothing guards the media CONTENTS. Since D1
 (delete-on-removal, 2026-07-21) a photo removal ALSO best-effort-deletes the S3
-object for each removed own-namespace key (units.ts:702 for DELETE /photos,
-units.ts:1127 for the PATCH diff). Pairing a non-atomic list write with a real
+object for each removed own-namespace key (units.ts:1435 for DELETE /photos,
+units.ts:2441 for the PATCH diff). Pairing a non-atomic list write with a real
 object delete introduces a new-in-kind, customer-visible failure: a DANGLING
 reference - unit.media lists a key whose S3 object has already been deleted.
 

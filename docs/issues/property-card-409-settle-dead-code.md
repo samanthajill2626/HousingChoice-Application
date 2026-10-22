@@ -6,13 +6,13 @@ severity: low
 status: open
 area: dashboard
 created: 2026-08-06
-refs: app/src/routes/units.ts:1030, app/src/repos/unitsRepo.ts:568, dashboard/src/routes/listing/ListingDetail.tsx:387, dashboard/src/routes/listing/ListingDetail.tsx:111
+refs: app/src/routes/units.ts:1899, app/src/repos/unitsRepo.ts:568, dashboard/src/routes/listing/ListingDetail.tsx:387, dashboard/src/routes/listing/ListingDetail.tsx:111
 ---
 
 **Problem.** The property Contacts card ships a 409 conflict handler
 (ListingDetail.tsx:387-401) meant to settle the card when a write collides
 with the landlord-of-record rules - but for ADD, MAKE-PRIMARY and ROLE-CHANGE
-it can never fire: `units.ts:1030 addContact` has no 409 branch because the
+it can never fire: `units.ts:1899 addContact` has no 409 branch because the
 landlord-of-record collision is resolved SILENTLY inside
 `unitsRepo.ts:568-570`. Only DELETE can produce the 409, so most of the
 handler is dead code. Two adjacent nits ride along: the 409 copy is

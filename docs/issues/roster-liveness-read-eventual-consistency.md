@@ -7,7 +7,7 @@ status: open
 area: app
 created: 2026-10-13
 updated: 2026-10-13
-refs: app/src/routes/units.ts:1747, app/src/routes/units.ts:1858, app/src/repos/unitsRepo.ts:1418, app/src/services/primaryHandoff.ts:110, app/src/repos/unitsRepo.ts:1789, app/scripts/assign-primary-contacts.ts:315, app/src/routes/units.ts:653, app/src/repos/unitsRepo.ts:876, app/src/repos/contactsRepo.ts:1018, app/src/lib/propertyContact.ts:92, app/src/routes/units.ts:708, app/src/routes/units.ts:2434, app/src/repos/unitsRepo.ts:900, app/src/lib/propertyContact.ts:164
+refs: app/src/routes/units.ts:1920, app/src/routes/units.ts:2031, app/src/repos/unitsRepo.ts:1418, app/src/services/primaryHandoff.ts:110, app/src/repos/unitsRepo.ts:1789, app/scripts/assign-primary-contacts.ts:315, app/src/routes/units.ts:704, app/src/repos/unitsRepo.ts:876, app/src/repos/contactsRepo.ts:1018, app/src/lib/propertyContact.ts:92, app/src/routes/units.ts:759, app/src/routes/units.ts:2639, app/src/repos/unitsRepo.ts:900, app/src/lib/propertyContact.ts:164
 ---
 
 **Problem.** Since `feat/primary-contact-integrity`, every AUTOMATIC
@@ -16,10 +16,10 @@ contacts through `readRosterContacts` (`app/src/lib/propertyContact.ts:86-104`),
 that is `contactsRepo.getManyByIds(ids, { requireComplete: true })`
 (`app/src/repos/contactsRepo.ts:1288-1290`), whose BatchGet carries no
 `ConsistentRead` (`contactsRepo.ts:978-980`). The callers that decide a WRITE
-from it: auto-primary on an add or edit (`app/src/routes/units.ts:1408` ->
+from it: auto-primary on an add or edit (`app/src/routes/units.ts:1920` ->
 `decideAutoPrimary`), the remove hand-off (`app/src/repos/unitsRepo.ts:1375`),
 the restore swap (`unitsRepo.ts:1664`), the "Restore without a landlord" heir
-pick (`app/src/routes/units.ts:597`), the contact-delete hand-off
+pick (`app/src/routes/units.ts:759`), the contact-delete hand-off
 (`app/src/services/primaryHandoff.ts:100-105` -> `unitsRepo.ts:1745`) and the
 one-time backfill (`app/scripts/assign-primary-contacts.ts:314`). The restore
 heir pick replaced caseworker-integrity's per-row consistent `getById`; plan
@@ -63,7 +63,7 @@ adjudicated them accepted; they are filed together here.
    moments ago therefore reads as deleted: auto-primary on an add can demote
    a LIVE flagged primary in favor of the added contact, and the same
    response - its row flags come from another read of the same kind
-   (`enrichRosterView`, `app/src/routes/units.ts:546`) - can mark the live
+   (`enrichRosterView`, `app/src/routes/units.ts:704`) - can mark the live
    row `deleted: true`, so the property page shows "(deleted)" and may lead
    "This property's contact was deleted.".
 3. **A soft-deleted flagged row is not displaced by a landlord-clearing
@@ -109,9 +109,9 @@ consistentRead? })` now puts `ConsistentRead: true` in the contacts table's
 (`app/src/lib/propertyContact.ts:92`) passes it through only when asked. The
 restore route asks for it in BOTH of its reads: "Restore without a
 landlord"'s heir pick (`clearedLandlordHeir`,
-`app/src/routes/units.ts:708`) and the `readContacts` it hands
+`app/src/routes/units.ts:759`) and the `readContacts` it hands
 `restoreWithLandlord` for the landlord swap's hand-off
-(`app/src/routes/units.ts:2434`). The regression against `main` is
+(`app/src/routes/units.ts:2639`). The regression against `main` is
 therefore CLOSED: caseworker-integrity's per-row consistent `getById`,
 which plan ruling R13 had relaxed into an eventually consistent batch read,
 is consistent again as a batch read - the replaced pin
@@ -122,12 +122,12 @@ now assert `consistentRead: true`. On the restore paths that closes shape
 read; a delete landing AFTER the read (F4's interleaving, spec 4.2's
 accepted race) is unchanged, and so is shape 3. Still eventually
 consistent, by the same ruling - what this issue now tracks: auto-primary
-on an add or edit (`app/src/routes/units.ts:1747`), the remove hand-off
-(`app/src/routes/units.ts:1858` -> `app/src/repos/unitsRepo.ts:1418`), the
+on an add or edit (`app/src/routes/units.ts:1920`), the remove hand-off
+(`app/src/routes/units.ts:2031` -> `app/src/repos/unitsRepo.ts:1418`), the
 contact-delete fan-out (`app/src/services/primaryHandoff.ts:110` ->
 `app/src/repos/unitsRepo.ts:1789`) and the one-time backfill
 (`app/scripts/assign-primary-contacts.ts:315`); the display read
-(`enrichRosterView`, `app/src/routes/units.ts:653`) stays eventually
+(`enrichRosterView`, `app/src/routes/units.ts:704`) stays eventually
 consistent as the suggested fix above allowed. Making any of those
 consistent is now one option on its `readRosterContacts` call.
 

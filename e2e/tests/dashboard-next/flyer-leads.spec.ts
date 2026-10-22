@@ -17,8 +17,9 @@
 //      (no reload - the build worklist's OR-24, the e2e pin of the public
 //      router's default event bus, OR-17), the thread shows the sign-up pin
 //      with the TYPED name (the contact keeps its own) - a pin wider than the
-//      comms pane is cut, never widening the pane over the Send button
-//      (self-QA QA-1) - and the property is on
+//      comms pane wraps, so its whole label, the typed name at its end
+//      included, stays visible (code review R2 F1), and it never widens the
+//      pane over the Send button (self-QA QA-1) - and the property is on
 //      the Properties sent card reading "Signed up from the flyer <date>" with
 //      the "Signed up" chip and the waiting row's actions;
 //   3. an EXISTING contact - a landlord with no thread yet - on /join (D4-D6):
@@ -44,10 +45,15 @@
 // public visitor is a SEPARATE browser context with no session, and the
 // existing tenant's sign-up is posted by the bare `request` fixture (no
 // session either), so the staff page can stay on the inbox throughout.
-import { test, expect, type APIRequestContext, type Browser, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Browser, type Locator, type Page } from '@playwright/test';
 import { getOutboundTo, registerParty, sendAsParty } from '../../fixtures/fakeTwilio.js';
 import { expectTodayReady } from '../../support/today.js';
-import { WIDE_RESTORE, expectNoHorizontalOverflow, expectNoHorizontalOverflowIn } from '../../support/viewport.js';
+import {
+  NARROW_360,
+  WIDE_RESTORE,
+  expectNoHorizontalOverflow,
+  expectNoHorizontalOverflowIn,
+} from '../../support/viewport.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 /** A seeded housing authority NAME (app/src/lib/seed/orgList.ts); a unit
@@ -261,6 +267,25 @@ async function contactIdByPhone(api: APIRequestContext, phone: string): Promise<
  *  could clear - set before the sign-up, read after the live update. */
 interface NoReloadMarker {
   __flyerLeadsNoReload?: boolean;
+}
+
+/** Code review R2 F1: a milestone pin's WHOLE label is visible - its text box
+ *  is not cut (scrollWidth within clientWidth: it wraps, never an ellipsis)
+ *  and the pin lies inside, side to side, the nearest box that clips it (the
+ *  stream that scrolls it). Soft, like the QA-1 checks beside it. */
+async function expectWholePinLabelVisible(pin: Locator, where: string): Promise<void> {
+  const g = await pin.evaluate((el) => {
+    const label = el.querySelector('span');
+    if (label === null) throw new Error('the pin has no label span');
+    let clip = el.parentElement;
+    while (clip !== null && getComputedStyle(clip).overflowX === 'visible') clip = clip.parentElement;
+    if (clip === null) throw new Error('no box clips the pin');
+    const p = el.getBoundingClientRect();
+    const c = clip.getBoundingClientRect();
+    return { cut: label.scrollWidth - label.clientWidth, left: p.left - c.left, right: c.right - p.right };
+  });
+  expect.soft(g.cut, `${where}: the pin label is cut`).toBeLessThanOrEqual(1);
+  expect.soft(Math.min(g.left, g.right), `${where}: the pin runs past the side of its stream`).toBeGreaterThanOrEqual(-1);
 }
 
 test('the flyer: the address heading links to Maps, the area sits under it, Same-day tours available, and no staff-only row or key', async ({
@@ -493,21 +518,30 @@ test('an existing tenant signs up from the flyer: no text, the open inbox row tu
   await expect(pin).toBeVisible({ timeout: 15_000 });
   await expect(pin).toHaveAttribute('href', `/listings/${unit.unitId}`);
 
-  // Self-QA QA-1, at the suite's default 1280x720: a pin this long used to
-  // widen the comms pane past its column (a flex item's default min-width:
-  // auto), under the right column, which painted over the reply box's Send
-  // button. The pane keeps its column's width, the label is cut with an
-  // ellipsis, and the full label stays on the pin's title for a hover.
+  // Self-QA QA-1 and code review R2 F1, at the suite's default 1280x720: a
+  // pin this long used to widen the comms pane past its column (a flex
+  // item's default min-width: auto), under the right column, which painted
+  // over the reply box's Send button; the QA-1 fix then cut it with an
+  // ellipsis, which hid the END of the label - the typed name, the only name
+  // an auto-captured contact has (spec D6.2). The pane keeps its column's
+  // width and the pin WRAPS, so the whole label stays visible.
   const column = timeline.locator('xpath=..');
   const commsBox = await timeline.boundingBox();
   const columnBox = await column.boundingBox();
   if (commsBox === null || columnBox === null) throw new Error('the comms pane or its column has no box');
   // Precondition: the label really is wider than the column - otherwise a
-  // flush pane would prove nothing. The label span's scrollWidth is its full
-  // text width whether or not the ellipsis cuts it.
-  const labelWidth = await pin.locator('span').evaluate((el) => el.scrollWidth);
-  expect(labelWidth, 'the pin label is not wider than the comms column').toBeGreaterThan(columnBox.width);
-  // Soft, so one run reports every symptom of the one defect.
+  // flush pane and an uncut label would prove nothing. Measured as ONE line
+  // in the label's own font, so it holds whether the pin wraps or is cut.
+  const labelOneLine = await pin.locator('span').evaluate((el) => {
+    const cs = getComputedStyle(el);
+    const ctx = document.createElement('canvas').getContext('2d');
+    if (ctx === null) throw new Error('no 2d canvas to measure the label with');
+    ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    if (!ctx.font.includes(cs.fontSize)) throw new Error(`the canvas did not take the label font (${ctx.font})`);
+    return ctx.measureText(el.textContent ?? '').width;
+  });
+  expect(labelOneLine, 'the pin label is not wider than the comms column').toBeGreaterThan(columnBox.width);
+  // Soft, so one run reports every symptom.
   expect
     .soft(commsBox.x + commsBox.width, 'the comms pane runs past its column')
     .toBeLessThanOrEqual(columnBox.x + columnBox.width + 1);
@@ -521,7 +555,14 @@ test('an existing tenant signs up from the flyer: no text, the open inbox row tu
     return hit === null ? 'nothing (off screen)' : `<${hit.tagName.toLowerCase()} class="${hit.getAttribute('class') ?? ''}">`;
   });
   expect.soft(atSendCentre, 'something paints over the Send button').toBe('the Send button');
-  await expect.soft(pin).toHaveAttribute('title', pinLabel);
+  await expectWholePinLabelVisible(pin, 'at 1280x720');
+  // R2 F1's worst case: on a phone the ellipsis showed NO flyer pin's typed
+  // name. The stacked shell gives the comms pane the full width, and the pin
+  // still wraps inside it.
+  await page.setViewportSize(NARROW_360);
+  await expect(pin).toBeVisible();
+  await expectWholePinLabelVisible(pin, 'at 360px');
+  await page.setViewportSize(WIDE_RESTORE);
 
   // Properties sent (D7, D8): the flyer row, its words, its chip, and the
   // waiting row's actions.

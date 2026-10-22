@@ -493,19 +493,18 @@ function milestoneHref(ms: TimelineMilestone): string | null {
 function MilestonePin({ ms }: { ms: TimelineMilestone }): React.JSX.Element {
   const href = milestoneHref(ms);
   const inner = <span className={styles.pillText}>{ms.label}</span>;
-  // title: a pin wider than the pane is cut with an ellipsis (.pill in
-  // Timeline.module.css), so the full label reads on hover (flyer-leads
-  // self-QA QA-1). The accessible name stays the label text.
+  // A pin wider than the pane WRAPS (.pill in Timeline.module.css), so the
+  // whole label is its visible text and it needs no title (flyer-leads code
+  // review R2 F1 / F2: a hover title helps no touch screen, doubled every
+  // short pin, and rendered typed newlines as line breaks).
   return (
     <div className={`${styles.evt} ${milestoneVariant(ms.type)}`}>
       {href ? (
-        <Link to={href} className={styles.pill} title={ms.label}>
+        <Link to={href} className={styles.pill}>
           {inner}
         </Link>
       ) : (
-        <span className={styles.pill} title={ms.label}>
-          {inner}
-        </span>
+        <span className={styles.pill}>{inner}</span>
       )}
     </div>
   );

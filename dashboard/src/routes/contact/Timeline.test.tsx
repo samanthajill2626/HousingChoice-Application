@@ -477,19 +477,23 @@ describe('Timeline', () => {
     expect(text.parentElement?.parentElement?.className).toContain('green');
   });
 
-  // flyer-leads self-QA QA-1: a pin wider than the pane is cut with an
-  // ellipsis (Timeline.styles.test.ts), so the pill carries its full label
-  // as a title - readable on hover - on a link pin and a plain pin alike. The
-  // title is not the accessible name: that stays the label text.
-  it('a milestone pin carries its full label as its title, link or not', () => {
+  // flyer-leads code review R2 F1 / F2: a pin wider than the pane WRAPS
+  // (Timeline.styles.test.ts), so its full label is its visible text and no
+  // pin needs a title - the QA-1 hover title was a redundant tooltip on every
+  // pin, and it rendered typed newlines from a public sign-up as line breaks.
+  // Link pin and plain pin alike; the accessible name stays the label text.
+  it('a milestone pin shows its full label as its text and carries no title, link or not', () => {
     renderTimeline({ items: [MILESTONE, NUMBER_ADDED] });
     const link = screen.getByRole('link', { name: 'Placement opened - 1450 Joseph Blvd' });
-    expect(link).toHaveAttribute('title', 'Placement opened - 1450 Joseph Blvd');
+    expect(link).not.toHaveAttribute('title');
+    expect(link).toHaveTextContent(/^Placement opened - 1450 Joseph Blvd$/);
     expect(link).toHaveAccessibleName('Placement opened - 1450 Joseph Blvd');
     const text = screen.getByText('Now also texting from (470) 555-0148');
     expect(text.closest('a')).toBeNull();
-    // pillText span -> the pill span, which carries the title.
-    expect(text.parentElement).toHaveAttribute('title', 'Now also texting from (470) 555-0148');
+    // pillText span -> the pill span: no title on either.
+    expect(text).not.toHaveAttribute('title');
+    expect(text.parentElement).not.toHaveAttribute('title');
+    expect(text.parentElement).toHaveTextContent(/^Now also texting from \(470\) 555-0148$/);
   });
 
   it('hides milestones when "Comms only" is toggled', () => {

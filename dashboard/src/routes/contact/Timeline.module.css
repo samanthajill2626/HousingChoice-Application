@@ -442,15 +442,25 @@
 }
 
 .pill {
-  border-radius: var(--radius-pill);
+  /* Half a ONE-line pin's height (12px text at line-height 1.5, 2px padding
+   * and a 1px border each way: 24px), so a one-line pin keeps its round ends
+   * and a wrapped pin is a rounded box whose corners never cut into its text
+   * - --radius-pill would clamp to half the WRAPPED height (code review R2
+   * F1). */
+  border-radius: var(--radius-lg);
   padding: 2px var(--sp-3);
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
-  white-space: nowrap;
   /* A flex item of .evt: min-width: 0 lets a long pin shrink to its row (the
-   * default, auto, held it at its text's width) so .pillText's ellipsis
-   * engages; max-width keeps it inside the row (QA-1). */
+   * default, auto, held it at its text's width - flyer-leads self-QA QA-1)
+   * and max-width keeps it inside the row, where it WRAPS: the whole label,
+   * the typed name at the end of a sign-up pin included, stays visible (R2
+   * F1 - the QA-1 ellipsis cut that name first). Its lines are centered,
+   * like a one-line pin between its side rules, so a wrapped pin never reads
+   * as a left-aligned inbound bubble. */
+  white-space: normal;
+  text-align: center;
   min-width: 0;
   max-width: 100%;
   text-decoration: none;
@@ -469,8 +479,9 @@ a.pill:focus-visible {
 }
 
 .pillText {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* A long word (an address or a typed name with no space) breaks anywhere,
+   * so a pin never runs past its row; nothing clips the text (R2 F1). */
+  overflow-wrap: anywhere;
 }
 
 .neutral .pill {

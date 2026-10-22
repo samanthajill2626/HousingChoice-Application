@@ -274,7 +274,7 @@ test('landlord requirements: the New form pre-fills them, the property page tags
       await expect(dialog.getByLabel('Tour type', { exact: true })).toHaveValue('landlord_led');
       await expect(dialog.getByLabel('Tour process', { exact: true })).toHaveValue(REQ.tourProcess);
       await expect(dialog.getByText('On flyer - tenants see it on the public flyer.', { exact: true })).toBeVisible();
-      await expect(dialog.getByText('Staff only - never leaves the dashboard.', { exact: true })).toBeVisible();
+      await expect(dialog.getByText('Staff only - not on the public flyer.', { exact: true })).toBeVisible();
       await expect(dialog.getByLabel('Credit score', { exact: true })).toHaveAccessibleDescription(/Staff only/);
       await expect(dialog.getByLabel('Subzone', { exact: true })).toHaveAccessibleDescription(/Staff only/);
       // flyer-leads D2 (2026-10-21): rent, accessibility, lease terms and every

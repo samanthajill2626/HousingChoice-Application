@@ -30,11 +30,14 @@ describe('FlyerTag', () => {
 });
 
 describe('FlyerLegend', () => {
+  // Cameron 2026-10-22 (flyer-leads FW-P2): the Staff only line speaks of the
+  // flyer only - rent still reaches tenants through the Matching [Rent] merge
+  // field, so neither line says a value stays in the dashboard.
   it('property forms: two lines explaining both tags', () => {
     render(<FlyerLegend audience="property" />);
     expect(screen.getAllByRole('listitem').map((li) => li.textContent)).toEqual([
       'On flyer - tenants see it on the public flyer.',
-      'Staff only - never leaves the dashboard.',
+      'Staff only - not on the public flyer.',
     ]);
   });
 
@@ -45,7 +48,7 @@ describe('FlyerLegend', () => {
     render(<FlyerLegend audience="landlord" />);
     expect(screen.getAllByRole('listitem').map((li) => li.textContent)).toEqual([
       'On property flyers - tenants see it once it is copied to a property (a new property, or Apply to properties).',
-      'Staff only - never leaves the dashboard.',
+      'Staff only - never on a property flyer.',
     ]);
   });
 });

@@ -336,7 +336,7 @@ describe('ListingEditForm', () => {
   it('a legend under the title explains both tags; the old single hint line is gone (spec 2026-10-20 D10)', () => {
     render(<ListingEditForm unit={UNIT} onClose={vi.fn()} onSaved={vi.fn()} />);
     expect(screen.getByText('On flyer - tenants see it on the public flyer.')).toBeInTheDocument();
-    expect(screen.getByText('Staff only - never leaves the dashboard.')).toBeInTheDocument();
+    expect(screen.getByText('Staff only - not on the public flyer.')).toBeInTheDocument();
     expect(screen.queryByText(/shown on the public flyer/i)).toBeNull();
   });
 

@@ -1058,7 +1058,7 @@ describe('UnitCreateForm - flyer tags and the D10 order (spec 2026-10-20)', () =
     setup({ landlordId: 'contact-landlord-0001' });
     await dialogReady();
     expect(screen.getByText('On flyer - tenants see it on the public flyer.')).toBeInTheDocument();
-    expect(screen.getByText('Staff only - never leaves the dashboard.')).toBeInTheDocument();
+    expect(screen.getByText('Staff only - not on the public flyer.')).toBeInTheDocument();
     // flyer-leads D2: Tenant-paid utilities is the only public free-text box.
     expect(describedTexts(screen.getByLabelText('Tenant-paid utilities'))).toContain(PUBLIC_NOTE);
     for (const label of ['Accessibility', 'Lease terms', 'Pets (details)', 'Pet fee']) {

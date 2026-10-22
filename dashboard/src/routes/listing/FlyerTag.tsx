@@ -32,13 +32,16 @@ export function FlyerTag({ visibility, audience, id }: FlyerTagProps): React.JSX
   );
 }
 
+// Cameron 2026-10-22 (flyer-leads FW-P2): the Staff only lines speak of the
+// flyer only. Rent is Staff only yet still reaches tenants through the
+// Matching [Rent] merge field, so no line says a value stays in the dashboard.
 const LEGEND: Readonly<Record<FlyerAudience, readonly [string, string]>> = {
-  property: ['On flyer - tenants see it on the public flyer.', 'Staff only - never leaves the dashboard.'],
+  property: ['On flyer - tenants see it on the public flyer.', 'Staff only - not on the public flyer.'],
   // Planner ruling PR-2 (code review PA-2): copy only - a landlord save never
   // changes an existing property, so the line says how a value gets there.
   landlord: [
     'On property flyers - tenants see it once it is copied to a property (a new property, or Apply to properties).',
-    'Staff only - never leaves the dashboard.',
+    'Staff only - never on a property flyer.',
   ],
 };
 

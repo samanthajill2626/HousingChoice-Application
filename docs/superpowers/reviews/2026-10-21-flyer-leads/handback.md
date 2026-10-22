@@ -1,5 +1,61 @@
 # Handback - feat/flyer-leads (build orchestrator, AUTO)
 
+## Update 2026-10-22 - fix wave FW-P1 (planner review P1)
+
+**MERGE-READY @098eaa11 on feat/flyer-leads (W:\tmp\flyer-leads), 0 behind
+main @0f6f29f9, UNMERGED (human gate).** Still NO infra or post-merge ops.
+This supersedes the gated commit 692c44a4 named below; everything after
+098eaa11 is mission records.
+
+FW-P1 ran the six items of `planner-review/adjudications.md` "FW-P1" and
+nothing else (OR-26 / OR-26b untouched, no second main sync, no review round
+of my own - the planner's reviewers re-review this diff). One fresh opus
+child; report `planner-review/FW-P1-report.md`; I read the whole code diff.
+
+| # | Item | Commit | Evidence |
+|---|---|---|---|
+| 1 | A-L2 FIX: the property Activity card's `contactName` uses the Sent to rule (`recipientLabelOf`: name, else formatted phone) | 6b632aef | RED `unitsApiActivity.test.ts` 1 failed / 19 passed (no contactName; expected "(404) 555-0142"), GREEN 20 + contactsBatchReads 10 + listingSendsApi 29, EXIT:0 |
+| 2 | C-F1 FIX: both `housing_fair_signup` audit appends are best-effort (`{ marker, step: 'audit', err }` + SIGNUP_STEP_FAILED, answer `{ ok: true }`); thread step left unguarded; step comments updated | 0363dde2 | RED `publicSignupLeads.test.ts` 2 failed / 55 ("expected 500 to be 200", main and deleted path); the PII pin in publicIntake.test.ts RED against the old file, then GREEN 57 + 60, EXIT:0 |
+| 3 | A-I2 DOC: `FlyerPage.tsx` heading comment names the suffix " - open in Google Maps" | 21b47d65 | comment only; FlyerPage.test.tsx 62 passed |
+| 4 | A-M2 FILE: Today crowd-out by made-up phones (+ the unpaginated-reads note) in `public-signup-abuse-hardening.md` | 4a7796fb | `npm run issues` EXIT:0 |
+| 5 | A-L1 + A-L3 FILE: the opted-out re-sign-up and the never-welcomed retry (with the candidate rule's double-text hazard) in `consent-capture-ignores-signup-web-form.md` | 4a7796fb | as above |
+| 6 | C-F2 DOC: spec section 7 residual bullet for the decline-click race (the fix list's exact text) | 21b47d65 | ASCII |
+
+Small deviations (child-reported, verified): `recipientLabelOf` now takes
+`ContactDisplayItem` (what `getDisplaysByIds` returns; `RecipientDisplay`
+callers unchanged); a one-paragraph comment at the thread step says it is
+NOT best-effort and points at the consent issue.
+
+**Gates on 098eaa11 (battery 4, bare, logs `.superpowers/sdd/gates/*-4.*`):**
+
+| Gate | Result |
+|---|---|
+| 1 `npm run typecheck` | EXIT:0 (0 `error TS`) |
+| 2 `npm test` (no AWS_* exported) | EXIT:0 - app `Test Files 526 passed (526)`, `Tests 11029 passed \| 1 skipped (11030)`; dashboard `265`, `5391 passed`; e2e workspace `22`, `508 passed`; fake-twilio `34`, `275 passed`; fake-twilio/web `13`, `111 passed`; no `[dynamoAdmin]` line |
+| 3 `npm run smoke` | EXIT:0 - "smoke-dist: OK - 1730 import specifier(s) across 301 emitted file(s) resolve under plain Node." |
+| 4 `timeout 2700 npm run e2e` | EXIT:0 - "371 passed (17.8m)", no failed / flaky / skipped; TIME_WAIT 25 before |
+| 5 `npx eslint $(git diff --name-only --diff-filter=d main...HEAD -- '*.ts' '*.tsx' '*.js' '*.mjs' '*.cjs')` | EXIT:1 - 70 files, 3 errors, all baseline-matched at the merge base 0f6f29f9 (Timeline.tsx x1, FlyerPage.tsx x2, `react-hooks/set-state-in-effect`); 0 ours |
+
+Branch now: 86 non-merge commits; code, tests and product docs (excluding
+docs/superpowers records) 80 files, +5864 / -711.
+
+For the planner (not changed - outside the six items; your call):
+- Spec line ~624 still says "The property Activity card is unchanged", which
+  item 1 makes stale.
+- Spec D6.4 ("every step after the contact is resolved or created is
+  best-effort") now covers the audit, but the thread get-or-create step stays
+  unguarded by the C-F1 ruling, and no residual bullet says so.
+- Items 1 and 2 moved `units.ts` / `public.ts` lines by up to +8 / +29, so
+  some older line citations in the issue files point a little early.
+- The leftover `e2e/.artifacts/session.pid` from your gate run (pid 17520,
+  dead) was cleared with `npm run e2e:stop` before battery 4 (the
+  `e2e-session-stale-pid-reuse-killtree` hazard); battery 4's own leftover
+  (48684, dead) was cleared the same way. No stack is running.
+
+---
+
+## Original handback (2026-10-22 00:20)
+
 **MERGE-READY @692c44a4 on feat/flyer-leads (W:\tmp\flyer-leads), 0 behind
 main @0f6f29f9, UNMERGED (human gate).** NO infra, migration, backfill,
 dependency or env change; nothing is owed after the merge. If it merges

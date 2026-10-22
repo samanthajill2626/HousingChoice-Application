@@ -315,7 +315,7 @@ export function FlyerPage(): React.JSX.Element {
       {/* flyer-leads D3: the address IS the heading and the Maps link - the
           whole block (street line + city line) is the tap target. The visible
           text leads the accessible name and the hidden suffix only ADDS to it
-          (WCAG 2.5.3); it also says the link leaves for Maps in a new tab.
+          (WCAG 2.5.3) and names the destination: " - open in Google Maps".
           The area is a line under an address heading, never dropped. */}
       <div className={styles.headingGroup}>
         {heading.kind === 'address' ? (

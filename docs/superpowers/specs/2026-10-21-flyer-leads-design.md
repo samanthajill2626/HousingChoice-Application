@@ -757,3 +757,8 @@ and plan section 4.
 - D6 audit wording (plan review R2 #5): `consentVersion` is the consent
   disclosure version in force, the server's `CONSENT_VERSION`. The form
   sends no version of its own; the two ship in one release.
+- The decline-click race: a sign-up that lands inside the outcome route's
+  own window between its 'Not interested' stamp and its write leaves that
+  new decline superseded at birth (the click answers Signed up; a second
+  click sticks). Accepted in the build's code review; filed as
+  docs/issues/flyer-signup-decline-click-race.md.

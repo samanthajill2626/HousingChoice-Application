@@ -784,3 +784,15 @@ and plan section 4.
   consequence; filed in docs/issues/consent-capture-ignores-signup-web-form.md).
   Because the audit is best-effort, a missing `housing_fair_signup` row no
   longer proves there was no sign-up; the error log line is then the trace.
+- D2 legend (Cameron, 2026-10-22): the Staff only legend line reads
+  'Staff only - not on the public flyer.' (property forms) and
+  'Staff only - never on a property flyer.' (landlord form). The tags are
+  about the flyer; rent still reaches tenants through the Matching [Rent]
+  merge field, which stays.
+- D6.2 opted-out note (Cameron, 2026-10-22): when the number is opted out
+  (the send path's rule: the thread's or the contact's sms_opt_out), the
+  pin label ends
+  ' (opted out of texts - they need to text START to get texts again)'.
+  The form cannot re-subscribe a number: Twilio's opt-out block lifts only
+  when the person texts START, YES or UNSTOP. No thank-you line (Cameron
+  rejected it: people do not remember texting STOP).

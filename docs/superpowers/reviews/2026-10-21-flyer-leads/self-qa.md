@@ -100,3 +100,21 @@ Probe (page-side style only, no source edit): `section[class*=_comms_]{min-width
 plus `.pill{min-width:0;max-width:100%}` -> comms == pane at 1024 / 1280 /
 1440, Send uncovered, the pill text ellipsized (client 518 < scroll 756 at
 1280), no horizontal scroll in the stream.
+
+## QA-1 follow-through (fix waves FW-QA, FW2, FW3)
+
+- FW-QA (a150db6b) stopped the pane from widening (Send uncovered) by letting
+  the pin shrink with an ellipsis; code review round 2 (F1) showed the
+  ellipsis cut the END of the label - the typed name - at every common width.
+- FW2 (41b6f83a) made pins WRAP inside the pane; FW3 (c0b6b501) contained a
+  pin's ink (`overflow: hidden`, no height cap) and made its radius scale
+  with its font; FW3 (88a686f5) hardened the checks (three CSS mutants RED).
+- Orchestrator review of the final rendering
+  (`.playwright-mcp\fw2-pins-final-1280.png`, `fw2-pins-final-375.png`,
+  `fw3-pins-1280.png`, `fw3-pins-360.png`): the long sign-up pin wraps to 2
+  lines at 1280 and 4 at 360 inside the pane with the typed name visible; a
+  short pin stays one line with round ends; Send is visible at both widths.
+- Pinned in e2e (flyer-leads.spec.ts, existing-tenant test): the comms
+  region stays inside its column, Send is not covered, and the label's box
+  lies inside the pin on all four sides with no sideways scroll - green in
+  the final gate battery (371 passed) on 692c44a4. QA-1 CLOSED.

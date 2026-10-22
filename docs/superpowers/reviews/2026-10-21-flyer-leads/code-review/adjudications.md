@@ -55,3 +55,50 @@ Fix wave 1 is comment, doc and issue work only - no behavior change, so no
 gate can move except through a typo. Its diff gets the round 2 re-review
 (fresh reviewer: what round 1 missed first, then the wave, then these
 rulings).
+
+## Self-QA run 1 (2026-10-21, HEAD b7b47ff2) - see self-qa.md
+
+| # | Finding | Sev | Ruling | Reason |
+|---|---|---|---|---|
+| QA-1 | A long milestone pin widens the contact page's comms pane under the right column and covers the Send button (1024-1440 px). | HIGH | FIX (FW-QA a150db6b) | Pre-existing CSS (`.comms` and `.pill` kept the flex default `min-width: auto`), made routine by the signed_up pin. Fixed with `min-width: 0` on both and pinned by styles, unit and e2e geometry tests (RED proven). |
+
+## Round 2 (2026-10-21, HEAD ce4c33d5)
+
+One fresh opus reviewer (`R2-review.md`), charged in order: what round 1
+missed, the fix-wave code cold, the adjudications, then closure. It read the
+spec only to check this file's citations. BLOCKER 0, HIGH 0; MEDIUM 2 (N1,
+F1), LOW 5, INFO 3; 5 adjudication challenges; 4 PLAUSIBLE. One throwaway
+probe (deleted).
+
+| # | Finding | Sev | Ruling | Reason |
+|---|---|---|---|---|
+| N1 | Follow up says "Sent <date>" (the sign-up instant) for a flyer-latest pair a later reply put back on the list; and its row labels a nameless contact by its RAW E.164 while the Sent to card shows the formatted phone. | MEDIUM | CAMERON (the words) + FIX (the label) | The words are OR-26b's second surface - folded into the new OR-26b row below. The label: Follow up's `nameOf` (`followUps.ts:87-91`) gets AR13's rule (`formatPhoneForDisplay(phone) ?? phone`) in FW2 - unknown contacts reach Follow up only since this branch (OR-12), so the inconsistency is new in practice. |
+| N2 | New-phone sign-ups are now an unread inbox row, a Today row and a "Signed up" row on the property, each; the hardening issue lists new phones as unchanged. | LOW | DOC (FW2) | Cameron's D6 call (new sign-ups are marked unread too); the issue text is corrected. |
+| N3 | The mark's touch can step `last_activity_at` back by under a second against a concurrent write (proven). | LOW | ACCEPT | Cosmetic; the order of rows can flicker by under a second. Already a plan watch item (S4 E) and R5 F6. Named in the handback. |
+| N4 | The flyer's new area line has no `overflow-wrap`. | INFO | FIX (FW2) | A new element of this branch; one declaration plus a styles pin. |
+| N5 | The gates have not run on HEAD. | INFO | (the final battery) | Run on the final commit before handback. |
+| F1 | The QA-1 ellipsis cuts the END of a pin - the typed name - at every common width (phones always), and `title` helps only on hover. | MEDIUM | FIX (FW2) | Spec D6.2 shows the typed name on purpose (the contact is never renamed; an unknown contact has no other name). Pins WRAP instead of clipping: `.pill` `white-space: normal` (still `min-width: 0; max-width: 100%`), the text breaks anywhere, no ellipsis; `title` removed (F2). The e2e geometry check (iii) becomes "the whole label is visible inside the pane". |
+| F2 | `title` on every pin is a redundant tooltip and renders typed newlines. | LOW | FIX (FW2) | Removed with F1. |
+| F3 | `flyer-signup-decline-click-race.md` misstates the window (one app process: no instance clock skew; the window is the route's own read-to-write path, widened by a slow or retried setDeclined). | LOW | FIX (doc, FW2) | |
+| F4 | `public-signup-abuse-hardening.md`: main did more than "write nothing" to an existing contact (it created a thread and sent the welcome to a never-welcomed one); the new-phone case is not unchanged (N2). | LOW | FIX (doc, FW2) | |
+| F5 | Re-pointed refs in the two older issue files. | INFO | ACCEPT | Pre-existing staleness; named in FW1-report. |
+
+Challenges to this file:
+- **OR-26b row (missing).** Agreed - added below.
+- **A5 / C2 reason.** Agreed: the window is not ordinary latency across
+  instances; on the single app process it is the route's own path from its
+  `at` stamp to `setDeclined`, widened by a slow or retried write. FILE stands
+  on the corrected reason; the issue text is fixed in FW2.
+- **A3.** Agreed: FILE a small improvement issue (offer the form's web-form
+  evidence when staff record consent for a contact who signed up), FW2.
+- **A1 / C1.** Agreed: the handback names that overlapping requests exceed the
+  spec's stated "at most one pin a day" bound (the approved spec is not edited).
+- **QA-1.** Closed for the Send button; F1 is fixed by FW2 rather than left
+  as a residual.
+
+| # | Finding | Sev | Ruling | Reason |
+|---|---|---|---|---|
+| OR-26b | A flyer-latest pair that a decline, tour or reply outranks reads "Sent <sign-up date>" on the roster row (`Card.tsx` - the words key on the `signed_up` outcome) AND on Follow up (`FollowUpView.tsx:118-119`), for a property that may never have been texted. | MEDIUM (R2) | CAMERON | Spec D8 defines "Signed up from the flyer <date>" for the `signed_up` outcome only. The alternative - a wire flag from `latestCountedShareKey` that both renderers key on - adds a wire field the spec does not have, and the copy is Cameron's. Built per spec meanwhile; in the handback with OR-26. |
+
+Fix wave 2 (FW2) carries N1 (label), N2, N4, F1, F2, F3, F4 and the A3
+issue; then a focused fresh round-3 review of its diff.

@@ -184,7 +184,7 @@ describe('buildFollowUps (last-heard-from 5.6)', () => {
 
   // The id rung of the fallback is unreachable for a KEPT row (eligibility
   // requires a phone); it exists because FollowUpItem.name is required.
-  it('a nameless contact falls back to the phone; names are part-wise trimmed', async () => {
+  it('a nameless contact falls back to its formatted phone; names are part-wise trimmed', async () => {
     const w = emptyWorld();
     w.units.push(unit('u1'));
     const byPhone = tenant('c-phone', { phone: '+15550100042' });
@@ -196,7 +196,27 @@ describe('buildFollowUps (last-heard-from 5.6)', () => {
     const out = await buildFollowUps(depsFor(w).deps);
     expect(out.items.map((i) => [i.contactId, i.name])).toEqual([
       ['c-padded', 'Ann'],
-      ['c-phone', '+15550100042'],
+      ['c-phone', '(555) 010-0042'],
+    ]);
+  });
+
+  // flyer-leads code review R2 N1: unknown contacts reach Follow up since this
+  // branch (worklist OR-12), so a nameless row must read as the property's
+  // Sent to card reads the same contact - AR13's rule, `recipientLabelOf` in
+  // routes/units.ts: `formatPhoneForDisplay(phone) ?? phone`. A NANP number is
+  // formatted; one formatPhoneForDisplay cannot format is shown as stored.
+  it('a nameless contact reads as the Sent to card labels it (AR13): a NANP phone formatted, any other as stored', async () => {
+    const w = emptyWorld();
+    w.units.push(unit('u1'));
+    w.contacts.push(
+      { contactId: 'c-nanp', type: 'unknown', status: 'active', phone: '+14045550123' } as ContactItem,
+      { contactId: 'c-intl', type: 'unknown', status: 'active', phone: '+442071234567' } as ContactItem,
+    );
+    w.sends.push(send('u1', 'c-nanp', ago(3 * DAY)), send('u1', 'c-intl', ago(4 * DAY)));
+    const out = await buildFollowUps(depsFor(w).deps);
+    expect(out.items.map((i) => [i.contactId, i.name])).toEqual([
+      ['c-intl', '+442071234567'],
+      ['c-nanp', '(404) 555-0123'],
     ]);
   });
 
@@ -370,7 +390,8 @@ describe('flyer-leads D8: a signed_up pair never waits (followUps.ts derives thr
         unitId: 'u1',
         unitLabel: 'u1',
         contactId: 'c-unk',
-        name: '+15550100077',
+        // R2 N1: the formatted phone, as the Sent to card labels it (AR13).
+        name: '(555) 010-0077',
         type: 'unknown',
         sentAt: signed,
         lastHeardFromAt: heard,

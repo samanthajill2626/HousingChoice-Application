@@ -28,6 +28,7 @@ import {
   type InterestedMode,
   type ListingSendOutcome,
 } from '../lib/listingSendOutcome.js';
+import { formatPhoneForDisplay } from '../lib/phone.js';
 import type { ContactsRepo, RecipientDisplay } from '../repos/contactsRepo.js';
 import type { ListingSendItem, ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import type { TourItem, ToursRepo } from '../repos/toursRepo.js';
@@ -83,11 +84,17 @@ export interface FollowUpsDeps {
 
 /** The row's name: the app's shared display-name rule (lib/contactName.ts
  *  contactDisplayName - first + last, part-wise trimmed; undefined when no
- *  name is known), then the phone, then the id - FollowUpItem.name is required. */
+ *  name is known), then the phone as staff chrome shows it
+ *  (`formatPhoneForDisplay(phone) ?? phone` - flyer-leads AR13, the label the
+ *  property's Sent to card gives the same contact, `recipientLabelOf` in
+ *  routes/units.ts; code review R2 N1: unknown contacts reach Follow up since
+ *  flyer-leads, worklist OR-12), then the id - FollowUpItem.name is required. */
 function nameOf(contact: RecipientDisplay): string {
   const display = contactDisplayName(contact);
   if (display !== undefined) return display;
-  return typeof contact.phone === 'string' && contact.phone.length > 0 ? contact.phone : contact.contactId;
+  const phone = typeof contact.phone === 'string' ? contact.phone : '';
+  if (phone.length > 0) return formatPhoneForDisplay(phone) ?? phone;
+  return contact.contactId;
 }
 
 function groupByTenant(tours: TourItem[]): Map<string, TourItem[]> {

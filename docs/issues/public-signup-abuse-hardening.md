@@ -6,7 +6,7 @@ severity: med
 status: open
 area: app
 created: 2026-10-21
-refs: app/src/routes/public.ts:637-673, app/src/repos/activityEventsRepo.ts:136-154, app/src/repos/activityEventsRepo.ts:214-245, app/src/app.ts:185-191, app/src/routes/public.ts:156-167, app/src/routes/public.ts:209-216, app/src/routes/public.ts:686-703, app/src/jobs/rosterActions.ts:236-237, app/src/jobs/rosterActions.ts:261-304, app/src/routes/public.ts:495-528, app/src/routes/public.ts:584, app/src/routes/today.ts:784-840, dashboard/src/routes/listing/listingFormat.ts:352, app/test/publicSignupLeads.test.ts:750-761, dashboard/src/routes/contact/Timeline.module.css:467-471, app/src/services/shareLedger.ts:50, app/src/services/shareLedger.ts:205-224, app/src/jobs/broadcastFanOut.ts:1270, app/src/services/shareAttemptOutcome.ts:188, app/scripts/repair-share-outcomes.ts
+refs: app/src/routes/public.ts:637-673, app/src/repos/activityEventsRepo.ts:136-154, app/src/repos/activityEventsRepo.ts:214-245, app/src/app.ts:185-191, app/src/routes/public.ts:156-167, app/src/routes/public.ts:209-216, app/src/routes/public.ts:686-703, app/src/jobs/rosterActions.ts:236-237, app/src/jobs/rosterActions.ts:261-304, app/src/routes/public.ts:495-528, app/src/routes/public.ts:584, app/src/routes/today.ts:784-840, dashboard/src/routes/listing/listingFormat.ts:352, app/test/publicSignupLeads.test.ts:750-761, dashboard/src/routes/contact/Timeline.module.css:467-471, app/src/services/shareLedger.ts:50, app/src/services/shareLedger.ts:205-224, app/src/jobs/broadcastFanOut.ts:1270, app/src/services/shareAttemptOutcome.ts:188, app/scripts/repair-share-outcomes.ts, app/src/routes/today.ts:182, app/src/routes/today.ts:704-754, app/src/lib/config.ts:1008-1014, app/src/routes/units.ts:1495-1520, app/src/services/followUps.ts:141-161
 ---
 
 **Problem.** Since `feat/flyer-leads` (spec
@@ -154,6 +154,40 @@ land (round 3, `R3-review.md` finding 2). Bounding it takes the new-contacts
 ceiling under Suggested fix. A per-phone limit cannot bound it either, since
 each made-up phone is used once.
 
+**Today crowd-out** (planner review P1, `P1-adversarial.md` M2, in
+`docs/superpowers/reviews/2026-10-21-flyer-leads/planner-review/`). Those
+unread rows are not only noise: they can push real work off Today.
+- Each made-up-phone sign-up is a NEW contact (`public.ts:562`), so the
+  24-hour repeat check never runs for it (a new contact skips the read,
+  `public.ts:662`), and its thread is left unread: the pin and the unread mark
+  run for every live contact, a new one included (`public.ts:675-694`).
+- Today keeps the newest 100 unread 1:1 threads: `TODAY_UNREAD_CAP` is 100
+  (`app/src/routes/today.ts:182`), and the unread pass walks the byUnread
+  index newest-activity-first and stops after 100 kept 1:1 rows
+  (`today.ts:704-752`, the break at `:752`).
+- At the default per-IP limit - 5 requests per 60 s
+  (`app/src/lib/config.ts:1008` and `:1014`, the `/public` limiter at
+  `app/src/app.ts:185-191`) - one IP makes 100 such contacts in about 20
+  minutes, each with an unread thread whose `last_activity_at` is its
+  sign-up instant. Every slot is then junk, and the real unreplied threads
+  drop off Today's Unreplied block until staff open or mark read the junk
+  ones; the inbox still lists them, below the junk. Today simply looks full:
+  only the capped WARN (`today.ts:754`) says anything was cut.
+- Before the branch the same request left a READ thread (only the outbound
+  welcome), which never entered the byUnread index and could not take a slot.
+- The unread mark itself stays (Cameron's D6 call, above). The fix direction
+  is the new-contacts ceiling under Suggested fix, applied to the bump as
+  well.
+
+Related, PLAUSIBLE (not reproduced): the same junk grows two unpaginated
+`requireComplete` reads without bound. The property's Sent to card reads every
+listed row of the unit (`app/src/routes/units.ts:1495-1520`: `listByUnit`
+paged to exhaustion, then one `getRecipientDisplaysByIds` batch with
+`requireComplete`), and Follow up reads every row within the 14-day lookback
+of every available property (`app/src/services/followUps.ts:141-161`: one
+`requireComplete` batch, which carries `signed_up` pairs too, though they
+never wait). One unprocessed BatchGet key 503s the whole card or tab.
+
 **3. A pin flood can block a deferred relay-group add** (adversarial R1 P1,
 not reproduced). The roster job's removal-history scan
 (`app/src/jobs/rosterActions.ts:261-304`) reads at most 250 of the contact's
@@ -216,7 +250,10 @@ beyond that residual.
   contacts per window - the shape
   [`public-welcome-text-global-cap`](public-welcome-text-global-cap.md)
   proposes for the welcome spend - since a per-phone limit never sees the same
-  made-up phone twice.
+  made-up phone twice. Apply it to the bump as well: past the ceiling, a new
+  contact's thread gets no unread mark (P1 M2's shape: the contact is still
+  created, only the bump is skipped), so made-up phones cannot fill Today's
+  unread block ("Today crowd-out", under point 2).
 - Normalize the typed names in `parseHousingFairBody` (`public.ts:197`)
   BEFORE its non-empty and length checks (`public.ts:209-216`):
   - strip C0/C1 control and bidi characters;

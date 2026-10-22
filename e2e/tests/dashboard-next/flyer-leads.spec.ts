@@ -16,7 +16,9 @@
 //      the inbox row turns unread LIVE on an inbox staff already have open
 //      (no reload - the build worklist's OR-24, the e2e pin of the public
 //      router's default event bus, OR-17), the thread shows the sign-up pin
-//      with the TYPED name (the contact keeps its own), and the property is on
+//      with the TYPED name (the contact keeps its own) - a pin wider than the
+//      comms pane is cut, never widening the pane over the Send button
+//      (self-QA QA-1) - and the property is on
 //      the Properties sent card reading "Signed up from the flyer <date>" with
 //      the "Signed up" chip and the waiting row's actions;
 //   3. an EXISTING contact - a landlord with no thread yet - on /join (D4-D6):
@@ -456,8 +458,9 @@ test('an existing tenant signs up from the flyer: no text, the open inbox row tu
 
   // The sign-up: the flyer form's own body (dashboard publicApi
   // submitHousingFair), posted with no session under a name of the visitor's
-  // own (D6 pins the TYPED name; D4 never renames the contact).
-  const typed = { firstName: `Typed${stamp}`, lastName: 'Signup' };
+  // own (D6 pins the TYPED name; D4 never renames the contact). A realistically
+  // long family name, so the pin below is wider than the comms pane (QA-1).
+  const typed = { firstName: `Typed${stamp}`, lastName: 'Montgomery-Featherstonehaugh' };
   const signup = await request.post(`${NEXT}/public/housing-fair`, {
     data: { ...typed, phone: tenant.phone, smsConsent: true, unitId: unit.unitId },
   });
@@ -489,6 +492,36 @@ test('an existing tenant signs up from the flyer: no text, the open inbox row tu
   const pin = timeline.getByRole('link', { name: pinLabel, exact: true });
   await expect(pin).toBeVisible({ timeout: 15_000 });
   await expect(pin).toHaveAttribute('href', `/listings/${unit.unitId}`);
+
+  // Self-QA QA-1, at the suite's default 1280x720: a pin this long used to
+  // widen the comms pane past its column (a flex item's default min-width:
+  // auto), under the right column, which painted over the reply box's Send
+  // button. The pane keeps its column's width, the label is cut with an
+  // ellipsis, and the full label stays on the pin's title for a hover.
+  const column = timeline.locator('xpath=..');
+  const commsBox = await timeline.boundingBox();
+  const columnBox = await column.boundingBox();
+  if (commsBox === null || columnBox === null) throw new Error('the comms pane or its column has no box');
+  // Precondition: the label really is wider than the column - otherwise a
+  // flush pane would prove nothing. The label span's scrollWidth is its full
+  // text width whether or not the ellipsis cuts it.
+  const labelWidth = await pin.locator('span').evaluate((el) => el.scrollWidth);
+  expect(labelWidth, 'the pin label is not wider than the comms column').toBeGreaterThan(columnBox.width);
+  // Soft, so one run reports every symptom of the one defect.
+  expect
+    .soft(commsBox.x + commsBox.width, 'the comms pane runs past its column')
+    .toBeLessThanOrEqual(columnBox.x + columnBox.width + 1);
+  const send = timeline.getByRole('button', { name: 'Send', exact: true });
+  await expect(send).toBeVisible();
+  await send.scrollIntoViewIfNeeded();
+  const atSendCentre = await send.evaluate((button) => {
+    const r = button.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (hit !== null && (hit === button || button.contains(hit))) return 'the Send button';
+    return hit === null ? 'nothing (off screen)' : `<${hit.tagName.toLowerCase()} class="${hit.getAttribute('class') ?? ''}">`;
+  });
+  expect.soft(atSendCentre, 'something paints over the Send button').toBe('the Send button');
+  await expect.soft(pin).toHaveAttribute('title', pinLabel);
 
   // Properties sent (D7, D8): the flyer row, its words, its chip, and the
   // waiting row's actions.

@@ -477,6 +477,21 @@ describe('Timeline', () => {
     expect(text.parentElement?.parentElement?.className).toContain('green');
   });
 
+  // flyer-leads self-QA QA-1: a pin wider than the pane is cut with an
+  // ellipsis (Timeline.styles.test.ts), so the pill carries its full label
+  // as a title - readable on hover - on a link pin and a plain pin alike. The
+  // title is not the accessible name: that stays the label text.
+  it('a milestone pin carries its full label as its title, link or not', () => {
+    renderTimeline({ items: [MILESTONE, NUMBER_ADDED] });
+    const link = screen.getByRole('link', { name: 'Placement opened - 1450 Joseph Blvd' });
+    expect(link).toHaveAttribute('title', 'Placement opened - 1450 Joseph Blvd');
+    expect(link).toHaveAccessibleName('Placement opened - 1450 Joseph Blvd');
+    const text = screen.getByText('Now also texting from (470) 555-0148');
+    expect(text.closest('a')).toBeNull();
+    // pillText span -> the pill span, which carries the title.
+    expect(text.parentElement).toHaveAttribute('title', 'Now also texting from (470) 555-0148');
+  });
+
   it('hides milestones when "Comms only" is toggled', () => {
     renderTimeline({ items: [MESSAGE_IN, MILESTONE, NUMBER_ADDED] });
     expect(screen.getByText(/Placement opened/)).toBeInTheDocument();

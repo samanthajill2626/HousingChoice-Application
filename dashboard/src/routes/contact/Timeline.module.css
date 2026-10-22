@@ -7,6 +7,10 @@
    * display:flex column in ContactDetail). Without it the section sizes to its
    * content and leaves a dead band between comms and the right rail. */
   flex: 1;
+  /* ...and never PAST its column: with the flex default (auto) a nowrap
+   * pin's width set the pane's minimum, so a long pin pushed the pane under
+   * the right column, over the Send button (flyer-leads self-QA QA-1). */
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -444,6 +448,11 @@
   align-items: center;
   gap: var(--sp-2);
   white-space: nowrap;
+  /* A flex item of .evt: min-width: 0 lets a long pin shrink to its row (the
+   * default, auto, held it at its text's width) so .pillText's ellipsis
+   * engages; max-width keeps it inside the row (QA-1). */
+  min-width: 0;
+  max-width: 100%;
   text-decoration: none;
   background: var(--c-evt-neutral-bg);
   border: 1px solid var(--c-evt-neutral-border);

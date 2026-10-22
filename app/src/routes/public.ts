@@ -94,7 +94,7 @@ import {
   housingAuthorityNames,
   loadPublicOrgEntries,
 } from '../services/publicOrgList.js';
-import { isOptedOut } from '../services/scheduledSendSuppression.js';
+import { isNumberThreadOptedOut } from '../services/numberSuppression.js';
 import { applyFlyerShareEntry, type FlyerShareResult } from '../services/shareLedger.js';
 
 /**
@@ -136,10 +136,11 @@ const SIGNUP_REPEAT_WINDOW_MS = 24 * 60 * 60 * 1000;
 /**
  * flyer-leads plan 1.1: the log line of every failed best-effort sign-up step,
  * with { marker, step } and never a name or phone. The steps: repeat_check
- * (WARN - it fails open), pin, touch (ERROR; WARN with reason group_thread
- * for a thread that is not 1:1), increment, ledger, and audit - the
- * housing_fair_signup append on both paths (planner review C-F1). The welcome
- * logs its own lines.
+ * (WARN - it fails open), opt_out_check (WARN - the number read behind the
+ * pin's opted-out note; the thread step's own flag stands in, FW-P3), pin,
+ * touch (ERROR; WARN with reason group_thread for a thread that is not 1:1),
+ * increment, ledger, and audit - the housing_fair_signup append on both paths
+ * (planner review C-F1). The welcome logs its own lines.
  */
 const SIGNUP_STEP_FAILED = 'housing-fair signup step failed';
 
@@ -159,13 +160,30 @@ type SignupSentSkipped =
   | 'error';
 
 /**
- * flyer-leads FW-P2 (Cameron, 2026-10-22): the end of the signed_up pin's
- * words when the number is opted out. A sign-up cannot opt a number back in -
- * Twilio's opt-out block lifts only when the person texts START, YES or
- * UNSTOP - so the pin tells staff (and no line on the public page: Cameron
- * rejected a thank-you line, since people do not remember texting STOP).
+ * flyer-leads FW-P2 / FW-P3 (Cameron, 2026-10-22): why texts to the signed-up
+ * number are off, which picks the end of the signed_up pin's words - worded
+ * by the CAUSE (FW-P3, Cameron's pick (a)) and judged in step (3b). A sign-up
+ * never opts anyone back in, so the pin tells staff (and no line on the
+ * public page: Cameron rejected a thank-you line, since people do not
+ * remember texting STOP).
+ * - 'number': a 1:1 thread of THIS number carries sms_opt_out. An inbound
+ *   STOP always writes the number's own thread flag (applyNumberSuppression,
+ *   services/numberSuppression.ts), and Twilio's opt-out block lifts only
+ *   when the person texts START, YES or UNSTOP from that number.
+ * - 'contact': only the contact's own flag - a staff Do-Not-Contact (the
+ *   contact menu's "Mark Do-Not-Contact"), or the contact's other number
+ *   opted out. Staff lift it with the same menu's "Allow SMS (clear
+ *   opt-out)". A 1:1 21610 receipt on the primary number and an imported
+ *   legacy STOP also flag the contact only (routes/webhooks/twilio.ts,
+ *   lib/import/apply.ts), so they read as this case too.
+ * - 'none': no note.
  */
-const SIGNUP_OPTED_OUT_NOTE = ' (opted out of texts - they need to text START to get texts again)';
+type SignupOptOut = 'number' | 'contact' | 'none';
+const SIGNUP_OPT_OUT_NOTE: Record<SignupOptOut, string> = {
+  number: ' (this number opted out of texts - they need to text START from it to get texts again)',
+  contact: ' (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)',
+  none: '',
+};
 
 /**
  * flyer-leads D6.2 (plan 1.1): the signed_up pin's words - inline staff copy,
@@ -174,7 +192,8 @@ const SIGNUP_OPTED_OUT_NOTE = ' (opted out of texts - they need to text START to
  * trim and by the parser): the contact itself is never renamed, and an
  * auto-captured unknown contact has no other name. The address is
  * formatAddress, falling back to the unitId, as the tour-request label does.
- * Each form ends with SIGNUP_OPTED_OUT_NOTE when the number is opted out.
+ * Each form ends with the SIGNUP_OPT_OUT_NOTE of why texts are off, if they
+ * are.
  */
 function signupPinLabel(args: {
   unitId: string | undefined;
@@ -182,10 +201,10 @@ function signupPinLabel(args: {
   viaFlyer: boolean;
   firstName: string;
   lastName: string;
-  optedOut: boolean;
+  optOut: SignupOptOut;
 }): string {
   const name = `${args.firstName} ${args.lastName}`;
-  const note = args.optedOut ? SIGNUP_OPTED_OUT_NOTE : '';
+  const note = SIGNUP_OPT_OUT_NOTE[args.optOut];
   if (args.unitId === undefined) return `Signed up on the join page as ${name}${note}`;
   if (!args.viaFlyer || args.flyerUnit === undefined) return `Signed up from a flyer as ${name}${note}`;
   return `Signed up from the flyer for ${formatAddress(args.flyerUnit.address) || args.unitId} as ${name}${note}`;
@@ -689,19 +708,34 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     // a new one too, AFTER its welcome, so its new thread ends with the
     // welcome as the newest message and is unread and on top. Both skipped on
     // a repeat. Each is best-effort, and a failed pin still marks the thread.
-    // FW-P2 (Cameron, 2026-10-22): an opted-out number's pin ends with a note
-    // for staff. The send path's rule (isOptedOut, sendMessage's gate) on what
-    // the handler has held since the thread step - the thread's flag (a STOP
-    // from the number before any contact held it, so a NEW contact gets the
-    // note too) or the contact's - with no new read. Only the words change.
-    const optedOut = isOptedOut(conversation.sms_opt_out, contact.sms_opt_out);
+    // FW-P2 / FW-P3 (Cameron, 2026-10-22): when texts to the number are off,
+    // the pin ends with a note for staff worded by its cause (SignupOptOut):
+    // 'number' when the thread step's thread or ANY 1:1 thread of the number
+    // carries the flag - a STOP from the number before any contact held it
+    // gives a NEW contact the note too, and an older thread's STOP counts
+    // (the number's threads, findByParticipantPhone, under
+    // readNumberSuppression's thread rule isNumberThreadOptedOut); else
+    // 'contact' when the contact's own flag is set; else no note. The read
+    // runs on every sign-up that writes a pin and never on a repeat, whatever
+    // the thread step's flag says (the answer's timing never turns on the
+    // opt-out). It is best-effort: a throw is logged (WARN step
+    // opt_out_check) and the thread step's flag stands in. Only the words
+    // change.
     let recorded = false;
     if (!isRepeat) {
+      let numberOptedOut = conversation.sms_opt_out === true;
+      try {
+        const threads = await conversations.findByParticipantPhone(phone);
+        if (threads.some(isNumberThreadOptedOut)) numberOptedOut = true;
+      } catch (err) {
+        log.warn({ marker, step: 'opt_out_check', err }, SIGNUP_STEP_FAILED);
+      }
+      const optOut: SignupOptOut = numberOptedOut ? 'number' : contact.sms_opt_out === true ? 'contact' : 'none';
       try {
         await activity.record({
           contactId,
           type: 'signed_up',
-          label: signupPinLabel({ unitId, flyerUnit, viaFlyer, firstName, lastName, optedOut }),
+          label: signupPinLabel({ unitId, flyerUnit, viaFlyer, firstName, lastName, optOut }),
           ...(sourceRefId !== undefined && { refType: 'unit' as const, refId: sourceRefId }),
           at: nowIso,
         });

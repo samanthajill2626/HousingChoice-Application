@@ -6,7 +6,7 @@
 // the public router's injected clock (plan 2.6, AR3) driven by `clock.ms`.
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
-import type { ContactItem, ContactType } from '../src/repos/contactsRepo.js';
+import { phoneRefId, type ContactItem, type ContactType } from '../src/repos/contactsRepo.js';
 import { seedFlyerSignUp, seedListingSend } from './helpers/listingSendSeed.js';
 import { toConversationUpdatedEvent } from '../src/lib/events.js';
 import type { ConversationItem, ConversationType } from '../src/repos/conversationsRepo.js';
@@ -1022,23 +1022,27 @@ describe('the housing_fair_signup audit is best-effort too (D6.4, planner review
   });
 });
 
-// flyer-leads FW-P2 (Cameron, 2026-10-22): the form cannot opt a number back
-// in - Twilio's opt-out block lifts only when the person texts START, YES or
-// UNSTOP - so the sign-up's pin tells staff. The rule is the send path's
-// (isOptedOut: the thread's or the contact's sms_opt_out), judged after the
-// thread step on what the handler already holds. Nothing else changes: the
-// unread mark, the repeat check, the flyer entry, the welcome rule, the answer
-// and the audit; neither flag is written.
+// flyer-leads FW-P2 / FW-P3 (Cameron, 2026-10-22): the form cannot opt a
+// number back in, so the sign-up's pin tells staff why texts are off - worded
+// by its CAUSE since FW-P3 (Cameron's pick (a)). A flag on one of the
+// number's 1:1 threads is a STOP from that number: the START note, since
+// Twilio's block lifts only when the person texts START, YES or UNSTOP from
+// it. The contact's flag alone (a staff Do-Not-Contact, or the contact's
+// other number opted out) gets the Do-Not-Contact note. Nothing else
+// changes: the unread mark, the repeat check, the flyer entry, the welcome
+// rule, the answer and the audit; neither flag is written.
+const STOP_NOTE = ' (this number opted out of texts - they need to text START from it to get texts again)';
+const DNC_NOTE = ' (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)';
+
+/** The three signed_up pin forms: [what, the extra body fields, the label]. */
+const PIN_FORMS: Array<[string, Record<string, unknown>, string]> = [
+  ['the flyer', { unitId: 'unit-1' }, FLYER_LABEL],
+  ['a flyer whose property is not shareable', { unitId: 'unit-placed' }, A_FLYER_LABEL],
+  ['the join page', {}, JOIN_LABEL],
+];
+
 describe('an opted-out number: the pin tells staff (FW-P2)', () => {
-  const NOTE = ' (opted out of texts - they need to text START to get texts again)';
-
-  const FORMS: Array<[string, Record<string, unknown>, string]> = [
-    ['the flyer', { unitId: 'unit-1' }, FLYER_LABEL],
-    ['a flyer whose property is not shareable', { unitId: 'unit-placed' }, A_FLYER_LABEL],
-    ['the join page', {}, JOIN_LABEL],
-  ];
-
-  it.each(FORMS)('the CONTACT opted out, %s: the pin label ends with the note', async (_what, extra, label) => {
+  it.each(PIN_FORMS)('the CONTACT opted out (its flag only), %s: the pin label ends with the Do-Not-Contact note', async (_what, extra, label) => {
     const { app, world } = harness();
     seedUnit(world);
     seedUnit(world, 'unit-placed', { status: 'placed' });
@@ -1049,13 +1053,13 @@ describe('an opted-out number: the pin tells staff (FW-P2)', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
-    expect(pins(world)).toEqual([expect.objectContaining({ contactId: 'c-1', label: `${label}${NOTE}`, at: T0_ISO })]);
+    expect(pins(world)).toEqual([expect.objectContaining({ contactId: 'c-1', label: `${label}${DNC_NOTE}`, at: T0_ISO })]);
     expect(world.unreadIncrements).toEqual(['conv-1']);
     expect(world.sent).toHaveLength(0);
     expect(world.contacts.find((c) => c.contactId === 'c-1')?.sms_opt_out).toBe(true);
   });
 
-  it('the THREAD opted out (the contact carries no flag): the note - and the mark, the entry, the audit and the repeat check are unchanged', async () => {
+  it('the THREAD opted out (the contact carries no flag): the STOP note - and the mark, the entry, the audit and the repeat check are unchanged', async () => {
     const { app, world, clock } = harness();
     seedUnit(world);
     seedContact(world);
@@ -1066,7 +1070,7 @@ describe('an opted-out number: the pin tells staff (FW-P2)', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
     expect(pins(world)).toEqual([
-      expect.objectContaining({ contactId: 'c-1', label: `${FLYER_LABEL}${NOTE}`, refType: 'unit', refId: 'unit-1', at: T0_ISO }),
+      expect.objectContaining({ contactId: 'c-1', label: `${FLYER_LABEL}${STOP_NOTE}`, refType: 'unit', refId: 'unit-1', at: T0_ISO }),
     ]);
     expect(world.unreadIncrements).toEqual(['conv-1']);
     expect(convUpdates(world)).toEqual([expect.objectContaining({ conversationId: 'conv-1', unread_count: 1 })]);
@@ -1095,7 +1099,7 @@ describe('an opted-out number: the pin tells staff (FW-P2)', () => {
     expect(world.unreadIncrements).toEqual(['conv-1']);
   });
 
-  it('a NEW contact on a thread that opted out before any contact held the number: the welcome is refused as today, and the pin carries the note', async () => {
+  it('a NEW contact on a thread that opted out before any contact held the number: the welcome is refused as today, and the pin carries the STOP note', async () => {
     const { app, world, capture } = harness();
     seedUnit(world);
     seedThread(world, { type: 'unknown_1to1', participants: undefined, sms_opt_out: true });
@@ -1112,7 +1116,7 @@ describe('an opted-out number: the pin tells staff (FW-P2)', () => {
       expect.objectContaining({ code: 'contact_opted_out' }),
     ]);
     expect(pins(world)).toEqual([
-      expect.objectContaining({ contactId: contact?.contactId, label: `${FLYER_LABEL}${NOTE}`, refId: 'unit-1', at: T0_ISO }),
+      expect.objectContaining({ contactId: contact?.contactId, label: `${FLYER_LABEL}${STOP_NOTE}`, refId: 'unit-1', at: T0_ISO }),
     ]);
     expect(world.unreadIncrements).toEqual(['conv-1']);
     expect(world.conversations.get('conv-1')?.sms_opt_out).toBe(true);
@@ -1127,5 +1131,183 @@ describe('an opted-out number: the pin tells staff (FW-P2)', () => {
     await post(app, signupBody({ unitId: 'unit-1' }));
 
     expect(pins(world).map((p) => p.label)).toEqual([FLYER_LABEL]);
+  });
+});
+
+// flyer-leads FW-P3 (Cameron, 2026-10-22: "Go with (a), the Do-Not-Contact
+// note"): the note says WHY texts are off. A flag on any 1:1 thread of the
+// signed-up NUMBER - the one the thread step returns, or an older one, read
+// with findByParticipantPhone under readNumberSuppression's thread rule
+// (isNumberThreadOptedOut) - is a STOP from that number: the START note. The
+// contact's flag alone is a staff Do-Not-Contact, or the contact's other
+// number opted out: the Do-Not-Contact note. The read runs only when a pin is
+// written, and it is best-effort: a throw is logged (WARN step
+// opt_out_check, no PII) and the thread step's own flag stands in.
+describe('the opted-out note by cause (FW-P3)', () => {
+  /** The primary number of a two-number contact whose second number is PHONE. */
+  const OTHER_PHONE = '+15550109999';
+  /** The typed name, the phone in every form, the stored name and the pin's address. */
+  const PII = ['Keisha', 'Jones', PHONE, '5550102000', '010-2000', 'Tia', 'Moss', '12 Oak St'];
+
+  /** An older, CLOSED thread of PHONE - never the one the thread step returns. */
+  function seedOlderThread(world: FakeWorld, over: Partial<ConversationItem> = {}): ConversationItem {
+    return seedThread(world, {
+      conversationId: 'conv-old',
+      status: 'closed',
+      last_activity_at: '2026-06-01T10:00:00.000Z',
+      created_at: '2026-06-01T10:00:00.000Z',
+      ...over,
+    });
+  }
+
+  it.each(PIN_FORMS)('the thread step returns a flagged thread, %s: the STOP note', async (_what, extra, label) => {
+    const { app, world } = harness();
+    seedUnit(world);
+    seedUnit(world, 'unit-placed', { status: 'placed' });
+    seedContact(world);
+    seedThread(world, { sms_opt_out: true });
+
+    const res = await post(app, signupBody(extra));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(pins(world)).toEqual([expect.objectContaining({ contactId: 'c-1', label: `${label}${STOP_NOTE}`, at: T0_ISO })]);
+  });
+
+  it('the flag only on an OLDER thread of the number (the thread step returns a clean one): the STOP note; only the current thread is marked, and no flag is written', async () => {
+    const { app, world } = harness();
+    seedUnit(world);
+    seedContact(world);
+    seedOlderThread(world, { sms_opt_out: true });
+    seedThread(world);
+    const read = vi.spyOn(world.conversationsRepo, 'findByParticipantPhone');
+
+    const res = await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(read.mock.calls).toEqual([[PHONE]]);
+    expect(pins(world)).toEqual([
+      expect.objectContaining({ contactId: 'c-1', label: `${FLYER_LABEL}${STOP_NOTE}`, refId: 'unit-1', at: T0_ISO }),
+    ]);
+    expect(world.unreadIncrements).toEqual(['conv-1']);
+    expect(world.conversations.get('conv-old')).toMatchObject({ status: 'closed', sms_opt_out: true });
+    expect(world.conversations.get('conv-1')).not.toHaveProperty('sms_opt_out');
+    expect(world.contacts.find((c) => c.contactId === 'c-1')).not.toHaveProperty('sms_opt_out');
+  });
+
+  const CONTACT_ONLY: Array<[string, (world: FakeWorld) => void]> = [
+    [
+      'a staff Do-Not-Contact on a one-number contact',
+      (world) => {
+        seedContact(world, { sms_opt_out: true });
+        seedThread(world);
+      },
+    ],
+    [
+      'the contact\'s OTHER number opted out (its primary STOPped; the sign-up comes from its second number)',
+      (world) => {
+        // A primary-number STOP flags the contact AND that number's own thread; PHONE's thread is clean.
+        seedContact(world, { phone: OTHER_PHONE, sms_opt_out: true });
+        world.contacts.push({ contactId: phoneRefId(PHONE), type: 'unknown', phone: PHONE, phone_ref: true, phone_ref_owner: 'c-1' } as ContactItem);
+        seedThread(world, {
+          conversationId: 'conv-primary',
+          participant_phone: OTHER_PHONE,
+          participants: [{ contactId: 'c-1', phone: OTHER_PHONE }],
+          sms_opt_out: true,
+        });
+        seedThread(world);
+      },
+    ],
+  ];
+
+  it.each(CONTACT_ONLY)('only the contact is flagged - %s: the Do-Not-Contact note', async (_what, arrange) => {
+    const { app, world } = harness();
+    seedUnit(world);
+    arrange(world);
+
+    const res = await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(pins(world)).toEqual([
+      expect.objectContaining({ contactId: 'c-1', label: `${FLYER_LABEL}${DNC_NOTE}`, refId: 'unit-1', at: T0_ISO }),
+    ]);
+    expect(world.unreadIncrements).toEqual(['conv-1']);
+    expect(world.contacts.find((c) => c.contactId === 'c-1')?.sms_opt_out).toBe(true);
+  });
+
+  it('both the number and the contact flagged (what a primary-number STOP writes): the STOP note', async () => {
+    const { app, world } = harness();
+    seedUnit(world);
+    seedContact(world, { sms_opt_out: true });
+    seedThread(world, { sms_opt_out: true });
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(pins(world).map((p) => p.label)).toEqual([`${FLYER_LABEL}${STOP_NOTE}`]);
+  });
+
+  it('(PIN) neither flagged, with an older clean thread too: no note', async () => {
+    const { app, world } = harness();
+    seedUnit(world);
+    seedContact(world);
+    seedOlderThread(world);
+    seedThread(world);
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(pins(world).map((p) => p.label)).toEqual([FLYER_LABEL]);
+  });
+
+  it('the number read runs once per sign-up that writes a pin, whatever the flags, and never on a repeat inside 24 hours', async () => {
+    const { app, world, clock } = harness();
+    seedUnit(world);
+    seedContact(world);
+    seedThread(world, { sms_opt_out: true });
+    const read = vi.spyOn(world.conversationsRepo, 'findByParticipantPhone');
+
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    // Read although the thread step's own flag already decides the note, so
+    // the answer's timing never turns on the opt-out.
+    expect(read.mock.calls).toEqual([[PHONE]]);
+
+    clock.ms = T0 + HOUR_MS;
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    expect(pins(world)).toHaveLength(1);
+    expect(read).toHaveBeenCalledTimes(1);
+
+    clock.ms = T0 + 25 * HOUR_MS;
+    await post(app, signupBody({ unitId: 'unit-1' }));
+    expect(pins(world).map((p) => p.label)).toEqual([`${FLYER_LABEL}${STOP_NOTE}`, `${FLYER_LABEL}${STOP_NOTE}`]);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  const READ_THROWS: Array<[string, Partial<ConversationItem>, string]> = [
+    ['the thread step returned a flagged thread: the STOP note stands', { sms_opt_out: true }, `${FLYER_LABEL}${STOP_NOTE}`],
+    ['only an OLDER thread is flagged: unseen, so no note', {}, FLYER_LABEL],
+  ];
+
+  it.each(READ_THROWS)('the number read throws - ONE WARN step opt_out_check with no PII, the thread step\'s flag stands in, 200 { ok: true }; %s', async (_what, threadOver, label) => {
+    const { app, world, capture } = harness();
+    seedUnit(world);
+    seedContact(world);
+    seedOlderThread(world, { sms_opt_out: true });
+    seedThread(world, threadOver);
+    vi.spyOn(world.conversationsRepo, 'findByParticipantPhone').mockRejectedValue(new Error('participant index down'));
+
+    const res = await post(app, signupBody({ unitId: 'unit-1' }));
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(pins(world).map((p) => p.label)).toEqual([label]);
+    expect(world.unreadIncrements).toEqual(['conv-1']);
+    expect((await ledgerRow(world))?.shares).toEqual({ flyer: flyerEntry(T0_ISO) });
+    expect(stepFailures(capture)).toEqual([
+      expect.objectContaining({ step: 'opt_out_check', level: 40, marker: expect.any(String) }),
+    ]);
+    const stepLine = JSON.stringify(stepFailures(capture));
+    for (const pii of PII) expect(stepLine, pii).not.toContain(pii);
+    expect(captured(capture)).toEqual([expect.objectContaining({ recorded: true, sentRecorded: true })]);
   });
 });

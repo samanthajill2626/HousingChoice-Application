@@ -120,15 +120,26 @@ export async function readNumberSuppression(
     return { suppressed: true, scope, ...(contactId !== undefined && { contactId }) };
   }
   const threads = await deps.conversationsRepo.findByParticipantPhone(phone);
-  // MULTI-PARTY THREADS ARE NOT PER-NUMBER RECORDS (invariant 13.6). Neither a
-  // relay_group nor a group_text can legitimately appear here (neither carries
-  // participant_phone), and spec 4.4 forbids sms_opt_out on a group thread at
-  // all - naming them keeps a future GSI change from silently reinterpreting a
-  // multi-party flag as this number's opt-out.
-  const suppressed = threads.some(
-    (c) => c.type !== 'relay_group' && c.type !== 'group_text' && c.sms_opt_out === true,
-  );
+  const suppressed = threads.some(isNumberThreadOptedOut);
   return { suppressed, scope, ...(contactId !== undefined && { contactId }) };
+}
+
+/**
+ * The THREAD rule of a number's suppression read: does this thread - one of
+ * the number's own, from conversationsRepo.findByParticipantPhone - carry its
+ * opt-out? Exported so readNumberSuppression above and the sign-up pin's
+ * opted-out note (routes/public.ts, flyer-leads FW-P3) apply ONE rule.
+ *
+ * MULTI-PARTY THREADS ARE NOT PER-NUMBER RECORDS (invariant 13.6). Neither a
+ * relay_group nor a group_text is a person's number (a group_text carries no
+ * participant_phone; a relay_group's is its synthetic POOL number, so only a
+ * read for a pool number - a sign-up typed with one - returns it), and spec
+ * 4.4 forbids sms_opt_out on a group thread at all - naming them keeps a
+ * future GSI change from silently reinterpreting a multi-party flag as this
+ * number's opt-out.
+ */
+export function isNumberThreadOptedOut(c: ConversationItem): boolean {
+  return c.type !== 'relay_group' && c.type !== 'group_text' && c.sms_opt_out === true;
 }
 
 /**

@@ -84,7 +84,7 @@ export async function isMemberSuppressed(
   // what keeps a future denormalization (a "primary member" participant_phone
   // for inbox rendering, a GSI widening) from silently reading a group flag as
   // this member's own opt-out and muting them from every relay announcement.
-  // The twin reader services/numberSuppression.ts:129 carries the same clause.
+  // The twin reader services/numberSuppression.ts:142 carries the same clause.
   //
   // WHAT IS DELIBERATELY *NOT* CHANGED HERE: this function's contact-flag rule
   // (`contact?.sms_opt_out` above, which speaks for ANY of the contact's

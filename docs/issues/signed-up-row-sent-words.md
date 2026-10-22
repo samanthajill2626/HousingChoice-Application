@@ -6,7 +6,7 @@ severity: low
 status: open
 area: dashboard
 created: 2026-10-22
-refs: dashboard/src/routes/contact/Card.tsx:349-351, dashboard/src/routes/contact/Card.tsx:371, dashboard/src/routes/broadcasts/FollowUpView.tsx:68, dashboard/src/routes/broadcasts/FollowUpView.tsx:119, dashboard/src/routes/contact/TenantFile.tsx:339, dashboard/src/routes/contact/PartnerFile.tsx:197, dashboard/src/routes/listing/ListingDetail.tsx:1345, app/src/lib/listingSendOutcome.ts:83-88, app/src/lib/listingSendOutcome.ts:130, app/src/services/followUps.ts:183, app/src/services/shareLedger.ts:136-137, app/src/services/shareLedger.ts:271-274, app/src/lib/shareLedgerKeys.ts:37-47, app/src/repos/listingSendsRepo.ts:135, app/src/repos/listingSendsRepo.ts:259, app/src/services/followUps.ts:44, dashboard/src/api/types.ts:3157, dashboard/src/api/types.ts:3728
+refs: dashboard/src/routes/contact/Card.tsx:349-351, dashboard/src/routes/contact/Card.tsx:371, dashboard/src/routes/broadcasts/FollowUpView.tsx:68, dashboard/src/routes/broadcasts/FollowUpView.tsx:119, dashboard/src/routes/contact/TenantFile.tsx:339, dashboard/src/routes/contact/PartnerFile.tsx:197, dashboard/src/routes/listing/ListingDetail.tsx:1345, app/src/lib/listingSendOutcome.ts:83-88, app/src/lib/listingSendOutcome.ts:130, app/src/services/followUps.ts:183, app/src/services/shareLedger.ts:136-137, app/src/repos/listingSendsRepo.ts:328-336, app/src/lib/shareLedgerKeys.ts:37-47, app/src/repos/listingSendsRepo.ts:135, app/src/repos/listingSendsRepo.ts:259, app/src/services/followUps.ts:44, dashboard/src/api/types.ts:3157, dashboard/src/api/types.ts:3728
 ---
 
 **Problem.** A flyer sign-up writes a `flyer` entry on the pair's
@@ -63,7 +63,8 @@ wherever it projects a row and already has the one rule
 'flyer'`. `Card.tsx:351` and `FollowUpView.tsx:119` then read "Signed up from
 the flyer <date>" whenever it is set, whatever the outcome. The existing
 `via` field cannot carry it: a row the flyer entry created reads
-`via: 'broadcast'` (putShareMemory's first-write value,
-`app/src/services/shareLedger.ts:271-274`), and an older row keeps whatever
+`via: 'broadcast'` (putShareMemory's first-write value: it SETs
+`#via = if_not_exists(#via, :via)`, `app/src/repos/listingSendsRepo.ts:336`,
+with `:via` bound to `'broadcast'` at `:328`), and an older row keeps whatever
 its first share wrote. A server and dashboard change, so it takes the full
 gates.

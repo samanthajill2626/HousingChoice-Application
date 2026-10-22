@@ -6,7 +6,7 @@ severity: low
 status: open
 area: dashboard
 created: 2026-10-21
-refs: dashboard/src/routes/contact/ConsentCaptureModal.tsx:28-109, dashboard/src/routes/contact/ContactCommsPane.tsx:369-371, dashboard/src/routes/contact/ConsentFields.tsx:57-62, dashboard/src/lib/consentCopy.ts:46-52, app/src/routes/contacts.ts:325-371, app/src/routes/public.ts:230, app/src/routes/public.ts:763-776, app/src/lib/smsCompliance.ts:66-91, app/src/lib/smsCompliance.ts:101, app/src/services/sendMessage.ts:551, app/src/jobs/broadcastFanOut.ts:276-283, app/src/services/groupMembers.ts:100-125, dashboard/src/routes/public/FlyerPage.tsx:251, dashboard/src/routes/public/FlyerPage.tsx:431-440, dashboard/src/routes/public/HousingFairIntake.tsx:163, app/src/services/sendMessage.ts:123, app/src/services/sendMessage.ts:513, app/src/lib/smsCompliance.ts:133, app/src/lib/smsCompliance.ts:239-245, app/src/lib/smsCompliance.ts:262-266, app/src/routes/public.ts:564, app/src/routes/public.ts:575-606, app/src/routes/public.ts:618-619, app/src/routes/public.ts:642, app/src/routes/public.ts:168, app/src/routes/public.ts:697, app/scripts/backfillConsentMethod.ts
+refs: dashboard/src/routes/contact/ConsentCaptureModal.tsx:28-109, dashboard/src/routes/contact/ContactCommsPane.tsx:369-371, dashboard/src/routes/contact/ConsentFields.tsx:57-62, dashboard/src/lib/consentCopy.ts:46-52, app/src/routes/contacts.ts:325-371, app/src/routes/public.ts:230, app/src/routes/public.ts:763-776, app/src/lib/smsCompliance.ts:66-91, app/src/lib/smsCompliance.ts:101, app/src/services/sendMessage.ts:551, app/src/jobs/broadcastFanOut.ts:276-283, app/src/services/groupMembers.ts:100-125, dashboard/src/routes/public/FlyerPage.tsx:251, dashboard/src/routes/public/FlyerPage.tsx:431-440, dashboard/src/routes/public/HousingFairIntake.tsx:163, app/src/services/sendMessage.ts:123, app/src/services/sendMessage.ts:513, app/src/lib/smsCompliance.ts:133, app/src/lib/smsCompliance.ts:239-245, app/src/lib/smsCompliance.ts:262-266, app/src/routes/public.ts:564, app/src/routes/public.ts:575-606, app/src/routes/public.ts:618-619, app/src/routes/public.ts:642, app/src/routes/public.ts:182-186, app/src/routes/public.ts:726-733, app/src/services/numberSuppression.ts:141-143, dashboard/src/routes/contact/ContactActionsMenu.tsx:207, app/scripts/backfillConsentMethod.ts
 ---
 
 **Problem.** A public sign-up - the flyer's "Sign up" box or /join - never
@@ -83,16 +83,28 @@ reach the person.
 Decided (Cameron, 2026-10-22, at the planner's verdict): the form cannot opt a
 number back in. Twilio's opt-out block lifts only when the person texts START,
 YES or UNSTOP, so no web-form rule can re-subscribe a STOPped number, and none
-is built. Staff see it instead (planner review FW-P2): when the number is
-opted out - the send path's rule, `isOptedOut` on the thread's or the
-contact's `sms_opt_out` (`app/src/routes/public.ts:697`) - the `signed_up`
-pin's label, in all three forms, ends with
-" (opted out of texts - they need to text START to get texts again)"
-(`SIGNUP_OPTED_OUT_NOTE`, `public.ts:168`). A new contact gets the note too
-when its thread carries the flag from a STOP sent before any contact held the
-number (its welcome is refused, as before). No thank-you line: Cameron
-rejected one, since people do not remember texting STOP, so the flyer's and
-/join's thank-you copy stays as it is.
+is built. Staff see it instead (planner review FW-P2), and since FW-P3
+(Cameron's pick (a), 2026-10-22) the note says WHY texts are off: the
+`signed_up` pin's label, in all three forms, ends with one of two notes
+(`SIGNUP_OPT_OUT_NOTE`, `app/src/routes/public.ts:182-186`, chosen at
+`:726-733`).
+- When a 1:1 thread of the signed-up number carries `sms_opt_out` - the
+  thread step's, or any of the number's threads (`findByParticipantPhone`
+  under readNumberSuppression's thread rule, `isNumberThreadOptedOut`,
+  `app/src/services/numberSuppression.ts:141-143`) - that is a STOP from the
+  number, and the label ends with
+  " (this number opted out of texts - they need to text START from it to get texts again)".
+  A new contact gets this note too when its thread carries the flag from a
+  STOP sent before any contact held the number (its welcome is refused, as
+  before).
+- Else, when only the contact's own `sms_opt_out` is set - a staff
+  Do-Not-Contact, which staff can lift themselves with "Allow SMS (clear
+  opt-out)" (`dashboard/src/routes/contact/ContactActionsMenu.tsx:207`), or
+  the contact's other number opted out - the label ends with
+  " (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)".
+
+No thank-you line: Cameron rejected one, since people do not remember texting
+STOP, so the flyer's and /join's thank-you copy stays as it is.
 
 **Also: a sign-up that fails before its welcome is never welcomed** (planner
 review P1, `P1-adversarial.md` L1). Spec D5 welcomes only a contact the

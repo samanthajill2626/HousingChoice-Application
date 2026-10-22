@@ -666,12 +666,17 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   "Signed up from the flyer for `<address>` as `<First Last>`" (linked to
   the property), "Signed up from a flyer as `<First Last>`" (the property
   is not shareable) or "Signed up on the join page as `<First Last>`".
-  When the number is opted out - the send path's rule: the thread's or the
-  contact's `sms_opt_out` - each form ends with
-  " (opted out of texts - they need to text START to get texts again)"
-  (Cameron, 2026-10-22). A sign-up cannot opt a number back in: Twilio's
-  opt-out block lifts only when the person texts START, YES or UNSTOP, so
-  the pin tells staff and the public page says nothing different.
+  When texts to the number are off, each form ends with a note worded by
+  its cause (Cameron, 2026-10-22). When a 1:1 thread of the signed-up
+  number carries `sms_opt_out` (a STOP from that number), it ends with
+  " (this number opted out of texts - they need to text START from it to get texts again)":
+  a sign-up cannot opt a number back in, since Twilio's opt-out block
+  lifts only when the person texts START, YES or UNSTOP from it. Else, when
+  only the contact's own `sms_opt_out` is set (a staff Do-Not-Contact, or
+  the contact's other number opted out), it ends with
+  " (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)":
+  staff lift it with "Allow SMS (clear opt-out)" on the contact's menu.
+  Either way the pin tells staff and the public page says nothing different.
   `<First Last>` is the name typed on the form: a sign-up never changes an
   existing contact (no name, type, status, voucher size, housing authority
   or consent), and only a contact the sign-up CREATED gets the welcome

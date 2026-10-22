@@ -425,8 +425,8 @@ was sent to them before.
   - Reason: the sign-up box asks for alerts about "this home and others", so
     a sign-up is not proof of renewed interest in a home they turned down.
     It also means a public request never undoes a decline that is already
-    written (one exception, a race inside the outcome route's own write:
-    section 7).
+    written (one exception: a sign-up inside the outcome route's own write
+    window, section 7).
   - "Current" is exactly `effectiveDecline(row, undefined)`
     (`listingSendOutcome.ts:47-58`) on the row the ledger write read: a
     decline whose instant is at or after `sentAt`, or any decline when the
@@ -627,7 +627,7 @@ reports it.
   It must not mis-forecast a `flyer` entry.
 - The property Activity card: a sign-up is not a property audit, so no new
   row appears there. Its contact label follows AR13 (section 7): a nameless
-  contact reads as its formatted phone.
+  contact reads as the phone as staff screens show it.
 - The audit: the `housing_fair_signup` fields (D6). Its reader,
   `app/scripts/backfill-join-housing-authority.ts:226`, must still work.
 - Unchanged and named on purpose: no write to an existing contact. Staff's
@@ -772,8 +772,9 @@ and plan section 4.
   Activity rows for that click. Accepted in the build's code review; filed
   as docs/issues/flyer-signup-decline-click-race.md.
 - D7 / AR13 at the handback review: the property Activity card's contact
-  label uses the same rule as the Sent to card (name, else the formatted
-  phone), since staff can now record outcomes on a nameless contact's row.
+  label uses the same rule as the Sent to card (name, else the phone as
+  staff screens show it), since staff can now record outcomes on a nameless
+  contact's row.
 - D6.4 at the handback review: the `housing_fair_signup` audit is
   best-effort too, on both the live and the deleted path (a throw is logged
   and the answer stays `{ ok: true }`). Still NOT best-effort, as before
@@ -789,10 +790,22 @@ and plan section 4.
   'Staff only - never on a property flyer.' (landlord form). The tags are
   about the flyer; rent still reaches tenants through the Matching [Rent]
   merge field, which stays.
-- D6.2 opted-out note (Cameron, 2026-10-22): when the number is opted out
-  (the send path's rule: the thread's or the contact's sms_opt_out), the
-  pin label ends
-  ' (opted out of texts - they need to text START to get texts again)'.
-  The form cannot re-subscribe a number: Twilio's opt-out block lifts only
-  when the person texts START, YES or UNSTOP. No thank-you line (Cameron
-  rejected it: people do not remember texting STOP).
+- D6.2 opted-out note, worded by its cause (Cameron, 2026-10-22, his pick
+  (a) in the P3 review): the note tells staff why texts to the number are
+  off, in one of two forms.
+  - A STOP from the number (Cameron, 2026-10-22): when a 1:1 thread of the
+    signed-up number carries sms_opt_out - the thread step's thread, or any
+    of the number's threads read with findByParticipantPhone under
+    readNumberSuppression's thread rule (best-effort: on a failed read the
+    thread step's flag stands in) - the pin label ends
+    ' (this number opted out of texts - they need to text START from it to get texts again)'.
+    A STOP always writes the number's own thread flag, and the form cannot
+    re-subscribe a number: Twilio's opt-out block lifts only when the
+    person texts START, YES or UNSTOP from it.
+  - A Do-Not-Contact (Cameron, 2026-10-22: "Go with (a), the Do-Not-Contact
+    note"): else, when only the contact's own sms_opt_out is set (a staff
+    Do-Not-Contact, or the contact's other number opted out), the label
+    ends ' (marked Do-Not-Contact - texts stay off unless staff choose Allow SMS)'.
+    Staff lift it with "Allow SMS (clear opt-out)" on the contact's menu.
+  - No thank-you line (Cameron rejected it: people do not remember texting
+    STOP).

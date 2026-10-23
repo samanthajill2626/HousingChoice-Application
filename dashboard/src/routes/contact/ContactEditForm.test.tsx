@@ -2029,6 +2029,49 @@ describe('ContactEditForm - one status list per type and the type-change rules (
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  // Code review R3 FW3-1: that 409 also tells the page (onStale), which
+  // re-reads the contact so the form opened next is built from the stored
+  // contact (pinned in ContactDetail.test.tsx). Only that 409: any other
+  // failure, of the status write or of the field PATCH, leaves the page alone.
+  it.each([
+    [
+      'the status write answers 409 contact_type_changed: onStale is called once',
+      'status',
+      new ApiError(409, 'contact_type_changed', 'contact_type_changed', { error: 'contact_type_changed' }),
+      1,
+    ],
+    [
+      'the status write answers 400 bad_transition: onStale is not called',
+      'status',
+      new ApiError(400, 'bad_transition', 'bad_transition', { error: 'bad_transition' }),
+      0,
+    ],
+    [
+      'the field PATCH answers 409 contact_changed: onStale is not called',
+      'patch',
+      new ApiError(409, 'contact_changed', 'contact_changed', { error: 'contact_changed' }),
+      0,
+    ],
+    ['the status write fails offline: onStale is not called', 'status', new Error('offline'), 0],
+  ] as const)('%s', async (_label, failing, err, calls) => {
+    const user = userEvent.setup();
+    const onStale = vi.fn();
+    const onSaved = vi.fn();
+    if (failing === 'patch') updateContact.mockRejectedValue(err);
+    else updateContact.mockResolvedValue({ ...TEAM_MEMBER, firstName: 'Samuel' });
+    setTenantStatus.mockRejectedValue(err);
+    render(<ContactEditForm contact={TEAM_MEMBER} onClose={vi.fn()} onSaved={onSaved} onStale={onStale} />);
+    await user.clear(screen.getByLabelText(/First name/i));
+    await user.type(screen.getByLabelText(/First name/i), 'Samuel');
+    await user.selectOptions(statusSelect(), 'inactive');
+    await user.click(save());
+
+    await screen.findByRole('alert');
+    expect(setTenantStatus).toHaveBeenCalledTimes(failing === 'patch' ? 0 : 1);
+    expect(onStale).toHaveBeenCalledTimes(calls);
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
   it('(PIN) a Parked landlord keeps its park reason across an unrelated-field save', async () => {
     const user = userEvent.setup();
     const parked: Contact = { ...LANDLORD, status: 'parked', park_reason: 'Declined the program' };

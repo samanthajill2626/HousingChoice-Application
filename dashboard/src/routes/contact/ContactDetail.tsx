@@ -932,6 +932,22 @@ export function ContactDetail(): React.JSX.Element {
       .finally(() => setSuggestionBusy(null));
   };
 
+  // After a 409 contact_type_changed - the header pill's (onChangeStatus
+  // below) or the edit form's (its onStale, code review R3 FW3-1) - someone
+  // re-typed the contact after this page read it. Re-read it and show it, so
+  // the pill and the next edit form offer the new type's statuses even when no
+  // contact.updated reaches the page (setContact is bound to this contactId,
+  // so a late answer after navigating away is a no-op). Consistent (planner
+  // ruling PR-3, plan round 1 P2): the re-type landed a moment ago and an
+  // eventually consistent GET could miss it.
+  const rereadRetypedContact = (): void => {
+    void getContact(contact.contactId, undefined, { consistent: true })
+      .then((fresh) => setContact(fresh))
+      .catch(() => {
+        /* best-effort: each 409's copy already says what to do */
+      });
+  };
+
   // Lifecycle-status change from the header's interactive pill. Goes through the
   // transition service (setTenantStatus serves ALL contact types — the route
   // validates against the stored contact's own type-scoped allowlist), NEVER a
@@ -969,16 +985,9 @@ export function ContactDetail(): React.JSX.Element {
           // other than the expectedType sent above, or the type changed
           // between the route's check and its write - so nothing was written.
           // Say so, and re-read the contact so the pill offers the new type's
-          // statuses (setContact is bound to this contactId, so a late answer
-          // after navigating away is a no-op).
+          // statuses (rereadRetypedContact above).
           setStatusError(CONTACT_TYPE_CHANGED_STATUS_COPY);
-          // Consistent (planner ruling PR-3, plan round 1 P2): the re-type
-          // landed a moment ago and an eventually consistent GET could miss it.
-          void getContact(contact.contactId, undefined, { consistent: true })
-            .then((fresh) => setContact(fresh))
-            .catch(() => {
-              /* best-effort: the message already asks staff to try again */
-            });
+          rereadRetypedContact();
           return;
         }
         setStatusError("Couldn't update the status - please try again.");
@@ -1369,6 +1378,10 @@ export function ContactDetail(): React.JSX.Element {
             setContact(updated);
             setEditing(false);
           }}
+          // Code review R3 FW3-1: the form's 409 contact_type_changed gets the
+          // header's re-read, so a reopened form is built from the stored
+          // contact even with the event stream down.
+          onStale={rereadRetypedContact}
           candidates={editCandidates}
         />
       ) : null}

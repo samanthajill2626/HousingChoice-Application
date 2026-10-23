@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError } from '../../api/index.js';
+import { ApiError, statusOptionsFor } from '../../api/index.js';
 import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import type {
   Contact,
@@ -170,6 +170,7 @@ import {
   MARK_UNREAD_NO_THREAD,
   RUN_INDICATOR_TIMEOUT_MS,
 } from './ContactDetail.js';
+import { CONTACT_TYPE_CHANGED_SAVE_COPY } from './ContactEditForm.js';
 
 function renderAt(contactId: string) {
   return render(
@@ -594,6 +595,74 @@ describe('ContactDetail', () => {
     expect(getContact).toHaveBeenLastCalledWith('u9', undefined, { consistent: true });
     // The pill now offers the re-typed contact's statuses, on its stored value.
     await screen.findByRole('button', { name: 'Contact status: Onboarding' });
+  });
+
+  // Code review R3 FW3-1: the edit form's own 409 contact_type_changed gets
+  // the same consistent re-read. Without it the page kept the contact the 409
+  // never refreshed, so with no contact.updated reaching the page (the stream
+  // down) a Cancel and reopen rebuilt the form from the stale type with Save
+  // on, and a redone type change re-sent { type } over the colleague's
+  // re-type. No event reaches this test: the re-read is the page's own.
+  it("the edit form's 409 contact_type_changed re-reads the contact; a reopened form is built from it", async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    const UNKNOWN_INACTIVE: Contact = { ...UNKNOWN, status: 'inactive' };
+    getContact.mockResolvedValue(UNKNOWN_INACTIVE);
+    // A's field PATCH lands; staff B makes the contact a landlord before A's
+    // status write, which answers 409.
+    updateContact.mockResolvedValue({ ...UNKNOWN_INACTIVE, type: 'tenant', status: 'onboarding' });
+    setTenantStatus.mockRejectedValue(
+      new ApiError(409, 'contact_type_changed', 'contact_type_changed', { error: 'contact_type_changed' }),
+    );
+    renderAt('u9');
+    await screen.findByRole('button', { name: 'Contact status: Inactive' });
+
+    // A's draft: Change type -> Tenant, Status Searching, Save.
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    await user.click(screen.getByRole('menuitem', { name: /edit contact details/i }));
+    const dialog = screen.getByRole('dialog', { name: 'Edit contact' });
+    await user.click(within(dialog).getByRole('button', { name: /Change type/i }));
+    await user.click(within(dialog).getByRole('button', { name: 'Tenant' }));
+    await user.selectOptions(within(dialog).getByRole('combobox', { name: /^Status$/ }), 'searching');
+    getContact.mockResolvedValue({ ...UNKNOWN, type: 'landlord', status: 'interested' });
+    const readsBefore = getContact.mock.calls.length;
+    await user.click(within(dialog).getByRole('button', { name: /^Save$/ }));
+
+    expect(await within(dialog).findByText(CONTACT_TYPE_CHANGED_SAVE_COPY)).toBeInTheDocument();
+    expect(updateContact).toHaveBeenCalledWith('u9', { type: 'tenant' });
+    expect(setTenantStatus).toHaveBeenCalledWith('u9', {
+      toStatus: 'searching',
+      source: 'manual',
+      expectedType: 'tenant',
+      porting: false,
+    });
+    // The page re-reads the contact, consistently (plan round 1 P2), exactly
+    // as for the header's 409 above...
+    await waitFor(() => expect(getContact.mock.calls.length).toBeGreaterThan(readsBefore));
+    expect(getContact).toHaveBeenLastCalledWith('u9', undefined, { consistent: true });
+    // ...and shows it: the landlord's statuses on its stored value, and no
+    // unknown treatment.
+    await screen.findByRole('button', { name: 'Contact status: Interested' });
+    expect(screen.queryByRole('heading', { name: 'Type unknown' })).toBeNull();
+    // The open form keeps its copy and Save off (FW2-2).
+    expect(within(dialog).getByText(CONTACT_TYPE_CHANGED_SAVE_COPY)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: /^Save$/ })).toBeDisabled();
+
+    // Cancel and reopen, still with no event: the form is built from the
+    // re-read landlord - its Status list is the landlord's - and Save is on.
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog', { name: 'Edit contact' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: /More actions/i }));
+    await user.click(screen.getByRole('menuitem', { name: /edit contact details/i }));
+    const reopened = screen.getByRole('dialog', { name: 'Edit contact' });
+    const status = within(reopened).getByRole('combobox', { name: /^Status$/ }) as HTMLSelectElement;
+    expect(within(status).getAllByRole('option').map((o) => (o as HTMLOptionElement).value)).toEqual(
+      statusOptionsFor('landlord').map((o) => o.value),
+    );
+    expect(status.value).toBe('interested');
+    expect(within(reopened).getByRole('button', { name: /^Save$/ })).toBeEnabled();
+    expect(updateContact).toHaveBeenCalledTimes(1);
+    expect(setTenantStatus).toHaveBeenCalledTimes(1);
   });
 
   it('marking an unknown contact Inactive from the header retitles its card Type unknown; the Mark as actions stay (spec 2026-10-23 D8)', async () => {

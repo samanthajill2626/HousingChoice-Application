@@ -106,18 +106,22 @@ export const CASEWORKER_USE_CONVERSION = 'To make this contact a caseworker, use
 export const DEPOSIT_CONFLICT_COPY =
   "A deposit can be one month's rent or a fixed amount, not both. Reload the landlord and try again.";
 
-/** Code review R1 FW1-1 (docblock corrected in R2 FW2-2): the save's status
- *  write answered 409 contact_type_changed - the stored type is no longer the
- *  one this form's Status list was built for (`statusType`: the type as
- *  opened, or the type the draft changed it to) because a colleague re-typed
- *  the contact, so the route wrote no status. It claims nothing about the
- *  other fields: a field PATCH that ran first may have saved them (a draft's
- *  type change included), or there was none. The form then disables Save
- *  until it is reopened: a retry would send the same expectedType into
+/** Code review R1 FW1-1 (docblock corrected in R2 FW2-2 and R3 FW3-1): the
+ *  save's status write answered 409 contact_type_changed - the stored type is
+ *  no longer the one this form's Status list was built for (`statusType`: the
+ *  type as opened, or the type the draft changed it to) because a colleague
+ *  re-typed the contact, so the route wrote no status. It claims nothing about
+ *  the other fields: a field PATCH that ran first may have saved them (a
+ *  draft's type change included), or there was none. The form then disables
+ *  Save for this opening: a retry would send the same expectedType into
  *  another 409 or, for a draft that changed the type, re-send that type in
  *  the field PATCH - which has no type fence - over the colleague's re-type,
- *  and its status write would then succeed. So the copy sends staff to a
- *  fresh read. */
+ *  and its status write would then succeed. It also calls `onStale`, on which
+ *  the contact page re-reads the contact (a consistent read) and shows it, so
+ *  the form opened next is built from the stored contact - the new type's
+ *  Status list, and whatever the PATCH saved - even when no contact.updated
+ *  reached the page. That read is best-effort; when it fails, the copy's
+ *  reload is the way to a fresh read. */
 export const CONTACT_TYPE_CHANGED_SAVE_COPY =
   "This contact's type changed while you were editing, so its status was not saved. Reload the contact to pick a status for its new type.";
 
@@ -125,6 +129,10 @@ export interface ContactEditFormProps {
   contact: Contact;
   onClose: () => void;
   onSaved: (updated: Contact) => void;
+  /** Code review R3 FW3-1: called when a save's status write answers 409
+   *  contact_type_changed - the contact this form was opened on is stale.
+   *  The contact page re-reads it, as for its header's own 409. */
+  onStale?: () => void;
   candidates?: Contact[];
 }
 
@@ -132,7 +140,13 @@ function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
 
-export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: ContactEditFormProps): React.JSX.Element {
+export function ContactEditForm({
+  contact,
+  onClose,
+  onSaved,
+  onStale,
+  candidates = [],
+}: ContactEditFormProps): React.JSX.Element {
   const vocab = useContactVocabulary();
 
   // The stored organization lists behind the two tenant pickers (spec
@@ -323,8 +337,10 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Code review R2 FW2-2: a save's status write answered 409
-  // contact_type_changed. Save then stays off until the form is reopened
-  // (closing unmounts it) - see CONTACT_TYPE_CHANGED_SAVE_COPY.
+  // contact_type_changed. Save then stays off for this opening (closing
+  // unmounts the form; R3 FW3-1: the page re-reads the contact on onStale, so
+  // the next opening is built from the stored contact) - see
+  // CONTACT_TYPE_CHANGED_SAVE_COPY.
   const [retypedUnderForm, setRetypedUnderForm] = useState(false);
 
   // Build the PATCH from only the fields the user actually changed. `org` is
@@ -598,9 +614,11 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         // FW1-1: the status write found the stored type is no longer the one
         // this form's Status list was built for (a colleague re-typed the
         // contact), so it wrote nothing. Say so; keep the draft. FW2-2: and
-        // turn Save off until the form is reopened (see the copy's docblock).
+        // turn Save off until the form is reopened. R3 FW3-1: and tell the
+        // page, which re-reads the contact (see the copy's docblock).
         setError(CONTACT_TYPE_CHANGED_SAVE_COPY);
         setRetypedUnderForm(true);
+        onStale?.();
       } else {
         // A type change that would orphan open records (spec 2026-10-12 D2):
         // keep the draft and show what blocks it beside the kind picker.

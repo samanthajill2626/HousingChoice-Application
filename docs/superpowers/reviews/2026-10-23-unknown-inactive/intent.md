@@ -2,15 +2,25 @@
 
 ## STATE
 
-- Phase: DESIGN - SPEC GATE. Spec rev 3 committed @540ae640 after review
-  round 1 (2 reviewers, 21 findings) and terminal round 2 (11 findings).
-  Waiting on Cameron's approval and his answers to the five gate calls listed
-  in design-review/adjudications.md.
+- Phase: DESIGN - spec APPROVED (rev 3 @540ae640; Cameron 2026-10-23: "I
+  agree with all of these five calls. These look good. The spec looks good,
+  so let's continue."). Tracker #30 Approach rewritten + Oct 23 note added
+  (Google Docs connector, verified). Compaction gate A offered.
 - Launch mode: not chosen yet.
 - Worktree: `W:\tmp\unknown-inactive`, branch `feat/unknown-inactive`, cut from
   main @916258ae. Issue `contacts-status-filter-tenants-only` committed @0957ed39.
-- NEXT STEP: on approval - update tracker #30 (Approach + Notes, third person),
-  offer compaction gate A, then write the implementation plan.
+- NEXT STEP: write the implementation plan to
+  `docs/superpowers/plans/2026-10-23-unknown-inactive-plan.md` (TDD,
+  zero-context builder; enumerate every writer AND reader from spec section 4
+  as a task or watch item), then adversarial plan review (two opus reviewers,
+  design-review-briefs.md PLAN brief), then mission block + launch gate.
+  Surface map from the read-only research is reproduced in the spec section 4;
+  the reviewers' round reports under design-review/ cite the rest by file:line.
+- Spec gate calls Cameron APPROVED: D7 team_member -> Active / unknown -> Needs
+  review from Inactive; D8 "Type unknown"; D9 Inactive tag on every type's
+  row; AI extraction keeps running for Inactive; same-type PATCH never resets
+  status.
+- Estimate in the tracker (1-2 hrs provisional) was NOT changed - not asked.
 
 ## What Cameron asked for
 

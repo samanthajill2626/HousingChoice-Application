@@ -2,7 +2,7 @@
 // unauthenticated + no-PII-on-the-wire, on the shared in-memory world via the
 // harness (authed by the real sealed session cookie next to the origin secret).
 // Mirrors placementsApi.test.ts's auth/harness conventions.
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -276,6 +276,109 @@ describe('status-model transition routes', () => {
 
       it('REJECTS an unknown status for a landlord with 400', async () => {
         expect((await authedPatch('/api/contacts/ll-1/tenant-status', { toStatus: 'bogus', source: 'manual' })).status).toBe(400);
+      });
+    });
+
+    // unknown-inactive spec D2 + section 5 test 2 (rulings AR3, AR4): every
+    // contact type moves through this route; the write is conditioned on the
+    // type the route's check read; every success notifies open pages.
+    describe('every contact type: Inactive, the conditional write, contact.updated', () => {
+      let notified: unknown[];
+      // Built, never written as an escape: the Edit/Write tools decode
+      // backslash-u escapes (plan section 5; caseworkerConversion.test.ts:593).
+      const ARROW = String.fromCharCode(0x2192);
+
+      beforeEach(async () => {
+        await world.contactsRepo.create({ contactId: 'pt-1', type: 'partner', status: 'active' });
+        await world.contactsRepo.create({ contactId: 'tm-1', type: 'team_member', status: 'active' });
+        await world.contactsRepo.create({ contactId: 'uk-1', type: 'unknown', status: 'needs_review' });
+        notified = [];
+        world.events.on('contact.updated', (payload) => notified.push(payload));
+      });
+
+      it('(PIN after S1) accepts inactive for partner, team_member and unknown: status_source manual, the audit, a typed timeline label', async () => {
+        const cases = [
+          { contactId: 'pt-1', from: 'active' },
+          { contactId: 'tm-1', from: 'active' },
+          { contactId: 'uk-1', from: 'needs_review' },
+        ] as const;
+        for (const { contactId, from } of cases) {
+          const res = await authedPatch(`/api/contacts/${contactId}/tenant-status`, { toStatus: 'inactive', source: 'manual' });
+          expect(res.status, contactId).toBe(200);
+          expect(res.body.contact.status, contactId).toBe('inactive');
+          expect(res.body.contact.status_source, contactId).toBe('manual');
+          expect((await world.contactsRepo.getById(contactId))?.status, contactId).toBe('inactive');
+          const audit = world.auditEvents.filter(
+            (a) => a.entityKey === `contacts#${contactId}` && a.event_type === 'tenant_status_changed',
+          );
+          expect(audit, contactId).toHaveLength(1);
+          expect(audit[0]!.payload, contactId).toMatchObject({ from, to: 'inactive', source: 'manual' });
+          // The seeded session's userId rides on the audit row (byActor GSI).
+          expect(typeof (audit[0]!.payload as { actor?: unknown }).actor, contactId).toBe('string');
+          const timeline = world.activityEvents.filter(
+            (e) => e.contactId === contactId && e.type === 'contact_status_changed',
+          );
+          // The partner map labels partner + team_member; the unknown map
+          // labels unknown (S1 statusLabelFor). Both read "Inactive".
+          expect(timeline.map((e) => e.label), contactId).toEqual([`Status ${ARROW} Inactive`]);
+        }
+      });
+
+      it('emits contact.updated { contactId } on every successful call, every type, a same-status call included', async () => {
+        await authedPatch('/api/contacts/uk-1/tenant-status', { toStatus: 'inactive', source: 'manual' });
+        await authedPatch('/api/contacts/tenant-1/tenant-status', { toStatus: 'searching', source: 'manual' });
+        await authedPatch('/api/contacts/pt-1/tenant-status', { toStatus: 'active', source: 'manual' });
+        expect(notified).toEqual([{ contactId: 'uk-1' }, { contactId: 'tenant-1' }, { contactId: 'pt-1' }]);
+      });
+
+      it('(PIN) emits nothing on a refused call (400 status illegal for the type, 404 unknown contact)', async () => {
+        expect((await authedPatch('/api/contacts/uk-1/tenant-status', { toStatus: 'searching', source: 'manual' })).status).toBe(400);
+        expect((await authedPatch('/api/contacts/c-ghost/tenant-status', { toStatus: 'inactive', source: 'manual' })).status).toBe(404);
+        expect(notified).toEqual([]);
+      });
+
+      it('the route check reads the stored contact strongly consistent (plan round 1 P12)', async () => {
+        // The edit form follows a type-change PATCH at once with this route
+        // (S4.4); an eventually consistent check read could still see the old
+        // type and 400 or 409 a status the PATCH already made legal.
+        const getById = vi.spyOn(world.contactsRepo, 'getById');
+        const res = await authedPatch('/api/contacts/uk-1/tenant-status', { toStatus: 'inactive', source: 'manual' });
+        expect(res.status).toBe(200);
+        // The first read of the request is the route's check read.
+        expect(getById).toHaveBeenNthCalledWith(1, 'uk-1', { consistentRead: true });
+      });
+
+      it('a re-type landing between the route check and the write is 409 contact_type_changed and writes nothing', async () => {
+        // The route's check read sees `unknown` (inactive is legal); a
+        // concurrent writer makes the contact a landlord right after it, so
+        // the status write must not store (landlord, inactive). The fake
+        // repo hands out its LIVE stored object, so the route gets a
+        // snapshot and the re-type lands on the stored contact.
+        const realGetById = world.contactsRepo.getById.bind(world.contactsRepo);
+        let reads = 0;
+        vi.spyOn(world.contactsRepo, 'getById').mockImplementation(async (id, opts) => {
+          const hit = await realGetById(id, opts);
+          if (id !== 'uk-1' || hit === undefined) return hit;
+          reads += 1;
+          if (reads !== 1) return hit;
+          const snapshot = structuredClone(hit);
+          hit.type = 'landlord';
+          return snapshot;
+        });
+
+        const res = await authedPatch('/api/contacts/uk-1/tenant-status', { toStatus: 'inactive', source: 'manual' });
+
+        expect(res.status).toBe(409);
+        expect(res.body).toEqual({ error: 'contact_type_changed' });
+        const stored = await world.contactsRepo.getById('uk-1');
+        expect(stored?.type).toBe('landlord'); // the concurrent writer's type stands
+        expect(stored?.status).toBe('needs_review'); // (landlord, inactive) was never stored
+        expect(stored?.status_source).toBeUndefined();
+        expect(
+          world.auditEvents.filter((a) => a.entityKey === 'contacts#uk-1' && a.event_type === 'tenant_status_changed'),
+        ).toEqual([]);
+        expect(world.activityEvents.filter((e) => e.contactId === 'uk-1')).toEqual([]);
+        expect(notified).toEqual([]);
       });
     });
   });

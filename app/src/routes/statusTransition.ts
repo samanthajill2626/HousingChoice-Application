@@ -35,6 +35,7 @@ import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js'
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import {
+  ContactTypeChangedError,
   createStatusTransitionService,
   EntityNotFoundError,
   TransitionRefusedError,
@@ -262,11 +263,15 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
 
     // TYPE-SCOPED status guard (docs/issues/landlord-lead-status-and-park.md):
     // this route handles ALL contact types, so validate `toStatus` against the
-    // STORED contact's own allowlist — a tenant's §5 lifecycle, a landlord's lead
-    // lifecycle (LANDLORD_STATUSES), else needs_review|active. Previously it only
+    // STORED contact's own allowlist (statusAllowlistFor) - a tenant's section 5
+    // lifecycle, a landlord's lead lifecycle (LANDLORD_STATUSES), an unknown's
+    // needs_review|inactive, else the partner/team_member
+    // needs_review|active|inactive (unknown-inactive spec D1). Previously it only
     // checked isTenantStatus, so a landlord wrongly accepted tenant-only on_hold/
     // inactive and rejected `parked`. 404 an unknown contact (the setter would).
-    const stored = await contacts.getById(contactId);
+    // Strongly consistent (plan round 1 P12): the edit form sends this right
+    // after a type-change PATCH, and a stale type would 400 or 409 it.
+    const stored = await contacts.getById(contactId, { consistentRead: true });
     if (!stored) {
       res.status(404).json({ error: 'contact_not_found' });
       return;
@@ -281,6 +286,10 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
       const updated = await service.setTenantStatus(contactId, {
         toStatus: b['toStatus'] as import('../lib/statusModel.js').TenantStatus,
         source: b['source'],
+        // Ruling AR4: the write is conditioned on the type the allowlist
+        // check above read, so a concurrent re-type is a 409, never an
+        // illegal (type, status) pair.
+        expectedType: stored.type,
         ...(typeof b['reason'] === 'string' && { reason: b['reason'] }),
         ...(typeof b['porting'] === 'boolean' && { porting: b['porting'] }),
         ...(req.user?.userId !== undefined && { actor: req.user.userId }),
@@ -334,6 +343,12 @@ function handleTransitionError(err: unknown, res: import('express').Response): v
   // tenant (409 { error: 'contact_not_tenant', contactKind }) or no longer
   // exists (404 tenant_not_found).
   if (sendContactTypeError(err, res)) return;
+  if (err instanceof ContactTypeChangedError) {
+    // Ruling AR4: the contact was re-typed between the status route's
+    // allowlist check and its conditional write. Nothing was written.
+    res.status(409).json({ error: 'contact_type_changed' });
+    return;
+  }
   if (err instanceof EntityNotFoundError) {
     res.status(404).json({ error: `${err.entity}_not_found` });
     return;

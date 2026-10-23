@@ -124,12 +124,18 @@ export interface InboxRow {
   channel?: InboxChannel; // channel of the latest item — OMITTED on relay_group rows
   direction?: 'inbound' | 'outbound'; // 'outbound' → "You: …" — OMITTED on relay_group rows
   lastActivityAt: string; // ISO; sort key (newest first)
-  needsTriage: boolean; // true for untriaged unknowns; ALWAYS false for relay_group
+  needsTriage: boolean; // true for untriaged unknowns (never for an Inactive contact); ALWAYS false for relay_group
   /** Deleted-contact resurfacing (2026-08-03 spec): present/true ONLY on a
    *  soft-deleted contact row surfaced by an unread post-deletion inbound —
    *  the dashboard renders a "Deleted" chip. Absent on live contacts and
    *  non-contact rows. */
   deleted?: boolean;
+  /** unknown-inactive spec D9 / plan ruling AR5: present and `true` ONLY on a
+   *  contact row whose contact's status is `inactive` - any type, any filter -
+   *  and the dashboard renders a muted "Inactive" tag. Absent otherwise, and
+   *  never on a contactless number row, a relay_group row or a group_text row
+   *  (the `deleted?: boolean` convention above). */
+  inactive?: boolean;
   // --- multi-party rows (relay_group AND group_text) ---------------------------
   conversationId?: string; // the conversation id -> route /conversations/:conversationId
   // --- relay_group ONLY --------------------------------------------------------
@@ -1113,8 +1119,14 @@ export async function aggregateInbox(
       channel,
       direction,
       lastActivityAt: maxConv.last_activity_at,
-      needsTriage: role === 'unknown',
+      // unknown-inactive D9 (AR5): an Inactive contact - any type - is not
+      // waiting on triage, so it never carries the chip; it carries the
+      // `inactive` tag instead. The literal `inactive` only: a landlord's own
+      // `parked` is untouched. Contactless number rows (rowForConversation and
+      // the unread branch's inline literal) keep `needsTriage: true`.
+      needsTriage: role === 'unknown' && contact.status !== 'inactive',
       ...(deleted && { deleted: true }),
+      ...(contact.status === 'inactive' && { inactive: true }),
     };
   };
 

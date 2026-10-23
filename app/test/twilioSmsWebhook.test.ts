@@ -526,6 +526,22 @@ describe('POST /webhooks/twilio/sms — conversation resolution', () => {
     const conv = [...world.conversations.values()][0]!;
     expect(conv.type).toBe('unknown_1to1');
   });
+
+  it('unknown-inactive D9 (W4): an inbound text to an EXISTING Inactive unknown contact leaves its status inactive - no stub, no reset', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-U-off', type: 'unknown', status: 'inactive', phone: TENANT_PHONE });
+
+    const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams());
+
+    expect(res.status).toBe(200);
+    // The only contact is the pre-existing one, and its status survived the
+    // whole inbound path (capture, the consent stamp, last-heard-from).
+    expect(world.contacts).toHaveLength(1);
+    expect(world.contacts[0]).toMatchObject({ contactId: 'contact-U-off', type: 'unknown', status: 'inactive' });
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.type).toBe('unknown_1to1');
+    expect(conv.participants).toEqual([{ contactId: 'contact-U-off', phone: TENANT_PHONE }]);
+  });
 });
 
 describe('POST /webhooks/twilio/sms — STOP/opt-out recording (doc §7.1)', () => {

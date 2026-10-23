@@ -306,6 +306,26 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(world.auditEvents).toEqual([]);
   });
 
+  it('unknown-inactive D9 (W4): an inbound call from an EXISTING Inactive unknown contact leaves its status inactive (the consent stamp writes consent only)', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-caller-off', type: 'unknown', status: 'inactive', phone: CALLER });
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(res.status).toBe(200);
+
+    expect(world.contacts).toHaveLength(1);
+    expect(world.contacts[0]).toMatchObject({
+      contactId: 'c-caller-off',
+      type: 'unknown',
+      status: 'inactive',
+      consent_method: 'inbound_call',
+    });
+    const conv = [...world.conversations.values()].find((c) => c.participant_phone === CALLER);
+    expect(conv?.participants).toEqual([{ contactId: 'c-caller-off', phone: CALLER }]);
+    expect(world.auditEvents).toEqual([]);
+  });
+
   it('the <Pause length> comes from the founder-editable OrgSettings preRingPauseSeconds', async () => {
     const world = createFakeWorld();
     // Founder edited the pause to 5s via the Settings panel (DB-backed setting).
